@@ -30,7 +30,11 @@ THE IDENTITY (exact, per position; every symbol is a recorded value):
            same rails), USD
   r_bench  the mean expected return per dollar of the CONTEMPORANEOUS
            QUALIFIED ALTERNATIVES (the pre-allocation tape at the decision
-           clock); no alternative existed -> 0: the alternative was no-trade
+           clock: opportunities an allocator could legally take under the
+           same hard rules); the tape read and holding none -> 0, the
+           alternative was no-trade; a tape that does not cover the clock,
+           or an admissible alternative whose economics were never recorded,
+           -> UNAVAILABLE (never a measured "none")
 
   opportunity_set  K_ref * r_bench                 the average alternative
   selection        K_ref * (r_c - r_bench)          WHAT
@@ -63,9 +67,21 @@ sizing actually used and Allie's allocation (SHADOW_PENDING_OWNER_APPROVAL,
 not authoritative) are each compared with LEGACY_SIZING, ALLIE,
 EQUAL_ALLOCATION, ROI_ONLY_RANKING, CAPITAL_HOUR_RANKING and
 RESERVE_NO_ALLOCATION: (K_policy - K_benchmark) * r_c, ex ante. Every
-benchmark K is clamped by the SAME hard rails (the paper hard-risk rail,
-the executable capacity, the idle capital) here, so the comparison is under
-identical rails by construction.
+benchmark K is clamped by the SAME hard rails here (the per-order cap, the
+usable idle capital after the hedge reserve, the per-market and per-fixture
+concentration headroom, the concurrent-group slot, and the executable
+capacity), so the comparison is under identical rails by construction; a
+CONFIGURED rail whose input is unmeasured (`rails["unmeasured"]`) makes every
+benchmark UNAVAILABLE rather than clamping some by fewer rails.
+
+ONE UNIT (red-team finding: legacy K was q_plan x d while the benchmarks were
+capital required = cost + fees, so equal quantities showed a spurious
+-fees x r_c allocation alpha). Every K in the identity and the matrix is in
+PLAN-COST units, contracts x d: a benchmark given in CAPITAL units
+(`allocation_unit = CAPITAL_REQUIRED_USD`, the replay's) is clamped by the
+rails in capital units, converted to contracts at the decision's capital per
+contract (capital required / planned qty, fees included) and priced at d.
+Equal quantities therefore give exactly zero allocation alpha.
 
 CAPITAL EFFICIENCY (a second, separate identity -- not a P&L term).
 realized profit per capital-hour; the capital charge = position
@@ -114,11 +130,15 @@ EQUAL, ROI, CAPHOUR, RESERVE = ("EQUAL_ALLOCATION", "ROI_ONLY_RANKING",
 BENCHMARKS = (LEGACY, ALLIE, EQUAL, ROI, CAPHOUR, RESERVE)
 POLICIES = (LEGACY, ALLIE)
 PRIMARY_BENCHMARK = EQUAL
-RAILS = ("hard_rail_usd", "capacity_usd", "idle_capital_usd")
+RAILS = ("hard_rail_usd", "capacity_usd", "idle_capital_usd",
+         "market_headroom_usd", "fixture_headroom_usd", "group_slot_usd")
+PLAN_COST, CAPITAL = "PLAN_COST_USD", "CAPITAL_REQUIRED_USD"
 #: float identity tolerance (the algebra is exact; this is float rounding)
 IDENTITY_EPS = 1e-9
 
-R_NO_FILL_OPEN = "ENTRY_ORDER_NOT_TERMINAL_UNFILLED_AT_THE_CLOCK"
+R_NO_FILL_OPEN = "ENTRY_ORDER_NOT_TERMINAL_UNFILLED_AT_THE_HORIZON"
+R_NO_ORDER = "ENTER_WITHOUT_A_RECORDED_ORDER_OR_REFUSAL"
+R_NO_CPC = "CAPITAL_PER_CONTRACT_UNMEASURED"
 R_NO_PLAN = "NO_PLANNED_QUANTITY_RECORDED"
 R_NO_P = "DECISION_CARRIES_NO_PROBABILITY"
 R_NO_D = "DECISION_CARRIES_NO_PLANNED_PRICE"
@@ -203,16 +223,26 @@ def _sum_q(fills) -> float:
 
 
 def clamp_to_rails(k, rails: dict):
-    """min(k, every MEASURED rail). The same rails for every benchmark."""
+    """(k clamped, rails applied, why). min(k, every configured rail); None
+    for a rail means NOT CONFIGURED (no limit). A configured rail whose
+    input is unmeasured (`rails["unmeasured"]`) makes the result None with
+    its reason -- the same rails for every benchmark, or none at all."""
     if k is None:
-        return None, []
+        return None, [], None
+    if float(k) <= 0:
+        # nothing allocated stays nothing under ANY rails (min(0, r) = 0)
+        return 0.0, [], None
+    um = (rails or {}).get("unmeasured") or {}
+    if um:
+        name = sorted(um)[0]
+        return None, [], "HARD_RAIL_UNMEASURED: %s: %s" % (name, um[name])
     out, used = float(k), []
     for name in RAILS:
         r = C.num((rails or {}).get(name))
         if r is not None:
             used.append(name)
             out = min(out, max(0.0, r))
-    return max(0.0, out), used
+    return max(0.0, out), used, None
 
 
 def _alternatives(alts: dict | None):
@@ -242,10 +272,17 @@ def attribute_v2(*, subject_id: str, book: str, sleeve, p, p_basis, d,
                  alternatives: dict | None = None,
                  allocations: dict | None = None, rails: dict | None = None,
                  capital: dict | None = None, actions: int = 0,
-                 extra: dict | None = None) -> dict:
+                 extra: dict | None = None,
+                 allocation_unit: str = PLAN_COST,
+                 capital_per_contract=None, fill_state_hint=None) -> dict:
     """V1 (unchanged, under `v1`) + the V2 identity, the allocation
     comparators and the capital-efficiency block. Fills are V1's shape:
-    {qty, price (cost space, excl. fee), fee_usd}."""
+    {qty, price (cost space, excl. fee), fee_usd}. `allocation_unit` says
+    whether `allocations` are in plan-cost USD (contracts x d) or capital
+    USD (capital required, fees included -- then `capital_per_contract` is
+    required to convert). `fill_state_hint="NO_ORDER_RECORDED"` names an
+    ENTER with neither an order nor a refusal (no order exists to be
+    "not terminal")."""
     v1 = A.attribute(subject_id=subject_id, book=book, p=p, p_basis=p_basis,
                      d=d, d_basis=d_basis, entry_fills=entry_fills,
                      sell_fills=sell_fills, hedge_legs=hedge_legs,
@@ -295,29 +332,53 @@ def attribute_v2(*, subject_id: str, book: str, sleeve, p, p_basis, d,
         "benchmark_return_per_dollar": C.rnd(r_bench, 9),
         "basis": bench_basis, "why": bench_why,
         "tape_basis": (alternatives or {}).get("basis")}
-    # the benchmark allocations, all under the same rails
+    # the benchmark allocations, all under the same rails, in ONE unit
     allocs = allocations or {}
+    cpc = C.num(capital_per_contract)
+    if allocation_unit == CAPITAL:
+        cpc_ok = cpc is not None and cpc > 0 and d is not None
+    else:
+        cpc_ok = d is not None and d > 0
     bench_k: dict = {}
     for b in BENCHMARKS:
         if b == LEGACY:
             continue
         a = allocs.get(b) or {}
         raw = C.num(a.get("usd"))
-        k, used = clamp_to_rails(raw, rails)
-        bench_k[b] = {"usd": C.rnd(k, 6), "raw_usd": C.rnd(raw, 6),
-                      "rails_applied": used, "basis": a.get("basis"),
-                      "why": None if k is not None else (
-                          a.get("why") or "NOT_PROVIDED")}
+        k, used, rwhy = clamp_to_rails(raw, rails)
+        contracts = cost = None
+        why_b = None
+        if k is None:
+            why_b = rwhy or a.get("why") or "NOT_PROVIDED"
+        elif not cpc_ok:
+            why_b = R_NO_CPC if d is not None else R_NO_D
+        elif allocation_unit == CAPITAL:
+            contracts = k / cpc
+            cost = contracts * d
+        else:
+            contracts, cost = k / d, k
+        bench_k[b] = {"usd": C.rnd(cost, 6), "contracts": C.rnd(contracts, 6),
+                      "capital_usd": (C.rnd(k, 6) if allocation_unit ==
+                                      CAPITAL else None),
+                      "raw_usd": C.rnd(raw, 6), "rails_applied": used,
+                      "basis": a.get("basis"), "why": why_b}
     k_plan = None if qp is None or d is None else qp * d
-    legacy_rails = clamp_to_rails(k_plan, rails)
+    k_plan_cap = (None if qp is None else qp * cpc if allocation_unit ==
+                  CAPITAL and cpc is not None else k_plan)
+    legacy_rails = clamp_to_rails(k_plan_cap, rails)
     bench_k[LEGACY] = {
-        "usd": C.rnd(k_plan, 6), "raw_usd": C.rnd(k_plan, 6),
+        "usd": C.rnd(k_plan, 6), "contracts": C.rnd(qp, 6),
+        "capital_usd": (C.rnd(k_plan_cap, 6) if allocation_unit == CAPITAL
+                        else None),
+        "raw_usd": C.rnd(k_plan, 6),
         "rails_applied": [], "basis": plan_qty_basis or "PLANNED_QTY_x_PLAN"
         "_PRICE (the legacy sizing actually used)",
-        "within_rails": (None if k_plan is None else
-                         legacy_rails[0] >= k_plan - 1e-6),
+        "within_rails": (None if k_plan_cap is None or legacy_rails[0] is None
+                         else legacy_rails[0] >= k_plan_cap - 1e-6),
         "why": None if k_plan is not None else (R_NO_PLAN if qp is None
                                                 else R_NO_D)}
+    out["allocation_unit"] = ("PLAN_COST_USD (contracts x d; benchmarks "
+                              "given in %s)" % allocation_unit)
     out["benchmark_allocations"] = bench_k
     k_ref = C.num(bench_k[PRIMARY_BENCHMARK]["usd"])
     k_ref_why = (None if k_ref is not None else "%s: %s" % (
@@ -364,7 +425,9 @@ def attribute_v2(*, subject_id: str, book: str, sleeve, p, p_basis, d,
 
     # ── the ex-post side: HOW WELL, HOW HANDLED, the coin ─────────────
     if no_fill:
-        if qp is not None and qp <= 0:
+        if fill_state_hint == "NO_ORDER_RECORDED":
+            fill_state = "NO_ORDER_RECORDED"
+        elif qp is not None and qp <= 0:
             fill_state = "NO_ENTRY_ATTEMPTED"
         elif entry_terminal is True:
             fill_state = "ENTRY_TERMINAL_UNFILLED"
@@ -375,11 +438,13 @@ def attribute_v2(*, subject_id: str, book: str, sleeve, p, p_basis, d,
     out["fill_state"] = fill_state
     realized = None
     realized_why = None
-    if fill_state == "ENTRY_UNFILLED_NOT_TERMINAL":
+    if fill_state in ("ENTRY_UNFILLED_NOT_TERMINAL", "NO_ORDER_RECORDED"):
+        r_open = (R_NO_ORDER if fill_state == "NO_ORDER_RECORDED"
+                  else R_NO_FILL_OPEN)
         for n in ("execution_usd", "management_usd", "settlement_usd",
                   "probability_usd"):
-            put(n, None, R_NO_FILL_OPEN)
-        realized_why = R_NO_FILL_OPEN
+            put(n, None, r_open)
+        realized_why = r_open
     elif no_fill:
         # nothing was acquired and nothing more can be: the position is a
         # MEASURED zero; execution carries the planned edge that never
@@ -485,8 +550,9 @@ def attribute_v2(*, subject_id: str, book: str, sleeve, p, p_basis, d,
         matrix[pol] = row
     out["allocation_alpha"] = {
         "matrix": matrix, "unit": "USD expected at the decision probability",
-        "basis": "(K_policy - K_benchmark) x r_c, each benchmark K clamped "
-                 "by the SAME hard rails (%s)" % ", ".join(RAILS),
+        "basis": "(K_policy - K_benchmark) x r_c in plan-cost units "
+                 "(contracts x d), each benchmark K clamped by the SAME hard "
+                 "rails (%s)" % ", ".join(RAILS),
         "allie_authority": "SHADOW_PENDING_OWNER_APPROVAL (not "
                            "authoritative; nothing was sized by it)",
         "summed_into_identity": False}

@@ -642,8 +642,9 @@ READERS = {
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
     # (237) THE HISTORICAL R30 REPLAY (RESEARCH / TOURNAMENT EVIDENCE): the
-    # choke point registers the table (its insert stamp and the outcome
-    # columns it reveals only at their own stamps); the reconstruction reads
+    # choke point registers the table (its insert stamp; the outcome columns
+    # are HIDDEN -- their stamps are the venue settlement time, not the
+    # write, so the replay never reads them); the reconstruction reads
     # the valuation row a historical decision ALREADY links to, BY ID ONLY,
     # at that decision's clock (provider observation, receipt, mapping,
     # valuation), both purposes because the decision was taken on that row

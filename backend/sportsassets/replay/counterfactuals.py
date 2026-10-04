@@ -4,33 +4,46 @@ Per decision, from its point-in-time components and the outcome read at the
 horizon (reconstruct.py):
 
   CURRENT_ACTION               what the historical PAPER chain did: the
-                               realized P&L of its position (V1 identity),
-                               0 for a refusal or an entry that never filled
+                               realized P&L of its position (V1 identity);
+                               a position fully exited by sale before its
+                               contract settled is its CASH P&L (labelled
+                               CLOSED_BY_SALE_CASH_PNL); 0 for a refusal or
+                               an entry that never filled
   R30_CANONICAL_ACTION         the replayed canonical intent: the same order
                                when it reproduces the historical one; NO new
-                               INVESTMENT exposure when no canonical intent
-                               can be built (the R30 invariant
-                               NO_CANONICAL_DECISION_INTENT =>
-                               NO_NEW_INVESTMENT_EXPOSURE)
+                               INVESTMENT exposure when the decision's OWN
+                               record cannot carry a canonical intent (the R30
+                               invariant NO_CANONICAL_DECISION_INTENT =>
+                               NO_NEW_INVESTMENT_EXPOSURE); UNAVAILABLE when
+                               the replay cannot see what the live chain had
+                               (the order form, the session) -- a gap in the
+                               replay's evidence is never a zero
   ROI_ONLY_ALLOCATION          the realized result per filled dollar scaled
-  CAPITAL_HOUR_ALLOCATION      to the benchmark allocation (capacity- and
-  ALLIE_ALLOCATION_SHADOW      rail-clamped by attribution_v2.clamp_to_rails),
-                               LINEAR_SCALING_WITHIN_CAPACITY; for a refused
-                               qualified opportunity the HYPOTHETICAL
-                               decision-time result scaled the same way
+  CAPITAL_HOUR_ALLOCATION      to the benchmark allocation (capital units,
+  ALLIE_ALLOCATION_SHADOW      clamped by the same hard rails),
+                               LINEAR_SCALING_WITHIN_CAPACITY; for an
+                               admissible opportunity that held no position
+                               the HYPOTHETICAL decision-time result scaled
+                               the same way (label HYPOTHETICAL, summed apart
+                               from realized results); an opportunity no
+                               allocator could legally take is a measured
+                               0 (NOT_ALLOCATABLE, with the hard rule)
   NO_TRADE                     0 P&L, 0 capital-hours
   HOLD_TO_SETTLEMENT           the entry fills held to the contract's own
                                settlement (sales and hedges removed)
   ACTUAL_XAVIER_MANAGEMENT     the realized result (Xavier's actions as taken)
   CANONICAL_XAVIER_MANAGEMENT  canonical_intent.management_action on each
-                               review's point-in-time inputs (its recorded
-                               selection, evidence state, protection, standing
-                               orders, candidates, open quantity); equal to the
+                               review's point-in-time inputs; equal to the
                                actual result when every review's canonical
-                               action matches the action taken, else the hold
-                               result plus each canonical sale priced at the
+                               action matches the action CARRIED OUT (the
+                               adapter's outcome included: a PROTECT with no
+                               uncommitted inventory placed nothing and is
+                               still the canonical PROTECT), else the hold
+                               result plus each canonical sale at the
                                review's own book-walk price (labelled), or
-                               UNAVAILABLE with the reason
+                               UNAVAILABLE with the reason (reviews
+                               truncated, a protective fill on the divergent
+                               path, a review without an evidence state)
 
 Every value is measured with its basis or None with its reason.
 """
@@ -41,6 +54,7 @@ from ..intel import attribution_v2 as V2
 from ..intel import common as IC
 from ..lost_opportunity import classify as LC
 from ..profitability import economics as EC
+from . import reconstruct as RC
 
 num = IC.num
 jl = IC.jload
@@ -53,6 +67,7 @@ COUNTERFACTUALS = ("CURRENT_ACTION", "R30_CANONICAL_ACTION",
 SCALING = "LINEAR_SCALING_OF_THE_REALIZED_RESULT_PER_FILLED_DOLLAR_WITHIN_" \
           "CAPACITY"
 HYPO = "HYPOTHETICAL"
+CLOSED_BY_SALE = "CLOSED_BY_SALE_CASH_PNL"
 
 
 def cf(pnl, ch=None, *, basis=None, why=None, **extra) -> dict:
@@ -113,6 +128,7 @@ def position_of(rec: dict) -> dict:
         if ppc is not None:
             payoff, outcome, pbasis = ppc, contract.get("outcome"), (
                 "CONTRACT_SETTLEMENT_" + b)
+    no_order = False
     if orders:
         plan = sum(num(o.get("qty")) or 0.0 for o in orders)
         plan_basis = "ENTRY_ORDER_QTY (the legacy sizing actually ordered)"
@@ -124,7 +140,7 @@ def position_of(rec: dict) -> dict:
         plan_basis = "ORDER_REFUSED_BY_PAPER_RISK:%s" % (
             out["refusal"].get("code"))
     elif dec.get("verdict") == "ENTER":
-        plan, terminal = None, None
+        plan, terminal, no_order = None, None, True
         plan_basis = "ENTER_WITHOUT_A_RECORDED_ORDER_OR_REFUSAL"
     else:
         plan, terminal, plan_basis = 0.0, True, "REFUSED_BY_THE_POLICY"
@@ -137,18 +153,22 @@ def position_of(rec: dict) -> dict:
                        "fee_usd": f.get("fee_usd"), "t": f["filled_at"]}
                       for f in entry],
             "sells": [{"qty": f["qty"], "price": f["price"],
-                       "fee_usd": f.get("fee_usd"), "t": f["filled_at"]}
+                       "fee_usd": f.get("fee_usd"), "t": f["filled_at"],
+                       "role": f.get("role")}
                       for f in sells],
             "hedges": hedges, "payoff": payoff, "outcome": outcome,
             "payoff_basis": pbasis, "own_settlement": own,
-            "plan_qty": plan, "plan_basis": plan_basis,
+            "plan_qty": plan, "plan_basis": plan_basis, "no_order": no_order,
             "entry_terminal": terminal, "q": q, "v": v, "fees": fees}
 
 
 def economics(rec: dict, pos: dict) -> dict:
     """profitability.economics.compute_position on the position's events
     (capital path, capital-hours, release) and the HOLD_TO_SETTLEMENT
-    counterfactual's."""
+    counterfactual's. A position still OPEN at the horizon keeps holding
+    its open cost basis TO THE HORIZON (`segments_to_horizon`): it occupies
+    capital until it is released, not only until its last fill (red-team
+    finding: compute_position's segments stop at the last event)."""
     dec = rec["decision"]
     orders = rec["outcome"].get("orders") or []
     events = ([dict(kind="BUY", t=e["t"], qty=e["qty"], price=e["price"],
@@ -176,6 +196,17 @@ def economics(rec: dict, pos: dict) -> dict:
          "basis": "PAPER_SETTLEMENT"} if own else None))
     lag = rec.get("lag_samples") or []
     actual = EC.compute_position(pos_rec, lag_samples=lag)
+    segs = list(actual.get("segments") or [])
+    horizon = rec.get("horizon")
+    if actual.get("state") == "OPEN" and pos["entry"] and horizon is not None:
+        basis = num(actual.get("open_cost_basis_usd")) or 0.0
+        t0 = actual.get("last_event_at")
+        if basis > 0 and t0 is not None and horizon > t0:
+            segs.append((t0, float(horizon), basis))
+        actual["capital_hours_to_horizon"] = round(sum(
+            (b - a) / EC.HOUR * c for a, b, c in segs), 9)
+        actual["open_at_horizon"] = True
+    actual["segments_to_horizon"] = segs
     hold = None
     contract = rec.get("contract_settlement")
     if pos["entry"] and pos["payoff"] is not None:
@@ -203,11 +234,22 @@ TAKEN_CLASS = {
     "KEEP_STANDING": CI.ACT_PROTECT, "CANCEL_FOR_REPLACEMENT": CI.ACT_PROTECT,
     "WAIT_FOR_TERMINAL": CI.ACT_PROTECT, "PLACE_STANDING": CI.ACT_PROTECT,
     "PLACEMENT_REFUSED": CI.ACT_PROTECT, "NONE": CI.ACT_NONE}
+#: the adapter outcomes that CARRY OUT a canonical action without placing
+#: an order (paper_xavier: _maintain_standing returns NONE /
+#: NO_UNCOMMITTED_INVENTORY under PROTECT when every held contract is already
+#: committed; _submit_sale returns NONE / NO_WALKABLE_SALE when the decided
+#: sale has no walkable quantity or price)
+EXECUTED_WITHOUT_ORDER = {
+    (CI.ACT_PROTECT, "NO_UNCOMMITTED_INVENTORY"),
+    (CI.ACT_EXIT, "NO_WALKABLE_SALE"), (CI.ACT_REDUCE, "NO_WALKABLE_SALE")}
 
 
-def canonical_review(review: dict) -> dict:
+def canonical_review(review: dict, recorded: dict | None = None) -> dict:
     """canonical_intent.management_action on the review's recorded,
-    point-in-time inputs, beside the action actually taken."""
+    point-in-time inputs, beside the action actually CARRIED OUT (the
+    recorded `taken` plus the adapter's outcome) and, when R30 recorded one,
+    the canonical action recorded at the time. Returns a COMPACT row (the
+    raw review JSON is not kept)."""
     sel = jl(review.get("selection")) or {}
     meas = jl(review.get("measure")) or {}
     alts = jl(review.get("alternatives")) or {}
@@ -215,12 +257,16 @@ def canonical_review(review: dict) -> dict:
     exp = jl(review.get("exposure")) or {}
     act = jl(review.get("action")) or {}
     taken = str(act.get("taken") or "NONE")
+    taken_why = act.get("why")
     actual = TAKEN_CLASS.get(taken)
     if actual is None and taken.startswith("SUBMIT_"):
         actual = CI.ACT_EXIT if "EXIT" in taken else CI.ACT_REDUCE
+    rec_action = (recorded or {}).get(review["review_id"])
     base = {"review_id": review["review_id"],
             "reviewed_at": review.get("reviewed_at"), "taken": taken,
-            "actual_action": actual or "UNCLASSIFIED:%s" % taken}
+            "taken_why": taken_why,
+            "actual_action": actual or "UNCLASSIFIED:%s" % taken,
+            "recorded_canonical_action": rec_action}
     state = meas.get("evidence_state")
     if state is None:
         return dict(base, canonical_action=None, match=None,
@@ -237,26 +283,49 @@ def canonical_review(review: dict) -> dict:
         protection_ok=bool(prot.get("ok")),
         standing_live=bool(std.get("live_orders")), candidate=cand,
         protective=prot, open_qty=exp.get("open_qty"))
+    canon = decided["action"]
     tl = decided.get("target_limit") or {}
-    return dict(base, canonical_action=decided["action"],
+    no_order = False
+    if taken == "NONE" and (canon, taken_why) in EXECUTED_WITHOUT_ORDER:
+        if canon == CI.ACT_PROTECT or decided.get("target_qty") is None \
+                or tl.get("limit_price") is None:
+            actual, no_order = canon, True
+    return dict(base, actual_action=actual or "UNCLASSIFIED:%s" % taken,
+                executed_without_order=no_order,
+                canonical_action=canon,
                 canonical_target_qty=num(decided.get("target_qty")),
                 canonical_limit_price=num(tl.get("limit_price")),
                 candidate_fee_usd=num((cand or {}).get("fee_usd")),
                 evidence_state=state, chosen=chosen,
-                match=(actual == decided["action"]), why=None)
+                recorded_matches_replay=(None if rec_action is None
+                                         else rec_action == canon),
+                match=(actual == canon), why=None)
 
 
 def management(rec: dict, pos: dict, realized, hold_pnl) -> dict:
-    reviews = [canonical_review(r) for r in rec["outcome"].get("reviews")
-               or []]
+    out_rec = rec["outcome"]
+    reviews = [r if "canonical_action" in r else canonical_review(
+        r, out_rec.get("mgmt_intents")) for r in out_rec.get("reviews") or []]
     unrec = [r for r in reviews if r["canonical_action"] is None]
     diverge = [r for r in reviews if r["match"] is False]
     out = {"reviews": len(reviews), "canonical_unavailable": len(unrec),
            "divergent": len(diverge), "per_review": reviews[:50],
-           "recorded_canonical_intents": len(
-               rec["outcome"].get("mgmt_intents") or [])}
+           "executed_without_order": sum(1 for r in reviews if r.get(
+               "executed_without_order")),
+           "reviews_truncated": bool(out_rec.get("reviews_truncated")),
+           "recorded_canonical_intents": len(out_rec.get("mgmt_intents")
+                                             or {}),
+           "recorded_differs_from_replay": sum(
+               1 for r in reviews if r.get("recorded_matches_replay")
+               is False)}
     if not pos["entry"]:
         out["canonical"] = cf(0.0, 0.0, basis="NO_POSITION_TO_MANAGE")
+        return out
+    if out_rec.get("reviews_truncated"):
+        out["canonical"] = cf(None, why=(
+            "REVIEWS_TRUNCATED: more than the per-position bound of Xavier "
+            "reviews (%d read); the canonical management path is not "
+            "established over all of them" % len(reviews)))
         return out
     if realized is None:
         out["canonical"] = cf(None, why="ACTUAL_RESULT_NOT_REALIZED_BY_THE_"
@@ -269,12 +338,18 @@ def management(rec: dict, pos: dict, realized, hold_pnl) -> dict:
         return out
     if not diverge:
         out["canonical"] = cf(realized, basis=(
-            "CANONICAL_MATCHED_EVERY_REVIEW (%d): the actual result"
-            % len(reviews)))
+            "CANONICAL_MATCHED_EVERY_REVIEW (%d, of which %d carried out "
+            "without an order): the actual result" % (
+                len(reviews), out["executed_without_order"])))
         return out
     if hold_pnl is None or pos["payoff"] is None:
         out["canonical"] = cf(None, why="HOLD_RESULT_UNAVAILABLE_FOR_THE_"
                               "DIVERGENT_PATH")
+        return out
+    if any(s.get("role") == "STANDING_PROTECTION" for s in pos["sells"]):
+        out["canonical"] = cf(None, why=(
+            "PROTECTIVE_FILLS_ON_A_DIVERGENT_PATH_NOT_PRICEABLE: the "
+            "canonical path would have to re-simulate the standing sale"))
         return out
     held = pos["q"]
     pnl = hold_pnl
@@ -329,8 +404,13 @@ def lost_opportunity(rec: dict, pos: dict) -> dict:
                         "settlement prices the HYPOTHETICAL beside it"}
     if not out.get("orders"):
         ref = out.get("refusal")
-        if ref and ref.get("capital"):
+        if ref and ref.get("code") in RC.CASH_REFUSALS:
+            # cash held by earlier allocations (the available cash, or the
+            # hedge reserve it would have had to spend)
             return {"classification": "CASH_UNAVAILABLE_BY_PRIOR_ALLOCATION",
+                    "refusal": ref.get("code")}
+        if ref and ref.get("code") in RC.RAIL_REFUSALS:
+            return {"classification": "REFUSED_BY_A_HARD_RISK_RAIL",
                     "refusal": ref.get("code")}
         if ref:
             return {"classification": "ORDER_REFUSED_BY_PAPER_RISK",
@@ -400,6 +480,7 @@ def evaluate(rec: dict) -> dict:
         payoff_basis=pos["payoff_basis"])
     lo = lost_opportunity(rec, pos)
     out: dict = {}
+    realized_basis = None
     if dec.get("verdict") != "ENTER":
         realized, why = 0.0, None
         out["CURRENT_ACTION"] = cf(0.0, 0.0, action="REFUSE",
@@ -416,10 +497,22 @@ def evaluate(rec: dict) -> dict:
     else:
         realized = v1.get("realized_pnl_usd")
         why = (v1.get("unmeasured") or {}).get("realized_pnl_usd")
+        realized_basis = "REALIZED (V1, reconciles to cash: %s)" % v1.get(
+            "reconciles")
+        if realized is None and act.get("state") == "CLOSED" and \
+                act.get("released_at") is not None and not pos["hedges"] \
+                and pos["payoff"] is None and \
+                num(act.get("net_profit_usd")) is not None:
+            # every contract was SOLD before the contract settled: the
+            # position's cash P&L is known; only the hold / management
+            # counterfactuals still wait for the settlement
+            realized, why = num(act["net_profit_usd"]), None
+            realized_basis = (CLOSED_BY_SALE + ": every contract sold "
+                              "before the contract settled (proceeds net of "
+                              "fees - acquisition incl. fees)")
         out["CURRENT_ACTION"] = cf(realized, ch_actual if realized is not None
                                    else None, action="ENTER",
-                                   basis="REALIZED (V1, reconciles to cash: "
-                                   "%s)" % v1.get("reconciles"), why=why)
+                                   basis=realized_basis, why=why)
     # R30 canonical action
     ci = rec["components"]["canonical_intent"]
     sleeve = rec["sleeve"]
@@ -432,36 +525,42 @@ def evaluate(rec: dict) -> dict:
             basis="THE_SAME_ORDER: the canonical intent carries the "
                   "historical side, quantity and limit (%s)"
                   % rec["intent_parity"].get("state"))
-    elif sleeve == "INVESTMENT":
+    elif sleeve == "INVESTMENT" and ci.get("cause") == RC.DECISION_CONTENT:
         out["R30_CANONICAL_ACTION"] = cf(
             0.0, 0.0, action="NO_CANONICAL_DECISION_INTENT",
+            cause=RC.DECISION_CONTENT,
             basis="NO_CANONICAL_DECISION_INTENT => NO_NEW_INVESTMENT_"
-                  "EXPOSURE: %s" % ci.get("why"))
+                  "EXPOSURE: the decision's own record cannot carry an "
+                  "intent (%s)" % ci.get("why"))
+    elif sleeve == "INVESTMENT":
+        out["R30_CANONICAL_ACTION"] = cf(
+            None, action="UNREPLAYABLE", cause=ci.get("cause"),
+            why="R30_CANONICAL_ACTION_UNREPLAYABLE: %s" % ci.get("why"))
     else:
         out["R30_CANONICAL_ACTION"] = dict(
             out["CURRENT_ACTION"], action="NO_CANONICAL_DECISION_INTENT",
             basis="non-INVESTMENT sleeve: the fail-closed invariant gates "
                   "INVESTMENT only (%s)" % ci.get("why"))
-    # allocation counterfactuals (rail-clamped exactly as attribution_v2)
+    # allocation counterfactuals (capital units, the same rails)
     rails = rec["rails"]
-    # the filled position's capital, fees included (the allocations are
-    # capital required = cost + fees, as R30 computes them)
     filled_usd = (pos["q"] * pos["v"] + pos["fees"]) if pos["q"] > 0 else 0.0
     hyp = hypothetical(rec, lo) if not pos["entry"] else {}
     for name, key in (("ROI_ONLY_ALLOCATION", "ROI_ONLY_RANKING"),
                       ("CAPITAL_HOUR_ALLOCATION", "CAPITAL_HOUR_RANKING"),
                       ("ALLIE_ALLOCATION_SHADOW", "ALLIE")):
         a = rec["allocations"].get(key) or {}
-        k, used = V2.clamp_to_rails(num(a.get("usd")), rails)
+        k, used, rwhy = V2.clamp_to_rails(num(a.get("usd")), rails)
         if k is None:
-            out[name] = cf(None, why=a.get("why") or "ALLOCATION_UNMEASURED")
+            out[name] = cf(None, why=rwhy or a.get("why")
+                           or "ALLOCATION_UNMEASURED")
         elif k <= 0:
             out[name] = cf(0.0, 0.0, k_usd=0.0, rails_applied=used,
                            basis="ALLOCATES_NOTHING: %s" % (a.get("basis")))
         elif not pos["entry"]:
             cost = rec["ev"]["capital_required"]
             if hyp.get("value") is None or not cost:
-                out[name] = cf(None, k_usd=k, why="HYPOTHETICAL_UNPRICED: %s"
+                out[name] = cf(None, k_usd=k, label=HYPO,
+                               why="HYPOTHETICAL_UNPRICED: %s"
                                % (hyp.get("why") or "no decision-time cost"))
             else:
                 out[name] = cf(hyp["value"] * k / cost, k_usd=k,
@@ -492,11 +591,12 @@ def evaluate(rec: dict) -> dict:
             % pos["payoff_basis"])
     out["ACTUAL_XAVIER_MANAGEMENT"] = dict(
         out["CURRENT_ACTION"], basis="the realized result: Xavier's "
-        "actions as taken")
+        "actions as taken (%s)" % (realized_basis or "-"))
     mg = management(rec, pos, realized if pos["entry"] else None,
                     out["HOLD_TO_SETTLEMENT"]["pnl_usd"])
     out["CANONICAL_XAVIER_MANAGEMENT"] = mg.pop("canonical")
     return {"position": pos, "economics": eco, "v1": v1,
             "counterfactuals": out, "management": mg,
             "lost_opportunity": lo, "realized_pnl_usd": realized,
+            "realized_basis": realized_basis,
             "realized_why": why, "capital_hours": ch_actual}

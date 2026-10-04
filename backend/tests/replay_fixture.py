@@ -10,16 +10,23 @@ account's INITIAL_FUNDING row and the run is given a `now` after B.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 import uuid
 
 from sportsassets import canonical_intent as CI
 
-try:
-    from tests import paper_harness as H
-except ImportError:                                             # pragma: no cover
-    import paper_harness as H
+
+def _harness():
+    """tests/paper_harness, imported only when an account is built through
+    the real session code (it loads the session's whole default-config
+    import graph; the runtime-footprint test builds its account raw)."""
+    try:
+        from tests import paper_harness as H
+    except ImportError:                                         # pragma: no cover
+        import paper_harness as H
+    return H
 
 SIM = "PAPER_SIM_V1"
 INV = "PINNACLE_COMPLETED_GAME_PAPER"          # INVESTMENT
@@ -36,12 +43,40 @@ def ts(e):
     return dt.datetime.fromtimestamp(float(e), dt.timezone.utc)
 
 
-async def account(conn, tag="rpl"):
+#: the session caps the raw account carries (bettor_paper_session's code
+#: defaults, restated so the raw path imports no session module)
+RAW_CONFIG = {"risk": {"per_order_cap_usd": 5000.0,
+                       "per_market_cap_usd": 10000.0,
+                       "per_fixture_cap_usd": 15000.0,
+                       "hedge_reserve_fraction": 0.20,
+                       "max_concurrent_groups": 150},
+              "entry": {"order_type": "MARKETABLE", "time_in_force": "IOC"},
+              "simulator_version": SIM}
+
+
+async def account(conn, tag="rpl", *, raw=False):
     """A fresh paper account. Returns (acct, B): B is a base clock after the
-    account's INITIAL_FUNDING ledger row (which the ledger stamps itself)."""
+    account's INITIAL_FUNDING ledger row (which the ledger stamps itself).
+    raw=True funds it through the ledger's own initializer and writes its
+    session row directly (no session-module import graph)."""
     w = time.time()
-    acct = await H.new_account(conn, tag, now=w - 7200.0)
-    return acct, w + 100.0
+    if not raw:
+        acct = await _harness().new_account(conn, tag, now=w - 7200.0)
+        return acct, w + 100.0
+    from sportsassets import bettor_paper_ledger as L
+    aid = "paper_test_%s_%s" % (tag, uuid.uuid4().hex[:10])
+    got = await L.ensure_account(conn, account_id=aid,
+                                 account_key=aid.upper())
+    assert got.get("ok"), got
+    sid = "paper_session_%s_raw" % hashlib.sha256(aid.encode()).hexdigest()[:10]
+    cfg = dict(RAW_CONFIG, account_id=aid)
+    await conn.execute(
+        "INSERT INTO paper_sessions (session_id, account_id, started_at, "
+        " config, config_sha, simulator_version, reporting_tz) VALUES "
+        " ($1,$2,$3,$4::jsonb,$5,$6,'UTC')", sid, aid, ts(w - 7200.0),
+        json.dumps(cfg), hashlib.sha256(json.dumps(
+            cfg, sort_keys=True).encode()).hexdigest(), SIM)
+    return {"account_id": aid, "session_id": sid, "config": cfg}, w + 100.0
 
 
 async def premap(conn, slug, *, game_start, updated_at):
@@ -70,14 +105,22 @@ async def valuation(conn, *, slug, p, recorded_at, observed_at, received_at):
         "e-" + slug)
 
 
+def md(*, bids=(), offers=()) -> dict:
+    """paper_harness.md's venue-shaped levels (restated: no harness import)."""
+    return {"bids": [{"px": {"value": "%.2f" % p}, "qty": "%s" % q}
+                     for p, q in bids],
+            "offers": [{"px": {"value": "%.2f" % p}, "qty": "%s" % q}
+                       for p, q in offers]}
+
+
 async def book(conn, slug, *, observed_at, recorded_at, bids=(), offers=()):
-    md = H.md(bids=bids, offers=offers)
+    md_ = md(bids=bids, offers=offers)
     return await conn.fetchval(
         "INSERT INTO paper_book_observations (us_market_slug, observed_at, "
         " source, bids, offers, read_basis, recorded_at) VALUES ($1,$2,"
         " 'TEST_FIXTURE_SYNTHETIC_BOOK',$3::jsonb,$4::jsonb,'TEST',$5) "
-        "RETURNING obs_id", slug, ts(observed_at), json.dumps(md["bids"]),
-        json.dumps(md["offers"]), ts(recorded_at))
+        "RETURNING obs_id", slug, ts(observed_at), json.dumps(md_["bids"]),
+        json.dumps(md_["offers"]), ts(recorded_at))
 
 
 def economics(*, qty, vwap, fees, net, depth=None, edge_pp=None):
@@ -115,7 +158,9 @@ async def decision(conn, acct, *, slug, at, recorded_at, verdict="ENTER",
 async def order(conn, acct, *, decision_id, group_id, slug, qty, limit, at,
                 strategy=INV, role="ENTRY", direction="BUY", side="LONG",
                 filled_qty=None, state="FILLED", terminal_at=None,
-                fixture=None):
+                fixture=None, updated_at=None, queue_ahead_qty=None):
+    """An order row. `updated_at` is its last durable write (the terminal
+    UPDATE in production); by default the insert's now(), i.e. before B."""
     oid = "paperord:" + uid()
     intent = ("ORDER_INTENT_%s_%s" % (direction, side))
     await conn.execute(
@@ -124,16 +169,34 @@ async def order(conn, acct, *, decision_id, group_id, slug, qty, limit, at,
         " us_market_slug, fixture, label, order_type, time_in_force, "
         " allow_partial, qty, limit_price, wire_price, reserved_usd, "
         " filled_qty, state, decision_id, decided_at, eligible_at, "
-        " expires_at, simulator_version, strategy, terminal_at, created_at) "
+        " expires_at, simulator_version, strategy, terminal_at, created_at, "
+        " updated_at, queue_ahead_qty) "
         " VALUES ($1,$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'{}'::jsonb,'MARKETABLE',"
-        " 'IOC',true,$11,$12,$12,$13,$14,$15,$16,$17,$17,$18,$19,$20,$21,$17)",
+        " 'IOC',true,$11,$12,$12,$13,$14,$15,$16,$17,$17,$18,$19,$20,$21,$17,"
+        " coalesce($22, now()),$23)",
         oid, acct["account_id"], acct["session_id"], group_id, role,
         direction, side, intent, slug, fixture or ("fx-" + slug), qty, limit,
         round(qty * limit, 6) if direction == "BUY" else 0.0,
         qty if filled_qty is None else filled_qty,
         state, decision_id, ts(at), ts(at + 90), SIM, strategy,
-        None if terminal_at is None else ts(terminal_at))
+        None if terminal_at is None else ts(terminal_at),
+        None if updated_at is None else ts(updated_at), queue_ahead_qty)
     return oid
+
+
+async def order_event(conn, *, order_id, kind, at, recorded_at, detail=None):
+    await conn.execute(
+        "INSERT INTO paper_order_events (order_id, kind, event_source, "
+        " simulator_version, at, detail, recorded_at) VALUES ($1,$2,"
+        " 'SIMULATOR',$3,$4,$5::jsonb,$6)", order_id, kind, SIM, ts(at),
+        json.dumps(detail or {}), ts(recorded_at))
+
+
+async def karen_event(conn, *, challenge_id, kind, at, recorded_at):
+    await conn.execute(
+        "INSERT INTO karen_challenge_events (challenge_id, at, kind, actor, "
+        " detail, recorded_at) VALUES ($1,$2,$3,'DEREK','{}'::jsonb,$4)",
+        challenge_id, ts(at), kind, ts(recorded_at))
 
 
 async def fill(conn, acct, *, order_id, group_id, slug, qty, price, fee, at,
@@ -242,13 +305,13 @@ async def recorded_intent(conn, *, decision_id, slug, qty, limit, at,
 # THE END-TO-END SCENARIO
 # ═════════════════════════════════════════════════════════════════════
 
-async def scenario(conn) -> dict:
+async def scenario(conn, *, raw=False) -> dict:
     """One INVESTMENT position managed by Xavier and settled, a qualified
     refusal on another market, a TRAINING entry refused for cash on the same
     fixture, an INVESTMENT entry whose record cannot build a canonical
     intent, deliberately FUTURE-DATED rows the replay must not see, and the
     settlement-lag history Allie needs."""
-    acct, B = await account(conn)
+    acct, B = await account(conn, raw=raw)
     m1, m2, m4 = uid("rpl-m1-"), uid("rpl-m2-"), uid("rpl-m4-")
     fx = "fx-" + m1
     # settlement-lag history: 6 markets settled 3 h after their start, a day
@@ -321,9 +384,11 @@ async def scenario(conn) -> dict:
     await fill(conn, acct, order_id=o2, group_id=g1, slug=m1, qty=40.0,
                price=0.70, fee=0.2, at=B + 601.0, recorded_at=B + 601.1,
                role="REDUCE", direction="SELL")
+    # production's writer shape: mechanical_selection = the selection
+    # (paper_xavier.py: mechanical_selection=chosen, chosen = selected)
     await review(
         conn, acct, group_id=g1, at=B + 1200.0, recorded_at=B + 1200.1,
-        selection={"selected": "HOLD", "mechanical_selection": None},
+        selection={"selected": "HOLD", "mechanical_selection": "HOLD"},
         measure={"evidence_state": "STALE_ENTRY_TIME_PROBABILITY",
                  "p": 0.66, "stale": True},
         alternatives={"candidates": [{"action": "HOLD", "qty": 60.0}],

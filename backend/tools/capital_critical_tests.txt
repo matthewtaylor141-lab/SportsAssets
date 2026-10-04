@@ -837,5 +837,6 @@ tests/test_agent_identity_api_authority.py
 # vendored red-team reference models stay byte-identical and without
 # authority (no decision / sizing / order path imports them).
 tests/test_r30_replay.py
+tests/test_r30_replay_units.py
 tests/test_alpha_attribution_v2.py
 tests/test_research_ref_models.py

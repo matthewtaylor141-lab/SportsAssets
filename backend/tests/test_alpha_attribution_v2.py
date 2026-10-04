@@ -268,9 +268,14 @@ def test_no_alternative_is_a_measured_no_trade_benchmark():
 def test_every_benchmark_allocation_is_clamped_by_the_same_rails():
     r = _row()
     bk = r["benchmark_allocations"]
-    for b in (V2.ALLIE, V2.EQUAL, V2.ROI, V2.CAPHOUR, V2.RESERVE):
+    for b in (V2.ALLIE, V2.EQUAL, V2.ROI):
         assert bk[b]["usd"] <= 700.0 + 1e-9, (b, bk[b])
-        assert bk[b]["rails_applied"] == list(V2.RAILS)
+        # every rail PROVIDED is applied, to every benchmark alike (V2.RAILS
+        # also names the concentration / group rails, absent from this row)
+        assert bk[b]["rails_applied"] == [r for r in V2.RAILS if r in RAILS]
+    # CAPITAL_HOUR (0 in ALLOC) and RESERVE allocate nothing: zero under
+    # any rails, no rail needed
+    assert bk[V2.CAPHOUR]["usd"] == 0.0 and bk[V2.RESERVE]["usd"] == 0.0
     assert bk[V2.EQUAL]["usd"] == 700.0 and bk[V2.EQUAL]["raw_usd"] == 1200.0
     assert bk[V2.LEGACY]["within_rails"] is True       # 120 x 0.552 = 66.24
     m = r["allocation_alpha"]["matrix"]
@@ -296,3 +301,50 @@ def test_the_summary_keeps_investment_apart_and_the_identity_holds():
     assert s["INVESTMENT"]["unavailable_reasons"].get(
         "settlement_usd:POSITION_NOT_SETTLED") == 1
     assert s["summed_across_books"] is False
+
+
+# ── §5b one unit, the full rail set, the no-order state ──────────────
+
+def test_equal_quantities_give_exactly_zero_allocation_alpha():
+    """Red-team finding: legacy K was q_plan x d (fees excluded) while the
+    benchmarks were capital required (fees included), so the same contracts
+    showed a spurious -fees x r_c allocation alpha. With benchmarks given in
+    CAPITAL units every K is converted to contracts x d."""
+    d, q, fees = 0.554, 100.0, 0.7
+    cpc = (q * d + fees) / q                  # capital per contract
+    alloc = {b: {"usd": q * cpc, "basis": "same 100 contracts"}
+             for b in (V2.ALLIE, V2.EQUAL, V2.ROI, V2.CAPHOUR)}
+    r = _row(d=d, plan_qty=q, allocations=alloc,
+             rails={"idle_capital_usd": 1e6}, allocation_unit=V2.CAPITAL,
+             capital_per_contract=cpc,
+             entry_fills=[{"qty": q, "price": d, "fee_usd": fees}])
+    assert abs(r["allocation_usd"]) <= 1e-9
+    for b in (V2.ALLIE, V2.EQUAL, V2.ROI, V2.CAPHOUR):
+        assert abs(r["allocation_alpha"]["matrix"][V2.LEGACY][b]["usd"]) \
+            <= 1e-9, b
+        assert abs(r["benchmark_allocations"][b]["contracts"] - q) <= 1e-9
+    assert r["identity"]["claimed"] and r["identity"]["level"] == V2.FULL
+    # without the capital per contract a capital-unit benchmark is unknown
+    r = _row(allocations=alloc, allocation_unit=V2.CAPITAL,
+             capital_per_contract=None)
+    assert r["allocation_usd"] is None
+    assert V2.R_NO_CPC in r["unmeasured"]["allocation_usd"]
+
+
+def test_an_unmeasured_hard_rail_makes_every_benchmark_unavailable():
+    r = _row(rails=dict(RAILS, unmeasured={
+        "market_headroom_usd": "OPEN_ORDERS_READ_TRUNCATED"}))
+    for b in (V2.ALLIE, V2.EQUAL, V2.ROI):
+        assert r["benchmark_allocations"][b]["usd"] is None
+        assert r["benchmark_allocations"][b]["why"].startswith(
+            "HARD_RAIL_UNMEASURED")
+    assert r["selection_usd"] is None and r["allocation_usd"] is None
+    assert r["identity"]["level"] == V2.COMBINED and r["identity"]["claimed"]
+
+
+def test_an_enter_with_no_order_has_its_own_fill_state():
+    r = _row(entry_fills=[], sell_fills=[], plan_qty=None,
+             entry_terminal=None, fill_state_hint="NO_ORDER_RECORDED")
+    assert r["fill_state"] == "NO_ORDER_RECORDED"
+    assert r["unmeasured"]["execution_usd"] == V2.R_NO_ORDER
+    assert r["realized_pnl_usd"] is None

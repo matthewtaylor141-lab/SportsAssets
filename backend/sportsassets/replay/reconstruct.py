@@ -6,9 +6,9 @@ query of its own. Two clocks per opportunity:
   DECISION CLOCK  max(decided_at, the decision row's recorded_at): the
                   instant the decision was made AND durable. Every input of
                   the replayed R30 chain (valuation, book, Karen, Eddie's
-                  history, Allie's inputs, the alternatives, the hurdle
-                  tape, the session's configuration) is read AT this clock:
-                  only rows recorded at or before it. The audit scope
+                  history, Allie's inputs, the rails, the alternatives, the
+                  hurdle tape, the session's configuration) is read AT this
+                  clock: only rows recorded at or before it. The audit scope
                   "<decision_id>:DECISION" carries the latest recorded stamp
                   used; the database CHECKs it is <= the decision clock.
   HORIZON         the run's clock_end: the PAPER execution, Xavier's
@@ -20,51 +20,57 @@ THE COMPONENTS (each MEASURED or UNAVAILABLE with its reason):
   provider_observation  external_valuations: provider, book, observed_at,
                         age, outcome books, probability
   bettor_receipt        received_at and the receipt latency
-  mapping               the contract identity the resolver bound (mapped
-                        outcome, payout event / complement, condition id)
-                        and the pre-map row VISIBLE at the clock
+  mapping               the contract identity the resolver bound and the
+                        event start from a row VISIBLE at the clock
   valuation             probability, executable price, edge, admissible,
-                        refusals, settlement comparison
+                        refusals, settlement comparison (outcome columns are
+                        hidden by the choke point)
   venue_book            the decision's own book observation (else the
                         latest at or before the decision), age, top of book
-  derek                 canonical_components.derek_component on the
-                        decision record (the R30 builder)
+  derek                 canonical_components.derek_component on the record
   karen                 Karen's challenges OPEN AT THE CLOCK on this market
-                        or strategy (state rebuilt from the challenge's own
-                        stamps); no Karen record at or before the clock ->
-                        UNAVAILABLE (Karen was not recording then)
+                        or strategy, the state rebuilt from the append-only
+                        karen_challenge_events recorded by the clock; no
+                        Karen record at or before the clock -> UNAVAILABLE
   eddie                 Eddie's estimate recorded by the clock, else
                         agents/eddie.estimate (pure) on the decision, its
                         book and Eddie's history AS OF the clock (floored to
-                        the history bucket, never after it), with the hard
-                        rule (canonical_components.eddie_component)
-  allie                 allie_capital.allocate on point-in-time inputs:
-                        event start (pre-map row or an earlier entry thesis
-                        visible at the clock), the settlement lags recorded
-                        before the clock, open exposure from the paper
-                        FILLS net of sales and settlements recorded by the
-                        clock (position truth, not entry nominal), idle
-                        capital from the paper LEDGER at the clock (this
-                        decision's own reservation excluded), the recent
-                        canonical INVESTMENT intents recorded by the clock
-                        (Allie's own hurdle sample) and the session's per-
-                        order rail. Authority stays
-                        SHADOW_PENDING_OWNER_APPROVAL.
-  opportunity_score     lost_opportunity.score.score (pure) as R30 computes
-                        it at the decision
+                        the history bucket); the queue at submission comes
+                        from the ACKNOWLEDGED order event (paper_orders'
+                        queue columns are rewritten in place and hidden)
+  allie                 allie_capital.allocate on point-in-time inputs (event
+                        start, settlement lags recorded before the clock,
+                        open exposure from position truth, usable idle cash
+                        from the ledger after the hedge reserve, Allie's own
+                        hurdle sample, the effective per-order rail).
+                        Authority stays SHADOW_PENDING_OWNER_APPROVAL.
+  rails                 THE HARD RISK RAILS EFFECTIVE AT THE CLOCK (the
+                        capital policy recorded on the decision, else the
+                        session configuration): per-order cap, per-market and
+                        per-fixture concentration headroom, the hedge reserve
+                        and the concurrent-group count, each from
+                        point-in-time positions, open orders and the ledger.
+                        Every benchmark AND Allie is clamped by exactly these;
+                        a configured rail whose input cannot be measured makes
+                        every benchmark UNAVAILABLE.
+  opportunity_score     lost_opportunity.score.score (pure) at the decision
   canonical_intent      canonical_intent.build_decision_intent (pure) for an
-                        ENTER; the order form from the session configuration
-                        effective at the clock; compared with the intent
-                        recorded at the time, when one exists
-  alternatives          the contemporaneous qualified alternatives (other
-                        markets, decided within the window before the clock,
-                        positive executable net after fees) -- the
-                        pre-allocation tape, refused and unallocated
-                        opportunities included
-  hurdle                the HURDLE_QUANTILE of the tape's expected profit per
-                        capital-hour over the tape window (not survivor
-                        biased: every qualified opportunity, not only the
-                        selected intents)
+                        ENTER; when it cannot be built the CAUSE is recorded:
+                        DECISION_CONTENT (the decision's own record makes it
+                        unbuildable -> the R30 invariant applies) or
+                        REPLAY_EVIDENCE_MISSING (the replay cannot see what
+                        the live chain had -> UNAVAILABLE, never a zero)
+  alternatives          the contemporaneous QUALIFIED alternatives in the
+                        same sleeve: opportunities an allocator could LEGALLY
+                        take under the same hard rules (Derek ENTER, or a
+                        refusal for capital only) with a positive recorded
+                        executable net after fees; hard-rule refusals
+                        (freshness, settlement, entry switch, already held,
+                        ...) are never alternatives; an admissible
+                        opportunity whose economics were never recorded makes
+                        the alternative set UNAVAILABLE
+  hurdle                the HURDLE_QUANTILE of the qualified tape's expected
+                        profit per capital-hour over the tape window
 
 Nothing here writes, sizes, submits or manages anything.
 """
@@ -82,7 +88,7 @@ from ..lost_opportunity import score as SC
 from ..profitability import economics as EC
 from . import pit as P
 
-VERSION = "R30_REPLAY_RECONSTRUCT_V1"
+VERSION = "R30_REPLAY_RECONSTRUCT_V2"
 HOUR = 3600.0
 DAY = 86400.0
 
@@ -101,20 +107,41 @@ DEFAULT_PARAMS = {
     "allie_hurdle_lookback_s": 7 * DAY,
     "mark_points_max": 120,
     "max_decisions": 200,
+    "capital_hour_step_usd": 50.0,
+    "max_reviews_per_position": 50000,
+    "max_fills_per_position": 20000,
+    #: the row bound of each run-level snapshot (<= pit.MAX_SNAPSHOT_ROWS)
+    "snapshot_max_rows": P.MAX_SNAPSHOT_ROWS,
 }
 
 FRESH = "FRESH_CURRENT_PROBABILITY"
 SELL_ROLES = ("EXIT", "REDUCE", "STANDING_PROTECTION")
 TERMINAL = ("FILLED", "PARTIALLY_FILLED", "EXPIRED", "CANCELED", "CANCELLED",
             "REJECTED")
-#: the paper ledger's capital refusals (live_parity.PAPER_CAPITAL_REFUSALS,
-#: restated: this module imports no execution module)
-CAPITAL_REFUSALS = (
-    "INSUFFICIENT_AVAILABLE_PAPER_CASH", "AN_ENTRY_MAY_NOT_SPEND_THE_HEDGE_"
-    "RESERVE", "ABOVE_THE_PER_ORDER_CAP", "ABOVE_THE_PER_MARKET_CONCENTRATION"
-    "_CAP", "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP",
-    "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS")
+#: the paper ledger's capital refusals (bettor_paper_ledger R_*, restated:
+#: this module imports no ledger module)
+R_CASH = "INSUFFICIENT_AVAILABLE_PAPER_CASH"
+R_HEDGE = "AN_ENTRY_MAY_NOT_SPEND_THE_HEDGE_RESERVE"
+CASH_REFUSALS = (R_CASH, R_HEDGE)
+RAIL_REFUSALS = ("ABOVE_THE_PER_ORDER_CAP",
+                 "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP",
+                 "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP",
+                 "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS")
+CAPITAL_REFUSALS = CASH_REFUSALS + RAIL_REFUSALS
+#: a refusal an ALLOCATOR could have changed (capital, not a hard rule on the
+#: opportunity itself): such a refused opportunity is still admissible
+ALLOCATION_ONLY_REFUSALS = CAPITAL_REFUSALS
 R_ORDER_REFUSED = "PAPER_RISK_REFUSED_THE_ORDER"
+CAP_KEYS = ("per_order_cap_usd", "per_market_cap_usd", "per_fixture_cap_usd",
+            "max_concurrent_groups", "hedge_reserve_fraction")
+#: the account under the owner's capital policy (bettor_paper_limits.
+#: ACCOUNT_ID, restated: the replay imports no paper module -- pinned equal by
+#: tests/test_r30_replay_units.py)
+OWNER_POLICY_ACCOUNT = "paper_acct_main"
+QUALIFIED, NOT_QUALIFIED, UNRECORDED = ("QUALIFIED", "NOT_QUALIFIED",
+                                        "ECONOMICS_UNRECORDED")
+DECISION_CONTENT = "DECISION_CONTENT"
+EVIDENCE_MISSING = "REPLAY_EVIDENCE_MISSING"
 
 num = IC.num
 jl = IC.jload
@@ -132,18 +159,25 @@ def quantile(xs, q):
     return AC.quantile(list(xs), q)
 
 
+def _chunks(xs, n):
+    xs = list(xs)
+    for i in range(0, len(xs), n):
+        yield xs[i:i + n]
+
+
 DEC_COLS = (
     "decision_id", "session_id", "account_id", "decided_at", "valuation_id",
     "us_market_slug", "holding_side", "intent", "fixture", "label",
     "verdict", "refusal", "refusals", "p_internal", "p_pinnacle",
     "p_blended", "pinnacle", "book_obs_id", "book", "proposed_qty",
     "limit_price", "economics", "policy_version", "policy_decision",
-    "strategy")
+    "strategy", "provenance")
+#: the tape needs only what econ_view and the qualification read
 TAPE_COLS = (
     "decision_id", "account_id", "decided_at", "us_market_slug",
     "holding_side", "fixture", "verdict", "refusal", "refusals",
     "p_internal", "p_pinnacle", "p_blended", "proposed_qty", "limit_price",
-    "economics", "policy_decision", "strategy", "book", "pinnacle")
+    "economics", "policy_decision", "strategy")
 
 
 def decision_clock(dec: dict) -> float:
@@ -155,11 +189,45 @@ def decision_clock(dec: dict) -> float:
 # PURE VIEWS OF A DECISION RECORD
 # ═════════════════════════════════════════════════════════════════════
 
+def _levels(acq: dict, cost, fees) -> list | None:
+    """The decision's recorded book walk as [(qty, price, fee)] (the
+    acquisition's walk; fees per level from its fee basis when it lines up,
+    else the recorded total fee pro rata by cost). None when not recorded."""
+    walk = acq.get("walk") if isinstance(acq, dict) else None
+    if not isinstance(walk, list) or not walk:
+        return None
+    lv = []
+    for w in walk:
+        if not isinstance(w, dict):
+            return None
+        q, px = num(w.get("take")), num(w.get("price"))
+        if q is None or px is None or q <= 0:
+            return None
+        lv.append([q, px, None])
+    fb = acq.get("fee_basis")
+    if isinstance(fb, list) and len(fb) == len(lv) and all(
+            isinstance(f, dict) and num(f.get("fee_usd")) is not None
+            and num(f.get("qty")) is not None
+            and abs(num(f.get("qty")) - lv[i][0]) < 1e-6
+            for i, f in enumerate(fb)):
+        for i, f in enumerate(fb):
+            lv[i][2] = num(f["fee_usd"])
+    elif fees is not None and cost:
+        tot = sum(q * px for q, px, _ in lv)
+        for x in lv:
+            x[2] = fees * (x[0] * x[1]) / tot if tot else 0.0
+    else:
+        return None
+    return [tuple(x) for x in lv]
+
+
 def econ_view(dec: dict) -> dict:
     """The decision's own executable economics: planned qty, plan price d,
     acquisition cost, fees, expected net after fees, the probability, the
-    capital required (cost + fees, as R30 computes it) and the expected
-    return per dollar r = (p - d) / d."""
+    capital required (cost + fees, as R30 computes it), the capital per
+    contract and the expected return per dollar r = (p - d) / d. `known` is
+    False -- with `why_unknown` -- when any of net / capital / r was never
+    recorded: that is NOT the same as a non-positive net."""
     e = jl(dec.get("economics")) or {}
     acq = e.get("acquisition") if isinstance(e, dict) else None
     acq = acq if isinstance(acq, dict) else {}
@@ -182,12 +250,60 @@ def econ_view(dec: dict) -> dict:
         cost, cost_basis = qty * d, "PLANNED_QTY_x_PLAN_PRICE"
     cap_req = None if cost is None else cost + (fees or 0.0)
     r = None if p is None or d is None or d <= 0 else (p - d) / d
+    why = None
+    if net is None:
+        why = "DECISION_TIME_EXECUTABLE_NET_NOT_RECORDED"
+    elif cap_req is None or cap_req <= 0:
+        why = "DECISION_TIME_CAPITAL_REQUIRED_NOT_RECORDED"
+    elif r is None:
+        why = ("DECISION_CARRIES_NO_PROBABILITY" if p is None
+               else "DECISION_CARRIES_NO_PLANNED_PRICE")
+    known = why is None
+    cpc = (cap_req / qty) if known and qty and qty > 0 else None
     return {"p": p, "p_basis": p_basis, "d": d, "d_basis": d_basis,
             "qty": qty, "cost": cost, "cost_basis": cost_basis, "fees": fees,
             "net": net, "net_basis": basis, "capital_required": cap_req,
-            "r": r, "roi": (None if net is None or not cap_req
-                            else net / cap_req),
-            "qualified": bool(net is not None and net > 0 and r is not None)}
+            "capital_per_contract": cpc, "r": r,
+            "roi": (None if net is None or not cap_req else net / cap_req),
+            "known": known, "why_unknown": why,
+            "positive": bool(known and net > 0),
+            "levels": _levels(acq, cost, fees)}
+
+
+def _codes(row: dict) -> set:
+    out = set(row.get("refusals") or [])
+    if row.get("refusal"):
+        out.add(row["refusal"])
+    return {c for c in out if c}
+
+
+def admissible(row: dict) -> tuple:
+    """Could an ALLOCATOR legally take this opportunity under the same hard
+    rules? Derek ENTER = yes; a refusal for capital only = yes (another
+    allocation could have funded it); any other refusal is a hard rule on
+    the opportunity itself (stale probability past the 30 s rule, settlement
+    not supported, entries switched off, already held, ...) = no."""
+    if row.get("verdict") == "ENTER":
+        return True, "POLICY_ADMITTED_ENTER"
+    codes = _codes(row)
+    if codes and codes <= set(ALLOCATION_ONLY_REFUSALS):
+        return True, "REFUSED_FOR_CAPITAL_ONLY: %s" % ",".join(sorted(codes))
+    return False, "HARD_RULE_REFUSAL: %s" % (
+        row.get("refusal") or (sorted(codes)[0] if codes
+                               else "NO_REFUSAL_CODE"))
+
+
+def qualify(row: dict, e: dict) -> dict:
+    ok, why = admissible(row)
+    if not ok:
+        return {"state": NOT_QUALIFIED, "why": why, "admissible": False}
+    if not e["known"]:
+        return {"state": UNRECORDED, "why": e["why_unknown"],
+                "admissible": True}
+    if e["net"] <= 0:
+        return {"state": NOT_QUALIFIED, "admissible": True,
+                "why": "NON_POSITIVE_EXECUTABLE_NET_AFTER_FEES (measured)"}
+    return {"state": QUALIFIED, "why": why, "admissible": True}
 
 
 def wire_of(dec: dict, limit):
@@ -218,81 +334,112 @@ class RunContext:
         self._views: dict = {}
         self._econ: dict = {}
         self.present: dict = {}
+        self.premap = self.theses = self.intents = None
+        self.karen = self.karen_events = None
+        self.karen_first_at = None
 
     async def prepare(self, decisions: list) -> None:
         R, p = self.R, self.params
-        for t in ("karen_challenges", "eddie_execution_estimates",
-                  "canonical_decision_intents", "canonical_management_intents",
-                  "us_premap", "xavier_entry_theses", "external_valuations",
+        for t in ("karen_challenges", "karen_challenge_events",
+                  "eddie_execution_estimates", "canonical_decision_intents",
+                  "canonical_management_intents", "us_premap",
+                  "xavier_entry_theses", "external_valuations",
                   "paper_audrey_findings"):
             self.present[t] = await R.has(t)
         accounts = sorted({d["account_id"] for d in decisions
                            if d.get("account_id")})
+        bound = max(1, min(P.MAX_SNAPSHOT_ROWS, int(p["snapshot_max_rows"])))
+        # THE TAPE covers [first replayed decision - tape window, horizon]
+        # (decisions are replayed oldest first, the tape is read in recorded
+        # order, so a bounded read covers the replayed decisions first; a
+        # clock past what it covers is TAPE_TRUNCATED, never "none")
+        first = min([float(d["decided_at"]) for d in decisions]
+                    + [self.start])
         where = ("decided_at >= to_timestamp($1) AND decided_at <= "
                  "to_timestamp($2)")
-        args: tuple = (self.start - p["tape_window_s"], self.end)
+        args: tuple = (first - p["tape_window_s"], self.end)
         if self.account_id:
             where += " AND account_id = $3"
             args = args + (self.account_id,)
         self.tape = await R.snapshot(
             "paper_decisions", until=self.end, cols=TAPE_COLS, where=where,
-            args=args, order="decided_at DESC")
+            args=args, id_col="decision_id", max_rows=bound)
+        # settlements: market facts, every account, all history (positions
+        # opened before the run need their settlements; the table is small)
         self.settlements = await R.snapshot(
             "paper_settlements", until=self.end,
             cols=("settlement_id", "account_id", "position_key", "version",
                   "group_id", "us_market_slug", "holding_side", "qty",
                   "outcome", "payout_per_contract", "settled_at"),
-            where="settled_at >= to_timestamp($1)",
-            args=(self.start - p["lag_lookback_s"],),
-            order="settled_at DESC")
+            id_col="settlement_id", max_rows=bound)
         slugs = sorted({r.get("us_market_slug") for r in
-                        self.tape.at(self.end, scope="_tape")
-                        + self.settlements.at(self.end, scope="_tape")
+                        self.tape.at_covered(scope="_tape")
+                        + self.settlements.at_covered(scope="_tape")
                         if r.get("us_market_slug")} |
                        {d.get("us_market_slug") for d in decisions
                         if d.get("us_market_slug")})
-        self.premap = None
         if self.present["us_premap"] and slugs:
             self.premap = await R.snapshot(
                 "us_premap", until=self.end,
                 cols=("market_slug", "game_start", "team_league",
-                      "sports_type", "event_slug", "updated_at"),
+                      "sports_type", "event_slug", "updated_at",
+                      "identifier", "side_norm"),
                 where="market_slug = ANY($1::text[]) AND game_start IS NOT "
-                      "NULL", args=(slugs,), order="updated_at DESC")
-        self.theses = None
+                      "NULL", args=(slugs,),
+                id_col=("identifier", "side_norm"), max_rows=bound)
         if self.present["xavier_entry_theses"] and slugs:
             self.theses = await R.snapshot(
                 "xavier_entry_theses", until=self.end,
                 cols=("thesis_id", "us_market_slug", "event_start_at"),
                 where="us_market_slug = ANY($1::text[]) AND event_start_at "
-                      "IS NOT NULL", args=(slugs,), order="recorded_at DESC")
-        self.intents = None
+                      "IS NOT NULL", args=(slugs,), id_col="thesis_id", max_rows=bound)
         if self.present["canonical_decision_intents"]:
             self.intents = await R.snapshot(
                 "canonical_decision_intents", until=self.end,
                 cols=("intent_id", "decision_id", "created_at", "sleeve",
                       "allie"),
-                where="sleeve = 'INVESTMENT' AND created_at >= "
-                      "to_timestamp($1)",
-                args=(self.start - p["allie_hurdle_lookback_s"],),
-                order="created_at DESC")
+                where="sleeve = $1 AND created_at >= to_timestamp($2)",
+                args=("INVESTMENT", first - p["allie_hurdle_lookback_s"]),
+                id_col="intent_id", max_rows=bound)
+        # fills of the replayed accounts, all history: position truth at any
+        # clock needs every open position, however old
         self.fills = await R.snapshot(
             "paper_fills", until=self.end,
             cols=("fill_id", "account_id", "group_id", "role", "direction",
                   "holding_side", "us_market_slug", "fixture", "qty", "price",
-                  "fee_usd", "filled_at"),
-            where="account_id = ANY($1::text[]) AND filled_at >= "
-                  "to_timestamp($2)",
-            args=(accounts, self.start - p["exposure_lookback_s"]),
-            order="filled_at DESC")
+                  "fee_usd", "gross_usd", "filled_at"),
+            where="account_id = ANY($1::text[])", args=(accounts,),
+            id_col="fill_id", max_rows=bound)
+        if self.present["karen_challenges"]:
+            first_k = await R.rows(
+                "karen_challenges", clock=self.end, cols=("challenge_id",),
+                order="created_at", limit=1, scope="_karen")
+            self.karen_first_at = (first_k[0]["__recorded_at"] if first_k
+                                   else None)
+            lo = first - p["karen_lookback_s"]
+            self.karen = await R.snapshot(
+                "karen_challenges", until=self.end,
+                cols=("challenge_id", "target_kind", "target_id",
+                      "challenged_at", "severity", "detector"),
+                where="challenged_at >= to_timestamp($1)", args=(lo,),
+                id_col="challenge_id", max_rows=bound)
+            if self.present["karen_challenge_events"]:
+                self.karen_events = await R.snapshot(
+                    "karen_challenge_events", until=self.end,
+                    cols=("event_id", "challenge_id", "kind", "at"),
+                    where="recorded_at >= to_timestamp($1)",
+                    args=(lo - DAY,), id_col="event_id", max_rows=bound)
         for name, snap in (("tape", self.tape),
                            ("settlements", self.settlements),
                            ("premap", self.premap), ("theses", self.theses),
-                           ("intents", self.intents), ("fills", self.fills)):
+                           ("intents", self.intents), ("fills", self.fills),
+                           ("karen", self.karen),
+                           ("karen_events", self.karen_events)):
             if snap is not None and snap.truncated:
                 self.notes["SNAPSHOT_TRUNCATED_%s" % name.upper()] = (
-                    "%d rows read (the bound); older rows of the window are "
-                    "absent from this run" % len(snap))
+                    "%d rows read (the bound); complete only up to %.3f: a "
+                    "clock after it reads the dependent component as "
+                    "UNAVAILABLE" % (len(snap), snap.complete_until))
 
     # ── the per-clock view (event start, settlement lag) ─────────────
     def view(self, clock: float, scope: str) -> "ClockView":
@@ -340,10 +487,24 @@ class RunContext:
         hscope = "_eddie_history:%d" % int(b)
         orders = await self.R.rows(
             "paper_orders", clock=b, scope=hscope,
-            cols=("order_id", "order_type", "state", "queue_ahead_qty",
-                  "created_at", "decided_at", "terminal_at"),
+            cols=("order_id", "order_type", "state", "created_at",
+                  "decided_at", "terminal_at"),
             where="created_at >= to_timestamp($1)", args=(lo,),
             order="created_at DESC", limit=E.HISTORY_LIMIT)
+        # THE QUEUE AT SUBMISSION: paper_orders.queue_ahead_qty is rewritten
+        # in place by the simulator (hidden by the choke point); the
+        # ACKNOWLEDGED order event records the queue the order was placed
+        # behind, append-only
+        queue: dict = {}
+        for ids in _chunks([o["order_id"] for o in orders], 2000):
+            for e in await self.R.rows(
+                    "paper_order_events", clock=b, scope=hscope,
+                    cols=("event_id", "order_id", "detail"),
+                    where="order_id = ANY($1::text[]) AND kind = $2",
+                    args=(ids, "ACKNOWLEDGED"), limit=P.MAX_LIMIT):
+                q = num((jl(e.get("detail")) or {}).get("queue_ahead_qty"))
+                if q is not None:
+                    queue[e["order_id"]] = q
         fills = await self.R.rows(
             "paper_fills", clock=b, scope=hscope,
             cols=("fill_id", "order_id", "holding_side", "us_market_slug",
@@ -359,7 +520,7 @@ class RunContext:
                                                    f["filled_at"]))
         o_rows = [{"order_type": o["order_type"],
                    "state": o.get("state_at_clock"),
-                   "queue_ahead_qty": o.get("queue_ahead_qty"),
+                   "queue_ahead_qty": queue.get(o["order_id"]),
                    "submit_s": (None if o.get("decided_at") is None else
                                 o["created_at"] - o["decided_at"])}
                   for o in orders]
@@ -404,7 +565,8 @@ class RunContext:
         h["read_at"] = b
         h["basis"] = ("eddie.summarise_history on paper orders / fills / "
                       "books recorded by %.0f (the history bucket floor of "
-                      "the decision clock)" % b)
+                      "the decision clock); the queue at submission from the "
+                      "ACKNOWLEDGED order events" % b)
         recs = [r for r in (self.R.scope(hscope).get("max_recorded_at"),)
                 if r is not None]
         self._hist[b] = (h, recs)
@@ -427,34 +589,52 @@ class ClockView:
         self.clock = clock
         self.premap: dict = {}
         self.theses: dict = {}
+        self.incomplete: list = []
         if ctx.premap is not None:
-            for r in ctx.premap.at(clock, scope=scope):
-                k = r["market_slug"]
-                if r.get("game_start") is not None and (
-                        k not in self.premap
-                        or r["__recorded_at"] > self.premap[k][1]):
-                    self.premap[k] = (r["game_start"], r["__recorded_at"])
+            try:
+                for r in ctx.premap.at(clock, scope=scope):
+                    k = r["market_slug"]
+                    if r.get("game_start") is not None and (
+                            k not in self.premap
+                            or r["__recorded_at"] > self.premap[k][1]):
+                        self.premap[k] = (r["game_start"], r["__recorded_at"])
+            except P.SnapshotIncomplete as exc:
+                self.incomplete.append(str(exc))
         if ctx.theses is not None:
-            for r in ctx.theses.at(clock, scope=scope):
-                k = r["us_market_slug"]
-                if k not in self.theses or \
-                        r["__recorded_at"] > self.theses[k][1]:
-                    self.theses[k] = (r["event_start_at"], r["__recorded_at"])
-        self.settlements = ctx.settlements.at(clock, scope=scope)
-        first: dict = {}
-        for s in self.settlements:
-            if s.get("outcome") not in ("WON", "LOST"):
-                continue
-            k = s["us_market_slug"]
-            if k not in first or s["settled_at"] < first[k]["settled_at"]:
-                first[k] = s
+            try:
+                for r in ctx.theses.at(clock, scope=scope):
+                    k = r["us_market_slug"]
+                    if k not in self.theses or \
+                            r["__recorded_at"] > self.theses[k][1]:
+                        self.theses[k] = (r["event_start_at"],
+                                          r["__recorded_at"])
+            except P.SnapshotIncomplete as exc:
+                self.incomplete.append(str(exc))
+        self.lag_why = None
+        try:
+            self.settlements = ctx.settlements.at(clock, scope=scope)
+        except P.SnapshotIncomplete as exc:
+            self.settlements, self.lag_why = None, str(exc)
         samples = []
-        for slug, s in first.items():
-            st, _ = self.event_start(slug)
-            if st is not None:
-                samples.append((s["__recorded_at"], s["settled_at"] - st))
+        if self.settlements is not None:
+            lo = clock - ctx.params["lag_lookback_s"]
+            first: dict = {}
+            for s in self.settlements:
+                if s.get("outcome") not in ("WON", "LOST") or \
+                        s.get("settled_at") is None or s["settled_at"] < lo:
+                    continue
+                k = s["us_market_slug"]
+                if k not in first or s["settled_at"] < first[k]["settled_at"]:
+                    first[k] = s
+            for slug, s in first.items():
+                st, _ = self.event_start(slug)
+                if st is not None:
+                    samples.append((s["__recorded_at"], s["settled_at"] - st))
         self.lag_samples = samples
-        self.lag, self.lag_n = EC.settlement_lag(samples, as_of=clock)
+        if self.settlements is None:
+            self.lag, self.lag_n = None, 0
+        else:
+            self.lag, self.lag_n = EC.settlement_lag(samples, as_of=clock)
 
     def event_start(self, slug) -> tuple:
         """(epoch, basis) of the market's event start from a row VISIBLE at
@@ -469,6 +649,9 @@ class ClockView:
             return self.theses[slug][0], (
                 "xavier_entry_theses.event_start_at (an earlier entry on "
                 "this market, recorded before the clock)")
+        if self.incomplete:
+            return None, ("EVENT_START_SNAPSHOT_TRUNCATED: %s"
+                          % self.incomplete[0])
         return None, ("NO_EVENT_START_RECORDED_AT_OR_BEFORE_THE_CLOCK: "
                       "us_premap rows are rewritten in place (none was last "
                       "written before the clock) and no earlier entry thesis "
@@ -480,8 +663,9 @@ class ClockView:
         if st is None:
             return None, st_basis, st, self.lag, self.lag_n
         if self.lag is None:
-            return None, ("SETTLEMENT_LAG_SAMPLE_%d_BELOW_%d" % (
-                self.lag_n, EC.MIN_LAG_SAMPLES)), st, self.lag, self.lag_n
+            return None, (self.lag_why or "SETTLEMENT_LAG_SAMPLE_%d_BELOW_%d"
+                          % (self.lag_n, EC.MIN_LAG_SAMPLES)), st, self.lag, \
+                self.lag_n
         h = max(0.0, st - float(dec["decided_at"]) + self.lag) / HOUR
         return (h if h > 0 else None,
                 st_basis if h > 0 else "NON_POSITIVE_HOLD", st, self.lag,
@@ -507,7 +691,8 @@ async def load_decisions(R: P.Reader, *, start: float, end: float,
         args.append(sorted(strategies))
         where += " AND strategy = ANY($%d::text[])" % len(args)
     if enter_only:
-        where += " AND verdict = 'ENTER'"
+        args.append("ENTER")
+        where += " AND verdict = $%d" % len(args)
     return await R.rows("paper_decisions", clock=end, cols=DEC_COLS,
                         where=where, args=tuple(args),
                         order="decided_at, decision_id", limit=int(limit),
@@ -589,7 +774,8 @@ async def valuation_chain(ctx: RunContext, dec, clock, scope) -> dict:
         "refusals": v.get("refusals") or [],
         "settlement_rule": v.get("settlement_rule"),
         "settlement_comparison": jl(v.get("settlement_comparison")),
-        "outcome_columns": "masked until their own stamps (pit registry)"}
+        "outcome_columns": "hidden by the choke point (their stamps are the "
+                           "venue settlement time, not the write)"}
     out["_row"] = v
     return out
 
@@ -633,38 +819,52 @@ async def venue_book(ctx: RunContext, dec, clock, scope) -> dict:
         "basis": basis}}
 
 
+KAREN_RESOLVED = ("UPHELD", "REJECTED", "WITHDRAWN")
+
+
 async def karen_at(ctx: RunContext, dec, clock, scope) -> dict:
     """Karen's challenges OPEN AT THE CLOCK on this market or strategy
-    (canonical_components.karen_at_decision's rule, point in time)."""
+    (canonical_components.karen_at_decision's rule, point in time). The
+    state comes from karen_challenge_events recorded by the clock (the
+    challenge row's own response / resolution stamps are caller-supplied
+    and hidden by the choke point)."""
     if not ctx.present.get("karen_challenges"):
         return {"state": "UNAVAILABLE",
                 "why": "KAREN_CHALLENGES_TABLE_ABSENT (migration 207)"}
-    any_row = await ctx.R.rows("karen_challenges", clock=clock, scope=scope,
-                               cols=("challenge_id",), limit=1)
-    if not any_row:
+    if ctx.karen_first_at is None or ctx.karen_first_at > clock + P.EPS_S:
         return {"state": "UNAVAILABLE",
                 "why": ("NO_KAREN_RECORD_AT_OR_BEFORE_THE_CLOCK: Karen was "
                         "not recording challenges then; her review is not "
                         "invented")}
-    rows = await ctx.R.rows(
-        "karen_challenges", clock=clock, scope=scope,
-        cols=("challenge_id", "target_kind", "target_id", "challenged_at",
-              "severity", "detector", "responded_at", "resolved_at",
-              "outcome"),
-        where="challenged_at <= to_timestamp($1) AND challenged_at >= "
-              "to_timestamp($2)",
-        args=(clock, clock - ctx.params["karen_lookback_s"]),
-        order="challenged_at DESC", limit=2000)
-    open_ = [r for r in rows if r["state_at_clock"] == "OPEN"]
+    if ctx.karen_events is None:
+        return {"state": "UNAVAILABLE",
+                "why": ("KAREN_CHALLENGE_EVENTS_TABLE_ABSENT: a challenge's "
+                        "state at the clock is not reconstructable")}
+    lb = ctx.params["karen_lookback_s"]
+    try:
+        rows = ctx.karen.at(clock, scope=scope,
+                            since=("challenged_at", clock - lb))
+        events = ctx.karen_events.at(clock, scope=scope)
+    except P.SnapshotIncomplete as exc:
+        return {"state": "UNAVAILABLE", "why": "KAREN_%s" % exc}
+    rows = [r for r in rows if r["challenged_at"] <= clock + P.EPS_S]
+    state: dict = {}
+    for e in events:
+        k = e["kind"]
+        if k in KAREN_RESOLVED:
+            state[e["challenge_id"]] = "RESOLVED"
+        elif k == "RESPONDED" and state.get(e["challenge_id"]) != "RESOLVED":
+            state[e["challenge_id"]] = "RESPONDED"
+    open_ = [r for r in rows if state.get(r["challenge_id"]) is None]
     tids = sorted({r["target_id"] for r in open_
                    if r["target_kind"] == "paper_decisions"})
     tdec = {}
-    if tids:
+    for ids in _chunks(tids, P.MAX_LIMIT):
         for t in await ctx.R.rows(
                 "paper_decisions", clock=clock, scope=scope,
                 cols=("decision_id", "us_market_slug", "strategy"),
-                where="decision_id = ANY($1::text[])", args=(tids,),
-                limit=len(tids)):
+                where="decision_id = ANY($1::text[])", args=(ids,),
+                limit=len(ids)):
             tdec[t["decision_id"]] = t
     on_m = sum(1 for r in open_ if (tdec.get(r["target_id"]) or {}).get(
         "us_market_slug") == dec.get("us_market_slug"))
@@ -676,8 +876,9 @@ async def karen_at(ctx: RunContext, dec, clock, scope) -> dict:
             "open_on_market": on_m, "open_on_strategy": on_s,
             "open_total": len(open_),
             "authority": "CHALLENGE_ONLY_ZERO_AUTHORITY",
-            "basis": "karen_challenges OPEN AT THE CLOCK (state rebuilt from "
-                     "responded_at / resolved_at <= the clock)"}
+            "basis": "karen_challenges raised by the clock, OPEN unless a "
+                     "RESPONDED / UPHELD / REJECTED / WITHDRAWN event was "
+                     "recorded by the clock (karen_challenge_events)"}
 
 
 def eddie_candidate(dec) -> dict:
@@ -715,69 +916,289 @@ async def eddie_at(ctx: RunContext, dec, clock, book_row, scope) -> dict:
     return comp
 
 
-def exposure_at(ctx: RunContext, dec, clock, scope) -> dict:
-    """OPEN EXPOSURE FROM POSITION TRUTH at the clock: per group, the cost
-    basis of the entry fills net of sales (average cost) and of settled
-    positions, from fills and settlements recorded by the clock -- not
-    entry filled_qty x limit (red-team item 9). This decision's own group
-    is excluded (its order is the one being allocated)."""
+# ═════════════════════════════════════════════════════════════════════
+# POSITION TRUTH, THE LEDGER AND THE HARD RAILS AT THE CLOCK
+# ═════════════════════════════════════════════════════════════════════
+
+def book_state_at(ctx: RunContext, dec, clock, scope, own_groups) -> dict:
+    """OPEN EXPOSURE FROM POSITION TRUTH at the clock, the paper ledger's
+    own rule (bettor_paper_ledger.positions: average cost incl. fees x open
+    quantity, open = bought - sold - settled), from every fill and
+    settlement of the account recorded by the clock -- not entry filled_qty
+    x limit (red-team item 9). This decision's own groups are excluded."""
     acct = dec.get("account_id")
-    fills = [f for f in ctx.fills.at(clock, scope=scope)
-             if f.get("account_id") == acct]
-    settled = {(s["group_id"], s["us_market_slug"], str(s["holding_side"]))
-               for s in ctx.settlements.at(clock, scope=scope)}
+    try:
+        fills = [f for f in ctx.fills.at(clock, scope=scope)
+                 if f.get("account_id") == acct]
+        setts = [s for s in ctx.settlements.at(clock, scope=scope)
+                 if s.get("account_id") == acct]
+    except P.SnapshotIncomplete as exc:
+        return un("OPEN_EXPOSURE_UNMEASURED: %s" % exc)
+    settled: dict = {}
+    for s in setts:
+        k = (s["group_id"], s["us_market_slug"], str(s["holding_side"]))
+        if k not in settled or (s.get("version") or 0) > settled[k][0]:
+            settled[k] = ((s.get("version") or 0), num(s.get("qty")) or 0.0)
     pos: dict = {}
-    for f in sorted(fills, key=lambda f: f["filled_at"]):
-        k = (f["group_id"], f["us_market_slug"], str(f["holding_side"]))
-        st = pos.setdefault(k, {"q": 0.0, "basis": 0.0,
-                                "fixture": f.get("fixture")})
-        q, px = num(f["qty"]) or 0.0, num(f["price"]) or 0.0
-        fee = num(f.get("fee_usd")) or 0.0
-        if str(f.get("direction")) == "BUY":
-            st["q"] += q
-            st["basis"] += q * px + fee
-        elif st["q"] > 1e-9:
-            take = min(q, st["q"])
-            st["basis"] -= st["basis"] / st["q"] * take
-            st["q"] -= take
-    book = fixture = 0.0
-    groups: set = set()
-    for k, st in pos.items():
-        if k in settled or st["q"] <= 1e-9 or st["basis"] <= 0:
+    for f in fills:
+        if f["group_id"] in own_groups:
             continue
-        book += st["basis"]
+        k = (f["group_id"], f["us_market_slug"], str(f["holding_side"]))
+        st = pos.setdefault(k, {"bought": 0.0, "cost": 0.0, "sold": 0.0,
+                                "fixture": f.get("fixture")})
+        q = num(f["qty"]) or 0.0
+        if str(f.get("direction")) == "BUY":
+            gross = num(f.get("gross_usd"))
+            if gross is None:
+                gross = q * (num(f["price"]) or 0.0)
+            st["bought"] += q
+            st["cost"] += gross + (num(f.get("fee_usd")) or 0.0)
+        else:
+            st["sold"] += q
+    by_market: dict = {}
+    by_fixture: dict = {}
+    groups: set = set()
+    fixture_groups: set = set()
+    book = 0.0
+    for k, st in pos.items():
+        open_q = st["bought"] - st["sold"] - settled.get(k, (0, 0.0))[1]
+        if open_q <= 1e-9 or st["bought"] <= 0:
+            continue
+        basis = st["cost"] / st["bought"] * open_q
+        book += basis
+        by_market[k[1]] = by_market.get(k[1], 0.0) + basis
+        if st.get("fixture"):
+            by_fixture[st["fixture"]] = by_fixture.get(st["fixture"],
+                                                       0.0) + basis
+        groups.add(k[0])
         if dec.get("fixture") and st.get("fixture") == dec.get("fixture"):
-            fixture += st["basis"]
-            groups.add(k[0])
-    return {"book_open_usd": book, "fixture_open_usd": fixture,
-            "fixture_open_groups": len(groups),
+            fixture_groups.add(k[0])
+    fx = dec.get("fixture")
+    return {"status": "MEASURED", "book_open_usd": book,
+            "by_market": by_market, "by_fixture": by_fixture,
+            "position_groups": groups,
+            "fixture_open_usd": by_fixture.get(fx, 0.0) if fx else 0.0,
+            "fixture_open_groups": len(fixture_groups),
             "basis": ("PAPER_FILLS_NET_OF_SALES_AND_SETTLEMENTS_RECORDED_BY_"
-                      "THE_CLOCK (position truth; window %.0f days)"
-                      % (ctx.params["exposure_lookback_s"] / DAY))}
+                      "THE_CLOCK (position truth: average cost incl. fees x "
+                      "open quantity; this decision's own group excluded)")}
 
 
-async def idle_capital_at(ctx: RunContext, dec, clock, group_ids,
-                          scope) -> tuple:
-    """(idle USD, basis | why): the paper ledger's cash minus reserved at
-    its latest row recorded by the clock, excluding this decision's own
-    group (its reservation is the allocation being decided)."""
-    where = "account_id = $1"
-    args: tuple = (dec["account_id"],)
-    if group_ids:
-        where += " AND (group_id IS NULL OR NOT (group_id = ANY($2::text[])))"
-        args = (dec["account_id"], sorted(group_ids))
+async def ledger_at(ctx: RunContext, dec, clock, scope, own_groups) -> dict:
+    """cash / reserved / available AT THE CLOCK from the paper ledger: the
+    running balances of the latest row recorded by the clock, minus this
+    decision's own group's deltas recorded by then (its reservation is the
+    allocation being decided)."""
+    acct = dec.get("account_id")
     rows = await ctx.R.rows(
         "paper_ledger", clock=clock, scope=scope,
-        cols=("seq", "cash_after_usd", "reserved_after_usd", "group_id"),
-        where=where, args=args, order="committed_at DESC, seq DESC", limit=1)
+        cols=("seq", "cash_after_usd", "reserved_after_usd"),
+        where="account_id = $1", args=(acct,),
+        order="committed_at DESC, seq DESC", limit=1)
     if not rows:
-        return None, "NO_PAPER_LEDGER_ROW_RECORDED_AT_OR_BEFORE_THE_CLOCK"
-    r = rows[0]
-    cash, res = num(r["cash_after_usd"]), num(r["reserved_after_usd"])
+        return un("NO_PAPER_LEDGER_ROW_RECORDED_AT_OR_BEFORE_THE_CLOCK")
+    cash, res = num(rows[0]["cash_after_usd"]), num(rows[0][
+        "reserved_after_usd"])
     if cash is None or res is None:
-        return None, "LEDGER_ROW_UNREADABLE"
-    return cash - res, ("PAPER_LEDGER_CASH_MINUS_RESERVED_AT_THE_CLOCK "
-                        "(seq %s)" % r["seq"])
+        return un("LEDGER_ROW_UNREADABLE")
+    own_c = own_r = 0.0
+    if own_groups:
+        mine = await ctx.R.rows(
+            "paper_ledger", clock=clock, scope=scope,
+            cols=("seq", "cash_delta_usd", "reserved_delta_usd"),
+            where="account_id = $1 AND group_id = ANY($2::text[])",
+            args=(acct, sorted(own_groups)), limit=P.MAX_LIMIT)
+        if len(mine) >= P.MAX_LIMIT:
+            return un("OWN_GROUP_LEDGER_ROWS_TRUNCATED")
+        own_c = sum(num(r["cash_delta_usd"]) or 0.0 for r in mine)
+        own_r = sum(num(r["reserved_delta_usd"]) or 0.0 for r in mine)
+    cash, res = cash - own_c, res - own_r
+    return {"status": "MEASURED", "cash_usd": cash, "reserved_usd": res,
+            "available_usd": cash - res,
+            "basis": ("PAPER_LEDGER_RUNNING_BALANCE_AT_THE_CLOCK (seq %s) "
+                      "minus this decision's own group" % rows[0]["seq"])}
+
+
+def caps_at(dec: dict, cfg) -> tuple:
+    """THE CAPS EFFECTIVE AT THE CLOCK: the capital policy RECORDED ON THE
+    DECISION (paper_decisions.provenance.capital_policy, written with every
+    decision since the owner policy, bettor_paper_limits) -- a versioned
+    policy recorded at the time -- else the session configuration effective
+    from its start. For the owner-policy account a decision whose
+    provenance is absent or errored cannot say which applied: UNAVAILABLE."""
+    prov = jl(dec.get("provenance"))
+    cp = prov.get("capital_policy") if isinstance(prov, dict) else None
+    if isinstance(cp, dict):
+        return ({k: cp.get(k) for k in CAP_KEYS},
+                "DECISION_PROVENANCE_CAPITAL_POLICY %s" % cp.get("version"))
+    if dec.get("account_id") == OWNER_POLICY_ACCOUNT and (
+            not isinstance(prov, dict) or prov.get("error")):
+        return None, ("CAPITAL_POLICY_AT_THE_CLOCK_NOT_RECORDED: the decision "
+                      "records no provenance, so whether the owner capital "
+                      "policy or the session caps applied is unknown")
+    if cfg is None:
+        return None, "SESSION_CONFIGURATION_NOT_VISIBLE_AT_THE_CLOCK"
+    risk = cfg.get("risk") or {}
+    return ({k: risk.get(k) for k in CAP_KEYS},
+            "SESSION_CONFIGURATION_EFFECTIVE_AT_THE_CLOCK")
+
+
+async def open_orders_at(ctx: RunContext, dec, clock, scope,
+                         own_groups) -> dict:
+    """The account's orders OPEN AT THE CLOCK (created by it, terminal
+    state not yet durable) and each open BUY's remaining reservation from
+    the ledger rows recorded by the clock."""
+    acct = dec.get("account_id")
+    rows: list = []
+    got = await ctx.R.paged(
+        "paper_orders", clock=clock, scope=scope,
+        cols=("order_id", "group_id", "direction", "us_market_slug",
+              "fixture", "state", "terminal_at"),
+        where="account_id = $1 AND created_at >= to_timestamp($2)",
+        args=(acct, clock - ctx.params["exposure_lookback_s"]),
+        id_col="order_id", on_page=rows.extend)
+    if got["truncated"]:
+        return un("OPEN_ORDERS_READ_TRUNCATED")
+    open_ = [o for o in rows if o.get("state_at_clock") == "OPEN_AT_THE_CLOCK"
+             and o["group_id"] not in own_groups]
+    buys = [o["order_id"] for o in open_ if str(o.get("direction")) == "BUY"]
+    rem: dict = {}
+    for ids in _chunks(buys, 2000):
+        lrows: list = []
+        g = await ctx.R.paged(
+            "paper_ledger", clock=clock, scope=scope,
+            cols=("seq", "order_id", "reserved_delta_usd"),
+            where="account_id = $1 AND order_id = ANY($2::text[])",
+            args=(acct, ids), id_col="seq", on_page=lrows.extend)
+        if g["truncated"]:
+            return un("OPEN_ORDER_RESERVATIONS_READ_TRUNCATED")
+        for r in lrows:
+            rem[r["order_id"]] = rem.get(r["order_id"], 0.0) + (
+                num(r["reserved_delta_usd"]) or 0.0)
+    by_market: dict = {}
+    by_fixture: dict = {}
+    for o in open_:
+        if str(o.get("direction")) != "BUY":
+            continue
+        x = max(0.0, rem.get(o["order_id"], 0.0))
+        by_market[o["us_market_slug"]] = by_market.get(
+            o["us_market_slug"], 0.0) + x
+        if o.get("fixture"):
+            by_fixture[o["fixture"]] = by_fixture.get(o["fixture"], 0.0) + x
+    return {"status": "MEASURED", "by_market": by_market,
+            "by_fixture": by_fixture,
+            "groups": {o["group_id"] for o in open_},
+            "basis": ("orders created within %.0f days and open at the "
+                      "clock; remaining reservation from ledger rows "
+                      "recorded by the clock" %
+                      (ctx.params["exposure_lookback_s"] / DAY))}
+
+
+class Rails:
+    """THE HARD RISK RAILS AT ONE CLOCK, applied identically to every
+    benchmark and to Allie (capital units: USD reserved, fees included)."""
+
+    def __init__(self, *, caps, source, ledger, book, orders, why=None):
+        self.caps, self.source = caps or {}, source
+        self.ledger, self.book, self.orders = ledger, book, orders
+        self.why = why
+        self.status = "UNAVAILABLE" if why else "MEASURED"
+        self.available = self.idle = self.keep = None
+        self.slots = None
+        if why:
+            return
+        cash, avail = ledger["cash_usd"], ledger["available_usd"]
+        frac = num(self.caps.get("hedge_reserve_fraction")) or 0.0
+        self.keep = cash * frac
+        self.available = avail
+        # the ledger refuses an entry when available - reserve < keep: the
+        # most an entry may reserve is available - keep
+        self.idle = max(0.0, avail - self.keep)
+        mx = self.caps.get("max_concurrent_groups")
+        if mx is not None:
+            n = len(book["position_groups"] | orders["groups"])
+            self.slots = max(0, int(mx) - n)
+
+    def per_order(self):
+        return num(self.caps.get("per_order_cap_usd"))
+
+    def headroom(self, slug, fixture) -> dict:
+        out = {}
+        mc = num(self.caps.get("per_market_cap_usd"))
+        if mc is not None:
+            ex = self.book["by_market"].get(slug, 0.0) + \
+                self.orders["by_market"].get(slug, 0.0)
+            out["market_headroom_usd"] = max(0.0, mc - ex)
+        fc = num(self.caps.get("per_fixture_cap_usd"))
+        if fc is not None and fixture:
+            ex = self.book["by_fixture"].get(fixture, 0.0) + \
+                self.orders["by_fixture"].get(fixture, 0.0)
+            out["fixture_headroom_usd"] = max(0.0, fc - ex)
+        return out
+
+    def for_opportunity(self, slug, fixture, capacity_usd=None) -> dict:
+        """The V2 rails dict of one opportunity (None = not configured)."""
+        if self.status != "MEASURED":
+            return {"unmeasured": {"rails": self.why}}
+        r = {"hard_rail_usd": self.per_order(),
+             "idle_capital_usd": self.idle, "capacity_usd": capacity_usd,
+             "group_slot_usd": (None if self.slots is None
+                                else (None if self.slots > 0 else 0.0))}
+        r.update(self.headroom(slug, fixture))
+        return r
+
+    def cap_for(self, slug, fixture, capital_required,
+                capacity_usd=None) -> float:
+        lim = [capital_required]
+        for k, v in self.for_opportunity(slug, fixture,
+                                         capacity_usd).items():
+            if k != "unmeasured" and v is not None:
+                lim.append(v)
+        return max(0.0, min(lim))
+
+    def as_dict(self) -> dict:
+        return {"status": self.status, "why": self.why,
+                "caps": self.caps, "caps_source": self.source,
+                "available_usd": _r(self.available, 4),
+                "hedge_reserve_keep_usd": _r(self.keep, 4),
+                "usable_idle_usd": _r(self.idle, 4),
+                "group_slots_left": self.slots,
+                "ledger_basis": (self.ledger or {}).get("basis"),
+                "exposure_basis": (self.book or {}).get("basis"),
+                "orders_basis": (self.orders or {}).get("basis")}
+
+
+async def rails_at(ctx: RunContext, dec, clock, scope, *, caps, source,
+                   ledger, book, own_groups) -> Rails:
+    """Build the rails; any CONFIGURED rail whose input is unmeasured makes
+    the whole set UNAVAILABLE (a benchmark under fewer rails than the
+    legacy sizing faced would not be 'identical rails')."""
+    if caps is None:
+        return Rails(caps=None, source=source, ledger=None, book=None,
+                     orders=None, why="RAILS_UNMEASURED: %s" % source)
+    if ledger.get("status") != "MEASURED":
+        return Rails(caps=caps, source=source, ledger=None, book=None,
+                     orders=None,
+                     why="IDLE_CAPITAL_UNMEASURED_AT_THE_CLOCK: %s"
+                     % ledger.get("why"))
+    need_pos = any(caps.get(k) is not None for k in (
+        "per_market_cap_usd", "per_fixture_cap_usd", "max_concurrent_groups"))
+    if need_pos and book.get("status") != "MEASURED":
+        return Rails(caps=caps, source=source, ledger=ledger, book=None,
+                     orders=None, why="RAIL_INPUT_UNMEASURED: %s"
+                     % book.get("why"))
+    orders = {"by_market": {}, "by_fixture": {}, "groups": set(),
+              "basis": "not needed (no concentration or group cap)"}
+    if need_pos:
+        orders = await open_orders_at(ctx, dec, clock, scope, own_groups)
+        if orders.get("status") != "MEASURED":
+            return Rails(caps=caps, source=source, ledger=ledger, book=book,
+                         orders=None, why="RAIL_INPUT_UNMEASURED: %s"
+                         % orders.get("why"))
+    if book.get("status") != "MEASURED":
+        book = {"by_market": {}, "by_fixture": {}, "position_groups": set()}
+    return Rails(caps=caps, source=source, ledger=ledger, book=book,
+                 orders=orders)
 
 
 def allie_hurdle_sample(ctx: RunContext, clock, scope) -> list:
@@ -786,9 +1207,12 @@ def allie_hurdle_sample(ctx: RunContext, clock, scope) -> list:
     capital-hour created within 7 days and recorded by the clock."""
     if ctx.intents is None:
         return []
-    rows = [r for r in ctx.intents.at(clock, scope=scope)
-            if r.get("created_at") is not None
-            and r["created_at"] > clock - ctx.params["allie_hurdle_lookback_s"]]
+    try:
+        rows = [r for r in ctx.intents.at(clock, scope=scope)
+                if r.get("created_at") is not None and r["created_at"]
+                > clock - ctx.params["allie_hurdle_lookback_s"]]
+    except P.SnapshotIncomplete:
+        return []
     rows.sort(key=lambda r: -r["created_at"])
     out = []
     for r in rows:
@@ -812,8 +1236,8 @@ async def entry_orders(ctx: RunContext, dec, clock, scope) -> list:
               "time_in_force", "qty", "limit_price", "wire_price",
               "reserved_usd", "created_at", "decision_id", "state",
               "filled_qty", "terminal_at", "terminal_reason", "strategy"),
-        where="decision_id = $1 AND role = 'ENTRY'",
-        args=(dec["decision_id"],), order="created_at", limit=20)
+        where="decision_id = $1 AND role = $2",
+        args=(dec["decision_id"], "ENTRY"), order="created_at", limit=20)
 
 
 async def recorded_intent(ctx: RunContext, dec, clock, scope):
@@ -831,7 +1255,11 @@ async def recorded_intent(ctx: RunContext, dec, clock, scope):
 
 def canonical_intent_at(dec, *, ev, comps, cfg, orders, clock) -> dict:
     """THE R30 CANONICAL DECISION INTENT the chain builds for this
-    decision (canonical_intent.build_decision_intent, pure), or why not."""
+    decision (canonical_intent.build_decision_intent, pure), or why not --
+    with the CAUSE: DECISION_CONTENT (the record itself cannot carry an
+    intent: the R30 invariant then means no new INVESTMENT exposure) or
+    REPLAY_EVIDENCE_MISSING (what the live chain had is not visible to the
+    replay at the clock: UNAVAILABLE, never a zero)."""
     if dec.get("verdict") != "ENTER":
         return {"status": "NOT_APPLICABLE", "action": "NO_INTENT_REFUSE",
                 "why": "R30 builds a canonical decision intent for an ENTER "
@@ -842,8 +1270,11 @@ def canonical_intent_at(dec, *, ev, comps, cfg, orders, clock) -> dict:
     tif = o.get("time_in_force") or ent.get("time_in_force")
     if order_type is None or tif is None:
         return un("NO_ORDER_FORM_RECORDED_AT_THE_CLOCK: neither the entry "
-                  "order nor the session configuration names one",
-                  action="NO_CANONICAL_DECISION_INTENT")
+                  "order nor the session configuration visible at the clock "
+                  "names one (the live chain had its configuration; the "
+                  "replay cannot see it)",
+                  action="NO_CANONICAL_DECISION_INTENT",
+                  cause=EVIDENCE_MISSING)
     limit = dec.get("limit_price") if dec.get("limit_price") is not None \
         else o.get("limit_price")
     wire = o.get("wire_price") if o.get("wire_price") is not None \
@@ -872,8 +1303,13 @@ def canonical_intent_at(dec, *, ev, comps, cfg, orders, clock) -> dict:
                                                 {}).get("per_order_cap_usd")},
             created_at=clock)
     except (ValueError, TypeError, KeyError) as exc:
-        return un("CANONICAL_INTENT_NOT_BUILDABLE: %s" % exc,
-                  action="NO_CANONICAL_DECISION_INTENT")
+        msg = str(exc)
+        cause = DECISION_CONTENT
+        if "wire price" in msg and dec.get("limit_price") is None \
+                and not orders:
+            cause = EVIDENCE_MISSING
+        return un("CANONICAL_INTENT_NOT_BUILDABLE: %s" % msg,
+                  action="NO_CANONICAL_DECISION_INTENT", cause=cause)
     return {"status": "BUILT", "action": "ENTER_WITH_CANONICAL_INTENT",
             "intent_id": it["intent_id"], "content_sha": it["content_sha"],
             "sleeve": it["sleeve"], "holding_side": it["holding_side"],
@@ -911,7 +1347,8 @@ def compare_intents(replayed: dict, recorded: dict | None) -> dict:
                     "ORDER fields are what parity requires"}
 
 
-def opportunity_at(dec, ev, eddie, idle, lag_samples, start, clock) -> dict:
+def opportunity_at(dec, ev, eddie, idle, idle_why, lag_samples, start,
+                   clock) -> dict:
     fp = eddie.get("expected_fill_probability") \
         if eddie.get("status") == "MEASURED" else None
     cand = {"candidate_id": dec["decision_id"], "decided_at":
@@ -926,9 +1363,8 @@ def opportunity_at(dec, ev, eddie, idle, lag_samples, start, clock) -> dict:
                    fill_basis="EDDIE_ESTIMATE_AT_DECISION" if fp is not None
                    else None, fill_source="EDDIE" if fp is not None else None,
                    idle_capital_usd=idle,
-                   idle_capital_why=None if idle is not None else
-                   "NO_PAPER_LEDGER_ROW_AT_THE_CLOCK", lag_samples=lag_samples,
-                   ctx={})
+                   idle_capital_why=None if idle is not None else idle_why,
+                   lag_samples=lag_samples, ctx={})
     return {"status": got.get("status"), "version": SC.VERSION,
             "opportunity_score": got.get("opportunity_score"),
             "score_basis": got.get("score_basis"), "why": got.get("why"),
@@ -942,38 +1378,91 @@ def opportunity_at(dec, ev, eddie, idle, lag_samples, start, clock) -> dict:
 # ═════════════════════════════════════════════════════════════════════
 
 def tape_at(ctx: RunContext, dec, clock, scope) -> dict:
-    """The pre-allocation qualified-opportunity tape at the clock: every
-    decision recorded by the clock (any verdict, any strategy) whose
-    decision-time economics were positive after fees, deduplicated by
-    market (latest decision per market)."""
-    rows = ctx.tape.at(clock, scope=scope)
-    W = ctx.params["alternatives_window_s"]
+    """The pre-allocation qualified-opportunity tape at the clock, in the
+    decision's sleeve: per market, the LATEST decision recorded by the
+    clock (the opportunity as last assessed), classified QUALIFIED /
+    NOT_QUALIFIED (hard rule, or a measured non-positive net) /
+    ECONOMICS_UNRECORDED. UNAVAILABLE when the bounded tape does not cover
+    the clock (TAPE_TRUNCATED) -- never a measured empty set."""
     T = ctx.params["tape_window_s"]
-    alts: dict = {}
-    hurdle_rows: dict = {}
+    W = ctx.params["alternatives_window_s"]
+    sleeve = CI.sleeve_of(dec.get("strategy"))
+    try:
+        rows = ctx.tape.at(clock, scope=scope,
+                           since=("decided_at", clock - T))
+    except P.SnapshotIncomplete as exc:
+        return {"status": "UNAVAILABLE", "why": "TAPE_TRUNCATED: %s" % exc,
+                "alternatives": [], "hurdle_rows": [], "sleeve": sleeve}
+    latest: dict = {}
+    other_sleeve = 0
     for r in rows:
         if r["decision_id"] == dec["decision_id"]:
             continue
         t = r.get("decided_at")
-        if t is None or t > clock or t < clock - T:
+        if t is None or t > clock + P.EPS_S:
             continue
-        e = ctx.econ(r)
-        if not e["qualified"]:
+        if CI.sleeve_of(r.get("strategy")) != sleeve:
+            other_sleeve += 1
             continue
-        slug = r.get("us_market_slug")
-        key = slug or r["decision_id"]
-        h = hurdle_rows.get(key)
-        if h is None or t > h["t"]:
-            hurdle_rows[key] = {"t": t, "r": r, "e": e}
-        if t >= clock - W and slug != dec.get("us_market_slug"):
-            a = alts.get(key)
-            if a is None or t > a["t"]:
-                alts[key] = {"t": t, "r": r, "e": e}
-    return {"alternatives": list(alts.values()),
-            "hurdle_rows": list(hurdle_rows.values())}
+        key = r.get("us_market_slug") or r["decision_id"]
+        if key not in latest or t > latest[key]["t"]:
+            latest[key] = {"t": t, "r": r}
+    alts, hurdle_rows = [], []
+    counts = {"QUALIFIED": 0, "HARD_RULE_REFUSAL": 0,
+              "NON_POSITIVE_NET": 0, "ECONOMICS_UNRECORDED": 0}
+    unrec_alts = unrec_tape = 0
+    for x in latest.values():
+        e = ctx.econ(x["r"])
+        q = qualify(x["r"], e)
+        in_window = (x["t"] >= clock - W and x["r"].get("us_market_slug")
+                     != dec.get("us_market_slug"))
+        item = {"t": x["t"], "r": x["r"], "e": e, "q": q}
+        if q["state"] == QUALIFIED:
+            hurdle_rows.append(item)
+            if in_window:
+                alts.append(item)
+                counts["QUALIFIED"] += 1
+        elif q["state"] == UNRECORDED:
+            unrec_tape += 1
+            if in_window:
+                unrec_alts += 1
+                counts["ECONOMICS_UNRECORDED"] += 1
+        elif in_window:
+            counts["HARD_RULE_REFUSAL" if not q["admissible"]
+                   else "NON_POSITIVE_NET"] += 1
+    return {"status": "MEASURED", "alternatives": alts,
+            "hurdle_rows": hurdle_rows, "sleeve": sleeve,
+            "window_counts": counts, "unrecorded_alternatives": unrec_alts,
+            "unrecorded_tape": unrec_tape, "other_sleeve_rows": other_sleeve}
+
+
+def alternatives_input(tape: dict, window_s) -> dict:
+    """The V2 alternatives block: MEASURED returns, or UNAVAILABLE when the
+    tape does not cover the clock or an admissible alternative's economics
+    were never recorded (then 'held none' would be an invented zero)."""
+    if tape.get("status") != "MEASURED":
+        return {"status": "UNAVAILABLE", "why": tape.get("why")}
+    if tape["unrecorded_alternatives"]:
+        return {"status": "UNAVAILABLE", "why": (
+            "ALTERNATIVES_WITH_UNRECORDED_ECONOMICS_%d: admissible "
+            "opportunities in the window whose executable net was never "
+            "recorded" % tape["unrecorded_alternatives"])}
+    return {"status": "MEASURED",
+            "returns": [a["e"]["r"] for a in tape["alternatives"]],
+            "basis": ("contemporaneous QUALIFIED alternatives in the %s "
+                      "sleeve within %.0f s before the clock (hard-rule "
+                      "refusals excluded: %s)" % (
+                          tape["sleeve"], window_s,
+                          tape["window_counts"]["HARD_RULE_REFUSAL"]))}
 
 
 def hurdle_at(ctx: RunContext, tape: dict, clock, scope) -> dict:
+    if tape.get("status") != "MEASURED":
+        return {"value": None, "n": 0, "why": tape.get("why")}
+    if tape["unrecorded_tape"]:
+        return {"value": None, "n": 0, "why": (
+            "HURDLE_TAPE_HAS_%d_ADMISSIBLE_ROWS_WITHOUT_RECORDED_ECONOMICS"
+            % tape["unrecorded_tape"])}
     ppch = []
     missing = 0
     for h in tape["hurdle_rows"]:
@@ -991,26 +1480,64 @@ def hurdle_at(ctx: RunContext, tape: dict, clock, scope) -> dict:
     return {"value": quantile(ppch, q), "n": len(ppch),
             "without_hours": missing, "why": None,
             "basis": ("the %d%% quantile of the expected profit per "
-                      "capital-hour of %d qualified opportunities on the "
-                      "pre-allocation tape (any verdict) within %.0f days "
-                      "before the clock" % (int(q * 100), len(ppch),
-                                            ctx.params["tape_window_s"] /
-                                            DAY))}
+                      "capital-hour of the %d qualified %s opportunities "
+                      "(latest per market) on the pre-allocation tape within "
+                      "%.0f days before the clock whose time to release is "
+                      "measured (%d without one)" % (
+                          int(q * 100), len(ppch), tape["sleeve"],
+                          ctx.params["tape_window_s"] / DAY, missing))}
 
 
-def allocation_benchmarks(ctx: RunContext, dec, ev, tape, *, idle, rail,
-                          eddie, allie, hours, clock, scope) -> dict:
-    """The benchmark allocations of THIS decision, every one under the same
-    rails (attribution_v2 clamps them identically):
+def tranches(oid, e, cap, hours, step_usd) -> tuple:
+    """THE SHADOW TRANCHES of one opportunity within its rail cap: one per
+    recorded book-walk level (capital = qty x price + fee, expected net =
+    qty x (p - price) - fee: deeper levels earn less per dollar), else equal
+    USD steps of the recorded economics (linear). Returns (tranches, basis).
+    """
+    from ..research_ref import marginal_capital_value as MCV
+    out = []
+    left = cap
+    if e.get("levels"):
+        basis = "BOOK_WALK_LEVELS"
+        src = [(q * px + fee, q * (e["p"] - px) - fee)
+               for q, px, fee in e["levels"]]
+    else:
+        basis = "EQUAL_USD_STEPS_OF_%.0f (no recorded walk)" % step_usd
+        n = max(1, int(math.ceil(e["capital_required"] / step_usd)))
+        c = e["capital_required"] / n
+        src = [(c, e["net"] * c / e["capital_required"])] * n
+    for i, (c, net) in enumerate(src):
+        if left <= 1e-9 or c <= 0:
+            break
+        take = min(c, left)
+        out.append(MCV.Tranche(
+            opportunity_id=oid, tranche_id="%04d" % i, capital_usd=take,
+            expected_net_usd=net * take / c,
+            expected_hours_to_release=hours, fill_probability=1.0))
+        left -= take
+    return out, basis
 
-      EQUAL_ALLOCATION      idle capital / N qualified opportunities at the
-                            clock (this one + the contemporaneous ones)
+
+def allocation_benchmarks(ctx: RunContext, dec, ev, qual, tape, *, rails,
+                          eddie, allie, hours, hurdle, clock, scope) -> dict:
+    """The benchmark allocations of THIS decision in CAPITAL units (USD
+    reserved, fees included), every one under the SAME hard rails
+    (`rails`):
+
+      EQUAL_ALLOCATION      usable idle capital / N qualified opportunities
+                            at the clock (this one + the contemporaneous
+                            qualified alternatives)
       ROI_ONLY_RANKING      greedy by expected net / capital required
       CAPITAL_HOUR_RANKING  research_ref.marginal_capital_value.allocate as
-                            a SHADOW tranche allocator (expected net per
-                            capital-hour)
+                            a SHADOW tranche allocator: book-walk tranches,
+                            the tape hurdle per capital-hour, the hedge
+                            reserve as its reserve
       RESERVE_NO_ALLOCATION 0
       ALLIE                 allie_capital's final allocatable amount
+
+    A missing input is UNAVAILABLE with its reason; a measured zero (the
+    opportunity is not legally allocatable, or its net is non-positive)
+    names its basis.
     """
     from ..research_ref import marginal_capital_value as MCV
     out = {"RESERVE_NO_ALLOCATION": {"usd": 0.0, "basis": "reserve: 0"},
@@ -1019,78 +1546,102 @@ def allocation_benchmarks(ctx: RunContext, dec, ev, tape, *, idle, rail,
                      if allie.get("status") == "MEASURED" else
                      {"usd": None, "why": "ALLIE_UNMEASURED: %s" % (
                          allie.get("why") or allie.get("binding_constraint"))})}
-    me = {"id": dec["decision_id"], "e": ev, "hours": hours}
-    pool = [me] + [{"id": a["r"]["decision_id"], "e": a["e"],
-                    "hours": ctx.hours_to_release(a["r"], clock, scope)[0]}
-                   for a in tape["alternatives"]]
-    if idle is None:
-        why = "IDLE_CAPITAL_UNMEASURED_AT_THE_CLOCK"
-        for b in ("EQUAL_ALLOCATION", "ROI_ONLY_RANKING",
-                  "CAPITAL_HOUR_RANKING"):
-            out[b] = {"usd": None, "why": why}
+    names = ("EQUAL_ALLOCATION", "ROI_ONLY_RANKING", "CAPITAL_HOUR_RANKING")
+
+    def all_(usd, key, txt):
+        for b in names:
+            out[b] = {"usd": usd, key: txt}
         return out
-    if not ev["qualified"] or not ev["capital_required"]:
-        why = ("THIS_OPPORTUNITY_IS_NOT_QUALIFIED_AT_THE_CLOCK (no positive "
-               "executable net after fees)")
-        for b in ("EQUAL_ALLOCATION", "ROI_ONLY_RANKING",
-                  "CAPITAL_HOUR_RANKING"):
-            out[b] = {"usd": 0.0, "basis": why}
-        return out
-    cap_me = eddie.get("max_executable_qty") \
+    if qual["state"] == NOT_QUALIFIED:
+        return all_(0.0, "basis", "NOT_ALLOCATABLE (measured): %s"
+                    % qual["why"])
+    if qual["state"] == UNRECORDED:
+        return all_(None, "why", "%s: the benchmark allocation of an "
+                    "opportunity whose economics were never recorded is "
+                    "unknown, not zero" % qual["why"])
+    if rails.status != "MEASURED":
+        return all_(None, "why", rails.why)
+    if tape.get("status") != "MEASURED":
+        return all_(None, "why", tape.get("why"))
+    if tape["unrecorded_alternatives"]:
+        return all_(None, "why", "POOL_INCOMPLETE: %d admissible "
+                    "alternatives without recorded economics"
+                    % tape["unrecorded_alternatives"])
+    cpc = ev.get("capital_per_contract")
+    cap_me = num(eddie.get("max_executable_qty")) \
         if eddie.get("status") == "MEASURED" else None
+    cap_me_usd = None if cap_me is None or cpc is None else cap_me * cpc
+    me = {"id": dec["decision_id"], "e": ev, "hours": hours,
+          "slug": dec.get("us_market_slug"), "fixture": dec.get("fixture"),
+          "capacity": cap_me_usd}
+    pool = [me] + [{"id": a["r"]["decision_id"], "e": a["e"],
+                    "hours": ctx.hours_to_release(a["r"], clock, scope)[0],
+                    "slug": a["r"].get("us_market_slug"),
+                    "fixture": a["r"].get("fixture"), "capacity": None}
+                   for a in tape["alternatives"]]
 
     def cap_of(o):
-        c = o["e"]["capital_required"]
-        lim = [c]
-        if rail is not None:
-            lim.append(rail)
-        if o is me and cap_me is not None and o["e"]["d"]:
-            lim.append(num(cap_me) * o["e"]["d"])
-        return max(0.0, min(lim))
+        return rails.cap_for(o["slug"], o["fixture"],
+                             o["e"]["capital_required"], o["capacity"])
     out["EQUAL_ALLOCATION"] = {
-        "usd": min(idle / len(pool), cap_of(me)),
-        "basis": "idle $%.2f / %d qualified opportunities at the clock"
-                 % (idle, len(pool))}
-    left = idle
+        "usd": min(rails.idle / len(pool), cap_of(me)),
+        "basis": "usable idle $%.2f (after the hedge reserve) / %d "
+                 "qualified opportunities at the clock, rail-clamped"
+                 % (rails.idle, len(pool))}
+    left = rails.idle
+    slots = rails.slots
     k_roi = 0.0
     for o in sorted(pool, key=lambda o: (-(o["e"]["roi"] or -1e9), o["id"])):
+        if slots is not None and slots <= 0:
+            break
         take = min(cap_of(o), max(0.0, left))
+        if take > 0 and slots is not None:
+            slots -= 1
         left -= take
         if o is me:
             k_roi = take
     out["ROI_ONLY_RANKING"] = {
         "usd": k_roi, "basis": "greedy by expected net / capital required "
-        "over %d qualified opportunities" % len(pool)}
+        "over %d qualified opportunities, rail-clamped" % len(pool)}
     if hours is None:
         out["CAPITAL_HOUR_RANKING"] = {
             "usd": None, "why": "THIS_OPPORTUNITY'S_TIME_TO_RELEASE_"
             "UNMEASURED_AT_THE_CLOCK"}
-    else:
-        fp = eddie.get("expected_fill_probability") \
-            if eddie.get("status") == "MEASURED" else None
-        tr, dropped = [], 0
-        for o in pool:
-            c = cap_of(o)
-            if o["hours"] is None or c <= 0 or o["e"]["net"] is None:
-                dropped += 1
-                continue
-            tr.append(MCV.Tranche(
-                opportunity_id=o["id"], tranche_id="1", capital_usd=c,
-                expected_net_usd=o["e"]["net"] * c / o["e"]["capital_required"],
-                expected_hours_to_release=o["hours"],
-                fill_probability=1.0))
-        got = MCV.allocate(tr, idle)
-        k = sum(t.capital_usd for t in got["chosen"] if t.opportunity_id
-                == me["id"])
+        return out
+    if hurdle.get("value") is None:
         out["CAPITAL_HOUR_RANKING"] = {
-            "usd": k, "basis": ("research_ref.marginal_capital_value."
-                                "allocate (RESEARCH_SHADOW_ONLY) over %d "
-                                "tranches (%d without a time to release "
-                                "left out); fill probability 1.0 for every "
-                                "tranche alike (Eddie's estimate %s is not "
-                                "available for the alternatives)"
-                                % (len(tr), dropped, fp)),
-            "authority": got["authority"]}
+            "usd": None, "why": "HURDLE_UNAVAILABLE: %s" % hurdle.get("why")}
+        return out
+    tr, dropped, bases = [], 0, set()
+    for o in pool:
+        c = cap_of(o)
+        if o["hours"] is None or c <= 0:
+            dropped += 1
+            continue
+        got, b = tranches(o["id"], o["e"], c, o["hours"],
+                          ctx.params["capital_hour_step_usd"])
+        tr.extend(got)
+        bases.add(b.split(" ")[0])
+    alloc = MCV.allocate(tr, rails.available, reserve_usd=rails.keep,
+                         hurdle_ppch=hurdle["value"])
+    k = sum(t.capital_usd for t in alloc["chosen"] if t.opportunity_id
+            == me["id"])
+    out["CAPITAL_HOUR_RANKING"] = {
+        "usd": k, "basis": ("research_ref.marginal_capital_value.allocate "
+                            "(RESEARCH_SHADOW_ONLY) over %d tranches (%s) of "
+                            "%d qualified opportunities (%d without a time "
+                            "to release left out), hurdle %.3g per "
+                            "capital-hour (the tape), reserve $%.2f (the "
+                            "hedge reserve); fill probability 1.0 for every "
+                            "tranche alike" % (
+                                len(tr), "/".join(sorted(bases)) or "-",
+                                len(pool), dropped, hurdle["value"],
+                                rails.keep or 0.0)),
+        "tranches_chosen": sum(1 for t in alloc["chosen"]
+                               if t.opportunity_id == me["id"]),
+        "rejections": sorted({w for t, w in alloc["rejected"]
+                              if t.opportunity_id == me["id"]}),
+        "authority": alloc["authority"]}
     return out
 
 
@@ -1098,14 +1649,19 @@ def allocation_benchmarks(ctx: RunContext, dec, ev, tape, *, idle, rail,
 # THE OUTCOME AT THE HORIZON
 # ═════════════════════════════════════════════════════════════════════
 
-async def outcome_at_horizon(ctx: RunContext, dec, scope) -> dict:
-    """The PAPER execution, Xavier's reviews, the canonical management
-    intents, the settlements and the release, read at the horizon."""
+async def outcome_at_horizon(ctx: RunContext, dec, scope,
+                             review_fn=None) -> dict:
+    """The PAPER execution, Xavier's reviews (paged, compacted by
+    `review_fn` page by page), the canonical management intents, the
+    settlements and the release, read at the horizon. A per-position bound
+    that stops a read is recorded (`*_truncated`), never silent."""
     R, H = ctx.R, ctx.end
     orders = await entry_orders(ctx, dec, H, scope)
     gids = sorted({o["group_id"] for o in orders})
     out = {"orders": orders, "group_ids": gids, "fills": [], "reviews": [],
-           "mgmt_intents": [], "settlements": [], "refusal": None}
+           "mgmt_intents": {}, "settlements": [], "refusal": None,
+           "fills_truncated": False, "reviews_truncated": False,
+           "mgmt_intents_truncated": False, "settlements_why": None}
     if not orders and dec.get("verdict") == "ENTER" and \
             ctx.present.get("paper_audrey_findings"):
         f = await R.rows("paper_audrey_findings", clock=H, scope=scope,
@@ -1116,44 +1672,76 @@ async def outcome_at_horizon(ctx: RunContext, dec, scope) -> dict:
                          limit=1)
         if f:
             det = jl(f[0].get("detail")) or {}
-            out["refusal"] = {"code": det.get("refusal"),
+            code = det.get("refusal")
+            out["refusal"] = {"code": code,
                               "found_at": f[0].get("found_at"),
-                              "capital": det.get("refusal")
-                              in CAPITAL_REFUSALS}
+                              "capital": code in CAPITAL_REFUSALS,
+                              "cash": code in CASH_REFUSALS}
     if not gids:
         return out
-    out["fills"] = await R.rows(
+    fills: list = []
+    g = await R.paged(
         "paper_fills", clock=H, scope=scope,
         cols=("fill_id", "order_id", "group_id", "role", "direction",
               "holding_side", "us_market_slug", "qty", "price", "fee_usd",
               "gross_usd", "filled_at"),
-        where="group_id = ANY($1::text[])", args=(gids,),
-        order="filled_at", limit=2000)
-    out["reviews"] = await R.rows(
+        where="group_id = ANY($1::text[])", args=(gids,), id_col="fill_id",
+        max_rows=int(ctx.params["max_fills_per_position"]),
+        on_page=fills.extend)
+    out["fills"] = sorted(fills, key=lambda f: (f["filled_at"],
+                                                f["fill_id"]))
+    out["fills_truncated"] = g["truncated"]
+    if ctx.present.get("canonical_management_intents"):
+        mi: dict = {}
+
+        def keep_intents(rows):
+            for r in rows:
+                if r.get("review_id"):
+                    mi[r["review_id"]] = r.get("action")
+        g = await R.paged(
+            "canonical_management_intents", clock=H, scope=scope,
+            cols=("intent_id", "review_id", "action"),
+            where="group_id = ANY($1::text[])", args=(gids,),
+            id_col="intent_id",
+            max_rows=int(ctx.params["max_reviews_per_position"]),
+            on_page=keep_intents)
+        out["mgmt_intents"] = mi
+        out["mgmt_intents_truncated"] = g["truncated"]
+    compact: list = []
+
+    def keep_reviews(rows):
+        for r in rows:
+            compact.append(review_fn(r, out["mgmt_intents"]) if review_fn
+                           else r)
+    g = await R.paged(
         "paper_xavier_reviews", clock=H, scope=scope,
         cols=("review_id", "group_id", "reviewed_at", "trigger",
               "recommendation", "refusal", "alternatives", "selection",
               "exposure", "standing", "measure", "action"),
-        where="group_id = ANY($1::text[])", args=(gids,),
-        order="reviewed_at", limit=500)
-    if ctx.present.get("canonical_management_intents"):
-        out["mgmt_intents"] = await R.rows(
-            "canonical_management_intents", clock=H, scope=scope,
-            cols=("intent_id", "review_id", "group_id", "action",
-                  "target_qty", "evidence_state", "created_at"),
-            where="group_id = ANY($1::text[])", args=(gids,),
-            order="created_at", limit=500)
-    out["settlements"] = [s for s in ctx.settlements.at(H, scope=scope)
-                          if s["group_id"] in gids]
+        where="group_id = ANY($1::text[])", args=(gids,), id_col="review_id",
+        max_rows=int(ctx.params["max_reviews_per_position"]),
+        on_page=keep_reviews)
+    out["reviews"] = sorted(compact, key=lambda r: (
+        r.get("reviewed_at") or 0, r.get("review_id")))
+    out["reviews_truncated"] = g["truncated"]
+    try:
+        out["settlements"] = [s for s in ctx.settlements.at(H, scope=scope)
+                              if s["group_id"] in gids]
+    except P.SnapshotIncomplete as exc:
+        out["settlements_why"] = str(exc)
     return out
 
 
-def contract_settlement(ctx: RunContext, slug, side, scope) -> dict | None:
-    """The market's own settlement (any group, WON/LOST/VOID_REFUND),
-    recorded by the horizon -- the contract's outcome for a position that
-    left before settling."""
+def contract_settlement(ctx: RunContext, slug, side, scope) -> tuple:
+    """(settlement | None, why): the market's own settlement (any group,
+    WON/LOST/VOID_REFUND), recorded by the horizon -- the contract's
+    outcome for a position that left before settling."""
+    try:
+        rows = ctx.settlements.at(ctx.end, scope=scope)
+    except P.SnapshotIncomplete as exc:
+        return None, str(exc)
     best = None
-    for s in ctx.settlements.at(ctx.end, scope=scope):
+    for s in rows:
         if s["us_market_slug"] != slug or s.get("outcome") not in (
                 "WON", "LOST", "VOID_REFUND"):
             continue
@@ -1161,14 +1749,15 @@ def contract_settlement(ctx: RunContext, slug, side, scope) -> dict | None:
         key = (same, s.get("settled_at") or 0, s.get("version") or 0)
         if best is None or key > best[0]:
             best = (key, s)
-    return None if best is None else best[1]
+    return (None if best is None else best[1]), None
 
 
-async def marks(ctx: RunContext, slug, t0, t1, scope) -> list:
-    """Book observations of the market between first fill and release,
-    recorded by the horizon, evenly thinned to mark_points_max."""
+async def marks(ctx: RunContext, slug, t0, t1, scope) -> tuple:
+    """(book observations of the market between first fill and release
+    recorded by the horizon, evenly thinned to mark_points_max; truncated)
+    """
     if not slug or t0 is None:
-        return []
+        return [], False
     rows = await ctx.R.rows(
         "paper_book_observations", clock=ctx.end, scope=scope,
         cols=("observed_at", "bids", "offers"),
@@ -1190,6 +1779,6 @@ async def marks(ctx: RunContext, slug, t0, t1, scope) -> list:
         order="observed_at DESC", limit=1)
     if truncated:
         ctx.notes["MARKS_TRUNCATED_%s" % slug] = (
-            "more than %d book observations while held: the marks cover the "
-            "first %d" % (P.MAX_LIMIT, P.MAX_LIMIT))
-    return prior + rows
+            "more than %d book observations while held: the marked drawdown "
+            "of this position is UNAVAILABLE" % P.MAX_LIMIT)
+    return prior + rows, truncated

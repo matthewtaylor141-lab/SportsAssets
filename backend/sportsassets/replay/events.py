@@ -15,11 +15,15 @@ observation. Per event:
   P&L                realized, and every counterfactual (summed only when
                      every member is measured; else UNAVAILABLE with the
                      member reasons, plus the measured-only partial sum
-                     labelled as such)
+                     labelled as such). HYPOTHETICAL members (an admissible
+                     opportunity that held no position, priced at its
+                     decision-time economics) are summed APART from the
+                     realized-result members, never into them
   capital            capital-hours, profit per capital-hour
   marked drawdown    the largest peak-to-trough fall of the event's MARKED
                      equity path (fills, sales, mid marks of the held side
-                     at every recorded book, the payout at release)
+                     at every recorded book, the payout at release);
+                     UNAVAILABLE when a member's marks were truncated
   opportunity cost   capital-hours x the pre-allocation tape's hurdle per
                      capital-hour (idle cash is not free)
   lost opportunity   the classification of each decision
@@ -62,14 +66,16 @@ def _mid(row, side):
     return (1.0 - m) if str(side).upper() == "SHORT" else m
 
 
-def equity_path(pos: dict, marks: list, *, released_at, realized) -> dict:
+def equity_path(pos: dict, marks: list, *, released_at, realized,
+                marks_truncated: bool = False) -> dict:
     """[(t, marked equity)] of one position: cash so far (buys at cost plus
     fees out, sales net of fees in) + open quantity x the held side's mid
     at the latest recorded book; the realized result at release."""
     ev = sorted([("B", e) for e in pos["entry"]] +
                 [("S", e) for e in pos["sells"]], key=lambda x: x[1]["t"])
     if not ev:
-        return {"path": [], "points_without_mark": 0}
+        return {"path": [], "points_without_mark": 0,
+                "marks_truncated": False}
     times = sorted({e["t"] for _, e in ev} |
                    {m["observed_at"] for m in marks
                     if m.get("observed_at") is not None})
@@ -104,7 +110,8 @@ def equity_path(pos: dict, marks: list, *, released_at, realized) -> dict:
         path.append((t, cash + q * (last_mark or 0.0)))
     if released_at is not None and realized is not None:
         path.append((released_at, float(realized)))
-    return {"path": path, "points_without_mark": skipped}
+    return {"path": path, "points_without_mark": skipped,
+            "marks_truncated": bool(marks_truncated)}
 
 
 def max_drawdown_levels(path) -> float | None:
@@ -140,12 +147,22 @@ def capital_at(segments, t) -> float:
     return sum(c for t0, t1, c in segments or [] if t0 <= t < t1)
 
 
-def capital_extras(item: dict, items: list, tape_h: list, horizon) -> dict:
+def _segs(item: dict) -> list:
+    """The position's capital segments, an OPEN position's open cost basis
+    carried to the horizon (counterfactuals.economics)."""
+    eco = item["eval"]["economics"]["actual"]
+    return eco.get("segments_to_horizon") or eco.get("segments") or []
+
+
+def capital_extras(item: dict, items: list, tape_h: dict, horizon) -> dict:
     """The marginal qualified opportunities actually available while this
-    position held capital, the entries refused because cash was held by
-    prior allocations, and the missed executable EV attributable to this
-    position's occupied capital (pro rata by capital among the run's open
-    positions at each refusal)."""
+    position held capital, the entries refused because CASH was held by
+    prior allocations (INSUFFICIENT_AVAILABLE_PAPER_CASH, or the hedge
+    reserve it would have had to spend -- not the per-order / concentration
+    / group rails, which are their own class), and the missed executable EV
+    attributable to this position's occupied capital (pro rata by capital
+    among the run's positions holding capital at each refusal; a position
+    still open at the horizon holds its open cost basis until then)."""
     eco = item["eval"]["economics"]["actual"]
     t0 = eco.get("opened_at")
     t1 = eco.get("released_at") or horizon
@@ -155,12 +172,32 @@ def capital_extras(item: dict, items: list, tape_h: list, horizon) -> dict:
                 "cash_unavailable_by_prior_allocations": na,
                 "missed_executable_ev_from_occupied_capital": na}
     slug = item["rec"]["decision"].get("us_market_slug")
-    avail = [o for o in tape_h if t0 <= o["t"] <= t1 and o["slug"] != slug]
+    sleeve = item["rec"]["sleeve"]
+    if t1 > (tape_h.get("complete_until") or 0.0) + 1e-6:
+        marg = {"status": "UNAVAILABLE", "why": (
+            "TAPE_TRUNCATED_BEFORE_THE_RELEASE: the bounded tape is complete "
+            "only up to %s" % tape_h.get("complete_until"))}
+    else:
+        avail = [o for o in tape_h["rows"] if t0 <= o["t"] <= t1
+                 and o["slug"] != slug and o["sleeve"] == sleeve]
+        unrec = [o for o in tape_h["unrecorded"] if t0 <= o["t"] <= t1
+                 and o["slug"] != slug and o["sleeve"] == sleeve]
+        marg = {
+            "status": "MEASURED" if not unrec else "LOWER_BOUND",
+            "n": len(avail), "unrecorded_n": len(unrec),
+            "expected_net_usd": _r(sum(o["net"] for o in avail), 6),
+            "window": [t0, t1],
+            "basis": "QUALIFIED opportunities (admissible under the same hard "
+                     "rules, positive recorded executable net after fees, "
+                     "same sleeve, other markets) on the tape recorded by the "
+                     "horizon, decided while this capital was held%s" % (
+                         "; LOWER_BOUND: %d admissible ones have unrecorded "
+                         "economics" % len(unrec) if unrec else "")}
     refused = [o for o in items if o is not item
                and o["eval"]["lost_opportunity"].get("classification")
                == "CASH_UNAVAILABLE_BY_PRIOR_ALLOCATION"
                and t0 <= float(o["rec"]["decision"]["decided_at"]) <= t1]
-    segs = eco.get("segments") or []
+    segs = _segs(item)
     missed_total = attributed = 0.0
     unpriced = 0
     for o in refused:
@@ -170,34 +207,31 @@ def capital_extras(item: dict, items: list, tape_h: list, horizon) -> dict:
             unpriced += 1 if net is None else 0
             continue
         mine = capital_at(segs, t)
-        book = sum(capital_at(x["eval"]["economics"]["actual"].get(
-            "segments"), t) for x in items)
+        book = sum(capital_at(_segs(x), t) for x in items)
         missed_total += net
         if book > 0:
             attributed += net * mine / book
     return {
-        "marginal_opportunities_available": {
-            "status": "MEASURED", "n": len(avail),
-            "expected_net_usd": _r(sum(o["net"] for o in avail), 6),
-            "window": [t0, t1],
-            "basis": "qualified opportunities (positive executable net after "
-                     "fees, any verdict, other markets) on the tape recorded "
-                     "by the horizon, decided while this capital was held"},
+        "marginal_opportunities_available": marg,
         "cash_unavailable_by_prior_allocations": {
             "status": "MEASURED", "n": len(refused),
             "codes": sorted({o["rec"]["outcome"]["refusal"]["code"]
                              for o in refused}),
             "basis": "the run's ENTER decisions whose paper order the ledger "
-                     "refused for capital, decided while this capital was "
-                     "held"},
+                     "refused because cash was held (available cash or the "
+                     "hedge reserve), decided while this capital was held"},
         "missed_executable_ev_from_occupied_capital": {
-            "status": "MEASURED", "total_usd": _r(missed_total, 6),
+            "status": "MEASURED" if not unpriced else "LOWER_BOUND",
+            "total_usd": _r(missed_total, 6),
             "attributed_usd": _r(attributed, 6),
             "unpriced_refusals": unpriced,
-            "basis": "decision-time executable net of each capital-refused "
-                     "entry x this position's capital / the run's open "
-                     "capital at that instant (positions opened before the "
-                     "run are outside the denominator)"}}
+            "basis": "decision-time executable net of each cash-refused "
+                     "entry x this position's capital / the run's capital "
+                     "held at that instant (open positions to the horizon; "
+                     "positions opened before the run are outside the "
+                     "denominator)%s" % (
+                         "; LOWER_BOUND: %d refusals without a recorded net"
+                         % unpriced if unpriced else "")}}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -207,13 +241,16 @@ def capital_extras(item: dict, items: list, tape_h: list, horizon) -> dict:
 def v2_row(item: dict, extras: dict) -> dict:
     rec, ev_ = item["rec"], item["eval"]
     pos = ev_["position"]
-    eddie = rec["components"]["eddie"]
-    cap_usd = None
-    if eddie.get("status") == "MEASURED" and num(
-            eddie.get("max_executable_qty")) is not None and rec["ev"]["d"]:
-        cap_usd = num(eddie["max_executable_qty"]) * rec["ev"]["d"]
-    alts = rec["tape"]["alternatives"]
     hurdle = rec["hurdle"]
+    eco = ev_["economics"]["actual"]
+    if not pos["entry"]:
+        ch, ch_why = 0.0, None
+    elif eco.get("state") == "CLOSED":
+        ch, ch_why = ev_["capital_hours"], None
+    else:
+        ch, ch_why = None, ("OPEN_AT_THE_HORIZON: the position still holds "
+                            "capital (%s capital-hours so far)" %
+                            eco.get("capital_hours_to_horizon"))
     return V2.attribute_v2(
         subject_id=pos["group_id"] or rec["decision"]["decision_id"],
         book="PAPER", sleeve=rec["sleeve"], p=rec["ev"]["p"],
@@ -224,18 +261,14 @@ def v2_row(item: dict, extras: dict) -> dict:
         payoff_basis=pos["payoff_basis"], plan_qty=pos["plan_qty"],
         plan_qty_basis=pos["plan_basis"],
         entry_terminal=pos["entry_terminal"],
-        alternatives={"status": "MEASURED",
-                      "returns": [a["e"]["r"] for a in alts],
-                      "basis": "contemporaneous qualified alternatives "
-                               "within %.0f s before the clock" %
-                               rec["params"]["alternatives_window_s"]},
-        allocations=rec["allocations"],
-        rails={"hard_rail_usd": rec["rails"].get("hard_rail_usd"),
-               "capacity_usd": cap_usd,
-               "idle_capital_usd": rec["rails"].get("idle_capital_usd")},
-        capital=dict(extras, position_capital_hours=ev_["capital_hours"]
-                     if pos["entry"] else 0.0,
-                     capital_hours_why=None,
+        alternatives=rec["alternatives_input"],
+        allocations=rec["allocations"], rails=rec["rails"],
+        allocation_unit=V2.CAPITAL,
+        capital_per_contract=rec["ev"].get("capital_per_contract"),
+        fill_state_hint=("NO_ORDER_RECORDED" if pos.get("no_order")
+                         else None),
+        capital=dict(extras, position_capital_hours=ch,
+                     capital_hours_why=ch_why,
                      hurdle_ppch=hurdle.get("value"),
                      hurdle_why=hurdle.get("why"),
                      hurdle_basis=hurdle.get("basis")),
@@ -248,7 +281,7 @@ def v2_row(item: dict, extras: dict) -> dict:
 # AGGREGATION
 # ═════════════════════════════════════════════════════════════════════
 
-def sum_cf(cfs: list) -> dict:
+def _sum_block(cfs: list) -> dict:
     vals = [c.get("pnl_usd") for c in cfs]
     missing: dict = {}
     for c in cfs:
@@ -267,6 +300,22 @@ def sum_cf(cfs: list) -> dict:
             "unavailable": missing,
             "measured_only_partial_sum_usd": _r(sum(meas)) if missing
             else None}
+
+
+def sum_cf(cfs: list) -> dict:
+    """The realized-result members summed; the HYPOTHETICAL members (label
+    HYPOTHETICAL) summed APART under `hypothetical` -- a decision-time
+    hypothetical is never added to realized P&L."""
+    real = [c for c in cfs if c.get("label") != CF.HYPO]
+    hyp = [c for c in cfs if c.get("label") == CF.HYPO]
+    out = _sum_block(real)
+    out["members"] = len(cfs)
+    out["hypothetical"] = (dict(_sum_block(hyp), label=CF.HYPO,
+                                note="decision-time hypotheticals of "
+                                     "opportunities that held no position; "
+                                     "never added to pnl_usd")
+                           if hyp else None)
+    return out
 
 
 def event_block(key: str, items: list, rows: list) -> dict:
@@ -299,7 +348,10 @@ def event_block(key: str, items: list, rows: list) -> dict:
     can = cfs["CANONICAL_XAVIER_MANAGEMENT"]["pnl_usd"]
     act = cfs["ACTUAL_XAVIER_MANAGEMENT"]["pnl_usd"]
     paths = [it["equity"]["path"] for it in items if it["equity"]["path"]]
-    dd = max_drawdown_levels(combine(paths)) if paths else None
+    marks_cut = [it["rec"]["decision"]["decision_id"] for it in items
+                 if it["equity"].get("marks_truncated")]
+    dd = (max_drawdown_levels(combine(paths)) if paths and not marks_cut
+          else None)
     charges = [num((r.get("capital_efficiency") or {}).get(
         "capital_charge_usd")) for r in rows]
     lo: dict = {}
@@ -333,7 +385,10 @@ def event_block(key: str, items: list, rows: list) -> dict:
                        "equal_usd": ksum("EQUAL_ALLOCATION"),
                        "roi_only_usd": ksum("ROI_ONLY_RANKING"),
                        "capital_hour_usd": ksum("CAPITAL_HOUR_RANKING"),
-                       "unit": "USD, rail-clamped (legacy as ordered)"},
+                       "unit": "plan-cost USD (contracts x d, fees "
+                               "excluded -- the V2 identity's unit); "
+                               "benchmarks rail-clamped in capital units "
+                               "first; legacy as ordered"},
             "execution": {
                 "planned_qty": (None if any(p is None for p in plan)
                                 else _r(sum(plan), 6)),
@@ -355,6 +410,8 @@ def event_block(key: str, items: list, rows: list) -> dict:
         "profit_per_capital_hour": cfs["CURRENT_ACTION"][
             "profit_per_capital_hour"],
         "marked_drawdown_usd": _r(dd),
+        "marked_drawdown_why": ("MARKS_TRUNCATED: %s" % marks_cut[:5]
+                                if marks_cut else None),
         "marked_points_without_mark": sum(
             it["equity"]["points_without_mark"] for it in items),
         "opportunity_cost_usd": (None if not rows or any(
@@ -371,7 +428,7 @@ def event_block(key: str, items: list, rows: list) -> dict:
     }
 
 
-def build(items: list, *, horizon: float, tape_h: list, notes: dict,
+def build(items: list, *, horizon: float, tape_h: dict, notes: dict,
           params: dict) -> dict:
     """items: [{rec, eval, equity}] -> {events, decisions, summary}."""
     for it in items:
@@ -399,6 +456,8 @@ def build(items: list, *, horizon: float, tape_h: list, notes: dict,
     inv = [it for it in items if it["rec"]["sleeve"] == INVESTMENT]
     inv_paths = [it["equity"]["path"] for it in inv if it["equity"]["path"]]
     all_paths = [it["equity"]["path"] for it in items if it["equity"]["path"]]
+    inv_cut = any(it["equity"].get("marks_truncated") for it in inv)
+    all_cut = any(it["equity"].get("marks_truncated") for it in items)
     census: dict = {}
     for it in items:
         for name, comp in it["rec"]["components"].items():
@@ -423,13 +482,13 @@ def build(items: list, *, horizon: float, tape_h: list, notes: dict,
             "events": sum(1 for e in events if e["investment_only"]),
             "counterfactuals": totals(inv),
             "portfolio_marked_drawdown_usd": _r(max_drawdown_levels(
-                combine(inv_paths))) if inv_paths else None,
+                combine(inv_paths))) if inv_paths and not inv_cut else None,
             "use": "the ONLY block fit for any production-confidence use, "
                    "and even then REPLAY_NOT_FORWARD_EVIDENCE"},
         "research_all_sleeves": {
             "decisions": len(items), "counterfactuals": totals(items),
             "portfolio_marked_drawdown_usd": _r(max_drawdown_levels(
-                combine(all_paths))) if all_paths else None,
+                combine(all_paths))) if all_paths and not all_cut else None,
             "use": "research only; TRAINING / BENCHMARK / UNCLASSIFIED are "
                    "never pooled into the INVESTMENT block"},
         "attribution": V2.summarize(rows),

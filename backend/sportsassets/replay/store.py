@@ -80,7 +80,12 @@ def decision_payload(item: dict) -> dict:
         "clock": rec["clock"], "sleeve": rec["sleeve"],
         "economics_at_decision": rec["ev"], "components": rec["components"],
         "intent_parity": rec["intent_parity"],
+        "qualification": rec.get("qualification"),
         "alternatives_n": len(rec["tape"]["alternatives"]),
+        "tape": {k: v for k, v in rec["tape"].items()
+                 if k != "alternatives"},
+        "alternatives_input": {k: v for k, v in (rec.get(
+            "alternatives_input") or {}).items() if k != "returns"},
         "hurdle": rec["hurdle"], "allocations": rec["allocations"],
         "rails": rec["rails"], "position": pos,
         "counterfactuals": ev["counterfactuals"],
