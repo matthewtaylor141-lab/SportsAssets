@@ -95,6 +95,61 @@
   status = 200
   force = true
 
+# ── POSITION ROOMS: /positions (every active position) and /position?g=<key>
+# (one correlated position). REWRITES (status 200) to ONE static page that
+# holds no data; it reads /api/command/positions/* same-origin through the
+# /api/command/* proxy above, so the HttpOnly session cookie is sent and the
+# API enforces authentication. Netlify keeps the query string on a rewrite.
+# ORDER: below the /api/command/* proxy and ABOVE the command-host catch-all,
+# which would otherwise map /positions to the non-existent /command/positions.
+[[redirects]]
+  from = "https://command.bettortoken.com/positions"
+  to = "/command/position.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/position"
+  to = "/command/position.html"
+  status = 200
+  force = true
+# ── end POSITION ROOMS ──────────────────────────────────────────────────
+# ── EDDIE AND SCOUT (claude/pos-agents, migration 217) ─────────────────
+# Eddie (head of execution, SHADOW ONLY) and Scout (market intelligence,
+# RESEARCH SHADOW ONLY): the same shell, framing
+# /api/command/agents/<agent>/page. Until the API serving that page is
+# released, the shell says NOT YET RELEASED (it asks before framing).
+[[redirects]]
+  from = "https://command.bettortoken.com/eddie"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/scout"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+# ── end EDDIE AND SCOUT ───────────────────────────────────────────────
+# ── THE TRADING FLOOR (/floor) AND THE CHIEF ALLOCATOR'S WORKSPACE ─────
+# /floor is BETTOR headquarters: the 3D trading floor (command/floor.html),
+# a static page that reads GET /api/command/floor through the same-origin
+# /api/command/* proxy above (session cookie, read only). /allocator is the
+# Chief Allocator's workspace in the same agent shell as /derek ... /karen.
+# REWRITES (status 200) so the address bar keeps the management URL; ORDER:
+# below the /api/command/* proxy and ABOVE the command-host catch-all.
+[[redirects]]
+  from = "https://command.bettortoken.com/floor"
+  to = "/command/floor.html"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "https://command.bettortoken.com/allocator"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/*"
   to = "/command/:splat"

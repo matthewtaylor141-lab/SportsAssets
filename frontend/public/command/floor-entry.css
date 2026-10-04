@@ -1,0 +1,16 @@
+/* The trading floor's front door on the management homepage. */
+.fe-door{position:relative;display:flex;align-items:center;justify-content:space-between;gap:24px;margin:0 0 22px;padding:26px 30px;border-radius:20px;overflow:hidden;text-decoration:none;color:#eef4fa;border:1px solid #3b6a86;background:radial-gradient(ellipse at 85% 0,#2f6f9a55,transparent 60%),radial-gradient(ellipse at 0 100%,#3d8f7a33,transparent 55%),linear-gradient(120deg,#0f2433,#0a1822);box-shadow:0 18px 50px #0006;transition:border-color .2s,transform .2s}
+.fe-door:hover{border-color:#7fc1e6;transform:translateY(-1px)}
+.fe-door:focus-visible{outline:3px solid #a9dbcb;outline-offset:4px}
+.fe-glow{position:absolute;inset:auto -10% -60% 40%;height:160%;background:radial-gradient(closest-side,#6ec3f233,transparent);pointer-events:none}
+.fe-copy{position:relative;display:flex;flex-direction:column;gap:6px;min-width:0}
+.fe-eyebrow{font-size:10px;font-weight:650;letter-spacing:.18em;color:#9ec6e2}
+.fe-copy strong{font-size:clamp(24px,2.4vw,34px);font-weight:600;letter-spacing:-.03em}
+.fe-sub{font-size:13px;color:#a8bccb;max-width:640px}
+.fe-lights{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.fe-desk{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:#c9d7e2;padding:4px 9px;border-radius:999px;background:#0b1a26;border:1px solid #23435a}
+.fe-desk i{width:7px;height:7px;border-radius:50%}
+.fe-sum{font-size:11.5px;color:#8ea6b8;font-variant-numeric:tabular-nums}
+.fe-cta{position:relative;flex:none;display:inline-flex;align-items:center;gap:10px;padding:13px 20px;border-radius:12px;background:#c4e5f4;color:#122a3a;font-weight:650;font-size:14px}
+@media (max-width:760px){.fe-door{flex-direction:column;align-items:flex-start;padding:20px}.fe-cta{align-self:stretch;justify-content:center}}
+@media (prefers-reduced-motion:reduce){.fe-door{transition:none}.fe-door:hover{transform:none}}
