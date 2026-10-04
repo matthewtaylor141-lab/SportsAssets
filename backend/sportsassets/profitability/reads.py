@@ -132,7 +132,10 @@ async def paper_positions(conn, *, now, account_id=C.PAPER_ACCOUNT,
         ev, evb = starts.get((g, slug), starts.get((None, slug), (None, None)))
         out.append({
             "book": "PAPER", "position_key": pk,
-            "venue": "PAPER_SIMULATED", "account_id": account_id,
+            # the paper book SIMULATES fills against the Polymarket US book;
+            # book=PAPER is what marks it simulated (never a venue named
+            # PAPER_SIMULATED, which no position model resolves)
+            "venue": "POLYMARKET_US", "account_id": account_id,
             "group_id": g, "us_market_slug": slug, "holding_side": side,
             "strategy": fs[0].get("strategy") or dec.get("strategy"),
             "events": [{"t": f["t"], "kind": f["direction"],

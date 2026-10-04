@@ -161,6 +161,12 @@ async def test_fixture_rows_drive_every_desk_state():
     await tx.start()
     try:
         await R.ensure_identities(conn)
+        # this scenario owns these desks' status rows: a status another test
+        # left behind (e.g. a fixed-clock run that "finished" in the future)
+        # would correctly read as no run in progress
+        await conn.execute(
+            "DELETE FROM agent_status WHERE agent_id = ANY($1::text[])",
+            ["DEREK", "XAVIER", "AUDREY", "KAREN"])
         await conn.execute(
             "INSERT INTO agent_decisions (decision_ref, agent_id, kind, "
             " decided_at) VALUES ($1,'DEREK','TEST',to_timestamp($2))",

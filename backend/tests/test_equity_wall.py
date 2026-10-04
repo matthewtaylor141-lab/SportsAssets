@@ -390,6 +390,9 @@ async def test_the_live_endpoint_over_real_records(monkeypatch):
             " baseline = $3::jsonb WHERE id = 1", now - 26 * 3600,
             now - 27 * 3600, json.dumps({"positions_net": {}, "balances": [
                 {"currentBalance": 1000, "buyingPower": 1000}]}))
+        # the scenario has no venue fill since the cutover; rows another
+        # test left behind would (correctly) make realized P&L unknown
+        await conn.execute("DELETE FROM execmirror_fills")
         await conn.execute("DELETE FROM execmirror_snapshots")
         s = snap(now - 26 * 3600)
         await conn.execute(
