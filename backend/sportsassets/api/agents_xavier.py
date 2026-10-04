@@ -166,7 +166,23 @@ async def workspace(conn, *, now: float | None = None) -> dict:
         pol = await XP.load(conn)
         spo = await SPO.load_policy(conn)
         slp = await XSP.load_view(conn)
+        # WHICH "SMALL LIVE": the actual lane Xavier has managed is the
+        # LEGACY MIRROR (labelled from its real control row), never the
+        # target SMALL LIVE -- BETTOR ORIGINATED, whose status is apart.
+        from .. import bettor_originated_status as BOS
+        try:
+            sl = await BOS.read_isolated(conn)
+            scope = {"legacy_mirror_label": sl["legacy_mirror"].get("label"),
+                     "small_live_bettor": {
+                         k: sl["small_live"].get(k)
+                         for k in ("title", "status", "why")},
+                     "note": ("live positions Xavier has managed came from "
+                              "the LEGACY MIRROR (paper-order copies), not "
+                              "from BETTOR-originated orders")}
+        except Exception as exc:                                # noqa: BLE001
+            scope = {"status": "UNAVAILABLE", "why": type(exc).__name__}
         return _sec(OK, None, {
+            "small_live_scope": scope,
             "xavier_record": XV.VERSION, "ladder": XL.VERSION,
             "decision_policy": FD.VERSION,
             "management_policy": {k: pol.get(k) for k in (

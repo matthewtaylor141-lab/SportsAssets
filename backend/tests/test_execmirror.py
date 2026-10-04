@@ -749,7 +749,7 @@ async def test_the_management_view_shows_paper_beside_live(monkeypatch):
         assert o["expected_scaled_qty"] == 2.702 and o["live"]["qty"] == 3
         assert o["live"]["venue_order_id"] == "v1" and o["live"]["filled_qty"] == 3
         assert v["coverage"]["mirrored"] == 1
-        assert v["title"] == "Live execution mirror · 1:1000"
+        assert v["title"] == "LEGACY MIRROR VALIDATION · execution mirror · 1:1000"
         mk = next(m for m in v["pnl"]["markets"] if m["market"] == po["slug"])
         assert mk["live"]["entry_target_qty"] == 3
         e = mk["comparison"]["explained"]

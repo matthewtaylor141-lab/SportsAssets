@@ -810,7 +810,7 @@ def test_the_route_answers_an_authorised_reader_and_refuses_bad_filters(client, 
     r = client.get("/api/command/small-live?view=kalshi", headers=auth)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["title"] == "Small Live · Paper vs Actual"
+    assert body["title"] == "Legacy Mirror Validation · Paper vs Actual"
     assert body["rows"] == [] and body["kalshi"]["status"] == "NOT_CONNECTED"
     assert r.headers["cache-control"] == "no-store"
     assert client.get("/api/command/small-live?view=betfair", headers=auth).status_code == 422

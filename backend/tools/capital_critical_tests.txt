@@ -790,3 +790,16 @@ tests/test_improvement_pipeline_db.py
 # forecast-horizons} routes are GET-only, READ ONLY, behind a command session.
 tests/test_lost_opportunity_is_research_only.py
 tests/test_lost_opportunity_ledger.py
+# Paper book economic truth and Small Live truth (claude/c28-books,
+# migration 223): every paper position carries a durable sleeve
+# (INVESTMENT / TRAINING / BENCHMARK / UNCLASSIFIED, never silently
+# INVESTMENT); INVESTMENT economics exclude TRAINING; starting cash + every
+# sleeve reconciles exactly to the account equity; the sleeve table is
+# append-only RESEARCH / SHADOW_NO_AUTHORITY; /api/command/profitability/
+# sleeves is GET-only, READ ONLY, behind a command session. SMALL LIVE --
+# BETTOR ORIGINATED is never ACTIVE without a BETTOR-originated,
+# venue-acknowledged order; mirror / RN1 / copy orders never count; Eddie's
+# EXECUTE_NOW recommendations are never orders; the legacy mirror label
+# follows its real control row; no control row is changed.
+tests/test_paper_sleeves.py
+tests/test_small_live_truth.py

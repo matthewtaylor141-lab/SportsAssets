@@ -14,13 +14,13 @@ a control.
   * DAILY research and performance report after 6 p.m. Eastern
     (update:daily:<ET date>)
   * ESCALATIONS addressed to the verified managers for a genuine decision
-    (no paper entry for 3 h; the live mirror underfunded), once a day each
+    (no paper entry for 3 h; the legacy mirror underfunded), once a day each
   * ALERTS for a service failure, a reconciliation discrepancy or a research
     blocker. An alert's source key is its condition fingerprint plus a 6-hour
     bucket, so an unchanged condition is not re-posted within 6 h, and an
     hourly summary consolidates everything routine.
 
-SIMULATED (paper) and ACTUAL (live 1:1,000 mirror account) figures are in
+SIMULATED (paper) and LEGACY MIRROR VALIDATION (the old 1:1,000 mirror account, not the target Small Live) figures are in
 separate, labelled sections. Figures are separate and labelled: simulated cash, reserved cash, exposure
 (open cost basis), realized P&L and unrealized P&L, with the ledger sequence
 and timestamp they come from; training strategies are reported apart from
@@ -223,26 +223,46 @@ async def mirror_snapshot(conn) -> dict | None:
         return None
     from . import execmirror_view as V
     v = await V.view(conn, limit=50)
+    small = None
+    try:
+        from . import bettor_originated_status as BOS
+        got = await BOS.read_isolated(conn)
+        small = {"status": got["small_live"]["status"],
+                 "why": got["small_live"]["why"]}
+    except Exception:                                          # noqa: BLE001
+        small = None
     return {"enabled": ctl["enabled"], "stopped": ctl["stopped"],
             "pnl": v["pnl"], "coverage": v["coverage"],
-            "account": v["account"], "events": v["events"][:5]}
+            "account": v["account"], "events": v["events"][:5],
+            "small_live": small}
 
 
 def mirror_block(m: dict | None) -> str:
+    """The LEGACY MIRROR (the old 1:1,000 execution mirror -- not the target
+    Small Live system), labelled from its control row, then SMALL LIVE --
+    BETTOR ORIGINATED on its own line when its status was read."""
+    from . import bettor_originated_status as BOS
     if not m:
-        return "ACTUAL (live account, 1:1,000 mirror): not enabled."
+        return ("LEGACY MIRROR VALIDATION (1:1,000 mirror account, not the "
+                "target Small Live): not enabled.")
     p, c = m["pnl"], m["coverage"]
     rec = (m["account"] or {}).get("reconciliation") or {}
     bal = ((m["account"] or {}).get("balances") or [{}])[0]
-    return ("ACTUAL (live account, 1:1,000 mirror) · %s · live P&L %s vs paper/1,000 %s "
+    sl = m.get("small_live") or None
+    tail = ("" if not sl else "\n%s: %s (%s)" % (
+        BOS.TITLE, sl.get("status") or "UNAVAILABLE",
+        str(sl.get("why") or "")[:200]))
+    return ("%s (1:1,000 mirror account; not the target Small Live) · live P&L "
+            "%s vs paper/1,000 %s "
             "(difference %s, tracking %s) · %s of %s paper orders mirrored · "
             "buying power %s · venue reconciliation %s" % (
-                "STOPPED" if m["stopped"] else ("ON" if m["enabled"] else "OFF"),
+                BOS.legacy_label({"enabled": m["enabled"],
+                                  "stopped": m["stopped"]}),
                 _usd(p.get("live_total")), _usd(p.get("expected_live_total")),
                 _usd(p.get("difference")), p.get("tracking_ratio") or "n/a",
                 c.get("mirrored"), c.get("paper_orders_seen"),
                 _usd(bal.get("buyingPower")),
-                "OK" if rec.get("reconciled") else ("DIFFERENCE" if rec else "not yet read")))
+                "OK" if rec.get("reconciled") else ("DIFFERENCE" if rec else "not yet read"))) + tail
 
 
 async def activity(conn, since: float, now: float) -> dict:
@@ -345,7 +365,7 @@ def decision_escalations(s: dict, act: dict, m: dict | None, now: float) -> list
         top = act["refusals"][0]
         out.append(("no-entries", _fp(top[0]),
                     "%s Decision needed · no paper entry for %d h. The leading refusal is "
-                    "%s (%d in the last period). The live 1:1,000 mirror can only trade "
+                    "%s (%d in the last period). The legacy 1:1,000 mirror can only copy "
                     "what paper trades. Do you want Derek to prioritise research on "
                     "this blocker (reply in thread), or keep the current policy?"
                     % (tag, (now - act["last_entry_at"]) // 3600, top[0], top[1])))
@@ -357,7 +377,7 @@ def decision_escalations(s: dict, act: dict, m: dict | None, now: float) -> list
             bp = None
         if bp is not None and bp < 500:
             out.append(("mirror-funding", _fp(round(bp)),
-                        "%s Decision needed · the live mirror account has %s buying "
+                        "%s Decision needed · the LEGACY mirror account has %s buying "
                         "power; mirroring the whole $500,000 paper account at 1:1,000 "
                         "needs about $500. Orders beyond the balance are recorded as "
                         "INSUFFICIENT_CASH, so live P&L will cover only part of paper. "

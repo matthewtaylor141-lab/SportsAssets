@@ -146,7 +146,13 @@ def test_no_funded_module_imports_the_paper_modules():
                # beside the actual books (never summed); it writes nothing and
                # imports no order, venue, execution or funded module
                # (tests/test_equity_wall_authority.py)
-               "api/command_equity.py"}
+               "api/command_equity.py",
+               # (223) the paper sleeve economics (/api/command/profitability/
+               # sleeves): GET-only, reads bettor_paper_sleeves.sleeve_book
+               # (paper ledger + paper_sleeve_classifications) inside a READ
+               # ONLY transaction; writes nothing, imports no order, venue,
+               # execution or funded module (tests/test_paper_sleeves.py)
+               "api/command_sleeves.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
