@@ -90,7 +90,15 @@ async def step_books(conn, ctx: dict) -> dict:
     observation first -- a fill can only be simulated on a book observed
     after placement; (3) held positions, stalest first, for marks and
     Xavier's exit ladder. A read this process made within seconds answers
-    without a second venue request (`bettor_paper_guard`)."""
+    without a second venue request (`bettor_paper_guard`).
+
+    XAVIER'S FRESH-EVIDENCE PRIORITY LIST (owner R30, migration 226): the
+    slugs of open VENUE_BOOK requests (`work_queue.priority_book_slugs`, at
+    most work_queue.MAX_PRIORITY_BOOKS_PER_PASS, oldest request first) are
+    read right after (1) and before everything else -- inside the same
+    half-of-the-pass cap, so no venue read is added, only re-ordered; each
+    read closes its request with the observation id (or FAILED)."""
+    from . import work_queue as WQ
     acct = ctx["account_id"]
     rows = await conn.fetch(
         "SELECT us_market_slug, order_type, state FROM paper_orders "
@@ -99,18 +107,29 @@ async def step_books(conn, ctx: dict) -> dict:
     due = [r["us_market_slug"] for r in rows
            if r["order_type"] == "MARKETABLE"
            and r["state"] == "PENDING_SIMULATION"]
+    prio = [s for s in await WQ.priority_book_slugs(conn, account_id=acct)
+            if s not in due]
     resting = await _stalest_first(conn, [
         r["us_market_slug"] for r in rows
-        if r["us_market_slug"] not in due])
-    slugs = list(dict.fromkeys(due + resting))
+        if r["us_market_slug"] not in due and r["us_market_slug"]
+        not in prio])
+    slugs = list(dict.fromkeys(due + prio + resting))
     held = await _stalest_first(conn, [
         p["us_market_slug"] for p in await L.positions(conn, acct)
         if p["us_market_slug"] not in slugs])
     slugs.extend(held)
     # AT MOST HALF THE PASS'S READS: the other half is Derek's.
     cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
-    return await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION",
-                            limit=max(1, cap // 2))
+    got = await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION",
+                           limit=max(1, cap // 2))
+    if prio:
+        read_prio = [s for s in prio if s in got["obs"]]
+        ctx["work_queue_books_read"] = len(read_prio)
+        got["work_queue"] = dict(await WQ.complete_book_reads(
+            conn, {s: got["obs"][s] for s in read_prio},
+            at=ctx["clock"]() if ctx.get("clock") else ctx["now"]),
+            priority=len(prio), priority_read=len(read_prio))
+    return got
 
 
 async def read_books(conn, ctx: dict, slugs: list, *, basis: str,
@@ -207,6 +226,12 @@ def default_steps() -> list:
         # entry, computed once an outcome is known. Records only.
         from . import xavier_management as XM
         steps.append(("xavier_value_add", XM.step_value_add))
+        # XAVIER'S FRESH-EVIDENCE WORK (owner R30, migration 226): the
+        # requests his stale-evidence reviews enqueued -- expired ones
+        # FAILED, landed evidence COMPLETED, held re-evaluations / priority
+        # book reads / re-reviews dispatched, all bounded per pass.
+        from . import work_queue as WQ
+        steps.append(("xavier_work_queue", WQ.drain))
     except ImportError:
         pass
     steps.append(("equity", step_equity))

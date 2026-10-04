@@ -37,6 +37,7 @@ from ..agents import agent_activity as AA
 from ..agents import agent_context as AC
 from ..agents import agent_memory as M
 from ..agents import identity as I
+from ..agent_work_state import read_work_states as _read_work_states
 from .agents_core import _pool, require_read
 
 router = APIRouter()
@@ -133,6 +134,14 @@ async def _state(conn, a: str, now: float) -> dict:
                     "state is at /api/command/floor/%s" % I.SLUGS[a]}
 
 
+async def _work_state(conn, a: str, now: float) -> dict:
+    """agent_work_state's derivation for this agent (read only)."""
+    got = await _read_work_states(conn, now=now)
+    return dict(got["states"].get(a) or {}, sections={
+        k: v for k, v in got["sections"].items()
+        if v.get("status") not in ("OK", "EMPTY")})
+
+
 async def _memory_summary(conn, a: str, sections: dict) -> dict:
     if not await M.has_schema(conn):
         sections["memory"] = {"status": AA.ABSENT, "why": M.R_NO_SCHEMA}
@@ -206,6 +215,13 @@ async def build_identity(conn, agent: str, *, now: float | None = None
     state = await _section(conn, sections, "state",
                            lambda: _state(conn, a, at)) or {
         "status": AA.UNAVAILABLE, "why": sections["state"]["why"]}
+    # THE WORK STATE (owner R30): from recorded open work and blockers --
+    # the heartbeat row alone said IDLE for Xavier while he owned positions
+    work = await _section(conn, sections, "work_state",
+                          lambda: _work_state(conn, a, at))
+    state = dict(state, work_state=(work or {}).get("state"),
+                 work_detail=(work or {}).get("detail") if work else
+                 "UNAVAILABLE: %s" % sections["work_state"]["why"])
     memory = await _memory_summary(conn, a, sections)
     exp = await _section(conn, sections, "experience",
                          lambda: AA.experience(conn, a, now=at))
@@ -219,7 +235,7 @@ async def build_identity(conn, agent: str, *, now: float | None = None
         "agent": {"agent_id": a, "slug": I.SLUGS[a],
                   "display_name": ident["display_name"]},
         "identity": ident, "identity_versions": nver,
-        "voice": voice, "state": state, "memory": memory,
+        "voice": voice, "state": state, "work": work, "memory": memory,
         "experience": exp if exp is not None else {
             "events": None, "status": AA.UNAVAILABLE,
             "why": sections["experience"]["why"]},

@@ -792,6 +792,14 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                 sched(pos["us_market_slug"], float(valuation["expires_at"]))
             except Exception:                                   # noqa: BLE001
                 pass
+        # FRESH-EVIDENCE WORK (owner R30, migration 226): a review that
+        # could not decide on fresh evidence enqueues the acquisitions it
+        # needs (probability, venue book, game state, re-review); a later
+        # review closes what it satisfies. Never raises.
+        from . import work_queue as WQ
+        await WQ.after_review(conn, ctx, group_id=group_id, pos=pos,
+                              review_id=rid, recommendation=recorded,
+                              measure=measure, at=at)
         reviews.append({"review_id": rid, "position": pos["position_key"],
                         "recommendation": recorded,
                         "mechanical_selection": chosen,

@@ -160,7 +160,14 @@ def test_no_funded_module_imports_the_paper_modules():
                # transaction; writes nothing, imports no order, venue,
                # execution or funded module
                # (tests/test_profitability_validation.py)
-               "api/command_validation.py"}
+               "api/command_validation.py",
+               # (226, owner R30) Xavier's fresh-evidence work queue: reads
+               # the paper ledger's open positions (to close the requests of
+               # a position that closed) and asks the paper runtime for a
+               # priority book read / a held re-review; it writes ONLY
+               # agent_work_* records and holds no submit, cancel or reserve
+               # call (tests/test_agent_work_state_authority.py)
+               "agents/work_queue.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package

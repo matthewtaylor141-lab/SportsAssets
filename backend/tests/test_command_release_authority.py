@@ -1,7 +1,7 @@
 """CAPITAL-CRITICAL: THE RELEASE-TRUTH READ HAS NO AUTHORITY, AND TELLS THE TRUTH.
 
 GET /api/command/release (api/command_release.py) reports the API build SHA,
-the workers' boot SHA, schema_migrations 216-225 and the committed release
+the workers' boot SHA, schema_migrations 216-226 and the committed release
 receipts. This proves the boundary the way test_command_floor_authority.py
 does for the floor:
 

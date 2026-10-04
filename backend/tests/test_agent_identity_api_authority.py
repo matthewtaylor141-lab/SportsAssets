@@ -62,7 +62,10 @@ ALLOWED_OURS = {
     "sportsassets.agents.identity", "sportsassets.agents.agent_memory",
     "sportsassets.agents.agent_context", "sportsassets.agents.agent_activity",
     "sportsassets.xavier_freshness", "sportsassets.order_state_truth",
-    "sportsassets.api.agents_core"}
+    "sportsassets.api.agents_core",
+    # the agents' work states (owner R30): stdlib + xavier_freshness only,
+    # SELECT-only SQL (tests/test_agent_work_state_authority.py)
+    "sportsassets.agent_work_state"}
 FORBIDDEN = ("execmirror", "kalshi", "pmus", "venue", "clob", "executor",
              "execution", "ledger", "simulator", "bettor_funded", "funded",
              "paper", "smalllive", "submit", "live_", "actual_admission",
