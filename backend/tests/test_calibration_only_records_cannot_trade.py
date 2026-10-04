@@ -641,6 +641,23 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (242) LAB-A EDGE DECAY (SHADOW RESEARCH): the lab's point-in-time
+    # accessor registers the table's stamps; the reader reads a qualified
+    # decision's own valuation BY ID and the later valuations of the SAME
+    # contract orientation (both purposes: the Pinnacle probability is the
+    # same evidence whatever the row's purpose) to measure how fast the
+    # executable edge decays; the pure core names the table in prose and in
+    # PIT calls; the offline fast-lane harness reads a recorded decision's
+    # sport family by id. None selects a candidate, sizes or places
+    # anything, and no decision path imports the lab
+    # (tests/test_lab_edge_decay_import_guard.py).
+    "lab/pit.py": ("PIT_ACCESSOR_STAMP_REGISTRY_ONLY", 1),
+    "lab/edge_decay_reads.py": (
+        "SHADOW_RESEARCH_BY_ID_AND_SAME_CONTRACT_LATER_VALUATIONS_READS_ALL",
+        2),
+    "lab/edge_decay.py": ("SHADOW_RESEARCH_PURE_CORE_PIT_CALLS_AND_PROSE", 5),
+    "scripts/lab_fastlane_measure.py": (
+        "OFFLINE_HARNESS_BY_ID_SPORT_FAMILY_ONLY", 1),
 }
 
 
