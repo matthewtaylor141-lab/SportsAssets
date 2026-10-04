@@ -488,7 +488,7 @@ def judge_parity(cutover: dict | None, counts: dict | None) -> dict:
               "basis": "any LOGIC_DIVERGENCE halts new live exposure "
                        "(live_parity)"}
     window = "since the recorded production cutover"
-    src = "live_parity_cutover + live_parity_ledger"
+    src = "live_parity_effective_cutover + live_parity_ledger"
     if not cutover:
         return unavailable("PARITY_DIVERGENCE",
                            "NO_PRODUCTION_CUTOVER_RECORDED", target=target,
@@ -669,10 +669,22 @@ async def read_slos(conn, *, now: float | None = None, api=None,
                               lambda: judge_scores(None, None, None, now=now)))
 
     # 7 · parity divergence
+    #
+    # THE EFFECTIVE CUTOVER, FROM THE VIEW (integration of the R30A runtime
+    # and intent streams). This read was written against the R30 singleton
+    # (`live_parity_cutover WHERE id = 1`, a `cutover_at` column). The intent
+    # stream made the table one row per deployment (cutover_id, recorded_at
+    # stamped by the database clock) and put the forward window's start in
+    # migration 225's view live_parity_effective_cutover -- the latest
+    # release whose decision-logic hash changed, with cutover_at. Merged, the
+    # old read raised UndefinedColumnError and this SLO answered UNAVAILABLE
+    # for a reason that was not the evidence. It now reads the same view
+    # live_parity.readiness_report and the profitability validation read, so
+    # "since the cutover" means one instant everywhere (this module still
+    # imports nothing from live_parity).
     async def parity():
         cut = await conn.fetchrow(
-            "SELECT cutover_at, release_sha FROM live_parity_cutover "
-            " WHERE id = 1")
+            "SELECT cutover_at, release_sha FROM live_parity_effective_cutover")
         if cut is None:
             return judge_parity(None, None)
         c = await conn.fetchrow(

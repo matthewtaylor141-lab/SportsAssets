@@ -566,19 +566,30 @@ def test_an_overdue_work_request_and_a_divergence_since_cutover_breach():
                 "group_id, kind, request_id, opened_at) VALUES ('XAVIER', "
                 "'PAPER', 'g-slo', 'PROBABILITY', $1, to_timestamp($2))",
                 rid, now - 7200)
-            sha = "a" * 40
+            # THE CUTOVER, IN MIGRATION 225'S PER-RELEASE SHAPE (integration
+            # of the R30A runtime and intent streams). This insert was
+            # written against the R30 singleton (id = 1, a caller-chosen
+            # cutover_at). The intent stream made it one row per deployment:
+            # cutover_id, a decision-logic hash, recorded_at stamped by the
+            # database clock (live_parity_cutover_stamp_trg), a named human,
+            # and the SLO now reads the effective cutover from the view. The
+            # divergence below is written at `now - 600` with `now` five
+            # years ahead, so it falls after the stamped instant exactly as
+            # it fell after the old `now - 86400`. A fresh sha keeps the
+            # trigger's "same release twice in a row" refusal out of the way.
+            sha = (uuid.uuid4().hex + uuid.uuid4().hex)[:40]
             hid = await c.fetchval(
                 "INSERT INTO live_parity_hook_installs (process, commit_sha, "
                 "hooks) VALUES ('api', $1, ARRAY['DECISION']) "
                 "RETURNING install_id", sha)
             await c.execute(
-                "INSERT INTO live_parity_cutover (id, cutover_at, "
-                "release_sha, api_sha, workers_sha, migrations, "
-                "hook_install_id, small_live_mode, small_live_halted, "
-                "capital_activated, evidence, recorded_by) VALUES (1, "
-                "to_timestamp($2), $1, $1, $1, ARRAY['225','226'], $3, "
-                "'SHADOW', false, false, '{}', 'test')", sha, now - 86400,
-                hid)
+                "INSERT INTO live_parity_cutover (release_sha, api_sha, "
+                "workers_sha, migrations, decision_logic_hash, "
+                "decision_logic_files, hook_install_id, small_live_mode, "
+                "small_live_halted, capital_activated, evidence, recorded_by)"
+                " VALUES ($1, $1, $1, ARRAY['225','226'], $2, '{}'::jsonb, "
+                "$3, 'SHADOW', false, false, '{}', 'release engineer')",
+                sha, "c" * 64, hid)
             iid = "cdi_" + uuid.uuid4().hex[:24]
             for eid, adapter, mode, scale, state in (
                     ("e_p_" + iid, "PAPER", "SIMULATED", 1, "PAPER_SUBMITTED"),

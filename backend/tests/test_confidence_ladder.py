@@ -635,23 +635,44 @@ async def _settled(conn, acct, *, strategy, at, qty, price, outcome):
 
 
 async def _cutover(conn, at: float) -> float:
-    """The production cutover (recorded once in production by
-    live_parity.record_cutover); here inside the rolled-back transaction."""
+    """The production cutover (recorded per release in production by
+    live_parity.record_cutover); here inside the rolled-back transaction.
+
+    MIGRATION 225'S PER-RELEASE SHAPE (integration of the R30A prof and
+    intent streams). This helper was written against the R30 singleton
+    (`live_parity_cutover WHERE id = 1`, a caller-chosen `cutover_at`). The
+    intent stream made the table one row per deployment whose recorded_at
+    the database clock stamps (live_parity_cutover_stamp_trg), with the
+    forward window's start in the view live_parity_effective_cutover --
+    which the endpoint already reads (command_validation.production_cutover_
+    epoch). So the existing cutover is read from that view, and a backdated
+    one is written the way tests/test_profitability_validation writes its
+    own: the stamp trigger disabled for THIS transaction only (the DDL rolls
+    back with everything else), a named human, and THIS build's decision-
+    logic hash (the validation verdict refuses a build whose logic no
+    cutover names)."""
+    from sportsassets import decision_logic as DL
     have = await conn.fetchval(
         "SELECT extract(epoch FROM cutover_at)::float8 FROM "
-        " live_parity_cutover WHERE id = 1")
+        " live_parity_effective_cutover")
     if have is not None:
         return float(have)
     iid = await conn.fetchval(
         "INSERT INTO live_parity_hook_installs (process, commit_sha, hooks) "
         " VALUES ('test', repeat('a', 40), ARRAY['X']) RETURNING install_id")
+    await conn.execute("ALTER TABLE live_parity_cutover DISABLE "
+                       "TRIGGER live_parity_cutover_stamp_trg")
     await conn.execute(
-        "INSERT INTO live_parity_cutover (cutover_at, release_sha, api_sha, "
-        " workers_sha, migrations, hook_install_id, small_live_mode, "
-        " small_live_halted, capital_activated, evidence, recorded_by) "
+        "INSERT INTO live_parity_cutover (recorded_at, release_sha, api_sha, "
+        " workers_sha, migrations, decision_logic_hash, decision_logic_files,"
+        " hook_install_id, small_live_mode, small_live_halted, "
+        " capital_activated, evidence, recorded_by) "
         " VALUES (to_timestamp($1), repeat('a', 40), repeat('a', 40), "
-        " repeat('a', 40), ARRAY['225','226'], $2, 'SHADOW', false, false, "
-        " '{}', 'test')", float(at), iid)
+        " repeat('a', 40), ARRAY['225','226'], $3, '{}'::jsonb, $2, "
+        " 'SHADOW', false, false, '{}', 'release engineer')", float(at), iid,
+        DL.decision_logic_hash()["hash"])
+    await conn.execute("ALTER TABLE live_parity_cutover ENABLE "
+                       "TRIGGER live_parity_cutover_stamp_trg")
     return float(at)
 
 
