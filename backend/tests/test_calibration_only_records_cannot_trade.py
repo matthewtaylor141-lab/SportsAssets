@@ -556,6 +556,18 @@ READERS = {
     # (209) THE IMPROVEMENT DRIVER: checks the table exists before reading
     # the scorecard's filtered Brier; registers paper experiments only.
     "agents/improvement_driver.py": ("EXISTENCE_CHECK_ONLY", 1),
+    # (216) THE PROFITABILITY WAREHOUSE (RESEARCH): the lineage reads the
+    # valuation rows a held position's decision (or execution intent)
+    # already links to, BY ID ONLY (version, experiment, devig, whether raw
+    # provider odds were kept), to reference them as the position's
+    # candidate stage; both purposes, because a calibration-only row a
+    # paper decision used is part of that position's history. The
+    # warehouse names the table once in prose. It selects no candidate,
+    # sizes and places nothing, and writes only pos_* tables
+    # (tests/test_profitability_is_research_only.py).
+    "profitability/reads.py": (
+        "BY_ID_OF_THE_HELD_POSITIONS_DECISION_RESEARCH_LINEAGE_ONLY", 2),
+    "profitability/warehouse.py": ("PROSE_ONLY", 1),
 }
 
 
