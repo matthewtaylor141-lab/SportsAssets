@@ -23,12 +23,17 @@ agents_core.require_read (401 without a session).
                                 Audrey -- UNAVAILABLE parts name why)
       data.counts / unavailable_by_reason / formula / unit
   GET /api/command/profitability/forecast-horizons
-      data.{PAPER,ACTUAL}.{24H,7D,30D}  expected opportunities, qualified
-                                opportunities, turnover, deployable capital,
-                                capital-hours, net P&L P10/P50/P90,
-                                P(positive), expected drawdown, capacity
-                                utilization; status UNPROVEN | UNAVAILABLE;
-                                scores per book:horizon
+      data.{PAPER,ACTUAL}.{24H,7D,30D}  THE INVESTMENT SLEEVE (production
+                                confidence, migration 227): expected
+                                opportunities, qualified opportunities,
+                                turnover, deployable capital, capital-hours,
+                                net P&L P10/P50/P90, P(positive), expected
+                                drawdown, capacity utilization; status
+                                UNPROVEN | UNAVAILABLE
+      by_sleeve.{book}.{sleeve}.{horizon}  every sleeve separately (research
+                                for TRAINING / BENCHMARK / UNCLASSIFIED);
+                                legacy_book_wide: pre-227 pooled forecasts;
+                                scores per book:sleeve:horizon
 
 EVERY RESPONSE IS RESEARCH WITH NO AUTHORITY: the envelope of the
 profitability reads, a READ ONLY transaction with a statement timeout, and
@@ -49,7 +54,12 @@ router = APIRouter()
 BASE = "/api/command/profitability"
 STATEMENT_TIMEOUT_MS = 8000
 CLASSIFIER_VERSION = "LOL_CLASSIFIER_V1"
-SCORE_VERSION = "LOL_OPPORTUNITY_SCORE_V1"
+#: V2 (R30A): executable-freshness capacity, freshness-checked Eddie fill
+#: estimate, INVESTMENT-only calibration and fill rates (lost_opportunity/
+#: score.py). V1 rows stay in the table, append-only, and are not served as
+#: the current score.
+SCORE_VERSION = "LOL_OPPORTUNITY_SCORE_V2"
+SLEEVES = ("INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
 CLASSES = ("GOOD_REFUSAL", "FALSE_REFUSAL", "UNKNOWABLE")
 JSON_COLS = ("detail", "unmeasured", "summary", "components", "quantiles",
              "validation", "basis")
@@ -60,10 +70,14 @@ LEDGER_DISCLOSURE = (
     "a missed opportunity. FALSE_REFUSAL requires a positive executable net "
     "EV under the policy's own thresholds after fees AND a named defect.")
 SCORE_FORMULA = ("expected net executable EV (pos_capacity, conditional on "
-                 "fill) x fill probability (CAPACITY rates, PAPER-simulated) "
-                 "x capacity factor (min(1, idle PAPER capital / executable "
-                 "capacity)) / capital-hours (executable capacity x expected "
-                 "hold hours); every input as of the decision instant")
+                 "fill, counted only when its book meets the strategy's "
+                 "executable freshness) x fill probability (Eddie's estimate "
+                 "on an executable-fresh book, else the CAPACITY snapshot's "
+                 "PRODUCTION rate: INVESTMENT strategies' PAPER-simulated "
+                 "entries) x capacity factor (min(1, idle PAPER capital / "
+                 "executable capacity)) / capital-hours (executable capacity "
+                 "x expected hold hours); every input as of the decision "
+                 "instant")
 
 
 def _env(status, why=None, **kw) -> dict:
@@ -201,6 +215,63 @@ async def lost_opportunities(
                  "n": 0}, **{c: 0 for c in CLASSES}))
             e[r["classification"]] += r["n"]
             e["n"] += r["n"]
+        # UNIQUE OPPORTUNITIES PER REFUSAL (R30A, owner audit 2026-10-04).
+        # The ledger holds ONE ROW PER DECISION, and every policy
+        # re-evaluates the same live market on each valuation: ranking the
+        # reasons by row count ranked how often a market was LOOKED AT
+        # (production: 22 decision rows per contract on average, up to 91).
+        # The reasons are now ranked by the unique opportunities they
+        # refused -- the funnel's key (fixture / market / side / line /
+        # period; the fixture, line and period from the decision the row
+        # classifies) -- with the rows kept beside it as evaluations, and the
+        # unique count split by the refusing strategy's sleeve (migration
+        # 223's map; a strategy outside it, or none, is UNCLASSIFIED). A row
+        # with no market or side cannot be deduplicated and counts as its own
+        # opportunity (`unkeyed`).
+        from ..profitability import common as PC
+        sl = {k: sorted(s_ for s_, v_ in PC.STRATEGY_SLEEVE.items()
+                        if v_ == k)
+              for k in (PC.INVESTMENT, PC.TRAINING, PC.BENCHMARK)}
+        for r in await conn.fetch(
+                "SELECT refusal, count(*) AS n, "
+                "       count(DISTINCT k) AS uniq, "
+                "       count(*) FILTER (WHERE k IS NULL) AS unkeyed, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($2::text[])) AS inv, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($3::text[])) AS tr, "
+                "       count(DISTINCT k) FILTER (WHERE strategy = "
+                "         ANY($4::text[])) AS bench, "
+                "       count(DISTINCT k) FILTER (WHERE strategy IS NULL OR "
+                "         NOT strategy = ANY($5::text[])) AS unc "
+                "  FROM (SELECT x.refusal, x.strategy, "
+                "               CASE WHEN x.us_market_slug IS NOT NULL "
+                "                     AND x.holding_side IS NOT NULL "
+                "                    THEN concat_ws('|', "
+                "                         coalesce(d.fixture, ''), "
+                "                         x.us_market_slug, "
+                "                         upper(x.holding_side), "
+                "                         coalesce(d.label->>'line', ''), "
+                "                         coalesce(d.label->>'period', '')) "
+                "               END AS k "
+                "          FROM lol_ledger x "
+                "          LEFT JOIN paper_decisions d "
+                "            ON d.decision_id = x.decision_ref "
+                "         WHERE x.classifier_version = $1) AS keyed "
+                " GROUP BY refusal", v, sl[PC.INVESTMENT], sl[PC.TRAINING],
+                sl[PC.BENCHMARK], sorted(PC.STRATEGY_SLEEVE)):
+            e = by_reason.get(r["refusal"] or "(none)")
+            if e is None:
+                continue
+            uniq = int(r["uniq"]) + int(r["unkeyed"])
+            e["unique_opportunities"] = uniq
+            e["evaluations"] = int(r["n"])
+            e["re_evaluations"] = int(r["n"]) - uniq
+            e["unkeyed"] = int(r["unkeyed"])
+            e["unique_opportunities_by_sleeve"] = {
+                PC.INVESTMENT: int(r["inv"]), PC.TRAINING: int(r["tr"]),
+                PC.BENCHMARK: int(r["bench"]),
+                PC.UNCLASSIFIED: int(r["unc"])}
         by_attr = {}
         for r in await conn.fetch(
                 "SELECT attribution, classification, count(*) AS n, "
@@ -286,9 +357,17 @@ async def lost_opportunities(
                 "total": total, "by_class": by_class,
                 "by_league": sorted(by_league.values(),
                                     key=lambda e: (-e["n"], e["league"])),
+                # ranked by UNIQUE OPPORTUNITIES; `n` (rows) is kept as
+                # the evaluations beside it
                 "by_refusal_reason": sorted(
                     by_reason.values(),
-                    key=lambda e: (-e["n"], e["refusal"])),
+                    key=lambda e: (-e.get("unique_opportunities", e["n"]),
+                                   -e["n"], e["refusal"])),
+                "by_refusal_reason_basis": (
+                    "unique opportunities (fixture / market / side / line / "
+                    "period) per refusal; `n` / `evaluations` are rows, "
+                    "`re_evaluations` the rows beyond the first per "
+                    "opportunity; split by the refusing strategy's sleeve"),
                 "by_attribution": sorted(
                     by_attr.values(),
                     key=lambda e: (-e["n"], e["attribution"])),
@@ -521,6 +600,24 @@ async def opportunity_scores(
             return _env("EMPTY", "NO_CANDIDATE_SCORED_YET" if last
                         else "NO_RUN_YET", data=None, last_run=last,
                         formula=SCORE_FORMULA)
+        # (R30A review) every score row names its scope at the top level:
+        # book, sleeve (the decision strategy's, classifier map), strategy,
+        # the deciding policy version and its confidence scope, as the
+        # scoring run recorded them in the row's detail
+        from ..profitability import common as PC
+        for r in rows:
+            det = r.get("detail") if isinstance(r.get("detail"), dict) \
+                else (json.loads(r["detail"]) if isinstance(
+                    r.get("detail"), str) else {})
+            sl = det.get("sleeve") or PC.strategy_sleeve(r.get("strategy"))
+            r["book"] = det.get("book") or "PAPER"
+            r["sleeve"] = sl
+            r["policy_version"] = det.get("policy_version")
+            r["policy_version_why"] = (
+                None if det.get("policy_version") else
+                "NOT_RECORDED_BEFORE_R30A_REVIEW" if "policy_version"
+                not in det else "THE_DECISION_RECORDED_NO_POLICY_VERSION")
+            r["confidence_scope"] = PC.confidence_scope(sl)
         await _expand(conn, rows)
         comp = max((r["computed_at"] for r in rows), default=None)
         return _env("OK", None, computed_at=comp, data={
@@ -536,13 +633,22 @@ HORIZON_KEYS = ("24H", "7D", "30D")
 
 @router.get(BASE + "/forecast-horizons", dependencies=[Depends(require_read)])
 async def forecast_horizons() -> dict:
-    """The latest 24H / 7D / 30D forecast per book, with each horizon's
-    forward scoring so far. UNPROVEN until that scoring validates it."""
+    """The latest 24H / 7D / 30D forecast per book AND sleeve (migration
+    227), with each horizon's forward scoring so far. `data.{PAPER,ACTUAL}`
+    is the PRODUCTION-CONFIDENCE scope -- the INVESTMENT sleeve only;
+    `by_sleeve` shows every sleeve separately (TRAINING / BENCHMARK /
+    UNCLASSIFIED are research), and pre-227 book-wide forecasts are listed
+    apart, never as INVESTMENT. UNPROVEN until each scope's own scoring
+    validates it."""
     async def fn(conn):
         data = {"PAPER": {}, "ACTUAL": {}}
+        by_sleeve = {b: {s: {} for s in SLEEVES} for b in ("PAPER", "ACTUAL")}
+        legacy = {"PAPER": {}, "ACTUAL": {}}
         latest = None
         for r in await conn.fetch(
-                "SELECT DISTINCT ON (book, horizon) forecast_id, book, "
+                "SELECT DISTINCT ON (book, sleeve, strategy, horizon) "
+                "       forecast_id, book, sleeve, strategy, policy_versions,"
+                "       classifier_version, confidence_scope, "
                 "       horizon, horizon_days, method, seed, sample_days, "
                 "       sample_positions, expected_opportunities, "
                 "       expected_qualified_opportunities, "
@@ -558,26 +664,46 @@ async def forecast_horizons() -> dict:
                 "       extract(epoch FROM horizon_end)::float8 "
                 "       AS horizon_end "
                 "  FROM lol_horizon_forecasts "
-                " ORDER BY book, horizon, issued_at DESC"):
+                " ORDER BY book, sleeve, strategy, horizon, issued_at DESC"):
             d = _row(r)
-            data[d["book"]][d["horizon"]] = d
+            if d["sleeve"] is None:
+                d["scope"] = "BOOK_WIDE_PRE_227"
+                legacy[d["book"]][d["horizon"]] = d
+                continue
+            if d["strategy"] not in (None, "ALL"):
+                continue
+            by_sleeve[d["book"]][d["sleeve"]][d["horizon"]] = d
+            if d["sleeve"] == "INVESTMENT":
+                data[d["book"]][d["horizon"]] = d
             latest = max(latest or 0, d["issued_at"])
         scores = {}
         for r in await conn.fetch(
-                "SELECT book, horizon, count(*) AS n, "
+                "SELECT book, coalesce(sleeve, 'BOOK_WIDE_PRE_227') AS sleeve,"
+                "       horizon, count(*) AS n, "
                 "       avg(inside_p10_p90::int) AS coverage, "
                 "       avg(brier_positive) AS brier "
-                "  FROM lol_horizon_forecast_scores GROUP BY book, horizon"):
-            scores["%s:%s" % (r["book"], r["horizon"])] = {
+                "  FROM lol_horizon_forecast_scores "
+                " GROUP BY book, coalesce(sleeve, 'BOOK_WIDE_PRE_227'), "
+                "          horizon"):
+            scores["%s:%s:%s" % (r["book"], r["sleeve"], r["horizon"])] = {
                 "scored": r["n"], "coverage": float(r["coverage"]),
                 "mean_brier": float(r["brier"])}
         last = await _last_run(conn, "HORIZONS")
         if latest is None:
             return _env("EMPTY", "NO_HORIZON_FORECAST_ISSUED_YET" if last
-                        else "NO_RUN_YET", data=None, last_run=last)
+                        else "NO_RUN_YET", data=None, last_run=last,
+                        legacy_book_wide=legacy)
         return _env("OK", None, computed_at=latest, data=data,
+                    by_sleeve=by_sleeve, legacy_book_wide=legacy,
+                    production_confidence_scope={
+                        "sleeve": "INVESTMENT", "strategy": "ALL",
+                        "rule": ("data.{PAPER,ACTUAL} is the INVESTMENT "
+                                 "sleeve only; TRAINING / BENCHMARK / "
+                                 "UNCLASSIFIED are in by_sleeve, never "
+                                 "pooled into it")},
                     scores=scores, horizons=list(HORIZON_KEYS),
-                    summed_across_books=False, last_run=last,
+                    summed_across_books=False, summed_across_sleeves=False,
+                    last_run=last,
                     forecast_label=("UNPROVEN until each horizon's own "
                                     "persisted forecasts are scored forward "
                                     "and validated"),

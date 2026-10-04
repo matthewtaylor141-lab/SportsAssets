@@ -201,7 +201,7 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
             fp, fbasis, fsrc = SC.execution_input(
                 eddie, None if fpe is None else fpe[1],
                 ("NO_CAPACITY_SNAPSHOT_AT_OR_BEFORE_DECISION"
-                 if fpe is None else fpe[2]))
+                 if fpe is None else fpe[2]), strategy=c.get("strategy"))
             got = SC.score(
                 c, fill_probability=fp, fill_basis=fbasis, fill_source=fsrc,
                 idle_capital_usd=None if cap is None else cap[1],
@@ -215,7 +215,18 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                 "score_basis": got.get("score_basis"),
                 "fill_probability_source": got.get(
                     "fill_probability_source"),
-                "capacity_ceiling_usd": C.num(c.get("capacity_ceiling_usd"))}
+                "capacity_ceiling_usd": C.num(c.get("capacity_ceiling_usd")),
+                "executable_freshness": c.get("executable_freshness"),
+                # (R30A review) the row's scope: book, the decision
+                # strategy's sleeve (classifier map), strategy, the deciding
+                # policy version, and its confidence scope
+                "book": "PAPER",
+                "sleeve": C.strategy_sleeve(c.get("strategy")),
+                "sleeve_basis": "THE_DECISION_STRATEGY_CLASSIFIER_MAP",
+                "strategy": c.get("strategy"),
+                "policy_version": c.get("policy_version"),
+                "confidence_scope": C.confidence_scope(
+                    C.strategy_sleeve(c.get("strategy")))}
             rows.append(got)
         n = await ST.save_scores(conn, run_id=run_id, now=now, rows=rows,
                                  version=SC.VERSION)
@@ -226,15 +237,31 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
     sc, status["SCORES"] = await _component(conn, run_id, "SCORES", scores,
                                             pos_run_id=pos_run_id)
 
+    # Per book AND sleeve (migration 227). The INVESTMENT horizons are the
+    # production-confidence ones: their opportunity lines count INVESTMENT
+    # candidates (qualified only on an executable-fresh book) and their
+    # capacity is the PRODUCTION capacity; the other sleeves are forecast on
+    # their own rows, as research, without a capacity line.
     async def horizons():
         scored = 0
         for f in await R.unscored_horizons(conn, now=now):
-            real, n = await R.realized_between(conn, book=f["book"],
-                                               start=f["hs"], end=f["he"])
+            real, n = await R.realized_between(
+                conn, book=f["book"], start=f["hs"], end=f["he"],
+                sleeve=f.get("sleeve"), strategy=f.get("strategy"))
             await ST.save_horizon_score(conn, HZ.score(
                 f, realized_pnl=real, realized_positions=n, now=now))
             scored += 1
-        opp = await R.opportunity_counts(conn, now=now)
+        opp_by = {C.INVESTMENT: await R.opportunity_counts(
+            conn, now=now, strategies=C.INVESTMENT_STRATEGIES)}
+        for s in C.SLEEVES:
+            if s == C.INVESTMENT:
+                continue
+            strat = sorted(k for k, v in C.STRATEGY_SLEEVE.items() if v == s)
+            # UNCLASSIFIED has no strategy of its own: no opportunity line
+            opp_by[s] = (await R.opportunity_counts(conn, now=now,
+                                                    strategies=strat)
+                         if strat else {"days": 0.0, "candidates": 0,
+                                        "qualified": 0})
         caps = await R.capital_now(conn)
         agg = capacity_agg or {}
         daily = C.num(agg.get("daily_executable_opportunity_dollars"))
@@ -242,16 +269,26 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                     or {}).get("value"))
         issued = {}
         for book in C.BOOKS:
-            for key, days in HZ.HORIZONS:
-                sc_ = await R.horizon_scores(conn, book=book, horizon=key)
-                fc = await asyncio.to_thread(
-                    HZ.build, econs, book=book, horizon=key, days=days,
-                    now=now, lookback_days=lookback_days, opportunity=opp,
-                    capital=caps.get(book), capacity_daily=daily,
-                    fill_probability=fp, scores=sc_)
-                fid = await ST.save_horizon(conn, run_id=run_id, fc=fc)
-                issued["%s:%s" % (book, key)] = {"status": fc["status"],
-                                                 "forecast_id": fid}
+            for sleeve in C.SLEEVES:
+                prod = sleeve == C.INVESTMENT and book == "PAPER"
+                for key, days in HZ.HORIZONS:
+                    sc_ = await R.horizon_scores(
+                        conn, book=book, horizon=key, sleeve=sleeve,
+                        strategy=C.ALL_STRATEGIES)
+                    fc = await asyncio.to_thread(
+                        HZ.build, econs, book=book, horizon=key, days=days,
+                        now=now, lookback_days=lookback_days,
+                        opportunity=opp_by.get(sleeve),
+                        capital=caps.get(book),
+                        capacity_daily=daily if prod else None,
+                        fill_probability=fp if prod else None, scores=sc_,
+                        sleeve=sleeve, strategy=C.ALL_STRATEGIES,
+                        capacity_why=None if prod else (
+                            "CAPACITY_IS_MEASURED_FOR_THE_PAPER_INVESTMENT_"
+                            "SLEEVE_ONLY"))
+                    fid = await ST.save_horizon(conn, run_id=run_id, fc=fc)
+                    issued["%s:%s:%s" % (book, sleeve, key)] = {
+                        "status": fc["status"], "forecast_id": fid}
         return {"scored": scored, "issued": issued}
 
     if econs is None:

@@ -81,6 +81,22 @@ def settlement_lag(samples, *, as_of=None):
     return C.median(lags), len(lags)
 
 
+def scope_of(pos: dict) -> dict:
+    """(R30A review) The scope an economics row was COMPUTED under,
+    recorded in its detail so every persisted row and every read of it
+    names book, sleeve, strategy and policy version: the position's durable
+    migration-223 classification at the computation (UNCLASSIFIED without
+    one -- never INVESTMENT), its basis, the deciding policy version and the
+    classifier version. A later classifier version is a later revision."""
+    sleeve = C.sleeve_of(pos)
+    return {"book": pos.get("book"), "sleeve": sleeve,
+            "sleeve_basis": pos.get("sleeve_basis"),
+            "strategy": pos.get("strategy"),
+            "policy_version": pos.get("policy_version"),
+            "classifier_version": pos.get("classifier_version"),
+            "confidence_scope": C.confidence_scope(sleeve)}
+
+
 def compute_position(pos: dict, *, lag_samples=(), book=None,
                      counterfactual_kind=None, basis=None) -> dict:
     """The economics of ONE position record (see reads.py for the shape).
@@ -94,7 +110,15 @@ def compute_position(pos: dict, *, lag_samples=(), book=None,
                 us_market_slug=pos.get("us_market_slug"),
                 holding_side=pos.get("holding_side"),
                 strategy=pos.get("strategy"), version=VERSION,
-                label=C.LABEL)
+                label=C.LABEL,
+                # the scope (migration 227): carried for the sleeve-scoped
+                # metrics and forecasts; not a pos_position_economics column.
+                # The row's detail records the scope it was computed under
+                # (scope_of, R30A review) -- a computed snapshot like the row
+                # itself, re-read from the durable classification each cycle
+                sleeve=C.sleeve_of(pos), sleeve_basis=pos.get("sleeve_basis"),
+                policy_version=pos.get("policy_version"),
+                classifier_version=pos.get("classifier_version"))
     events = sorted((e for e in pos.get("events") or []
                      if C.num(e.get("t")) is not None
                      and (C.num(e.get("qty")) or 0) > 0),
@@ -109,7 +133,7 @@ def compute_position(pos: dict, *, lag_samples=(), book=None,
                   "capital_committed_usd"):
             out.put(k, None, R_NO_BUY)
         out["segments"] = []
-        out["detail"] = {"events": len(events)}
+        out["detail"] = {"events": len(events), "scope": scope_of(pos)}
         return out
     first_buy = buys[0]["t"]
     res = pos.get("reservation") or None
@@ -250,7 +274,8 @@ def compute_position(pos: dict, *, lag_samples=(), book=None,
                                 "SINCE" if state == "OPEN" else "FULL_LIFE"),
         "sale_without_holding": bad_sale,
         "decision_id": pos.get("decision_id"),
-        "lag_samples_at_entry": lag_n}
+        "lag_samples_at_entry": lag_n,
+        "scope": scope_of(pos)}
     return out
 
 
@@ -404,6 +429,32 @@ def portfolio(econs: list, *, book: str, now: float, account_capital=None,
     out["utilization_basis"] = (
         "capital-hours inside the window (open positions accrued to now) / "
         "(current account capital x window hours)")
+    return out
+
+
+#: the profit lines of a portfolio that a SLEEVE may report on its own (the
+#: capital lines -- account capital, utilization, idle capital -- belong to
+#: the one shared cash ledger and are never attributed to a sleeve)
+SLEEVE_PROFIT_KEYS = ("positions", "open_positions", "closed_positions",
+                      "capital_locked_positions_usd", "window_days",
+                      "window_start", "realized_sample",
+                      "realized_net_profit_usd", "realized_capital_hours",
+                      "REALIZED_PROFIT_PER_CAPITAL_HOUR", "expected_sample",
+                      "EXPECTED_PROFIT_PER_CAPITAL_HOUR")
+
+
+def sleeve_profit(econs: list, *, book: str, sleeve: str, now: float,
+                  lag_samples=(), window_days=WINDOW_DAYS) -> dict:
+    """ONE sleeve's profit lines inside a book's CAPITAL picture (rows of
+    other sleeves are never included; UNCLASSIFIED is never INVESTMENT)."""
+    rows = [e for e in econs if e.get("book") == book
+            and C.sleeve_of(e) == sleeve]
+    rep = portfolio(rows, book=book, now=now, lag_samples=lag_samples,
+                    window_days=window_days)
+    out = {k: rep.get(k) for k in SLEEVE_PROFIT_KEYS}
+    out["unmeasured"] = {k: v for k, v in (rep.get("unmeasured") or {}).items()
+                         if k in SLEEVE_PROFIT_KEYS}
+    out.update(C.scope_fields(rows, book=book, sleeve=sleeve))
     return out
 
 

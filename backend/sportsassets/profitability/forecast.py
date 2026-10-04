@@ -6,6 +6,12 @@ its OWN forecasts, persisted daily, have been scored against the 30 days
 that followed and passed VALIDATION (below). Nothing reads it to size,
 limit or allocate anything.
 
+SCOPE (migration 227): one forecast per book AND SLEEVE, never pooled. The
+INVESTMENT forecast is the PRODUCTION-CONFIDENCE forecast; TRAINING,
+BENCHMARK and UNCLASSIFIED are forecast separately as research, each
+validated only by its OWN scored history, and scored against its own
+sleeve's realized P&L.
+
 METHOD (per book, never summed): the daily realized net P&L series over the
 lookback (metrics.daily_series; a day with no closure is a measured 0 once
 history has begun) is resampled by a circular block bootstrap (BLOCK_DAYS
@@ -85,9 +91,15 @@ def validation(scores: list) -> dict:
 
 
 def build(econs: list, *, book: str, now: float, lookback_days: float,
-          capacity_daily=None, fill_probability=None, scores=()) -> dict:
-    """ONE book's 30-day forecast record (see the module docstring)."""
-    rows = [e for e in econs if e.get("book") == book]
+          capacity_daily=None, fill_probability=None, scores=(),
+          sleeve=None, strategy=None, capacity_why=None) -> dict:
+    """ONE book's (and ONE scope's) 30-day forecast record (see the module
+    docstring). `sleeve` INVESTMENT is the PRODUCTION-CONFIDENCE forecast;
+    every other sleeve is forecast separately as research; `sleeve` None
+    pools every sleeve (research only). `scores` must be THIS scope's own
+    scored forecasts."""
+    rows = [e for e in econs
+            if C.in_scope(e, book=book, sleeve=sleeve, strategy=strategy)]
     lb = now - lookback_days * DAY
     closed = [e for e in rows if e.get("state") == "CLOSED"
               and e.get("net_profit_usd") is not None
@@ -101,9 +113,15 @@ def build(econs: list, *, book: str, now: float, lookback_days: float,
                 resamples=RESAMPLES, block_days=BLOCK_DAYS,
                 sample_days=len(vals), sample_positions=len(closed),
                 validation=val, version=VERSION, label=C.LABEL)
+    out.update(C.scope_fields(rows, book=book, sleeve=sleeve,
+                              strategy=strategy or C.ALL_STRATEGIES))
     inputs = {"book": book, "series": [(d, C.rnd(v)) for d, v in series],
               "capacity_daily": capacity_daily,
               "fill_probability": fill_probability}
+    if sleeve is not None:
+        # the scope is part of what was forecast (a pre-227 book-wide input
+        # hash is unchanged)
+        inputs.update(sleeve=sleeve, strategy=strategy or C.ALL_STRATEGIES)
     out["inputs_sha256"] = C.sha(inputs)
     keys = ("expected_pnl_usd", "p10_pnl_usd", "p50_pnl_usd", "p90_pnl_usd",
             "prob_positive", "expected_max_drawdown_usd",
@@ -163,7 +181,7 @@ def build(econs: list, *, book: str, now: float, lookback_days: float,
         % days)
     if capacity_daily is None:
         out.put("capacity_ceiling_usd", None,
-                "NO_MEASURED_DAILY_EXECUTABLE_OPPORTUNITY")
+                capacity_why or "NO_MEASURED_DAILY_EXECUTABLE_OPPORTUNITY")
     else:
         fp = fill_probability if fill_probability is not None else 1.0
         out.put("capacity_ceiling_usd",
@@ -199,6 +217,9 @@ def score(fc: dict, *, realized_pnl: float, realized_positions: int,
     pos = realized_pnl > 0
     pp = float(fc["prob_positive"])
     return {"forecast_id": fc["forecast_id"], "book": fc["book"],
+            # the forecast's own scope (NULL for a pre-227 book-wide one)
+            "sleeve": fc.get("sleeve"), "strategy": fc.get("strategy"),
+            "confidence_scope": fc.get("confidence_scope"),
             "scored_at": now, "realized_pnl_usd": C.rnd(realized_pnl),
             "realized_positions": int(realized_positions),
             "pit": C.rnd(pit, 6),

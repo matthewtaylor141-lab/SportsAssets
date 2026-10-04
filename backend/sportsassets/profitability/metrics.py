@@ -1,6 +1,14 @@
 """THE FIVE NORTH-STAR METRICS (RESEARCH). Pure; no I/O.
 
-Each metric, per book (PAPER and ACTUAL separately, never summed), carries:
+SCOPE (migration 227). Each metric is computed per book (PAPER and ACTUAL
+separately, never summed) AND per sleeve: INVESTMENT is the only
+PRODUCTION-CONFIDENCE scope; TRAINING, BENCHMARK and UNCLASSIFIED are
+computed separately and labelled RESEARCH_NOT_PRODUCTION_CONFIDENCE, so a
+training loss or win can never move an INVESTMENT metric. Every metric
+carries book, sleeve, strategy (ALL or one strategy) and the policy
+versions of its sample.
+
+Each metric carries:
 value, sample_n, ci_low / ci_high (90% percentile bootstrap where a CI is
 meaningful), period, status, why, trend (against the last observation at
 least TREND_MIN_AGE_H old) and data freshness (the newest source event it
@@ -140,9 +148,17 @@ def _prob_positive(values, rng, paths):
 
 
 def compute(econs: list, *, book: str, now: float, lookback_days: float,
-            period_days=PERIOD_DAYS) -> list:
-    """The five metrics for ONE book."""
-    rows = [e for e in econs if e.get("book") == book]
+            period_days=PERIOD_DAYS, sleeve=None, strategy=None) -> list:
+    """The five metrics for ONE book and ONE scope (migration 227).
+
+    `sleeve` names the sleeve measured: INVESTMENT is the PRODUCTION
+    CONFIDENCE scope; TRAINING / BENCHMARK / UNCLASSIFIED are research,
+    shown separately. A row without a sleeve is UNCLASSIFIED -- never
+    INVESTMENT. `sleeve` None pools every sleeve (a caller that has already
+    scoped its rows, or research only: never labelled production
+    confidence). `strategy` None / ALL = every strategy of the sleeve."""
+    rows = [e for e in econs
+            if C.in_scope(e, book=book, sleeve=sleeve, strategy=strategy)]
     closed = [e for e in rows if e.get("state") == "CLOSED"
               and e.get("net_profit_usd") is not None]
     lo = now - period_days * DAY
@@ -306,7 +322,10 @@ def compute(econs: list, *, book: str, now: float, lookback_days: float,
                 ci=ci, period=period, detail=detail))
     # freshness: the newest source event seen for this book
     as_of = max([e.get("last_event_at") or 0 for e in rows] or [0]) or None
+    scope = C.scope_fields(rows, book=book, sleeve=sleeve,
+                           strategy=strategy or C.ALL_STRATEGIES)
     for m in out:
+        m.update(scope)
         m["book"] = book
         m["data_as_of"] = as_of
     return out

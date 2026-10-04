@@ -55,6 +55,83 @@ def _ep(v):
 
 
 # ═════════════════════════════════════════════════════════════════════
+# THE SLEEVES (migration 223's durable classification; migration 227)
+# ═════════════════════════════════════════════════════════════════════
+
+R_NO_SLEEVE_SCHEMA = "MIGRATION_223_NOT_APPLIED"
+R_NO_DURABLE = "NO_DURABLE_CLASSIFICATION"
+
+
+async def sleeve_classes(conn, gids) -> dict | None:
+    """{group_id: {sleeve, strategy, policy_version, classifier_version,
+    basis}} -- each group's CURRENT durable classification
+    (paper_sleeve_current_v). None when migration 223 is absent (every
+    position then reads UNCLASSIFIED, never INVESTMENT)."""
+    if not await has(conn, "paper_sleeve_current_v"):
+        return None
+    gids = sorted({g for g in gids if g})
+    if not gids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT group_id, sleeve, strategy, policy_version, "
+        "       classifier_version, basis "
+        "  FROM paper_sleeve_current_v WHERE group_id = ANY($1::text[])",
+        gids)
+    return {r["group_id"]: dict(r) for r in rows}
+
+
+def attach_sleeve(pos: dict, classes, *, strategy_fallback=False,
+                  policy_version=None) -> dict:
+    """Stamp a position record with its sleeve, the classification basis,
+    the deciding policy version and the classifier version: the group's
+    durable migration-223 classification, else UNCLASSIFIED -- for PAPER
+    AND ACTUAL alike.
+
+    (R30A review) An ACTUAL position whose group has no durable
+    classification used to take the classifier's sleeve of the strategy the
+    live lane recorded -- INVESTMENT for the completed-game policy or Derek
+    -- while the twin's ladder read the same open ACTUAL positions as
+    UNCLASSIFIED. Migration 223's own reason for a group without a durable
+    row is NO_DURABLE_CLASSIFICATION, i.e. UNCLASSIFIED, and UNCLASSIFIED
+    never counts as INVESTMENT. So it is UNCLASSIFIED everywhere now; with
+    `strategy_fallback` (the ACTUAL readers) the strategy map's sleeve is
+    kept beside it as `strategy_map_sleeve` -- information, never the
+    sleeve."""
+    c = (classes or {}).get(pos.get("group_id"))
+    extra = {}
+    if c is not None:
+        sleeve = c["sleeve"] if c["sleeve"] in C.SLEEVES else C.UNCLASSIFIED
+        basis = c.get("basis")
+        pv = policy_version or c.get("policy_version")
+        cv = c.get("classifier_version")
+    else:
+        sleeve, pv, cv = C.UNCLASSIFIED, policy_version, None
+        basis = R_NO_SLEEVE_SCHEMA if classes is None else R_NO_DURABLE
+        if strategy_fallback and pos.get("strategy"):
+            extra["strategy_map_sleeve"] = C.strategy_sleeve(pos["strategy"])
+            extra["strategy_map_role"] = (
+                "INFORMATION ONLY: the classifier's sleeve of the strategy "
+                "the live lane recorded; without a durable classification "
+                "the position is UNCLASSIFIED (never INVESTMENT)")
+    pos.update(sleeve=sleeve, sleeve_basis=basis, policy_version=pv,
+               classifier_version=cv, **extra)
+    return pos
+
+
+def _sleeve_case_sql(group_col: str, strategy_col: str, *, book_col: str,
+                     have_view: bool) -> str:
+    """SQL expression: the sleeve of an economics row -- the durable
+    classification of its group, else UNCLASSIFIED (PAPER and ACTUAL alike:
+    R30A review, see attach_sleeve). `strategy_col` / `book_col` are kept
+    for the callers' signature; neither can make a row INVESTMENT."""
+    del strategy_col, book_col
+    if not have_view:
+        return "'UNCLASSIFIED'"
+    return ("coalesce((SELECT s.sleeve FROM paper_sleeve_current_v s "
+            "           WHERE s.group_id = %s), 'UNCLASSIFIED')" % group_col)
+
+
+# ═════════════════════════════════════════════════════════════════════
 # PAPER
 # ═════════════════════════════════════════════════════════════════════
 
@@ -97,6 +174,7 @@ async def paper_positions(conn, *, now, account_id=C.PAPER_ACCOUNT,
     slugs = sorted({k[1] for k in by_pos})
     cset = await contract_settlements(conn, slugs)
     starts = await event_starts(conn, slugs, gids)
+    classes = await sleeve_classes(conn, gids)
     sets_by_key: dict = {}
     for s in setts:
         sets_by_key.setdefault(s["position_key"], []).append(s)
@@ -130,7 +208,7 @@ async def paper_positions(conn, *, now, account_id=C.PAPER_ACCOUNT,
                   "outcome": last["outcome"], "ref": last["settlement_id"],
                   "basis": "PAPER_SETTLEMENT_LATEST_VERSION"}
         ev, evb = starts.get((g, slug), starts.get((None, slug), (None, None)))
-        out.append({
+        out.append(attach_sleeve({
             "book": "PAPER", "position_key": pk,
             # the paper book SIMULATES fills against the Polymarket US book;
             # book=PAPER is what marks it simulated (never a venue named
@@ -160,8 +238,10 @@ async def paper_positions(conn, *, now, account_id=C.PAPER_ACCOUNT,
                                        | ({dec_id} if dec_id else set())),
                 "simulator_versions": sorted({f["simulator_version"]
                                               for f in fs
-                                              if f.get("simulator_version")})}})
-    return {"positions": out, "group_ids": gids, "decisions": decisions}
+                                              if f.get("simulator_version")})}},
+            classes, policy_version=dec.get("policy_version")))
+    return {"positions": out, "group_ids": gids, "decisions": decisions,
+            "sleeve_schema": classes is not None}
 
 
 async def paper_capital(conn, *, account_id=C.PAPER_ACCOUNT) -> dict:
@@ -266,6 +346,7 @@ async def actual_positions(conn, *, now, days=LOOKBACK_DAYS) -> dict:
     cset = await contract_settlements(conn, slugs)
     gset = await group_settlements(conn, gids)
     starts = await event_starts(conn, slugs, gids)
+    classes = await sleeve_classes(conn, gids)
     by_pos: dict = {}
     for r in raw:
         by_pos.setdefault((r["venue"], r["group_id"], r["slug"], r["side"]),
@@ -292,7 +373,9 @@ async def actual_positions(conn, *, now, days=LOOKBACK_DAYS) -> dict:
         ev, evb = starts.get((g, slug), starts.get((None, slug), (None, None)))
         hs = [h for h in handoffs if h["group_id"] == g
               and h.get("us_market_slug") in (slug, None)]
-        out.append({
+        ipv = sorted({i["policy_version"] for i in gi
+                      if i.get("policy_version")})
+        out.append(attach_sleeve({
             "book": "ACTUAL",
             "position_key": "actualpos:%s:%s:%s:%s" % (venue, g, slug, side),
             "venue": venue, "account_id": None, "group_id": g,
@@ -323,9 +406,12 @@ async def actual_positions(conn, *, now, days=LOOKBACK_DAYS) -> dict:
                 "valuation_ids": sorted({int(i["valuation_id"]) for i in gi
                                          if i.get("valuation_id")
                                          is not None}),
-                "handoff_ids": sorted({h["handoff_id"] for h in hs})}})
+                "handoff_ids": sorted({h["handoff_id"] for h in hs})}},
+            classes, strategy_fallback=True,
+            policy_version=(ipv[0] if len(ipv) == 1
+                            else dec.get("policy_version"))))
     return {"positions": out, "group_ids": gids, "decisions": decisions,
-            "handoffs": handoffs}
+            "handoffs": handoffs, "sleeve_schema": classes is not None}
 
 
 async def actual_capital(conn) -> dict:
@@ -586,8 +672,11 @@ async def capacity_candidates(conn, *, now, account_id=None,
     rows = await conn.fetch(
         "SELECT d.decision_id, d.us_market_slug, d.holding_side, "
         "       d.p_blended, d.p_pinnacle, d.p_internal, d.book_obs_id, "
-        "       d.strategy, extract(epoch FROM d.decided_at)::float8 "
-        "       AS decided_at "
+        "       d.strategy, d.policy_version, "
+        "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
+        "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
+        "       END AS decision_book_age_s, "
+        "       extract(epoch FROM d.decided_at)::float8 AS decided_at "
         "  FROM paper_decisions d "
         " WHERE d.decided_at >= to_timestamp($1) "
         "   AND ($2::text IS NULL OR d.account_id = $2) "
@@ -605,7 +694,9 @@ async def capacity_candidates(conn, *, now, account_id=None,
                     "holding_side": r["holding_side"],
                     "strategy": r["strategy"], "probability": p,
                     "probability_basis": pb,
-                    "book_obs_id": r["book_obs_id"]})
+                    "book_obs_id": r["book_obs_id"],
+                    "policy_version": r["policy_version"],
+                    "decision_book_age_s": r["decision_book_age_s"]})
     return out
 
 
@@ -661,21 +752,27 @@ async def capacity_books(conn, cands: list) -> dict:
 
 
 async def capacity_rates(conn, *, now, account_id=None,
-                         days=RATE_DAYS) -> dict:
-    """Book-level empirical rates for the capacity model (named basis)."""
+                         days=RATE_DAYS, strategies=None) -> dict:
+    """Book-level empirical rates for the capacity model (named basis).
+    `strategies` None = every paper strategy (the RESEARCH rates); a list =
+    only those strategies' orders (the PRODUCTION rates pass the INVESTMENT
+    strategies, so a TRAINING or BENCHMARK fill never moves them)."""
     from . import capacity as CP
 
     cut = float(now) - days * 86400.0
+    strat = None if strategies is None else sorted(strategies)
+    tag = "" if strat is None else "_INVESTMENT_STRATEGIES"
     r = await conn.fetchrow(
         "SELECT count(*) AS n, sum(qty) AS q, sum(filled_qty) AS f "
         "  FROM paper_orders WHERE role = 'ENTRY' "
         "   AND state = ANY($1::text[]) AND created_at >= to_timestamp($2) "
-        "   AND ($3::text IS NULL OR account_id = $3)",
-        PAPER_TERMINAL_STATES, cut, account_id)
+        "   AND ($3::text IS NULL OR account_id = $3) "
+        "   AND ($4::text[] IS NULL OR strategy = ANY($4::text[]))",
+        PAPER_TERMINAL_STATES, cut, account_id, strat)
     fp = CP.rate(C.num(r["f"]) or 0.0, C.num(r["q"]) or 0.0, int(r["n"]),
                  min_n=20, basis="PAPER_SIMULATED_ENTRY_ORDERS_FILLED_QTY_"
-                                 "SHARE_%dD" % int(days),
-                 why="FEWER_THAN_20_TERMINAL_PAPER_ENTRY_ORDERS")
+                                 "SHARE_%dD%s" % (int(days), tag),
+                 why="FEWER_THAN_20_TERMINAL_PAPER_ENTRY_ORDERS%s" % tag)
     lat = await conn.fetchrow(
         "SELECT count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY "
         "       extract(epoch FROM f.first - o.decided_at)) AS med "
@@ -684,7 +781,9 @@ async def capacity_rates(conn, *, now, account_id=None,
         "    ON f.first IS NOT NULL "
         " WHERE o.role = 'ENTRY' AND o.created_at >= to_timestamp($1) "
         "   AND o.decided_at IS NOT NULL "
-        "   AND ($2::text IS NULL OR o.account_id = $2)", cut, account_id)
+        "   AND ($2::text IS NULL OR o.account_id = $2) "
+        "   AND ($3::text[] IS NULL OR o.strategy = ANY($3::text[]))",
+        cut, account_id, strat)
     ex = await conn.fetchrow(
         "SELECT count(*) AS n, percentile_cont(0.5) WITHIN GROUP (ORDER BY "
         "       extract(epoch FROM f.first - o.created_at)) AS med "
@@ -693,7 +792,9 @@ async def capacity_rates(conn, *, now, account_id=None,
         "    ON f.first IS NOT NULL "
         " WHERE o.role IN ('EXIT', 'REDUCE') "
         "   AND o.created_at >= to_timestamp($1) "
-        "   AND ($2::text IS NULL OR o.account_id = $2)", cut, account_id)
+        "   AND ($2::text IS NULL OR o.account_id = $2) "
+        "   AND ($3::text[] IS NULL OR o.strategy = ANY($3::text[]))",
+        cut, account_id, strat)
 
     def med(row, min_n, basis, why):
         n = int(row["n"])
@@ -704,11 +805,12 @@ async def capacity_rates(conn, *, now, account_id=None,
 
     out = {"fill_probability": fp,
            "deployment_time_s": med(
-               lat, 5, "MEDIAN_PAPER_ENTRY_DECISION_TO_FIRST_FILL_%dD"
-               % int(days), "FEWER_THAN_5_FILLED_PAPER_ENTRY_ORDERS"),
+               lat, 5, "MEDIAN_PAPER_ENTRY_DECISION_TO_FIRST_FILL_%dD%s"
+               % (int(days), tag), "FEWER_THAN_5_FILLED_PAPER_ENTRY_ORDERS"),
            "time_to_exit_s": med(
-               ex, 5, "MEDIAN_PAPER_EXIT_ORDER_TO_FIRST_FILL_%dD" % int(days),
-               "FEWER_THAN_5_FILLED_PAPER_EXIT_ORDERS")}
+               ex, 5, "MEDIAN_PAPER_EXIT_ORDER_TO_FIRST_FILL_%dD%s"
+               % (int(days), tag), "FEWER_THAN_5_FILLED_PAPER_EXIT_ORDERS"),
+           "strategies": strat}
     if await has(conn, "execmirror_orders"):
         a = await conn.fetchrow(
             "SELECT count(*) AS n, sum(live_qty) AS q, sum(cum_qty) AS f "
@@ -728,14 +830,25 @@ async def capacity_rates(conn, *, now, account_id=None,
 
 
 async def capacity_recent(conn, *, now, hours=CAPACITY_LOOKBACK_H) -> list:
+    """The latest assessment per recent candidate, with what the executable
+    freshness check needs: the assessment's book (id, age at the decision)
+    and the decision's own recorded book (id, age the decision saw)."""
     rows = await conn.fetch(
-        "SELECT candidate_id, us_market_slug, holding_side, status, why, "
-        "       theoretical_opportunity_dollars, "
-        "       executable_opportunity_dollars, executable_capacity_usd, "
-        "       capacity_ceiling_usd, "
-        "       extract(epoch FROM decided_at)::float8 AS decided_at "
-        "  FROM pos_capacity_latest WHERE decided_at >= to_timestamp($1) "
-        " ORDER BY decided_at DESC LIMIT $2",
+        "SELECT c.candidate_id, c.us_market_slug, c.holding_side, c.status, "
+        "       c.why, c.strategy, c.book_obs_id, c.book_age_s, "
+        "       c.theoretical_opportunity_dollars, "
+        "       c.executable_opportunity_dollars, c.executable_capacity_usd, "
+        "       c.capacity_ceiling_usd, "
+        "       d.book_obs_id AS decision_book_obs_id, "
+        "       d.policy_version, "
+        "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
+        "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
+        "       END AS decision_book_age_s, "
+        "       extract(epoch FROM c.decided_at)::float8 AS decided_at "
+        "  FROM pos_capacity_latest c "
+        "  LEFT JOIN paper_decisions d ON d.decision_id = c.candidate_id "
+        " WHERE c.decided_at >= to_timestamp($1) "
+        " ORDER BY c.decided_at DESC LIMIT $2",
         float(now) - hours * 3600.0, MAX_ROWS)
     return [dict(r) for r in rows]
 
@@ -745,34 +858,52 @@ async def capacity_recent(conn, *, now, hours=CAPACITY_LOOKBACK_H) -> list:
 # ═════════════════════════════════════════════════════════════════════
 
 async def previous_metrics(conn, *, now, min_age_h) -> dict:
+    """{(book, sleeve, strategy, metric): the latest SCOPED observation at
+    least `min_age_h` old}. Pre-227 book-wide rows (sleeve NULL) are never
+    a scoped metric's trend base."""
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (book, metric) book, metric, value, status, "
+        "SELECT DISTINCT ON (book, sleeve, strategy, metric) book, sleeve, "
+        "       strategy, metric, value, status, "
         "       extract(epoch FROM computed_at)::float8 AS computed_at "
         "  FROM pos_metric_observations "
-        " WHERE computed_at <= to_timestamp($1) "
-        " ORDER BY book, metric, computed_at DESC",
+        " WHERE computed_at <= to_timestamp($1) AND sleeve IS NOT NULL "
+        " ORDER BY book, sleeve, strategy, metric, computed_at DESC",
         float(now) - min_age_h * 3600.0)
-    return {(r["book"], r["metric"]): dict(r) for r in rows}
+    return {(r["book"], r["sleeve"], r["strategy"], r["metric"]): dict(r)
+            for r in rows}
 
 
 async def latest_metric_shas(conn) -> dict:
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (book, metric) book, metric, content_sha256 "
-        "  FROM pos_metric_observations ORDER BY book, metric, "
-        "       computed_at DESC")
-    return {(r["book"], r["metric"]): r["content_sha256"] for r in rows}
+        "SELECT DISTINCT ON (book, sleeve, strategy, metric) book, sleeve, "
+        "       strategy, metric, content_sha256 "
+        "  FROM pos_metric_observations WHERE sleeve IS NOT NULL "
+        " ORDER BY book, sleeve, strategy, metric, computed_at DESC")
+    return {(r["book"], r["sleeve"], r["strategy"], r["metric"]):
+            r["content_sha256"] for r in rows}
 
 
-async def forecast_scores(conn, book) -> list:
+async def forecast_scores(conn, book, sleeve=None,
+                          strategy=C.ALL_STRATEGIES) -> list:
+    """The scores of THIS scope's own forecasts (a forecast is validated
+    only by its own scored history: an INVESTMENT forecast is never
+    validated by a TRAINING forecast's scores, nor by a pre-227 book-wide
+    forecast's)."""
     rows = await conn.fetch(
-        "SELECT inside_p10_p90, brier_positive FROM pos_forecast_scores "
-        " WHERE book = $1 ORDER BY scored_at LIMIT $2", book, MAX_ROWS)
+        "SELECT s.inside_p10_p90, s.brier_positive "
+        "  FROM pos_forecast_scores s "
+        "  JOIN pos_forecasts f ON f.forecast_id = s.forecast_id "
+        " WHERE s.book = $1 AND f.sleeve IS NOT DISTINCT FROM $2 "
+        "   AND f.strategy IS NOT DISTINCT FROM $3 "
+        " ORDER BY s.scored_at LIMIT $4", book, sleeve,
+        strategy if sleeve is not None else None, MAX_ROWS)
     return [dict(r) for r in rows]
 
 
 async def unscored_forecasts(conn, *, now) -> list:
     rows = await conn.fetch(
-        "SELECT f.forecast_id, f.book, f.quantiles, f.prob_positive, "
+        "SELECT f.forecast_id, f.book, f.sleeve, f.strategy, "
+        "       f.confidence_scope, f.quantiles, f.prob_positive, "
         "       f.p10_pnl_usd, f.p50_pnl_usd, f.p90_pnl_usd, "
         "       extract(epoch FROM f.horizon_start)::float8 AS hs, "
         "       extract(epoch FROM f.horizon_end)::float8 AS he "
@@ -785,12 +916,24 @@ async def unscored_forecasts(conn, *, now) -> list:
     return [dict(r) for r in rows]
 
 
-async def realized_between(conn, *, book, start, end) -> tuple:
+async def realized_between(conn, *, book, start, end, sleeve=None,
+                           strategy=None) -> tuple:
+    """(realized net, positions) of the book's positions released inside
+    [start, end). `sleeve` None = every sleeve (a pre-227 book-wide
+    forecast is scored against the whole book it forecast); a sleeve =
+    only positions of that sleeve (the group's durable classification;
+    UNCLASSIFIED never counts as INVESTMENT); `strategy` None / ALL = every
+    strategy of the sleeve."""
+    have_view = await has(conn, "paper_sleeve_current_v")
+    sleeve_sql = _sleeve_case_sql("e.group_id", "e.strategy",
+                                  book_col="e.book", have_view=have_view)
     r = await conn.fetchrow(
-        "SELECT count(*) AS n, sum(net_profit_usd) AS s "
-        "  FROM pos_economics_latest WHERE book = $1 AND state = 'CLOSED' "
-        "   AND net_profit_usd IS NOT NULL "
-        "   AND released_at >= to_timestamp($2) "
-        "   AND released_at < to_timestamp($3)", book, float(start),
-        float(end))
+        "SELECT count(*) AS n, sum(e.net_profit_usd) AS s "
+        "  FROM pos_economics_latest e WHERE e.book = $1 "
+        "   AND e.state = 'CLOSED' AND e.net_profit_usd IS NOT NULL "
+        "   AND e.released_at >= to_timestamp($2) "
+        "   AND e.released_at < to_timestamp($3) "
+        "   AND ($4::text IS NULL OR " + sleeve_sql + " = $4) "
+        "   AND ($5::text IS NULL OR $5 = 'ALL' OR e.strategy = $5)",
+        book, float(start), float(end), sleeve, strategy)
     return (C.num(r["s"]) or 0.0), int(r["n"])

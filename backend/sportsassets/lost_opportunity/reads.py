@@ -230,14 +230,24 @@ async def coverage_refusals(conn, *, now, classifier_version,
 
 async def score_candidates(conn, *, now, version, hours=SCORE_LOOKBACK_H,
                            limit=MAX_SCORES_PER_CYCLE) -> list:
+    """The latest capacity row of each recent candidate not yet scored by
+    `version`, with the decision's verdict / league / valuation, the event
+    start and -- for the V2 executable-freshness check -- the capacity book
+    (id, age at the decision) beside the decision's own recorded book (id,
+    the age the decision saw)."""
+    from ..profitability import capacity as CP
     rows = await conn.fetch(
         "SELECT c.capacity_id, c.candidate_id, c.status, c.why, "
         "       c.us_market_slug, c.holding_side, c.strategy, "
         "       c.executable_opportunity_dollars, c.executable_capacity_usd, "
-        "       c.capacity_ceiling_usd, "
+        "       c.capacity_ceiling_usd, c.book_obs_id, c.book_age_s, "
         "       extract(epoch FROM c.decided_at)::float8 AS decided_at, "
         "       d.verdict, d.label->>'competition' AS league, "
-        "       d.valuation_id "
+        "       d.valuation_id, d.book_obs_id AS decision_book_obs_id, "
+        "       d.policy_version, "
+        "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
+        "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
+        "       END AS decision_book_age_s "
         "  FROM pos_capacity_latest c "
         "  LEFT JOIN paper_decisions d ON d.decision_id = c.candidate_id "
         " WHERE c.decided_at >= to_timestamp($1) "
@@ -251,6 +261,11 @@ async def score_candidates(conn, *, now, version, hours=SCORE_LOOKBACK_H,
     starts = await event_starts(conn, [r["us_market_slug"] for r in out])
     for r in out:
         r["event_start_at"] = starts.get(r["us_market_slug"])
+        r["executable_freshness"] = CP.executable_fresh(
+            strategy=r.get("strategy"), book_obs_id=r.get("book_obs_id"),
+            decision_book_obs_id=r.get("decision_book_obs_id"),
+            book_age_s=r.get("book_age_s"),
+            recorded_age_s=r.get("decision_book_age_s"))
     return out
 
 
@@ -320,9 +335,11 @@ async def lag_samples(conn, *, now) -> list:
 
 async def score_context(conn, *, cands: list, since: float) -> dict:
     """What the decomposition reads, as of each decision: the PAPER
-    EDGE_CALIBRATION observations, the intel regime states, the
-    candidates' valuation rows (settlement comparison), and the pos-learn
-    edge confidence of each valuation when migration 218 is present."""
+    INVESTMENT sleeve's EDGE_CALIBRATION observations (migration 227: never
+    the pre-227 book-wide rows, never a TRAINING / BENCHMARK sleeve's), the
+    intel regime states, the candidates' valuation rows (settlement
+    comparison), and the pos-learn edge confidence of each valuation when
+    migration 218 is present."""
     out = {"calibration": [], "regimes": [], "valuations": {},
            "edge_confidence": {}, "edge_confidence_why": None,
            "eddie": {}, "eddie_why": None}
@@ -331,9 +348,11 @@ async def score_context(conn, *, cands: list, since: float) -> dict:
             "       status, why, sample_n, detail->>'unit' AS unit "
             "  FROM pos_metric_observations "
             " WHERE book = 'PAPER' AND metric = 'EDGE_CALIBRATION' "
+            "   AND sleeve = 'INVESTMENT' AND strategy = 'ALL' "
             "   AND computed_at >= coalesce((SELECT max(computed_at) "
             "        FROM pos_metric_observations WHERE book = 'PAPER' "
             "         AND metric = 'EDGE_CALIBRATION' "
+            "         AND sleeve = 'INVESTMENT' AND strategy = 'ALL' "
             "         AND computed_at <= to_timestamp($1)), "
             "       to_timestamp($1)) "
             " ORDER BY computed_at ASC LIMIT 2000", float(since)):
@@ -428,19 +447,54 @@ async def eddie_estimates(conn, decision_ids) -> tuple:
 OPP_LOOKBACK_DAYS = 14.0
 
 
-async def opportunity_counts(conn, *, now, days=OPP_LOOKBACK_DAYS) -> dict:
-    r = await conn.fetchrow(
-        "SELECT count(*) AS n, count(*) FILTER (WHERE status = 'MEASURED' "
-        "         AND executable_opportunity_dollars > 0) AS q, "
-        "       extract(epoch FROM min(decided_at))::float8 AS first "
-        "  FROM pos_capacity_latest "
-        " WHERE decided_at >= to_timestamp($1) "
-        "   AND decided_at <= to_timestamp($2)",
-        float(now) - days * 86400.0, float(now))
-    first = C.num(r["first"])
+async def opportunity_counts(conn, *, now, days=OPP_LOOKBACK_DAYS,
+                             strategies=None) -> dict:
+    """Candidates (and qualified candidates) per lookback. `strategies` None
+    = every paper strategy, counted as before (research); a list = only
+    those strategies' candidates, and a candidate QUALIFIES only when its
+    capacity book meets the strategy's executable freshness standard
+    (profitability/capacity.executable_fresh) -- the production count."""
+    from ..profitability import capacity as CP
+    strat = None if strategies is None else sorted(strategies)
+    rows = await conn.fetch(
+        "SELECT c.status, c.strategy, c.executable_opportunity_dollars, "
+        "       c.book_obs_id, c.book_age_s, "
+        "       d.book_obs_id AS decision_book_obs_id, "
+        "       CASE WHEN jsonb_typeof(d.book->'age_at_decision_s') = "
+        "            'number' THEN (d.book->>'age_at_decision_s')::float8 "
+        "       END AS decision_book_age_s, "
+        "       extract(epoch FROM c.decided_at)::float8 AS decided_at "
+        "  FROM pos_capacity_latest c "
+        "  LEFT JOIN paper_decisions d ON d.decision_id = c.candidate_id "
+        " WHERE c.decided_at >= to_timestamp($1) "
+        "   AND c.decided_at <= to_timestamp($2) "
+        "   AND ($3::text[] IS NULL OR c.strategy = ANY($3::text[])) "
+        " LIMIT $4", float(now) - days * 86400.0, float(now), strat,
+        PR.MAX_ROWS)
+    n = q = 0
+    first = None
+    for r in rows:
+        n += 1
+        t = C.num(r["decided_at"])
+        if t is not None:
+            first = t if first is None else min(first, t)
+        if r["status"] != "MEASURED" or not (
+                (C.num(r["executable_opportunity_dollars"]) or 0) > 0):
+            continue
+        if strat is not None and not CP.executable_fresh(
+                strategy=r["strategy"], book_obs_id=r["book_obs_id"],
+                decision_book_obs_id=r["decision_book_obs_id"],
+                book_age_s=r["book_age_s"],
+                recorded_age_s=r["decision_book_age_s"])["fresh"]:
+            continue
+        q += 1
     span = 0.0 if first is None else min(days, (float(now) - first) / 86400.0)
-    return {"candidates": int(r["n"]), "qualified": int(r["q"]),
-            "days": round(span, 3), "lookback_days": days}
+    return {"candidates": n, "qualified": q, "days": round(span, 3),
+            "lookback_days": days, "strategies": strat,
+            "qualified_rule": (
+                "MEASURED, positive executable opportunity" + (
+                    "" if strat is None else
+                    ", book within the strategy's executable freshness"))}
 
 
 async def capital_now(conn) -> dict:
@@ -461,7 +515,8 @@ async def capital_now(conn) -> dict:
 
 async def unscored_horizons(conn, *, now) -> list:
     rows = await conn.fetch(
-        "SELECT f.forecast_id, f.book, f.horizon, f.quantiles, "
+        "SELECT f.forecast_id, f.book, f.horizon, f.sleeve, f.strategy, "
+        "       f.confidence_scope, f.quantiles, "
         "       f.prob_positive, f.p10_pnl_usd, f.p50_pnl_usd, "
         "       f.p90_pnl_usd, "
         "       extract(epoch FROM f.horizon_start)::float8 AS hs, "
@@ -475,14 +530,24 @@ async def unscored_horizons(conn, *, now) -> list:
     return [dict(r) for r in rows]
 
 
-async def horizon_scores(conn, *, book, horizon) -> list:
+async def horizon_scores(conn, *, book, horizon, sleeve=None,
+                         strategy=C.ALL_STRATEGIES) -> list:
+    """THIS scope's own scored horizon forecasts (a sleeve's forecast is
+    validated only by its own history; `sleeve` None = the pre-227
+    book-wide forecasts)."""
     rows = await conn.fetch(
-        "SELECT inside_p10_p90, brier_positive "
-        "  FROM lol_horizon_forecast_scores "
-        " WHERE book = $1 AND horizon = $2 ORDER BY scored_at LIMIT 5000",
-        book, horizon)
+        "SELECT s.inside_p10_p90, s.brier_positive "
+        "  FROM lol_horizon_forecast_scores s "
+        "  JOIN lol_horizon_forecasts f ON f.forecast_id = s.forecast_id "
+        " WHERE s.book = $1 AND s.horizon = $2 "
+        "   AND f.sleeve IS NOT DISTINCT FROM $3 "
+        "   AND f.strategy IS NOT DISTINCT FROM $4 "
+        " ORDER BY s.scored_at LIMIT 5000", book, horizon, sleeve,
+        strategy if sleeve is not None else None)
     return [dict(r) for r in rows]
 
 
-async def realized_between(conn, *, book, start, end) -> tuple:
-    return await PR.realized_between(conn, book=book, start=start, end=end)
+async def realized_between(conn, *, book, start, end, sleeve=None,
+                           strategy=None) -> tuple:
+    return await PR.realized_between(conn, book=book, start=start, end=end,
+                                     sleeve=sleeve, strategy=strategy)

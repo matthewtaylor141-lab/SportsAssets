@@ -847,3 +847,27 @@ tests/test_agent_identity_api_authority.py
 # quarantined, and an empty run; capital-critical.yml runs the whole suite on
 # the exact pushed SHA in the image's 3.12.3 + lock + Postgres 16 environment.
 tests/test_ci_verdict.py
+# (R30A, migration 227) EVERY PRODUCTION-CONFIDENCE NUMBER IS INVESTMENT-ONLY:
+# a TRAINING (or BENCHMARK, or UNCLASSIFIED) win or loss cannot move a
+# north-star metric, forecast, horizon forecast, production capacity rate,
+# INVESTMENT profit line, twin ladder input, scorecard sample or the
+# Opportunity Score's calibration; production capacity uses the strategy's
+# executable book freshness (the entry rule's bound), the 300 s research
+# number stays labelled research; 227 refuses unscoped rows and a TRAINING
+# row labelled PRODUCTION_CONFIDENCE; its rollback refuses while scoped rows
+# exist.
+tests/test_investment_only_confidence.py
+# (R30A) THE CONFIDENCE LADDER (GET /api/command/confidence-ladder): levels
+# 0..6 exactly as the owner's audit names them, never a skipped level;
+# level 2 from validation's forward event-clustered checks plus power from
+# the observed variance (no invented sample count); level 3 is live_parity's
+# gate; levels 4-6 NOT_REACHED while SMALL LIVE is SHADOW; a TRAINING win or
+# loss moves no INVESTMENT level; GET-only, READ ONLY, no write.
+tests/test_confidence_ladder.py
+# (R30A) THE UNIQUE OPPORTUNITY FUNNEL (GET /api/command/opportunity-funnel):
+# blockers ranked by unique opportunities (fixture / market / side / line /
+# period), repeated decision rows counted as re-evaluations; executable EV
+# only at the strategy's own book freshness and a fresh probability, else
+# UNAVAILABLE with its reason; proven over decisions the real completed-game
+# paper pass recorded; GET-only, READ ONLY, no write.
+tests/test_opportunity_funnel.py

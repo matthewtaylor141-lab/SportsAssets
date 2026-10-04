@@ -36,13 +36,28 @@ measured is null with its reason, never a silent 1.0.
 Unit: expected net USD per USD-hour of capital. A candidate whose
 executable opportunity is measured 0 scores 0 (a measured zero). Any missing
 input -> status UNAVAILABLE, score None, `why` and `unmeasured` naming it.
+
+V2 (R30A, owner audit 2026-10-04) -- THE SCORE IS A PRODUCTION-CONFIDENCE
+NUMBER, so nothing in it may be moved by a TRAINING or BENCHMARK outcome or
+priced on a book no entry could have used:
+  * NET_EV counts the capacity assessment ONLY when its book meets the
+    strategy's executable freshness standard (profitability/capacity.
+    executable_fresh, the entry decision's own book-age bound); otherwise
+    UNAVAILABLE (BOOK_OLDER_THAN_THE_STRATEGY_EXECUTABLE_FRESHNESS) -- the
+    V1 score priced books up to 300 s old;
+  * P(fill) uses Eddie's estimate only when HIS book meets that standard
+    (his estimator accepts books up to 120 s); else the CAPACITY snapshot's
+    PRODUCTION rate (INVESTMENT strategies' entry orders only);
+  * CALIBRATION_CONFIDENCE is the INVESTMENT sleeve's EDGE_CALIBRATION
+    (V1 read the book-wide PAPER one, which pooled TRAINING outcomes).
 """
 from __future__ import annotations
 
+from ..profitability import capacity as CP
 from ..profitability import common as C
 from ..profitability import economics as EC
 
-VERSION = "LOL_OPPORTUNITY_SCORE_V1"
+VERSION = "LOL_OPPORTUNITY_SCORE_V2"
 UNIT = "USD_EXPECTED_NET_PER_USD_CAPITAL_HOUR"
 HOUR = 3600.0
 
@@ -80,11 +95,34 @@ def eddie_view(est, why=None) -> dict:
     return v
 
 
-def execution_input(eddie_est, snapshot_fp, snapshot_basis) -> tuple:
+def eddie_fresh(eddie_est, strategy) -> tuple:
+    """(usable, why): Eddie's estimate counts only when the book HE priced
+    meets the strategy's executable freshness standard (his own estimator
+    accepts books up to 120 s; the entry rule does not)."""
+    if not eddie_est:
+        return False, None
+    age = C.num(eddie_est.get("book_age_s"))
+    bound = CP.executable_bound(strategy)
+    if age is None:
+        return False, "EDDIE_BOOK_AGE_UNKNOWN"
+    if abs(age) > bound:
+        return False, ("EDDIE_BOOK_%.1fs_OLDER_THAN_THE_STRATEGY_EXECUTABLE_"
+                       "FRESHNESS_%.0fs" % (age, bound))
+    return True, None
+
+
+def execution_input(eddie_est, snapshot_fp, snapshot_basis,
+                    strategy=None) -> tuple:
     """(fill probability, basis, source) for the score's P(fill): Eddie's
-    expected fill probability for this decision when he measured one, else
-    the CAPACITY snapshot's fill share as of the decision, else None."""
-    fp = C.num((eddie_est or {}).get("expected_fill_probability"))
+    expected fill probability for this decision when he measured one on a
+    book meeting the strategy's executable freshness, else the CAPACITY
+    snapshot's PRODUCTION fill share as of the decision, else None."""
+    ok, why = eddie_fresh(eddie_est, strategy)
+    fp = C.num((eddie_est or {}).get("expected_fill_probability")) \
+        if ok else None
+    if fp is None and why:
+        snapshot_basis = "%s (Eddie's estimate not used: %s)" % (
+            snapshot_basis, why)
     if fp is not None:
         return fp, ("eddie_execution_estimates %s (%s, SHADOW_ONLY) from the "
                     "decision's recorded book %s, estimated at %s" % (
@@ -119,10 +157,11 @@ def components(out: dict, ctx: dict) -> dict:
         "CALIBRATION_CONFIDENCE": _comp(
             C.num(cal.get("value")), unit=cal.get("unit") or "ratio",
             status=(cal.get("status") if cal.get("status") else None),
-            why=cal.get("why") or "NO_EDGE_CALIBRATION_OBSERVATION_AT_OR_"
-                                  "BEFORE_THE_DECISION",
-            basis="pos-econ EDGE_CALIBRATION (PAPER) as of the decision, "
-                  "n=%s" % cal.get("sample_n")),
+            why=cal.get("why") or "NO_INVESTMENT_EDGE_CALIBRATION_"
+                                  "OBSERVATION_AT_OR_BEFORE_THE_DECISION",
+            basis="pos-econ EDGE_CALIBRATION of the PAPER INVESTMENT sleeve "
+                  "(never TRAINING / BENCHMARK) as of the decision, n=%s"
+                  % cal.get("sample_n")),
         "EXECUTION_CONFIDENCE": dict(_comp(
             out.get("fill_probability"), unit="probability", in_score=True,
             why=um.get("fill_probability"),
@@ -181,9 +220,22 @@ def _score(cand: dict, *, fill_probability=None, fill_basis=None,
                 us_market_slug=cand.get("us_market_slug"),
                 holding_side=cand.get("holding_side"), score_unit=UNIT)
     whys = []
+    # THE EXECUTABLE FRESHNESS OF THE CAPACITY BOOK (V2). The runner stamps
+    # `executable_freshness` (profitability/capacity.executable_fresh) from
+    # the capacity row and its decision: a book no entry could have used is
+    # not executable EV, and its capacity is not executable capacity. (The
+    # canonical decision's own call scores the ENTER decision's own book,
+    # which the entry rule already held to the bound, and stamps nothing.)
+    xf = cand.get("executable_freshness")
+    stale = isinstance(xf, dict) and not xf.get("fresh")
     if cand.get("status") != C.MEASURED:
         why = "CAPACITY_UNAVAILABLE: %s" % (cand.get("why") or
                                             "no capacity assessment")
+        out.put("expected_net_executable_ev_usd", None, why)
+        whys.append(why)
+    elif stale:
+        why = "CAPACITY_NOT_EXECUTABLE: %s (age %s s, bound %s s)" % (
+            xf.get("why"), xf.get("age_s"), xf.get("bound_s"))
         out.put("expected_net_executable_ev_usd", None, why)
         whys.append(why)
     else:
@@ -191,8 +243,10 @@ def _score(cand: dict, *, fill_probability=None, fill_basis=None,
                 C.num(cand.get("executable_opportunity_dollars")),
                 "NO_EXECUTABLE_OPPORTUNITY_FIGURE")
     ev = out["expected_net_executable_ev_usd"]
-    cap = C.num(cand.get("executable_capacity_usd"))
-    out.put("executable_capacity_usd", cap, "NO_EXECUTABLE_CAPACITY_FIGURE")
+    cap = None if stale else C.num(cand.get("executable_capacity_usd"))
+    out.put("executable_capacity_usd", cap,
+            "CAPACITY_NOT_EXECUTABLE" if stale
+            else "NO_EXECUTABLE_CAPACITY_FIGURE")
 
     fp = C.num(fill_probability)
     out.put("fill_probability", fp, "FILL_PROBABILITY_NOT_MEASURED")

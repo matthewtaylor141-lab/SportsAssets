@@ -9,9 +9,19 @@ EMPTY names why (no run yet, migration 216 absent, unknown position);
 UNAVAILABLE names the failed read. A failed read is never shown as zeros.
 PAPER, ACTUAL and COUNTERFACTUAL are separate keys, never summed.
 
+PRODUCTION CONFIDENCE IS INVESTMENT-ONLY (migration 227). `data.PAPER` /
+`data.ACTUAL` of north-star and forecast are the INVESTMENT sleeve's rows;
+every sleeve is in `by_sleeve` (TRAINING / BENCHMARK / UNCLASSIFIED labelled
+research), every strategy in `by_strategy`; rows written before 227 pooled
+every strategy and are shown under `legacy_book_wide`, never as INVESTMENT.
+Every row carries book, sleeve, strategy and policy_versions. The capacity
+snapshot's top level is the PRODUCTION capacity (INVESTMENT, executable
+freshness); its `research` key is the 300 s, every-strategy aggregate.
+
 ROUTES (the logic is sportsassets/profitability/*; these read pos_* only):
   GET /api/command/profitability                    latest run per component
   GET /api/command/profitability/north-star         the five metrics per book
+                                                    and sleeve
   GET /api/command/profitability/capital            portfolio capital per book
                                                     + positions (?book=&limit=)
   GET /api/command/profitability/capacity           aggregate + candidates
@@ -119,42 +129,90 @@ async def profitability_index() -> dict:
     return await _read(fn)
 
 
+def _jl(v):
+    """A jsonb value as read (dict, or its JSON text)."""
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return None
+    return v if isinstance(v, dict) else None
+
+
+SLEEVES = ("INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
+SCOPE_RULE = ("data.{PAPER,ACTUAL} is PRODUCTION CONFIDENCE: the INVESTMENT "
+              "sleeve only (migration 227). TRAINING, BENCHMARK and "
+              "UNCLASSIFIED are in by_sleeve, labelled research, and are "
+              "never pooled into it; by_strategy splits every sleeve by "
+              "strategy. Pre-227 rows pooled every strategy and are listed "
+              "under legacy_book_wide, never as INVESTMENT.")
+
+
+def _metric_row(r, now) -> dict:
+    d = _row(r)
+    det = d.pop("detail") or {}
+    d["trend"] = det.get("trend")
+    d["unit"] = det.get("unit")
+    d["ci_level"] = det.get("ci_level")
+    d["ci_why"] = det.get("ci_why")
+    d["period"] = det.get("period")
+    d["metric_detail"] = det.get("detail")
+    d["policy_version"] = det.get("policy_version")
+    d["policy_version_why"] = det.get("policy_version_why")
+    d["sleeve_role"] = det.get("sleeve_role")
+    if d.get("sleeve") is None:
+        d["scope"] = "BOOK_WIDE_PRE_227"
+        d["confidence_scope"] = "RESEARCH_NOT_PRODUCTION_CONFIDENCE"
+    d["freshness"] = {
+        "data_as_of": d["data_as_of"],
+        "data_age_s": (None if d["data_as_of"] is None
+                       else round(now - d["data_as_of"], 1)),
+        "observation_written_at": d["computed_at"],
+        "why": None if d["data_as_of"] is not None
+        else "NO_SOURCE_EVENT_FOR_THIS_SCOPE"}
+    return d
+
+
 @router.get(BASE + "/north-star", dependencies=[Depends(require_read)])
 async def profitability_north_star() -> dict:
     async def fn(conn):
         rows = await conn.fetch(
-            "SELECT DISTINCT ON (book, metric) book, metric, value, sample_n,"
+            "SELECT DISTINCT ON (book, sleeve, strategy, metric) book, "
+            "       sleeve, strategy, policy_versions, classifier_version, "
+            "       confidence_scope, metric, value, sample_n,"
             "       ci_low, ci_high, status, why, detail, run_id, "
             "       extract(epoch FROM period_start)::float8 AS period_start,"
             "       extract(epoch FROM period_end)::float8 AS period_end, "
             "       extract(epoch FROM data_as_of)::float8 AS data_as_of, "
             "       extract(epoch FROM computed_at)::float8 AS computed_at "
             "  FROM pos_metric_observations "
-            " ORDER BY book, metric, computed_at DESC")
+            " ORDER BY book, sleeve, strategy, metric, computed_at DESC")
         if not rows:
             return _env("EMPTY", "NO_RUN_YET", data=None)
         now = time.time()
         data = {"PAPER": {}, "ACTUAL": {}}
+        by_sleeve = {b: {s: {} for s in SLEEVES} for b in data}
+        by_strategy = {b: {} for b in data}
+        legacy = {b: {} for b in data}
         for r in rows:
-            d = _row(r)
-            det = d.pop("detail") or {}
-            d["trend"] = det.get("trend")
-            d["unit"] = det.get("unit")
-            d["ci_level"] = det.get("ci_level")
-            d["ci_why"] = det.get("ci_why")
-            d["period"] = det.get("period")
-            d["metric_detail"] = det.get("detail")
-            d["freshness"] = {
-                "data_as_of": d["data_as_of"],
-                "data_age_s": (None if d["data_as_of"] is None
-                               else round(now - d["data_as_of"], 1)),
-                "observation_written_at": d["computed_at"],
-                "why": None if d["data_as_of"] is not None
-                else "NO_SOURCE_EVENT_FOR_THIS_BOOK"}
-            data[r["book"]][r["metric"]] = d
+            d = _metric_row(r, now)
+            b, s, st = r["book"], r["sleeve"], r["strategy"]
+            if s is None:
+                legacy[b][r["metric"]] = d
+            elif st in (None, "ALL"):
+                by_sleeve[b][s][r["metric"]] = d
+                if s == "INVESTMENT":
+                    data[b][r["metric"]] = d
+            else:
+                by_strategy[b].setdefault(st, {})[r["metric"]] = d
         last = await _last_ok(conn, "NORTH_STAR")
         return _env("OK", None, computed_at=last, data=data,
-                    summed_across_books=False,
+                    by_sleeve=by_sleeve, by_strategy=by_strategy,
+                    legacy_book_wide=legacy,
+                    production_confidence_scope={
+                        "sleeve": "INVESTMENT", "strategy": "ALL",
+                        "rule": SCOPE_RULE},
+                    summed_across_books=False, summed_across_sleeves=False,
                     last_confirmed_run_at=last)
     return await _read(fn)
 
@@ -175,7 +233,7 @@ async def profitability_capital(
             "       expected_net_profit_usd, expected_capital_hours, "
             "       realized_profit_per_capital_hour, "
             "       expected_profit_per_capital_hour, release_basis, "
-            "       unmeasured, "
+            "       unmeasured, detail, "
             "       extract(epoch FROM opened_at)::float8 AS opened_at, "
             "       extract(epoch FROM last_event_at)::float8 "
             "       AS last_event_at, "
@@ -185,6 +243,22 @@ async def profitability_capital(
             "  FROM pos_economics_latest WHERE ($1 = '' OR book = $1) "
             " ORDER BY (state = 'OPEN') DESC, last_event_at DESC NULLS LAST "
             " LIMIT $2", book, int(limit))]
+        # (R30A review) every position row names its scope -- book, sleeve,
+        # strategy, the deciding policy version -- as the economics run
+        # computed it (economics.scope_of: the group's durable migration-223
+        # classification, else UNCLASSIFIED, never INVESTMENT; PAPER and
+        # ACTUAL alike). A row computed before that stamp says so.
+        for r in rows:
+            scope = (_jl(r.pop("detail", None)) or {}).get("scope") or {}
+            sl = scope.get("sleeve")
+            r["sleeve"] = sl if sl in SLEEVES else "UNCLASSIFIED"
+            r["sleeve_basis"] = (scope.get("sleeve_basis") if scope else
+                                 "NOT_RECORDED_BEFORE_R30A_REVIEW")
+            r["policy_version"] = scope.get("policy_version")
+            r["classifier_version"] = scope.get("classifier_version")
+            r["confidence_scope"] = (
+                "PRODUCTION_CONFIDENCE" if r["sleeve"] == "INVESTMENT"
+                else "RESEARCH_NOT_PRODUCTION_CONFIDENCE")
         now = time.time()
         for r in rows:
             r["REALIZED_PROFIT_PER_CAPITAL_HOUR"] = r[
@@ -212,23 +286,39 @@ async def profitability_capital(
 @router.get(BASE + "/capacity", dependencies=[Depends(require_read)])
 async def profitability_capacity(
         limit: int = Query(default=100, ge=1, le=1000)) -> dict:
+    """The capacity snapshot (top level: PRODUCTION confidence, INVESTMENT
+    at executable freshness; `research` beside it) and the latest
+    per-candidate assessments.
+
+    (R30A review) Each candidate row now names its scope -- book, sleeve
+    (the decision strategy's sleeve: migration 223's classifier map; a
+    strategy outside it UNCLASSIFIED), strategy, policy_version (the
+    decision's) -- and its executable freshness. The row's own dollar
+    figures are the RESEARCH assessment (books up to the research bound,
+    300 s) and say so (`confidence_scope`); the PRODUCTION figure beside them
+    is the same assessment ONLY when the candidate is INVESTMENT and its
+    book met the strategy's executable freshness standard, else None with
+    the reason."""
+    from ..profitability import capacity as CP
+    from ..profitability import common as PC
+
     async def fn(conn):
         snap = await _snapshot(conn, "CAPACITY", "NONE")
         rows = [_row(r) for r in await conn.fetch(
-            "SELECT capacity_id, candidate_id, us_market_slug, holding_side, "
-            "       strategy, status, why, probability, best_price, "
-            "       book_obs_id, book_age_s, visible_depth_usd, "
-            "       visible_depth_contracts, max_executable_contracts, "
-            "       executable_capacity_usd, capacity_ceiling_usd, "
-            "       capacity_ceiling_depth_bound, "
-            "       theoretical_opportunity_dollars, "
-            "       executable_opportunity_dollars, expected_price_impact, "
-            "       edge_decay_per_1000_usd, exit_liquidity_usd, "
-            "       exit_unabsorbed_contracts, edge_at_size, unmeasured, "
-            "       fee_basis, "
-            "       extract(epoch FROM decided_at)::float8 AS decided_at "
-            "  FROM pos_capacity_latest ORDER BY decided_at DESC NULLS LAST "
-            " LIMIT $1", int(limit))]
+            "SELECT c.capacity_id, c.candidate_id, c.us_market_slug, "
+            "       c.holding_side, c.strategy, c.status, c.why, "
+            "       c.probability, c.best_price, c.book_obs_id, c.book_age_s, "
+            "       c.visible_depth_usd, c.visible_depth_contracts, "
+            "       c.max_executable_contracts, c.executable_capacity_usd, "
+            "       c.capacity_ceiling_usd, c.capacity_ceiling_depth_bound, "
+            "       c.theoretical_opportunity_dollars, "
+            "       c.executable_opportunity_dollars, "
+            "       c.expected_price_impact, c.edge_decay_per_1000_usd, "
+            "       c.exit_liquidity_usd, c.exit_unabsorbed_contracts, "
+            "       c.edge_at_size, c.unmeasured, c.fee_basis, c.detail, "
+            "       extract(epoch FROM c.decided_at)::float8 AS decided_at "
+            "  FROM pos_capacity_latest c "
+            " ORDER BY c.decided_at DESC NULLS LAST LIMIT $1", int(limit))]
         for r in rows:
             r["THEORETICAL_OPPORTUNITY_DOLLARS"] = r[
                 "theoretical_opportunity_dollars"]
@@ -236,6 +326,38 @@ async def profitability_capacity(
                 "executable_opportunity_dollars"]
             r["EXPECTED_EDGE_AT_SIZE"] = r["edge_at_size"]
             r["CAPACITY_CEILING_USD"] = r["capacity_ceiling_usd"]
+            scope = (_jl(r.pop("detail", None)) or {}).get("scope") or {}
+            sleeve = scope.get("sleeve") or PC.strategy_sleeve(
+                r.get("strategy"))
+            r["policy_version"] = scope.get("policy_version")
+            r["scope_basis"] = (
+                "RECORDED_AT_ASSESSMENT" if scope else
+                "NOT_RECORDED_BEFORE_R30A_REVIEW: sleeve from the decision "
+                "strategy's classifier map; policy version and the "
+                "decision's own book unknown")
+            r["decision_book_obs_id"] = scope.get("decision_book_obs_id")
+            r["decision_book_age_s"] = scope.get("decision_book_age_s")
+            view = CP.executable_view(r)
+            fresh = view["executable_freshness"]
+            r.update(
+                book="PAPER", sleeve=sleeve,
+                sleeve_basis=scope.get("sleeve_basis")
+                or "THE_DECISION_STRATEGY_CLASSIFIER_MAP",
+                confidence_scope=PC.RESEARCH_SCOPE,
+                research_basis=(
+                    "RESEARCH: this assessment accepts a book up to %ds from "
+                    "the decision; the PRODUCTION figure is the same only "
+                    "at the strategy's executable freshness"
+                    % int(CP.MAX_BOOK_AGE_S)),
+                executable_freshness=fresh)
+            if sleeve != PC.INVESTMENT:
+                prod, why = None, "SLEEVE_IS_%s_NOT_PRODUCTION" % sleeve
+            elif view.get("status") != PC.MEASURED:
+                prod, why = None, view.get("why")
+            else:
+                prod, why = view.get("executable_opportunity_dollars"), None
+            r["PRODUCTION_EXECUTABLE_OPPORTUNITY_DOLLARS"] = prod
+            r["production_executable_opportunity_why"] = why
         if snap is None:
             return _env("EMPTY", "NO_RUN_YET", data=None, candidates=rows)
         return _env("OK", None, computed_at=snap["computed_at"],
@@ -248,21 +370,39 @@ async def profitability_forecast(
         history: int = Query(default=30, ge=0, le=500)) -> dict:
     async def fn(conn):
         latest = {}
+        by_sleeve = {}
+        legacy = {}
         for b in ("PAPER", "ACTUAL"):
+            by_sleeve[b] = {}
+            for s in SLEEVES:
+                r = await conn.fetchrow(
+                    "SELECT * FROM pos_forecasts WHERE book = $1 "
+                    "   AND sleeve = $2 AND strategy = 'ALL' "
+                    " ORDER BY issued_at DESC LIMIT 1", b, s)
+                by_sleeve[b][s] = None if r is None else _row(r)
+            # THE PRODUCTION-CONFIDENCE FORECAST: the INVESTMENT sleeve's
+            latest[b] = by_sleeve[b]["INVESTMENT"]
             r = await conn.fetchrow(
                 "SELECT * FROM pos_forecasts WHERE book = $1 "
-                " ORDER BY issued_at DESC LIMIT 1", b)
-            latest[b] = None if r is None else _row(r)
+                "   AND sleeve IS NULL ORDER BY issued_at DESC LIMIT 1", b)
+            legacy[b] = None if r is None else dict(
+                _row(r), scope="BOOK_WIDE_PRE_227",
+                confidence_scope="RESEARCH_NOT_PRODUCTION_CONFIDENCE")
         scores = [_row(r) for r in await conn.fetch(
             "SELECT * FROM pos_forecast_scores ORDER BY scored_at DESC "
             " LIMIT $1", int(history))] if history else []
-        if not any(latest.values()):
+        if not any(v for bs in by_sleeve.values() for v in bs.values()):
             return _env("EMPTY", "NO_FORECAST_ISSUED_YET", data=None,
-                        scores=scores)
-        comp = max((v["issued_at"] for v in latest.values() if v),
-                   default=None)
-        return _env("OK", None, computed_at=comp, data=latest, scores=scores,
-                    summed_across_books=False,
+                        scores=scores, legacy_book_wide=legacy)
+        comp = max((v["issued_at"] for bs in by_sleeve.values()
+                    for v in bs.values() if v), default=None)
+        return _env("OK", None, computed_at=comp, data=latest,
+                    by_sleeve=by_sleeve, legacy_book_wide=legacy,
+                    scores=scores,
+                    production_confidence_scope={
+                        "sleeve": "INVESTMENT", "strategy": "ALL",
+                        "rule": SCOPE_RULE},
+                    summed_across_books=False, summed_across_sleeves=False,
                     forecast_label=("UNPROVEN until the forecasts' own forward "
                                     "calibration validates them"))
     return await _read(fn)

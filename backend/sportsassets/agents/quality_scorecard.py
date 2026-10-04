@@ -1014,30 +1014,80 @@ async def admission_metric(conn, now: float) -> dict:
 # PROFITABILITY EVIDENCE
 # ═════════════════════════════════════════════════════════════════════
 
+#: the sleeves (migration 223); the forward-sample verdict that feeds
+#: confidence counts the INVESTMENT sleeve only (R30A, owner audit P0 #5)
+SLEEVES = ("INVESTMENT", "TRAINING", "BENCHMARK", "UNCLASSIFIED")
+#: migration 223's strategy -> sleeve map (pinned equal to
+#: bettor_paper_sleeves.STRATEGY_SLEEVE by tests/test_investment_only_
+#: confidence.py), for an ACTUAL position whose paper group has no durable
+#: classification
+STRATEGY_SLEEVE = {
+    "PINNACLE_COMPLETED_GAME_PAPER": "INVESTMENT",
+    "DEREK_ENTRY_POLICY_V2": "INVESTMENT",
+    "PINNACLE_EXPLORATION_PAPER": "TRAINING",
+    "PINNACLE_ONLY_PAPER_BENCHMARK": "BENCHMARK",
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": "BENCHMARK",
+}
+
+
+async def _postmortem_rows(conn, book: str) -> list:
+    """The book's closed positions with each one's sleeve: the group's
+    durable classification (migration 223), else -- ACTUAL only -- the
+    classifier's sleeve of the recorded strategy, else UNCLASSIFIED (never
+    INVESTMENT)."""
+    have = await _regclass(conn, "paper_sleeve_current_v")
+    rows = await conn.fetch(
+        "SELECT p.opened_at, p.closed_at, p.fixture, p.us_market_slug, "
+        "       p.realized_pnl_usd, p.strategy, %s AS sleeve "
+        "  FROM position_postmortems p %s WHERE p.book=$1"
+        % (("s.sleeve", "LEFT JOIN paper_sleeve_current_v s "
+                        "ON s.group_id = p.group_id") if have
+           else ("NULL::text", "")), book)
+    out = []
+    for r in rows:
+        sleeve = r["sleeve"] or (STRATEGY_SLEEVE.get(str(r["strategy"]))
+                                 if book == "ACTUAL" else None)
+        out.append({"opened_at": _ep(r["opened_at"]),
+                    "closed_at": _ep(r["closed_at"]),
+                    "fixture": r["fixture"],
+                    "us_market_slug": r["us_market_slug"],
+                    "realized_pnl_usd": float(r["realized_pnl_usd"]),
+                    "sleeve": sleeve if sleeve in SLEEVES
+                    else "UNCLASSIFIED"})
+    return out
+
+
 async def profitability_metrics(conn, now: float) -> list:
+    """THE PREDECLARED FORWARD SAMPLE, PER BOOK -- INVESTMENT SLEEVE ONLY.
+
+    THE DEFECT (owner audit 2026-10-04, P0 #5): the forward-sample verdict
+    read every closed PAPER position, so a TRAINING (exploration) win or
+    loss, or a BENCHMARK control arm's, moved the confidence statistic a
+    live-capital decision reads. It now counts the INVESTMENT sleeve only;
+    every other sleeve's verdict is computed separately and shown in
+    `detail.other_sleeves` (research, never the metric's value)."""
     out = []
     nxt = ("accumulate the predeclared forward sample; nothing before "
            "%s counts" % FORWARD_SAMPLE_RULE["forward_start"])
     present = await _regclass(conn, "position_postmortems")
     for book in ("PAPER", "ACTUAL"):
         mid = "forward_sample_%s" % book.lower()
-        name = "Profitability evidence (%s): forward sample" % book
+        name = ("Profitability evidence (%s, INVESTMENT sleeve): forward "
+                "sample" % book)
         if not present:
             m = unavailable(mid, name, "MIGRATION_209_NOT_APPLIED",
                             next_improvement=nxt)
             m["value"] = FORWARD_SAMPLE_RULE["verdict_until_sufficient"]
-            m["detail"] = {"verdict": m["value"], "rule": FORWARD_SAMPLE_RULE}
+            m["detail"] = {"verdict": m["value"], "rule": FORWARD_SAMPLE_RULE,
+                           "sleeve": "INVESTMENT"}
             out.append(m)
             continue
-        rows = [{"opened_at": _ep(r["opened_at"]),
-                 "closed_at": _ep(r["closed_at"]),
-                 "fixture": r["fixture"], "us_market_slug": r["us_market_slug"],
-                 "realized_pnl_usd": float(r["realized_pnl_usd"])}
-                for r in await conn.fetch(
-                    "SELECT opened_at, closed_at, fixture, us_market_slug, "
-                    "       realized_pnl_usd FROM position_postmortems "
-                    " WHERE book=$1", book)]
+        allrows = await _postmortem_rows(conn, book)
+        rows = [r for r in allrows if r["sleeve"] == "INVESTMENT"]
         v = forward_verdict(rows, now=now)
+        others = {s: forward_verdict([r for r in allrows
+                                      if r["sleeve"] == s], now=now)
+                  for s in SLEEVES if s != "INVESTMENT"}
         out.append(metric(
             mid, name, value=v["verdict"], numerator=v["positions"],
             denominator=v["required_positions"], sample=v["positions"],
@@ -1046,11 +1096,17 @@ async def profitability_metrics(conn, now: float) -> list:
                 "level": 0.95, "method": "ONE_SIDED_NORMAL_MEAN"},
             unit="verdict", last_measured_at=now,
             status="MEASURED" if v["sufficient"] else "INSUFFICIENT_SAMPLE",
-            detail=dict(v, rule=FORWARD_SAMPLE_RULE),
+            detail=dict(v, rule=FORWARD_SAMPLE_RULE, book=book,
+                        sleeve="INVESTMENT",
+                        confidence_scope="PRODUCTION_CONFIDENCE",
+                        other_sleeves={
+                            s: dict(o, confidence_scope=(
+                                "RESEARCH_NOT_PRODUCTION_CONFIDENCE"))
+                            for s, o in others.items()}),
             blocker=None if v["sufficient"] else (
-                "%d of %d independent forward positions; %.1f of %d days"
-                % (v["positions"], v["required_positions"],
-                   v["calendar_days"], v["required_days"])),
+                "%d of %d independent forward INVESTMENT positions; %.1f of "
+                "%d days" % (v["positions"], v["required_positions"],
+                             v["calendar_days"], v["required_days"])),
             next_improvement=nxt))
     return out
 

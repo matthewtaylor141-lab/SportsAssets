@@ -73,12 +73,15 @@ def econ_rows(rows: list) -> list:
 
 def select_rows(econs: list, sleeve_of_group: dict, sleeve: str) -> list:
     """The sleeve's PAPER economics rows (a group without a durable
-    classification is UNCLASSIFIED -- never INVESTMENT). Pure."""
+    classification is UNCLASSIFIED -- never INVESTMENT), each stamped with
+    its sleeve so the metric layer scopes and labels it (migration 227).
+    Pure."""
+    rows = [dict(e, sleeve=sleeve_of_group.get(e.get("group_id"),
+                                                "UNCLASSIFIED"))
+            for e in econs if e.get("book") == "PAPER"]
     if sleeve == "COMBINED":
-        return [e for e in econs if e.get("book") == "PAPER"]
-    return [e for e in econs if e.get("book") == "PAPER"
-            and sleeve_of_group.get(e.get("group_id"), "UNCLASSIFIED")
-            == sleeve]
+        return rows
+    return [e for e in rows if e["sleeve"] == sleeve]
 
 
 def capital_summary(rows: list, *, now: float,
@@ -152,8 +155,13 @@ async def _read(conn, sleeve: str, now: float) -> dict:
     rows = select_rows(econs, groups, sleeve)
     ns = None
     if has_pos:
-        ms = await asyncio.to_thread(MT.compute, rows, book="PAPER", now=now,
-                                     lookback_days=LOOKBACK_DAYS)
+        # one sleeve's rows, scoped and labelled by the metric layer
+        # (INVESTMENT = production confidence); COMBINED pools every sleeve
+        # and is labelled research -- never production confidence
+        ms = await asyncio.to_thread(
+            MT.compute, rows, book="PAPER", now=now,
+            lookback_days=LOOKBACK_DAYS,
+            sleeve=None if sleeve == "COMBINED" else sleeve)
         ns = {}
         for m in ms:
             m["computed_at"] = now

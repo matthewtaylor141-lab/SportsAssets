@@ -59,7 +59,12 @@ ALLOWED_PROJECT = {
     "sportsassets.profitability.economics",
     "sportsassets.profitability.reads",
     "sportsassets.profitability.forecast",
-    "sportsassets.profitability.metrics"}
+    "sportsassets.profitability.metrics",
+    # (R30A) the Opportunity Score V2 and the production horizon counts
+    # apply the strategy's executable book-freshness standard through
+    # profitability.capacity.executable_fresh -- a PURE module (no I/O; its
+    # own closure is pinned by test_profitability_is_research_only.py)
+    "sportsassets.profitability.capacity"}
 FORBIDDEN = POS.FORBIDDEN
 #: tables the read routes may read (SELECT only): their own, pos-econ's,
 #: and the records the expandable opportunity view joins by id

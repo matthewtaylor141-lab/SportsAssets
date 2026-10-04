@@ -38,6 +38,8 @@ from datetime import datetime, timezone
 from . import order_state_truth as OST
 
 ACCOUNT = "paper_acct_main"
+#: the most decision rows one update reads to rank the leading refusals
+RANKED_DECISIONS_MAX = 20000
 STATE_KEY = "agent.slack.updates"
 CC = "https://command.bettortoken.com"
 AGENT = "audrey"                 # updates speak as the auditor
@@ -273,10 +275,33 @@ async def activity(conn, since: float, now: float) -> dict:
         """SELECT count(*) AS decisions,
                   count(*) FILTER (WHERE verdict <> 'REFUSE') AS approved
              FROM paper_decisions WHERE decided_at > to_timestamp($1)""", since)
-    top = await conn.fetch(
-        """SELECT refusal, count(*) AS n FROM paper_decisions
-            WHERE decided_at > to_timestamp($1) AND refusal IS NOT NULL
-            GROUP BY 1 ORDER BY 2 DESC LIMIT 3""", since)
+    # THE LEADING REFUSALS, BY UNIQUE OPPORTUNITY (R30A, owner audit
+    # 2026-10-04). This used to be `count(*) GROUP BY refusal` over every
+    # strategy's decision rows -- TRAINING and BENCHMARK included -- so the
+    # "leading refusal" management was asked to decide on was the one that
+    # re-evaluated the same few markets most often (production: 22 rows per
+    # contract on average, up to 91). It is now the unique-opportunity
+    # ranking of profitability.opportunity_funnel (key fixture / market /
+    # side / line / period, attributed per strategy), over the INVESTMENT
+    # sleeve only, of the paper account (as the order counts below); the
+    # rows are kept beside it as evaluations.
+    from .profitability import common as PC
+    from .profitability import opportunity_funnel as FN
+    inv = sorted(s_ for s_, v in PC.STRATEGY_SLEEVE.items()
+                 if v == PC.INVESTMENT)
+    drows = [dict(x) for x in await conn.fetch(
+        """SELECT decision_id, strategy, verdict, refusal, refusals,
+                  us_market_slug, holding_side, fixture,
+                  label->>'line' AS line, label->>'period' AS scope,
+                  extract(epoch FROM decided_at)::float8 AS decided_at
+             FROM paper_decisions
+            WHERE account_id = $4 AND decided_at > to_timestamp($1)
+              AND strategy = ANY($2::text[])
+            ORDER BY decided_at DESC LIMIT $3""", since, inv,
+        RANKED_DECISIONS_MAX, ACCOUNT)]
+    ranked = [e for e in FN.blocker_ranking(drows, sleeve=PC.INVESTMENT,
+                                            top=10)
+              if e["unique_opportunities"]][:3]
     # ENTRY ORDERS ARE NOT FILLS: the count is split by the ONE shared state
     # mapping (order_state_truth) -- filled, still resting / partial, ended
     # unfilled -- so "new entries" is never read as positions taken.
@@ -298,7 +323,14 @@ async def activity(conn, since: float, now: float) -> dict:
             ORDER BY created_at LIMIT 10""", float(UNANSWERED_AFTER_S)) \
         if await conn.fetchval("SELECT to_regclass('agent_slack_delivery') IS NOT NULL") else []
     return {"decisions": int(r["decisions"] or 0), "approved": int(r["approved"] or 0),
-            "refusals": [(x["refusal"], int(x["n"])) for x in top],
+            "refusals": [(e["blocker"], int(e["unique_opportunities"]))
+                         for e in ranked],
+            "refusal_evaluations": {e["blocker"]: int(e["evaluations"])
+                                    for e in ranked},
+            "refusal_basis": ("unique INVESTMENT opportunities (fixture / "
+                              "market / side / line / period, per strategy); "
+                              "re-evaluations not counted"),
+            "refusal_rows_truncated": len(drows) >= RANKED_DECISIONS_MAX,
             "entries": int(o["entries"] or 0), "other_orders": int(o["other"] or 0),
             "entries_filled": int(o["entries_filled"] or 0),
             "entries_resting": int(o["entries_resting"] or 0),
@@ -335,7 +367,9 @@ def progress_text(s: dict, act: dict, m: dict | None, prev: dict, *, label: str,
                       act["other_orders"]))
     why, nxt, action = [], [], "None."
     if act["entries"] == 0 and act["refusals"]:
-        why.append("No new paper entries: every decision was refused, mostly "
+        why.append("No new paper entries: every decision was refused. Leading "
+                   "INVESTMENT blockers by unique opportunity (re-evaluations "
+                   "not counted): "
                    + ", ".join("%s (%d)" % r for r in act["refusals"]) + ".")
         nxt.append("Derek keeps evaluating; the refusal reasons are under "
                    "research in #agent-workroom.")
@@ -378,7 +412,8 @@ def decision_escalations(s: dict, act: dict, m: dict | None, now: float) -> list
         top = act["refusals"][0]
         out.append(("no-entries", _fp(top[0]),
                     "%s Decision needed · no paper entry for %d h. The leading refusal is "
-                    "%s (%d in the last period). The legacy 1:1,000 mirror can only copy "
+                    "%s (%d unique INVESTMENT opportunities in the last period; "
+                    "re-evaluations not counted). The legacy 1:1,000 mirror can only copy "
                     "what paper trades. Do you want Derek to prioritise research on "
                     "this blocker (reply in thread), or keep the current policy?"
                     % (tag, (now - act["last_entry_at"]) // 3600, top[0], top[1])))

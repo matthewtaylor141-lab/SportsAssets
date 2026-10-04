@@ -56,7 +56,125 @@ from ..intel import common as IC
 from . import common as C
 
 VERSION = "POS_CAPACITY_V1"
+#: THE RESEARCH BOUND. A per-candidate assessment (and the RESEARCH
+#: aggregate) accepts the latest readable book observation within this many
+#: seconds of the decision. It is NOT an executable standard: the entry
+#: decision itself refuses a book older than EXECUTABLE_BOOK_MAX_AGE_S
+#: (THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT), so a 300 s-old book is a book
+#: no entry could have used. Kept, and labelled RESEARCH wherever it is shown.
 MAX_BOOK_AGE_S = 300.0
+
+# ── CAPACITY AT EXECUTABLE FRESHNESS (owner audit 2026-10-04) ────────────
+#
+# THE DEFECT. The capacity the forecast's ceiling, the Opportunity Score's
+# fill rate and the cockpit read was the RESEARCH aggregate above: it priced
+# candidates against book observations up to 300 s from the decision --
+# thirty times older than the entry rule allows -- and pooled every paper
+# strategy (TRAINING and BENCHMARK candidates included). Production
+# confidence read capacity no INVESTMENT entry could have executed.
+#
+# THE RULE. Production-confidence capacity counts an assessment only when
+# its book meets the strategy's OWN executable freshness standard -- the
+# age bound the entry decision applies (paper_benchmark.BOOK_MAX_AGE_S =
+# 10 s, pinned equal by a test). The completed-game investment policy, the
+# benchmark, the maker and the exploration arms each REFUSE a book older
+# than it (THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT). Derek's entry policy
+# has NO book-age refusal of its own (corrected, R30A review): it reads a
+# new book -- or reuses a shared read at most bettor_paper_guard.
+# SHARED_BOOK_MAX_AGE_S = 6 s old -- inside its decision deadline, and
+# refuses only a deadline overrun, a read error or an empty book. For Derek
+# the 10 s bound is therefore the CONSERVATIVE executable standard (every
+# book he could have acted on is within it), not a rule he applies:
+#
+#   the decision's OWN book observation   counted when the age the decision
+#                                         recorded (paper_decisions.book.
+#                                         age_at_decision_s) is within the
+#                                         bound (if it recorded none: |decided
+#                                         - observed| within the bound)
+#   any other observation of the market   counted only when observed AT OR
+#                                         BEFORE the decision and within the
+#                                         bound (never a later book)
+#
+# Anything else is UNAVAILABLE (BOOK_OLDER_THAN_THE_STRATEGY_EXECUTABLE_
+# FRESHNESS) -- never re-priced on an older book, never zero.
+#: pinned equal to agents.paper_benchmark.BOOK_MAX_AGE_S by a test (this
+#: module may not import a paper module)
+EXECUTABLE_BOOK_MAX_AGE_S = 10.0
+#: per strategy (the four policies with a book-age refusal apply this entry
+#: bound; Derek, with none, gets it as the conservative standard -- his
+#: reads are fresh or at most SHARED_BOOK_MAX_AGE_S old; a strategy not
+#: named here gets EXECUTABLE_BOOK_MAX_AGE_S)
+EXECUTABLE_BOOK_MAX_AGE_BY_STRATEGY = {
+    "PINNACLE_COMPLETED_GAME_PAPER": EXECUTABLE_BOOK_MAX_AGE_S,
+    "DEREK_ENTRY_POLICY_V2": EXECUTABLE_BOOK_MAX_AGE_S,
+    "PINNACLE_ONLY_PAPER_BENCHMARK": EXECUTABLE_BOOK_MAX_AGE_S,
+    "PINNACLE_COMPLETED_GAME_MAKER_PAPER": EXECUTABLE_BOOK_MAX_AGE_S,
+    "PINNACLE_EXPLORATION_PAPER": EXECUTABLE_BOOK_MAX_AGE_S,
+}
+R_NOT_EXECUTABLE_FRESH = "BOOK_OLDER_THAN_THE_STRATEGY_EXECUTABLE_FRESHNESS"
+R_BOOK_AFTER_DECISION = "BOOK_OBSERVED_AFTER_THE_DECISION_NOT_ITS_OWN"
+R_NO_BOOK_AGE = "BOOK_AGE_AT_DECISION_UNKNOWN"
+OWN_BOOK = "DECISION_OWN_BOOK_OBSERVATION"
+LATEST_BOOK = "LATEST_OBSERVATION_AT_OR_BEFORE_THE_DECISION"
+
+
+def executable_bound(strategy) -> float:
+    """The strategy's executable book-freshness bound (seconds)."""
+    return float(EXECUTABLE_BOOK_MAX_AGE_BY_STRATEGY.get(
+        str(strategy or ""), EXECUTABLE_BOOK_MAX_AGE_S))
+
+
+def executable_fresh(*, strategy, book_obs_id, decision_book_obs_id,
+                     book_age_s, recorded_age_s=None) -> dict:
+    """Does a book meet the strategy's executable freshness standard at the
+    decision? {fresh, why, age_s, bound_s, source}. Pure."""
+    bound = executable_bound(strategy)
+    own = (book_obs_id is not None and decision_book_obs_id is not None
+           and int(book_obs_id) == int(decision_book_obs_id))
+    rec, age = C.num(recorded_age_s), C.num(book_age_s)
+    out = {"bound_s": bound, "source": OWN_BOOK if own else LATEST_BOOK,
+           "strategy": strategy}
+    if book_obs_id is None:
+        return dict(out, fresh=False, why=R_NO_BOOK, age_s=None)
+    if own:
+        a = rec if rec is not None else (None if age is None else abs(age))
+        basis = ("paper_decisions.book.age_at_decision_s" if rec is not None
+                 else "|decided_at - observed_at|")
+        if a is None:
+            return dict(out, fresh=False, why=R_NO_BOOK_AGE, age_s=None,
+                        age_basis=basis)
+        return dict(out, fresh=a <= bound, age_s=C.rnd(a, 3), age_basis=basis,
+                    why=None if a <= bound else R_NOT_EXECUTABLE_FRESH)
+    if age is None:
+        return dict(out, fresh=False, why=R_NO_BOOK_AGE, age_s=None)
+    if age < 0:
+        return dict(out, fresh=False, why=R_BOOK_AFTER_DECISION,
+                    age_s=C.rnd(age, 3), age_basis="decided_at - observed_at")
+    return dict(out, fresh=age <= bound, age_s=C.rnd(age, 3),
+                age_basis="decided_at - observed_at",
+                why=None if age <= bound else R_NOT_EXECUTABLE_FRESH)
+
+
+def executable_view(row: dict) -> dict:
+    """A capacity row as PRODUCTION confidence may count it: unchanged when
+    its book meets the strategy's executable freshness, else UNAVAILABLE
+    with the reason and NO capacity number (never re-priced on an older
+    book). `row` carries book_obs_id, book_age_s and, from the decision,
+    decision_book_obs_id / decision_book_age_s."""
+    f = executable_fresh(
+        strategy=row.get("strategy"), book_obs_id=row.get("book_obs_id"),
+        decision_book_obs_id=row.get("decision_book_obs_id"),
+        book_age_s=row.get("book_age_s"),
+        recorded_age_s=row.get("decision_book_age_s"))
+    out = dict(row, executable_freshness=f)
+    if row.get("status") != C.MEASURED or f["fresh"]:
+        return out
+    out.update(status=C.UNAVAILABLE, why=f["why"])
+    for k in ("theoretical_opportunity_dollars",
+              "executable_opportunity_dollars", "executable_capacity_usd",
+              "capacity_ceiling_usd", "visible_depth_usd"):
+        out[k] = None
+    return out
 SIZE_GRID_USD = (10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0,
                  5000.0, 10000.0)
 EPS = 1e-12
@@ -216,11 +334,14 @@ def assess(cand: dict, book: dict | None, *, fee_fn) -> dict:
     return out
 
 
-def aggregate(rows: list, *, rates: dict) -> dict:
+def aggregate(rows: list, *, rates: dict, scope: dict | None = None) -> dict:
     """Aggregate capacity over the latest candidate per (market, side).
     `rates` carries the book-level fill probability, deployment time and
-    time to exit (each value-or-None with a reason)."""
+    time to exit (each value-or-None with a reason). `scope` names what the
+    aggregate counts (sleeve, strategies, freshness standard)."""
     out = C.Out(label=C.LABEL, authority=C.AUTHORITY, version=VERSION)
+    if scope is not None:
+        out["scope"] = dict(scope)
     out["candidates"] = len(rows)
     latest: dict = {}
     for r in sorted(rows, key=lambda r: r.get("decided_at") or 0):
