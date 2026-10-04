@@ -116,6 +116,16 @@ jobs:
           # did not run, so the role exists here exactly as it does there
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE sportsassets LOGIN PASSWORD 'sportsassets' CREATEDB"
+          # THE SERVER'S OWN LOG STAYS QUIET. The suite drives thousands of
+          # deliberate refusals (CHECK violations, append-only triggers); the
+          # service container logged every one, and the runner prints that log
+          # after the last step, so the first run's (37228505615) last 5,000
+          # lines were all server noise and the test result above them could
+          # not be read through the API. Statement-level server logging only.
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'panic'" \
+            -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" \
+            -c "SELECT pg_reload_conf()"
           # `us_premap` is the COLLECTOR's table: production built it with
           # workers/premap._ensure_table long before migrations 031/055/106/153
           # altered it, and no migration creates it. The same DDL runs here, so
@@ -181,6 +191,16 @@ jobs:
           print("verdict **%s**  tests %s  unexpected %d  quarantined %d  expired %d  stale %d  critical violations %d"
                 % (v["verdict"], v["counts"].get("tests"), len(v["unexpected"]), len(v["quarantined"]),
                    len(v["expired"]), len(v["stale"]), len(v["critical"]["violations"])))
+          PY
+          # each reason as an annotation too: readable from the check run
+          # through the API even when the log is not
+          python - "$RUNNER_TEMP/capital-critical-verdict.json" <<'PY' || true
+          import json, sys
+          v = json.load(open(sys.argv[1]))
+          names = v["unexpected"] + [x["test"] for x in v["critical"]["violations"]] \
+              + [x["test"] for x in v["stale"]] + [x["test"] for x in v["expired"]]
+          for n in names[:40]:
+              print("::error title=capital-critical %s::%s" % (v["verdict"], n))
           PY
           exit $rc
 

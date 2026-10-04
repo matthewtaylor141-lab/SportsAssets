@@ -87,6 +87,16 @@ jobs:
           # `sportsassets` role and skip without it
           psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
             -c "CREATE ROLE sportsassets LOGIN PASSWORD 'sportsassets' CREATEDB"
+          # THE SERVER'S OWN LOG STAYS QUIET. The suite drives thousands of
+          # deliberate refusals (CHECK violations, append-only triggers); the
+          # service container logged every one, and the runner prints that log
+          # after the last step, so the first run's (37228505615) last 5,000
+          # lines were all server noise and the test result above them could
+          # not be read through the API. Statement-level server logging only.
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'panic'" \
+            -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" \
+            -c "SELECT pg_reload_conf()"
           # `us_premap` is the collector's table (workers/premap._ensure_table);
           # no migration creates it and four alter it
           python - <<'PY'
