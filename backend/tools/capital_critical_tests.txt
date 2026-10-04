@@ -711,3 +711,8 @@ tests/test_nfl_slate_reaches_a_recorded_outcome.py
 # for every coverage incident (NULL is not absence), the per-game NFL
 # reconciliation on GET /api/command/coverage.
 tests/test_league_coverage_status.py
+# ui-floor: GET /api/command/floor (+ /{agent}) -- the trading-floor
+# aggregate is GET only, session-authenticated, one READ ONLY transaction
+# with a bounded statement timeout, SELECT-only SQL, and imports no order,
+# venue, ledger, paper or funded module.
+tests/test_command_floor_authority.py
