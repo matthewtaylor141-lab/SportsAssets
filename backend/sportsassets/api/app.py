@@ -787,6 +787,17 @@ try:
 except ImportError:
     log.warning("confidence ladder: api.command_confidence_ladder not loaded",
                 exc_info=True)
+# ── THE UNIQUE OPPORTUNITY FUNNEL (R30A): /api/command/opportunity-funnel.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# blockers ranked by unique opportunities (fixture / market / side / line /
+# period), repeated decision rows as re-evaluations, near misses and missed
+# executable EV at the strategy's own book freshness. No route here writes.
+try:
+    from .command_opportunity_funnel import router as _command_funnel_router
+    app.include_router(_command_funnel_router)
+except ImportError:
+    log.warning("opportunity funnel: api.command_opportunity_funnel not "
+                "loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).

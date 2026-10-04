@@ -844,3 +844,10 @@ tests/test_investment_only_confidence.py
 # gate; levels 4-6 NOT_REACHED while SMALL LIVE is SHADOW; a TRAINING win or
 # loss moves no INVESTMENT level; GET-only, READ ONLY, no write.
 tests/test_confidence_ladder.py
+# (R30A) THE UNIQUE OPPORTUNITY FUNNEL (GET /api/command/opportunity-funnel):
+# blockers ranked by unique opportunities (fixture / market / side / line /
+# period), repeated decision rows counted as re-evaluations; executable EV
+# only at the strategy's own book freshness and a fresh probability, else
+# UNAVAILABLE with its reason; proven over decisions the real completed-game
+# paper pass recorded; GET-only, READ ONLY, no write.
+tests/test_opportunity_funnel.py
