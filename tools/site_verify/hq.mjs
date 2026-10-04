@@ -10,7 +10,7 @@ const OUT = process.env.OUT || "site_verify_out";
 fs.mkdirSync(OUT, { recursive: true });
 const report = { at: new Date().toISOString(), host: HOST, runs: [] };
 const browser = await chromium.launch();
-for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]]) {
+for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filter(([l]) => !process.env.ONLY || process.env.ONLY === l)) {
   for (const path of (process.env.PAGES || "/,/floor,/positions,/xavier,/allocator,/eddie,/scout").split(",")) {
     const ctx = await browser.newContext({ viewport: { width: vw, height: vh } });
     if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
@@ -33,6 +33,10 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]]) {
       const de = document.documentElement;
       return { title: document.title, sections: secs, overflowX: de.scrollWidth > de.clientWidth + 1,
                scrollWidth: de.scrollWidth, clientWidth: de.clientWidth,
+               overflowers: [...document.querySelectorAll("body *")].map((el) => {
+                 const r = el.getBoundingClientRect();
+                 return { r: Math.round(r.right), w: Math.round(r.width), sel: el.tagName.toLowerCase() + (el.id ? "#" + el.id : "") + (typeof el.className === "string" && el.className ? "." + el.className.trim().split(/\s+/).slice(0, 3).join(".") : "") };
+               }).filter((o) => o.r > de.clientWidth + 1).sort((a, b) => b.r - a.r).slice(0, 12),
                shadowLabels: (document.body.innerText.match(/SHADOW/g) || []).length,
                liveWord: (document.body.innerText.match(/\bLIVE\b/g) || []).length };
     }).catch((e) => ({ error: String(e).slice(0, 200) }));
@@ -45,6 +49,7 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]]) {
 await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
 for (const r of report.runs) {
+  if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
   console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} SHADOW=${r.shadowLabels}`);
   for (const e of r.errors.slice(0, 6)) console.log("   err: " + e);
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));

@@ -596,7 +596,7 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install playwright@1.48.2 >/dev/null 2>&1
           npx playwright install --with-deps chromium >/dev/null 2>&1
-          node hq.mjs
+          ONLY="${HQ_ONLY:-}" PAGES="${HQ_PAGES:-}" node hq.mjs
       - name: Commit the evidence
         if: always()
         shell: bash
