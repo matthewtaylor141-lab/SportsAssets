@@ -628,13 +628,8 @@ def test_a_held_soccer_position_still_has_a_provider_key():
     keys = loop.provider_keys_for_family("soccer")
     assert keys, "a held soccer position must still resolve to provider keys"
     assert "soccer_usa_mls" in keys
-    # AND IT IS NOT THE BUDGETED SET: more keys than a cycle may fetch. R30A:
-    # the four-key count is gone; what bounds a cycle is the credit envelope,
-    # which at the conservative per-fetch estimate buys 80 / 20 = 4 fetches.
-    from sportsassets import collector_coverage as cov
-    assert len(keys) > (cov.per_cycle_allowance(cov.DAILY_CREDIT_ENVELOPE,
-                                                loop.CYCLE_S)
-                        / cov.CREDITS_PER_FETCH_ESTIMATE)
+    # AND IT IS NOT THE BUDGETED SET: more keys than a cycle may fetch.
+    assert len(keys) > loop.MAX_METERED_SPORTS_PER_CYCLE
     assert len(keys) > len([k for k, _ in loop.SPORTS])
 
 

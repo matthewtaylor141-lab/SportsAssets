@@ -255,10 +255,13 @@ def test_the_football_board_makes_ncaaf_a_candidate_within_the_budget():
             "refusal": loop.R_PROVIDER_DOES_NOT_LIST} in [
         {k: r[k] for k in ("key", "our_token", "refusal")}
         for r in sel["rejected"]]
-    # R30A: THE FOUR-KEY COUNT IS GONE (it starved NCAAF in 137 of 153 cycles
-    # with a venue cfb event in the next 24 h, research-sql run 37233454453).
-    # select_sports confirms; which confirmed competitions a cycle fetches is
-    # collector_coverage.plan's decision, in credits, receipted.
+    # R30A: THE FIRST-COME TRUNCATION IS GONE (it starved NCAAF in 137 of 153
+    # cycles with a venue cfb event in the next 24 h, research-sql run
+    # 37233454453). select_sports confirms and drops nothing; which confirmed
+    # competitions get the unchanged four calls is collector_coverage.plan's
+    # decision, earliest deadline first, receipted. The pin on the budget's
+    # VALUE stays: it is still four metered calls a cycle.
+    assert loop.MAX_METERED_SPORTS_PER_CYCLE == 4
     assert sel["budget"] is None
     assert sel["budget_dropped"] == []
     # THE PRODUCTION STATE BEFORE THE FIX: the soccer board alone never

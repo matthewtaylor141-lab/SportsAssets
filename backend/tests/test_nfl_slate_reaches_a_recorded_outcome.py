@@ -164,7 +164,7 @@ def test_nfl_is_one_league_everywhere():
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 2 · THE BUDGET, UNCHANGED, ON TODAY'S MEASURED BOARD
+# 2 · THE BUDGET, UNCHANGED, ON TODAY'S MEASURED BOARD (R30A: SCHEDULED)
 # ═════════════════════════════════════════════════════════════════════
 
 #: The boards the collector read at 2026-10-04T04:26Z (heartbeat
@@ -186,23 +186,25 @@ CATALOGUE = {"ok": True, "sports": [{"key": k, "active": True} for k in (
 def test_the_schedule_serves_nfl_and_skips_serie_b_with_no_event_in_the_horizon():
     """THE 2026-10-04 BOARD (cfb 34, unl 26, nfl 15, brb 8 events).
 
-    WHAT THIS TEST PINNED BEFORE R30A, AND WHY IT CHANGED. Under the four-key
-    count `select_sports` requested MLB, NCAAF, UNL and NFL and named Brazil
-    Serie B `budget_dropped`; once the Saturday slate aged off, NCAAF was the
-    one dropped. Measured over the following week (research-sql run
-    37233454453) the same rule left NCAAF unfetched in 137 of 153 cycles with
-    a venue cfb event in the next 24 h. The count is gone: `select_sports`
-    confirms every candidate, and `collector_coverage.plan` decides in
-    credits. Serie B still is not fetched on this board -- because it has no
-    venue event in the next 24 h, which costs nothing and says so by name --
-    and NCAAF is no longer the price of the NFL."""
+    WHAT THIS TEST PINNED BEFORE R30A, AND WHY IT CHANGED. Under first-come
+    truncation of a fixed ranking `select_sports` requested MLB, NCAAF, UNL
+    and NFL and named Brazil Serie B `budget_dropped`; once the Saturday
+    slate aged off, NCAAF was the one dropped. Measured over the following
+    week (research-sql run 37233454453) the same rule left NCAAF unfetched in
+    137 of 153 cycles with a venue cfb event in the next 24 h. The budget is
+    unchanged (four metered calls); the truncation is gone: `select_sports`
+    confirms every candidate, and `collector_coverage.plan` gives the four
+    calls earliest deadline first. Serie B still is not fetched on this
+    board -- because it has no venue event in the next 24 h, which costs
+    nothing and says so by name -- and NCAAF is no longer the price of the
+    NFL."""
     fb = loop.football_candidates(FOOTBALL_BOARD)
     assert [(c["key"], c["our_token"]) for c in fb] == [(NCAAF, "cfb"),
                                                         (NFL, "nfl")]
     merged = loop.merge_candidates(loop.candidates_from_board(SOCCER_BOARD),
                                    fb)
     sel = loop.select_sports(CATALOGUE, candidates=merged)
-    # every catalogue-confirmed candidate, no count, nothing dropped
+    # every catalogue-confirmed candidate, nothing truncated, nothing dropped
     assert [k for k, _ in sel["sports"]] == [
         "baseball_mlb", NCAAF, "soccer_uefa_nations_league", NFL,
         "soccer_brazil_serie_b"]
@@ -643,12 +645,15 @@ async def test_every_nfl_game_ends_in_a_recorded_named_outcome(monkeypatch):
 
         out = await loop.cycle(conn)
 
-        # 1 · requested within the credit envelope, and fetched. R30A: the
-        # four-key count is gone; the bound is the envelope in CREDITS, so the
-        # pin is the spend against this cycle's budget and the NFL receipt.
+        # 1 · requested within the unchanged budget, and fetched. R30A: the
+        # four calls are scheduled rather than truncated, so the pin is the
+        # budget's own receipt (calls and credits) and the NFL receipt.
         requested = [k for k, _ in out["sports_selection"]["sports"]]
         assert NFL in requested, out["sports_selection"]
+        assert len(requested) <= loop.MAX_METERED_SPORTS_PER_CYCLE
         cc = out["collector_coverage"]
+        assert cc["cycle"]["calls_made"] <= cc["cycle"]["calls_budget"] == \
+            loop.MAX_METERED_SPORTS_PER_CYCLE, cc
         assert cc["spent_this_cycle"] <= cc["envelope"]["cycle_budget"], cc
         assert {r["key"]: r["final"] for r in cc["competitions"]}[NFL] == \
             "FETCHED", cc

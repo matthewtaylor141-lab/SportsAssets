@@ -295,12 +295,7 @@ def test_the_metered_budget_change_is_stated_as_a_change():
     different length."""
     chg = loop.METERED_BUDGET_CHANGE
     assert chg["before"]["keys"] == 3
-    # R30A: the count constant is gone and the record stays -- the daily
-    # credit envelope that replaced it is DERIVED from "after": ~80 credits a
-    # cycle x 96 cycles = 7,680 a day, stated with its arithmetic.
-    assert chg["after"]["keys"] == 4
-    assert chg["r30a"]["daily_envelope_credits"] == 80 * 96
-    assert "7,680" in chg["r30a"]["arithmetic"]
+    assert chg["after"]["keys"] == loop.MAX_METERED_SPORTS_PER_CYCLE == 4
     assert "soccer_epl" in chg["before"]["keys_named"]
     assert chg["before"]["of_which_unreachable"] == ["soccer_epl"]
     assert "1,900" in chg["net"]

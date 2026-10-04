@@ -1046,13 +1046,25 @@ def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
     if prov == 0:
         c = collector or {}
         venue = row.get("venue_catalogue_events")
+        # R30A: the collector's durable per-cycle receipts (migration 248),
+        # when read, say what happened to THIS league in the last 24 h -- not
+        # only in the one cycle the heartbeat describes.
+        rec = ((c.get("receipts") or {}).get("by_competition") or {}).get(
+            league) or {}
+        last = rec.get("last_receipt")
         if not c.get("fresh"):
             why = "COLLECTOR_HEARTBEAT_NOT_CURRENT"
         elif league in (c.get("rejected") or {}):
             why = "PROVIDER_REFUSED: %s" % c["rejected"][league]
         elif league in (c.get("budget_dropped") or ()):
-            why = ("NOT_REQUESTED_METERED_BUDGET_SPENT: the cycle's %s keys "
-                   "went to higher venue coverage" % c.get("budget", "?"))
+            why = ("NOT_REQUESTED_METERED_BUDGET_SPENT: the cycle's %s "
+                   "metered calls went to higher-priority competitions"
+                   % c.get("budget", "?")) + _receipt_note(rec)
+        elif last == "SKIPPED_NO_VENUE_EVENT_IN_HORIZON":
+            why = ("NOT_REQUESTED_NO_VENUE_EVENT_IN_THE_COLLECTOR_HORIZON"
+                   + _receipt_note(rec))
+        elif last == "FETCH_FAILED":
+            why = "REQUESTED_THE_PROVIDER_CALL_FAILED" + _receipt_note(rec)
         elif league in (c.get("requested") or ()):
             why = "REQUESTED_THE_PROVIDER_RETURNED_NO_EVENTS"
         else:
@@ -1137,11 +1149,189 @@ VENUE_TOKENS_SQL = """
 """
 
 
+# ── THE COLLECTOR'S COVERAGE RECEIPTS (migration 248, R30A) ─────────────
+#
+# THE DEFECT THESE REPLACE AS THE DESK'S SOURCE. `budget_dropped` lived on
+# ONE heartbeat row that every cycle overwrote, so the desk could say what the
+# LAST cycle dropped and nothing about the day: NCAAF was unfetched in 137 of
+# the 153 cycles with a venue cfb event in the next 24 h (research-sql run
+# 37233454453) and no record of it existed until it was reconstructed by
+# hand. The scheduled cycle now appends one receipt per competition per cycle
+# (requested / served / budget-dropped with its reason and promised slot /
+# skipped, cycles since served) and one budget row per cycle (calls made
+# against the declared budget). Read-only here; never raises.
+
+COVERAGE_RECEIPTS_WINDOW_S = 86400.0
+COVERAGE_RECEIPTS_SQL = """
+    SELECT competition,
+           count(*) AS cycles,
+           count(*) FILTER (WHERE planned = 'SCHEDULED') AS requested,
+           count(*) FILTER (WHERE receipt = 'FETCHED') AS served,
+           count(*) FILTER (WHERE receipt = 'FETCH_FAILED') AS fetch_failed,
+           count(*) FILTER (WHERE receipt IN (
+               'DEFERRED_TO_SLOT', 'DEFERRED_NO_SLOT_WITHIN_ENVELOPE'))
+             AS budget_dropped,
+           count(*) FILTER (WHERE receipt = 'SKIPPED_NO_VENUE_EVENT_IN_HORIZON')
+             AS skipped_no_venue_event,
+           count(*) FILTER (WHERE receipt IN (
+               'PROVIDER_DOES_NOT_LIST', 'PROVIDER_LISTS_INACTIVE',
+               'PROVIDER_CATALOGUE_UNREAD')) AS provider_refused,
+           (array_agg(receipt ORDER BY cycle_at DESC, id DESC))[1]
+             AS last_receipt,
+           (array_agg(why ORDER BY cycle_at DESC, id DESC))[1] AS last_why,
+           (array_agg(cycles_since_served ORDER BY cycle_at DESC, id DESC))[1]
+             AS cycles_since_served,
+           (array_agg(extract(epoch FROM next_slot_at)
+                      ORDER BY cycle_at DESC, id DESC))[1] AS next_slot_at,
+           (array_agg(bound_cycles ORDER BY cycle_at DESC, id DESC))[1]
+             AS bound_cycles,
+           (array_agg(starvation_bound_cycles
+                      ORDER BY cycle_at DESC, id DESC))[1]
+             AS starvation_bound_cycles,
+           extract(epoch FROM max(cycle_at)) AS last_cycle_at,
+           extract(epoch FROM max(cycle_at) FILTER (WHERE receipt = 'FETCHED'))
+             AS last_fetched_at,
+           coalesce(sum(credits_charged), 0) AS credits
+      FROM collector_coverage_receipts
+     WHERE scope = 'COMPETITION'
+       AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
+       AND cycle_at <= to_timestamp($1)
+     GROUP BY competition
+"""
+COVERAGE_CYCLES_SQL = """
+    SELECT count(*) AS cycles,
+           count(*) FILTER (WHERE calls_made > calls_budget) AS over_budget,
+           max(calls_made) AS max_calls_made,
+           max(calls_budget) AS calls_budget,
+           coalesce(sum(credits_spent), 0) AS credits_spent,
+           extract(epoch FROM max(cycle_at)) AS last_cycle_at,
+           (array_agg(cycle_id ORDER BY cycle_at DESC, id DESC))[1]
+             AS last_cycle_id,
+           (array_agg(detail->>'writer_lease' ORDER BY cycle_at DESC, id DESC))[1]
+             AS writer_lease
+      FROM collector_coverage_receipts
+     WHERE scope = 'CYCLE'
+       AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
+       AND cycle_at <= to_timestamp($1)
+"""
+COVERAGE_LAST_CYCLE_SQL = """
+    SELECT competition, planned, receipt, why, cycles_since_served,
+           extract(epoch FROM next_slot_at) AS next_slot_at,
+           venue_events_in_horizon
+      FROM collector_coverage_receipts
+     WHERE scope = 'COMPETITION' AND cycle_id = $1
+     ORDER BY priority_rank NULLS LAST, competition
+"""
+#: The receipts that are a BUDGET DROP (collector_coverage.BUDGET_DROPPED).
+RECEIPT_BUDGET_DROPPED = ("DEFERRED_TO_SLOT",
+                          "DEFERRED_NO_SLOT_WITHIN_ENVELOPE")
+
+
+def _num_or_none(v):
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+async def collector_receipts(conn, *, now: float,
+                             window_s: float = COVERAGE_RECEIPTS_WINDOW_S
+                             ) -> dict:
+    """The collector's coverage receipts over the last `window_s`: per
+    competition requested / served / fetch_failed / budget_dropped / skipped
+    counts with the latest receipt, its reason, its promised slot and the
+    cycles since it was last served; the cycles' budget rows (calls made
+    against the declared budget, any cycle over it); and the latest cycle's
+    rows. Never raises: an absent table is MIGRATION_248_NOT_APPLIED, a
+    failed read is named -- never an empty, healthy-looking answer."""
+    out: dict[str, Any] = {
+        "read": False, "window_s": window_s,
+        "source": "collector_coverage_receipts (migration 248)",
+        "by_competition": {}, "cycles": None, "last_cycle": None}
+    if not await _regclass(conn, "collector_coverage_receipts"):
+        out["why"] = "MIGRATION_248_NOT_APPLIED"
+        return out
+    try:
+        async with conn.transaction():
+            comp = await conn.fetch(COVERAGE_RECEIPTS_SQL, float(now),
+                                    float(window_s))
+            cyc = await conn.fetchrow(COVERAGE_CYCLES_SQL, float(now),
+                                      float(window_s))
+            last = []
+            if cyc is not None and cyc["last_cycle_id"] is not None:
+                last = await conn.fetch(COVERAGE_LAST_CYCLE_SQL,
+                                        cyc["last_cycle_id"])
+    except Exception as exc:                                    # noqa: BLE001
+        out["why"] = "%s:%s" % (R_READ_FAILED, type(exc).__name__)
+        return out
+    for r in comp:
+        out["by_competition"][str(r["competition"])] = {
+            "cycles": int(r["cycles"]), "requested": int(r["requested"]),
+            "served": int(r["served"]),
+            "fetch_failed": int(r["fetch_failed"]),
+            "budget_dropped": int(r["budget_dropped"]),
+            "skipped_no_venue_event": int(r["skipped_no_venue_event"]),
+            "provider_refused": int(r["provider_refused"]),
+            "last_receipt": r["last_receipt"], "last_why": r["last_why"],
+            "cycles_since_served": r["cycles_since_served"],
+            "next_slot_at": _num_or_none(r["next_slot_at"]),
+            "bound_cycles": r["bound_cycles"],
+            "starvation_bound_cycles": r["starvation_bound_cycles"],
+            "last_cycle_at": _num_or_none(r["last_cycle_at"]),
+            "last_fetched_at": _num_or_none(r["last_fetched_at"]),
+            "credits": float(r["credits"] or 0.0)}
+    if cyc is not None and int(cyc["cycles"] or 0) > 0:
+        out["cycles"] = {
+            "cycles": int(cyc["cycles"]),
+            "over_budget": int(cyc["over_budget"] or 0),
+            "max_calls_made": cyc["max_calls_made"],
+            "calls_budget": cyc["calls_budget"],
+            "credits_spent": float(cyc["credits_spent"] or 0.0),
+            "last_cycle_at": _num_or_none(cyc["last_cycle_at"]),
+            "last_cycle_id": cyc["last_cycle_id"],
+            "writer_lease": cyc["writer_lease"]}
+        out["last_cycle"] = [
+            {"competition": r["competition"], "planned": r["planned"],
+             "receipt": r["receipt"], "why": r["why"],
+             "cycles_since_served": r["cycles_since_served"],
+             "next_slot_at": _num_or_none(r["next_slot_at"]),
+             "venue_events_in_horizon": r["venue_events_in_horizon"]}
+            for r in last]
+    out["read"] = True
+    return out
+
+
+def _receipt_note(rec: dict) -> str:
+    """'; budget-dropped in 3 of 96 cycles in 24 h, served in 93, ...' from
+    one competition's receipts summary, or '' when there is none."""
+    if not rec:
+        return ""
+    bits = ["budget-dropped in %d of %d cycles in 24 h, served in %d"
+            % (rec.get("budget_dropped") or 0, rec.get("cycles") or 0,
+               rec.get("served") or 0)]
+    if rec.get("cycles_since_served") is not None:
+        bits.append("%s cycle(s) since served" % rec["cycles_since_served"])
+    else:
+        bits.append("not served in the receipts' window")
+    if rec.get("next_slot_at") is not None:
+        bits.append("next slot %s" % _dt.datetime.fromtimestamp(
+            rec["next_slot_at"], _dt.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"))
+    return "; " + ", ".join(bits)
+
+
 async def collector_selection(conn, *, now: float) -> dict:
     """The collector's last cycle selection, for naming why a league has no
-    provider events. Never raises."""
+    provider events. Never raises.
+
+    R30A: the durable coverage receipts are read beside the heartbeat. When
+    their latest cycle is current, `requested` and `budget_dropped` come from
+    THAT record (what the cycle actually requested and dropped, with the
+    reason and the promised slot in `budget_dropped_why`); the heartbeat is
+    the fallback on a database without migration 248."""
     out = {"fresh": False, "requested": [], "rejected": {},
-           "budget_dropped": [], "budget": None, "at": None}
+           "budget_dropped": [], "budget": None, "at": None,
+           "source": "HEARTBEAT"}
     try:
         raw = await conn.fetchval(
             "SELECT value FROM ingestion_state WHERE key = $1", COLLECTOR_KEY)
@@ -1157,6 +1347,27 @@ async def collector_selection(conn, *, now: float) -> dict:
                    budget=sel.get("metered_budget"))
     except Exception as exc:                                    # noqa: BLE001
         out["why"] = type(exc).__name__
+    rec = await collector_receipts(conn, now=now)
+    out["receipts"] = rec
+    cyc = rec.get("cycles") or {}
+    last_at = cyc.get("last_cycle_at")
+    if rec.get("read") and last_at is not None and \
+            0 <= now - last_at <= COLLECTOR_FRESH_S:
+        last = rec.get("last_cycle") or []
+        out.update(
+            source="COVERAGE_RECEIPTS", fresh=True,
+            at=max(last_at, out["at"] or 0.0),
+            requested=[r["competition"] for r in last
+                       if r["planned"] == "SCHEDULED"],
+            budget_dropped=[r["competition"] for r in last
+                            if r["receipt"] in RECEIPT_BUDGET_DROPPED],
+            budget_dropped_why={
+                r["competition"]: {"receipt": r["receipt"], "why": r["why"],
+                                   "next_slot_at": r["next_slot_at"],
+                                   "cycles_since_served":
+                                       r["cycles_since_served"]}
+                for r in last if r["receipt"] in RECEIPT_BUDGET_DROPPED},
+            budget=cyc.get("calls_budget", out["budget"]))
     return out
 
 
@@ -1221,14 +1432,27 @@ async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                         "venue_discovered", "mapped_events",
                         "settlement_supported", "evaluated_events",
                         "decided_events", "entered_events", "refused_events",
-                        "venue_catalogue_events")}})
+                        "venue_catalogue_events")},
+                    # R30A: the collector's 24 h receipts for this league
+                    # (requested / served / budget-dropped / cycles since
+                    # served), None where the collector has no receipt for it
+                    "collector_receipt": (
+                        ((coll.get("receipts") or {}).get("by_competition")
+                         or {}).get(key))})
     summary = {s: 0 for s in LEAGUE_STATUSES}
     for o in out:
         summary[o["status"]] += 1
     return {"day": day.isoformat(), "tz": tz, "statuses": out,
             "summary": summary, "status_vocabulary": list(LEAGUE_STATUSES),
-            "collector": {k: coll.get(k) for k in (
-                "fresh", "at", "requested", "budget_dropped", "budget")},
+            "collector": dict(
+                {k: coll.get(k) for k in (
+                    "fresh", "at", "requested", "budget_dropped", "budget",
+                    "source", "budget_dropped_why")},
+                # R30A: the durable receipts behind it -- the cycles' budget
+                # rows (calls made against the declared budget, any cycle
+                # over it) and per-competition 24 h counts
+                receipts={k: (coll.get("receipts") or {}).get(k) for k in (
+                    "read", "why", "window_s", "cycles", "by_competition")}),
             "venue_read": None if not isinstance(venue, str) else venue}
 
 

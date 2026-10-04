@@ -449,6 +449,22 @@ def substitute(monkeypatch, venue: Venue, *, schedule_state="Pre-Game",
     monkeypatch.setattr(loop, "fetch_scores", fake_scores)
     monkeypatch.setattr(loop, "_fetch_schedule_blocking", fake_schedule)
 
+    # R30A · THE COVERAGE SCHEDULER SKIPS A COMPETITION WITH NO VENUE EVENT IN
+    # THE NEXT 24 H, read from the venue catalogue (us_premap). This fixture
+    # seeds its market in `markets`, not us_premap, and dates its game on the
+    # fixed GAME day while the cycle runs on the real clock -- so the venue
+    # horizon would read MLB as empty and MLB would correctly not be fetched.
+    # Before R30A MLB was fetched every cycle whatever the venue listed (240
+    # cycles in 7 days with no venue event in the next 24 h, research-sql run
+    # 37233454453). The subject here is the lifecycle, not scheduling, so the
+    # horizon is stated UNREAD -- exactly the answer of a failed read -- and
+    # the competition stays in demand, as the scheduler treats an unread
+    # horizon.
+    async def _horizon_unread(conn):
+        return {"read": False, "by_token": {}, "source": "substituted",
+                "error": "SUBSTITUTED_BY_THE_FIXTURE"}
+    monkeypatch.setattr(loop, "venue_horizon", _horizon_unread)
+
     # ── (1) BOOK CURRENCY: THE NAMED EXTERNAL DEPENDENCY ─────────────
     real_bce = loop.book_currency_evidence
 
