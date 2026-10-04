@@ -91,7 +91,8 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
   let keys = [];
   try { keys = await page.evaluate(async () => {
     const r = await fetch("/api/command/positions/rooms?book=PAPER"); const j = await r.json();
-    return (j.rooms || []).map((x) => x.group_key).filter(Boolean).slice(0, 3); }); } catch (e) { report.rooms_error = String(e).slice(0, 200); }
+    const all = [].concat(j.rooms || [], ...Object.values(j.venues || {}).map((v) => (v && v.rooms) || []));
+    return all.map((x) => x.group_key).filter(Boolean).slice(0, 3); }); } catch (e) { report.rooms_error = String(e).slice(0, 200); }
   report.rooms = [];
   for (const k of keys) {
     const detail = await page.evaluate(async (k) => {
