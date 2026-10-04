@@ -317,10 +317,31 @@ async def _expand(conn, rows: list) -> None:
     """The expandable view of each opportunity, read at request time from
     the records that already exist (decision, capacity, Karen, Audrey,
     allocator, Xavier); every part absent is UNAVAILABLE with its reason.
-    Eddie's execution assessment is UNAVAILABLE until pos-agents ships."""
+    Eddie's execution assessment is his latest eddie_execution_estimates
+    row for the decision (migration 217, SHADOW_ONLY)."""
     ids = [r["candidate_id"] for r in rows if r.get("candidate_id")]
     caps = [r["capacity_id"] for r in rows if r.get("capacity_id")]
     dec, cap, kar, aud, alloc, xav = {}, {}, {}, {}, {}, {}
+    eddie, eddie_why = {}, None
+    if not await _has(conn, "eddie_execution_estimates"):
+        eddie_why = ("EDDIE_EXECUTION_ESTIMATES_ABSENT (migration 217 not "
+                     "applied)")
+    elif ids:
+        for e in await conn.fetch(
+                "SELECT DISTINCT ON (decision_id) decision_id, estimate_id, "
+                "       estimator_version, recommendation, "
+                "       recommendation_reason, execution_style, "
+                "       expected_fill_probability, "
+                "       expected_net_executable_edge_pp, "
+                "       expected_execution_loss_pp, "
+                "       expected_executable_ev_usd, expected_time_to_fill_s, "
+                "       book_obs_id, book_age_s, "
+                "       extract(epoch FROM estimated_at)::float8 "
+                "       AS estimated_at "
+                "  FROM eddie_execution_estimates "
+                " WHERE decision_id = ANY($1::text[]) "
+                " ORDER BY decision_id, estimated_at DESC", ids):
+            eddie[e["decision_id"]] = dict(e)
     if ids:
         for d in await conn.fetch(
                 "SELECT decision_id, verdict, refusal, refusals, p_pinnacle, "
@@ -434,8 +455,17 @@ async def _expand(conn, rows: list) -> None:
         k = kar.get(r.get("candidate_id"))
         ex["karen_challenge"] = (dict(k, status="OK") if k else
                                  _na("NO_KAREN_CHALLENGE_ON_THIS_DECISION"))
-        ex["eddie_execution"] = _na("POS_AGENTS_NOT_INTEGRATED: Eddie's "
-                                    "execution assessment is not deployed")
+        e = eddie.get(r.get("candidate_id"))
+        if e:
+            ex["eddie_execution"] = dict(
+                {k: (f(v) if k.startswith("expected_") or k == "book_age_s"
+                     else v) for k, v in e.items()},
+                status="OK", authority="SHADOW_ONLY",
+                basis="eddie_execution_estimates (migration 217), latest "
+                      "estimate of this decision")
+        else:
+            ex["eddie_execution"] = _na(
+                eddie_why or "NO_EDDIE_ESTIMATE_FOR_THIS_DECISION")
         a = alloc.get(r.get("candidate_id"))
         ex["allocator"] = (dict(a, status="OK", basis="intel_allocations "
                                 "(SHADOW) latest run") if a else dict(

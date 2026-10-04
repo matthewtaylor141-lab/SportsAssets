@@ -530,3 +530,150 @@ async def test_a_failed_read_is_unavailable_not_zeros(monkeypatch):
     got = await API.opportunity_scores(status="", limit=5)
     assert got["status"] == "UNAVAILABLE" and got["data"] is None
     assert "database down" in got["why"]
+
+
+# ── cand27 integration: Eddie's execution estimate and the attribution ──
+
+OWNER_ATTRIBUTIONS = (
+    "SETTLEMENT", "IDENTITY_MAPPING", "FRESHNESS", "LIQUIDITY",
+    "EXECUTION_UNCERTAINTY", "THRESHOLD", "RISK", "CAPACITY",
+    "KAREN_CHALLENGE", "UNSUPPORTED_LEAGUE", "EXPLICIT_POLICY",
+    "MISSING_PROBABILITY", "MISSING_EXECUTABLE_BOOK")
+
+
+def test_every_owner_refusal_category_is_reachable():
+    assert set(OWNER_ATTRIBUTIONS) <= set(CL.ATTRIBUTIONS)
+    reach = {
+        CL.R_SETTLEMENT: "SETTLEMENT", CL.R_IDENTITY: "IDENTITY_MAPPING",
+        CL.R_STALE: "FRESHNESS", CL.R_NO_DEPTH: "LIQUIDITY",
+        CL.R_LIMIT: "EXECUTION_UNCERTAINTY", CL.R_BELOW: "THRESHOLD",
+        CL.R_ORDER_REFUSED: "RISK", CL.R_CAPACITY: "CAPACITY",
+        "KAREN_CHALLENGE_BLOCKED": "KAREN_CHALLENGE",
+        "UNSUPPORTED_LEAGUE": "UNSUPPORTED_LEAGUE",
+        CL.R_ENTRIES_DISABLED: "EXPLICIT_POLICY",
+        CL.R_NO_PINNACLE: "MISSING_PROBABILITY",
+        CL.R_NO_BOOK: "MISSING_EXECUTABLE_BOOK"}
+    assert {CL.attribution(c) for c in reach} == set(OWNER_ATTRIBUTIONS)
+    for code, cat in reach.items():
+        assert CL.attribution(code) == cat, code
+    # an unknown code is never guessed into a category
+    assert CL.attribution("SOMETHING_ELSE_ENTIRELY") == "UNATTRIBUTED"
+
+
+def test_a_hindsight_winner_is_never_false_for_any_refusal_code():
+    """Every recognised refusal, on a decision with no executable positive
+    net EV, settles WON and is still never FALSE_REFUSAL."""
+    codes = sorted(CL.MARKET_CODES | CL.CONTROL_CODES
+                   | CL.MISSING_INPUT_CODES | CL.DEFECT_CODES)
+    for code in codes:
+        d = _dec(refusals=[code], policy_decision=X.pd_fig(-0.25))
+        won = CL.classify(dict(d, settlement=_settle("WON")))
+        lost = CL.classify(dict(d, settlement=_settle("LOST")))
+        assert won["classification"] != CL.FALSE, (code, won["reason"])
+        assert won["classification"] == lost["classification"], code
+
+
+EDDIE = {"estimate_id": "eddie:1", "estimator_version": "EDDIE_V1",
+         "estimated_at": 1.0, "expected_fill_probability": 0.6,
+         "expected_net_executable_edge_pp": -0.4,
+         "expected_executable_ev_usd": -0.01, "recommendation":
+         "SKIP_EXECUTION", "recommendation_reason": "NET_EDGE_NOT_POSITIVE",
+         "book_obs_id": 7}
+
+
+def test_execution_confidence_comes_from_eddie_when_he_measured_it():
+    fp, basis, src = SC.execution_input(EDDIE, 0.8, "snapshot")
+    assert (fp, src) == (0.6, SC.EDDIE) and "eddie:1" in basis
+    fp, basis, src = SC.execution_input(
+        dict(EDDIE, expected_fill_probability=None, fill_why="NO_HISTORY"),
+        0.8, "snapshot")
+    assert (fp, basis, src) == (0.8, "snapshot", SC.CAPACITY_SNAPSHOT)
+    assert SC.execution_input(None, None, "NO_SNAPSHOT") == (
+        None, "NO_SNAPSHOT", None)
+    cand = {"candidate_id": "c", "status": "MEASURED",
+            "executable_opportunity_dollars": 5.0,
+            "executable_capacity_usd": 200.0, "decided_at": 1000.0 * HOUR,
+            "event_start_at": 1002.0 * HOUR}
+    lags = [(0.0, 3 * HOUR)] * 6
+    got = SC.score(cand, fill_probability=0.6, fill_basis=basis,
+                   fill_source=SC.EDDIE, idle_capital_usd=1000.0,
+                   lag_samples=lags, ctx={"eddie": EDDIE})
+    ex = got["components"]["EXECUTION_CONFIDENCE"]
+    assert ex["value"] == 0.6 and ex["source"] == SC.EDDIE
+    assert ex["in_score"] is True
+    assert ex["eddie"]["status"] == "MEASURED"
+    assert ex["eddie"]["recommendation"] == "SKIP_EXECUTION"
+    assert got["opportunity_score"] == pytest.approx(5.0 * 0.6 / 1000.0)
+    none = SC.score(cand, fill_probability=None, idle_capital_usd=1000.0,
+                    lag_samples=lags, ctx={"eddie_why": "TABLE_ABSENT"})
+    ex = none["components"]["EXECUTION_CONFIDENCE"]
+    assert ex["value"] is None and ex["why"] and ex["source"] is None
+    assert ex["eddie"] == {"status": "UNAVAILABLE", "why": "TABLE_ABSENT"}
+
+
+@pg
+async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
+        monkeypatch):
+    from sportsassets.api import command_lost_opportunity as API
+
+    now = time.time()
+    async with _txn() as conn:
+        async def pool():
+            return _Pool(conn)
+        monkeypatch.setattr(API, "_pool", pool)
+        acct = await X.account(conn, now=now)
+        await P.lag_history(conn, acct, now=now)
+        d = await X.decision(conn, acct, at=now - 600, refusals=[CL.R_BELOW],
+                             pd=X.pd_fig(-0.1))
+        await P.premap(conn, d["slug"], now + 2 * HOUR)
+        snap = ("INSERT INTO pos_snapshots (snapshot_id, run_id, component, "
+                " book, computed_at, payload, data_sha256, version) VALUES "
+                " ($1,'r',$2,$3,to_timestamp($4),$5::jsonb,'s','v')")
+        await conn.execute(snap, F.uid("s"), "CAPITAL", "PAPER", now - 3600,
+                           '{"idle_capital_usd": 1000.0, "unmeasured": {}}')
+        await conn.execute(snap, F.uid("s"), "CAPACITY", "NONE", now - 3600,
+                           '{"rates": {"fill_probability": {"value": 0.8, '
+                           '"n": 40, "basis": "TEST"}}}')
+        await conn.execute(
+            "INSERT INTO pos_capacity (capacity_id, candidate_id, run_id, "
+            " computed_at, decided_at, us_market_slug, holding_side, status, "
+            " executable_opportunity_dollars, executable_capacity_usd, "
+            " capacity_ceiling_usd, content_sha256, version) VALUES ($1,$2,"
+            " 'r',to_timestamp($3),to_timestamp($4),$5,'LONG','MEASURED',5.0,"
+            " 200.0,400.0,'s','v')", F.uid("cap"), d["decision_id"], now,
+            now - 600, d["slug"])
+        eid = F.uid("eddie")
+        await conn.execute(
+            "INSERT INTO eddie_execution_estimates (estimate_id, decision_id,"
+            " estimator_version, estimated_at, decided_at, us_market_slug, "
+            " holding_side, expected_fill_probability, "
+            " expected_net_executable_edge_pp, expected_executable_ev_usd, "
+            " recommendation, recommendation_reason, unmeasured, "
+            " evidence_refs) VALUES ($1,$2,'EDDIE_TEST',to_timestamp($3),"
+            " to_timestamp($4),$5,'LONG',0.55,-0.3,-0.02,'SKIP_EXECUTION',"
+            " 'NET_EDGE_NOT_POSITIVE',$6::jsonb,$7::jsonb)", eid,
+            d["decision_id"], now - 300, now - 600, d["slug"],
+            '{"theoretical_edge": "t", "fees": "t", "spread_cost": "t", '
+            '"slippage": "t", "adverse_selection": "t", "time_to_fill": "t",'
+            ' "capital_hours": "t", "max_executable_size": "t"}',
+            '[{"kind": "paper_decisions", "id": "%s"}]' % d["decision_id"])
+        got = await LR.run_component(conn, now=now)
+        assert got["components"]["SCORES"] == "OK", got
+        r = await conn.fetchrow(
+            "SELECT * FROM lol_opportunity_scores_latest "
+            " WHERE candidate_id = $1", d["decision_id"])
+        assert r["status"] == "MEASURED", r["why"]
+        comps = P.j(r["components"])
+        ex = comps["EXECUTION_CONFIDENCE"]
+        assert ex["value"] == pytest.approx(0.55)
+        assert ex["source"] == SC.EDDIE and eid in ex["basis"]
+        assert ex["eddie"]["estimate_id"] == eid
+        assert r["opportunity_score"] == pytest.approx(
+            5.0 * 0.55 * 1.0 / (200.0 * r["expected_hold_h"]))
+        served = await API.opportunity_scores(status="", limit=50)
+        row = next(x for x in served["data"]["rows"]
+                   if x["candidate_id"] == d["decision_id"])
+        e = row["expand"]["eddie_execution"]
+        assert e["status"] == "OK" and e["estimate_id"] == eid
+        assert e["recommendation"] == "SKIP_EXECUTION"
+        assert e["authority"] == "SHADOW_ONLY"

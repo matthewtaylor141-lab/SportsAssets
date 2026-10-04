@@ -208,8 +208,18 @@ def test_nothing_outside_the_layer_reads_or_imports_it():
     # production, probability, threshold, sizing or capital path
     # (tests/test_improvement_pipeline_authority.py pins both), so nothing in
     # PRODUCTION reads a poslearn table through it.
+    # (migration 220, claude/pos-lol, integrated in claude/cand27): the
+    # Lost Opportunity Ledger's loader SELECTs poslearn_opportunities JOIN
+    # poslearn_forecasts by a candidate's external valuation id, read-only,
+    # to show the SHADOW edge-confidence forecast as the opportunity score's
+    # EDGE_CONFIDENCE component (displayed beside the score; it does NOT
+    # multiply into it). The package writes only its own lol_* tables and
+    # its import closure holds no venue / order / paper / funded module
+    # (tests/test_lost_opportunity_is_research_only.py pins both); the
+    # write check below applies to it too.
     research_readers = {PKG / "agents" / "improvement_pipeline.py",
-                        PKG / "agents" / "improvement_stages.py"}
+                        PKG / "agents" / "improvement_stages.py",
+                        PKG / "lost_opportunity" / "reads.py"}
     for p in PKG.rglob("*.py"):
         if p.parent == PKG / "poslearn" or p == API or p in research_readers:
             continue

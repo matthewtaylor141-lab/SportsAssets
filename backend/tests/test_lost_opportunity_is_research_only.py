@@ -67,7 +67,10 @@ ROUTE_READS = {"lol_ledger", "lol_runs", "lol_opportunity_scores_latest",
                "lol_horizon_forecasts", "lol_horizon_forecast_scores",
                "pos_capacity", "paper_decisions", "karen_challenges",
                "paper_audrey_findings", "intel_allocations",
-               "xavier_entry_theses"}
+               "xavier_entry_theses",
+               # Eddie's SHADOW_ONLY execution estimate of the decision
+               # (migration 217), joined by decision id for the expand view
+               "eddie_execution_estimates"}
 
 
 # ── §1 static ────────────────────────────────────────────────────────
