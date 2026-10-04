@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 
 
 def _preset(text: str, name: str) -> tuple[str, int]:

@@ -232,8 +232,11 @@ def test_the_real_render_ops_step_is_not_flagged_by_the_expression_cap():
     and carries no interpolation, so it is out of scope by construction."""
     import yaml as _y
 
-    with open(os.path.join(REPO, ".github", "workflows",
-                           "render-ops.yml")) as fh:
+    from tests.workflow_source import render_ops_path
+
+    # The script lives in .github/render-ops/ops.sh now; the effective source
+    # re-inlines it, which is the body the expression rule would apply to.
+    with open(render_ops_path()) as fh:
         doc = _y.safe_load(fh)
     step = doc["jobs"]["ops"]["steps"][0]
     assert len(step["run"]) > 400_000

@@ -39,8 +39,9 @@ import pytest
 from tests import test_render_ops_fills_missed as fm
 from tests import test_render_ops_hourly as hourly
 from tests.test_render_ops_fills_missed import World, _f
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 FA = ("WITH fa AS (SELECT x.fill_id, x.name, x.order_id, x.book_id FROM xmltable('/table/row' PASSING (CASE WHEN"
       " to_regclass('mirror_fill_answers') IS NULL THEN '<table/>'::xml ELSE query_to_xml('SELECT fill_id, name,"
       " order_id, book_id FROM mirror_fill_answers WHERE whale = ''rn1'' AND fill_ts >= extract(epoch FROM now() -"

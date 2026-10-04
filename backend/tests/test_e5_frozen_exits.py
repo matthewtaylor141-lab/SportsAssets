@@ -43,10 +43,11 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     _armed, _cancels, _census, _fill, _gone, _his, _kinds, _mkt, _places, _ratio_fills,
     _s4_unproven, _short_book, _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 SELL_SHORT = "ORDER_INTENT_SELL_SHORT"
 REPO = pathlib.Path(__file__).resolve().parents[2]
-YML = REPO / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 MIG_DIR = pathlib.Path(migrate.MIGRATIONS_DIR)
 SQL_056 = MIG_DIR / "056_mirror_registered_positions.sql"
 REGISTER_COLUMNS = {"id", "whale", "us_market_slug", "condition_id", "asset", "shares", "side",

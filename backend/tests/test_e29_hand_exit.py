@@ -56,9 +56,10 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
     BUY, CID, GTC_TIF, M, N, NOW, SELL, SHORT, SLUG, _NoClose, _armed, _census, _fill, _his, _mkt, _places,
     _ratio_fills, _run, _short_book, _shorts_on, _tick,
 )
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-YML = ROOT / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 NEW_NAMES = ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
 KEY = f"rn1:{CID}"
 HIS_NET = -24600.6                  # book_1317_0022 row 239: his_net -24600.6

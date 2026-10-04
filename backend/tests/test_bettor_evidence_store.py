@@ -17,6 +17,7 @@ import pytest
 
 from sportsassets import bettor_evidence_store as ES
 from sportsassets.api import command_center as IO
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 
 # ── a fake pool. SYNTHETIC. ──────────────────────────────────────────
@@ -512,10 +513,7 @@ class TestTheReleaseMigrationMatchesTheCode:
     normalised and nothing else forgiven.
     """
 
-    WORKFLOW = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))),
-        ".github/workflows/render-ops.yml")
+    WORKFLOW = _render_ops_file()
 
     def _case(self, label):
         src = open(self.WORKFLOW, encoding="utf-8").read()

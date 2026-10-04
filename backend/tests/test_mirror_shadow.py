@@ -18,6 +18,7 @@ import pytest
 
 from sportsassets.analytics import mirror_report as mr
 from sportsassets.workers import mirror_shadow as ms
+from tests.workflow_source import render_ops_file as _render_ops_file
 
 M, N = "tok-mich", "tok-nak"
 CID = "0xcond"
@@ -628,7 +629,7 @@ def test_no_mark_names_the_venue_state(monkeypatch):
     assert mr.no_mark_class("no mark:") == "unclassified" and mr.no_mark_class("frozen") is None
     assert mr.no_mark_class("no mark: quote off ladder None/1.0") == "quote off ladder"
     # the census's SQL reads the prefix, never the old exact text
-    wf = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+    wf = _render_ops_file()
     src = wf.read_text()
     assert "= 'no mark: book unreadable'" not in src and "LIKE 'no mark:%'" in src
 

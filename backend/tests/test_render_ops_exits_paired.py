@@ -48,8 +48,9 @@ import pytest
 
 from tests import test_render_ops_hourly as hourly
 from tests.test_render_ops_fills_missed import World, _f
+from tests.workflow_source import render_ops_file as _render_ops_file
 
-YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+YML = _render_ops_file()
 VERDICTS = ("we_matched_his_cut", "he_reduced_we_held", "no_exit_by_him", "exited_with_him", "partial_exit",
             "exit_placed_unfilled", "no_exit_order")
 # he_reduced_we_held since FILL lane 0b, before no_exit_by_him (its sub-case); we_matched_his_cut since FILL
