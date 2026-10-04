@@ -778,6 +778,15 @@ async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
         "TRUNCATE smalllive_reviews, smalllive_handoffs, "
         "smalllive_reconciliations, execmirror_fills, execmirror_events, "
         "execmirror_snapshots, execmirror_orders")
+    # NO_CAPITAL_ACTIVATED also counts small_live_order_events (R30A chaos
+    # stream; written only by a LIVE adapter, append-only, so this is a no-op
+    # on an honest database). INTEGRATION FIX: the chaos stream cleared the
+    # venue-order tables at the END of this helper, the intent stream at its
+    # START (above) and then put `venue_order` back -- merged, the trailing
+    # DELETE erased that very order and the `venue_order=True` case recorded
+    # the cutover it must refuse. The world is now cleared once, here, BEFORE
+    # anything the caller asked for is written.
+    await conn.execute("DELETE FROM small_live_order_events")
     if venue_order:
         await conn.execute(
             "INSERT INTO execmirror_orders (mirror_id, role, us_market_slug, "
@@ -804,16 +813,6 @@ async def _cutover_world(conn, *, sha=SHA, workers=SHA, migrations=True,
     if await conn.fetchval("SELECT count(*) FROM execmirror_control") == 0:
         await conn.execute("INSERT INTO execmirror_control DEFAULT VALUES")
     await conn.execute("UPDATE execmirror_control SET stopped = $1", stopped)
-    # THE WORLD HAS NO VENUE ORDERS. NO_CAPITAL_ACTIVATED counts every
-    # execmirror order that ever carried a venue order id, and the files that
-    # sort before this one (test_actual_admission, test_execmirror,
-    # test_execution_intent_fanout) leave fake-venue rows behind in the shared
-    # test database, so this proof failed in a full run for a reason that is
-    # not its subject. Cleared inside this test's own transaction, which is
-    # rolled back (R30A chaos stream).
-    await conn.execute("DELETE FROM execmirror_fills")
-    await conn.execute("DELETE FROM execmirror_orders")
-    await conn.execute("DELETE FROM small_live_order_events")
 
 
 @pg
@@ -1991,7 +1990,10 @@ def test_the_decision_logic_list_is_derived_from_the_decision_roots():
     # the modules the review named are pinned
     for m in ("bettor_paper_ledger.py", "bettor_settlement_terms.py",
               "bettor_paper_session.py", "workers/ext_pinnacle_loop.py",
-              "pinnapi_primary.py", "bettor_xavier_standing_orders.py"):
+              "pinnapi_primary.py", "bettor_xavier_standing_orders.py",
+              # integration of the R30A NFL stream: the NFL settlement /
+              # tie conversion paper_benchmark and paper_xavier import
+              "bettor_nfl_settlement.py"):
         assert m in DL.DECISION_LOGIC_FILES, m
     # the 30 s rule's own constant is inside a pinned file
     src = (pathlib.Path(LP.__file__).resolve().parent

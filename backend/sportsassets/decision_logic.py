@@ -55,6 +55,13 @@ DECISION_LOGIC_FILES = (
     "bettor_paper_limits.py", "bettor_paper_session.py",
     "bettor_paper_simulator.py", "bettor_book_snapshot.py",
     "bettor_settlement_terms.py", "bettor_funded_model.py",
+    # NFL money line (R30A NFL stream, pinned at integration): the venue's
+    # payout in every settlement state against the book's, the tie-rate
+    # conversion of the book's no-tie probability into the venue payout
+    # (p_venue = (1 - t) * p_book + 0.5 * t) and the game-phase rule --
+    # paper_benchmark's ENTER and paper_xavier's measure both import it, so
+    # a change to it changes the decision and must restart the forward window
+    "bettor_nfl_settlement.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",
