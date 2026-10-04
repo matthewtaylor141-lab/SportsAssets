@@ -827,3 +827,8 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (R30C, 233) THE OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT: both scored at
+# the decision instant beside (never in) the canonical intent; INVESTMENT
+# only, forward only, unique opportunities, event-clustered intervals; V2 has
+# no authority and promotion is never automatic; no backfill (CHECK).
+tests/test_opportunity_score_tournament.py

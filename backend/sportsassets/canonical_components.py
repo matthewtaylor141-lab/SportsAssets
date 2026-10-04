@@ -30,6 +30,10 @@ P(fill) and Allie's executable net say the same; ACTUAL is UNMEASURED with
 its reason while SMALL LIVE is SHADOW. Simulated fills are never presented
 as live execution quality.
 
+R30C · OPPORTUNITY SCORE V2 (opportunity_score_v2) is computed here at the
+same instant from the same inputs and returned as `opportunity_score_v2` --
+NOT a component of the intent: live_parity records it beside the intent in
+the shadow tournament (migration 233) and nothing reads it to decide.
 
 Bounded: every read runs in its own savepoint under a short timeout, and the
 slow-moving inputs (Eddie's fill history, settlement lags, the capital
@@ -49,6 +53,8 @@ log = logging.getLogger(__name__)
 VERSION = "CANONICAL_COMPONENTS_V1"
 CACHE_S = 300.0
 COMPONENT_TIMEOUT_S = 2.0
+#: how far back V2's exceptional-settlement counts look (R30C)
+EXCEPTIONAL_LOOKBACK_DAYS = 60
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -317,6 +323,80 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
     return await _bounded(conn, go)
 
 
+async def exceptional_at_decision(conn, *, sport, now: float) -> dict:
+    """THE EXCEPTIONAL-SETTLEMENT BOUND V2 reads: VOID_REFUND counts of
+    settled markets (WON / LOST / VOID_REFUND, recorded at or before the
+    decision, last EXCEPTIONAL_LOOKBACK_DAYS) by sport over the canonical
+    path (intent -> its paper ENTRY order -> the group's settlement), and
+    pooled over every paper settlement. Cached; bounded."""
+    from . import opportunity_score_v2 as V2
+
+    async def counts():
+        by = {}
+        if await conn.fetchval(
+                "SELECT to_regclass('canonical_decision_intents') IS NOT NULL"):
+            for r in await conn.fetch(
+                    """SELECT i.contract->>'sport_family' AS sport,
+                              count(DISTINCT s.us_market_slug) FILTER (
+                                  WHERE s.outcome = 'VOID_REFUND') AS k,
+                              count(DISTINCT s.us_market_slug) AS n
+                         FROM canonical_decision_intents i
+                         JOIN paper_orders o
+                           ON o.idempotency_key = i.decision_id || ':ENTRY'
+                         JOIN paper_settlements s ON s.group_id = o.group_id
+                        WHERE s.outcome IN ('WON', 'LOST', 'VOID_REFUND')
+                          AND s.recorded_at <= to_timestamp($1)
+                          AND s.recorded_at >= to_timestamp($1)
+                                               - make_interval(days => $2)
+                        GROUP BY 1""", float(now),
+                    int(EXCEPTIONAL_LOOKBACK_DAYS)):
+                if r["sport"]:
+                    by[str(r["sport"]).lower()] = {"k": int(r["k"]),
+                                                   "n": int(r["n"])}
+        p = await conn.fetchrow(
+            """SELECT count(DISTINCT us_market_slug) FILTER (
+                          WHERE outcome = 'VOID_REFUND') AS k,
+                      count(DISTINCT us_market_slug) AS n
+                 FROM paper_settlements
+                WHERE outcome IN ('WON', 'LOST', 'VOID_REFUND')
+                  AND recorded_at <= to_timestamp($1)
+                  AND recorded_at >= to_timestamp($1)
+                                     - make_interval(days => $2)""",
+            float(now), int(EXCEPTIONAL_LOOKBACK_DAYS))
+        return {"by_sport": by, "pooled": {"k": int(p["k"] or 0),
+                                           "n": int(p["n"] or 0)}}
+
+    async def go():
+        c = await _cached("v2_exceptional", now, counts)
+        return V2.exceptional_from_counts(
+            scope_counts=c["by_sport"],
+            scope_key=None if not sport else str(sport).lower(),
+            pooled=c["pooled"])
+    got = await _bounded(conn, go)
+    if got.get("status") == "UNAVAILABLE":
+        return {"rate_ucb": None, "why": got.get("why")}
+    return got
+
+
+async def opportunity_v2_at_decision(conn, *, decision: dict,
+                                     eddie_est: dict, allie: dict,
+                                     now: float) -> dict:
+    """OPPORTUNITY SCORE V2 (opportunity_score_v2) at the decision
+    instant, from the same inputs V1 and Allie saw. SHADOW, NO AUTHORITY:
+    it is recorded in the tournament (migration 233), never on the intent,
+    and nothing reads it to decide."""
+    from . import opportunity_score_v2 as V2
+    ex = await exceptional_at_decision(conn, sport=decision.get("sport"),
+                                       now=now)
+    try:
+        return V2.score(V2.inputs_from(eddie_est, allie, ex))
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("opportunity v2 failed", exc_info=True)
+        return {"status": "UNAVAILABLE", "version": V2.VERSION,
+                "spec_sha": V2.SPEC_SHA, "opportunity_score": None,
+                "why": "V2_FAILED:%s" % type(exc).__name__}
+
+
 async def at_decision(conn, *, decision: dict, book_row: dict | None,
                       cost_usd, p, wire, now: float | None = None) -> dict:
     """All four computed components for one decision (derek is built by the
@@ -344,5 +424,9 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
                                     strategy=decision.get("strategy"), now=at)
     allie = await allie_at_decision(conn, decision=decision, eddie=eddie,
                                     now=at)
+    # R30C: Opportunity Score V2 (shadow tournament only -- the caller
+    # records it beside the intent, never in it)
+    v2 = await opportunity_v2_at_decision(conn, decision=decision,
+                                          eddie_est=est, allie=allie, now=at)
     return {"eddie": eddie, "opportunity_score": opp, "karen": karen,
-            "allie": allie, "version": VERSION}
+            "allie": allie, "opportunity_score_v2": v2, "version": VERSION}
