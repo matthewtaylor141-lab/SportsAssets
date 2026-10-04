@@ -18,7 +18,7 @@ function summary(p,s){
  const d=data(s);
  if(!d) return s && s.status==='EMPTY' ? 'No activity recorded yet. Open the workspace for context.' : 'Activity is not available in this read.';
  if(p.id==='derek') {const rows=Object.values(d.by_strategy||{});return rows.reduce((a,r)=>a+(Number(r.decisions)||0),0)+' recorded decisions · '+rows.reduce((a,r)=>a+(Number(r.enter)||0),0)+' entry decisions';}
- if(p.id==='xavier')return count(d.open_positions)+' open positions · '+count(d.open_management_orders)+' protection orders';
+ if(p.id==='xavier')return count(d.open_positions)+' open positions · '+count(d.open_management_orders)+' open protective orders (not protection until filled)';
  return count(d.findings)+' audit findings · Latest report '+(d.last_report_day||'not yet available');
 }
 function render(ctx){

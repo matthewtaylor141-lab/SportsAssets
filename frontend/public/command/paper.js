@@ -299,7 +299,7 @@
     }
     if (k === "xavier") {
       return "<li><b>" + esc(d.handoffs) + "</b> positions handed over · <b>" + esc(d.open_positions) + "</b> open · " + esc(d.pending_settlement) + " pending settlement</li><li>" +
-        esc(d.reviews) + " reviews (" + esc(d.reviews_24h) + " in 24 h) · " + esc(d.open_management_orders) + " open protection orders · " + esc(d.settlements) + " settlements</li>";
+        esc(d.reviews) + " reviews (" + esc(d.reviews_24h) + " in 24 h) · " + esc(d.open_management_orders) + " open protective orders (orders, not fills: not protection until filled) · " + esc(d.settlements) + " settlements</li>";
     }
     return "<li><b>" + esc(d.findings) + "</b> findings (" + esc(d.warnings_or_critical) + " warning or critical) · " + esc(d.findings_24h) + " in 24 h</li><li>latest daily report " + esc(d.last_report_day || "none yet") + "</li>";
   }
