@@ -28,6 +28,16 @@ timestamps -- nothing here is invented for animation:
                 / BLOCKED / FAILED / RECOVERING (the activity says on what)
   IDLE          heartbeat fresh, nothing in progress or recent
 
+THE WORK STATE (owner R30, `work_state` / `work_detail` / `work_basis` /
+`work_since` / `work_counts` beside the desk state above, on both routes):
+one of WORKING, REVIEWING, WAITING_FOR_FRESH_EVIDENCE, BLOCKED_ON_MARKET_DATA,
+HANDOFF_PENDING, IDLE_NO_OPEN_WORK, derived by `agent_work_state` from the
+agent's recorded open work, current reviews, runs in progress, open fresh-
+evidence requests, market-data reads and hand-offs not yet picked up (null,
+with its reason, only when those facts cannot be read). Xavier is never
+IDLE_NO_OPEN_WORK while he owns an open position. The desk `state` keeps its
+seven-state vocabulary for the existing page.
+
 COLLABORATION EDGES are real rows inside the window (default one hour):
 Karen's challenges (raised / answered / resolved), collaboration-loop stages
 recorded by one agent on another's finding (migration 203), Derek -> Xavier
@@ -51,6 +61,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ..agent_work_state import WORK_STATES as _WORK_STATES
+from ..agent_work_state import read_work_states as _read_work_states
 from ..xavier_freshness import of_assessment as _xf_of_assessment
 from ..xavier_freshness import of_review as _xf_of_review
 from .agents_core import _pool, require_read
@@ -864,6 +876,11 @@ async def build_floor(conn, *, now: float | None = None,
     opportunities = await _opportunities(rd, alloc)
     edges = merge_edges(await _edges_raw(rd, now - window_s))
     by_target = ch.get("by_target") or {}
+    # THE WORK STATE OF EVERY DESK (owner R30): recorded work and blockers
+    work = await rd.run("work_states", (), lambda c: _read_work_states(
+        c, now=now), default={}) or {}
+    rd.sections.update(work.get("sections") or {})
+    work_states = work.get("states") or {}
 
     agents = []
     for seat in SEATS:
@@ -1119,6 +1136,7 @@ async def build_floor(conn, *, now: float | None = None,
         state = derive_state(a, now=now, deployed=deployed,
                              deploy_why=deploy_why, heartbeat_at=hb_at,
                              stale_s=stale_s, status=st, signals=signals)
+        wk = work_states.get(a) if deployed else None
         tgt = by_target.get(a) or {}
         agents.append({
             "agent": a, "slug": seat["slug"],
@@ -1145,6 +1163,15 @@ async def build_floor(conn, *, now: float | None = None,
             "activity_basis": state["activity_basis"],
             "focus": focus, "last_output": last_output,
             "monitor": monitor,
+            "work_state": (wk or {}).get("state"),
+            "work_detail": (wk or {}).get("detail") if wk else (
+                "Not yet deployed (%s)" % deploy_why if not deployed else
+                "Work facts unavailable (%s)" % (
+                    rd.sections.get("work_states", {}).get("why")
+                    or "NOT_READ")),
+            "work_basis": (wk or {}).get("basis") or [],
+            "work_since": (wk or {}).get("since"),
+            "work_counts": (wk or {}).get("counts"),
             "challenges": {
                 "open_against": (tgt.get("open", 0) + tgt.get("responded", 0))
                 if a in ("DEREK", "XAVIER", "AUDREY", "CHIEF_ALLOCATOR")
@@ -1157,9 +1184,13 @@ async def build_floor(conn, *, now: float | None = None,
                 else None},
         })
     counts = {s: sum(1 for x in agents if x["state"] == s) for s in STATES}
+    work_counts = {s: sum(1 for x in agents if x["work_state"] == s)
+                   for s in _WORK_STATES}
     return {"version": VERSION, "read_at": now, "read_only": True,
             "window_s": window_s, "active_window_s": ACTIVE_WINDOW_S,
             "states": list(STATES), "counts": counts,
+            "work_states": list(_WORK_STATES),
+            "work_counts": work_counts,
             "agents": agents, "edges": edges,
             "feed": feed, "opportunities": opportunities,
             "sections": rd.sections,
@@ -1210,6 +1241,24 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
                             "from": "KAREN", "at": _ep(r["challenged_at"]),
                             "href": "/api/command/karen/challenges/%s"
                             % r["challenge_id"]})
+        if a == "XAVIER" and await rd.exists("agent_work_open") and \
+                await rd.exists("agent_work_requests"):
+            # (226) the fresh-evidence acquisitions his stale reviews
+            # enqueued and that are still open
+            for r in await c.fetch(
+                    "SELECT r.request_id, r.kind, r.group_id, r.reason, "
+                    "       r.enqueued_at, r.expires_at "
+                    "  FROM agent_work_open o JOIN agent_work_requests r "
+                    "    ON r.request_id = o.request_id "
+                    " WHERE o.agent_id = 'XAVIER' "
+                    " ORDER BY r.enqueued_at DESC LIMIT 25"):
+                out.append({"kind": "agent_work_requests",
+                            "id": r["request_id"],
+                            "title": "Acquire %s for %s" % (r["kind"],
+                                                           r["group_id"]),
+                            "status": "OPEN · %s" % r["reason"],
+                            "from": "XAVIER", "at": _ep(r["enqueued_at"]),
+                            "expires_at": _ep(r["expires_at"])})
         if a == "AUDREY" and await rd.exists("karen_challenges"):
             for r in await c.fetch(
                     "SELECT challenge_id, target_agent, claim, responded_at "
@@ -1359,7 +1408,8 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
             "timeline": timeline, "timeline_window_s": DETAIL_WINDOW_S,
             "peers": [{"agent": x["agent"], "slug": x["slug"],
                        "display_name": x["display_name"],
-                       "state": x["state"], "workspace": x["workspace"]}
+                       "state": x["state"], "work_state": x["work_state"],
+                       "workspace": x["workspace"]}
                       for x in floor["agents"]],
             "sections": dict(floor["sections"], **{
                 "detail." + k: v for k, v in rd.sections.items()}),

@@ -126,6 +126,47 @@ class Scheduler:
         self.pending[eid] = tick
         self.wake.set()
 
+    def request_held(self, eid) -> str:
+        """A FRESH-EVIDENCE REQUEST for a HELD event (agents.work_queue,
+        owner R30): queue the event's CURRENT quote on the held queue exactly
+        as a change would have. Bounded by construction -- held events only,
+        a live seed, a quote the cache reads as usable now (fresh within its
+        30 s limit: a stale quote is never evaluated as if fresh), never a
+        version already evaluated or already queued; the same single worker
+        and deadline serve it. Returns what happened, by name; never
+        raises."""
+        if self.closed:
+            return 'SCHEDULER_CLOSED'
+        if not self._is_held(eid):
+            return 'NOT_A_HELD_EVENT'
+        seed = self.seeds.get(eid)
+        if seed is None:
+            self.counts['HELD_REQUEST_NO_DISCOVERY_SEED'] += 1
+            return 'HELD_NO_DISCOVERY_SEED'
+        if not self._seed_live(eid, seed):
+            return 'DISCOVERY_EXPIRED'
+        if eid in self.held_pending:
+            return 'ALREADY_QUEUED'
+        got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
+                              evaluated_ms=self.clock()*1000)
+        q = got.get('quote')
+        if not got.get('ok') or q is None:
+            self.counts['HELD_REQUEST_UNUSABLE'] += 1
+            return str(got.get('reason') or 'UNUSABLE_QUOTE')
+        version = (q.epoch, q.source_change_ms, tuple(sorted(q.prices.items())))
+        if self.seen.get(eid) == version:
+            self.counts['HELD_REQUEST_ALREADY_EVALUATED'] += 1
+            return 'ALREADY_EVALUATED_THIS_VERSION'
+        self.seen[eid] = version
+        self.pending.pop(eid, None)
+        self.held_pending[eid] = dict(version=version,
+                                      received_at=q.received_ms/1000,
+                                      queued_at=self.clock(), held=True,
+                                      requested=True)
+        self.counts['HELD_REQUESTED'] += 1
+        self.wake.set()
+        return 'QUEUED'
+
     def next_job(self):
         """(event id, tick) to evaluate next: held before discovery."""
         if self.held_pending:
@@ -187,6 +228,29 @@ class Scheduler:
             except Exception:
                 self.counts['AUDIT_FAILED'] += 1
                 log.exception('pinnapi reactive audit failed; no unaudited evaluation started')
+
+
+def request_held_reevaluation(slug) -> dict:
+    """THE HELD RE-EVALUATION OF ONE HELD SLUG, on request (agents.
+    work_queue's PROBABILITY request): the slug's provider event from the
+    held watch, then `Scheduler.request_held`. In-process, no I/O, never
+    raises; every refusal is named (not a held target, no scheduler in this
+    process, no seed, a stale quote, already evaluated)."""
+    from . import pinnapi_held as PH
+    try:
+        eid = PH.WATCH.slug_event.get(slug)
+        if eid is None:
+            return {"queued": False, "event_id": None,
+                    "reason": PH.WATCH.unmatched.get(slug)
+                    or "NOT_A_HELD_TARGET_IN_THIS_PROCESS"}
+        if ACTIVE is None:
+            return {"queued": False, "event_id": eid,
+                    "reason": "REACTIVE_SCHEDULER_NOT_RUNNING"}
+        why = ACTIVE.request_held(eid)
+        return {"queued": why == 'QUEUED', "event_id": eid, "reason": why}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"queued": False, "reason": "REQUEST_FAILED",
+                "error": type(exc).__name__}
 
 
 def register(event, **kwargs):

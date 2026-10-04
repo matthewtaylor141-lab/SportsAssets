@@ -468,6 +468,14 @@ READERS = {
     # joined settlement evidence to settle paper positions.
     "agents/paper_derek.py": (
         "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 3),
+    # (226, owner R30) Xavier's fresh-evidence work queue: reads the HELD
+    # paper group's own entry valuation by id (its condition id = the
+    # fixture identity) and the newest valuation of that same contract
+    # (xavier_freshness.LATEST_VALUATION_SQL) to close a PROBABILITY request
+    # with its valuation id. It selects no candidate, sizes nothing, places
+    # nothing; it writes only agent_work_* records.
+    "agents/work_queue.py": (
+        "HELD_PAPER_POSITION_EVIDENCE_BY_ID_NEVER_SELECTS_A_CANDIDATE", 4),
     "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_OF_THE_ROW_JUST_WRITTEN", 1),
     # (184) plus the venue's published settlement PRICE for a contract it
     # settled at a price (VENUE_PRICE_SQL): a settlement-evidence read by

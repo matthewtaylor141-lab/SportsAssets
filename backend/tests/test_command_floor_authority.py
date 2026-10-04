@@ -38,7 +38,11 @@ STDLIB = {"__future__", "json", "time", "datetime", "typing"}
 ALLOWED = {"fastapi", "sportsassets.api.agents_core",
            # the read-time freshness truth of Xavier's recommendation (owner
            # P0, 2026-10-04): pure, stdlib only, imports nothing of ours
-           "sportsassets.xavier_freshness"}
+           "sportsassets.xavier_freshness",
+           # the agents' work states (owner R30): stdlib + xavier_freshness
+           # only, SELECT-only SQL -- tests/test_agent_work_state_authority.py
+           # holds it to the same static rules as this module
+           "sportsassets.agent_work_state"}
 FORBIDDEN = ("execmirror", "kalshi", "pmus", "venue", "clob", "executor",
              "execution", "ledger", "simulator", "bettor_funded", "funded",
              "paper_", "smalllive", "order", "submit", "live_",
@@ -82,7 +86,8 @@ def test_the_floor_imports_no_order_venue_ledger_or_paper_module():
         if top == "sportsassets":
             mod = imp if imp.count(".") <= 2 else imp.rsplit(".", 1)[0]
             assert mod in ALLOWED or imp.rsplit(".", 1)[0] in (
-                "sportsassets.xavier_freshness",) or imp in {
+                "sportsassets.xavier_freshness",
+                "sportsassets.agent_work_state") or imp in {
                 "sportsassets.api.agents_core._pool",
                 "sportsassets.api.agents_core.require_read"}, imp
         else:
