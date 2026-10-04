@@ -827,3 +827,15 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (244) LAB-F POLICY / MARKET DRIFT SENTINEL: SHADOW_RESEARCH_ONLY. The lab
+# imports only the standard library and itself and NOTHING outside the lab
+# imports it but the API's router registration (both directions); its only
+# writes are INSERTs into migration 244's append-only lab_drift_* tables; the
+# GET route runs READ ONLY under a statement timeout; every historical row
+# goes through the one point-in-time accessor (a deliberately future-dated
+# row changes nothing); drift lowers an information-only confidence modifier
+# and returns revalidation work that is never enqueued -- it changes no
+# policy, threshold, size, limit or order.
+tests/test_lab_is_shadow_only.py
+tests/test_lab_drift_sentinel.py
+tests/test_lab_drift_reads_db.py
