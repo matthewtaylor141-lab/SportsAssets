@@ -28,11 +28,14 @@ and only when:
   4 it is the ONLY such event. Two candidates are an ambiguity, and an
     ambiguity is refused rather than resolved by preference.
 
-Then the contract that pays on the priced outcome (the provider's HOME team,
-as on the global path) is read off the venue's own rows: for soccer the
-per-side contract whose `team_name` is home, bought LONG; for baseball the one
-row of the single two-way contract whose `team_name` is home, with THAT ROW'S
-intent. The draw contract names no team and can never be the priced outcome.
+Then the contract that pays on the priced outcome is read off the venue's own
+rows. The priced outcome was the provider's HOME team only until the P0
+incident repair (2026-10-04); it is now EVERY outcome of the de-vigged set,
+asked one at a time: for soccer the per-side contract whose `team_name` is the
+priced team, bought LONG, or for the draw the event's one team-less
+`...-draw` contract whose own question asks about a draw, bought LONG; for a
+two-way family the one row of the single two-way contract whose `team_name`
+is the priced team, with THAT ROW'S intent.
 Every row of the matched event must be REAL by `bettor_venue_realism`, and the
 chosen contract's period must be FULL_MATCH by
 `bettor_venue_mapping.period_of_venue_slug` -- the same two gates the global
@@ -77,6 +80,10 @@ MATCHED_BY = "VENUE_NATIVE_TEAM_NAMES_AND_START_TIME"
 CONTRACT_IDENTITY_BASIS = "VENUE_NATIVE_US_SLUG"
 PAYOUT_EVENT_BASIS = ("VENUE_NATIVE_CONTRACT_ROW_WHOSE_OWN_TEAM_NAME_IS_THE_"
                       "REQUESTED_OUTCOME")
+#: The draw contract names no team; it is chosen by its own identifier and
+#: question (`_draw_contract`), and says so on the row.
+PAYOUT_EVENT_BASIS_DRAW = ("VENUE_NATIVE_TEAMLESS_DRAW_CONTRACT_WHOSE_OWN_"
+                           "QUESTION_IS_THE_DRAW")
 
 # ── THE NAMED REFUSALS ───────────────────────────────────────────────
 R_NO_EVENT = "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE"
@@ -117,10 +124,63 @@ R_MATCH_RAISED = "VENUE_NATIVE_MATCH_RAISED"
 #: the provider's name: Ohio / Ohio State, Miami (FL) / Miami (OH).
 R_NICKNAME = "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM"
 
+# ── EVERY OUTCOME OF THE EVENT, NOT ONLY HOME (P0 incident, 2026-10-04) ──
+#
+# THE DEFECT. This resolver answered for the provider's HOME team only
+# (`priced = home`), so the away contract of every mapped event, and the
+# soccer draw contract, were never resolved, never valued and never decided:
+# 57 opportunities a day from the mapped events instead of ~140 (production
+# funnel receipt, 2026-10-04). The team assignment was ALREADY established for
+# both teams -- the one-to-one match below proves which participant is home
+# and which is away -- so the away contract is read off the same evidence.
+#
+# THE DRAW HAS NO TEAM, so it cannot be found by team name. It is the
+# event's ONE team-less contract whose identifier is `<prefix>-<event>-draw`,
+# which carries exactly one LONG and one SHORT row and whose own question
+# asks whether the match ends in a draw -- three facts from the venue's own
+# catalogue, all required. A contract failing any of them refuses by name.
+#: The requested outcome is not one of home / away / draw.
+R_PRICED_DESIGNATION = "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION"
+#: A draw was asked for on a family whose winner contract is two-way.
+R_NO_DRAW_IN_FAMILY = "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME"
+#: The event lists no team-less contract at all.
+R_NO_DRAW_CONTRACT = "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND"
+#: More than one team-less contract: which one is the draw is not shown.
+R_DRAW_CONTRACT_AMBIGUOUS = "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS"
+#: One team-less contract, but its identifier, its two sides or its own
+#: question does not establish that it pays on the draw.
+R_DRAW_CONTRACT_NOT_ESTABLISHED = "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED"
+#: The caller named the venue event the discovery matched (pinnapi_discovery,
+#: exact structured names) and that event is not among the candidates here.
+R_DISCOVERED_EVENT_ABSENT = "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW"
+
 REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_NO_PRICED_CONTRACT, R_PRICED_CONTRACT_AMBIGUOUS,
             R_CONTRACT_SIDES, R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED,
-            R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED, R_NICKNAME)
+            R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED, R_NICKNAME,
+            R_PRICED_DESIGNATION, R_NO_DRAW_IN_FAMILY, R_NO_DRAW_CONTRACT,
+            R_DRAW_CONTRACT_AMBIGUOUS, R_DRAW_CONTRACT_NOT_ESTABLISHED,
+            R_DISCOVERED_EVENT_ABSENT)
+
+#: ── WHICH REFUSALS ARE ABOUT THE EVENT, NOT ONE OF ITS OUTCOMES ──────
+#:
+#: The collector now asks once per outcome. A refusal in this set says the
+#: FIXTURE could not be identified (no venue event, two candidates, a naming
+#: gap, an unreadable catalogue), so asking again for the next outcome of the
+#: same event would only count the same finding twice; the collector stops
+#: the event there. Every other refusal -- no row for this team, an ambiguous
+#: row, the draw contract's own evidence, a period or realism finding on THE
+#: chosen contract -- is about one outcome, and the next outcome is still
+#: asked. Unknown codes are treated as outcome-level (the next outcome is
+#: asked), the direction that never hides an outcome.
+EVENT_LEVEL_REFUSALS = frozenset((
+    R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
+    R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED, R_READ_TRUNCATED,
+    R_COMPETITION, R_MATCH_RAISED, R_NICKNAME, R_DISCOVERED_EVENT_ABSENT))
+
+#: The designations an outcome can carry: the provider's home team, its away
+#: team, and the draw of a three-way (soccer) book.
+DESIGNATIONS = ("home", "away", "draw")
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -653,9 +713,18 @@ def _refuse(out: dict, code: str, why: str) -> dict:
 
 
 def match_event(*, home, away, commence_epoch, family, rows,
-                competition=None, league_tokens=None) -> dict:
+                competition=None, league_tokens=None, priced="home",
+                event_slug=None) -> dict:
     """THE ONE venue event for this provider fixture and the contract that
-    pays on HOME, or a named refusal saying what failed. Pure; never raises.
+    pays on the PRICED outcome (`priced`: 'home' -- the default, the only
+    outcome before the P0 incident repair -- 'away', or 'draw' on a soccer
+    event), or a named refusal saying what failed. Pure; never raises.
+
+    `event_slug`, when given, is the venue event pinnapi_discovery already
+    matched to this provider event by exact structured names and start time
+    (pinnapi_census.event_identity). Only that event is a candidate here; every
+    check below still runs on it, and if it is not inside the window the
+    match refuses (R_DISCOVERED_EVENT_ABSENT) rather than looking elsewhere.
 
     `rows` are `us_premap` rows (dicts or records) carrying market_slug,
     intent, event_slug, event_title, question, kind, sports_type, team_abbr,
@@ -676,11 +745,19 @@ def match_event(*, home, away, commence_epoch, family, rows,
                  "competition": competition,
                  "commence_epoch": commence_epoch,
                  "tolerance_s": START_TOLERANCE_S, "candidates": 0,
-                 "partial_matches": [], "matched_by": MATCHED_BY}
+                 "partial_matches": [], "matched_by": MATCHED_BY,
+                 "priced": priced, "discovered_event_slug": event_slug}
+    if priced not in DESIGNATIONS:
+        return _refuse(out, R_PRICED_DESIGNATION, (
+            "the priced outcome %r is not one of %s" % (priced, DESIGNATIONS)))
     if family not in FAMILY_WINNER_TYPES:
         return _refuse(out, R_FAMILY, (
             "family %r has no established full-match winner type on the "
             "venue; only %s are read" % (family, sorted(FAMILY_WINNER_TYPES))))
+    if priced == "draw" and family != "soccer":
+        return _refuse(out, R_NO_DRAW_IN_FAMILY, (
+            "the %s winner contract is two-way; only soccer's full-time "
+            "result has a draw" % (family,)))
     try:
         commence = float(commence_epoch)
     except (TypeError, ValueError):
@@ -704,6 +781,21 @@ def match_event(*, home, away, commence_epoch, family, rows,
     events, set_aside = _events_in_window(rows, family=family,
                                           commence_epoch=commence,
                                           league_tokens=league_tokens)
+    if event_slug is not None:
+        # THE DISCOVERED EVENT ONLY. Not a looser match: the same checks run
+        # on it; an event the discovery did not name is simply not asked.
+        named = [e for e in events if e["event_slug"] == str(event_slug)]
+        out["events_in_window_before_discovery_restriction"] = len(events)
+        if not named:
+            out["events_in_window"] = len(events)
+            out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
+            return _refuse(out, R_DISCOVERED_EVENT_ABSENT, (
+                "the discovered venue event %s is not among the %d %s winner "
+                "event(s) within %.0f min of the provider's start in the "
+                "named league(s) %s" % (event_slug, len(events), family,
+                                       START_TOLERANCE_S / 60.0,
+                                       out["league_tokens"])))
+        events = named
     out["events_in_window"] = len(events)
     out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
     full = []
@@ -806,29 +898,36 @@ def match_event(*, home, away, commence_epoch, family, rows,
             return _refuse(out, verdict.get("refusal")
                            or vreal.R_REALISM_NOT_ESTABLISHED,
                            "%s: %s" % (r.get("market_slug"), verdict.get("why")))
-    # ── THE CONTRACT THAT PAYS ON HOME ───────────────────────────────
-    mine = [r for r in ev["rows"] if participant_name(r, family) == home_p]
+    if priced == "draw":
+        return _draw_contract(out, ev, family=family)
+    # ── THE CONTRACT THAT PAYS ON THE PRICED TEAM ─────────────────────
+    # Home or away, read off the SAME one-to-one assignment: the participant
+    # the provider's home matched, or the OTHER one.
+    priced_p = home_p if priced == "home" else away_p
+    out["priced_participant"] = priced_p
+    mine = [r for r in ev["rows"] if participant_name(r, family) == priced_p]
     if family == "soccer":
-        # The per-side contract on home, bought LONG. Its SHORT row pays on
-        # NOT(home) -- the draw AND the away win -- and is never this
-        # outcome. The draw contract carries no team and cannot be selected.
+        # The per-side contract on the priced team, bought LONG. Its SHORT
+        # row pays on NOT(team) -- the draw AND the other team's win -- and
+        # is never this outcome. The draw contract carries no team and is
+        # only ever selected for the draw (`_draw_contract`).
         picked = [r for r in mine if str(r.get("intent") or "") == LONG]
     else:
-        # The single two-way contract: the row whose own team is home, with
-        # THAT row's intent. SHORT is the venue saying home is its short side
-        # of the contract; the contract still pays on home, so the payout
-        # event is home and only the ladder changes.
+        # The single two-way contract: the row whose own team is the priced
+        # team, with THAT row's intent. SHORT is the venue saying that team
+        # is its short side of the contract; the contract still pays on that
+        # team, so the payout event is that team and only the ladder changes.
         picked = [r for r in mine
                   if str(r.get("intent") or "") in (LONG, SHORT)]
     if not picked:
         return _refuse(out, R_NO_PRICED_CONTRACT, (
             "event %s lists no %s contract row for the priced team %r"
             % (ev["event_slug"], "LONG per-side" if family == "soccer"
-               else "LONG or SHORT", home_p)))
+               else "LONG or SHORT", priced_p)))
     if len(picked) > 1:
         return _refuse(out, R_PRICED_CONTRACT_AMBIGUOUS, (
             "event %s lists %d candidate rows for the priced team %r (%s)"
-            % (ev["event_slug"], len(picked), home_p,
+            % (ev["event_slug"], len(picked), priced_p,
                ", ".join(sorted({str(r.get('market_slug')) for r in picked})))))
     row = picked[0]
     slug = str(row.get("market_slug") or "")
@@ -869,12 +968,88 @@ def match_event(*, home, away, commence_epoch, family, rows,
                row={k: (v.isoformat() if isinstance(v, _dt.datetime) else v)
                     for k, v in row.items()},
                why=("venue event %s (%s) starts %+.0f s from the provider; "
-                    "home %r is the participant %r, whose %s row on %s is "
+                    "%s %r is the participant %r, whose %s row on %s is "
                     "bought %s"
                     % (ev["event_slug"], " vs ".join(ev["participants"]),
-                       ev["offset_s"], home, home_p,
+                       ev["offset_s"], priced,
+                       home if priced == "home" else away, priced_p,
                        "per-side" if family == "soccer" else "two-way",
                        slug, row.get("intent"))))
+    return out
+
+
+def _draw_contract(out: dict, ev: dict, *, family) -> dict:
+    """THE EVENT'S DRAW CONTRACT, bought LONG, or a named refusal. Pure.
+
+    Three facts, every one from the venue's own catalogue rows, all required:
+
+      1 it is the event's ONE contract whose rows name no team (the per-side
+        contracts all carry their team in `team_name`);
+      2 its identifier is `<prefix>-<event_slug>-draw` -- the event's own slug
+        followed by the side token `draw`, which is also the decomposition the
+        period rule below reads (`bettor_venue_mapping.period_of_venue_slug`
+        with side 'draw');
+      3 it carries exactly one LONG and one SHORT row, and its own question
+        asks whether the match ends in a draw -- so LONG is YES on the draw.
+
+    The LONG row pays on the draw and nothing else, so the payout event is
+    the draw itself: no complement is involved.
+    """
+    slug_ev = ev["event_slug"]
+    teamless = [r for r in ev["rows"]
+                if not str(r.get("team_name") or "").strip()]
+    slugs = sorted({str(r.get("market_slug") or "") for r in teamless})
+    out["draw_candidates"] = slugs[:6]
+    if not slugs:
+        return _refuse(out, R_NO_DRAW_CONTRACT, (
+            "event %s lists no contract without a team, so no draw contract "
+            "exists to price" % (slug_ev,)))
+    if len(slugs) > 1:
+        return _refuse(out, R_DRAW_CONTRACT_AMBIGUOUS, (
+            "event %s lists %d contracts without a team (%s); which one pays "
+            "on the draw is not shown" % (slug_ev, len(slugs),
+                                          ", ".join(slugs[:6]))))
+    slug = slugs[0]
+    rows = [r for r in teamless if str(r.get("market_slug") or "") == slug]
+    intents = sorted(str(r.get("intent") or "") for r in rows)
+    questions = {" ".join(str(r.get("question") or "").lower().split())
+                 for r in rows}
+    why_not = []
+    if not slug.lower().endswith("-%s-draw" % slug_ev.lower()):
+        why_not.append("identifier %r is not <prefix>-%s-draw" % (slug,
+                                                                  slug_ev))
+    if intents != sorted([LONG, SHORT]):
+        why_not.append("sides %s are not one LONG and one SHORT" % intents)
+    if not questions or not all(re.search(r"\bdraw\b", q) for q in questions):
+        why_not.append("its own question does not ask about a draw (%s)"
+                       % sorted(questions)[:2])
+    if why_not:
+        out["draw_contract_evidence"] = {"market_slug": slug,
+                                         "intents": intents,
+                                         "questions": sorted(questions)[:2]}
+        return _refuse(out, R_DRAW_CONTRACT_NOT_ESTABLISHED,
+                       "event %s: %s" % (slug_ev, "; ".join(why_not)))
+    row = next(r for r in rows if str(r.get("intent") or "") == LONG)
+    period = vmap.period_of_venue_slug(
+        slug, side="draw", event_slug=row.get("event_slug"),
+        kind=row.get("kind"), event_title=row.get("event_title"),
+        sports_market_type_v2=None,
+        sports_market_type=row.get("sports_type"),
+        type_metadata_available=bool(row.get("sports_type")))
+    out["period_evidence"] = period
+    if period.get("period") != vmap.FULL_MATCH:
+        return _refuse(out, (period.get("refusals") or [None])[0]
+                       or vmap.R_PERIOD_UNKNOWN,
+                       period.get("why") or "period not established")
+    out["priced_participant"] = None
+    out.update(ok=True, us_market_slug=slug, intent=LONG,
+               row={k: (v.isoformat() if isinstance(v, _dt.datetime) else v)
+                    for k, v in row.items()},
+               why=("venue event %s (%s) starts %+.0f s from the provider; "
+                    "the draw is the team-less contract %s (its own question "
+                    "asks about a draw), bought LONG"
+                    % (slug_ev, " vs ".join(ev["participants"]),
+                       ev["offset_s"], slug)))
     return out
 
 
@@ -917,7 +1092,8 @@ def identity_from_match(match: dict, *, priced_outcome) -> dict:
         "version", "event_slug", "participants", "assignment", "orientation",
         "offset_s", "tolerance_s", "candidates", "candidate_events",
         "partial_matches", "events_in_window", "womens_competition",
-        "competition", "league_tokens", "set_aside", "why")}
+        "competition", "league_tokens", "set_aside", "why", "priced",
+        "priced_participant", "discovered_event_slug", "draw_candidates")}
     out["venue_native"]["name_evidence"] = match.get("name_evidence")
     if not match.get("ok"):
         out["refusal"] = match.get("refusal") or R_NO_EVENT
@@ -962,10 +1138,17 @@ def identity_from_match(match: dict, *, priced_outcome) -> dict:
         "the ladder that supplies acquisition cost, and nothing else. It "
         "does NOT name the payout event")
     out["payout_event"] = str(priced_outcome)
-    out["payout_event_basis"] = PAYOUT_EVENT_BASIS
+    draw = match.get("priced") == "draw"
+    out["priced_designation"] = match.get("priced") or "home"
+    out["payout_event_basis"] = (PAYOUT_EVENT_BASIS_DRAW if draw
+                                 else PAYOUT_EVENT_BASIS)
     out["probability_event"] = str(priced_outcome)
     out["payout_is_complement"] = False
     out["complement_note"] = (
+        ("payout_is_complement is false because the contract chosen is the "
+         "event's draw contract bought LONG (YES on its own question, 'end in "
+         "a draw?'): the probability's event and the payout event are the "
+         "SAME event, the draw") if draw else
         "payout_is_complement is false because the contract row was chosen "
         "for carrying the requested outcome as its own team: the "
         "probability's event and the payout event are the SAME event. A "
@@ -977,16 +1160,23 @@ def identity_from_match(match: dict, *, priced_outcome) -> dict:
 
 async def resolve_venue_native(conn, *, home, away, commence_time, family,
                                now, competition=None,
-                               league_tokens=None) -> dict:
-    """Provider fixture -> the venue's own contract for HOME, or a refusal.
+                               league_tokens=None, priced="home",
+                               draw_label="Draw", event_slug=None) -> dict:
+    """Provider fixture -> the venue's own contract for the PRICED outcome
+    ('home' by default, 'away', or 'draw' on soccer), or a refusal.
 
     One bounded read of `us_premap`, then `match_event`. Returns EXACTLY the
     keys `ext_pinnacle_loop.resolve_venue_identity` returns (plus
     `venue_native`, the match evidence, and `contract_identity_basis`), so the
-    admission path downstream is the same path. Never raises.
+    admission path downstream is the same path. The identity's
+    `priced_outcome` / `payout_event` is the provider's own name for that
+    outcome: its home or away team, or `draw_label` (the de-vigged set's draw
+    outcome name). `event_slug` restricts the match to the venue event the
+    discovery named (see `match_event`). Never raises.
     """
-    priced = home
-    out = _identity_shell(priced_outcome=priced)
+    priced_name = {"home": home, "away": away,
+                   "draw": draw_label}.get(priced, priced)
+    out = _identity_shell(priced_outcome=priced_name)
     types = FAMILY_WINNER_TYPES.get(family)
     if not types:
         out.update(refusal=R_FAMILY,
@@ -1020,8 +1210,9 @@ async def resolve_venue_native(conn, *, home, away, commence_time, family,
     try:
         match = match_event(home=home, away=away, commence_epoch=at,
                             family=family, rows=rows, competition=competition,
-                            league_tokens=league_tokens)
-        got = identity_from_match(match, priced_outcome=priced)
+                            league_tokens=league_tokens, priced=priced,
+                            event_slug=event_slug)
+        got = identity_from_match(match, priced_outcome=priced_name)
     except Exception as exc:                                   # noqa: BLE001
         # FAIL CLOSED AND SAY SO. `cycle()` never raises, and a defect here
         # must not take down every other event's decision -- nor may it map
@@ -1054,6 +1245,9 @@ def describe() -> dict:
         "nfl_teams": len(NFL_TEAMS),
         "womens_provider_competitions": sorted(WOMENS_PROVIDER_COMPETITIONS),
         "refusals": list(REFUSALS),
-        "priced_outcome": "the provider's HOME team, as on the global path",
+        "priced_outcome": ("EVERY outcome of the de-vigged set: the "
+                           "provider's home team, its away team, and the "
+                           "draw on a soccer event (P0 incident repair)"),
+        "event_level_refusals": sorted(EVENT_LEVEL_REFUSALS),
         "never_repairs": "a missing provider price (NO_PINNACLE_ON_EVENT)",
     }
