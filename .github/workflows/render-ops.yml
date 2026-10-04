@@ -662,16 +662,16 @@ jobs:
               [ -z "$SRC" ] || [ -z "$DST" ] && { echo "service lookup failed"; exit 1; }
               get "/services/$SRC/env-vars?limit=100" > /tmp/src.json
               for K in PMX_CLIENT_ID PMX_PARTICIPANT_ID PMX_KEY_ID PMX_PRIVATE_KEY_B64; do
-                V=$(jq -r --arg k "$K" '.[]? | .envVar | select(.key==$k) | .value' /tmp/src.json | head -1)
-                [ -z "$V" ] && { echo "  $K absent on workers; nothing copied"; continue; }
-                echo "::add-mask::$V"
-                F=$(printf '%s' "$V" | sha256sum | cut -c1-12)
-                CODE=$(curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X PUT \
-                       -H "Authorization: Bearer $KEY" -H "Accept: application/json" -H "Content-Type: application/json" \
-                       -d "{\"value\":$(printf '%s' "$V" | jq -Rs .)}" "$API/services/$DST/env-vars/$K")
-                D=$(get "/services/$DST/env-vars?limit=100" | jq -r --arg k "$K" '.[]? | .envVar | select(.key==$k) | .value' | head -1 | tr -d '\n' | sha256sum | cut -c1-12)
-                echo "  $K -> sportsassets-api HTTP $CODE len=${#V} sha12=$F dst_sha12=$D $([ "$F" = "$D" ] && echo MATCH || echo MISMATCH)"
-                unset V
+                jq -j --arg k "$K" '[.[]? | .envVar | select(.key==$k) | .value][0] // ""' /tmp/src.json > /tmp/v
+                [ -s /tmp/v ] || { echo "  $K absent on workers; nothing copied"; continue; }
+                while IFS= read -r l; do [ -n "$l" ] && echo "::add-mask::$l"; done < /tmp/v
+                jq -c --arg k "$K" '{value: ([.[]? | .envVar | select(.key==$k) | .value][0])}' /tmp/src.json > /tmp/body.json
+                F=$(sha256sum < /tmp/v | cut -c1-12); N=$(wc -c < /tmp/v)
+                CODE=$(curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X PUT -H "Authorization: Bearer $KEY" \
+                       -H "Accept: application/json" -H "Content-Type: application/json" -d @/tmp/body.json "$API/services/$DST/env-vars/$K")
+                D=$(get "/services/$DST/env-vars?limit=100" | jq -j --arg k "$K" '[.[]? | .envVar | select(.key==$k) | .value][0] // ""' | sha256sum | cut -c1-12)
+                echo "  $K -> sportsassets-api HTTP $CODE len=$N sha12=$F dst_sha12=$D $([ "$F" = "$D" ] && echo MATCH || echo MISMATCH)"
+                rm -f /tmp/v /tmp/body.json
               done
               echo "(an env change does not redeploy by itself: deploy the exact SHA with deploy-api-commit)"
               ;;
