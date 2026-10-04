@@ -24,6 +24,14 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
     let status = null;
     try { status = (await page.goto(HOST + path, { waitUntil: "load", timeout: 60000 }))?.status(); } catch (e) { errors.push("GOTO " + String(e).slice(0, 160)); }
     await page.waitForTimeout(12000);
+    // the floor mounts its characters one by one after the room is drawn;
+    // wait (bounded) for its own completion signal before the screenshot
+    let characters = null;
+    if (path === "/floor") {
+      characters = await page.waitForFunction(() => document.body.getAttribute("data-characters"), null, { timeout: 90000 })
+        .then((h) => h.jsonValue()).catch(() => "NOT_SIGNALLED_IN_90S");
+      await page.waitForTimeout(1500);
+    }
     const info = await page.evaluate(() => {
       const secs = [...document.querySelectorAll("section, [data-section]")].map((s) => {
         const h = s.querySelector("h1,h2,h3"); const t = (s.innerText || "").replace(/\s+/g, " ");
@@ -42,7 +50,7 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
     }).catch((e) => ({ error: String(e).slice(0, 200) }));
     const shot = `${OUT}/${label}${(path === "/" ? "_home" : path.replace(/[\/.?=]/g, "_"))}.png`;
     await page.screenshot({ path: shot, fullPage: true }).catch(() => {});
-    report.runs.push({ label, path, status, ms: Date.now() - t0, errors, apis: [...new Set(apis)].slice(0, 40), ...info });
+    report.runs.push({ label, path, status, ms: Date.now() - t0, characters, errors, apis: [...new Set(apis)].slice(0, 40), ...info });
     await ctx.close();
   }
 }
@@ -50,7 +58,7 @@ await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
-  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} SHADOW=${r.shadowLabels}`);
+  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} SHADOW=${r.shadowLabels}${r.characters ? " characters=" + r.characters : ""}`);
   for (const e of r.errors.slice(0, 6)) console.log("   err: " + e);
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));
   for (const s of (r.sections || [])) console.log(`   [${s.h}] unavailable=${s.unavailable} nan=${s.nan} chars=${s.chars} :: ${s.sample}`);
