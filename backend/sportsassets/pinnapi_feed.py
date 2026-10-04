@@ -180,6 +180,14 @@ class Quote:
     confirmed_received_ms: Optional[float] = None
     confirmed_by: Optional[str] = None
     confirmed_clock: Optional[str] = None
+    #: THE LINE OF EACH DESIGNATION, as Pinnacle states it on that price
+    #: (R30A inc-families). `line` above is the FIRST price's points only --
+    #: on a spread that is the home OR the away handicap, whichever the
+    #: provider listed first, and the two have opposite signs. A line market
+    #: is matched to a venue contract by the identical line AND side, so the
+    #: line is kept per designation ({'home': -3.5, 'away': 3.5},
+    #: {'over': 47.5, 'under': 47.5}); empty on a moneyline.
+    points: dict = field(default_factory=dict)
 
     def decimal_prices(self) -> dict:
         return {d: american_to_decimal(p) for d, p in self.prices.items()}
@@ -308,12 +316,14 @@ def extract_markets(rec: dict) -> Optional[list]:
         if not isinstance(m, dict) or not m.get("type"):
             return None
         prices = m.get("prices")
-        pr, line = {}, None
+        pr, line, pts = {}, None, {}
         if isinstance(prices, list):
             for p in prices:
                 if not isinstance(p, dict) or "designation" not in p:
                     return None
                 pr[str(p["designation"])] = _num(p.get("price"))
+                if p.get("points") is not None:
+                    pts[str(p["designation"])] = _num(p.get("points"))
                 if line is None and p.get("points") is not None:
                     line = _num(p.get("points"))
         elif prices is not None:
@@ -325,11 +335,24 @@ def extract_markets(rec: dict) -> Optional[list]:
                                                else line)
         out.append((str(key), {
             "market_type": str(m.get("type")), "period": period,
-            "side": side, "line": line, "prices": pr,
+            "side": side, "line": line, "prices": pr, "points": pts,
             "open": (m.get("status") in (None, "open")),
             "alternate": m.get("isAlternate"),
             "market_version": _num(m.get("version"))}))
     return out
+
+
+def _moved(prev: "Quote", f: dict) -> bool:
+    """A CHANGE is a new price OR a new line under the same market key.
+
+    Pinnacle keys a spread or total by its line ("s;0;s;-3.5"), so a moved
+    line is usually a new key -- but a market whose key does not carry the
+    line (a team total keyed per side, the keyless fallback) can move its
+    points while keeping its prices. Reading only the prices would carry the
+    OLD line's change time onto the new line, and a line that has just moved
+    would look as old as the line it replaced."""
+    return (prev.prices != f["prices"]
+            or dict(prev.points or {}) != dict(f.get("points") or {}))
 
 
 def closed_periods(rec: dict) -> set:
@@ -672,7 +695,7 @@ class FeedCache:
             if not f["open"] or (f["period"] or 0) in closed:
                 continue
             prev = old.get((eid, key))
-            changed = prev is None or prev.prices != f["prices"]
+            changed = prev is None or _moved(prev, f)
             if as_change and changed and prev is not None:
                 change = frame_ts
             elif as_change and prev is None:
@@ -717,7 +740,7 @@ class FeedCache:
                 self.counts["markets_closed"] += 1
                 continue
             prev = self.quotes.get(k)
-            changed = prev is None or prev.prices != f["prices"]
+            changed = prev is None or _moved(prev, f)
             change = frame_ts if changed else prev.source_change_ms
             if changed:
                 self.counts["price_changes"] += 1
@@ -751,6 +774,7 @@ class FeedCache:
             epoch=epoch, source_change_ms=change, frame_ts_ms=frame_ts,
             received_ms=rx, open=True, alternate=f["alternate"],
             market_version=f.get("market_version"),
+            points=dict(f.get("points") or {}),
             first_observed_ms=(rx if first_observed is None
                                else first_observed))
         return q

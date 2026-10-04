@@ -193,8 +193,23 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             "one outcome is the other two together, never the opposing "
             "team alone"),
         "raw_odds": val.get("raw_odds"),
-        "observed_at": val.get("observed_at"),
-        "received_at": val.get("received_at"),
+        # THE PROVIDER'S OWN INSTANT, EVEN WHEN THE DE-VIG REFUSED FIRST
+        # (P0 incident, migration 261). `devig.valuation` sets observed_at
+        # only after its support, book, outcome-set and odds checks, so a row
+        # it refused earlier (football's MARKET_NOT_IN_SUPPORTED_SET) carried
+        # NULL -- and the one-per-observation index coalesced every such row
+        # of a contract onto one key for ever: NFL valuations stopped at
+        # 13:28Z on 2026-10-04, before the kickoffs. The quote's own provider
+        # stamp is the same fact the de-vig would have recorded; it is taken
+        # here when the de-vig did not reach it, and stays None only when the
+        # quote carries no readable stamp (the database then labels our own
+        # receipt or recording time instead, never NULL).
+        "observed_at": (val.get("observed_at")
+                        if val.get("observed_at") is not None
+                        else _provider_instant(quote.get("observed_at"))),
+        "received_at": (val.get("received_at")
+                        if val.get("received_at") is not None
+                        else _provider_instant(quote.get("received_at"))),
         "age_s": val.get("age_s"),
         "mapped_outcome": val.get("mapped_outcome"),
         "order_submitted": False,
@@ -360,6 +375,19 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
                   if rec["admissible"] else
                   ("; ".join(rec["refusals"]) or "no reason recorded"))
     return _with_purpose(rec, record_purpose, calibration_only_evidence)
+
+
+def _provider_instant(value):
+    """A quote's own stamp as epoch seconds (the de-vig's parser), or None
+    when there is none or it does not read as a finite instant. Pure."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(devig._epoch(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if out == out and out not in (float("inf"),
+                                             float("-inf")) else None
 
 
 def _with_purpose(rec: dict, purpose, evidence) -> dict:
@@ -792,6 +820,16 @@ STAGES = (
         "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED",
         "VENUE_NATIVE_MATCH_RAISED",
         "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM",
+        # EVERY OUTCOME OF THE EVENT (P0 incident repair, 2026-10-04): the
+        # away and draw contracts are resolved too, and each has its own
+        # identity refusals (bettor_venue_native_identity).
+        "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION",
+        "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME",
+        "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND",
+        "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS",
+        "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED",
+        "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW",
+        "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE",
         "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
         "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
         "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN",
@@ -978,6 +1016,18 @@ EVALUABILITY_OF = {
     # cand22: a college school contained in another (Ohio / Ohio State) with
     # the venue nickname absent from the provider name -- refused, not mapped.
     "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM": COULD_NOT_EVALUATE,
+    # EVERY OUTCOME (P0 incident repair): the away / draw contract could not
+    # be shown -- an unknown designation, no draw in a two-way family, no or
+    # two team-less contracts, a draw contract whose own identifier, sides or
+    # question do not establish the draw, or the discovered venue event
+    # missing from the window. Each is a comparison not made, not a verdict.
+    "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW": COULD_NOT_EVALUATE,
+    "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE": COULD_NOT_EVALUATE,
 
     # ── EXTERNAL DEPENDENCY: the missing input is theirs ──────────────
     # THE PROVIDER DOES NOT QUOTE IT (yet). Measured 2026-09-29: UNL fixtures

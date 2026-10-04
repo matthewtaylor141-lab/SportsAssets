@@ -1448,16 +1448,39 @@ R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
 #: global match ignores dates (VENUE_MAPPING_AMBIGUOUS, the MLB series case),
 #: or only line markets (VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE). Each
 #: is a statement about the GLOBAL catalogue, and `bettor_venue_native_identity`
-#: asks the venue's own. Every code must be one of these: a CLOSED or SEGMENT
-#: code beside them says the fixture was found and was unusable, which the
-#: venue-native path has no business overriding. And identity, only when the
-#: US catalogue crossing found NOTHING (NO_VENUE_NATIVE_CONTRACT_IN_PREMAP) --
-#: never a realism, intent or period refusal, which are findings about a
-#: contract that was found.
+#: asks the venue's own. And identity, only when the US catalogue crossing
+#: found NOTHING (NO_VENUE_NATIVE_CONTRACT_IN_PREMAP) -- never a realism,
+#: intent or period refusal, which are findings about a contract that was
+#: found.
+#:
+#: ── VENUE-NATIVE FIRST: A GLOBAL SEGMENT OR CLOSED ROW NO LONGER BLOCKS ──
+#:
+#: THIS USED TO EXCLUDE CLOSED AND SEGMENT, on the reasoning that such a code
+#: "says the fixture was found and was unusable". The production identity
+#: receipt (P0 incident, 2026-10-04) showed what it actually says: the GLOBAL
+#: catalogue is matched on names alone and is date-blind, so its segment or
+#: closed row is an inning market, a half, or YESTERDAY's series game -- a
+#: different global row, not a finding about the venue's own contract for
+#: this fixture. 5 events in 72 h (MLB, Serie B, UNL) and ~21 h of one MLB
+#: playoff game's scheduled coverage were lost to it. The venue's own
+#: catalogue is the counterparty, and `bettor_venue_native_identity`
+#: re-applies its own gates to what it finds -- the FULL_MATCH period rule,
+#: realism on every row of the event, the re-seen window that drops closed
+#: contracts, both teams one-to-one inside the start tolerance -- so nothing
+#: the global code was guarding against can pass through it. The global
+#: codes stay on the event as context (`global_refusal_replaced`).
 #:
 #: NO_PINNACLE_ON_EVENT IS NOT HERE AND CANNOT BE: it is refused before the
 #: mapping is attempted. No catalogue can repair a missing provider price.
-VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE)
+#:
+#: GLOBAL_CATALOGUE_NOT_CONSULTED is the PinnAPI-native discovery's own: its
+#: event was matched to ONE venue event by exact structured names
+#: (pinnapi_discovery), so the date-blind global search is not run at all and
+#: the venue-native resolver is asked for that event directly.
+R_GLOBAL_NOT_CONSULTED = "GLOBAL_CATALOGUE_NOT_CONSULTED_FOR_A_PINNAPI_NATIVE_EVENT"
+VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE,
+                            vmap.R_SEGMENT, vmap.R_CLOSED,
+                            R_GLOBAL_NOT_CONSULTED)
 VENUE_NATIVE_MAY_REPLACE_IDENTITY = (R_NO_PREMAP,)
 
 
@@ -2000,6 +2023,221 @@ def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
         owner.cache if owner else None, quote, at=at,
         max_age_s=PINNACLE_MAX_AGE_S,
         runtime_id=feed._STATE.get("runtime_id"))
+
+
+#: The marker `pinnapi_read_refusal` hands `pinnapi_primary.select` as a
+#: fallback, so the WS refusal reason select would otherwise discard comes back.
+_PINNAPI_REFUSAL_PROBE = "__pinnapi_read_refusal_probe__"
+
+
+def pinnapi_read_refusal(event: dict, *, family: str, at: float) -> str:
+    """WHY THE LEASED WS CACHE GAVE NO PRICE FOR THIS EVENT, by name.
+
+    `primary.select` returns None when the WS read refuses and there is no
+    fallback, and the reason is lost -- the event then reads as if Pinnacle had
+    no price at all. A PinnAPI-native event was DISCOVERED in that very feed,
+    so "no Pinnacle" is never true of it: its refusal is the WS read's own
+    (FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE, FEED_QUOTE_OLDER_THAN_LIMIT,
+    PINNAPI_PRIMARY_NO_EXACT_FIXTURE, ...). This asks the same select with a
+    marker fallback and reads the reason off it. Read-only; never raises."""
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_primary as primary
+        owner = feed._STATE.get("owner")
+        got = primary.select(
+            owner.cache if owner else None, event,
+            {_PINNAPI_REFUSAL_PROBE: True}, family=family,
+            sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
+            runtime_id=feed._STATE.get("runtime_id"))
+    except Exception as exc:                                   # noqa: BLE001
+        return "PINNAPI_READ_RAISED:%s" % type(exc).__name__
+    if isinstance(got, dict) and got.get(_PINNAPI_REFUSAL_PROBE):
+        return str((got.get("reference_input") or {}).get("fallback_reason")
+                   or "PINNAPI_READ_REFUSED_WITHOUT_A_REASON")
+    return "PINNAPI_READ_SUCCEEDED_ON_RECHECK"
+
+
+# ── EVERY OUTCOME OF THE EVENT (P0 incident repair, 2026-10-04) ─────────
+#
+# THE DEFECT. The cycle priced exactly one outcome per provider event, the
+# provider's HOME team: `resolve_venue_identity` was called with
+# `priced_outcome=quote['home']`, `resolve_venue_native` hard-coded
+# `priced = home`, and the valuation carried `selection=quote['home']`. The
+# away contract of every mapped event and the soccer draw contract were never
+# resolved, valued or decided -- 57 opportunities a day from the mapped events
+# instead of ~140 (31 two-way events x 2 + 26 soccer events x 3, production
+# funnel receipt 2026-10-04), with no threshold anywhere involved.
+#
+# NOW every outcome of the complete de-vigged set is asked, one at a time, in
+# this order: home, away, and the draw on a three-way (soccer) book. Each gets
+# its own venue contract (through the SAME resolvers), its own book read, its
+# own valuation row and its own paper decision. The probability of each is the
+# de-vig's own number for that outcome -- the set is normalised once over all
+# outcomes, so p(away) is never 1 - p(home) on a three-way book.
+OUTCOME_DESIGNATIONS_THREE_WAY = ("home", "away", "draw")
+OUTCOME_DESIGNATIONS_TWO_WAY = ("home", "away")
+#: The family whose full-time result is three-way (draw is its own outcome,
+#: bettor_pinnacle_devig.SUPPORTED[('soccer', 'h2h')] == 3).
+THREE_WAY_FAMILIES = frozenset(("soccer",))
+R_PRICED_OUTCOME_ABSENT = "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE"
+
+
+def outcome_designations(family) -> tuple:
+    """The outcomes one event is priced on, in the order they are asked."""
+    return (OUTCOME_DESIGNATIONS_THREE_WAY if family in THREE_WAY_FAMILIES
+            else OUTCOME_DESIGNATIONS_TWO_WAY)
+
+
+def outcome_items(events, family):
+    """(event index, designation) for every outcome of every event, events in
+    their given order and outcomes in `outcome_designations` order. Lazy, so a
+    re-fetch that replaces later events in the list is seen."""
+    for i in range(len(events)):
+        for d in outcome_designations(family):
+            yield i, d
+
+
+def priced_outcome_name(quote: dict, designation: str):
+    """The provider quote's OWN name for one designation -- its home team, its
+    away team, or the one outcome of the priced set that is the draw -- or
+    None when the quote does not carry it. Never a guess: the draw is the
+    single price key whose tokens are exactly {'draw'}."""
+    q = quote or {}
+    if designation == "home":
+        return q.get("home")
+    if designation == "away":
+        return q.get("away")
+    if designation == "draw":
+        hits = [n for n in (q.get("prices") or {})
+                if _team_tokens(n)[0] == frozenset(("draw",))]
+        return hits[0] if len(hits) == 1 else None
+    return None
+
+
+def native_identity_of(event) -> dict | None:
+    """The PinnAPI-native discovery's identity carried on an event dict
+    (`pinnapi_discovery`): the venue event slug it matched, the venue league
+    token(s) confirmed for its provider league, the provider sport key the
+    fixture-scope source is keyed on. None for a discovery-provider event."""
+    n = event.get("pinnapi_native") if isinstance(event, dict) else None
+    return n if isinstance(n, dict) else None
+
+
+def league_tokens_for(sport_key, event) -> tuple:
+    """The venue league token(s) the venue-native search is confined to: the
+    discovery's confirmed token for a PinnAPI-native event, else the provider
+    competition's own (`venue_league_tokens`)."""
+    n = native_identity_of(event)
+    if n is not None:
+        return tuple(str(t) for t in (n.get("venue_league_tokens") or ()))
+    return venue_league_tokens(sport_key)
+
+
+# ── ONE FIXTURE, ONE EVENT KEY, WHICHEVER DISCOVERY FOUND IT ─────────────
+#
+# A venue-native valuation has no global condition, so the paper ledger counts
+# its FIXTURE as "event:<event_key>" (agents.derek_policy.fixture_of) -- and
+# that key is what the fixture rails compare: exclusive fixture ownership
+# across strategies, one live entry per fixture, exploration's fixture lock and
+# its sampling draw. Before the P0 repair every event key came from the one
+# discovery provider. Now a fixture can be discovered by the-odds-api (its
+# event id) OR by the PinnAPI feed (`pinnapi:<matchup id>`), and the same venue
+# event could reach the ledger under two keys -- two "fixtures" -- letting a
+# second strategy hold another contract of a fixture a first already holds.
+# That would loosen a rail, which this repair must never do.
+#
+# So the event key of a venue-native valuation is the FIRST key already
+# recorded for any contract of the same VENUE event (us_premap.event_slug) in
+# this experiment; only a venue event never valued before takes the provider's
+# own id. Read through the one-per-observation index's leading columns
+# (experiment, '' condition, slug), so it is an index lookup. The answer is
+# then FIXED in `venue_fixture_event_keys` (migration 261, one row per venue
+# event, insert-once): two writers racing on a never-valued event -- the
+# scheduled cycle and a reactive worker -- both read back the one row that
+# won, so they can never record two keys for one fixture.
+FIXTURE_KEY_READ_SQL = """
+    SELECT event_key, basis FROM venue_fixture_event_keys
+     WHERE venue_event_slug = $1
+"""
+FIXTURE_KEY_INSERT_SQL = """
+    INSERT INTO venue_fixture_event_keys
+        (venue_event_slug, event_key, basis, first_provider_event_id)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (venue_event_slug) DO NOTHING
+"""
+STICKY_EVENT_KEY_SQL = """
+    SELECT v.event_key
+      FROM external_valuations v
+     WHERE v.experiment_id = $1
+       AND coalesce(v.condition_id, '') = ''
+       AND coalesce(v.us_market_slug, '') = ANY($2::text[])
+       AND v.event_key IS NOT NULL
+     ORDER BY v.decided_at ASC, v.id ASC
+     LIMIT 1
+"""
+VENUE_EVENT_SLUGS_SQL = """
+    SELECT DISTINCT market_slug FROM us_premap
+     WHERE event_slug = $1 AND market_slug IS NOT NULL
+     LIMIT 64
+"""
+
+
+async def sticky_event_key(conn, *, venue_event_slug, proposed, cache=None
+                           ) -> dict:
+    """{'event_key', 'basis', 'proposed'} for a venue-native valuation: the
+    first event key recorded for the venue event, else `proposed`. A failed
+    read keeps `proposed` and says so. Never raises."""
+    out = {"event_key": proposed, "proposed": proposed,
+           "venue_event_slug": venue_event_slug,
+           "basis": "PROVIDER_EVENT_ID_FIRST_VALUATION_OF_THIS_VENUE_EVENT"}
+    if not venue_event_slug:
+        out["basis"] = "PROVIDER_EVENT_ID_NO_VENUE_EVENT_KEY"
+        return out
+    if cache is not None and venue_event_slug in cache:
+        out.update(cache[venue_event_slug])
+        return out
+    slug = str(venue_event_slug)
+    try:
+        fixed = await conn.fetchrow(FIXTURE_KEY_READ_SQL, slug)
+    except Exception:                                          # noqa: BLE001
+        # migration 261 absent: the history read below still applies, only
+        # the insert-once fixing (the race guard) is unavailable
+        fixed, table = None, False
+    else:
+        table = True
+    if fixed is None:
+        try:
+            slugs = [r["market_slug"] for r in await conn.fetch(
+                VENUE_EVENT_SLUGS_SQL, slug)]
+            got = (await conn.fetchval(STICKY_EVENT_KEY_SQL,
+                                       ext.EXPERIMENT_ID, slugs)
+                   if slugs else None)
+        except Exception as exc:                               # noqa: BLE001
+            out["basis"] = "PROVIDER_EVENT_ID_STICKY_READ_FAILED:%s" % (
+                type(exc).__name__)
+            return out
+        if got is not None and str(got) != str(proposed):
+            out.update(event_key=str(got),
+                       basis="FIRST_EVENT_KEY_RECORDED_FOR_THIS_VENUE_EVENT")
+        elif got is not None:
+            out["basis"] = "SAME_AS_THE_FIRST_EVENT_KEY_RECORDED"
+        if table and out["event_key"] is not None:
+            try:
+                await conn.execute(FIXTURE_KEY_INSERT_SQL, slug,
+                                   str(out["event_key"]), out["basis"],
+                                   None if proposed is None else str(proposed))
+                fixed = await conn.fetchrow(FIXTURE_KEY_READ_SQL, slug)
+            except Exception as exc:                           # noqa: BLE001
+                out["fixing"] = "NOT_FIXED:%s" % type(exc).__name__
+    if fixed is not None:
+        out["event_key"] = fixed["event_key"]
+        out["basis"] = ("FIXED_FOR_THIS_VENUE_EVENT:%s" % fixed["basis"]
+                        if str(fixed["event_key"]) != str(proposed)
+                        else fixed["basis"])
+        out["fixed_in"] = "venue_fixture_event_keys"
+    if cache is not None:
+        cache[venue_event_slug] = {k: out[k] for k in ("event_key", "basis")}
+    return out
 
 
 # ── the venue side, read in the same cycle ──────────────────────────
