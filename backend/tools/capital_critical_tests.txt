@@ -803,3 +803,10 @@ tests/test_lost_opportunity_ledger.py
 # follows its real control row; no control row is changed.
 tests/test_paper_sleeves.py
 tests/test_small_live_truth.py
+# C28 RESTING (P0): a RESTING sell / hedge / order is NOT protection. One
+# shared pure mapping (sportsassets/order_state_truth.py) of every raw order
+# state to PROPOSED / SUBMITTED / RESTING / PARTIAL / FILLED / CANCELLED /
+# REJECTED / EXPIRED (+ explicit UNKNOWN, never FILLED); only FILLED quantity
+# counts as protection in every reader; the conditional floor is IF_FILLED and
+# never the realized floor; Kalshi NOT_CONNECTED is never inferred.
+tests/test_resting_is_not_protection.py

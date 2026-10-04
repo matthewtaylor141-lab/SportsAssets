@@ -299,12 +299,13 @@
     }
     return '<div class="sl-col ' + (paper ? 'sl-paper' : 'sl-actual') + '">' + head + '<div class="facts">' +
       fact(paper ? 'Open qty' : 'Held qty', qty(paper ? p.open_qty : p.held_qty)) +
-      fact('Standing protection (resting, not filled)', qty(p.standing_resting_qty) +
+      (p.position_qty !== undefined ? fact('Position qty (held + sold by filled protection)', qty(p.position_qty)) : '') +
+      fact('Standing orders (resting, NOT protection until filled)', qty(p.standing_resting_qty) +
         (num(p.standing_resting_orders) !== null ? '<span class="sl-why">' +
           esc(p.standing_resting_orders) + ' resting order(s)</span>' : '')) +
       fact('Filled protection', qty(p.filled_protection_qty)) +
       fact('Unprotected qty', qty(p.unprotected_qty)) +
-      (paper ? '' : fact('Protection awaiting submission', qty(p.pending_submission_qty))) +
+      (paper && (p.pending_submission_qty === undefined || p.pending_submission_qty === null) ? '' : fact('Protective orders not yet submitted (NOT protection)', qty(p.pending_submission_qty))) +
       '</div></div>';
   }
 
@@ -345,7 +346,8 @@
     function prot(p) {
       p = p || {};
       if (p.why_unavailable) { return NA; }
-      return 'standing ' + qty(p.standing_resting_qty) + ' · filled ' + qty(p.filled_protection_qty);
+      return 'filled ' + qty(p.filled_protection_qty) + ' · unprotected ' + qty(p.unprotected_qty) +
+        ' · standing ' + qty(p.standing_resting_qty) + ' <span class="sl-why">(standing is not protection)</span>';
     }
     return '<div class="sl-ops facts three">' +
       fact('Xavier recommendation', '<span class="sl-tag">paper</span> ' + txt(xp.latest_recommendation) +
@@ -546,7 +548,7 @@
         ? pill(m.probability_evidence_state, evidenceTone(m.probability_evidence_state)) +
           why(m.probability_limitation) : NA) +
       fact('Alternatives', has(m.alternatives) ? '<pre class="mono">' + json(m.alternatives) + '</pre>' : NA) +
-      fact('Standing protection (resting)', 'paper ' + qty(sp.paper_resting_qty) +
+      fact('Standing orders (resting, NOT protection until filled)', 'paper ' + qty(sp.paper_resting_qty) +
            ' · actual ' + qty(sp.actual_resting_qty)) +
       fact('Filled protection', 'paper ' + qty(fp.paper_filled_qty) +
            ' · actual ' + qty(fp.actual_filled_qty)) +

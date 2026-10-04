@@ -15,6 +15,8 @@ import datetime as dt
 import json
 from decimal import Decimal
 
+from . import order_state_truth as OST
+
 TRAINING_HINTS = ("EXPLOR", "TRAIN")
 
 
@@ -738,34 +740,45 @@ async def _management(conn, rows: list) -> dict:
             out["reviews"][v["group_id"]] = dict(v)
         # PROTECTION, read from the orders and fills themselves: a resting
         # protective order is NOT filled protection, so the two are separate.
+        # The raw states of each bucket come from the ONE shared mapping
+        # (order_state_truth): standing = RESTING / PARTIAL (a requested
+        # cancel can still fill), pending = PROPOSED / SUBMITTED / UNKNOWN,
+        # and only a fill-bearing state's own filled quantity is filled.
         for g in await conn.fetch(
                 """SELECT g AS group_id,
                           (SELECT coalesce(sum(o.qty - o.filled_qty), 0) FROM paper_orders o
                             WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
-                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
-                            AS resting,
+                              AND o.state = ANY($2::text[])) AS resting,
                           (SELECT count(*) FROM paper_orders o
                             WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
-                              AND o.state IN ('PENDING_SIMULATION','RESTING','PARTIALLY_FILLED'))
-                            AS resting_orders,
+                              AND o.state = ANY($2::text[])) AS resting_orders,
+                          (SELECT coalesce(sum(o.qty - o.filled_qty), 0) FROM paper_orders o
+                            WHERE o.group_id = g AND o.role = 'STANDING_PROTECTION'
+                              AND o.state = ANY($3::text[])) AS pending,
                           (SELECT coalesce(sum(f.qty), 0) FROM paper_fills f
                             WHERE f.group_id = g AND f.role = 'STANDING_PROTECTION') AS filled
-                     FROM unnest($1::text[]) AS g""", groups):
+                     FROM unnest($1::text[]) AS g""", groups,
+                OST.raw_states(OST.SRC_PAPER, OST.STANDING_STATES),
+                OST.raw_states(OST.SRC_PAPER, OST.PENDING_STATES)):
             out["paper_protection"][g["group_id"]] = dict(g)
         for g in await conn.fetch(
                 """SELECT g AS group_id,
                           (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting,
+                              AND m.state = ANY($2::text[])) AS resting,
                           (SELECT count(*) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('OPEN','PARTIALLY_FILLED')) AS resting_orders,
-                          (SELECT coalesce(sum(m.live_qty), 0) FROM execmirror_orders m
+                              AND m.state = ANY($2::text[])) AS resting_orders,
+                          (SELECT coalesce(sum(m.live_qty - m.cum_qty), 0) FROM execmirror_orders m
                             WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
-                              AND m.state IN ('PLANNED','SUBMITTING','UNKNOWN')) AS pending,
+                              AND m.state = ANY($3::text[])) AS pending,
                           (SELECT coalesce(sum(m.cum_qty), 0) FROM execmirror_orders m
-                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION') AS filled
-                     FROM unnest($1::text[]) AS g""", groups):
+                            WHERE m.group_id = g AND m.role = 'STANDING_PROTECTION'
+                              AND m.state = ANY($4::text[])) AS filled
+                     FROM unnest($1::text[]) AS g""", groups,
+                OST.raw_states(OST.SRC_MIRROR, OST.STANDING_STATES),
+                OST.raw_states(OST.SRC_MIRROR, OST.PENDING_STATES),
+                OST.raw_states(OST.SRC_MIRROR, OST.FILL_BEARING_STATES)):
             out["live_protection"][g["group_id"]] = dict(g)
         # ACTUAL inventory and cash, from venue fills only
         fills_by_group: dict = {}
@@ -939,7 +952,23 @@ RECONCILIATION_MEANING = {
 }
 PROTECTION_RULE = ("a resting protective order is NOT filled protection: the standing "
                    "(resting) quantity and the filled protection quantity are shown "
-                   "separately and never added together")
+                   "separately and never added together. " + OST.RULE + ". "
+                   + OST.POSITION_BASIS)
+
+
+def protection_quantities(*, held, resting, filled, pending=None) -> dict:
+    """THE PROTECTION LEDGER OF ONE BOOK'S GROUP, from the aggregates. A
+    standing protective SALE of the held side has already taken its FILLED
+    quantity out of the holding, so the position it protects is held + filled
+    and the unprotected quantity is that minus the filled protection -- the
+    RESTING quantity never reduces it. Pure."""
+    h, r, f = _d(held), _d(resting), _d(filled)
+    position = h + f if h > 0 or f > 0 else Decimal(0)
+    return {"position_qty": _f(position),
+            "standing_resting_qty": _f(r),
+            "filled_protection_qty": _f(f),
+            "pending_submission_qty": None if pending is None else _f(_d(pending)),
+            "unprotected_qty": _f(max(Decimal(0), position - f))}
 
 
 def _evidence_state(docs) -> tuple:
@@ -993,33 +1022,43 @@ def _protection(g, mg) -> dict:
     lp = mg["live_protection"].get(g)
     if pp is not None and gp.get("fills"):
         open_q = _d(gp.get("open_qty"))
+        q = protection_quantities(held=open_q, resting=pp["resting"],
+                                  filled=pp["filled"], pending=pp.get("pending"))
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": _f(open_q),
-                 "standing_resting_qty": _f(pp["resting"]),
+                 "position_qty": q["position_qty"],
+                 "standing_resting_qty": q["standing_resting_qty"],
                  "standing_resting_orders": pp["resting_orders"],
-                 "filled_protection_qty": _f(pp["filled"]),
-                 "unprotected_qty": _f(open_q - _d(pp["resting"])) if open_q > 0 else _f(0),
+                 "pending_submission_qty": q["pending_submission_qty"],
+                 "filled_protection_qty": q["filled_protection_qty"],
+                 "unprotected_qty": q["unprotected_qty"],
                  "source": ("paper_orders (role STANDING_PROTECTION, still resting) / "
                             "paper_fills (role STANDING_PROTECTION)"),
                  "why_unavailable": None}
     else:
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": None,
+                 "position_qty": None, "pending_submission_qty": None,
                  "standing_resting_qty": None, "standing_resting_orders": None,
                  "filled_protection_qty": None, "unprotected_qty": None, "source": None,
                  "why_unavailable": ("no simulated fill in this group: there is no paper "
                                      "position to protect")}
     if lp is not None and gl.get("live_bought"):
         held = _d(gl["live_held"])
+        q = protection_quantities(held=held, resting=lp["resting"],
+                                  filled=lp["filled"], pending=lp["pending"])
         actual = {"label": "ACTUAL POSITION", "held_qty": _f(held),
-                  "standing_resting_qty": _f(lp["resting"]),
+                  "position_qty": q["position_qty"],
+                  "standing_resting_qty": q["standing_resting_qty"],
                   "standing_resting_orders": lp["resting_orders"],
-                  "pending_submission_qty": _f(lp["pending"]),
-                  "filled_protection_qty": _f(lp["filled"]),
-                  "unprotected_qty": _f(held - _d(lp["resting"])) if held > 0 else _f(0),
+                  "pending_submission_qty": q["pending_submission_qty"],
+                  "filled_protection_qty": q["filled_protection_qty"],
+                  "unprotected_qty": q["unprotected_qty"],
                   "source": ("execmirror_orders (role STANDING_PROTECTION: resting = "
-                             "OPEN / PARTIALLY_FILLED remainder; filled = venue cum qty)"),
+                             "OPEN / PARTIALLY_FILLED / CANCEL_REQUESTED remainder; "
+                             "filled = venue cum qty)"),
                   "why_unavailable": None}
     else:
         actual = {"label": "ACTUAL POSITION", "held_qty": None,
+                  "position_qty": None,
                   "standing_resting_qty": None, "standing_resting_orders": None,
                   "pending_submission_qty": None, "filled_protection_qty": None,
                   "unprotected_qty": None, "source": None,

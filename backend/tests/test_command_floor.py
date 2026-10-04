@@ -240,7 +240,15 @@ async def test_fixture_rows_drive_every_desk_state():
         assert x["state"] == "STALE" and x["heartbeat"]["age_s"] > 4000
         labels = [m["label"] for m in x["monitor"]]
         assert "Managed positions · PAPER" in labels
-        assert "Managed positions · ACTUAL" in labels   # never summed
+        # never summed: ACTUAL is venue by venue, each venue's connection
+        # read from its own control row (C28 venue independence)
+        assert "Managed positions · ACTUAL · POLYMARKET US" in labels
+        assert "Managed positions · ACTUAL · KALSHI" in labels
+        assert "Managed positions · ACTUAL" not in labels
+        mon = {m["label"]: m for m in x["monitor"]}
+        k = mon["Managed positions · ACTUAL · KALSHI"]
+        if k["value"] is None:
+            assert "NOT_CONNECTED" in (k["why"] or "") or k["why"]
 
         al = by["CHIEF_ALLOCATOR"]
         assert al["state"] == "IDLE", al["state_detail"]

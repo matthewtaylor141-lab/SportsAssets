@@ -431,9 +431,14 @@ async def test_the_operating_view_on_one_complete_chain():
         assert pr["paper"]["standing_resting_qty"] == pytest.approx(1702)
         assert pr["paper"]["standing_resting_orders"] == 1
         assert pr["paper"]["filled_protection_qty"] == pytest.approx(1000)
-        assert pr["paper"]["unprotected_qty"] == pytest.approx(0)
+        # C28 P0: the 1,702 RESTING never reduce the unprotected quantity --
+        # the position protected is 1,702 held + 1,000 already sold by the
+        # filled protective sale; only the 1,000 FILLED are protection
+        assert pr["paper"]["position_qty"] == pytest.approx(2702)
+        assert pr["paper"]["unprotected_qty"] == pytest.approx(1702)
         assert pr["actual"]["held_qty"] == pytest.approx(3)
         assert pr["actual"]["standing_resting_qty"] == pytest.approx(3)
+        assert pr["actual"]["unprotected_qty"] == pytest.approx(3)
         assert pr["actual"]["filled_protection_qty"] == 0.0
         assert pr["actual"]["pending_submission_qty"] == 0.0
         assert "NOT filled protection" in pr["rule"]
@@ -481,6 +486,7 @@ async def test_the_operating_view_on_one_complete_chain():
         pr2 = r2["management"]["protection"]["actual"]
         assert pr2["standing_resting_qty"] == 0.0 and pr2["filled_protection_qty"] == 3.0
         assert pr2["held_qty"] == 0.0
+        assert pr2["position_qty"] == 3.0 and pr2["unprotected_qty"] == 0.0
         a2 = r2["actual"]
         assert a2["group_pnl_kind"] == "REALIZED"
         assert a2["group_pnl_usd"] == pytest.approx(-1.68 - 0.06 + 1.80 - 0.03)

@@ -140,7 +140,10 @@ def test_actual_and_paper_are_separate_rooms_never_summed():
     # one real contract held, at 1:1000; nothing of the paper book in it
     assert [lg["holding"]["open_qty"] for lg in a["legs"]] == [1.0]
     prot = _order(a, "mirror_fx_prot")
+    # a requested-but-unconfirmed cancel can still fill: its own canonical
+    # state CANCEL_PENDING (order_state_truth, the owner's 9-state list)
     assert prot["state"] == "CANCEL_PENDING"
+    assert prot["sub_state"] is None
     assert prot["raw_state"] == "CANCEL_REQUESTED"
     assert prot["if_it_fills"]["available"] is True     # it can still fill
     assert a["xavier"][0]["protection"]["filled_protection_qty"] == 0.0
@@ -320,7 +323,8 @@ def test_xavier_panel_reads_the_persisted_decision():
     assert acts[:3] == ["HOLD", "REDUCE", "EXIT"]          # ranked by value
     assert "HEDGE" in acts and "PROTECTION" in acts and "REALLOCATE" in acts
     prot = next(a for a in x["alternatives"] if a["action"] == "PROTECTION")
-    assert prot["note"] == "RESTING - NOT PROTECTION UNTIL FILLED"
+    assert prot["note"] == ("STANDING 1,000 - NOT PROTECTION UNTIL FILLED; "
+                            "FILLED PROTECTION 0")
     assert x["protection"]["filled_protection_qty"] == 0.0
     assert x["protection"]["unfilled_resting_protection_qty"] == 1000.0
     assert x["next_review_due_at"] is not None
@@ -390,5 +394,5 @@ def test_every_raw_state_of_both_machines_is_mapped():
     assert set(P.MIRROR_STATE_MAP) == set(mirror)
     from sportsassets import kalshi_orders as KO
     assert set(KO.TRANSITIONS) | set(KO.TERMINAL) == set(mirror)
-    assert P.canonical_state("NEW_STATE", table="paper_orders").startswith(
-        "UNMAPPED")
+    # an unmapped raw state is the explicit UNKNOWN, never FILLED
+    assert P.canonical_state("NEW_STATE", table="paper_orders") == "UNKNOWN"
