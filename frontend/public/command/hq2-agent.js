@@ -22,10 +22,10 @@
   var memory=document.createElement('div');memory.className='bt-agent2-memory';memory.innerHTML='<span class="unreleased">MEMORY + EXPERIENCE API</span> · The interface is ready for independent episodic memory, learned experience and voice identity. Until the backend releases evidence-backed memory records, this panel intentionally does not invent a history.';
   hero.insertAdjacentElement('afterend',memory);
   function update(a){
-    var m=B.STATES[B.stateOf(a)],st=document.getElementById('bt-agent2-state');if(st){st.style.color=m.color;st.querySelector('span').textContent=m.label+(a&&a.state_detail?' · '+a.state_detail:'');}
+    var m=B.STATES[B.stateOf(a)],st=document.getElementById('bt-agent2-state');if(st){st.style.color=m.color;st.querySelector('span').textContent=m.label+(a&&(a.work_detail||a.state_detail)?' · '+(a.work_detail||a.state_detail):'');}
     // the portrait's pose follows the same recorded state (the floor's mapping):
     // stale / not deployed / unknown settle and stay still, never animated
-    var st0=B.stateOf(a),mode=st0==='STALE'||st0==='NOT_DEPLOYED'||st0==='UNKNOWN'?'unavailable':st0==='WAITING'?'waiting':m.motion==='review'||m.motion==='work'?'reviewing':'monitoring';
+    var st0=B.stateOf(a),mode=st0==='STALE'||st0==='NOT_DEPLOYED'||st0==='UNKNOWN'?'unavailable':/^WAITING/.test(st0)?'waiting':m.motion==='review'||m.motion==='work'?'reviewing':'monitoring';
     if(document.body.getAttribute('data-cc-mode')!==mode){document.body.setAttribute('data-cc-mode',mode);window.dispatchEvent(new CustomEvent('cc:mode',{detail:{mode:mode}}));}
     var hb=document.getElementById('bt-agent2-hb');if(hb)hb.textContent=a&&a.heartbeat&&a.heartbeat.at?B.ago(a.heartbeat.at):'UNAVAILABLE';
   }

@@ -9,7 +9,7 @@ function agentName(a){
   if(a.agent==='CHIEF_ALLOCATOR'||a.slug==='allocator')return'Allie';
   return a.name||a.agent||'';
 }
-function agentStateClass(a){var s=(a&&a.state)||'';return /CHALLENG/.test(s)?'challenge':/WORK|REVIEW/.test(s)?'live':/WAIT/.test(s)?'wait':'';}
+function agentStateClass(a){var s=(a&&(a.work_state||a.state))||'';return /CHALLENG|BLOCKED/.test(s)?'challenge':/WORKING|REVIEW/.test(s)?'live':/WAIT|HANDOFF/.test(s)?'wait':'';}
 
 /* Home operating brief */
 function buildHome(){
@@ -28,12 +28,12 @@ function buildHome(){
 }
 function readFloor(){
  fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(f){
-   var as=f.agents||[],active=as.filter(function(a){return /WORK|REVIEW|CHALLENG/.test(a.state||'')}).length;
+   var as=f.agents||[],active=as.filter(function(a){return /WORKING|REVIEW|CHALLENG/.test(a.work_state||a.state||'')}).length;
    var pulse=document.getElementById('hq3-pulse');if(pulse)pulse.innerHTML=
     '<span class="hq3-chip good"><i></i>'+active+' ACTIVE DESKS</span><span class="hq3-chip"><i></i>'+as.length+' AGENTS REPORTING</span>'+
     '<span class="hq3-chip"><i></i>'+((f.edges||[]).length)+' COLLABORATIONS</span>';
    var box=document.getElementById('hq3-agents');if(box)box.innerHTML=as.map(function(a){
-     return '<div class="hq3-agent-mini '+agentStateClass(a)+'"><b>'+esc(agentName(a))+'</b><span>'+esc(String(a.state||'UNKNOWN').replace(/_/g,' '))+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span></div>';
+     return '<div class="hq3-agent-mini '+agentStateClass(a)+'"><b>'+esc(agentName(a))+'</b><span>'+esc(String(a.work_state||a.state||'UNKNOWN').replace(/_/g,' '))+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span></div>';
    }).join('');
    var sub=document.getElementById('hq3-company-sub');if(sub)sub.textContent='Live state from durable work records · '+((f.edges||[]).length)+' recent collaboration links.';
  }).catch(function(){

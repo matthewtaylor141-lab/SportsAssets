@@ -77,7 +77,7 @@ function panel(slug) {
   el.innerHTML = '<header class="fl-p-head" style="--a:' + s.accent + '"><span class="fl-mono big" data-agent="' + esc(s.slug) + '" aria-hidden="true">' + esc(s.initial) + '</span><div><span class="fl-eyebrow">' + esc(s.short) + '</span><h2>' + esc(s.name) + '</h2><p>' + esc(a ? a.title : s.role) + '</p></div>' +
     '<button type="button" class="fl-x" data-close aria-label="Close the agent summary">×</button></header>' +
     (!a ? '<p class="fl-p-empty">' + esc(state.read ? (state.read.why || 'No state recorded for this agent in the latest read.') : 'Waiting for the first floor read…') + '</p>' :
-    '<section class="fl-p-now">' + chip(a) + '<p>' + esc(a.state_detail || '') + '</p><small>' + (a.state_since ? 'since ' + esc(B.ago(a.state_since, now)) + ' · ' : '') +
+    '<section class="fl-p-now">' + chip(a) + '<p>' + esc(a.work_detail || a.state_detail || '') + '</p><small>' + (a.state_since ? 'since ' + esc(B.ago(a.state_since, now)) + ' · ' : '') +
       basisText(a.state_basis && a.state_basis[0]) + '</small></section>' +
     '<section class="fl-p-hb"><div><span class="fl-eyebrow">Heartbeat</span><strong>' + esc(a.heartbeat && a.heartbeat.at != null ? B.age(now - a.heartbeat.at).trim() + ' ago' : 'none recorded') + '</strong>' +
       '<small>' + esc(a.heartbeat && a.heartbeat.at != null ? B.clock(a.heartbeat.at) : '') + ' · stale after ' + esc(B.age(a.heartbeat && a.heartbeat.stale_after_s).trim()) + '</small><small>' + esc(a.heartbeat && a.heartbeat.source || '') + '</small></div>' +
@@ -113,7 +113,7 @@ function tip(slug, x, y) {
   const el = $('#fl-tip');
   if (!slug) { el.hidden = true; return; }
   const s = B.BY_SLUG[slug], a = agentOf(slug), r = $('#fl-stage').getBoundingClientRect();
-  el.innerHTML = '<b style="color:' + s.accent + '">' + esc(s.name) + '</b><span>' + esc(a ? a.title : s.role) + '</span>' + (a ? chip(a) + '<small>' + esc(a.state_detail || '') + '</small>' : '<small>No state yet</small>') + '<em>Click to focus · click again for the workspace</em>';
+  el.innerHTML = '<b style="color:' + s.accent + '">' + esc(s.name) + '</b><span>' + esc(a ? a.title : s.role) + '</span>' + (a ? chip(a) + '<small>' + esc(a.work_detail || a.state_detail || '') + '</small>' : '<small>No state yet</small>') + '<em>Click to focus · click again for the workspace</em>';
   el.hidden = false;
   el.style.left = Math.min(r.width - 280, Math.max(8, x - r.left + 14)) + 'px';
   el.style.top = Math.max(8, y - r.top + 14) + 'px';

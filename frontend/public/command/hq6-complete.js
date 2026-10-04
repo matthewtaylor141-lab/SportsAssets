@@ -9,6 +9,9 @@ function ago(t){if(!t)return'never';var s=Math.max(0,Date.now()/1000-t);return s
 function nameOf(a){if(!a)return'';if(a.slug==='allocator'||a.agent==='CHIEF_ALLOCATOR')return'Allie';var seat=window.BTFloor&&window.BTFloor.BY_AGENT&&window.BTFloor.BY_AGENT[a.agent];return a.name||a.display_name||(seat&&seat.name)||(a.slug?a.slug.charAt(0).toUpperCase()+a.slug.slice(1):'');}
 function humanState(slug,state,detail){
   state=String(state||'UNKNOWN');
+  /* command final: the R30 work_state vocabulary (served beside the legacy state) */
+  var R30={WAITING_FOR_FRESH_EVIDENCE:'Waiting for fresh evidence',BLOCKED_ON_MARKET_DATA:'Blocked on market data',HANDOFF_PENDING:'Handoff pending'};
+  if(R30[state])return R30[state];if(state==='WORKING')state='WORKING_ON';if(state==='IDLE_NO_OPEN_WORK')state='IDLE';
   var M={
     derek:{WORKING_ON:'Reviewing opportunities',REVIEWING:'Reviewing an entry decision',WAITING:'Waiting for a qualified opportunity',IDLE:'Standing by for the next opportunity'},
     karen:{CHALLENGING:'Challenging the evidence',REVIEWING:'Reviewing a claim',WAITING:'Waiting for a claim to challenge',IDLE:'No open challenge'},
@@ -67,9 +70,9 @@ function installBrief(){
       document.getElementById('hq6-collab-p').textContent=e.summary||edgeLabel(e.kind);
       document.getElementById('hq6-collab-t').textContent=edgeLabel(e.kind)+' · '+ago(e.at)+' ago';
     }else document.getElementById('hq6-collab').textContent='No collaboration in the current window';
-    var active=as.filter(a=>/WORKING_ON|REVIEWING|CHALLENGING/.test(a.state||''));
+    var active=as.filter(a=>/WORKING|REVIEWING|CHALLENGING/.test(a.work_state||a.state||''));
     document.getElementById('hq6-active').textContent=active.length+' active desk'+(active.length===1?'':'s');
-    document.getElementById('hq6-active-p').textContent=active.length?active.map(a=>nameOf(a)+' — '+humanState(a.slug,a.state,a.state_detail)).join(' · '):'No active work is recorded in the current floor read.';
+    document.getElementById('hq6-active-p').textContent=active.length?active.map(a=>nameOf(a)+' — '+humanState(a.slug,a.work_state||a.state,a.work_detail||a.state_detail)).join(' · '):'No active work is recorded in the current floor read.';
     var newest=Math.max.apply(null,as.map(a=>a.heartbeat&&a.heartbeat.at||0));document.getElementById('hq6-active-t').textContent=newest?'Newest heartbeat '+ago(newest)+' ago':'No heartbeat';
   }).catch(function(){
     ['hq6-attn','hq6-collab','hq6-active'].forEach(id=>document.getElementById(id).textContent='UNAVAILABLE');
@@ -111,9 +114,9 @@ function installAgent(){
 
   function render(d){
     var a=d&&d.agent?d.agent:(d&&d.slug?d:null);if(!a)return;
-    document.getElementById('hq6-now-title').textContent=humanState(slug,a.state,a.state_detail);
-    document.getElementById('hq6-now-detail').textContent=a.state_detail||'No additional work detail recorded.';
-    document.getElementById('hq6-now-code').innerHTML='MACHINE STATE · '+esc(String(a.state||'UNKNOWN'))+' <span class="hq6-machine-state">'+ago(a.heartbeat&&a.heartbeat.at)+' AGO</span>';
+    document.getElementById('hq6-now-title').textContent=humanState(slug,a.work_state||a.state,a.work_detail||a.state_detail);
+    document.getElementById('hq6-now-detail').textContent=a.work_detail||a.state_detail||'No additional work detail recorded.';
+    document.getElementById('hq6-now-code').innerHTML='MACHINE STATE · '+esc(String(a.work_state||a.state||'UNKNOWN'))+' <span class="hq6-machine-state">'+ago(a.heartbeat&&a.heartbeat.at)+' AGO</span>';
     var out=a.last_output||a.focus||(d&&d.last_output)||(d&&d.focus);
     document.getElementById('hq6-now-output').textContent=out?(out.summary||out.kind||out.id||'Recorded output'):'No consequential output in current read';
     document.getElementById('hq6-now-hb').textContent=a.heartbeat&&a.heartbeat.at?ago(a.heartbeat.at)+' ago':'UNAVAILABLE';
@@ -173,7 +176,7 @@ function installFloor(){
     var ctx=panel.querySelector('.hq6-context');
     if(!ctx){ctx=document.createElement('section');ctx.className='hq6-context';var head=panel.querySelector('.fl-p-head');if(head)head.insertAdjacentElement('afterend',ctx);}
     var es=(st.floor.edges||[]).filter(e=>e.from===a.agent||e.to===a.agent).sort((x,y)=>(y.at||0)-(x.at||0)),e=es[0],other=e&&(e.from===a.agent?e.to:e.from),seat=other&&window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[other];
-    ctx.innerHTML='<div class="k">CURRENT WORK</div><h3>'+esc(humanState(slug,a.state,a.state_detail))+'</h3><p>'+esc(a.state_detail||'No additional state detail recorded.')+'</p><small>MACHINE · '+esc(a.state||'UNKNOWN')+(e?' · LATEST COLLAB · '+esc(seat?seat.name:other)+' · '+ago(e.at)+' AGO':'')+'</small>';
+    ctx.innerHTML='<div class="k">CURRENT WORK</div><h3>'+esc(humanState(slug,a.work_state||a.state,a.work_detail||a.state_detail))+'</h3><p>'+esc(a.work_detail||a.state_detail||'No additional state detail recorded.')+'</p><small>MACHINE · '+esc(a.work_state||a.state||'UNKNOWN')+(e?' · LATEST COLLAB · '+esc(seat?seat.name:other)+' · '+ago(e.at)+' AGO':'')+'</small>';
     lastSlug=slug;
   },1000);
 }

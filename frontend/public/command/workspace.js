@@ -48,7 +48,7 @@
     var status = !S.read ? 'Reading the floor…' : S.read.status === 'OK' ? 'Live · read ' + B.ago(S.read.at, t) : stale ? 'STALE READ · last good ' + B.ago(S.lastOk.at, t) : readState(S.read, 'the floor').why;
     return '<header class="wsx-hero" style="--a:' + seat.accent + '">' +
       '<div class="wsx-id"><span class="wsx-mono" aria-hidden="true">' + esc(seat.initial) + '</span><div><span class="wsx-eyebrow">' + esc(seat.short) + ' · AI agent</span><h1>' + esc(seat.name) + '</h1><p>' + esc(a ? a.title : seat.role) + '</p></div></div>' +
-      '<div class="wsx-live">' + chip(st) + '<p class="wsx-detail">' + esc(a ? a.state_detail : (S.read ? readState(S.read, 'the floor').why : '')) + '</p>' +
+      '<div class="wsx-live">' + chip(st) + '<p class="wsx-detail">' + esc(a ? (a.work_detail || a.state_detail) : (S.read ? readState(S.read, 'the floor').why : '')) + '</p>' +
         '<small>' + (a && a.state_since ? 'since ' + esc(B.ago(a.state_since, t)) + ' · ' : '') + esc(status) + (fixture ? ' · <b class="wsx-fx">FIXTURE DATA — NOT PRODUCTION</b>' : '') + '</small></div>' +
       '<div class="wsx-hb"><span class="wsx-eyebrow">Heartbeat</span><strong>' + esc(a && a.heartbeat && a.heartbeat.at != null ? B.age(t - a.heartbeat.at).trim() + ' ago' : a ? 'none recorded' : '—') + '</strong>' +
         '<small>' + esc(a && a.heartbeat && a.heartbeat.at != null ? B.clock(a.heartbeat.at) : '') + (a && a.heartbeat ? ' · stale after ' + esc(B.age(a.heartbeat.stale_after_s).trim()) : '') + '</small>' +
@@ -57,7 +57,7 @@
   }
   function strip(a) {   // eddie / scout: no duplicate workspace, only the live strip
     var t = now(), st = B.stateOf(a);
-    return '<div class="wsx-strip" style="--a:' + seat.accent + '"><b>' + esc(seat.name) + '</b>' + chip(st) + '<span>' + esc(a ? a.state_detail : (S.read ? readState(S.read, 'the floor').why : 'Reading the floor…')) + '</span>' +
+    return '<div class="wsx-strip" style="--a:' + seat.accent + '"><b>' + esc(seat.name) + '</b>' + chip(st) + '<span>' + esc(a ? (a.work_detail || a.state_detail) : (S.read ? readState(S.read, 'the floor').why : 'Reading the floor…')) + '</span>' +
       '<small>♥ ' + esc(a && a.heartbeat && a.heartbeat.at != null ? B.ago(a.heartbeat.at, t) : 'no heartbeat') + '</small><a href="/floor">Trading floor →</a></div>';
   }
 

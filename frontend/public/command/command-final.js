@@ -26,21 +26,25 @@ function ageS(s){if(!fin(s))return'—';s=Math.max(0,s);return s<90?Math.floor(s
 function age(t){if(!t)return'never';return ageS(Date.now()/1000-t);}
 function workState(a){return String(a&&a.work_state||a&&a.state||'UNKNOWN');}
 function workDetail(a){return a&&a.work_detail||a&&a.state_detail||'No recorded work detail.';}
+var ACTIVE=/^(WORKING|WORKING_ON|REVIEWING|CHALLENGING)$/;
 function workTone(s){
  s=String(s||'');
+ if(/^IDLE/.test(s))return'blue';
  if(/BLOCKED|FAILED|CHALLENG/.test(s))return'red';
  if(/WAITING|HANDOFF/.test(s))return'gold';
  if(/WORK|REVIEW/.test(s))return'green';
  if(/STALE|UNKNOWN|NOT_DEPLOYED/.test(s))return'dim';
  return'blue';
 }
+/* legacy IDLE only means "no run in progress": it knows nothing about open
+   work, so it is never shown as "No open work" (R30's IDLE_NO_OPEN_WORK is) */
 function human(s){
  var map={
   WORKING:'Working now',WORKING_ON:'Working now',REVIEWING:'Reviewing',
   CHALLENGING:'Challenging evidence',WAITING:'Waiting',
   WAITING_FOR_FRESH_EVIDENCE:'Waiting for fresh evidence',
   BLOCKED_ON_MARKET_DATA:'Blocked on market data',
-  HANDOFF_PENDING:'Handoff pending',IDLE:'No open work',
+  HANDOFF_PENDING:'Handoff pending',IDLE:'Idle',
   IDLE_NO_OPEN_WORK:'No open work',STALE:'Stale',UNKNOWN:'Unavailable',
   NOT_DEPLOYED:'Not deployed'
  };
@@ -194,7 +198,7 @@ function installHome(){
 function renderHomeFloor(f){
  lastFloor=f;
  var as=f&&f.agents||[];
- var active=as.filter(function(a){return /WORK|REVIEW|CHALLENG/.test(workState(a));});
+ var active=as.filter(function(a){return ACTIVE.test(workState(a));});
  var blocked=as.filter(function(a){return /BLOCKED|WAITING|HANDOFF/.test(workState(a));});
  var company=document.getElementById('cf-company-state');
  if(company){
@@ -409,7 +413,7 @@ function installFloor(){
 function updateFloorHud(){
  var st=window.__floor,f=st&&st.floor;
  if(f){
-  var as=f.agents||[],active=as.filter(function(a){return /WORK|REVIEW|CHALLENG/.test(workState(a));}).length;
+  var as=f.agents||[],active=as.filter(function(a){return ACTIVE.test(workState(a));}).length;
   var blocked=as.filter(function(a){return /BLOCKED|WAITING/.test(workState(a));}).length;
   var hand=as.filter(function(a){return /HANDOFF/.test(workState(a));}).length;
   [['cf-f-active',active+' / '+as.length],['cf-f-blocked',blocked],['cf-f-handoffs',hand]].forEach(function(x){setText(x[0],x[1]);});

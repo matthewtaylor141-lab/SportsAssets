@@ -29,7 +29,7 @@
   var targets=['.fl-screen','#app','.ws-tabs','#ws-root','#page','.acc','.profitability','.position-page','.institutional'];
   targets.forEach(function(s){document.querySelectorAll(s).forEach(function(n){n.classList.add('bt-hq2-content-offset');});});
   function ago(t){if(!t)return 'NO HEARTBEAT';var s=Math.max(0,Date.now()/1000-t);return s<60?Math.round(s)+'S AGO':s<3600?Math.floor(s/60)+'M AGO':Math.floor(s/3600)+'H AGO';}
-  function tone(a){var s=(a&&a.state)||'';return /WORK|REVIEW|CHALLENG/.test(s)?'good':/WAIT|STALE/.test(s)?'warn':'';}
+  function tone(a){var s=(a&&(a.work_state||a.state))||'';return /WORKING|REVIEW|CHALLENG/.test(s)?'good':/WAIT|STALE|HANDOFF|BLOCKED/.test(s)?'warn':'';}
   function update(f){
     var agents=(f&&f.agents)||[], newest=0;
     agents.forEach(function(a){newest=Math.max(newest,(a.heartbeat&&a.heartbeat.at)||0);});
@@ -46,7 +46,7 @@
         '<span><b>'+((counts.WORKING_ON||0)+(counts.REVIEWING||0)+(counts.CHALLENGING||0))+'</b> active desks</span>',
         '<span><b>'+edge+'</b> collaboration links</span>'
       ];
-      agents.forEach(function(a){var seat=window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[a.agent];var n=seat?seat.name:(a.display_name||a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allie').replace('Chief Allocator','Allie');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
+      agents.forEach(function(a){var seat=window.BTFloor&&BTFloor.BY_AGENT&&BTFloor.BY_AGENT[a.agent];var n=seat?seat.name:(a.display_name||a.name||a.agent||'').replace('CHIEF_ALLOCATOR','Allie').replace('Chief Allocator','Allie');bits.push('<span class="'+tone(a)+'"><b>'+n+'</b> '+String(a.work_state||a.state||'UNKNOWN').replace(/_/g,' ')+' · '+ago(a.heartbeat&&a.heartbeat.at)+'</span>');});
       rail.innerHTML=bits.concat(bits).join('');
     }
     var t=document.getElementById('bt-hq2-tape');if(t)t.classList.toggle('stale',state!=='live');

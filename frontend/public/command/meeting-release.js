@@ -8,7 +8,7 @@ function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){retur
 function money(n,d){return typeof n==='number'&&isFinite(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d||0,maximumFractionDigits:d||0}).format(n):'UNAVAILABLE';}
 function signed(n){return typeof n==='number'&&isFinite(n)?(n>0?'+':n<0?'−':'')+money(Math.abs(n),2):'UNAVAILABLE';}
 function ago(t){if(!t)return'NO HEARTBEAT';var s=Math.max(0,Date.now()/1000-t);return s<60?Math.round(s)+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h';}
-function stateColor(a,def){var s=(a&&(a.work_state||a.state))||'';return /CHALLENG/.test(s)?'#ff8197':/WORK|REVIEW/.test(s)?'#57e1ad':/WAIT/.test(s)?'#efca79':def;}
+function stateColor(a,def){var s=(a&&(a.work_state||a.state))||'';return /CHALLENG|BLOCKED/.test(s)?'#ff8197':/WORKING|REVIEW/.test(s)?'#57e1ad':/WAIT|HANDOFF/.test(s)?'#efca79':def;}
 function patchAllie(root){
  root=root||document;var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),n,arr=[];while(n=w.nextNode())arr.push(n);
  /* integration: 'Chief Allocator' is Allie's TITLE (shown beside her name), so only the bare legacy label 'Allocator' becomes her name */arr.forEach(function(t){if(t.nodeValue&&t.nodeValue.trim()==='Allocator')t.nodeValue='Allie';});
