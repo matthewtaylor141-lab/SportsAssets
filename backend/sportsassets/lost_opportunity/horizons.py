@@ -159,8 +159,10 @@ def build(econs: list, *, book: str, horizon: str, days: int, now: float,
             out.put("capacity_utilization", None,
                     "NO_ACCOUNT_CAPITAL_RECORD")
         else:
+            # two significant figures: a tiny utilization is shown as what
+            # it is (3e-05), never rounded to a manufactured 0
             out.put("capacity_utilization",
-                    round(exp_ch / (acct * days * 24.0), 4))
+                    float("%.2g" % (exp_ch / (acct * days * 24.0))))
         # the trailing 30 days, measured (not a forecast)
         lo30 = now - 30 * DAY
         ch30 = 0.0
