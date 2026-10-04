@@ -51,6 +51,9 @@ for (const [label, vw, vh] of [["desktop", 1440, 900], ["phone", 390, 844]].filt
                humanDirectory: (document.body.innerText.match(/HUMAN DIRECTORY · [A-Z ]+/) || [null])[0],
                build: [document.querySelector('script[data-meeting]') && "MEETING", document.querySelector('script[data-hq4],#hq4-company-root') && "HQ4"].filter(Boolean).join("+") || "BASE",
                homeOrder: [...document.querySelectorAll("#bt-meeting-home .mtg-head, #hq4-company-home, #bt-meeting-home .mtg-attention, #bt-meeting-home .mtg-capital, #bt-meeting-home .mtg-team")].filter((e) => getComputedStyle(e).display !== "none").sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top).map((e) => e.id || e.className.split(" ")[0]).join(">"),
+               hq5: { pulse: !!document.getElementById("hq5-pulse"), tapeHidden: !document.querySelector(".bt-hq2-market-tape") || getComputedStyle(document.querySelector(".bt-hq2-market-tape")).display === "none",
+                      floorbar: document.querySelectorAll("#hq5-floorbar .hq5-view").length, palette: !!document.querySelector(".hq5-palette-backdrop"),
+                      dockPortraits: [...document.querySelectorAll(".fl-agent .fl-mono")].filter((e) => /portraits\//.test(getComputedStyle(e).backgroundImage)).length },
                brand: { icon: [...document.querySelectorAll('link[rel~="icon"]')].map((l) => l.getAttribute("href")).join(" "),
                         rail: (getComputedStyle(document.querySelector(".bt-hq2-logo") || document.body).backgroundImage.match(/brand\/[a-z0-9-]+\.png/) || [null])[0],
                         topbar: (getComputedStyle(document.querySelector(".bt-hq2-brandword") || document.body, "::before").backgroundImage.match(/brand\/[a-z0-9-]+\.png/) || [null])[0],
@@ -125,7 +128,7 @@ await browser.close();
 fs.writeFileSync(`${OUT}/hq_report.json`, JSON.stringify(report, null, 1));
 for (const r of report.runs) {
   if (r.overflowers && r.overflowers.length) console.log("   overflow: " + JSON.stringify(r.overflowers));
-  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.homeOrder ? " order=" + r.homeOrder : ""}${r.brand ? " brand=" + JSON.stringify(r.brand) : ""}${r.characters ? " characters=" + r.characters : ""}`);
+  console.log(`== ${r.label} ${r.path} HTTP ${r.status} ${r.ms}ms title="${r.title}" build=${r.build} overflowX=${r.overflowX} (${r.scrollWidth}/${r.clientWidth}) errors=${r.errors.length} canvases=${JSON.stringify(r.canvases)} iframes=${JSON.stringify(r.iframes)}${r.employeeLinks && r.employeeLinks.length ? " employees=" + r.employeeLinks.join(",") : ""}${r.humanDirectory ? " [" + r.humanDirectory + "]" : ""}${r.homeOrder ? " order=" + r.homeOrder : ""}${r.brand ? " brand=" + JSON.stringify(r.brand) : ""}${r.hq5 ? " hq5=" + JSON.stringify(r.hq5) : ""}${r.characters ? " characters=" + r.characters : ""}`);
   for (const e of r.errors.slice(0, 6)) console.log("   err: " + e);
   console.log("   apis: " + r.apis.join(" | ").slice(0, 1800));
   for (const s of (r.sections || [])) console.log(`   [${s.h}] unavailable=${s.unavailable} nan=${s.nan} chars=${s.chars} :: ${s.sample}`);
