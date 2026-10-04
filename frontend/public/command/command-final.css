@@ -1,0 +1,145 @@
+/* BETTOR COMMAND · FINAL CONVERGENCE
+   One final visual layer: institutional, cinematic, legible, truthful. */
+:root{
+ --cf-bg:#020711;--cf-panel:#061223;--cf-panel2:#09192d;--cf-line:rgba(154,187,220,.14);
+ --cf-line2:rgba(154,187,220,.24);--cf-ink:#f2f7fc;--cf-muted:#8ca0b6;
+ --cf-blue:#6698ff;--cf-cyan:#69d8ff;--cf-green:#57e1ad;--cf-gold:#efca79;--cf-red:#ff8197;
+}
+
+/* Global legibility: critical operational content is no longer 7–9px. */
+body{font-feature-settings:"tnum" 1,"ss01" 1}
+.bt-hq2,.meeting-home,.hq4-company-page,.meeting-real-floor,.command-final-agent{letter-spacing:0}
+.mtg-kicker,.bt-kicker,.clean-kicker,.wsx-eyebrow,.hq6-now .eyebrow,.hq4-summary span,
+.cf-eyebrow{font-size:10px!important;line-height:1.15!important;letter-spacing:.12em!important}
+.mtg-metric span,.mtg-live-stat span,.hq6-now-cell span,.wsx-src,.wsx-kpi small,.hq4-agent-state,
+.hq4-agent-open,.bt-equity2-pulse{font-size:10.5px!important}
+.hq4-agent-task,.mtg-agent .task,.wsx-empty,.wsx-detail,.hq6-now>p{font-size:12px!important;line-height:1.45!important}
+.mtg-btn,.hq4-tool,.hq4-company-link{font-size:12px!important}
+
+/* HOME */
+.command-final-home{background:
+ radial-gradient(1100px 620px at 70% -5%,rgba(45,91,195,.18),transparent 62%),
+ radial-gradient(900px 580px at 4% 28%,rgba(28,91,117,.10),transparent 65%),#020711!important}
+.command-final-home .mtg-wrap{max-width:1560px!important}
+.command-final-home .mtg-head{padding:10px 0 3px}
+.command-final-home .mtg-head h1{font-size:clamp(43px,5vw,76px)!important;line-height:.94!important;max-width:800px}
+.command-final-home .mtg-head p{font-size:14px!important;line-height:1.55!important;max-width:720px}
+.cf-command-strip{
+ order:1.5;display:grid;grid-template-columns:1.1fr .8fr .8fr .9fr 1.35fr;gap:1px;margin:18px 0 2px;
+ border:1px solid var(--cf-line);border-radius:18px;overflow:hidden;background:var(--cf-line);
+ box-shadow:0 28px 70px rgba(0,0,0,.26)
+}
+.cf-strip-cell{padding:13px 15px;min-width:0;background:linear-gradient(180deg,rgba(8,23,43,.97),rgba(5,14,27,.97))}
+.cf-strip-cell span{display:block;color:#6f849b;font:700 9.5px ui-monospace,monospace;text-transform:uppercase;letter-spacing:.1em}
+.cf-strip-cell b{display:block;margin-top:7px;color:#e9f2fb;font-size:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cf-strip-cell b.good{color:var(--cf-green)}.cf-strip-cell b.warn{color:var(--cf-gold)}
+.cf-strip-cell small{display:block;margin-top:4px;color:#667b92;font-size:10.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.command-final-home .mtg-capital{grid-template-columns:minmax(0,1.48fr) minmax(320px,.52fr)!important;gap:12px!important}
+.command-final-home .mtg-paper,.command-final-home .mtg-live{
+ border-radius:24px!important;border-color:var(--cf-line2)!important;
+ background:linear-gradient(180deg,rgba(9,26,49,.96),rgba(4,13,27,.98))!important;
+ box-shadow:0 32px 90px rgba(0,0,0,.35)!important
+}
+.command-final-home .mtg-equity{font-size:clamp(42px,4.8vw,72px)!important;letter-spacing:-.055em!important}
+.cf-chart-head{display:grid;grid-template-columns:1.3fr 1fr 1fr .8fr;gap:7px;margin:15px 0 8px}
+.cf-chart-head>div{padding:9px 11px;border:1px solid rgba(151,180,214,.1);border-radius:11px;background:rgba(3,11,22,.62)}
+.cf-chart-head span{display:block;color:#667b92;font:700 8.5px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
+.cf-chart-head b{display:block;margin-top:5px;color:#dfe9f4;font-size:11px}
+.cf-chart-head b.live{color:var(--cf-green)}.cf-chart-head b.warn{color:var(--cf-gold)}.cf-chart-head b.dim{color:#75869a}
+.command-final-home .mtg-chart.cf-live-chart{height:280px!important;border-radius:16px!important;background:
+ linear-gradient(180deg,rgba(3,11,24,.88),rgba(2,8,17,.96))!important;border:1px solid rgba(129,164,208,.12)!important;overflow:hidden}
+.command-final-home .mtg-chart canvas{width:100%!important;height:100%!important}
+.command-final-home .mtg-last{font-size:10.5px!important;background:rgba(3,12,24,.8);padding:6px 9px;border:1px solid rgba(151,180,214,.12);border-radius:999px}
+.command-final-home .hq4-agent-grid{gap:10px!important}
+.cf-person-card{min-height:210px!important;border-radius:19px!important}
+.cf-person-card::before{height:92px!important;opacity:.98!important;filter:saturate(.96) contrast(1.04)!important}
+.cf-person-card .hq4-agent-title b,.cf-person-card>b{font-size:14px!important}
+.cf-person-card:hover{transform:translateY(-5px) scale(1.01)!important;box-shadow:0 24px 60px rgba(0,0,0,.34)!important}
+
+/* FLOOR: cinematic but still an operating surface. */
+.command-final-floor .fl-stage::after{
+ content:"";position:absolute;inset:0;z-index:1;pointer-events:none;
+ background:radial-gradient(ellipse at 50% 52%,transparent 46%,rgba(0,0,0,.30) 100%),
+ linear-gradient(180deg,rgba(39,85,140,.05),transparent 22%,transparent 72%,rgba(0,0,0,.20));
+ mix-blend-mode:normal
+}
+.command-final-floor .fl-canvas{filter:saturate(1.06) contrast(1.025)}
+.cf-floor-hud{
+ position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:6;display:flex;gap:1px;
+ border:1px solid rgba(158,192,226,.14);border-radius:14px;overflow:hidden;background:rgba(3,10,20,.72);
+ box-shadow:0 14px 44px rgba(0,0,0,.26);backdrop-filter:blur(16px)
+}
+.cf-floor-hud>div{padding:8px 12px;background:rgba(7,20,37,.74);min-width:92px}
+.cf-floor-hud span{display:block;color:#687d93;font:700 8px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase}
+.cf-floor-hud b{display:block;color:#e8f1fa;font-size:12px;margin-top:4px}
+.cf-floor-hud .cf-hud-truth{display:flex;align-items:center;gap:6px;min-width:auto}
+.cf-hud-truth i{width:7px;height:7px;border-radius:50%;background:var(--cf-green);box-shadow:0 0 11px rgba(87,225,173,.7)}
+.command-final-floor .fl-panel{width:min(430px,38vw)!important;border-radius:20px!important;background:rgba(5,16,30,.94)!important}
+.command-final-floor .fl-agent{min-height:52px!important}
+.command-final-floor .fl-agent b{font-size:11.5px!important}
+.command-final-floor .fl-agent small{font-size:9.5px!important}
+.command-final-floor .wall-screen{border-radius:12px!important}
+
+/* AGENT PAGES: mission-first, person + work. */
+.command-final-agent{background:
+ radial-gradient(950px 560px at 7% 8%,rgba(48,92,170,.13),transparent 65%),#020711!important}
+.command-final-agent .hq6-agent-layout{max-width:1760px!important;grid-template-columns:minmax(330px,420px) minmax(0,1fr)!important;gap:16px!important}
+.command-final-agent .hq6-agent-person{top:78px!important}
+.command-final-agent .bt-agent2{border:1px solid var(--cf-line2)!important;background:linear-gradient(180deg,rgba(8,24,45,.98),rgba(4,13,26,.99))!important}
+.command-final-agent .bt-agent2-face.bt-portrait{height:350px!important;border-radius:17px!important}
+.command-final-agent .bt-agent2-id h1{font-size:50px!important}
+.cf-agent-mission{
+ margin-bottom:11px;padding:17px;border:1px solid var(--cf-line2);border-radius:18px;
+ background:linear-gradient(135deg,rgba(10,29,53,.96),rgba(5,15,29,.98));box-shadow:0 22px 60px rgba(0,0,0,.24)
+}
+.cf-agent-mission header{display:flex;align-items:flex-start;justify-content:space-between;gap:18px}
+.cf-agent-mission h2{margin:6px 0 4px;color:#eef5fc;font-size:22px;letter-spacing:-.025em}
+.cf-agent-mission header p{margin:0;color:#869ab0;font-size:12.5px;line-height:1.45}
+.cf-work-chip{padding:7px 10px;border:1px solid rgba(151,180,214,.15);border-radius:999px;color:#91a7bd;font:700 9.5px ui-monospace,monospace;text-transform:uppercase;white-space:nowrap}
+.cf-work-chip[data-tone=green]{color:var(--cf-green);border-color:rgba(87,225,173,.25);background:rgba(87,225,173,.06)}
+.cf-work-chip[data-tone=gold]{color:var(--cf-gold);border-color:rgba(239,202,121,.25);background:rgba(239,202,121,.06)}
+.cf-work-chip[data-tone=red]{color:var(--cf-red);border-color:rgba(255,129,151,.25);background:rgba(255,129,151,.06)}
+.cf-work-chip[data-tone=dim]{color:#74859a}
+.cf-mission-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin-top:14px}
+.cf-mission-grid>div{padding:11px;border:1px solid rgba(151,180,214,.1);border-radius:12px;background:rgba(3,12,24,.58);min-width:0}
+.cf-mission-grid span{display:block;color:#667b92;font:700 8.5px ui-monospace,monospace;text-transform:uppercase}
+.cf-mission-grid b{display:block;margin-top:6px;color:#dfe9f3;font-size:11.5px;line-height:1.3;overflow:hidden;text-overflow:ellipsis}
+.cf-mission-grid small{display:block;margin-top:4px;color:#667b92;font-size:9.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.command-final-agent .wsx-card{padding:18px 19px!important}
+.command-final-agent .wsx-card h2{font-size:15px!important}.command-final-agent .wsx-card h3{font-size:13px!important}
+.command-final-agent .wsx-card p,.command-final-agent .wsx-card li,.command-final-agent .wsx-t{font-size:11.5px!important}
+.command-final-agent .wsx-kpi strong{font-size:18px!important}
+.command-final-agent .wsx-t th{font-size:10px!important}.command-final-agent .wsx-t td{font-size:11px!important;line-height:1.35!important}
+
+/* Company page */
+.hq4-company-page .hq4-page{max-width:1740px!important}
+.hq4-company-page .hq4-section{border-color:var(--cf-line)!important}
+.hq4-company-page .hq4-agent-card{min-height:220px!important}
+.hq4-company-page .hq4-agent-face{width:48px!important;height:54px!important}
+
+/* Microinteractions only on truthful elements. */
+@media(prefers-reduced-motion:no-preference){
+ .cf-hud-truth i{animation:cfPulse 2.2s ease-in-out infinite}
+ .cf-work-chip[data-tone=green]::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:currentColor;margin-right:6px;box-shadow:0 0 8px currentColor}
+ @keyframes cfPulse{0%,100%{opacity:.55;transform:scale(.9)}50%{opacity:1;transform:scale(1.12)}}
+}
+
+/* Mobile is a deliberate operating mode, not compressed desktop. */
+@media(max-width:900px){
+ .cf-command-strip{grid-template-columns:1fr 1fr;display:grid}.cf-strip-cell:last-child{grid-column:1/-1}
+ .command-final-home .mtg-capital{grid-template-columns:1fr!important}
+ .command-final-home .mtg-chart.cf-live-chart{height:230px!important}
+ .cf-chart-head{grid-template-columns:1fr 1fr}
+ .cf-floor-hud{left:8px;right:8px;transform:none;overflow-x:auto;justify-content:flex-start}
+ .cf-floor-hud>div{flex:0 0 auto}
+ .command-final-agent .hq6-agent-layout{display:block!important}
+ .cf-mission-grid{grid-template-columns:1fr 1fr}
+}
+@media(max-width:520px){
+ .cf-command-strip{grid-template-columns:1fr}
+ .cf-strip-cell:last-child{grid-column:auto}
+ .cf-chart-head{grid-template-columns:1fr 1fr}
+ .cf-mission-grid{grid-template-columns:1fr}
+ .cf-agent-mission header{display:block}.cf-work-chip{display:inline-block;margin-top:10px}
+ .command-final-home .mtg-head h1{font-size:42px!important}
+}

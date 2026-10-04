@@ -8,7 +8,7 @@ function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){retur
 function money(n,d){return typeof n==='number'&&isFinite(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d||0,maximumFractionDigits:d||0}).format(n):'UNAVAILABLE';}
 function signed(n){return typeof n==='number'&&isFinite(n)?(n>0?'+':n<0?'−':'')+money(Math.abs(n),2):'UNAVAILABLE';}
 function ago(t){if(!t)return'NO HEARTBEAT';var s=Math.max(0,Date.now()/1000-t);return s<60?Math.round(s)+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h';}
-function stateColor(a,def){var s=(a&&a.state)||'';return /CHALLENG/.test(s)?'#ff8197':/WORK|REVIEW/.test(s)?'#57e1ad':/WAIT/.test(s)?'#efca79':def;}
+function stateColor(a,def){var s=(a&&(a.work_state||a.state))||'';return /CHALLENG/.test(s)?'#ff8197':/WORK|REVIEW/.test(s)?'#57e1ad':/WAIT/.test(s)?'#efca79':def;}
 function patchAllie(root){
  root=root||document;var w=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),n,arr=[];while(n=w.nextNode())arr.push(n);
  /* integration: 'Chief Allocator' is Allie's TITLE (shown beside her name), so only the bare legacy label 'Allocator' becomes her name */arr.forEach(function(t){if(t.nodeValue&&t.nodeValue.trim()==='Allocator')t.nodeValue='Allie';});
@@ -63,7 +63,7 @@ function drawCurve(c){
 }
 function renderTeam(f){
  var by={};(f&&f.agents||[]).forEach(a=>by[a.slug]=a);
- document.getElementById('mtg-team').innerHTML=AGENTS.map(function(m){var a=by[m[0]],col=stateColor(a,m[3]);return '<a class="mtg-agent" href="/'+m[0]+'" style="--a:'+m[3]+'"><b>'+m[1]+'</b><span class="role">'+m[2]+'</span><div class="state" style="color:'+col+'"><i></i>'+(a?esc(String(a.state||'UNKNOWN').replace(/_/g,' '))+' · '+ago(a.heartbeat&&a.heartbeat.at):'STATE UNAVAILABLE')+'</div><div class="task">'+esc(a&&a.state_detail||'Open workspace for current evidence.')+'</div><span class="open">Open workspace →</span></a>';}).join('');
+ document.getElementById('mtg-team').innerHTML=AGENTS.map(function(m){var a=by[m[0]],col=stateColor(a,m[3]);return '<a class="mtg-agent" href="/'+m[0]+'" style="--a:'+m[3]+'"><b>'+m[1]+'</b><span class="role">'+m[2]+'</span><div class="state" style="color:'+col+'"><i></i>'+(a?esc(String(a.work_state||a.state||'UNKNOWN').replace(/_/g,' '))+' · '+ago(a.heartbeat&&a.heartbeat.at):'STATE UNAVAILABLE')+'</div><div class="task">'+esc(a&&(a.work_detail||a.state_detail)||'Open workspace for current evidence.')+'</div><span class="open">Open workspace →</span></a>';}).join('');
  if(!f)return; /* no floor read yet: attention stays READING (never 'no alert' before the evidence) */
  var alerts=[];(f&&f.agents||[]).forEach(function(a){(a.alerts||[]).forEach(function(z){alerts.push({who:a.slug==='allocator'?'Allie':a.name||a.agent,msg:z.message||z.summary||z.code||String(z)});});});
  if(alerts.length){document.getElementById('mtg-attn').textContent=alerts[0].who+' needs attention';document.getElementById('mtg-attn-sub').textContent=alerts[0].msg}else{document.getElementById('mtg-attn').textContent='No agent alert in the current floor read';document.getElementById('mtg-attn-sub').textContent='Open Audrey for complete audit and coverage evidence.'}

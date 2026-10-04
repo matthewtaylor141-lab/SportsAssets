@@ -427,7 +427,7 @@ export async function createFloor(host, opts) {
     c.fillText(label, W - cw - 36 + 40, 72);
     // detail
     c.fillStyle = '#c8d6e2'; c.font = '400 28px Inter, system-ui, sans-serif';
-    const detail = !a ? (readMeta.why || 'No floor read yet') : (a.state_detail || '');
+    const detail = !a ? (readMeta.why || 'No floor read yet') : (a.work_detail || a.state_detail || '');
     wrap(c, detail, 46, 168, W - 92, 36, 2);
     // KPI
     const k = kpi(a);
@@ -612,7 +612,24 @@ export async function createFloor(host, opts) {
 
   /* ── arms: typing / reviewing pose over the controller's motion ─── */
   function stepArms(av, dt, T) {
-    const p = av.pose; const tgt = av.walk ? 0 : (p.target || 0);
+    const p = av.pose; const social = av.walk && av.walk.stage === 'hold';
+    if (social) {
+      const beat = 0.5 + 0.5 * Math.sin(T * 2.3 + av.phase);
+      av.ctl._hinge('rightUpperArm', 0.07 + 0.05 * beat);
+      av.ctl._hinge('rightLowerArm', 0.42 + 0.20 * beat);
+      av.ctl._hinge('leftUpperArm', 0.04);
+      av.ctl._hinge('leftLowerArm', 0.28);
+      av.ctl._turn('head', 0.015 * Math.sin(T * 2.0), 0.03 * Math.sin(T * 0.9), 0);
+      av.ctl._turn('chest', 0, 0, 0.018 * Math.sin(T * 1.25));
+      return;
+    }
+    const pWalk = av.walk && (av.walk.stage === 'out' || av.walk.stage === 'back');
+    if (pWalk) {
+      const gait = Math.sin(av.phase);
+      av.ctl._turn('chest', -0.018, 0, gait * 0.022);
+      av.ctl._turn('head', 0.008 * Math.cos(av.phase), 0, -gait * 0.010);
+    }
+    const tgt = av.walk ? 0 : (p.target || 0);
     p.type = damp(p.type, tgt, 3, dt);
     if (p.type < 0.01 && !av.walk) return;
     const typing = p.type;

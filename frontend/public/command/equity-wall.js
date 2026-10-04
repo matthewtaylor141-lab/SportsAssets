@@ -37,7 +37,7 @@
   var LIVE = '/api/command/equity/live';
   var CURVE = '/api/command/equity/curve';
   var WINDOWS = ['1d', '7d', '30d'];
-  var CURVE_REFRESH_MS = 60000;
+  var CURVE_REFRESH_MS = 10000;
   var REDUCED = !!(window.matchMedia &&
     window.matchMedia('(prefers-reduced-motion: reduce)').matches);
   var uid = 0;
@@ -153,7 +153,7 @@
     var k = curveKey(book, venue, win), c = S.curves[k];
     if (c && c.inflight) { return; }
     if (c && !force && Date.now() - c.at < CURVE_REFRESH_MS) { return; }
-    if (c && force && Date.now() - c.at < 15000) { return; }
+    if (c && force && Date.now() - c.at < 5000) { return; }
     S.curves[k] = c = c || {at: 0, data: null, etag: null};
     c.inflight = true;
     var q = '?book=' + book + (venue ? '&venue=' + venue : '') + '&window=' + win;
@@ -251,10 +251,14 @@
     if (fin(eq) && (ok || stale)) {
       var last = series.length ? series[series.length - 1] : null;
       var changeAt = ts(acct.last_change_at) || ts(acct.source_at);
-      if (ok && !acct.no_new_mark) {
-        // the live value, placed at its last genuine change, held to now
-        var at = Math.max(last ? last.t : (since || now), changeAt || 0);
-        if (!last || last.v !== eq) { series.push({t: Math.min(at, now), v: eq, cause: 'LIVE'}); }
+      var ma = acct.marks_as_of || {};
+      var markFresh = fin(ma.newest_age_s) && ma.newest_age_s <= (ma.stale_mark_after_s || acct.stale_after_s || 300);
+      if (ok && markFresh) {
+        // A CURRENT RECORDED MARK keeps the endpoint live even when its price
+        // is unchanged. The value is the server's current equity; no price is
+        // interpolated or invented between observations.
+        var at = Math.max(last ? last.t : (since || now), ts(ma.newest_at) || changeAt || 0);
+        if (!last || last.v !== eq || at > last.t) { series.push({t: Math.min(at, now), v: eq, cause: 'LIVE'}); }
         end = {t: now, v: eq, live: true};
       } else if (ok) {
         // NO NEW MARK: the books were re-read but no mark PRICE moved, so the

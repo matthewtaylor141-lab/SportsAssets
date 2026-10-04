@@ -38,7 +38,12 @@
     IDLE:         {label: 'Idle',             color: '#93a3b8', tone: 'slate',  motion: 'idle'},
     STALE:        {label: 'Stale',            color: '#5d6878', tone: 'dim',    motion: 'still'},
     NOT_DEPLOYED: {label: 'Not yet deployed', short: 'Not deployed', color: '#56627a', tone: 'off',    motion: 'still'},
-    UNKNOWN:      {label: 'Unknown',          color: '#4a5566', tone: 'off',    motion: 'still'}
+    UNKNOWN:      {label: 'Unknown',          color: '#4a5566', tone: 'off',    motion: 'still'},
+    WORKING:      {label: 'Working',          color: '#50d8ac', tone: 'green',  motion: 'work'},
+    WAITING_FOR_FRESH_EVIDENCE:{label:'Waiting for fresh evidence',color:'#e9be74',tone:'amber',motion:'idle'},
+    BLOCKED_ON_MARKET_DATA:{label:'Blocked on market data',color:'#ff9d78',tone:'red',motion:'idle'},
+    HANDOFF_PENDING:{label:'Handoff pending',color:'#82b8ff',tone:'blue',motion:'review'},
+    IDLE_NO_OPEN_WORK:{label:'No open work',color:'#93a3b8',tone:'slate',motion:'idle'}
   };
 
   var EDGE_LABELS = {
@@ -74,7 +79,7 @@
     if (/^LOOP_/.test(kind)) return 'Loop · ' + kind.slice(5).replace(/_/g, ' ').toLowerCase();
     return String(kind || '').replace(/_/g, ' ').toLowerCase();
   }
-  function stateOf(a) { return a && STATES[a.state] ? a.state : 'UNKNOWN'; }
+  function stateOf(a) { var w=a&&a.work_state; if(w&&STATES[w])return w; return a&&STATES[a.state]?a.state:'UNKNOWN'; }
   function stateMeta(a) { return STATES[stateOf(a)]; }
 
   /* ONE READ. Resolves {status, data, why, httpStatus, at}:
