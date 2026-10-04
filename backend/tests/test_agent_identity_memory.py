@@ -431,6 +431,19 @@ def test_memory_requires_evidence_confidence_and_mandate():
         summary="raise the risk limit to $500")) == M.R_AUTHORITY
 
 
+def test_the_learner_cursor_never_skips_rows_sharing_the_batch_instant():
+    n = M.DERIVE_LIMIT
+    rows = [{"t": 100.0 + i // 10} for i in range(n)]
+    assert M._cursor(rows[:3], "t", 999.0) == 999.0     # not full: all read
+    c = M._cursor(rows, "t", 999.0)
+    assert c < rows[-1]["t"] and c > rows[-11]["t"]     # re-read last instant
+    same = [{"t": 5.0}] * n
+    assert M._cursor(same, "t", 999.0) == 5.0           # never stalls
+    lo, hi = M.wilson(15, 30)
+    assert 0.31 < lo < 0.34 and 0.66 < hi < 0.69
+    assert M.wilson(0, 0) is None
+
+
 def test_resting_is_not_protection_and_stale_is_not_hold_in_xavier_facts():
     orders = [{"order_ref": "o1", "role": "STANDING_PROTECTION",
                "direction": "SELL", "qty": 100, "filled_qty": 0,

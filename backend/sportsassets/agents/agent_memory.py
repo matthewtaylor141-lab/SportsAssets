@@ -738,8 +738,13 @@ def _num(v, fmt="%.3f") -> str:
 
 
 def _cursor(rows, col, until):
+    """The next cursor. A full batch stops just BEFORE its last timestamp,
+    so rows sharing that instant (one transaction's settlements) are read
+    again next time (memory ids make the replay a no-op); only a batch
+    whose rows ALL share one instant advances past it."""
     if len(rows) >= DERIVE_LIMIT:
-        return _ep(rows[-1][col])
+        first, last = _ep(rows[0][col]), _ep(rows[-1][col])
+        return last if first == last else last - 1e-6
     return until
 
 
@@ -826,6 +831,7 @@ async def derive_derek_calibration(conn, since, until):
 
 
 SETTLED_GROUPS_SQL = """
+SELECT * FROM (
 SELECT DISTINCT ON (s.group_id) s.group_id, s.settlement_id, s.outcome,
        s.settled_at, s.recorded_at, h.handoff_id, h.decision_id
   FROM paper_settlements s
@@ -833,7 +839,8 @@ SELECT DISTINCT ON (s.group_id) s.group_id, s.settlement_id, s.outcome,
  WHERE s.recorded_at > to_timestamp($1) AND s.recorded_at <= to_timestamp($2)
    AND EXISTS (SELECT 1 FROM paper_xavier_reviews r
                 WHERE r.group_id = s.group_id)
- ORDER BY s.group_id, s.recorded_at DESC"""
+ ORDER BY s.group_id, s.recorded_at DESC) q
+ ORDER BY q.recorded_at, q.group_id LIMIT $3"""
 
 
 async def _protection_facts(conn, group_id, at):
@@ -872,7 +879,7 @@ async def _protection_facts(conn, group_id, at):
 
 
 async def derive_xavier_settled(conn, since, until):
-    groups = await conn.fetch(SETTLED_GROUPS_SQL + " LIMIT $3", since, until,
+    groups = await conn.fetch(SETTLED_GROUPS_SQL, since, until,
                               DERIVE_LIMIT)
     groups = sorted(groups, key=lambda g: (_ep(g["recorded_at"]),
                                            g["group_id"]))
@@ -1114,7 +1121,8 @@ async def derive_karen_detector_lessons(conn, since, until):
 
 async def derive_allocator_settled(conn, since, until):
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (a.run_id, a.candidate_id) a.run_id, "
+        "SELECT * FROM (SELECT DISTINCT ON (a.run_id, a.candidate_id) "
+        "       a.run_id, "
         "       a.candidate_id, a.rank, a.shadow_usd, a.decision_id, "
         "       a.binding_constraint, s.settlement_id, s.outcome, "
         "       s.settled_at, s.recorded_at "
@@ -1123,7 +1131,8 @@ async def derive_allocator_settled(conn, since, until):
         "  JOIN paper_settlements s ON s.group_id = h.group_id "
         " WHERE a.shadow_usd > 0 AND s.recorded_at > to_timestamp($1) "
         "   AND s.recorded_at <= to_timestamp($2) "
-        " ORDER BY a.run_id, a.candidate_id, s.recorded_at DESC LIMIT $3",
+        " ORDER BY a.run_id, a.candidate_id, s.recorded_at DESC) q "
+        " ORDER BY q.recorded_at, q.run_id, q.candidate_id LIMIT $3",
         since, until, DERIVE_LIMIT)
     rows = sorted(rows, key=lambda r: (_ep(r["recorded_at"]), r["run_id"],
                                        r["candidate_id"]))
