@@ -1128,7 +1128,8 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
     the short side its complement. Otherwise: no payout, the position stays
     open and pending -- a refund is never assumed."""
     from .. import bettor_settlement_terms as ST
-    prices, ev, stated = set(), [], False
+    from .. import bettor_nfl_settlement as NFL
+    prices, ev, stated, tie_stated = set(), [], False, False
     for r in rows:
         try:
             sp = float(str(r.get("settlement_read")).strip())
@@ -1143,17 +1144,34 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
         terms = ST.read_terms(r.get("rules") or "").get("terms") or {}
         if ST.PAY_LAST_FAIR_MARKET_PRICE in terms.values():
             stated = True
+        # R30A: THE NFL TIE. "If the game ends in a tie, the market will
+        # settle to $0.50." is a stated price settlement of an ORDINARILY
+        # COMPLETED game, read from the contract's own text.
+        if NFL.venue_tie_payout(r.get("rules")).get("payout") == 0.5:
+            tie_stated = True
     if not ev:
         return {"price": None, "why": "NO_VENUE_PRICE_SETTLEMENT_RECORDED"}
     if len(prices) > 1:
         return {"price": None, "why": "CONFLICTING_VENUE_SETTLEMENT_PRICES",
                 "evidence": ev}
-    if not stated:
+    tie_price = tie_stated and prices == {0.5}
+    if not stated and not tie_price:
         return {"price": None, "evidence": ev,
                 "why": ("VENUE_SETTLED_AT_A_PRICE_BUT_THE_CONTRACT_TEXT_HELD_"
                         "STATES_NO_PRICE_SETTLEMENT")}
     long_px = prices.pop()
     per = long_px if holding_side == "LONG" else round(1.0 - long_px, 9)
+    if tie_price:
+        return {"price": per, "venue_long_price": long_px, "evidence": ev,
+                "rule": ("the contract's stated tie settlement: a tied game "
+                         "settles to $0.50, so each side is paid 0.50 per "
+                         "contract"),
+                "settlement_state": "TIE_AFTER_OVERTIME",
+                "state_class": NFL.ORDINARY,
+                "quote": NFL.Q_VENUE_TIE,
+                "note": ("the last-fair-market-price clause, also stated, "
+                         "could print the same 0.50; the payout is the "
+                         "venue's published price either way")}
     return {"price": per, "venue_long_price": long_px, "evidence": ev,
             "rule": "the contract's stated last-fair-market-price settlement"}
 

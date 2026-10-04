@@ -944,7 +944,11 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
 #   HEALTHY                 provider events reach decisions and at least one
 #                           ENTER
 #   REFUSING_BY_POLICY      reaches decisions, every one REFUSED by a named
-#                           policy (football today: SETTLEMENT_NOT_SUPPORTED)
+#                           policy (NFL until R30A: SETTLEMENT_NOT_SUPPORTED
+#                           everywhere; since R30A the completed-game policy
+#                           prices the NFL tie from cited evidence and the
+#                           strict policy still refuses settlement by name --
+#                           bettor_nfl_settlement.STRICT_POLICY_MISSING)
 #   EXPLICITLY_UNSUPPORTED  not in the collector's scope by its declared maps
 #                           (ext_pinnacle_loop), the reason named
 #   COVERAGE_INCIDENT       provider events > 0 and an expected stage zero

@@ -122,7 +122,12 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # executing process's decision hook. It imports NOTHING and
                    # does no I/O (pinned below); the benchmark never imports
                    # an execution, venue or funded module through it.
-                   "decision_hooks"}
+                   "decision_hooks",
+                   # R30A: the NFL settlement evidence and tie conversion.
+                   # Standard library only (math, re, datetime, zoneinfo --
+                   # pinned below): cited quotes, a binomial interval and a
+                   # date read, no I/O and no execution, venue or funded path.
+                   "bettor_nfl_settlement"}
 
 
 def _imports(path: pathlib.Path) -> list:
@@ -149,6 +154,13 @@ def test_the_decision_hook_registry_imports_nothing():
     from sportsassets import decision_hooks
     assert _imports(pathlib.Path(decision_hooks.__file__)) == []
     assert decision_hooks.DECISION_HOOK is None or callable(decision_hooks.DECISION_HOOK)
+
+
+def test_the_nfl_settlement_module_imports_only_the_standard_library():
+    from sportsassets import bettor_nfl_settlement
+    imports = set(_imports(pathlib.Path(bettor_nfl_settlement.__file__)))
+    assert imports <= {"__future__", "annotations", "math", "re", "datetime",
+                       "zoneinfo", "ZoneInfo"}, imports
 
 
 def test_owner_limits_helper_is_pure_configuration_only():

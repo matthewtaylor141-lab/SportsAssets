@@ -220,6 +220,30 @@ REFUSAL_WORDS = {
         "the venue's rules text was not recorded"),
     "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT": ("no completed-game terms are "
                                                "held for this sport"),
+    # R30A · the NFL money line (bettor_nfl_settlement), each naming what
+    # is missing rather than that football is unsupported
+    "NFL_TIE_RATE_EVIDENCE_NOT_HELD": ("the cited NFL tie rate is not held, "
+                                       "so a tie cannot be priced"),
+    "NFL_VENUE_RULES_TEXT_NOT_RECORDED": ("the venue's NFL rules text was not "
+                                          "recorded"),
+    "NFL_VENUE_TIE_PAYOUT_NOT_STATED": ("the venue's text states no payout for "
+                                        "a tied NFL game"),
+    "NFL_VENUE_TIE_PAYOUT_IS_NOT_THE_CITED_HALF": (
+        "the venue's tie payout is not the cited $0.50"),
+    "NFL_BOOK_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (
+        "Pinnacle's line prices a draw (the regulation market), not the "
+        "two-way game line"),
+    "NFL_PRO_BOWL_OR_EXHIBITION_NEVER_TRADED": ("a Pro Bowl or exhibition "
+                                                "game is never traded"),
+    "NFL_FIXTURE_DATE_NOT_CONSISTENT_WITH_THE_VENUE_SLUG": (
+        "the game's date does not match the venue's own date for it"),
+    "NFL_FIXTURE_DATE_NOT_READABLE_FROM_THE_VENUE_SLUG": (
+        "the venue slug carries no readable game date"),
+    "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (
+        "Pinnacle's football line prices a draw (the regulation market)"),
+    "VENUE_PROBABILITY_CONVERSION_REFUSED": (
+        "the Pinnacle price could not be converted to the venue contract's "
+        "value"),
     "NO_QUALIFIED_PINNACLE_PROBABILITY": "no usable Pinnacle price",
     "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE": "the Pinnacle price did not qualify",
     "PINNACLE_NOT_FRESH": "the Pinnacle price was too old",

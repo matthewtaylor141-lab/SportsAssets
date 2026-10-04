@@ -220,7 +220,11 @@ def classify_listing(row: dict, *, mand: dict) -> tuple:
         return S_OUTSIDE, "%s:%s" % (X_MARKET_TYPE, st)
     if kind.get("period") != IS.PERIOD_FULL:
         return S_OUTSIDE, "%s:%s" % (X_PERIOD, kind.get("period"))
-    if (fam, "h2h") not in devig.SUPPORTED:
+    if (fam, "h2h") not in devig.SUPPORTED and devig.expected_outcomes(
+            # R30A: a market admitted for ONE league (the NFL) is supported
+            # for that league's listings only; any other league of the
+            # family -- NCAAF -- stays UNSUPPORTED for the same named reason.
+            fam, "h2h", league=league_of_row(row)["token"]) is None:
         return S_UNSUPPORTED, "%s:%s" % (X_NO_PROBABILITY, fam)
     if fam not in L.PINNACLE_SETTLEMENT or \
             vset.BOOK_SETTLEMENT.get(fam) is None:

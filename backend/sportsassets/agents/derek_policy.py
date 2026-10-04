@@ -2066,9 +2066,14 @@ async def catalogue_row(conn, slug) -> dict | None:
     if not slug:
         return None
     try:
+        # game_start_epoch (R30A): the venue's scheduled kickoff instant, read
+        # only to check an NFL contract's date mapping (slug date == the
+        # kickoff's America/New_York day); it classifies nothing else.
         r = await conn.fetchrow(
             "SELECT market_slug, event_slug, event_title, question, "
-            "       sports_type FROM us_premap WHERE market_slug = $1 "
+            "       sports_type, "
+            "       extract(epoch FROM game_start)::float8 AS game_start_epoch"
+            "  FROM us_premap WHERE market_slug = $1 "
             " ORDER BY updated_at DESC LIMIT 1", str(slug))
         return None if r is None else dict(r)
     except Exception:                                          # noqa: BLE001

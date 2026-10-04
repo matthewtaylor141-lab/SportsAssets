@@ -164,7 +164,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     min_edge_pp = max(float(params["values"]["min_gross_edge_pp"]),
                       PB.CG_MIN_EDGE_PP_V2)
     min_edge = min_edge_pp / 100.0
-    match = PB.completed_game_match(cand, row)
+    match = PB.completed_game_match(cand, row, catalogue=cat)
     refusals.extend(match["refusals"])
     real = DP._realism(cand, cat)
     if real["status"] == DP.FAIL:
@@ -175,6 +175,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                real_event=real, displayed_quote_used_as_price=False)
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
+    # R30A: an NFL line's P(win | no tie) is valued as the venue contract
+    # (tie pays 0.50) at the worst cited tie rate, before any edge or EV.
+    conv_refusal = PB.apply_venue_conversion(pin, match)
+    if conv_refusal and conv_refusal not in refusals:
+        refusals.append(conv_refusal)
     cross = await PB.cross_strategy_exposure(
         conn, account_id=ctx["account_id"], strategy=STRATEGY,
         slug=cand.get("us_market_slug"), fixture=cand.get("fixture"))
@@ -484,7 +489,10 @@ async def step_maintain(conn, ctx: dict) -> dict:
         contract = None
         if r["valuation_id"] is not None:
             contract = await conn.fetchrow(
-                "SELECT buy_intent, payout_event, payout_is_complement "
+                "SELECT buy_intent, payout_event, payout_is_complement, "
+                "       sport_family, us_market_slug, raw_odds, "
+                "       settlement_comparison->>'venue_rules_text' "
+                "         AS venue_rules_text "
                 "  FROM external_valuations WHERE id=$1",
                 int(r["valuation_id"]))
         v = None
@@ -499,9 +507,29 @@ async def step_maintain(conn, ctx: dict) -> dict:
                 bool(contract["payout_is_complement"]))
         age = (None if v is None or v["observed_at"] is None
                else round(at - L._epoch(v["observed_at"]), 3))
+        p_new = None if v is None else float(v["probability"])
+        if p_new is not None and contract is not None:
+            # R30A: the standing bid is re-checked on the SAME scale it was
+            # placed on -- an NFL line's P(win | no tie) as the venue
+            # contract's value (tie pays 0.50) at the worst cited tie rate.
+            # A conversion that cannot be made leaves no probability, and
+            # check_resting then cancels on the missing reading.
+            from .. import bettor_nfl_settlement as NFL
+            if (str(contract["sport_family"] or "") == "football"
+                    and NFL.league_of_slug(contract["us_market_slug"])
+                    == "nfl"):
+                pin_like = {"p": p_new}
+                why = PB.apply_venue_conversion(pin_like, {
+                    "venue_conversion": {
+                        "sport_family": "football", "league": "nfl",
+                        "venue_rules_text": contract["venue_rules_text"],
+                        "book_outcome_names": list(
+                            (DP._j(contract["raw_odds"]) or {}).keys()),
+                        "phase": None}})
+                p_new = None if why else pin_like["p"]
         chk = check_resting(
             limit=float(r["limit_price"]),
-            p_new=None if v is None else float(v["probability"]),
+            p_new=p_new,
             reading_age_s=age, min_edge=min_edge,
             fee_pc=lambda px: PB.fee_per_contract(fee_fn, px, at),
             enabled=bool(en.get("enabled")))
