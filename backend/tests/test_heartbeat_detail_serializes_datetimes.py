@@ -90,13 +90,22 @@ async def test_heartbeat_through_the_pool_writes_datetime_detail(monkeypatch):
     assert json.loads(args[2])["bucket"].startswith("2026-10-04T12:00")
 
 
-def test_heartbeat_json_is_total():
+def test_heartbeat_json_converts_datetimes_and_stays_strict():
+    """RE-PINNED AT R30A (2026-10-04). This was `..._is_total`: it asserted a
+    Decimal and a set were turned into text. That totality contradicted the
+    owner rule test_shadow_bettor.py::test_the_heartbeat_serializer_stays_strict
+    pins ("Unexpected unsupported types should remain detectable", not
+    default=str), and the two tests could not both pass. The datetime
+    conversion -- the production defect this file reproduces -- is kept and
+    pinned at every depth; an unexpected type raises, as it did before."""
     out = json.loads(DB.heartbeat_json({
         "at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
-        "day": date(2026, 1, 2), "px": Decimal("0.52"), "s": {1, 2} - {1},
+        "day": date(2026, 1, 2),
         "nested": [{"t": datetime(2026, 1, 2, tzinfo=UTC)}]}))
     assert out["at"] == "2026-01-02T03:04:05+00:00"
     assert out["day"] == "2026-01-02"
-    assert out["px"] == "0.52"
     assert out["nested"][0]["t"].startswith("2026-01-02T00:00")
     assert DB.heartbeat_json(None) == "{}"
+    for unexpected in (Decimal("0.52"), {1}, object()):
+        with pytest.raises(TypeError, match="not JSON serializable"):
+            DB.heartbeat_json({"x": unexpected})

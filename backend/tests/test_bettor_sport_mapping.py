@@ -205,10 +205,57 @@ def test_the_universe_query_now_selects_the_columns_it_needs():
 
 
 def test_wiring_the_mapping_did_not_move_the_policy_code_sha():
-    """universe() is outside the decision boundary on purpose."""
+    """universe() is outside the decision boundary on purpose.
+
+    RE-EXPRESSED AT R30A (2026-10-04). This used to be ONE literal,
+    84c80e7c..., recorded at 6cc0bb5 (2026-09-20). Two facts have changed
+    since, both legitimately, and the literal could survive neither:
+
+      1. THE DECISION PATH CHANGED. 70ca3a4 (2026-09-23, "the refusal was
+         unconditional; now it is a verdict") gave `shadow_bettor.decide` its
+         entry-gate branch. `decide` is inside the boundary, so the hash HAD
+         to move -- that is the boundary working, and the production freeze
+         (`shadow_store.freeze_policy`) compares it fail-closed.
+      2. THE INTERPRETER. The digest is over `ast.dump`, whose output is
+         per Python minor version. The same tree at 6cc0bb5 is 84c80e7c on
+         3.10/3.11 (where the literal was recorded) and 92a190a0 on 3.12.3;
+         at 0ebdd33 it is 5a4b1c52 on 3.11 (CI run 37223385978's value) and
+         98aaa204 on 3.12.3. Production runs 3.12.3, pinned by digest in the
+         Dockerfile and checked at boot by `runtime_manifest`; an
+         interpreter bump would move the running sha and block shadow
+         decision writing until a new freeze -- the fail-closed direction.
+
+    The PROPERTY this test exists for is that wiring `universe()` cannot move
+    the hash. That is now asserted directly, on any interpreter, by
+    mutating `universe` / `UNIVERSE_SQL` through `overrides` (unchanged) and
+    `decide` (moved). The literal is kept for the gated interpreter only.
+    """
+    import platform
+    from sportsassets import runtime_manifest as RM
     from sportsassets import shadow_bettor_codesha as cs
-    assert cs.semantic_code_sha() == (
-        "84c80e7c08153db58266fe56780330fbe5d927ba9f6b76ca8e839c7fef7f8110")
+    import pathlib
+    src = (pathlib.Path(cs.__file__).parent / "shadow_bettor.py").read_text()
+    base = cs.semantic_code_sha()
+    # the mapping's wiring site: the universe query and its reader
+    assert "p.team_league" in src
+    rewired = src.replace("p.team_league", "p.team_league, p.extra_col")
+    assert rewired != src
+    assert cs.semantic_code_sha(
+        overrides={"shadow_bettor.py": rewired}) == base
+    reader = src.replace("async def universe(pool, *, fresh_s=7200, limit=40)",
+                         "async def universe(pool, *, fresh_s=3600, limit=41)")
+    assert reader != src
+    assert cs.semantic_code_sha(
+        overrides={"shadow_bettor.py": reader}) == base
+    # ... while the decision itself is inside it
+    moved = src.replace('B_RISK_GATE = "RISK_GATE"',
+                        'B_RISK_GATE = "RISK_GATE_RENAMED"', 1)
+    assert moved != src
+    assert cs.semantic_code_sha(
+        overrides={"shadow_bettor.py": moved}) != base
+    if platform.python_version() == RM.EXPECTED_PYTHON:
+        assert base == (
+            "98aaa204379a812b90a5154c1bd70f80418a6ffb85f4571b45554199aaff2172")
 
 
 # ── a venue-stated non-sport is not an unknown ───────────────────────

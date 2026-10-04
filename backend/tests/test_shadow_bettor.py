@@ -766,6 +766,24 @@ def test_v5_considers_more_than_it_can_produce():
     assert bpol.DECLARATION["actionEvEngineIsImportedNotCopied"] is True
 
 
+def test_v5s_declaration_does_not_follow_the_live_action_catalogue(monkeypatch):
+    """R30A ci (2026-10-04). fe69419 added FORM_INDIRECT_HEDGE to the shared
+    action catalogue and, because V5's considered set was DERIVED from it,
+    rewrote V5's frozen declaration (POLICY_SHA 1887fe6e -> 6129637a), which
+    `freeze_policy` refuses at boot. The set is frozen now: V5 hashes to the
+    sha it was frozen with at e8ab303, and a further catalogue addition
+    cannot move it."""
+    from sportsassets import bettor_ev_actions as evacts
+    assert bpol.POLICY_SHA.startswith("1887fe6ee4624e31")
+    assert "FORM_INDIRECT_HEDGE" in evacts.ACTIONS
+    assert "FORM_INDIRECT_HEDGE" not in bpol.CONSIDERED_ACTION_SET
+    assert set(bpol.CONSIDERED_ACTION_SET) < set(evacts.ACTIONS)
+    before = bpol.policy_sha()
+    monkeypatch.setattr(evacts, "ACTIONS",
+                        tuple(evacts.ACTIONS) + ("A_LATER_ACTION",))
+    assert bpol.policy_sha() == before
+
+
 def test_v1s_recorded_hashes_are_kept_and_never_recomputed():
     """"Do not rehash V1." Its frozen numbers are constants here so the
     evidence that code changed after the freeze survives."""
@@ -845,13 +863,30 @@ def test_pipeline_health_converts_its_datetimes_by_name():
 
 
 def test_the_heartbeat_serializer_stays_strict():
-    """A blanket default= would fix this symptom and hide the next."""
-    db_src = (BACKEND / "sportsassets" / "db.py").read_text()
-    beat = db_src[db_src.index("async def heartbeat("):]
-    beat = beat[:beat.index("\nasync def ", 5)] if "\nasync def " in beat[5:] \
-        else beat[:2000]
-    assert "json.dumps(detail or {})" in beat
-    assert "default=" not in beat
+    """A blanket default= would fix this symptom and hide the next.
+
+    RE-EXPRESSED AT R30A (2026-10-04). This read the SOURCE of
+    `db.heartbeat` for a bare `json.dumps(detail or {})`. dea1b2e (2026-10-04)
+    moved the serialization into `db.heartbeat_json` so both write paths
+    share it, and gave it a converter for the one known non-JSON type a
+    heartbeat carries (bettor_state's datetime `bucket`). The text pin could
+    not survive the move. The PROPERTY -- known datetimes converted
+    explicitly, any other unsupported type still raises -- is asserted by
+    behaviour on the serializer `heartbeat` actually calls."""
+    import datetime as _dt
+    import inspect
+    import json
+    from decimal import Decimal
+    from sportsassets import db as DB
+    beat = inspect.getsource(DB.heartbeat)
+    assert "default=" not in beat and "json.dumps" not in beat
+    assert beat.count("heartbeat_json(detail)") == 2, "both write paths"
+    assert json.loads(DB.heartbeat_json(
+        {"t": _dt.datetime(2026, 1, 2, tzinfo=_dt.timezone.utc)}))["t"] \
+        == "2026-01-02T00:00:00+00:00"
+    for unexpected in (Decimal("1.5"), {1}, object(), b"x"):
+        with pytest.raises(TypeError):
+            DB.heartbeat_json({"x": unexpected})
 
 
 def test_a_heartbeat_failure_is_loud_and_recorded():

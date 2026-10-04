@@ -80,7 +80,31 @@ ACTION_SET = [sh.NO_TRADE]
 # considered one action and an engine that considered fifteen both
 # produce NO_TRADE, and only this distinction tells them apart in the
 # ledger.
-CONSIDERED_ACTION_SET = list(evacts.ACTIONS)
+#
+# FROZEN AS A LITERAL, NOT DERIVED FROM THE LIVE CATALOGUE (R30A ci,
+# 2026-10-04). This was `list(evacts.ACTIONS)`. The declaration below says
+# the breadth is "frozen in the declaration ... rather than a property of
+# whatever the code happened to loop over that day" -- and deriving it made
+# it exactly that property. On 2026-09-27 fe69419 added FORM_INDIRECT_HEDGE to
+# `bettor_ev_actions.ACTIONS` (correctly, for the funded management path) and
+# thereby rewrote BETTOR_EV_SHADOW_V5's declaration under a version already
+# carrying rows: POLICY_SHA moved 1887fe6ee4624e31 -> 6129637ab533a879, so
+# `shadow_store.freeze_policy` answers REFUSED ("Bump the version") at every
+# boot of a build containing fe69419. Measured by importing this module from
+# `git archive` of e8ab303 (V5's declaration), fe69419^, fe69419 and 0ebdd33.
+#
+# These are the fifteen V5 declared at e8ab303, in that order; with them the
+# declaration hashes to V5's frozen 1887fe6e again. Nothing more is unlocked
+# by this: the decision code moved under V5 on 2026-09-23 (70ca3a4), so the
+# freeze now reports ALREADY_FROZEN with codeShaMatches=False and the worker
+# stays in POLICY_CODE_DRIFT -- decision writing blocked, the true state,
+# reported by its true reason. A lane that should weigh sixteen is V6, which
+# is a new declaration, never an edit of this one.
+CONSIDERED_ACTION_SET = [
+    "MAKE_YES", "MAKE_NO", "MAKE_BOTH", "TAKE_YES", "TAKE_NO",
+    "POST_COMPLEMENT", "TAKE_COMPLEMENT", "COMPLETE_PAIR", "MERGE", "HOLD",
+    "WAIT_REQUOTE", "DIRECT_EXIT", "HEDGE", "HOLD_TO_SETTLEMENT", "NO_TRADE",
+]
 
 # ── the declaration ──────────────────────────────────────────────────
 

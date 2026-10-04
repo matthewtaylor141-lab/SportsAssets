@@ -179,20 +179,35 @@ async def close_pool() -> None:
 
 
 def _heartbeat_default(o):
-    """What JSON cannot carry, as text: a datetime / date as ISO-8601
-    (bettor_state's tick stats carry its observation `bucket` as a
-    datetime), anything else as its str. Never raises."""
+    """The ONE type JSON cannot carry that a heartbeat is known to hold: a
+    datetime / date / time, as ISO-8601 (bettor_state's tick stats carry its
+    observation `bucket` as a datetime). Anything else RAISES.
+
+    STRICT ON PURPOSE (R30A ci, 2026-10-04). dea1b2e added this converter
+    with `return str(o)` for every other type, which made the serializer
+    total -- and contradicted the owner rule pinned by
+    test_shadow_bettor.py::test_the_heartbeat_serializer_stays_strict:
+    "Explicitly convert the known datetime fields ... Unexpected unsupported
+    types should remain detectable." Not default=str. A Decimal or a set
+    turned into text by a blanket default is a heartbeat that silently
+    changes shape; raising keeps it a loud, recorded heartbeat failure (the
+    caller's log.error path), which is how the datetime defect itself was
+    found. Before dea1b2e these types raised too, so this narrows nothing
+    that ever worked."""
     import datetime as _dt
     if isinstance(o, (_dt.datetime, _dt.date, _dt.time)):
         return o.isoformat()
-    return str(o)
+    raise TypeError("Object of type %s is not JSON serializable "
+                    "(heartbeat details convert datetimes only)"
+                    % type(o).__name__)
 
 
 def heartbeat_json(detail) -> str:
     """THE ONE SERIALIZATION OF A HEARTBEAT DETAIL. A bare json.dumps raised
     `TypeError: Object of type datetime is not JSON serializable` on every
     bettor_state tick, so that loop's heartbeat (and the accounting it
-    carries) never reached the database."""
+    carries) never reached the database. Datetimes are converted; every
+    other non-JSON type still raises (see `_heartbeat_default`)."""
     import json
     return json.dumps(detail or {}, default=_heartbeat_default)
 
