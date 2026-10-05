@@ -646,8 +646,12 @@ async def test_k6b_the_completed_game_decision_reads_the_row_the_pinnapi_collect
     e = env
     rows = await RI._one_reactive(e)
     assert [r["state"] for r in rows] == ["COMPLETED"], rows
-    vids = rows[0]["detail"]["valuation_ids"]
-    assert len(vids) == 1, rows[0]["detail"]
+    # (integration with inc-edge) each evaluation now ALSO records the other
+    # side of the same contract (the complement, CALIBRATION_ONLY); the round
+    # trip below is the priced side's, read as RI._priced reads it
+    all_vids = rows[0]["detail"]["valuation_ids"]
+    vids = await RI._priced(e, all_vids)
+    assert len(vids) == 1 and len(all_vids) == 2, rows[0]["detail"]
     v = await RI._valuation(e, vids[0])
     # ── the writer's row: the collector's own PinnAPI record ──
     assert v["provider"] == PP.PROVIDER
