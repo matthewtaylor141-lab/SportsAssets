@@ -12,6 +12,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import { adrianaReadback } from './adriana_readback.mjs';
 
 const HOST = process.env.HOST || 'https://command.bettortoken.com';
 const TOKEN = process.env.ADMIN_TOKEN || '';
@@ -48,6 +49,8 @@ const server = http.createServer(async (req, res) => {
 });
 await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
 const BASE = 'http://127.0.0.1:' + PORT;
+report.adriana = await adrianaReadback(HOST, TOKEN, OUT);
+console.log('adriana ' + JSON.stringify({ seat: report.adriana.seat && { deployed: report.adriana.seat.deployed, state: report.adriana.seat.state, work_state: report.adriana.seat.work_state }, workspace: report.adriana.workspace_http, census: report.adriana.census && { scan: report.adriana.census.scan_id, status: report.adriana.census.status, structures: report.adriana.census.structures_considered, opportunities: report.adriana.census.opportunities, refused: report.adriana.census.refusals_total } }));
 
 const report = { host: HOST, candidate: process.env.CAND_SHA || null, started: new Date().toISOString(), views: [], proxied };
 const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
@@ -78,7 +81,7 @@ function watchPage(page, sink) {
     ['1_command_1440', async () => page.evaluate(() => window.__hq.go('command'))],
     ['2_floor_wide_1440', async () => page.evaluate(() => window.__hq.go('floor'))],
     ['3_derek_desk_1440', async () => page.evaluate(() => { window.__hq.go('floor'); window.__hq.openDesk('derek'); })],
-    ['4_ariana_desk_1440', async () => page.evaluate(() => { window.__hq.closeDesk(); window.__hq.openDesk('ariana'); })],
+    ['4_adriana_desk_1440', async () => page.evaluate(() => { window.__hq.closeDesk(); window.__hq.openDesk('adriana'); })],
     ['5_markets_1440', async () => page.evaluate(() => window.__hq.go('markets'))],
     ['6_capital_risk_1440', async () => page.evaluate(() => window.__hq.go('capital'))],
     ['7_reports_1440', async () => page.evaluate(() => window.__hq.go('reports'))]

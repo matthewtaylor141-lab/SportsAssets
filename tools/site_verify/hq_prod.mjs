@@ -5,6 +5,7 @@
 // console errors and every non-GET to /api/** (must be none).
 import fs from 'node:fs';
 import { chromium } from 'playwright';
+import { adrianaReadback } from './adriana_readback.mjs';
 const HOST = process.env.HOST || 'https://command.bettortoken.com';
 const TOKEN = process.env.ADMIN_TOKEN || '';
 const OUT = process.env.OUT || 'site_verify_out';
@@ -18,6 +19,8 @@ for (let i = 0; i < 60; i++) {
   await new Promise((r) => setTimeout(r, 15000));
 }
 console.log('build.json ' + JSON.stringify(report.build));
+report.adriana = await adrianaReadback(HOST, TOKEN, OUT);
+console.log('adriana ' + JSON.stringify({ seat: report.adriana.seat && { deployed: report.adriana.seat.deployed, state: report.adriana.seat.state, work_state: report.adriana.seat.work_state }, workspace: report.adriana.workspace_http, census: report.adriana.census && { scan: report.adriana.census.scan_id, status: report.adriana.census.status, structures: report.adriana.census.structures_considered, opportunities: report.adriana.census.opportunities, refused: report.adriana.census.refusals_total } }));
 const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 async function auth(ctx) { if (TOKEN) await ctx.route(HOST + '/api/command/**', (r) => r.continue({ headers: { ...r.request().headers(), 'x-admin-token': TOKEN } })); }
 async function probe(page) {
@@ -47,7 +50,7 @@ function watchPage(page, sink) {
     ['1_command_1440', async () => page.evaluate(() => window.__hq.go('command'))],
     ['2_floor_wide_1440', async () => page.evaluate(() => window.__hq.go('floor'))],
     ['3_derek_desk_1440', async () => page.evaluate(() => { window.__hq.go('floor'); window.__hq.openDesk('derek'); })],
-    ['4_ariana_desk_1440', async () => page.evaluate(() => { window.__hq.closeDesk(); window.__hq.openDesk('ariana'); })],
+    ['4_adriana_desk_1440', async () => page.evaluate(() => { window.__hq.closeDesk(); window.__hq.openDesk('adriana'); })],
     ['5_markets_1440', async () => page.evaluate(() => window.__hq.go('markets'))],
     ['6_capital_risk_1440', async () => page.evaluate(() => window.__hq.go('capital'))],
     ['7_reports_1440', async () => page.evaluate(() => window.__hq.go('reports'))]
