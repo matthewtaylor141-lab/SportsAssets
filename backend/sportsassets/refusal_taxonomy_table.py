@@ -1750,11 +1750,24 @@ EXEC_GATING_STREAM = {
     "LIFECYCLE_FORWARD_EVIDENCE_INSUFFICIENT": (E, RAIL, "OUT_OF_FUNNEL"),
 }
 
+#: THE PROFITABILITY OS VIEW (sportsassets/pos_os): why-codes a read-only
+#: section names when it cannot compute -- never a trading refusal; every
+#: one is SOFTWARE (a read, a sample or a recorded mark the view lacks).
+POS_OS_STREAM = {
+    "POS_OS_INPUT_NOT_READ": (S, DATA, "ACCOUNTING"),
+    "POS_OS_NO_RECORDED_ROWS_IN_WINDOW": (S, DATA, "ACCOUNTING"),
+    "POS_OS_COMPONENT_RAISED": (S, INT, "ACCOUNTING"),
+    "POS_OS_BELOW_MINIMUM_SAMPLE": (S, DATA, "ACCOUNTING"),
+    "POS_OS_NO_RECORDED_MARK_AT_HORIZON": (S, DATA, "FILL"),
+    "POS_OS_NO_RECORDED_MID_AT_FILL": (S, DATA, "FILL"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())
                + list(INTEGRATION_STREAMS.items())
                + list(COVERAGE_CENSUS.items())
-               + list(EXEC_GATING_STREAM.items())):
+               + list(EXEC_GATING_STREAM.items())
+               + list(POS_OS_STREAM.items())):
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL

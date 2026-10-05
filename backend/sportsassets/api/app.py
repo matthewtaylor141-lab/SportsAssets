@@ -754,6 +754,16 @@ try:
 except ImportError:
     log.warning("profitability: api.command_profitability not loaded",
                 exc_info=True)
+# ── THE PROFITABILITY OS PAGE: GET /api/command/profitability/os (one
+# section per component, sportsassets/pos_os). GET only, COMMAND auth,
+# READ ONLY transaction. RESEARCH: observes and recommends, no authority.
+try:
+    from .command_profitability_os import (
+        router as _command_profitability_os_router)
+    app.include_router(_command_profitability_os_router)
+except ImportError:
+    log.warning("profitability: api.command_profitability_os not loaded",
+                exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
 # /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.
