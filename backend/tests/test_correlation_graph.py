@@ -654,6 +654,11 @@ async def _position(conn, a, *, slug, side, qty, px, group, at):
     r = await SIM.simulate_order(conn, got["order"]["order_id"], now=at + 4,
                                  fee_fn=H.zero_fee)
     assert r["state"] == "FILLED", r
+    # the held book re-read two-sided after the fill: an exit-side mark, so
+    # the position is freshly manageable (migration 270's allocation rail
+    # refuses a strategy's next ENTRY while its held positions are not)
+    await H.observe(conn, slug, at + 5, bids=[(round(px - 0.02, 2), qty * 2)],
+                    offers=[(px, qty * 2)])
 
 
 @pg

@@ -1132,7 +1132,15 @@ def test_no_funded_module_reads_or_imports_the_policy_parameters():
                        # parameter heads READ ONLY to replay the incumbent
                        # policy beside its challengers; it writes only
                        # poslearn_* tables (tests/test_poslearn_authority.py)
-                       "poslearn/reads.py", "poslearn/models.py"}, readers
+                       "poslearn/reads.py", "poslearn/models.py",
+                       # (2026-10-05) the Profitability OS view reads the
+                       # parameter ACTIVATIONS READ ONLY (experiment
+                       # governance + the release / incident twin), in a READ
+                       # ONLY transaction; it imports no order, venue or
+                       # funded module and writes nothing
+                       # (tests/test_pos_os_authority.py)
+                       "pos_os/reads.py", "pos_os/governance.py",
+                       "pos_os/release_twin.py"}, readers
     assert not any("funded" in r or "live" in r for r in readers)
     # bettor_paper_ops is the management pages' PAPER read model: Audrey's
     # page reads the learning summary and event audits through it (read-only)
