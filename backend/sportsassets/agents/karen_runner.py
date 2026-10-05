@@ -11,7 +11,11 @@ lifespan). Every pass:
      grounding rule (every cited record must exist) and is idempotent on
      (detector, target record) -- a restart or a second process writes
      nothing new;
-  4. heartbeats the outcome (DECISION_RECORDED when it opened a challenge,
+  4. enqueues what it found and did not open (the open-challenge cap, the
+     per-pass budget) as CHALLENGE_INVESTIGATION items in her DURABLE WORK
+     QUEUE (agents/agent_work.py, migration 301), completed by the challenge
+     that later opens them or failed when the same rule no longer holds;
+  5. heartbeats the outcome (DECISION_RECORDED when it opened a challenge,
      IDLE when it found nothing, FAILED when every detector failed) and
      finishes the run, with a service heartbeat `agent_karen`.
 
@@ -666,6 +670,30 @@ async def _open_count(conn, detector: str) -> int:
         "   AND state IN ('OPEN', 'RESPONDED')", detector) or 0)
 
 
+def _deferred(c: dict, why: str) -> dict | None:
+    """A detector candidate the pass did not open, as a CHALLENGE_
+    INVESTIGATION backlog subject (agents/agent_work.py). A loop-finding
+    candidate (its own stage machinery) is not deferred here."""
+    if c.get("loop") or not c.get("target_kind") or \
+            c.get("target_id") is None:
+        return None
+    from . import agent_work as AW
+    return {"agent": K.KAREN,
+            "subject": AW.subject_key(c["detector"], c["target_kind"],
+                                      c["target_id"]),
+            "arose_at": c.get("record_at"),
+            "source_table": c["target_kind"],
+            "source_id": str(c["target_id"]),
+            "collaborator": (c.get("target_agent")
+                             if c.get("target_agent") != K.KAREN else None),
+            "blocker": why,
+            "detail": {"detector": c["detector"],
+                       "target_kind": c["target_kind"],
+                       "target_id": str(c["target_id"]),
+                       "target_agent": c.get("target_agent"),
+                       "severity": c.get("severity")}}
+
+
 async def _open_candidate(conn, c: dict, at: float) -> dict:
     if c.get("loop"):
         return await K.challenge_finding(
@@ -700,6 +728,7 @@ async def pass_once(conn, *, now: float | None = None,
     await R.start_run(conn, K.KAREN, run_id, now=at,
                       summary={"detectors": [d for d, _ in detectors]})
     budget = MAX_NEW_PER_PASS
+    deferred: list = []
     for name, fn in detectors:
         if budget <= 0:
             break
@@ -707,9 +736,16 @@ async def pass_once(conn, *, now: float | None = None,
             async with asyncio.timeout(DETECTOR_TIMEOUT_S):
                 if await _open_count(conn, name) >= MAX_OPEN_PER_DETECTOR:
                     summary["refused"][name] = "OPEN_CHALLENGE_CAP_REACHED"
+                    # what the capped detector would raise is owed work,
+                    # not silence: it is enqueued, nothing is opened
+                    deferred += [_deferred(c, "OPEN_CHALLENGE_CAP_REACHED")
+                                 for c in await fn(conn, at,
+                                                   MAX_NEW_PER_DETECTOR)]
                     continue
                 cands = await fn(conn, at, MAX_NEW_PER_DETECTOR)
                 summary["candidates"] += len(cands)
+                deferred += [_deferred(c, "PASS_BUDGET_EXHAUSTED") for c in
+                             cands[min(MAX_NEW_PER_DETECTOR, budget):]]
                 for c in cands[:min(MAX_NEW_PER_DETECTOR, budget)]:
                     got = await _open_candidate(conn, c, at)
                     if got.get("ok") and got.get("created"):
@@ -721,6 +757,17 @@ async def pass_once(conn, *, now: float | None = None,
             raise
         except Exception as exc:                                # noqa: BLE001
             summary["detector_errors"][name] = type(exc).__name__
+    # THE DURABLE QUEUE (migration 301): the deferred candidates
+    try:
+        from . import agent_work as AW
+        async with asyncio.timeout(DETECTOR_TIMEOUT_S):
+            summary["work_queue"] = await AW.sync_for(
+                conn, "karen_runner", now=at,
+                pushed={AW.K_INVESTIGATION: [d for d in deferred if d]})
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        summary["work_queue"] = {"error": type(exc).__name__}
     elapsed = round(time.monotonic() - t0, 3)
     failed_all = len(summary["detector_errors"]) == len(detectors) > 0
     if failed_all:

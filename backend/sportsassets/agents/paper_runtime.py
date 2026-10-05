@@ -323,6 +323,30 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # THE AGENTS' DURABLE WORK QUEUES (owner R30 section 17, migration
+        # 301): on the main account's pass, at most every minute, Derek's
+        # candidates awaiting fresh evidence, Allie's allocation reviews and
+        # Audrey's open reconciliations are enqueued with their owner, SLA,
+        # blocker, evidence needed and collaborator, and closed by the
+        # records that resolve them. Writes only agent_work_* records.
+        from . import agent_work as AWQ
+        # ROOT-CAUSE CLUSTERS (owner R30 section 20): repeated Karen /
+        # Audrey findings opened as ONE engineering item each, and a linked
+        # fix's measured effect -- before the queue step, which enqueues
+        # Audrey's triage of every open cluster
+        from . import improvement_clusters as RCC
+        steps.append(("root_cause_clusters", RCC.step))
+        steps.append(("agent_work_queues", AWQ.step))
+        # MEMORY USEFULNESS (owner R30 section 19): which lessons were in
+        # each new decision's context (point in time), and, hourly, their
+        # forward INVESTMENT-sleeve evidence -- a lesson with harmful
+        # evidence is downweighted / superseded (append-only; a weight only
+        # falls; no decision reads it to trade)
+        from . import lesson_usage as LU
+        steps.append(("lesson_usage", LU.step))
+    except ImportError:
+        pass
+    try:
         # THE AGENTS' OWN MEMORY (migration 224): at most every 10 minutes,
         # each agent learns from durable outcomes (settlements, reviews,
         # challenge outcomes, execution outcomes, tournament verdicts) into
