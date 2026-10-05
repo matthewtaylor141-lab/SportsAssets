@@ -1,0 +1,240 @@
+{
+ "at": "2026-10-05T22:32:58.780Z",
+ "floor_http": 200,
+ "seat": {
+  "deployed": true,
+  "deploy_why": null,
+  "state": "WORKING_ON",
+  "work_state": "BLOCKED_ON_MARKET_DATA",
+  "work_detail": "Market data failing: VENUE_BOOK_READS_FAILING",
+  "heartbeat": {
+   "at": 1791239516.096655,
+   "age_s": 62.9,
+   "stale_after_s": 900,
+   "source": "agent_status.last_heartbeat_at"
+  },
+  "monitor": [
+   {
+    "label": "Census passes (24h)",
+    "value": 2,
+    "source": "adriana_arb_scans",
+    "as_of": 1791239516.039859,
+    "why": null
+   },
+   {
+    "label": "Proven after costs (24h)",
+    "value": 0,
+    "source": "adriana_arb_opportunities",
+    "as_of": 1791239516.039859,
+    "why": null
+   },
+   {
+    "label": "Refused (last pass)",
+    "value": 0,
+    "source": "adriana_arb_scans",
+    "as_of": 1791239516.039859,
+    "why": null
+   },
+   {
+    "label": "Fresh books (last pass)",
+    "value": 0,
+    "source": "adriana_arb_scans",
+    "as_of": 1791239516.039859,
+    "why": null
+   }
+  ],
+  "last_output": {
+   "kind": "adriana_arb_scans",
+   "id": "adr-scan-1791239513716",
+   "href": "/api/command/adriana",
+   "at": 1791239516.039859,
+   "summary": "Census OK · 0 structures · 0 proven · 0 refused"
+  },
+  "authority": "SHADOW_ONLY"
+ },
+ "adriana_edges": [
+  {
+   "from": "ADRIANA",
+   "to": "AUDREY",
+   "kind": "REVIEW_REQUEST",
+   "count": 1,
+   "at": 1791239198.503787
+  }
+ ],
+ "workspace_http": 200,
+ "agent": {
+  "agent_id": "ADRIANA",
+  "display_name": "Adriana",
+  "mandate": "Find structures whose payout is fixed in every outcome -- cross-venue complements, YES / NO complements, middles across lines and exhaustive outcome baskets -- and prove or refuse each one: identical settlement and payoff in every outcome (void, postponement and tie included), synchronized fresh books, executable depth on every leg, and a positive worst case after every fee, slippage allowance and cost at the largest profitable matched size. Records every opportunity and every refusal in SHADOW. Never calls a structure guaranteed unless all of that reconciles. Holds NO authority: no venue submission, no order, no cancel, no credential, no capital, no approval, no promotion.",
+  "policy_version": "CODE_DEFAULT",
+  "model_version": "NO_OUTCOME_MODEL_EXHAUSTIVE_PAYOFF_SOLVER",
+  "code_version": "sportsassets.workers.ext_pinnacle_loop@39688763d8b8#9c84ca01af8e0c3ec20c6c9379665a490b12de6d",
+  "tool_permissions": {
+   "denied": [
+    "request.funded_entry",
+    "dispatch.xavier_claim",
+    "write.entry_decisions",
+    "write.management_decisions",
+    "write.agent_audits",
+    "write.directives",
+    "write.policy_candidates",
+    "write.challenges",
+    "read.all",
+    "write.feature_promotion",
+    "write.capital_allocation",
+    "write.release_eligibility",
+    "write.execution_estimates",
+    "write.candidate_reviews",
+    "write.feature_registry",
+    "write.feature_tournaments",
+    "order.submit_direct",
+    "order.cancel_direct",
+    "deploy",
+    "write.risk_limits",
+    "write.credentials",
+    "write.account_authority",
+    "write.approvals",
+    "write.submission_switches",
+    "write.policy_activation",
+    "promotion"
+   ],
+   "allowed": [
+    "read.books",
+    "read.catalogue",
+    "read.findings",
+    "write.arb_records",
+    "write.agent_handoffs",
+    "write.loop_findings",
+    "write.agent_tasks"
+   ],
+   "order_path": null,
+   "authority_status": "SHADOW_ONLY"
+  },
+  "identity_updated_at": 1791239184.307487,
+  "state": "DECISION_RECORDED",
+  "activity": "CENSUS_RECORDED",
+  "waiting_on": null,
+  "dependencies": null,
+  "last_heartbeat_at": 1791239516.096655,
+  "last_run_started_at": 1791239513.716654,
+  "last_run_finished_at": 1791239516.096655,
+  "last_run_elapsed_s": 2.38,
+  "runs": 2,
+  "errors": 0,
+  "last_error": null,
+  "cadence": {
+   "target_interval_s": 300
+  },
+  "role": "HEAD_OF_ARBITRAGE"
+ },
+ "census": {
+  "scan_id": "adr-scan-1791239513716",
+  "started_at": 1791239513.716654,
+  "finished_at": 1791239516.039859,
+  "status": "OK",
+  "why": null,
+  "engine_version": "ADRIANA_CENSUS_V1+ADRIANA_ARB_ENGINE_V1",
+  "venues": {
+   "KALSHI": {
+    "why": "NO_KALSHI_BOOK_SOURCE: no Kalshi order book is recorded in Postgres (the admin board is an in-memory cache and the suspended edge-shadow service kept its own SQLite); the engine prices Kalshi legs, the census cannot read any",
+    "source": null,
+    "status": "UNAVAILABLE"
+   },
+   "POLYMARKET": {
+    "why": "NO_POLYMARKET_INTERNATIONAL_BOOK_SOURCE: no book is recorded and no fee schedule is known",
+    "source": null,
+    "status": "UNAVAILABLE"
+   },
+   "POLYMARKET_US": {
+    "why": null,
+    "source": "paper_book_observations (recorded, read-only)",
+    "status": "SUPPORTED",
+    "fee_schedule": "bettor_fee_schedule (dated, per order)"
+   }
+  },
+  "markets_read": 3,
+  "books_fresh": 0,
+  "structures_considered": 0,
+  "opportunities": 0,
+  "refusals_total": 0,
+  "refusals_recorded": 0,
+  "by_verdict": {},
+  "by_kind": {},
+  "by_code": {
+   "by_code": {},
+   "skipped": {
+    "BOOK_READ_FAILED": 20,
+    "SLUG_GRAMMAR_NOT_READ": 10,
+    "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED": 76
+   },
+   "by_primary_code": {},
+   "conditional_candidates": 0,
+   "same_market_pairs_not_considered": 3
+  },
+  "limits": {
+   "max_age_s": 30,
+   "hypothesis": "HYPOTHESIS_BOTH_LEGS_SETTLE_50_50_ON_VOID_OR_POSTPONEMENT",
+   "max_skew_s": 5,
+   "max_markets": 800,
+   "book_window_s": 900,
+   "max_recorded_refusals": 150
+  },
+  "authority": {
+   "mode": "SHADOW",
+   "cancel": false,
+   "submit": false,
+   "capital": false,
+   "credentials": false
+  },
+  "mode": "SHADOW",
+  "production_effect": "NONE"
+ },
+ "venues": {
+  "KALSHI": {
+   "why": "NO_KALSHI_BOOK_SOURCE: no Kalshi order book is recorded in Postgres (the admin board is an in-memory cache and the suspended edge-shadow service kept its own SQLite); the engine prices Kalshi legs, the census cannot read any",
+   "source": null,
+   "status": "UNAVAILABLE"
+  },
+  "POLYMARKET": {
+   "why": "NO_POLYMARKET_INTERNATIONAL_BOOK_SOURCE: no book is recorded and no fee schedule is known",
+   "source": null,
+   "status": "UNAVAILABLE"
+  },
+  "POLYMARKET_US": {
+   "why": null,
+   "source": "paper_book_observations (recorded, read-only)",
+   "status": "SUPPORTED",
+   "fee_schedule": "bettor_fee_schedule (dated, per order)"
+  }
+ },
+ "opportunities": {
+  "status": "EMPTY",
+  "why": "NO_STRUCTURE_PROVEN_AFTER_COSTS: every evaluated structure was refused with its reason",
+  "n": 0
+ },
+ "refusals": {
+  "status": "EMPTY",
+  "why": "NO_REFUSAL_RECORDED",
+  "n": 0
+ },
+ "blockers": {
+  "status": "OK",
+  "why": null,
+  "n": 2
+ },
+ "census_passes": {
+  "status": "OK",
+  "why": null,
+  "n": 2
+ },
+ "top_refusals": [],
+ "authority": {
+  "submit": false,
+  "cancel": false,
+  "credentials": false,
+  "capital": false,
+  "mode": "SHADOW"
+ },
+ "mode": "SHADOW",
+ "production_effect": "NONE"
+}
