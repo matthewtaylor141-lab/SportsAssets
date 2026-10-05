@@ -1189,10 +1189,26 @@ class _Http502(Exception):
 @pg
 async def test_a_429_stops_the_calendar_lane_and_applies_the_circuit(monkeypatch):
     window, ahead, earlier = build_board()
-    min_ahead = _iso(NOW + timedelta(hours=96))[:13]
-    venue = FakeVenue(window + ahead + earlier, fail_on=lambda q: (
-        _Http429() if str(q.get("startTimeMin", "")).startswith(min_ahead)
-        else None))
+
+    # The 429 goes to the AHEAD pass's first slice: startTimeMin at the
+    # sweep's forward edge, now+96h, on the clock the sweep reads when it
+    # sends the request. It used to be matched by the hour prefix of the
+    # module-level NOW, fixed at import; run 37244944534 collected at
+    # 23:47Z and reached this test after 00:00Z, the prefix named an hour
+    # the sweep never asked for, no 429 was raised and the test failed
+    # with `applied == []`. The band (+/-24h) cannot touch any other
+    # request: the window pass starts at now-12h, the next ahead slice at
+    # now+336h, every earlier slice before now-12h.
+    def _first_ahead_slice(q):
+        raw = q.get("startTimeMin")
+        if not raw:
+            return None
+        lo = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+        edge = datetime.now(timezone.utc) + timedelta(hours=96)
+        return _Http429() if abs(lo - edge) < timedelta(hours=24) else None
+
+    venue = FakeVenue(window + ahead + earlier, fail_on=_first_ahead_slice)
     applied = []
     from sportsassets import venue_pace
     monkeypatch.setattr(venue_pace, "penalize_observed",
