@@ -652,3 +652,86 @@ async def test_a_qualifying_other_side_enters_and_xavier_measures_it(cg_on):
         await PL.purge_everything(conn)
         await _clean(conn, slug)
         await conn.close()
+
+
+@pg
+async def test_a_strategy_never_holds_both_sides_of_one_contract(
+        cg_on, monkeypatch):
+    """BOTH SIDES ARE NOW VALUED, so a strategy holding one side of a binary
+    contract could be handed the other: holding both pays exactly 1 whatever
+    happens -- a locked spread-and-fees loss, or an exit dressed as a new
+    entry (exits are management's). Under the owner's capital policy (the
+    same scope as THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT) the decision is a
+    named REFUSE and the account lock refuses the order too."""
+    from sportsassets import bettor_paper_ledger as L
+    from sportsassets import bettor_paper_limits as LIMITS
+    conn = await H.connect()
+    slug = "atc-unl-gre-ger-2026-10-04-gre"
+    odds = {"Draw": 3.40, "Greece": 4.54, "Germany": 1.95}
+    offers = [_lv(0.25, 6000.0), _lv(0.26, 2400.0), _lv(0.27, 900.0)]
+    bids = [_lv(0.24, 5200.0), _lv(0.23, 3100.0), _lv(0.22, 800.0)]
+    real = LIMITS.uses_owner_policy
+    scratch: dict = {}
+    monkeypatch.setattr(LIMITS, "uses_owner_policy",
+                        lambda a: a == scratch.get("id") or real(a))
+    try:
+        now = time.time() + 5.0
+        await PL.purge_everything(conn)
+        await PL.purge_research_models(conn)
+        acct = await PL.new_account(conn, "cmpbox", now=now)
+        scratch["id"] = acct["account_id"]
+        # 1 · the complement (SHORT, NOT(Greece)) enters on the qualifying book
+        rec, contract, evq, vq, extra = _home_record(
+            slug, odds, offers, bids, now=now - 2.0)
+        comp, _ = _complement(rec, contract, evq, vq, extra, now=now - 2.0)
+        cid = await ext.persist(conn, copy.deepcopy(comp))
+        t = PL.Transport(now)
+        t.books[slug] = {"offers": offers, "bids": bids}
+        client = PL.client(t)
+        t.t = max(t.t, now)
+        out = await PR.paper_pass(conn, now=now,
+                                  account_id=acct["account_id"],
+                                  market_data=client, config=acct["config"],
+                                  force=True, fee_fn=None, sleep=_nosleep)
+        assert out["ran"] and not out["errors"], out["errors"]
+        c = await conn.fetchrow(
+            "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
+            " valuation_id=$2 AND strategy=$3", acct["session_id"], cid, CG)
+        assert c["verdict"] == "ENTER" and c["holding_side"] == "SHORT"
+        # 2 · a later valuation makes the HOME side (LONG, Greece) clear the
+        # threshold on its own book: it is refused by name, not entered
+        now2 = now + 30.0
+        rec2, *_ = _home_record(slug, {"Draw": 3.10, "Greece": 2.60,
+                                       "Germany": 2.90}, offers, bids,
+                                now=now2 - 2.0)
+        hid = await ext.persist(conn, copy.deepcopy(rec2))
+        assert hid
+        t.t = max(t.t, now2)
+        out = await PR.paper_pass(conn, now=now2,
+                                  account_id=acct["account_id"],
+                                  market_data=client, config=acct["config"],
+                                  force=True, fee_fn=None, sleep=_nosleep)
+        assert out["ran"] and not out["errors"], out["errors"]
+        h = await conn.fetchrow(
+            "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
+            " valuation_id=$2 AND strategy=$3", acct["session_id"], hid, CG)
+        assert h is not None and h["holding_side"] == "LONG"
+        assert h["verdict"] == "REFUSE"
+        assert L.R_OPPOSITE_SIDE_HELD in list(h["refusals"]), h["refusals"]
+        assert H.j(h["pinnacle"])["opposite_side_held"]
+        assert await conn.fetchval(
+            "SELECT count(*) FROM paper_orders WHERE account_id=$1 AND "
+            " us_market_slug=$2 AND holding_side='LONG'",
+            acct["account_id"], slug) == 0
+        # 3 · and the account lock refuses such an order outright
+        o = H.order(acct, key="box-long", slug=slug, qty=10, limit=0.30,
+                    holding_side="LONG", at=now2, fixture=None)
+        o["strategy"] = CG
+        got = await L.submit_order(conn, o, fee_fn=H.zero_fee, now=now2)
+        assert got["ok"] is False
+        assert got["refusal"] == L.R_OPPOSITE_SIDE_HELD and got["under_lock"]
+        assert client.mutation_attempts == 0
+    finally:
+        await PL.purge_everything(conn)
+        await _clean(conn, slug)
+        await conn.close()

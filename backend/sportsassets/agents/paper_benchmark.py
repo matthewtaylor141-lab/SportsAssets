@@ -1562,6 +1562,21 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         pin["same_contract_held"] = held_same
         if held_same:
             refusals.append(L.R_SAME_CONTRACT_HELD)
+        else:
+            # ...AND ITS OTHER SIDE (L.R_OPPOSITE_SIDE_HELD): both sides of a
+            # binary contract are now valued, and holding both is a locked
+            # loss or an exit dressed as an entry. Read here so the decision
+            # is a named REFUSE; the lock re-checks it in submit_order.
+            opp = L.other_side(side)
+            try:
+                held_other = (await L.same_contract_held(
+                    conn, ctx["account_id"], STRATEGY,
+                    cand.get("us_market_slug"), opp) if opp else [])
+            except Exception as exc:                            # noqa: BLE001
+                held_other = [{"error": type(exc).__name__}]
+            pin["opposite_side_held"] = held_other
+            if held_other:
+                refusals.append(L.R_OPPOSITE_SIDE_HELD)
     p = pin.get("p")
     obs, md, levels, edges = None, None, [], []
     sized: dict = {"qty": 0, "limit": None, "wire": None}

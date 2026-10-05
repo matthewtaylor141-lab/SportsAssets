@@ -641,6 +641,14 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (P0 incident) THE PER-AGENT FUNNEL RECEIPT (GET-only, READ ONLY
+    # transaction): reads a decision's own valuation BY ID for its sport and
+    # side, and counts valuations written per sport / side / purpose for the
+    # receipt. Both purposes, because the agents decided on those rows
+    # whatever their purpose. Selects no candidate, sizes and places nothing.
+    "agent_funnel.py": (
+        "REPORTING_RECEIPT_BY_DECISION_VALUATION_ID_AND_COUNTS_NEVER_SELECTS",
+        2),
 }
 
 

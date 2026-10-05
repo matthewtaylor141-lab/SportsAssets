@@ -357,6 +357,20 @@ R_SAME_STRATEGY_LIVE = "THIS_STRATEGY_ALREADY_HAS_A_LIVE_ENTRY_ON_THIS_FIXTURE"
 #: would add another ~$1,000 to the same position on every valuation; that is
 #: an add to an existing position, not a new ~$1,000 initial position.
 R_SAME_CONTRACT_HELD = "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT"
+#: THE OTHER SIDE OF A CONTRACT THIS STRATEGY HOLDS (P0 incident, inc-edge).
+#: Since each valuation also values the other side of its binary contract
+#: (bettor_complement_valuation), a strategy holding one side could be handed
+#: the other: holding both pays exactly 1 whatever happens, so the pair is a
+#: locked spread-and-fees loss or an exit dressed as a new entry -- exits are
+#: management's. The owner's capital policy keeps a held contract from being
+#: re-entered (same_strategy_same_contract); this is that rule for the side
+#: it could not see before both sides were valued. Same scope (the owner
+#: policy's account), same place (decision, and again under the lock).
+R_OPPOSITE_SIDE_HELD = "THIS_STRATEGY_HOLDS_THE_OTHER_SIDE_OF_THIS_CONTRACT"
+
+
+def other_side(holding_side) -> str | None:
+    return {"LONG": "SHORT", "SHORT": "LONG"}.get(str(holding_side or ""))
 
 
 async def same_contract_held(conn, account_id: str, strategy, slug,
@@ -497,6 +511,15 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
                 if held:
                     return {"ok": False, "refusal": R_SAME_CONTRACT_HELD,
                             "under_lock": True, "by": held,
+                            "reservation_usd": f(reserve),
+                            "available_usd": f(cs["available"])}
+                opp = other_side(o.get("holding_side"))
+                held_other = (await same_contract_held(
+                    conn, acct, o.get("strategy"), o.get("us_market_slug"),
+                    opp) if opp else [])
+                if held_other:
+                    return {"ok": False, "refusal": R_OPPOSITE_SIDE_HELD,
+                            "under_lock": True, "by": held_other,
                             "reservation_usd": f(reserve),
                             "available_usd": f(cs["available"])}
             if exclusive_fixture and o.get("role") == "ENTRY":

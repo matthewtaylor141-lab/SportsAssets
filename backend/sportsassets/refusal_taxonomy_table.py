@@ -1537,6 +1537,10 @@ INCIDENT_STREAMS = {
     "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET":
         (S, FRESH, "FILL"),
     "ENTER_WITHOUT_ORDER": (S, INT, "ORDER"),
+    # a strategy never holds both sides of one binary contract (the owner's
+    # same-contract rule, now that both sides are valued)
+    "THIS_STRATEGY_HOLDS_THE_OTHER_SIDE_OF_THIS_CONTRACT":
+        (E, RAIL, "RISK_ADMISSION"),
     # our own venue request gate refused to dispatch (pacing, not the venue)
     "VENUE_GATE_COOLDOWN": (S, CAP, "VENUE_BOOK"),
     "VENUE_RATE_LIMITED": (S, DATA, "VENUE_BOOK"),

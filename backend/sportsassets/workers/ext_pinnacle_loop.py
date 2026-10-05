@@ -8361,7 +8361,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         at=time.time()) if fresh_ev is not None else None)
                     if (q2 is not None and q2.get("home") == quote.get("home")
                             and q2.get("away") == quote.get("away")):
-                        events[_i] = fresh_ev
+                        events[_i] = event = fresh_ev
                         quote = q2
                         _pe = _quote_epoch(quote)
                         reference_received_at = quote["received_at"]
