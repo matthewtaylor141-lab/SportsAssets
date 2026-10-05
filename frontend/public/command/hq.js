@@ -157,7 +157,7 @@ function capitalHTML(compact) {
       kv('Deployed', U.usd(ex.cost_basis_usd, 0), fin(op.count) ? op.count + ' open · cost basis' : null) +
       kv('Realized P&L', U.signedUsd(p.realized_pnl_usd, 0), 'ledger', tone(p.realized_pnl_usd)) +
       kv('Unrealized', unOk ? U.signedUsd(p.unrealized_pnl_usd, 0) : null, fin(op.count) ? (op.marked || 0) + ' of ' + op.count + ' marked' : null, tone(p.unrealized_pnl_usd)) +
-      (compact ? '' : kv('Cash', U.usd(p.cash_usd, 0), 'fees paid ' + (U.usd(p.fees_paid_usd, 0) || '—')) + kv('Marks', fin(op.stale_marks) ? (op.count - op.stale_marks) + ' fresh' : null, fin(op.stale_marks) ? op.stale_marks + ' stale > ' + ((p.marks_as_of || {}).stale_mark_after_s || 300) + 's' : null, op.stale_marks ? 'warn' : '')) +
+      (compact ? '' : kv('Cash', U.usd(p.cash_usd, 0), 'fees paid ' + (U.usd(p.fees_paid_usd, 0) || '—')) + kv('Marks', fin(op.stale_marks) ? (op.count - op.stale_marks - (op.unmarked || 0)) + ' fresh' : null, fin(op.stale_marks) ? op.stale_marks + ' stale > ' + ((p.marks_as_of || {}).stale_mark_after_s || 300) + 's' : null, op.stale_marks ? 'warn' : '')) +
     '</div>' + (p.status !== 'OK' ? '<div class="why warn">paper book ' + esc(p.status) + (p.why ? ': ' + esc(p.why) : '') + '</div>' : '') +
     '<div class="why" style="margin-top:10px">' + esc(p.label || '') + ' · as of ' + esc(U.hm(p.source_at)) + '</div>';
 }
@@ -181,7 +181,7 @@ function teamHTML() {
   const ds = HQ.desks();
   if (!HQ.reads.floor.data) return '<div class="lbl">Agent activity</div>' + dna(S.signedOut ? 'sign-in required' : HQ.reads.floor.why || 'reading the floor');
   const active = ds.filter((d) => d.active).length;
-  return '<div class="lbl">Agent activity <em>' + active + ' at work · ' + ds.length + ' desks</em>' + (PHONE ? '' : '<button type="button" data-watch aria-pressed="' + (S.watch ? 'true' : 'false') + '" title="Follow the recorded agent events of the latest floor read"><i class="dot blue"></i>Watch BETTOR work</button>') + '</div><div class="team">' + ds.map((d) => {
+  return '<div class="lbl">Agent activity <em>' + active + '/' + ds.length + ' at work</em>' + (PHONE ? '' : '<button type="button" data-watch aria-pressed="' + (S.watch ? 'true' : 'false') + '" title="Follow the recorded agent events of the latest floor read"><i class="dot blue"></i>Watch BETTOR work</button>') + '</div><div class="team">' + ds.map((d) => {
     const img = portrait(d);
     return '<button class="mate' + (d.planned ? ' planned' : '') + '" data-desk="' + esc(d.slug) + '" type="button">' +
       (img ? '<img src="' + esc(img) + '" alt="" width="34" height="34" loading="lazy">' : '<span class="ph">' + esc(d.name.slice(0, 2).toUpperCase()) + '</span>') +
