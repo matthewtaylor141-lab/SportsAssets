@@ -414,6 +414,12 @@ def test_the_old_key_swallowed_the_complement_and_251_keeps_it():
                 old = (MIG / "rollback" /
                        "251_external_valuations_one_per_observation_per_"
                        "side.down.sql").read_text()
+                # (rolled back) the rows 106's key cannot hold -- other
+                # proofs' complements and no-instant rows -- are cleared so
+                # the rollback's own guard lets it apply here
+                await conn.execute(
+                    "DELETE FROM external_valuations WHERE "
+                    "payout_is_complement OR observed_at IS NULL")
                 await conn.execute(old)
                 assert await ext.persist(conn, copy.deepcopy(rec))
                 assert await ext.persist(conn, copy.deepcopy(comp)) is None
@@ -482,7 +488,7 @@ def test_the_rollback_refuses_while_complement_rows_exist():
             try:
                 await conn.execute(
                     "DELETE FROM external_valuations WHERE "
-                    "payout_is_complement")
+                    "payout_is_complement OR observed_at IS NULL")
                 await conn.execute(down)
                 d = await conn.fetchval(
                     "SELECT indexdef FROM pg_indexes WHERE indexname="

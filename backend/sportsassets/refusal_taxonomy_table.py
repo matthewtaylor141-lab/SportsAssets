@@ -1527,7 +1527,36 @@ SIBLING_STREAMS = {
     "canonical_origination_required": (E, RAIL, "ORDER"),
 }
 
-for _k, _v in list(INLINE.items()) + list(SIBLING_STREAMS.items()):
+#: THE P0 INCIDENT STREAMS (coverage -> trade starvation) merged beside this
+#: one: the simulator's skipped-read codes, the collector's precise venue-read
+#: refusals on a failed read (now recorded, no price), the ENTER backstop and
+#: the gross-edge input validation (gross_edge_inputs). Every input-validation
+#: failure is SOFTWARE: the economics were never judged on inputs the
+#: software could vouch for.
+INCIDENT_STREAMS = {
+    "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET":
+        (S, FRESH, "FILL"),
+    "ENTER_WITHOUT_ORDER": (S, INT, "ORDER"),
+    # our own venue request gate refused to dispatch (pacing, not the venue)
+    "VENUE_GATE_COOLDOWN": (S, CAP, "VENUE_BOOK"),
+    "VENUE_RATE_LIMITED": (S, DATA, "VENUE_BOOK"),
+    "VENUE_TIMEOUT": (S, DATA, "VENUE_BOOK"),
+    "VENUE_NOT_FOUND": (S, DATA, "VENUE_BOOK"),
+    "VENUE_ERROR": (S, DATA, "VENUE_BOOK"),
+    "GROSS_EDGE_INPUT_PROBABILITY_NOT_A_PROBABILITY": (S, DATA, "EV"),
+    "GROSS_EDGE_INPUT_PROBABILITY_NOT_ORIENTED_TO_THE_HELD_SIDE":
+        (S, INT, "EV"),
+    "GROSS_EDGE_INPUT_PROBABILITY_ORIENTATION_NOT_VERIFIABLE":
+        (S, DATA, "EV"),
+    "GROSS_EDGE_INPUT_PRICE_NOT_THE_BUY_SIDE_OF_THE_BOOK": (S, INT, "EV"),
+    "GROSS_EDGE_INPUT_BOOK_CROSSED": (S, DATA, "EV"),
+    "GROSS_EDGE_INPUT_FEE_NOT_EVALUABLE": (S, DATA, "EV"),
+    "GROSS_EDGE_INPUT_PINNACLE_AGE_NOT_WITHIN_LIMIT": (S, FRESH, "EV"),
+    "GROSS_EDGE_INPUT_BOOK_AGE_NOT_WITHIN_LIMIT": (S, FRESH, "EV"),
+}
+
+for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
+               + list(INCIDENT_STREAMS.items())):
     TABLE.setdefault(_k, _v)
 
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,

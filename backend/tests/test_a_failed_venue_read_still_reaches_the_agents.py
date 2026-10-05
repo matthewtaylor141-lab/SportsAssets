@@ -286,19 +286,26 @@ async def _no_price_valuation(conn, *, decided_at: float, p_pin=0.62):
         " received_at, probability, decision, admissible, refusals, why, "
         " payout_event, payout_is_complement, buy_intent, ladder_side, "
         " record_purpose, decided_at, event_key, settlement_comparison, "
-        " calibration_only_evidence) "
+        " calibration_only_evidence, mapped_outcome, mapping_match, "
+        " probability_event) "
         "VALUES ($1,'PINNACLE_DEVIG_V1','EXTERNAL_BOOKMAKER_VALUATION',"
         " 'the-odds-api.com/v4','pinnacle','power','PMUS',$2,$2,'HOME',"
-        " 'baseball','h2h','FULL_GAME','{}'::jsonb,2,2,to_timestamp($3),"
+        " 'baseball','h2h','FULL_GAME',$9::jsonb,2,2,to_timestamp($3),"
         " to_timestamp($3 + 1),$4,'NO_TRADE',false,$5::text[],'synthetic',"
         " 'HOME',false,'ORDER_INTENT_BUY_LONG','ASK','CALIBRATION_ONLY',"
-        " to_timestamp($6),'e-' || $2,$7::jsonb,$8::jsonb) RETURNING id",
+        " to_timestamp($6),'e-' || $2,$7::jsonb,$8::jsonb,'HOME','EXACT',"
+        " 'HOME') RETURNING id",
         ext.EXPERIMENT_ID, slug, decided_at - 5.0, float(p_pin),
         [loop.R_VENUE_READ_ERROR, loop.VR_RATE_LIMITED,
          "MARKET_STATE_UNREADABLE", vp.R_CALIBRATION_ONLY],
         decided_at,
         json.dumps(PL.settlement_comparison("INCOMPATIBLE"), default=str),
-        json.dumps(ev))
+        json.dumps(ev),
+        # THE PINNACLE PRICES THE PROBABILITY CAME FROM, as the writer
+        # records them: a fair two-way book that de-vigs to exactly p_pin
+        # (the gross-edge input validation recomputes it from the row).
+        json.dumps({"HOME": 1.0 / float(p_pin),
+                    "AWAY": 1.0 / (1.0 - float(p_pin))}))
     return {"valuation_id": vid, "slug": slug}
 
 

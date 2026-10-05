@@ -105,6 +105,7 @@ from .. import bettor_paper_ledger as L
 from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
 from .. import bettor_settlement_terms as ST
+from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 from . import paper_derek as PD
 
@@ -1566,6 +1567,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     sized: dict = {"qty": 0, "limit": None, "wire": None}
     econ: dict | None = None
     book_age = None
+    gross_inputs: dict | None = None
     if not refusals:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         bk = await book_for(conn, ctx, cand["us_market_slug"],
@@ -1595,6 +1597,28 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
         else:
+            # THE GROSS EDGE'S INPUTS, VALIDATED BEFORE THE EDGE IS JUDGED
+            # (P0 incident; gross_edge_inputs). The threshold is unchanged;
+            # what is checked is that p is the held side's probability (the
+            # de-vig recomputed from the row's own prices), the price is the
+            # side a BUY consumes, the fee evaluates, and the Pinnacle and
+            # book ages are inside their unchanged rules. Inputs that fail
+            # are a SOFTWARE refusal by name -- never BELOW_MIN_GROSS_EDGE.
+            gross_inputs = GEI.validate(
+                p=p, side=side, row=row, levels=levels,
+                consumed_side=lv["side"], md=md,
+                fee_per_contract=(lambda px: fee_per_contract(fee_fn, px,
+                                                              at)),
+                pin=pin, decided_at=at, edge_at=float(clock()),
+                book_observed_at=obs.get("observed_at"),
+                book_max_age_s=BOOK_MAX_AGE_S, threshold_edge_pp=min_edge_pp)
+            if not gross_inputs["ok"]:
+                refusals.extend(gross_inputs["refusals"])
+                gross_inputs["unvalidated_best_level_edge_pp"] = (
+                    level_edges(levels[:1], p, min_edge=min_edge)[0][
+                        "edge_pp"] if levels and isinstance(
+                            p, (int, float)) else None)
+        if gross_inputs is not None and gross_inputs["ok"]:
             edges = level_edges(levels, p, min_edge=min_edge)
             consumed = await SIM._consumed(conn, cand["us_market_slug"],
                                            lv["side"], obs["obs_id"])
@@ -1681,6 +1705,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "book_age_s": book_age, "book_max_age_s": BOOK_MAX_AGE_S,
         "book_currency": BOOK_CURRENCY,
         "acquisition": econ, "shortfall": short,
+        # THE VALIDATION RECEIPT of the gross edge's inputs (None when the
+        # decision never reached the gross-edge step).
+        "gross_edge_inputs": gross_inputs,
         "refusals": refusals}
     if cg:
         economics_rec.update(
@@ -1714,6 +1741,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     bool(levels) and book_age is not None
                     and book_age <= BOOK_MAX_AGE_S),
          "value": book_age, "threshold": BOOK_MAX_AGE_S, "units": "seconds"},
+        {"condition": "gross_edge_inputs_validated",
+         "passed": (None if gross_inputs is None
+                    else bool(gross_inputs["ok"])),
+         "refusals": ([] if gross_inputs is None
+                      else list(gross_inputs["refusals"])),
+         "version": GEI.VERSION},
         {"condition": ("edge_at_least_min_gross_edge_pp_at_every_level_used"
                        if cg else "edge_at_least_5pp_at_every_level_used"),
          "passed": None if not edges else bool(edges[0]["clears_min_edge"]),
@@ -1740,6 +1773,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             "expected_net_profit_usd"),
         "fees_usd": (econ or {}).get("fees_usd"),
         "shortfall": short, "book_currency": BOOK_CURRENCY,
+        "gross_edge_inputs": (None if gross_inputs is None else {
+            "version": gross_inputs["version"], "ok": gross_inputs["ok"],
+            "refusals": gross_inputs["refusals"],
+            "checks": {c["check"]: c["passed"]
+                       for c in gross_inputs["checks"]}}),
         "admitted": verdict == DP.ENTER,
         "refusal": refusals[0] if refusals else None,
         "refusals": refusals}
