@@ -139,8 +139,8 @@ export function capital(ctx, W, H, hq) {
   kv('EQUITY', sm && sm.equity && sm.equity.usd != null ? u.usd(sm.equity.usd) : 'UNAVAILABLE', x2, top + 430 * s, sm && sm.equity && sm.equity.usd != null ? C.ink : C.warn);
   kv('ORDERS · FILLS', sm && sm.orders ? (sm.orders.submitted + ' submitted · ' + (sm.fills ? sm.fills.count : 0) + ' fills') : 'UNAVAILABLE', x2 + colW / 2, top + 430 * s, sm && sm.orders ? C.ink : C.warn);
   const ch = sm && sm.shadow_chain;
-  kv('EDDIE SHADOW DECISIONS', ch && ch.eddie_estimates != null ? String(ch.eddie_estimates) : 'UNAVAILABLE', x2, top + 540 * s, ch && ch.eddie_estimates != null ? C.ink : C.warn);
-  kv('LAST SHADOW DECISION', ch && ch.last_eddie_decision_at ? u.clock(ch.last_eddie_decision_at) : 'NONE RECORDED', x2 + colW / 2, top + 540 * s, C.ink);
+  kv('ARCHER SHADOW DECISIONS', ch && ch.archer_estimates != null ? String(ch.archer_estimates) : 'UNAVAILABLE', x2, top + 540 * s, ch && ch.archer_estimates != null ? C.ink : C.warn);
+  kv('LAST SHADOW DECISION', ch && ch.last_archer_decision_at ? u.clock(ch.last_archer_decision_at) : 'NONE RECORDED', x2 + colW / 2, top + 540 * s, C.ink);
   text(ctx, sm && sm.equity && sm.equity.usd == null ? 'equity: ' + (sm.equity.why || 'UNAVAILABLE') : '', x2, top + 640 * s, C.dim, '500', 19 * s, true, colW);
   // LEGACY MIRROR, per venue
   const by = H - 120 * s;
@@ -319,7 +319,7 @@ export const DESK_SCREENS = {
   scout: ['coverage', 'status', 'metrics'],
   allocator: ['ranking', 'status', 'metrics'],
   adriana: ['metrics', 'status', 'edges'],
-  eddie: ['marks', 'smalllive', 'status', 'positions', 'metrics', 'edges'],
+  archer: ['marks', 'smalllive', 'status', 'positions', 'metrics', 'edges'],
   audrey: ['audit', 'composition', 'status', 'edges'],
   xavier: ['xavier', 'positions', 'status']
 };
@@ -456,8 +456,8 @@ const PANELS = {
     if (!sm) { na(ctx, W, H, hq.equity().why || 'not read'); return; }
     font(ctx, '400', 14 * s); ctx.fillStyle = '#cfdbe7'; wrap(ctx, sm.why || '', 18 * s, 82 * s, W - 36 * s, 19 * s, 3);
     const ch = sm.shadow_chain || {};
-    [['SHADOW DECISIONS', ch.eddie_estimates != null ? String(ch.eddie_estimates) : 'UNAVAILABLE'], ['ORDERS SUBMITTED', sm.orders ? String(sm.orders.submitted) : 'UNAVAILABLE'],
-     ['FILLS', sm.fills ? String(sm.fills.count) : 'UNAVAILABLE'], ['LAST SHADOW', ch.last_eddie_decision_at ? u.clock(ch.last_eddie_decision_at) : 'NONE']].forEach((kv, i) => {
+    [['SHADOW DECISIONS', ch.archer_estimates != null ? String(ch.archer_estimates) : 'UNAVAILABLE'], ['ORDERS SUBMITTED', sm.orders ? String(sm.orders.submitted) : 'UNAVAILABLE'],
+     ['FILLS', sm.fills ? String(sm.fills.count) : 'UNAVAILABLE'], ['LAST SHADOW', ch.last_archer_decision_at ? u.clock(ch.last_archer_decision_at) : 'NONE']].forEach((kv, i) => {
       const x = 18 * s + (i % 2) * (W / 2), y = 168 * s + Math.floor(i / 2) * 54 * s;
       text(ctx, kv[0], x, y, C.dim, '700', 10 * s, true); text(ctx, kv[1], x, y + 24 * s, /UNAVAIL/.test(kv[1]) ? C.warn : C.ink, '500', 18 * s, true, W / 2 - 30 * s);
     });

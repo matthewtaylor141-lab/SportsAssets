@@ -366,7 +366,7 @@
     return header(r) + scoreboard(r.game_state || {}, r) + protectionStrip(r, olab) + economic(r, olab) +
       '<div class="pr-grid">' +
         '<div class="pr-col-main">' + ladder(r, olab) + scenarios(r, olab) + '</div>' +
-        '<aside class="pr-col-side">' + xavierPanels(r, olab) + eddie(r.eddie || {}) + audreyKaren(r) + '</aside>' +
+        '<aside class="pr-col-side">' + xavierPanels(r, olab) + archer(r.archer || r.eddie || {}) + audreyKaren(r) + '</aside>' +
       '</div>' + provenance(r);
   }
 
@@ -775,7 +775,7 @@
       '</div>' + (p.line ? '<code class="pr-pline">' + esc(p.line) + '</code>' : '') + '</div>';
   }
 
-  function eddie(e) {
+  function archer(e) {
     var body = e.status === 'OK'
       ? (e.estimates || []).map(function (x) {
           return '<li><b>' + esc(x.recommendation) + '</b> <span class="muted">' + esc(x.recommendation_reason || '') + '</span>' +
@@ -783,7 +783,7 @@
             ' · net edge ' + (num(x.expected_net_executable_edge_pp) !== null ? x.expected_net_executable_edge_pp.toFixed(2) + 'pp' : '—') + ' · ' + esc(when(x.estimated_at)) + '</small></li>';
         }).join('')
       : '';
-    return '<section class="pr-panel pr-eddie"><header class="pr-ph"><h2>Eddie · execution</h2>' + chip(esc(e.status || 'UNAVAILABLE'), e.status === 'OK' ? 'green' : 'pr-chip-na') + '</header>' +
+    return '<section class="pr-panel pr-archer"><header class="pr-ph"><h2>Archer · execution</h2>' + chip(esc(e.status || 'UNAVAILABLE'), e.status === 'OK' ? 'green' : 'pr-chip-na') + '</header>' +
       (body ? '<ul class="pr-list">' + body + '</ul>' : '<p class="muted">' + esc(human(e.why)) + '</p>') + '</section>';
   }
 

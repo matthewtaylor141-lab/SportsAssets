@@ -5,7 +5,7 @@ const people = [
  {id:'derek',name:'Derek',initial:'D',role:'Discovery & entry',desc:'Find the opportunity. Explain the conviction.',prompt:'Walk me through your latest entry decision.'},
  {id:'karen',name:'Karen',initial:'K',role:'Red team',desc:'Challenge the claim. Expose missing evidence.',prompt:'What are we missing right now?'},
  {id:'scout',name:'Scout',initial:'S',role:'Market intelligence',desc:'Find structure. Separate hypotheses from facts.',prompt:'What are you researching now?'},
- {id:'eddie',name:'Eddie',initial:'E',role:'Execution',desc:'Decide whether edge survives execution.',prompt:'Show the latest execution estimates.'},
+ {id:'archer',name:'Archer',initial:'A',role:'Execution',desc:'Decide whether edge survives execution.',prompt:'Show the latest execution estimates.'},
  {id:'allocator',name:'Allie',initial:'A',role:'Chief Allocator',desc:'Put portfolio integrity ahead of a single trade.',prompt:'How would you allocate capital now?'},
  {id:'audrey',name:'Audrey',initial:'A',role:'Audit & intelligence',desc:'Verify the result. Improve the process.',prompt:'Give me a management briefing.'},
  {id:'xavier',name:'Xavier',initial:'X',role:'Portfolio management',desc:'Own the position. Manage the outcome.',prompt:'What positions are you managing?'}

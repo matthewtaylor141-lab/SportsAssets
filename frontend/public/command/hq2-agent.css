@@ -65,7 +65,7 @@
   .bt-agent2-face.bt-portrait{width:100%;height:clamp(280px,82vw,360px)}.bt-hq2 .ws-tabs{padding-left:10px!important;padding-top:96px!important}
 }
 /* (the desktop rail margin is the C28 integration rule below) on a page
-   without tabs (eddie, scout) the hero also clears the bar; the content
+   without tabs (archer, scout) the hero also clears the bar; the content
    after the hero needs no second bar offset */
 .bt-hq2 .ws-tabs[hidden]+.bt-agent2{margin-top:112px}
 .bt-hq2 .bt-agent2-memory~#ws-root,.bt-hq2 .bt-agent2-memory~#page{padding-top:18px!important}

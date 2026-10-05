@@ -55,7 +55,7 @@
         '<a class="wsx-floor" href="/floor">See ' + esc(seat.name) + ' on the trading floor →</a></div>' +
       '</header>';
   }
-  function strip(a) {   // eddie / scout: no duplicate workspace, only the live strip
+  function strip(a) {   // archer / scout: no duplicate workspace, only the live strip
     var t = now(), st = B.stateOf(a);
     return '<div class="wsx-strip" style="--a:' + seat.accent + '"><b>' + esc(seat.name) + '</b>' + chip(st) + '<span>' + esc(a ? (a.work_detail || a.state_detail) : (S.read ? readState(S.read, 'the floor').why : 'Reading the floor…')) + '</span>' +
       '<small>♥ ' + esc(a && a.heartbeat && a.heartbeat.at != null ? B.ago(a.heartbeat.at, t) : 'no heartbeat') + '</small><a href="/floor">Trading floor →</a></div>';

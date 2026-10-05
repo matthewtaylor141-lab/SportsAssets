@@ -6,7 +6,7 @@
 if(window.__BTCommandFinal)return; window.__BTCommandFinal=true;
 
 var PATH=(location.pathname||'/').replace(/\/+$/,'')||'/';
-var AGENT_PATH=/^\/(derek|karen|scout|eddie|allocator|audrey|xavier)$/;
+var AGENT_PATH=/^\/(derek|karen|scout|archer|eddie|allocator|audrey|xavier)$/;  // eddie: Archer's historical address (266)
 var EQ_LIVE='/api/command/equity/live', EQ_CURVE='/api/command/equity/curve?book=PAPER&window=1d';
 var floorTimer=null, equitySamples=[], lastFloor=null, lastEquity=null;
 var eqOffset=0;            // server clock minus browser clock, from the latest equity read
@@ -57,9 +57,14 @@ function nameOf(code,as){
  var a=(as||[]).find(function(x){return x.agent===code;});
  return a&&(a.display_name||a.name)||String(code||'');
 }
-function fetchJSON(url){
+function fetchJSON(url,noAlias){
+ // migration 266: a build before the rename knows Archer only as /eddie
+ var ARCHER_SEG=/\/archer(?=\/|\?|$)/;
  return fetch(url,{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}})
-  .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();});
+  .then(function(r){
+   if(r.status===404&&!noAlias&&ARCHER_SEG.test(url))return fetchJSON(url.replace(ARCHER_SEG,'/eddie'),true);
+   if(!r.ok)throw new Error('HTTP '+r.status);
+   return r.json().then(function(j){return window.BTFloor&&BTFloor.dealias?BTFloor.dealias(j):j;});});
 }
 function setText(n,txt,cls){
  if(typeof n==='string')n=document.getElementById(n);if(!n)return null;
@@ -430,13 +435,13 @@ var ROLE={
  derek:{eyebrow:'ENTRY DECISIONS · DISCOVERY',out:'Latest decision',metric:'Decision record'},
  karen:{eyebrow:'RED TEAM · EVIDENCE CHALLENGES',out:'Latest challenge',metric:'Open challenges raised'},
  scout:{eyebrow:'MARKET INTELLIGENCE · RESEARCH',out:'Latest research output',metric:'Research output'},
- eddie:{eyebrow:'EXECUTION QUALITY · SHADOW',out:'Latest execution estimate',metric:'Execution estimate'},
+ archer:{eyebrow:'EXECUTION QUALITY · SHADOW',out:'Latest execution estimate',metric:'Execution estimate'},
  allocator:{eyebrow:'CAPITAL ALLOCATION · SHADOW SLEEVE',out:'Latest allocation run',metric:'Allocation'},
  audrey:{eyebrow:'AUDIT · RECONCILIATION',out:'Latest finding',metric:'Audit findings'},
  xavier:{eyebrow:'PORTFOLIO MANAGEMENT · OPEN POSITIONS',out:'Latest management review',metric:'Positions under management'}
 };
 function installAgent(){
- var m=PATH.match(AGENT_PATH);if(!m)return; var slug=m[1],role=ROLE[slug];
+ var m=PATH.match(AGENT_PATH);if(!m)return; var slug=m[1]==='eddie'?'archer':m[1],role=ROLE[slug];
  document.body.classList.add('command-final-agent');
  var tries=0;
  function go(){
@@ -491,8 +496,9 @@ function roleMetric(slug,d,a){
   if(feat==null&&!lo)return U('no research record in this read');
   return {b:feat!=null?feat+' features registered':'Count not read',s:lo?'latest proposal '+age(lo.at)+' ago · research shadow only':'no feature recorded'};
  }
- if(slug==='eddie'){
-  var est=outs.filter(function(o){return /eddie/.test(o.kind||'');})[0]||(lo&&/eddie/.test(lo.kind||'')?lo:null);
+ if(slug==='archer'){
+  // his records keep their storage name (eddie_execution_estimates)
+  var est=outs.filter(function(o){return /archer|eddie/.test(o.kind||'');})[0]||(lo&&/archer|eddie/.test(lo.kind||'')?lo:null);
   var n=mval(monitorOf(a,/^Estimates/));
   if(!est&&n==null)return U('no execution estimate in this read');
   var keys=est?Object.keys(est).filter(function(k){return /spread|depth|slippage|executable_edge/.test(k)&&est[k]!=null;}):[];

@@ -529,7 +529,7 @@
       '<div class="ew-sl-statusrow">' + pill + '<span class="ew-sl-why">' + esc(sl.why || '') + '</span></div>' +
       (compact ? '' : grid) +
       '<div class="ew-sv-row">' + [venue('Polymarket US', v.polymarket_us), venue('Kalshi', v.kalshi)].join('') + '</div>' +
-      (compact ? '' : '<p class="ew-note">Counts only orders from BETTOR\'s own chain (' + esc(sl.chain_required || 'Derek → allocation → Eddie → venue order + ack') + '). RN1, mirror and copy orders never count.</p>') +
+      (compact ? '' : '<p class="ew-note">Counts only orders from BETTOR\'s own chain (' + esc(sl.chain_required || 'Derek → allocation → Archer → venue order + ack') + '). RN1, mirror and copy orders never count.</p>') +
       '</div>';
   }
   function legacyTitle(live) {

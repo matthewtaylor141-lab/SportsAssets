@@ -3,6 +3,7 @@
   if(window.__BTHQ2Agent)return;window.__BTHQ2Agent=true;
   var B=window.BTFloor;if(!B)return;
   var slug=(location.pathname.replace(/\/+$/,'').split('/').pop()||'derek').toLowerCase();
+  if(B.canonicalSlug)slug=B.canonicalSlug(slug);   // /eddie: Archer's historical address (266)
   var s=B.BY_SLUG[slug]||B.BY_SLUG.derek;
   var P={
     derek:["The edge has to survive the math.","Decisive, concise, probability-first. He wants the thesis, the edge, the invalidation condition and the reason to act now."],
@@ -10,7 +11,7 @@
     audrey:["If the ledger disagrees, the story is wrong.","Literal, forensic and citation-heavy. She reconciles before she interprets and never turns missing evidence into zero."],
     karen:["What are we missing? Prove it.","Contrarian and dry. She attacks unsupported claims, hidden assumptions and convenient certainty. She has no authority to approve anything."],
     allocator:["The portfolio matters more than the trade.","Conservative capital steward. Correlation, concentration, capacity and opportunity cost outrank a single attractive idea."],
-    eddie:["Price is not execution.","Fast, terse and microstructure-obsessed. Spread, depth, fees, fill probability and latency determine whether theoretical edge survives."],
+    archer:["Price is not execution.","Fast, terse and microstructure-obsessed. Spread, depth, fees, fill probability and latency determine whether theoretical edge survives."],
     scout:["Find structure. Do not fall in love with it.","Curious and experimental. He hunts patterns and alternate data, but a research hypothesis never promotes itself."]
   };
   var quote=P[slug]||["Independent agent.",""]; var hero=document.createElement('section');hero.className='bt-agent2';hero.dataset.agent=slug;hero.style.setProperty('--a',s.accent);
@@ -33,9 +34,12 @@
     var d=r.current.status==='OK'?r.current.data:r.lastOk&&r.lastOk.data;var a=d&&d.agent?d.agent:(d&&d.slug?d:null);if(a)update(a);
   });
   // Optional future identity endpoint. A 404 is NOT RELEASED, never a fabricated empty memory.
-  fetch('/api/command/agents/'+slug+'/identity',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}}).then(function(r){
+  // migration 266: a build before the rename knows Archer only as /eddie
+  var idRead=function(s,again){return fetch('/api/command/agents/'+s+'/identity',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}}).then(function(r){
+    if(r.status===404&&s==='archer'&&!again)return idRead('eddie',true);
     if(r.status===404)return null;if(!r.ok)throw new Error();return r.json();
-  }).then(function(j){if(!j)return;var mem=document.getElementById('bt-agent2-mem'),exp=document.getElementById('bt-agent2-exp'),v=document.getElementById('bt-agent2-voice');
+  });};
+  idRead(slug).then(function(j){if(!j)return;var mem=document.getElementById('bt-agent2-mem'),exp=document.getElementById('bt-agent2-exp'),v=document.getElementById('bt-agent2-voice');
     if(mem)mem.textContent=j.memory&&j.memory.count!=null?j.memory.count+' memories':'UNAVAILABLE';
     if(exp)exp.textContent=j.experience&&j.experience.events!=null?j.experience.events+' resolved events':'UNAVAILABLE';
     if(v&&j.voice&&j.voice.display_name)v.textContent=j.voice.display_name;

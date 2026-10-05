@@ -1,7 +1,16 @@
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
 (function(){
 'use strict';if(window.__BTHQ6)return;window.__BTHQ6=true;
 var PATH=(location.pathname||'/').replace(/\/+$/,'')||'/';
-var AGENTS=['derek','karen','scout','eddie','allocator','audrey','xavier'];
+var AGENTS=['derek','karen','scout','archer','allocator','audrey','xavier'];
 
 function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function ago(t){if(!t)return'never';var s=Math.max(0,Date.now()/1000-t);return s<60?Math.round(s)+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h';}
@@ -16,7 +25,7 @@ function humanState(slug,state,detail){
     derek:{WORKING_ON:'Reviewing opportunities',REVIEWING:'Reviewing an entry decision',WAITING:'Waiting for a qualified opportunity',IDLE:'Standing by for the next opportunity'},
     karen:{CHALLENGING:'Challenging the evidence',REVIEWING:'Reviewing a claim',WAITING:'Waiting for a claim to challenge',IDLE:'No open challenge'},
     scout:{WORKING_ON:'Researching a market pattern',REVIEWING:'Reviewing research evidence',WAITING:'Waiting for new research input',IDLE:'Standing by for a research candidate'},
-    eddie:{WORKING_ON:'Evaluating execution quality',REVIEWING:'Reviewing execution economics',WAITING:'Waiting for an executable candidate',IDLE:'Standing by for an executable candidate'},
+    archer:{WORKING_ON:'Evaluating execution quality',REVIEWING:'Reviewing execution economics',WAITING:'Waiting for an executable candidate',IDLE:'Standing by for an executable candidate'},
     allocator:{WORKING_ON:'Ranking capital allocation',REVIEWING:'Reviewing portfolio impact',WAITING:'Waiting for qualified candidates',IDLE:'No allocation decision in progress'},
     audrey:{WORKING_ON:'Reconciling the operating record',REVIEWING:'Auditing evidence and controls',WAITING:'Waiting for the next audit item',IDLE:'No active audit item'},
     xavier:{WORKING_ON:'Managing an open position',REVIEWING:'Reviewing position management',WAITING:'Waiting for fresh management evidence',IDLE:'No management action in progress'}
@@ -53,7 +62,7 @@ function installBrief(){
     '<article class="hq6-brief-card"><div class="k">Latest collaboration</div><h3 id="hq6-collab">Reading hand-offs</h3><p id="hq6-collab-p">Only durable collaboration events appear here.</p><small id="hq6-collab-t"></small></article>'+
     '<article class="hq6-brief-card"><div class="k">Active now</div><h3 id="hq6-active">Reading company state</h3><p id="hq6-active-p">Agent activity is derived from current heartbeats.</p><small id="hq6-active-t"></small></article>';
   capital.insertAdjacentElement('afterend',sec);
-  fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(function(f){
+  fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json().then(btDealias):Promise.reject()).then(function(f){
     var as=f.agents||[],alerts=[];
     as.forEach(function(a){(a.alerts||[]).forEach(z=>alerts.push({a:a,z:z}));});
     if(alerts.length){
@@ -83,8 +92,8 @@ setTimeout(installBrief,50);
 
 /* Agent page: persistent person + work, identity deeper, human status first. */
 function installAgent(){
-  var m=PATH.match(/^\/(derek|xavier|audrey|karen|allocator|eddie|scout)$/);if(!m)return;
-  var slug=m[1],hero=document.querySelector('.bt-agent2'),tabs=document.getElementById('ws-tabs'),ws=document.getElementById('ws-root'),page=document.getElementById('page'),state=document.getElementById('state');
+  var m=PATH.match(/^\/(derek|xavier|audrey|karen|allocator|archer|eddie|scout)$/);if(!m)return;
+  var slug=m[1]==='eddie'?'archer':m[1],hero=document.querySelector('.bt-agent2'),tabs=document.getElementById('ws-tabs'),ws=document.getElementById('ws-root'),page=document.getElementById('page'),state=document.getElementById('state');
   if(!hero||hero.closest('.hq6-agent-layout'))return;
   var parent=hero.parentNode,layout=document.createElement('div');layout.className='hq6-agent-layout';
   var person=document.createElement('aside');person.className='hq6-agent-person';
@@ -131,7 +140,11 @@ function installAgent(){
     document.getElementById('hq6-now-attn').textContent=alerts.length?(alerts[0].message||alerts[0].summary||alerts[0].code||'Recorded alert'):'No management request recorded';
     if(tl[0])document.getElementById('hq6-now-collab').textContent='Latest collaboration · '+edgeLabel(tl[0].kind)+' · '+ago(tl[0].at)+' ago';
   }
-  fetch('/api/command/floor/'+slug,{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(render).catch(function(){
+  // migration 266: a build before the rename serves Archer's seat as /eddie
+  var floorRead=function(s,again){return fetch('/api/command/floor/'+s,{credentials:'same-origin',cache:'no-store'}).then(function(r){
+    if(r.status===404&&s==='archer'&&!again)return floorRead('eddie',true);
+    return r.ok?r.json().then(function(j){return window.BTFloor&&BTFloor.dealias?BTFloor.dealias(j):j;}):Promise.reject();});};
+  floorRead(slug).then(render).catch(function(){
     document.getElementById('hq6-now-title').textContent='Current work unavailable';document.getElementById('hq6-now-code').textContent='STATE · UNAVAILABLE';
   });
 }

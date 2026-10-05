@@ -36,7 +36,7 @@ const ZONE = {
   scout: ['Research & signals', 'Market intelligence'],
   allocator: ['Capital allocation', 'Chief Allocator'],
   adriana: ['Arbitrage desk', 'Head of Arbitrage'],
-  eddie: ['Execution & microstructure', 'Head of Execution'],
+  archer: ['Execution & microstructure', 'Head of Execution'],
   audrey: ['Audit & reconciliation', 'Risk & audit'],
   xavier: ['Portfolio management', 'Portfolio Manager']
 };
@@ -48,7 +48,7 @@ export const ADRIANA = {agent: 'ADRIANA', slug: 'adriana', name: 'Adriana', shor
   plannedWhy: 'The serving API has no ADRIANA seat in GET /api/command/floor: nothing on this desk is live until it does.'};
 
 /* the floor plan: the desk order around the horseshoe, west to east */
-export const ORDER = ['derek', 'karen', 'scout', 'allocator', 'adriana', 'eddie', 'audrey', 'xavier'];
+export const ORDER = ['derek', 'karen', 'scout', 'allocator', 'adriana', 'archer', 'audrey', 'xavier'];
 
 /* THE FLOOR API STATE -> what the headquarters shows. One to one. */
 export const STATE = {

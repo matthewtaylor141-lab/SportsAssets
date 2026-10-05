@@ -16,7 +16,7 @@
  * Characters: the licensed Microsoft Rocketbox models in the repo
  * (team-demo/assets/models, MIT). EVERY agent wears its OWN model -- seven
  * distinct people; no seat reuses or recolours another agent's body (see
- * CAST and CREDITS). Eddie's headset is a desk prop. Nothing is downloaded
+ * CAST and CREDITS). Archer's headset is a desk prop. Nothing is downloaded
  * from anywhere else. */
 import * as THREE from './team-demo/assets/three.module.min.js';
 import {clone as cloneSkinned} from './team-demo/assets/SkeletonUtils.js';
@@ -39,7 +39,7 @@ export const CREDITS = {
   audrey: 'Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)',
   karen: 'Rocketbox Business_Female_02 (MIT, © 2020 Microsoft)',
   allocator: 'Rocketbox Business_Female_03 (MIT, © 2020 Microsoft)',
-  eddie: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
+  archer: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
   scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)'
 };
 // which licensed model each seat wears: its own, never a recoloured copy of
@@ -50,7 +50,7 @@ export const CAST = {
   audrey: {model: 'audrey', tint: null},
   karen: {model: 'karen', tint: null},
   allocator: {model: 'allie', tint: null},
-  eddie: {model: 'eddie', tint: null, headset: true},
+  archer: {model: 'archer', tint: null, headset: true},
   scout: {model: 'scout', tint: null}
 };
 const WALK_WINDOW_S = 600;          // an edge newer than this may walk once

@@ -44,13 +44,13 @@
     XAVIER: {name: 'Xavier', accent: '#9fd2f2', initial: 'X'},
     AUDREY: {name: 'Audrey', accent: '#cdb6f6', initial: 'A'},
     KAREN: {name: 'Karen', accent: '#ff9a8f', initial: 'K'},
-    EDDIE: {name: 'Eddie', accent: '#6fe0d2', initial: 'E'},
+    ARCHER: {name: 'Archer', accent: '#6fe0d2', initial: 'A'},
     SCOUT: {name: 'Scout', accent: '#f5b072', initial: 'S'},
     CHIEF_ALLOCATOR: {name: 'Allie', accent: '#ecc66d', initial: 'A'}
   };
-  var OWNERS = ['DEREK', 'XAVIER', 'AUDREY', 'EDDIE', 'SCOUT', 'CHIEF_ALLOCATOR'];
+  var OWNERS = ['DEREK', 'XAVIER', 'AUDREY', 'ARCHER', 'SCOUT', 'CHIEF_ALLOCATOR'];
   var SOURCE = {KAREN_UPHELD_CHALLENGE: 'Upheld Karen challenge', AUDREY_FINDING: 'Audrey finding',
-                COVERAGE_INCIDENT: 'Coverage incident', EDDIE_SKIP_EXECUTION: 'Eddie skip',
+                COVERAGE_INCIDENT: 'Coverage incident', EDDIE_SKIP_EXECUTION: 'Archer skip',
                 FALSE_REFUSAL: 'False refusal', TOURNAMENT_VERDICT: 'Tournament verdict',
                 AGENT_FINDING: 'Agent finding', HUMAN_REPORTED: 'Reported by a person'};
   var CLASS = {RUNNER: 'Runner', OWNER_AGENT: 'Owner', PEER_AGENT: 'Peer', CHALLENGER: 'Challenger',
@@ -85,8 +85,13 @@
     var e = epoch(iso);
     return e === null ? '—' : new Date(e * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
   }
+  /* migration 266: an item owned under the execution agent's historical
+   * alias (EDDIE) is Archer's, shown as such and labelled historical */
+  var ALIASES = {EDDIE: 'ARCHER'};
+  function canon(a) { var k = String(a || '').toUpperCase(); return ALIASES[k] || k; }
   function agent(a) {
     var k = String(a || '').toUpperCase();
+    if (ALIASES[k]) { return Object.assign({}, AGENTS[ALIASES[k]], {historical_alias: k, name: AGENTS[ALIASES[k]].name + ' (recorded as ' + k + ')'}); }
     return AGENTS[k] || {name: a || '—', accent: '#c9d6ea', initial: String(a || '?').charAt(0).toUpperCase(), person: true};
   }
   function avatar(a, small) {
@@ -200,7 +205,7 @@
 
   function visible(c) {
     var f = S.filter;
-    if (f.owner !== 'ALL' && c.owner_agent !== f.owner) { return false; }
+    if (f.owner !== 'ALL' && canon(c.owner_agent) !== f.owner) { return false; }
     if (f.prot && !(c.protected && c.protected.is_protected)) { return false; }
     if (f.dispute && !(c.disagreements && c.disagreements.total)) { return false; }
     if (f.q) {
@@ -274,7 +279,7 @@
     var shown = items.filter(visible);
     st.hidden = items.length > 0;
     st.className = 'im-state';
-    st.innerHTML = items.length ? '' : 'The ledger holds no improvement item yet. Items appear when the runner finds an upheld Karen challenge, an Audrey finding, a coverage incident, an Eddie skip, a false refusal or a tournament verdict.';
+    st.innerHTML = items.length ? '' : 'The ledger holds no improvement item yet. Items appear when the runner finds an upheld Karen challenge, an Audrey finding, a coverage incident, an Archer skip, a false refusal or a tournament verdict.';
     var by = {}, total = {};
     STAGES.concat(['TERMINAL']).forEach(function (s) { by[s] = []; total[s] = 0; });
     items.forEach(function (c) { var k = TERMINAL.indexOf(c.stage) >= 0 ? 'TERMINAL' : c.stage; if (total[k] !== undefined) { total[k]++; } });

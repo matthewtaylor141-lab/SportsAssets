@@ -27,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CMD = ROOT / "frontend" / "public" / "command"
 MODELS = CMD / "team-demo" / "assets" / "models"
 MANIFEST = json.loads((MODELS / "manifest.json").read_text())
-SLUGS = ["derek", "xavier", "audrey", "karen", "allocator", "eddie", "scout", "adriana"]
+SLUGS = ["derek", "xavier", "audrey", "karen", "allocator", "archer", "scout", "adriana"]
 
 
 def _glb_json(path: pathlib.Path) -> dict:
@@ -60,7 +60,7 @@ def test_no_two_agents_share_a_model_or_a_source_avatar():
     assert dict(zip(SLUGS, sources)) == {
         "derek": "Business_Male_03", "xavier": "Business_Male_05", "audrey": "Business_Female_04",
         "karen": "Business_Female_02", "allocator": "Business_Female_03",
-        "eddie": "Business_Male_04", "scout": "Business_Male_06",
+        "archer": "Business_Male_04", "scout": "Business_Male_06",
         "adriana": "Business_Female_01"}
     shas = [chars[s]["source"]["sha256"] for s in SLUGS]
     assert len(set(shas)) == len(shas)

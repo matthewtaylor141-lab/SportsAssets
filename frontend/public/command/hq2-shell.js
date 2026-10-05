@@ -1,10 +1,19 @@
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
 (function(){
   'use strict';
   if(window.__BTHQ2Shell){return;} window.__BTHQ2Shell=true;
   var path=(location.pathname||'/').replace(/\/+$/,'')||'/';
   var page = path==='/ops'?'ops':path==='/floor'?'floor':path.indexOf('/position')===0?'positions':
     path==='/profitability'?'profitability':path==='/acceptance'?'acceptance':path==='/company'?'company':
-    /\/(derek|xavier|audrey|karen|allocator|eddie|scout)$/.test(path)?'agents':'home';
+    /\/(derek|xavier|audrey|karen|allocator|archer|eddie|scout)$/.test(path)?'agents':'home';
   var names={ops:'Operations Desk',home:'Command',floor:'Trading Floor',positions:'Position Rooms',profitability:'Profitability OS',agents:'AI Team',company:'Company',acceptance:'Acceptance'};
   /* Command Ops R1: Operations is the first destination. [page, href, icon,
      label, short label shown on a phone's six-column bar] */
@@ -55,7 +64,7 @@
   }
   function read(){
     fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}})
-      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();}).then(update).catch(function(){
+      .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json().then(btDealias);}).then(update).catch(function(){
         var live=document.getElementById('bt-hq2-live');if(live){live.dataset.state='stale';live.querySelector('span').textContent='OPERATING STATE UNAVAILABLE';}
       });
   }

@@ -242,24 +242,26 @@
   {
    "id": "migration-217",
    "group": "Migrations",
-   "requirement": "Migration 217 — Eddie and Scout agents (shadow only)",
+   "requirement": "Migration 217 — Eddie (Archer since migration 266) and Scout agents (shadow only)",
    "owner": "POS-AGENTS",
    "code": [
     "backend/sportsassets/api/agents_pos.py"
    ],
    "tests": [
-    "tests/test_eddie_scout_identity_and_no_authority.py",
-    "tests/test_eddie_execution_estimates.py"
+    "tests/test_archer_scout_identity_and_no_authority.py",
+    "tests/test_archer_execution_estimates.py"
    ],
    "migrations": [
     "217_eddie_scout_agents.sql"
    ],
    "api": [
+    "/api/command/archer",
     "/api/command/eddie",
     "/api/command/scout"
    ],
    "worker": "sportsassets-workers",
    "frontend": [
+    "/archer",
     "/eddie",
     "/scout"
    ],

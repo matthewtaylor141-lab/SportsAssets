@@ -60,7 +60,7 @@ const damp = (a, b, k, dt) => a + (b - a) * (1 - Math.exp(-k * dt));
 
 /* THE FLOOR PLAN. Angle from north (the BETTOR wall), clockwise; the eight
  * desks form a horseshoe that opens toward the establishing camera. */
-const SEAT_ANGLE = {derek: -126, karen: -90, scout: -54, allocator: -18, adriana: 18, eddie: 54, audrey: 90, xavier: 126};
+const SEAT_ANGLE = {derek: -126, karen: -90, scout: -54, allocator: -18, adriana: 18, archer: 54, audrey: 90, xavier: 126};
 const R_DESK = 9.3;
 const DESK_TOP = 0.74;
 const SEAT_TOP = 0.47;
@@ -72,7 +72,7 @@ export const CREDITS = {
   audrey: 'Rocketbox Business_Female_04 (MIT, © 2020 Microsoft)',
   karen: 'Rocketbox Business_Female_02 (MIT, © 2020 Microsoft)',
   allocator: 'Rocketbox Business_Female_03 (MIT, © 2020 Microsoft)',
-  eddie: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
+  archer: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
   scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)',
   adriana: 'Rocketbox Business_Female_01 (MIT, © 2020 Microsoft)'
 };
@@ -80,7 +80,7 @@ export const CREDITS = {
 // body, never a tint (models/manifest.json entries, when present, win)
 export const CAST = {
   derek: {model: 'derek', tint: null}, xavier: {model: 'xavier', tint: null}, audrey: {model: 'audrey', tint: null},
-  karen: {model: 'karen', tint: null}, allocator: {model: 'allie', tint: null}, eddie: {model: 'eddie', tint: null},
+  karen: {model: 'karen', tint: null}, allocator: {model: 'allie', tint: null}, archer: {model: 'archer', tint: null},
   scout: {model: 'scout', tint: null}, adriana: {model: 'adriana', tint: null}
 };
 
@@ -498,7 +498,7 @@ export async function createHQ(host, opts) {
     scene.add(g);
     const L = (x, y, z, rx, ry, rz, sx, sy, sz) => new THREE.Matrix4().multiplyMatrices(g.matrixWorld, M4(x, y, z, rx, ry, rz, sx, sy, sz));
     const accent = new THREE.Color(planned ? '#6d7c90' : seat.accent);
-    const wide = slug === 'allocator' ? 2.9 : slug === 'eddie' ? 2.7 : 2.3;
+    const wide = slug === 'allocator' ? 2.9 : slug === 'archer' ? 2.7 : 2.3;
     // zone plate + its lit edge (state colour)
     addStatic(roundedBox(5.6, 0.03, 4.6, 0.35, 6), MAT.carpet, L(0, 0.015, -0.25), {noShadow: true});
     const edgeMat = new THREE.MeshBasicMaterial({color: accent.clone().multiplyScalar(2)});
@@ -538,7 +538,7 @@ export async function createHQ(host, opts) {
       return holder;
     };
     const mw = 0.6, mh = 0.35, y0 = DESK_TOP + 0.36;
-    if (slug === 'eddie') {
+    if (slug === 'archer') {
       [-0.62, 0, 0.62].forEach((x, i) => { monAt(kinds[i], x, y0, mw, mh, [-0.32, 0, 0.32][i]); monAt(kinds[i + 3], x, y0 + 0.385, mw, mh, [-0.32, 0, 0.32][i]); });
     } else if (slug === 'xavier') {
       monAt(kinds[0], 0, y0 + 0.02, 1.15, 0.38, 0, true); monAt(kinds[1], -0.88, y0, mw * 0.85, mh * 0.85, -0.5); monAt(kinds[2], 0.88, y0, mw * 0.85, mh * 0.85, 0.5);
@@ -548,7 +548,7 @@ export async function createHQ(host, opts) {
       [-0.63, 0, 0.63].forEach((x, i) => monAt(kinds[i], x, y0, mw, mh, [-0.36, 0, 0.36][i]));
     }
     // monitor stand pole + base
-    addStatic(new THREE.CylinderGeometry(0.018, 0.018, slug === 'eddie' ? 0.82 : 0.42, 10), MAT.alu, L(0, DESK_TOP + 0.21 * (slug === 'eddie' ? 1.95 : 1), 1.06), {noReflect: true});
+    addStatic(new THREE.CylinderGeometry(0.018, 0.018, slug === 'archer' ? 0.82 : 0.42, 10), MAT.alu, L(0, DESK_TOP + 0.21 * (slug === 'archer' ? 1.95 : 1), 1.06), {noReflect: true});
     addStatic(new THREE.BoxGeometry(0.26, 0.012, 0.16), MAT.alu, L(0, DESK_TOP + 0.006, 1.06), {noReflect: true, noShadow: true});
     // the executive chair (base static; the seat reads as leather)
     {
@@ -609,7 +609,7 @@ export async function createHQ(host, opts) {
       addStatic(new THREE.BoxGeometry(0.3, 0.007, 0.007), MAT.brass, L(-1.15, DESK_TOP + 0.25, 0.7), {noReflect: true});
       for (const px of [-0.14, 0.14]) addStatic(new THREE.CylinderGeometry(0.05, 0.035, 0.012, 20), MAT.brass, L(-1.15 + px, DESK_TOP + 0.18, 0.7), {noReflect: true});
     }
-    if (slug === 'eddie') {   // headset on the desk
+    if (slug === 'archer') {   // headset on the desk
       const hs = new THREE.TorusGeometry(0.09, 0.008, 8, 24, Math.PI); addStatic(hs, MAT.bezel, L(1.05, DESK_TOP + 0.09, 0.62, 0, 0.6, 0), {noReflect: true});
       for (const sx of [-1, 1]) addStatic(new THREE.CylinderGeometry(0.035, 0.035, 0.03, 16), MAT.bezel, L(1.05 + sx * 0.074, DESK_TOP + 0.02, 0.62 + sx * 0.05, Math.PI / 2, 0.6, 0), {noReflect: true});
     }

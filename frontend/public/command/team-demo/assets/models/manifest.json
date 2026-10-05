@@ -187,8 +187,8 @@
         "no authored animation clips: idle, gestures and speech are procedural (cc_avatar.js)"
       ]
     },
-    "eddie": {
-      "model": "eddie.glb",
+    "archer": {
+      "model": "archer.glb",
       "license_file": "ROCKETBOX_LICENSE.md",
       "license_spdx": "MIT",
       "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Male_04, Copyright (c) 2020 Microsoft",
@@ -217,7 +217,13 @@
         "Rocketbox ships no headset for this avatar; the trading floor adds its headset as a desk prop, not part of the licensed model",
         "short hair is painted on the head mesh (no hair cards are supplied for this avatar)",
         "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
-      ]
+      ],
+      "historical_alias": {
+        "slug": "eddie",
+        "model": "eddie.glb",
+        "portrait": "portraits/eddie.jpg",
+        "note": "migration 266 renamed the execution agent EDDIE -> ARCHER; the same Rocketbox model (byte-identical copy, same sha256) is shipped under the new key, and the historical files stay at their old paths"
+      }
     },
     "scout": {
       "model": "scout.glb",
@@ -282,5 +288,8 @@
         "no authored animation clips: idle, gestures and speech are procedural (cc_avatar.js)"
       ]
     }
+  },
+  "historical_aliases": {
+    "eddie": "archer"
   }
 }

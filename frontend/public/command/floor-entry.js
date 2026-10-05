@@ -3,10 +3,20 @@
  * entry above the account, and fills its seven desk lights from
  * GET /api/command/floor -- real states only; before a read, or without a
  * session, the lights are grey and say so. */
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
+
 (function () {
   'use strict';
   if (!window.BTOffice || !BTOffice.render) return;
-  var SEATS = [['derek', 'Derek'], ['karen', 'Karen'], ['scout', 'Scout'], ['eddie', 'Eddie'],
+  var SEATS = [['derek', 'Derek'], ['karen', 'Karen'], ['scout', 'Scout'], ['archer', 'Archer'],
                ['allocator', 'Allie'], ['audrey', 'Audrey'], ['xavier', 'Xavier']];
   var COLORS = {WORKING_ON: '#50d8ac', REVIEWING: '#6fb6ff', CHALLENGING: '#ff8395', WAITING: '#e9be74',
                 IDLE: '#93a3b8', STALE: '#5d6878', NOT_DEPLOYED: '#3d4859'};
@@ -47,7 +57,7 @@
       if (r.status === 401 || r.status === 403) { last = null; note = 'Sign in to see the desks’ live states.'; return null; }
       if (r.status === 404) { last = null; note = 'The floor read ships with the next API release; the floor opens with desks unlit.'; return null; }
       if (!r.ok) { note = 'Floor states unavailable (HTTP ' + r.status + ').'; return null; }
-      return r.json();
+      return r.json().then(btDealias);
     }).then(function (j) { if (j) { last = j; } refresh(); }).catch(function () { note = 'Floor states unavailable.'; refresh(); });
   }
   var render = BTOffice.render;

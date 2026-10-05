@@ -1,8 +1,17 @@
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
 (function(){
 'use strict';if(window.__BTMeetingRelease)return;window.__BTMeetingRelease=true;
 var AGENTS=[
  ['derek','Derek','CIO · Discovery & Entry','#9fe3bf'],['karen','Karen','Red Team','#ff8197'],['scout','Scout','Market Intelligence','#f5b072'],
- ['eddie','Eddie','Head of Execution','#67d9ff'],['allocator','Allie','Chief Allocator','#ff9bcf'],['audrey','Audrey','Risk & Audit','#bca8ff'],['xavier','Xavier','Portfolio Mgmt','#9fd2f2']
+ ['archer','Archer','Head of Execution','#67d9ff'],['allocator','Allie','Chief Allocator','#ff9bcf'],['audrey','Audrey','Risk & Audit','#bca8ff'],['xavier','Xavier','Portfolio Mgmt','#9fd2f2']
 ];
 function esc(x){return String(x==null?'':x).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});}
 function money(n,d){return typeof n==='number'&&isFinite(n)?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',minimumFractionDigits:d||0,maximumFractionDigits:d||0}).format(n):'UNAVAILABLE';}
@@ -16,7 +25,7 @@ function patchAllie(root){
 /* real floor */
 if(location.pathname==='/floor'){document.body.classList.add('meeting-real-floor');}
 /* avatar-first agent pages */
-if(/^\/(derek|xavier|audrey|karen|eddie|scout|allocator)\/?$/.test(location.pathname)){document.body.classList.add('meeting-agent');}
+if(/^\/(derek|xavier|audrey|karen|archer|eddie|scout|allocator)\/?$/.test(location.pathname)){document.body.classList.add('meeting-agent');}
 patchAllie();
 
 /* executive homepage */
@@ -37,7 +46,7 @@ function buildHome(){
 function loadHome(){
  /* integration: the seven employee links are drawn at once and the two reads are independent; production showed a slow equity read leaving the team and attention empty for 12+ s on phone when they waited on each other */
  renderTeam(null);
- fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(renderTeam).catch(function(){var a=document.getElementById('mtg-attn');if(a)a.textContent='FLOOR READ UNAVAILABLE';var b=document.getElementById('mtg-attn-sub');if(b)b.textContent='No alert state is shown without the floor record. Open Audrey for audit evidence.';});
+ fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json().then(btDealias):Promise.reject()).then(renderTeam).catch(function(){var a=document.getElementById('mtg-attn');if(a)a.textContent='FLOOR READ UNAVAILABLE';var b=document.getElementById('mtg-attn-sub');if(b)b.textContent='No alert state is shown without the floor record. Open Audrey for audit evidence.';});
  fetch('/api/command/equity/live',{credentials:'same-origin',cache:'no-store'}).then(r=>r.ok?r.json():Promise.reject()).then(renderEquity).catch(function(){var e=document.getElementById('mtg-equity');if(e)e.textContent='UNAVAILABLE';var l=document.getElementById('mtg-l-state');if(l)l.textContent='UNAVAILABLE';});
 }
 function renderEquity(x){

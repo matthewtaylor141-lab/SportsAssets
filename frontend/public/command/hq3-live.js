@@ -1,3 +1,12 @@
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
 (function(){
 'use strict';
 if(window.__BTHQ3)return;window.__BTHQ3=true;
@@ -27,7 +36,7 @@ function buildHome(){
   readFloor();readEq();
 }
 function readFloor(){
- fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(f){
+ fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store'}).then(function(r){if(!r.ok)throw 0;return r.json().then(btDealias)}).then(function(f){
    var as=f.agents||[],active=as.filter(function(a){return /WORKING|REVIEW|CHALLENG/.test(a.work_state||a.state||'')}).length;
    var pulse=document.getElementById('hq3-pulse');if(pulse)pulse.innerHTML=
     '<span class="hq3-chip good"><i></i>'+active+' ACTIVE DESKS</span><span class="hq3-chip"><i></i>'+as.length+' AGENTS REPORTING</span>'+

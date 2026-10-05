@@ -5,18 +5,18 @@
   if(!B){return;}
   // each agent's face: a still render of their OWN licensed 3D model
   // (team-demo/assets/models/portraits, rendered from manifest.json models)
-  var FACES={derek:1,xavier:1,audrey:1,karen:1,allocator:1,eddie:1,scout:1};
+  var FACES={derek:1,xavier:1,audrey:1,karen:1,allocator:1,archer:1,scout:1};
   function face(slug){return FACES[slug]?'background:#0b1526 url(team-demo/assets/models/portraits/'+slug+'.jpg) center 18%/cover no-repeat':'';}
   var persona={
     derek:["DECISIVE · PROBABILITY FIRST","Rejects weak edges. Wants a crisp thesis, a measurable edge and a reason to act now."],
     karen:["SKEPTICAL · SOURCE OBSESSED","Adversarial by design. Finds the unsupported sentence, asks what is missing and refuses decorative certainty."],
     scout:["CURIOUS · PATTERN HUNTER","Research-first and exploratory. Looks for structure without promoting his own hypotheses."],
-    eddie:["FAST · EXECUTION OBSESSED","Thinks in spread, depth, fees, queue, slippage and latency. Recommendation is not an order."],
+    archer:["FAST · EXECUTION OBSESSED","Thinks in spread, depth, fees, queue, slippage and latency. Recommendation is not an order."],
     allocator:["ALLIE · PORTFOLIO FIRST","Sees the whole book: capacity, correlation, concentration, capital-hours and opportunity cost."],
     audrey:["LITERAL · LEDGER FIRST","Reconciles the record. Contradictions survive until proven resolved; missing evidence never becomes zero."],
     xavier:["CALM · LOSS AWARE","Manages what we already own. Freshness, downside and alternatives come before narrative confidence."]
   };
-  var pos={derek:[10,68],karen:[23,43],scout:[39,28],eddie:[59,27],allocator:[76,40],audrey:[88,61],xavier:[70,70]};
+  var pos={derek:[10,68],karen:[23,43],scout:[39,28],archer:[59,27],allocator:[76,40],audrey:[88,61],xavier:[70,70]};
   var state={floor:null,read:null};
   var host=document.createElement('main');host.id='bt-hq2-floor';host.className='bt-hq2-content-offset';
   host.innerHTML='<section class="hq2-floor-head"><div class="hq2-floor-title"><div class="eyebrow">BettorToken · operating headquarters</div><h1>Where the company is alive.</h1><p>Seven independent desks. One evidence chain. Every state, hand-off and collaboration below comes from recorded system activity — not decorative animation.</p></div><div class="hq2-floor-meta"><span id="hq2-fresh">READING</span><span id="hq2-edges">— COLLABORATIONS</span><span class="live">READ ONLY</span></div></section>'+
@@ -26,7 +26,7 @@
   '<div class="hq2-pods" id="hq2-pods"></div>'+
   '<div class="hq2-walls"><article class="hq2-wall"><div class="k">Opportunity radar</div><div class="big" id="hq2-opp">READING</div><div class="small" id="hq2-opp-s">Waiting for allocator evidence.</div></article>'+
   '<article class="hq2-wall"><div class="k">Company pulse</div><div class="big" id="hq2-pulse">READING</div><div class="small" id="hq2-pulse-s">Agent state is derived from heartbeats and durable work records.</div></article>'+
-  '<article class="hq2-wall"><div class="k">Execution + risk</div><div class="big" id="hq2-exec">READING</div><div class="small" id="hq2-exec-s">Eddie recommendations stay separate from venue orders.</div></article></div>'+
+  '<article class="hq2-wall"><div class="k">Execution + risk</div><div class="big" id="hq2-exec">READING</div><div class="small" id="hq2-exec-s">Archer recommendations stay separate from venue orders.</div></article></div>'+
   '<aside class="hq2-floor-drawer" id="hq2-drawer" aria-label="Agent detail"></aside></section>';
   document.body.appendChild(host);
   function esc(x){return B.esc(x)}
@@ -71,7 +71,7 @@
     document.getElementById('hq2-opp').textContent=opp.length?opp.length+' ranked candidate'+(opp.length===1?'':'s'):'NO RANKING';
     document.getElementById('hq2-opp-s').textContent=opp[0]?(opp[0].market||opp[0].candidate_id||'Top candidate')+(opp[0].score!=null?' · score '+Number(opp[0].score).toFixed(4):''):'No shadow allocation ranking recorded.';
     document.getElementById('hq2-pulse').textContent=working+' ACTIVE · '+stale+' STALE';
-    var ed=agent('eddie');document.getElementById('hq2-exec').textContent=ed?String(ed.state||'UNKNOWN').replace(/_/g,' '):'UNAVAILABLE';
+    var ed=agent('archer');document.getElementById('hq2-exec').textContent=ed?String(ed.state||'UNKNOWN').replace(/_/g,' '):'UNAVAILABLE';
     document.getElementById('hq2-exec-s').textContent=ed&&ed.state_detail||'Execution desk has no current state.';
     document.getElementById('hq2-edges').textContent=(f.edges||[]).length+' COLLABORATIONS';
   }

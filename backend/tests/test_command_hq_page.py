@@ -99,7 +99,7 @@ const SEATS = [
   {agent: 'DEREK', slug: 'derek', name: 'Derek', short: 'CIO', role: 'CIO', accent: '#9fe3bf'},
   {agent: 'KAREN', slug: 'karen', name: 'Karen', short: 'Red team', role: 'Red team', accent: '#ff9a8f'},
   {agent: 'SCOUT', slug: 'scout', name: 'Scout', short: 'Intel', role: 'Intel', accent: '#f5b072'},
-  {agent: 'EDDIE', slug: 'eddie', name: 'Eddie', short: 'Exec', role: 'Exec', accent: '#6fe0d2'},
+  {agent: 'ARCHER', slug: 'archer', name: 'Archer', short: 'Exec', role: 'Exec', accent: '#6fe0d2'},
   {agent: 'CHIEF_ALLOCATOR', slug: 'allocator', name: 'Allie', short: 'Alloc', role: 'Alloc', accent: '#ecc66d'},
   {agent: 'AUDREY', slug: 'audrey', name: 'Audrey', short: 'Audit', role: 'Audit', accent: '#cdb6f6'},
   {agent: 'XAVIER', slug: 'xavier', name: 'Xavier', short: 'PM', role: 'PM', accent: '#9fd2f2'}];
@@ -134,7 +134,7 @@ FLOOR = {"agents": [
 
 def test_adriana_is_a_desk_but_not_deployed_until_the_floor_serves_her():
     r = _run(FLOOR)
-    assert r["slugs"] == ["derek", "karen", "scout", "allocator", "adriana", "eddie", "audrey", "xavier"]
+    assert r["slugs"] == ["derek", "karen", "scout", "allocator", "adriana", "archer", "audrey", "xavier"]
     assert r["adriana"] == {"planned": True, "label": "NOT DEPLOYED · UNVERIFIED", "active": False, "code": "NOT_DEPLOYED"}
     assert r["adrianaPlanned"] is True
 

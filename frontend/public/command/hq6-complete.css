@@ -42,7 +42,7 @@
 .mtg-agent[href="/derek"]::before,.hq4-agent-card.derek::before{background-image:url("team-demo/assets/models/portraits/derek.jpg")}
 .mtg-agent[href="/karen"]::before,.hq4-agent-card.karen::before{background-image:url("team-demo/assets/models/portraits/karen.jpg")}
 .mtg-agent[href="/scout"]::before,.hq4-agent-card.scout::before{background-image:url("team-demo/assets/models/portraits/scout.jpg")}
-.mtg-agent[href="/eddie"]::before,.hq4-agent-card.eddie::before{background-image:url("team-demo/assets/models/portraits/eddie.jpg")}
+.mtg-agent[href="/archer"]::before,.hq4-agent-card.archer::before{background-image:url("team-demo/assets/models/portraits/archer.jpg")}
 .mtg-agent[href="/allocator"]::before,.hq4-agent-card.allocator::before{background-image:url("team-demo/assets/models/portraits/allocator.jpg")}
 .mtg-agent[href="/audrey"]::before,.hq4-agent-card.audrey::before{background-image:url("team-demo/assets/models/portraits/audrey.jpg")}
 .mtg-agent[href="/xavier"]::before,.hq4-agent-card.xavier::before{background-image:url("team-demo/assets/models/portraits/xavier.jpg")}
@@ -149,7 +149,7 @@ body.meeting-real-floor .fl-agent::before{
 body.meeting-real-floor .fl-agent[data-slug="derek"]::before{background-image:url("team-demo/assets/models/portraits/derek.jpg")}
 body.meeting-real-floor .fl-agent[data-slug="karen"]::before{background-image:url("team-demo/assets/models/portraits/karen.jpg")}
 body.meeting-real-floor .fl-agent[data-slug="scout"]::before{background-image:url("team-demo/assets/models/portraits/scout.jpg")}
-body.meeting-real-floor .fl-agent[data-slug="eddie"]::before{background-image:url("team-demo/assets/models/portraits/eddie.jpg")}
+body.meeting-real-floor .fl-agent[data-slug="archer"]::before{background-image:url("team-demo/assets/models/portraits/archer.jpg")}
 body.meeting-real-floor .fl-agent[data-slug="allocator"]::before{background-image:url("team-demo/assets/models/portraits/allocator.jpg")}
 body.meeting-real-floor .fl-agent[data-slug="audrey"]::before{background-image:url("team-demo/assets/models/portraits/audrey.jpg")}
 body.meeting-real-floor .fl-agent[data-slug="xavier"]::before{background-image:url("team-demo/assets/models/portraits/xavier.jpg")}

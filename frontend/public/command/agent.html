@@ -62,7 +62,7 @@
   <a href="/audrey" data-agent="audrey">Audrey<span class="sep"> · </span><span class="role">Audit &amp; Intel</span></a>
   <a href="/karen" data-agent="karen">Karen<span class="sep"> · </span><span class="role">Red Team</span></a>
   <a href="/allocator" data-agent="allocator">Allie<span class="sep"> · </span><span class="role">Chief Allocator</span></a>
-  <a href="/eddie" data-agent="eddie">Eddie<span class="sep"> · </span><span class="role">Execution</span></a>
+  <a href="/archer" data-agent="archer">Archer<span class="sep"> · </span><span class="role">Execution</span></a>
   <a href="/scout" data-agent="scout">Scout<span class="sep"> · </span><span class="role">Intelligence</span></a>
   <span class="tag">AI agents · paper experiment</span>
 </nav>
@@ -83,12 +83,15 @@
 (function () {
   // derek, xavier, audrey, karen: the workspace + their classic desk page.
   // allocator: the workspace only (no classic page exists).
-  // eddie, scout: their own pages (pos-agents) framed as before, with the
+  // archer, scout: their own pages (pos-agents) framed as before, with the
   // live floor state above them -- never a duplicate workspace.
-  var AGENTS = {derek: 1, xavier: 1, audrey: 1, karen: 1, allocator: 1, eddie: 1, scout: 1};
+  var AGENTS = {derek: 1, xavier: 1, audrey: 1, karen: 1, allocator: 1, archer: 1, scout: 1};
   var WORKSPACE = {derek: 1, xavier: 1, audrey: 1, karen: 1, allocator: 1};
-  var CLASSIC = {derek: 1, xavier: 1, audrey: 1, karen: 1, eddie: 1, scout: 1};
+  var CLASSIC = {derek: 1, xavier: 1, audrey: 1, karen: 1, archer: 1, scout: 1};
   var name = (location.pathname.replace(/\/+$/, "").split("/").pop() || "").toLowerCase();
+  // migration 266: /eddie is Archer's historical address
+  var ALIASES = {eddie: "archer"};
+  if (ALIASES[name]) { name = ALIASES[name]; }
   if (!AGENTS[name]) { name = "derek"; }
   document.querySelectorAll("nav a[data-agent]").forEach(function (a) {
     if (a.getAttribute("data-agent") === name) { a.setAttribute("aria-current", "page"); }
@@ -109,6 +112,15 @@
     if (framed) { frame.hidden = !frame.src; return; }
     framed = true;
     fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store"})
+      .then(function (r) {
+        // migration 266: a build before the rename serves Archer's page only
+        // at his historical address -- ask there before saying NOT RELEASED
+        if (r.status === 404 && name === "archer" && url.indexOf("/eddie/") < 0) {
+          url = "/api/command/agents/eddie/page";
+          return fetch(url, {method: "GET", credentials: "same-origin", cache: "no-store"});
+        }
+        return r;
+      })
       .then(function (r) {
         if (r.ok) { frame.src = url; frame.hidden = false; return; }
         if (r.status === 401 || r.status === 403) {
@@ -143,7 +155,7 @@
     load();
     select(want);
   } else {
-    // eddie / scout: the live floor strip above their own page
+    // archer / scout: the live floor strip above their own page
     window.__btWorkspace = {agent: name, stripOnly: true};
     root.hidden = false; root.classList.add("strip-only");
     load();

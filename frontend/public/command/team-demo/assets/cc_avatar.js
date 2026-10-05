@@ -347,7 +347,7 @@ export const LIGHTING = {
   cinematic_crimson: {key: [0xfff0e6, 2.4, [-1.8, 2.3, 2.0]], fill: [0xc8d2e8, 0.55, [1.8, 1.4, 1.8]], rim: [0xff9a8f, 1.2, [1.3, 2.2, -2.0]], env: 0.5, exposure: 1.0},
   // Allie: soft, even, warm-gold rim (the senior allocator's office)
   cinematic_gold: {key: [0xfff2e0, 2.2, [-1.3, 2.4, 2.4]], fill: [0xf0e6d8, 0.85, [1.7, 1.6, 2.0]], rim: [0xffd38a, 1.8, [1.2, 2.3, -2.0]], env: 0.65, exposure: 1.05},
-  // Eddie: cool screen light with a teal rim (the execution desk)
+  // Archer: cool screen light with a teal rim (the execution desk)
   cinematic_teal: {key: [0xe6f2ff, 2.3, [-1.5, 2.3, 2.2]], fill: [0xb8e0ff, 0.6, [1.8, 1.4, 1.8]], rim: [0x5fe6d4, 2.0, [1.3, 2.1, -2.0]], env: 0.55, exposure: 1.0},
   // Scout: warm amber key, curious and informal (the research corner)
   cinematic_amber: {key: [0xffe2c0, 2.3, [-1.5, 2.4, 2.2]], fill: [0xcfe0ff, 0.6, [1.8, 1.5, 1.8]], rim: [0xffb46a, 1.9, [1.2, 2.2, -2.0]], env: 0.6, exposure: 1.02},

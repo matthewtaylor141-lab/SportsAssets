@@ -1,3 +1,12 @@
+/* migration 266: the execution agent EDDIE is ARCHER; a floor answer from a
+ * build before the rename is read as Archer's (labelled historical_alias) */
+var btDealias = window.btDealias || function (j) {
+  if (window.BTFloor && window.BTFloor.dealias) return window.BTFloor.dealias(j);
+  (j && j.agents || []).forEach(function (a) { if (a && (a.slug === 'eddie' || a.agent === 'EDDIE')) { a.slug = 'archer'; a.agent = 'ARCHER'; a.historical_alias = 'EDDIE'; } });
+  (j && j.edges || []).forEach(function (e) { ['from', 'to'].forEach(function (k) { if (e && (e[k] === 'eddie' || e[k] === 'EDDIE')) { e[k] = e[k] === 'EDDIE' ? 'ARCHER' : 'archer'; e.historical_alias = 'EDDIE'; } }); });
+  return j;
+};
+window.btDealias = btDealias;
 (function(){
 'use strict';
 if(window.__BTHQ5)return;window.__BTHQ5=true;
@@ -14,7 +23,7 @@ var ROUTES=[
  {name:'Derek',sub:'CIO · Discovery & Entry',href:'/derek',ico:'',agent:'derek'},
  {name:'Karen',sub:'Red Team',href:'/karen',ico:'',agent:'karen'},
  {name:'Scout',sub:'Market Intelligence',href:'/scout',ico:'',agent:'scout'},
- {name:'Eddie',sub:'Head of Execution',href:'/eddie',ico:'',agent:'eddie'},
+ {name:'Archer',sub:'Head of Execution',href:'/archer',ico:'',agent:'archer'},
  {name:'Allie',sub:'Chief Allocator',href:'/allocator',ico:'',agent:'allocator'},
  {name:'Audrey',sub:'Risk & Audit',href:'/audrey',ico:'',agent:'audrey'},
  {name:'Xavier',sub:'Portfolio Management',href:'/xavier',ico:'',agent:'xavier'}
@@ -35,7 +44,7 @@ if(bar&&!document.getElementById('hq5-pulse')){
   document.addEventListener('click',function(e){if(!pop.hidden&&!pop.contains(e.target)&&e.target!==b)pop.hidden=true;});
 }
 function readPulse(){
- fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}}).then(function(r){if(!r.ok)throw 0;return r.json()}).then(function(f){
+ fetch('/api/command/floor',{credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'}}).then(function(r){if(!r.ok)throw 0;return r.json().then(btDealias)}).then(function(f){
    var as=f.agents||[],newest=0;as.forEach(a=>newest=Math.max(newest,a.heartbeat&&a.heartbeat.at||0));
    var age=newest?Date.now()/1000-newest:Infinity,btn=document.getElementById('hq5-pulse'),pop=document.getElementById('hq5-pulse-pop');
    if(btn){btn.classList.toggle('live',age<120);btn.classList.toggle('warn',age>=120&&age<900);btn.querySelector('span').textContent=(age<120?'Company Live':'Company Pulse')+' · '+ago(newest);}

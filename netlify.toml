@@ -114,11 +114,18 @@
   status = 200
   force = true
 # ── end POSITION ROOMS ──────────────────────────────────────────────────
-# ── EDDIE AND SCOUT (claude/pos-agents, migration 217) ─────────────────
-# Eddie (head of execution, SHADOW ONLY) and Scout (market intelligence,
+# ── ARCHER AND SCOUT (claude/pos-agents, migration 217) ─────────────────
+# Archer (head of execution, SHADOW ONLY; named Eddie until migration 266 --
+# /eddie, his historical address, stays below) and Scout (market intelligence,
 # RESEARCH SHADOW ONLY): the same shell, framing
 # /api/command/agents/<agent>/page. Until the API serving that page is
 # released, the shell says NOT YET RELEASED (it asks before framing).
+[[redirects]]
+  from = "https://command.bettortoken.com/archer"
+  to = "/command/agent.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/eddie"
   to = "/command/agent.html"
@@ -130,7 +137,7 @@
   to = "/command/agent.html"
   status = 200
   force = true
-# ── end EDDIE AND SCOUT ───────────────────────────────────────────────
+# ── end ARCHER AND SCOUT ───────────────────────────────────────────────
 # ── THE TRADING FLOOR (/floor) AND THE CHIEF ALLOCATOR'S WORKSPACE ─────
 # /floor is BETTOR headquarters: the 3D trading floor (command/floor.html),
 # a static page that reads GET /api/command/floor through the same-origin
