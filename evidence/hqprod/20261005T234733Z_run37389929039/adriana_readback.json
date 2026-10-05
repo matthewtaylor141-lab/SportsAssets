@@ -1,54 +1,54 @@
 {
- "at": "2026-10-05T23:30:10.522Z",
+ "at": "2026-10-05T23:42:22.074Z",
  "floor_http": 200,
  "seat": {
   "deployed": true,
   "deploy_why": null,
   "state": "WORKING_ON",
-  "work_state": "BLOCKED_ON_MARKET_DATA",
-  "work_detail": "Market data failing: VENUE_BOOK_READS_FAILING",
+  "work_state": "WORKING",
+  "work_detail": "Recorded arbitrage census adr-scan-1791243464859",
   "heartbeat": {
-   "at": 1791242861.704284,
-   "age_s": 157.1,
+   "at": 1791243467.679777,
+   "age_s": 274.6,
    "stale_after_s": 900,
    "source": "agent_status.last_heartbeat_at"
   },
   "monitor": [
    {
     "label": "Census passes (24h)",
-    "value": 13,
+    "value": 15,
     "source": "adriana_arb_scans",
-    "as_of": 1791242857.848023,
+    "as_of": 1791243467.631902,
     "why": null
    },
    {
     "label": "Proven after costs (24h)",
     "value": 0,
     "source": "adriana_arb_opportunities",
-    "as_of": 1791242857.848023,
+    "as_of": 1791243467.631902,
     "why": null
    },
    {
     "label": "Refused (last pass)",
-    "value": 0,
+    "value": 4,
     "source": "adriana_arb_scans",
-    "as_of": 1791242857.848023,
+    "as_of": 1791243467.631902,
     "why": null
    },
    {
     "label": "Fresh books (last pass)",
     "value": 0,
     "source": "adriana_arb_scans",
-    "as_of": 1791242857.848023,
+    "as_of": 1791243467.631902,
     "why": null
    }
   ],
   "last_output": {
    "kind": "adriana_arb_scans",
-   "id": "adr-scan-1791242854363",
+   "id": "adr-scan-1791243464859",
    "href": "/api/command/adriana",
-   "at": 1791242857.848023,
-   "summary": "Census OK · 0 structures · 0 proven · 0 refused"
+   "at": 1791243467.631902,
+   "summary": "Census OK · 4 structures · 0 proven · 4 refused"
   },
   "authority": "SHADOW_ONLY"
  },
@@ -60,7 +60,7 @@
   "mandate": "Find structures whose payout is fixed in every outcome -- cross-venue complements, YES / NO complements, middles across lines and exhaustive outcome baskets -- and prove or refuse each one: identical settlement and payoff in every outcome (void, postponement and tie included), synchronized fresh books, executable depth on every leg, and a positive worst case after every fee, slippage allowance and cost at the largest profitable matched size. Records every opportunity and every refusal in SHADOW. Never calls a structure guaranteed unless all of that reconciles. Holds NO authority: no venue submission, no order, no cancel, no credential, no capital, no approval, no promotion.",
   "policy_version": "CODE_DEFAULT",
   "model_version": "NO_OUTCOME_MODEL_EXHAUSTIVE_PAYOFF_SOLVER",
-  "code_version": "sportsassets.workers.ext_pinnacle_loop@39688763d8b8#9c84ca01af8e0c3ec20c6c9379665a490b12de6d",
+  "code_version": "sportsassets.workers.ext_pinnacle_loop@39688763d8b8#e54ee95a6e540a910c4825cf05ce4cf746509a92",
   "tool_permissions": {
    "denied": [
     "request.funded_entry",
@@ -102,16 +102,16 @@
    "order_path": null,
    "authority_status": "SHADOW_ONLY"
   },
-  "identity_updated_at": 1791239184.307487,
+  "identity_updated_at": 1791243127.274681,
   "state": "DECISION_RECORDED",
   "activity": "CENSUS_RECORDED",
   "waiting_on": null,
   "dependencies": null,
-  "last_heartbeat_at": 1791242861.704284,
-  "last_run_started_at": 1791242854.363283,
-  "last_run_finished_at": 1791242861.704284,
-  "last_run_elapsed_s": 7.341,
-  "runs": 13,
+  "last_heartbeat_at": 1791243467.679777,
+  "last_run_started_at": 1791243464.859777,
+  "last_run_finished_at": 1791243467.679777,
+  "last_run_elapsed_s": 2.82,
+  "runs": 15,
   "errors": 0,
   "last_error": null,
   "cadence": {
@@ -120,9 +120,9 @@
   "role": "HEAD_OF_ARBITRAGE"
  },
  "census": {
-  "scan_id": "adr-scan-1791242854363",
-  "started_at": 1791242854.363283,
-  "finished_at": 1791242857.848023,
+  "scan_id": "adr-scan-1791243464859",
+  "started_at": 1791243464.859777,
+  "finished_at": 1791243467.631902,
   "status": "OK",
   "why": null,
   "engine_version": "ADRIANA_CENSUS_V1+ADRIANA_ARB_ENGINE_V1",
@@ -144,24 +144,35 @@
     "fee_schedule": "bettor_fee_schedule (dated, per order)"
    }
   },
-  "markets_read": 7,
+  "markets_read": 10,
   "books_fresh": 0,
-  "structures_considered": 0,
+  "structures_considered": 4,
   "opportunities": 0,
-  "refusals_total": 0,
-  "refusals_recorded": 0,
-  "by_verdict": {},
-  "by_kind": {},
+  "refusals_total": 4,
+  "refusals_recorded": 4,
+  "by_verdict": {
+   "REFUSED": 4
+  },
+  "by_kind": {
+   "MIDDLE_FLOOR": 4
+  },
   "by_code": {
-   "by_code": {},
+   "by_code": {
+    "STALE_BOOK": 1,
+    "PAYOFF_FLOOR_BELOW_COST": 3,
+    "VOID_TERMS_NOT_ESTABLISHED": 4
+   },
    "skipped": {
-    "BOOK_READ_FAILED": 14,
+    "BOOK_READ_FAILED": 10,
     "SLUG_GRAMMAR_NOT_READ": 10,
     "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED": 75
    },
-   "by_primary_code": {},
+   "by_primary_code": {
+    "STALE_BOOK": 1,
+    "PAYOFF_FLOOR_BELOW_COST": 3
+   },
    "conditional_candidates": 0,
-   "same_market_pairs_not_considered": 7
+   "same_market_pairs_not_considered": 10
   },
   "limits": {
    "max_age_s": 30,
@@ -207,7 +218,7 @@
  "refusals": {
   "status": "OK",
   "why": null,
-  "n": 4
+  "n": 8
  },
  "blockers": {
   "status": "OK",
@@ -221,36 +232,46 @@
  },
  "top_refusals": [
   {
-   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
-   "codes": [
-    "PAYOFF_FLOOR_BELOW_COST",
-    "VOID_TERMS_NOT_ESTABLISHED"
-   ],
-   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
-   "kind": "MIDDLE_FLOOR"
-  },
-  {
-   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
-   "codes": [
-    "PAYOFF_FLOOR_BELOW_COST",
-    "VOID_TERMS_NOT_ESTABLISHED"
-   ],
-   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
-   "kind": "MIDDLE_FLOOR"
-  },
-  {
-   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
-   "codes": [
-    "PAYOFF_FLOOR_BELOW_COST",
-    "VOID_TERMS_NOT_ESTABLISHED"
-   ],
-   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
-   "kind": "MIDDLE_FLOOR"
-  },
-  {
    "primary_code": "STALE_BOOK",
    "codes": [
     "STALE_BOOK",
+    "STALE_BOOK",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "mlb-cws-cle-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "mlb-cws-cle-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "mlb-cws-cle-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "mlb-cws-cle-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
     "VOID_TERMS_NOT_ESTABLISHED"
    ],
    "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
