@@ -610,6 +610,85 @@ jobs:
           mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "hq evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
 
+  weekly:
+    # OFF UNLESS verify == weekly. READ-ONLY GETs for the Monday weekly
+    # management report, written to claude/site-verify-evidence as JSON files.
+    # Why a file and not a log line: the engine-diagnostic probe's gzip+base64
+    # log blobs are corrupted by the Actions secret masker (see its EXPORT
+    # note), and its artifacts cannot be fetched from the session container.
+    # A committed file is neither masked nor size-capped. The week is the ET
+    # Mon-Sun that ended before this run. Nothing here writes to the API.
+    # Account balances: only balance-like fields are kept (no identifiers).
+    if: ${{ inputs.verify == 'weekly' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the week's report inputs (GET only)
+        timeout-minutes: 32
+        shell: bash
+        env:
+          BASE: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          OUT=weekly_out; mkdir -p "$OUT"
+          TODAY=$(TZ=America/New_York date +%F); DOW=$(TZ=America/New_York date +%u)
+          THIS_MON=$(date -d "$TODAY -$((DOW - 1)) days" +%F)
+          MON=$(date -d "$THIS_MON -7 days" +%F); SUN=$(date -d "$THIS_MON -1 days" +%F)
+          echo "week $MON .. $SUN (ET) read at $(date -u +%FT%TZ)" | tee "$OUT/week.txt"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          get() {   # get <path> <file> <max-time>
+            code=$(curl -sS --max-time "$3" -o "$OUT/$2" -w '%{http_code}' -H "$H" "$BASE$1")
+            echo "$1 -> HTTP $code bytes=$(wc -c < "$OUT/$2" 2>/dev/null)" | tee -a "$OUT/index.txt"
+          }
+          get "/api/report/range?from=$MON&to=$SUN" report_range.json 90
+          get "/api/venue-export-raw?since=$MON" venue_export_raw.json 280
+          get "/api/pmus-account" pmus_account_full.json 90
+          jq '[paths(scalars) as $p | select(($p | map(tostring) | join(".")) | test("balance|cash|buying|equity|notional|available|reserv|as_of|currency|positions_count|open_orders"; "i"))
+               | {key: ($p | map(tostring) | join(".")), value: getpath($p)}]' "$OUT/pmus_account_full.json" > "$OUT/pmus_balances.json" 2>/dev/null
+          rm -f "$OUT/pmus_account_full.json"
+          get "/api/whales" whales_full.json 60
+          jq -c '[.[] | {id, username, active}]' "$OUT/whales_full.json" > "$OUT/whales.json" 2>/dev/null
+          rm -f "$OUT/whales_full.json"
+          echo '[]' > "$OUT/whale_days.json"
+          for id in $(jq -r '[.[] | select(.active != false)][:8][].id' "$OUT/whales.json"); do
+            for i in 0 1 2 3 4 5 6; do
+              d=$(date -d "$MON +$i days" +%F)
+              rm -f /tmp/wd.json
+              for try in 1 2; do
+                code=$(curl -sS --max-time 110 -o /tmp/wd.json -w '%{http_code}' -H "$H" "$BASE/api/whales/$id/day/$d")
+                [ "$code" = 200 ] && break; sleep 3
+              done
+              echo "/api/whales/$id/day/$d -> HTTP $code" >> "$OUT/index.txt"
+              [ "$code" = 200 ] || continue
+              jq -c --argjson id "$id" '. as $o | {id: $id, date: $o.date, pnl: $o.pnl, stake: $o.stake,
+                wins: $o.wins, losses: $o.losses, settled: $o.settled_count, trades: $o.trades_placed,
+                volume: $o.volume_placed,
+                sports: [($o.sports // [])[] | {sport, pnl, stake, wins, losses,
+                  top: ((.bets // [])[:3] | map({t: (.market_title // .event_title // ""), pnl}))}]}' \
+                /tmp/wd.json > /tmp/wd1.json 2>/dev/null || continue
+              jq -c -s '.[0] + [.[1]]' "$OUT/whale_days.json" /tmp/wd1.json > /tmp/wd2.json && mv /tmp/wd2.json "$OUT/whale_days.json"
+            done
+          done
+          echo "whale_days rows: $(jq length "$OUT/whale_days.json")"
+          ls -la "$OUT"
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          RUN=${{ github.run_id }}
+          D="evidence/weekly/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1 || true
+          mkdir -p "$D" && cp weekly_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "weekly evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+
   office:
     # THE MANAGEMENT OFFICE ON THE PRODUCTION SITE. OFF UNLESS verify ==
     # office. Compares what /xavier /derek /audrey show with the operations,
