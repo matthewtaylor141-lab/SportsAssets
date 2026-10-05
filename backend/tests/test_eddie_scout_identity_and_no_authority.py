@@ -36,6 +36,7 @@ pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIG = ROOT / "migrations"
 UP = (MIG / "217_eddie_scout_agents.sql").read_text()
+UP_265 = (MIG / "265_adriana_arbitrage_agent.sql").read_text()
 DOWN = (MIG / "rollback" / "217_eddie_scout_agents.down.sql").read_text()
 
 DENIED_BY_SPEC = (
@@ -56,7 +57,7 @@ def test_eddie_and_scout_are_registered_identities_with_mandates():
     assert R.EDDIE == "EDDIE" and R.SCOUT == "SCOUT"
     assert R.EDDIE in R.AGENTS and R.SCOUT in R.AGENTS
     assert R.AGENTS == ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE",
-                        "SCOUT")
+                        "SCOUT", "ADRIANA")
     for aid in (R.EDDIE, R.SCOUT):
         assert aid not in R.OPERATING_AGENTS
         perms = R.IDENTITIES[aid]["tool_permissions"]
@@ -243,6 +244,9 @@ async def test_the_identities_are_persisted_with_their_permissions():
     conn, tx = await _tx()
     try:
         await conn.execute(UP)                                # idempotent
+        # re-running 217 narrows the identity CHECK to its six agents; 265
+        # (Adriana) re-asserts the widened CHECK after it
+        await conn.execute(UP_265)
         got = await R.ensure_identities(conn)
         assert got["ok"] is True, got
         for aid, role in ((R.EDDIE, "HEAD_OF_EXECUTION"),
@@ -257,7 +261,7 @@ async def test_the_identities_are_persisted_with_their_permissions():
                       " display_name, mandate) VALUES ('MARCO','m','m')")
         n = await conn.fetchval("SELECT count(*) FROM agent_identities WHERE "
                                 " agent_id = ANY($1)", list(R.AGENTS))
-        assert n == len(R.AGENTS) == 6
+        assert n == len(R.AGENTS) == 7
     finally:
         await tx.rollback()
         await conn.close()

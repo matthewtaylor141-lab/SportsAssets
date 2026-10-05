@@ -195,9 +195,9 @@ async def _since(conn):
 # 1 · IDENTITY: one canonical, immutable, unapproved-until-approved record
 # ═════════════════════════════════════════════════════════════════════
 
-def test_seven_identities_each_complete_and_valid():
+def test_eight_identities_each_complete_and_valid():
     assert I.AGENTS == ("DEREK", "XAVIER", "AUDREY", "KAREN",
-                        "CHIEF_ALLOCATOR", "EDDIE", "SCOUT")
+                        "CHIEF_ALLOCATOR", "EDDIE", "SCOUT", "ADRIANA")
     sigs = set()
     for a in I.AGENTS:
         row = I.identity_row(a)
@@ -206,7 +206,7 @@ def test_seven_identities_each_complete_and_valid():
             assert row[k] not in (None, "", []), (a, k)
         assert row["approved_by"] == I.PENDING and row["approved_at"] is None
         sigs.add(row["signature"])
-    assert len(sigs) == 7                      # seven distinct personalities
+    assert len(sigs) == 8                      # eight distinct personalities
     assert I.IDENTITY_SPEC["EDDIE"]["authority_status"] == "SHADOW_ONLY"
     assert I.IDENTITY_SPEC["SCOUT"]["authority_status"] == \
         "RESEARCH_SHADOW_ONLY"
@@ -318,7 +318,7 @@ async def test_the_migration_seed_equals_the_code_and_versions_are_immutable():
 def test_one_voice_profile_per_agent_and_no_secret_fields():
     ids = {I.VOICE_SPEC[a]["voice_profile_id"] for a in I.AGENTS}
     aliases = {I.VOICE_SPEC[a]["provider_voice_alias"] for a in I.AGENTS}
-    assert len(ids) == len(aliases) == 7
+    assert len(ids) == len(aliases) == 8
     for a in I.AGENTS:
         assert I.IDENTITY_SPEC[a]["default_voice_profile"] == \
             I.VOICE_SPEC[a]["voice_profile_id"]

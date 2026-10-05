@@ -92,6 +92,7 @@ def test_every_api_lifespan_runner_is_inventoried():
         "_PEER.run": "agents.peer_responder",
         "_EDDIE.run": "agents.eddie_runner",
         "_SCOUT.run": "agents.scout_runner", "_EXM.run": "execmirror.tick",
+        "_ADRIANA.run": "agents.adriana_runner",
         "_INTEL.run": "intel.runner", "_POS.run": "profitability.runner",
         "_POSLEARN.run": "position_learning.runner",
         "_TWIN.run": "twin.runner",

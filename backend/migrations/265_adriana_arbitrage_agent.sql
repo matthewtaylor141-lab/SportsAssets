@@ -280,7 +280,11 @@ CREATE TABLE IF NOT EXISTS adriana_arb_opportunities (
         AND total_cost_usd > 0 AND min_payout_usd > 0),
     CONSTRAINT adriana_opp_legs_ck CHECK (
         jsonb_typeof(legs) = 'array' AND jsonb_array_length(legs) >= 2),
-    CONSTRAINT adriana_opp_refs_ck CHECK (pos_refs_grounded(evidence_refs)),
+    -- her own grounding check (not 217's pos_refs_grounded, so 217 can
+    -- still be rolled back and re-applied on its own)
+    CONSTRAINT adriana_opp_refs_ck CHECK (
+        jsonb_typeof(evidence_refs) = 'array'
+        AND jsonb_array_length(evidence_refs) BETWEEN 1 AND 50),
     CONSTRAINT adriana_opp_mode_ck CHECK (mode = 'SHADOW'),
     CONSTRAINT adriana_opp_effect_ck CHECK (production_effect = 'NONE')
 );

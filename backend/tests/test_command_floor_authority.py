@@ -170,7 +170,7 @@ async def test_the_request_path_is_a_read_only_transaction(monkeypatch):
         class R:
             headers: dict = {}
         floor = await FL.floor_index(R())
-        assert floor["read_only"] is True and len(floor["agents"]) == 7
+        assert floor["read_only"] is True and len(floor["agents"]) == 8
         assert all(a["state"] in FL.STATES for a in floor["agents"])
         detail = await FL.floor_agent("karen", R())
         assert detail["agent"]["agent"] == "KAREN"

@@ -87,6 +87,9 @@ CONTEXT_SOURCES = {
     R.SCOUT: ("scout_sources", "scout_features",
               "scout_feature_observations", "scout_feature_tournaments",
               "external_valuations"),
+    R.ADRIANA: ("adriana_arb_scans", "adriana_arb_opportunities",
+                "adriana_arb_refusals", "paper_book_observations",
+                "us_premap"),
 }
 
 REQUIRES = {

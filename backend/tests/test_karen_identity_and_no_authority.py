@@ -193,6 +193,9 @@ async def test_the_identity_is_persisted_with_its_permissions():
         # re-running 207 narrows the identity CHECK to its four agents;
         # 217 (Eddie, Scout) re-asserts the widened CHECK after it
         await conn.execute((MIG / "217_eddie_scout_agents.sql").read_text())
+        # and 265 (Adriana) re-asserts the eight-agent CHECK after 217
+        await conn.execute(
+            (MIG / "265_adriana_arbitrage_agent.sql").read_text())
         got = await R.ensure_identities(conn)
         assert got["ok"] is True and got["agents"]["KAREN"]["ok"], got
         st = await R.status_of(conn, R.KAREN)

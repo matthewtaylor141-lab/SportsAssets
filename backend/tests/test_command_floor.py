@@ -135,7 +135,7 @@ def test_edges_merge_per_pair_and_drop_people_and_self_edges():
 def test_the_seats_are_in_candidate_review_order_with_boundaries():
     assert [s["agent"] for s in FL.SEATS] == [
         "DEREK", "KAREN", "SCOUT", "EDDIE", "CHIEF_ALLOCATOR", "AUDREY",
-        "XAVIER"]
+        "XAVIER", "ADRIANA"]
     for s in FL.SEATS:
         assert s["may"] and s["may_not"], s["agent"]
         assert s["workspace"] == "/" + s["slug"]
@@ -270,7 +270,7 @@ async def test_fixture_rows_drive_every_desk_state():
             "kind": "karen_challenges", "id": cid,
             "href": "/api/command/karen/challenges/%s" % cid}
         assert floor["counts"]["NOT_DEPLOYED"] >= 0
-        assert sum(floor["counts"].values()) == 7
+        assert sum(floor["counts"].values()) == 8
         assert floor["read_only"] is True
 
         kd = await FL.build_agent_detail(conn, "karen", now=now)

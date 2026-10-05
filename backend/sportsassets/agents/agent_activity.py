@@ -265,6 +265,24 @@ EXPERIENCE: dict[str, list] = {
          "SELECT count(*) FROM scout_feature_tournaments "
          " WHERE verdict IS NOT NULL", "tournaments with a verdict"),
     ],
+    "ADRIANA": [
+        ("census_passes", "Census passes", "RECORDS",
+         ("adriana_arb_scans",), "SELECT count(*) FROM adriana_arb_scans",
+         "adriana_arb_scans rows"),
+        ("structures_evaluated", "Structures evaluated", "RECORDS",
+         ("adriana_arb_scans",),
+         "SELECT coalesce(sum(structures_considered), 0) "
+         "  FROM adriana_arb_scans",
+         "sum of structures_considered over her passes"),
+        ("proven_after_costs", "Proven after costs", "RECORDS",
+         ("adriana_arb_opportunities",),
+         "SELECT count(*) FROM adriana_arb_opportunities",
+         "adriana_arb_opportunities rows (GUARANTEED_AFTER_COSTS only)"),
+        ("realized_outcomes_observed", "Refusals recorded", "RECORDS",
+         ("adriana_arb_refusals",),
+         "SELECT count(*) FROM adriana_arb_refusals",
+         "adriana_arb_refusals rows, each with its codes"),
+    ],
 }
 EVENTS_KEY = "realized_outcomes_observed"
 

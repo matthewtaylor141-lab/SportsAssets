@@ -69,7 +69,8 @@ def test_the_six_owner_states_exactly():
         "WORKING", "REVIEWING", "WAITING_FOR_FRESH_EVIDENCE",
         "BLOCKED_ON_MARKET_DATA", "HANDOFF_PENDING", "IDLE_NO_OPEN_WORK")
     assert set(W.AGENTS) == {"DEREK", "KAREN", "SCOUT", "EDDIE",
-                             "CHIEF_ALLOCATOR", "AUDREY", "XAVIER"}
+                             "CHIEF_ALLOCATOR", "AUDREY", "XAVIER",
+                             "ADRIANA"}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -255,6 +256,16 @@ CASES = {
         ({"market": VENUE_DOWN}, W.IDLE),         # nothing needs the books
         ({"market": FEED_DOWN,                    # he reads books, not feed
           "handoffs": _h("ENTER_DECISION_WITHOUT_ESTIMATE")}, W.HANDOFF),
+        ({"status": _status("WAITING_FOR_EVIDENCE")}, W.WAITING),
+        ({"outputs": OUT}, W.WORKING),
+        ({}, W.IDLE)],
+    # (265) Adriana's standing census reads the books: a venue outage
+    # blocks her even with nothing handed to her
+    "ADRIANA": [
+        ({"status": RUN}, W.WORKING),
+        ({"market": VENUE_DOWN}, W.BLOCKED),
+        ({"market": FEED_DOWN}, W.IDLE),          # she reads books, not feed
+        ({"handoffs": _h("AGENT_TASK_OPEN")}, W.HANDOFF),
         ({"status": _status("WAITING_FOR_EVIDENCE")}, W.WAITING),
         ({"outputs": OUT}, W.WORKING),
         ({}, W.IDLE)],
