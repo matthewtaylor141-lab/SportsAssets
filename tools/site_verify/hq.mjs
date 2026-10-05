@@ -124,6 +124,29 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
       catch (e) { return { error: String(e).slice(0, 200) }; }
     }, u);
   }
+  // PAPER E2E readback (read only): Derek's operations parsed IN THE PAGE so the
+  // 60 kB body trim cannot hide them -- the paper_control rows, each strategy's
+  // counts and every recent ENTRY order (slug, league, qty, state, fill, cost).
+  report.derek_paper = await page.evaluate(async () => {
+    try {
+      const r = await fetch("/api/command/paper/operations?agent=derek&limit=80", { credentials: "same-origin" });
+      if (!r.ok) return { status: r.status };
+      const j = await r.json(), d = (s) => (s && s.data) || null;
+      return {
+        status: r.status, as_of: j.as_of,
+        controls: (d(j.controls) || []).map((c) => ({ key: c.control_key, enabled: c.enabled, updated_by: c.updated_by, updated_at: c.updated_at })),
+        strategies: (j.strategies || []).map((s) => ({
+          strategy: s.strategy, counts: d(s.counts), funnel: d(s.funnel),
+          orders_status: s.orders && s.orders.status, orders_why: s.orders && s.orders.why,
+          orders: (d(s.orders) || []).map((o) => ({ order_id: o.order_id, created_at: o.created_at, state: o.state, qty: o.qty,
+            filled_qty: o.filled_qty, limit_price: o.limit_price, avg_fill_price: o.avg_fill_price, cost_usd: o.cost_usd,
+            fees_usd: o.fees_usd, slug: o.us_market_slug, competition: o.label && o.label.competition,
+            participant: o.label && o.label.participant, market_type: o.label && o.label.market_type, line: o.label && o.label.line,
+            group_id: o.group_id, decision_id: o.decision_id, edge_pp: o.edge_pp, terminal_reason: o.terminal_reason })),
+        })),
+      };
+    } catch (e) { return { error: String(e).slice(0, 200) }; }
+  });
   // room keys from the UNTRIMMED list (the probe body above is trimmed for the report)
   let keys = [];
   try { keys = await page.evaluate(async () => {
