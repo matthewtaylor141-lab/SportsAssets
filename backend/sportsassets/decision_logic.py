@@ -86,6 +86,15 @@ DECISION_LOGIC_FILES = (
     # imports them and no ENTER, size, freshness or management decision reads
     # them (bettor_external_shadow uses them for a row's stage label only).
     "bettor_market_family.py",
+    # PAPER TURNAROUND / CAPITAL GATING (migration 290): paper_derek's and
+    # paper_benchmark's ENTER consult the capital-eligibility gate (executable
+    # depth, resolved settlement, total executable EV) and the strategy
+    # lifecycle (a no-entry state refuses, REDUCED_SIZE halves); the ledger's
+    # submit_order reads the lifecycle and the stale-management rate under
+    # the account lock -- a change to any of them changes which entries are
+    # placed and at what size
+    "bettor_capital_eligibility.py", "bettor_strategy_lifecycle.py",
+    "bettor_stale_management.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",

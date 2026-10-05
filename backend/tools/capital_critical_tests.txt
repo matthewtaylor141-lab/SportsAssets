@@ -1084,3 +1084,5 @@ tests/test_paper_management_epoch.py
 # discovered venue event (containment still refused).
 tests/test_coverage_first_loss_census.py
 tests/test_ncaaf_native_seed_identity.py
+tests/test_capital_eligibility.py
+tests/test_strategy_lifecycle.py

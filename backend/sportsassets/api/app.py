@@ -788,6 +788,15 @@ try:
     app.include_router(_command_sleeves_router)
 except ImportError:
     log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
+# ── PAPER TURNAROUND (migration 290): /api/command/paper/turnaround. GET
+# only, COMMAND auth, READ ONLY transaction; lifecycle states, predeclared
+# rules, rolling P&L, $/capital-hour, drawdown, stale management. No write.
+try:
+    from .command_turnaround import router as _command_turnaround_router
+    app.include_router(_command_turnaround_router)
+except ImportError:
+    log.warning("turnaround: api.command_turnaround not loaded",
+                exc_info=True)
 # ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
 # named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
 try:

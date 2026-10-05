@@ -2175,6 +2175,32 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 elif not econ["net_ev_positive"]:
                     refusals.append(R_NET)
     PD.recheck_primary_reference(cand, pin, ctx, refusals)
+    capital = None
+    if not refusals:
+        # CAPITAL ELIGIBILITY + THE STRATEGY LIFECYCLE (migration 290), on
+        # the ladder the simulator would walk (net of paper liquidity already
+        # consumed at this observation): no executable depth, unresolved
+        # identity / settlement or a non-positive total executable EV is a
+        # recorded CASH/WAIT, never an order.
+        capital = await PD.capital_gate(
+            conn, ctx, strategy=STRATEGY, p=p,
+            levels=[{"price": t["price"], "qty": t["take"]}
+                    for t in (econ or {}).get("walk") or []],
+            sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn,
+            # THE POLICY'S OWN CONTRACT MATCH resolves the settlement terms:
+            # the strict benchmark's needs COMPATIBLE and every rule
+            # established; the completed-game policy's proves the ordinary-
+            # completion grading period from the cited texts (exceptional
+            # terms are disclosed research risks). Not established -> refused.
+            settlement={"compatibility": ("COMPATIBLE" if match.get(
+                "established") is True else "NOT_ESTABLISHED_BY_THE_MATCH"),
+                "basis": "the policy's contract match (%s)" % (
+                    "completed_game_match" if cg else "contract_match")})
+        if capital.get("capital_eligible"):
+            sized = dict(sized, qty=int(capital["qty"]))
+        else:
+            refusals.extend(r for r in capital["refusals"]
+                            if r not in refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_edge = edges[0]["edge_pp"] if edges else None
     short = _shortfall(pin=pin, best_edge_pp=best_edge,
@@ -2212,6 +2238,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         # THE VALIDATION RECEIPT of the gross edge's inputs (None when the
         # decision never reached the gross-edge step).
         "gross_edge_inputs": gross_inputs,
+        "capital_eligibility": capital,
         "refusals": refusals}
     if cg:
         economics_rec.update(

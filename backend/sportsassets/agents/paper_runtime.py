@@ -232,6 +232,15 @@ def default_steps() -> list:
         steps.append(("maker_maintain", PMK.step_maintain))
     steps.append(("simulate", step_simulate))
     try:
+        # PAPER TURNAROUND (migration 290): the predeclared loss / drawdown
+        # rules applied to every strategy on the MAIN paper account, at most
+        # every RUN_EVERY_S, BEFORE this pass's entries. Records demotions
+        # only (never a promotion, never an order or a cap).
+        from .. import bettor_strategy_lifecycle as LC
+        steps.append(("turnaround", LC.step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy
