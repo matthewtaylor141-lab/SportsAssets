@@ -661,6 +661,54 @@ jobs:
           git rm -rq --cached . >/dev/null 2>&1 || true
           mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
           git add "$D" && git commit -q -m "hqpreview evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
+  hqprod:
+    # OFF UNLESS verify == hqprod. READ-ONLY production readback of the 3D
+    # headquarters on the live command host: waits for /build.json to serve the
+    # head of claude/session-njaewf, then renders the nine views signed in.
+    if: ${{ inputs.verify == 'hqprod' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+          path: candidate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Read back the production command host
+        timeout-minutes: 32
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          OUT: site_verify_out
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          export CAND="$GITHUB_WORKSPACE/candidate"
+          export CAND_SHA="$(git -C "$CAND" rev-parse HEAD)"
+          echo "candidate $CAND_SHA"
+          cd tools/site_verify
+          npm init -y >/dev/null 2>&1
+          npm install playwright@1.48.2 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          mkdir -p "$OUT" && echo "$CAND_SHA" > "$OUT/candidate_sha.txt"
+          EXPECT_SHA="$CAND_SHA" node hq_prod.mjs
+      - name: Commit the evidence
+        if: always()
+        shell: bash
+        run: |
+          RUN=${{ github.run_id }}
+          D="evidence/hqprod/$(date -u +%Y%m%dT%H%M%SZ)_run$RUN"
+          git config user.name "site-verify"
+          git config user.email "site-verify@users.noreply.github.com"
+          git fetch -q origin claude/site-verify-evidence && git checkout -q -B ev origin/claude/site-verify-evidence || git checkout -q --orphan ev
+          git rm -rq --cached . >/dev/null 2>&1 || true
+          mkdir -p "$D" && cp tools/site_verify/site_verify_out/* "$D"/ 2>/dev/null
+          git add "$D" && git commit -q -m "hqprod evidence, run $RUN" && git push -q origin ev:claude/site-verify-evidence && echo "evidence pushed: $D"
   weekly:
     # OFF UNLESS verify == weekly. READ-ONLY GETs for the Monday weekly
     # management report, written to claude/site-verify-evidence as JSON files.
