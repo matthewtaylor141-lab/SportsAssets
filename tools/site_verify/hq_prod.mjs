@@ -59,7 +59,7 @@ function watchPage(page, sink) {
     await page.evaluate(() => { if (window.__hqScene) window.__hqScene.settle(); }).catch(() => {});
     await page.waitForTimeout(2500);
     const r = await probe(page);
-    await page.screenshot({ path: `${OUT}/${name}.png` });
+    await page.screenshot({ path: `${OUT}/${name}.png`, timeout: 150000 }).catch((e) => sink.errors.push(name + ' SCREENSHOT ' + String(e).slice(0, 120)));
     report.views.push({ name, ...r, errors: sink.errors.slice(before) });
   }
   report.desktop = { errors: sink.errors.slice(0, 40), nonGet: sink.nonGet };
@@ -76,7 +76,7 @@ for (const [name, hash] of [['8_mobile_command_390', 'command'], ['9_mobile_capi
   await page.goto(BASE + '/#' + hash, { waitUntil: 'load', timeout: 90000 });
   await page.waitForTimeout(20000);
   const r = await probe(page);
-  await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true });
+  await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true, timeout: 150000 }).catch((e) => sink.errors.push(name + ' SCREENSHOT ' + String(e).slice(0, 120)));
   report.views.push({ name, ...r, errors: sink.errors, nonGet: sink.nonGet });
   await ctx.close();
 }
