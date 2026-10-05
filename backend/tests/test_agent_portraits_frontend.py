@@ -1,8 +1,8 @@
 """EVERY AGENT IS ITS OWN LICENSED 3D PERSON (frontend/public/command).
 
 Static proofs over the shipped files:
-  * models/manifest.json has a complete licensed entry for each of the seven
-    agents (model, licence file, SPDX, licensor, test_asset false), each model
+  * models/manifest.json has a complete licensed entry for each of the eight
+    agents (Adriana, the eighth, wears Rocketbox Business_Female_01) (model, licence file, SPDX, licensor, test_asset false), each model
     file exists, is a glTF 2.0 binary of a sane size with the ARKit blink and
     viseme targets the pipeline drives, and NO two agents share a model file
     or a Rocketbox source avatar;
@@ -27,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 CMD = ROOT / "frontend" / "public" / "command"
 MODELS = CMD / "team-demo" / "assets" / "models"
 MANIFEST = json.loads((MODELS / "manifest.json").read_text())
-SLUGS = ["derek", "xavier", "audrey", "karen", "allocator", "eddie", "scout"]
+SLUGS = ["derek", "xavier", "audrey", "karen", "allocator", "eddie", "scout", "adriana"]
 
 
 def _glb_json(path: pathlib.Path) -> dict:
@@ -60,7 +60,8 @@ def test_no_two_agents_share_a_model_or_a_source_avatar():
     assert dict(zip(SLUGS, sources)) == {
         "derek": "Business_Male_03", "xavier": "Business_Male_05", "audrey": "Business_Female_04",
         "karen": "Business_Female_02", "allocator": "Business_Female_03",
-        "eddie": "Business_Male_04", "scout": "Business_Male_06"}
+        "eddie": "Business_Male_04", "scout": "Business_Male_06",
+        "adriana": "Business_Female_01"}
     shas = [chars[s]["source"]["sha256"] for s in SLUGS]
     assert len(set(shas)) == len(shas)
 

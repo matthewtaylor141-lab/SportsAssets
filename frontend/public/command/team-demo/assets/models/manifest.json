@@ -249,6 +249,38 @@
         "short hair is painted on the head mesh (no hair cards are supplied for this avatar)",
         "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing on a phone, not photoreal in a close-up"
       ]
+    },
+    "adriana": {
+      "model": "adriana.glb",
+      "license_file": "ROCKETBOX_LICENSE.md",
+      "license_spdx": "MIT",
+      "licensed_from": "Microsoft Rocketbox (github.com/microsoft/Microsoft-Rocketbox), Assets/Avatars/Professions/Business_Female_01, Copyright (c) 2020 Microsoft",
+      "test_asset": false,
+      "credit": "Character model: Microsoft Rocketbox Business_Female_01 (MIT, © 2020 Microsoft)",
+      "framing": "chest",
+      "lighting": "cinematic_cool",
+      "source": {
+        "repository": "https://github.com/microsoft/Microsoft-Rocketbox",
+        "revision": "master",
+        "preview": "https://github.com/microsoft/Microsoft-Rocketbox/blob/master/Assets/Avatars/Professions/Business_Female_01/Business_Female_01.png",
+        "files": [
+          "Assets/Avatars/Professions/Business_Female_01/Export/Business_Female_01_facial.fbx",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_head_color.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_head_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_head_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_body_color.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_body_normal.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_body_specular.tga",
+          "Assets/Avatars/Professions/Business_Female_01/Textures/f014_opacity_color.tga"
+        ],
+        "converted_by": "FBX2glTF 0.9.7 + gltf-transform (tools/rocketbox_to_glb.mjs, tools/rocketbox_textures.py): head colour 2K JPEG (q82, to stay inside the 2.4 MB model bound), body colour and every normal/roughness map 1K JPEG, hair-card/lash opacity map 1K RGBA PNG, specular mapped to roughness; the 175 FBX morph targets order-verified against the FBX, then pruned to the 67 the pipeline drives (15 visemes AA_VI_*, ARKit 52 AK_*); Meshopt-compressed",
+        "sha256": "6462f13a8a83eaf906298849fc8d7aea9eaebaaa361639545c1ea6ea8fe1cebb"
+      },
+      "casting": "adult woman in a black two-piece trouser suit and white open-collar shirt: Adriana, Head of Arbitrage -- her own Rocketbox body (Business_Female_01), used by no other agent, no recolour",
+      "known_gaps": [
+        "Rocketbox is a real-time asset (about 10k triangles, 2K head texture): credible at chest framing, not photoreal in a close-up",
+        "no authored animation clips: idle, gestures and speech are procedural (cc_avatar.js)"
+      ]
     }
   }
 }
