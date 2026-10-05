@@ -36,6 +36,7 @@ pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIG = ROOT / "migrations"
 UP = (MIG / "217_eddie_scout_agents.sql").read_text()
+from tests._pre_265 import remove_adriana_rows  # noqa: E402
 UP_265 = (MIG / "265_adriana_arbitrage_agent.sql").read_text()
 DOWN = (MIG / "rollback" / "217_eddie_scout_agents.down.sql").read_text()
 
@@ -243,6 +244,7 @@ async def _as(conn, agent):
 async def test_the_identities_are_persisted_with_their_permissions():
     conn, tx = await _tx()
     try:
+        await remove_adriana_rows(conn)                       # pre-265
         await conn.execute(UP)                                # idempotent
         # re-running 217 narrows the identity CHECK to its six agents; 265
         # (Adriana) re-asserts the widened CHECK after it
@@ -523,8 +525,10 @@ async def test_217_is_idempotent_and_its_rollback_refuses_over_records():
     import asyncpg
     conn, tx = await _tx()
     try:
+        await remove_adriana_rows(conn)                       # pre-265
         await conn.execute(UP)
         await conn.execute(UP)
+        await conn.execute(UP_265)                # the eight-agent CHECK
         await R.ensure_identities(conn)
         await R.start_run(conn, R.EDDIE, "eddie-run:p217-down")
         sp = conn.transaction()
@@ -546,6 +550,7 @@ async def test_217_is_idempotent_and_its_rollback_refuses_over_records():
                            "TRIGGER agent_persona_versions_kept_trg")
         await conn.execute("DELETE FROM agent_chat_conversations WHERE "
                            " agent_id IN ('EDDIE','SCOUT')")
+        await remove_adriana_rows(conn)                       # pre-265
         await conn.execute(DOWN)
         await conn.execute(DOWN)
         assert await conn.fetchval(

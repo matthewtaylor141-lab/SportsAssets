@@ -181,6 +181,9 @@ async def _pre_217(conn):
                        "('EDDIE', 'SCOUT')")
     await conn.execute("DELETE FROM agent_identities WHERE agent_id IN "
                        "('EDDIE', 'SCOUT')")
+    # and before 265 (Adriana)
+    from tests._pre_265 import remove_adriana_rows
+    await remove_adriana_rows(conn)
 
 
 @pg
