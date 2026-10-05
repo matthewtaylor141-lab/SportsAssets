@@ -1085,3 +1085,45 @@ async def test_the_discovery_pass_seeds_and_counts_the_line_contracts(
     assert "receipts" not in dg and "by_venue_event" not in dg
     assert dg["line_census"]["contracts"] >= 1
     json.dumps(dg, default=str)
+
+
+@pg
+async def test_the_scheduled_cycle_prices_a_metered_events_line_contracts(
+        line_env, monkeypatch):
+    """The SCHEDULED cycle (no WS trigger): a metered discovery event the
+    venue-native resolver maps reaches the line lane through the PinnAPI
+    discovery index of its venue event, under the cycle's own bound."""
+    import types as _t
+    e = line_env
+    rows = [dict(r) for r in await e.conn.fetch(
+        PD.venue_events_sql([RI.SPORT_ID]))]
+    disc = PD.discover(e.cache.events, rows, sport_ids=[RI.SPORT_ID])
+    assert e.game.event_slug in disc["by_venue_event"]
+    monkeypatch.setitem(FR._STATE, "discovery", disc)
+    VN.substitute(monkeypatch, slugs=[e.game.us_slug],
+                  odds_by_sport={"baseball_mlb": lambda now: [
+                      VN.odds_event(e.game, "ln%d" % e.eid, at=now)]})
+    monkeypatch.setattr(pmus, "_get_client", lambda: e.venue)
+    monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+        cache=e.cache))
+    now = time.time()
+    e.cache.apply({"type": "prematch_markets", "matchup_id": e.eid,
+                   "sport_id": RI.SPORT_ID, "ts": (now - 0.2) * 1000,
+                   "data": _ws_markets((-105, -105), (150, -170))},
+                  epoch=e.cache.authority.epoch, received_ms=now * 1000)
+    out = await loop.cycle(e.conn)
+    assert out.get("ran") is True, out.get("why")
+    lm = out["line_markets"]
+    assert lm["instrument_cap"] == loop.MAX_LINE_INSTRUMENTS_PER_CYCLE
+    assert lm["jobs"] == 1 and lm["instruments_evaluated"] == 2, lm
+    assert lm["by_sport_family_state"][
+        "baseball|spread|LINE_VALUATION_RECORDED_CALIBRATION_ONLY"] == 2
+    vals = await e.conn.fetch(
+        "SELECT contract_selection, event_key FROM external_valuations "
+        " WHERE us_market_slug=$1", e.line_slug)
+    assert {v["contract_selection"] for v in vals} == {
+        "Colorado Rockies -1.5", "Miami Marlins +1.5"}
+    h2h = await e.conn.fetchval(
+        "SELECT event_key FROM external_valuations WHERE us_market_slug=$1"
+        " ORDER BY id LIMIT 1", e.game.us_slug)
+    assert {v["event_key"] for v in vals} == {h2h}, "one fixture, one key"
