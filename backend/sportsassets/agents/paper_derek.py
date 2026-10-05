@@ -689,6 +689,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
              "account_id": ctx["account_id"],
              "session_id": ctx["session_id"],
              "group_id": group_id_for(did), "role": "ENTRY",
+             "strategy": STRATEGY,
              "direction": "BUY", "holding_side": side,
              "intent": cand.get("side"),
              "us_market_slug": cand["us_market_slug"],
