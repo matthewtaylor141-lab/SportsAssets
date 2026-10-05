@@ -253,7 +253,10 @@ def test_the_funnel_never_sums_an_unmeasured_stage_as_zero():
     v = {s["k"]: s["value"] for s in fu["stages"]}
     assert v["provider_events"] == 64 and v["mapped_events"] == 12 and v["filled_events"] == 1
     assert fu["partial"] is True and "collector did not request it" in json.dumps(fu)
-    assert [s for s in fu["stages"] if s.get("largestLoss")][0]["k"] == "mapped_events"
+    # the loss compares only leagues that measured BOTH stages: NCAAF's 50 unmeasured
+    # matches are not a loss; NFL's evaluated 10 -> entered 2 is the largest (8)
+    loss = [s for s in fu["stages"] if s.get("largestLoss")]
+    assert [(s["k"], s["largestLoss"]) for s in loss] == [("entered_events", 8)]
     assert _node("M.model.funnel(null,'coverage not read')")["stages"] == []
 
 
@@ -267,3 +270,50 @@ def test_the_release_shows_api_workers_and_alignment():
     assert rows["FRONTEND"]["value"] == "ab02b03" and rows["NETLIFY DEPLOY"]["value"] == "6ac2"
     att = _node("M.model.attention({release:{ok:true,data:%s},equity:null,coverage:null,floor:null})" % json.dumps(rel))
     assert att["items"][0]["title"] == "API / WORKER SHA MISMATCH" and att["missing"] == ["equity", "coverage", "floor"]
+
+
+def test_a_body_that_fails_mid_read_never_freezes_the_feed():
+    """a response whose body read fails after the headers (the timeout, a dropped
+    connection) is recorded as a failed read and the feed is read again"""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not installed")
+    script = (
+        "const vm=require('vm'),fs=require('fs');let calls=0;"
+        "const c={setTimeout:(f,ms)=>0,clearTimeout(){},setInterval(){},AbortController:class{constructor(){this.signal={}}abort(){}},"
+        "navigator:{onLine:true},location:{pathname:'/mobile.html'},addEventListener(){},scrollTo(){},"
+        "document:{getElementById:()=>null,querySelector:()=>null,querySelectorAll:()=>[],addEventListener(){},readyState:'complete',hidden:false,body:null},"
+        "fetch:(u)=>{calls++;return calls===1?Promise.resolve({ok:true,status:200,text:()=>Promise.reject(new TypeError('network connection was lost'))})"
+        ":Promise.resolve({ok:true,status:200,text:()=>Promise.resolve(JSON.stringify({paper:{status:'OK',realized_pnl_usd:5}}))})}};"
+        "c.window=c;c.globalThis=c;vm.runInNewContext(fs.readFileSync(%r,'utf8'),c);"
+        "const P=c.BTMobile.page,f=c.BTMobile.FEEDS[0];"
+        "(async()=>{const r1=await P.read(f,false);const e=P.feeds[f.k];const stuck=e.inflight!==null;"
+        "e.nextAt=0;const r2=await P.read(f,false);"
+        "process.stdout.write(JSON.stringify({r1ok:r1.ok,r1net:!!r1.network,stuck:stuck,calls:calls,r2ok:r2.ok,good:e.good&&e.good.data.paper.realized_pnl_usd}))})()"
+    ) % str(COMMAND / "mobile-command.js")
+    out = json.loads(subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=True).stdout)
+    assert out == {"r1ok": False, "r1net": True, "stuck": False, "calls": 2, "r2ok": True, "good": 5}
+    # the desk's shared read broker carries the same repair
+    assert ".catch(function () { return {ok: false, state: 'ERROR', http: 0" in OPS_JS
+
+
+def test_counts_dates_alerts_and_reasons_are_never_invented():
+    # the opportunity count is a number only when the list was served
+    assert "o.status === 'OK' || o.status === 'EMPTY' ? String(o.rows.length) : '—'" in JS
+    # a record older than 12 h shows its date and age, never a bare clock under "now"
+    assert _node("M.fmt.when(%r)" % (NOW - 2 * 86400 - 3600)) == "10-07 07:53Z · 2d 1h ago"
+    assert _node("M.fmt.when(%r)" % (NOW - 60)) == "08:52:20Z"
+    # yesterday's coverage alert is listed (as on the desk), after today's, and says so
+    cov = {"days": [{"day": "2026-10-05", "leagues": []}], "alerts": [
+        {"league": "a", "league_name": "NCAAF", "kind": "ABSENT_DOWNSTREAM", "stage_to": "mapped", "severity": "CRITICAL", "day": "2026-10-04", "detected_at": NOW - 90000},
+        {"league": "b", "league_name": "NFL", "kind": "COLLAPSE", "stage_to": "evaluated", "severity": "CRITICAL", "day": "2026-10-05", "detected_at": NOW - 60}]}
+    att = _node("M.model.attention({coverage:{ok:true,data:%s}})" % json.dumps(cov))["items"]
+    assert [x["title"] for x in att] == ["COVERAGE COLLAPSE · NFL", "COVERAGE ABSENT DOWNSTREAM · NCAAF"]
+    assert att[1]["detail"].startswith("EARLIER DAY")
+    # paper/derek's own reason when its tables are absent; league status's own reason
+    d = _node("M.model.kpis(null, {derek:{status:'UNAVAILABLE',why:'MIGRATION_171_IS_NOT_APPLIED'}}, {})")
+    assert "MIGRATION_171_IS_NOT_APPLIED" in json.dumps(d)
+    o = _node("M.model.opps({derek:{status:'UNAVAILABLE',why:'MIGRATION_171_IS_NOT_APPLIED'}})")
+    assert o["status"] is None and "MIGRATION_171_IS_NOT_APPLIED" in o["why"]
+    cv = _node("M.model.coverage({days:[{leagues:[{league:'x',league_name:'NFL'}]}],league_status:{status:'UNAVAILABLE',why:'READ_FAILED'}})")
+    assert cv[0]["status"] is None and "READ_FAILED" in cv[0]["reason"]

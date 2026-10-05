@@ -151,7 +151,10 @@
           var c = classify(r, body, r.ok ? perr : null);
           return {ok: false, state: r.ok ? 'ERROR' : c.state, http: r.status, data: null, why: r.ok ? perr : c.why};
         });
-      }, function () { return {ok: false, state: 'ERROR', http: 0, data: null, why: 'NETWORK: the API did not answer'}; })
+      })
+      // a failure while the body downloads (a dropped connection) lands here too, so
+      // inflight is always cleared and the endpoint is read again
+      .catch(function () { return {ok: false, state: 'ERROR', http: 0, data: null, why: 'NETWORK: the API did not answer'}; })
       .then(function (res) {
         res.at = Date.now(); res.sent = sent; res.ms = res.at - sent; res.url = url;
         if (res.ok) { e.fails = 0; e.nextAt = 0; e.good = res; sessionPut(url, res); }

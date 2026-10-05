@@ -53,7 +53,7 @@
       type: 'password', autocomplete: 'current-password', required: 'required',
       'aria-label': 'Workspace password',
       style: 'padding:11px 12px;border-radius:9px;border:1px solid #2b3b58;' +
-        'background:#0b1220;color:#e8edf5;font-size:15px'
+        'background:#0b1220;color:#e8edf5;font-size:16px'
     });
     var err = el('div', {
       role: 'alert', 'aria-live': 'polite',

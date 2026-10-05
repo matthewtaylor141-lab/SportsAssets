@@ -55,6 +55,12 @@
     return Math.floor(s / 86400) + 'd ' + Math.floor(s % 86400 / 3600) + 'h';
   }
   function clock(t) { var e = epoch(t); return e == null ? null : new Date(e * 1000).toISOString().slice(11, 19) + 'Z'; }
+  /* a record time: the clock when recent, the date and age once it is older than 12 h */
+  function when(t) {
+    var e = epoch(t); if (e == null) { return null; }
+    var a = nowS() - e;
+    return a > 43200 ? new Date(e * 1000).toISOString().slice(5, 10) + ' ' + new Date(e * 1000).toISOString().slice(11, 16) + 'Z · ' + age(a) + ' ago' : clock(e);
+  }
   function usd(v, d) {
     v = num(v);
     if (v == null) { return null; }
@@ -66,12 +72,17 @@
   function pp(v) { v = num(v); return v == null ? null : (v > 0 ? '+' : '') + v.toFixed(2) + ' pp'; }
   function short(sha) { return sha ? String(sha).slice(0, 7) : null; }
   function words(s) { return s == null ? null : String(s).replace(/_/g, ' '); }
-  var fmt = {esc: esc, fin: fin, num: num, epoch: epoch, age: age, clock: clock, usd: usd, int: intf, pp: pp, short: short};
+  var fmt = {esc: esc, fin: fin, num: num, epoch: epoch, age: age, clock: clock, when: when, usd: usd, int: intf, pp: pp, short: short};
 
   var DNA = 'DATA NOT AVAILABLE';
 
   // ── VIEW MODELS (pure: parsed API bodies in, plain objects out) ───
   /* the PAPER book tiles: equity/live paper.* and paper/derek */
+  /* paper/derek answers {derek: {status: UNAVAILABLE, why}} when its tables are absent */
+  function derekWhy(D, section) {
+    var d = D && D.derek;
+    return d && d.status && d.status !== 'OK' ? 'paper/derek ' + d.status + (d.why ? ': ' + d.why : '') : 'paper/derek carried no ' + section;
+  }
   function kpis(E, D, opts) {
     opts = opts || {};
     var P = E && E.paper, out = [];
@@ -102,7 +113,7 @@
     // decisions in the last 24 h: the full count paper/derek serves (refusal_summary_24h)
     var s = D && D.refusal_summary_24h, dec = {k: 'Decisions 24h', book: 'PAPER', sub: null, tone: null};
     if (!D) { dec.value = null; dec.why = opts.derekWhy || 'paper/derek not read'; }
-    else if (!s) { dec.value = null; dec.why = 'paper/derek carried no refusal_summary_24h'; }
+    else if (!s) { dec.value = null; dec.why = derekWhy(D, 'refusal_summary_24h'); }
     else if (s.status === 'OK' || s.status === 'EMPTY') {
       var all = 0, enter = 0;
       (s.data || []).forEach(function (r) { var n = num(r.n) || 0; all += n; if (r.verdict === 'ENTER') { enter += n; } });
@@ -112,7 +123,7 @@
     // PAPER fills in the last 24 h, from the newest `limit` fill rows
     var f = D && D.fills, fl = {k: 'Fills 24h', book: 'PAPER · SIMULATED', sub: null, tone: null};
     if (!D) { fl.value = null; fl.why = opts.derekWhy || 'paper/derek not read'; }
-    else if (!f) { fl.value = null; fl.why = 'paper/derek carried no fills section'; }
+    else if (!f) { fl.value = null; fl.why = derekWhy(D, 'fills section'); }
     else if (f.status === 'OK' || f.status === 'EMPTY') {
       var rows = f.data || [], cut = nowS() - 86400;
       var n24 = rows.filter(function (x) { var e = epoch(x.filled_at); return e != null && e >= cut; }).length;
@@ -157,11 +168,16 @@
               why: measured ? (miss.length ? 'PARTIAL · unmeasured in ' + miss.length + ': ' + miss.join('; ') : null) : (leagues.length ? 'unmeasured in every league' : 'no league rows today'),
               partial: !!(measured && miss.length)};
     });
-    // the largest measured loss between consecutive stages
+    // the largest measured loss between consecutive stages, over the leagues that
+    // measured BOTH stages (an unmeasured league is never counted as lost)
     var worst = 0, worstI = -1;
-    for (var i = 1; i < stages.length; i++) {
-      var a = stages[i - 1].value, b = stages[i].value;
-      if (a != null && b != null && a - b > worst) { worst = a - b; worstI = i; }
+    for (var i = 1; i < STAGES.length; i++) {
+      var lost = 0, pairs = 0;
+      leagues.forEach(function (L) {
+        var a = num(L[STAGES[i - 1].k]), b = num(L[STAGES[i].k]);
+        if (a != null && b != null) { lost += a - b; pairs++; }
+      });
+      if (pairs && lost > worst) { worst = lost; worstI = i; }
     }
     if (worstI > 0) { stages[worstI].largestLoss = worst; }
     return {day: day.day || null, tz: C.tz || 'America/New_York', why: null, stages: stages, partial: partial, leagues: leagues.length};
@@ -199,7 +215,7 @@
   /* PAPER decisions (paper/derek opportunities.data[]), economics read as the desk reads them */
   function opps(D) {
     var o = D && D.opportunities;
-    if (!o) { return {status: null, why: D ? 'paper/derek carried no opportunities' : null, rows: []}; }
+    if (!o) { return {status: null, why: D ? derekWhy(D, 'opportunities') : null, rows: []}; }
     return {status: o.status, why: o.why || null, rows: (o.data || []).map(function (d) {
       var e = d.economics || {}, pd = d.policy_decision || {}, acq = e.acquisition || {}, lab = d.label || {};
       var gross = num(e.best_level_edge_pp); if (gross == null) { gross = num(pd.gross_edge_pp); }
@@ -225,12 +241,13 @@
 
   /* per-league coverage, today */
   function coverage(C) {
-    var d0 = C && C.days && C.days[0], st = {};
+    var d0 = C && C.days && C.days[0], st = {}, ls = (C && C.league_status) || {};
+    var lsWhy = ls.status && ls.status !== 'OK' ? 'league status ' + ls.status + (ls.why ? ': ' + ls.why : '') : null;
     (((C && C.league_status) || {}).statuses || []).forEach(function (s) { st[s.league] = s; });
     return ((d0 && d0.leagues) || []).map(function (L) {
       var un = L.unavailable || {}, s = st[L.league] || {};
       function cell(k) { var x = num(L[k]); return {value: x, why: x == null ? (un[k] || 'NULL') : null}; }
-      return {league: L.league, name: L.league_name || L.league, status: s.status || null, reason: s.reason || null,
+      return {league: L.league, name: L.league_name || L.league, status: s.status || null, reason: s.reason || (s.status ? null : lsWhy),
               provider: cell('provider_events'), mapped: cell('mapped_events'), evaluated: cell('evaluated_events'),
               filled: cell('filled_events')};
     });
@@ -288,15 +305,16 @@
       }
       var today = C.days && C.days[0] && C.days[0].day, groups = {};
       (C.alerts || []).forEach(function (x) {
-        if (today && x.day !== today) { return; }      // the current day only, on the phone
         var k = [x.league, x.kind, x.stage_to].join('|');
-        var g = groups[k] || (groups[k] = {a: x, at: null, sev: x.severity});
+        var g = groups[k] || (groups[k] = {a: x, at: null, sev: x.severity, current: false});
+        if (today && x.day === today) { g.current = true; }
         var at = epoch(x.detected_at); if (at != null && (g.at == null || at > g.at)) { g.at = at; }
         if (x.severity === 'CRITICAL') { g.sev = 'CRITICAL'; }
       });
       Object.keys(groups).forEach(function (k) {
         var g = groups[k], d = g.a.detail || {};
-        out.push({sev: g.sev || 'WARNING', title: 'COVERAGE ' + words(g.a.kind || 'ALERT') + ' · ' + (g.a.league_name || g.a.league), detail: d.statement || ((g.a.stage_from || '?') + ' → ' + (g.a.stage_to || '?')), at: g.at});
+        out.push({sev: g.sev || 'WARNING', title: 'COVERAGE ' + words(g.a.kind || 'ALERT') + ' · ' + (g.a.league_name || g.a.league),
+                  detail: (g.current || !today ? '' : 'EARLIER DAY · ') + (d.statement || ((g.a.stage_from || '?') + ' → ' + (g.a.stage_to || '?'))), at: g.at, current: g.current});
       });
     }
     var Fd = fl && fl.ok ? fl.data : null;
@@ -307,7 +325,7 @@
                 detail: a.state === 'STALE' ? 'heartbeat ' + (fin(hb.age_s) ? age(hb.age_s) + ' old' : 'never recorded') : (a.deploy_why || 'not deployed on this API'), at: epoch(hb.at)});
     });
     var rank = {CRITICAL: 0, WARNING: 1, INFO: 2};
-    out.sort(function (x, y) { return (rank[x.sev] - rank[y.sev]) || ((y.at || 0) - (x.at || 0)); });
+    out.sort(function (x, y) { return (rank[x.sev] - rank[y.sev]) || ((x.current === false ? 1 : 0) - (y.current === false ? 1 : 0)) || ((y.at || 0) - (x.at || 0)); });
     return {items: out, read: read, missing: missing};
   }
 
@@ -367,7 +385,7 @@
     if (S.signedOut) { return Promise.resolve(e.res); }
     var last = e.res && (e.res.sent || e.res.at);
     if (last && e.res.ok && t - last < (force ? f.every / 2 : f.every - 500)) { return Promise.resolve(e.res); }
-    if (e.fails && t < e.nextAt) { return Promise.resolve(e.res); }
+    if (e.fails && t < e.nextAt && !(force && e.res && e.res.network && (!last || t - last >= f.every / 2))) { return Promise.resolve(e.res); }
     var sent = t, ctl = typeof AbortController === 'function' ? new AbortController() : null;
     var timer = setTimeout(function () { if (ctl) { ctl.abort(); } }, TIMEOUT_MS);
     e.inflight = fetch(f.url, {method: 'GET', credentials: 'same-origin', cache: 'no-store', headers: {Accept: 'application/json'}, signal: ctl ? ctl.signal : undefined})
@@ -379,8 +397,11 @@
           var c = classify(r, body);
           return {ok: false, state: r.ok ? 'ERROR' : c.state, http: r.status, data: null, why: r.ok ? perr : c.why};
         });
-      }, function (err) {
-        return {ok: false, state: 'ERROR', http: 0, data: null,
+      })
+      // a failure at ANY point -- before the headers, or while the body downloads (the
+      // timeout, a dropped connection) -- lands here, so the feed is never left stuck
+      .catch(function (err) {
+        return {ok: false, state: 'ERROR', http: 0, data: null, network: true,
                 why: err && err.name === 'AbortError' ? 'no answer within ' + (TIMEOUT_MS / 1000) + ' s' : (offline() ? 'offline' : 'network: the API did not answer')};
       })
       .then(function (res) {
@@ -393,14 +414,14 @@
           if (res.state === 'SIGNED_OUT') { signedOut(); }
         }
         e.res = res; e.inflight = null;
-        render();
+        guard('all', render);
         return res;
       });
     return e.inflight;
   }
   function tickAll(force) {
     if (doc.hidden) { return Promise.resolve([]); }
-    return Promise.all(FEEDS.map(function (f) { return read(f, force); }));
+    return Promise.all(FEEDS.map(function (f) { return read(f, force).catch(function () { return null; }); }));
   }
   /* signed out: stop polling until the sign-in reloads the page; open the one sign-in panel */
   function signedOut() {
@@ -536,7 +557,7 @@
     if (!c.data) { setHTML('#mc-tape', '<div class="mc-row">' + dna(readWhy('floor')) + '</div>'); return; }
     if (!rows.length) { setHTML('#mc-tape', '<div class="mc-row"><b>No recorded activity in the floor window.</b><p>Nothing is synthesized.</p></div>'); return; }
     setHTML('#mc-tape', rows.slice(0, S.expanded ? 30 : 6).map(function (x) {
-      return '<div class="mc-tape-item"><time datetime="' + esc(new Date(x.at * 1000).toISOString()) + '">' + esc(clock(x.at)) + '</time><div><b>' + esc(x.who) + '</b> · ' + esc(x.what || '') + (x.n > 1 ? ' ×' + esc(intf(x.n)) : '') + '</div></div>';
+      return '<div class="mc-tape-item"><time datetime="' + esc(new Date(x.at * 1000).toISOString()) + '">' + esc(when(x.at)) + '</time><div><b>' + esc(x.who) + '</b> · ' + esc(x.what || '') + (x.n > 1 ? ' ×' + esc(intf(x.n)) : '') + '</div></div>';
     }).join('') + staleNote('floor'));
   }
   function renderLive() {
@@ -545,14 +566,14 @@
     if (!fd.length) { setHTML('#mc-live-events', '<article class="mc-row"><b>No PAPER decision in the floor read.</b><p>The app never invents activity.</p></article>'); return; }
     setHTML('#mc-live-events', fd.map(function (x) {
       return '<article class="mc-row"><div class="mc-row-head"><b>' + esc(x.fixture || x.market || DNA) + '</b>' + badge(x.verdict, x.verdict === 'ENTER' ? 'good' : '') + '</div>' +
-        '<p>' + esc(clock(x.at) || '') + (x.at ? ' (' + esc(age(nowS() - x.at)) + ' ago)' : '') + ' · ' + esc(x.book) + (x.side ? ' · ' + esc(x.side) : '') +
+        '<p>' + esc(when(x.at) || '') + (x.at && nowS() - x.at <= 43200 ? ' (' + esc(age(nowS() - x.at)) + ' ago)' : '') + ' · ' + esc(x.book) + (x.side ? ' · ' + esc(x.side) : '') +
         (x.limit != null ? ' · limit ' + esc(x.limit.toFixed(3)) : '') + (x.p != null ? ' · p ' + esc(x.p.toFixed(3)) : '') + '</p>' +
         (x.market && x.fixture ? '<p class="mc-mono">' + esc(x.market) + '</p>' : '') + (x.refusal ? '<p>' + esc(x.refusal) + '</p>' : '') + '</article>';
     }).join('') + staleNote('floor'));
   }
   function renderOpps() {
     var c = cur('derek'), o = opps(c.data), cnt = $('#mc-opp-count');
-    if (cnt) { cnt.textContent = c.data ? String(o.rows.length) : '—'; }
+    if (cnt) { cnt.textContent = o.status === 'OK' || o.status === 'EMPTY' ? String(o.rows.length) : '—'; }
     if (!c.data) { setHTML('#mc-opportunities', '<article class="mc-row">' + dna(readWhy('derek')) + '</article>'); return; }
     if (!o.rows.length) { setHTML('#mc-opportunities', '<article class="mc-row"><b>' + esc(o.status === 'EMPTY' ? 'No PAPER decision recorded' : DNA) + '</b><p>' + esc(o.why || '') + '</p></article>'); return; }
     setHTML('#mc-opportunities', o.rows.map(function (r) {
@@ -560,7 +581,7 @@
       if (r.gross != null) { econ.push('gross ' + pp(r.gross)); }
       if (r.net != null) { econ.push('net ' + usd(r.net)); }
       return '<article class="mc-row"><div class="mc-row-head"><b>' + esc(r.title || DNA) + '</b>' + badge(r.verdict, r.verdict === 'ENTER' ? 'good' : '') + '</div>' +
-        '<p>' + esc(clock(r.at) || '') + (r.competition ? ' · ' + esc(r.competition) : '') + (r.strategy ? ' · ' + esc(r.strategy) : '') + ' · PAPER</p>' +
+        '<p>' + esc(when(r.at) || '') + (r.competition ? ' · ' + esc(r.competition) : '') + (r.strategy ? ' · ' + esc(r.strategy) : '') + ' · PAPER</p>' +
         '<p>' + (econ.length ? esc(econ.join(' · ')) : 'economics not served on this decision') + '</p>' + (r.refusal ? '<p>' + esc(r.refusal) + '</p>' : '') + '</article>';
     }).join('') + staleNote('derek'));
   }
@@ -614,12 +635,22 @@
     });
     root.scrollTo(0, 0);
   }
-  function sheet(open) {
-    var s = $('#mc-sheet'); if (!s) { return; }
-    s.hidden = !open;
-    if (open) { var first = s.querySelector('.mc-sheet-panel a, .mc-sheet-panel button'); if (first) { first.focus(); } }
+  var returnFocus = null;
+  function openDialog(s, first) { returnFocus = doc.activeElement; s.hidden = false; var f = s.querySelector(first); if (f) { f.focus(); } }
+  function closeDialog(s) { if (s.hidden) { return; } s.hidden = true; var r = returnFocus; returnFocus = null; if (r && r.focus && !r.closest('[hidden]')) { r.focus(); } else { var m = $('#mc-more'); if (m) { m.focus(); } } }
+  function sheet(open) { var s = $('#mc-sheet'); if (s) { if (open) { openDialog(s, '.mc-sheet-panel a'); } else { closeDialog(s); } } }
+  function install(open) { var s = $('#mc-install'); if (s) { if (open) { openDialog(s, '.mc-install-x'); } else { closeDialog(s); } } }
+  /* Tab and Shift+Tab stay inside an open dialog */
+  function trapTab(e) {
+    if (e.key !== 'Tab') { return; }
+    var d = ['#mc-install', '#mc-sheet'].map($).filter(function (x) { return x && !x.hidden; })[0];
+    if (!d) { return; }
+    var els = Array.prototype.slice.call(d.querySelectorAll('a[href], button')).filter(function (x) { return x.offsetParent !== null; });
+    if (!els.length) { return; }
+    var first = els[0], last = els[els.length - 1];
+    if (e.shiftKey && doc.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && doc.activeElement === last) { e.preventDefault(); first.focus(); }
   }
-  function install(open) { var s = $('#mc-install'); if (s) { s.hidden = !open; } }
   function refreshNow(show) {
     if (show) { toast(S.signedOut ? 'Sign in to read' : 'Refreshing…'); }
     tickAll(true).then(function () {
@@ -637,19 +668,22 @@
     on('#mc-live-refresh', function () { refreshNow(true); });
     on('#mc-more', function () { sheet(true); });
     $$('[data-sheet-close]').forEach(function (x) { x.addEventListener('click', function () { sheet(false); }); });
-    on('#mc-install-help', function () { sheet(false); install(true); });
+    on('#mc-install-help', function () { var s = $('#mc-sheet'); if (s) { s.hidden = true; } install(true); });
     $$('[data-install-close]').forEach(function (x) { x.addEventListener('click', function () { install(false); }); });
     on('#mc-tape-expand', function () {
       S.expanded = !S.expanded; renderTape();
       var b = $('#mc-tape-expand'); if (b) { b.textContent = S.expanded ? 'Collapse' : 'History'; }
     });
-    doc.addEventListener('keydown', function (e) { if (e.key === 'Escape') { sheet(false); install(false); } });
+    doc.addEventListener('keydown', function (e) { if (e.key === 'Escape') { sheet(false); install(false); } else { trapTab(e); } });
     // a portrait that fails to load becomes the neutral avatar tile (no letter mark)
     doc.addEventListener('error', function (e) {
       var t = e.target;
       if (t && t.tagName === 'IMG' && t.classList.contains('mc-avatar')) { t.removeAttribute('src'); t.classList.add('mc-avatar-missing'); }
     }, true);
-    root.addEventListener('online', function () { render(); tickAll(true); });
+    root.addEventListener('online', function () {
+      FEEDS.forEach(function (f) { var e = F[f.k]; if (e.res && e.res.network) { e.fails = 0; e.nextAt = 0; } });
+      render(); tickAll(true);
+    });
     root.addEventListener('offline', render);
     doc.addEventListener('visibilitychange', function () { if (!doc.hidden) { tickAll(true); } });
   }
@@ -679,6 +713,8 @@
       try { root.localStorage.setItem('bt-mobile-install-seen', '1'); } catch (e) { /* private mode */ }
     }, 2500);
   }
+  // the read loop, for the node tests (backend/tests/test_mobile_command_page.py)
+  root.BTMobile.page = {read: read, feeds: F};
   function boot() {
     if (!doc.getElementById('mobile-command')) { return; }
     wire();
