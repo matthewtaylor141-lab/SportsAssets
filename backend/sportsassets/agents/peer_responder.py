@@ -26,8 +26,16 @@ modules never call it, and it never writes as Karen.
      The database refuses Karen resolving, the target rejecting, and
      anyone but a third party resolving a dispute (migrations 207 / 212).
 
-It writes only karen_challenges / karen_challenge_events (through karen.py)
-and, for an agent that answered, an agent_runs row. It holds no order,
+  3. THE DURABLE QUEUE (agents/agent_work.py, migration 301): every OPEN
+     challenge is a CHALLENGE_RESPONSE item of its target, every RESPONDED
+     one a CHALLENGE_EVALUATION item of its evaluator (depending on the
+     response item); a challenge the rule cannot be re-applied to is a
+     BLOCKED attempt (a person answers), a refusal a BLOCKED attempt naming
+     it; the recorded response / outcome completes the item.
+
+It writes only karen_challenges / karen_challenge_events (through karen.py),
+its agent_work_* queue records and, for an agent that answered, an
+agent_runs row. It holds no order,
 approval, activation, limit or control path.
 
 Off switch: PEER_RESPONDER_ENABLED=0 (default on).
@@ -202,6 +210,32 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
             raise
         except Exception as exc:                                # noqa: BLE001
             summary["errors"]["evaluate:" + ev] = type(exc).__name__
+    # THE DURABLE QUEUE (migration 301): what each side could not finish
+    from . import agent_work as AW
+    blocked_r: dict = {}
+    for r in summary["responses"].values():
+        for cid in r.get("skipped") or []:
+            blocked_r[cid] = {"outcome": AW.O_BLOCKED,
+                              "blocker": "RULE_NOT_REAPPLICABLE_A_PERSON_"
+                                         "ANSWERS", "next_in_s": INTERVAL_S}
+        for cid, why in (r.get("refused") or {}).items():
+            if cid != "*":
+                blocked_r[cid] = {"outcome": AW.O_BLOCKED,
+                                  "blocker": str(why or "REFUSED"),
+                                  "next_in_s": INTERVAL_S}
+    blocked_e: dict = {}
+    for r in summary["evaluations"].values():
+        for cid in r.get("skipped") or []:
+            blocked_e[cid] = {"outcome": AW.O_BLOCKED,
+                              "blocker": "RULE_NOT_REAPPLICABLE_A_PERSON_"
+                                         "EVALUATES", "next_in_s": INTERVAL_S}
+        for cid, why in (r.get("refused") or {}).items():
+            blocked_e[cid] = {"outcome": AW.O_BLOCKED,
+                              "blocker": str(why or "REFUSED"),
+                              "next_in_s": INTERVAL_S}
+    summary["work_queue"] = await AW.sync_for(
+        conn, "peer_responder", now=at,
+        attempts={AW.K_RESPONSE: blocked_r, AW.K_EVALUATION: blocked_e})
     acted: dict[str, dict] = {}
     for a, r in summary["responses"].items():
         if r["conceded"] or r["disputed"]:

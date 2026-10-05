@@ -824,6 +824,15 @@ try:
     app.include_router(_command_agent_funnel_router)
 except ImportError:
     log.warning("agent funnel: api.command_agent_funnel not loaded",
+                 exc_info=True)
+# ── R30C RISK EVIDENCE: /api/command/settlement-exception-risk and
+# /api/command/correlation-graph. GET only, COMMAND auth, READ ONLY
+# transaction; shadow information -- no cap, haircut or ENTER rule changes.
+try:
+    from .command_risk_evidence import router as _command_risk_router
+    app.include_router(_command_risk_router)
+except ImportError:
+    log.warning("risk evidence: api.command_risk_evidence not loaded",
                 exc_info=True)
 # ── PROFITABILITY VALIDATION PER SLEEVE: /api/command/profitability/
 # validation (?since=). GET only, COMMAND auth, READ ONLY transaction with a
@@ -857,6 +866,26 @@ try:
     app.include_router(_command_funnel_router)
 except ImportError:
     log.warning("opportunity funnel: api.command_opportunity_funnel not "
+                "loaded", exc_info=True)
+# ── R30C LIVE EXECUTION CALIBRATION: /api/command/execution-calibration.
+# PAPER_SIMULATION, LIVE_SHADOW and ACTUAL side by side, never pooled; GET
+# only, COMMAND auth, READ ONLY transaction with a statement timeout.
+try:
+    from .command_execution_calibration import (
+        router as _command_execution_calibration_router)
+    app.include_router(_command_execution_calibration_router)
+except ImportError:
+    log.warning("execution calibration: api.command_execution_calibration "
+                "not loaded", exc_info=True)
+# ── R30C OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT:
+# /api/command/opportunity-score-tournament. V2 has no authority; GET only,
+# COMMAND auth, READ ONLY transaction with a statement timeout.
+try:
+    from .command_opportunity_tournament import (
+        router as _command_opportunity_tournament_router)
+    app.include_router(_command_opportunity_tournament_router)
+except ImportError:
+    log.warning("score tournament: api.command_opportunity_tournament not "
                 "loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
@@ -894,6 +923,26 @@ try:
     app.include_router(_command_improvements_router)
 except ImportError:
     log.warning("improvements: api.command_improvements not loaded",
+                exc_info=True)
+# ── ROOT-CAUSE IMPROVEMENT CLUSTERS (migration 301): /api/command/
+# improvement-clusters (+ /{id}). GET only, COMMAND auth, one READ ONLY
+# transaction with a statement timeout. No route here writes, links a fix,
+# merges, deploys or approves.
+try:
+    from .command_improvement_clusters import router as _command_rcc_router
+    app.include_router(_command_rcc_router)
+except ImportError:
+    log.warning("clusters: api.command_improvement_clusters not loaded",
+                exc_info=True)
+# ── AGENT SCORECARDS (owner R30 section 18): /api/command/agent-scorecards.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement
+# timeout. Decision and economic quality per agent, never activity counts;
+# no route here writes, approves or changes a threshold.
+try:
+    from .command_agent_scorecards import router as _command_scd_router
+    app.include_router(_command_scd_router)
+except ImportError:
+    log.warning("scorecards: api.command_agent_scorecards not loaded",
                 exc_info=True)
 # ── THE LOST OPPORTUNITY READS (migration 220): /api/command/profitability/
 # lost-opportunities and /opportunity-scores. GET only, COMMAND auth, READ

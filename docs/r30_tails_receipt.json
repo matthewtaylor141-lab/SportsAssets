@@ -1,0 +1,1511 @@
+{
+ "schema": "BETTOR_R30_TAILS_RECEIPT_V1",
+ "line_base": "origin/claude/adriana @ 5827e30 (release-api fd2bff3 + ADRIANA); release squash 525bc44 carries R30 base + R30A",
+ "branch": "claude/r30-tails",
+ "method": [
+  "git cherry / patch-id against origin/claude/adriana: no tail commit is patch-equivalent, because the line took R30 base + R30A as ONE squash (525bc44, the tree of claude/inc-release-full @ a42914b).",
+  "So each commit was classified by content: the share of its added lines (>= 8 chars) present verbatim in the same file of the line, plus each branch tip's content against the line, plus reading the residue of every commit under ~95%. Residue was always a later revision (same branch review commit or the integration), never missing behaviour.",
+  "INCLUDED evidence cites 525bc44 and a file:line in origin/claude/adriana carrying one of the commit's own added lines.",
+  "REIMPLEMENTED: cherry-picked (no commit) onto the line, conflicts resolved keeping every line addition, integrated with R30A's per-release cutover / owner live approvals / ADRIANA, migrations renumbered into 300-309, then tested.",
+  "No R30 source branch, release-api or session-njaewf was modified; nothing deployed; no order placed or cancelled; no workflow file touched."
+ ],
+ "port_commits": [
+  {
+   "commit": "ce9123d",
+   "stream": "R30C risk (settlement-exception risk, correlation graph; shadow)",
+   "sources": [
+    "b5ae12a",
+    "1a7dcdc",
+    "2aaea34"
+   ]
+  },
+  {
+   "commit": "bb15add",
+   "stream": "R30C exec (execution-evidence classes, Opportunity Score V2 tournament, execution calibration; migration 233 -> 300)",
+   "sources": [
+    "c9054ec",
+    "1b2475e",
+    "33b9e13",
+    "4a3f704"
+   ]
+  },
+  {
+   "commit": "8e5654a",
+   "stream": "R30B agents (durable queues, root-cause clusters, memory usefulness, scorecards; migration 234 -> 301)",
+   "sources": [
+    "13d57d5",
+    "5bdf0ed",
+    "851f635",
+    "0caf1d7",
+    "29f8fec",
+    "fc1923a",
+    "24c5a27"
+   ]
+  },
+  {
+   "commit": "a6f8bd6",
+   "stream": "current rails over the stream copies; release check 216..301",
+   "sources": [
+    "5bdf0ed (234 section 3 machine-actor copy)"
+   ]
+  }
+ ],
+ "current_rail_kept_over_tail": [
+  {
+   "source": "13d57d5 / 24c5a27 (migration 234 section 4)",
+   "tail": "authority-guard registry re-declared from the pre-R30A 225: no live_parity_cutover (recorded_by, CONTROL), no live_approvals (approved_by, APPROVAL); its rollback restored the same shorter list",
+   "current": "the current 225 registry (both rows) kept in 301 and in 301's rollback",
+   "where": "8e5654a; pinned by tests/test_agent_work_queues.py::test_the_301_registry_is_a_superset_of_225s_and_its_rollback_restores_it and tests/test_agent_operations_authority.py::test_301_and_its_rollback_keep_every_registry_row_of_the_current_225"
+  },
+  {
+   "source": "5bdf0ed (migration 234 section 3)",
+   "tail": "agent_ops_is_machine_actor = 221's list (no ADRIANA, no ARB/ARBITRAGE suffix)",
+   "current": "265's improve_is_machine_actor (ADRIANA + ARB/ARBITRAGE) copied exactly",
+   "where": "a6f8bd6; pinned by tests/test_agent_operations_authority.py::test_301_machine_actor_test_is_the_current_one_adriana_included"
+  },
+  {
+   "source": "1b2475e / 4a3f704 (tournament route)",
+   "tail": "forward window from the R30 singleton cutover (live_parity_cutover WHERE id = 1, caller-chosen cutover_at)",
+   "current": "live_parity_effective_cutover (per-release, DB-clock stamped, decision-logic hash), as command_validation reads it",
+   "where": "bb15add, api/command_opportunity_tournament.py cutover_epoch"
+  },
+  {
+   "source": "c9054ec / 1b2475e / b5ae12a (new decision-path imports)",
+   "tail": "not in the decision-logic hash",
+   "current": "execution_evidence.py, settlement_exception_risk.py, opportunity_score_v2.py pinned in DECISION_LOGIC_FILES (a change restarts the forward window); opportunity_tournament.py excused with its reason",
+   "where": "bb15add, sportsassets/decision_logic.py"
+  }
+ ],
+ "rejected_for_looser_rail": [],
+ "summary_per_branch": {
+  "r30-live-parity": {
+   "INCLUDED": 10,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-chaos": {
+   "INCLUDED": 18,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-ci": {
+   "INCLUDED": 22,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-intent": {
+   "INCLUDED": 18,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-nfl": {
+   "INCLUDED": 15,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-prof": {
+   "INCLUDED": 15,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30a-runtime": {
+   "INCLUDED": 15,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 0
+  },
+  "r30b-agents": {
+   "INCLUDED": 9,
+   "REIMPLEMENTED": 7,
+   "REJECTED": 0
+  },
+  "r30c-exec": {
+   "INCLUDED": 9,
+   "REIMPLEMENTED": 4,
+   "REJECTED": 0
+  },
+  "r30c-replay": {
+   "INCLUDED": 10,
+   "REIMPLEMENTED": 0,
+   "REJECTED": 5
+  },
+  "r30c-risk": {
+   "INCLUDED": 9,
+   "REIMPLEMENTED": 3,
+   "REJECTED": 0
+  }
+ },
+ "summary_unique_commits": {
+  "INCLUDED": 59,
+  "REIMPLEMENTED": 14,
+  "REJECTED": 5
+ },
+ "unique_commits": 78,
+ "known_gaps": [
+  "r30c-replay (5 commits, migration 237, research_ref, replay, attribution_v2) is outside this lane and REJECTED here as such, not on merit; a replay-lane port would land it in the 300-309 block.",
+  "ADRIANA (265) owns no durable-queue kind and has no scorecard in this port; tests state both (her waiting signal is HANDOFF_PENDING, as Derek's).",
+  "Production approves no LIVE policy or gate, so the execution-calibration LIVE_SHADOW column stays empty there; every SHADOW_EXCLUDED record is counted by its governance reason. Nothing in this port approves anything.",
+  "Migrations 300 / 301 are new numbers for the streams' 233 / 234; the refusal taxonomy keeps MIGRATION_234/237_NOT_APPLIED and adds MIGRATION_300/301_NOT_APPLIED.",
+  "Capital activation, SMALL LIVE (SHADOW), the $25 per-order cap, the 1:1,000 scale, EV / settlement / freshness / risk gates and strategy allowlists are untouched."
+ ],
+ "tests": [
+  "Environment: Python 3.12 venv, Postgres test DB adr_r30 migrated through 265, then 300 and 301 applied with sportsassets.scripts.migrate.",
+  "Area sweep (146 files whose names match refusal_taxonomy / loop_health / command_release / agent_ / risk / execution / intent / parity / eddie / karen / scout / improvement / lesson / memory / scorecard / calibration / opportunity / tournament / correlation / settlement_exception / position_room / twin / lost_opportunity / paper_records / xavier / allie / adriana / identity / work_state / work_queue / migration): `RN1X_TEST_DSN=... python -m pytest -q -p no:cacheprovider <files>` -> 2880 passed, 2 failed, 1 skipped.",
+  "Baseline, same command on origin/claude/adriana (136 of those files exist there) -> 2706 passed, the SAME 2 failed, 1 skipped: test_agent_persona_chat_is_grounded.py::test_no_yankees_position_is_said_truthfully and test_xavier_tradeoff_directive_becomes_an_evaluated_artifact.py::test_a_loss_directive_becomes_an_evaluated_committed_xavier_candidate (local committed-row residue; not introduced here).",
+  "Capital-critical list readers (test_ci_verdict, test_command_floor_authority, test_equity_wall_authority and every test that reads tools/capital_critical_tests.txt) -> 310 passed.",
+  "New capital-critical test files (all listed in backend/tools/capital_critical_tests.txt): test_settlement_exception_risk.py, test_correlation_graph.py, test_risk_evidence_authority.py, test_execution_calibration.py, test_opportunity_score_tournament.py, test_agent_operations_authority.py, test_agent_work_queues.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py."
+ ],
+ "rows": [
+  {
+   "branch": "r30-live-parity",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30-live-parity",
+   "sha": "96fd3490f8ecd9b707c3f83f0cdc66d9abfe463b",
+   "subject": "bettor_state heartbeat: serialize the bucket at the producer, keep db.heartbeat strict [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 96.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/workers/bettor_state.py:247; carried; db.heartbeat stays strict (heartbeat_json) as r30a-ci 77ae432 pinned"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "56fcddb6d6111a6671e721166bdc44ee59a26629",
+   "subject": "R30A chaos: the venue state machine recovers from evidence, never re-sends, never double-books [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 92.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/execmirror.py:1262; carried as revised by 23a6580 (strict trade-log read, late lane never overwrites recovery)"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "ebbf7c014e35c37f3d3292ba2a2b3ed625717c58",
+   "subject": "R30A chaos: order clients add no hidden retry; a 429 is one request, named, and trips the circuit [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.5% of its added lines present verbatim in the line; e.g. backend/tests/test_order_posts_are_sent_once_and_429s_are_named.py:244"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "4a350cf277f487305f62db60672ca183cb90bdbd",
+   "subject": "R30A chaos: a silent provider and a late settlement, through the real writers and readers [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_chaos_provider_disconnect_and_delayed_settlement.py:345"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "1a44a1ec747482c8b9a640b243a806915a6ba586",
+   "subject": "R30A contracts: every critical writer -> reader pair round-trips the persisted production row [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 94.8% of its added lines present verbatim in the line; e.g. backend/tests/test_contract_writers_round_trip_to_their_readers.py:562"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "23a65807b6c5aa4f69cbf3948019bcb29b8f3cbb",
+   "subject": "R30A chaos review: the trade log is read strictly, a late lane never overwrites recovery, same-shape attempts are paired earliest first [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/execmirror.py:452"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "1bfce7e9f692965edd500997c44391c5d3d29d6f",
+   "subject": "R30A chaos review: a 429 on any funded / copy / desk order request trips the shared circuit at the adapter [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 76.1% of its added lines present verbatim in the line; e.g. backend/sportsassets/pmus.py:204; the adapter-level 429 trip is superseded within r30a-chaos by 5e939ec (trip at the transport, submit_fok byte-identical), which the line carries"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "fcec724a3d8dded3f478a56a7992f154a9cdaf7c",
+   "subject": "R30A contracts review: management intents verify in production; the PinnAPI collector row reaches the CG decision [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.1% of its added lines present verbatim in the line; e.g. backend/sportsassets/canonical_intent.py:894"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "5e939ec78aca1ac7b3a82e3c880da581758d7a37",
+   "subject": "R30A chaos review: the order 429 circuit trips at the transport, submit_fok stays byte-identical; late answers keep their timeline [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/venue_request_gate.py:325"
+  },
+  {
+   "branch": "r30a-chaos",
+   "sha": "f8df33f459b2fb99e067db44382f55d98d9f192f",
+   "subject": "R30A chaos review: critical-list wording follows the circuit trip to the transport [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "391840b8d3e53534cb9ab8b9a32b083c1411a94e",
+   "subject": "[skip render] R30A ci: the 429 / retry proofs reach the code they pin",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/bettor_universe_probe.py:222"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "77ae4324f64d0505ba9e704f724045ba15217390",
+   "subject": "[skip render] R30A ci: frozen declarations stay frozen; the heartbeat stays strict",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/shadow_bettor_policy.py:106"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "63356b06e0bd4e4395e96e13dacd6b74927c4e89",
+   "subject": "[skip render] R30A ci: tests that depended on the wall clock, test order or a refactored literal",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_pmus_account.py:44"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "85203b2e06a106f01b8dad29f924b9877cbb44bc",
+   "subject": "[skip render] R30A ci: render-ops help line regenerated; e-series pins re-expressed, never dropped",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. .github/render-ops/ops.sh:614"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "fa875e28d0cfadf7e850681a502fa8b90df59ed3",
+   "subject": "[skip render] R30A ci: one exact-SHA capital-critical workflow; a verdict with no baseline",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. .github/workflows/capital-critical.yml:83"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "5226b78b285d5cd673e0f511cd5c15bc7fa09080",
+   "subject": "[skip render] R30A ci: run833's history-horizon test no longer sits on a float tie",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "a67df12a8a6b64867208f21c4d061cd1dd36bf52",
+   "subject": "[skip render] R30A ci: the E9 fold tests wait for the tick's real thread, bounded",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_e9_review_pins.py:64"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "140969f3e9d4c4ce2b6684640035efb8c2f69946",
+   "subject": "[skip render] R30A ci: the result is readable through the API -- quiet server log, annotated verdict",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. .github/workflows/capital-critical.yml:206"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "58c507e6b159e9edea5b63cd33bed5f534120624",
+   "subject": "[skip render] R30A ci: two failures release gate f40 saw on 3.12.3 that 3.11 CI hid",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_workers_boot_stagger.py:171"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "c96bb6579e8729fdc1d97dfd8fbb4571c1501390",
+   "subject": "[skip render] R30A ci: L2 review pins read the world's clock, not the suite's",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_l2_review_pins.py:77"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "f157e52beb16b2e177b7d5099c5ad0c5c8499fe2",
+   "subject": "[skip render] R30A ci: the offline e2e host guard no longer leaves a self-calling socket layer",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_run834_offline_e2e.py:386"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "1a96613acfea31a7cec04ff5707e73f86ff47db2",
+   "subject": "[skip render] R30A ci: a 14-day time bomb and a cutover world the test never built",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_improvement_pipeline_seeding.py:515"
+  },
+  {
+   "branch": "r30a-ci",
+   "sha": "251285e6bf8c44e37106845b7b25c5cf652b0b3a",
+   "subject": "[skip render] R30A ci: capital-critical prints the failing tracebacks, bounded",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. .github/workflows/capital-critical.yml:168"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "72ca2cabfbc928c66ee765d3c455d15b6c93e80f",
+   "subject": "R30A intent: complete canonical intents, per-release cutover, owner live approvals (225 in place) [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 96.3% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:179"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "c66bd7f66209493694a5eb9d79ab756d691be3bc",
+   "subject": "R30A intent: live gates and LIVE policy need versioned, hash-matched owner approval [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/live_rule_artifacts.py:21"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "2f0d590656cf0b25e5be1728b586bc2b2ea4255c",
+   "subject": "R30A intent: adapters, parity, latency chain and per-release cutover [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 87.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/live_parity.py:2078; carried as revised by 16b9867 (review fixes) and the integration"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "17d1fd0e67df445e0530ba54d28b18277a886b0d",
+   "subject": "R30A intent: one origin of live exposure -- the canonical intent [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.4% of its added lines present verbatim in the line; e.g. backend/sportsassets/bettor_funded_execution.py:170"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "4464c58f41afd3f355d99c57ce166c26729d2a6c",
+   "subject": "R30A intent: prove the intent, window, policy, parity, latency and approvals [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.8% of its added lines present verbatim in the line; e.g. backend/sportsassets/live_parity.py:1673"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "df954e1d270db68ebc551756e0199e198aa852b9",
+   "subject": "R30A intent: the alternative set never fails a Xavier review [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/agents/paper_xavier.py:679"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "99c89b40263e5f64c4617f50d8edd21deb39eb7e",
+   "subject": "WIP(r30a-intent): preserve partial work after agent interruption [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.9% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:102"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "16b986779dabe37c42cdfbc15c5eedb3578ce645",
+   "subject": "R30A intent: review fixes -- exact parity, governance now, rollback cutovers, one origin at the venue primitives [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/live_authorization.py:8"
+  },
+  {
+   "branch": "r30a-intent",
+   "sha": "4c8a8c586ac9a1b2490ce22818c8f83075f163a2",
+   "subject": "R30A intent: the canonical-intent purity pin admits decimal.ROUND_FLOOR [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_pinnacle_only_paper_benchmark.py:178"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "495f9a6276654d89187232dfad6b0424b37299c4",
+   "subject": "R30A NFL: cited settlement + tie evidence; NFL-only de-vig admission; PinnAPI football [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 94.1% of its added lines present verbatim in the line; e.g. docs/receipts/r30a_nfl_measured_outcome_set_2026-10-04.md:25; carried as revised by 6b10564 and the all-six-sport PinnAPI scope (260)"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "b3d1e85d84cc74cd3e81203f95b9ee97ecec0aa5",
+   "subject": "R30A NFL: payout comparison per state; CG V3 NFL grading + tie conversion; tie paper settlement [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 85.1% of its added lines present verbatim in the line; e.g. backend/sportsassets/agents/paper_benchmark.py:2934; carried as revised by 6b10564 and the P0 NCAAF stream (football no longer NFL-only in paper_benchmark; NCAAF on its own cited clauses)"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "e36ab2eead80b02f0f64de740160856a6d82760f",
+   "subject": "R30A NFL: hot NFL freshness tier in the existing reactive scheduler [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 93.2% of its added lines present verbatim in the line; e.g. backend/sportsassets/pinnapi_reactive.py:196; carried with the R30A review bound (HOT_MAX_CONSECUTIVE)"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "3f614de9b08f595feda0b57e8882a8f33fe416ee",
+   "subject": "R30A NFL: end-to-end tests through the real paper pass; evidence fixtures [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 96.5% of its added lines present verbatim in the line; e.g. backend/tests/fixtures/pmus_nfl_listing_2026_10_04_snf_mnf.json:55"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "6b1056474f6972c49d8953bf11382e480cf5c5b8",
+   "subject": "R30A NFL review fixes: held NFL feed reads, established phase, exact tie clause, isolated tie proof [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.6% of its added lines present verbatim in the line; e.g. docs/receipts/r30a_nfl_measured_outcome_set_2026-10-04.md:73"
+  },
+  {
+   "branch": "r30a-nfl",
+   "sha": "966903f0b2f012a0bd10b55ef473add77a07133f",
+   "subject": "R30A NFL: isolate the focus-universe candidate tier from other proofs' residue [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_p5_focus_universe.py:220"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "6bb8965c760bbd602ea407e1449fa68a16cf5617",
+   "subject": "[skip render] R30A prof: every production-confidence number is INVESTMENT-only (migration 227); capacity at executable freshness",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.0% of its added lines present verbatim in the line; e.g. backend/migrations/227_investment_only_confidence.sql:167"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "bb220f74ca47956082e556d6133de6155939bd40",
+   "subject": "[skip render] R30A prof: the confidence ladder, levels 0..6 per strategy and overall (GET /api/command/confidence-ladder)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 89.9% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/confidence_ladder.py:22; carried as revised by 72e0e9f / 280cc86 and 225's per-release cutover"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "2c8900417b0a24104755f50cd1f9259f96e11c05",
+   "subject": "[skip render] R30A prof: the unique opportunity funnel (GET /api/command/opportunity-funnel)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/opportunity_funnel.py:102; carried as revised by 72e0e9f (per-strategy funnel)"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "72e0e9fcac85f33c7d6574465e5ee4052fe1e326",
+   "subject": "[skip render] R30A prof review: level 2 on a payoff-floored variance; per-strategy funnel; unique-opportunity rankings everywhere",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 98.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/api/command_opportunity_funnel.py:13"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "280cc86382c1ef8a9adefe4c8b491f012606c15c",
+   "subject": "[skip render] R30A prof review: every row names its scope; ACTUAL without a durable class is UNCLASSIFIED; INVESTMENT-only agent scorecards; unconditional 227 rollback proof",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/twin/runner.py:556"
+  },
+  {
+   "branch": "r30a-prof",
+   "sha": "9ca9c1efb3bbe0756b05b1893597c6cc96ebfd48",
+   "subject": "[skip render] R30A prof review: two new DB proofs made hermetic against committed rows",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tests/test_lost_opportunity_ledger.py:677"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "d96f34cad551a62e43de1e84f234f6980fce71fe",
+   "subject": "R30A runtime: the API pool starvation root cause -- lock holders get their own sessions, fenced; reactive jobs take one connection [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 95.2% of its added lines present verbatim in the line; e.g. backend/sportsassets/pinnapi_reactive.py:457"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "20a6204ce4e9296b8991144188027181f474aa7f",
+   "subject": "R30A runtime: loop inventory with fenced single-writer leases, loop health (migration 229) and the runtime SLOs [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 92.3% of its added lines present verbatim in the line; e.g. backend/migrations/229_runtime_loop_health.sql:64; carried as revised by b58a291 (honest loop health and SLOs) and the per-release cutover"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "d5f0e1b36cc30dc8556e6a5617185e239d1fa0d1",
+   "subject": "R30A runtime: loop health reads nothing from the isolated position-learning layer [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/loop_health.py:272"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "b58a29136a7315fc390988da6066753c677a005b",
+   "subject": "R30A runtime review: the event-loop stalls behind the timeouts, a decider that always contends again, honest loop health and SLOs [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 96.8% of its added lines present verbatim in the line; e.g. backend/sportsassets/agents/capability_runtime.py:178"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "a7109d2b079f88447328554080ae03203240436a",
+   "subject": "R30A runtime review: decision latency judges a summary row on its parts [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/runtime_slo.py:237"
+  },
+  {
+   "branch": "r30a-runtime",
+   "sha": "9ae78d87fd11e66980c252022e621ff7999269cd",
+   "subject": "R30A runtime: the two full-suite failures this branch added, fixed [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/sportsassets/loop_health.py:235"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "13d57d5a31d5593bd94d6f2a0241167635b4b9e6",
+   "subject": "R30B agents: durable work queues for all seven agents on the 226 queue (migration 234 \u00a71) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "5bdf0eda8e6f14d8ac77a7db347a0142167af007",
+   "subject": "R30B agents: root-cause improvement clusters and GET /api/command/improvement-clusters (migration 234 \u00a73) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "851f63514a004de826c9aa99db443b1a2d729ce4",
+   "subject": "R30B agents: memory usefulness -- lesson retrieval per decision, forward INVESTMENT evidence, append-only supersession (migration 234 \u00a72) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "0caf1d79d5226d9796851bdf4ccd3774856f70ae",
+   "subject": "R30B agents: scorecards by decision and economic quality, GET /api/command/agent-scorecards (section 18) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "29f8fecb1894fa47195f31dca26ea942a244d62a",
+   "subject": "R30B agents: scorecard authority proof; the stream's proofs on the capital-critical list [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "fc1923a2a9844a4022f292884f8c5ffe63bd0f00",
+   "subject": "R30B agents: window-reading proofs run at a time no other proof writes at [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30b-agents",
+   "sha": "24c5a2701f81a4df2663d6ee1b60b258e3d3b9b1",
+   "subject": "R30B agents review: owned work never reads idle, attempts follow their schedule, memory acts only on measured evidence, fixes must be material [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "8e5654a + a6f8bd6 (R30 tails agents port; machine-actor test aligned to 265 in a6f8bd6; migration 234 -> 301, registry kept a superset of the current 225): backend/sportsassets/agents/agent_work.py, improvement_clusters.py, lesson_usage.py, agent_scorecards.py, agent_work_state.py; tests/test_agent_work_queues.py, test_agent_work_state.py, test_improvement_clusters.py, test_lesson_usage.py, test_agent_scorecards.py, test_agent_operations_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "c9054ec892a284c21521efcdc79378694a8b0836",
+   "subject": "R30C exec: three execution-evidence classes; every LIVE-path execution estimate states what it was fitted on [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "bb15add (R30 tails exec port; migration 233 -> 300): backend/sportsassets/execution_evidence.py, opportunity_score_v2.py, opportunity_tournament.py, execution_calibration.py, api/command_execution_calibration.py, api/command_opportunity_tournament.py; tests/test_execution_calibration.py, test_opportunity_score_tournament.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "1b2475eebc8333a0fb89f516c956719e4c5859e2",
+   "subject": "R30C exec: Opportunity Score V2 (lower confidence bound) and the V1/V2 shadow tournament, migration 233 [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "bb15add (R30 tails exec port; migration 233 -> 300): backend/sportsassets/execution_evidence.py, opportunity_score_v2.py, opportunity_tournament.py, execution_calibration.py, api/command_execution_calibration.py, api/command_opportunity_tournament.py; tests/test_execution_calibration.py, test_opportunity_score_tournament.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "33b9e13c1fc2fa3613f7562a57224f30d0d0b06c",
+   "subject": "R30C exec: live execution calibration, PAPER_SIMULATION / LIVE_SHADOW / ACTUAL side by side [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "bb15add (R30 tails exec port; migration 233 -> 300): backend/sportsassets/execution_evidence.py, opportunity_score_v2.py, opportunity_tournament.py, execution_calibration.py, api/command_execution_calibration.py, api/command_opportunity_tournament.py; tests/test_execution_calibration.py, test_opportunity_score_tournament.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-exec",
+   "sha": "4a3f70449de578b22b3cf5381add834988317b8e",
+   "subject": "R30C exec review fixes: shadow fill figures never a LIVE estimate, event-gated intervals with a floor, one V2 spec series, database-clock no-backfill [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "bb15add (R30 tails exec port; migration 233 -> 300): backend/sportsassets/execution_evidence.py, opportunity_score_v2.py, opportunity_tournament.py, execution_calibration.py, api/command_execution_calibration.py, api/command_opportunity_tournament.py; tests/test_execution_calibration.py, test_opportunity_score_tournament.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "96fd3490f8ecd9b707c3f83f0cdc66d9abfe463b",
+   "subject": "bettor_state heartbeat: serialize the bucket at the producer, keep db.heartbeat strict [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 96.6% of its added lines present verbatim in the line; e.g. backend/sportsassets/workers/bettor_state.py:247; carried; db.heartbeat stays strict (heartbeat_json) as r30a-ci 77ae432 pinned"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "1c75f21870c3fe7bcb6dbbf6358589cb68d70b59",
+   "subject": "R30C replay: vendor the red-team kit's reference models unchanged as research modules [skip render]",
+   "merge": false,
+   "verdict": "REJECTED",
+   "evidence": "outside this lane (agents / execution / risk): research-only historical replay / attribution with no control, gate or rail depending on it; not ported here so no unreviewed research module or migration (237) enters the line under this receipt; left for a replay-lane port (it would land in the 300-309 block)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "1cb8da954dc8f1066987ce10e30c4d4219855c62",
+   "subject": "R30C: Alpha Attribution V2 on intel/attribution (selection / allocation / capital efficiency) [skip render]",
+   "merge": false,
+   "verdict": "REJECTED",
+   "evidence": "outside this lane (agents / execution / risk): research-only historical replay / attribution with no control, gate or rail depending on it; not ported here so no unreviewed research module or migration (237) enters the line under this receipt; left for a replay-lane port (it would land in the 300-309 block)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "81ba9230d08ec2182b0248f7221013fcb6304332",
+   "subject": "R30C replay: historical R30 decision replay through one anti-hindsight choke point (migration 237, GET /api/command/r30-replay) [skip render]",
+   "merge": false,
+   "verdict": "REJECTED",
+   "evidence": "outside this lane (agents / execution / risk): research-only historical replay / attribution with no control, gate or rail depending on it; not ported here so no unreviewed research module or migration (237) enters the line under this receipt; left for a replay-lane port (it would land in the 300-309 block)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "f8cddd4614854a3a3d7919e7a29cb14409d10788",
+   "subject": "R30C replay: runtime import guard covers the lazily imported Eddie estimator [skip render]",
+   "merge": false,
+   "verdict": "REJECTED",
+   "evidence": "outside this lane (agents / execution / risk): research-only historical replay / attribution with no control, gate or rail depending on it; not ported here so no unreviewed research module or migration (237) enters the line under this receipt; left for a replay-lane port (it would land in the 300-309 block)"
+  },
+  {
+   "branch": "r30c-replay",
+   "sha": "3e8a2a0a61043b51f72932c94f2d760fa16a9699",
+   "subject": "R30C replay: answer the adversarial review (qualified = legally allocatable, coverage-aware tape, identical rails, one unit, tranche allocator, no invented zeros) [skip render]",
+   "merge": false,
+   "verdict": "REJECTED",
+   "evidence": "outside this lane (agents / execution / risk): research-only historical replay / attribution with no control, gate or rail depending on it; not ported here so no unreviewed research module or migration (237) enters the line under this receipt; left for a replay-lane port (it would land in the 300-309 block)"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "dea1b2eae3ca313c1e637e097615211dfcefe3b8",
+   "subject": "db.heartbeat serializes datetimes: the bettor_state heartbeat is written again [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/db.py:339; superseded within the R30 base by 96fd349 (serialize at the producer) and r30a-ci 77ae432 (heartbeat stays strict); the line carries that strict form"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "50faaffb9b9549ccef5bad315375e55ef955e5b7",
+   "subject": "BETTOR R30: profitability validation per sleeve (read-only)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 97.5% of its added lines present verbatim in the line; e.g. backend/sportsassets/profitability/validation.py:833"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "a801b2549a1d250fdb7f5dd7b935850056c6d312",
+   "subject": "[skip render] R30 live parity core: one canonical intent, two execution adapters, parity ledger, halt, readiness gate",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 90.7% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:178; the line carries it as revised by R30A intent (live_parity re-exports canonical_intent; per-release cutover; owner live approvals)"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "38d2bb2110171bf661ac33862aba9b36e372e7e3",
+   "subject": "[skip render] R30: merge the profitability validation stream; the readiness gate reads the INVESTMENT forward verdict",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44 (the readiness gate reads the INVESTMENT forward verdict)"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "0c08b0ac46820d5bcf8a45596a63eb3b79d86641",
+   "subject": "[skip render] R30: the live parity tests are capital-critical (gate rejects a run where any is skipped or fails)",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 100.0% of its added lines present verbatim in the line; e.g. backend/tools/capital_critical_tests.txt:506"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "3c6616b6b49972814a842ea962ebb982a8159d72",
+   "subject": "R30 live parity: agent work states, Xavier's fresh-evidence queue, one current review per position [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 99.6% of its added lines present verbatim in the line; e.g. backend/migrations/226_agent_work_queue.sql:20"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "31791c09f9003e7b9395a96fc174cc186a290245",
+   "subject": "[skip render] R30: production cutover recorded once after verified conditions; Allie capital-efficiency allocation; independent-event profitability",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 91.2% of its added lines present verbatim in the line; e.g. backend/migrations/225_live_parity.sql:439; the one-row cutover singleton is superseded by R30A intent 72ca2ca's STRICTER per-release cutover (decision-logic hash, DB-clock stamp, named human); Allie allocation and per-sleeve profitability carried"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "e8821c8589d682d77b58b678b1ab53dad9eacbfd",
+   "subject": "R30: merge agent work states (226) into live parity; track 216-226 [skip render]",
+   "merge": true,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44 (squash of claude/inc-release-full @ a42914b); merge resolution carried by the squash 525bc44"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "0ebdd339c2a88df98f0358326d047684f4f2fd37",
+   "subject": "R30: release endpoint docstring tracks 216..226 [skip render]",
+   "merge": false,
+   "verdict": "INCLUDED",
+   "evidence": "525bc44; 0.0% of its added lines present verbatim in the line; superseded: the release check tracks 216..265 in the line (216..301 after this reconciliation), a superset of 216..226"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "b5ae12a749027690accd335ba78d4641a593e432",
+   "subject": "R30C: measured settlement-exception risk on the canonical decision (shadow) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "ce9123d (R30 tails risk port): backend/sportsassets/settlement_exception_risk.py, correlation_graph.py, api/command_risk_evidence.py; tests/test_settlement_exception_risk.py, test_correlation_graph.py, test_risk_evidence_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "1a7dcdcbc9c25151bc81b1818c263c33cea9dab7",
+   "subject": "R30C: evidence-backed correlation graph beside the worst-case caps (shadow) [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "ce9123d (R30 tails risk port): backend/sportsassets/settlement_exception_risk.py, correlation_graph.py, api/command_risk_evidence.py; tests/test_settlement_exception_risk.py, test_correlation_graph.py, test_risk_evidence_authority.py (capital-critical)"
+  },
+  {
+   "branch": "r30c-risk",
+   "sha": "2aaea345113d5f555c2de08ad26995db5acc3afd",
+   "subject": "R30C review: measured mixture, unknown identity is worst case, cap-refused candidates, league-scoped ties [skip render]",
+   "merge": false,
+   "verdict": "REIMPLEMENTED",
+   "evidence": "ce9123d (R30 tails risk port): backend/sportsassets/settlement_exception_risk.py, correlation_graph.py, api/command_risk_evidence.py; tests/test_settlement_exception_risk.py, test_correlation_graph.py, test_risk_evidence_authority.py (capital-critical)"
+  }
+ ]
+}

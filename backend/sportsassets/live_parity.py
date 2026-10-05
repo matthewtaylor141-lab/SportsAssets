@@ -1603,7 +1603,8 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
         from . import canonical_components as CC
         comps = await CC.at_decision(conn, decision=decision,
                                      book_row=book_row, cost_usd=cost, p=p,
-                                     wire=sized.get("wire"), now=at)
+                                     wire=sized.get("wire"), now=at,
+                                     contract=cand)
         pinnacle = cand.get("pinnacle") or {}
         pin = pin or {}
         prm = params if isinstance(params, dict) else None
@@ -1717,7 +1718,14 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 if isinstance(params, dict) else None,
                 # R30A review: the build that decided, inside the sha, so a
                 # row can be attributed to its decision logic after the fact
-                "build": serving_build_identity()},
+                "build": serving_build_identity(),
+                # R30C: the expected settlement-exception cost against the
+                # completed-game assumption. SHADOW evidence for Eddie /
+                # Allie (R30B); it gates nothing and is not one of the
+                # parity ledger's evidence ids (`evidence_ids`).
+                "settlement_exception_risk": comps.get(
+                    "settlement_exception_risk") or unavailable(
+                        "COMPONENT_NOT_COMPUTED")},
             opportunity_score=comps["opportunity_score"],
             derek=CC.derek_component(
                 verdict=verdict, policy_version=version,
@@ -1742,6 +1750,15 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 "acquisition_cost_usd": cost},
             created_at=at)
         await record_decision_intent(conn, intent)
+        # R30C · THE OPPORTUNITY SCORE SHADOW TOURNAMENT: V1 (the score the
+        # intent carries) and V2 (the lower-confidence-bound score) recorded
+        # BESIDE the intent at this decision instant (migration 300). V2 has
+        # no authority: it is not in the intent, nothing reads it to decide,
+        # and a failure here never touches the decision (savepoint inside).
+        from . import opportunity_tournament as OT
+        await OT.record_entry(conn, intent=intent,
+                              v1=comps.get("opportunity_score"),
+                              v2=comps.get("opportunity_score_v2"))
         return intent
     except Exception:                                          # noqa: BLE001
         log.warning("canonical intent not built for %s", did, exc_info=True)

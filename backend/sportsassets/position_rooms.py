@@ -55,6 +55,7 @@ import time
 
 from . import bettor_book_snapshot as BS
 from . import bettor_venue_native_identity as VNI
+from . import execution_evidence as EE
 from . import order_state_truth as OST
 from . import xavier_freshness as XF
 
@@ -1267,10 +1268,14 @@ def eddie_view(present: bool, rows: list) -> dict:
             "spread_cost_pp", "expected_fees_pp", "expected_slippage_pp",
             "max_executable_qty", "expected_executable_ev_usd",
             "book_age_s", "authority", "unmeasured")
+    # R30C: every fill probability shown says what it was fitted on (the
+    # paper simulator's rate is never displayed as live execution quality)
     return {"status": "OK", "source": "eddie_execution_estimates",
             "estimates": [dict({k: (iso(r.get(k)) if k.endswith("_at")
                                     else r.get(k)) for k in keep},
-                               estimated_at=iso(r.get("estimated_at")))
+                               estimated_at=iso(r.get("estimated_at")),
+                               fill_probability_evidence=(
+                                   EE.fill_probability_label(r)))
                           for r in rows[:10]]}
 
 

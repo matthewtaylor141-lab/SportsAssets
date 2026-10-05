@@ -15,7 +15,12 @@ Every pass:
      to evaluate any tournament that reached its predeclared minimum sample;
   8. opens a collaboration-loop finding (EVIDENCE + HYPOTHESIS, routed to
      his default peers) for each feature that has observations;
-  9. heartbeats the outcome and finishes the run (service `agent_scout`).
+  9. syncs his DURABLE WORK QUEUE (agents/agent_work.py, migration 301):
+     each feature under test is a RESEARCH_QUESTION item, attempted every
+     pass (PROGRESSED when its frozen samples grew, else WAITING with the
+     count against the predeclared minimum) and completed by the
+     evaluator's verdict;
+ 10. heartbeats the outcome and finishes the run (service `agent_scout`).
 
 Bounded and failure-isolated like Eddie's runner. Writes only Scout's
 records (declared as SCOUT, so the database refuses any order / approval /
@@ -139,6 +144,12 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
     summary["evaluations"] = verdicts
     summary["findings"] = await _phase(summary, "findings",
                                        open_feature_findings(conn, now=at))
+    from . import agent_work as AW
+
+    async def queue():
+        return await AW.sync_for(conn, "scout_runner", now=at, attempts={
+            AW.K_RESEARCH: await AW.research_attempts(conn, now=at)})
+    summary["work_queue"] = await _phase(summary, "work_queue", queue())
     elapsed = round(time.monotonic() - t0, 3)
     wrote = bool((summary.get("ingest") or {}).get("observed")) or bool(
         (summary.get("samples") or {}).get("frozen"))

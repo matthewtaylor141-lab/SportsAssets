@@ -675,6 +675,34 @@ READERS = {
     # management packet. It selects no candidate, sizes and places nothing.
     "bettor_paper_freshness.py": (
         "HELD_POSITION_SETTLEMENT_IDENTITY_BY_ENTRY_VALUATION_ID_ONLY", 2),
+    # (R30C) THE MEASURED SETTLEMENT-EXCEPTION TABLE reads the outcome join's
+    # columns (outcome_basis, settlement_read) and the recorded per-condition
+    # settlement comparison of BOTH purposes deliberately: it measures how
+    # often the VENUE settled a valued market other than ordinarily, and a
+    # calibration-only row's market settles exactly like an entry row's. It
+    # selects no candidate, sizes and places nothing; its cost rides on the
+    # canonical decision as shadow evidence (tests/
+    # test_settlement_exception_risk.py, test_risk_evidence_authority.py).
+    "settlement_exception_risk.py": (
+        "SETTLEMENT_OUTCOME_MEASUREMENT_BOTH_PURPOSES_NEVER_SELECTS", 5),
+    # (R30C) THE CORRELATION GRAPH reads the latest probability of a market
+    # the PAPER book already holds, works or decided (by its slug), and the
+    # settled LONG outcomes of both purposes for the measured same-day
+    # dependence. Display / shadow only: no selection, no cap change.
+    # Re-pinned 3 -> 6 (R30C review): the latest valuation's event_key is
+    # read as a fallback fixture identity for a node with no catalogue row,
+    # and a cap-refused DECISION (already recorded in paper_decisions) is
+    # shown only while its market has no outcome_known row -- an exclusion,
+    # not a selection: the candidates are recorded decisions, never
+    # valuations, and nothing is sized for an order or placed. The other new
+    # mentions are the module's own docstring / source labels.
+    "correlation_graph.py": (
+        "HELD_BOOK_PROBABILITY_AND_SETTLED_OUTCOMES_DISPLAY_ONLY", 6),
+    # (R30C) THE SETTLEMENT-EXCEPTION COMPONENT of a canonical decision reads
+    # the venue rules text of the decision's OWN valuation row, BY ID: the
+    # decision was already taken on that row; nothing is selected.
+    "canonical_components.py": (
+        "BY_ID_OF_THE_DECISIONS_OWN_VALUATION_RULES_TEXT_ONLY", 1),
 }
 
 

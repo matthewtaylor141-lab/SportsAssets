@@ -253,11 +253,11 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
         # reserved-but-unused stream slots are REPORTED ABSENT, not hidden:
         # this database carries every migration of this build, so the absent
         # numbers are exactly the ones no file in the build uses
-        assert sch["tracked_range"] == [216, 290]
-        for n in (248, 249, 251, 260, 261, 264, 265, 270, 290):
+        assert sch["tracked_range"] == [216, 301]
+        for n in (248, 249, 251, 260, 261, 264, 265, 270, 290, 300, 301):
             assert tracked[n]["status"] == "APPLIED", n
             assert tracked[n]["in_this_build"] is True, n
-        assert sch["numbers_absent"] == EXPECTED_ABSENT_216_264
+        assert sch["numbers_absent"] == EXPECTED_ABSENT_216_301
         assert out["running_build_gated"] is False    # f33 is VOID
         assert out["running_build_receipts"]
     finally:
@@ -270,11 +270,12 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
 #: 231 chaos, 232-247 R30B/R30C/addendum/LAB, 250 router, 252 NFL
 #: continuation, 253-259 control plane, 262 inc-sim, 263 inc-families).
 EXPECTED_ABSENT_216_264 = ([228] + list(range(230, 248)) + [250]
-                           + list(range(252, 260)) + [262, 263]
-                           # 266..289 less 270 (paper mark freshness):
-                           # parallel lanes' reserved slots below PAPER
-                           # TURNAROUND (290)
-                           + [n for n in range(266, 290) if n != 270])
+                           + list(range(252, 260)) + [262, 263])
+#: (R30 tails) 216..301: the above plus 266..299 less the numbers wave-1
+#: lanes took (270 paper mark freshness, 290 PAPER TURNAROUND), the slots
+#: between ADRIANA (265) and the R30 tails block (300 R30C exec, 301 agents)
+EXPECTED_ABSENT_216_301 = EXPECTED_ABSENT_216_264 + [
+    n for n in range(266, 300) if n not in (270, 290)]
 
 
 def test_the_tracked_range_covers_every_migration_in_this_build():
@@ -283,14 +284,14 @@ def test_the_tracked_range_covers_every_migration_in_this_build():
     reaches the build's highest migration, and the absent numbers inside it
     are exactly the unused reserved slots (30 of them)."""
     from sportsassets.api import command_release as R
-    assert (R.TRACKED_FROM, R.TRACKED_TO) == (216, 290)
+    assert (R.TRACKED_FROM, R.TRACKED_TO) == (216, 301)
     nums = sorted(R._num(f) for f in R.build_migrations())
     assert nums[-1] == R.TRACKED_TO, "a migration above the tracked range"
     present = {n for n in nums if R.TRACKED_FROM <= n <= R.TRACKED_TO}
     absent = [k for k in range(R.TRACKED_FROM, R.TRACKED_TO + 1)
               if k not in present]
-    assert absent == EXPECTED_ABSENT_216_264
-    assert len(absent) == 30 + 23
+    assert absent == EXPECTED_ABSENT_216_301
+    assert len(absent) == 30 + 32
 
 
 # ── §5 listed ────────────────────────────────────────────────────────
