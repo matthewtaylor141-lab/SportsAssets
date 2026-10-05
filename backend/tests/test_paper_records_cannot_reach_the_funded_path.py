@@ -182,7 +182,18 @@ def test_no_funded_module_imports_the_paper_modules():
                # priority book read / a held re-review; it writes ONLY
                # agent_work_* records and holds no submit, cancel or reserve
                # call (tests/test_agent_work_state_authority.py)
-               "agents/work_queue.py"}
+               "agents/work_queue.py",
+               # (290) PAPER TURNAROUND: the strategy lifecycle reads the
+               # paper ledger's positions and marks (through the read-only
+               # stale-management seam) and writes ONLY its own append-only
+               # paper_strategy_lifecycle_events; the ledger calls its entry
+               # gate, which can only refuse or shrink a paper ENTRY. The
+               # GET-only turnaround route reads it in a READ ONLY
+               # transaction. None imports an order, venue, execution or
+               # funded module (tests/test_strategy_lifecycle.py)
+               "bettor_strategy_lifecycle.py",
+               "bettor_stale_management.py",
+               "api/command_turnaround.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package
