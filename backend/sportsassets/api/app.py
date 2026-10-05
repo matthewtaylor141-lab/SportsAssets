@@ -765,6 +765,17 @@ try:
     app.include_router(_command_live_parity_router)
 except ImportError:
     log.warning("live parity: api.command_live_parity not loaded", exc_info=True)
+# ── THE PER-AGENT FUNNEL RECEIPT (P0 incident): /api/command/agent-funnel.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# RECEIVED / ELIGIBLE / REJECTED_SOFTWARE / REJECTED_ECONOMIC / ENTER / ORDER /
+# FILL per agent strategy, every code classified by the one taxonomy. No
+# route here writes; orders and fills are the PAPER account's.
+try:
+    from .command_agent_funnel import router as _command_agent_funnel_router
+    app.include_router(_command_agent_funnel_router)
+except ImportError:
+    log.warning("agent funnel: api.command_agent_funnel not loaded",
+                exc_info=True)
 # ── PROFITABILITY VALIDATION PER SLEEVE: /api/command/profitability/
 # validation (?since=). GET only, COMMAND auth, READ ONLY transaction with a
 # statement timeout; the verdict reads the INVESTMENT sleeve's FORWARD

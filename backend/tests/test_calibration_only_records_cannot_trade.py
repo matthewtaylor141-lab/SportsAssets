@@ -209,12 +209,17 @@ def test_an_entry_decision_writes_the_same_row_as_before():
     asyncio.run(ext.persist(r, default))
     (sql, args), = r.calls
     assert sql is ext.INSERT
-    assert len(args) == 50
+    # 51, not 50: migration 251 added ONE column, observed_at_basis (which
+    # clock observed_at is). It is NULL for every aged reading, so an entry
+    # decision's row is the row it always was plus one NULL; the 48 golden
+    # values and the purpose pair below are unchanged.
+    assert len(args) == 51
     now = json.loads(json.dumps(list(args[:48]), default=str))
     assert len(now) == len(GOLDEN_ENTRY_VALUES_AT_BASE) == 48
     for i, (a, b) in enumerate(zip(now, GOLDEN_ENTRY_VALUES_AT_BASE)):
         assert _same(a, b), (i, a, b)
-    assert args[48:] == (vp.ENTRY_DECISION, None)
+    assert args[48:50] == (vp.ENTRY_DECISION, None)
+    assert args[50] is None                      # observed_at_basis ($51)
 
 
 def test_a_calibration_record_is_written_with_its_purpose_and_evidence():
@@ -223,7 +228,8 @@ def test_a_calibration_record_is_written_with_its_purpose_and_evidence():
     asyncio.run(ext.persist(r, rec))
     (sql, args), = r.calls
     assert sql is ext.INSERT
-    assert len(args) == 50
+    # 51: migration 251's observed_at_basis is the last value (see above)
+    assert len(args) == 51
     assert args[48] == vp.CALIBRATION_ONLY
     assert json.loads(args[49])["usable_for_orders"] is False
     # the executable-price and size columns go down empty
@@ -646,6 +652,14 @@ READERS = {
     # descriptive name list with no SQL behind it: selects nothing, reads no
     # row, sizes and places nothing
     "agents/agent_context.py": ("CONTEXT_SOURCE_NAME_LIST_PROSE_ONLY", 2),
+    # (P0 incident) THE PER-AGENT FUNNEL RECEIPT (GET-only, READ ONLY
+    # transaction): reads a decision's own valuation BY ID for its sport and
+    # side, and counts valuations written per sport / side / purpose for the
+    # receipt. Both purposes, because the agents decided on those rows
+    # whatever their purpose. Selects no candidate, sizes and places nothing.
+    "agent_funnel.py": (
+        "REPORTING_RECEIPT_BY_DECISION_VALUATION_ID_AND_COUNTS_NEVER_SELECTS",
+        2),
 }
 
 
@@ -1060,7 +1074,11 @@ async def test_the_scheduled_path_records_a_calibration_row_and_nothing_trades(
             "estimated_edge_per_contract, proposed_size, execution_estimate, "
             "risk_verdict, exposure_observed, calibration_only_evidence, "
             "us_market_slug, event_key, settlement_comparison "
-            "FROM external_valuations WHERE condition_id=$1", F.CONDITION)
+            # THE PRICED SIDE'S ROW. Since migration 251 the same read also
+            # records the OTHER side of the contract (asserted below), so
+            # the row this block describes is named, not left to row order.
+            "FROM external_valuations WHERE condition_id=$1 "
+            "AND NOT payout_is_complement", F.CONDITION)
         assert row["record_purpose"] == vp.CALIBRATION_ONLY
         assert row["admissible"] is False and row["decision"] == "NO_TRADE"
         refusals = list(row["refusals"])
@@ -1110,12 +1128,53 @@ async def test_the_scheduled_path_records_a_calibration_row_and_nothing_trades(
                 "UPDATE external_valuations SET admissible=true, "
                 "decision='BUY' WHERE id=$1", row["id"])
 
-        # ── EACH CONSUMER, HANDED THE CYCLE'S OWN RECORD, REFUSES ─────
+        # ── THE OTHER SIDE OF THE SAME CONTRACT: RECORDED, AND SEALED ─
+        # (P0 incident, inc-edge). The same refused read also values the
+        # complement -- the SHORT side of this contract, paying on
+        # NOT(home) -- from the same de-vig as 1 - p. It is CALIBRATION_ONLY
+        # like the priced side, and every consumer below refuses it too.
+        assert out["calibration_only"]["recorded"] == 1
+        assert out["calibration_only"]["complement_recorded"] == 1
+        comp_row = await conn.fetchrow(
+            "SELECT id, record_purpose, admissible, decision, refusals, "
+            "probability, executable_price, proposed_size, buy_intent, "
+            "payout_event, payout_is_complement, contract_selection, "
+            "calibration_only_evidence FROM external_valuations "
+            "WHERE condition_id=$1 AND payout_is_complement", F.CONDITION)
+        assert comp_row["record_purpose"] == vp.CALIBRATION_ONLY
+        assert comp_row["admissible"] is False
+        assert comp_row["decision"] == "NO_TRADE"
+        assert comp_row["executable_price"] is None
+        assert comp_row["proposed_size"] is None
+        assert list(comp_row["refusals"])[0] == \
+            loop.R_BOOK_CURRENCY_NOT_ESTABLISHED
+        assert comp_row["buy_intent"] == "ORDER_INTENT_BUY_SHORT"
+        assert comp_row["contract_selection"] == F.HOME
+        assert comp_row["payout_event"] == "NOT(%s)" % F.HOME
+        assert comp_row["probability"] == pytest.approx(
+            1.0 - row["probability"], abs=1e-12)
+        cev = json.loads(comp_row["calibration_only_evidence"])
+        assert cev["usable_for_orders"] is False
+        assert cev["displayed_quote"]["usable_for_orders"] is False
+        # the side the complement consumes: the bids, at 1 - bid
+        assert cev["displayed_quote"]["acquisition_price"] == \
+            pytest.approx(1.0 - F.BIDS[0][0])
+        with pytest.raises(asyncpg.PostgresError):
+            await conn.execute(
+                "UPDATE external_valuations SET admissible=true, "
+                "decision='BUY' WHERE id=$1", comp_row["id"])
+
+        # ── EACH CONSUMER, HANDED THE CYCLE'S OWN RECORDS, REFUSES ────
         rec, = [r for r in seen
                 if (r.get("contract") or {}).get("condition_id")
-                == F.CONDITION]
+                == F.CONDITION and not r.get("payout_is_complement")]
+        comp, = [r for r in seen
+                 if (r.get("contract") or {}).get("condition_id")
+                 == F.CONDITION and r.get("payout_is_complement")]
         assert rec["record_purpose"] == vp.CALIBRATION_ONLY
-        for candidate in (rec, dict(rec, admissible=True, decision="BUY")):
+        assert comp["record_purpose"] == vp.CALIBRATION_ONLY
+        for candidate in (rec, dict(rec, admissible=True, decision="BUY"),
+                          comp, dict(comp, admissible=True, decision="BUY")):
             b = await loop.bind_payout_outcome(
                 conn, condition_id=F.CONDITION, payout_event=F.HOME,
                 intent="ORDER_INTENT_BUY_LONG",
@@ -1245,7 +1304,10 @@ async def test_with_currency_established_the_entry_path_is_unchanged(
         r = _Recorder()
         await ext.persist(r, rec)
         assert r.calls[0][0] is ext.INSERT
-        assert r.calls[0][1][48:] == (vp.ENTRY_DECISION, None)
+        # [48:50]: migration 251 appended observed_at_basis ($51), NULL for
+        # an aged reading -- the purpose pair itself is unchanged
+        assert r.calls[0][1][48:50] == (vp.ENTRY_DECISION, None)
+        assert r.calls[0][1][50] is None
         row = await conn.fetchrow(
             "SELECT record_purpose, calibration_only_evidence, admissible, "
             "decision, executable_price, proposed_size, execution_estimate "

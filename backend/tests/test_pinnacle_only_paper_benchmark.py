@@ -146,7 +146,13 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # total row. Pure (no socket, database, venue, funded or
                    # order path): it imports only the de-vig and the feed
                    # cache's pure reader (pinned below).
-                   "bettor_market_family"}
+                   "bettor_market_family",
+                   # (P0 incident) the gross-edge input validation: pure
+                   # arithmetic over the row, the book and the fee function
+                   # it is handed; imports only the de-vig arithmetic and the
+                   # book level parser (pinned in
+                   # tests/test_gross_edge_inputs_are_validated.py)
+                   "gross_edge_inputs"}
 
 
 def _imports(path: pathlib.Path) -> list:

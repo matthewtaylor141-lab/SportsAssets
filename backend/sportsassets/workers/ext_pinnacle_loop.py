@@ -47,6 +47,7 @@ import os
 import re
 import time
 
+from .. import bettor_complement_valuation as CV
 from .. import bettor_entry_execution as entryx
 from ..db import advisory_held as _db_advisory_held
 from ..db import advisory_held_by as _db_advisory_held_by
@@ -2158,6 +2159,48 @@ ODDS_REFETCH_IS_NOT_A_RETRY = (
     "when it fails the existing quote is kept and ages normally, so the "
     "freshness rule refuses it by name instead of the sport being dropped")
 
+#: ── QUOTE_STALE_ON_ARRIVAL WAS OURS: REFRESH ON DEMAND (P0 incident) ──
+#:
+#: THE MEASURED DEFECT (production 2026-10-04, NFL ~600 QUOTE_STALE_ON_ARRIVAL
+#: rows a day; ~1,034 candidate-rows/day across leagues whose provider lag was
+#: inside 30 s and whose quote was nonetheless refused). `received_at` is
+#: stamped once per sport fetch and the candidates behind it wait on paced
+#: venue reads, ~5-6 s per queue position, so a quote the provider handed us
+#: INSIDE the 30 s rule went past it in our own queue. EVENTS_PER_ODDS_FETCH
+#: (a fixed share) stays at its default; this refresh is targeted instead: it
+#: fires ONLY for a candidate whose provider lag at receipt was inside the
+#: limit and whose age at arrival is over it -- exactly the case our own
+#: delay caused -- and it re-reads the provider so the candidate is judged on
+#: a quote of the provider's own current instant. The 30 s rule, its clock
+#: (the provider's last_update) and the instant it is applied at are
+#: unchanged; a quote the provider itself delivered stale is never refreshed
+#: (that is a coverage fact, refused by name as before). Bounded per sport per
+#: cycle; the credit cost is measured on the cycle row.
+#:
+#: OFF BY DEFAULT -- THE METERED BUDGET IS THE OWNER'S (review of 7bd084b).
+#: Every refresh is a metered the-odds-api fetch: at a bound of 4, up to 16
+#: more per 4-sport cycle against the 4 made today, and the incident's root
+#: causes treat that budget as an owner resource decision (RC8: raising
+#: MAX_METERED_SPORTS_PER_CYCLE is "owner resource decision"). It also does
+#: not remove the cause -- our serial, paced venue reads -- it re-reads the
+#: provider, which only helps when the provider's last_update moved, so
+#: credits go to STILL_STALE outcomes too. At 0 nothing extra is fetched:
+#: each candidate our delay made stale is counted (`capped`: one refresh the
+#: owner's bound would have made) and refused QUOTE_STALE_ON_ARRIVAL by name
+#: exactly as before, so the owner sees what enabling it costs and saves.
+#: The owner enables it by setting this bound (4 is the proposed value).
+ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT = 0
+ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT = 4
+ADAPTIVE_ODDS_REFETCH_RULE = (
+    "refreshes the provider quote only for a candidate the provider handed "
+    "over inside the freshness limit and our own processing pushed past it; "
+    "the limit, its clock and its instant are unchanged; a provider-stale "
+    "quote is never refreshed; at most adaptive_refetch_max_per_sport per "
+    "sport per cycle, which is 0 (off) until the owner sets it: every "
+    "refresh is a metered fetch and the metered budget is the owner's "
+    "resource decision (each candidate it would have refreshed is counted "
+    "as capped)")
+
 #: The venue read is the slow part; bound it so one hanging book cannot
 #: hold the cycle open.
 VENUE_TIMEOUT_S = 10.0
@@ -2618,6 +2661,112 @@ R_BOOK_CURRENCY_CONTRADICTED = "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT"
 #: describe, and the candidate stops where it always did.
 CALIBRATION_ONLY_AFTER = (R_BOOK_CURRENCY_NOT_ESTABLISHED,
                           R_BOOK_CURRENCY_CONTRADICTED)
+
+#: ── A FAILED VENUE READ STILL REACHES THE AGENTS (P0 incident 2026-10-04) ──
+#:
+#: THE GAP THIS CLOSES, measured in production on 191b299. When the collector's
+#: OWN venue book read failed -- VENUE_BOOK_READ_FAILED (our request gate's
+#: cooldown refusal, the await timing out) or VENUE_BOOK_READ_RETURNED_ERROR (a
+#: 429, a timeout, a 404, any venue error) -- no valuation was written at all,
+#: not even calibration-only, so NO paper agent ever received the opportunity:
+#: 165 PinnAPI-triggered evaluations a day (19.5% of reactive completions,
+#: mostly HELD events, which starved Xavier's fresh evidence) and 48+ discovery
+#: events a day. Yet no paper strategy prices from the collector's read: each
+#: reads its OWN book at its decision (`paper_book_observations`) and refuses by
+#: name when it cannot.
+#:
+#: So after exactly these two refusals the same evaluate/persist path runs and
+#: the record is sealed CALIBRATION_ONLY, with NO displayed price (none was
+#: read: `displayed_quote.acquisition_price` NULL, `executable_price` NULL by
+#: migration 144's CHECK) and a PRECISE `venue_read_refusal`:
+#:
+#:   VENUE_GATE_COOLDOWN  our venue request gate refused to dispatch (a 429
+#:                        cooldown longer than the wait it may hold)
+#:   VENUE_RATE_LIMITED   the venue answered 429 / a rate-limit error
+#:   VENUE_TIMEOUT        no answer in time (the await or the transport)
+#:   VENUE_NOT_FOUND      the venue answered 404 / not found
+#:   VENUE_ERROR          any other failure, named in the diagnostic
+#:
+#: The event stays REFUSED under its venue-read code in the tally and the
+#: ledger, exactly as before; nothing trades on a NULL price -- the record is
+#: inadmissible three times over (`_seal_calibration_only`, migration 144's
+#: CHECKs, and every consumer that reads `record_purpose`).
+VR_GATE_COOLDOWN = "VENUE_GATE_COOLDOWN"
+VR_RATE_LIMITED = "VENUE_RATE_LIMITED"
+VR_TIMEOUT = "VENUE_TIMEOUT"
+VR_NOT_FOUND = "VENUE_NOT_FOUND"
+VR_ERROR = "VENUE_ERROR"
+VENUE_READ_REFUSALS = (VR_GATE_COOLDOWN, VR_RATE_LIMITED, VR_TIMEOUT,
+                       VR_NOT_FOUND, VR_ERROR)
+CALIBRATION_ONLY_AFTER_READ_FAILURE = (R_VENUE_READ_FAILED,
+                                       R_VENUE_READ_ERROR)
+NO_BOOK_READ = ("NO_BOOK_WAS_READ: the venue read failed, so nothing was "
+                "displayed and there is no price of any kind")
+
+
+def venue_read_refusal(vq) -> str | None:
+    """THE PRECISE REASON A COLLECTOR BOOK READ FAILED, from the failed
+    `venue_quote` itself (its diagnostic carries our gate's refusal or the
+    venue's status and error type). None unless the read failed or errored."""
+    vq = vq if isinstance(vq, dict) else {}
+    if vq.get("refusal") not in CALIBRATION_ONLY_AFTER_READ_FAILURE:
+        return None
+    from .. import venue_request_gate as grt
+    gate_codes = {v for k, v in vars(grt).items()
+                  if k.startswith("R_") and isinstance(v, str)}
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    err = str(vq.get("venue_error") or vq.get("exception")
+              or diag.get("error_type") or diag.get("exception")
+              or diag.get("code") or "")
+    if (vq.get("refused_by") == "OUR_REQUEST_GATE"
+            or diag.get("stage") == "REQUEST_GATE"
+            or diag.get("refusal") in gate_codes or err in gate_codes):
+        return VR_GATE_COOLDOWN
+    status = diag.get("http_status")
+    if status is None:
+        status = diag.get("status")
+    try:
+        status = None if status is None else int(status)
+    except (TypeError, ValueError):
+        status = None
+    name = err.lower().replace("_", "")
+    if diag.get("is_rate_limited") or status == 429 or "ratelimit" in name:
+        return VR_RATE_LIMITED
+    if status == 404 or "notfound" in name:
+        return VR_NOT_FOUND
+    if diag.get("is_timeout") or "timeout" in name:
+        return VR_TIMEOUT
+    return VR_ERROR
+
+
+def _read_failure_basis(vq) -> dict | None:
+    """The calibration-only basis of a FAILED read: no book, no displayed
+    price, the precise refusal and what the venue (or our gate) said. None
+    for any other refusal, so every other candidate stops where it did."""
+    code = venue_read_refusal(vq)
+    if code is None:
+        return None
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    return {"refusal": vq["refusal"], "venue_read_refusal": code,
+            "no_book_read": True,
+            "displayed": {"ok": False, "acquisition_price": None,
+                          "api_price": None, "side_consumed": None,
+                          "depth": None, "usable_for_orders": False,
+                          "what_this_is": NO_BOOK_READ},
+            "book_currency": {"verdict": "NOT_READ", "mechanism": None,
+                              "mechanisms_unavailable": None,
+                              "partial": None,
+                              "why": "no book was read, so no currency "
+                                     "question arises"},
+            "venue_read_why": vq.get("why"),
+            "venue_read_diagnostic": {
+                k: diag.get(k) for k in (
+                    "stage", "code", "status", "http_status", "exception",
+                    "error_type", "is_rate_limited", "is_timeout",
+                    "retry_after_s", "refusal", "request_id")
+                if diag.get(k) is not None}}
 #: The named counter the spec asks for: valuations recorded inadmissible, for
 #: calibration only. Reported beside the tally, never inside it -- the event's
 #: own outcome stays REFUSED under the currency code, so "written" cannot
@@ -3035,11 +3184,14 @@ def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
 
 
 def primary_pinnacle_h2h(event: dict, *, received_at: float,
-                         family: str, at: float) -> dict | None:
+                         family: str, at: float,
+                         explain: dict | None = None) -> dict | None:
     """Preferred live WS source, with the original collector as fallback.
 
     Reads the existing owner in this process; never opens another socket.
     Discovery/independent-book evidence stays with the original event.
+    `explain` receives the WS refusal reason when the WS price is not used
+    (pinnapi_primary.select), so a None is never left unexplained.
     """
     from .. import pinnapi_feed_runtime as feed
     from .. import pinnapi_primary as primary
@@ -3048,7 +3200,58 @@ def primary_pinnacle_h2h(event: dict, *, received_at: float,
         owner.cache if owner else None, event,
         pinnacle_h2h(event, received_at=received_at), family=family,
         sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
-        runtime_id=feed._STATE.get("runtime_id"))
+        runtime_id=feed._STATE.get("runtime_id"), explain=explain)
+
+
+#: ── WHY AN EVENT HAS NO USABLE PINNACLE PRICE, BY NAME (P0 incident) ──
+#:
+#: THE MISLABEL (production 2026-10-04, 2,534 rows/day). When the PinnAPI read
+#: was refused (no exact fixture, sport not subscribed, age unknown, stale, no
+#: feed authority) AND the-odds-api payload carried no Pinnacle h2h, the event
+#: was recorded NO_PINNACLE_ON_EVENT -- as if the book had no price. The cause
+#: is now recorded as the codes that produced it, in order: the WS refusal
+#: reason (pinnapi_primary.select, e.g. PINNAPI_PRIMARY_SPORT_UNSUPPORTED,
+#: PINNAPI_PRIMARY_NO_EXACT_FIXTURE, FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE,
+#: FEED_OWNERSHIP_NOT_HELD), then what the discovery payload lacked. Both are
+#: classified in refusal_taxonomy_table; NO_PINNACLE_ON_EVENT remains only for
+#: a WS read that refused without a reason, which select() never does.
+R_PAYLOAD_HAS_NO_PINNACLE = "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK"
+R_PINNACLE_HAS_NO_H2H = "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET"
+R_NO_PINNACLE_ON_EVENT = "NO_PINNACLE_ON_EVENT"
+
+
+def pinnacle_absence_in_payload(event) -> str | None:
+    """What the discovery payload lacked for a Pinnacle h2h, by name, or None
+    when it carries one."""
+    books = (event or {}).get("bookmakers") or []
+    pin = next((b for b in books if (b or {}).get("key") == devig.BOOK),
+               None)
+    if pin is None:
+        return R_PAYLOAD_HAS_NO_PINNACLE
+    if not any((m or {}).get("key") == "h2h"
+               for m in (pin.get("markets") or [])):
+        return R_PINNACLE_HAS_NO_H2H
+    return None
+
+
+def no_pinnacle_codes(explain, event) -> list:
+    """The codes recorded for an event with no usable Pinnacle price, in
+    order: the WS refusal reason, then the discovery payload's absence."""
+    ws = (explain or {}).get("reason")
+    legacy = pinnacle_absence_in_payload(event)
+    codes = [c for c in (ws, legacy) if c]
+    return codes or [R_NO_PINNACLE_ON_EVENT]
+
+
+def no_pinnacle_stage(codes) -> str:
+    """THE LANE STAGE OF AN EVENT WITH NO USABLE PINNACLE PRICE: the stage of
+    its BINDING code -- the first, the WS refusal when there is one -- from
+    the one taxonomy (`ext.STAGE_OF`, derived by `ext.lane_stage_of`), so a
+    WS price refused as stale stops at 2_FRESHNESS and a provider-side
+    identity refusal or the payload's absence at 1_PROBABILITY (review of
+    7bd084b: every such event was staged 1_PROBABILITY whatever the cause)."""
+    first = next(iter(codes or []), None)
+    return ext.STAGE_OF.get(first) or "1_PROBABILITY"
 
 
 def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
@@ -4126,8 +4329,73 @@ def _displayed_market_state(basis: dict) -> dict:
             "side_consumed": d.get("side_consumed"),
             "depth": d.get("depth"),
             "readable": bool(d.get("ok")),
-            "ask_basis": ("DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
+            # A FAILED READ DISPLAYED NOTHING: no price, and it says so.
+            "ask_basis": ("NO_BOOK_WAS_READ__NO_PRICE"
+                          if (basis or {}).get("no_book_read") else
+                          "DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
                           "ESTABLISHED__NOT_USABLE_FOR_ORDERS")}
+
+
+def complement_record(rec: dict, *, contract: dict, ev_quote: dict,
+                      quote: dict, vq: dict, fee_fn, now: float,
+                      outcome_books, extra, reference_check,
+                      decision_lag_s, state_gates_for=None) -> tuple:
+    """THE OTHER SIDE OF THE CONTRACT `rec` VALUED, as (record, None), or
+    (None, the named reason none is written).
+
+    `rec` is the HOME calibration-only record exactly as the cycle built
+    and persisted it. The complement is the SAME `ext.evaluate` on the SAME
+    quote dict (`ev_quote`), contract identity and decision instant, with
+    the other intent and `payout_is_complement=True` -- the lane's one
+    inversion, so its probability is 1 - p(selection) over the complete
+    outcome set and its payout event NOT(selection). Its displayed price is
+    the other side of the SAME refused read
+    (`displayed_not_for_orders_other_side`), and it is sealed
+    CALIBRATION_ONLY: never admissible, no executable price, no size. The
+    settlement comparison and the venue rules text are the contract's own
+    (one contract, two sides) and are carried over; the PinnAPI provenance
+    is re-stamped by `pinnapi_primary.stamp_record`, which removes the
+    probability when the decision-instant check failed, exactly as on the
+    home record. Pure apart from `ext.evaluate` (no I/O)."""
+    other = (vq or {}).get("displayed_not_for_orders_other_side")
+    ok, why = CV.applies(rec, contract, other)
+    if not ok:
+        return None, why
+    home_ev = dict(rec.get("calibration_only_evidence") or {})
+    evidence = CV.complement_evidence(home_ev, other, decision_instant=now,
+                                      decision_lag_s=decision_lag_s)
+    out = ext.evaluate(
+        contract=CV.complement_contract(contract), quote=dict(ev_quote),
+        market_state=_displayed_market_state(
+            {"displayed": evidence["displayed_quote"],
+             "no_book_read": bool(evidence.get("no_book_read"))}),
+        execution_plan=None,
+        execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
+                            "crossing": True},
+        size=None,
+        risk={"permitted": False, "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
+        fee_fn=fee_fn, now=now, outcome_books=outcome_books, armed=True,
+        payout_is_complement=True, extra_refusals=list(extra or []),
+        record_purpose=ext.PURPOSE_CALIBRATION_ONLY,
+        calibration_only_evidence=evidence)
+    cev = out["calibration_only_evidence"]
+    if state_gates_for is not None:
+        cev["state_gates"] = state_gates_for(out.get("probability"))
+    for k in ("freshness", "rails"):
+        if k in home_ev:
+            cev[k] = home_ev[k]
+    out["venue_quote"] = vq
+    out["mapping"] = rec.get("mapping")
+    out["settlement"] = rec.get("settlement")
+    scmp = dict(rec.get("settlement_comparison") or {})
+    scmp.pop("reference_input", None)
+    scmp["complement_of_the_priced_side"] = {
+        "basis": CV.BASIS, "version": CV.VERSION,
+        "home_buy_intent": contract.get("buy_intent")}
+    out["settlement_comparison"] = scmp
+    from .. import pinnapi_primary as primary
+    primary.stamp_record(out, quote, reference_check)
+    return out, None
 
 
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
@@ -4226,6 +4494,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
                 "why": "venue read error: %s" % book["error"],
                 "venue_error": _sanitize(book["error"], limit=80),
+                # OUR GATE NAMED AS OURS (`venue_read_refusal`).
+                "refused_by": book.get("refused_by"),
                 "diagnostic": diag}
 
     read_at = time.time()
@@ -4405,6 +4675,17 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         "displayed_not_for_orders": _displayed_not_for_orders(
             book, intent=intent, slug=slug, read_at=read_at,
             currency=currency, venue_ts=vt, venue_clock_basis=age_basis),
+        # AND WHAT THE SAME BOOK DISPLAYED ON THE OTHER SIDE, for the
+        # complement record (`bettor_complement_valuation`): the other side
+        # of this binary contract is valued from this one read -- a pure
+        # parse of the payload already in hand, no second request, under
+        # the same no-order key and flag.
+        "displayed_not_for_orders_other_side": (
+            _displayed_not_for_orders(
+                book, intent=CV.other_intent(intent), slug=slug,
+                read_at=read_at, currency=currency, venue_ts=vt,
+                venue_clock_basis=age_basis)
+            if CV.other_intent(intent) else None),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
         "http_observation": book.get("http_observation")}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
@@ -9436,6 +9717,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # inferred from the credit count. Both are 0 at the default setting.
     odds_refetches = 0
     odds_refetch_failures = 0
+    # the on-demand refresh of a quote OUR delay made stale (by outcome)
+    adaptive_refetch = {"fired": 0, "saved": 0, "still_stale": 0,
+                        "failed": 0, "capped": 0}
 
     # ── THE LATENCY MEASUREMENT, ACCUMULATED OVER THE WHOLE CYCLE ──────
     #
@@ -9498,7 +9782,17 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # belongs to stays REFUSED under its venue-read code.
     cal_only: dict = {"attempted": 0, "recorded": 0, "already_recorded": 0,
                       "not_recorded_cycle_bound": 0, "persist_errors": {},
-                      "refusals": {}, "rows": []}
+                      "refusals": {}, "rows": [],
+                      # THE OTHER SIDE OF EACH RECORDED CONTRACT
+                      # (`bettor_complement_valuation`), counted apart from
+                      # the home records above so `recorded` keeps meaning
+                      # one record per refused read.
+                      "complement_recorded": 0,
+                      "complement_already_recorded": 0,
+                      "complement_not_recorded": {},
+                      "complement_persist_errors": {},
+                      # FAILED READS taken to a no-price record, by refusal
+                      "after_read_failure": {}}
 
     # ── R30A · THE EVALUATION BOUND, SHARED BY RESERVE, NEVER BY ORDER ──
     #
@@ -9652,6 +9946,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # because `received_at` is stamped per fetch and the accumulated
         # processing delay is what it governs.
         served_by_this_fetch = 0
+        adaptive_this_sport = 0
         # BY INDEX OVER A LOCAL LIST, so a re-fetch can actually replace the
         # events still to come. `for event in got["events"]` binds the list
         # once, so rebinding `got` inside it would have changed nothing --
@@ -9881,8 +10176,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                        "venue_event_slug"))
                 if _lj is not None:
                     line_jobs.append(_lj)
+            _ws_why: dict = {}
             quote = primary_pinnacle_h2h(
-                event, received_at=received_at, family=family, at=time.time())
+                event, received_at=received_at, family=family, at=time.time(),
+                explain=_ws_why)
             if stream_seed is None:
                 from .. import pinnapi_reactive as reactive
                 reactive.register(event, sport_key=sport_key, family=family,
@@ -9893,18 +10190,36 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 # it when there was one; with none (a PinnAPI-native seed
                 # has no other provider) the read is asked again for its
                 # reason, so the event never reads as "no Pinnacle".
-                _ws_why = (((quote or {}).get("reference_input") or {})
-                           .get("fallback_reason")
-                           or pinnapi_read_refusal(event, family=family,
-                                                   at=time.time()))
-                _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_why
+                # (integration) inc-edge's `explain` reason comes first: it
+                # is the same select's refusal, captured without a re-read.
+                _ws_reason = (_ws_why.get("reason")
+                              or ((quote or {}).get("reference_input") or {})
+                              .get("fallback_reason")
+                              or pinnapi_read_refusal(event, family=family,
+                                                      at=time.time()))
+                _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_reason
                 tally[_ws_code] = tally.get(_ws_code, 0) + 1
                 _step_refuse(_ws_code)
+                # THE WS REASON, KEPT (it was discarded here): why the
+                # reactive evaluation's own trigger could not be used.
+                if _ws_why.get("reason"):
+                    tally[_ws_why["reason"]] = \
+                        tally.get(_ws_why["reason"], 0) + 1
+                    _event_fields({"ws_refusal": _ws_why["reason"]})
                 continue
             if quote is None:
-                tally["NO_PINNACLE_ON_EVENT"] = \
-                    tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
-                _step_refuse("NO_PINNACLE_ON_EVENT")
+                # NO USABLE PINNACLE PRICE, BY CAUSE (no_pinnacle_codes): the
+                # WS refusal reason, then what the discovery payload lacked.
+                _np = no_pinnacle_codes(_ws_why, event)
+                for _c in _np:
+                    tally[_c] = tally.get(_c, 0) + 1
+                    _step_refuse(_c)
+                _event_fields({"stage": no_pinnacle_stage(_np),
+                               "ws_refusal": _ws_why.get("reason"),
+                               "payload_absence":
+                                   pinnacle_absence_in_payload(event),
+                               "formerly_recorded_as":
+                                   R_NO_PINNACLE_ON_EVENT})
                 continue
             if stream_seed is not None:
                 source = quote["reference_input"]
@@ -10126,6 +10441,69 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             _pe = _quote_epoch(quote)
             reference_received_at = quote["received_at"]
             _arr = time.time()
+            # ── OUR DELAY MADE IT STALE: REFRESH IT, ON DEMAND ──────────
+            # (ADAPTIVE_ODDS_REFETCH_RULE). Only a the-odds-api quote (a
+            # PinnAPI quote is already read at the decision instant), only
+            # when the provider delivered it inside the limit, only while
+            # the per-sport bound holds; a refresh that fails or is still
+            # over the limit leaves the candidate to be refused by name.
+            if (stream_seed is None and _pe is not None
+                    and (_arr - _pe) > PINNACLE_MAX_AGE_S
+                    and reference_received_at is not None
+                    and (float(reference_received_at) - _pe)
+                    <= PINNACLE_MAX_AGE_S
+                    and ((quote.get("reference_input") or {}).get("provider")
+                         != "pinnapi.com/raw-websocket")):
+                if adaptive_this_sport >= ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT:
+                    adaptive_refetch["capped"] += 1
+                    _event_fields({"adaptive_odds_refetch": (
+                        "CAPPED" if ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT > 0
+                        else "OFF_PENDING_THE_OWNERS_METERED_BUDGET")})
+                else:
+                    adaptive_this_sport += 1
+                    adaptive_refetch["fired"] += 1
+                    odds_refetches += 1
+                    again = await fetch_odds(sport_key, api_key=api_key)
+                    credits["used"] = (again.get("credits_used")
+                                       or credits["used"])
+                    credits["remaining"] = (again.get("credits_remaining")
+                                            or credits["remaining"])
+                    fresh_ev = None
+                    if again.get("ok") and again.get("received_at") is not None:
+                        # THE NEW RECEIPT INSTANT AND THE NEW PAYLOAD'S OWN
+                        # PRICES, together, for this candidate and every one
+                        # still to come in this sport (as the fixed re-fetch
+                        # above does).
+                        received_at = again["received_at"]
+                        served_by_this_fetch = 1
+                        fresh = {(e or {}).get("id"): e
+                                 for e in (again["events"] or [])
+                                 if isinstance(e, dict) and (e or {}).get("id")}
+                        for _j in range(_i + 1, len(events)):
+                            _r = fresh.get((events[_j] or {}).get("id"))
+                            if _r is not None:
+                                events[_j] = _r
+                        fresh_ev = fresh.get((event or {}).get("id"))
+                    q2 = (primary_pinnacle_h2h(
+                        fresh_ev, received_at=received_at, family=family,
+                        at=time.time()) if fresh_ev is not None else None)
+                    if (q2 is not None and q2.get("home") == quote.get("home")
+                            and q2.get("away") == quote.get("away")):
+                        events[_i] = event = fresh_ev
+                        quote = q2
+                        _pe = _quote_epoch(quote)
+                        reference_received_at = quote["received_at"]
+                        _arr = time.time()
+                        outcome = ("SAVED" if _pe is not None
+                                   and (_arr - _pe) <= PINNACLE_MAX_AGE_S
+                                   else "STILL_STALE")
+                    else:
+                        outcome = "FAILED"
+                        odds_refetch_failures += 1
+                    adaptive_refetch[{"SAVED": "saved",
+                                      "STILL_STALE": "still_stale",
+                                      "FAILED": "failed"}[outcome]] += 1
+                    _event_fields({"adaptive_odds_refetch": outcome})
             _event_fields(arrival_split(_pe, reference_received_at, _arr))
             if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
                 lat["skipped_stale_on_arrival"] += 1
@@ -10365,6 +10743,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 # admission block below is reachable.
                 calibration_only = _calibration_only_basis(vq)
                 if calibration_only is None:
+                    # A FAILED READ IS RECORDED TOO, with no price and its
+                    # precise refusal, so the agents still receive the
+                    # opportunity (CALIBRATION_ONLY_AFTER_READ_FAILURE).
+                    calibration_only = _read_failure_basis(vq)
+                    if calibration_only is not None:
+                        _vq_entry["venue_read_refusal"] = \
+                            calibration_only["venue_read_refusal"]
+                        cal_only["after_read_failure"][
+                            calibration_only["venue_read_refusal"]] = \
+                            cal_only["after_read_failure"].get(
+                                calibration_only["venue_read_refusal"],
+                                0) + 1
+                if calibration_only is None:
                     continue
                 if (evaluated + cal_only["attempted"]
                         >= MAX_CALIBRATION_ONLY_PER_CYCLE):
@@ -10456,9 +10847,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             if calibration_only is not None:
                 # THE VENUE READ'S OWN REFUSAL LEADS the record's refusals: it
                 # is where this candidate stopped as an entry, and every later
-                # code is what the trace met after it.
-                extra = [calibration_only["refusal"]] + [
-                    c for c in extra if c != calibration_only["refusal"]]
+                # code is what the trace met after it. A FAILED read's precise
+                # refusal follows it (VENUE_RATE_LIMITED, ...).
+                lead = [calibration_only["refusal"]] + (
+                    [calibration_only["venue_read_refusal"]]
+                    if calibration_only.get("no_book_read") else [])
+                extra = lead + [c for c in extra if c not in lead]
 
             # Independent-book depth is re-aged too; a cached discovery
             # payload must not supply stale corroboration for a WS price.
@@ -10518,9 +10912,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 "settlement_rule": srule["book_rule"],
                 "event_key": quote["event_id"],
             }
-            rec = ext.evaluate(
-                contract=contract,
-                quote={# THE BOOK IS DECLARED, and the source checks it.
+            # THE QUOTE THE VALUATION READS, named once: the complement of
+            # this record (`bettor_complement_valuation`) is valued from the
+            # SAME dict, so the two can never price different inputs.
+            ev_quote = {
+                       # THE BOOK IS DECLARED, and the source checks it.
                        # Omitting it made the valuation refuse every event
                        # with PINNACLE_NOT_IN_THIS_PAYLOAD -- correctly,
                        # since an undeclared book is exactly the silent
@@ -10542,7 +10938,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        "period": ident["period"],
                        "period_basis": "THE_FEED_H2H_MARKET_IS_FULL_MATCH",
                        "line": None,
-                       "settlement_rule": srule["book_rule"]},
+                       "settlement_rule": srule["book_rule"]}
+            rec = ext.evaluate(
+                contract=contract,
+                quote=ev_quote,
                 # THE ACQUISITION PRICE, NOT THE API PRICE. For a LONG
                 # these are the same number; for a SHORT the API price is
                 # YES-denominated and the cost is its complement, and
@@ -10626,15 +11025,31 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                 if calibration_only is None
                                 else ext.PURPOSE_CALIBRATION_ONLY),
                 calibration_only_evidence=(
-                    None if calibration_only is None else {
-                        "venue_read_refusal": calibration_only["refusal"],
+                    None if calibration_only is None else dict({
+                        # THE PRECISE REFUSAL: the currency code for a read
+                        # book; VENUE_GATE_COOLDOWN / _RATE_LIMITED /
+                        # _TIMEOUT / _NOT_FOUND / _ERROR for a failed read.
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        # the lane's own code for where the read stopped
+                        "venue_read_lane_refusal": calibration_only["refusal"],
                         "venue_read_why": _sanitize(
                             calibration_only.get("venue_read_why") or "",
                             limit=240),
                         "book_currency": calibration_only["book_currency"],
                         "displayed_quote": calibration_only["displayed"],
                         "decision_instant_epoch_s": now,
-                        "decision_lag_s": decision_lag_s}))
+                        "decision_lag_s": decision_lag_s},
+                        **({"no_book_read": True, "displayed_price": None,
+                            "venue_read_diagnostic": calibration_only.get(
+                                "venue_read_diagnostic"),
+                            "agents_read_their_own_book": (
+                                "no paper strategy prices from this record: "
+                                "each reads its own book at its decision "
+                                "and refuses by name when it cannot")}
+                           if calibration_only.get("no_book_read")
+                           else {}))))
             if calibration_only is None:
                 evaluated += 1
                 step["evaluated"] += 1
@@ -10799,7 +11214,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "us_market_slug": ident.get("us_market_slug"),
                         "event_key": quote.get("event_id"),
                         "probability": rec.get("probability"),
-                        "venue_read_refusal": calibration_only["refusal"],
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        "venue_read_lane_refusal": calibration_only[
+                            "refusal"],
                         "displayed_price_not_for_orders": (
                             calibration_only["displayed"]
                             .get("acquisition_price"))})
@@ -10808,6 +11227,52 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 if stream_seed is not None:
                     stream_seed["valuation_ids"].append(cal_id)
                 await _paper_valuation(conn, cal_id)
+                # ── THE OTHER SIDE OF THE SAME CONTRACT (P0 incident) ──────
+                #
+                # The lane prices the provider's HOME team only, so the other
+                # side of this binary contract -- the away team on an MLB
+                # money line, NO on a soccer per-side contract -- was never
+                # valued, and its paper strategies could never buy it. It is
+                # valued here from the SAME de-vig, quote, identity, read and
+                # decision instant, as 1 - p (complete outcome set), sealed
+                # CALIBRATION_ONLY exactly like this record, and decided by
+                # the paper strategies like any other row. Never raises into
+                # the cycle; every outcome is counted by name.
+                comp, comp_why = complement_record(
+                    rec, contract=contract, ev_quote=ev_quote, quote=quote,
+                    vq=vq, fee_fn=fee_fn, now=now,
+                    outcome_books=quote["depth"].get(str(quote["home"])),
+                    extra=extra, reference_check=reference_check,
+                    decision_lag_s=decision_lag_s,
+                    state_gates_for=(lambda p: entryx.state_from_evidence(
+                        freshness=_cfr,
+                        settlement=_settlement_compatibility(srule),
+                        probability=p, calibration=calibration)))
+                if comp is None:
+                    cal_only["complement_not_recorded"][comp_why] = \
+                        cal_only["complement_not_recorded"].get(
+                            comp_why, 0) + 1
+                    _vq_entry["complement_record"] = comp_why
+                    continue
+                try:
+                    comp_id = await ext.persist(conn, comp)
+                except Exception as exc:                       # noqa: BLE001
+                    name = "COMPLEMENT_PERSIST:" + type(exc).__name__
+                    cal_only["complement_persist_errors"][name] = \
+                        cal_only["complement_persist_errors"].get(
+                            name, 0) + 1
+                    _vq_entry["complement_record"] = name
+                    continue
+                if comp_id is None:
+                    cal_only["complement_already_recorded"] += 1
+                    _vq_entry["complement_record"] = "ALREADY_RECORDED"
+                    continue
+                cal_only["complement_recorded"] += 1
+                _vq_entry["complement_record"] = "RECORDED"
+                _vq_entry["complement_valuation_id"] = comp_id
+                if stream_seed is not None:
+                    stream_seed["valuation_ids"].append(comp_id)
+                await _paper_valuation(conn, comp_id)
                 continue
             try:
                 row_id = await ext.persist(conn, rec)
@@ -11163,6 +11628,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "is_the_default": EVENTS_PER_ODDS_FETCH >= MAX_PER_CYCLE,
                "odds_refetches": odds_refetches,
                "odds_refetch_failures": odds_refetch_failures,
+               # the on-demand refresh of quotes OUR delay made stale
+               "adaptive_refetch": dict(adaptive_refetch),
+               "adaptive_refetch_rule": ADAPTIVE_ODDS_REFETCH_RULE,
+               "adaptive_refetch_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT,
+               "adaptive_refetch_proposed_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT,
                "what_it_is_for": (
                    "399 of 1,126 evaluation rows produced no fair value and "
                    "every one failed at QUOTE_STALE. 296 of those 399 were "

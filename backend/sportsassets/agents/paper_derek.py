@@ -56,6 +56,7 @@ from typing import Any
 from .. import bettor_paper_guard as G
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 
 VERSION = "PAPER_DEREK_V1"
@@ -492,6 +493,8 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     if not model.get("ok"):
         refusals.append(model.get("refusal") or R_NO_RESEARCH_MODEL)
     obs, md, levels, internal = None, None, [], None
+    gross_inputs: dict | None = None
+    fee_fn = ctx.get("fee_fn")
     if not refusals:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
@@ -509,19 +512,48 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         elif obs.get("error") or not levels:
             refusals.append(R_NO_BOOK)
         else:
-            internal = score(model, price=levels[0]["price"],
-                             payout_is_complement=bool(
-                                 cand.get("payout_is_complement")))
-            if not internal.get("ok"):
-                refusals.append(internal["refusal"])
+            # THE GROSS EDGE'S INPUTS, VALIDATED BEFORE V2 JUDGES THE EDGE
+            # (P0 incident; review of 7bd084b: only the completed-game
+            # policy carried the receipt, so Derek still recorded
+            # BELOW_MIN_GROSS_EDGE on inputs nothing had checked). The same
+            # checks as every policy: the Pinnacle p is the held side's (the
+            # de-vig recomputed from the row's own prices), the price is the
+            # side a BUY consumes, the fee evaluates, the Pinnacle age is
+            # inside its unchanged rule. This policy reads its own book
+            # inside the decision and has no book-age bound; none is added
+            # (book_max_age_s None: the age is recorded, an unknown receipt
+            # instant fails). A failed input is a SOFTWARE refusal by name
+            # and the V2 combination is not run on it -- never an economic
+            # verdict on unvalidated numbers. No threshold moves.
+            gross_inputs = GEI.validate(
+                p=pin.get("p"), side=side, row=row, levels=levels,
+                consumed_side=lv["side"], md=md,
+                fee_per_contract=(lambda px: float(L._fee(fee_fn, 1, px,
+                                                          at))),
+                pin=pin, decided_at=at,
+                edge_at=(float(ctx["clock"]()) if ctx.get("clock")
+                         else at),
+                book_observed_at=obs.get("observed_at"),
+                book_max_age_s=None,
+                threshold_edge_pp=round(float(ent["min_gross_edge_pp"])
+                                        * 100.0, 9))
+            pin["gross_edge_inputs"] = gross_inputs
+            if not gross_inputs["ok"]:
+                refusals.extend(r for r in gross_inputs["refusals"]
+                                if r not in refusals)
+            else:
+                internal = score(model, price=levels[0]["price"],
+                                 payout_is_complement=bool(
+                                     cand.get("payout_is_complement")))
+                if not internal.get("ok"):
+                    refusals.append(internal["refusal"])
     # ── THE V2 COMBINATION, on the observed book ─────────────────────
     params = {"min_gross_edge_pp": float(ent["min_gross_edge_pp"]),
               "min_net_ev_usd": float(ent["min_net_ev_usd"])}
     pd, econ, sized = None, None, {"qty": 0, "limit": None}
     p_int = (internal or {}).get("p")
     p_blend = DP.blend(p_int, pin.get("p")) if p_int is not None else None
-    fee_fn = ctx.get("fee_fn")
-    if levels and p_blend is not None:
+    if levels and p_blend is not None and (gross_inputs or {}).get("ok"):
         maxfee1 = float(L.max_fee_for(1, 0.5, at=at, fee_fn=fee_fn))
         sized = size_and_limit(
             levels, p_blended=p_blend,
@@ -555,6 +587,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                 "compatibility") == "COMPATIBLE"),
             policy_version=DP.POLICY_V2)
         pd["instrument"] = label
+        pd["gross_edge_inputs"] = GEI.summary(gross_inputs)
         refusals.extend(r for r in pd["refusals"] if r not in refusals)
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
@@ -647,6 +680,9 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: from here its order is owed, whatever the
+    # decision deadline (`bounded_decision`; the backstop names a miss).
+    enter_recorded(ctx, did)
     # ── ONLY NOW, THE PAPER ORDER ─────────────────────────────────────
     delay = float(sim_cfg["decision_to_execution_delay_s"])
     order = {"idempotency_key": "%s:ENTRY" % did,
@@ -787,17 +823,39 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     """THE DELAY, HONOURED: wait (within the pass budget) until the new
     entries become eligible, observe their books again, and simulate. An
     entry whose eligible book is not observed this pass stays pending for
-    the next one, or expires with no fill."""
+    the next one, or expires with no fill.
+
+    R30A INCIDENT REPAIR. Two ways this step manufactured an unusable or a
+    harmful observation are closed:
+      * the read is made with `not_before` = the entry's eligible instant,
+        so the 6 s shared-read cache can no longer answer it with the
+        decision's own PRE-eligible receipt (recorded outside the order's
+        window, the read was wasted -- 22 of the 60 filled entries in 7 d,
+        research-sql run 37233864395, E2);
+      * the step no longer reads when the pass has no time left to finish a
+        read after the wait: it used to sleep to the eligible instant and
+        then read with nothing left on the pass deadline, recording an
+        ERRORED observation (PAPER_BOOK_READ_DEADLINE_EXCEEDED /
+        VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE) INSIDE the order's
+        window -- 99 such reads in 7 d (E3), the commonest first observation
+        of the 100 entry orders that then expired unread. Such an entry now
+        stays pending for the entry-fill read (`paper_runtime.
+        schedule_entry_fill`) or the next pass's books step, within its
+        unchanged TTL."""
     pend = list(ctx.get("pending_entries") or [])
     known = {p["order_id"] for p in pend}
-    # ...and every open marketable order still waiting for a book observed
-    # at or after its eligible instant (e.g. one the in-cycle hook submitted).
+    # ...and every open marketable order still waiting for a READABLE book
+    # observed at or after its eligible instant (e.g. one the in-cycle hook
+    # submitted). An errored observation holds no book and the simulator
+    # skips it (bettor_paper_simulator.R_NO_READABLE_BOOK), so an order that
+    # has met only those is still waiting and is read again here.
     for r in await conn.fetch(
             "SELECT o.order_id, o.eligible_at FROM paper_orders o "
             " WHERE o.account_id=$1 AND o.order_type='MARKETABLE' "
             "   AND o.state='PENDING_SIMULATION' AND NOT EXISTS (SELECT 1 "
             "   FROM paper_book_observations b WHERE b.us_market_slug = "
-            "   o.us_market_slug AND b.observed_at >= o.eligible_at)",
+            "   o.us_market_slug AND b.observed_at >= o.eligible_at "
+            "   AND b.error IS NULL)",
             ctx["account_id"]):
         if r["order_id"] not in known:
             pend.append({"order_id": r["order_id"],
@@ -805,24 +863,42 @@ async def step_after_delay(conn, ctx: dict) -> dict:
     if not pend:
         return {"pending": 0}
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
-    wait = max(float(p["eligible_at"]) for p in pend) - float(clock())
+    now0 = float(clock())
+    elig = {p["order_id"]: float(p["eligible_at"]) for p in pend}
+    wait = max(elig.values()) - now0
     left = ctx["deadline"] - time.monotonic()
     sleep = ctx.get("sleep") or asyncio.sleep
-    if wait > 0 and wait < left:
+    room = left - BOOK_READ_RESERVE_S - AFTER_DELAY_MIN_READ_S
+    waited = 0.0
+    if 0 < wait < room:
         await sleep(wait)
-    slugs = sorted({r["us_market_slug"] for r in await conn.fetch(
-        "SELECT us_market_slug FROM paper_orders WHERE order_id = ANY($1)",
-        [p["order_id"] for p in pend])})
-    from .paper_runtime import read_books
-    got = await read_books(conn, ctx, slugs, basis="ENTRY_AFTER_DELAY")
+        waited = wait
     # In production the clock has advanced by the wait already; with a
-    # fixed test clock the wait is added explicitly. Either way a fill needs
-    # a book observed at or after the order's eligible instant.
-    base = float(clock())
-    if ctx.get("clock") is not time.time:
-        base += max(wait, 0.0)
-    sim_now = max([base] + [float(o["observed_at"])
-                            for o in got["obs"].values()])
+    # fixed test clock the wait is added explicitly.
+    eff_now = max(float(clock()), now0 + waited)
+    slug_of = {r["order_id"]: r["us_market_slug"] for r in await conn.fetch(
+        "SELECT order_id, us_market_slug FROM paper_orders "
+        " WHERE order_id = ANY($1)", [p["order_id"] for p in pend])}
+    not_before: dict = {}
+    for oid, e in elig.items():
+        slug = slug_of.get(oid)
+        if slug is not None and e <= eff_now + 1e-6:
+            not_before[slug] = max(e, not_before.get(slug, 0.0))
+    deferred = sum(1 for oid, e in elig.items() if e > eff_now + 1e-6)
+    no_time = (ctx["deadline"] - time.monotonic()) <= (
+        BOOK_READ_RESERVE_S + AFTER_DELAY_MIN_READ_S)
+    got = {"read": 0, "obs": {}}
+    if not_before and not no_time:
+        from .paper_runtime import read_books
+        got = await read_books(conn, ctx, sorted(not_before),
+                               basis="ENTRY_AFTER_DELAY",
+                               not_before=not_before)
+    elif not_before:
+        deferred += len(not_before)
+    # A fill needs a READABLE book observed at or after the order's
+    # eligible instant (the simulator's rule).
+    sim_now = max([eff_now] + [float(o["observed_at"])
+                               for o in got["obs"].values()])
     res = []
     for p in pend:
         r = await SIM.simulate_order(conn, p["order_id"], now=sim_now,
@@ -833,7 +909,8 @@ async def step_after_delay(conn, ctx: dict) -> dict:
                             if x.get("ok") and not x.get("duplicate"))
         res.append({k: r.get(k) for k in ("order_id", "state", "filled_qty",
                                           "refusal", "pending")})
-    return {"pending": len(pend), "books": got["read"], "results": res}
+    return {"pending": len(pend), "books": got["read"], "results": res,
+            "deferred_past_the_pass_deadline": deferred}
 
 
 
@@ -848,14 +925,28 @@ async def step_after_delay(conn, ctx: dict) -> dict:
 # refusal, which it raises rather than queue past the deadline).
 
 BOOK_READ_RESERVE_S = 1.5
+#: R30A: the least time a book read is given; step_after_delay does not
+#: start one with less left on the pass deadline (it would only record an
+#: errored observation inside the order's window).
+AFTER_DELAY_MIN_READ_S = 1.0
 R_BOOK_DEADLINE = "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE"
 
 
-async def read_book_within_deadline(ctx: dict, slug: str) -> dict:
+async def read_book_within_deadline(ctx: dict, slug: str, *,
+                                    not_before_epoch=None) -> dict:
+    """`not_before_epoch` (R30A): the read must be RECEIVED at or after this
+    instant (a pending entry's eligible instant) -- the shared-read cache may
+    not answer with an older receipt. Passed only when given, so every
+    existing caller and test stand-in is called exactly as before."""
     md = ctx["market_data"]
     dl = ctx.get("deadline")
+    nb = ({} if not_before_epoch is None
+          else {"not_before_epoch": float(not_before_epoch)})
     if dl is None:
-        return await md.read_book(slug)
+        try:
+            return await md.read_book(slug, **nb)
+        except TypeError:
+            return await md.read_book(slug)
     remaining = float(dl) - time.monotonic() - BOOK_READ_RESERVE_S
     if remaining <= 0.0:
         return {"marketData": None, "error": G.R_BOOK_READ_DEADLINE,
@@ -863,7 +954,7 @@ async def read_book_within_deadline(ctx: dict, slug: str) -> dict:
                 "why": "no time left inside the decision deadline"}
     try:
         return await md.read_book(slug, deadline_epoch_s=time.time()
-                                  + remaining, timeout_s=remaining)
+                                  + remaining, timeout_s=remaining, **nb)
     except TypeError:
         # a market-data client without deadline support (a test stand-in)
         return await md.read_book(slug)
@@ -875,3 +966,187 @@ def book_deadline_refusal(got: dict) -> bool:
     g = got or {}
     return (g.get("error") == G.R_BOOK_READ_DEADLINE
             or g.get("refused_by") == "OUR_REQUEST_GATE")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# A RECORDED ENTER ALWAYS GETS ITS ORDER (P0 incident 2026-10-04)
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEFECT, measured in production on 191b299. The in-cycle hook bounded
+# the WHOLE decision with asyncio.wait_for(VALUATION_HOOK_TIMEOUT_S = 8 s). A
+# decision INSERTs its row first and only then -- for an ENTER -- runs the
+# execution-intent hook, builds the canonical intent and submits the paper
+# order. A deadline that fell after the INSERT cancelled the order sequence
+# and left a recorded ENTER with no paper order and no PAPER_RISK_REFUSED
+# finding: about one a day, 4% of the completed-game policy's ENTERs.
+#
+# THE RULE. The decision deadline bounds the DECISION: everything up to and
+# including the INSERT of its row. A decision that wrote an ENTER says so
+# (`enter_recorded`, right after the INSERT); from then on the deadline no
+# longer applies and the order sequence -- execution hook, canonical intent,
+# paper order, in that canonical order, the paper order's fields read from
+# the intent -- runs to completion, bounded only by ENTER_ORDER_GRACE_S so a
+# wedged hook cannot hold the cycle for ever. Nothing is left running in the
+# background: the decision's connection is never used by two coroutines at
+# once, and a decision cut BEFORE its INSERT is cancelled exactly as before
+# (it recorded nothing, so nothing is owed).
+#
+# THE BACKSTOP. Whatever still leaves a recorded ENTER without an order -- the
+# grace exceeded, an outer cancellation (the reactive evaluation's own
+# deadline), a process restart between the INSERT and the order -- becomes a
+# named finding ENTER_WITHOUT_ORDER once the ENTER is ENTER_WITHOUT_ORDER_
+# AFTER_S old (`step_enter_backstop`, every paper pass). An ENTER whose order
+# the paper risk check refused already carries its own finding
+# (PAPER_RISK_REFUSED_THE_ORDER) and is not one of these. The backstop names;
+# it never places a late order on a decision whose book and price are gone.
+
+CTX_ENTER_RECORDED = "enter_recorded"
+#: How long a RECORDED ENTER's order sequence may run past the decision
+#: deadline. Above the measured tail (hook + intent + submit) by a wide
+#: margin; below the paper pass budget's multiple that would wedge a cycle.
+ENTER_ORDER_GRACE_S = 15.0
+#: An ENTER this old with no order and no order refusal is a finding. Above
+#: VALUATION_HOOK_TIMEOUT_S + ENTER_ORDER_GRACE_S, so an order still being
+#: submitted is never named.
+ENTER_WITHOUT_ORDER_AFTER_S = 60.0
+ENTER_BACKSTOP_LOOKBACK_S = 6 * 3600.0
+ENTER_BACKSTOP_MAX_PER_PASS = 50
+F_ENTER_WITHOUT_ORDER = "ENTER_WITHOUT_ORDER"
+
+
+class EnterOrderGraceExceeded(asyncio.TimeoutError):
+    """A RECORDED ENTER whose order sequence outran ENTER_ORDER_GRACE_S after
+    the decision deadline. A TimeoutError, so every caller that handled the
+    old timeout still does; the backstop names the ENTER afterwards."""
+
+    def __init__(self, decision_id, *, timeout_s, grace_s):
+        super().__init__(
+            "ENTER %s was recorded but its paper order did not complete "
+            "within %.1f s after the %.1f s decision deadline"
+            % (decision_id, float(grace_s), float(timeout_s)))
+        self.decision_id = decision_id
+        self.timeout_s = float(timeout_s)
+        self.grace_s = float(grace_s)
+
+
+def enter_recorded(ctx: dict, decision_id: str) -> None:
+    """A decision calls this RIGHT AFTER its ENTER row is written and before
+    its order sequence starts: from here its order is owed. A no-op when the
+    decision does not run under `bounded_decision` (the pass steps)."""
+    ev = ctx.get(CTX_ENTER_RECORDED)
+    if ev is not None:
+        ctx["enter_recorded_decision_id"] = decision_id
+        ev.set()
+
+
+async def bounded_decision(make, ctx: dict, *, timeout_s: float,
+                           grace_s: float | None = None) -> dict:
+    """RUN `make(ctx)` -- one decision -- WITH ITS DEADLINE ON THE DECISION
+    ONLY. Before its ENTER row is recorded the decision is cancelled at
+    `timeout_s` and asyncio.TimeoutError is raised, as before. After it, the
+    order sequence completes, up to `grace_s` more (EnterOrderGraceExceeded
+    beyond that). `make` receives a shallow copy of `ctx` carrying the
+    signal; shared sub-dicts (books_by_slug) stay shared."""
+    grace = ENTER_ORDER_GRACE_S if grace_s is None else float(grace_s)
+    ev = asyncio.Event()
+    run_ctx = dict(ctx)
+    run_ctx[CTX_ENTER_RECORDED] = ev
+    t0 = time.monotonic()
+    task = asyncio.ensure_future(make(run_ctx))
+    try:
+        try:
+            return await asyncio.wait_for(asyncio.shield(task),
+                                          float(timeout_s))
+        except asyncio.TimeoutError:
+            if task.done():
+                # finished (or failed -- including with its own TimeoutError)
+                # at the deadline: its own outcome, exactly as before
+                return task.result()
+            if not ev.is_set():
+                raise                   # cut before its INSERT: nothing owed
+        # THE ENTER IS RECORDED: its order is owed. Same task, same
+        # connection, no second coroutine on it.
+        did = run_ctx.get("enter_recorded_decision_id")
+        try:
+            rec = await asyncio.wait_for(asyncio.shield(task), grace)
+        except asyncio.TimeoutError:
+            raise EnterOrderGraceExceeded(did, timeout_s=timeout_s,
+                                          grace_s=grace) from None
+        return dict(rec, order_after_decision_deadline={
+            "decision_id": did, "decision_deadline_s": float(timeout_s),
+            "grace_s": grace,
+            "elapsed_s": round(time.monotonic() - t0, 3),
+            "why": ("the ENTER was recorded before the decision deadline; "
+                    "its order sequence was allowed to complete")})
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.wait({task})
+        if task.done() and not task.cancelled():
+            task.exception()                # retrieved: never logged unread
+
+
+ENTER_BACKSTOP_SQL = """
+    SELECT d.decision_id, d.session_id, d.strategy, d.valuation_id,
+           d.us_market_slug, d.fixture, d.policy_version,
+           extract(epoch FROM d.decided_at)::float8 AS decided_at
+      FROM paper_decisions d
+     WHERE d.account_id = $1 AND d.verdict = 'ENTER'
+       AND d.decided_at <= to_timestamp($2)
+       AND d.decided_at > to_timestamp($3)
+       AND NOT EXISTS (SELECT 1 FROM paper_orders o
+                        WHERE o.decision_id = d.decision_id)
+       AND NOT EXISTS (SELECT 1 FROM paper_audrey_findings f
+                        WHERE f.account_id = d.account_id
+                          AND f.kind = ANY($4::text[])
+                          AND f.subject = d.decision_id)
+     ORDER BY d.decided_at
+     LIMIT $5
+"""
+
+
+async def step_enter_backstop(conn, ctx: dict) -> dict:
+    """EVERY RECORDED ENTER HAS AN ORDER, OR A NAMED FINDING. Each ENTER of
+    this account at least ENTER_WITHOUT_ORDER_AFTER_S old (within the
+    lookback) with no paper order naming it and no order refusal becomes ONE
+    finding ENTER_WITHOUT_ORDER (idempotent per decision). Records only:
+    no order is placed, cancelled or changed."""
+    at = float(ctx["clock"]()) if ctx.get("clock") else float(ctx["now"])
+    rows = await conn.fetch(
+        ENTER_BACKSTOP_SQL, ctx["account_id"],
+        at - ENTER_WITHOUT_ORDER_AFTER_S, at - ENTER_BACKSTOP_LOOKBACK_S,
+        [R_ORDER_REFUSED, F_ENTER_WITHOUT_ORDER],
+        ENTER_BACKSTOP_MAX_PER_PASS)
+    named = []
+    for r in rows:
+        did = r["decision_id"]
+        fid = "paperfind:" + hashlib.sha256(
+            ("%s:%s:%s" % (r["session_id"], F_ENTER_WITHOUT_ORDER, did))
+            .encode()).hexdigest()[:24]
+        detail = {
+            "decision_id": did, "strategy": r["strategy"],
+            "policy_version": r["policy_version"],
+            "valuation_id": r["valuation_id"],
+            "us_market_slug": r["us_market_slug"], "fixture": r["fixture"],
+            "decided_at": r["decided_at"],
+            "age_at_detection_s": round(at - float(r["decided_at"]), 3),
+            "threshold_s": ENTER_WITHOUT_ORDER_AFTER_S,
+            "order_refusal_recorded": False,
+            "why": ("a recorded ENTER has no paper order naming it and no "
+                    "order refusal: its order sequence was cut after the "
+                    "decision row was written (grace exceeded, an outer "
+                    "cancellation or a process restart). Nothing is placed "
+                    "late: the decision's book and price are gone"),
+            "named_by": "paper_derek.step_enter_backstop"}
+        got = await conn.fetchval(
+            "INSERT INTO paper_audrey_findings (finding_id, session_id, "
+            " account_id, found_at, kind, severity, subject, detail) "
+            "VALUES ($1,$2,$3,$4,$5,'WARNING',$6,$7::jsonb) "
+            "ON CONFLICT DO NOTHING RETURNING finding_id",
+            fid, r["session_id"], ctx["account_id"], L._ts(at),
+            F_ENTER_WITHOUT_ORDER, did, json.dumps(detail, default=str))
+        if got is not None:
+            named.append(did)
+    return {"enter_without_order": len(named), "decision_ids": named[:10],
+            "examined": len(rows),
+            "threshold_s": ENTER_WITHOUT_ORDER_AFTER_S}

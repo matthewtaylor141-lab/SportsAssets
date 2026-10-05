@@ -1030,3 +1030,37 @@ tests/test_collector_coverage_receipts.py
 tests/test_r30a_pinnapi_scope_clock_inplay.py
 tests/test_r30a_pinnapi_native_discovery.py
 tests/test_r30a_line_market_family.py
+# (251) P0 INCIDENT inc-edge: the OTHER side of each binary venue contract is
+# valued from the same de-vig as 1 - p (complete outcome set), sealed
+# CALIBRATION_ONLY (never admissible, no executable price), kept by the
+# side-aware uniqueness key, decided by the real paper pass under the
+# unchanged 0.5 pp / fee rules, and measured by Xavier on 1 - p.
+tests/test_the_other_side_of_the_contract_is_valued.py
+# (251) P0 INCIDENT inc-edge: one valuation per observation per side without
+# the NULL collapse (the de-vig records the quote's source instant on a
+# pre-aging refusal); the gross edge's inputs validated per decision
+# (orientation recomputed from the row's own prices, the BUY side of the book
+# on the adapter's cent grid, a declared venue conversion re-derived, fee,
+# Pinnacle age at the decision instant, book bound) for CG, Derek V2 and the
+# maker -- a failing input is a SOFTWARE refusal, never BELOW_MIN_GROSS_EDGE;
+# thresholds unchanged; the source-instant label is stored on the row.
+tests/test_gross_edge_inputs_are_validated.py
+# P0 INCIDENT inc-edge: a quote the provider delivered inside 30 s and our own
+# queue made stale can be refreshed on demand -- OFF by default (no extra
+# metered credit until the owner sets the bound); the 30 s rule, its clock
+# and its instant unchanged; provider-stale quotes never refreshed.
+tests/test_quote_stale_on_arrival_is_not_self_inflicted.py
+# P0 INCIDENT inc-edge (router): the per-agent funnel receipt over the real
+# writers' records, every code SOFTWARE / ECONOMIC by the one taxonomy
+# (unknown = UNCLASSIFIED, never economic); GET /api/command/agent-funnel is
+# read-only; NO_PINNACLE_ON_EVENT recorded by cause.
+tests/test_agent_funnel_receipt.py
+tests/test_refusal_taxonomy.py
+# P0 INCIDENT inc-sim / router (merged): the paper simulator fills on the first
+# READABLE book in the order's window and expires only at expires_at; a
+# recorded ENTER always gets its PAPER order or a named ENTER_WITHOUT_ORDER; a
+# failed collector venue read still reaches the agents as a no-price record.
+tests/test_paper_simulator_skips_unreadable_books.py
+tests/test_r30a_entry_fill_window.py
+tests/test_a_recorded_enter_always_gets_its_order.py
+tests/test_a_failed_venue_read_still_reaches_the_agents.py

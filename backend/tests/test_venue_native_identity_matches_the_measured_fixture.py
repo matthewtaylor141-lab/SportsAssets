@@ -1024,8 +1024,13 @@ async def test_no_pinnacle_is_never_repaired_by_the_venue_catalogue(monkeypatch)
         monkeypatch.setattr(V, "resolve_venue_native", spy)
         out = await loop.cycle(conn)
         row = _ev(out, "np")
-        assert row["codes"] == ["NO_PINNACLE_ON_EVENT"]
-        assert row["first_refusal"] == "NO_PINNACLE_ON_EVENT"
+        # P0 INCIDENT (attribution): the generic NO_PINNACLE_ON_EVENT is now
+        # recorded BY CAUSE -- the PinnAPI refusal (no feed owner here), then
+        # the discovery payload's absence -- and still nothing else: the
+        # venue catalogue is never asked (below).
+        assert row["codes"] == ["FEED_OWNERSHIP_NOT_HELD",
+                                loop.R_PAYLOAD_HAS_NO_PINNACLE]
+        assert row["first_refusal"] == "FEED_OWNERSHIP_NOT_HELD"
         assert row["mapped_by"] is None and row["us_market_slug"] is None
         assert row["provider_lag_s"] is None
         assert calls == []
@@ -1136,10 +1141,13 @@ async def test_none_of_the_captures_21_no_pinnacle_events_is_repaired(
                 if str(r["provider_event_id"]).startswith(PREFIX + "nopin-")]
         assert len(rows) == 21
         for r in rows:
-            assert r["codes"] == ["NO_PINNACLE_ON_EVENT"], r
+            # (P0 incident) by cause, not the generic NO_PINNACLE_ON_EVENT
+            assert r["codes"] == ["FEED_OWNERSHIP_NOT_HELD",
+                                  loop.R_PAYLOAD_HAS_NO_PINNACLE], r
             assert r["mapped_by"] is None and r["us_market_slug"] is None
         assert calls == []
-        assert out["refusals"]["NO_PINNACLE_ON_EVENT"] == 21
+        assert out["refusals"][loop.R_PAYLOAD_HAS_NO_PINNACLE] == 21
+        assert "NO_PINNACLE_ON_EVENT" not in out["refusals"]
         for k in keys:
             fn = out["funnel_by_provider_sport"][k]
             assert fn["mapping_confirmation"]["ok"] is True, fn

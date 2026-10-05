@@ -526,6 +526,52 @@ def _contract_agrees(contract: dict, quote: dict) -> dict:
     return {"ok": True, "refusal": None}
 
 
+# ── the source instant of a quote the de-vig refused before aging ───
+
+#: Basis written beside observed_at when the de-vig refused BEFORE its aging
+#: step: the instant is the quote's own (the provider's last_update / the
+#: feed's change time), recorded so the valuation row has an observation
+#: identity; it was never aged, so no age, no freshness verdict and no
+#: probability is derived from it.
+OBSERVED_AT_NOT_AGED = "QUOTE_SOURCE_INSTANT_NOT_AGED"
+
+
+def _stamp_source_instant(out: dict, quote: dict) -> dict:
+    """THE QUOTE'S OWN INSTANT ON A REFUSAL THAT CAME BEFORE AGING.
+
+    THE DEFECT (P0 incident 2026-10-04, root cause "observation clock
+    collapse on refused de-vig"). Every refusal returned before the aging
+    step (MARKET_NOT_IN_SUPPORTED_SET, PINNACLE_NOT_IN_THIS_PAYLOAD, a
+    contract disagreement, OUTCOME_SET_INCOMPLETE, ODDS_NOT_A_PRICE) left
+    observed_at NULL, and the valuation table's uniqueness key coalesced NULL
+    to -infinity, so the FIRST such valuation of a contract was its only
+    one, for ever: the NFL slate stopped valuing at 13:28Z (146 NFL and 54
+    NCAAF evaluation instances lost that day). The quote's stated instant is
+    therefore recorded on the refusal -- source time, labelled as such and
+    never aged -- so a re-read of an unchanged quote is one row and a moved
+    quote is a new one (migration 105's rule, migration 251's key). A quote
+    whose instant cannot be read records none; nothing here can raise and
+    nothing here changes a refusal or a probability."""
+    if out.get("observed_at") is not None or not isinstance(quote, dict):
+        return out
+    raw = quote.get("observed_at")
+    if raw is None:
+        return out
+    try:
+        at = _epoch(raw)
+    except (TypeError, ValueError):
+        return out
+    try:
+        received = (None if quote.get("received_at") is None
+                    else _epoch(quote["received_at"]))
+    except (TypeError, ValueError):
+        received = None
+    out["observed_at"] = float(at)
+    out["received_at"] = received
+    out["observed_at_basis"] = OBSERVED_AT_NOT_AGED
+    return out
+
+
 # ── the valuation ───────────────────────────────────────────────────
 
 def valuation(*, contract: dict, quote: dict, now: float,
@@ -556,7 +602,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
     if method not in METHODS:
         refusals.append(R_UNKNOWN_METHOD)
         out["why"] = "de-vig method %r is not one of %r" % (method, METHODS)
-        return out
+        return _stamp_source_instant(out, quote)
 
     expected = SUPPORTED.get((sport, market))
     league = None
@@ -613,7 +659,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
                     "the book's priced set for an UNSUPPORTED market, kept so "
                     "the measured-set rule can be evaluated; no probability "
                     "is derived from it")
-        return out
+        return _stamp_source_instant(out, quote)
     out["expected_outcomes"] = expected
 
     if _norm(quote.get("book")) != BOOK:
@@ -621,13 +667,13 @@ def valuation(*, contract: dict, quote: dict, now: float,
         out["why"] = ("this payload is from %r, not %s. A source named for "
                       "Pinnacle must not silently substitute another book"
                       % (quote.get("book"), BOOK))
-        return out
+        return _stamp_source_instant(out, quote)
 
     agree = _contract_agrees(contract, quote)
     if not agree["ok"]:
         refusals.append(agree["refusal"])
         out["why"] = agree["why"]
-        return out
+        return _stamp_source_instant(out, quote)
 
     outcomes = dict(quote.get("outcomes") or {})
     out["outcomes_priced"] = len(outcomes)
@@ -647,7 +693,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
                       "the COMPLETE set; over a subset it returns a number "
                       "that still looks like a probability and is not one"
                       % (len(outcomes), expected))
-        return out
+        return _stamp_source_instant(out, quote)
 
     bad = [n for n, o in outcomes.items()
            if not isinstance(o, (int, float)) or float(o) <= 1.0]
@@ -655,7 +701,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
         refusals.append(R_BAD_ODDS)
         out["why"] = ("decimal odds must exceed 1.0; offending outcomes %r"
                       % sorted(bad))
-        return out
+        return _stamp_source_instant(out, quote)
 
     observed_at = quote.get("observed_at")
     if observed_at is None:

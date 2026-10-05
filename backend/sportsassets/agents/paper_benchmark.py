@@ -110,6 +110,7 @@ from .. import bettor_settlement_terms as ST
 from .. import bettor_nfl_settlement as NFL
 from .. import bettor_ncaaf_settlement as NCAAF
 from .. import bettor_market_family as MF
+from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 from . import paper_derek as PD
 
@@ -2049,11 +2050,28 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         pin["same_contract_held"] = held_same
         if held_same:
             refusals.append(L.R_SAME_CONTRACT_HELD)
+        else:
+            # ...AND ITS OTHER SIDE, RECORDED (L.OPPOSITE_SIDE_HELD_IS): both
+            # sides of a binary contract are now valued, so a held other side
+            # is named on the decision for the owner -- it refuses nothing
+            # (no new risk-admission rule without the owner; review of
+            # 7bd084b). An unreadable answer is recorded as such.
+            opp = L.other_side(side)
+            try:
+                held_other = (await L.same_contract_held(
+                    conn, ctx["account_id"], STRATEGY,
+                    cand.get("us_market_slug"), opp) if opp else [])
+            except Exception as exc:                            # noqa: BLE001
+                held_other = [{"error": type(exc).__name__}]
+            pin["opposite_side_held"] = held_other
+            if held_other:
+                pin["opposite_side_held_is"] = L.OPPOSITE_SIDE_HELD_IS
     p = pin.get("p")
     obs, md, levels, edges = None, None, [], []
     sized: dict = {"qty": 0, "limit": None, "wire": None}
     econ: dict | None = None
     book_age = None
+    gross_inputs: dict | None = None
     if not refusals:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         bk = await book_for(conn, ctx, cand["us_market_slug"],
@@ -2083,6 +2101,28 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
         else:
+            # THE GROSS EDGE'S INPUTS, VALIDATED BEFORE THE EDGE IS JUDGED
+            # (P0 incident; gross_edge_inputs). The threshold is unchanged;
+            # what is checked is that p is the held side's probability (the
+            # de-vig recomputed from the row's own prices), the price is the
+            # side a BUY consumes, the fee evaluates, and the Pinnacle and
+            # book ages are inside their unchanged rules. Inputs that fail
+            # are a SOFTWARE refusal by name -- never BELOW_MIN_GROSS_EDGE.
+            gross_inputs = GEI.validate(
+                p=p, side=side, row=row, levels=levels,
+                consumed_side=lv["side"], md=md,
+                fee_per_contract=(lambda px: fee_per_contract(fee_fn, px,
+                                                              at)),
+                pin=pin, decided_at=at, edge_at=float(clock()),
+                book_observed_at=obs.get("observed_at"),
+                book_max_age_s=BOOK_MAX_AGE_S, threshold_edge_pp=min_edge_pp)
+            if not gross_inputs["ok"]:
+                refusals.extend(gross_inputs["refusals"])
+                gross_inputs["unvalidated_best_level_edge_pp"] = (
+                    level_edges(levels[:1], p, min_edge=min_edge)[0][
+                        "edge_pp"] if levels and isinstance(
+                            p, (int, float)) else None)
+        if gross_inputs is not None and gross_inputs["ok"]:
             edges = level_edges(levels, p, min_edge=min_edge)
             consumed = await SIM._consumed(conn, cand["us_market_slug"],
                                            lv["side"], obs["obs_id"])
@@ -2169,6 +2209,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "book_age_s": book_age, "book_max_age_s": BOOK_MAX_AGE_S,
         "book_currency": BOOK_CURRENCY,
         "acquisition": econ, "shortfall": short,
+        # THE VALIDATION RECEIPT of the gross edge's inputs (None when the
+        # decision never reached the gross-edge step).
+        "gross_edge_inputs": gross_inputs,
         "refusals": refusals}
     if cg:
         economics_rec.update(
@@ -2209,6 +2252,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     bool(levels) and book_age is not None
                     and book_age <= BOOK_MAX_AGE_S),
          "value": book_age, "threshold": BOOK_MAX_AGE_S, "units": "seconds"},
+        {"condition": "gross_edge_inputs_validated",
+         "passed": (None if gross_inputs is None
+                    else bool(gross_inputs["ok"])),
+         "refusals": ([] if gross_inputs is None
+                      else list(gross_inputs["refusals"])),
+         "version": GEI.VERSION},
         {"condition": ("edge_at_least_min_gross_edge_pp_at_every_level_used"
                        if cg else "edge_at_least_5pp_at_every_level_used"),
          "passed": None if not edges else bool(edges[0]["clears_min_edge"]),
@@ -2235,6 +2284,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             "expected_net_profit_usd"),
         "fees_usd": (econ or {}).get("fees_usd"),
         "shortfall": short, "book_currency": BOOK_CURRENCY,
+        "gross_edge_inputs": (None if gross_inputs is None else {
+            "version": gross_inputs["version"], "ok": gross_inputs["ok"],
+            "refusals": gross_inputs["refusals"],
+            "checks": {c["check"]: c["passed"]
+                       for c in gross_inputs["checks"]}}),
         "admitted": verdict == DP.ENTER,
         "refusal": refusals[0] if refusals else None,
         "refusals": refusals}
@@ -2317,6 +2371,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: from here its paper order is owed. The hook's
+    # decision deadline stops applying (PD.bounded_decision); the order
+    # sequence below keeps its canonical order -- the canonical decision
+    # intent (built before the execution hook since R30A intent), then the
+    # execution intent that names it, then the paper order read from it --
+    # and an ENTER that still ends without an order is named by the backstop
+    # (PD.step_enter_backstop, ENTER_WITHOUT_ORDER).
+    PD.enter_recorded(ctx, did)
     # ── R30 · THE ONE CANONICAL DECISION INTENT, FIRST ──────────────────
     # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
     # below reads side, quantity, prices and order form FROM IT; the SMALL
@@ -2609,7 +2671,14 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
     """The per-valuation hook's benchmark decision: guarded, bounded, never
     raises (CancelledError excepted). The context is SHARED across the
     strategies deciding this valuation (`books_by_slug`): the deadline is
-    reset per strategy, the book read is not repeated while it is current."""
+    reset per strategy, the book read is not repeated while it is current.
+
+    THE DEADLINE BOUNDS THE DECISION, NOT A RECORDED ENTER'S ORDER (P0
+    incident 2026-10-04): `PD.bounded_decision` cancels a decision cut
+    before its row is written, exactly as `wait_for` did, but once an ENTER
+    row is written its order sequence completes (up to
+    PD.ENTER_ORDER_GRACE_S more). A grace overrun is a TIMEOUT that names
+    the recorded decision; the backstop turns it into ENTER_WITHOUT_ORDER."""
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
     t0 = time.monotonic()
@@ -2620,16 +2689,25 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
         ctx.setdefault("books_by_slug", {})      # shared by the copies
         ctx = dict(ctx, deadline=time.monotonic() + float(timeout_s))
         ctx.pop("benchmark", None)
-        rec = await asyncio.wait_for((decide or decide_one)(
-            conn, ctx, row, pol), timeout_s)
+        fn = decide or decide_one
+        rec = await PD.bounded_decision(
+            lambda c: fn(conn, c, row, pol), ctx, timeout_s=timeout_s)
         return dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
             "deferred", "strategy", "book_source", "book_age_s",
-            "cooldown_s", "retry_after_s", "retry", "selection")},
+            "cooldown_s", "retry_after_s", "retry", "selection",
+            "order_after_decision_deadline")},
             decided=not rec.get("deferred"), why=rec.get("why"),
             elapsed_s=round(time.monotonic() - t0, 3))
     except asyncio.CancelledError:
         raise
+    except PD.EnterOrderGraceExceeded as exc:
+        # THE ENTER IS RECORDED; ITS ORDER DID NOT COMPLETE IN THE GRACE.
+        return {"decided": False, "strategy": STRATEGY, "timeout": True,
+                "decision_id": exc.decision_id, "verdict": DP.ENTER,
+                "enter_recorded_without_order": True,
+                "error": "EnterOrderGraceExceeded: %s" % exc,
+                "elapsed_s": round(time.monotonic() - t0, 3)}
     except asyncio.TimeoutError:
         return {"decided": False, "strategy": STRATEGY, "timeout": True,
                 "error": "TimeoutError: the in-cycle decision exceeded its "
