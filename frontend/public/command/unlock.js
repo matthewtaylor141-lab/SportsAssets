@@ -118,7 +118,10 @@
       // is authenticated and the ledger is unreadable -- COMMAND's own
       // banner says so far better than a login box would, and showing a
       // password prompt for an outage would be a lie about the cause.
-      if (r.status === 401 || r.status === 403) panel(submit);
+      // one dialog at a time: a page that opened it on its own 401 first
+      // (BTUnlock.open) must not get a second panel stacked on top
+      if ((r.status === 401 || r.status === 403) &&
+          !document.getElementById('command-unlock')) panel(submit);
     }).catch(function () { /* offline: COMMAND's own banner covers it */ });
   }
 

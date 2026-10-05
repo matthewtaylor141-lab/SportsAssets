@@ -250,3 +250,26 @@
   for = "/build.json"
   [headers.values]
     Cache-Control = "no-cache"
+
+# Mobile Command (command/mobile.html): its app-shell service worker and its
+# manifest must never be a stale copy either. The command host serves both at
+# the root (/sw-mobile.js -> /command/sw-mobile.js), so both spellings.
+[[headers]]
+  for = "/sw-mobile.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/command/sw-mobile.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/manifest.webmanifest"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/command/manifest.webmanifest"
+  [headers.values]
+    Cache-Control = "no-cache"

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#f6f8fb">
+<meta name="color-scheme" content="light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="BETTOR">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="format-detection" content="telephone=no">
+<meta name="robots" content="noindex,nofollow">
+<meta name="description" content="BETTOR Mobile Command: the read-only production picture on iPhone and iPad. PAPER is simulated; SMALL LIVE stays SHADOW; every value from a production endpoint or DATA NOT AVAILABLE.">
+<title>BETTOR · Mobile Command</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png">
+<link rel="stylesheet" href="mobile-command.css">
+</head>
+<body>
+<div id="mobile-command" class="mc-shell">
+<header class="mc-topbar">
+  <a class="mc-brand" href="./mobile.html" aria-label="BETTOR Mobile Command">
+    <img class="mc-brandmark" src="brand/bettortoken-app-icon-180.png" alt="" width="34" height="34"><span><b>BETTOR</b><small>MOBILE COMMAND</small></span>
+  </a>
+  <div class="mc-top-actions">
+    <button id="mc-refresh" class="mc-icon-btn" type="button" aria-label="Refresh live data"><span aria-hidden="true">↻</span></button>
+    <button id="mc-more" class="mc-icon-btn" type="button" aria-label="Open app menu" aria-haspopup="dialog"><span aria-hidden="true">•••</span></button>
+  </div>
+</header>
+<section id="mc-system-strip" class="mc-system-strip" data-render="strip" aria-label="Production state">
+  <span><i class="mc-dot mc-dot-warn"></i>Connecting</span><span>PAPER —</span><span>SMALL LIVE —</span>
+</section>
+<main id="mc-main" class="mc-main">
+<section data-screen="command" class="mc-screen is-active" aria-label="Command">
+  <div class="mc-hero">
+    <div><p class="mc-eyebrow">MISSION CONTROL</p><h1>Command</h1><p class="mc-muted">Production, read only. PAPER is simulated execution; SMALL LIVE stays SHADOW.</p></div>
+    <div id="mc-readiness" class="mc-readiness" data-render="mode"><span>SMALL LIVE</span><b>—</b></div>
+  </div>
+  <div id="mc-kpis" class="mc-kpi-grid" data-render="kpis"></div>
+  <article class="mc-card mc-card-accent">
+    <div class="mc-card-head"><div><p class="mc-eyebrow" id="mc-funnel-day">TODAY · PROVIDER EVENTS</p><h2>Opportunity funnel</h2></div><button class="mc-text-btn" type="button" data-go="opportunities">Decisions</button></div>
+    <div id="mc-funnel" class="mc-funnel" data-render="funnel"></div>
+  </article>
+  <article class="mc-card">
+    <div class="mc-card-head"><div><p class="mc-eyebrow">NEEDS ATTENTION</p><h2>Top blockers</h2></div><span id="mc-incident-count" class="mc-badge">—</span></div>
+    <div id="mc-attention" class="mc-stack" data-render="attention"></div>
+  </article>
+  <article class="mc-card">
+    <div class="mc-card-head"><div><p class="mc-eyebrow">AGENT SQUAD</p><h2>Who is working</h2></div><button class="mc-text-btn" type="button" data-go="agents">All agents</button></div>
+    <div id="mc-agent-strip" class="mc-agent-strip" data-render="agents"></div>
+  </article>
+  <article class="mc-card">
+    <div class="mc-card-head"><div><p class="mc-eyebrow">RECORDED ACTIVITY</p><h2>What is happening now</h2></div><button id="mc-tape-expand" class="mc-text-btn" type="button">History</button></div>
+    <div id="mc-tape" class="mc-tape" data-render="tape"></div>
+  </article>
+</section>
+
+<section data-screen="floor" class="mc-screen" aria-label="Trading floor">
+  <div class="mc-page-title"><div><p class="mc-eyebrow">VIRTUAL OFFICE</p><h1>Trading Floor</h1></div><a class="mc-primary-btn" href="floor.html">War Room</a></div>
+  <button id="mc-watch-real" class="mc-watch-real" type="button"><span class="mc-watch-pulse" aria-hidden="true"></span><span><b>Live watch room</b><small id="mc-watch-sub">Derek's latest PAPER decisions on real events</small></span><span aria-hidden="true">›</span></button>
+  <div id="mc-floor-agents" class="mc-desk-grid"></div>
+</section>
+
+<section data-screen="live" class="mc-screen" aria-label="Live watch room">
+  <div class="mc-page-title"><div><p class="mc-eyebrow">LIVE WATCH ROOM · PAPER</p><h1>Real Events</h1></div><button id="mc-live-refresh" class="mc-primary-btn" type="button">Refresh</button></div>
+  <p class="mc-muted mc-lede">Derek's latest PAPER decisions, as recorded on real events (floor feed, newest 12).</p>
+  <div id="mc-live-events" class="mc-stack" data-render="live"></div>
+</section>
+
+<section data-screen="opportunities" class="mc-screen" aria-label="Decisions">
+  <div class="mc-page-title"><div><p class="mc-eyebrow">DECISION BOARD · PAPER</p><h1>Opportunities</h1></div><span id="mc-opp-count" class="mc-badge">—</span></div>
+  <p class="mc-muted mc-lede">The newest 40 PAPER decisions with the gross edge and net expected profit they were decided on.</p>
+  <div id="mc-opportunities" class="mc-stack" data-render="opps"></div>
+</section>
+
+<section data-screen="agents" class="mc-screen" aria-label="Agent squad">
+  <div class="mc-page-title"><div><p class="mc-eyebrow">BETTOR TEAM</p><h1>Agent Squad</h1></div></div>
+  <div id="mc-agents" class="mc-agent-grid"></div>
+</section>
+
+<section data-screen="system" class="mc-screen" aria-label="System">
+  <div class="mc-page-title"><div><p class="mc-eyebrow">HEALTH + COVERAGE</p><h1>System</h1></div></div>
+  <div id="mc-coverage" class="mc-coverage-grid" data-render="coverage"></div>
+  <article class="mc-card"><div class="mc-card-head"><div><p class="mc-eyebrow">RELEASE</p><h2>Production identity</h2></div></div><div id="mc-release" class="mc-keyvals" data-render="release"></div></article>
+  <article class="mc-card"><div class="mc-card-head"><div><p class="mc-eyebrow">READS</p><h2>Feeds on this phone</h2></div></div><div id="mc-feeds" class="mc-keyvals" data-render="feeds"></div></article>
+  <article class="mc-card mc-card-mirror"><div class="mc-card-head"><div><p class="mc-eyebrow">ACTUAL · LEGACY MIRROR · REAL MONEY</p><h2>Shown, never summed</h2></div></div><div id="mc-mirror" class="mc-keyvals" data-render="mirror"></div></article>
+</section>
+</main>
+
+<nav class="mc-tabbar" aria-label="Mobile command navigation">
+<button type="button" data-tab="command" class="is-active" aria-current="page"><span aria-hidden="true">⌂</span><small>Command</small></button>
+<button type="button" data-tab="floor"><span aria-hidden="true">◫</span><small>Floor</small></button>
+<button type="button" data-tab="live"><span aria-hidden="true">◉</span><small>Live</small></button>
+<button type="button" data-tab="opportunities"><span aria-hidden="true">↗</span><small>Opps</small></button>
+<button type="button" data-tab="agents"><span aria-hidden="true">◎</span><small>Agents</small></button>
+<button type="button" data-tab="system"><span aria-hidden="true">◇</span><small>System</small></button>
+</nav>
+</div>
+
+<div id="mc-sheet" class="mc-sheet" hidden>
+<button class="mc-sheet-shade" type="button" data-sheet-close aria-label="Close menu"></button>
+<section class="mc-sheet-panel" role="dialog" aria-modal="true" aria-labelledby="mc-sheet-title">
+<div class="mc-grabber" aria-hidden="true"></div><h2 id="mc-sheet-title">Mobile Command</h2>
+<a href="./">Desktop Command</a><a href="floor.html">3D Trading Floor</a><a href="ops.html">Operations Desk</a>
+<button id="mc-install-help" type="button">Add to Home Screen</button><button data-sheet-close type="button">Close</button>
+</section>
+</div>
+
+<div id="mc-install" class="mc-install" hidden>
+<div class="mc-install-card" role="dialog" aria-modal="true" aria-labelledby="mc-install-title"><button data-install-close type="button" class="mc-install-x" aria-label="Close">×</button><img class="mc-install-icon" src="brand/bettortoken-app-icon-180.png" alt="" width="44" height="44"><h2 id="mc-install-title">Install BETTOR</h2>
+<p>In Safari, tap <b>Share</b>, choose <b>Add to Home Screen</b>, then tap <b>Add</b>.</p>
+<p class="mc-muted">The installed app opens full-screen. iOS keeps its sign-in separate from Safari, so it asks for the Command password once. Live API responses are never cached offline.</p></div>
+</div>
+<div id="mc-toast" class="mc-toast" role="status" aria-live="polite"></div>
+<script src="unlock.js"></script>
+<script src="mobile-command.js"></script>
+</body>
+</html>

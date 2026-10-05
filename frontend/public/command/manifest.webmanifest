@@ -1,0 +1,21 @@
+{
+  "name": "BettorToken Command",
+  "short_name": "BETTOR",
+  "description": "Read-only mobile command for BettorToken operations: PAPER book, agents, decisions, coverage and production identity.",
+  "id": "./mobile.html",
+  "start_url": "./mobile.html",
+  "scope": "./mobile.html",
+  "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#edf2f6",
+  "theme_color": "#f6f8fb",
+  "categories": ["finance", "business", "productivity"],
+  "icons": [
+    {"src": "brand/bettortoken-app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "brand/bettortoken-app-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "brand/bettortoken-app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
+    {"src": "brand/bettortoken-app-icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    {"src": "brand/bettortoken-app-icon-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any"}
+  ]
+}
