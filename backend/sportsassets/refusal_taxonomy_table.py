@@ -1694,9 +1694,24 @@ INTEGRATION_STREAMS = {
     "LINE_PERSIST": (S, INT, "AGENT_EVALUATION"),
 }
 
+#: THE FIRST-LOSS CENSUS (coverage_first_loss, 2026-10-05): the codes it
+#: names for an event whose furthest record carries no refusal code. Each
+#: says the software did not carry the event to a judgement -- a deferral by
+#: the evaluation bound, an outcome the ledger could not classify, an
+#: admitted event with no linked valuation, a valuation no paper strategy
+#: decided, a REFUSE recorded without a code -- so each is SOFTWARE.
+COVERAGE_CENSUS = {
+    "PROVIDER_EVENT_DEFERRED_BY_THE_EVALUATION_BOUND": (S, CAP, "INGESTION"),
+    "PROVIDER_EVENT_LEDGER_OUTCOME_UNCLASSIFIED": (S, INT, "INGESTION"),
+    "ADMITTED_EVENT_HAS_NO_LINKED_VALUATION": (S, INT, "PROBABILITY"),
+    "VALUATION_REACHED_NO_PAPER_DECISION": (S, INT, "AGENT_EVALUATION"),
+    "PAPER_DECISION_REFUSED_WITHOUT_A_CODE": (S, INT, "AGENT_EVALUATION"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())
-               + list(INTEGRATION_STREAMS.items())):
+               + list(INTEGRATION_STREAMS.items())
+               + list(COVERAGE_CENSUS.items())):
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL

@@ -660,6 +660,14 @@ READERS = {
     "agent_funnel.py": (
         "REPORTING_RECEIPT_BY_DECISION_VALUATION_ID_AND_COUNTS_NEVER_SELECTS",
         2),
+    # (2026-10-05) THE FIRST-LOSS CENSUS (GET-only, READ ONLY transaction):
+    # reads the sealed valuations of the window's provider events (both
+    # purposes -- the paper strategies decide on either) by event key or venue
+    # contract, only to say where each event stopped and on which code.
+    # Selects no candidate, sizes and places nothing.
+    "coverage_first_loss.py": (
+        "REPORTING_FIRST_LOSS_CENSUS_BY_EVENT_KEY_OR_CONTRACT_NEVER_SELECTS",
+        10),
 }
 
 
