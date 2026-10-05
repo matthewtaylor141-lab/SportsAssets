@@ -1076,3 +1076,16 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+# R30C SETTLEMENT-EXCEPTION RISK: the measured exception table (the venue's own
+# settlements as the outcome join and the paper ledger wrote them; exact
+# Clopper-Pearson / Wilson upper bounds; unknown is never zero; external base
+# rates only with citation, count and denominator) and its cost on the
+# canonical decision's evidence, which gates nothing (same ENTER, order, size).
+tests/test_settlement_exception_risk.py
+# R30C CORRELATION GRAPH: exact / measured / unmeasured=worst-case edges of
+# shared settlement dependence; the evidenced case never above the worst case;
+# the worst-case caps stay authoritative and unchanged.
+tests/test_correlation_graph.py
+# R30C risk evidence routes: GET-only, command session or 401, READ ONLY
+# transaction with a statement timeout, no order/venue/paper/funded import.
+tests/test_risk_evidence_authority.py

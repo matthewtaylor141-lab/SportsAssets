@@ -16,6 +16,14 @@ THE DECISION INSTANT, from the decision's own inputs:
                      candidate against the open book of her latest run
   karen              Karen's review state of this market and strategy: open
                      challenges at the decision instant
+  settlement_exception_risk
+                     (R30C) the expected cost of the exceptional settlement
+                     states -- postponement / suspension settled at a price,
+                     a declared void, a tie the book does not price -- against
+                     the completed-game assumption, from the MEASURED
+                     exception-risk table (settlement_exception_risk). Carried
+                     on the intent's EVIDENCE; shadow information, never a
+                     gate
 
 Each component is MEASURED or carries an explicit UNAVAILABLE reason --
 never a manufactured value. Components are evidence on the intent; none of
@@ -265,10 +273,70 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
     return await _bounded(conn, go)
 
 
+async def settlement_exception_at_decision(conn, *, decision: dict,
+                                           contract: dict | None,
+                                           p, now: float) -> dict:
+    """THE EXPECTED SETTLEMENT-EXCEPTION COST OF THIS DECISION (R30C,
+    settlement_exception_risk.decision_cost) against the completed-game
+    assumption: the measured exception-risk table (cached CACHE_S; the venue's
+    own settlement records) at the decision's sport / league / market, the
+    decision's own venue rules text for the payouts, the held side's
+    probability, price and quantity. MEASURED, PRIOR_BOUNDED (named events at
+    the conservative prior) or UNAVAILABLE with the reason.
+
+    SHADOW EVIDENCE ONLY: it is recorded on the intent's evidence and gates
+    nothing -- the ENTER / REFUSE rule, the size and every cap are unchanged
+    (R30C; Eddie and Allie read it in R30B)."""
+    from . import settlement_exception_risk as SER
+    c = contract if isinstance(contract, dict) else {}
+
+    async def table():
+        return await SER.measure(conn, now=now)
+
+    async def go():
+        t = await _cached("settlement_exception_table", now, table)
+        if not t.get("ok"):
+            return _un("%s:%s" % (SER.R_NO_TABLE, t.get("refusal")),
+                       version=SER.VERSION, authority=SER.AUTHORITY,
+                       gates_the_decision=False)
+        scmp = c.get("settlement_comparison")
+        if isinstance(scmp, str):
+            import json as _json
+            try:
+                scmp = _json.loads(scmp)
+            except ValueError:
+                scmp = None
+        if not isinstance(scmp, dict) and c.get("valuation_id") is not None:
+            # the decision's candidate carries the valuation id, not its
+            # rules text: read the venue's own words off the valuation row
+            # the decision was made on (the collector persisted them there)
+            txt = await conn.fetchval(
+                "SELECT settlement_comparison->>'venue_rules_text' "
+                "  FROM external_valuations WHERE id = $1",
+                int(c["valuation_id"]))
+            scmp = {"venue_rules_text": txt}
+        e = (decision.get("economics") or {}).get("acquisition") or {}
+        price = e.get("vwap") if e.get("vwap") is not None else \
+            decision.get("limit_price")
+        slug = decision.get("us_market_slug") or c.get("us_market_slug")
+        return SER.decision_cost(
+            t, sport_family=decision.get("sport") or c.get("sport_family"),
+            league=SER.league_of(slug), market=c.get("market"),
+            holding_side=decision.get("holding_side"), p=p, price=price,
+            qty=decision.get("proposed_qty"),
+            venue_rules_text=(scmp or {}).get("venue_rules_text"),
+            conditional_net_usd=decision.get(
+                "executable_opportunity_dollars"))
+    return await _bounded(conn, go)
+
+
 async def at_decision(conn, *, decision: dict, book_row: dict | None,
-                      cost_usd, p, wire, now: float | None = None) -> dict:
-    """All four computed components for one decision (derek is built by the
-    caller from its own record). Never raises."""
+                      cost_usd, p, wire, now: float | None = None,
+                      contract: dict | None = None) -> dict:
+    """All computed components for one decision (derek is built by the
+    caller from its own record). `contract` is the valuation row the
+    decision was made on (its market type and venue rules text feed the
+    settlement-exception cost). Never raises."""
     at = float(now if now is not None else time.time())
     if decision.get("event_start_at") is None and decision.get("us_market_slug"):
         # the event start the opportunity score and Allie's time to capital
@@ -290,5 +358,8 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
                                     strategy=decision.get("strategy"), now=at)
     allie = await allie_at_decision(conn, decision=decision, eddie=eddie,
                                     now=at)
+    exc = await settlement_exception_at_decision(
+        conn, decision=decision, contract=contract, p=p, now=at)
     return {"eddie": eddie, "opportunity_score": opp, "karen": karen,
-            "allie": allie, "version": VERSION}
+            "allie": allie, "settlement_exception_risk": exc,
+            "version": VERSION}
