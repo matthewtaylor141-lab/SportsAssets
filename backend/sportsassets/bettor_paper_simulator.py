@@ -87,7 +87,15 @@ R_TOUCH_ONLY = "TOUCH_IS_NOT_A_FILL"
 R_NO_CROSS = "NO_LIQUIDITY_CROSSED_THE_LIMIT"
 R_QUEUE_AHEAD = "CROSSING_LIQUIDITY_WENT_TO_THE_QUEUE_AHEAD"
 R_GTD_EXPIRED = "GOOD_TILL_DATE_EXPIRED"
+#: HISTORICAL (records written before R30A): a marketable order released on
+#: the FIRST observation in its window because that observation was an
+#: errored read. No longer written by `_marketable` -- see
+#: R_NO_READABLE_BOOK_IN_WINDOW. A resting order still names it per book.
 R_BOOK_UNREADABLE = "THE_OBSERVED_BOOK_WAS_UNREADABLE"
+#: R30A: the marketable order's window closed with ONLY errored reads in it
+#: (or none at all after an errored one): no book was ever observed, so there
+#: is no fill evidence. The detail carries how many unreadable reads were seen.
+R_NO_READABLE_BOOK_IN_WINDOW = "NO_READABLE_BOOK_OBSERVED_BEFORE_THE_ORDER_EXPIRED"
 
 # ── AN UNREADABLE OBSERVATION IS EVIDENCE OF NOTHING, NOT A VERDICT ─────────
 #
@@ -119,7 +127,11 @@ R_BOOK_UNREADABLE = "THE_OBSERVED_BOOK_WAS_UNREADABLE"
 # without the venue modules, and a test pins them equal to their sources.
 R_NO_READABLE_BOOK_YET = \
     "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET"
-R_NO_READABLE_BOOK = "NO_READABLE_BOOK_BEFORE_EXPIRY"
+#: ONE TERMINAL CODE, TWO NAMES: the inc-sim and router streams repaired this
+#: defect independently and named the same outcome differently; it is the
+#: router's spelling (already classified SOFTWARE/DATA at stage FILL by
+#: `refusal_taxonomy_table`) under both names, never two codes for one fact.
+R_NO_READABLE_BOOK = R_NO_READABLE_BOOK_IN_WINDOW
 U_GATE_REFUSED = "GATE_REFUSED"
 U_DEADLINE_CUT = "DEADLINE_CUT"
 U_VENUE_ERROR = "VENUE_ERROR"
@@ -493,24 +505,29 @@ async def _apply_takes(conn, o, *, takes, obs, basis, now, fee_fn,
 async def window_observations(conn, o) -> dict:
     """THE ORDER'S WINDOW, READ ONCE: the FIRST READABLE observation in
     [eligible_at, expires_at] (receipt instant, then obs id) and every
-    UNREADABLE observation in the window before it (bounded)."""
+    UNREADABLE observation in the window before it (bounded).
+
+    Readable means the row carries no error (NULL or empty, exactly what
+    `_md` reads as a book); every other row holds no book and is skipped."""
     slug, t0, t1 = o["us_market_slug"], o["eligible_at"], o["expires_at"]
     obs = await conn.fetchrow(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
-        "   AND observed_at >= $2 AND observed_at <= $3 AND error IS NULL "
+        "   AND observed_at >= $2 AND observed_at <= $3 "
+        "   AND coalesce(error, '') = '' "
         " ORDER BY observed_at, obs_id LIMIT 1", slug, t0, t1)
     if obs is None:
         bad = await conn.fetch(
             "SELECT obs_id, observed_at, source, read_basis, error "
             "  FROM paper_book_observations WHERE us_market_slug=$1 "
             "   AND observed_at >= $2 AND observed_at <= $3 "
-            "   AND error IS NOT NULL ORDER BY observed_at, obs_id LIMIT $4",
+            "   AND coalesce(error, '') <> '' "
+            " ORDER BY observed_at, obs_id LIMIT $4",
             slug, t0, t1, MAX_SKIPPED_SCANNED)
     else:
         bad = await conn.fetch(
             "SELECT obs_id, observed_at, source, read_basis, error "
             "  FROM paper_book_observations WHERE us_market_slug=$1 "
-            "   AND observed_at >= $2 AND error IS NOT NULL "
+            "   AND observed_at >= $2 AND coalesce(error, '') <> '' "
             "   AND (observed_at, obs_id) < ($3, $4) "
             " ORDER BY observed_at, obs_id LIMIT $5",
             slug, t0, obs["observed_at"], obs["obs_id"], MAX_SKIPPED_SCANNED)
@@ -521,26 +538,67 @@ async def window_observations(conn, o) -> dict:
 
 
 async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
+    """THE MARKETABLE RULE: the FIRST READABLE book observed at or after
+    decision + delay, within the order's TTL.
+
+    R30A INCIDENT REPAIR (the ENTER -> FILL collapse; merged from the inc-sim
+    and router streams, which found the same defect independently). This
+    used to take the first observation of ANY kind in [eligible_at,
+    expires_at] and, when that observation was an errored read, release the
+    order at once as THE_OBSERVED_BOOK_WAS_UNREADABLE. Those errored
+    "observations" are almost all OUR OWN refusals to read -- the venue
+    request gate declining to wait out a cooldown past the paper pass's
+    remaining deadline (VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE), the
+    pass's own deadline already spent (PAPER_BOOK_READ_DEADLINE_EXCEEDED), a
+    429 -- recorded with our receipt instant, so they landed inside the
+    window and killed the order before any book was ever seen. Production, 7
+    days to 2026-10-04 20:54Z (research-sql run 37233864395, E1-E3): 100 of
+    the 168 paper entry orders (28 of 45 completed-game, 72 of 123
+    exploration) expired this way; 94 of them had nothing but errored reads
+    in their window (44/day, 61% of entry orders, on the 24 h receipt).
+
+    An errored read is evidence of nothing: no book was observed, so it can
+    neither fill nor refuse a fill -- the SAME rule the resting path already
+    applies (`_resting` skips an unreadable book) and the frozen config's own
+    wording ("the FIRST book observed at or after decision time + delay; no
+    such book before the TTL -> EXPIRED"). So errored reads are skipped
+    (named and classed GATE_REFUSED / DEADLINE_CUT / VENUE_ERROR on the
+    order's evidence and events); the order fills on the first READABLE book
+    in its window (chronologically first, never chosen), or expires at its
+    TTL with NO_READABLE_BOOK_OBSERVED_BEFORE_THE_ORDER_EXPIRED and the
+    counts of unreadable reads it saw. Nothing else changes: the delay, the
+    TTL, the limit, the depth walk, the consumption ledger and the fees are
+    the session's frozen ones."""
     oid = o["order_id"]
     win = await window_observations(conn, o)
     obs, skipped = win["readable"], win["skipped"]
+    if obs is not None and _md(obs) is None:
+        # Unreachable by construction (the query reads exactly what `_md`
+        # reads as a book); kept so a future change to either cannot turn an
+        # unreadable row into a fill.
+        obs = None
     if obs is None:
+        unreadable = int(skipped["total"])
         if float(now) >= L._epoch(o["expires_at"]):
             # EXPIRED ONLY AT EXPIRES_AT, and the reason says which: nothing
             # was observed in the window, or only reads that held no book --
             # named, and counted by who refused them.
-            reason = (R_NO_READABLE_BOOK if skipped["total"]
+            reason = (R_NO_READABLE_BOOK if unreadable
                       else R_NO_BOOK_IN_WINDOW)
             rel = await L.release_remainder_locked(
                 conn, order_id=oid, reason=reason, at=now, state="EXPIRED",
-                detail=({"unreadable_books_skipped": skipped}
-                        if skipped["total"] else None))
+                detail=({"unreadable_books_skipped": skipped,
+                         "unreadable_reads_in_window": unreadable}
+                        if unreadable else
+                        {"unreadable_reads_in_window": 0}))
             return {"order_id": oid, "state": "EXPIRED", "refusal": reason,
-                    "released": rel, "unreadable_books_skipped": skipped}
+                    "released": rel, "unreadable_books_skipped": skipped,
+                    "unreadable_reads_in_window": unreadable}
         return {"order_id": oid, "state": o["state"], "pending": True,
-                "refusal": (R_NO_READABLE_BOOK_YET if skipped["total"]
+                "refusal": (R_NO_READABLE_BOOK_YET if unreadable
                             else R_NO_BOOK_YET),
-                "unreadable_books_skipped": skipped}
+                "unreadable_books_skipped": skipped,
+                "unreadable_reads_in_window": unreadable}
     md = _md(obs)
     lv = levels_for(md, direction=o["direction"],
                     holding_side=o["holding_side"])

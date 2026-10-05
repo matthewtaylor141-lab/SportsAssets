@@ -76,7 +76,7 @@ class PaperMarketDataClient:
 
     # ── the one read ────────────────────────────────────────────────
     async def read_book(self, slug: str, *, deadline_epoch_s=None,
-                        timeout_s=None) -> dict:
+                        timeout_s=None, not_before_epoch=None) -> dict:
         """One book read, off the event loop. Returns {marketData, error,
         observed_at}; never raises.
 
@@ -86,14 +86,26 @@ class PaperMarketDataClient:
         the read carried NO deadline, so the gate could hold it for its 20 s
         undeadlined cap (plus the SDK's 30 s HTTP timeout) while the in-cycle
         decision around it was cancelled at 8 s -- and a cancelled decision
-        recorded nothing at all."""
+        recorded nothing at all.
+
+        WITH `not_before_epoch` (R30A), the answer must be a book RECEIVED at
+        or after that instant: a pending marketable entry needs a book
+        observed at or after its eligible instant, and the 6 s shared-read
+        cache otherwise answered its after-delay read with the decision's own
+        pre-eligible receipt -- recorded outside the order's window, so the
+        read was wasted (research-sql run 37233864395, E2: 22 of 60 filled
+        entries had such a read). A transport that does not take the
+        argument (a test stand-in) is called exactly as before."""
         object.__setattr__(self, "_calls", self._calls + 1)
         t0 = time.time()
-        call = (functools.partial(self._transport, slug,
-                                  deadline_epoch_s=deadline_epoch_s)
-                if deadline_epoch_s is not None
-                and _accepts_deadline(self._transport)
-                else functools.partial(self._transport, slug))
+        kw = {}
+        if deadline_epoch_s is not None and _accepts(
+                self._transport, "deadline_epoch_s"):
+            kw["deadline_epoch_s"] = deadline_epoch_s
+        if not_before_epoch is not None and _accepts(
+                self._transport, "not_before_epoch"):
+            kw["not_before_epoch"] = float(not_before_epoch)
+        call = functools.partial(self._transport, slug, **kw)
         try:
             fut = asyncio.to_thread(call)
             got = (await asyncio.wait_for(fut, float(timeout_s))
@@ -159,27 +171,42 @@ class PaperMarketDataClient:
 SHARED_BOOK_MAX_AGE_S = 6.0
 
 
-def _default_transport(slug: str, *, deadline_epoch_s=None) -> dict:
+def _default_transport(slug: str, *, deadline_epoch_s=None,
+                       not_before_epoch=None) -> dict:
     """The collection cycle's own paced, public book read (`pmus.book_read`
     through `_read_book_blocking`), with the caller's deadline handed to the
     venue request gate -- or, when this process read the same book within
     SHARED_BOOK_MAX_AGE_S, that read, with its original receipt instant and
     `shared_read: True` (no venue request; nothing is made fresher than it
-    is). Imported lazily so constructing the client reaches nothing."""
+    is). Imported lazily so constructing the client reaches nothing.
+
+    `not_before_epoch` (R30A): a shared read received BEFORE that instant
+    does not answer -- the caller needs a book observed at or after it -- so
+    the venue is read instead (paced and gated exactly as any other read)."""
     from .workers import ext_pinnacle_loop as L
     shared = L.recent_book(slug, max_age_s=SHARED_BOOK_MAX_AGE_S)
-    if shared is not None:
+    if shared is not None and (
+            not_before_epoch is None
+            or float(shared.get("observed_at") or 0.0)
+            >= float(not_before_epoch)):
         return shared
     return L._read_book_blocking(slug, deadline_epoch_s=deadline_epoch_s)
+
+
+def _accepts(transport, name: str) -> bool:
+    """Whether a transport takes the keyword `name` (the default takes
+    `deadline_epoch_s` and `not_before_epoch`; a test's one-argument
+    transport takes neither, and is called as before)."""
+    try:
+        return name in inspect.signature(transport).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 def _accepts_deadline(transport) -> bool:
     """Whether a transport takes `deadline_epoch_s` (the default does; a
     test's one-argument transport does not, and is called as before)."""
-    try:
-        return "deadline_epoch_s" in inspect.signature(transport).parameters
-    except (TypeError, ValueError):
-        return False
+    return _accepts(transport, "deadline_epoch_s")
 
 
 # ═════════════════════════════════════════════════════════════════════

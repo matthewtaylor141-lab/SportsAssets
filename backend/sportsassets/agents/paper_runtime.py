@@ -101,27 +101,61 @@ async def step_books(conn, ctx: dict) -> dict:
     from . import work_queue as WQ
     acct = ctx["account_id"]
     rows = await conn.fetch(
-        "SELECT us_market_slug, order_type, state FROM paper_orders "
+        "SELECT us_market_slug, order_type, state, "
+        "       extract(epoch FROM eligible_at)::float8 AS eligible_epoch "
+        "  FROM paper_orders "
         " WHERE account_id=$1 AND state = ANY($2::text[])", acct,
         list(L.OPEN_STATES))
+    # A MARKETABLE ENTRY IS DUE ONLY ONCE IT IS ELIGIBLE (R30A). Read before
+    # its eligible instant, the book cannot be used for its fill (the
+    # simulator takes the first readable book AT OR AFTER decision + delay),
+    # so the read spent one of the step's half-cap slots for nothing -- and,
+    # worse, primed the 6 s shared-read cache, so the after-delay read a
+    # second later was answered with that same pre-eligible receipt and was
+    # wasted too. Production, 7 d to 2026-10-04 20:54Z (research-sql run
+    # 37233864395, E2): 75 of the 100 entry orders that expired unread had a
+    # books-step read made after the decision but before eligibility. A
+    # not-yet-eligible entry is read by step_after_delay / the entry-fill
+    # read (`schedule_entry_fill`) at its eligible instant instead.
+    clock_now = float(ctx["clock"]()) if ctx.get("clock") else float(
+        ctx["now"])
+    pending_slugs = {r["us_market_slug"] for r in rows
+                     if r["order_type"] == "MARKETABLE"
+                     and r["state"] == "PENDING_SIMULATION"}
     due = [r["us_market_slug"] for r in rows
            if r["order_type"] == "MARKETABLE"
-           and r["state"] == "PENDING_SIMULATION"]
+           and r["state"] == "PENDING_SIMULATION"
+           and (r["eligible_epoch"] is None
+                or float(r["eligible_epoch"]) <= clock_now)]
+    not_yet = pending_slugs - set(due)
+    # each due entry's read must be RECEIVED at or after its eligible instant
+    due_not_before = {}
+    for r in rows:
+        if (r["order_type"] == "MARKETABLE"
+                and r["state"] == "PENDING_SIMULATION"
+                and r["us_market_slug"] in due
+                and r["eligible_epoch"] is not None):
+            due_not_before[r["us_market_slug"]] = max(
+                float(r["eligible_epoch"]),
+                due_not_before.get(r["us_market_slug"], 0.0))
     prio = [s for s in await WQ.priority_book_slugs(conn, account_id=acct)
-            if s not in due]
+            if s not in due and s not in not_yet]
     resting = await _stalest_first(conn, [
         r["us_market_slug"] for r in rows
         if r["us_market_slug"] not in due and r["us_market_slug"]
-        not in prio])
+        not in prio and r["us_market_slug"] not in not_yet])
     slugs = list(dict.fromkeys(due + prio + resting))
     held = await _stalest_first(conn, [
         p["us_market_slug"] for p in await L.positions(conn, acct)
-        if p["us_market_slug"] not in slugs])
+        if p["us_market_slug"] not in slugs
+        and p["us_market_slug"] not in not_yet])
     slugs.extend(held)
     # AT MOST HALF THE PASS'S READS: the other half is Derek's.
     cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
     got = await read_books(conn, ctx, slugs, basis="OPEN_ORDER_OR_POSITION",
-                           limit=max(1, cap // 2))
+                           limit=max(1, cap // 2),
+                           not_before=due_not_before)
+    got["deferred_until_eligible"] = len(not_yet)
     if prio:
         read_prio = [s for s in prio if s in got["obs"]]
         ctx["work_queue_books_read"] = len(read_prio)
@@ -133,10 +167,15 @@ async def step_books(conn, ctx: dict) -> dict:
 
 
 async def read_books(conn, ctx: dict, slugs: list, *, basis: str,
-                     limit: int | None = None) -> dict:
+                     limit: int | None = None,
+                     not_before: dict | None = None) -> dict:
+    """`not_before` (R30A): {slug: epoch} -- for a pending marketable entry,
+    its eligible instant: the read must be received at or after it (the
+    shared-read cache may not answer with an older receipt)."""
     from .. import bettor_paper_simulator as SIM
     cap = int(ctx["config"]["cadence"]["max_book_reads_per_pass"])
     out = {"read": 0, "errors": 0, "skipped_budget": 0, "obs": {}}
+    nb_map = dict(not_before or {})
     for slug in slugs:
         if ctx["books_read"] >= cap or not _budget_left(ctx) or (
                 limit is not None and out["read"] >= limit):
@@ -145,7 +184,8 @@ async def read_books(conn, ctx: dict, slugs: list, *, basis: str,
         # BOUNDED BY THE PASS DEADLINE: a read the venue cooldown would hold
         # past the pass budget is refused by name, never left to overrun it.
         from . import paper_derek as _PD
-        got = await _PD.read_book_within_deadline(ctx, slug)
+        got = await _PD.read_book_within_deadline(
+            ctx, slug, not_before_epoch=nb_map.get(slug))
         ctx["books_read"] += 1
         rec = await SIM.record_book(conn, slug=slug, read=got,
                                     source="PAPER_MARKET_DATA_CLIENT",
@@ -668,6 +708,172 @@ def schedule_book_retry(*, valuation_id: int, strategies: list,
             "budget_per_hour": RETRY_BUDGET_PER_HOUR}
 
 
+# ── THE ENTRY-FILL READ: ONE BOOK READ AT THE ENTRY'S ELIGIBLE INSTANT ───
+#
+# R30A INCIDENT REPAIR (the ENTER -> FILL collapse). An in-cycle ENTER used
+# to depend on the paper pass for the book its fill is simulated on: the
+# hook schedules a pass, but (1) a pass already running coalesces the
+# request away, (2) the pass reads the entry in its books step BEFORE it is
+# eligible (wasted, and it primes the 6 s shared cache with a pre-eligible
+# receipt), and (3) its after-delay step reads with whatever is left of the
+# 20 s pass budget -- usually nothing, so the read was refused by our own
+# gate and recorded as an errored observation inside the order's window.
+# Production, 7 d to 2026-10-04 20:54Z (research-sql run 37233864395): 100
+# of 168 paper entry orders expired with no readable book; E6 -- once
+# expired, their market was next read p50 229 s (completed-game) / 863 s
+# (exploration) later, far outside the 90 s TTL.
+#
+# So each in-cycle ENTER gets ONE dedicated, bounded read: on its own pool
+# connection, off the cycle, it waits for the order's eligible instant
+# (decision + the session's unchanged 2 s delay), reads the book with
+# `not_before` = that instant and a deadline of its own (never past the
+# order's TTL, at most ENTRY_FILL_MAX_WAIT_S, so a venue cooldown is waited
+# out rather than refused against an exhausted pass budget), records it like
+# every other read, and simulates the order on it under the simulator's
+# unchanged rules (first READABLE book at or after eligible, the limit, the
+# depth walk, the consumption ledger, the fees). At most ENTRY_FILL_
+# CONCURRENCY run at once and ENTRY_FILL_BUDGET_PER_HOUR per rolling hour --
+# one read per ENTER, a few dozen a day, against the thousands of position
+# reads the pass makes. It decides nothing, changes no threshold, and a read
+# it cannot make leaves the order pending for the pass, as before.
+ENTRY_FILL_CONCURRENCY = 2
+ENTRY_FILL_BUDGET_PER_HOUR = 240
+ENTRY_FILL_MAX_WAIT_S = 30.0
+ENTRY_FILL_TTL_MARGIN_S = 2.0
+ENTRY_FILL_READ_BASIS = "ENTRY_AT_ELIGIBLE"
+_ENTRY_FILL: dict = {"sem": None, "loop": None, "recent": [], "tasks": set(),
+                     "scheduled": 0, "refused_budget": 0, "last": None}
+
+
+def _entry_fill_sem() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    if _ENTRY_FILL["sem"] is None or _ENTRY_FILL["loop"] is not loop:
+        _ENTRY_FILL["sem"] = asyncio.Semaphore(ENTRY_FILL_CONCURRENCY)
+        _ENTRY_FILL["loop"] = loop
+    return _ENTRY_FILL["sem"]
+
+
+async def entry_fill(conn, order_ids, *, market_data=None, clock=None,
+                     sleep=None, fee_fn=None) -> dict:
+    """THE ENTRY-FILL READ for `order_ids` (pending marketable entries):
+    wait for each market's eligible instant, read its book once (received at
+    or after that instant), record it, simulate the orders on it. Bounded;
+    never raises."""
+    from .. import bettor_paper_simulator as SIM
+    from . import paper_derek as PD
+    clock = clock or time.time
+    sleep = sleep or asyncio.sleep
+    out: dict[str, Any] = {"orders": len(list(order_ids or [])), "read": 0,
+                           "errors": 0, "results": []}
+    try:
+        rows = await conn.fetch(
+            "SELECT order_id, us_market_slug, state, order_type, "
+            "       extract(epoch FROM eligible_at)::float8 AS eligible_epoch, "
+            "       extract(epoch FROM expires_at)::float8 AS expires_epoch "
+            "  FROM paper_orders WHERE order_id = ANY($1::text[]) "
+            "   AND order_type = 'MARKETABLE' "
+            "   AND state = 'PENDING_SIMULATION'",
+            [str(o) for o in (order_ids or [])])
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, error=type(exc).__name__)
+    by_slug: dict = {}
+    for r in rows:
+        by_slug.setdefault(r["us_market_slug"], []).append(dict(r))
+    md = market_data if market_data is not None else _client()
+    for slug, orders in sorted(by_slug.items()):
+        elig = max(float(o["eligible_epoch"]) for o in orders)
+        expires = min(float(o["expires_epoch"]) for o in orders)
+        wait = elig - float(clock())
+        if wait > 0:
+            await sleep(wait)
+        now = max(float(clock()), elig)
+        budget = min(ENTRY_FILL_MAX_WAIT_S,
+                     expires - ENTRY_FILL_TTL_MARGIN_S - now)
+        if budget <= PD.BOOK_READ_RESERVE_S:
+            out["results"].append({"us_market_slug": slug,
+                                   "skipped": "NO_TIME_LEFT_IN_THE_TTL"})
+            continue
+        rctx = {"market_data": md,
+                "deadline": time.monotonic() + budget}
+        got = await PD.read_book_within_deadline(rctx, slug,
+                                                 not_before_epoch=elig)
+        rec = await SIM.record_book(conn, slug=slug, read=got,
+                                    source="PAPER_MARKET_DATA_CLIENT",
+                                    read_basis=ENTRY_FILL_READ_BASIS)
+        out["read"] += 1
+        out["errors"] += 1 if rec.get("error") else 0
+        sim_now = max(float(clock()), float(rec["observed_at"]))
+        for o in orders:
+            r = await SIM.simulate_order(conn, o["order_id"], now=sim_now,
+                                         fee_fn=fee_fn)
+            out["results"].append({k: r.get(k) for k in (
+                "order_id", "state", "filled_qty", "refusal", "pending")}
+                | {"book_obs_id": rec.get("obs_id"),
+                   "book_error": rec.get("error")})
+    return out
+
+
+def schedule_entry_fill(order_ids, *, get_pool=None, now=None,
+                        after=None) -> dict:
+    """START ONE BACKGROUND ENTRY-FILL READ for `order_ids`, within the
+    concurrency and hourly budget. Returns at once; never raises. `after`
+    (optional) is called once the read finishes (the runtime passes the
+    paper-pass trigger, so the handoff and Xavier follow a first fill)."""
+    ids = [str(o) for o in (order_ids or []) if o]
+    if not ids:
+        return {"scheduled": False, "why": "NO_ORDERS"}
+    at = time.time() if now is None else float(now)
+    _ENTRY_FILL["recent"] = [t for t in _ENTRY_FILL["recent"]
+                             if at - t < 3600.0]
+    if len(_ENTRY_FILL["recent"]) >= ENTRY_FILL_BUDGET_PER_HOUR:
+        _ENTRY_FILL["refused_budget"] += 1
+        return {"scheduled": False, "why": "ENTRY_FILL_BUDGET_EXHAUSTED",
+                "budget_per_hour": ENTRY_FILL_BUDGET_PER_HOUR}
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
+    if get_pool is None:
+        from ..db import get_pool
+    _ENTRY_FILL["recent"].append(at)
+    _ENTRY_FILL["scheduled"] += 1
+
+    async def run():
+        async with _entry_fill_sem():
+            try:
+                pool = await get_pool()
+                async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as c:
+                    _ENTRY_FILL["last"] = await asyncio.wait_for(
+                        entry_fill(c, ids),
+                        ENTRY_FILL_MAX_WAIT_S + 15.0)
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                log.warning("paper entry-fill read failed (%s)", ids,
+                            exc_info=True)
+            if after is not None:
+                try:
+                    after()
+                except Exception:                              # noqa: BLE001
+                    pass
+
+    t = loop.create_task(run())
+    _ENTRY_FILL["tasks"].add(t)
+    t.add_done_callback(_ENTRY_FILL["tasks"].discard)
+    return {"scheduled": True, "orders": ids,
+            "in_flight": len(_ENTRY_FILL["tasks"]),
+            "budget_used_last_hour": len(_ENTRY_FILL["recent"]),
+            "budget_per_hour": ENTRY_FILL_BUDGET_PER_HOUR}
+
+
+def entry_fill_status() -> dict:
+    return {"scheduled": _ENTRY_FILL["scheduled"],
+            "refused_budget": _ENTRY_FILL["refused_budget"],
+            "in_flight": len(_ENTRY_FILL["tasks"]),
+            "budget_per_hour": ENTRY_FILL_BUDGET_PER_HOUR,
+            "last": _ENTRY_FILL["last"]}
+
+
 async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
                                    strategies, via: str, attempt_no: int,
                                    schedule_retry) -> dict:
@@ -735,6 +941,26 @@ async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
     return results
 
 
+def _start_entry_fill(order_ids, *, schedule_fill, schedule_entry):
+    """The entry-fill read for these orders (R30A). Production (no injected
+    `schedule_fill`): `schedule_entry_fill`, then a paper pass so the handoff
+    and Xavier follow a first fill. A test that injects `schedule_fill`
+    without `schedule_entry` gets nothing new. Never raises."""
+    fn = schedule_entry
+    if fn is None and schedule_fill is None:
+        from . import runtime as _RT
+
+        def fn(ids):
+            return schedule_entry_fill(ids, after=lambda: _RT.paper_pass_hook(
+                trigger="ENTRY_FILL_READ"))
+    if fn is None:
+        return None
+    try:
+        return fn(list(dict.fromkeys(order_ids)))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"scheduled": False, "error": type(exc).__name__}
+
+
 async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                            market_data=None, account_id: str | None = None,
                            fee_fn=None, schedule_fill=None,
@@ -742,12 +968,17 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                            via: str = "IN_CYCLE_AT_THE_VALUATION_INSTANT",
                            attempt_no: int = 1,
                            schedule_retry=None,
-                           book_retry: bool = True) -> dict:
+                           book_retry: bool = True,
+                           schedule_entry=None) -> dict:
     """ONE PAPER DECISION FOR ONE JUST-WRITTEN VALUATION. Never raises.
 
     `strategies` (the book retry) limits the run to those benchmark-family
     strategies; the retry decides only what its first attempt deferred.
-    `book_retry=False` decides a cut read at once (no retry)."""
+    `book_retry=False` decides a cut read at once (no retry).
+    `schedule_entry` (R30A) starts the entry-fill read for the orders this
+    valuation produced; by default `schedule_entry_fill` in production (when
+    `schedule_fill` is not injected), and nothing when a test injects
+    `schedule_fill` without it."""
     if not S.env_on():
         return {"decided": False, "why": S.R_ENV_OFF}
     acct = account_id or DEFAULT_ACCOUNT_ID
@@ -816,6 +1047,8 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                     sched()
                 except Exception:                              # noqa: BLE001
                     pass
+                _start_entry_fill(orders, schedule_fill=schedule_fill,
+                                  schedule_entry=schedule_entry)
             return {"decided": True, "via": via, "attempt_no": attempt_no,
                     "strategies": {k: {kk: (v or {}).get(kk) for kk in (
                         "decision_id", "verdict", "refusal", "order_id",
@@ -881,10 +1114,20 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             except Exception as exc:                           # noqa: BLE001
                 rec["fill_pass"] = {"scheduled": False,
                                     "error": type(exc).__name__}
+            ef = _start_entry_fill(
+                [o for o in ([rec.get("order_id"),
+                              (bench or {}).get("order_id")]
+                             + [r.get("order_id") for r in family.values()
+                                if isinstance(r, dict)]) if o],
+                schedule_fill=schedule_fill, schedule_entry=schedule_entry)
+            if ef is not None:
+                rec["entry_fill"] = ef
         out = dict({k: rec.get(k) for k in (
             "decision_id", "verdict", "refusal", "order_id", "duplicate",
             "deferred", "fill_pass")}, decided=not rec.get("deferred"),
             mutation_attempts=delta)
+        if rec.get("entry_fill") is not None:
+            out["entry_fill"] = rec["entry_fill"]
         if bench is not None:
             out["benchmark"] = bench
             if bench_cg is not None:
