@@ -145,14 +145,18 @@ def test_a_policy_sha_is_approved_only_by_its_own_approve():
 
 def test_the_named_human_rule_matches_the_database_check():
     for robot in ("system", "SYSTEM", "derek", "Xavier:x", "audrey", "karen",
-                  "allie", "chief_allocator", "eddie", "scout", "bettor",
+                  "allie", "chief_allocator", "eddie", "archer", "scout",
+                  "bettor",
                   "claude code", "agent:release", "migration 225",
                   "test_harness_system", "", "   ", None):
         assert CI.is_named_human(robot) is False, robot
     for human in ("owner@example", "release engineer", "M. Owner"):
         assert CI.is_named_human(human) is True, human
-    sql = (MIG / "225_live_parity.sql").read_text()
+    # the database's current definition: 225's function as migration 266
+    # redefined it ('archer' beside 'eddie', the rename)
+    sql = (MIG / "266_archer_execution_agent_rename.sql").read_text()
     assert CI.NON_HUMAN_ACTOR_PATTERN.lstrip("^") in sql.replace("'^", "'")
+    assert "FUNCTION live_parity_named_human" in sql
 
 
 # ═════════════════════════════════════════════════════════════════════

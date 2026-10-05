@@ -10,7 +10,7 @@ refused by the triggers and CHECKs:
      gate receipt) -> FORWARD RESULT -> ROLLED BACK, each written by its
      permitted actor class; the item's stage follows its transitions.
   §2 NO SELF-APPROVAL. The owner, the hypothesis author and the patch
-     author never evaluate or mark eligible; Karen, Eddie and Scout never
+     author never evaluate or mark eligible; Karen, Archer and Scout never
      evaluate; ELIGIBLE_CHANGE needs an independent PASS and no FAIL.
   §3 PROTECTED AREAS. requires_human_review and two independent reviews are
      forced by CHECK; one PASS is not enough; an agent cannot mark a
@@ -231,8 +231,8 @@ async def test_no_proposer_or_author_evaluates_or_marks_its_own_change():
         # the patch author
         await _no(conn, iid, "INDEPENDENT_EVALUATION", "Jane Engineer",
                   "HUMAN", 7, outcome="PASS", match="proposed or authored")
-        # Karen, Eddie and Scout never evaluate
-        for who in ("KAREN", "EDDIE", "SCOUT"):
+        # Karen, Archer and Scout never evaluate
+        for who in ("KAREN", "ARCHER", "SCOUT"):
             await _no(conn, iid, "INDEPENDENT_EVALUATION", who,
                       "INDEPENDENT_EVALUATOR", 7, outcome="PASS")
         # an evaluation must come first; an INCONCLUSIVE is not a PASS

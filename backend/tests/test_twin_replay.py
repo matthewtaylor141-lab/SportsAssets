@@ -12,7 +12,7 @@ FREE FROM FUTURE INFORMATION.
      instant change no world's result (while one injected BEFORE does -- the
      control); the database refuses a trace that read the future.
   §3 THE WORLDS. Derek threshold, sizing, Xavier always-HOLD and immediate
-     EXIT, allocator, Karen block accepted/ignored, Eddie and Scout
+     EXIT, allocator, Karen block accepted/ignored, Archer and Scout
      (UNAVAILABLE without their interface, computed with it) -- each checked
      against hand-computed P&L on the synthetic stream.
   §4 VERSIONED AND FROZEN. A scenario's id is its spec's sha; the database
@@ -300,7 +300,7 @@ def test_karen_block_accepted_versus_ignored():
     assert ign["C"]["world_action"] == "BLOCK_IGNORED"
 
 
-def test_eddie_and_scout_are_unavailable_without_their_interface():
+def test_archer_and_scout_are_unavailable_without_their_interface():
     for key in ("EDDIE_ALTERNATE_EXECUTION", "SCOUT_FEATURE_INCLUDED",
                 "SCOUT_FEATURE_EXCLUDED"):
         r = run(key)
@@ -310,17 +310,17 @@ def test_eddie_and_scout_are_unavailable_without_their_interface():
         assert r["body"]["world"] is None and r["traces"] == []
 
 
-def test_eddie_and_scout_worlds_when_the_interface_exists():
+def test_archer_and_scout_worlds_when_the_interface_exists():
     t = TF.T0
     st = TF.stream(
-        eddie=[{"decision_id": "A", "at": t - 1, "qty": 100,
+        archer=[{"decision_id": "A", "at": t - 1, "qty": 100,
                 "baseline_vwap": 0.53, "eddie_vwap": 0.525,
                 "baseline_fee_usd": 1.0, "eddie_fee_usd": 0.5}],
         scout=[{"feature_id": "f1", "decision_id": "B", "at": t + 9,
                 "p_with": 0.60, "p_without": 0.50, "status": "VALIDATED"}])
     ed = TF.by_subject(run("EDDIE_ALTERNATE_EXECUTION", st))
     assert ed["A"]["pnl_usd"] == pytest.approx(46.0 + 0.5 + 0.5)
-    assert ed["C"]["world_action"] == "NO_EDDIE_PLAN_AT_DECISION"
+    assert ed["C"]["world_action"] == "NO_ARCHER_PLAN_AT_DECISION"
     inc = TF.by_subject(run("SCOUT_FEATURE_INCLUDED", st))
     exc = TF.by_subject(run("SCOUT_FEATURE_EXCLUDED", st))
     assert inc["B"]["world_action"] == "ENTER"

@@ -133,11 +133,11 @@ async def build_streams(conn, *, now, since, account_id,
     regimes = await R.regimes(conn, since=since, until=now)
     dids = [o["subject_id"] for o in paper["opps"] + actual["opps"]]
     allocs = await R.allocations(conn, dids, since=since, until=now)
-    eddie, ew = await R.iface(conn, "EDDIE", since=since, until=now)
+    archer, ew = await R.iface(conn, "ARCHER", since=since, until=now)
     scout, sw = await R.iface(conn, "SCOUT", since=since, until=now)
     books = await R.point_books(conn, _book_instants(
         paper["positions"] + actual["positions"], karen))
-    why = {"EDDIE": ew, "SCOUT": sw}
+    why = {"ARCHER": ew, "SCOUT": sw}
     out = {}
     for basis, b in (("PAPER", paper), ("ACTUAL", actual)):
         if basis == "ACTUAL" and not include_actual:
@@ -145,9 +145,9 @@ async def build_streams(conn, *, now, since, account_id,
         out[basis] = E.Stream(
             basis=basis, opps=b["opps"], positions=b["positions"],
             oracle=b["oracle"], books=books, regimes=regimes,
-            allocations=allocs, karen=karen, eddie=eddie, scout=scout,
+            allocations=allocs, karen=karen, archer=archer, scout=scout,
             iface_why=why, window=(since, now))
-    return {"streams": out, "regimes": regimes, "eddie": (eddie, ew),
+    return {"streams": out, "regimes": regimes, "archer": (archer, ew),
             "scout": (scout, sw)}
 
 
@@ -213,12 +213,12 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
             research_only=True, production_truth=False,
             summed_across_books=False,
             inputs={b: s.input_sha() for b, s in got["streams"].items()},
-            interfaces={"EDDIE": got["eddie"][1], "SCOUT": got["scout"][1]},
+            interfaces={"ARCHER": got["archer"][1], "SCOUT": got["scout"][1]},
             scenarios=summaries)
         await ST.save_snapshot(conn, run_id=run_id, component="TWIN",
                                payload=payload, now=now, version=E.VERSION)
         ctx.update(streams=got["streams"], regimes=got["regimes"],
-                   eddie=got["eddie"], scout=got["scout"], results=results,
+                   archer=got["archer"], scout=got["scout"], results=results,
                    traces=traces)
         return {"results": len(done), "inserted": inserted}
 
@@ -283,7 +283,7 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         await ST.register_spec(conn, kind="SCORECARD_RULES", version=1,
                                spec=SCD.RULES, now=now)
         db = await SCD.load(conn, now=now, since=since)
-        ed, ew = ctx.get("eddie") or (None, "TWIN_COMPONENT_FAILED")
+        ed, ew = ctx.get("archer") or (None, "TWIN_COMPONENT_FAILED")
         sc_, sw = ctx.get("scout") or (None, "TWIN_COMPONENT_FAILED")
         # THE AGENT SCORECARDS' PAPER / ACTUAL ROWS ARE INVESTMENT-ONLY
         # (R30A review, owner audit P0 #5). Derek's realized edge and
@@ -306,7 +306,7 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         rows = SCD.compute(streams=by_sleeve["INVESTMENT"],
                            results=ctx.get("results") or {},
                            traces=ctx.get("traces") or {}, db=db,
-                           eddie_rows=ed, eddie_why=ew, scout_rows=sc_,
+                           archer_rows=ed, archer_why=ew, scout_rows=sc_,
                            scout_why=sw)
         for r in rows:
             if r["book"] in ("PAPER", "ACTUAL") and r["agent"] in (
@@ -421,12 +421,12 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         db = await EV.load(conn, since=since, until=now,
                            account_id=account_id,
                            group_ids=[p["group_id"] for p in allpos])
-        ed, ew = ctx.get("eddie") or (None, "TWIN_COMPONENT_FAILED")
+        ed, ew = ctx.get("archer") or (None, "TWIN_COMPONENT_FAILED")
         sc_, sw = ctx.get("scout") or (None, "TWIN_COMPONENT_FAILED")
         ok = await EV.decisions_exist(conn, [r["decision_id"] for r in (
             ed or []) + (sc_ or [])])
-        got = EV.compute(db=db, positions=allpos, eddie_rows=ed,
-                         eddie_why=ew, scout_rows=sc_, scout_why=sw,
+        got = EV.compute(db=db, positions=allpos, archer_rows=ed,
+                         archer_why=ew, scout_rows=sc_, scout_why=sw,
                          decision_ok=ok)
         await ST.save_evals(conn, run_id=run_id, now=now, rows=got["rows"])
         await ST.save_snapshot(
@@ -573,7 +573,7 @@ def sleeve_streams(streams: dict, group_sleeves: dict, sleeve: str) -> dict:
             opps=[o for o in st.opps if opp_sleeve(o) == sleeve],
             positions=[p for p in st.positions if pos_sleeve(p) == sleeve],
             oracle=st.oracle, books=st.books, regimes=st.regimes,
-            allocations=st.allocations, karen=st.karen, eddie=st.eddie,
+            allocations=st.allocations, karen=st.karen, archer=st.archer,
             scout=st.scout, iface_why=st.iface_why, window=st.window)
     return out
 

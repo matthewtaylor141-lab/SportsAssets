@@ -1,12 +1,12 @@
-"""EDDIE'S AND SCOUT'S DESKS ON THEIR COMMAND CENTRE PAGES (migration 217).
+"""ARCHER'S AND SCOUT'S DESKS ON THEIR COMMAND CENTRE PAGES (migration 217).
 
 Each page leads with the agent's desk: the live 3D character at an original,
-procedural desk (cc_characters.js -- Eddie an institutional execution desk
+procedural desk (cc_characters.js -- Archer an institutional execution desk
 with order-book / depth screens, Scout a research desk with sports-feed,
 feature-test and weather / data panels) and, beside it, the desk panels.
 
 EVERY VALUE ON THE DESK COMES FROM THE AGENT'S ENDPOINT. The page's data
-module reads /api/command/eddie or /scout (the shared BOOT_JS) and hands the
+module reads /api/command/archer or /scout (the shared BOOT_JS) and hands the
 JSON to `DESK.render`, which fills the panels, sets the character's pose
 from the persisted heartbeat (`cc:mode`, the same rule as the other agents:
 stale or FAILED is UNAVAILABLE) and redraws the 3D screens (`cc:desk`). A
@@ -20,7 +20,7 @@ RESEARCH SHADOW ONLY in words.
 from __future__ import annotations
 
 DESK_META = {
-    "eddie": {"name": "Eddie", "role": "Head of Execution",
+    "archer": {"name": "Archer", "role": "Head of Execution",
               "authority": "SHADOW ONLY · NO ORDER, CANCEL, VENUE OR "
                            "CAPITAL AUTHORITY",
               "blurb": ("Preserves Derek's theoretical edge between decision "
@@ -41,10 +41,10 @@ DESK_META = {
               "accent": "#6fd39a"},
 }
 
-#: The desk panels, in order: (key, label). Eddie's and Scout's lists are
+#: The desk panels, in order: (key, label). Archer's and Scout's lists are
 #: the owner's acceptance standard.
 PANELS = {
-    "eddie": (("heartbeat", "Heartbeat"), ("current_task", "Current task"),
+    "archer": (("heartbeat", "Heartbeat"), ("current_task", "Current task"),
               ("alerts", "Alerts"),
               ("analysis", "Current execution analysis"),
               ("candidate", "Candidate contract"),
@@ -97,10 +97,10 @@ DESK_CSS = r"""
 .pd-blurb{margin:8px 0 0;font-size:13px;color:var(--ink-2)}
 body[data-cc-mode=unavailable] .pd-stage{filter:saturate(.4)}
 /* phone width: long identity chips (versions, mandates) wrap, never scroll */
-body.ag-eddie .ident>div,body.ag-scout .ident>div{min-width:0;flex:1 1 auto}
-body.ag-eddie .chip,body.ag-scout .chip{white-space:normal;overflow-wrap:anywhere;max-width:100%}
-body.ag-eddie .mandate,body.ag-scout .mandate{overflow-wrap:anywhere}
-body.ag-eddie main,body.ag-scout main{overflow-x:clip}
+body.ag-archer .ident>div,body.ag-scout .ident>div{min-width:0;flex:1 1 auto}
+body.ag-archer .chip,body.ag-scout .chip{white-space:normal;overflow-wrap:anywhere;max-width:100%}
+body.ag-archer .mandate,body.ag-scout .mandate{overflow-wrap:anywhere}
+body.ag-archer main,body.ag-scout main{overflow-x:clip}
 @media (max-width:980px){.pd{grid-template-columns:1fr}.pd-stage{position:relative;top:0;height:440px;min-height:340px}}
 @media (max-width:560px){.pd-panels{grid-template-columns:1fr}.pd-ov h1{font-size:26px}.pd-stage{height:340px;min-height:300px}}
 """
@@ -111,7 +111,7 @@ def _fallback_svg(kind: str) -> str:
     only. The screens are blank frames here -- the numbers live in the desk
     panels, drawn from the record."""
     acc = DESK_META[kind]["accent"]
-    if kind == "eddie":
+    if kind == "archer":
         frames = ('<rect x="40" y="150" width="150" height="90" rx="6"/>'
                   '<rect x="225" y="70" width="190" height="110" rx="6"/>'
                   '<rect x="450" y="150" width="150" height="90" rx="6"/>')
@@ -200,7 +200,7 @@ var DESK = (function () {
       finding: d.recent_finding ? esc(d.recent_finding) : nm('no finding recorded yet'),
       economic: isObj(d.economic_score) ? (d.economic_score.value === null || d.economic_score.value === undefined ? nm(d.economic_score.why) : esc(num(d.economic_score.value, 2)) + ' USD<div class="s">' + esc(d.economic_score.name) + '</div>') : nm('no score in this record')};
   }
-  function eddie(d, json) {
+  function archer(d, json) {
     var f = common(d, json), a = d.current_analysis, u = isObj(a) && isObj(a.unmeasured) ? a.unmeasured : {};
     var pv = d.predicted_vs_realized;
     if (!isObj(a)) {
@@ -209,7 +209,9 @@ var DESK = (function () {
       var c = isObj(a.candidate) ? a.candidate : {};
       f.analysis = '<b>' + esc(a.recommendation) + '</b> <span class="s">(SHADOW · ' + esc(a.estimate_id) + ')</span><div class="s">' + esc(a.reason) + '</div><div class="s">theoretical edge ' + val(a.theoretical_edge_pp, u.theoretical_edge) + ' · net executable edge ' + val(a.expected_net_executable_edge_pp, u.net_executable_edge) + '</div>';
       f.candidate = esc(c.us_market_slug) + ' ' + esc(c.holding_side) + '<div class="s">' + esc(c.decision_id) + ' · qty ' + esc(num(c.proposed_qty, 2)) + ' ≤ ' + esc(num(c.limit_price, 3)) + '</div>';
-      f.fill = 'probability ' + val(a.expected_fill_probability, u.fill_probability, 3) + '<div class="s">max executable size ' + val(a.max_executable_qty, u.max_executable_size, 0) + '</div>';
+      // R30C: a fill probability is always shown with the class it was fitted on (the paper simulator's rate is never live execution quality)
+      var fe = isObj(a.fill_probability_evidence) ? a.fill_probability_evidence : {};
+      f.fill = 'probability ' + val(a.expected_fill_probability, u.fill_probability, 3) + '<div class="s">fitted on ' + esc(fe.fitted_on || 'UNLABELLED') + (fe.live_ci_low !== undefined && fe.live_ci_low !== null ? ' · live interval ' + esc(num(fe.live_ci_low, 3)) + '–' + esc(num(fe.live_ci_high, 3)) : '') + ' · ' + esc(fe.live_use || 'not proof of live execution') + '</div><div class="s">max executable size ' + val(a.max_executable_qty, u.max_executable_size, 0) + '</div>';
       f.slippage = val(a.expected_slippage_pp, u.slippage);
       f.policy = a.execution_policy ? esc(a.execution_policy) : nm('no policy recorded');
       var ms = isObj(a.microstructure) ? a.microstructure : {}, b = isObj(a.book) ? a.book : {};
@@ -239,7 +241,7 @@ var DESK = (function () {
     json = isObj(json) ? json : {};
     var d = isObj(json.desk) ? json.desk : (isObj(json.sections) && isObj(json.sections.desk) && isObj(json.sections.desk.data) ? json.sections.desk.data : null);
     if (!d) return {_unavailable: 'the endpoint returned no desk record'};
-    return kind === 'eddie' ? eddie(d, json) : scout(d, json);
+    return kind === 'archer' ? archer(d, json) : scout(d, json);
   }
   function setAll(html) {
     if (typeof document === 'undefined') return;

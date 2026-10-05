@@ -68,6 +68,12 @@ async def _pool():
 def _agent(agent: str) -> str:
     ag = P.agent_of(agent)
     if ag is None:
+        # (266) the historical alias (eddie) is the agent it now names;
+        # anything recorded through it is recorded as ARCHER
+        from ..agents import registry as _R
+        if _R.historical_alias(agent):
+            ag = P.agent_of(_R.canonical_agent_id(agent))
+    if ag is None:
         raise HTTPException(status_code=404, detail={
             "reason": P.R_UNKNOWN_AGENT, "agents": ["derek", "xavier",
                                                     "audrey"]})
@@ -181,7 +187,7 @@ async def persona_latest(agent: str, response: Response,
         got = await PC.transcript(conn, cid) if cid else None
     if got is None:
         if absent == "empty":
-            # opt-in (?absent=empty, the Eddie / Scout pages): "none yet" as
+            # opt-in (?absent=empty, the Archer / Scout pages): "none yet" as
             # an explicit empty answer instead of a 404 the browser logs
             return {"conversation": None, "messages": [], "read_only": True,
                     "status": "NO_CONVERSATION_YET_FOR_THIS_AGENT_AND_ROLE",

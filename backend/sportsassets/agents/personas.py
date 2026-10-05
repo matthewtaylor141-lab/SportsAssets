@@ -54,9 +54,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 VERSION = "agent-personas-v1"
-AGENTS = ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT")
+AGENTS = ("DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "SCOUT")
 SLUG_TO_AGENT = {"derek": "DEREK", "xavier": "XAVIER", "audrey": "AUDREY",
-                 "karen": "KAREN", "eddie": "EDDIE", "scout": "SCOUT"}
+                 "karen": "KAREN", "archer": "ARCHER", "scout": "SCOUT"}
 
 R_NO_SCHEMA = "MIGRATION_180_NOT_APPLIED"
 R_UNKNOWN_AGENT = "UNKNOWN_AGENT"
@@ -353,10 +353,10 @@ DEFAULT_PROFILES["KAREN"] = {
     },
 }
 
-# EDDIE (head of execution, migration 217). Answers ONLY from his own SHADOW
+# ARCHER (head of execution, migration 217). Answers ONLY from his own SHADOW
 # estimate and outcome records (persona_facts gives him nothing else).
-DEFAULT_PROFILES["EDDIE"] = {
-    "display_name": "Eddie",
+DEFAULT_PROFILES["ARCHER"] = {
+    "display_name": "Archer",
     "role_title": "the head of execution",
     "perspective": "EXECUTION_MICROSTRUCTURE",
     "perspective_text": (
@@ -365,7 +365,7 @@ DEFAULT_PROFILES["EDDIE"] = {
         "fill is; how much capital waits while it works; and whether the "
         "net executable edge is positive at all."),
     "persona_text": (
-        "Eddie runs execution like an institutional desk: fast, precise, "
+        "Archer runs execution like an institutional desk: fast, precise, "
         "controlled. He speaks in basis points of edge preserved or lost, "
         "fill probabilities and capital-hours, never in hunches. He does not "
         "forecast games -- the probability is Derek's -- and he is "
@@ -394,7 +394,11 @@ DEFAULT_PROFILES["EDDIE"] = {
                      "unmeasured", "predicted_vs_realized"],
     "voice_profile": {
         "provider": "elevenlabs", "voice_id": None,
-        "voice_id_env": "ELEVENLABS_VOICE_ID_EDDIE",
+        "voice_id_env": "ELEVENLABS_VOICE_ID_ARCHER",
+        # (266) the variable the deployment configured under the agent's
+        # historical name; read only when the ARCHER variable is unset, so
+        # the agent keeps ITS OWN voice across the rename (never another's)
+        "voice_id_env_legacy": "ELEVENLABS_VOICE_ID_EDDIE",
         "character": ("adult man; measured, precise, low and even; trading-"
                       "floor composure"),
         "preferred_names": ["Daniel", "Adam", "Brian", "George"],
@@ -665,10 +669,15 @@ async def history(conn, agent: str) -> list:
     agent = agent_of(agent) or agent
     if not await has_schema(conn):
         return []
+    # (266) the versions this seat recorded under its historical alias
+    # (EDDIE's, for ARCHER) come first, each labelled historical_alias
+    from . import registry as _R
     rows = await conn.fetch(
-        "SELECT %s FROM agent_persona_versions WHERE agent_id=$1 "
-        " ORDER BY version" % _COLS, agent)
-    return [_row(r) for r in rows]
+        "SELECT %s FROM agent_persona_versions "
+        " WHERE agent_id = ANY($1::text[]) "
+        " ORDER BY (agent_id = $2), version" % _COLS,
+        _R.ids_with_aliases(agent), _R.canonical_agent_id(agent))
+    return [_R.label_aliases(_row(r)) for r in rows]
 
 
 async def get_version(conn, agent: str, version: int) -> dict | None:
@@ -772,11 +781,23 @@ def allowed_categories(env=None) -> tuple:
     return tuple(c for c in cats if c not in NEVER_CATEGORIES)
 
 
+def _env_voice(env, vp: dict, agent: str) -> tuple:
+    """(variable name, its value or None): the profile's variable, else --
+    only when that is unset -- its historical-alias variable (266)."""
+    name = str(vp.get("voice_id_env") or ("ELEVENLABS_VOICE_ID_%s" % agent))
+    v = (env.get(name) or "").strip() or None
+    legacy = vp.get("voice_id_env_legacy")
+    if v is None and legacy:
+        lv = (env.get(str(legacy)) or "").strip() or None
+        if lv is not None:
+            return str(legacy), lv
+    return name, v
+
+
 def configured_voice_id(agent: str, profile: dict, env=None) -> str | None:
     env = os.environ if env is None else env
     vp = profile.get("voice_profile") or {}
-    name = vp.get("voice_id_env") or ("ELEVENLABS_VOICE_ID_%s" % agent)
-    v = (env.get(str(name)) or "").strip() or (vp.get("voice_id") or "")
+    v = _env_voice(env, vp, agent)[1] or (vp.get("voice_id") or "")
     return v if v and _VOICE_ID.match(v) else None
 
 
@@ -1047,8 +1068,7 @@ def configured_voice_report(agent: str, profile: dict, env=None) -> dict:
     are not secrets; the API key is never read here)."""
     env = os.environ if env is None else env
     vp = profile.get("voice_profile") or {}
-    name = str(vp.get("voice_id_env") or ("ELEVENLABS_VOICE_ID_%s" % agent))
-    env_v = (env.get(name) or "").strip() or None
+    name, env_v = _env_voice(env, vp, agent)
     prof_v = (vp.get("voice_id") or None)
     eff = configured_voice_id(agent, profile, env)
     return {"env_var": name, "env_voice_id": env_v,

@@ -1,7 +1,7 @@
-"""EDDIE'S SHADOW EXECUTION ESTIMATES, THE HARD RULE, OUTCOMES, THE SCORECARD,
+"""ARCHER'S SHADOW EXECUTION ESTIMATES, THE HARD RULE, OUTCOMES, THE SCORECARD,
 THE RUNNER AND THE CANDIDATE-REVIEW WORKFLOW (migration 217).
 
-  * THE HARD RULE: Eddie never recommends executing (EXECUTE_NOW /
+  * THE HARD RULE: Archer never recommends executing (EXECUTE_NOW /
     REST_LIMIT / SPLIT) a candidate whose expected executable EV is <= 0 --
     or unmeasured -- whatever its theoretical edge. Pure (`estimate`,
     `enforce_hard_rule`), at the write (`record_estimate`) and in the
@@ -20,8 +20,8 @@ import time
 
 import pytest
 
-from sportsassets.agents import eddie as E
-from sportsassets.agents import eddie_runner as ER
+from sportsassets.agents import archer as E
+from sportsassets.agents import archer_runner as ER
 from sportsassets.agents import pos_workflow as W
 from sportsassets.agents import registry as R
 
@@ -329,7 +329,7 @@ async def test_the_runner_pass_estimates_reviews_and_heartbeats(monkeypatch):
             " (expected_executable_ev_usd > 0 AND "
             "  expected_net_executable_edge_pp > 0)")
         assert bad == 0
-        st = await R.status_of(conn, R.EDDIE)
+        st = await R.status_of(conn, R.ARCHER)
         assert st["state"] in ("DECISION_RECORDED", "IDLE")
         assert st["runs"] >= 1
         # idempotent: a second pass writes no new estimate for the same
@@ -413,11 +413,11 @@ async def test_a_failing_phase_is_isolated_and_never_raises():
 
 # the interface the other streams read (pos-twin: pos_iface_* views with
 # these exact columns; pos-learn: eddie_execution_estimates by name)
-TWIN_EDDIE = ("decision_id", "at", "qty", "baseline_vwap", "eddie_vwap",
+TWIN_ARCHER = ("decision_id", "at", "qty", "baseline_vwap", "eddie_vwap",
               "baseline_fee_usd", "eddie_fee_usd")
 TWIN_SCOUT = ("feature_id", "decision_id", "at", "p_with", "p_without",
               "status")
-LEARN_EDDIE = ("us_market_slug", "execution_uncertainty", "fill_probability",
+LEARN_ARCHER = ("us_market_slug", "execution_uncertainty", "fill_probability",
                "estimated_at")
 
 
@@ -430,13 +430,13 @@ async def test_the_interface_views_carry_the_contracted_columns():
             return {r["column_name"] for r in rows}
         q = ("SELECT column_name FROM information_schema.columns WHERE "
              " table_name=$1")
-        assert set(TWIN_EDDIE) <= cols(await conn.fetch(
+        assert set(TWIN_ARCHER) <= cols(await conn.fetch(
             q, "pos_iface_eddie_execution"))
         assert {"baseline_fill_ratio", "eddie_fill_ratio"} <= cols(
             await conn.fetch(q, "pos_iface_eddie_execution"))
         assert set(TWIN_SCOUT) <= cols(await conn.fetch(
             q, "pos_iface_scout_feature_effects"))
-        assert set(LEARN_EDDIE) <= cols(await conn.fetch(
+        assert set(LEARN_ARCHER) <= cols(await conn.fetch(
             q, "eddie_execution_estimates"))
         if not await conn.fetchval(
                 "SELECT count(*) FROM paper_decisions WHERE verdict='ENTER'"):

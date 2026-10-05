@@ -458,23 +458,34 @@ async def lifespan(_: FastAPI):
         peer_task = asyncio.create_task(_PEER.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("karen: peer responder not armed", exc_info=True)
-    # Eddie (Head of Execution) and Scout (Market Intelligence), migration
+    # Archer (Head of Execution) and Scout (Market Intelligence), migration
     # 217: SHADOW / RESEARCH ONLY. Each writes only its own records, each
     # write transaction declared as that agent (the database refuses any
     # order, intent, fill, approval or control write); bounded per pass;
-    # never raises into this process. Kill switches EDDIE_RUNNER_ENABLED=0
+    # never raises into this process. Kill switches ARCHER_RUNNER_ENABLED=0
     # and SCOUT_RUNNER_ENABLED=0.
-    eddie_task = scout_task = None
+    archer_task = scout_task = None
     try:
-        from ..agents import eddie_runner as _EDDIE
-        eddie_task = asyncio.create_task(_EDDIE.run(_cap_pool))
+        from ..agents import archer_runner as _ARCHER
+        archer_task = asyncio.create_task(_ARCHER.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
-        log.warning("eddie: runner not armed", exc_info=True)
+        log.warning("archer: runner not armed", exc_info=True)
     try:
         from ..agents import scout_runner as _SCOUT
         scout_task = asyncio.create_task(_SCOUT.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("scout: runner not armed", exc_info=True)
+    # Adriana (Head of Arbitrage), migration 265: SHADOW ONLY. Her census
+    # reads recorded books, writes only her own records (each transaction
+    # declared as ADRIANA: the database refuses any order, intent, fill,
+    # approval or control write), never calls a venue. Kill switch
+    # ADRIANA_RUNNER_ENABLED=0.
+    adriana_task = None
+    try:
+        from ..agents import adriana_runner as _ADRIANA
+        adriana_task = asyncio.create_task(_ADRIANA.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("adriana: runner not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -571,7 +582,7 @@ async def lifespan(_: FastAPI):
         log.exception("twin research runner failed to arm")
     # ── THE IMPROVEMENT PIPELINE RUNNER (migration 221) ──────────────
     # Seeds improvement items from real signals (upheld Karen challenges,
-    # Audrey findings, coverage incidents, Eddie SKIP_EXECUTION, false
+    # Audrey findings, coverage incidents, Archer SKIP_EXECUTION, false
     # refusals, tournament verdicts) and mirrors the stages the agents have
     # already recorded. Writes only its own improve_* tables; never a human
     # or engineering step; no push, merge, deploy, order or capital path.
@@ -597,7 +608,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             eddie_task, scout_task, intel_task, pos_task, poslearn_task, twin_task,
+                             archer_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
                              improve_task,
                              *watchdog_tasks)
                  if t is not None]
@@ -669,13 +680,21 @@ try:
 except ImportError:
     log.warning("agents: api.agents_karen not loaded", exc_info=True)
 try:
-    # Eddie and Scout (migration 217): /api/command/eddie, /api/command/scout,
-    # /api/command/agents/{eddie,scout} and /api/command/pos/reviews. Reads
+    # Archer and Scout (migration 217): /api/command/archer, /api/command/scout,
+    # /api/command/agents/{archer,scout} and /api/command/pos/reviews. Reads
     # only; there is no write route.
     from .agents_pos import router as _agents_pos_router
     app.include_router(_agents_pos_router)
 except ImportError:
     log.warning("agents: api.agents_pos not loaded", exc_info=True)
+try:
+    # Adriana (migration 265): /api/command/adriana, /api/command/agents/
+    # adriana, /api/command/adriana/scans and /opportunities/{id}. Reads
+    # only; there is no write route.
+    from .adriana_api import router as _adriana_router
+    app.include_router(_adriana_router)
+except ImportError:
+    log.warning("agents: api.adriana_api not loaded", exc_info=True)
 try:
     from .agents_chat import router as _agents_chat_router
     app.include_router(_agents_chat_router)
@@ -695,6 +714,17 @@ try:
     app.include_router(_command_quality_router)
 except ImportError:
     log.warning("quality: api.command_quality not loaded", exc_info=True)
+# ── THE FIRST-LOSS CENSUS: /api/command/coverage/first-loss (?hours=).
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# per provider event, the first chain stage it was lost at, its code and
+# class (SOFTWARE / ECONOMIC / EXTERNAL), per competition and sport.
+try:
+    from .command_coverage_first_loss import \
+        router as _command_coverage_first_loss_router
+    app.include_router(_command_coverage_first_loss_router)
+except ImportError:
+    log.warning("coverage: api.command_coverage_first_loss not loaded",
+                exc_info=True)
 # ── INSTITUTIONAL REPORTS ON THE PAPER ACCOUNT: /api/command/paper/reports/*
 # Read-only, COMMAND auth (same dependency as the paper experiment read).
 try:
@@ -723,6 +753,16 @@ try:
     app.include_router(_command_profitability_router)
 except ImportError:
     log.warning("profitability: api.command_profitability not loaded",
+                exc_info=True)
+# ── THE PROFITABILITY OS PAGE: GET /api/command/profitability/os (one
+# section per component, sportsassets/pos_os). GET only, COMMAND auth,
+# READ ONLY transaction. RESEARCH: observes and recommends, no authority.
+try:
+    from .command_profitability_os import (
+        router as _command_profitability_os_router)
+    app.include_router(_command_profitability_os_router)
+except ImportError:
+    log.warning("profitability: api.command_profitability_os not loaded",
                 exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
@@ -758,6 +798,15 @@ try:
     app.include_router(_command_sleeves_router)
 except ImportError:
     log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
+# ── PAPER TURNAROUND (migration 290): /api/command/paper/turnaround. GET
+# only, COMMAND auth, READ ONLY transaction; lifecycle states, predeclared
+# rules, rolling P&L, $/capital-hour, drawdown, stale management. No write.
+try:
+    from .command_turnaround import router as _command_turnaround_router
+    app.include_router(_command_turnaround_router)
+except ImportError:
+    log.warning("turnaround: api.command_turnaround not loaded",
+                exc_info=True)
 # ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
 # named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
 try:
@@ -775,6 +824,15 @@ try:
     app.include_router(_command_agent_funnel_router)
 except ImportError:
     log.warning("agent funnel: api.command_agent_funnel not loaded",
+                 exc_info=True)
+# ── R30C RISK EVIDENCE: /api/command/settlement-exception-risk and
+# /api/command/correlation-graph. GET only, COMMAND auth, READ ONLY
+# transaction; shadow information -- no cap, haircut or ENTER rule changes.
+try:
+    from .command_risk_evidence import router as _command_risk_router
+    app.include_router(_command_risk_router)
+except ImportError:
+    log.warning("risk evidence: api.command_risk_evidence not loaded",
                 exc_info=True)
 # ── PROFITABILITY VALIDATION PER SLEEVE: /api/command/profitability/
 # validation (?since=). GET only, COMMAND auth, READ ONLY transaction with a
@@ -808,6 +866,26 @@ try:
     app.include_router(_command_funnel_router)
 except ImportError:
     log.warning("opportunity funnel: api.command_opportunity_funnel not "
+                "loaded", exc_info=True)
+# ── R30C LIVE EXECUTION CALIBRATION: /api/command/execution-calibration.
+# PAPER_SIMULATION, LIVE_SHADOW and ACTUAL side by side, never pooled; GET
+# only, COMMAND auth, READ ONLY transaction with a statement timeout.
+try:
+    from .command_execution_calibration import (
+        router as _command_execution_calibration_router)
+    app.include_router(_command_execution_calibration_router)
+except ImportError:
+    log.warning("execution calibration: api.command_execution_calibration "
+                "not loaded", exc_info=True)
+# ── R30C OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT:
+# /api/command/opportunity-score-tournament. V2 has no authority; GET only,
+# COMMAND auth, READ ONLY transaction with a statement timeout.
+try:
+    from .command_opportunity_tournament import (
+        router as _command_opportunity_tournament_router)
+    app.include_router(_command_opportunity_tournament_router)
+except ImportError:
+    log.warning("score tournament: api.command_opportunity_tournament not "
                 "loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
@@ -845,6 +923,26 @@ try:
     app.include_router(_command_improvements_router)
 except ImportError:
     log.warning("improvements: api.command_improvements not loaded",
+                exc_info=True)
+# ── ROOT-CAUSE IMPROVEMENT CLUSTERS (migration 301): /api/command/
+# improvement-clusters (+ /{id}). GET only, COMMAND auth, one READ ONLY
+# transaction with a statement timeout. No route here writes, links a fix,
+# merges, deploys or approves.
+try:
+    from .command_improvement_clusters import router as _command_rcc_router
+    app.include_router(_command_rcc_router)
+except ImportError:
+    log.warning("clusters: api.command_improvement_clusters not loaded",
+                exc_info=True)
+# ── AGENT SCORECARDS (owner R30 section 18): /api/command/agent-scorecards.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement
+# timeout. Decision and economic quality per agent, never activity counts;
+# no route here writes, approves or changes a threshold.
+try:
+    from .command_agent_scorecards import router as _command_scd_router
+    app.include_router(_command_scd_router)
+except ImportError:
+    log.warning("scorecards: api.command_agent_scorecards not loaded",
                 exc_info=True)
 # ── THE LOST OPPORTUNITY READS (migration 220): /api/command/profitability/
 # lost-opportunities and /opportunity-scores. GET only, COMMAND auth, READ

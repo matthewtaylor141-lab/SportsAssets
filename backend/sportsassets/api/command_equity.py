@@ -881,6 +881,7 @@ async def read_paper(conn, *, now: float, account_id: str | None = None) -> dict
                             genuine_mark_at=genuine, sleeves=sleeves)
         out["management"] = await read_management(conn, acct, now=now,
                                                   bal=bal, paper=out)
+        out["freshness"] = await read_freshness(conn, acct, now=now)
         return out
     except Exception as exc:                                    # noqa: BLE001
         return paper_account(None, now=now, error="PAPER_READ_FAILED: %s: %s"
@@ -910,6 +911,26 @@ async def read_management(conn, acct: str, *, now: float, bal: dict,
     return m
 
 
+async def read_freshness(conn, acct: str, *, now: float) -> dict:
+    """EVERY OPEN PAPER POSITION IN EXACTLY ONE MARK-FRESHNESS CLASS
+    (bettor_paper_freshness): the counts with their rules, the fresh rate and
+    the stale-management rate over the MARKABLE positions, by strategy, and
+    the latest held-mark refresh run. A failed read is UNAVAILABLE with its
+    reason -- never zero counts. The per-position rows are served by
+    GET /api/command/paper/freshness."""
+    from .. import bettor_paper_freshness as PMF
+    try:
+        got = await PMF.read(conn, acct, now=now, rows_limit=0)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": "UNAVAILABLE", "counts": None,
+                "why": "FRESHNESS_READ_FAILED: %s: %s"
+                       % (type(exc).__name__, str(exc)[:160])}
+    got.pop("positions", None)
+    got.pop("positions_truncated", None)
+    got["positions_route"] = "/api/command/paper/freshness"
+    return got
+
+
 async def read_sleeves(conn, acct: str, *, now: float, bal: dict) -> tuple:
     """(sleeves, last genuine mark change) -- a failed sleeve read is
     UNAVAILABLE with its reason and never breaks the account figures."""
@@ -935,7 +956,7 @@ async def read_small_live(conn, *, now: float) -> dict:
                        % (type(exc).__name__, str(exc)[:160])}
     small = dict(got["small_live"])
     small["legacy_mirror"] = got["legacy_mirror"]
-    small["eddie_funnel"] = got["eddie_funnel"]
+    small["archer_funnel"] = got["archer_funnel"]
     return small
 
 

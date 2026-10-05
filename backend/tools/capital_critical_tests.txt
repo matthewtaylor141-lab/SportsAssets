@@ -766,23 +766,40 @@ tests/test_profitability_economics.py
 tests/test_profitability_capacity.py
 tests/test_profitability_metrics_forecast.py
 tests/test_profitability_warehouse_cycle.py
-# Eddie (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
+# Archer (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
 # RESEARCH_SHADOW_ONLY), claude/pos-agents, migration 217: persisted
 # identities with NO venue / order / cancel / capital / approval / promotion
 # authority (registry deny lists + pos_authority.may + a first-firing trigger
 # on every approval, control, order, intent and fill table that refuses
 # either as an actor column or as the session's declared acting agent);
-# Eddie's hard rule (no executing recommendation with expected executable
+# Archer's hard rule (no executing recommendation with expected executable
 # EV <= 0, in code AND a CHECK); Scout's compliant-source guard and a frozen
 # prospective tournament he cannot judge or promote.
-tests/test_eddie_scout_identity_and_no_authority.py
-tests/test_eddie_execution_estimates.py
+tests/test_archer_scout_identity_and_no_authority.py
+tests/test_archer_execution_estimates.py
 tests/test_scout_features_and_tournament.py
-tests/test_eddie_scout_api_pages_slack.py
+tests/test_archer_scout_api_pages_slack.py
+# (266) the execution agent renamed EDDIE -> ARCHER: one active execution
+# identity, the same zero submit / cancel / credential / capital authority
+# under either name (code and database), EDDIE kept only as a historical
+# alias (append-only rows, labelled on read), the migration idempotent and
+# its rollback refused while ARCHER has records.
+tests/test_archer_rename.py
+# Adriana (Head of Arbitrage, SHADOW_ONLY), claude/adriana, migration 265:
+# the eighth identity with NO venue / order / cancel / credential / capital /
+# approval authority (registry deny lists, pos_authority, the same first-
+# firing trigger now naming ADRIANA, machine-actor classification in the
+# learning and improvement pipelines); the pure arbitrage engine (payoff and
+# settlement equivalence, synchronized freshness, depth, per-order fees, the
+# largest profitable size, the leg-risk state machine, the basket solver,
+# mutation tests) and the census that refuses every structure whose venue
+# settlement terms are not established.
+tests/test_adriana_agent.py
+tests/test_adriana_arb_engine.py
 # The profitability operating system, part 3 (claude/pos-learn, migration
 # 218): the model tournament (M0 raw PinnAPI champion vs calibrated,
 # microstructure, Scout / cross-market placeholders and sport-specific
-# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / EDDIE
+# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / ARCHER
 # variants on one shared opportunity set), the edge-confidence and avoidance
 # meta-models, the seeded randomized SHADOW experiment platform. SHADOW /
 # RESEARCH: no probability, threshold, sizing, allowlist, order or capital
@@ -838,7 +855,7 @@ tests/test_lost_opportunity_ledger.py
 # append-only RESEARCH / SHADOW_NO_AUTHORITY; /api/command/profitability/
 # sleeves is GET-only, READ ONLY, behind a command session. SMALL LIVE --
 # BETTOR ORIGINATED is never ACTIVE without a BETTOR-originated,
-# venue-acknowledged order; mirror / RN1 / copy orders never count; Eddie's
+# venue-acknowledged order; mirror / RN1 / copy orders never count; Archer's
 # EXECUTE_NOW recommendations are never orders; the legacy mirror label
 # follows its real control row; no control row is changed.
 tests/test_paper_sleeves.py
@@ -863,7 +880,7 @@ tests/test_command_release_authority.py
 # (224) THE SEVEN AGENTS' IDENTITY, MEMORY, EXPERIENCE AND EVENTS: GET-only
 # reads in a READ ONLY transaction; the memory learner writes only its own
 # append-only tables; bundles differ per agent and never widen the
-# registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
+# registry (Karen / Scout / Archer boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
 # (R30A ci) THE EXACT-SHA CAPITAL-CRITICAL VERDICT: tools/ci_verdict.py rejects
 # every unquarantined failure or error, malformed / expired / stale quarantine
@@ -1065,3 +1082,65 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+# Coverage failures + first-loss census (2026-10-05): the event ledger stages
+# venue-identity and WS-unusable refusals (and the funnel derives the stage
+# for rows written without one), a sticky-key valuation is attributed by its
+# venue contract, the per-event first-loss census and its read-only route,
+# and a PinnAPI-native college seed's school-only names map on the
+# discovered venue event (containment still refused).
+tests/test_coverage_first_loss_census.py
+tests/test_ncaaf_native_seed_identity.py
+tests/test_capital_eligibility.py
+tests/test_strategy_lifecycle.py
+tests/test_paper_mark_freshness_classifier.py
+tests/test_paper_mark_refresh_coverage.py
+tests/test_xavier_management_packet.py
+tests/test_pos_os_authority.py
+tests/test_pos_os_components.py
+tests/test_pos_os_db.py
+# R30C SETTLEMENT-EXCEPTION RISK: the measured exception table (the venue's own
+# settlements as the outcome join and the paper ledger wrote them; exact
+# Clopper-Pearson / Wilson upper bounds; unknown is never zero; external base
+# rates only with citation, count and denominator) and its cost on the
+# canonical decision's evidence, which gates nothing (same ENTER, order, size).
+tests/test_settlement_exception_risk.py
+# R30C CORRELATION GRAPH: exact / measured / unmeasured=worst-case edges of
+# shared settlement dependence; the evidenced case never above the worst case;
+# the worst-case caps stay authoritative and unchanged.
+tests/test_correlation_graph.py
+# R30C risk evidence routes: GET-only, command session or 401, READ ONLY
+# transaction with a statement timeout, no order/venue/paper/funded import.
+tests/test_risk_evidence_authority.py
+# (R30C, 300) LIVE EXECUTION CALIBRATION: PAPER_SIMULATION, LIVE_SHADOW and
+# ACTUAL kept apart in storage, estimation and display; every LIVE-path
+# execution estimate states the class it was fitted on; a LIVE estimate
+# without ACTUAL is labelled and WIDER (never zero-width; the shadow's
+# tautological fill figures are never one); MEASURED needs >= 20
+# independent events; ACTUAL is UNMEASURED with its reason (never a zero);
+# a venue event can never name a SHADOW execution; the route loads no
+# venue / execution module at run time.
+tests/test_execution_calibration.py
+# (R30C, 300) THE OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT: both scored at
+# the decision instant beside (never in) the canonical intent; INVESTMENT
+# only, forward only, ONE SPEC SERIES at a time, unique opportunities,
+# event-clustered intervals; V2 has no authority and promotion is never
+# automatic; no backfill (database clock forced, row must be its intent's,
+# CHECK on both sides); V2 MEASURED through the real decision hook.
+tests/test_opportunity_score_tournament.py
+# R30B AGENTS (migration 301; owner R30 program sections 17-20): every
+# agent's durable queue on the 226 table (owner, blocker, SLA, dependency,
+# last / next attempt, evidence needed, collaborator; IDLE impossible while
+# owning open work; WAITING needs an enqueued reacquisition); Eddie and Scout
+# may enqueue their own work but write no governance row (217 registry
+# extended, a superset of 225's); root-cause clusters whose fix only a named
+# person links and whose effect is measured, never assumed; lesson retrieval
+# and an append-only supersession that only lowers a weight and grants no
+# authority; read-only scorecards by decision / economic quality; and the
+# authority proof that none of these modules writes outside its own records
+# or imports an order, execution, venue, funded or paper module.
+tests/test_agent_operations_authority.py
+tests/test_agent_work_queues.py
+tests/test_agent_work_state.py
+tests/test_improvement_clusters.py
+tests/test_lesson_usage.py
+tests/test_agent_scorecards.py

@@ -40,7 +40,7 @@ this learner's own ingestion_state watermark (tests pin the SQL).
 The same outcome teaches each agent something different (section 4): Derek
 the entry he priced, Xavier the management state and filled protection at
 settlement, Audrey whether the books reconciled, Karen whether her
-challenge was upheld, the Allocator what his SHADOW ranking did, Eddie the
+challenge was upheld, the Allocator what his SHADOW ranking did, Archer the
 realized vs predicted execution loss, Scout whether his feature validated.
 """
 from __future__ import annotations
@@ -55,6 +55,7 @@ from typing import Any
 from .. import order_state_truth as OST
 from .. import xavier_freshness as XF
 from . import identity as I
+from . import registry as R
 
 log = logging.getLogger(__name__)
 
@@ -111,6 +112,10 @@ EVIDENCE_TABLES: dict[str, tuple] = {
     "eddie_execution_outcomes": ("eddie_execution_outcomes",
                                  ("outcome_id",)),
     "scout_features": ("scout_features", ("feature_id",)),
+    "adriana_arb_scans": ("adriana_arb_scans", ("scan_id",)),
+    "adriana_arb_opportunities": ("adriana_arb_opportunities",
+                                  ("opportunity_id",)),
+    "adriana_arb_refusals": ("adriana_arb_refusals", ("refusal_id",)),
     "scout_feature_tournaments": ("scout_feature_tournaments",
                                   ("tournament_id",)),
     "intel_runs": ("intel_runs", ("run_id",)),
@@ -131,8 +136,10 @@ MANDATE: dict[str, tuple] = {
                "karen_challenges", "audrey_audit_reports"),
     "KAREN": ("karen_challenges", "karen_detector"),
     "CHIEF_ALLOCATOR": ("intel_allocations", "karen_challenges"),
-    "EDDIE": ("eddie_execution_estimates", "execution_calibration"),
+    "ARCHER": ("eddie_execution_estimates", "execution_calibration"),
     "SCOUT": ("scout_feature_tournaments", "scout_features"),
+    "ADRIANA": ("adriana_arb_opportunities", "adriana_arb_refusals",
+                "adriana_arb_scans"),
 }
 
 #: Keys a memory's facts may never carry: a memory is not a setting.
@@ -585,7 +592,9 @@ def _mem_row(r) -> dict:
     d["facts"] = _j(d.get("facts")) or {}
     d["confidence"] = _f(d.get("confidence"))
     d["source"] = "agent_memory_events"
-    d["historical"] = d.get("superseded_by") is not None
+    d["lesson_weight"] = _f(d.get("lesson_weight", 1.0))
+    d["historical"] = d.get("superseded_by") is not None or (
+        d["lesson_weight"] is not None and d["lesson_weight"] <= 0)
     return d
 
 
@@ -607,17 +616,48 @@ async def private_memories(conn, *, reader: str, owner: str,
                            before: float | None = None,
                            include_superseded: bool = True) -> list:
     """THE OWNER'S MEMORY, for the owner itself or the human OPERATOR only.
-    Another agent is refused (PrivateMemoryRefused) before any read."""
+    Another agent is refused (PrivateMemoryRefused) before any read.
+
+    With include_superseded=False (the agent's own context bundle,
+    agent_context.build_context) a lesson SUPERSEDED on forward INVESTMENT
+    evidence (migration 301's agent_lesson_supersessions, weight 0) is left
+    out like a memory superseded by a newer one, and a DOWNWEIGHTED lesson
+    ranks after full-weight memories (R30B review: the supersession record
+    had changed nothing an agent read). Every row carries `lesson_weight`
+    (1.0 before any supersession). Read only; the weight grants nothing."""
     o = _check_reader(reader, owner)
-    rows = await conn.fetch(
-        "SELECT %s FROM agent_memory_events WHERE agent_id=$1 "
-        "   AND ($2::text IS NULL OR memory_kind=$2) "
-        "   AND ($3::float8 IS NULL OR learned_at < to_timestamp($3)) "
-        "   AND ($4 OR superseded_by IS NULL) "
-        " ORDER BY learned_at DESC, memory_id DESC LIMIT $5" % _MEM_COLS,
-        o, kind, before, bool(include_superseded),
-        max(1, min(int(limit or 50), 500)))
-    return [_mem_row(r) for r in rows]
+    n = max(1, min(int(limit or 50), 500))
+    # (266) a memory recorded under the historical alias (EDDIE) is the
+    # canonical agent's own, shown with historical_alias -- never relabelled
+    ids = R.ids_with_aliases(o)
+    if await _exists(conn, "agent_lesson_supersessions"):
+        rows = await conn.fetch(
+            "SELECT %s, coalesce(w.weight, 1.0) AS lesson_weight "
+            "  FROM agent_memory_events m LEFT JOIN LATERAL (SELECT s.weight"
+            "       FROM agent_lesson_supersessions s "
+            "      WHERE s.lesson_table = 'agent_memory_events' "
+            "        AND s.lesson_id = m.memory_id "
+            "      ORDER BY s.decided_at DESC, s.recorded_at DESC LIMIT 1) w "
+            "    ON true WHERE m.agent_id = ANY($1::text[]) "
+            "   AND ($2::text IS NULL OR m.memory_kind=$2) "
+            "   AND ($3::float8 IS NULL OR m.learned_at < to_timestamp($3)) "
+            "   AND ($4 OR (m.superseded_by IS NULL "
+            "               AND coalesce(w.weight, 1.0) > 0)) "
+            " ORDER BY CASE WHEN $4 THEN 1.0 ELSE coalesce(w.weight, 1.0) "
+            "          END DESC, m.learned_at DESC, m.memory_id DESC "
+            " LIMIT $5" % ", ".join("m." + c.strip()
+                                    for c in _MEM_COLS.split(",")),
+            ids, kind, before, bool(include_superseded), n)
+    else:
+        rows = await conn.fetch(
+            "SELECT %s FROM agent_memory_events "
+            " WHERE agent_id = ANY($1::text[]) "
+            "   AND ($2::text IS NULL OR memory_kind=$2) "
+            "   AND ($3::float8 IS NULL OR learned_at < to_timestamp($3)) "
+            "   AND ($4 OR superseded_by IS NULL) "
+            " ORDER BY learned_at DESC, memory_id DESC LIMIT $5" % _MEM_COLS,
+            ids, kind, before, bool(include_superseded), n)
+    return [R.label_aliases(_mem_row(r)) for r in rows]
 
 
 async def legacy_lessons(conn, *, reader: str, owner: str,
@@ -672,14 +712,16 @@ async def handoffs_to(conn, agent: str, *, limit: int = 50) -> list:
         "       message_kind, subject_type, subject_id, summary, "
         "       evidence_refs, response_to, shared_memory_id, status, "
         "       created_at FROM agent_conversation_messages "
-        " WHERE to_agent=$1 ORDER BY created_at DESC, message_id DESC "
-        " LIMIT $2", I.agent_of(agent), max(1, min(int(limit), 500)))
+        " WHERE to_agent = ANY($1::text[]) "
+        " ORDER BY created_at DESC, message_id DESC "
+        " LIMIT $2", R.ids_with_aliases(I.agent_of(agent)),
+        max(1, min(int(limit), 500)))
     out = []
     for r in rows:
         d = dict(r)
         d["created_at"] = _ep(d["created_at"])
         d["evidence_refs"] = _j(d["evidence_refs"]) or []
-        out.append(d)
+        out.append(R.label_aliases(d))
     return out
 
 
@@ -692,7 +734,8 @@ async def memory_counts(conn, agent: str) -> dict:
         "       AS corrections, "
         "       count(*) FILTER (WHERE superseded_by IS NOT NULL) "
         "       AS superseded, max(learned_at) AS last "
-        "  FROM agent_memory_events WHERE agent_id=$1", a)
+        "  FROM agent_memory_events WHERE agent_id = ANY($1::text[])",
+        R.ids_with_aliases(a))
     out = {"agent_memory_events": int(r["n"]), "lessons": int(r["lessons"]),
            "self_corrections": int(r["corrections"]),
            "superseded": int(r["superseded"]), "last_at": _ep(r["last"]),
@@ -1156,7 +1199,7 @@ async def derive_allocator_settled(conn, since, until):
     return out, _cursor(rows, "recorded_at", until)
 
 
-async def derive_eddie_outcomes(conn, since, until):
+async def derive_archer_outcomes(conn, since, until):
     rows = await conn.fetch(
         "SELECT o.outcome_id, o.estimate_id, o.decision_id, o.source, "
         "       o.measured_at, o.realized_execution_loss_pp, "
@@ -1173,7 +1216,7 @@ async def derive_eddie_outcomes(conn, since, until):
         real, pred = _f(r["realized_execution_loss_pp"]), _f(
             r["predicted_execution_loss_pp"])
         out.append(_cand(
-            "EDDIE", CASE, "eddie_execution_estimates", r["estimate_id"],
+            "ARCHER", CASE, "eddie_execution_estimates", r["estimate_id"],
             "%s fill of decision %s: I predicted %.2f pp of execution loss; "
             "%.2f pp was realized (error %+.2f pp). SHADOW -- nothing "
             "executed on my estimate." % (r["source"], r["decision_id"],
@@ -1190,7 +1233,7 @@ async def derive_eddie_outcomes(conn, since, until):
     return out, _cursor(rows, "created_at", until)
 
 
-async def derive_eddie_calibration(conn, since, until):
+async def derive_archer_calibration(conn, since, until):
     r = await conn.fetchrow(
         "SELECT count(*) AS n, avg(realized_execution_loss_pp - "
         "       predicted_execution_loss_pp) AS bias, "
@@ -1209,15 +1252,15 @@ async def derive_eddie_calibration(conn, since, until):
     verdict = ("UNDERESTIMATES_LOSS" if lo > 0.5 else
                "OVERESTIMATES_LOSS" if hi < 0.5 else "UNBIASED_WITHIN_CI")
     return [_cand(
-        "EDDIE", LESSON, "execution_calibration", "all_measured_outcomes",
+        "ARCHER", LESSON, "execution_calibration", "all_measured_outcomes",
         "Across %d measured fills the realized execution loss exceeded my "
         "prediction in %d (%.3f; 95%% Wilson interval %.3f-%.3f); mean "
         "error %+.3f pp: %s." % (n, k, k / n, lo, hi, float(r["bias"]),
                                  verdict),
         [{"kind": "eddie_execution_outcomes", "id": i}
          for i in r["ids"][:20]],
-        confidence=0.95, claim_key="calibration:eddie", claim_value=verdict,
-        deriver="eddie_calibration", source_event_at=r["last_at"],
+        confidence=0.95, claim_key="calibration:archer", claim_value=verdict,
+        deriver="archer_calibration", source_event_at=r["last_at"],
         facts={"n": n, "worse": k, "mean_error_pp": float(r["bias"])})], \
         until
 
@@ -1272,9 +1315,9 @@ DERIVERS: dict[str, tuple] = {
         "karen_challenges",)),
     "allocator_settled": (derive_allocator_settled, (
         "intel_allocations", "paper_handoffs", "paper_settlements")),
-    "eddie_execution_outcomes": (derive_eddie_outcomes, (
+    "eddie_execution_outcomes": (derive_archer_outcomes, (
         "eddie_execution_outcomes",)),
-    "eddie_calibration": (derive_eddie_calibration, (
+    "archer_calibration": (derive_archer_calibration, (
         "eddie_execution_outcomes",)),
     "scout_tournament_verdicts": (derive_scout_tournaments, (
         "scout_feature_tournaments", "scout_features")),

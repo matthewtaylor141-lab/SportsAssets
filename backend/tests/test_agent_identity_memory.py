@@ -195,9 +195,9 @@ async def _since(conn):
 # 1 · IDENTITY: one canonical, immutable, unapproved-until-approved record
 # ═════════════════════════════════════════════════════════════════════
 
-def test_seven_identities_each_complete_and_valid():
+def test_eight_identities_each_complete_and_valid():
     assert I.AGENTS == ("DEREK", "XAVIER", "AUDREY", "KAREN",
-                        "CHIEF_ALLOCATOR", "EDDIE", "SCOUT")
+                        "CHIEF_ALLOCATOR", "ARCHER", "SCOUT", "ADRIANA")
     sigs = set()
     for a in I.AGENTS:
         row = I.identity_row(a)
@@ -206,8 +206,8 @@ def test_seven_identities_each_complete_and_valid():
             assert row[k] not in (None, "", []), (a, k)
         assert row["approved_by"] == I.PENDING and row["approved_at"] is None
         sigs.add(row["signature"])
-    assert len(sigs) == 7                      # seven distinct personalities
-    assert I.IDENTITY_SPEC["EDDIE"]["authority_status"] == "SHADOW_ONLY"
+    assert len(sigs) == 8                      # eight distinct personalities
+    assert I.IDENTITY_SPEC["ARCHER"]["authority_status"] == "SHADOW_ONLY"
     assert I.IDENTITY_SPEC["SCOUT"]["authority_status"] == \
         "RESEARCH_SHADOW_ONLY"
     assert I.IDENTITY_SPEC["KAREN"]["authority_status"] == \
@@ -318,7 +318,7 @@ async def test_the_migration_seed_equals_the_code_and_versions_are_immutable():
 def test_one_voice_profile_per_agent_and_no_secret_fields():
     ids = {I.VOICE_SPEC[a]["voice_profile_id"] for a in I.AGENTS}
     aliases = {I.VOICE_SPEC[a]["provider_voice_alias"] for a in I.AGENTS}
-    assert len(ids) == len(aliases) == 7
+    assert len(ids) == len(aliases) == 8
     for a in I.AGENTS:
         assert I.IDENTITY_SPEC[a]["default_voice_profile"] == \
             I.VOICE_SPEC[a]["voice_profile_id"]
@@ -463,7 +463,7 @@ def test_memory_requires_evidence_confidence_and_mandate():
     assert M.validate_candidate(_cand(confidence=None)) == M.R_NO_CONFIDENCE
     assert M.validate_candidate(_cand(confidence=0)) == M.R_NO_CONFIDENCE
     assert M.validate_candidate(_cand(confidence=True)) == M.R_NO_CONFIDENCE
-    # Derek may not remember an Eddie execution estimate as his own subject
+    # Derek may not remember an Archer execution estimate as his own subject
     assert M.validate_candidate(_cand(
         subject_type="eddie_execution_estimates")) == M.R_OUT_OF_MANDATE
     # a memory is not a setting
@@ -801,8 +801,8 @@ async def test_the_rollback_refuses_people_decisions_and_drops_only_224():
 
 
 @pg
-async def test_eddie_and_scout_learn_from_their_own_outcomes():
-    """Eddie learns realized vs predicted execution loss (and hands it to
+async def test_archer_and_scout_learn_from_their_own_outcomes():
+    """Archer learns realized vs predicted execution loss (and hands it to
     Derek explicitly); Scout learns the evaluator's verdict on his
     hypothesis -- an OBSERVATION he did not judge."""
     from sportsassets.agents import scout as S
@@ -852,8 +852,8 @@ async def test_eddie_and_scout_learn_from_their_own_outcomes():
         for name in ("eddie_execution_outcomes",
                      "scout_tournament_verdicts"):
             assert res["derivers"][name]["created"] >= 1, res
-        ed = [m for m in await M.private_memories(conn, reader="EDDIE",
-                                                  owner="EDDIE")
+        ed = [m for m in await M.private_memories(conn, reader="ARCHER",
+                                                  owner="ARCHER")
               if m["subject_id"] == eid]
         assert ed and ed[0]["facts"]["realized_pp"] == 1.5
         assert "SHADOW" in ed[0]["summary"]

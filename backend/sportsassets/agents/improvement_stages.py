@@ -88,20 +88,21 @@ RUNNER_STAGES = (EVIDENCE, HYPOTHESIS, PEER_CHALLENGE, OWNER_RESPONSE,
                  EXPERIMENT, INDEPENDENT_EVALUATION, ELIGIBLE_CHANGE, CLOSED)
 
 KAREN = "KAREN"
-AGENTS = ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT",
-          "CHIEF_ALLOCATOR")
-OWNER_AGENTS = ("DEREK", "XAVIER", "AUDREY", "EDDIE", "SCOUT",
-                "CHIEF_ALLOCATOR")
+AGENTS = ("DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "SCOUT",
+          "CHIEF_ALLOCATOR", "ADRIANA")
+OWNER_AGENTS = ("DEREK", "XAVIER", "AUDREY", "ARCHER", "SCOUT",
+                "CHIEF_ALLOCATOR", "ADRIANA")
 EVALUATOR_AGENTS = ("DEREK", "XAVIER", "AUDREY")
 #: the default independent evaluator per owner (karen.EVALUATOR_FOR,
-#: extended to Eddie and Scout: Audrey evaluates both)
+#: extended to Archer and Scout: Audrey evaluates both)
 EVALUATOR_FOR = {"DEREK": "AUDREY", "XAVIER": "AUDREY", "AUDREY": "XAVIER",
-                 "EDDIE": "AUDREY", "SCOUT": "AUDREY",
-                 "CHIEF_ALLOCATOR": "AUDREY"}
+                 "ARCHER": "AUDREY", "SCOUT": "AUDREY",
+                 "CHIEF_ALLOCATOR": "AUDREY", "ADRIANA": "AUDREY"}
 #: the default (non-Karen) peer challenger per owner
-#: (collaboration_loop.PEER_ROUTING for Eddie / Scout: Derek first)
+#: (collaboration_loop.PEER_ROUTING for Archer / Scout: Derek first)
 PEER_FOR = {"DEREK": "XAVIER", "XAVIER": "DEREK", "AUDREY": "XAVIER",
-            "EDDIE": "DEREK", "SCOUT": "DEREK", "CHIEF_ALLOCATOR": "DEREK"}
+            "ARCHER": "DEREK", "SCOUT": "DEREK", "CHIEF_ALLOCATOR": "DEREK",
+            "ADRIANA": "ARCHER"}
 
 SOURCE_KINDS = ("KAREN_UPHELD_CHALLENGE", "AUDREY_FINDING",
                 "COVERAGE_INCIDENT", "EDDIE_SKIP_EXECUTION", "FALSE_REFUSAL",
@@ -147,10 +148,31 @@ R_NEEDS_HUMAN = "A_PROTECTED_AREA_NEEDS_A_HUMAN"
 R_NO_SOURCE = "AN_AGENT_STAGE_CITES_THE_RECORD_IT_WAS_TAKEN_FROM"
 R_BAD_CLASS = "THE_ACTOR_IS_NOT_OF_THAT_CLASS"
 R_RUNNER_HUMAN = "THE_RUNNER_NEVER_WRITES_A_HUMAN_OR_ENGINEERING_STEP"
+#: (266) an item owned under a historical alias (EDDIE) is a historical
+#: record: append-only and never updated, so no stage is added to it (the
+#: database freezes the row too). New work is ARCHER's, in a new item.
+R_HISTORICAL_ALIAS = "AN_ITEM_OWNED_UNDER_A_HISTORICAL_ALIAS_IS_READ_ONLY"
 
 
 def _u(v) -> str:
     return str(v or "").strip().upper()
+
+
+#: (266) historical alias -> the agent it names now; pinned equal to
+#: registry.HISTORICAL_ALIASES by a test (this rules module is pure)
+HISTORICAL_ALIASES = {"EDDIE": "ARCHER"}
+
+
+def _historical(v) -> bool:
+    return _u(v) in HISTORICAL_ALIASES
+
+
+def _owner(v) -> str:
+    """An item's owner as the agent it names NOW (266): an item owned under
+    the historical alias EDDIE is ARCHER's. (Such an item is read-only --
+    check_event refuses it first -- so this only keeps "is this the owner"
+    honest.) The stored owner_agent is never rewritten."""
+    return HISTORICAL_ALIASES.get(_u(v), _u(v))
 
 
 def item_id_for(source_kind: str, source_key: str) -> str:
@@ -185,7 +207,7 @@ def required_reviews(areas) -> int:
 # ═════════════════════════════════════════════════════════════════════
 
 def actor_class_ok(item: dict, actor: str, cls: str) -> bool:
-    who, owner = _u(actor), _u(item.get("owner_agent"))
+    who, owner = _u(actor), _owner(item.get("owner_agent"))
     if cls == OWNER_AGENT:
         return who == owner
     if cls == CHALLENGER:
@@ -201,7 +223,8 @@ def actor_class_ok(item: dict, actor: str, cls: str) -> bool:
     return False
 
 
-_MACHINE_EXACT = {"DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT",
+_MACHINE_EXACT = {"DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "EDDIE",
+                  "SCOUT",
                   "ALLOCATOR", "CHIEF_ALLOCATOR", "CALIBRATION_ENGINE",
                   "MODEL_TOURNAMENT", "CLAUDE", "SYSTEM", "RUNNER",
                   "MIGRATION", "ROOT", "POSTGRES", "BOT", "AGENT", "CI",
@@ -213,7 +236,10 @@ _MACHINE_PREFIX = re.compile(
     r"|RUNNER|INTEL|AUTOMATION|SERVICE|IMPROVEMENT|PIPELINE|GITHUB|CI|CRON"
     r"|WORKER|DEPLOY)([:/ ._-]|$)")
 _MACHINE_NAMED = re.compile(
-    r"(DEREK|XAVIER|AUDREY|KAREN|EDDIE|SCOUT|ALLOCATOR)[ ._:-]*(AGENT|BOT|V[0-9]"
+    # (266) EDDIE stays: the historical alias is still a machine, never a
+    # human approver / reviewer / engineer
+    r"(DEREK|XAVIER|AUDREY|KAREN|ARCHER|EDDIE|SCOUT|ALLOCATOR)[ ._:-]*"
+    r"(AGENT|BOT|V[0-9]"
     r"|CHALLENGER|RED[ ._-]*TEAM|EXECUTION|RESEARCH|INTEL)")
 
 
@@ -246,6 +272,8 @@ def check_event(item: dict, events: list, new: dict, *,
         _u(new.get("actor"))
     cur = item.get("stage")
     cur_seq = SEQ.get(cur, 0) if cur else 0
+    if _historical(item.get("owner_agent")):
+        return R_HISTORICAL_ALIAS
     if cur in TERMINAL:
         return R_TERMINAL
     if runner and cls in (HUMAN, ENGINEERING):
@@ -274,7 +302,7 @@ def check_event(item: dict, events: list, new: dict, *,
         return R_SKIPPED
     if cls not in PERMITTED[stage]:
         return R_NOT_OWNER if stage == HYPOTHESIS else R_NOT_PERMITTED
-    owner = _u(item.get("owner_agent"))
+    owner = _owner(item.get("owner_agent"))
     if stage == OWNER_RESPONSE:
         chal = [e for e in events or [] if e.get("stage") == PEER_CHALLENGE]
         if not any(e.get("actor_class") == CHALLENGER for e in chal) or \
@@ -310,7 +338,7 @@ def next_required(item: dict, events: list) -> dict:
     """{code, label, actor_class, actors}: the step the item waits for and
     who may take it -- derived only from the recorded events. Pure."""
     stage = item.get("stage")
-    owner = _u(item.get("owner_agent"))
+    owner = _owner(item.get("owner_agent"))
     protected = bool(item.get("requires_human_review"))
     need = int(item.get("required_independent_reviews") or 1)
     ev = list(events or [])
@@ -319,6 +347,10 @@ def next_required(item: dict, events: list) -> dict:
         return {"code": code, "label": label, "actor_class": cls,
                 "actors": list(actors)}
 
+    if _historical(item.get("owner_agent")):
+        return out("NONE_HISTORICAL_ALIAS",
+                   "HISTORICAL RECORD (%s) · READ ONLY"
+                   % _u(item.get("owner_agent")), None, [])
     if stage is None:
         return out("AWAITING_EVIDENCE", "AWAITING EVIDENCE", RUNNER,
                    [RUNNER_ACTOR])
@@ -424,8 +456,8 @@ def disagreement_summary(rows: list) -> dict:
 LINKS = {
     "karen_challenges": ("/karen", "/api/command/karen/challenges/%s"),
     "agent_findings": ("/audrey", "/api/command/agents/findings/%s"),
-    "eddie_execution_estimates": ("/eddie",
-                                  "/api/command/eddie/estimates/%s"),
+    "eddie_execution_estimates": ("/archer",
+                                  "/api/command/archer/estimates/%s"),
     "paper_audrey_findings": ("/audrey", None),
     "audrey_audit_reports": ("/audrey", None),
     "coverage_collapse_alerts": ("/audrey", "/api/command/coverage"),
@@ -465,7 +497,8 @@ def slack_agent(event: dict) -> str:
     who = _u(event.get("actor"))
     if event.get("actor_class") in (OWNER_AGENT, PEER_AGENT, CHALLENGER,
                                     INDEPENDENT_EVALUATOR) and who in (
-            "DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT"):
+            "DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "SCOUT",
+            "ADRIANA"):
         return who.lower()
     return "audrey"
 

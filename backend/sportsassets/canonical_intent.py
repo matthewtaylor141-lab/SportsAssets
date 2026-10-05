@@ -96,7 +96,8 @@ R_POLICY_UNAPPROVED = "LIVE_POLICY_VERSION_NOT_APPROVED"
 LIVE_POLICY_REFUSALS = (R_POLICY_MISSING, R_POLICY_SHA, R_POLICY_UNAPPROVED)
 #: actors that are never a human approver (migration 225 CHECKs the SAME
 #: pattern, character for character, on every approval / cutover row and on
-#: a halt clear; a test pins the two equal). Three parts, searched
+#: a halt clear -- as redefined by migration 266, which adds 'archer' beside
+#: 'eddie' when the execution agent was renamed; a test pins the two equal). Three parts, searched
 #: case-insensitively anywhere in the actor:
 #:   1 an agent / system identity at the START (the R30 list: these are also
 #:     human first names, so only the leading position is refused, as before)
@@ -111,8 +112,8 @@ LIVE_POLICY_REFUSALS = (R_POLICY_MISSING, R_POLICY_SHA, R_POLICY_UNAPPROVED)
 #: 'admin' all passed as named humans -- for the cutover's recorded_by and
 #: for live_approvals.approved_by, the LIVE governance approver.
 NON_HUMAN_ACTOR_PATTERN = (
-    r"^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|scout|"
-    r"bettor|claude|agent|migration|test_harness_system)"
+    r"^(system|derek|xavier|audrey|karen|allie|chief_allocator|eddie|"
+    r"archer|scout|bettor|claude|agent|migration|test_harness_system)"
     r"|(^|[^a-z0-9])(bots?|ci|cron|codex|assistant|openai|gpt|chatgpt|"
     r"anthropic|llm|copilot|automation|automated|service|svc|root|admin|"
     r"administrator|scheduler|deploy|deployer|render|github|actions|worker|"

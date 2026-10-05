@@ -592,6 +592,24 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
     recheck_primary_reference(cand, pin, ctx, refusals)
+    if not refusals:
+        # CAPITAL ELIGIBILITY + THE STRATEGY LIFECYCLE (migration 290): an
+        # admitted ENTER gets paper capital only with executable depth,
+        # resolved identity and settlement terms, and a positive total
+        # executable EV; otherwise CASH/WAIT is the recorded decision.
+        ce = await capital_gate(
+            conn, ctx, strategy=STRATEGY, p=p_blend, levels=levels,
+            sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn)
+        if econ is not None:
+            econ["capital_eligibility"] = ce
+        if pd is not None:
+            pd["capital_eligibility"] = {k: ce.get(k) for k in (
+                "decision", "capital_eligible", "qty", "allocation_usd",
+                "total_executable_ev_usd", "refusals")}
+        if ce.get("capital_eligible"):
+            sized = dict(sized, qty=int(ce["qty"]))
+        else:
+            refusals.extend(r for r in ce["refusals"] if r not in refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     would_enter = verdict == DP.ENTER
     if would_enter:
@@ -716,6 +734,41 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                                **{k: v for k, v in got.items()
                                   if k not in ("ok",)}})
     return rec
+
+
+async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
+                       cand: dict, side, at: float, fee_fn,
+                       settlement: dict | None = None) -> dict:
+    """THE PAPER PATH'S CAPITAL GATE for one admitted ENTER: the strategy's
+    lifecycle state (bettor_strategy_lifecycle.decision_gate: a no-entry
+    state refuses by name; REDUCED_SIZE halves the size) and then
+    bettor_capital_eligibility.evaluate on the observed ladder. Shared by
+    Derek and the benchmark policies. `settlement` (default: the candidate's
+    recorded comparison) lets a policy pass the settlement verdict its own
+    contract match established. Never raises: a failure refuses."""
+    from .. import bettor_capital_eligibility as CE
+    from .. import bettor_strategy_lifecycle as LC
+    try:
+        lc = await LC.decision_gate(conn, account_id=ctx["account_id"],
+                                    strategy=strategy, at=at)
+    except Exception as exc:                                    # noqa: BLE001
+        lc = {"ok": False, "refusal": LC.R_LIFECYCLE_UNREADABLE,
+              "size_factor": 0.0, "why": type(exc).__name__}
+    if lc.get("refusal"):
+        return {"version": CE.VERSION, "capital_eligible": False,
+                "decision": CE.CASH_WAIT, "allocation_usd": 0.0, "qty": 0,
+                "refusals": [lc["refusal"]], "lifecycle": lc}
+    ce = CE.evaluate(
+        p=p, levels=levels, qty=sized.get("qty"), limit=sized.get("limit"),
+        fee_fn=lambda q, px: float(L._fee(fee_fn, q, px, at)),
+        settlement=(cand.get("settlement") if settlement is None
+                    else settlement),
+        identity={"us_market_slug": cand.get("us_market_slug"),
+                  "payout_event": cand.get("payout_event"),
+                  "fixture": cand.get("fixture"), "holding_side": side},
+        size_factor=lc.get("size_factor", 0.0))
+    ce["lifecycle"] = lc
+    return ce
 
 
 def decision_provenance(**kw) -> dict:

@@ -1196,7 +1196,7 @@ async def karen_facts(conn, *, question: str,
 
 
 # ═════════════════════════════════════════════════════════════════════
-# EDDIE AND SCOUT: THEIR OWN RECORDS -- AND NOTHING ELSE (migration 217)
+# ARCHER AND SCOUT: THEIR OWN RECORDS -- AND NOTHING ELSE (migration 217)
 # ═════════════════════════════════════════════════════════════════════
 
 _EEX = re.compile(r"\beex:[0-9a-f]{24}\b")
@@ -1237,17 +1237,17 @@ def _pos_metrics(f: Facts, source: str, met: dict) -> None:
               "%s: unmeasured (%s), not zero" % (name, m.get("why")))
 
 
-async def eddie_facts(conn, *, question: str,
+async def archer_facts(conn, *, question: str,
                       context: dict | None = None) -> dict:
-    """Eddie's fact list: his status, his SHADOW estimates (the ones the
+    """Archer's fact list: his status, his SHADOW estimates (the ones the
     question names, else the latest), their predicted vs realized outcomes
     and his scorecard. Nothing else is read."""
-    from . import eddie as E
+    from . import archer as E
     if not await E.schema(conn):
-        return _pos_empty("EDDIE", "Eddie's estimate records (migration 217 "
+        return _pos_empty("ARCHER", "Archer's estimate records (migration 217 "
                                    "not applied)")
     f = Facts()
-    await _pos_status(conn, f, "EDDIE")
+    await _pos_status(conn, f, "ARCHER")
     named = set(_EEX.findall(str(question or "")))
     for k in ("estimate_id", "decision_id", "subject"):
         v = (context or {}).get(k)
@@ -1268,7 +1268,7 @@ async def eddie_facts(conn, *, question: str,
             len(rows))
     for e in rows:
         un = e.get("unmeasured") or {}
-        f.add("eddie_estimates", e["estimate_id"], "recommendation",
+        f.add("archer_estimates", e["estimate_id"], "recommendation",
               e["recommendation"],
               "Estimate %s of Derek's candidate %s (SHADOW): %s as %s; "
               "theoretical edge %s, spread %s, slippage %s, fees %s, adverse "
@@ -1287,7 +1287,7 @@ async def eddie_facts(conn, *, question: str,
                       "%s (%s)" % kv for kv in sorted(un.items())))[:400]
                   if un else ""))
     for o in await E.outcomes(conn, limit=POS_ROWS_IN_FACTS):
-        f.add("eddie_outcomes", o["outcome_id"], "realized_execution_loss_pp",
+        f.add("archer_outcomes", o["outcome_id"], "realized_execution_loss_pp",
               o.get("realized_execution_loss_pp"),
               "Outcome %s of %s: predicted execution loss %s, realized %s "
               "(filled %s at VWAP %s)." % (
@@ -1296,13 +1296,13 @@ async def eddie_facts(conn, *, question: str,
                   o.get("realized_execution_loss_pp"), o.get("filled_qty"),
                   o.get("fill_vwap")))
     try:
-        _pos_metrics(f, "eddie_metrics", (await E.metrics(conn))["metrics"])
+        _pos_metrics(f, "archer_metrics", (await E.metrics(conn))["metrics"])
     except Exception as exc:                                    # noqa: BLE001
-        f.miss("Eddie's scorecard (%s)" % type(exc).__name__)
+        f.miss("Archer's scorecard (%s)" % type(exc).__name__)
     return {"subject": None, "demonstration": False, "found": bool(rows),
             "scope": "BOOK", "facts": f.items, "checked": f.checked,
             "missing": f.missing, "memory": None, "work_context": None,
-            "paper": {"present": False, "why": "not read for Eddie: he "
+            "paper": {"present": False, "why": "not read for Archer: he "
                       "answers only from his estimate records"}}
 
 
@@ -1360,8 +1360,8 @@ async def gather(conn, *, question: str, context: dict | None = None,
     """The one fact list for this question (see the module docstring)."""
     if str(agent or "").upper() == "KAREN":
         return await karen_facts(conn, question=question, context=context)
-    if str(agent or "").upper() == "EDDIE":
-        return await eddie_facts(conn, question=question, context=context)
+    if str(agent or "").upper() == "ARCHER":
+        return await archer_facts(conn, question=question, context=context)
     if str(agent or "").upper() == "SCOUT":
         return await scout_facts(conn, question=question, context=context)
     subj = subject_of(question)

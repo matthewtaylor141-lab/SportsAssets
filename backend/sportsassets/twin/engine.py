@@ -2,7 +2,7 @@
 
 WHAT IT DOES. The recorded stream (decisions, fills, settlements, books,
 probabilities, fees, management actions, Karen blocks, regime states,
-shadow allocations; EDDIE / SCOUT rows through their interface views) is
+shadow allocations; ARCHER / SCOUT rows through their interface views) is
 built into recorded POSITIONS and OPPORTUNITIES, then replayed through one
 frozen alternate world at a time. Each world decision is made at an instant
 t through a TimeView that only exposes records whose `at` <= t; the view
@@ -295,7 +295,7 @@ class Stream:
     def __init__(self, *, basis: str, opps: list, positions: list,
                  oracle: dict | None = None, books: list | None = None,
                  regimes: list | None = None, allocations: list | None = None,
-                 karen: list | None = None, eddie: list | None = None,
+                 karen: list | None = None, archer: list | None = None,
                  scout: list | None = None, iface_why: dict | None = None,
                  window: tuple = (0.0, 0.0)):
         self.basis = basis
@@ -313,7 +313,7 @@ class Stream:
         self.regimes = sorted(regimes or [], key=key)
         self.allocations = sorted(allocations or [], key=key)
         self.karen = sorted(karen or [], key=key)
-        self.eddie = None if eddie is None else sorted(eddie, key=key)
+        self.archer = None if archer is None else sorted(archer, key=key)
         self.scout = None if scout is None else sorted(scout, key=key)
         self.iface_why = dict(iface_why or {})
         self.window = (float(window[0]), float(window[1]))
@@ -335,7 +335,7 @@ class Stream:
                 "regimes": strip(self.regimes),
                 "allocations": strip(self.allocations),
                 "karen": strip(self.karen),
-                "eddie": None if self.eddie is None else strip(self.eddie),
+                "archer": None if self.archer is None else strip(self.archer),
                 "scout": None if self.scout is None else strip(self.scout),
                 "iface_why": self.iface_why}
 
@@ -442,8 +442,8 @@ class TimeView:
                 out.append(r)
         return out
 
-    def eddie(self, decision_id: str):
-        recs = [r for r in self._upto(self._s.eddie or [])
+    def archer(self, decision_id: str):
+        recs = [r for r in self._upto(self._s.archer or [])
                 if r.get("decision_id") == decision_id]
         if not recs:
             return None
@@ -857,7 +857,7 @@ def world_karen(stream: Stream, spec: dict) -> list:
     return out
 
 
-def world_eddie(stream: Stream, spec: dict) -> list:
+def world_archer(stream: Stream, spec: dict) -> list:
     out = []
     for pos in stream.positions:
         if pos["entry_at"] is None:
@@ -865,12 +865,12 @@ def world_eddie(stream: Stream, spec: dict) -> list:
         opp = _opp_of(stream, pos)
         view = stream.view(pos["decided_at"])
         view.decision(opp)
-        row = view.eddie(pos["decision_id"])
+        row = view.archer(pos["decision_id"])
         base = pos["realized_pnl_usd"]
         if row is None:
             out.append(_pos_row(
                 pos, kind="EXECUTE", view=view, recorded_action="RECORDED_FILL",
-                world_action="NO_EDDIE_PLAN_AT_DECISION", pnl=base,
+                world_action="NO_ARCHER_PLAN_AT_DECISION", pnl=base,
                 why=pos["realized_unmeasured"], basis="RECORDED_EXECUTION",
                 capital=pos["cost_usd"], entry_at=pos["entry_at"],
                 close_at=pos["close_at"]))
@@ -879,16 +879,16 @@ def world_eddie(stream: Stream, spec: dict) -> list:
         if base is None or ev is None or ef is None or pos["v"] is None:
             out.append(_pos_row(
                 pos, kind="EXECUTE", view=view, recorded_action="RECORDED_FILL",
-                world_action="EDDIE_PLAN", pnl=None,
-                why=pos["realized_unmeasured"] or "EDDIE_ROW_INCOMPLETE",
+                world_action="ARCHER_PLAN", pnl=None,
+                why=pos["realized_unmeasured"] or "ARCHER_ROW_INCOMPLETE",
                 capital=pos["cost_usd"]))
             continue
         q = pos["q"]
         pnl = base + q * (pos["v"] - ev) + (pos["fees"] - ef)
         out.append(_pos_row(
             pos, kind="EXECUTE", view=view, recorded_action="RECORDED_FILL",
-            world_action="EDDIE_PLAN", pnl=pnl,
-            basis="RECORDED_PNL_WITH_EDDIE_FILL_PRICE_AND_FEE",
+            world_action="ARCHER_PLAN", pnl=pnl,
+            basis="RECORDED_PNL_WITH_ARCHER_FILL_PRICE_AND_FEE",
             capital=q * ev + ef, entry_at=pos["entry_at"],
             close_at=pos["close_at"]))
     return out
@@ -914,12 +914,12 @@ WORLDS = {
     "XAVIER_ALWAYS_HOLD": world_xavier_hold,
     "XAVIER_IMMEDIATE_EXIT": world_xavier_exit,
     "ALLOCATOR": world_allocator,
-    "EDDIE_EXECUTION": world_eddie,
+    "EDDIE_EXECUTION": world_archer,
     "SCOUT_FEATURE": world_scout,
     "KAREN_BLOCK": world_karen,
 }
 #: worlds that need an interface view of a parallel stream
-REQUIRES = {"EDDIE_EXECUTION": "EDDIE", "SCOUT_FEATURE": "SCOUT"}
+REQUIRES = {"EDDIE_EXECUTION": "ARCHER", "SCOUT_FEATURE": "SCOUT"}
 
 
 # ═════════════════════════════════════════════════════════════════════

@@ -13,14 +13,14 @@ TWO DIFFERENT THINGS, NEVER CONFUSED:
   SMALL LIVE -- BETTOR ORIGINATED
                              the target: a real venue order that originated
                              from BETTOR's own decision chain
-                                 Derek decision -> allocation -> Eddie
+                                 Derek decision -> allocation -> Archer
                                  execution decision -> real venue order with a
                                  venue acknowledgement.
                              Status is exactly one of STATUSES, derived from
                              stored evidence by `derive_status` (pure):
       NOT_CONFIGURED       no BETTOR-originated execution path exists, and
                            no shadow chain evidence
-      SHADOW               no venue path, but the chain runs in shadow (Eddie
+      SHADOW               no venue path, but the chain runs in shadow (Archer
                            execution decisions recorded; nothing is sent)
       READY_NOT_ACTIVATED  a configured path with a venue, not activated (or
                            activated with no BETTOR-originated venue-acked
@@ -33,17 +33,17 @@ TWO DIFFERENT THINGS, NEVER CONFUSED:
 
   ACTIVE IS IMPOSSIBLE WITHOUT a venue-acknowledged order carrying the whole
   chain (`is_bettor_originated`). RN1, mirror and copy orders never count,
-  whatever fields they carry. EDDIE'S RECOMMENDATIONS ARE NEVER ORDERS:
+  whatever fields they carry. ARCHER'S RECOMMENDATIONS ARE NEVER ORDERS:
   EXECUTE_NOW / SKIP_EXECUTION counts are reported apart from orders
   submitted, venue-acknowledged and filled.
 
 TODAY (this build): `BETTOR_ORIGINATED_PATH_CONFIGURED` is False -- no code
-path turns an Eddie execution decision into a venue order. Eddie is
-SHADOW_ONLY (agents/eddie.py) and migration 217 refuses EDDIE on every
+path turns an Archer execution decision into a venue order. Archer is
+SHADOW_ONLY (agents/archer.py) and migration 217 refuses ARCHER on every
 order, intent, fill, approval and control table; the execution intent's
 actual lane (execution_intent.py) submits through the mirror machinery
-without an allocation or an Eddie decision. So the status is SHADOW when
-Eddie's shadow estimates exist, else NOT_CONFIGURED -- never ACTIVE.
+without an allocation or an Archer decision. So the status is SHADOW when
+Archer's shadow estimates exist, else NOT_CONFIGURED -- never ACTIVE.
 
 This module makes no venue call, imports no order / venue / execution /
 funded module, and only SELECTs. It changes no control row, cap, scale or
@@ -62,13 +62,13 @@ NOT_CONFIGURED, SHADOW, READY, ACTIVE, DEGRADED, STOPPED = (
     "STOPPED")
 STATUSES = (NOT_CONFIGURED, SHADOW, READY, ACTIVE, DEGRADED, STOPPED)
 
-#: No code path in this build submits a venue order from an Eddie
+#: No code path in this build submits a venue order from an Archer
 #: execution decision (see the module docstring). A build that adds one
 #: changes this constant through the approved process, with its own tests.
 BETTOR_ORIGINATED_PATH_CONFIGURED = False
 #: Why, stated on every surface.
 PATH_WHY = ("no BETTOR-originated execution path exists in this build: "
-            "Eddie is SHADOW ONLY (no submit, cancel or capital authority, "
+            "Archer is SHADOW ONLY (no submit, cancel or capital authority, "
             "enforced in code and by migration 217), and the only real-venue "
             "order paths on record are the LEGACY MIRROR (paper-order copies "
             "and the execution intents' mirror lane)")
@@ -78,14 +78,14 @@ NON_BETTOR_ORIGINS = ("RN1", "COPY", "COPY_TRADE", "MIRROR", "LEGACY_MIRROR",
                       "EXECMIRROR", "EXECUTION_MIRROR", "KALSHI_MIRROR",
                       "EXECUTION_INTENT_MIRROR_LANE", "PAPER_ORDER_COPY",
                       "WHALE", "SHADOW")
-#: Eddie's "execute" recommendations (pinned equal to eddie.EXECUTING)
+#: Archer's "execute" recommendations (pinned equal to archer.EXECUTING)
 EXECUTING_RECOMMENDATIONS = ("EXECUTE_NOW", "REST_LIMIT", "SPLIT")
 RECOMMENDATIONS = ("EXECUTE_NOW", "REST_LIMIT", "SPLIT", "WAIT",
                    "SKIP_EXECUTION")
 #: the lane heartbeat older than this is not current
 HEARTBEAT_STALE_AFTER_S = 180.0
 
-CHAIN_FIELDS = ("derek_decision_id", "allocation_id", "eddie_estimate_id",
+CHAIN_FIELDS = ("derek_decision_id", "allocation_id", "archer_estimate_id",
                 "venue_order_id", "venue_ack_at")
 
 
@@ -120,9 +120,9 @@ def is_bettor_originated(order: dict) -> tuple:
     for k in CHAIN_FIELDS:
         if not order.get(k):
             return False, "CHAIN_INCOMPLETE: no %s" % k
-    if order.get("eddie_recommendation") not in EXECUTING_RECOMMENDATIONS:
-        return False, ("EDDIE_DID_NOT_RECOMMEND_EXECUTION (%s)"
-                       % order.get("eddie_recommendation"))
+    if order.get("archer_recommendation") not in EXECUTING_RECOMMENDATIONS:
+        return False, ("ARCHER_DID_NOT_RECOMMEND_EXECUTION (%s)"
+                       % order.get("archer_recommendation"))
     if order.get("venue") not in ("polymarket_us", "kalshi"):
         return False, "NOT_A_REAL_VENUE (%s)" % order.get("venue")
     return True, None
@@ -130,7 +130,7 @@ def is_bettor_originated(order: dict) -> tuple:
 
 def derive_status(ev: dict, *, now: float) -> dict:
     """ev = {path_configured, control: {enabled, stopped} | None,
-    orders: [candidate venue orders], shadow: {eddie_estimates},
+    orders: [candidate venue orders], shadow: {archer_estimates},
     heartbeat_at, venues: {polymarket_us: {state}, kalshi: {state}}}.
     Pure. ACTIVE requires at least one order passing
     `is_bettor_originated`."""
@@ -154,10 +154,10 @@ def derive_status(ev: dict, *, now: float) -> dict:
             status, why = DEGRADED, ("BETTOR-originated orders are recorded "
                                      "but no configured path exists: "
                                      "inconsistent records")
-        elif (shadow.get("eddie_estimates") or 0) > 0:
+        elif (shadow.get("archer_estimates") or 0) > 0:
             status, why = SHADOW, (PATH_WHY + "; the chain runs in SHADOW "
-                                   "(%d Eddie execution decisions recorded, "
-                                   "none sent)" % shadow["eddie_estimates"])
+                                   "(%d Archer execution decisions recorded, "
+                                   "none sent)" % shadow["archer_estimates"])
         else:
             status, why = NOT_CONFIGURED, PATH_WHY
     elif not connected:
@@ -204,8 +204,8 @@ async def _exists(conn, table: str) -> bool:
                                     table))
 
 
-async def eddie_counts(conn, *, now: float) -> dict:
-    """Eddie's RECOMMENDATIONS (never orders), all-time and last 24 h."""
+async def archer_counts(conn, *, now: float) -> dict:
+    """Archer's RECOMMENDATIONS (never orders), all-time and last 24 h."""
     if not await _exists(conn, "eddie_execution_estimates"):
         return {"status": "UNAVAILABLE", "why": "MIGRATION_217_NOT_APPLIED",
                 "recommendations": None}
@@ -301,7 +301,7 @@ async def intents_evidence(conn) -> dict | None:
             "last_at": _iso(r["last_at"]),
             "note": ("execution intents' actual lane is the LEGACY MIRROR "
                      "machinery (execmirror_control + execmirror_orders): no "
-                     "allocation, no Eddie execution decision -- never "
+                     "allocation, no Archer execution decision -- never "
                      "BETTOR-originated")}
 
 
@@ -328,9 +328,9 @@ async def target_venues(conn) -> dict:
     return {"polymarket_us": pm, "kalshi": k}
 
 
-def eddie_funnel(counts: dict, *, verified_orders: list, legacy: dict | None
+def archer_funnel(counts: dict, *, verified_orders: list, legacy: dict | None
                  ) -> dict:
-    """Eddie's RECOMMENDATIONS apart from ORDERS. Pure."""
+    """Archer's RECOMMENDATIONS apart from ORDERS. Pure."""
     rec = (counts or {}).get("recommendations")
     acked = [o for o in verified_orders if o.get("venue_ack_at")]
     return {
@@ -350,7 +350,7 @@ def eddie_funnel(counts: dict, *, verified_orders: list, legacy: dict | None
         "bettor_fills": sum(int(o.get("fills") or 0) for o in verified_orders),
         "orders_basis": (PATH_WHY if not BETTOR_ORIGINATED_PATH_CONFIGURED
                          else "BETTOR-originated venue orders"),
-        "legacy_mirror_not_eddie": (None if not legacy else {
+        "legacy_mirror_not_archer": (None if not legacy else {
             "label": legacy.get("label"),
             "orders_sent_or_planned": (legacy.get("orders") or {}).get(
                 "sent_or_planned"),
@@ -361,9 +361,9 @@ def eddie_funnel(counts: dict, *, verified_orders: list, legacy: dict | None
 
 
 async def read(conn, *, now: float | None = None) -> dict:
-    """{small_live, legacy_mirror, eddie_funnel}: plain SELECTs only."""
+    """{small_live, legacy_mirror, archer_funnel}: plain SELECTs only."""
     now = float(time.time() if now is None else now)
-    counts = await eddie_counts(conn, now=now)
+    counts = await archer_counts(conn, now=now)
     legacy = await legacy_mirror(conn, now=now)
     venues = await target_venues(conn)
     intents = await intents_evidence(conn)
@@ -372,13 +372,13 @@ async def read(conn, *, now: float | None = None) -> dict:
     orders: list = []
     ev = {"path_configured": BETTOR_ORIGINATED_PATH_CONFIGURED,
           "control": None, "orders": orders,
-          "shadow": {"eddie_estimates": counts.get("estimates") or 0},
+          "shadow": {"archer_estimates": counts.get("estimates") or 0},
           "heartbeat_at": None, "venues": venues}
     d = derive_status(ev, now=now)
     small = {
         "title": TITLE, "status": d["status"], "why": d["why"],
         "statuses": list(STATUSES), "version": VERSION,
-        "chain_required": ("Derek decision -> allocation -> Eddie execution "
+        "chain_required": ("Derek decision -> allocation -> Archer execution "
                            "decision -> real venue order with venue ack"),
         "path_configured": BETTOR_ORIGINATED_PATH_CONFIGURED,
         "capital": {"usd": None, "why": "no capital is assigned to a "
@@ -400,8 +400,8 @@ async def read(conn, *, now: float | None = None) -> dict:
         "heartbeat": {"at": None, "state": "NO_LANE_PROCESS",
                       "why": "no BETTOR-originated lane process exists"},
         "venues": venues,
-        "shadow_chain": {"eddie_estimates": counts.get("estimates"),
-                         "last_eddie_decision_at":
+        "shadow_chain": {"archer_estimates": counts.get("estimates"),
+                         "last_archer_decision_at":
                              counts.get("last_estimated_at"),
                          "status": counts.get("status"),
                          "why": counts.get("why")},
@@ -415,7 +415,7 @@ async def read(conn, *, now: float | None = None) -> dict:
         "as_of": _iso(now),
     }
     return {"small_live": small, "legacy_mirror": legacy,
-            "eddie_funnel": eddie_funnel(counts,
+            "archer_funnel": archer_funnel(counts,
                                          verified_orders=d["verified_orders"],
                                          legacy=legacy)}
 

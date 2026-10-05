@@ -7,7 +7,10 @@ WHAT IT DOES, every INTERVAL_S in the API process (api/app.py lifespan):
        KAREN_UPHELD_CHALLENGE  karen_challenges state UPHELD (owner: the
                                challenged agent); a challenge of a loop
                                finding is not a second item -- it is that
-                               finding's PEER_CHALLENGE, mirrored below
+                               finding's PEER_CHALLENGE, mirrored below; a
+                               challenge whose class has a root-cause
+                               cluster (migration 301) is not an item: the
+                               cluster is
        AUDREY_FINDING          paper_audrey_findings WARNING / CRITICAL,
                                one item per finding kind; a finding that a
                                coverage alert already routes is left to the
@@ -16,7 +19,7 @@ WHAT IT DOES, every INTERVAL_S in the API process (api/app.py lifespan):
                                COVERAGE_INCIDENT or CRITICAL, one item per
                                (league, stage, kind)
        EDDIE_SKIP_EXECUTION    eddie_execution_estimates SKIP_EXECUTION, one
-                               item per UTC day (owner: Eddie)
+                               item per UTC day (owner: Archer)
        FALSE_REFUSAL           lol_ledger FALSE_REFUSAL (only when the lost-
                                opportunity table exists), one item per defect
        TOURNAMENT_VERDICT      scout_feature_tournaments VALIDATED (owner
@@ -196,10 +199,41 @@ def _cand(source_kind, source_key, source_ref, title, statement, owner,
 async def seed_karen(conn, *, now: float) -> list:
     if not await _regclass(conn, "karen_challenges"):
         return []
+    # ONE ITEM PER ROOT CAUSE, NOT PER CHALLENGE (owner R30 section 20,
+    # migration 301): an upheld challenge of a class that has a root-cause
+    # cluster (Karen detector x target agent) is a member of that cluster,
+    # which is the engineering item -- production seeded 232 items from 684
+    # repeated HOLD_ON_STALE_PROBABILITY challenges of 7 groups. WHILE THE
+    # CLUSTER IS ACTIVE (OPEN / FIX_LINKED / FIX_PARTIALLY_EFFECTIVE /
+    # FIX_NOT_EFFECTIVE) every member folds into it. Once it is
+    # FIX_EFFECTIVE or CLOSED, a challenge of a record made AFTER the cluster
+    # reached that status is a RECURRENCE and is seeded as its own item
+    # again (R30B review: folding every status had left a defect recurring
+    # after a "fix" with no work item anywhere); the cluster runner also
+    # re-measures FIX_EFFECTIVE clusters and moves them back on regression.
+    clustered = "TRUE"
+    if await _regclass(conn, "improvement_clusters"):
+        clustered = (
+            "NOT EXISTS (SELECT 1 FROM improvement_clusters c "
+            "  LEFT JOIN LATERAL (SELECT s.status_to, (SELECT min(e2.at) "
+            "       FROM improvement_cluster_events e2 WHERE e2.cluster_id "
+            "       = c.cluster_id AND e2.at > coalesce((SELECT max(e3.at) "
+            "       FROM improvement_cluster_events e3 WHERE e3.cluster_id "
+            "       = c.cluster_id AND e3.status_to <> s.status_to), "
+            "       '-infinity'::timestamptz)) AS since FROM (SELECT "
+            "       e.status_to FROM improvement_cluster_events e WHERE "
+            "       e.cluster_id = c.cluster_id ORDER BY e.at DESC, "
+            "       e.event_id DESC LIMIT 1) s) st ON true "
+            " WHERE c.source = 'KAREN' "
+            "   AND c.finding_class = karen_challenges.detector "
+            "   AND c.target_agent = karen_challenges.target_agent "
+            "   AND (coalesce(st.status_to, 'OPEN') NOT IN "
+            "        ('FIX_EFFECTIVE', 'CLOSED') "
+            "        OR karen_challenges.record_at <= st.since))")
     rows = await conn.fetch(
         "SELECT * FROM karen_challenges WHERE state = 'UPHELD' "
         "   AND finding_id IS NULL "
-        "   AND resolved_at >= to_timestamp($1) "
+        "   AND resolved_at >= to_timestamp($1) AND " + clustered +
         " ORDER BY resolved_at DESC, challenge_id LIMIT $2",
         now - LOOKBACK_S, SOURCE_LIMIT)
     out = []
@@ -341,7 +375,7 @@ async def seed_audrey(conn, *, now: float) -> list:
     return out
 
 
-async def seed_eddie(conn, *, now: float) -> list:
+async def seed_archer(conn, *, now: float) -> list:
     if not await _regclass(conn, "eddie_execution_estimates"):
         return []
     rows = await conn.fetch(
@@ -359,12 +393,15 @@ async def seed_eddie(conn, *, now: float) -> list:
     for day, rs in groups.items():
         edges = [r["expected_net_executable_edge_pp"] for r in rs
                  if r["expected_net_executable_edge_pp"] is not None]
+        # (266) the source kind and key keep their historical spelling:
+        # they ARE the item's identity (UNIQUE (source_kind, source_key))
+        # and a day already seeded before the rename must not seed twice
         out.append(_cand(
             "EDDIE_SKIP_EXECUTION", "eddie_skip:%s" % day,
             {"kind": "eddie_execution_estimates", "id": rs[0]["estimate_id"]},
-            "Eddie SKIP_EXECUTION on %d Derek candidate(s) (%s)" % (
+            "Archer SKIP_EXECUTION on %d Derek candidate(s) (%s)" % (
                 len(rs), day),
-            "Eddie's SHADOW estimates recorded SKIP_EXECUTION for %d Derek "
+            "Archer's SHADOW estimates recorded SKIP_EXECUTION for %d Derek "
             "ENTER candidate(s) on %s (UTC): the expected net executable "
             "edge after fees, spread, slippage and adverse selection did not "
             "support executing%s. First reason recorded: %s" % (
@@ -372,7 +409,7 @@ async def seed_eddie(conn, *, now: float) -> list:
                 " (median %.2f pp over %d measured)" % (
                     sorted(edges)[len(edges) // 2], len(edges))
                 if edges else "", str(rs[0]["recommendation_reason"])[:400]),
-            "EDDIE",
+            "ARCHER",
             [{"kind": "eddie_execution_estimates", "id": r["estimate_id"]}
              for r in rs],
             ("execution", "SKIP_EXECUTION")))
@@ -411,7 +448,7 @@ async def seed_false_refusals(conn, *, now: float) -> list:
 
 def _variant_owner(subject: str, kind: str) -> str:
     s = str(subject or "").upper()
-    for a in ("DEREK", "XAVIER", "EDDIE", "AUDREY", "SCOUT"):
+    for a in ("DEREK", "XAVIER", "ARCHER", "AUDREY", "SCOUT"):
         if s.startswith(a):
             return a
     if s.startswith("ALLOCATOR") or s.startswith("CHIEF_ALLOCATOR"):
@@ -476,7 +513,7 @@ async def seed_tournaments(conn, *, now: float) -> list:
 
 
 SOURCES = (("karen", seed_karen), ("coverage", seed_coverage),
-           ("audrey", seed_audrey), ("eddie", seed_eddie),
+           ("audrey", seed_audrey), ("archer", seed_archer),
            ("false_refusal", seed_false_refusals),
            ("tournament", seed_tournaments))
 

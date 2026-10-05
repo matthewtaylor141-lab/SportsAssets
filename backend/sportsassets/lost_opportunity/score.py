@@ -8,13 +8,13 @@
                      the sum over book levels with marginal net edge > 0 of
                      q x (p - price - fee), conditional on fill (pos-econ
                      capacity model, from the recorded book at decision)
-  P(fill)            Eddie's expected fill probability for THIS decision
+  P(fill)            Archer's expected fill probability for THIS decision
                      (eddie_execution_estimates, migration 217, SHADOW_ONLY,
                      from the decision's recorded book) when he measured
                      one; else the CAPACITY snapshot's book-level fill
                      probability (PAPER-simulated entry fill share; pos-econ
                      rates) as of the decision. EXECUTION_CONFIDENCE names
-                     which (`source`) and always shows Eddie's estimate (or
+                     which (`source`) and always shows Archer's estimate (or
                      why there is none) beside it.
   capacity factor    min(1, idle PAPER capital / executable capacity): the
                      share of the opportunity's capital the book could fund
@@ -45,7 +45,7 @@ priced on a book no entry could have used:
     executable_fresh, the entry decision's own book-age bound); otherwise
     UNAVAILABLE (BOOK_OLDER_THAN_THE_STRATEGY_EXECUTABLE_FRESHNESS) -- the
     V1 score priced books up to 300 s old;
-  * P(fill) uses Eddie's estimate only when HIS book meets that standard
+  * P(fill) uses Archer's estimate only when HIS book meets that standard
     (his estimator accepts books up to 120 s); else the CAPACITY snapshot's
     PRODUCTION rate (INVESTMENT strategies' entry orders only);
   * CALIBRATION_CONFIDENCE is the INVESTMENT sleeve's EDGE_CALIBRATION
@@ -71,16 +71,27 @@ def _comp(value, *, unit=None, status=None, why=None, basis=None,
             "in_score": in_score}
 
 
-EDDIE = "EDDIE_EXECUTION_ESTIMATE"
+ARCHER = "ARCHER_EXECUTION_ESTIMATE"
 CAPACITY_SNAPSHOT = "POS_CAPACITY_SNAPSHOT_FILL_SHARE"
 
+#: R30C · WHAT P(fill) IS FITTED ON. Both sources -- Archer's estimate and the
+#: CAPACITY snapshot's fill share -- are rates of the PAPER SIMULATOR's own
+#: orders: never live execution evidence. Stated as the literal so this
+#: research package imports nothing outside itself and the profitability
+#: layer; pinned equal to execution_evidence.PAPER_SIMULATION (and the
+#: live-use label to execution_evidence.LIVE_USE) by
+#: tests/test_execution_calibration.py.
+EXECUTION_EVIDENCE_CLASS = "PAPER_SIMULATION"
+EXECUTION_EVIDENCE_LIVE_USE = (
+    "DERIVED_FROM_PAPER_SIMULATION_NOT_PROOF_OF_LIVE_EXECUTION")
 
-def eddie_view(est, why=None) -> dict:
-    """Eddie's (SHADOW_ONLY) estimate of this decision as shown beside the
+
+def archer_view(est, why=None) -> dict:
+    """Archer's (SHADOW_ONLY) estimate of this decision as shown beside the
     execution component; UNAVAILABLE with its reason when there is none."""
     if not est:
         return {"status": C.UNAVAILABLE,
-                "why": why or "NO_EDDIE_ESTIMATE_FOR_THIS_DECISION"}
+                "why": why or "NO_ARCHER_ESTIMATE_FOR_THIS_DECISION"}
     keys = ("estimate_id", "estimator_version", "estimated_at",
             "expected_fill_probability", "expected_net_executable_edge_pp",
             "expected_execution_loss_pp", "expected_executable_ev_usd",
@@ -91,45 +102,45 @@ def eddie_view(est, why=None) -> dict:
     v.update(status=C.MEASURED, why=None, authority="SHADOW_ONLY")
     if v["expected_fill_probability"] is None:
         v["fill_probability_why"] = (est.get("fill_why")
-                                     or "EDDIE_FILL_PROBABILITY_UNMEASURED")
+                                     or "ARCHER_FILL_PROBABILITY_UNMEASURED")
     return v
 
 
-def eddie_fresh(eddie_est, strategy) -> tuple:
-    """(usable, why): Eddie's estimate counts only when the book HE priced
+def archer_fresh(archer_est, strategy) -> tuple:
+    """(usable, why): Archer's estimate counts only when the book HE priced
     meets the strategy's executable freshness standard (his own estimator
     accepts books up to 120 s; the entry rule does not)."""
-    if not eddie_est:
+    if not archer_est:
         return False, None
-    age = C.num(eddie_est.get("book_age_s"))
+    age = C.num(archer_est.get("book_age_s"))
     bound = CP.executable_bound(strategy)
     if age is None:
-        return False, "EDDIE_BOOK_AGE_UNKNOWN"
+        return False, "ARCHER_BOOK_AGE_UNKNOWN"
     if abs(age) > bound:
-        return False, ("EDDIE_BOOK_%.1fs_OLDER_THAN_THE_STRATEGY_EXECUTABLE_"
+        return False, ("ARCHER_BOOK_%.1fs_OLDER_THAN_THE_STRATEGY_EXECUTABLE_"
                        "FRESHNESS_%.0fs" % (age, bound))
     return True, None
 
 
-def execution_input(eddie_est, snapshot_fp, snapshot_basis,
+def execution_input(archer_est, snapshot_fp, snapshot_basis,
                     strategy=None) -> tuple:
-    """(fill probability, basis, source) for the score's P(fill): Eddie's
+    """(fill probability, basis, source) for the score's P(fill): Archer's
     expected fill probability for this decision when he measured one on a
     book meeting the strategy's executable freshness, else the CAPACITY
     snapshot's PRODUCTION fill share as of the decision, else None."""
-    ok, why = eddie_fresh(eddie_est, strategy)
-    fp = C.num((eddie_est or {}).get("expected_fill_probability")) \
+    ok, why = archer_fresh(archer_est, strategy)
+    fp = C.num((archer_est or {}).get("expected_fill_probability")) \
         if ok else None
     if fp is None and why:
-        snapshot_basis = "%s (Eddie's estimate not used: %s)" % (
+        snapshot_basis = "%s (Archer's estimate not used: %s)" % (
             snapshot_basis, why)
     if fp is not None:
         return fp, ("eddie_execution_estimates %s (%s, SHADOW_ONLY) from the "
                     "decision's recorded book %s, estimated at %s" % (
-                        eddie_est.get("estimate_id"),
-                        eddie_est.get("estimator_version"),
-                        eddie_est.get("book_obs_id"),
-                        eddie_est.get("estimated_at"))), EDDIE
+                        archer_est.get("estimate_id"),
+                        archer_est.get("estimator_version"),
+                        archer_est.get("book_obs_id"),
+                        archer_est.get("estimated_at"))), ARCHER
     if C.num(snapshot_fp) is not None:
         return C.num(snapshot_fp), snapshot_basis, CAPACITY_SNAPSHOT
     return None, snapshot_basis, None
@@ -167,7 +178,12 @@ def components(out: dict, ctx: dict) -> dict:
             why=um.get("fill_probability"),
             basis=out.get("fill_probability_basis")),
             source=out.get("fill_probability_source"),
-            eddie=eddie_view(ctx.get("eddie"), ctx.get("eddie_why"))),
+            # R30C: the class the P(fill) was fitted on, beside the number
+            evidence_class=(EXECUTION_EVIDENCE_CLASS
+                            if out.get("fill_probability_source") else None),
+            live_use=(EXECUTION_EVIDENCE_LIVE_USE
+                      if out.get("fill_probability_source") else None),
+            archer=archer_view(ctx.get("archer"), ctx.get("archer_why"))),
         "LIQUIDITY_CAPACITY": _comp(
             out.get("capacity_factor"), unit="fraction", in_score=True,
             why=um.get("capacity_factor"),

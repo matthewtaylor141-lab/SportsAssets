@@ -86,6 +86,15 @@ DECISION_LOGIC_FILES = (
     # imports them and no ENTER, size, freshness or management decision reads
     # them (bettor_external_shadow uses them for a row's stage label only).
     "bettor_market_family.py",
+    # PAPER TURNAROUND / CAPITAL GATING (migration 290): paper_derek's and
+    # paper_benchmark's ENTER consult the capital-eligibility gate (executable
+    # depth, resolved settlement, total executable EV) and the strategy
+    # lifecycle (a no-entry state refuses, REDUCED_SIZE halves); the ledger's
+    # submit_order reads the lifecycle and the stale-management rate under
+    # the account lock -- a change to any of them changes which entries are
+    # placed and at what size
+    "bettor_capital_eligibility.py", "bettor_strategy_lifecycle.py",
+    "bettor_stale_management.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",
@@ -94,9 +103,26 @@ DECISION_LOGIC_FILES = (
     "agents/xavier_management.py", "agents/xavier_small_live_policy.py",
     "bettor_xavier_standing_orders.py", "xavier_freshness.py",
     "bettor_funded_decision.py",
+    # (270) paper mark freshness: Xavier's management packet (no HOLD /
+    # EXIT / REDUCE / hedge without reconciled qty, a fresh probability, a
+    # current book with exit depth, settlement identity and protection
+    # state) and the allocation rail bettor_paper_ledger.submit_order applies
+    # to every ENTRY (no growth where management is stale) -- both change
+    # which actions and entries happen, so a change restarts the window
+    "xavier_packet.py", "bettor_paper_freshness.py",
     # the agent components inside the intent
-    "agents/eddie.py", "lost_opportunity/score.py",
-    "lost_opportunity/reads.py", "profitability/economics.py")
+    "agents/archer.py", "lost_opportunity/score.py",
+    "lost_opportunity/reads.py", "profitability/economics.py",
+    # (R30 tails, pinned at integration) the R30C shadow components the
+    # canonical-components path computes at the decision instant: the
+    # execution-evidence labels and widened LIVE intervals on Archer's
+    # estimate (inside the intent), the settlement-exception cost (on the
+    # intent's evidence) and Opportunity Score V2 (beside it). None gates the
+    # decision, but each shapes what the intent records, as archer.py and
+    # lost_opportunity/score.py do -- pinned, so a change restarts the
+    # forward window rather than slipping under it
+    "execution_evidence.py", "settlement_exception_risk.py",
+    "opportunity_score_v2.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
 #: modules that make the ENTER decision, size it, review a position, and
@@ -127,6 +153,10 @@ NOT_DECISION_LOGIC = {
                                   "constant, a row label"),
     "bettor_paper_guard.py": ("the import guard keeping paper modules away "
                               "from execution; decides nothing"),
+    "opportunity_tournament.py": ("(R30C) records V1 / V2 BESIDE an intent "
+                                  "already recorded, in its own append-only "
+                                  "table under a savepoint; decides nothing "
+                                  "and nothing reads it to decide"),
 }
 
 

@@ -288,16 +288,24 @@ API_LOOPS = (
                  "response per challenge"},
           armed=("env_not_off", "PEER_RESPONDER_ENABLED", "1"),
           sources=(_hb("agent_peer_responder", *OK_ERROR),)),
-    _spec("agents.eddie_runner", "api", 300.0, critical=False,
+    _spec("agents.archer_runner", "api", 300.0, critical=False,
           lease={"kind": "NONE", "why": "SHADOW estimates keyed per "
                  "decision"},
-          armed=("env_not_off", "EDDIE_RUNNER_ENABLED", "1"),
-          sources=(_hb("agent_eddie", *OK_ERROR),)),
+          # (266) the variable carries the agent's new name; a deployment
+          # that set only the historical EDDIE_RUNNER_ENABLED keeps it
+          armed=("env_not_off_or_legacy", "ARCHER_RUNNER_ENABLED", "1",
+                 "EDDIE_RUNNER_ENABLED"),
+          sources=(_hb("agent_archer", *OK_ERROR),)),
     _spec("agents.scout_runner", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "RESEARCH observations keyed per "
                  "feature and window"},
           armed=("env_not_off", "SCOUT_RUNNER_ENABLED", "1"),
           sources=(_hb("agent_scout", *OK_ERROR),)),
+    _spec("agents.adriana_runner", "api", 300.0, critical=False,
+          lease={"kind": "NONE", "why": "SHADOW census passes keyed per "
+                 "scan id"},
+          armed=("env_not_off", "ADRIANA_RUNNER_ENABLED", "1"),
+          sources=(_hb("agent_adriana", *OK_ERROR),)),
     _spec("agents.improvement_pipeline", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "items seeded from source keys "
                  "(UNIQUE); stages mirrored, never decided"},
@@ -612,6 +620,14 @@ def armed(spec: dict, env=None, rows: dict | None = None) -> tuple:
         v = str(env.get(rule[1], rule[2])).strip().lower()
         return (v not in _OFF), (None if v not in _OFF
                                  else "ENV_%s_OFF" % rule[1])
+    if kind == "env_not_off_or_legacy":
+        # (name, default, legacy name): the name when set, else the legacy
+        # name when set, else the default
+        name = rule[1] if env.get(rule[1]) is not None else (
+            rule[3] if env.get(rule[3]) is not None else rule[1])
+        v = str(env.get(name, rule[2])).strip().lower()
+        return (v not in _OFF), (None if v not in _OFF
+                                 else "ENV_%s_OFF" % name)
     if kind == "env_set":
         v = str(env.get(rule[1], "") or "").strip()
         return bool(v), (None if v else "ENV_%s_NOT_SET" % rule[1])

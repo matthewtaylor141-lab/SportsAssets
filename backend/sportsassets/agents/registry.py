@@ -38,20 +38,91 @@ DEREK = "DEREK"
 XAVIER = "XAVIER"
 AUDREY = "AUDREY"
 KAREN = "KAREN"
-#: (migration 217) Eddie, Head of Execution (SHADOW_ONLY), and Scout, Market
-#: Intelligence (RESEARCH_SHADOW_ONLY). Neither holds any order, cancel,
-#: venue or capital authority.
-EDDIE = "EDDIE"
+#: (migration 217, renamed by 266) Archer, Head of Execution (SHADOW_ONLY),
+#: and Scout, Market Intelligence (RESEARCH_SHADOW_ONLY). Neither holds any
+#: order, cancel, venue or capital authority.
+ARCHER = "ARCHER"
 SCOUT = "SCOUT"
+#: (migration 265) Adriana, Head of Arbitrage (SHADOW_ONLY): proves or
+#: refuses fixed-payout structures across venues; no order, cancel, venue,
+#: credential or capital authority.
+ADRIANA = "ADRIANA"
 #: The shadow / research agents: no order path, no approval, no promotion.
-SHADOW_AGENTS = (EDDIE, SCOUT)
+SHADOW_AGENTS = (ARCHER, SCOUT, ADRIANA)
 #: The three OPERATING agents (entry, management, audit) -- the ones Karen
 #: challenges, and the only ones that may propose a collaboration-loop
 #: finding or hold an order path.
 OPERATING_AGENTS = (DEREK, XAVIER, AUDREY)
-#: Every registered agent identity, Karen (207), Eddie and Scout (217)
-#: included.
-AGENTS = (DEREK, XAVIER, AUDREY, KAREN, EDDIE, SCOUT)
+#: Every registered agent identity, Karen (207), Archer and Scout (217) and
+#: Adriana (265) included.
+AGENTS = (DEREK, XAVIER, AUDREY, KAREN, ARCHER, SCOUT, ADRIANA)
+
+# ── HISTORICAL ALIASES (migration 266) ──────────────────────────────────
+#: The execution agent was RENAMED: EDDIE -> ARCHER (same mandate, same
+#: SHADOW_ONLY authority, same records). "EDDIE" survives ONLY as a
+#: historical alias for audit: rows written as 'EDDIE' before 266 are
+#: append-only and are never rewritten or deleted, and every NEW write uses
+#: ARCHER. EDDIE is in no agent list: it has no identity, no permission, no
+#: seat, no heartbeat and no runner, so exactly one execution agent is
+#: active. A reader that shows a historical row names ARCHER and says so
+#: with an explicit `historical_alias: "EDDIE"` -- never a silent relabel.
+EDDIE_ALIAS = "EDDIE"
+#: historical alias -> the canonical agent it now names
+HISTORICAL_ALIASES: dict[str, str] = {EDDIE_ALIAS: ARCHER}
+#: the agent-id columns a historical row may carry the alias in
+ALIAS_COLUMNS = ("agent_id", "agent", "assignee", "created_by", "actor",
+                 "proposer", "owner_agent", "from_agent", "to_agent",
+                 "recorded_by")
+
+
+def canonical_agent_id(v) -> str | None:
+    """The canonical agent id for `v` (any case): a historical alias maps
+    to the agent it now names ('eddie' -> 'ARCHER'); anything else is
+    upper-cased as is; empty -> None. Pure."""
+    s = str(v or "").strip().upper()
+    if not s:
+        return None
+    return HISTORICAL_ALIASES.get(s, s)
+
+
+def historical_alias(v) -> str | None:
+    """'EDDIE' when `v` is a historical alias (any case), else None."""
+    s = str(v or "").strip().upper()
+    return s if s in HISTORICAL_ALIASES else None
+
+
+def ids_with_aliases(agent_id) -> list[str]:
+    """[canonical, *its historical aliases]: what a reader filters on so a
+    canonical agent's history (written under an alias) is never hidden."""
+    aid = canonical_agent_id(agent_id)
+    if aid is None:
+        return []
+    return [aid] + sorted(a for a, c in HISTORICAL_ALIASES.items()
+                          if c == aid)
+
+
+def label_aliases(row: dict | None, columns=ALIAS_COLUMNS) -> dict | None:
+    """A historical row as a reader shows it: each agent-id column holding a
+    historical alias names the canonical agent instead, and the row carries
+    `historical_alias` (the alias as written) and `historical_alias_columns`
+    (which columns held it). The stored row is never changed; a row with no
+    alias is returned unchanged. Pure."""
+    if not isinstance(row, dict):
+        return row
+    cols = []
+    alias = None
+    out = dict(row)
+    for k in columns:
+        v = out.get(k)
+        if isinstance(v, str) and historical_alias(v):
+            alias = historical_alias(v)
+            canon = HISTORICAL_ALIASES[alias]
+            out[k] = canon if v.isupper() else canon.lower()
+            cols.append(k)
+    if cols:
+        out["historical_alias"] = alias
+        out["historical_alias_columns"] = cols
+    return out
 
 # ── STATES (agent_status.state CHECK) ───────────────────────────────────
 S_IDLE = "IDLE"
@@ -106,7 +177,7 @@ TOOLS: dict[str, str] = {
                              "reconciliation reports (read only)"),
     "read.audits": "paper_audrey_findings / audrey_audit_reports (read only)",
     "read.findings": "agent_findings and their stages (read only)",
-    # Eddie's and Scout's evidence reads (read only; named one by one)
+    # Archer's and Scout's evidence reads (read only; named one by one)
     "read.books": ("paper_book_observations / institutional stream "
                    "evidence (recorded books, read only)"),
     "read.orders_fills": ("paper_orders / paper_fills / execution_intents "
@@ -140,6 +211,13 @@ TOOLS: dict[str, str] = {
     "write.feature_tournaments": (
         "scout_feature_tournaments spec FREEZE and frozen samples only; the "
         "verdict is the evaluator's, never Scout's"),
+    "write.arb_records": (
+        "adriana_arb_scans / adriana_arb_opportunities / "
+        "adriana_arb_refusals (migration 265): SHADOW arbitrage proofs and "
+        "refusals, never an order"),
+    "write.agent_handoffs": (
+        "agent_conversation_messages HANDOFF / REVIEW_REQUEST rows naming "
+        "one's own record (224), never an instruction to act"),
     "write.loop_findings": ("agent_findings / stages of the collaboration "
                             "loop (203) for one's own findings and peer "
                             "challenges; never RELEASE_ELIGIBILITY"),
@@ -177,7 +255,7 @@ TOOLS: dict[str, str] = {
                                   "ELIGIBLE_FOR_HUMAN_RELEASE_REVIEW"),
 }
 
-#: (217) Denied to Eddie and Scout on top of NEVER_GRANTED.
+#: (217) Denied to Archer and Scout on top of NEVER_GRANTED.
 SHADOW_DENIED = ("request.funded_entry", "dispatch.xavier_claim",
                  "write.entry_decisions", "write.management_decisions",
                  "write.agent_audits", "write.directives",
@@ -279,8 +357,8 @@ IDENTITIES: dict[str, dict] = {
             "order_path": None,
         },
     },
-    EDDIE: {
-        "display_name": "Eddie",
+    ARCHER: {
+        "display_name": "Archer",
         "role": "HEAD_OF_EXECUTION",
         "authority": "SHADOW_ONLY",
         "mandate": (
@@ -336,6 +414,35 @@ IDENTITIES: dict[str, dict] = {
             "order_path": None,
         },
     },
+    ADRIANA: {
+        "display_name": "Adriana",
+        "role": "HEAD_OF_ARBITRAGE",
+        "authority": "SHADOW_ONLY",
+        "mandate": (
+            "Find structures whose payout is fixed in every outcome -- "
+            "cross-venue complements, YES / NO complements, middles across "
+            "lines and exhaustive outcome baskets -- and prove or refuse each "
+            "one: identical settlement and payoff in every outcome (void, "
+            "postponement and tie included), synchronized fresh books, "
+            "executable depth on every leg, and a positive worst case after "
+            "every fee, slippage allowance and cost at the largest "
+            "profitable matched size. Records every opportunity and every "
+            "refusal in SHADOW. Never calls a structure guaranteed unless "
+            "all of that reconciles. Holds NO authority: no venue "
+            "submission, no order, no cancel, no credential, no capital, no "
+            "approval, no promotion."),
+        "policy_key": "arbitrage",
+        "tool_permissions": {
+            "authority_status": "SHADOW_ONLY",
+            "allowed": ["read.books", "read.catalogue", "read.findings",
+                        "write.arb_records", "write.agent_handoffs",
+                        "write.loop_findings", "write.agent_tasks"],
+            "denied": [*SHADOW_DENIED, "write.execution_estimates",
+                       "write.candidate_reviews", "write.feature_registry",
+                       "write.feature_tournaments", *NEVER_GRANTED],
+            "order_path": None,
+        },
+    },
 }
 
 
@@ -352,10 +459,12 @@ def _model_version(agent_id: str) -> str:
         return "UNREADABLE:%s" % type(exc).__name__
     if agent_id == KAREN:
         return "NO_MODEL_RULE_BASED_CHALLENGE_DETECTORS"
-    if agent_id == EDDIE:
+    if agent_id == ARCHER:
         return "NO_OUTCOME_MODEL_RULE_BASED_EXECUTION_ESTIMATOR"
     if agent_id == SCOUT:
         return "NO_MODEL_PROSPECTIVE_FEATURE_TOURNAMENT"
+    if agent_id == ADRIANA:
+        return "NO_OUTCOME_MODEL_EXHAUSTIVE_PAYOFF_SOLVER"
     return "NO_MODEL_DETERMINISTIC_AUDIT"
 
 
@@ -754,7 +863,7 @@ async def link_decision(conn, *, agent_id, kind, subject, decided_at, verdict,
 async def status_of(conn, agent_id) -> dict | None:
     """Identity + status for one agent, or None when it was never registered.
     A registered agent with no status row reads state None, not IDLE."""
-    aid = str(agent_id or "").upper()
+    aid = canonical_agent_id(agent_id) or ""
     r = await conn.fetchrow(
         "SELECT i.agent_id, i.display_name, i.mandate, i.policy_version, "
         "       i.model_version, i.code_version, i.tool_permissions, "
@@ -769,21 +878,25 @@ async def status_of(conn, agent_id) -> dict | None:
         return None
     out = _row(r)
     out["role"] = IDENTITIES.get(aid, {}).get("role")
+    if historical_alias(agent_id):
+        out["alias_of"] = aid.lower()
+        out["historical_alias"] = historical_alias(agent_id)
     return out
 
 
 async def tasks(conn, *, assignee=None, status=None, limit=50) -> list:
     rows = await conn.fetch(
-        "SELECT * FROM agent_tasks WHERE ($1::text IS NULL OR assignee=$1) "
+        "SELECT * FROM agent_tasks "
+        " WHERE ($1::text[] IS NULL OR assignee = ANY($1::text[])) "
         "   AND ($2::text IS NULL OR status=$2) "
         " ORDER BY updated_at DESC, task_id LIMIT $3",
-        None if assignee is None else str(assignee).upper(), status,
+        None if assignee is None else ids_with_aliases(assignee), status,
         max(1, min(int(limit or 50), 500)))
     return [_task_row(r) for r in rows]
 
 
 def _task_row(r) -> dict:
-    t = _row(r)
+    t = label_aliases(_row(r))
     t["evidence_links"] = [{"kind": "agent_tasks", "id": t["task_id"],
                             "href": "/api/command/agents/tasks/%s"
                             % t["task_id"]}]
@@ -799,19 +912,20 @@ async def task(conn, task_id) -> dict | None:
         "SELECT event_id, task_id, at, kind, actor, detail "
         "  FROM agent_task_events WHERE task_id=$1 ORDER BY event_id",
         str(task_id))
-    return {"task": _task_row(r), "events": [_row(e) for e in ev]}
+    return {"task": _task_row(r),
+            "events": [label_aliases(_row(e)) for e in ev]}
 
 
 async def decisions(conn, *, agent_id=None, limit=50) -> list:
     rows = await conn.fetch(
         "SELECT * FROM agent_decisions "
-        " WHERE ($1::text IS NULL OR agent_id=$1) "
+        " WHERE ($1::text[] IS NULL OR agent_id = ANY($1::text[])) "
         " ORDER BY decided_at DESC, decision_ref LIMIT $2",
-        None if agent_id is None else str(agent_id).upper(),
+        None if agent_id is None else ids_with_aliases(agent_id),
         max(1, min(int(limit or 50), 500)))
     out = []
     for r in rows:
-        d = _row(r)
+        d = label_aliases(_row(r))
         d["evidence"] = list(d.get("evidence_refs") or [])
         out.append(d)
     return out

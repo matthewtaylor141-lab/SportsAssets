@@ -108,8 +108,12 @@ def position_criteria(book: str, positions: list) -> list:
         net = [b for _, b in ex]
         ci = C.mean_ci(net)
         pred = C.mean([a for a, _ in ex])
+        # R30C: the slippage here is fitted on this book's fills -- the paper
+        # simulator's for PAPER, the legacy mirror's venue fills for ACTUAL
         ev = {"n": len(ex), "mean_predicted_edge_pc": C.rnd(pred),
-              "mean_edge_after_execution_pc": C.rnd(C.mean(net)), "ci": ci}
+              "mean_edge_after_execution_pc": C.rnd(C.mean(net)), "ci": ci,
+              "execution_evidence_class": C.EXECUTION_EVIDENCE_CLASS.get(
+                  book)}
         if len(ex) < c["min_n"] or ci is None:
             out.append(_ev("EXECUTION_LOSS_CONSUMES_EDGE", book, strat,
                            "INSUFFICIENT_SAMPLE", ev,

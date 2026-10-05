@@ -165,9 +165,10 @@ async def _expect(conn, sql, *args, match=None):
 
 
 async def _pre_217(conn):
-    """Re-running 207 presumes a database before 217 (Eddie, Scout): their
-    identity / status / persona rows -- which a later test may have
-    committed -- are removed inside the test's rolled-back transaction."""
+    """Re-running 207 presumes a database before 217 (Eddie -- Archer since
+    266 -- and Scout): their identity / status / persona rows -- which a
+    later test may have committed -- are removed inside the test's
+    rolled-back transaction."""
     if await conn.fetchval("SELECT to_regclass('agent_persona_versions')"):
         await conn.execute("ALTER TABLE agent_persona_versions DISABLE "
                            "TRIGGER USER")
@@ -178,9 +179,15 @@ async def _pre_217(conn):
         await conn.execute("DELETE FROM agent_chat_conversations WHERE "
                            " agent_id IN ('EDDIE', 'SCOUT')")
     await conn.execute("DELETE FROM agent_status WHERE agent_id IN "
-                       "('EDDIE', 'SCOUT')")
+                       "('SCOUT')")
     await conn.execute("DELETE FROM agent_identities WHERE agent_id IN "
-                       "('EDDIE', 'SCOUT')")
+                       "('SCOUT')")
+    # and before 265 (Adriana) and 266 (ARCHER, and his historical alias
+    # EDDIE, whose identity rows the alias guard freezes outside a test)
+    from tests._pre_265 import remove_adriana_rows
+    from tests._pre_266 import remove_archer_rows
+    await remove_adriana_rows(conn)
+    await remove_archer_rows(conn, alias=True)
 
 
 @pg
@@ -191,8 +198,15 @@ async def test_the_identity_is_persisted_with_its_permissions():
         await _pre_217(conn)
         await conn.execute(UP)                                # idempotent
         # re-running 207 narrows the identity CHECK to its four agents;
-        # 217 (Eddie, Scout) re-asserts the widened CHECK after it
+        # 217 (Eddie -- now Archer -- and Scout) re-asserts the widened
+        # CHECK after it
         await conn.execute((MIG / "217_eddie_scout_agents.sql").read_text())
+        # and 265 (Adriana) re-asserts the eight-agent CHECK after 217, and
+        # 266 (the EDDIE -> ARCHER rename) after 265
+        await conn.execute(
+            (MIG / "265_adriana_arbitrage_agent.sql").read_text())
+        await conn.execute(
+            (MIG / "266_archer_execution_agent_rename.sql").read_text())
         got = await R.ensure_identities(conn)
         assert got["ok"] is True and got["agents"]["KAREN"]["ok"], got
         st = await R.status_of(conn, R.KAREN)

@@ -59,8 +59,8 @@ ENDPOINTS = {
     "audrey": "/api/command/agents/audrey",
     # Karen (red team / challenge, migration 207): api/agents_karen.py
     "karen": "/api/command/karen",
-    # Eddie and Scout (migration 217): api/agents_pos.py
-    "eddie": "/api/command/eddie",
+    # Archer and Scout (migration 217): api/agents_pos.py
+    "archer": "/api/command/archer",
     "scout": "/api/command/scout",
     "chat": "/api/command/agents/audrey/chat",
     "directives": "/api/command/agents/audrey/directives",
@@ -105,7 +105,7 @@ REQUIRED_SECTIONS = {
                "releases", "directives", "conversations", "provider"),
     "karen": ("status", "authority", "current_challenges",
               "recent_challenges", "metrics", "detectors"),
-    "eddie": ("status", "authority", "desk", "execution_funnel",
+    "archer": ("status", "authority", "desk", "execution_funnel",
               "current_estimates",
               "predicted_vs_realized", "scorecard", "candidate_reviews",
               "runner"),
@@ -119,7 +119,7 @@ PAGE_PATHS = {
     "xavier": "/api/command/agents/xavier/page",
     "audrey": "/api/command/agents/audrey/page",
     "karen": "/api/command/agents/karen/page",
-    "eddie": "/api/command/agents/eddie/page",
+    "archer": "/api/command/agents/archer/page",
     "scout": "/api/command/agents/scout/page",
     "demo": "/api/command/agents/demo/page",
 }
@@ -435,7 +435,7 @@ var AG = (function () {
     index: '/api/command/agents', derek: '/api/command/agents/derek',
     xavier: '/api/command/agents/xavier', audrey: '/api/command/agents/audrey',
     karen: '/api/command/karen',
-    eddie: '/api/command/eddie', scout: '/api/command/scout',
+    archer: '/api/command/archer', scout: '/api/command/scout',
     chat: '/api/command/agents/audrey/chat', directives: '/api/command/agents/audrey/directives'
   };
   var FETCH_OPTS = {credentials: 'same-origin', cache: 'no-store', headers: {'Accept': 'application/json'}};
@@ -659,7 +659,7 @@ var AG = (function () {
     XAVIER: {letter: 'X', role: 'Position management · exits', kind: 'xavier'},
     AUDREY: {letter: 'A', role: 'Audit · management chat · improvement', kind: 'audrey'},
     KAREN: {letter: 'K', role: 'Red team · challenge · no authority', kind: 'karen'},
-    EDDIE: {letter: 'E', role: 'Head of execution · shadow only', kind: 'eddie'},
+    ARCHER: {letter: 'R', role: 'Head of execution · shadow only', kind: 'archer'},
     SCOUT: {letter: 'S', role: 'Market intelligence · research only', kind: 'scout'}
   };
   function depList(v) {
@@ -1617,7 +1617,7 @@ KAREN_JS = r"""
 })(AG);
 """
 
-# Eddie and Scout (migration 217): their records, read only. Null is
+# Archer and Scout (migration 217): their records, read only. Null is
 # UNKNOWN / NOT MEASURED with the reason, never zero; no write control.
 POS_JS = r"""
 (function (AG) {
@@ -1639,10 +1639,10 @@ POS_JS = r"""
       {label: 'Definition', keys: ['definition']}], {rd: ctx.rd});
   }
   function deskNote(sec) { var d = isObj(sec.data) ? sec.data : {}; return '<p class="note">The desk above draws these values: ' + esc(d.name) + ', ' + esc(d.role) + ', authority ' + esc(d.authority) + '; affordances ' + esc(d.affordances) + '.</p>'; }
-  /* RECOMMENDATIONS ARE NOT ORDERS: Eddie's shadow EXECUTE_NOW /
+  /* RECOMMENDATIONS ARE NOT ORDERS: Archer's shadow EXECUTE_NOW /
      SKIP_EXECUTION counts, then what was actually submitted, venue-
      acknowledged and filled by a BETTOR-originated order, each in its own
-     cell; the legacy mirror's orders are named apart and are not Eddie's. */
+     cell; the legacy mirror's orders are named apart and are not Archer's. */
   function funnel(sec) {
     var d = isObj(sec.data) ? sec.data : null;
     if (!d) return AG.genericBody(sec);
@@ -1651,8 +1651,8 @@ POS_JS = r"""
     }
     var sl = isObj(d.small_live) ? d.small_live : {};
     var ven = isObj(sl.venues) ? sl.venues : {};
-    var lm = isObj(d.legacy_mirror_not_eddie) ? d.legacy_mirror_not_eddie : null;
-    return '<p class="note"><b>Recommendations are not orders.</b> Eddie is SHADOW ONLY: an EXECUTE_NOW recommendation sends nothing.</p>'
+    var lm = isObj(d.legacy_mirror_not_archer) ? d.legacy_mirror_not_archer : null;
+    return '<p class="note"><b>Recommendations are not orders.</b> Archer is SHADOW ONLY: an EXECUTE_NOW recommendation sends nothing.</p>'
       + '<div class="metrics">' + cell('EXECUTE_NOW recommendations', d.execute_now_recommendations, 'shadow · not orders')
       + cell('SKIP_EXECUTION recommendations', d.skip_execution_recommendations, 'shadow')
       + cell('Orders actually submitted', d.bettor_orders_submitted, 'BETTOR-originated only')
@@ -1661,7 +1661,7 @@ POS_JS = r"""
       + '<p class="note">' + esc(d.orders_basis || '') + '</p>'
       + '<p><b>' + esc(sl.title || 'SMALL LIVE — BETTOR ORIGINATED') + ':</b> ' + AG.statusPill(sl.status || 'UNAVAILABLE') + ' <span class="mute">' + esc(sl.why || '') + '</span></p>'
       + '<p class="mute">Polymarket US: ' + esc((ven.polymarket_us || {}).state || '—') + ' · Kalshi: ' + esc((ven.kalshi || {}).state || '—') + '</p>'
-      + (lm ? '<p class="mute">' + esc(lm.label || 'LEGACY MIRROR VALIDATION') + ' (not Eddie\'s, not Small Live): ' + esc(lm.orders_sent_or_planned) + ' sent or planned · ' + esc(lm.venue_acknowledged) + ' venue-acknowledged · ' + esc(lm.fills) + ' fills</p>' : '');
+      + (lm ? '<p class="mute">' + esc(lm.label || 'LEGACY MIRROR VALIDATION') + ' (not Archer\'s, not Small Live): ' + esc(lm.orders_sent_or_planned) + ' sent or planned · ' + esc(lm.venue_acknowledged) + ' venue-acknowledged · ' + esc(lm.fills) + ' fills</p>' : '');
   }
   function estimates(sec, ctx) {
     var rows = AG.rowsOf(sec.data, ['estimates', 'rows']);
@@ -1676,6 +1676,7 @@ POS_JS = r"""
       {label: 'Execution loss', keys: ['expected_execution_loss_pp'], num: 1},
       {label: 'Net executable edge', keys: ['expected_net_executable_edge_pp'], num: 1},
       {label: 'Fill probability', keys: ['expected_fill_probability'], num: 1},
+      {label: 'Fill fitted on', render: function (r) { var fe = r.fill_probability_evidence || {}; return esc(fe.fitted_on || 'UNLABELLED') + '<div class="mute">' + esc(fe.live_use || 'not proof of live execution') + (fe.live_ci_low !== undefined && fe.live_ci_low !== null ? ' · live ' + esc(fe.live_ci_low) + '–' + esc(fe.live_ci_high) : '') + '</div>'; }},
       {label: 'Time to fill (s)', keys: ['expected_time_to_fill_s'], num: 1},
       {label: 'Capital-hours', keys: ['expected_capital_hours'], num: 1},
       {label: 'Max size', keys: ['max_executable_qty'], num: 1}, {label: 'EV (USD)', keys: ['expected_executable_ev_usd'], num: 1},
@@ -1687,7 +1688,7 @@ POS_JS = r"""
     if (!rows.length) return AG.genericBody(sec, ctx.rd);
     return AG.table(rows, [
       {label: 'Outcome', keys: ['outcome_id']}, {label: 'Derek candidate', keys: ['decision_id']},
-      {label: 'Eddie said', keys: ['recommendation']}, {label: 'Source', keys: ['source']},
+      {label: 'Archer said', keys: ['recommendation']}, {label: 'Source', keys: ['source']},
       {label: 'Filled qty', keys: ['filled_qty'], num: 1}, {label: 'VWAP', keys: ['fill_vwap'], num: 1},
       {label: 'Predicted loss', keys: ['predicted_execution_loss_pp'], num: 1},
       {label: 'Realized loss', keys: ['realized_execution_loss_pp'], num: 1},
@@ -1754,15 +1755,15 @@ POS_JS = r"""
       {label: 'Observed', keys: ['observed_timestamp'], u: 'ts'}, {label: 'Licensing', keys: ['licensing_class']},
       {label: 'Provenance', render: function (r) { return refs(r.provenance); }}], {rd: ctx.rd});
   }
-  AG.SPECS.eddie = {sections: [
+  AG.SPECS.archer = {sections: [
     {key: 'status', title: 'Status & heartbeat', render: R.status},
-    {key: 'authority', title: 'Authority · SHADOW ONLY', note: 'Eddie holds no venue submission, order, cancel, capital, approval or promotion authority. Enforced in code and in the database (migration 217).'},
+    {key: 'authority', title: 'Authority · SHADOW ONLY', note: 'Archer holds no venue submission, order, cancel, capital, approval or promotion authority. Enforced in code and in the database (migration 217).'},
     {key: 'desk', title: 'Desk record', render: deskNote},
     {key: 'execution_funnel', title: 'Recommendations vs orders · SMALL LIVE — BETTOR ORIGINATED', render: funnel, wide: true, note: 'EXECUTE_NOW and SKIP_EXECUTION are shadow recommendations, never orders. Orders, venue acknowledgements and fills count only BETTOR-originated venue orders; legacy mirror orders never count.'},
     {key: 'current_estimates', title: 'Execution estimates (shadow)', render: estimates, wide: true, note: 'Never EXECUTE_NOW / REST_LIMIT / SPLIT when the expected executable EV is not positive. Null is unmeasured, never zero.'},
     {key: 'predicted_vs_realized', title: 'Predicted vs realized execution loss', render: outcomes, wide: true},
     {key: 'scorecard', title: 'Scorecard · numerator / denominator', render: metricsTable, wide: true, note: 'UNAVAILABLE until measured.'},
-    {key: 'candidate_reviews', title: 'Candidate reviews · Derek → Karen → Scout → Eddie → Allocator → Audrey → Xavier', render: reviews, wide: true},
+    {key: 'candidate_reviews', title: 'Candidate reviews · Derek → Karen → Scout → Archer → Allocator → Audrey → Xavier', render: reviews, wide: true},
     {key: 'runner', title: 'Runner'}
   ]};
   AG.SPECS.scout = {sections: [
@@ -1783,9 +1784,9 @@ INDEX_JS = r"""
 (function (AG) {
   'use strict';
   var esc = AG.esc, pick = AG.pick, isObj = AG.isObj;
-  var IDS = ['DEREK', 'XAVIER', 'AUDREY', 'KAREN', 'EDDIE', 'SCOUT'];
+  var IDS = ['DEREK', 'XAVIER', 'AUDREY', 'KAREN', 'ARCHER', 'SCOUT'];
   var TERMINAL = ['RELEASED', 'REJECTED', 'CLOSED_NO_CHANGE', 'CANCELLED', 'ROLLED_BACK'];
-  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement', KAREN: 'Challenges all three with evidence; holds no authority', EDDIE: 'Estimates execution of Derek\'s candidates in shadow; no order or capital authority', SCOUT: 'Tests compliant external features prospectively; no trade or promotion authority'};
+  var MANDATE = {DEREK: 'Finds and enters opportunities', XAVIER: 'Manages owned positions and exits', AUDREY: 'Audits both, talks with management, runs improvement', KAREN: 'Challenges all three with evidence; holds no authority', ARCHER: 'Estimates execution of Derek\'s candidates in shadow; no order or capital authority', SCOUT: 'Tests compliant external features prospectively; no trade or promotion authority'};
   function agentCard(a, id, tasks, rd) {
     var meta = AG.AGENT_META[id];
     if (!isObj(a)) return '<div class="panel acard ag-' + meta.kind + '" data-agent="' + id + '"><div class="ident"><div class="sigil">' + meta.letter + '</div><div><div class="role">' + esc(meta.role) + '</div><h1>' + id.charAt(0) + id.slice(1).toLowerCase() + '</h1></div></div>'
@@ -2048,7 +2049,7 @@ CHAT_PANEL_HTML = r"""
 # ═════════════════════════════════════════════════════════════════════
 
 TALK_NAMES = {"derek": "Derek", "xavier": "Xavier", "audrey": "Audrey",
-              "karen": "Karen", "eddie": "Eddie", "scout": "Scout"}
+              "karen": "Karen", "archer": "Archer", "scout": "Scout"}
 
 TALK_PANEL_HTML = r"""
 <section class="card wide talk" id="talk" data-agent="%%AGENT%%" aria-label="Talk to %%NAME%%">
@@ -2077,7 +2078,7 @@ TALK_SCOPE = {
               "and the independent evaluations",
               "What are you challenging right now?",
               "Which of your challenges were rejected, and why?"),
-    "eddie": ("his shadow execution estimates, the costs between decision "
+    "archer": ("his shadow execution estimates, the costs between decision "
               "and fill, and predicted against realized execution loss",
               "What are you estimating right now?",
               "How much edge did execution cost on the last fill?"),
@@ -2359,13 +2360,13 @@ def karen_hero_html() -> str:
 
 
 _PAGE_TITLES = {"index": "Agents", "derek": "Derek", "xavier": "Xavier",
-                "audrey": "Audrey", "karen": "Karen", "eddie": "Eddie",
+                "audrey": "Audrey", "karen": "Karen", "archer": "Archer",
                 "scout": "Scout"}
 
 
 def _nav(current: str) -> str:
     items = [("index", "Agents"), ("derek", "Derek"), ("xavier", "Xavier"),
-             ("audrey", "Audrey"), ("karen", "Karen"), ("eddie", "Eddie"),
+             ("audrey", "Audrey"), ("karen", "Karen"), ("archer", "Archer"),
              ("scout", "Scout"), ("demo", "Product demo")]
     return "".join(
         '<a href="%s"%s>%s</a>' % (PAGE_PATHS[k],
@@ -2396,7 +2397,7 @@ _DESCS = {
     "xavier": "Xavier: owned positions, the spread ladder, every alternative, payouts and servicing. Read-only.",
     "audrey": "Audrey: reports, findings, outcomes, improvement tasks, releases, directives and management chat.",
     "karen": "Karen: red-team challenges to Derek, Xavier and Audrey, their peer responses, outcomes and metrics. No authority. Read-only.",
-    "eddie": "Eddie: head of execution. Shadow execution estimates of Derek's candidates, predicted vs realized execution loss and his scorecard. No order or capital authority. Read-only.",
+    "archer": "Archer: head of execution. Shadow execution estimates of Derek's candidates, predicted vs realized execution loss and his scorecard. No order or capital authority. Read-only.",
     "scout": "Scout: market intelligence. Compliant sources, the feature registry, frozen forward tests against PinnAPI and his scorecard. No trade or promotion authority. Read-only.",
 }
 
@@ -2414,7 +2415,7 @@ _CC_SHELL = r"""<!doctype html>
 <a class="skip" href="#cc-main">Skip to the records</a>
 <header class="top cc-top"><a class="brand" href="/api/command/agents/page"><span class="mark"></span>BETTOR <b>COMMAND</b></a>
 <nav class="cc-nav" aria-label="Agents">%%NAV%%</nav>
-<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/karen/page">Karen · red team</a><a href="/api/command/agents/eddie/page">Eddie · execution</a><a href="/api/command/agents/scout/page">Scout · intelligence</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
+<nav class="cc-sub" aria-label="More"><a href="/api/command/agents/page">All agents</a><a href="/api/command/agents/karen/page">Karen · red team</a><a href="/api/command/agents/archer/page">Archer · execution</a><a href="/api/command/agents/scout/page">Scout · intelligence</a><a href="/api/command/agents/demo/page">Product demo</a></nav>
 <div class="meta"><span class="ro">READ-ONLY</span><span id="readat">reading&#8230;</span><button id="trace-btn" type="button">Trace</button><button id="refresh" type="button">Refresh</button></div></header>
 <main id="cc-main" tabindex="-1">
 <div class="cc-paper-banner" id="paper-banner" data-state="READING" role="status" aria-live="polite">Reading the paper session&#8230;</div>
@@ -2501,9 +2502,9 @@ def page_html(kind: str) -> str:
         return _cc_page_html(kind)
     js = CORE_JS + COMMON_JS + TRACE_JS
     js += {"index": INDEX_JS, "derek": DEREK_JS, "xavier": XAVIER_JS,
-           "audrey": AUDREY_JS, "karen": KAREN_JS, "eddie": POS_JS,
+           "audrey": AUDREY_JS, "karen": KAREN_JS, "archer": POS_JS,
            "scout": POS_JS}[kind]
-    if kind in ("eddie", "scout"):
+    if kind in ("archer", "scout"):
         return _pos_page_html(kind, js)
     js += BOOT_JS
     shell = _SHELL
@@ -2530,7 +2531,7 @@ def page_html(kind: str) -> str:
 
 
 def _pos_page_html(kind: str, js: str) -> str:
-    """Eddie's / Scout's page: the desk (live 3D character at an original
+    """Archer's / Scout's page: the desk (live 3D character at an original
     desk, every value from the endpoint), the persona chat, then every
     record section. Read only: no write control of any kind."""
     from . import agent_desks as DK
@@ -2565,7 +2566,7 @@ def render_js(kind: str) -> str:
     from . import agent_cc_page as CCP
     return CORE_JS + COMMON_JS + TRACE_JS + {"index": INDEX_JS, "derek": DEREK_JS,
                                   "xavier": XAVIER_JS, "audrey": AUDREY_JS,
-                                  "karen": KAREN_JS, "eddie": POS_JS,
+                                  "karen": KAREN_JS, "archer": POS_JS,
                                   "scout": POS_JS}[kind] + (
         CCP.CC_CORE_JS + CCP.PAPER_CORE_JS + OPS.OPS_CORE_JS
         if kind in ("derek", "xavier", "audrey") else "")
@@ -2810,11 +2811,18 @@ async def agents_karen_page(request: Request):
     return _serve(request, lambda: page_html("karen"), _cc_headers)
 
 
-@router.get("/api/command/agents/eddie/page", include_in_schema=False)
-async def agents_eddie_page(request: Request):
+@router.get("/api/command/agents/archer/page", include_in_schema=False)
+async def agents_archer_page(request: Request):
     # the Command Centre CSP (the 3D desk module and its spoken answers),
-    # framed by the /eddie management shell
-    return _serve(request, lambda: page_html("eddie"), _cc_headers)
+    # framed by the /archer management shell
+    return _serve(request, lambda: page_html("archer"), _cc_headers)
+
+
+@router.get("/api/command/agents/eddie/page", include_in_schema=False)
+async def agents_eddie_page_alias(request: Request):
+    # (266) the historical alias: the old address still draws Archer's page
+    # (the agent it now names); /api/command/eddie answers alias_of: archer
+    return _serve(request, lambda: page_html("archer"), _cc_headers)
 
 
 @router.get("/api/command/agents/scout/page", include_in_schema=False)

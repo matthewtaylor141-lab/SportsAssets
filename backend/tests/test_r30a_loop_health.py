@@ -90,8 +90,9 @@ def test_every_api_lifespan_runner_is_inventoried():
         "_RN1XM.run": "rn1x_model", "_CAP.run": "agents.capability_runtime",
         "_KAREN.run": "agents.karen_runner",
         "_PEER.run": "agents.peer_responder",
-        "_EDDIE.run": "agents.eddie_runner",
+        "_ARCHER.run": "agents.archer_runner",
         "_SCOUT.run": "agents.scout_runner", "_EXM.run": "execmirror.tick",
+        "_ADRIANA.run": "agents.adriana_runner",
         "_INTEL.run": "intel.runner", "_POS.run": "profitability.runner",
         "_POSLEARN.run": "position_learning.runner",
         "_TWIN.run": "twin.runner",
@@ -179,7 +180,7 @@ def test_copied_constants_match_the_loops():
     from sportsassets import pinnapi_held as PH
     from sportsassets import pinnapi_owner as PO
     from sportsassets.agents import capability_runtime as CAP
-    from sportsassets.agents import eddie_runner, improvement_pipeline
+    from sportsassets.agents import archer_runner, improvement_pipeline
     from sportsassets.agents import karen_runner, peer_responder, scout_runner
     from sportsassets.intel import runner as INTEL
     from sportsassets.poslearn import runner as POSL
@@ -190,10 +191,10 @@ def test_copied_constants_match_the_loops():
     from sportsassets.workers import rn1x_model_loop as MOD
     from sportsassets.workers import rn1x_shadow as SHD
 
-    (DESK, EXM, FR, PH, PO, CAP, eddie_runner, improvement_pipeline,
+    (DESK, EXM, FR, PH, PO, CAP, archer_runner, improvement_pipeline,
      karen_runner, peer_responder, scout_runner, INTEL, POSL, POS, TWIN, EXT,
      LRN, MOD, SHD) = map(_Declared, (
-        DESK, EXM, FR, PH, PO, CAP, eddie_runner, improvement_pipeline,
+        DESK, EXM, FR, PH, PO, CAP, archer_runner, improvement_pipeline,
         karen_runner, peer_responder, scout_runner, INTEL, POSL, POS, TWIN,
         EXT, LRN, MOD, SHD))
     B = {s["name"]: s for s in LH.API_LOOPS}
@@ -228,7 +229,7 @@ def test_copied_constants_match_the_loops():
         assert B[name]["cadence_s"] == mod.CYCLE_S, name
         assert B[name]["armed"][1] == mod.ENV_KILL, name
     for mod, name in ((karen_runner, "agents.karen_runner"),
-                      (eddie_runner, "agents.eddie_runner"),
+                      (archer_runner, "agents.archer_runner"),
                       (scout_runner, "agents.scout_runner"),
                       (peer_responder, "agents.peer_responder"),
                       (improvement_pipeline, "agents.improvement_pipeline")):

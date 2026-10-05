@@ -14,14 +14,24 @@ token. Her answers come from her challenge records only (no persona model).
 She is optional: the bridge can be enabled with the three operating agents
 configured and Karen not yet set up.
 
-EDDIE (head of execution) and SCOUT (market intelligence), migration 217,
-are dedicated apps on exactly the same terms: SLACK_EDDIE_BOT_TOKEN /
+ARCHER (head of execution) and SCOUT (market intelligence), migration 217,
+are dedicated apps on exactly the same terms: SLACK_ARCHER_BOT_TOKEN /
 _SIGNING_SECRET / _APP_ID and SLACK_SCOUT_BOT_TOKEN / _SIGNING_SECRET /
 _APP_ID. Each posts only under its own token, only when all three values
 differ from EVERY other agent's (`dedicated_identity`), and content of
-theirs (source_key 'eddie:...' / 'scout:...') is never sent under another
+theirs (source_key 'archer:...' / 'scout:...') is never sent under another
 agent's token. They answer mentions from their own records only (no persona
 model), and they are optional too.
+
+THE HISTORICAL ALIAS (migration 266). Archer was named EDDIE. His app's
+values may still be configured under the historical names SLACK_EDDIE_*:
+each ARCHER value falls back to its SLACK_EDDIE_* twin ONLY when the
+SLACK_ARCHER_* one is unset -- still his own app, and still subject to the
+same all-three-present, distinct-from-every-other-agent rule, so with
+neither configured nothing is sent (fail closed). 'eddie' is not an agent
+here: Slack events posted to /slack/eddie/events are Archer's (alias), a
+delivery queued as 'eddie' before 266 is never claimed or sent, and content
+keyed 'eddie:' travels under no token but Archer's.
 """
 from __future__ import annotations
 import asyncio
@@ -35,17 +45,28 @@ import uuid
 import httpx
 
 CONTROL='agent.slack.bridge'
-AGENTS=('derek','xavier','audrey','karen','eddie','scout')
-#: The bridge may be enabled once these are configured; Karen, Eddie and
-#: Scout are optional.
+AGENTS=('derek','xavier','audrey','karen','archer','scout','adriana')
+#: The bridge may be enabled once these are configured; Karen, Archer, Scout
+#: and Adriana are optional.
 REQUIRED_AGENTS=('derek','xavier','audrey')
 KAREN='karen'
 KAREN_SOURCE='karen:'
-EDDIE='eddie'
+ARCHER='archer'
 SCOUT='scout'
+ADRIANA='adriana'
 #: The agents with a DEDICATED app whose content may never travel under
 #: another agent's token: agent -> its source_key prefix.
-DEDICATED={KAREN:KAREN_SOURCE,EDDIE:'eddie:',SCOUT:'scout:'}
+DEDICATED={KAREN:KAREN_SOURCE,ARCHER:'archer:',SCOUT:'scout:',ADRIANA:'adriana:'}
+#: (266) historical alias slug -> the agent it names now; its source-key
+#: prefix stays that agent's content; its env prefix is read as a fallback
+HISTORICAL_ALIASES={'eddie':ARCHER}
+ALIAS_SOURCES={'eddie:':ARCHER}
+LEGACY_ENV={ARCHER:'SLACK_EDDIE_'}
+
+def canonical_agent(agent):
+ """A slug or historical alias -> the canonical slug ('eddie' -> 'archer')."""
+ a=str(agent or '').strip().lower()
+ return HISTORICAL_ALIASES.get(a,a)
 QUEUE_CAP=300
 
 def _clean(v):
@@ -53,11 +74,16 @@ def _clean(v):
  # surrounding quotes; none of those is ever part of a Slack value.
  return (v or '').strip().strip('"\'').strip()
 
+def _agent_env(agent,name):
+ """SLACK_<AGENT>_<name>; for Archer, SLACK_EDDIE_<name> when his is unset."""
+ v=_clean(os.getenv('SLACK_'+agent.upper()+'_'+name))
+ if not v and agent in LEGACY_ENV:v=_clean(os.getenv(LEGACY_ENV[agent]+name))
+ return v
+
 def settings(agent):
  if agent not in AGENTS:raise ValueError('UNKNOWN_AGENT')
- prefix='SLACK_'+agent.upper()+'_'
- return {'secret':_clean(os.getenv(prefix+'SIGNING_SECRET')),'token':_clean(os.getenv(prefix+'BOT_TOKEN')),
-         'app':_clean(os.getenv(prefix+'APP_ID')),'team':_clean(os.getenv('SLACK_TEAM_ID')),
+ return {'secret':_agent_env(agent,'SIGNING_SECRET'),'token':_agent_env(agent,'BOT_TOKEN'),
+         'app':_agent_env(agent,'APP_ID'),'team':_clean(os.getenv('SLACK_TEAM_ID')),
          'channels':{x.strip() for x in os.getenv('SLACK_ALLOWED_CHANNEL_IDS','').split(',') if x.strip()},
          'managers':{x.strip() for x in os.getenv('SLACK_MANAGEMENT_USER_IDS','').split(',') if x.strip()},
          'workroom':_clean(os.getenv('SLACK_WORKROOM_CHANNEL_ID'))}
@@ -206,22 +232,25 @@ async def publish_karen_challenges(conn):
 POS_POSTS_PER_PASS=3
 
 async def publish_pos_posts(conn):
- """THE #agent-workroom PATH FOR EDDIE AND SCOUT: evidence-linked
- collaboration posts read from their records (eddie.workroom_posts /
- scout.workroom_posts -- review / estimate / outcome / tournament ids), once
+ """THE #agent-workroom PATH FOR ARCHER, SCOUT AND ADRIANA: evidence-linked
+ collaboration posts read from their records (archer.workroom_posts /
+ scout.workroom_posts / adriana.workroom_posts -- review / estimate /
+ outcome / tournament / census / opportunity ids), once
  each, at most POS_POSTS_PER_PASS per agent per pass, queued ONLY as that
  agent so they go out under its own token. Nothing is queued until the
  agent's dedicated identity is configured and its own."""
- for agent in (EDDIE,SCOUT):
+ for agent in (ARCHER,SCOUT,ADRIANA):
   if not dedicated_identity(agent)['ok']:continue
   cfg=settings(agent)
   if not cfg['workroom'] or cfg['workroom'] not in cfg['channels']:continue
-  table='eddie_execution_estimates' if agent==EDDIE else 'scout_features'
+  table={ARCHER:'eddie_execution_estimates',SCOUT:'scout_features',ADRIANA:'adriana_arb_scans'}[agent]
   if await conn.fetchval("SELECT to_regclass($1)",table) is None:continue
-  if agent==EDDIE:
-   from .agents import eddie as M
-  else:
+  if agent==ARCHER:
+   from .agents import archer as M
+  elif agent==SCOUT:
    from .agents import scout as M
+  else:
+   from .agents import adriana as M
   for key,text in (await M.workroom_posts(conn,limit=POS_POSTS_PER_PASS))[:POS_POSTS_PER_PASS]:
    source=DEDICATED[agent]+key
    if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",agent,cfg['team'],source):continue
@@ -238,7 +267,7 @@ async def publish_improvement_posts(conn):
  IMPROVE_POSTS_PER_PASS per pass and IMPROVE_POSTS_PER_HOUR per hour, from
  the last IMPROVE_WINDOW_H hours (an older transition is not backfilled).
  Each line goes out under the agent that recorded the transition, through
- the existing per-agent path: Karen / Eddie / Scout content only under their
+ the existing per-agent path: Karen / Archer / Scout content only under their
  own dedicated token (their source-key prefixes), a runner, human or
  engineering transition reported by Audrey naming who recorded it. Nothing
  is queued for an agent whose Slack identity is not configured."""
@@ -276,9 +305,12 @@ def impersonation(job):
  if source.startswith(KAREN_SOURCE) and agent!=KAREN:return 'IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN'
  if agent==KAREN and not karen_identity()['distinct']:return 'IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN'
  if agent==KAREN and not karen_identity()['configured']:return 'KAREN_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT'
- for owner in (EDDIE,SCOUT):
+ for owner in (ARCHER,SCOUT,ADRIANA):
   if source.startswith(DEDICATED[owner]) and agent!=owner:return 'IMPERSONATION_REFUSED_%s_CONTENT_ON_ANOTHER_TOKEN'%owner.upper()
- for owner in (EDDIE,SCOUT):
+ for prefix,owner in ALIAS_SOURCES.items():
+  if source.startswith(prefix) and agent!=owner:return 'IMPERSONATION_REFUSED_%s_CONTENT_ON_ANOTHER_TOKEN'%owner.upper()
+ if agent not in AGENTS:return 'NOT_A_CURRENT_AGENT_NOTHING_SENT'
+ for owner in (ARCHER,SCOUT,ADRIANA):
   if agent==owner:
    ident=dedicated_identity(owner)
    if not ident['distinct']:return 'IMPERSONATION_REFUSED_%s_TOKEN_NOT_ITS_OWN'%owner.upper()
@@ -298,11 +330,13 @@ async def claim(conn):
   except Exception:pass  # Karen's posts never block the bridge
   try:
    async with conn.transaction():await publish_pos_posts(conn)
-  except Exception:pass  # Eddie's / Scout's posts never block the bridge
+  except Exception:pass  # Archer's / Scout's posts never block the bridge
   try:
    async with conn.transaction():await publish_improvement_posts(conn)
   except Exception:pass  # the improvement digest never blocks the bridge
-  row=await conn.fetchrow("SELECT * FROM agent_slack_delivery WHERE (state IN ('QUEUED','READY') OR (state='WORKING' AND lease_until<now())) AND attempts<3 ORDER BY created_at,delivery_id LIMIT 1 FOR UPDATE SKIP LOCKED")
+  # only a CURRENT agent's delivery is claimed: one queued under the
+  # historical alias 'eddie' before 266 stays as recorded, never sent
+  row=await conn.fetchrow("SELECT * FROM agent_slack_delivery WHERE (state IN ('QUEUED','READY') OR (state='WORKING' AND lease_until<now())) AND attempts<3 AND agent=ANY($1::text[]) ORDER BY created_at,delivery_id LIMIT 1 FOR UPDATE SKIP LOCKED",list(AGENTS))
   if not row:return None
   token=uuid.uuid4().hex
   await conn.execute("UPDATE agent_slack_delivery SET state='WORKING',claim_token=$2,attempts=attempts+1,lease_until=now()+interval '120 seconds',updated_at=now() WHERE delivery_id=$1",row['delivery_id'],token)
@@ -346,10 +380,10 @@ async def process(pool,job):
   async with asyncio.timeout(10):
    async with pool.acquire() as c:answer=await K.slack_answer(c)
   message_id=None
- if not answer and job['agent'] in (EDDIE,SCOUT):
-  # Eddie and Scout answer from their own records only, likewise.
-  if job['agent']==EDDIE:
-   from .agents import eddie as M
+ if not answer and job['agent'] in (ARCHER,SCOUT):
+  # Archer and Scout answer from their own records only, likewise.
+  if job['agent']==ARCHER:
+   from .agents import archer as M
   else:
    from .agents import scout as M
   async with asyncio.timeout(10):

@@ -64,7 +64,7 @@ unmeasurable metric is value None, status UNAVAILABLE, with a precise reason
                           no strategy are book-wide only, stated as such
   EXECUTION_QUALITY_DELTA_PP  mean (realized - predicted) execution loss per
                           contract (eddie_execution_outcomes, PAPER) --
-                          positive = execution cost more than Eddie
+                          positive = execution cost more than Archer
                           predicted; the delta vs the naive taker execution
                           and the qty-weighted USD are beside it
   MANAGEMENT_VALUE_DELTA_USD  sum of xavier_value_add incrementals

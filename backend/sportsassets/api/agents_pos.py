@@ -1,12 +1,16 @@
-"""EDDIE'S AND SCOUT'S WORKSPACES (migration 217): READ-ONLY.
+"""ARCHER'S AND SCOUT'S WORKSPACES (migration 217): READ-ONLY.
 
-  GET /api/command/eddie                      profile, status, desk, current
+  GET /api/command/archer                      profile, status, desk, current
                                               estimates, outcomes, scorecard,
                                               candidate reviews (+ the
                                               workspace contract `sections`)
-  GET /api/command/agents/eddie               the same (route parity)
-  GET /api/command/eddie/estimates            filter by recommendation
-  GET /api/command/eddie/estimates/{id}       one estimate + its outcomes
+  GET /api/command/agents/archer               the same (route parity)
+  GET /api/command/archer/estimates            filter by recommendation
+  GET /api/command/archer/estimates/{id}       one estimate + its outcomes
+  GET /api/command/eddie[...]                 (266) the historical alias of
+                                              each Archer route above: the
+                                              same payload plus
+                                              alias_of: "archer"
   GET /api/command/scout                      profile, status, desk, sources,
                                               features, observations,
                                               tournaments, scorecard
@@ -92,10 +96,10 @@ def _authority_section(agent: str) -> dict:
                 "enforced_by": PA.profile(agent)["enforced_by"]})
 
 
-async def _eddie_workspace() -> dict:
+async def _archer_workspace() -> dict:
     from ..agents import collaboration_loop as CL
-    from ..agents import eddie as E
-    from ..agents import eddie_runner as ER
+    from ..agents import archer as E
+    from ..agents import archer_runner as ER
     from ..agents import pos_authority as PA
     from ..agents import pos_workflow as W
     from ..agents import registry as R
@@ -105,10 +109,10 @@ async def _eddie_workspace() -> dict:
         if not await E.schema(conn):
             raise HTTPException(status_code=503, detail={
                 "reason": E.R_NO_SCHEMA})
-        st, status_sec = await _status_section(conn, R.EDDIE)
+        st, status_sec = await _status_section(conn, R.ARCHER)
         current = await _read_section(
             E.estimates(conn, limit=50),
-            empty_why="EDDIE_HAS_ESTIMATED_NO_CANDIDATE",
+            empty_why="ARCHER_HAS_ESTIMATED_NO_CANDIDATE",
             evidence_of=lambda r: list(r.get("evidence") or []))
         outs = await _read_section(
             E.outcomes(conn, limit=50),
@@ -119,7 +123,7 @@ async def _eddie_workspace() -> dict:
             empty_why="NO_CANDIDATE_REVIEW_RECORDED",
             evidence_of=lambda r: list(r.get("evidence") or []))
         met, metrics = await _metric_section(E.metrics(conn))
-        # RECOMMENDATIONS ARE NOT ORDERS: Eddie's EXECUTE_NOW /
+        # RECOMMENDATIONS ARE NOT ORDERS: Archer's EXECUTE_NOW /
         # SKIP_EXECUTION counts beside BETTOR-originated orders submitted,
         # venue-acknowledged and filled (bettor_originated_status).
         funnel_sec = await _funnel_section(conn)
@@ -130,14 +134,14 @@ async def _eddie_workspace() -> dict:
             desk = None
             desk_sec = {"status": "UNAVAILABLE", "why": type(exc).__name__,
                         "data": None, "evidence": []}
-    ident = R.IDENTITIES[R.EDDIE]
-    profile = dict(PA.profile(R.EDDIE),
+    ident = R.IDENTITIES[R.ARCHER]
+    profile = dict(PA.profile(R.ARCHER),
                    recommendations=list(E.RECOMMENDATIONS),
                    hard_rule=("never recommend executing (EXECUTE_NOW / "
                               "REST_LIMIT / SPLIT) when the expected "
                               "executable EV is <= 0 or unmeasured"),
                    dimensions=list(E.DIMENSIONS),
-                   peer_routing=list(CL.PEER_ROUTING["EDDIE"]),
+                   peer_routing=list(CL.PEER_ROUTING["ARCHER"]),
                    persona={"manner": "fast, precise, controlled, "
                                       "institutional",
                             "grounding": "his estimate and outcome records "
@@ -146,13 +150,15 @@ async def _eddie_workspace() -> dict:
                            "interval_s": ER.INTERVAL_S,
                            "max_estimates_per_pass":
                                ER.MAX_ESTIMATES_PER_PASS,
-                           "kill_switch": "EDDIE_RUNNER_ENABLED"})
+                           "kill_switch": "ARCHER_RUNNER_ENABLED",
+                           "kill_switch_historical_alias":
+                               "EDDIE_RUNNER_ENABLED"})
     return {
         "agent": dict(st, role=ident["role"]), "profile": profile,
         "desk": desk, "metrics": met,
         "sections": {
             "status": status_sec,
-            "authority": _authority_section(R.EDDIE),
+            "authority": _authority_section(R.ARCHER),
             "desk": desk_sec,
             "current_estimates": current,
             "predicted_vs_realized": outs,
@@ -167,7 +173,7 @@ async def _eddie_workspace() -> dict:
 
 
 async def _funnel_section(conn) -> dict:
-    """Eddie's recommendations apart from orders, and the SMALL LIVE --
+    """Archer's recommendations apart from orders, and the SMALL LIVE --
     BETTOR ORIGINATED status beside the LEGACY MIRROR label."""
     from .. import bettor_originated_status as BOS
     try:
@@ -175,7 +181,7 @@ async def _funnel_section(conn) -> dict:
     except Exception as exc:                                    # noqa: BLE001
         return {"status": "UNAVAILABLE", "why": type(exc).__name__,
                 "data": None, "evidence": []}
-    f = dict(got["eddie_funnel"])
+    f = dict(got["archer_funnel"])
     f["small_live"] = {k: got["small_live"].get(k) for k in (
         "title", "status", "why", "chain_required", "venues")}
     f["legacy_mirror_label"] = (got["legacy_mirror"] or {}).get("label")
@@ -250,25 +256,25 @@ async def _scout_workspace() -> dict:
         "read_only": True}
 
 
-@router.get("/api/command/eddie", dependencies=[Depends(require_read)])
-async def eddie_workspace(response: Response) -> dict:
+@router.get("/api/command/archer", dependencies=[Depends(require_read)])
+async def archer_workspace(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return await _eddie_workspace()
+    return await _archer_workspace()
 
 
-@router.get("/api/command/agents/eddie", dependencies=[Depends(require_read)])
-async def eddie_workspace_agents(response: Response) -> dict:
+@router.get("/api/command/agents/archer", dependencies=[Depends(require_read)])
+async def archer_workspace_agents(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
-    return await _eddie_workspace()
+    return await _archer_workspace()
 
 
-@router.get("/api/command/eddie/estimates",
+@router.get("/api/command/archer/estimates",
             dependencies=[Depends(require_read)])
-async def eddie_estimates(response: Response,
+async def archer_estimates(response: Response,
                           recommendation: str | None = Query(default=None),
                           limit: int = Query(default=50, ge=1, le=500)
                           ) -> dict:
-    from ..agents import eddie as E
+    from ..agents import archer as E
     response.headers["Cache-Control"] = "no-store"
     if recommendation is not None and recommendation not in \
             E.RECOMMENDATIONS:
@@ -286,10 +292,10 @@ async def eddie_estimates(response: Response,
             "read_only": True}
 
 
-@router.get("/api/command/eddie/estimates/{estimate_id}",
+@router.get("/api/command/archer/estimates/{estimate_id}",
             dependencies=[Depends(require_read)])
-async def eddie_estimate(estimate_id: str, response: Response) -> dict:
-    from ..agents import eddie as E
+async def archer_estimate(estimate_id: str, response: Response) -> dict:
+    from ..agents import archer as E
     response.headers["Cache-Control"] = "no-store"
     pool = await _pool()
     async with _ro(pool) as conn:
@@ -297,11 +303,50 @@ async def eddie_estimate(estimate_id: str, response: Response) -> dict:
             got = await E.estimate_record(conn, estimate_id)
         except Exception as exc:                                # noqa: BLE001
             raise HTTPException(status_code=503, detail={
-                "reason": "EDDIE_READ_FAILED", "detail": type(exc).__name__})
+                "reason": "ARCHER_READ_FAILED", "detail": type(exc).__name__})
     if got is None:
         raise HTTPException(status_code=404, detail={
             "reason": "NO_SUCH_ESTIMATE", "estimate_id": estimate_id})
     return dict(got, read_at=time.time(), read_only=True)
+
+
+# ── THE HISTORICAL ALIAS (migration 266): /api/command/eddie[...] ────────
+# The execution agent was renamed EDDIE -> ARCHER. Each old route still
+# answers -- with exactly the Archer payload plus `alias_of: "archer"`, so a
+# bookmark or an old client keeps working and is told the canonical name.
+ALIAS_OF = "archer"
+
+
+def _aliased(payload: dict) -> dict:
+    return dict(payload, alias_of=ALIAS_OF, historical_alias="EDDIE")
+
+
+@router.get("/api/command/eddie", dependencies=[Depends(require_read)])
+async def eddie_workspace_alias(response: Response) -> dict:
+    return _aliased(await archer_workspace(response))
+
+
+@router.get("/api/command/agents/eddie", dependencies=[Depends(require_read)])
+async def eddie_workspace_agents_alias(response: Response) -> dict:
+    return _aliased(await archer_workspace_agents(response))
+
+
+@router.get("/api/command/eddie/estimates",
+            dependencies=[Depends(require_read)])
+async def eddie_estimates_alias(response: Response,
+                                recommendation: str | None = Query(
+                                    default=None),
+                                limit: int = Query(default=50, ge=1, le=500)
+                                ) -> dict:
+    return _aliased(await archer_estimates(response,
+                                           recommendation=recommendation,
+                                           limit=limit))
+
+
+@router.get("/api/command/eddie/estimates/{estimate_id}",
+            dependencies=[Depends(require_read)])
+async def eddie_estimate_alias(estimate_id: str, response: Response) -> dict:
+    return _aliased(await archer_estimate(estimate_id, response))
 
 
 @router.get("/api/command/scout", dependencies=[Depends(require_read)])

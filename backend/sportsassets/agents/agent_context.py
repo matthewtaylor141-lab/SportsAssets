@@ -2,7 +2,7 @@
 
 Section 11 of the HQ2 directive: Derek must not receive Audrey's bundle,
 Karen receives no authority tool, Scout sees no live-order mutation tool,
-Eddie holds no capital-approval authority, and Xavier's management context
+Archer holds no capital-approval authority, and Xavier's management context
 carries the current valuation / review identity.
 
 A BUNDLE (pure, `bundle(agent)`) is
@@ -82,11 +82,14 @@ CONTEXT_SOURCES = {
               "intel_allocations"),
     I.CHIEF_ALLOCATOR: ("intel_runs", "intel_allocations",
                         "paper_decisions", "paper_handoffs"),
-    R.EDDIE: ("eddie_execution_estimates", "eddie_execution_outcomes",
+    R.ARCHER: ("eddie_execution_estimates", "eddie_execution_outcomes",
               "paper_book_observations", "paper_decisions"),
     R.SCOUT: ("scout_sources", "scout_features",
               "scout_feature_observations", "scout_feature_tournaments",
               "external_valuations"),
+    R.ADRIANA: ("adriana_arb_scans", "adriana_arb_opportunities",
+                "adriana_arb_refusals", "paper_book_observations",
+                "us_premap"),
 }
 
 REQUIRES = {

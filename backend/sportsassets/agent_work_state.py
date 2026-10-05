@@ -7,7 +7,7 @@ THE SIX STATES (one per agent, derived only from recorded rows):
 
   WORKING                     a run is recorded in progress, or the agent
                               recorded an output inside ACTIVE_WINDOW_S
-                              (producers: Derek, Eddie, Scout, the Chief
+                              (producers: Derek, Archer, Scout, the Chief
                               Allocator)
   REVIEWING                   the same evidence for a reviewing role
                               (Xavier, Audrey, Karen); for Xavier also: every
@@ -29,7 +29,7 @@ THE SIX STATES (one per agent, derived only from recorded rows):
                               absent, unreadable or older than
                               MARKET_DATA_MAX_AGE_S). Only agents whose work
                               reads market data can be blocked on it: Xavier,
-                              Derek, Eddie. Karen, Audrey, Scout and the Chief
+                              Derek, Archer. Karen, Audrey, Scout and the Chief
                               Allocator read no live market data, so this
                               state is never theirs (tested).
   HANDOFF_PENDING             work handed to the agent, recorded, and not yet
@@ -57,10 +57,46 @@ THE HAND-OFF PREDICATES, PER AGENT (each a recorded row, named in `basis`):
                   resolved
   XAVIER          an open position (net filled quantity, not settled; ACTUAL:
                   smalllive_handoffs OPEN) with NO review recorded
-  EDDIE           paper ENTER decisions inside his lookback (EDDIE_LOOKBACK_S
-                  = agents.eddie_runner.LOOKBACK_S) with no execution estimate
+  ARCHER           paper ENTER decisions inside his lookback (ARCHER_LOOKBACK_S
+                  = agents.archer_runner.LOOKBACK_S) with no execution estimate
   CHIEF_ALLOCATOR paper ENTER decisions recorded after her latest allocation
                   run started (that run could not have ranked them)
+
+THE DURABLE QUEUE (owner R30 program section 17, migration 301). Every
+agent's open work items (agent_work_requests with an open agent_work_open
+slot: owner, blocker, SLA due_at, dependency, last / next attempt, evidence
+needed, collaborator) are read for every agent and DRIVE the state:
+
+  * an agent that owns ANY open item is never IDLE_NO_OPEN_WORK (the guard in
+    `derive`, and `invariant_holds`). The open count is read PER AGENT with
+    no limit (count(*) GROUP BY agent_id) and the items PER AGENT under a
+    per-agent bound -- never one global LIMIT, which let 2001 of Karen's
+    investigations push Scout's one item out of the read and derive Scout
+    IDLE while he owned it (R30B review). A queue that could not be read is
+    never taken as empty: an agent that would otherwise be IDLE has no state
+    (None, with the reason), as Xavier's unreadable positions already do;
+  * WAITING_FOR_FRESH_EVIDENCE is derived ONLY from an enqueued
+    REACQUISITION that an acquisition path services: an open item of an
+    acquisition kind (Xavier's PROBABILITY / VENUE_BOOK / GAME_STATE /
+    MANAGEMENT_REASSESSMENT, dispatched by work_queue.drain; Scout's
+    RESEARCH_QUESTION, whose prospective samples his own runner freezes each
+    pass) or an open item whose latest attempt recorded WAITING_FOR_FRESH_
+    EVIDENCE with a scheduled next attempt -- EXCEPT a PASSIVE kind. Derek's
+    CANDIDATE_FRESH_EVIDENCE is passive: no acquisition path reads it (the
+    hot-candidate list has no consumer on this branch), so its only "next
+    attempt" is his next ordinary re-decision -- work nobody acquires
+    evidence for, HANDOFF_PENDING (REACQUISITION_NOT_ENQUEUED), never
+    passive WAITING. A waiting SIGNAL with no enqueued reacquisition (a
+    heartbeat WAITING_FOR_EVIDENCE, Scout's features under test, Xavier's
+    non-current positions with no open request) is the same:
+    HANDOFF_PENDING, kind REACQUISITION_NOT_ENQUEUED;
+  * an open item never attempted, or whose scheduled next attempt is
+    overdue by more than the agent's stale window, is HANDOFF_PENDING; one
+    whose next attempt is scheduled (or was due inside the window) is the
+    agent's busy state; a market-data agent's item BLOCKED on a market-data
+    blocker is BLOCKED_ON_MARKET_DATA;
+  * an item past its SLA is OVERDUE (counted in `queue.overdue`, named in
+    the basis).
 
 Xavier's per-position facts read the ONE current review per position from
 `xavier_current_review` (migration 226; the newest review per group when the
@@ -89,12 +125,12 @@ HANDOFF = "HANDOFF_PENDING"
 IDLE = "IDLE_NO_OPEN_WORK"
 WORK_STATES = (WORKING, REVIEWING, WAITING, BLOCKED, HANDOFF, IDLE)
 
-AGENTS = ("DEREK", "KAREN", "SCOUT", "EDDIE", "CHIEF_ALLOCATOR", "AUDREY",
-          "XAVIER")
+AGENTS = ("DEREK", "KAREN", "SCOUT", "ARCHER", "CHIEF_ALLOCATOR", "AUDREY",
+          "XAVIER", "ADRIANA")
 BUSY = {"XAVIER": REVIEWING, "AUDREY": REVIEWING, "KAREN": REVIEWING}
 #: the agents whose open work reads live market data, and which data
 MARKET_SOURCES = {"XAVIER": ("feed", "venue"), "DEREK": ("feed", "venue"),
-                  "EDDIE": ("venue",)}
+                  "ARCHER": ("venue",), "ADRIANA": ("venue",)}
 #: = agents.karen.EVALUATOR_FOR (read, not imported; a test pins equality)
 EVALUATOR_FOR = {"DEREK": "AUDREY", "XAVIER": "AUDREY",
                  "CHIEF_ALLOCATOR": "AUDREY", "AUDREY": "XAVIER"}
@@ -120,9 +156,101 @@ FEED_HEARTBEAT_KEY = "pinnapi_feed_last"
 FEED_HEARTBEAT_S = 30.0
 FEED_OK_STATES = ("OWNER_SYNCED",)
 WAITING_STATUSES = ("WAITING_FOR_EVIDENCE", "WAITING_FOR_PROVIDER")
-EDDIE_LOOKBACK_S = 2 * 86400.0   # = agents.eddie_runner.LOOKBACK_S
+ARCHER_LOOKBACK_S = 2 * 86400.0   # = agents.archer_runner.LOOKBACK_S
 MAX_POSITIONS = 500
 SAMPLE_IDS = 5
+
+#: THE DURABLE QUEUE (migration 301). The acquisition kinds: an open item of
+#: one of them IS an enqueued reacquisition, serviced by a named path (=
+#: agents.work_queue.EVIDENCE_KINDS + MANAGEMENT_REASSESSMENT, dispatched by
+#: work_queue.drain, and Scout's RESEARCH_QUESTION, whose samples his runner
+#: freezes; agents.agent_work.ACQUISITION_KINDS; a test pins both).
+ACQUISITION_KINDS = ("PROBABILITY", "VENUE_BOOK", "GAME_STATE",
+                     "MANAGEMENT_REASSESSMENT", "RESEARCH_QUESTION")
+#: PASSIVE kinds: no acquisition path services them, so not even a WAITING
+#: attempt with a next attempt scheduled is an enqueued reacquisition.
+#: Derek's CANDIDATE_FRESH_EVIDENCE (R30B review: it had been counted as one
+#: while nothing read it -- agents.agent_work.hot_candidate_slugs has no
+#: caller); it leaves this list only when an acquisition path dispatches it
+#: (agents.agent_work.PASSIVE_KINDS, pinned).
+PASSIVE_KINDS = ("CANDIDATE_FRESH_EVIDENCE",)
+O_WAITING = "WAITING_FOR_FRESH_EVIDENCE"
+O_BLOCKED = "BLOCKED"
+#: a BLOCKED attempt's blocker that names failing / absent market data
+MARKET_BLOCKER_PREFIXES = ("FEED_", "VENUE_", "BOOK_", "NO_VENUE_BOOK",
+                           "LATEST_VENUE_BOOK", "THE_OBSERVED_BOOK",
+                           "MARKET_DATA_", "NO_DECISION_BOOK")
+#: THE PER-AGENT READ BOUND: at most this many open items are read per
+#: agent (most overdue first); the agent's open COUNT is always read in full
+#: (OPEN_COUNTS_SQL), so a bound can never hide an agent's work.
+MAX_QUEUE_ITEMS = 500
+K_NOT_ENQUEUED = "REACQUISITION_NOT_ENQUEUED"
+K_QUEUE_UNTOUCHED = "QUEUE_ITEM_NOT_PICKED_UP"
+R_QUEUE_UNREADABLE = "QUEUE_UNREADABLE"
+
+#: EVERY AGENT'S OPEN COUNT, unbounded (one row per agent that owns work)
+OPEN_COUNTS_SQL = (
+    "SELECT o.agent_id, count(*) AS n, count(*) FILTER (WHERE "
+    "       coalesce(r.due_at, r.expires_at) < to_timestamp($1)) AS overdue "
+    "  FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id "
+    " GROUP BY o.agent_id")
+
+#: EVERY OPEN ITEM WITH ITS TERMS (226 rows recorded before migration 301
+#: read their SLA as their expiry and their evidence as their kind). The
+#: latest attempt is the newest ATTEMPTED / DISPATCHED event.
+_ITEM_COLUMNS = (
+    "SELECT r.request_id, r.agent_id, r.kind, r.position_kind, r.group_id, "
+    "       r.us_market_slug, r.reason, r.source_table, r.source_id, "
+    "       r.batch_id, r.detail, r.blocker, r.depends_on, r.collaborator, "
+    "       coalesce(r.evidence_needed, jsonb_build_array(r.kind)) "
+    "         AS evidence_needed, "
+    "       extract(epoch FROM r.enqueued_at)::float8 AS enqueued_at, "
+    "       extract(epoch FROM r.expires_at)::float8 AS expires_at, "
+    "       extract(epoch FROM coalesce(r.due_at, r.expires_at))::float8 "
+    "         AS due_at, "
+    "       extract(epoch FROM coalesce(r.next_attempt_at, r.enqueued_at))"
+    "         ::float8 AS requested_next_at, "
+    "       la.state AS last_state, "
+    "       extract(epoch FROM la.at)::float8 AS last_attempt_at, "
+    "       la.outcome AS last_outcome, la.blocker AS last_blocker, "
+    "       extract(epoch FROM la.next_attempt_at)::float8 "
+    "         AS last_next_attempt_at, la.detail AS last_detail, "
+    "       (SELECT count(*) FROM agent_work_request_events c "
+    "         WHERE c.request_id = r.request_id "
+    "           AND c.state IN ('ATTEMPTED', 'DISPATCHED')) AS attempts ")
+_LAST_ATTEMPT = (
+    "  LEFT JOIN LATERAL (SELECT e.state, e.at, e.outcome, e.blocker, "
+    "                            e.next_attempt_at, e.detail "
+    "                       FROM agent_work_request_events e "
+    "                      WHERE e.request_id = r.request_id "
+    "                        AND e.state IN ('ATTEMPTED', 'DISPATCHED') "
+    "                      ORDER BY e.at DESC, e.event_id DESC LIMIT 1) la "
+    "    ON true ")
+#: one agent's (or every agent's) open items of the named kinds, most
+#: overdue first, at most $3 -- a caller that reads every agent uses
+#: OPEN_ITEMS_BY_AGENT_SQL instead, never one global limit
+OPEN_ITEMS_SQL = (
+    _ITEM_COLUMNS +
+    "  FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id " +
+    _LAST_ATTEMPT +
+    " WHERE ($1::text IS NULL OR o.agent_id = $1) "
+    "   AND ($2::text[] IS NULL OR o.kind = ANY($2::text[])) "
+    " ORDER BY coalesce(r.due_at, r.expires_at), r.request_id LIMIT $3")
+#: EVERY AGENT'S open items, bounded PER AGENT ($1 each, most overdue first)
+OPEN_ITEMS_BY_AGENT_SQL = (
+    "WITH pick AS (SELECT o.request_id, row_number() OVER (PARTITION BY "
+    "       o.agent_id ORDER BY coalesce(r.due_at, r.expires_at), "
+    "       r.request_id) AS rn FROM agent_work_open o "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id) " +
+    _ITEM_COLUMNS +
+    "  FROM pick p "
+    "  JOIN agent_work_open o ON o.request_id = p.request_id "
+    "  JOIN agent_work_requests r ON r.request_id = o.request_id " +
+    _LAST_ATTEMPT +
+    " WHERE p.rn <= $1 "
+    " ORDER BY o.agent_id, coalesce(r.due_at, r.expires_at), r.request_id")
 
 # position classes (Xavier)
 P_UNREVIEWED, P_CURRENT, P_BLOCKED, P_WAITING = (
@@ -234,6 +362,174 @@ def position_class(p: dict, *, market: dict, now: float) -> tuple:
         or "NOT_CURRENT")
 
 
+def market_blocker(blocker) -> bool:
+    """Does a BLOCKED attempt's blocker name failing market data? Pure."""
+    b = str(blocker or "").upper()
+    return bool(b) and b.startswith(MARKET_BLOCKER_PREFIXES)
+
+
+def queue_item(row: dict, now: float) -> dict:
+    """ONE OPEN QUEUE ITEM with its terms, from an OPEN_ITEMS_SQL row (or the
+    same keys). Pure. The current blocker is the latest ATTEMPTED event's
+    (when it named one), else the request's; the next attempt is the latest
+    ATTEMPTED event's, else the request's own; OVERDUE is past due_at."""
+    r = dict(row or {})
+    due = _ep(r.get("due_at"))
+    last_at = _ep(r.get("last_attempt_at"))
+    outcome = r.get("last_outcome")
+    nxt = _ep(r.get("last_next_attempt_at")) \
+        if r.get("last_state") == "ATTEMPTED" else None
+    if nxt is None:
+        nxt = _ep(r.get("requested_next_at"))
+        if last_at is not None and nxt is not None and nxt <= last_at:
+            nxt = None          # a dispatch with no scheduled next attempt
+    blocker = (r.get("last_blocker")
+               if r.get("last_state") == "ATTEMPTED"
+               and r.get("last_blocker") else r.get("blocker"))
+    ev = _j(r.get("evidence_needed"))
+    det = _j(r.get("detail"))
+    overdue = due is not None and now > due
+    return {
+        "request_id": r.get("request_id"), "owner": r.get("agent_id"),
+        "kind": r.get("kind"), "subject_kind": r.get("position_kind"),
+        "subject": r.get("group_id"), "slug": r.get("us_market_slug"),
+        "reason": r.get("reason"), "source_table": r.get("source_table"),
+        "source_id": r.get("source_id"),
+        "blocker": blocker, "dependency": r.get("depends_on"),
+        "collaborator": r.get("collaborator"),
+        "evidence_needed": ev if isinstance(ev, list) else [r.get("kind")],
+        "enqueued_at": _ep(r.get("enqueued_at")),
+        "expires_at": _ep(r.get("expires_at")), "due_at": due,
+        "overdue": overdue,
+        "overdue_s": round(now - due, 1) if overdue else 0.0,
+        "age_s": (None if _ep(r.get("enqueued_at")) is None
+                  else round(now - _ep(r.get("enqueued_at")), 1)),
+        "last_attempt_at": last_at, "last_attempt": r.get("last_state"),
+        "last_attempt_blocker": (r.get("last_blocker")
+                                 if r.get("last_state") == "ATTEMPTED"
+                                 else None),
+        "outcome": outcome if r.get("last_state") == "ATTEMPTED" else (
+            "DISPATCHED" if r.get("last_state") == "DISPATCHED" else None),
+        "next_attempt_at": nxt,
+        "attempts": int(r.get("attempts") or 0),
+        "last_attempt_detail": (_j(r.get("last_detail"))
+                                if isinstance(_j(r.get("last_detail")), dict)
+                                else {}),
+        "detail": det if isinstance(det, dict) else {}}
+
+
+def is_reacquisition(item: dict) -> bool:
+    """An ENQUEUED REACQUISITION: an acquisition kind, or an item of a kind
+    an acquisition path services whose latest attempt recorded
+    WAITING_FOR_FRESH_EVIDENCE with its next attempt scheduled (never a
+    PASSIVE kind). Pure."""
+    if item.get("kind") in PASSIVE_KINDS:
+        return False
+    return item.get("kind") in ACQUISITION_KINDS or (
+        item.get("outcome") == O_WAITING
+        and item.get("next_attempt_at") is not None)
+
+
+def picked_up(item: dict, now: float, stale_s: float = STALE_FLOOR_S) -> bool:
+    """Is the item being worked? Attempted, and its scheduled next attempt is
+    not overdue by more than the stale window (an item whose attempts back
+    off is still worked while its next attempt is scheduled); with no
+    scheduled next attempt, attempted inside the window. Pure."""
+    last = item.get("last_attempt_at")
+    if last is None:
+        return False
+    nxt = item.get("next_attempt_at")
+    if nxt is not None and float(nxt) > float(last):
+        return now - float(nxt) <= stale_s
+    return 0 <= now - float(last) <= stale_s
+
+
+def queue_classes(agent: str, items: list, now: float,
+                  stale_s: float = STALE_FLOOR_S, *,
+                  open_count: int | None = None,
+                  overdue_count: int | None = None) -> dict:
+    """The agent's open items by what they mean for its state. Pure.
+    `open_count` / `overdue_count` are the agent's unbounded counts (the
+    items may be a bounded read of them)."""
+    reacq, md, unserviced, untouched, active = [], [], [], [], []
+    for i in items or []:
+        if is_reacquisition(i):
+            reacq.append(i)
+        elif i.get("outcome") == O_BLOCKED and agent in MARKET_SOURCES \
+                and market_blocker(i.get("blocker")):
+            md.append(i)
+        elif i.get("outcome") == O_WAITING:
+            # waiting for evidence nobody acquires (a PASSIVE kind)
+            unserviced.append(i)
+        elif not picked_up(i, now, stale_s):
+            untouched.append(i)
+        else:
+            active.append(i)
+    over = [i for i in items or [] if i.get("overdue")]
+    by_kind: dict = {}
+    for i in items or []:
+        by_kind[i.get("kind")] = by_kind.get(i.get("kind"), 0) + 1
+    n_read = len(items or [])
+    n_open = max(int(open_count), n_read) if open_count is not None \
+        else n_read
+    return {"reacquisition": reacq, "blocked_market": md,
+            "unserviced": unserviced,
+            "untouched": untouched, "active": active, "overdue": over,
+            "summary": {
+                "open": n_open, "read": n_read,
+                "limited": n_open > n_read,
+                "overdue": max(int(overdue_count), len(over))
+                if overdue_count is not None else len(over),
+                "by_kind": by_kind, "reacquisition": len(reacq),
+                "untouched": len(untouched), "active": len(active),
+                "waiting_unserviced": len(unserviced),
+                "blocked_on_market_data": len(md),
+                "oldest_due_at": min([i["due_at"] for i in items or []
+                                      if i.get("due_at") is not None]
+                                     or [None], key=lambda x: x or 0),
+                "max_overdue_s": max([i.get("overdue_s") or 0.0
+                                      for i in items or []] or [0.0])}}
+
+
+def _qref(items: list, kind: str) -> dict:
+    """A basis row naming queue items (ids, kinds, overdue)."""
+    return {"table": "agent_work_open / agent_work_requests", "kind": kind,
+            "count": len(items),
+            "overdue": sum(1 for i in items if i.get("overdue")),
+            "items": [{"request_id": i.get("request_id"),
+                       "kind": i.get("kind"), "subject": i.get("subject"),
+                       "blocker": i.get("blocker"),
+                       "due_at": i.get("due_at"),
+                       "overdue": i.get("overdue")}
+                      for i in items[:SAMPLE_IDS]]}
+
+
+def _queue_handoff(hs: list, qc: dict, **kw) -> dict:
+    """HANDOFF_PENDING from hand-offs and queue items nobody picked up:
+    never attempted / attempts lapsed (QUEUE_ITEM_NOT_PICKED_UP), or waiting
+    for evidence no acquisition path is asked for (REACQUISITION_NOT_
+    ENQUEUED)."""
+    rows = [dict(h) for h in hs]
+    parts = ["%s %d" % (h["kind"], h["count"]) for h in hs]
+    times = [_ep(h.get("oldest_at")) for h in hs
+             if _ep(h.get("oldest_at")) is not None]
+    lst = qc["untouched"]
+    if lst:
+        rows.append(_qref(lst, K_QUEUE_UNTOUCHED))
+        parts.append("%d queued item(s) not picked up (%d overdue)" % (
+            len(lst), sum(1 for i in lst if i.get("overdue"))))
+    un = qc["unserviced"]
+    if un:
+        rows.append(_qref(un, K_NOT_ENQUEUED))
+        parts.append("%d item(s) waiting for evidence that no acquisition "
+                     "path is asked for (%s)" % (len(un), ", ".join(sorted(
+                         {str(i.get("kind")) for i in un}))))
+    times += [i["enqueued_at"] for i in lst + un
+              if i.get("enqueued_at") is not None]
+    return _out(HANDOFF, "Handed over, not yet picked up: " + "; ".join(
+        parts), rows, since=min(times) if times else None, **kw)
+
+
 def _out(state, detail, basis, since=None, **kw) -> dict:
     return dict({"state": state, "detail": detail, "basis": basis,
                  "since": since, "version": VERSION}, **kw)
@@ -292,46 +588,122 @@ def _run(facts: dict, now: float) -> dict | None:
 # THE DERIVATION
 # ═════════════════════════════════════════════════════════════════════
 
+def _queue(facts: dict, now: float) -> tuple:
+    """(items, classes) of the agent's open queue items (and its unbounded
+    open / overdue counts, when read)."""
+    items = [i if "overdue" in i else queue_item(i, now)
+             for i in facts.get("queue") or []]
+    qc = queue_classes(facts.get("agent") or "", items, now,
+                       float(facts.get("stale_s") or STALE_FLOOR_S),
+                       open_count=facts.get("queue_open"),
+                       overdue_count=facts.get("queue_overdue"))
+    if facts.get("queue_why"):
+        qc["summary"]["read_status"] = facts.get("queue_status")
+        qc["summary"]["why"] = facts.get("queue_why")
+    return items, qc
+
+
+def queue_unreadable(facts: dict) -> bool:
+    """The durable queue exists and could not be read: never taken as
+    empty."""
+    return facts.get("queue_status") == "UNAVAILABLE"
+
+
+def _xavier_reacquisition(facts: dict) -> int:
+    """Open reacquisition requests across Xavier's positions."""
+    return sum(len(p.get("requests") or {})
+               for p in facts.get("positions") or [])
+
+
 def invariant_holds(agent: str, facts: dict, state) -> bool:
-    """XAVIER WITH ANY OPEN / UNRESOLVED POSITION IS NEVER IDLE. Pure."""
-    if agent != "XAVIER" or state != IDLE:
-        return True
-    n = facts.get("open_positions")
-    return not ((n is None or int(n) > 0) or (facts.get("positions") or []))
+    """THE OWNER'S INVARIANTS, from the recorded facts. Pure.
+
+      * XAVIER WITH ANY OPEN / UNRESOLVED POSITION IS NEVER IDLE;
+      * NO AGENT THAT OWNS AN OPEN QUEUE ITEM IS IDLE;
+      * WAITING_FOR_FRESH_EVIDENCE ONLY WITH AN ENQUEUED REACQUISITION (an
+        open acquisition item, an item whose latest attempt is waiting with a
+        next attempt scheduled, or -- Xavier -- an open request on a
+        position)."""
+    items = [i if "overdue" in i else queue_item(i, 0.0)
+             for i in facts.get("queue") or []]
+    if state == IDLE:
+        # an open item read, an open COUNT (the items may be a bounded
+        # read), or a queue that could not be read at all
+        if items or int(facts.get("queue_open") or 0) > 0 \
+                or queue_unreadable(facts):
+            return False
+        if agent == "XAVIER":
+            n = facts.get("open_positions")
+            if (n is None or int(n) > 0) or (facts.get("positions") or []):
+                return False
+    if state == WAITING:
+        if not (any(is_reacquisition(i) for i in items)
+                or (agent == "XAVIER" and _xavier_reacquisition(facts) > 0)):
+            return False
+    return True
 
 
 def derive(agent: str, facts: dict, *, now: float | None = None) -> dict:
-    """THE WORK STATE OF ONE AGENT from its recorded facts. Pure.
+    """THE WORK STATE OF ONE AGENT from its recorded facts and its durable
+    queue. Pure.
 
     Returns {"state" (one of WORK_STATES, or None when the facts it needs
     could not be read), "detail", "basis" [rows it rests on], "since",
-    "counts" (Xavier: positions per class), "version"}."""
+    "counts" (Xavier: positions per class), "queue" (the open items'
+    summary), "version"}."""
     now = float(now if now is not None else time.time())
     facts = dict(facts or {}, agent=agent)
     out = _xavier(facts, now) if agent == "XAVIER" else _generic(
         agent, facts, now)
-    if not invariant_holds(agent, facts, out["state"]):
+    items, qc = _queue(facts, now)
+    out.setdefault("queue", qc["summary"])
+    if out["state"] == IDLE and queue_unreadable(facts):
+        # THE QUEUE COULD NOT BE READ: whether the agent owns open work is
+        # unknown, and unknown is never "no open work" (R30B review: a
+        # failed read had derived KAREN and SCOUT IDLE while each owned
+        # items). Every other state rests on its own recorded rows.
+        return _out(None, "The durable queue could not be read; never taken "
+                    "as empty", out["basis"] + [{
+                        "table": "agent_work_open / agent_work_requests",
+                        "why": "%s:%s" % (R_QUEUE_UNREADABLE,
+                                          facts.get("queue_why"))}],
+                    counts=out.get("counts"), queue=qc["summary"])
+    if out["state"] is not None and not invariant_holds(agent, facts,
+                                                        out["state"]):
         # unreachable by construction (an open position is unreviewed,
-        # blocked, waiting or current); kept so no fact shape can ever
-        # yield IDLE for an owner of open positions
-        out = _out(WAITING, "Owns open positions; no review state could be "
+        # blocked, waiting or current; an open item is a reacquisition,
+        # blocked, untouched or active; WAITING is only ever derived from a
+        # reacquisition); kept so no fact shape can ever yield IDLE for an
+        # owner of open work, or WAITING with nothing enqueued. A guard can
+        # fabricate no reacquisition: owned work with no classifiable state
+        # is work not picked up.
+        out = _out(HANDOFF, "Owns open work; no work state could be "
                    "classified (guard)", out["basis"],
-                   counts=out.get("counts"), guard="XAVIER_NEVER_IDLE")
+                   counts=out.get("counts"), queue=qc["summary"],
+                   guard=("XAVIER_NEVER_IDLE" if agent == "XAVIER"
+                          and out["state"] == IDLE else
+                          "WAITING_REQUIRES_ENQUEUED_REACQUISITION"
+                          if out["state"] == WAITING else
+                          "OWNER_OF_OPEN_WORK_NEVER_IDLE"))
     return out
 
 
 def _generic(agent: str, facts: dict, now: float) -> dict:
     busy = BUSY.get(agent, WORKING)
+    items, qc = _queue(facts, now)
+    qs = qc["summary"]
     run = _run(facts, now)
     if run:
         return _out(busy, str(run.get("activity") or "Run in progress"),
-                    [run], since=_ep(run.get("started_at")))
+                    [run], since=_ep(run.get("started_at")), queue=qs)
     hs = _handoffs(facts)
     srcs = MARKET_SOURCES.get(agent)
-    # Derek's standing work always reads the feed and the books; Eddie's
-    # only when decisions are waiting for his estimate
-    market_work = agent == "DEREK" or (agent == "EDDIE" and any(
-        h["kind"] == "ENTER_DECISION_WITHOUT_ESTIMATE" for h in hs))
+    # Derek's and Adriana's standing work always reads the books (Derek's
+    # the feed too); Archer's only when decisions are waiting for his
+    # estimate (R30B: or his queue holds an EXECUTION_ESTIMATE item)
+    market_work = agent in ("DEREK", "ADRIANA") or (agent == "ARCHER" and (any(
+        h["kind"] == "ENTER_DECISION_WITHOUT_ESTIMATE" for h in hs) or any(
+        i.get("kind") == "EXECUTION_ESTIMATE" for i in items)))
     if srcs and market_work:
         ms = market_status(facts.get("market"), now)
         bad = [dict(ms[s], source=s) for s in srcs if ms[s].get("blocked")]
@@ -340,35 +712,75 @@ def _generic(agent: str, facts: dict, now: float) -> dict:
                 b["why"] for b in bad), [dict(b, table=(
                     "ingestion_state:%s" % FEED_HEARTBEAT_KEY
                     if b["source"] == "feed" else "paper_book_observations"))
-                    for b in bad])
-    if hs:
-        return _handoff_out(hs)
+                    for b in bad], queue=qs)
+    if qc["blocked_market"]:
+        lst = qc["blocked_market"]
+        return _out(BLOCKED, "%d open item(s) blocked on market data (%s)" % (
+            len(lst), ", ".join(sorted({str(i.get("blocker"))
+                                        for i in lst}))),
+            [_qref(lst, "QUEUE_ITEM_BLOCKED_ON_MARKET_DATA")],
+            since=min(i["last_attempt_at"] for i in lst), queue=qs)
+    if hs or qc["untouched"] or qc["unserviced"]:
+        if not qc["untouched"] and not qc["unserviced"]:
+            return dict(_handoff_out(hs), queue=qs)
+        return _queue_handoff(hs, qc, queue=qs)
+    if qc["reacquisition"]:
+        lst = qc["reacquisition"]
+        return _out(WAITING, "Waiting for fresh evidence; %d reacquisition "
+                    "item(s) enqueued (%s)%s" % (
+                        len(lst), ", ".join(sorted({
+                            str(i.get("kind")) for i in lst})),
+                        ", %d overdue" % qs["overdue"]
+                        if qs["overdue"] else ""),
+                    [_qref(lst, "ENQUEUED_REACQUISITION")],
+                    since=min(i["enqueued_at"] for i in lst
+                              if i.get("enqueued_at") is not None)
+                    if any(i.get("enqueued_at") is not None for i in lst)
+                    else None, queue=qs)
+    if qc["active"]:
+        lst = qc["active"]
+        blocked = sorted({str(i.get("blocker")) for i in lst
+                          if i.get("outcome") == O_BLOCKED})
+        return _out(busy, "Working %d open item(s)%s%s" % (
+            len(lst), " (blocked: %s)" % ", ".join(blocked) if blocked
+            else "", ", %d overdue" % qs["overdue"] if qs["overdue"]
+            else ""), [_qref(lst, "QUEUE_ITEM_BEING_WORKED")],
+            since=max(i["last_attempt_at"] for i in lst), queue=qs)
     waits = [w for w in facts.get("waiting") or []
              if int(w.get("count") or 0) > 0]
     sw = _status_waiting(facts, now)
     if waits or sw:
+        # A WAITING SIGNAL WITH NO ENQUEUED REACQUISITION is never passive
+        # waiting (owner R30 section 17): nobody picked the work up.
         parts = ["%s %d" % (w["kind"], w["count"]) for w in waits]
         if sw:
             parts.append(str(sw.get("activity") or sw["kind"]))
-        return _out(WAITING, "Waiting for fresh evidence: " + "; ".join(
-            parts), [dict(w) for w in waits] + ([sw] if sw else []),
-            since=_ep((sw or {}).get("at")))
+        return _out(HANDOFF, "Needs fresh evidence and no reacquisition is "
+                    "enqueued: " + "; ".join(parts),
+                    [dict(w) for w in waits] + ([sw] if sw else []) + [
+                        {"table": "agent_work_open", "kind": K_NOT_ENQUEUED,
+                         "count": 0}],
+                    since=_ep((sw or {}).get("at")), queue=qs)
     o = _recent_output(facts, now)
     if o:
         return _out(busy, "Recorded %s" % (o.get("label") or o.get("table")),
-                    [dict(o)], since=_ep(o["at"]))
+                    [dict(o)], since=_ep(o["at"]), queue=qs)
     return _out(IDLE, "No open work recorded", [{
-        "table": "agent_status", "id": agent, "why": "NO_RUN_IN_PROGRESS_"
-        "NO_HANDOFF_NO_WAITING_NO_RECENT_OUTPUT"}])
+        "table": "agent_status / agent_work_open", "id": agent,
+        "why": "NO_RUN_IN_PROGRESS_NO_HANDOFF_NO_OPEN_ITEM_NO_RECENT_OUTPUT"}],
+        queue=qs)
 
 
 def _xavier(facts: dict, now: float) -> dict:
     n_open = facts.get("open_positions")
     positions = list(facts.get("positions") or [])
+    items, qc = _queue(facts, now)
+    qs = qc["summary"]
     if n_open is None:
         return _out(None, "Open positions could not be read; never taken as "
                     "zero", [{"table": "paper_fills", "why":
-                              facts.get("positions_why") or "UNREADABLE"}])
+                              facts.get("positions_why") or "UNREADABLE"}],
+                    queue=qs)
     ms = market_status(facts.get("market"), now)
     classes: dict = {P_UNREVIEWED: [], P_CURRENT: [], P_BLOCKED: [],
                      P_WAITING: []}
@@ -395,70 +807,97 @@ def _xavier(facts: dict, now: float) -> dict:
                      "review_id"), "why": p.get("why")}
                 for p in lst[:SAMPLE_IDS]]
 
+    def out(*a, **kw):
+        return _out(*a, counts=counts, queue=qs, **kw)
+
     run = _run(facts, now)
     if run:
-        return _out(REVIEWING, "%s · %d open positions" % (
+        return out(REVIEWING, "%s · %d open positions" % (
             run.get("activity") or "Review run in progress", n_open),
-            [run], since=_ep(run.get("started_at")), counts=counts)
+            [run], since=_ep(run.get("started_at")))
     if classes[P_UNREVIEWED]:
         lst = classes[P_UNREVIEWED]
         oldest = min([_ep(p.get("first_fill_at")) for p in lst
                       if _ep(p.get("first_fill_at")) is not None]
                      or [None], key=lambda x: x or 0)
-        return _out(HANDOFF, "%d of %d open positions handed over with no "
-                    "review yet" % (len(lst), n_open),
-                    [{"table": "paper_fills / smalllive_handoffs",
-                      "kind": "OPEN_POSITION_WITHOUT_REVIEW",
-                      "count": len(lst), "positions": ids(lst)}],
-                    since=oldest, counts=counts)
+        return out(HANDOFF, "%d of %d open positions handed over with no "
+                   "review yet" % (len(lst), n_open),
+                   [{"table": "paper_fills / smalllive_handoffs",
+                     "kind": "OPEN_POSITION_WITHOUT_REVIEW",
+                     "count": len(lst), "positions": ids(lst)}],
+                   since=oldest)
     if classes[P_BLOCKED]:
         lst = classes[P_BLOCKED]
         whys = sorted({p["why"] for p in lst})
-        return _out(BLOCKED, "%d of %d open positions blocked on market data "
-                    "(%s)" % (len(lst), n_open, ", ".join(whys)),
-                    [{"table": "paper_book_observations / ingestion_state:%s"
-                      % FEED_HEARTBEAT_KEY, "kind": "POSITION_MARKET_DATA",
-                      "count": len(lst), "positions": ids(lst),
-                      "feed": ms["feed"]}], counts=counts)
+        return out(BLOCKED, "%d of %d open positions blocked on market data "
+                   "(%s)" % (len(lst), n_open, ", ".join(whys)),
+                   [{"table": "paper_book_observations / ingestion_state:%s"
+                     % FEED_HEARTBEAT_KEY, "kind": "POSITION_MARKET_DATA",
+                     "count": len(lst), "positions": ids(lst),
+                     "feed": ms["feed"]}])
     if classes[P_WAITING]:
         lst = classes[P_WAITING]
         since = min([_ep((p.get("current_review") or {}).get("reviewed_at"))
                      for p in lst] or [None], key=lambda x: x or 0)
-        return _out(WAITING, "%d of %d open positions waiting for fresh "
-                    "evidence; %d acquisition requests open%s" % (
-                        len(lst), n_open, sum(reqs.values()),
-                        (", %d positions with none open" % not_enqueued)
-                        if not_enqueued else ""),
-                    [{"table": "xavier_current_review",
-                      "kind": "CURRENT_REVIEW_NOT_CURRENT",
-                      "count": len(lst), "positions": ids(lst)},
-                     {"table": "agent_work_open", "kind": "OPEN_REQUESTS",
-                      "by_kind": reqs}], since=since, counts=counts)
+        basis = [{"table": "xavier_current_review",
+                  "kind": "CURRENT_REVIEW_NOT_CURRENT",
+                  "count": len(lst), "positions": ids(lst)},
+                 {"table": "agent_work_open", "kind": "OPEN_REQUESTS",
+                  "by_kind": reqs}]
+        if sum(reqs.values()) or qc["reacquisition"]:
+            return out(WAITING, "%d of %d open positions waiting for fresh "
+                       "evidence; %d acquisition requests open%s" % (
+                           len(lst), n_open, sum(reqs.values()),
+                           (", %d positions with none open" % not_enqueued)
+                           if not_enqueued else ""), basis, since=since)
+        # NOT ONE REACQUISITION ENQUEUED (a backoff after expired requests,
+        # or a position the queue never covered): never passive waiting
+        return out(HANDOFF, "%d of %d open positions need fresh evidence and "
+                   "no reacquisition is enqueued (%d positions with none "
+                   "open)" % (len(lst), n_open, not_enqueued),
+                   basis + [{"table": "agent_work_open",
+                             "kind": K_NOT_ENQUEUED,
+                             "count": not_enqueued}], since=since)
     hs = _handoffs(facts)
-    if hs:
-        return dict(_handoff_out(hs), counts=counts)
+    if hs or qc["untouched"] or qc["unserviced"]:
+        if not qc["untouched"] and not qc["unserviced"]:
+            return dict(_handoff_out(hs), counts=counts, queue=qs)
+        return _queue_handoff(hs, qc, queue=qs, counts=counts)
     if classes[P_CURRENT]:
         lst = classes[P_CURRENT]
-        return _out(REVIEWING, "Managing %d open positions on CURRENT "
-                    "reviews" % n_open,
-                    [{"table": "xavier_current_review",
-                      "kind": "CURRENT_REVIEW_INSIDE_FRESHNESS_WINDOW",
-                      "count": len(lst), "positions": ids(lst)}],
-                    since=max([_ep((p.get("current_review") or {}).get(
-                        "reviewed_at")) or 0 for p in lst]), counts=counts)
+        return out(REVIEWING, "Managing %d open positions on CURRENT "
+                   "reviews" % n_open,
+                   [{"table": "xavier_current_review",
+                     "kind": "CURRENT_REVIEW_INSIDE_FRESHNESS_WINDOW",
+                     "count": len(lst), "positions": ids(lst)}],
+                   since=max([_ep((p.get("current_review") or {}).get(
+                       "reviewed_at")) or 0 for p in lst]))
     if int(n_open) > 0:
-        return _out(WAITING, "%d open positions beyond the %d classified; "
-                    "none is idle" % (n_open, len(positions)),
-                    [{"table": "paper_fills", "kind": "OPEN_POSITIONS",
-                      "count": int(n_open)}], counts=counts)
+        # positions beyond the classified: not one is idle, and with no
+        # reacquisition recorded for them they are owed work
+        return out(HANDOFF, "%d open positions beyond the %d classified; "
+                   "none is idle" % (n_open, len(positions)),
+                   [{"table": "paper_fills", "kind": "OPEN_POSITIONS",
+                     "count": int(n_open)}])
+    if qc["reacquisition"]:
+        lst = qc["reacquisition"]
+        return out(WAITING, "No open position; %d reacquisition item(s) "
+                   "still enqueued" % len(lst),
+                   [_qref(lst, "ENQUEUED_REACQUISITION")])
+    if qc["active"] or qc["blocked_market"]:
+        lst = qc["active"] + qc["blocked_market"]
+        return out(REVIEWING, "Working %d open item(s)" % len(lst),
+                   [_qref(lst, "QUEUE_ITEM_BEING_WORKED")])
     sw = _status_waiting(facts, now)
     if sw:
-        return _out(WAITING, "Waiting for fresh evidence: %s" % (
-            sw.get("activity") or sw["kind"]), [sw], since=sw["at"],
-            counts=counts)
-    return _out(IDLE, "No open position, no hand-off recorded",
-                [{"table": "paper_fills / smalllive_handoffs",
-                  "kind": "OPEN_POSITIONS", "count": 0}], counts=counts)
+        return out(HANDOFF, "Needs fresh evidence and no reacquisition is "
+                   "enqueued: %s" % (sw.get("activity") or sw["kind"]),
+                   [sw, {"table": "agent_work_open", "kind": K_NOT_ENQUEUED,
+                         "count": 0}], since=sw["at"])
+    return out(IDLE, "No open position, no hand-off, no open item recorded",
+               [{"table": "paper_fills / smalllive_handoffs",
+                 "kind": "OPEN_POSITIONS", "count": 0}])
+
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -715,7 +1154,7 @@ async def _read_positions(s: _Sections, now: float) -> dict:
 
 async def _read_handoffs(s: _Sections, now: float) -> dict:
     """{agent: [handoff rows]} from agent_tasks, karen_challenges, paper
-    ENTER decisions (Eddie, the Chief Allocator)."""
+    ENTER decisions (Archer, the Chief Allocator)."""
     out: dict = {a: [] for a in AGENTS}
 
     async def tasks(conn):
@@ -733,7 +1172,7 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
             " WHERE state IN ('OPEN', 'RESPONDED') "
             " GROUP BY target_agent, state")]
 
-    async def eddie(conn):
+    async def archer(conn):
         return dict(await conn.fetchrow(
             "SELECT count(*) AS n, min(d.decided_at) AS oldest, "
             "       (array_agg(d.decision_id ORDER BY d.decided_at))[1:5] "
@@ -743,7 +1182,7 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
             "                        AND to_timestamp($2) "
             "   AND NOT EXISTS (SELECT 1 FROM eddie_execution_estimates e "
             "                    WHERE e.decision_id = d.decision_id)",
-            now - EDDIE_LOOKBACK_S, now))
+            now - ARCHER_LOOKBACK_S, now))
 
     async def allocator(conn):
         last = await conn.fetchrow(
@@ -780,11 +1219,11 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
                 "kind": "CHALLENGE_ANSWER_TO_EVALUATE:%s" % tgt,
                 "table": "karen_challenges", "count": int(r["n"]),
                 "oldest_at": _ep(r["oldest"]), "ids": list(r["ids"] or [])})
-    e = await s.run("work.eddie_pending", ("paper_decisions",
+    e = await s.run("work.archer_pending", ("paper_decisions",
                                            "eddie_execution_estimates"),
-                    eddie)
+                    archer)
     if e and int(e["n"] or 0):
-        out["EDDIE"].append({
+        out["ARCHER"].append({
             "kind": "ENTER_DECISION_WITHOUT_ESTIMATE",
             "table": "paper_decisions", "count": int(e["n"]),
             "oldest_at": _ep(e["oldest"]), "ids": list(e["ids"] or [])})
@@ -809,7 +1248,7 @@ async def _read_outputs(s: _Sections) -> dict:
             ("KAREN", "karen_challenges", "challenge",
              "SELECT challenge_id AS id, challenged_at AS at "
              "  FROM karen_challenges ORDER BY challenged_at DESC LIMIT 1"),
-            ("EDDIE", "eddie_execution_estimates", "execution estimate",
+            ("ARCHER", "eddie_execution_estimates", "execution estimate",
              "SELECT estimate_id AS id, estimated_at AS at "
              "  FROM eddie_execution_estimates ORDER BY estimated_at DESC "
              " LIMIT 1"),
@@ -823,6 +1262,9 @@ async def _read_outputs(s: _Sections) -> dict:
             ("AUDREY", "audrey_audit_reports", "audit report",
              "SELECT report_id AS id, computed_at AS at "
              "  FROM audrey_audit_reports ORDER BY computed_at DESC LIMIT 1"),
+            ("ADRIANA", "adriana_arb_scans", "arbitrage census",
+             "SELECT scan_id AS id, finished_at AS at FROM adriana_arb_scans"
+             " ORDER BY finished_at DESC LIMIT 1"),
             ("CHIEF_ALLOCATOR", "intel_runs", "allocation run",
              "SELECT run_id AS id, finished_at AS at FROM intel_runs "
              " WHERE component = 'ALLOCATOR' AND status = 'OK' "
@@ -870,6 +1312,53 @@ async def _read_scout_waiting(s: _Sections) -> list:
              "ids": list(r["ids"] or [])}]
 
 
+async def _read_queue(s: _Sections, now: float) -> dict:
+    """{"items": {agent: [open items]}, "counts": {agent: {"n", "overdue"}},
+    "status", "why"} from the durable queue (226 + 301). The counts are
+    unbounded; the items bounded PER AGENT (never one global limit). Without
+    migration 301 the section is ABSENT (no 301 work exists to own); a read
+    that failed is UNAVAILABLE -- named, never a zero."""
+    out: dict = {"items": {a: [] for a in AGENTS}, "counts": {},
+                 "status": "OK", "why": None}
+
+    try:
+        has301 = bool(await s.conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM information_schema.columns "
+            " WHERE table_name = 'agent_work_requests' "
+            "   AND column_name = 'due_at')"))
+    except Exception:                                           # noqa: BLE001
+        has301 = False
+    if not has301:
+        s.status["work.queue"] = {"status": "ABSENT",
+                                  "why": "MIGRATION_301_NOT_APPLIED"}
+        return dict(out, status="ABSENT", why="MIGRATION_301_NOT_APPLIED")
+
+    async def fn(conn):
+        counts = {r["agent_id"]: {"n": int(r["n"]),
+                                  "overdue": int(r["overdue"])}
+                  for r in await conn.fetch(OPEN_COUNTS_SQL, now)}
+        rows = [dict(r) for r in await conn.fetch(
+            OPEN_ITEMS_BY_AGENT_SQL, MAX_QUEUE_ITEMS)] if counts else []
+        return {"counts": counts, "rows": rows}
+    tables = ("agent_work_open", "agent_work_requests",
+              "agent_work_request_events")
+    got = await s.run("work.queue", tables, fn)
+    st = s.status.get("work.queue") or {}
+    if got is None and st.get("status") not in ("OK", "EMPTY"):
+        return dict(out, status=st.get("status") or "UNAVAILABLE",
+                    why=st.get("why") or "READ_FAILED")
+    got = got or {"counts": {}, "rows": []}
+    out["counts"] = got["counts"]
+    for r in got["rows"]:
+        if r.get("agent_id") in out["items"]:
+            out["items"][r["agent_id"]].append(queue_item(r, now))
+    s.status["work.queue"] = {
+        "status": "OK" if got["counts"] else "EMPTY", "why": None,
+        "limited": {a: c["n"] for a, c in got["counts"].items()
+                    if c["n"] > len(out["items"].get(a) or [])}}
+    return out
+
+
 async def read_facts(conn, *, now: float | None = None) -> dict:
     """EVERY AGENT'S RECORDED WORK FACTS. Read only; a missing table or a
     failed read is named in `sections`, never raised and never a zero."""
@@ -882,12 +1371,19 @@ async def read_facts(conn, *, now: float | None = None) -> dict:
     outs = await _read_outputs(s)
     alloc_run = await _read_allocator_run(s, now)
     scout_wait = await _read_scout_waiting(s)
+    queue = await _read_queue(s, now)
     facts = {}
     for a in AGENTS:
         st = status.get(a)
+        qn = queue["counts"].get(a) or {"n": 0, "overdue": 0}
         f = {"status": st, "stale_s": (st or {}).get("stale_s"),
              "market": market, "handoffs": hand.get(a) or [],
-             "outputs": outs.get(a) or [], "waiting": []}
+             "outputs": outs.get(a) or [], "waiting": [],
+             "queue": queue["items"].get(a) or [],
+             "queue_status": queue["status"], "queue_why": queue["why"],
+             "queue_open": qn["n"] if queue["status"] in ("OK",) else None,
+             "queue_overdue": qn["overdue"]
+             if queue["status"] in ("OK",) else None}
         if a == "XAVIER":
             f.update(open_positions=pos["open"], positions=pos["positions"],
                      positions_why=pos["why"])

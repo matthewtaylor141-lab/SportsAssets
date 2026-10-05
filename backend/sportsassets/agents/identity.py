@@ -1,7 +1,7 @@
-"""THE SEVEN AGENTS' CANONICAL IDENTITY AND VOICE PROFILE (migration 224).
+"""THE EIGHT AGENTS' CANONICAL IDENTITY AND VOICE PROFILE (migration 224).
 
 One registry for Derek, Xavier, Audrey, Karen, Allie (the Chief Allocator),
-Eddie and Scout: who each one is (title, mission, personality, communication style,
+Archer and Scout: who each one is (title, mission, personality, communication style,
 expertise, decision principles, what it may and may not do) and which voice
 profile it speaks with. This EXTENDS, never replaces, what exists:
 
@@ -49,12 +49,18 @@ from . import registry as R
 VERSION = "AGENT_IDENTITY_V1"
 
 CHIEF_ALLOCATOR = "CHIEF_ALLOCATOR"
-#: The seven agents, in the order the directive names them.
-AGENTS = (R.DEREK, R.XAVIER, R.AUDREY, R.KAREN, CHIEF_ALLOCATOR, R.EDDIE,
-          R.SCOUT)
+#: The eight agents, in the order the directives name them (Adriana, the
+#: eighth, joined with migration 265).
+AGENTS = (R.DEREK, R.XAVIER, R.AUDREY, R.KAREN, CHIEF_ALLOCATOR, R.ARCHER,
+          R.SCOUT, R.ADRIANA)
+#: (migration 266) the execution agent's historical alias. NOT an agent: it
+#: has no slug, no identity, no voice and no permission here (`agent_of`
+#: refuses it). Readers that show its historical rows label them with
+#: registry.label_aliases (historical_alias: "EDDIE").
+HISTORICAL_ALIASES = dict(R.HISTORICAL_ALIASES)
 SLUGS = {R.DEREK: "derek", R.XAVIER: "xavier", R.AUDREY: "audrey",
-         R.KAREN: "karen", CHIEF_ALLOCATOR: "allocator", R.EDDIE: "eddie",
-         R.SCOUT: "scout"}
+         R.KAREN: "karen", CHIEF_ALLOCATOR: "allocator", R.ARCHER: "archer",
+         R.SCOUT: "scout", R.ADRIANA: "adriana"}
 BY_SLUG = {v: k for k, v in SLUGS.items()}
 
 PENDING = "PENDING_OWNER_APPROVAL"
@@ -63,7 +69,25 @@ SOURCE_REF = ("CLAUDE_AGENT_BACKEND_PROMPT.md (HQ2 backend directive) "
               "section 1 'Immutable identity registry' and section 6 'Voice "
               "identity'")
 
-R_UNKNOWN_AGENT = "NOT_ONE_OF_THE_SEVEN_AGENTS"
+R_UNKNOWN_AGENT = "NOT_ONE_OF_THE_EIGHT_AGENTS"
+
+#: Where each identity's version 1 came from. Six came from the HQ2
+#: directive (migration 224); Adriana's from the PM directive that made her
+#: the eighth employee (migration 265); Archer's from the PM directive that
+#: renamed the execution agent (migration 266 -- the HQ2 version 1 of the
+#: same seat stays recorded under its historical alias EDDIE). An agent not
+#: named here uses the HQ2 source.
+SOURCES = {
+    R.ARCHER: ("PM_DIRECTIVE_2026-10-05_ARCHER",
+               "CURRENT BETTOR PM DIRECTIVE (2026-10-05): the execution agent "
+               "EDDIE is renamed ARCHER / archer, Head of Execution; same "
+               "SHADOW_ONLY mandate and authority; EDDIE kept only as a "
+               "historical alias for audit (migration 266)"),
+    R.ADRIANA: ("PM_DIRECTIVE_2026-10-05_ADRIANA",
+                "CURRENT BETTOR PM DIRECTIVE (2026-10-05) section 3 'Build "
+                "ADRIANA now': canonical identity ADRIANA / adriana, eighth "
+                "BETTOR employee, SHADOW/PAPER arbitrage agent"),
+}
 R_NO_SCHEMA = "MIGRATION_224_NOT_APPLIED"
 
 #: The fields every identity carries (section 1 of the directive), plus the
@@ -272,8 +296,8 @@ IDENTITY_SPEC: dict[str, dict[str, Any]] = {
         "signature": "The portfolio matters more than the trade.",
         "authority_status": "SHADOW_WEIGHTS_ONLY",
     },
-    R.EDDIE: {
-        "display_name": "Eddie",
+    R.ARCHER: {
+        "display_name": "Archer",
         "title": "Head of Execution",
         "presentation": PRESENTATION_MALE,
         "role": "HEAD_OF_EXECUTION",
@@ -338,6 +362,55 @@ IDENTITY_SPEC: dict[str, dict[str, Any]] = {
         "signature": "Find structure. Do not fall in love with it.",
         "authority_status": "RESEARCH_SHADOW_ONLY",
     },
+    R.ADRIANA: {
+        "display_name": "Adriana",
+        "title": "Head of Arbitrage",
+        "presentation": PRESENTATION_FEMALE,
+        "role": "HEAD_OF_ARBITRAGE",
+        "mission": (
+            "Find structures whose payout is fixed in every outcome -- "
+            "cross-venue complements, YES / NO complements, middles and "
+            "exhaustive outcome baskets -- and prove or refuse each one: "
+            "identical settlement and payoff in every outcome, synchronized "
+            "fresh books, executable depth on every leg and a positive worst "
+            "case after every fee, slippage allowance and cost. Records "
+            "every opportunity and refusal in SHADOW; nothing executes on "
+            "it."),
+        "personality_traits": ["exacting", "calm", "settlement-literate",
+                               "hardest on her own numbers"],
+        "communication_style": (
+            "Precise and unhurried. States the structure, the worst-case "
+            "payout, the size and the cost, then every condition that would "
+            "break it."),
+        "expertise_domains": ["cross-venue arbitrage",
+                              "settlement and payoff equivalence",
+                              "complement and basket pricing",
+                              "order-book depth, fees and leg risk"],
+        "decision_principles": [
+            "If one outcome can lose, it is not an arbitrage.",
+            "Settlement first, prices second.",
+            "A stale or unsynchronized book proves nothing.",
+            "An opportunity is SHADOW; nothing executes on it."],
+        "may": ["Read recorded venue books, the catalogue and settlement "
+                "terms",
+                "Record arbitrage opportunities and refusals with their "
+                "evidence (SHADOW)",
+                # HISTORICAL WORDING, KEPT: her version-1 row (migration
+                # 265) is immutable and equals this text character for
+                # character; "Eddie" here is the execution agent's
+                # historical alias (registry.HISTORICAL_ALIASES -> ARCHER).
+                # A re-worded version is a new identity version for the
+                # owner to approve, never an edit of version 1.
+                "Hand an opportunity to Eddie for an execution review and "
+                "ask Karen to challenge it"],
+        "may_not": ["Place, cancel or route any order on any venue",
+                    "Hold or read any venue credential",
+                    "Allocate, reserve or approve capital",
+                    "Change a size, limit, threshold, fee or freshness rule",
+                    _NEVER],
+        "signature": "If one outcome can lose, it is not an arbitrage.",
+        "authority_status": "SHADOW_ONLY",
+    },
 }
 for _a, _s in IDENTITY_SPEC.items():
     _s["agent_id"] = _a
@@ -364,7 +437,7 @@ ALLOCATOR_TOOLS = {
 
 
 def agent_of(v) -> str | None:
-    """A slug, id or label -> one of the seven agent ids, else None."""
+    """A slug, id or label -> one of the eight agent ids, else None."""
     s = str(v or "").strip()
     if not s:
         return None
@@ -414,8 +487,10 @@ _STYLE = {
     R.KAREN: "Dry, pointed and quick; deadpan, never shouting.",
     CHIEF_ALLOCATOR: ("Composed and even; portfolio-level. adult woman; "
                       "her own voice, never another agent's."),
-    R.EDDIE: "Fast and terse; numbers first.",
+    R.ARCHER: "Fast and terse; numbers first.",
     R.SCOUT: "Curious and careful; says HYPOTHESIS or OBSERVATION aloud.",
+    R.ADRIANA: ("Precise and unhurried; worst case first. adult woman; her "
+                "own voice, never another agent's."),
 }
 
 
@@ -507,10 +582,11 @@ def identity_row(agent: str) -> dict:
     if a is None:
         raise ValueError(R_UNKNOWN_AGENT)
     s = copy.deepcopy(IDENTITY_SPEC[a])
+    directive, ref = SOURCES.get(a, (SOURCE_DIRECTIVE, SOURCE_REF))
     return dict({k: s[k] for k in IDENTITY_FIELDS}, identity_version=1,
                 content_sha=content_sha(s), approved_by=PENDING,
-                approved_at=None, source_directive=SOURCE_DIRECTIVE,
-                source_ref=SOURCE_REF)
+                approved_at=None, source_directive=directive,
+                source_ref=ref)
 
 
 def code_identity(agent: str, *, why: str) -> dict:
@@ -536,7 +612,9 @@ def voice_claims(latest: dict) -> dict:
     by the agent order). `latest` = {agent: resolution row}."""
     owners: dict = {}
     order = {a: i for i, a in enumerate(AGENTS)}
-    rows = [(a, r) for a, r in (latest or {}).items()
+    # a resolution recorded under a historical alias (EDDIE, before 266) is
+    # the canonical agent's own claim (ARCHER's), never another agent's
+    rows = [(R.canonical_agent_id(a), r) for a, r in (latest or {}).items()
             if r and r.get("status") == "RESOLVED" and r.get("voice_id")]
     rows.sort(key=lambda ar: (float(ar[1].get("resolved_at") or 0),
                               order.get(ar[0], 99)))
@@ -658,10 +736,16 @@ async def current_identity(conn, agent: str) -> dict | None:
 
 
 async def identity_versions(conn, agent: str) -> list:
+    """Every recorded version of `agent`, oldest first. The versions its
+    seat recorded under a historical alias (EDDIE's, for ARCHER) come first,
+    each LABELLED `historical_alias` -- shown, never silently relabelled."""
+    a = agent_of(agent)
     rows = await conn.fetch(
-        "SELECT %s FROM agent_identity_versions WHERE agent_id=$1 "
-        " ORDER BY identity_version" % _ID_COLS, agent_of(agent))
-    return [_id_row(r) for r in rows]
+        "SELECT %s FROM agent_identity_versions "
+        " WHERE agent_id = ANY($1::text[]) "
+        " ORDER BY (agent_id = $2) , identity_version" % _ID_COLS,
+        R.ids_with_aliases(a) if a else [], a)
+    return [R.label_aliases(_id_row(r)) for r in rows]
 
 
 _VP_COLS = ("voice_profile_id, agent_id, version, provider, "
@@ -701,7 +785,22 @@ async def latest_resolutions(conn) -> dict:
         "       resolved_at "
         "  FROM agent_voice_resolutions "
         " ORDER BY agent_id, resolution_id DESC")
-    return {r["agent_id"]: dict(r) for r in rows}
+    out: dict = {}
+    for r in rows:
+        d = dict(r)
+        a = R.canonical_agent_id(d["agent_id"])
+        if R.historical_alias(d["agent_id"]):
+            # the alias's history is the canonical agent's, labelled; the
+            # canonical agent's own later resolution wins
+            d = R.label_aliases(d)
+            if a in out and int(out[a]["resolution_id"]) > int(
+                    d["resolution_id"]):
+                continue
+        elif a in out and int(out[a]["resolution_id"]) > int(
+                d["resolution_id"]):
+            continue
+        out[a] = d
+    return out
 
 
 async def read_voice(conn, agent: str, *, env=None) -> dict:

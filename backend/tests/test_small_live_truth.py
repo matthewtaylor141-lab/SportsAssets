@@ -3,20 +3,20 @@
   §1 THE STATUS (pure, bettor_originated_status.derive_status): exactly one
      of NOT_CONFIGURED / SHADOW / READY_NOT_ACTIVATED / ACTIVE / DEGRADED /
      STOPPED; NEVER ACTIVE without a BETTOR-originated, venue-acknowledged
-     order carrying the whole chain (Derek decision -> allocation -> Eddie
+     order carrying the whole chain (Derek decision -> allocation -> Archer
      execution decision -> venue order + ack); RN1, mirror and copy orders
      never count whatever they carry; this build has no BETTOR-originated
      path, so the status is SHADOW / NOT_CONFIGURED.
-  §2 RECOMMENDATIONS ARE NOT ORDERS: Eddie's EXECUTE_NOW counts never
+  §2 RECOMMENDATIONS ARE NOT ORDERS: Archer's EXECUTE_NOW counts never
      appear as orders submitted, venue-acknowledged or filled.
   §3 THE LEGACY MIRROR LABEL comes from the real control row: STOPPED only
      when it says so, RUNNING when it runs; the equity wall, the mirror
-     report, Slack and Eddie's page carry it.
+     report, Slack and Archer's page carry it.
   §4 AUTHORITY: the module makes no venue call, imports no order / venue /
      execution / funded module, holds no SQL write and changes no control
      row; the path constant stays False.
   §5 DATABASE: over real records (a STOPPED mirror with excluded copies, a
-     live-eligible intent refused, Eddie EXECUTE_NOW estimates, no Kalshi
+     live-eligible intent refused, Archer EXECUTE_NOW estimates, no Kalshi
      key) the status is SHADOW, Kalshi and Polymarket US are NOT_CONNECTED,
      orders are 0 and the reads leave every control row unchanged.
 ALL DATA HERE IS SYNTHETIC TEST DATA.
@@ -45,8 +45,8 @@ NOW = 1_791_100_000.0
 
 def _order(**kw):
     o = {"origin": "BETTOR", "derek_decision_id": "paperdec:1",
-         "allocation_id": "alloc:1", "eddie_estimate_id": "eddie:1",
-         "eddie_recommendation": "EXECUTE_NOW", "venue": "polymarket_us",
+         "allocation_id": "alloc:1", "archer_estimate_id": "archer:1",
+         "archer_recommendation": "EXECUTE_NOW", "venue": "polymarket_us",
          "venue_order_id": "V-1", "venue_ack_at": NOW - 60, "fills": 1}
     o.update(kw)
     return o
@@ -55,7 +55,7 @@ def _order(**kw):
 def _ev(**kw):
     ev = {"path_configured": True, "control": {"enabled": True,
                                                "stopped": False},
-          "orders": [], "shadow": {"eddie_estimates": 3},
+          "orders": [], "shadow": {"archer_estimates": 3},
           "heartbeat_at": NOW - 10,
           "venues": {"polymarket_us": {"state": "CONNECTED"},
                      "kalshi": {"state": "NOT_CONNECTED"}}}
@@ -83,7 +83,7 @@ def test_active_needs_a_bettor_originated_venue_acknowledged_order():
         assert got["refused_orders"][0]["refused"].startswith(
             "CHAIN_INCOMPLETE"), k
     for rec in ("SKIP_EXECUTION", "WAIT", None):
-        got = B.derive_status(_ev(orders=[_order(eddie_recommendation=rec)]),
+        got = B.derive_status(_ev(orders=[_order(archer_recommendation=rec)]),
                               now=NOW)
         assert got["status"] != "ACTIVE", rec
     got = B.derive_status(_ev(orders=[_order(venue="paper")]), now=NOW)
@@ -123,7 +123,7 @@ def test_this_build_has_no_bettor_originated_path():
                              now=NOW)
     assert shadow["status"] == "SHADOW"
     none = B.derive_status(_ev(path_configured=False, control=None,
-                               shadow={"eddie_estimates": 0}), now=NOW)
+                               shadow={"archer_estimates": 0}), now=NOW)
     assert none["status"] == "NOT_CONFIGURED"
     # even a fully formed order cannot make an unconfigured path ACTIVE
     odd = B.derive_status(_ev(path_configured=False, orders=[_order()]),
@@ -133,7 +133,7 @@ def test_this_build_has_no_bettor_originated_path():
 
 # ── §2 recommendations are not orders ────────────────────────────────
 
-def test_eddie_execute_now_counts_never_appear_as_orders():
+def test_archer_execute_now_counts_never_appear_as_orders():
     counts = {"status": "OK", "why": None,
               "recommendations": {"EXECUTE_NOW": 41, "REST_LIMIT": 2,
                                   "SPLIT": 1, "WAIT": 3,
@@ -142,20 +142,20 @@ def test_eddie_execute_now_counts_never_appear_as_orders():
     legacy = {"label": "LEGACY MIRROR VALIDATION — STOPPED",
               "orders": {"sent_or_planned": 0, "venue_acknowledged": 0},
               "fills": {"count": 0}}
-    f = B.eddie_funnel(counts, verified_orders=[], legacy=legacy)
+    f = B.archer_funnel(counts, verified_orders=[], legacy=legacy)
     assert f["recommendations_are_not_orders"] is True
     assert f["execute_now_recommendations"] == 41
     assert f["skip_execution_recommendations"] == 17
     assert f["bettor_orders_submitted"] == 0
     assert f["bettor_orders_venue_acknowledged"] == 0
     assert f["bettor_fills"] == 0
-    assert f["legacy_mirror_not_eddie"]["label"].startswith(
+    assert f["legacy_mirror_not_archer"]["label"].startswith(
         "LEGACY MIRROR VALIDATION")
-    from sportsassets.agents import eddie as E
+    from sportsassets.agents import archer as E
     assert tuple(B.EXECUTING_RECOMMENDATIONS) == tuple(E.EXECUTING)
     assert set(B.RECOMMENDATIONS) == set(E.RECOMMENDATIONS)
     # unmeasured is not zero
-    u = B.eddie_funnel({"status": "UNAVAILABLE", "why": "X",
+    u = B.archer_funnel({"status": "UNAVAILABLE", "why": "X",
                         "recommendations": None}, verified_orders=[],
                        legacy=None)
     assert u["execute_now_recommendations"] is None
@@ -260,7 +260,7 @@ async def test_over_real_records_the_status_is_shadow_and_orders_are_zero():
             "VALUES ('slt:m1', 'paperord:slt1', 'ENTRY', 'slt-mkt', "
             " 'ORDER_INTENT_BUY_LONG', 'MARKETABLE', 'IOC', 'EXCLUDED', "
             " 'BELOW_VENUE_MINIMUM')")
-        has_eddie = await conn.fetchval(
+        has_archer = await conn.fetchval(
             "SELECT to_regclass('eddie_execution_estimates') IS NOT NULL")
         before = await _controls(conn)
         got = await B.read_isolated(conn, now=now)
@@ -280,9 +280,9 @@ async def test_over_real_records_the_status_is_shadow_and_orders_are_zero():
         assert lm["label"] == "LEGACY MIRROR VALIDATION — STOPPED"
         assert lm["is_target_small_live"] is False
         assert lm["orders"]["excluded"] >= 1
-        f = got["eddie_funnel"]
+        f = got["archer_funnel"]
         assert f["bettor_orders_submitted"] == 0
-        if has_eddie:
+        if has_archer:
             assert f["status"] == "OK"
             assert isinstance(f["execute_now_recommendations"], int)
     finally:
@@ -301,7 +301,7 @@ async def test_the_equity_payload_reports_small_live_apart():
     sl = got["small_live_bettor"]
     assert sl["title"] == "SMALL LIVE — BETTOR ORIGINATED"
     assert sl["status"] in B.STATUSES and sl["status"] != "ACTIVE"
-    assert sl["eddie_funnel"]["recommendations_are_not_orders"] is True
+    assert sl["archer_funnel"]["recommendations_are_not_orders"] is True
     assert got["actual"]["legacy_mirror"] is True
     assert got["actual"]["venues"]["polymarket_us"]["label"].startswith(
         "Polymarket US · LEGACY MIRROR VALIDATION")

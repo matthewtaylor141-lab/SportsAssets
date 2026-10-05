@@ -227,7 +227,7 @@ def raw_paper(*, fresh=True, game_age_s=900.0, book_age_s=12.0):
                        "challenged_at": NOW - 900}],
             "audrey": {"findings": [], "reconciliations": [],
                        "postmortems": []},
-            "eddie": {"present": False, "rows": []},
+            "archer": {"present": False, "rows": []},
             "game_state": game_row(game_age_s), "matchups": matchups()}
 
 
@@ -256,5 +256,5 @@ def raw_actual():
                 {"group_id": G_NYY, "venue": "POLYMARKET",
                  "status": "MATCHED", "reconciled_at": NOW - 30,
                  "discrepancies": []}], "postmortems": []},
-            "eddie": {"present": False, "rows": []},
+            "archer": {"present": False, "rows": []},
             "game_state": game_row(30.0), "matchups": matchups()}

@@ -3,7 +3,7 @@
   1 DEREK_CANDIDATE           Derek's paper ENTER decision
   2 KAREN_CHALLENGE           Karen's challenge of it (karen_challenges)
   3 SCOUT_EVIDENCE            Scout's feature observations of its game
-  4 EDDIE_EXECUTION_ESTIMATE  Eddie's SHADOW execution estimate
+  4 ARCHER_EXECUTION_ESTIMATE  Archer's SHADOW execution estimate
   5 ALLOCATOR_RANKING         the Chief Allocator's shadow rank (intel_*)
   6 AUDREY_RISK_CHECK         Audrey's independent risk recompute (intel_*)
   7 XAVIER_MANAGEMENT_PLAN    Xavier's review of the filled position
@@ -13,20 +13,20 @@ pos_candidate_review_steps), with the QUESTION asked of that agent, the
 AGENT whose record answers it, the EVIDENCE ids (grounded: each exists), the
 RESPONSE (quoted from that record), any DISAGREEMENT with an earlier step,
 the RESOLUTION, the EXPERIMENT it feeds (a collaboration-loop finding or a
-Scout tournament) and, later and once, the RESULT (Eddie's realized
+Scout tournament) and, later and once, the RESULT (Archer's realized
 execution loss; Xavier's first review).
 
 WHAT THIS IS NOT. Nobody is asked to act and nothing is decided here: every
 response is read from that agent's own record. A step with no record says
 NO_RECORD (or NOT_APPLICABLE: Xavier manages only filled positions) and
 cites the candidate. A disagreement is recorded, never resolved by
-authority: Eddie and Scout hold none, and nothing is blocked, approved or
+authority: Archer and Scout hold none, and nothing is blocked, approved or
 sent. The writer is the workflow (recorded_by POS_WORKFLOW), hosted by
-Eddie's runner, inside a transaction declared as EDDIE -- so the database
+Archer's runner, inside a transaction declared as ARCHER -- so the database
 would refuse it any order / approval / control write.
 
-THE COLLABORATION LOOP. When Eddie's SHADOW recommendation disagrees with
-Derek's ENTER (SKIP_EXECUTION / WAIT), Eddie opens a loop finding (203)
+THE COLLABORATION LOOP. When Archer's SHADOW recommendation disagrees with
+Derek's ENTER (SKIP_EXECUTION / WAIT), Archer opens a loop finding (203)
 with its EVIDENCE and HYPOTHESIS stages, routed to his default peers
 (collaboration_loop.PEER_ROUTING); the step's experiment_ref names it.
 """
@@ -46,7 +46,7 @@ STEPS = (
     (1, "DEREK_CANDIDATE", "DEREK"),
     (2, "KAREN_CHALLENGE", "KAREN"),
     (3, "SCOUT_EVIDENCE", "SCOUT"),
-    (4, "EDDIE_EXECUTION_ESTIMATE", "EDDIE"),
+    (4, "ARCHER_EXECUTION_ESTIMATE", "ARCHER"),
     (5, "ALLOCATOR_RANKING", "CHIEF_ALLOCATOR"),
     (6, "AUDREY_RISK_CHECK", "AUDREY"),
     (7, "XAVIER_MANAGEMENT_PLAN", "XAVIER"),
@@ -57,7 +57,7 @@ QUESTIONS = {
     "KAREN_CHALLENGE": "Is there a grounded challenge to this candidate?",
     "SCOUT_EVIDENCE": ("Is there compliant external evidence about this "
                        "game, and what is its status?"),
-    "EDDIE_EXECUTION_ESTIMATE": ("How much of the theoretical edge survives "
+    "ARCHER_EXECUTION_ESTIMATE": ("How much of the theoretical edge survives "
                                  "execution, and should it execute?"),
     "ALLOCATOR_RANKING": ("Where does the Chief Allocator rank it, and with "
                           "what shadow size?"),
@@ -189,25 +189,25 @@ async def step_scout(conn, d: dict, ctx: dict) -> dict:
 
 async def _open_disagreement_finding(conn, d: dict, e: dict, *,
                                      now: float) -> str | None:
-    """Eddie's loop finding for a Derek-ENTER / Eddie-not-execute
+    """Archer's loop finding for a Derek-ENTER / Archer-not-execute
     disagreement: EVIDENCE + HYPOTHESIS, idempotent."""
     refs = [{"kind": "eddie_execution_estimates", "id": e["estimate_id"]},
             {"kind": "paper_decisions", "id": str(d["decision_id"])}]
     title = "Execution disagreement on %s" % d["decision_id"]
     got = await CL.open_finding(
-        conn, proposer=R.EDDIE, title=title[:300],
-        statement=("Derek recorded ENTER; Eddie's SHADOW estimate %s "
+        conn, proposer=R.ARCHER, title=title[:300],
+        statement=("Derek recorded ENTER; Archer's SHADOW estimate %s "
                    "recommends %s (%s). Routed to %s." % (
                        e["estimate_id"], e["recommendation"],
                        e["recommendation_reason"][:400],
-                       ", ".join(CL.PEER_ROUTING["EDDIE"]))),
+                       ", ".join(CL.PEER_ROUTING["ARCHER"]))),
         evidence_refs=refs, evidence_window_end=now, at=now)
     if not got.get("ok"):
         return None
     if await conn.fetchval("SELECT stage FROM agent_findings WHERE "
                            " finding_id=$1", got["finding_id"]) == CL.EVIDENCE:
         await CL.record_hypothesis(
-            conn, got["finding_id"], actor=R.EDDIE,
+            conn, got["finding_id"], actor=R.ARCHER,
             hypothesis=("Executing %s loses more than its theoretical edge "
                         "(%s pp): expected net executable edge %s pp. The "
                         "realized execution loss will show it." % (
@@ -217,19 +217,19 @@ async def _open_disagreement_finding(conn, d: dict, e: dict, *,
     return got["finding_id"]
 
 
-async def step_eddie(conn, d: dict, ctx: dict) -> dict:
+async def step_archer(conn, d: dict, ctx: dict) -> dict:
     e = await conn.fetchrow(
         "SELECT * FROM eddie_execution_estimates WHERE decision_id=$1 "
         " ORDER BY estimated_at DESC LIMIT 1", str(d["decision_id"]))
     if e is None:
         return {"status": "NO_RECORD", "evidence_refs": _cand_ref(d),
-                "response": "Eddie has not estimated this candidate."}
+                "response": "Archer has not estimated this candidate."}
     e = dict(e)
-    ctx["eddie"] = e
+    ctx["archer"] = e
     dis = res = exp = None
     if e["recommendation"] in ("SKIP_EXECUTION", "WAIT"):
-        dis = {"between": ["DEREK", "EDDIE"], "derek": "ENTER",
-               "eddie": e["recommendation"],
+        dis = {"between": ["DEREK", "ARCHER"], "derek": "ENTER",
+               "archer": e["recommendation"],
                "why": e["recommendation_reason"][:500]}
         res = NO_AUTHORITY
         # a MEASURED negative (SKIP) is a hypothesis worth a loop finding;
@@ -239,7 +239,7 @@ async def step_eddie(conn, d: dict, ctx: dict) -> dict:
             if e["recommendation"] == "SKIP_EXECUTION" else None
         if fid:
             exp = {"kind": "agent_findings", "id": fid,
-                   "routed_to": list(CL.PEER_ROUTING["EDDIE"])}
+                   "routed_to": list(CL.PEER_ROUTING["ARCHER"])}
     un = _j(e.get("unmeasured")) or {}
     return {"status": "ANSWERED",
             "evidence_refs": [{"kind": "eddie_execution_estimates",
@@ -274,11 +274,11 @@ async def step_allocator(conn, d: dict, ctx: dict) -> dict:
                 "response": "The Chief Allocator has not ranked this "
                             "candidate."}
     dis = None
-    e = ctx.get("eddie") or {}
+    e = ctx.get("archer") or {}
     if e.get("recommendation") in ("SKIP_EXECUTION", "WAIT") and \
             float(a["shadow_usd"] or 0) > 0:
-        dis = {"between": ["EDDIE", "CHIEF_ALLOCATOR"],
-               "eddie": e.get("recommendation"),
+        dis = {"between": ["ARCHER", "CHIEF_ALLOCATOR"],
+               "archer": e.get("recommendation"),
                "allocator_shadow_usd": float(a["shadow_usd"])}
     return {"status": "ANSWERED",
             "evidence_refs": [{"kind": "intel_allocations",
@@ -348,7 +348,7 @@ async def step_xavier(conn, d: dict, ctx: dict) -> dict:
 
 STEP_FN = {"DEREK_CANDIDATE": step_derek, "KAREN_CHALLENGE": step_karen,
            "SCOUT_EVIDENCE": step_scout,
-           "EDDIE_EXECUTION_ESTIMATE": step_eddie,
+           "ARCHER_EXECUTION_ESTIMATE": step_archer,
            "ALLOCATOR_RANKING": step_allocator,
            "AUDREY_RISK_CHECK": step_audrey,
            "XAVIER_MANAGEMENT_PLAN": step_xavier}
@@ -361,12 +361,12 @@ STEP_FN = {"DEREK_CANDIDATE": step_derek, "KAREN_CHALLENGE": step_karen,
 async def assemble(conn, decision_id: str, *, now: float | None = None
                    ) -> dict:
     """Record every missing step of one candidate's review, in order, in
-    one transaction declared as EDDIE. Idempotent. Never raises."""
+    one transaction declared as ARCHER. Idempotent. Never raises."""
     at = float(now if now is not None else time.time())
-    PA.assert_may(R.EDDIE, "write.candidate_reviews")
+    PA.assert_may(R.ARCHER, "write.candidate_reviews")
     try:
         async with conn.transaction():
-            await PA.act_as(conn, R.EDDIE)
+            await PA.act_as(conn, R.ARCHER)
             d = await conn.fetchrow(
                 "SELECT decision_id, decided_at, us_market_slug, "
                 "       holding_side, proposed_qty, limit_price, p_blended, "
@@ -388,12 +388,12 @@ async def assemble(conn, decision_id: str, *, now: float | None = None
             written = []
             for seq, step, agent in STEPS:
                 if seq <= have:
-                    if step == "EDDIE_EXECUTION_ESTIMATE":
+                    if step == "ARCHER_EXECUTION_ESTIMATE":
                         e = await conn.fetchrow(
                             "SELECT * FROM eddie_execution_estimates WHERE "
                             " decision_id=$1 ORDER BY estimated_at DESC "
                             " LIMIT 1", d["decision_id"])
-                        ctx["eddie"] = dict(e) if e else {}
+                        ctx["archer"] = dict(e) if e else {}
                     continue
                 s = await STEP_FN[step](conn, d, ctx)
                 n = CL.normalise_refs(s["evidence_refs"])
@@ -426,11 +426,11 @@ async def assemble(conn, decision_id: str, *, now: float | None = None
 
 
 async def attach_results(conn, *, now: float, limit: int = 20) -> dict:
-    """THE RESULTS, once each: Eddie's realized execution loss on step 4,
+    """THE RESULTS, once each: Archer's realized execution loss on step 4,
     Xavier's first review on step 7."""
     n = 0
     async with conn.transaction():
-        await PA.act_as(conn, R.EDDIE)
+        await PA.act_as(conn, R.ARCHER)
         for r in await conn.fetch(
                 "SELECT s.review_id, x.outcome_id, "
                 "       x.predicted_execution_loss_pp, "
@@ -439,7 +439,11 @@ async def attach_results(conn, *, now: float, limit: int = 20) -> dict:
                 "  JOIN pos_candidate_reviews v USING (review_id) "
                 "  JOIN eddie_execution_outcomes x ON x.decision_id = "
                 "       v.decision_id "
-                " WHERE s.seq = 4 AND s.result IS NULL LIMIT $1", limit):
+                " WHERE s.seq = 4 AND s.result IS NULL "
+                # (266) a step written under the historical alias EDDIE is
+                # a historical record: never updated (frozen in the DB too)
+                "   AND s.agent <> ALL($2::text[]) LIMIT $1", limit,
+                sorted(R.HISTORICAL_ALIASES)):
             await conn.execute(
                 "UPDATE pos_candidate_review_steps SET result=$2::jsonb, "
                 " result_at=to_timestamp($3) WHERE review_id=$1 AND seq=4 "

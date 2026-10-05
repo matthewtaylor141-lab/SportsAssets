@@ -7,6 +7,8 @@ router=APIRouter()
 
 @router.post('/api/integrations/slack/{agent}/events')
 async def events(agent:str,request:Request):
+ # (266) /slack/eddie/events is Archer's app under its historical alias
+ agent=S.canonical_agent(agent)
  try:cfg=S.settings(agent)
  except ValueError:raise HTTPException(404,'UNKNOWN_AGENT')
  if not cfg['secret']:raise HTTPException(503,'SLACK_NOT_CONFIGURED')

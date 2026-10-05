@@ -1014,6 +1014,58 @@ STAGE_OF = {code: name for name, codes in STAGES for code in codes}
 STAGE_ORDER = [name for name, _ in STAGES]
 STAGE_UNCLASSIFIED = "9_UNCLASSIFIED_REFUSAL"
 
+#: ── THE EVENT LEDGER'S STAGE OF A REFUSAL (coverage census, 2026-10-05) ──
+#:
+#: THE DEFECT. Two refusal sites of the collector's cycle wrote their event's
+#: `ext_candidate_outcomes` row with NO stage: the venue-native identity
+#: refusal (the global catalogue's refusal, then the venue's own -- e.g.
+#: NO_VENUE_CONTRACT_FOR_EVENT, NO_VENUE_NATIVE_EVENT_FOR_FIXTURE, and for
+#: every PinnAPI-native basketball seed VENUE_NATIVE_FAMILY_NOT_SUPPORTED)
+#: and a WS evaluation whose PinnAPI price was not usable
+#: (WS_REFERENCE_NOT_USABLE:<reason>). coverage_integrity ranks a row by its
+#: stage (REACH_SQL), and a REFUSED row with no stage and no venue contract
+#: ranks 0 -- "we do not know it passed anything" -- so an event that HAD a
+#: Pinnacle price and stopped at venue identity was counted as never
+#: normalized. That is the PINNAPI_NATIVE:BASKETBALL "normalization failure"
+#: and the provider -> normalized collapse of Serie B / the Nations League
+#: on days the venue lists few of the provider's fixtures.
+#:
+#: THE GLOBAL CATALOGUE'S OWN IDENTITY REFUSALS (bettor_venue_mapping R_*,
+#: pinned equal by tests/test_coverage_first_loss_census.py) are not in
+#: STAGES above, which lists the codes the census attributes; they are
+#: identity refusals by their own words. EVENT_DOES_NOT_NAME_TWO_TEAMS and
+#: TEAM_NAMES_COLLIDE_AFTER_NORMALISATION are deliberately absent: they are
+#: findings about the PROVIDER's record, not the venue's catalogue.
+LEDGER_IDENTITY_CODES = (
+    "NO_VENUE_CONTRACT_FOR_EVENT", "VENUE_MAPPING_AMBIGUOUS",
+    "VENUE_MARKET_CLOSED_OR_RESOLVED",
+    "VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME",
+    "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE",
+    "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP")
+LEDGER_STAGE_OF = dict(STAGE_OF, **{c: "3_IDENTITY" for c in
+                                    LEDGER_IDENTITY_CODES
+                                    if c not in STAGE_OF})
+#: the wrapper a WS evaluation records when its PinnAPI price is not usable
+WS_REFERENCE_WRAPPER = "WS_REFERENCE_NOT_USABLE"
+
+
+def ledger_stage_of(code) -> str | None:
+    """The lane stage an event-ledger row carrying `code` as its first
+    refusal stopped at: the one taxonomy's lane stage (LEDGER_STAGE_OF);
+    for WS_REFERENCE_NOT_USABLE:<reason>, the stage of the reason it wraps
+    (`lane_stage_of`, as `no_pinnacle_stage` stages a refused WS read: a
+    freshness refusal at 2_FRESHNESS, any other at 1_PROBABILITY). None for
+    a code no table stages. Pure."""
+    s = str(code or "").strip()
+    if not s:
+        return None
+    head, _, inner = s.partition(":")
+    if head == WS_REFERENCE_WRAPPER:
+        inner = inner.split(":", 1)[0]
+        return (STAGE_OF.get(inner) or lane_stage_of(inner)
+                or "1_PROBABILITY")
+    return LEDGER_STAGE_OF.get(s) or LEDGER_STAGE_OF.get(head)
+
 
 # ── IS THIS A DECISION OR AN INABILITY? ─────────────────────────────
 #

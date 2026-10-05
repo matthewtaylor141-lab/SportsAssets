@@ -1,15 +1,15 @@
-"""EDDIE'S AND SCOUT'S READ API, PAGES, DESKS, PERSONAS, ROLE BRIEFS AND
+"""ARCHER'S AND SCOUT'S READ API, PAGES, DESKS, PERSONAS, ROLE BRIEFS AND
 SLACK IDENTITIES (migration 217).
 
-  * /api/command/eddie, /api/command/scout, /api/command/agents/{eddie,
+  * /api/command/archer, /api/command/scout, /api/command/agents/{archer,
     scout}, the estimate and review reads need the COMMAND read credential,
     have NO write route, and return the shared workspace contract; the
     agents index lists both;
-  * /api/command/agents/{eddie,scout}/page is served only to the COMMAND
+  * /api/command/agents/{archer,scout}/page is served only to the COMMAND
     credential; its render code (run under node) draws every required
     section and the desk draws every value from the record -- NOT MEASURED
     with the reason when absent -- with no submit / trade affordance;
-  * the management URLs /eddie and /scout reach the pages through the shell;
+  * the management URLs /archer and /scout reach the pages through the shell;
   * personas and role briefs ground each in its own records;
   * Slack: each speaks only under its own bot token; a token, app id or
     signing secret shared with ANY other agent refuses its deliveries; its
@@ -52,12 +52,17 @@ T0 = 1_790_000_000.0
 def test_the_routes_require_the_command_credential_and_none_writes():
     from sportsassets.api import app as A
     c = TestClient(A.app)
-    paths = ("/api/command/eddie", "/api/command/agents/eddie",
-             "/api/command/eddie/estimates",
-             "/api/command/eddie/estimates/eex:x", "/api/command/scout",
+    paths = ("/api/command/archer", "/api/command/agents/archer",
+             "/api/command/archer/estimates",
+             "/api/command/archer/estimates/eex:x", "/api/command/scout",
              "/api/command/agents/scout", "/api/command/pos/reviews",
-             "/api/command/agents/eddie/page",
-             "/api/command/agents/scout/page")
+             "/api/command/agents/archer/page",
+             "/api/command/agents/scout/page",
+             # (266) Archer's historical addresses, aliases of the above
+             "/api/command/eddie", "/api/command/agents/eddie",
+             "/api/command/eddie/estimates",
+             "/api/command/eddie/estimates/eex:x",
+             "/api/command/agents/eddie/page")
     for path in paths:
         assert c.get(path).status_code == 401, path
     from tests.test_agent_workspaces_show_runtime_records import _route_paths
@@ -67,8 +72,8 @@ def test_the_routes_require_the_command_credential_and_none_writes():
         assert p in routes, p
     for route in A.app.routes:
         path = getattr(route, "path", "")
-        if path.startswith(("/api/command/eddie", "/api/command/scout",
-                            "/api/command/pos")):
+        if path.startswith(("/api/command/archer", "/api/command/scout",
+                            "/api/command/pos", "/api/command/eddie")):
             assert getattr(route, "methods", {"GET"}) <= {"GET", "HEAD"}, \
                 path
 
@@ -88,13 +93,13 @@ async def test_the_workspaces_follow_the_contract(monkeypatch):
     from sportsassets.api import agents_pos as AP
     await _ws(monkeypatch)
     try:
-        e = await AP.eddie_workspace(Response())
-        same = await AP.eddie_workspace_agents(Response())
+        e = await AP.archer_workspace(Response())
+        same = await AP.archer_workspace_agents(Response())
         assert set(e) == set(same)
         assert e["read_only"] is True and e["production_effect"] == "NONE"
         assert e["profile"]["authority"] == "SHADOW_ONLY"
         assert "hard_rule" in e["profile"]
-        assert set(P.REQUIRED_SECTIONS["eddie"]) <= set(e["sections"])
+        assert set(P.REQUIRED_SECTIONS["archer"]) <= set(e["sections"])
         for k, sec in e["sections"].items():
             assert sec["status"] in ("OK", "EMPTY", "UNAVAILABLE"), k
             if sec["status"] != "OK":
@@ -111,18 +116,18 @@ async def test_the_workspaces_follow_the_contract(monkeypatch):
         assert s["profile"]["evaluator"] == "CALIBRATION_ENGINE"
         idx = await AC.agents_index(Response())
         ids = [a["agent_id"] for a in idx["agents"]]
-        assert ids == list(R.AGENTS) and "EDDIE" in ids and "SCOUT" in ids
+        assert ids == list(R.AGENTS) and "ARCHER" in ids and "SCOUT" in ids
         r = await AP.pos_reviews(Response(), limit=5)
         assert r["steps"] == ["DEREK_CANDIDATE", "KAREN_CHALLENGE",
-                              "SCOUT_EVIDENCE", "EDDIE_EXECUTION_ESTIMATE",
+                              "SCOUT_EVIDENCE", "ARCHER_EXECUTION_ESTIMATE",
                               "ALLOCATOR_RANKING", "AUDREY_RISK_CHECK",
                               "XAVIER_MANAGEMENT_PLAN"]
         with pytest.raises(Exception) as ex:
-            await AP.eddie_estimates(Response(), recommendation="BUY",
+            await AP.archer_estimates(Response(), recommendation="BUY",
                                      limit=5)
         assert getattr(ex.value, "status_code", None) == 400
         with pytest.raises(Exception) as ex:
-            await AP.eddie_estimate("eex:none", Response())
+            await AP.archer_estimate("eex:none", Response())
         assert getattr(ex.value, "status_code", None) == 404
         # the connection the reads use is read only
         pool = await db.get_pool()
@@ -156,7 +161,7 @@ def _client(monkeypatch):
     return TestClient(app, raise_server_exceptions=False)
 
 
-@pytest.mark.parametrize("kind", ["eddie", "scout"])
+@pytest.mark.parametrize("kind", ["archer", "scout"])
 def test_the_page_is_served_like_the_other_agent_pages(monkeypatch, kind):
     assert P.PAGE_PATHS[kind] == "/api/command/agents/%s/page" % kind
     assert P.ENDPOINTS[kind] == "/api/command/%s" % kind
@@ -212,8 +217,8 @@ def _sec(data, status="OK", why=None):
     return {"status": status, "why": why, "data": data, "evidence": []}
 
 
-EDDIE_DESK = {
-    "agent": "EDDIE", "name": "Eddie", "role": "Head of Execution",
+ARCHER_DESK = {
+    "agent": "ARCHER", "name": "Archer", "role": "Head of Execution",
     "authority": "SHADOW_ONLY",
     "heartbeat": {"state": "DECISION_RECORDED",
                   "last_heartbeat_at": T0 - 30, "activity": "x"},
@@ -241,12 +246,12 @@ EDDIE_DESK = {
 
 
 def test_the_desk_draws_every_value_from_the_record_and_names_nulls():
-    j = {"agent": {"agent_id": "EDDIE", "state": "DECISION_RECORDED",
+    j = {"agent": {"agent_id": "ARCHER", "state": "DECISION_RECORDED",
                    "last_heartbeat_at": T0 - 30,
                    "cadence": {"target_interval_s": 300}},
-         "read_at": T0, "desk": EDDIE_DESK}
-    f = _node("eddie", "return DESK.fields('eddie', %s);" % json.dumps(j))
-    for key, _ in DK.PANELS["eddie"]:
+         "read_at": T0, "desk": ARCHER_DESK}
+    f = _node("archer", "return DESK.fields('archer', %s);" % json.dumps(j))
+    for key, _ in DK.PANELS["archer"]:
         assert key in f, key
     assert "WAIT" in f["analysis"] and "eex:1" in f["analysis"]
     assert "NOT MEASURED" in f["capital_hours"]
@@ -256,7 +261,7 @@ def test_the_desk_draws_every_value_from_the_record_and_names_nulls():
     assert "0.550" in f["microstructure"] and "NO_EVENT_START" in \
         f["microstructure"]
     assert "NOT MEASURED" in f["predicted_realized"]
-    modes = _node("eddie", """
+    modes = _node("archer", """
       var a = {state: 'DECISION_RECORDED', last_heartbeat_at: %f, cadence: {target_interval_s: 300}};
       return [DESK.modeOf(a, %f).mode, DESK.modeOf(a, %f).mode,
               DESK.modeOf({state: 'FAILED', last_heartbeat_at: %f}, %f).mode,
@@ -265,7 +270,7 @@ def test_the_desk_draws_every_value_from_the_record_and_names_nulls():
     assert modes == ["monitoring", "unavailable", "unavailable",
                      "unavailable", "reviewing"]
     # no desk record: every panel says so, nothing is invented
-    f = _node("eddie", "return DESK.fields('eddie', {read_at: 1});")
+    f = _node("archer", "return DESK.fields('archer', {read_at: 1});")
     assert f.get("_unavailable")
     scout = {"heartbeat": {}, "alerts": [], "active_searches": [],
              "data_sources": [{"source_id": "w", "name": "Weather",
@@ -283,7 +288,7 @@ def test_the_desk_draws_every_value_from_the_record_and_names_nulls():
     assert "NOT MEASURED" in f["heartbeat"]
 
 
-@pytest.mark.parametrize("kind", ["eddie", "scout"])
+@pytest.mark.parametrize("kind", ["archer", "scout"])
 def test_the_render_code_draws_every_required_section(kind):
     specs = _node(kind, "return AG.SPECS[%r].sections.map(function(s)"
                         "{return s.key;});" % kind)
@@ -293,7 +298,7 @@ def test_the_render_code_draws_every_required_section(kind):
 def test_the_3d_desks_are_original_and_read_no_data():
     src = (REPO / "backend" / "sportsassets" / "assets" / "agents" /
            "cc_characters.js").read_text()
-    assert "eddie: {" in src and "scout: {" in src
+    assert "archer: {" in src and "scout: {" in src
     assert "desk: 'execution'" in src and "desk: 'research'" in src
     assert "DEPTH AT DECISION" in src and "SPORTS FEED" in src
     assert "WEATHER" in src and "cc:desk" in src
@@ -305,7 +310,7 @@ def test_the_management_urls_reach_the_pages_through_the_shell():
     shell = (REPO / "frontend" / "public" / "command" /
              "agent.html").read_text()
     toml = (REPO / "netlify.toml").read_text()
-    for kind in ("eddie", "scout"):
+    for kind in ("archer", "scout"):
         assert 'href="/%s" data-agent="%s"' % (kind, kind) in shell
         assert "%s: 1" % kind in shell
         m = re.search(r'from = "https://command\.bettortoken\.com/%s"\s+'
@@ -315,6 +320,13 @@ def test_the_management_urls_reach_the_pages_through_the_shell():
         # above the command-host catch-all
         assert toml.index('command.bettortoken.com/%s"' % kind) < \
             toml.index('command.bettortoken.com/*"')
+    # (266) /eddie, Archer's historical address, still reaches his page
+    assert re.search(r'from = "https://command\.bettortoken\.com/eddie"\s+'
+                     r'to = "/command/agent\.html"\s+status = 200\s+'
+                     r'force = true', toml)
+    assert toml.index('command.bettortoken.com/eddie"') < \
+        toml.index('command.bettortoken.com/*"')
+    assert 'var ALIASES = {eddie: "archer"};' in shell
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -324,7 +336,7 @@ def test_the_management_urls_reach_the_pages_through_the_shell():
 def test_personas_are_versioned_profiles_grounded_in_their_records():
     from sportsassets.agents import persona_chat as PC
     from sportsassets.agents import personas as PS
-    for aid, slug, words in (("EDDIE", "eddie", ("fast", "precise",
+    for aid, slug, words in (("ARCHER", "archer", ("fast", "precise",
                                                   "controlled",
                                                   "institutional")),
                              ("SCOUT", "scout", ("research-minded",
@@ -343,15 +355,15 @@ def test_personas_are_versioned_profiles_grounded_in_their_records():
 
 def test_role_briefs_are_scoped_and_bounded():
     from sportsassets.agents import role_brief as B
-    for aid in ("EDDIE", "SCOUT"):
+    for aid in ("ARCHER", "SCOUT"):
         sql = B.SQL[aid]
         assert "$1" in sql and "LIMIT 101" in sql and "BETWEEN" in sql
         assert aid in B.FOCUS
-    assert "eddie_execution_estimates" in B.SQL["EDDIE"]
-    assert "d.account_id=$1" in B.SQL["EDDIE"]
-    assert "<= 0" in B.FOCUS["EDDIE"]
+    assert "eddie_execution_estimates" in B.SQL["ARCHER"]
+    assert "d.account_id=$1" in B.SQL["ARCHER"]
+    assert "<= 0" in B.FOCUS["ARCHER"]
     assert "never validate or promote your own feature" in B.FOCUS["SCOUT"]
-    got = B.summarize("EDDIE", [dict(estimate_id="eex:%d" % i,
+    got = B.summarize("ARCHER", [dict(estimate_id="eex:%d" % i,
                                      recommendation="WAIT" if i else "SKIP_"
                                      "EXECUTION") for i in range(3)],
                       1000, "acct")
@@ -370,9 +382,9 @@ async def test_their_facts_come_only_from_their_records():
     await tx.start()
     try:
         e = await PF.gather(conn, question="what are you estimating?",
-                            agent="EDDIE")
+                            agent="ARCHER")
         s = await PF.gather(conn, question="which features?", agent="SCOUT")
-        for b, prefix in ((e, "eddie_"), (s, "scout_")):
+        for b, prefix in ((e, "archer_"), (s, "scout_")):
             assert all(f["source"].startswith(prefix) for f in b["facts"])
             assert b["paper"]["present"] is False
     finally:
@@ -394,7 +406,9 @@ FOUR = {"derek": ("xoxb-d", "sd", "AD"), "xavier": ("xoxb-x", "sx", "AX"),
 def _env(monkeypatch, **agents):
     for k, v in BASE.items():
         monkeypatch.setenv(k, v)
-    for a in ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT"):
+    # EDDIE too: Archer's values under his historical names are a fallback
+    for a in ("DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "EDDIE",
+              "SCOUT"):
         for f in ("BOT_TOKEN", "SIGNING_SECRET", "APP_ID"):
             monkeypatch.delenv("SLACK_%s_%s" % (a, f), raising=False)
     for a, (tok, sec, app) in agents.items():
@@ -403,11 +417,11 @@ def _env(monkeypatch, **agents):
         monkeypatch.setenv("SLACK_%s_APP_ID" % a.upper(), app)
 
 
-@pytest.mark.parametrize("agent", ["eddie", "scout"])
+@pytest.mark.parametrize("agent", ["archer", "scout"])
 def test_a_dedicated_identity_configured_by_its_own_env_names(monkeypatch,
                                                               agent):
     assert agent in S.AGENTS and agent not in S.REQUIRED_AGENTS
-    other = "scout" if agent == "eddie" else "eddie"
+    other = "scout" if agent == "archer" else "archer"
     _env(monkeypatch, **FOUR)
     got = S.dedicated_identity(agent)
     assert got == {"configured": False, "distinct": True, "ok": False,
@@ -444,7 +458,7 @@ def test_a_dedicated_identity_configured_by_its_own_env_names(monkeypatch,
 
 
 def test_the_manifests_and_the_one_admin_step_per_app():
-    for agent, name in (("eddie", "Eddie"), ("scout", "Scout")):
+    for agent, name in (("archer", "Archer"), ("scout", "Scout")):
         m = json.loads((REPO / "research" / ("%s-manifest.json" % agent))
                        .read_text())
         assert m["features"]["bot_user"]["display_name"] == name
@@ -453,12 +467,18 @@ def test_the_manifests_and_the_one_admin_step_per_app():
         assert len(m["display_information"]["description"]) <= 140
         assert set(m["oauth_config"]["scopes"]["bot"]) == {
             "app_mentions:read", "chat:write", "chat:write.public"}
-    doc = (REPO / "research" / "eddie_scout_slack_setup.md").read_text()
+    doc = (REPO / "research" / "archer_scout_slack_setup.md").read_text()
     assert doc.count("-- THE ACTION") == 2
-    for v in ("SLACK_EDDIE_BOT_TOKEN", "SLACK_EDDIE_SIGNING_SECRET",
-              "SLACK_EDDIE_APP_ID", "SLACK_SCOUT_BOT_TOKEN",
+    for v in ("SLACK_ARCHER_BOT_TOKEN", "SLACK_ARCHER_SIGNING_SECRET",
+              "SLACK_ARCHER_APP_ID", "SLACK_SCOUT_BOT_TOKEN",
               "SLACK_SCOUT_SIGNING_SECRET", "SLACK_SCOUT_APP_ID"):
         assert v in doc, v
+    # (266) the app installed under Archer's historical name keeps working,
+    # and the doc says how: its event URL and its SLACK_EDDIE_* values
+    assert "SLACK_EDDIE_*" in doc and "/slack/eddie/events" in doc
+    old = json.loads((REPO / "research" / "eddie-manifest.json").read_text())
+    assert old["settings"]["event_subscriptions"]["request_url"].endswith(
+        "/api/integrations/slack/eddie/events")
 
 
 @pytest.fixture
@@ -479,7 +499,7 @@ async def pool(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", ["eddie", "scout"])
+@pytest.mark.parametrize("agent", ["archer", "scout"])
 async def test_answers_from_records_under_its_own_token(pool, monkeypatch,
                                                         agent):
     own = ("xoxb-" + agent, "s" + agent, "A" + agent.upper())

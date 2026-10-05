@@ -1,6 +1,9 @@
-"""EDDIE AND SCOUT (migration 217): FIRST-CLASS IDENTITIES WITH NO AUTHORITY.
+"""ARCHER AND SCOUT (migration 217): FIRST-CLASS IDENTITIES WITH NO AUTHORITY.
 
-  * the registry holds EDDIE (Head of Execution, SHADOW_ONLY) and SCOUT
+(ARCHER was named EDDIE until migration 266; tests/test_archer_rename.py
+proves the rename and the historical alias.)
+
+  * the registry holds ARCHER (Head of Execution, SHADOW_ONLY) and SCOUT
     (Market Intelligence, RESEARCH_SHADOW_ONLY) with explicit allow lists and
     DENY lists naming every order, dispatch, cancel, capital, limit,
     credential, account, approval, switch, deploy, activation, promotion and
@@ -10,7 +13,7 @@
     no order / venue / funded / execution path and write only their tables;
   * in the database: a trigger on every approval / activation / promotion /
     control / decision-of-record table AND every order / intent / fill table
-    refuses EDDIE or SCOUT -- named in an actor column, or declared as the
+    refuses ARCHER or SCOUT -- named in an actor column, or declared as the
     session's acting agent -- the task history refuses them moving a task to
     an approval or release state, and the collaboration loop admits them as
     proposers and peers but never at RELEASE_ELIGIBILITY.
@@ -36,6 +39,10 @@ pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MIG = ROOT / "migrations"
 UP = (MIG / "217_eddie_scout_agents.sql").read_text()
+from tests._pre_265 import remove_adriana_rows  # noqa: E402
+from tests._pre_266 import (DOWN_266, UP_266, as_written_before_266,  # noqa
+                            remove_archer_rows)
+UP_265 = (MIG / "265_adriana_arbitrage_agent.sql").read_text()
 DOWN = (MIG / "rollback" / "217_eddie_scout_agents.down.sql").read_text()
 
 DENIED_BY_SPEC = (
@@ -52,19 +59,19 @@ DENIED_BY_SPEC = (
 # IDENTITY AND PERMISSIONS (code)
 # ════════════════════════════════════════════════════════════════════
 
-def test_eddie_and_scout_are_registered_identities_with_mandates():
-    assert R.EDDIE == "EDDIE" and R.SCOUT == "SCOUT"
-    assert R.EDDIE in R.AGENTS and R.SCOUT in R.AGENTS
-    assert R.AGENTS == ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE",
-                        "SCOUT")
-    for aid in (R.EDDIE, R.SCOUT):
+def test_archer_and_scout_are_registered_identities_with_mandates():
+    assert R.ARCHER == "ARCHER" and R.SCOUT == "SCOUT"
+    assert R.ARCHER in R.AGENTS and R.SCOUT in R.AGENTS
+    assert R.AGENTS == ("DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER",
+                        "SCOUT", "ADRIANA")
+    for aid in (R.ARCHER, R.SCOUT):
         assert aid not in R.OPERATING_AGENTS
         perms = R.IDENTITIES[aid]["tool_permissions"]
         assert perms["order_path"] is None
         assert not set(perms["allowed"]) & set(perms["denied"])
         assert set(perms["allowed"]) | set(perms["denied"]) <= set(R.TOOLS)
-    e, s = R.IDENTITIES[R.EDDIE], R.IDENTITIES[R.SCOUT]
-    assert e["display_name"] == "Eddie" and e["role"] == "HEAD_OF_EXECUTION"
+    e, s = R.IDENTITIES[R.ARCHER], R.IDENTITIES[R.SCOUT]
+    assert e["display_name"] == "Archer" and e["role"] == "HEAD_OF_EXECUTION"
     assert e["authority"] == "SHADOW_ONLY"
     assert e["tool_permissions"]["authority_status"] == "SHADOW_ONLY"
     assert "Does NOT predict outcomes" in e["mandate"]
@@ -77,7 +84,7 @@ def test_eddie_and_scout_are_registered_identities_with_mandates():
 
 def test_no_marco_identifier_remains_anywhere_in_the_change():
     for path in [ROOT / "sportsassets" / "agents" / n for n in (
-            "registry.py", "eddie.py", "eddie_runner.py", "scout.py",
+            "registry.py", "archer.py", "archer_runner.py", "scout.py",
             "scout_runner.py", "pos_authority.py", "pos_workflow.py",
             "feature_tournament.py", "personas.py", "persona_chat.py")] + [
             ROOT / "sportsassets" / "api" / "agents_pos.py",
@@ -88,10 +95,10 @@ def test_no_marco_identifier_remains_anywhere_in_the_change():
 
 
 def test_each_may_only_its_own_reads_and_records():
-    e = R.IDENTITIES[R.EDDIE]["tool_permissions"]["allowed"]
+    e = R.IDENTITIES[R.ARCHER]["tool_permissions"]["allowed"]
     s = R.IDENTITIES[R.SCOUT]["tool_permissions"]["allowed"]
     for aid, allowed, writes in (
-            (R.EDDIE, e, {"write.execution_estimates",
+            (R.ARCHER, e, {"write.execution_estimates",
                           "write.candidate_reviews", "write.loop_findings",
                           "write.agent_tasks"}),
             (R.SCOUT, s, {"write.feature_registry",
@@ -102,12 +109,12 @@ def test_each_may_only_its_own_reads_and_records():
             assert R.permits(aid, tool) and PA.may(aid, tool), (aid, tool)
         assert not R.permits(aid, "read.all")
     # neither may write the other's records
-    assert not PA.may(R.EDDIE, "write.feature_registry")
+    assert not PA.may(R.ARCHER, "write.feature_registry")
     assert not PA.may(R.SCOUT, "write.execution_estimates")
     assert not PA.may(R.SCOUT, "write.candidate_reviews")
 
 
-@pytest.mark.parametrize("aid", ["EDDIE", "SCOUT"])
+@pytest.mark.parametrize("aid", ["ARCHER", "SCOUT"])
 def test_every_authority_is_denied_explicitly_and_refused(aid):
     denied = R.IDENTITIES[aid]["tool_permissions"]["denied"]
     for tool in DENIED_BY_SPEC:
@@ -128,13 +135,13 @@ def test_every_authority_is_denied_explicitly_and_refused(aid):
 
 
 def test_actor_matching_mirrors_the_database_and_spares_people():
-    for a, who in (("EDDIE", "EDDIE"), ("eddie", "EDDIE"),
-                   ("agent:eddie", "EDDIE"), ("slack:eddie", "EDDIE"),
-                   ("eddie-bot", "EDDIE"), ("Eddie execution", "EDDIE"),
+    for a, who in (("ARCHER", "ARCHER"), ("archer", "ARCHER"),
+                   ("agent:archer", "ARCHER"), ("slack:archer", "ARCHER"),
+                   ("archer-bot", "ARCHER"), ("Archer execution", "ARCHER"),
                    ("SCOUT", "SCOUT"), ("agent/scout", "SCOUT"),
                    ("scout research", "SCOUT"), ("scout-bot", "SCOUT")):
         assert PA.actor_of(a) == who, a
-    for a in ("Eddie Ruiz", "scouting report", "OWNER", "KAREN", "", None,
+    for a in ("Archer Ruiz", "scouting report", "OWNER", "KAREN", "", None,
               7, "Boy Scout"):
         assert PA.actor_of(a) is None, a
 
@@ -144,8 +151,8 @@ _ORDER_MODULES = ("venue", "kalshi", "clob", "live_executor",
                   "bettor_xavier", "workers", "pmus", "pmx", "edge_gate",
                   "entry_execution", "execution_gate")
 _OWN_TABLES = {
-    "eddie.py": {"eddie_execution_estimates", "eddie_execution_outcomes"},
-    "eddie_runner.py": set(),
+    "archer.py": {"eddie_execution_estimates", "eddie_execution_outcomes"},
+    "archer_runner.py": set(),
     "scout.py": {"scout_sources", "scout_features",
                  "scout_feature_observations", "scout_feature_tournaments",
                  "scout_tournament_samples"},
@@ -189,17 +196,17 @@ def test_the_api_module_has_no_write_route():
 
 
 def test_default_peer_routing_is_recorded_in_the_loop():
-    assert CL.PEER_ROUTING["EDDIE"] == ("DEREK", "XAVIER", "CHIEF_ALLOCATOR",
+    assert CL.PEER_ROUTING["ARCHER"] == ("DEREK", "XAVIER", "CHIEF_ALLOCATOR",
                                         "AUDREY", "KAREN")
     assert CL.PEER_ROUTING["SCOUT"][:4] == ("DEREK", "KAREN",
                                             "CALIBRATION_ENGINE",
                                             "MODEL_TOURNAMENT")
     assert "AUDREY" in CL.PEER_ROUTING["SCOUT"]
     assert "MODEL_CHALLENGERS" in CL.PEER_ROUTING["SCOUT"]
-    assert CL.default_peer("EDDIE") == "DEREK"
+    assert CL.default_peer("ARCHER") == "DEREK"
     assert CL.default_peer("SCOUT", exclude=("DEREK",)) == "KAREN"
     # neither may mark a finding release-eligible, in code
-    for aid in ("EDDIE", "SCOUT"):
+    for aid in ("ARCHER", "SCOUT"):
         assert CL.check_advance(
             {"proposer": "DEREK", "stage": "INDEPENDENT_EVALUATION",
              "evidence_refs": [{"kind": "agent_decisions", "id": "x"}]},
@@ -242,10 +249,16 @@ async def _as(conn, agent):
 async def test_the_identities_are_persisted_with_their_permissions():
     conn, tx = await _tx()
     try:
+        await remove_adriana_rows(conn)                       # pre-265
+        await remove_archer_rows(conn)                        # pre-266
         await conn.execute(UP)                                # idempotent
+        # re-running 217 narrows the identity CHECK to its six agents; 265
+        # (Adriana) and 266 (ARCHER) re-assert the widened CHECK after it
+        await conn.execute(UP_265)
+        await conn.execute(UP_266)
         got = await R.ensure_identities(conn)
         assert got["ok"] is True, got
-        for aid, role in ((R.EDDIE, "HEAD_OF_EXECUTION"),
+        for aid, role in ((R.ARCHER, "HEAD_OF_EXECUTION"),
                           (R.SCOUT, "MARKET_INTELLIGENCE")):
             assert got["agents"][aid]["ok"], got
             st = await R.status_of(conn, aid)
@@ -257,7 +270,7 @@ async def test_the_identities_are_persisted_with_their_permissions():
                       " display_name, mandate) VALUES ('MARCO','m','m')")
         n = await conn.fetchval("SELECT count(*) FROM agent_identities WHERE "
                                 " agent_id = ANY($1)", list(R.AGENTS))
-        assert n == len(R.AGENTS) == 6
+        assert n == len(R.AGENTS) == 7
     finally:
         await tx.rollback()
         await conn.close()
@@ -309,7 +322,7 @@ async def test_the_trigger_guards_every_approval_control_and_order_table():
 @pg
 @pytest.mark.asyncio
 async def test_an_ordinary_session_is_untouched_by_the_guard():
-    """The guard refuses ONLY Eddie / Scout: an ordinary session's write to
+    """The guard refuses ONLY Archer / Scout: an ordinary session's write to
     a guarded table -- including a table guarded by the session declaration
     alone (no actor column) -- passes it."""
     import asyncpg
@@ -347,7 +360,7 @@ async def test_an_ordinary_session_is_untouched_by_the_guard():
 
 @pg
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", ["EDDIE", "SCOUT"])
+@pytest.mark.parametrize("agent", ["ARCHER", "SCOUT"])
 async def test_the_database_refuses_each_agent_on_approval_and_control(agent):
     conn, tx = await _tx()
     try:
@@ -373,7 +386,7 @@ async def test_the_database_refuses_each_agent_on_approval_and_control(agent):
                       " actor) VALUES (true, $1)", agent.lower(), match=err)
         # a person who happens to share the name is a person
         await conn.execute("INSERT INTO agent_slack_control_audit (enabled, "
-                           " actor) VALUES (false, 'Eddie Ruiz')")
+                           " actor) VALUES (false, 'Archer Ruiz')")
         # THE SESSION DECLARED AS THE AGENT: every control and approval
         # write refused, whatever the actor column says
         sp = conn.transaction()
@@ -396,7 +409,7 @@ async def test_the_database_refuses_each_agent_on_approval_and_control(agent):
 
 @pg
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", ["EDDIE", "SCOUT"])
+@pytest.mark.parametrize("agent", ["ARCHER", "SCOUT"])
 async def test_the_database_refuses_each_agent_on_the_order_tables(agent):
     conn, tx = await _tx()
     try:
@@ -448,7 +461,7 @@ async def test_the_database_refuses_each_agent_on_the_order_tables(agent):
 
 @pg
 @pytest.mark.asyncio
-@pytest.mark.parametrize("agent", ["EDDIE", "SCOUT"])
+@pytest.mark.parametrize("agent", ["ARCHER", "SCOUT"])
 async def test_neither_moves_a_task_to_approval_or_release(agent):
     conn, tx = await _tx()
     try:
@@ -483,20 +496,20 @@ async def test_in_the_loop_they_propose_and_peer_but_never_mark_release():
         refs = [{"kind": "agent_decisions", "id": "adr:p217-1"}]
         import time
         t = time.time()
-        got = await CL.open_finding(conn, proposer="EDDIE", title="e217",
+        got = await CL.open_finding(conn, proposer="ARCHER", title="e217",
                                     statement="s", evidence_refs=refs,
                                     evidence_window_end=t - 5, at=t)
         assert got["ok"] and got["created"], got
         fid = got["finding_id"]
         assert (await CL.record_hypothesis(
-            conn, fid, actor="EDDIE", hypothesis="h", evidence_refs=refs,
+            conn, fid, actor="ARCHER", hypothesis="h", evidence_refs=refs,
             at=t + 1))["ok"]
         ch = await CL.record_challenge(conn, fid, actor="SCOUT",
                                        challenge="c", outcome="SUSTAINED",
                                        evidence_refs=refs, at=t + 2)
         assert ch["ok"], ch
         # the database refuses either at RELEASE_ELIGIBILITY directly
-        for agent in ("EDDIE", "SCOUT"):
+        for agent in ("ARCHER", "SCOUT"):
             await _expect(conn, "INSERT INTO agent_finding_stages (finding_id,"
                           " seq, stage, actor, at, outcome, body) VALUES "
                           " ($1, 7, 'RELEASE_ELIGIBILITY', $2, now(), "
@@ -519,29 +532,54 @@ async def test_217_is_idempotent_and_its_rollback_refuses_over_records():
     import asyncpg
     conn, tx = await _tx()
     try:
+        await remove_adriana_rows(conn)                       # pre-265
+        await remove_archer_rows(conn)                        # pre-266
         await conn.execute(UP)
         await conn.execute(UP)
+        await conn.execute(UP_265)                # the eight-agent CHECK
+        await conn.execute(UP_266)                # ARCHER (the rename)
         await R.ensure_identities(conn)
-        await R.start_run(conn, R.EDDIE, "eddie-run:p217-down")
+        await R.start_run(conn, R.ARCHER, "archer-run:p217-down")
+        # the rollback chain refuses over his records: 266 first (ARCHER's
+        # run), then 217 (a run recorded under his historical name EDDIE,
+        # before the rename -- inserted here past the alias guard, as a
+        # pre-266 database holds it)
         sp = conn.transaction()
         await sp.start()
+        with pytest.raises(asyncpg.RaiseError, match="rollback refused"):
+            await conn.execute(DOWN_266)
+        await sp.rollback()
+        sp = conn.transaction()
+        await sp.start()
+        await as_written_before_266(
+            conn, "INSERT INTO agent_runs (run_id, agent_id, started_at) "
+                  "VALUES ('eddie-run:p217-down', 'EDDIE', now())",
+            table="agent_runs")
         with pytest.raises(asyncpg.RaiseError):
             await conn.execute(DOWN)
         await sp.rollback()
         await conn.execute("ALTER TABLE agent_runs DISABLE TRIGGER "
                            "agent_runs_append_only_trg")
         await conn.execute("DELETE FROM agent_runs WHERE agent_id IN "
-                           "('EDDIE','SCOUT')")
+                           "('ARCHER','SCOUT')")
         await conn.execute("ALTER TABLE agent_runs ENABLE TRIGGER "
                            "agent_runs_append_only_trg")
         await conn.execute("ALTER TABLE agent_persona_versions DISABLE "
                            "TRIGGER agent_persona_versions_kept_trg")
         await conn.execute("DELETE FROM agent_persona_versions WHERE "
-                           " agent_id IN ('EDDIE','SCOUT')")
+                           " agent_id IN ('ARCHER','SCOUT')")
         await conn.execute("ALTER TABLE agent_persona_versions ENABLE "
                            "TRIGGER agent_persona_versions_kept_trg")
         await conn.execute("DELETE FROM agent_chat_conversations WHERE "
-                           " agent_id IN ('EDDIE','SCOUT')")
+                           " agent_id IN ('ARCHER','SCOUT')")
+        # with no record of his left, 266 rolls back (twice: idempotent)
+        await conn.execute(DOWN_266)
+        await conn.execute(DOWN_266)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM agent_identity_versions "
+            " WHERE agent_id = 'ARCHER'") == 0
+        await remove_adriana_rows(conn)                       # pre-265
+        await remove_archer_rows(conn, alias=True)            # pre-217
         await conn.execute(DOWN)
         await conn.execute(DOWN)
         assert await conn.fetchval(

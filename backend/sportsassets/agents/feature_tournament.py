@@ -3,7 +3,7 @@
 This is the calibration engine's verdict on one of Scout's frozen forward
 tests -- NOT Scout's. It writes as CALIBRATION_ENGINE (a rule-based role,
 not an agent identity) and the database refuses a verdict recorded by Scout
-(migration 217: evaluated_by may not be EDDIE / SCOUT).
+(migration 217: evaluated_by may not be ARCHER / SCOUT).
 
   * nothing is evaluated before the PREDECLARED minimum sample has settled
     outcomes -- the tournament stays UNDER_TEST with its progress;

@@ -154,7 +154,7 @@ def system_prompt(persona: dict) -> str:
          "desk (Derek: discovery and entry; Xavier: position management and "
          "protection; Audrey: audit of results and decision quality; Karen: "
          "red team, who challenges the other three with evidence and holds "
-         "no authority; Eddie: head of execution, SHADOW estimates only; "
+         "no authority; Archer: head of execution, SHADOW estimates only; "
          "Scout: market intelligence, research only). You are talking with the desk's management." % (
              persona.get("display_name"), persona.get("role_title")),
          "", "WHO YOU ARE", str(persona.get("persona_text") or ""),
@@ -225,7 +225,7 @@ OPENERS = {
     "KAREN": ["What are we missing?", "", "Prove it. Here's what the record "
               "actually shows.", "Let's poke at the assumptions.",
               "Evidence first, applause later."],
-    "EDDIE": ["Execution first.", "", "Here is what survives the spread.",
+    "ARCHER": ["Execution first.", "", "Here is what survives the spread.",
               "Net of costs, then.", "Precisely:"],
     "SCOUT": ["Here's what the evidence shows so far.", "",
               "Status first, then the source.", "Let's see what's validated.",
@@ -235,7 +235,7 @@ PLAIN_OPENERS = {"DEREK": "Here's what the record says.",
                  "XAVIER": "Plainly, then.",
                  "AUDREY": "Let's be honest about this one.",
                  "KAREN": "Evidence first.",
-                 "EDDIE": "Execution first.",
+                 "ARCHER": "Execution first.",
                  "SCOUT": "Status first, then the source."}
 
 
@@ -471,7 +471,7 @@ PAPER_AGENT_LEADS = {
                                    "(Derek's two-model policy and the "
                                    "Pinnacle-only benchmark)")},
     "AUDREY": {"paper_decisions": "Paper decisions to audit"},
-    "KAREN": {}, "EDDIE": {}, "SCOUT": {}}
+    "KAREN": {}, "ARCHER": {}, "SCOUT": {}}
 LEGACY_LEAD = ("Legacy desk account, not the paper account — figures as of "
                "the time shown")
 _RX_PAPER_Q = re.compile(r"\b(paper|cash|balances?|reserved|available|"
@@ -498,9 +498,9 @@ SOURCE_ORDER = {
     "KAREN": ["karen_challenges", "karen_peer_responses",
               "karen_evaluations", "karen_evidence", "karen_metrics",
               "karen_status"],
-    # Eddie and Scout talk ONLY from their own records (migration 217)
-    "EDDIE": ["eddie_estimates", "eddie_outcomes", "eddie_metrics",
-              "eddie_status"],
+    # Archer and Scout talk ONLY from their own records (migration 217)
+    "ARCHER": ["archer_estimates", "archer_outcomes", "archer_metrics",
+              "archer_status"],
     "SCOUT": ["scout_features", "scout_sources", "scout_observations",
               "scout_metrics", "scout_status"],
 }
@@ -543,10 +543,10 @@ LEADS = {
               "karen_evidence": "The evidence, as recorded",
               "karen_metrics": "My own scorecard",
               "karen_status": "Where I stand"},
-    "EDDIE": {"eddie_estimates": "My execution estimates (SHADOW)",
-              "eddie_outcomes": "Predicted against realized",
-              "eddie_metrics": "My scorecard",
-              "eddie_status": "Where I stand"},
+    "ARCHER": {"archer_estimates": "My execution estimates (SHADOW)",
+              "archer_outcomes": "Predicted against realized",
+              "archer_metrics": "My scorecard",
+              "archer_status": "Where I stand"},
     "SCOUT": {"scout_features": "Features and their forward tests",
               "scout_sources": "Sources and their compliance",
               "scout_observations": "Latest observations",
@@ -560,7 +560,7 @@ MISSING_LEAD = {"DEREK": "What I don't have",
                 "XAVIER": "Not in the record",
                 "AUDREY": "Missing evidence",
                 "KAREN": "What nobody has proven yet",
-                "EDDIE": "Not measured",
+                "ARCHER": "Not measured",
                 "SCOUT": "Not yet validated"}
 TIME_NOTE = {
     "DEREK": ("Those are the figures as decided at the times shown; nothing "
@@ -571,7 +571,7 @@ TIME_NOTE = {
                "current picture is only what the latest records say."),
     "KAREN": ("A challenge is a question, not a verdict, until an "
               "independent evaluator upholds it."),
-    "EDDIE": ("An estimate is a SHADOW recommendation as of its record time; "
+    "ARCHER": ("An estimate is a SHADOW recommendation as of its record time; "
               "nothing executes on it."),
     "SCOUT": ("A feature is unproven until its frozen forward test is "
               "evaluated -- and the verdict is never mine."),
@@ -660,7 +660,7 @@ def _not_found(agent: str, bundle: dict, depth: str) -> list:
         "KAREN": "What are we missing? Any record about %s. I have no "
                  "challenge that cites %s, and I don't challenge what "
                  "isn't recorded." % (subj, subj),
-        "EDDIE": "I have no execution estimate about %s; I estimate only "
+        "ARCHER": "I have no execution estimate about %s; I estimate only "
                  "Derek's recorded candidates." % subj,
         "SCOUT": "I hold no compliant feature or observation about %s; I "
                  "don't speculate past my records." % subj,
@@ -1411,7 +1411,7 @@ REFUSAL_VOICE = {
                "nothing has been changed."),
     "KAREN": ("Nice try. I hold no authority at all — I question things, I "
               "don't change them — and nothing has been changed."),
-    "EDDIE": ("No. I hold no order, cancel, venue or capital authority — my "
+    "ARCHER": ("No. I hold no order, cancel, venue or capital authority — my "
               "estimates are shadow only — and nothing has been changed."),
     "SCOUT": ("I can't. I decide no trade and can't promote a feature, not "
               "even my own — and nothing has been changed."),

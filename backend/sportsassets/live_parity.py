@@ -9,7 +9,7 @@ intent through different execution adapters:
                                 ENTER (paper_benchmark.decide_one): strategy +
                                 version, evidence snapshot ids, opportunity
                                 score, Derek's verdict, Karen's review state,
-                                Allie's allocation, Eddie's executable-EV
+                                Allie's allocation, Archer's executable-EV
                                 verdict, side, venue, contract, limit, sizing
                                 basis, created_at -- and the sha256 of all of
                                 it. Immutable (migration 225).
@@ -81,7 +81,7 @@ R30A ADDITIONS (truth / convergence):
                   them -- they are never counted as logic divergences, and
                   never as passes.
   ALLIE / EDDIE   the parity comparison also compares Allie's final
-                  allocation (scaled) and Eddie's executable estimate; a
+                  allocation (scaled) and Archer's executable estimate; a
                   capital-scale difference is EXPECTED_SCALE_DIFFERENCE,
                   anything else LOGIC_DIVERGENCE.
   ALTERNATIVES    a management pair compares the evaluated alternative set:
@@ -184,7 +184,7 @@ VENUE_EXCLUSIONS = {M.UNSUPPORTED_ORDER, M.INVENTORY_COMMITTED,
 #: while any row of its sample carries one.
 R_GATE_APPROVAL = "LIVE_GATE_APPROVAL_ABSENT_OR_STALE"
 GOVERNANCE_EXCLUSIONS = set(LIVE_POLICY_REFUSALS) | {R_GATE_APPROVAL}
-#: tolerance for a scaled dollar comparison (Allie / Eddie): the scaled
+#: tolerance for a scaled dollar comparison (Allie / Archer): the scaled
 #: values are computed from the same intent, so they agree to rounding
 SCALED_USD_TOLERANCE = Decimal("0.000001")
 #: paper-ledger refusals that are the paper account's capital caps
@@ -249,8 +249,8 @@ def _num_s(v) -> str | None:
 #: WHAT THE ALLIE / EDDIE COMPARISON IS -- AND IS NOT (R30A section 30;
 #: stated on every comparison and on the readiness report). R30A review: both
 #: adapters' views are computed by allie_eddie_view from the SAME canonical
-#: intent's Allie and Eddie components, so the comparison cannot produce a
-#: LOGIC_DIVERGENCE from Allie's or Eddie's own logic in production. In
+#: intent's Allie and Archer components, so the comparison cannot produce a
+#: LOGIC_DIVERGENCE from Allie's or Archer's own logic in production. In
 #: SHADOW the SMALL LIVE adapter has no capital allocator and no execution
 #: estimator of its own: what it brings is LIVE CAPITAL STATE -- the live
 #: per-order rail and the live account's current buying power -- which bounds
@@ -258,7 +258,7 @@ def _num_s(v) -> str | None:
 #: this is a SCALE-CONSISTENCY check of the two adapters' views, never
 #: evidence that an independent LIVE evaluation agreed. An independent one
 #: needs a LIVE-side Allie (allocating against the live account's capital
-#: and exposure) and a LIVE-side Eddie (estimating against the live order's
+#: and exposure) and a LIVE-side Archer (estimating against the live order's
 #: own size on the venue book); neither exists in this release.
 ALLIE_EDDIE_BASIS = {
     "kind": "SCALE_CONSISTENCY_CHECK_NOT_AN_INDEPENDENT_EVALUATION",
@@ -278,7 +278,7 @@ def allie_eddie_view(intent: dict, *, scale=1, live_rail_usd=None,
     the SAME intent: the PAPER adapter at scale 1, the SMALL LIVE adapter at
     1:scale, where Allie's final allocation is also bounded by LIVE CAPITAL
     STATE -- the live rail (the per-order cap the SMALL LIVE adapter
-    applies) and the live account's current buying power -- and Eddie's
+    applies) and the live account's current buying power -- and Archer's
     executable EV is in live dollars. Scale-free facts (status,
     recommendation, edge in percentage points, fill probability, Allie's
     binding term) are carried unchanged; any of them differing between the
@@ -702,7 +702,7 @@ def compare(*, kind: str, intent: dict, paper: dict, live: dict, scale,
     on the live record leaves the logic comparison to the would-be order
     (`plan_state` / `plan_exclusion`); the governance refusals are recorded
     on the comparison and block readiness, the expiry is a venue-timing
-    difference. Allie / Eddie (decisions) and the alternative set
+    difference. Allie / Archer (decisions) and the alternative set
     (management) are compared too."""
     pr, lr = paper.get("requested") or {}, live.get("requested") or {}
     fields: dict[str, Any] = {}
@@ -1603,7 +1603,8 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
         from . import canonical_components as CC
         comps = await CC.at_decision(conn, decision=decision,
                                      book_row=book_row, cost_usd=cost, p=p,
-                                     wire=sized.get("wire"), now=at)
+                                     wire=sized.get("wire"), now=at,
+                                     contract=cand)
         pinnacle = cand.get("pinnacle") or {}
         pin = pin or {}
         prm = params if isinstance(params, dict) else None
@@ -1717,7 +1718,14 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 if isinstance(params, dict) else None,
                 # R30A review: the build that decided, inside the sha, so a
                 # row can be attributed to its decision logic after the fact
-                "build": serving_build_identity()},
+                "build": serving_build_identity(),
+                # R30C: the expected settlement-exception cost against the
+                # completed-game assumption. SHADOW evidence for Eddie /
+                # Allie (R30B); it gates nothing and is not one of the
+                # parity ledger's evidence ids (`evidence_ids`).
+                "settlement_exception_risk": comps.get(
+                    "settlement_exception_risk") or unavailable(
+                        "COMPONENT_NOT_COMPUTED")},
             opportunity_score=comps["opportunity_score"],
             derek=CC.derek_component(
                 verdict=verdict, policy_version=version,
@@ -1742,6 +1750,15 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 "acquisition_cost_usd": cost},
             created_at=at)
         await record_decision_intent(conn, intent)
+        # R30C · THE OPPORTUNITY SCORE SHADOW TOURNAMENT: V1 (the score the
+        # intent carries) and V2 (the lower-confidence-bound score) recorded
+        # BESIDE the intent at this decision instant (migration 300). V2 has
+        # no authority: it is not in the intent, nothing reads it to decide,
+        # and a failure here never touches the decision (savepoint inside).
+        from . import opportunity_tournament as OT
+        await OT.record_entry(conn, intent=intent,
+                              v1=comps.get("opportunity_score"),
+                              v2=comps.get("opportunity_score_v2"))
         return intent
     except Exception:                                          # noqa: BLE001
         log.warning("canonical intent not built for %s", did, exc_info=True)

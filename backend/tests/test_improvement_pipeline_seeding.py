@@ -17,7 +17,7 @@
      with the ORIGIN dissent preserved; a reconciliation challenge is
      protected (two reviews + human); an OPEN or REJECTED challenge seeds
      nothing.
-  §4 EDDIE / FALSE REFUSALS / TOURNAMENTS. SKIP_EXECUTION estimates group
+  §4 ARCHER / FALSE REFUSALS / TOURNAMENTS. SKIP_EXECUTION estimates group
      per day (later rows are appended as EVIDENCE, not a transition);
      FALSE_REFUSAL rows group per defect only when the lost-opportunity table
      exists (absent -> nothing, no error); a VALIDATED Scout tournament seeds
@@ -337,7 +337,7 @@ async def test_a_reconciliation_challenge_is_protected_and_rejected_is_not_seede
         await conn.close()
 
 
-# ── §4 Eddie, false refusals, tournaments ───────────────────────────
+# ── §4 Archer, false refusals, tournaments ───────────────────────────
 
 UNMEASURED = {k: "TEST_FIXTURE_NOT_MEASURED" for k in (
     "theoretical_edge", "fees", "spread_cost", "slippage",
@@ -357,7 +357,7 @@ async def _skip(conn, n, at):
 
 
 @pg
-async def test_eddie_skips_group_per_day_and_later_rows_append_evidence():
+async def test_archer_skips_group_per_day_and_later_rows_append_evidence():
     conn, tx = await _tx()
     try:
         await _skip(conn, 1, NOW - 600)
@@ -366,7 +366,7 @@ async def test_eddie_skips_group_per_day_and_later_rows_append_evidence():
         es = await _items(conn, "EDDIE_SKIP_EXECUTION")
         assert len(es) == 1
         it = es[0]
-        assert it["owner_agent"] == "EDDIE"
+        assert it["owner_agent"] == "ARCHER"
         assert len(it["evidence_refs"]) == 2
         assert "EXECUTION_AUTHORIZATION" in it["protected_areas"]
         await _skip(conn, 3, NOW - 100)
@@ -469,7 +469,7 @@ async def test_the_budget_the_isolation_and_the_kill_switch(monkeypatch):
         async def broken(conn, *, now):
             raise RuntimeError("source down")
         monkeypatch.setattr(P, "SOURCES", (("broken", broken),
-                                           ("eddie", P.seed_eddie)))
+                                           ("archer", P.seed_archer)))
         s = await P.pass_once(conn, now=NOW)
         assert "source:broken" in s["errors"]
         assert s["status"] == "PARTIAL"
@@ -498,7 +498,7 @@ def _slack_env(monkeypatch, *, karen_shares_derek=False):
     monkeypatch.setenv("SLACK_ALLOWED_CHANNEL_IDS", "CWORK")
     monkeypatch.setenv("SLACK_WORKROOM_CHANNEL_ID", "CWORK")
     monkeypatch.setenv("SLACK_MANAGEMENT_USER_IDS", "UMGR")
-    for a in ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT"):
+    for a in ("DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER", "SCOUT"):
         tok = "xoxb-%s" % a.lower()
         if a == "KAREN" and karen_shares_derek:
             tok = "xoxb-derek"

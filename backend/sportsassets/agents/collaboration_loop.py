@@ -54,10 +54,10 @@ from typing import Any
 AGENTS = ("DEREK", "XAVIER", "AUDREY")
 #: Agents that may act in the loop ONLY by recording a PEER_CHALLENGE.
 CHALLENGERS_ONLY = ("KAREN",)
-#: (migration 217) Eddie (execution) and Scout (intelligence) propose and
+#: (migration 217) Archer (execution) and Scout (intelligence) propose and
 #: peer-review findings like the operating agents, but NEVER record
 #: RELEASE_ELIGIBILITY: they hold no promotion authority of any kind.
-SHADOW_PARTICIPANTS = ("EDDIE", "SCOUT")
+SHADOW_PARTICIPANTS = ("ARCHER", "SCOUT", "ADRIANA")
 #: Who may propose a finding.
 PROPOSERS = AGENTS + SHADOW_PARTICIPANTS
 
@@ -67,9 +67,12 @@ PROPOSERS = AGENTS + SHADOW_PARTICIPANTS
 #: MODEL_TOURNAMENT and MODEL_CHALLENGERS are roles (rule-based components),
 #: not agent identities; they hold no tool and no authority.
 PEER_ROUTING = {
-    "EDDIE": ("DEREK", "XAVIER", "CHIEF_ALLOCATOR", "AUDREY", "KAREN"),
+    "ARCHER": ("DEREK", "XAVIER", "CHIEF_ALLOCATOR", "AUDREY", "KAREN"),
     "SCOUT": ("DEREK", "KAREN", "CALIBRATION_ENGINE", "MODEL_TOURNAMENT",
               "AUDREY", "MODEL_CHALLENGERS"),
+    # (265) Karen attacks every proven structure first; Archer reviews its
+    # executability; Audrey evaluates; Derek is told what the books imply
+    "ADRIANA": ("KAREN", "ARCHER", "AUDREY", "DEREK"),
 }
 #: The first AGENT (identity, not role) in a shadow agent's routing that is
 #: not the proposer: who is asked to challenge / evaluate its finding.
@@ -156,7 +159,11 @@ AUTHORITY_KEYS = frozenset((
 
 R_UNKNOWN_AGENT = "THAT_IS_NOT_ONE_OF_THE_THREE_AGENTS"
 R_CHALLENGER_ONLY = "KAREN_RECORDS_ONLY_THE_PEER_CHALLENGE_STAGE"
-R_SHADOW_NO_RELEASE = "EDDIE_AND_SCOUT_NEVER_MARK_RELEASE_ELIGIBILITY"
+R_SHADOW_NO_RELEASE = "ARCHER_AND_SCOUT_NEVER_MARK_RELEASE_ELIGIBILITY"
+#: (266) a finding proposed under a historical alias (EDDIE) is a historical
+#: record: append-only and never updated, so no stage advances it (the
+#: database freezes the row too). Its reader shows it, labelled.
+R_HISTORICAL_ALIAS = "A_FINDING_PROPOSED_UNDER_A_HISTORICAL_ALIAS_IS_READ_ONLY"
 R_UNGROUNDED = "A_FINDING_NEEDS_AT_LEAST_ONE_EVIDENCE_REFERENCE"
 R_BAD_REF = "AN_EVIDENCE_REFERENCE_NEEDS_A_KIND_AND_AN_ID"
 R_UNKNOWN_KIND = "THAT_EVIDENCE_KIND_IS_NOT_A_RECORD_THE_AGENTS_KEEP"
@@ -301,11 +308,43 @@ def check_stopping_rule(rule) -> str | None:
     return None
 
 
+#: (266) historical alias -> the agent it names now; pinned equal to
+#: registry.HISTORICAL_ALIASES by a test (this module imports no registry)
+HISTORICAL_ALIASES = {"EDDIE": "ARCHER"}
+
+
+def _canon(v):
+    if not isinstance(v, str):
+        return v
+    u = v.strip().upper()
+    return HISTORICAL_ALIASES.get(u, u)
+
+
+def _historical(v) -> bool:
+    return isinstance(v, str) and v.strip().upper() in HISTORICAL_ALIASES
+
+
+def _label(row: dict) -> dict:
+    """A historical row as shown: the alias column names the agent it now
+    names, with historical_alias (registry.label_aliases, inlined)."""
+    out, cols = dict(row), []
+    for k in ("proposer", "actor"):
+        if _historical(out.get(k)):
+            out["historical_alias"] = out[k].strip().upper()
+            out[k] = HISTORICAL_ALIASES[out["historical_alias"]]
+            cols.append(k)
+    if cols:
+        out["historical_alias_columns"] = cols
+    return out
+
+
 def check_advance(finding: dict, stages: list, new: dict) -> str | None:
     """THE GUARDS, PURE: may `new` (a stage dict) follow `stages` of
     `finding`? None when it may, else the refusal. The database enforces
     the same rules."""
     f = dict(finding or {})
+    if _historical(f.get("proposer")):
+        return R_HISTORICAL_ALIAS
     by_seq = {int(s["seq"]): s for s in stages or []}
     stage, actor = new.get("stage"), new.get("actor")
     if actor in CHALLENGERS_ONLY:
@@ -337,7 +376,11 @@ def check_advance(finding: dict, stages: list, new: dict) -> str | None:
     if at is None or (prev and at < float(_ep(prev["at"]))) or \
             at < float(_ep(f.get("created_at")) or 0):
         return R_TIME
-    proposer = f.get("proposer")
+    # (266) compared as the agents they name NOW: a finding proposed under
+    # the historical alias EDDIE is ARCHER's own (he records its proposer
+    # stages and can never challenge, evaluate or mark it eligible)
+    proposer = _canon(f.get("proposer"))
+    actor = _canon(actor)
     refs = new.get("evidence_refs") or []
     if stage in (EVIDENCE, HYPOTHESIS, PEER_CHALLENGE,
                  INDEPENDENT_EVALUATION):
@@ -370,7 +413,7 @@ def check_advance(finding: dict, stages: list, new: dict) -> str | None:
     if stage == INDEPENDENT_EVALUATION:
         cand, exp = by_seq.get(5) or {}, by_seq.get(4) or {}
         hyp = by_seq.get(2) or {}
-        if actor in (proposer, cand.get("actor")):
+        if actor in (proposer, _canon(cand.get("actor"))):
             return R_SELF_EVALUATION
         if new.get("outcome") not in EVALUATION_OUTCOMES:
             return R_BAD_OUTCOME
@@ -445,7 +488,8 @@ async def finding(conn, finding_id: str) -> dict | None:
     st = await conn.fetch(
         "SELECT * FROM agent_finding_stages WHERE finding_id=$1 ORDER BY seq",
         str(finding_id))
-    return {"finding": _row(f), "stages": [_row(s) for s in st],
+    return {"finding": _label(_row(f)),
+            "stages": [_label(_row(s)) for s in st],
             "production_effect": "NONE"}
 
 
@@ -455,7 +499,7 @@ async def findings(conn, *, stage: str | None = None, limit: int = 50
         "SELECT * FROM agent_findings WHERE ($1::text IS NULL OR stage=$1) "
         " ORDER BY updated_at DESC, finding_id LIMIT $2", stage,
         max(1, min(int(limit or 50), 500)))
-    return [_row(r) for r in rows]
+    return [_label(_row(r)) for r in rows]
 
 
 def finding_id_for(proposer: str, refs: list, title: str) -> str:

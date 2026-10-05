@@ -13,7 +13,7 @@ WHAT A STATE MEANS. Every state is DERIVED from real rows with their
 timestamps -- nothing here is invented for animation:
 
   NOT_DEPLOYED  the agent's tables / identity do not exist on this database
-                (Eddie and Scout until migration 217 ships)
+                (Archer and Scout until migration 217 ships)
   STALE         no heartbeat, or the latest heartbeat is older than the
                 agent's stale bound (3 x its recorded cadence, floor 15 min)
   WORKING_ON    a run is in progress inside the heartbeat window
@@ -42,7 +42,7 @@ COLLABORATION EDGES are real rows inside the window (default one hour):
 Karen's challenges (raised / answered / resolved), collaboration-loop stages
 recorded by one agent on another's finding (migration 203), Derek -> Xavier
 paper hand-offs, the candidate-review workflow's consecutive steps and
-Eddie's estimates of Derek's decisions (migration 217, read only when the
+Archer's estimates of Derek's decisions (migration 217, read only when the
 tables exist) and the agents' durable hand-off / memory hand-off messages
 (agent_conversation_messages, migration 224). Each edge carries its
 evidence ids.
@@ -124,8 +124,8 @@ WAITING_STATUSES = ("WAITING_FOR_EVIDENCE", "WAITING_FOR_PROVIDER", "BLOCKED",
 BUSY_STATE = {"KAREN": "CHALLENGING", "AUDREY": "REVIEWING",
               "XAVIER": "REVIEWING"}
 
-# ── THE SEVEN DESKS, IN THE CANDIDATE-REVIEW ORDER ───────────────────────
-# Derek -> Karen -> Scout -> Eddie -> Allocator -> Audrey -> Xavier is the
+# ── THE EIGHT DESKS: THE CANDIDATE-REVIEW ORDER, THEN ADRIANA ───────────
+# Derek -> Karen -> Scout -> Archer -> Allocator -> Audrey -> Xavier is the
 # order of pos_candidate_review_steps (migration 217); the floor seats them
 # along the arc in that order so the review flows across the room.
 SEATS = (
@@ -162,10 +162,10 @@ SEATS = (
      "may_not": ["Adopt or promote a feature into a model",
                  "Judge his own tournament (the evaluator decides)",
                  "Any order, capital or venue action"]},
-    {"agent": "EDDIE", "slug": "eddie", "display_name": "Eddie",
+    {"agent": "ARCHER", "slug": "archer", "display_name": "Archer",
      "title": "Head of Execution · shadow only",
      "authority_level": "SHADOW_ONLY",
-     "workspace": "/eddie", "kind": "POS_AGENT",
+     "workspace": "/archer", "kind": "POS_AGENT",
      "deploy_table": "eddie_execution_estimates",
      "may": ["Estimate executable edge, fill probability and slippage for "
              "Derek's decisions (SHADOW)",
@@ -207,9 +207,28 @@ SEATS = (
      "may_not": ["Open a new entry",
                  "Write entry decisions, audits or directives",
                  "Change limits, approvals or submission switches"]},
+    # (265) the eighth desk: not a step of the candidate review, so it sits
+    # after it
+    {"agent": "ADRIANA", "slug": "adriana", "display_name": "Adriana",
+     "title": "Head of Arbitrage · shadow only",
+     "authority_level": "SHADOW_ONLY",
+     "workspace": "/adriana", "kind": "POS_AGENT",
+     "deploy_table": "adriana_arb_scans",
+     "may": ["Read recorded venue books, the catalogue and settlement terms",
+             "Record arbitrage opportunities and refusals with their "
+             "evidence (SHADOW)",
+             "Hand an opportunity to Archer for an execution review and ask "
+             "Karen to challenge it"],
+     "may_not": ["Place, cancel or route any order on any venue",
+                 "Hold or read any venue credential",
+                 "Allocate, reserve or approve capital",
+                 "Change a size, limit, threshold, fee or freshness rule"]},
 )
 SEAT_BY_AGENT = {s["agent"]: s for s in SEATS}
 SEAT_BY_SLUG = {s["slug"]: s for s in SEATS}
+#: (266) a historical seat address -> the seat it names now; pinned equal to
+#: registry.HISTORICAL_ALIASES by a test (this module imports no registry)
+SEAT_ALIASES = {"eddie": "archer"}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -613,7 +632,7 @@ async def _allocator(rd: _Reads, now: float) -> dict:
     return await rd.run("intel_runs", ("intel_runs",), fn) or {}
 
 
-async def _eddie(rd: _Reads, now: float) -> dict:
+async def _archer(rd: _Reads, now: float) -> dict:
     async def fn(conn):
         agg = await conn.fetchrow(
             "SELECT count(*) AS n FROM eddie_execution_estimates "
@@ -640,6 +659,35 @@ async def _scout(rd: _Reads, now: float) -> dict:
         return {"features": int(agg["n"]),
                 "last": None if last is None else dict(last)}
     return await rd.run("scout_features", ("scout_features",), fn) or {}
+
+
+async def _adriana(rd: _Reads, now: float) -> dict:
+    """Her latest census pass, a day of passes and the newest proven
+    opportunity -- as recorded (265)."""
+    async def fn(conn):
+        agg = await conn.fetchrow(
+            "SELECT count(*) AS n, coalesce(sum(opportunities), 0) AS opp, "
+            "       coalesce(sum(refusals_total), 0) AS ref "
+            "  FROM adriana_arb_scans WHERE finished_at >= to_timestamp($1)",
+            now - DETAIL_WINDOW_S)
+        last = await conn.fetchrow(
+            "SELECT scan_id, started_at, finished_at, status, why, venues, "
+            "       markets_read, books_fresh, structures_considered, "
+            "       opportunities, refusals_total, refusals_recorded, "
+            "       by_code, by_kind FROM adriana_arb_scans "
+            " ORDER BY finished_at DESC LIMIT 1")
+        opp = await conn.fetchrow(
+            "SELECT opportunity_id, scan_id, structure_kind, event_key, "
+            "       venues, max_qty, net_profit_usd, edge_per_set_usd, "
+            "       decided_at FROM adriana_arb_opportunities "
+            " ORDER BY decided_at DESC LIMIT 1")
+        return {"scans24": int(agg["n"]), "opportunities24": int(agg["opp"]),
+                "refusals24": int(agg["ref"]),
+                "last": None if last is None else dict(last),
+                "last_opportunity": None if opp is None else dict(opp)}
+    return await rd.run("adriana_arb_scans",
+                        ("adriana_arb_scans", "adriana_arb_opportunities"),
+                        fn) or {}
 
 
 async def _feed(rd: _Reads, now: float) -> list:
@@ -789,8 +837,8 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
             prev = r
         return out
 
-    async def eddie(conn):
-        return [{"from": "DEREK", "to": "EDDIE", "kind": "EXECUTION_ESTIMATE",
+    async def archer(conn):
+        return [{"from": "DEREK", "to": "ARCHER", "kind": "EXECUTION_ESTIMATE",
                  "at": r["estimated_at"],
                  "evidence": _ref("eddie_execution_estimates",
                                   r["estimate_id"]),
@@ -824,7 +872,7 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
             ("edges.paper_handoffs", ("paper_handoffs",), handoffs),
             ("edges.candidate_review", ("pos_candidate_review_steps",),
              pos_steps),
-            ("edges.eddie_estimates", ("eddie_execution_estimates",), eddie)):
+            ("edges.archer_estimates", ("eddie_execution_estimates",), archer)):
         raw.extend(await rd.run(name, tables, fn, default=[]) or [])
     return raw
 
@@ -866,11 +914,14 @@ async def build_floor(conn, *, now: float | None = None,
     aud = await _audrey(rd, now)
     ch = await _challenges(rd, now)
     alloc = await _allocator(rd, now)
-    eddie_deployed = (await rd.exists("eddie_execution_estimates")
-                      and "EDDIE" in status)
+    archer_deployed = (await rd.exists("eddie_execution_estimates")
+                      and "ARCHER" in status)
     scout_deployed = await rd.exists("scout_features") and "SCOUT" in status
-    eddie = await _eddie(rd, now) if eddie_deployed else {}
+    adriana_deployed = (await rd.exists("adriana_arb_scans")
+                        and "ADRIANA" in status)
+    archer = await _archer(rd, now) if archer_deployed else {}
     scout = await _scout(rd, now) if scout_deployed else {}
+    adriana = await _adriana(rd, now) if adriana_deployed else {}
     slack = await _slack(rd, now)
     feed = await _feed(rd, now)
     opportunities = await _opportunities(rd, alloc)
@@ -896,8 +947,9 @@ async def build_floor(conn, *, now: float | None = None,
             ok_table = await rd.exists(seat["deploy_table"])
             deployed = bool(ok_table and a in status)
             deploy_why = (None if deployed else
-                          "MIGRATION_217_NOT_APPLIED" if not ok_table else
-                          "IDENTITY_NOT_REGISTERED")
+                          ("MIGRATION_265_NOT_APPLIED" if a == "ADRIANA"
+                           else "MIGRATION_217_NOT_APPLIED")
+                          if not ok_table else "IDENTITY_NOT_REGISTERED")
         elif seat["kind"] == "INTEL":
             deployed = await rd.exists("intel_runs")
             deploy_why = None if deployed else "MIGRATION_208_NOT_APPLIED"
@@ -1089,19 +1141,19 @@ async def build_floor(conn, *, now: float | None = None,
                 _m("Shadow sleeve allocated", _money(al.get("shadow_usd"))
                    if al else None, "intel_allocations",
                    (lr or {}).get("started_at"), "NO_ALLOCATOR_RUN")]
-        elif a == "EDDIE" and deployed:
-            le = eddie.get("last")
+        elif a == "ARCHER" and deployed:
+            le = archer.get("last")
             if le:
                 focus = last_output = dict(_ref(
                     "eddie_execution_estimates", le["estimate_id"],
-                    "/api/command/eddie/estimates/%s" % le["estimate_id"],
+                    "/api/command/archer/estimates/%s" % le["estimate_id"],
                     le["estimated_at"]), decision_id=le["decision_id"],
                     summary="%s · decision %s" % (le["recommendation"],
                                                   le["decision_id"]))
                 signals.append({"at": le["estimated_at"], "hint":
                                 "WORKING_ON", "label": "Estimated execution: "
                                 + last_output["summary"], "ref": focus})
-            monitor = [_m("Estimates (24h)", eddie.get("n24"),
+            monitor = [_m("Estimates (24h)", archer.get("n24"),
                           "eddie_execution_estimates",
                           (le or {}).get("estimated_at"),
                           rd.sections.get("eddie_execution_estimates",
@@ -1119,6 +1171,46 @@ async def build_floor(conn, *, now: float | None = None,
             monitor = [_m("Features registered", scout.get("features"),
                           "scout_features", (ls or {}).get("proposed_at"),
                           rd.sections.get("scout_features", {}).get("why"))]
+        elif a == "ADRIANA" and deployed:
+            sc, lo = adriana.get("last"), adriana.get("last_opportunity")
+            sec_why = rd.sections.get("adriana_arb_scans", {}).get("why")
+            if lo:
+                focus = last_output = dict(_ref(
+                    "adriana_arb_opportunities", lo["opportunity_id"],
+                    "/api/command/adriana/opportunities/%s"
+                    % lo["opportunity_id"], lo["decided_at"]),
+                    summary="%s · %s · %s · %d sets · $%.2f worst-case "
+                            "net (SHADOW)" % (
+                                lo["structure_kind"], lo["event_key"],
+                                "+".join(lo["venues"] or []),
+                                lo["max_qty"],
+                                float(lo["net_profit_usd"])))
+            if sc:
+                summ = ("Census %s · %d structures · %d proven · %d refused"
+                        % (sc["status"], sc["structures_considered"],
+                           sc["opportunities"], sc["refusals_total"]))
+                scan_ref = dict(_ref("adriana_arb_scans", sc["scan_id"],
+                                     "/api/command/adriana",
+                                     sc["finished_at"]), summary=summ)
+                if last_output is None or (_ep(sc["finished_at"]) or 0) > \
+                        (_ep(last_output.get("at")) or 0):
+                    focus = last_output = scan_ref
+                signals.append({"at": sc["finished_at"], "hint":
+                                "WORKING_ON", "label": summ, "ref": scan_ref})
+            monitor = [
+                _m("Census passes (24h)", adriana.get("scans24"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why),
+                _m("Proven after costs (24h)",
+                   adriana.get("opportunities24"),
+                   "adriana_arb_opportunities", (sc or {}).get("finished_at"),
+                   sec_why),
+                _m("Refused (last pass)", (sc or {}).get("refusals_total"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why or "NO_CENSUS_PASS"),
+                _m("Fresh books (last pass)", (sc or {}).get("books_fresh"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why or "NO_CENSUS_PASS")]
 
         # A challenge raised against this agent recently is a REVIEWING
         # signal only once it answers (CHALLENGE_ANSWERED edge from it).
@@ -1356,6 +1448,39 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
                                 str(r["claim"])[:160]),
                             "href": "/api/command/karen/challenges/%s"
                             % r["challenge_id"]})
+        elif a == "ADRIANA" and await rd.exists("adriana_arb_scans"):
+            for r in await c.fetch(
+                    "SELECT opportunity_id, structure_kind, event_key, "
+                    "       venues, max_qty, net_profit_usd, decided_at "
+                    "  FROM adriana_arb_opportunities "
+                    " ORDER BY decided_at DESC LIMIT 10"):
+                out.append({"kind": "adriana_arb_opportunities",
+                            "id": r["opportunity_id"],
+                            "at": _ep(r["decided_at"]),
+                            "verdict": "GUARANTEED_AFTER_COSTS",
+                            "summary": "%s · %s · %s · %d sets · $%.2f "
+                                       "worst-case net (SHADOW)" % (
+                                           r["structure_kind"],
+                                           r["event_key"],
+                                           "+".join(r["venues"] or []),
+                                           r["max_qty"],
+                                           float(r["net_profit_usd"])),
+                            "href": "/api/command/adriana/opportunities/%s"
+                            % r["opportunity_id"]})
+            for r in await c.fetch(
+                    "SELECT refusal_id, structure_kind, event_key, venues, "
+                    "       primary_code, decided_at "
+                    "  FROM adriana_arb_refusals "
+                    " ORDER BY decided_at DESC LIMIT 10"):
+                out.append({"kind": "adriana_arb_refusals",
+                            "id": r["refusal_id"],
+                            "at": _ep(r["decided_at"]),
+                            "verdict": "REFUSED",
+                            "summary": "REFUSED %s · %s · %s · %s" % (
+                                r["primary_code"], r["structure_kind"],
+                                r["event_key"] or "NO_EVENT_IDENTITY",
+                                "+".join(r["venues"] or []))})
+            out.sort(key=lambda x: -(x["at"] or 0))
         elif a == "CHIEF_ALLOCATOR" and await rd.exists("intel_runs"):
             for r in await c.fetch(
                     "SELECT run_id, status, started_at, finished_at, "
@@ -1441,6 +1566,13 @@ async def floor_index(response: Response) -> dict:
             dependencies=[Depends(require_read)])
 async def floor_agent(agent: str, response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    # (266) a historical alias (eddie) reads the seat it now names (archer)
+    # and says so -- the same payload plus alias_of / historical_alias
+    canon = SEAT_ALIASES.get(str(agent).lower())
+    if canon:
+        got = await floor_agent(canon, response)
+        return dict(got or {}, alias_of=canon,
+                    historical_alias=str(agent).upper())
     if str(agent).lower() not in SEAT_BY_SLUG:
         raise HTTPException(status_code=404, detail={
             "reason": "NOT_A_FLOOR_AGENT", "agents": sorted(SEAT_BY_SLUG)})
