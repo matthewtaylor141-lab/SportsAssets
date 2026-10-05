@@ -34,8 +34,18 @@ START_TOLERANCE_S = 90 * 60
 #: played." So the NFL line read is the period-0 money line with EXACTLY the
 #: two teams. A draw-priced football line is the regulation market and is
 #: refused by name (FOOTBALL_DRAW_PRICED), never de-vigged as the game line.
-SPORTS = {"baseball": 6, "soccer": 1, "football": 5}
+#: (integration) every sport the inc-pinnapi scope subscribes is matched; the
+#: football rule above still governs the football line.
 R_FOOTBALL_DRAW_PRICED = "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW"
+#: PinnAPI's OWN sport ids ("## Sport IDs -- Stable integer mapping";
+#: tests/fixtures/pinnapi_ws_subscription_docs_2026_10_04.json): every sport
+#: the R30A scope subscribes (pinnapi_feed_runtime.SCOPE_SPORTS), so a
+#: subscribed sport is never refused PINNAPI_PRIMARY_SPORT_UNSUPPORTED before
+#: its fixture is even looked up. Matching a fixture prices nothing by
+#: itself: the de-vig's supported set, the venue-native winner types and the
+#: settlement comparison still decide, each refusing by its own name.
+SPORTS = {"baseball": 6, "soccer": 1, "football": 5, "basketball": 3,
+          "hockey": 4, "tennis": 2}
 
 
 def epoch(value):
@@ -61,7 +71,37 @@ def name(value):
     return " ".join(re.findall(r"[^\W_]+", text))
 
 
-def match_event(cache, event, family):
+def fixture_index(cache) -> dict:
+    """{(sport id, frozenset of the two folded names): [(fixture id, home,
+    away, start)]} over ONE `fixture_view` of the cache, in its order.
+
+    THE REGISTRATION COST (adversarial verification, finding 1, fix stage
+    2026-10-05): `match_event` rebuilt the whole fixture view for every
+    reactive registration -- ~7 ms per seed on 2,600 cached events, every
+    discovery pass, on the API's event loop. A pass that registers many
+    seeds builds this once; `match_event(index=...)` then answers exactly
+    what the full scan answers (the same two names, the same sport, the same
+    start tolerance), by lookup."""
+    view, _skipped = F.fixture_view(cache.events)
+    out: dict = {}
+    for fx in view:
+        h, a = name(fx.get("home")), name(fx.get("away"))
+        if not h or not a or h == a:
+            continue
+        out.setdefault((fx.get("sport_id"), frozenset((h, a))), []).append(
+            (fx["id"], h, a, epoch(fx.get("startTime"))))
+    return out
+
+
+def match_event(cache, event, family, *, index=None):
+    """((fixture id, {home, away} labels), None) for the ONE fixture whose
+    two participants are exactly the event's, starting within the
+    tolerance; else (None, named reason). R30A RC3: a fixture is read from
+    `pinnapi_feed.fixture_view`, so a prematch matchup whose game is in play
+    is still matched (its live-phase child prices it), and a live game
+    whose parent left the cache is its own fixture -- a child record is no
+    longer skipped for carrying a parentId. `index` (`fixture_index` of the
+    same cache) replaces the scan with a lookup; the answer is the same."""
     sid = SPORTS.get(family)
     start = epoch(event.get("commence_time"))
     home, away = name(event.get("home_team")), name(event.get("away_team"))
@@ -70,14 +110,16 @@ def match_event(cache, event, family):
     if start is None or not home or not away or home == away:
         return None, "PINNAPI_PRIMARY_FIXTURE_UNPROVED"
     hits = []
-    for eid, meta in cache.events.items():
-        if meta.get("sport_id") != sid or meta.get("parentId"):
-            continue
-        other_start = epoch(meta.get("startTime"))
+    if index is not None:
+        candidates = index.get((sid, frozenset((home, away))), ())
+    else:
+        view, _skipped = F.fixture_view(cache.events)
+        candidates = [(fx["id"], name(fx.get("home")), name(fx.get("away")),
+                       epoch(fx.get("startTime"))) for fx in view
+                      if fx.get("sport_id") == sid]
+    for eid, h, a, other_start in candidates:
         if other_start is None or abs(start - other_start) > START_TOLERANCE_S:
             continue
-        teams = F.participants(meta)
-        h, a = name(teams.get("home")), name(teams.get("away"))
         if h != a and {home, away} == {h, a}:
             hits.append((eid, {"home": event["home_team"] if home == h
                                else event["away_team"],
@@ -148,12 +190,17 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     if reason:
         return fail(reason)
     eid, labels = hit
-    got = cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
+    # THE RECORD THAT PRICES THE FIXTURE NOW: its live-phase child while in
+    # play, else the fixture itself (R30A RC3)
+    qid, why = cache.fixture_quote_id(eid)
+    if why:
+        return fail(why)
+    got = cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
                      evaluated_ms=at * 1000, max_age_s=max_age_s)
     if not got.get("ok"):
         return fail(got.get("reason"), got.get("provenance"))
     q = got["quote"]
-    if (epoch(q.source_change_ms) is None or epoch(q.received_ms) is None
+    if (epoch(q.change_ms) is None or epoch(q.received_ms) is None
             or q.received_ms > at * 1000):
         return fail("PINNAPI_PRIMARY_CLOCK_INVALID")
     if (q.market_type != "moneyline" or q.period != 0 or q.alternate
@@ -166,7 +213,7 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     if set(odds) != expected or any(v is None or not math.isfinite(v) or v <= 1
                                    for v in odds.values()):
         return fail("PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES")
-    live = cache.events[eid].get("isLive")
+    live = cache.events[qid].get("isLive")
     if not isinstance(live, bool) or q.stream != ("live" if live else "prematch"):
         return fail("PINNAPI_PRIMARY_PHASE_UNPROVED")
     labels["draw"] = "Draw"
@@ -175,13 +222,17 @@ def select(cache, event, fallback, *, family, sharp_books, at,
                                   at=at, max_age_s=max_age_s)
     prov = dict(got["provenance"], version=VERSION, provider=PROVIDER,
                 runtime_id=runtime_id, feed_event_id=eid,
+                quote_event_id=qid,
                 market_key=q.key, stream=q.stream, raw_odds=dict(q.prices),
                 outcome_labels=labels, independent_books=evidence,
                 discovery_event_id=event.get("id"), family=family,
                 discovery_home=event["home_team"], discovery_away=event["away_team"],
                 discovery_start=event["commence_time"])
     return {"prices": prices, "depth": depth,
-            "observed_at": q.source_change_ms / 1000,
+            # the change instant the 30 s rule measures from: the provider
+            # stamp, or (only for a change in an unstamped frame) our
+            # labelled observation of it -- provenance names which
+            "observed_at": q.change_ms / 1000,
             "received_at": q.received_ms / 1000,
             "home": event["home_team"], "away": event["away_team"],
             "event_id": event.get("id"),
@@ -208,17 +259,24 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
     if (why or hit[0] != p["feed_event_id"] or
             any(hit[1][d] != p["outcome_labels"].get(d) for d in ("home", "away"))):
         return {"ok": False, "reason": why or "PINNAPI_PRIMARY_FIXTURE_CHANGED"}
-    got = cache.read(p["feed_event_id"], p["market_key"],
+    qid = p.get("quote_event_id", p["feed_event_id"])
+    now_qid, why = cache.fixture_quote_id(p["feed_event_id"])
+    if why or now_qid != qid:
+        # the game went in play (or its live record changed) since the
+        # quote was selected: a different record prices it now
+        return {"ok": False, "reason": why or "PINNAPI_PRIMARY_INPUT_CHANGED"}
+    got = cache.read(qid, p["market_key"],
                      evaluated_ms=at * 1000, max_age_s=max_age_s)
     if not got.get("ok"):
         return {"ok": False, "reason": got.get("reason"),
                 "provenance": got.get("provenance")}
     q = got["quote"]
-    if (epoch(q.source_change_ms) is None or epoch(q.received_ms) is None
+    if (epoch(q.change_ms) is None or epoch(q.received_ms) is None
             or q.received_ms > at * 1000):
         return {"ok": False, "reason": "PINNAPI_PRIMARY_CLOCK_INVALID"}
-    live = cache.events[p["feed_event_id"]].get("isLive")
+    live = cache.events[qid].get("isLive")
     if (q.epoch != p["epoch"] or q.source_change_ms != p["source_change_ms"]
+            or q.change_ms != p.get("change_ms", q.change_ms)
             or q.prices != p["raw_odds"] or q.stream != p["stream"]
             or not isinstance(live, bool)
             or q.stream != ("live" if live else "prematch")

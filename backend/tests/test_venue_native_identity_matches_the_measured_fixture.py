@@ -482,10 +482,20 @@ def test_only_the_global_catalogues_own_misses_are_offered_to_it():
     assert may(["NO_VENUE_CONTRACT_FOR_EVENT"])
     assert may(["VENUE_MAPPING_AMBIGUOUS"])
     assert may(["VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
-    # a CLOSED or SEGMENT finding beside it means the fixture WAS found
-    assert not may(["VENUE_MARKET_CLOSED_OR_RESOLVED",
-                    "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
-    assert not may(["VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME"])
+    # UPDATED, R30A P0 incident (normalization/identity root cause RC6, merged
+    # from the inc-discovery stream): this test pinned that a CLOSED or
+    # SEGMENT finding in the GLOBAL catalogue means "the fixture WAS found".
+    # The production receipt measured that it does not: the global catalogue
+    # is matched on names alone and is date-blind, so its segment or closed
+    # row was an inning market, a half, or YESTERDAY's series game -- 5 events
+    # in 72 h (MLB, Serie B, UNL) and ~21 h of one MLB playoff game's coverage
+    # were lost to it. The venue-native resolver re-applies its own FULL_MATCH
+    # period rule, realism and re-seen window, so those refusals are now
+    # offered to the venue's own catalogue (ext_pinnacle_loop.
+    # VENUE_NATIVE_MAY_REPLACE, whose comment carries the evidence).
+    assert may(["VENUE_MARKET_CLOSED_OR_RESOLVED",
+                "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
+    assert may(["VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME"])
     assert not may(["TEAM_NAMES_COLLIDE_AFTER_NORMALISATION"])
     assert not may([])
     # NO PROVIDER PRICE CAN NEVER BE REPAIRED BY A CATALOGUE

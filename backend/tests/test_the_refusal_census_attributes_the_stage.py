@@ -155,6 +155,10 @@ def test_every_declared_refusal_is_a_string_production_actually_emits():
               "sportsassets/bettor_settlement_terms.py",
               "sportsassets/bettor_pinnacle_devig.py",
               "sportsassets/workers/ext_pinnacle_loop.py",
+              # the line-market family module emits the line lane's
+              # settlement refusal (R30A P0 incident); listed so its code is
+              # found where it is raised, nothing else in the check changes
+              "sportsassets/bettor_market_family.py",
               "sportsassets/bettor_freshness.py"):
         p = pathlib.Path(f)
         if p.exists():

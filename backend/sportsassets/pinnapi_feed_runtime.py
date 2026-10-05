@@ -17,7 +17,9 @@ service, and arming must not need a deploy.)
 SCOPE: ingestion_state 'pinnapi_feed_scope' = {"sport_ids": [...],
 "streams": [...]}; absent -> baseball only ([6], live + prematch). The soccer
 prematch firehose was 1,291 events in one snapshot (bounded capture
-2026-10-01), so wider scopes are an explicit choice.
+2026-10-01), so wider scopes are an explicit choice. R30A (P0 incident):
+migration 260 makes that choice -- every sport present at BOTH Pinnacle and
+the venue (SCOPE_SPORTS below) -- and `scope` no longer truncates to four.
 
 ONE READ BY A DECISION: Xavier's measure of a HELD benchmark position
 (`held_moneyline`, called from paper_xavier when the external valuation is
@@ -40,6 +42,7 @@ provider-stamp->receipt distribution.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import logging
 import math
@@ -63,11 +66,72 @@ ROW_READ_TIMEOUT_S = 5.0
 HEARTBEAT_WRITE_TIMEOUT_S = 3.0
 CENSUS_TIMEOUT_S = 10.0
 DEFAULT_SCOPE = {"sport_ids": [6], "streams": ["live", "prematch"]}
-ALLOWED_SPORTS = set(range(1, 13))
+#: PinnAPI's OWN sport ids, from its public documentation ("## Sport IDs --
+#: Stable integer mapping. Use these in `sport_id` query params throughout
+#: the API": 1 Soccer ... 12 Golf), read from https://pinnapi.com/llms-full.txt
+#: by the PinnAPI probe run 37232918224 (2026-10-04T20:40Z, 56,250 bytes, sha256
+#: 162705de...d394d -- the same bytes fetch-docs run 37226335697 read at
+#: 18:56Z). Excerpt: tests/fixtures/pinnapi_ws_subscription_docs_2026_10_04.json.
+#: "`sport_ids` use the same integer IDs as the rest of the API".
+PINNAPI_SPORT_IDS = {1: "Soccer", 2: "Tennis", 3: "Basketball", 4: "Hockey",
+                     5: "Football", 6: "Baseball", 7: "Rugby", 8: "MMA",
+                     9: "Boxing", 10: "Other", 11: "Esports", 12: "Golf"}
+ALLOWED_SPORTS = set(PINNAPI_SPORT_IDS)
+
+# ── THE R30A SCOPE: EVERY SPORT AT BOTH PINNACLE AND THE VENUE ──────────
+#
+# THE DEFECT (P0 incident root cause RC1, measured 2026-10-04). Production
+# subscribed sport ids [1, 6] only (migration 193), and `scope` kept at most
+# FOUR ids (`[:4]`, a copy of the probe's sampling bound WS_MAX_SPORTS, not a
+# provider limit). Football, hockey, basketball and tennis therefore had no
+# Pinnacle WebSocket price at all: 616 venue events/24 h (77% of the
+# real-sport winner universe) and 29,446 contracts were priced, if at all,
+# only through the metered fallback.
+#
+# THE PROVIDER'S DOCUMENTED LIMITS (same capture): "One WebSocket connection
+# per account"; a frame is delivered when "its sport_id matches a sport-level
+# subscription"; the only subscription cap is on EVENT ids ("Event-level
+# subscriptions are capped at 200 ids per stream per connection") -- there is
+# no documented cap on sport-level subscriptions. We subscribe by sport, on
+# the one socket the owner already holds, so the scope below is inside every
+# documented limit.
+#
+# THE SIX. The owner named them (football, basketball, baseball, hockey,
+# soccer, tennis) and both sides list each: the venue's current listing
+# carries nfl/cfb, nba/wnba, mlb, nhl, soccer and atp/wta contracts
+# (research-sql run 37235155757, section L1) and the PinnAPI REST probe (run
+# 37232918224) listed football 64 prematch, tennis 165, basketball 62 and
+# hockey 106 events beside the soccer and baseball already held.
+#
+# BOUNDED, NOT TRUNCATED. The scope admits exactly the sports whose cache
+# load was MEASURED against the existing bounds (pinnapi_feed: "CAPACITY FOR
+# THE R30A SCOPE (sports 1-6)": 45,136 markets worst case against
+# MAX_MARKETS 120,000, ~1,750 records against MAX_EVENTS 4,000). Any other
+# id in the control row -- a documented one whose load was never measured,
+# or one the documentation does not list -- is refused BY NAME in the
+# scope's own receipt (`refused`), never silently dropped, and never
+# subscribed. Nothing here is a count cap.
+SCOPE_SPORTS = (1, 2, 3, 4, 5, 6)
+R_SCOPE_UNDOCUMENTED = "SPORT_ID_NOT_IN_PINNAPI_DOCUMENTATION"
+R_SCOPE_UNMEASURED = "SPORT_CAPACITY_NOT_MEASURED_AGAINST_THE_CACHE_BOUNDS"
+R_SCOPE_NOT_AN_ID = "SPORT_ID_NOT_AN_INTEGER"
 
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
-                "census": None, "runtime_id": None, "held": None}
+                "census": None, "runtime_id": None, "held": None,
+                "scope": None, "discovery": None}
 CENSUS_S = 60.0
+#: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
+#: one bounded catalogue read per CENSUS_S, under its own timeout
+DISCOVERY_TIMEOUT_S = 10.0
+#: THE PASS'S OWN CPU DEADLINE (adversarial verification, finding 1, fix
+#: stage 2026-10-05). The matching pass is CPU work; it now runs in a worker
+#: thread (so the WS owner, the reactive deadlines and HTTP keep the event
+#: loop), and `DISCOVERY_TIMEOUT_S` -- an asyncio timeout -- can cancel the
+#: AWAIT but never the thread. So the pass checks this deadline itself and
+#: stops (PASS_OVER_BUDGET, nothing seeded). Measured after the fix: 0.16 s
+#: for 1,300 fixtures x 400 venue events (29.67 s before), 0.62 s for
+#: 2,600 x 1,500 -- the budget is ~8x the largest measured pass.
+DISCOVERY_CPU_BUDGET_S = 5.0
 #: held_moneyline is the only decision read; no order path reads the feed
 DECISION_EFFECT = "XAVIER_HELD_MEASURE_ONLY (read-only, held positions)"
 
@@ -106,19 +170,43 @@ async def armed(pool) -> bool:
         return False
 
 
-async def scope(pool) -> dict:
-    try:
-        v = _jsonish(await _read_row(pool, SCOPE_KEY))
-    except Exception:                                           # noqa: BLE001
-        v = None
+def scope_of(value) -> dict:
+    """The subscription a control-row value asks for, every refusal named.
+
+    {"sport_ids": [...], "streams": [...]} plus, when anything was refused,
+    "refused": {repr(id): reason}. Pure; never raises. No count cap: an id
+    is admitted exactly when it is a documented PinnAPI id whose load on the
+    cache was measured (SCOPE_SPORTS)."""
+    v = _jsonish(value)
     if not isinstance(v, dict):
         return dict(DEFAULT_SCOPE)
-    sports = [int(x) for x in (v.get("sport_ids") or [])
-              if str(x).isdigit() and int(x) in ALLOWED_SPORTS][:4]
+    sports, refused = [], {}
+    for x in (v.get("sport_ids") or []):
+        if isinstance(x, bool) or not str(x).strip().isdigit():
+            refused[str(x)[:16]] = R_SCOPE_NOT_AN_ID
+            continue
+        sid = int(str(x).strip())
+        if sid not in ALLOWED_SPORTS:
+            refused[str(sid)] = R_SCOPE_UNDOCUMENTED
+        elif sid not in SCOPE_SPORTS:
+            refused[str(sid)] = R_SCOPE_UNMEASURED
+        elif sid not in sports:
+            sports.append(sid)
     streams = [x for x in (v.get("streams") or []) if x in ("live",
                                                             "prematch")]
-    return {"sport_ids": sports or DEFAULT_SCOPE["sport_ids"],
-            "streams": streams or DEFAULT_SCOPE["streams"]}
+    out = {"sport_ids": sorted(sports) or DEFAULT_SCOPE["sport_ids"],
+           "streams": streams or DEFAULT_SCOPE["streams"]}
+    if refused:
+        out["refused"] = refused
+    return out
+
+
+async def scope(pool) -> dict:
+    try:
+        v = await _read_row(pool, SCOPE_KEY)
+    except Exception:                                           # noqa: BLE001
+        v = None
+    return scope_of(v)
 
 
 def digest() -> dict:
@@ -130,6 +218,10 @@ def digest() -> dict:
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
     d["c1_decision_effect"] = DECISION_EFFECT
+    d["scope"] = _STATE.get("scope")
+    from . import pinnapi_discovery as PD
+    d["native_discovery"] = (PD.digest(_STATE["discovery"])
+                             if _STATE.get("discovery") else None)
     from . import pinnapi_held as PH
     d["held_priority_targets"] = PH.WATCH.status()
     return d
@@ -181,6 +273,15 @@ def _capped(d: dict) -> str:
     if cen:
         cen["by_sport_family_phase_state"] = "TRUNCATED_FOR_SIZE"
         d["coverage_census"] = cen
+    disc = dict(d.get("native_discovery") or {})
+    if disc:
+        disc["by_sport_league_state"] = "TRUNCATED_FOR_SIZE"
+        disc["receipt_sample"] = "TRUNCATED_FOR_SIZE"
+        if isinstance(disc.get("line_census"), dict):
+            disc["line_census"] = dict(
+                disc["line_census"],
+                by_sport_family_state="TRUNCATED_FOR_SIZE")
+        d["native_discovery"] = disc
     d["heartbeat_truncated"] = True
     s = json.dumps(d, default=str)
     if len(s) <= HEARTBEAT_MAX_BYTES:
@@ -225,6 +326,99 @@ async def _census_once(pool) -> dict:
     return out
 
 
+async def _discovery_once(pool) -> dict:
+    """PINNAPI-NATIVE DISCOVERY (R30A RC2): every subscribed fixture the
+    feed holds, matched to the venue's own events with a receipt each
+    (pinnapi_discovery), and every MATCHED fixture seeded in the reactive
+    scheduler -- so a PinnAPI price change is evaluated whether or not the
+    metered provider ever listed the competition. A fixture the metered
+    cycle already seeded keeps that seed (its other books corroborate).
+    Read-only; places nothing."""
+    from . import pinnapi_discovery as PD
+    from . import pinnapi_primary as P
+    from . import pinnapi_reactive as RX
+    o = _STATE.get("owner")
+    t0 = time.time()
+    if o is None or not o.cache.authority.synced:
+        return {"skipped": "FEED_NOT_SYNCED", "computed_at": t0}
+    async with pool.acquire() as c:
+        rows = [dict(r) for r in await c.fetch(
+            PD.venue_events_sql(o.sport_ids))]
+    # OFF THE EVENT LOOP (adversarial verification, finding 1): the pass is
+    # CPU work, so it runs in a worker thread over a SNAPSHOT of the events
+    # taken here, on the loop -- the thread never iterates the live cache
+    # the WS owner writes -- and stops itself at its own CPU deadline.
+    snapshot = {k: dict(v) for k, v in o.cache.events.items()
+                if isinstance(v, dict)}
+    out = await asyncio.to_thread(
+        PD.discover, snapshot, rows, sport_ids=list(o.sport_ids),
+        deadline=time.monotonic() + DISCOVERY_CPU_BUDGET_S)
+    # REGISTRATION, back on the loop, against the CURRENT cache through ONE
+    # fixture index (not one fixture-view rebuild per seed)
+    reg = collections.Counter()
+    index = P.fixture_index(o.cache) if out["seeds"] else None
+    priced = families_with_a_priced_market()
+    for ev in out["seeds"]:
+        fam = ev["pinnapi_native"]["family"]
+        if fam not in P.SPORTS:
+            reg["FAMILY_NOT_PRICED_BY_THE_PRIMARY_SELECTOR"] += 1
+            continue
+        if fam not in priced:
+            # no market of this family can be priced (adversarial
+            # verification P2): a seed would only spend single-worker
+            # evaluations and two audit rows per change, pricing nothing.
+            # The receipt stays MATCHED; the seed is counted by name.
+            reg[R_NOT_SEEDED_NO_PRICED_MARKET] += 1
+            continue
+        reg[RX.register(ev, sport_key=PD.sport_key_for(fam), family=fam,
+                        received_at=t0, native=True, index=index)
+            or "NO_SCHEDULER"] += 1
+    out["registered"] = dict(reg)
+    # THE LINE CENSUS (bettor_market_family.census): every line contract the
+    # venue lists on a matched fixture, by sport / family / precise state --
+    # one more bounded catalogue read; no venue request, nothing priced
+    try:
+        from . import bettor_market_family as MF
+        slugs = sorted(out.get("by_venue_event") or {})
+        if slugs:
+            async with pool.acquire() as c:
+                lrows = [dict(r) for r in await c.fetch(
+                    PD.line_rows_sql(), slugs, list(MF.VENUE_LINE_TYPES),
+                    int(PD.RESEEN_WITHIN_S), int(PD.MAX_LINE_ROWS))]
+        else:
+            lrows = []
+        out["line_census"] = dict(
+            MF.census(lrows, out.get("by_venue_event"), o.cache,
+                      now_ms=time.time() * 1000.0),
+            rows_truncated=len(lrows) >= PD.MAX_LINE_ROWS)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        out["line_census"] = {"error": type(exc).__name__}
+    out["computed_at"] = t0
+    out["took_ms"] = round((time.time() - t0) * 1000)
+    return out
+
+
+#: a MATCHED fixture of a family no market of which can be priced is not
+#: seeded (counted under this name in the pass's `registered`)
+R_NOT_SEEDED_NO_PRICED_MARKET = "NOT_SEEDED_NO_PRICEABLE_MARKET_FOR_THE_FAMILY"
+
+
+def families_with_a_priced_market() -> set:
+    """The families at least one market of which the decision path can
+    price: the de-vig's supported set (money line and the line families it
+    admits) and every line family whose payoff equivalence is proven
+    (bettor_market_family.EQUIVALENCE). Derived, never typed: a family
+    becomes seeded the moment one of its markets is proven. On the R30A
+    evidence that is every subscribed family but tennis (no tennis money line
+    in the de-vig set; tennis spreads and totals NOT_PROVEN)."""
+    from . import bettor_market_family as MF
+    from . import bettor_pinnacle_devig as devig
+    return ({str(k[0]) for k in devig.SUPPORTED}
+            | {str(k[0]) for k in MF.EQUIVALENCE})
+
+
 async def _beat_loop(pool):
     last_census = 0.0
     while True:
@@ -244,6 +438,14 @@ async def _beat_loop(pool):
             except Exception as exc:                            # noqa: BLE001
                 _STATE["census"] = {"error": type(exc).__name__,
                                     "detail": str(exc)[:200]}
+            try:
+                async with asyncio.timeout(DISCOVERY_TIMEOUT_S):
+                    _STATE["discovery"] = await _discovery_once(pool)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                _STATE["discovery"] = {"error": type(exc).__name__,
+                                       "detail": str(exc)[:200]}
         try:
             await _write_heartbeat(pool, dict(digest(), beat_at=time.time()))
         except asyncio.CancelledError:
@@ -281,6 +483,7 @@ async def start_default(pool, *, writer_pid: int, writer_lock_key: int,
         PH.install(owner.cache)
         PH.add_listener(PH.paper_review_listener)
         _STATE.update(owner=owner, pool=pool, runtime_id=uuid.uuid4().hex,
+                      scope=sc,
                       task=loop.create_task(owner.run()),
                       beat=loop.create_task(_beat_loop(pool)),
                       held=loop.create_task(PH.refresh_loop(pool)))
@@ -333,7 +536,7 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
-                  census=None, held=None)
+                  census=None, held=None, scope=None, discovery=None)
     return {"verdict": verdict, "terminal_heartbeat": final_status}
 
 
@@ -433,8 +636,9 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
         return {"ok": False, "reason": R_OUTCOME_UNMAPPED, "sport_id": sid,
                 "feed_event_id": eid}
     key = F.FULL_GAME_MONEYLINE_KEY
-    got = read(eid, key, evaluated_ms=float(at) * 1000.0,
-               max_age_s=float(max_age_s))
+    # the record that prices the fixture now (its live-phase child in play)
+    got = read(ev.get("quote_id", eid), key,
+               evaluated_ms=float(at) * 1000.0, max_age_s=float(max_age_s))
     where = {"sport_id": sid, "feed_event_id": eid, "market_key": key,
              "designation": des}
     if not got.get("ok"):
@@ -457,7 +661,8 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
                   "line": None, "league": row.get("team_league"),
                   "us_market_slug": row.get("identifier")},
         quote={"book": devig.BOOK, "outcomes": q.decimal_prices(),
-               "observed_at": prov["source_change_ms"] / 1000.0,
+               "observed_at": prov.get("change_ms",
+                                       prov.get("source_change_ms")) / 1000.0,
                "received_at": prov["received_ms"] / 1000.0,
                "event_key": eid, "period": period, "line": None},
         now=float(at), max_age_s=float(max_age_s))

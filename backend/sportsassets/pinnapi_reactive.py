@@ -96,6 +96,45 @@ def worst_case_job_s(deadline: float = 12.0, session_wait: float = SESSION_WAIT_
                      ) -> float:
     return (session_wait + FENCE_S + AUDIT_S + float(deadline) + AUDIT_S
             + session_wait + AUDIT_S)
+#: HOW MANY FIXTURES MAY HOLD A DISCOVERY SEED (R30A P0 incident). 512 was
+#: sized for the metered cycle's few competitions. PinnAPI-native discovery
+#: now seeds EVERY matched fixture of six subscribed sports each census pass
+#: (pinnapi_feed_runtime._discovery_once), and the measured six-sport load is
+#: ~1,750 cached fixtures (pinnapi_feed "CAPACITY FOR THE R30A SCOPE"). Past
+#: the cap, each pass's later registrations evict its earlier ones in the
+#: same iteration order every time, so the same fixtures would be unseeded
+#: for good -- a silent loss (counted only as SEED_EVICTED). The cap now
+#: covers the cache's own event bound, the same order of magnitude; a seed
+#: is one copied discovery event (~1-2 KB), ~8 MB at the cap. A memory bound,
+#: not a threshold: no evaluation, freshness or economic rule reads it.
+SEED_CAP = 4000
+
+
+def version_of(q) -> tuple:
+    """A quote's evaluation version: (epoch, change instant, prices). The
+    change instant is the one the 30 s rule measures from (the provider
+    stamp, or our labelled observation of an unstamped change -- R30A RC4),
+    so a change the cache dates either way is a new version."""
+    return (q.epoch, getattr(q, "change_ms", q.source_change_ms),
+            tuple(sorted(q.prices.items())))
+
+
+def fixture_of(cache, quote):
+    """The fixture a changed quote prices (R30A RC3): a live-phase child's
+    change is its prematch parent's, which is what seeds are keyed on."""
+    fid = getattr(quote, "fixture_id", None)
+    if fid is not None:
+        return fid
+    canon = getattr(cache, "canonical_id", None)
+    return canon(quote.event_id) if callable(canon) else quote.event_id
+
+
+def _quote_record(cache, eid):
+    """(the record that prices fixture `eid` now, None) or (None, reason)."""
+    fq = getattr(cache, "fixture_quote_id", None)
+    if not callable(fq):
+        return eid, None
+    return fq(eid)
 
 
 class Scheduler:
@@ -108,7 +147,8 @@ class Scheduler:
     before."""
 
     def __init__(self, cache, evaluate, audit, *, clock=time.time,
-                 queue_cap=128, seed_cap=512, seed_ttl=1800, deadline=12,
+                 queue_cap=128, seed_cap=SEED_CAP, seed_ttl=1800,
+                 deadline=12,
                  held=None, session=None, session_wait=SESSION_WAIT_S):
         from . import pinnapi_held as PH
         self.cache, self.evaluate, self.audit, self.clock = cache, evaluate, audit, clock
@@ -157,21 +197,37 @@ class Scheduler:
                else self.seed_ttl)
         return 0 <= self.clock() - seed['registered_at'] <= ttl
 
-    def register(self, event, *, sport_key, family, received_at):
-        # Registration is called only AFTER competition confirmation.
-        hit, why = P.match_event(self.cache, event, family)
+    def register(self, event, *, sport_key, family, received_at,
+                 native=False, index=None):
+        """Seed one fixture. Called after competition confirmation (the
+        metered cycle) or after a MATCHED PinnAPI-native discovery receipt
+        (`native`, pinnapi_discovery). A native registration never replaces
+        a live seed the metered cycle registered for the same fixture: that
+        seed's event carries independent books that corroborate the price.
+        `index` (`pinnapi_primary.fixture_index` of this cache, built once by
+        a pass that registers many seeds) spares a full fixture-view rebuild
+        per seed. Returns what happened, by name."""
+        hit, why = P.match_event(self.cache, event, family, index=index)
         if why:
             self.counts[why] += 1
-            return
+            return why
         if len(json.dumps(event, default=str)) > 16384:
             self.counts['SEED_TOO_LARGE'] += 1
-            return
+            return 'SEED_TOO_LARGE'
         eid = hit[0]
+        old = self.seeds.get(eid)
+        if (native and old is not None and self._seed_live(eid, old)
+                and not (old.get('event') or {}).get('pinnapi_native')):
+            self.counts['NATIVE_KEPT_METERED_SEED'] += 1
+            return 'NATIVE_KEPT_METERED_SEED'
+        if native:
+            self.counts['NATIVE_SEEDED'] += 1
         self.seeds[eid] = dict(event=copy.deepcopy(event), sport_key=sport_key,
                                family=family, received_at=received_at,
                                registered_at=self.clock())
         self.seeds.move_to_end(eid)
         self._evict_seeds()
+        return 'SEEDED' if eid in self.seeds else 'SEED_EVICTED'
 
     def _evict_seeds(self):
         while len(self.seeds) > self.seed_cap:
@@ -189,7 +245,7 @@ class Scheduler:
     def changed(self, quote):
         if self.closed or quote.key != F.FULL_GAME_MONEYLINE_KEY:
             return
-        eid = quote.event_id
+        eid = fixture_of(self.cache, quote)
         held = self._is_held(eid)
         seed = self.seeds.get(eid)
         if seed is None:
@@ -199,10 +255,14 @@ class Scheduler:
         if not self._seed_live(eid, seed):
             self.counts['DISCOVERY_EXPIRED'] += 1
             return
-        if not self.cache.read(eid, quote.key, evaluated_ms=self.clock()*1000).get('ok'):
+        got = self.cache.read(quote.event_id, quote.key,
+                              evaluated_ms=self.clock()*1000)
+        if not got.get('ok'):
             self.counts['UNUSABLE_CHANGE'] += 1
+            # WHICH refusal, not only that there was one (incident RC7)
+            self.counts['UNUSABLE_CHANGE:%s' % got.get('reason')] += 1
             return
-        version = (quote.epoch, quote.source_change_ms, tuple(sorted(quote.prices.items())))
+        version = version_of(quote)
         if self.seen.get(eid) == version:
             self.counts['UNCHANGED'] += 1
             return
@@ -259,13 +319,15 @@ class Scheduler:
             return 'DISCOVERY_EXPIRED'
         if eid in self.held_pending:
             return 'ALREADY_QUEUED'
-        got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
-                              evaluated_ms=self.clock()*1000)
+        qid, why = _quote_record(self.cache, eid)
+        got = (self.cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
+                               evaluated_ms=self.clock()*1000)
+               if why is None else {'ok': False, 'reason': why})
         q = got.get('quote')
         if not got.get('ok') or q is None:
             self.counts['HELD_REQUEST_UNUSABLE'] += 1
             return str(got.get('reason') or 'UNUSABLE_QUOTE')
-        version = (q.epoch, q.source_change_ms, tuple(sorted(q.prices.items())))
+        version = version_of(q)
         if self.seen.get(eid) == version:
             self.counts['HELD_REQUEST_ALREADY_EVALUATED'] += 1
             return 'ALREADY_EVALUATED_THIS_VERSION'
@@ -313,15 +375,22 @@ class Scheduler:
             if self.session is not None:
                 await self._run_job_on_one_session(eid, tick)
                 continue
+            # `deadline_s` travels with the job so work the evaluation may
+            # add (the line-market lane) is never started when it cannot
+            # finish inside this same deadline (ext_pinnacle_loop.
+            # line_market_pass): the money-line evaluation is never turned
+            # into a TIMEOUT by it.
             attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                            evaluation_started_at=self.clock(), state='STARTED',
+                           deadline_s=self.deadline,
                            counters=dict(self.counts))
             seed = self.seeds.get(eid)
-            got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
-                                  evaluated_ms=self.clock()*1000)
+            qid, why = _quote_record(self.cache, eid)
+            got = (self.cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
+                                   evaluated_ms=self.clock()*1000)
+                   if why is None else {'ok': False, 'reason': why})
             q = got.get('quote')
-            version = None if q is None else (q.epoch, q.source_change_ms,
-                                              tuple(sorted(q.prices.items())))
+            version = None if q is None else version_of(q)
             if (not got.get('ok') or version != tick['version'] or seed is None or
                     not self._seed_live(eid, seed)):
                 attempt.update(state='REFUSED', reason=got.get('reason') or 'SUPERSEDED_OR_EXPIRED')
@@ -381,15 +450,24 @@ async def _run_job_on_one_session(self, eid, tick):
     evaluation and completion audit all on it."""
     import contextlib
     t0 = self.clock()
+    # (integration) the same reads the single-connection path makes since
+    # inc-pinnapi: the fixture's CURRENT pricing record (its live-phase
+    # child while in play, R30A RC3), the change instant the 30 s rule
+    # measures from (`version_of`, RC4), and `deadline_s` travelling with
+    # the job so the line-market lane never starts work it cannot finish
+    # inside this deadline. Production runs THIS path (`start` passes
+    # `session`), so without them the stream's fixes would not run there.
     attempt = dict(attempt_id=uuid.uuid4().hex, event_id=eid, **tick,
                    evaluation_started_at=t0, state='STARTED',
+                   deadline_s=self.deadline,
                    counters=dict(self.counts))
     seed = self.seeds.get(eid)
-    got = self.cache.read(eid, F.FULL_GAME_MONEYLINE_KEY,
-                          evaluated_ms=self.clock()*1000)
+    qid, why = _quote_record(self.cache, eid)
+    got = (self.cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
+                           evaluated_ms=self.clock()*1000)
+           if why is None else {'ok': False, 'reason': why})
     q = got.get('quote')
-    version = None if q is None else (q.epoch, q.source_change_ms,
-                                      tuple(sorted(q.prices.items())))
+    version = None if q is None else version_of(q)
     if (not got.get('ok') or version != tick['version'] or seed is None or
             not self._seed_live(eid, seed)):
         attempt.update(state='REFUSED', reason=got.get('reason') or 'SUPERSEDED_OR_EXPIRED')
@@ -487,7 +565,8 @@ def request_held_reevaluation(slug) -> dict:
 
 def register(event, **kwargs):
     if ACTIVE is not None:
-        ACTIVE.register(event, **kwargs)
+        return ACTIVE.register(event, **kwargs)
+    return None
 
 
 def start(pool, *, cycle):

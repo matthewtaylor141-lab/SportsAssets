@@ -1,0 +1,727 @@
+{
+ "_what": "THE VENUE'S OWN LISTINGS of full-game line contracts (spread, total, team total) across football (NFL, NCAAF), hockey (NHL), basketball (NBA), baseball (MLB), soccer (UNL, international friendlies) and tennis (ATP), as served by its public gateway to the GitHub runner: the rules text bettor_market_family proves settlement equivalence from, contract by contract.",
+ "_source": "GET https://gateway.polymarket.us/v1/markets?slug=<s1>&slug=<s2>... (two reads, 11 slugs each)",
+ "_reader": "github-actions runner (fetch-docs workflow, read-only public GET, no credential)",
+ "_reads": {
+  "R1": {
+   "workflow": "fetch-docs",
+   "run_id": 37235387633,
+   "job_id": 111533335936,
+   "retrieved_at": "2026-10-04T21:16:00Z",
+   "response_bytes": 34075,
+   "response_sha256": "dc07809277a9e75fae7a2e302609b81e90b52cb4f59656f56e8f12ac76428590"
+  },
+  "R2": {
+   "workflow": "fetch-docs",
+   "run_id": 37235391116,
+   "job_id": 111533358580,
+   "retrieved_at": "2026-10-04T21:16:07Z",
+   "response_bytes": 36579,
+   "response_sha256": "4c267eae58a2fe39823886a24b885f12aeade71d9cb380b94b70e37e2bd50e35"
+  }
+ },
+ "_subset": "the fields this repository reads (id, slug, question, description, marketType, sportsMarketType, sportsMarketTypeV2, line, gameStartTime, spreadTotalSuffix, metadata.teamId, rulesDisclaimer, and per side: description, long, team id/name/abbreviation/league/alias/safeName/ordering); icons, colours, prices and provider ids omitted. The response sha256 is of the WHOLE response as the runner printed it, so this subset is attributable but not byte-reproducible",
+ "_slugs_from": "research-sql run 37235155757 (job 111532681253, research/incident_fam_line_contracts.sql, read 2026-10-04T21:12:48Z), section L3: the catalogue rows of these exact identifiers",
+ "markets": [
+  {
+   "read": "R1",
+   "id": "1002995",
+   "slug": "asc-nfl-det-car-2026-10-04-neg-10pt5",
+   "question": "Will the Detroit Lions cover -10.5 vs the Carolina Panthers in DET Lions vs. CAR Panthers?",
+   "description": "This market will settle to Yes if Detroit Lions covers a -10.5 point spread in the Detroit Lions vs Carolina Panthers professional football game scheduled for Oct 4, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "spreads",
+   "sportsMarketType": "football_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -10.5,
+   "gameStartTime": "2026-10-05T00:20:00Z",
+   "marketSides": [
+    {
+     "description": "-10.50",
+     "long": true,
+     "team": {
+      "id": 58,
+      "name": "Detroit Lions",
+      "abbreviation": "det",
+      "league": "nfl",
+      "alias": "Lions",
+      "safeName": "DET Lions",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+10.50",
+     "long": false,
+     "team": {
+      "id": 52,
+      "name": "Carolina Panthers",
+      "abbreviation": "car",
+      "league": "nfl",
+      "alias": "Panthers",
+      "safeName": "CAR Panthers",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R1",
+   "id": "1003504",
+   "slug": "tsc-nfl-det-car-2026-10-04-total-22pt5",
+   "question": "Will the total in DET Lions vs. CAR Panthers be more than 22.5?",
+   "description": "This market will settle to Yes if Detroit Lions and Carolina Panthers combine for over 22.5 points in the Detroit Lions vs Carolina Panthers professional football game scheduled for Oct 4, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "totals",
+   "sportsMarketType": "football_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 22.5,
+   "gameStartTime": "2026-10-05T00:20:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R1",
+   "id": "1009117",
+   "slug": "tsc-nfl-det-car-2026-10-04-tt-car-10pt5",
+   "question": "Will the total in DET Lions vs. CAR Panthers be more than 10.5?",
+   "description": "Team Point Total settles Over if Carolina Panthers scores more than 10.5 points in the full game of the Detroit Lions vs Carolina Panthers professional football game scheduled for Oct 4, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended before this market is determined and is not resumed or rescheduled within two weeks of the originally scheduled date, it will be flagged for manual last-fair-market-price settlement. Outcome sourced from the NFL.",
+   "marketType": "totals",
+   "sportsMarketType": "football_team_points_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 10.5,
+   "gameStartTime": "2026-10-05T00:20:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "points",
+   "metadata": {
+    "teamId": 52
+   }
+  },
+  {
+   "read": "R1",
+   "id": "1142184",
+   "slug": "asc-nhl-uta-nyr-2026-10-04-neg-1pt5",
+   "question": "Will the UTA Mammoth cover -1.5 vs the NYR Rangers in UTA vs NYR?",
+   "description": "This market will settle to Yes if Mammoth covers a -1.5 goal spread in the Mammoth vs Rangers NHL game scheduled for Oct 4, 2026 at 6:00PM ET. Overtime is included if played. If a shootout determines the winner, the shootout will count as one goal for the winning team. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "spreads",
+   "sportsMarketType": "hockey_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -1.5,
+   "gameStartTime": "2026-10-04T22:00:00Z",
+   "marketSides": [
+    {
+     "description": "-1.50",
+     "long": true,
+     "team": {
+      "id": 1515,
+      "name": "Mammoth",
+      "abbreviation": "uta",
+      "league": "nhl",
+      "alias": "Mammoth",
+      "safeName": "Utah Mammoth",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+1.50",
+     "long": false,
+     "team": {
+      "id": 1495,
+      "name": "Rangers",
+      "abbreviation": "nyr",
+      "league": "nhl",
+      "alias": "Rangers",
+      "safeName": "New York Rangers",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R1",
+   "id": "1142191",
+   "slug": "tsc-nhl-uta-nyr-2026-10-04-2pt5",
+   "question": "Will the total in UTA vs NYR be more than 2.5?",
+   "description": "This market will settle to Yes if UTA Mammoth and NYR Rangers combine for over 2.5 goals in the UTA Mammoth vs NYR Rangers NHL game scheduled for Oct 4, 2026 at 6:00PM ET. Overtime is included if played. If a shootout determines the winner, the shootout will count as one goal for the winning team. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "totals",
+   "sportsMarketType": "hockey_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 2.5,
+   "gameStartTime": "2026-10-04T22:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R1",
+   "id": "1142244",
+   "slug": "tsc-nhl-uta-nyr-2026-10-04-tt-nyr-0pt5",
+   "question": "Will NYR Rangers score more than 0.5 goals in UTA vs NYR?",
+   "description": "This market will settle to Yes if NYR Rangers scores over 0.5 goals in the UTA Mammoth vs NYR Rangers NHL game scheduled for Oct 4, 2026 at 6:00PM ET. Overtime is included if played. If a shootout determines the winner, the shootout will count as one goal for the winning team. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "props",
+   "sportsMarketType": "hockey_team_total_goals",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_PROP",
+   "line": 0.5,
+   "gameStartTime": "2026-10-04T22:00:00Z",
+   "marketSides": [
+    {
+     "description": "Yes",
+     "long": true
+    },
+    {
+     "description": "No",
+     "long": false
+    }
+   ],
+   "metadata": {
+    "teamId": 1495
+   },
+   "title": "NYR Rangers total goals"
+  },
+  {
+   "read": "R1",
+   "id": "1146319",
+   "slug": "asc-cfb-soumis-troy-2026-10-06-neg-10pt5",
+   "question": "Will the Southern Miss cover -10.5 vs the Troy in Southern Miss vs. Troy?",
+   "description": "This market will settle to Yes if Southern Miss covers a -10.5 point spread in the Southern Miss vs Troy College Football game scheduled for Oct 6, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "spreads",
+   "sportsMarketType": "football_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -10.5,
+   "gameStartTime": "2026-10-07T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "-10.50",
+     "long": true,
+     "team": {
+      "id": 1166,
+      "name": "Southern Miss",
+      "abbreviation": "soumis",
+      "league": "cfb",
+      "alias": "Golden Eagles",
+      "safeName": "Southern Miss",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+10.50",
+     "long": false,
+     "team": {
+      "id": 1307,
+      "name": "Troy",
+      "abbreviation": "troy",
+      "league": "cfb",
+      "alias": "Trojans",
+      "safeName": "Troy",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R1",
+   "id": "1177708",
+   "slug": "tsc-cfb-soumis-troy-2026-10-06-tt-soumis-10pt5",
+   "question": "Will the total in Southern Miss vs. Troy be more than 10.5?",
+   "description": "Team Point Total settles Over if Southern Miss scores more than 10.5 points in the full game of the Southern Miss vs Troy College Football game scheduled for Oct 6, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended before this market is determined and is not resumed or rescheduled within two weeks of the originally scheduled date, it will be flagged for manual last-fair-market-price settlement. Outcome sourced from the relevant governing body.",
+   "marketType": "totals",
+   "sportsMarketType": "football_team_points_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 10.5,
+   "gameStartTime": "2026-10-07T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "points",
+   "metadata": {
+    "teamId": 1166
+   }
+  },
+  {
+   "read": "R1",
+   "id": "1182450",
+   "slug": "tsc-cfb-soumis-troy-2026-10-06-total-22pt5",
+   "question": "Will the total in Southern Miss vs. Troy be more than 22.5?",
+   "description": "This market will settle to Yes if Southern Miss and Troy combine for over 22.5 points in the Southern Miss vs Troy College Football game scheduled for Oct 6, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "totals",
+   "sportsMarketType": "football_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 22.5,
+   "gameStartTime": "2026-10-07T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R1",
+   "id": "1191592",
+   "slug": "asc-nba-gs-lac-2026-10-04-neg-2pt5",
+   "question": "Will the GS Warriors cover -2.5 vs the LA Clippers in GS Warriors vs. LA Clippers?",
+   "description": "This market will settle to Yes if Warriors covers a -2.5 point spread in the Warriors vs Clippers professional basketball game originally scheduled for Oct 4, 2026 at 7:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "spreads",
+   "sportsMarketType": "basketball_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -2.5,
+   "gameStartTime": "2026-10-04T23:00:00Z",
+   "marketSides": [
+    {
+     "description": "-2.50",
+     "long": true,
+     "team": {
+      "id": 47,
+      "name": "Warriors",
+      "abbreviation": "gs",
+      "league": "nba",
+      "alias": "Warriors",
+      "safeName": "Golden State",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+2.50",
+     "long": false,
+     "team": {
+      "id": 20,
+      "name": "Clippers",
+      "abbreviation": "lac",
+      "league": "nba",
+      "alias": "Clippers",
+      "safeName": "Los Angeles C",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R1",
+   "id": "1191595",
+   "slug": "tsc-nba-gs-lac-2026-10-04-221pt5",
+   "question": "Will the total in GS Warriors vs. LA Clippers be more than 221.5?",
+   "description": "This market will settle to Yes if GS Warriors and LA Clippers combine for over 221.5 points in the GS Warriors vs LA Clippers professional basketball game originally scheduled for Oct 4, 2026 at 7:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "totals",
+   "sportsMarketType": "basketball_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 221.5,
+   "gameStartTime": "2026-10-04T23:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R2",
+   "id": "1002991",
+   "slug": "asc-nfl-det-car-2026-10-04-neg-13pt5",
+   "question": "Will the Detroit Lions cover -13.5 vs the Carolina Panthers in DET Lions vs. CAR Panthers?",
+   "description": "This market will settle to Yes if Detroit Lions covers a -13.5 point spread in the Detroit Lions vs Carolina Panthers professional football game scheduled for Oct 4, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "spreads",
+   "sportsMarketType": "football_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -13.5,
+   "gameStartTime": "2026-10-05T00:20:00Z",
+   "marketSides": [
+    {
+     "description": "-13.50",
+     "long": true,
+     "team": {
+      "id": 58,
+      "name": "Detroit Lions",
+      "abbreviation": "det",
+      "league": "nfl",
+      "alias": "Lions",
+      "safeName": "DET Lions",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+13.50",
+     "long": false,
+     "team": {
+      "id": 52,
+      "name": "Carolina Panthers",
+      "abbreviation": "car",
+      "league": "nfl",
+      "alias": "Panthers",
+      "safeName": "CAR Panthers",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "points"
+  },
+  {
+   "read": "R2",
+   "id": "1111910",
+   "slug": "asc-unl-cyp-lat-2026-10-05-neg-1pt5",
+   "question": "Will the Cyprus cover -1.5 vs the Latvia in CYP vs LAT?",
+   "description": "This market will settle to Yes if Cyprus covers a -1.5 goal spread at the end of 90 minutes plus stoppage time in the Cyprus vs Latvia match (UEFA Nations League) scheduled for 2026-10-05 12:00PM ET. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from UEFA Nations League.",
+   "marketType": "spreads",
+   "sportsMarketType": "soccer_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -1.5,
+   "gameStartTime": "2026-10-05T16:00:00Z",
+   "marketSides": [
+    {
+     "description": "-1.50",
+     "long": true,
+     "team": {
+      "id": 34886,
+      "name": "Cyprus",
+      "abbreviation": "cyp",
+      "league": "unl",
+      "alias": "Cyprus",
+      "safeName": "Cyprus",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "+1.50",
+     "long": false,
+     "team": {
+      "id": 34902,
+      "name": "Latvia",
+      "abbreviation": "lat",
+      "league": "unl",
+      "alias": "Latvia",
+      "safeName": "Latvia",
+      "ordering": "away"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R2",
+   "id": "1111913",
+   "slug": "tsc-unl-cyp-lat-2026-10-05-0pt5",
+   "question": "Will the total in CYP vs LAT be more than 0.5?",
+   "description": "This market will settle to Yes if Cyprus and Latvia combine to score over 0.5 goals during 90 minutes plus stoppage time in the Cyprus vs Latvia UEFA Nations League match scheduled for 2026-10-05 12:00PM ET. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from UEFA Nations League.",
+   "marketType": "totals",
+   "sportsMarketType": "soccer_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 0.5,
+   "gameStartTime": "2026-10-05T16:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R2",
+   "id": "1142182",
+   "slug": "asc-nhl-uta-nyr-2026-10-04-neg-2pt5",
+   "question": "Will the UTA Mammoth cover -2.5 vs the NYR Rangers in UTA vs NYR?",
+   "description": "This market will settle to Yes if Mammoth covers a -2.5 goal spread in the Mammoth vs Rangers NHL game scheduled for Oct 4, 2026 at 6:00PM ET. Overtime is included if played. If a shootout determines the winner, the shootout will count as one goal for the winning team. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "spreads",
+   "sportsMarketType": "hockey_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -2.5,
+   "gameStartTime": "2026-10-04T22:00:00Z",
+   "marketSides": [
+    {
+     "description": "-2.50",
+     "long": true,
+     "team": {
+      "id": 1515,
+      "name": "Mammoth",
+      "abbreviation": "uta",
+      "league": "nhl",
+      "alias": "Mammoth",
+      "safeName": "Utah Mammoth",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+2.50",
+     "long": false,
+     "team": {
+      "id": 1495,
+      "name": "Rangers",
+      "abbreviation": "nyr",
+      "league": "nhl",
+      "alias": "Rangers",
+      "safeName": "New York Rangers",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R2",
+   "id": "1163754",
+   "slug": "asc-mlb-atl-lad-2026-10-04-neg-1pt5",
+   "question": "Will the Atlanta Braves cover -1.5 vs the Los Angeles Dodgers in Game 2: ATL Braves vs. LA Dodgers?",
+   "description": "This market will settle to Yes if the Atlanta Braves cover a -1.5 run spread in the Atlanta Braves vs Los Angeles Dodgers MLB NL Division Series Game 2 scheduled for 2026-10-04 at 8:00PM ET. Extra innings are included if played. If the game is shortened but an official final result is declared, the market will settle based on that result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+   "marketType": "spreads",
+   "sportsMarketType": "baseball_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -1.5,
+   "gameStartTime": "2026-10-05T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "-1.50",
+     "long": true,
+     "team": {
+      "id": 3001,
+      "name": "Atlanta Braves",
+      "abbreviation": "atl",
+      "league": "mlb",
+      "alias": "Atlanta Braves",
+      "safeName": "Braves",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "+1.50",
+     "long": false,
+     "team": {
+      "id": 3014,
+      "name": "Los Angeles Dodgers",
+      "abbreviation": "lad",
+      "league": "mlb",
+      "alias": "Los Angeles Dodgers",
+      "safeName": "Dodgers",
+      "ordering": "home"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "runs"
+  },
+  {
+   "read": "R2",
+   "id": "1193390",
+   "slug": "tsc-mlb-atl-lad-2026-10-04-6pt5",
+   "question": "Will the total in Game 2: ATL Braves vs. LA Dodgers be more than 6.5?",
+   "description": "This market will settle to Yes if the Atlanta Braves and Los Angeles Dodgers combine for over 6.5 runs in the Atlanta Braves vs Los Angeles Dodgers MLB NL Division Series Game 2 scheduled for 2026-10-04 at 8:00PM ET. Extra innings are included if played. If the game is shortened but an official final result is declared, the market will settle based on that result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+   "marketType": "totals",
+   "sportsMarketType": "baseball_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 6.5,
+   "gameStartTime": "2026-10-05T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "runs"
+  },
+  {
+   "read": "R2",
+   "id": "1193637",
+   "slug": "tsc-mlb-atl-lad-2026-10-04-tt-atl-1pt5",
+   "question": "Will Atlanta Braves score more than 1.5 runs in Game 2: ATL Braves vs. LA Dodgers?",
+   "description": "This market will settle to Yes if the Atlanta Braves score over 1.5 runs in the Atlanta Braves vs Los Angeles Dodgers MLB NL Division Series Game 2 scheduled for 2026-10-04. Extra innings are included if played. If the game is shortened but an official final result is declared, the market will settle based on that result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+   "marketType": "props",
+   "sportsMarketType": "baseball_team_total_runs",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_PROP",
+   "line": 1.5,
+   "gameStartTime": "2026-10-05T00:00:00Z",
+   "marketSides": [
+    {
+     "description": "Yes",
+     "long": true
+    },
+    {
+     "description": "No",
+     "long": false
+    }
+   ],
+   "metadata": {
+    "teamId": 3001
+   },
+   "title": "Atlanta Braves total runs"
+  },
+  {
+   "read": "R2",
+   "id": "1197746",
+   "slug": "tsc-atp-alikac-grilom-2026-10-04-tg-17pt5",
+   "question": "Will the total in Alibek Kachmazov vs. Grigoriy Lomakin be more than 17.5?",
+   "description": "This market will settle to Yes if over 17.5 games are played across the full Alibek Kachmazov vs. Grigoriy Lomakin ATP match scheduled for October 5, 2026. If the match does not begin due to a walkover, withdrawal, or cancellation, the market will settle to the last fair market price. If a player retires during the match and the market can be unconditionally settled based on play already completed, the market will settle accordingly; otherwise the market will settle to the last fair market price. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from ATP.",
+   "marketType": "totals",
+   "sportsMarketType": "tennis_match_total_games",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 17.5,
+   "gameStartTime": "2026-10-05T02:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "games",
+   "rulesDisclaimer": "Resolves based on the total number of games played over the full match."
+  },
+  {
+   "read": "R2",
+   "id": "1197754",
+   "slug": "asc-atp-alikac-grilom-2026-10-04-gs-neg-1pt5",
+   "question": "Will the Alibek Kachmazov cover -1.5 vs the Grigoriy Lomakin in Alibek Kachmazov vs. Grigoriy Lomakin?",
+   "description": "This market will settle to Yes if Alibek Kachmazov covers a -1.5 game spread against Grigoriy Lomakin across the full Alibek Kachmazov vs. Grigoriy Lomakin ATP match scheduled for October 5, 2026. If the match does not begin due to a walkover, withdrawal, or cancellation, the market will settle to the last fair market price. If a player retires during the match and the market can be unconditionally settled based on play already completed, the market will settle accordingly; otherwise the market will settle to the last fair market price. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from ATP.",
+   "marketType": "spreads",
+   "sportsMarketType": "tennis_match_games_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -1.5,
+   "gameStartTime": "2026-10-05T02:00:00Z",
+   "marketSides": [
+    {
+     "description": "-1.50",
+     "long": true,
+     "team": {
+      "id": 39080,
+      "name": "Alibek Kachmazov",
+      "abbreviation": "alikac",
+      "league": "atp",
+      "alias": "",
+      "safeName": "Alibek Kachmazov",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "+1.50",
+     "long": false,
+     "team": {
+      "id": 5999,
+      "name": "Grigoriy Lomakin",
+      "abbreviation": "grilom",
+      "league": "atp",
+      "alias": "Grigoriy Lomakin",
+      "safeName": "Grigoriy Lomakin",
+      "ordering": "away"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "games",
+   "rulesDisclaimer": "Resolves based on the difference in total games won over the full match."
+  },
+  {
+   "read": "R2",
+   "id": "1208257",
+   "slug": "asc-intf-uga-cdr-2026-10-05-neg-1pt5",
+   "question": "Will the Uganda cover -1.5 vs the DR Congo in UGA vs CDR?",
+   "description": "This market will settle to Yes if Uganda covers a -1.5 goal spread at the end of 90 minutes plus stoppage time in the Uganda vs DR Congo match (International Friendlies) scheduled for 2026-10-05 9:00AM ET. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from International Friendlies.",
+   "marketType": "spreads",
+   "sportsMarketType": "soccer_team_full_game_spread",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_SPREAD",
+   "line": -1.5,
+   "gameStartTime": "2026-10-05T13:00:00Z",
+   "marketSides": [
+    {
+     "description": "-1.50",
+     "long": true,
+     "team": {
+      "id": 8540,
+      "name": "Uganda",
+      "abbreviation": "uga",
+      "league": "intf",
+      "alias": "",
+      "safeName": "",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "+1.50",
+     "long": false,
+     "team": {
+      "id": 8529,
+      "name": "DR Congo",
+      "abbreviation": "cdr",
+      "league": "intf",
+      "alias": "",
+      "safeName": "",
+      "ordering": "away"
+     }
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  },
+  {
+   "read": "R2",
+   "id": "1208260",
+   "slug": "tsc-intf-uga-cdr-2026-10-05-0pt5",
+   "question": "Will the total in UGA vs CDR be more than 0.5?",
+   "description": "This market will settle to Yes if Uganda and DR Congo combine to score over 0.5 goals during 90 minutes plus stoppage time in the Uganda vs DR Congo International Friendlies match scheduled for 2026-10-05 9:00AM ET. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from International Friendlies.",
+   "marketType": "totals",
+   "sportsMarketType": "soccer_team_full_game_total",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL",
+   "line": 0.5,
+   "gameStartTime": "2026-10-05T13:00:00Z",
+   "marketSides": [
+    {
+     "description": "Over",
+     "long": true
+    },
+    {
+     "description": "Under",
+     "long": false
+    }
+   ],
+   "spreadTotalSuffix": "goals"
+  }
+ ]
+}

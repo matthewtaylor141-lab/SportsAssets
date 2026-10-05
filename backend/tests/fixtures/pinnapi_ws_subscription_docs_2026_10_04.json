@@ -1,0 +1,57 @@
+{
+ "_what": "PinnAPI's public documentation (llms-full.txt), the lines the R30A scope and discovery code cite: the stable sport-id table, the WebSocket subscription rules and caps, child matchups and the prematch frames. Verbatim lines; nothing interpreted here.",
+ "source_url": "https://pinnapi.com/llms-full.txt",
+ "reader": "the PinnAPI readiness probe's docs read (read-only public GET of llms-full.txt; no key is sent for docs -- pinnapi_probe.docs)",
+ "captured_in": {
+  "probe_run_id": 37232918224,
+  "retrieved_at": "2026-10-04T20:40:01Z",
+  "evidence_dir": "evidence/pinnapi/20261004T204001Z_run37232918224/docs/llms-full_txt.txt"
+ },
+ "bytes": 56250,
+ "sha256": "162705debe68ec5ec7e4779defcb3720be1dedd8bf85f731e0cda9fc7ebd394d",
+ "same_bytes_as": {
+  "workflow": "fetch-docs",
+  "run_id": 37226335697,
+  "retrieved_at": "2026-10-04T18:56:20Z"
+ },
+ "excerpt": {
+  "sport_ids_table": [
+   "## Sport IDs",
+   "",
+   "Stable integer mapping. Use these in `sport_id` query params throughout the API.",
+   "",
+   "| ID | Sport |",
+   "|---|---|",
+   "| 1 | Soccer |",
+   "| 2 | Tennis |",
+   "| 3 | Basketball |",
+   "| 4 | Hockey |",
+   "| 5 | Football |",
+   "| 6 | Baseball |",
+   "| 7 | Rugby (Union + League) |",
+   "| 8 | MMA (UFC, Bellator, ONE, etc.) |",
+   "| 9 | Boxing |",
+   "| 10 | Other (Volleyball, Handball) |",
+   "| 11 | Esports (Dota 2, CS2, League of Legends, etc.) |",
+   "| 12 | Golf (PGA, DP World Tour, LIV — head-to-heads) |"
+  ],
+  "subscribe_rules": [
+   "// Send this within 5s of connecting or the server closes the socket.",
+   "// You can subscribe by SPORT (firehose) or by specific EVENT IDs (filtered),",
+   "// or both in the same message. At least one of sport_ids / event_ids is required.",
+   "`streams` values: `\"live\"`, `\"prematch\"`, or both. `sport_ids` use the same integer IDs as the rest of the API (1 = Soccer, 2 = Tennis, …). `event_ids` are Pinnacle's matchup IDs (9-10 digit integers, the same `id` field that appears on every record).",
+   "**Filter rule**: a frame is delivered to a sub if **either** its sport_id matches a sport-level subscription **or** its event_id matches an event-level subscription. So `sport_ids: [2], event_ids: [12345]` means \"all of Tennis plus this one specific event in any sport\".",
+   "**Per-stream cap**: 200 event_ids per connection per stream (live and prematch counted independently). Subscribing past the cap returns `{type:\"error\", code:\"event_id_cap\", ...}` and the request is rejected wholesale. Auto-cleanup: when an event is removed from our store (`op: \"del\"`), the hub silently drops it from all subs' event_id sets — you don't need to send unsubscribe yourself.",
+   "API key can also be sent in an `x-api-key` header during the HTTP upgrade. One WebSocket connection per account (separate slot from SSE — you can run both).",
+   "Re-subscribe on reconnect. Server-side state is not preserved — the snapshot at the start of every connection is your sync point. Exponential backoff (1s → 2s → 4s → 30s cap) recommended. The 1-connection cap means opening a new socket will close any previous one for the same key."
+  ],
+  "child_matchups": [
+   "| `rec.parentId` | If present, this is a CHILD matchup (alt periods, props derived from a parent event). Its full metadata (participants, league) lives on the parent record. |",
+   "| `op` | `\"add\"` = new event or new markets appeared. `\"upd\"` = incremental change (typically just changed markets — merge by composite key, don't replace the whole list). `\"del\"` = event removed by Pinnacle (kicked off, settled, voided) — drop your local copy. |"
+  ],
+  "prematch_frames": [
+   "| `type` | `prematch_matchups` = response from `/sports/{sid}/matchups`, fired every 5s per sport. Includes both prematch and live entries — filter by `data[i].isLive === false` if you want strict prematch. `prematch_markets` = response from `/matchups/{id}/markets/related/straight`, fired only when Pinnacle bumped `matchup.version`. |",
+   "| `data` | For `prematch_matchups`: array of full matchup records. For `prematch_markets`: array of market objects scoped to one matchup. **This is the authoritative current snapshot from Pinnacle** — any market in your local store that's NOT in this list has been closed by Pinnacle. Drop it. |"
+  ]
+ }
+}

@@ -390,7 +390,12 @@ READERS = {
     "agents/intelligence_reports.py": ("BOUNDED_RESEARCH_AND_PROVIDER_CONTRIBUTION_REPORTS_BOTH_PURPOSES_NO_EXECUTION", 2),
     # writes, or joins outcomes onto, the table; census reads are reporting
     "bettor_external_shadow.py": ("WRITER_AND_REPORTING_CENSUS", 9),
-    "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 8),
+    # 8 -> 9 (R30A P0 incident, migration 261): STICKY_EVENT_KEY_SQL reads
+    # the FIRST event key already recorded for a venue event, both purposes,
+    # so a fixture found by either discovery keeps one event key and the
+    # fixture rails never see one game as two. An identity read: it selects
+    # no candidate, sizes and places nothing.
+    "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 9),
     # SHOULD read calibration-only rows
     "bettor_source_calibration.py": ("CALIBRATION_MEASUREMENT_READS_ALL", 3),
     # (208) the SHADOW intelligence layer: the calibration engine scores

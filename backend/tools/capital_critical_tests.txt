@@ -1020,3 +1020,13 @@ tests/test_venue_catalogue_readers_and_receipts.py
 # appended to collector_coverage_receipts and read by coverage_integrity.
 tests/test_collector_coverage_scheduler.py
 tests/test_collector_coverage_receipts.py
+# R30A P0 INCIDENT (inc-pinnapi): the six-sport PinnAPI scope inside the
+# provider's documented limits, the feed clock that never guesses an age (the
+# 30 s rule unchanged), in-play children pricing their fixture; PinnAPI-native
+# discovery with a named receipt per fixture and one fixed event key per venue
+# fixture (migration 261); line markets priced only where both sides' cited
+# words prove the payoff equivalent, half-point and exact line only, de-vigged
+# on their own pair, and entered only by the completed-game paper policy.
+tests/test_r30a_pinnapi_scope_clock_inplay.py
+tests/test_r30a_pinnapi_native_discovery.py
+tests/test_r30a_line_market_family.py
