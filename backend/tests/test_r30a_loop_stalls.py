@@ -47,88 +47,31 @@ import pytest
 from sportsassets import pinnapi_feed as F
 
 
-# ── the implementation before R30A, verbatim (191b299) ────────────────
+# ── the scanning implementation ───────────────────────────────────────
+#
+# (integration) This was the four per-event operations of 191b299, verbatim.
+# inc-pinnapi then changed what those operations DO (R30A RC3 / RC4: three
+# clocks per quote, an observed change in an unstamped frame, the in-play
+# child, an unparsed record of a held event; pinnapi_feed `_put(clocks=)`,
+# `_replace_event(confirm_kind=)`), so the 191b299 copy no longer describes
+# the cache and could only fail on signatures. What this proof is FOR is
+# unchanged: the per-event index must change no behaviour. inc-pinnapi routed
+# every per-event key lookup through ONE method, `FeedCache._keys_of`, which
+# uses the index when the store keeps one and scans otherwise -- so the
+# scanning implementation is now the CURRENT cache with a plain dict store
+# (no index) and `_keys_of` the full scan, and the two are replayed frame by
+# frame exactly as before.
 
 class _ScanningCache(F.FeedCache):
-    """The four per-event operations exactly as they were: full scans."""
+    """The current cache, every per-event key lookup a full scan of a plain
+    dict (no per-event index)."""
 
-    def _drop_event(self, eid):
-        self.events.pop(eid, None)
-        for k in [k for k in self.quotes if k[0] == eid]:
-            del self.quotes[k]
-        self.counts["events_deleted"] += 1
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.quotes = {}
 
-    def _replace_event(self, ev, *, stream, sport, epoch, frame_ts, rx,
-                       as_change, keep_meta=False):
-        eid = ev["id"]
-        parsed = self.extract(ev)
-        if parsed is None:
-            self.counts["unparsed"] += 1
-            return
-        if not keep_meta:
-            self._touch_meta(ev, stream=stream, sport=sport)
-        else:
-            self.events.setdefault(eid, {"id": eid, "stream": stream,
-                                         "sport_id": sport})
-            self.events.move_to_end(eid)
-        old = {k: q for k, q in self.quotes.items() if k[0] == eid}
-        for k in old:
-            del self.quotes[k]
-        closed = F.closed_periods(ev)
-        for key, f in parsed:
-            if not f["open"] or (f["period"] or 0) in closed:
-                continue
-            prev = old.get((eid, key))
-            changed = prev is None or prev.prices != f["prices"]
-            if as_change and changed and prev is not None:
-                change = frame_ts
-            elif as_change and prev is None:
-                change = None
-            else:
-                change = prev.source_change_ms if (
-                    prev and not changed) else None
-            self._put(eid, key, f, stream, sport, epoch, change, frame_ts,
-                      rx)
-        self._bound()
-
-    def _merge_event(self, rec, *, stream, sport, epoch, frame_ts, rx):
-        eid = rec["id"]
-        self._touch_meta(rec, stream=stream, sport=sport)
-        closed = F.closed_periods(rec)
-        for k in [k for k, q in self.quotes.items()
-                  if k[0] == eid and (q.period or 0) in closed]:
-            del self.quotes[k]
-        parsed = self.extract(rec)
-        if parsed is None:
-            self.counts["unparsed"] += 1
-            return
-        for key, f in parsed:
-            k = (eid, key)
-            if not f["open"] or (f["period"] or 0) in closed:
-                self.quotes.pop(k, None)
-                self.counts["markets_closed"] += 1
-                continue
-            prev = self.quotes.get(k)
-            changed = prev is None or prev.prices != f["prices"]
-            change = frame_ts if changed else prev.source_change_ms
-            if changed:
-                self.counts["price_changes"] += 1
-                self.last_change_received_ms = rx
-            self._put(eid, key, f, stream, sport, epoch, change, frame_ts, rx)
-        self._bound()
-
-    def _bound(self):
-        while len(self.events) > self.max_events:
-            eid, _ = self.events.popitem(last=False)
-            for k in [k for k in self.quotes if k[0] == eid]:
-                del self.quotes[k]
-            self.counts["events_evicted"] += 1
-        if len(self.quotes) > self.max_markets:
-            for eid in list(self.events):
-                if len(self.quotes) <= self.max_markets:
-                    break
-                self._drop_event(eid)
-                self.counts["events_evicted"] += 1
+    def _keys_of(self, eid) -> list:
+        return [k for k in self.quotes if k[0] == eid]
 
 
 # ── frames ─────────────────────────────────────────────────────────────
