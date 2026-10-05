@@ -215,7 +215,9 @@ async def test_natively_served_college_games_are_reported_as_ncaaf():
         key = PD.sport_key_for("football", ["cfb"])
         await _rows(conn, key, ["aec-cfb-a%d-b%d-2026-10-05" % (i, i)
                                 for i in range(12)], now=now)
-        day = CI.local_day(now, CI.ALERT_TIMEZONE)
+        # the rows are written at now - 60: their own local day, so a run in
+        # the first minute after local midnight reads the day they sit in
+        day = CI.local_day(now - 60, CI.ALERT_TIMEZONE)
         f = await CI.funnel_for_day(conn, day, CI.ALERT_TIMEZONE)
         rows = (list(f["leagues"].values())
                 if isinstance(f.get("leagues"), dict) else f.get("leagues"))
@@ -246,7 +248,9 @@ async def test_reconcile_reads_the_native_key_beside_the_metered_one():
     await tx.start()
     try:
         now = time.time()
-        day = CI.local_day(now, CI.ALERT_TIMEZONE)
+        # the rows are written at now - 60: their own local day, so a run in
+        # the first minute after local midnight reads the day they sit in
+        day = CI.local_day(now - 60, CI.ALERT_TIMEZONE)
         start, end = CI.day_window(day, CI.ALERT_TIMEZONE)
         kick = start + 3600 * 20
         await conn.execute("DELETE FROM ext_candidate_outcomes")
