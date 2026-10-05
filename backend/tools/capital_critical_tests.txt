@@ -1089,3 +1089,19 @@ tests/test_correlation_graph.py
 # R30C risk evidence routes: GET-only, command session or 401, READ ONLY
 # transaction with a statement timeout, no order/venue/paper/funded import.
 tests/test_risk_evidence_authority.py
+# (R30C, 300) LIVE EXECUTION CALIBRATION: PAPER_SIMULATION, LIVE_SHADOW and
+# ACTUAL kept apart in storage, estimation and display; every LIVE-path
+# execution estimate states the class it was fitted on; a LIVE estimate
+# without ACTUAL is labelled and WIDER (never zero-width; the shadow's
+# tautological fill figures are never one); MEASURED needs >= 20
+# independent events; ACTUAL is UNMEASURED with its reason (never a zero);
+# a venue event can never name a SHADOW execution; the route loads no
+# venue / execution module at run time.
+tests/test_execution_calibration.py
+# (R30C, 300) THE OPPORTUNITY SCORE V1 / V2 SHADOW TOURNAMENT: both scored at
+# the decision instant beside (never in) the canonical intent; INVESTMENT
+# only, forward only, ONE SPEC SERIES at a time, unique opportunities,
+# event-clustered intervals; V2 has no authority and promotion is never
+# automatic; no backfill (database clock forced, row must be its intent's,
+# CHECK on both sides); V2 MEASURED through the real decision hook.
+tests/test_opportunity_score_tournament.py

@@ -96,7 +96,17 @@ DECISION_LOGIC_FILES = (
     "bettor_funded_decision.py",
     # the agent components inside the intent
     "agents/eddie.py", "lost_opportunity/score.py",
-    "lost_opportunity/reads.py", "profitability/economics.py")
+    "lost_opportunity/reads.py", "profitability/economics.py",
+    # (R30 tails, pinned at integration) the R30C shadow components the
+    # canonical-components path computes at the decision instant: the
+    # execution-evidence labels and widened LIVE intervals on Eddie's
+    # estimate (inside the intent), the settlement-exception cost (on the
+    # intent's evidence) and Opportunity Score V2 (beside it). None gates the
+    # decision, but each shapes what the intent records, as eddie.py and
+    # lost_opportunity/score.py do -- pinned, so a change restarts the
+    # forward window rather than slipping under it
+    "execution_evidence.py", "settlement_exception_risk.py",
+    "opportunity_score_v2.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
 #: modules that make the ENTER decision, size it, review a position, and
@@ -127,6 +137,10 @@ NOT_DECISION_LOGIC = {
                                   "constant, a row label"),
     "bettor_paper_guard.py": ("the import guard keeping paper modules away "
                               "from execution; decides nothing"),
+    "opportunity_tournament.py": ("(R30C) records V1 / V2 BESIDE an intent "
+                                  "already recorded, in its own append-only "
+                                  "table under a savepoint; decides nothing "
+                                  "and nothing reads it to decide"),
 }
 
 

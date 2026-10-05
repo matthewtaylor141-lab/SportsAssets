@@ -1750,6 +1750,15 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                 "acquisition_cost_usd": cost},
             created_at=at)
         await record_decision_intent(conn, intent)
+        # R30C · THE OPPORTUNITY SCORE SHADOW TOURNAMENT: V1 (the score the
+        # intent carries) and V2 (the lower-confidence-bound score) recorded
+        # BESIDE the intent at this decision instant (migration 300). V2 has
+        # no authority: it is not in the intent, nothing reads it to decide,
+        # and a failure here never touches the decision (savepoint inside).
+        from . import opportunity_tournament as OT
+        await OT.record_entry(conn, intent=intent,
+                              v1=comps.get("opportunity_score"),
+                              v2=comps.get("opportunity_score_v2"))
         return intent
     except Exception:                                          # noqa: BLE001
         log.warning("canonical intent not built for %s", did, exc_info=True)

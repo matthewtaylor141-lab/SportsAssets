@@ -209,7 +209,9 @@ var DESK = (function () {
       var c = isObj(a.candidate) ? a.candidate : {};
       f.analysis = '<b>' + esc(a.recommendation) + '</b> <span class="s">(SHADOW · ' + esc(a.estimate_id) + ')</span><div class="s">' + esc(a.reason) + '</div><div class="s">theoretical edge ' + val(a.theoretical_edge_pp, u.theoretical_edge) + ' · net executable edge ' + val(a.expected_net_executable_edge_pp, u.net_executable_edge) + '</div>';
       f.candidate = esc(c.us_market_slug) + ' ' + esc(c.holding_side) + '<div class="s">' + esc(c.decision_id) + ' · qty ' + esc(num(c.proposed_qty, 2)) + ' ≤ ' + esc(num(c.limit_price, 3)) + '</div>';
-      f.fill = 'probability ' + val(a.expected_fill_probability, u.fill_probability, 3) + '<div class="s">max executable size ' + val(a.max_executable_qty, u.max_executable_size, 0) + '</div>';
+      // R30C: a fill probability is always shown with the class it was fitted on (the paper simulator's rate is never live execution quality)
+      var fe = isObj(a.fill_probability_evidence) ? a.fill_probability_evidence : {};
+      f.fill = 'probability ' + val(a.expected_fill_probability, u.fill_probability, 3) + '<div class="s">fitted on ' + esc(fe.fitted_on || 'UNLABELLED') + (fe.live_ci_low !== undefined && fe.live_ci_low !== null ? ' · live interval ' + esc(num(fe.live_ci_low, 3)) + '–' + esc(num(fe.live_ci_high, 3)) : '') + ' · ' + esc(fe.live_use || 'not proof of live execution') + '</div><div class="s">max executable size ' + val(a.max_executable_qty, u.max_executable_size, 0) + '</div>';
       f.slippage = val(a.expected_slippage_pp, u.slippage);
       f.policy = a.execution_policy ? esc(a.execution_policy) : nm('no policy recorded');
       var ms = isObj(a.microstructure) ? a.microstructure : {}, b = isObj(a.book) ? a.book : {};

@@ -46,6 +46,13 @@ from __future__ import annotations
 
 import math
 
+#: R30C · EXECUTION EVIDENCE CLASS. What this module reconciles is the
+#: venue's own order record (fill evidence read back from the venue) -- ACTUAL
+#: evidence of the micro-calibration lane, not of the canonical path, and no
+#: LIVE estimate is fitted on it. Pinned equal to execution_evidence.ACTUAL
+#: by tests/test_execution_calibration.py.
+EXECUTION_EVIDENCE_CLASS = "ACTUAL"
+
 # ── outcomes, all named ──────────────────────────────────────────────
 SUBMITTED = "SUBMITTED"
 REFUSED_BY_VENUE = "REFUSED_BY_VENUE"

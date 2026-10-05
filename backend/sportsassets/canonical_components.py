@@ -30,6 +30,19 @@ never a manufactured value. Components are evidence on the intent; none of
 them changes the paper decision, its order or the live proposal (both
 adapters read the same intent, so they see the same components).
 
+R30C · EXECUTION EVIDENCE. Every execution figure a component carries says
+which class it was fitted on (execution_evidence): Eddie's fill probability,
+markout and time to fill are the paper simulator's (PAPER_SIMULATION), with
+their class interval and a WIDER live interval; the Opportunity Score's
+P(fill) and Allie's executable net say the same; ACTUAL is UNMEASURED with
+its reason while SMALL LIVE is SHADOW. Simulated fills are never presented
+as live execution quality.
+
+R30C · OPPORTUNITY SCORE V2 (opportunity_score_v2) is computed here at the
+same instant from the same inputs and returned as `opportunity_score_v2` --
+NOT a component of the intent: live_parity records it beside the intent in
+the shadow tournament (migration 300) and nothing reads it to decide.
+
 Bounded: every read runs in its own savepoint under a short timeout, and the
 slow-moving inputs (Eddie's fill history, settlement lags, the capital
 snapshot, Allie's latest run) are cached for CACHE_S.
@@ -41,11 +54,24 @@ import logging
 import time
 from typing import Any
 
+from . import execution_evidence as EE
+
 log = logging.getLogger(__name__)
 
 VERSION = "CANONICAL_COMPONENTS_V1"
 CACHE_S = 300.0
 COMPONENT_TIMEOUT_S = 2.0
+#: how far back V2's exceptional-settlement counts look (R30C)
+EXCEPTIONAL_LOOKBACK_DAYS = 60
+#: the settlement outcomes V2 counts as EXCEPTIONAL (the edge is forfeited
+#: or replaced): a void refund, and the venue's own published settlement
+#: price (migration 184, e.g. $0.50 per contract on an NFL tie)
+EXCEPTIONAL_OUTCOMES = ("VOID_REFUND", "SETTLED_AT_VENUE_PRICE")
+SETTLED_OUTCOMES = ("WON", "LOST") + EXCEPTIONAL_OUTCOMES
+#: why Allie's fixture haircut is not a measurement for this decision
+R_NO_FIXTURE = ("NO_FIXTURE_ON_THE_DECISION: the open groups on its fixture "
+                "cannot be counted, so the correlation haircut 0 is not a "
+                "measured absence of correlation")
 _CACHE: dict[str, tuple[float, Any]] = {}
 
 
@@ -114,11 +140,52 @@ def eddie_component(est: dict | None, why: str | None = None) -> dict:
             "execution_style": est.get("execution_style"),
             "max_executable_qty": est.get("max_executable_qty"),
             "unmeasured": est.get("unmeasured") or {},
+            # R30C: what the fill probability, markout and time to fill were
+            # fitted on (PAPER_SIMULATION today), their LIVE (widened)
+            # intervals, and why ACTUAL is unmeasured -- so the LIVE adapter
+            # reading this intent can never take a paper fill rate for the
+            # venue's (execution_evidence)
+            "execution_evidence": est.get("execution_evidence") or {
+                "fitted_on": "UNMEASURED",
+                "why": "THE_ESTIMATE_CARRIES_NO_EXECUTION_EVIDENCE"},
+            # R30C review: the point EV / net edge / fill probability above
+            # are the paper simulator's; their LIVE interval (wider, by the
+            # declared transfer penalty and floor) travels beside them
+            "live_interval": _eddie_live_interval(est),
             "authority": "SHADOW_ONLY_CARRIED_AS_EVIDENCE"}
 
 
-async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
-                            now: float) -> dict:
+def _eddie_live_interval(est: dict) -> dict:
+    """The LIVE interval of Eddie's EV, net executable edge and fill
+    probability (execution_evidence.live_executable_bounds, computed by
+    agents/eddie.estimate), or UNAVAILABLE with its reason."""
+    ev = est.get("execution_evidence") or {}
+    li = ev.get("live_interval") or {}
+    fp = ev.get("fill_probability") or {}
+    if li.get("status") != "MEASURED":
+        return {"status": "UNAVAILABLE", "fitted_on": ev.get("fitted_on"),
+                "why": li.get("why") or "THE_ESTIMATE_CARRIES_NO_LIVE_"
+                                        "INTERVAL",
+                "expected_fill_probability": {
+                    "low": fp.get("live_ci_low"),
+                    "high": fp.get("live_ci_high")}}
+    return {"status": "MEASURED", "fitted_on": li.get("fitted_on"),
+            "live_use": li.get("live_use"),
+            "is_proof_of_live_execution": bool(
+                li.get("is_proof_of_live_execution")),
+            "expected_executable_ev_usd": li.get(
+                "expected_executable_ev_usd"),
+            "expected_net_executable_edge_pp": li.get(
+                "expected_net_executable_edge_pp"),
+            "expected_fill_probability": {"low": fp.get("live_ci_low"),
+                                          "high": fp.get("live_ci_high")}}
+
+
+async def eddie_estimate_at_decision(conn, *, decision: dict,
+                                     book_row: dict | None,
+                                     now: float) -> dict:
+    """Eddie's RAW estimate at the decision instant (agents/eddie.estimate on
+    his cached recorded history), or {status: UNAVAILABLE, why}."""
     from .agents import eddie as E
 
     async def hist():
@@ -127,7 +194,13 @@ async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
     async def go():
         h = await _cached("eddie_history", now, hist)
         return E.estimate(decision, book_row, h, now=now)
-    est = await _bounded(conn, go)
+    return await _bounded(conn, go)
+
+
+async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
+                            now: float) -> dict:
+    est = await eddie_estimate_at_decision(conn, decision=decision,
+                                           book_row=book_row, now=now)
     if est.get("status") == "UNAVAILABLE":
         return eddie_component(None, est["why"])
     return eddie_component(est)
@@ -166,6 +239,28 @@ async def opportunity_at_decision(conn, *, decision: dict, eddie: dict,
                 "expected_net_executable_ev_usd": got.get(
                     "expected_net_executable_ev_usd"),
                 "fill_probability": got.get("fill_probability"),
+                # R30C: the P(fill) in the score is Eddie's, fitted on the
+                # paper simulator -- said here, beside the number
+                "fill_probability_evidence": (
+                    (eddie.get("execution_evidence") or {}).get("fitted_on")
+                    if fp is not None else None),
+                "fill_probability_live_use": (
+                    (eddie.get("execution_evidence") or {}).get("live_use")
+                    if fp is not None else None),
+                # R30C review: the WIDER live uncertainty of that P(fill)
+                # beside the point; V1 itself is a point score -- its
+                # uncertainty-adjusted counterpart is V2 (a lower bound),
+                # recorded in the shadow tournament, never on the intent
+                "fill_probability_live_interval": (
+                    ((eddie.get("live_interval") or {}).get(
+                        "expected_fill_probability"))
+                    if fp is not None else None),
+                "score_live_interval": {
+                    "status": "UNAVAILABLE",
+                    "why": ("V1_IS_A_POINT_SCORE: its P(fill) live interval "
+                            "is beside it; the uncertainty-adjusted live "
+                            "counterpart is Opportunity Score V2 (lower "
+                            "confidence bound), shadow tournament only")},
                 "capacity_factor": got.get("capacity_factor"),
                 "capital_hours": got.get("capital_hours"),
                 "unmeasured": got.get("unmeasured") or {},
@@ -235,6 +330,10 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         cap_snap = await _cached("lol_capital", now, capital)
         hs = await _cached("allie_hurdle", now, hurdle)
         fx = decision.get("fixture")
+        # R30C review: with no fixture on the decision the open groups on it
+        # cannot be counted -- Allie's arithmetic still sees 0 (her module
+        # is unchanged), but the haircut is labelled UNMEASURED below so no
+        # reader (V2 included) takes that 0 for a measured "no correlation"
         fixture = await conn.fetchrow(
             """SELECT count(DISTINCT o.group_id) AS n,
                       coalesce(sum(o.filled_qty * o.limit_price), 0) AS usd
@@ -252,7 +351,7 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         em = await conn.fetchrow(
             "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
         e = eddie if eddie.get("status") == "MEASURED" else {}
-        return AC.allocate(
+        out = AC.allocate(
             eddie_ev_usd=e.get("expected_executable_ev_usd"),
             modelled_net_usd=decision.get("executable_opportunity_dollars"),
             capital_required_usd=decision.get("capital_required_usd"),
@@ -270,6 +369,49 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
             live_rail_usd=None if em is None else float(em["max_order_usd"]),
             live_scale=None if em is None else float(em["scale"]),
             order_cost_usd=decision.get("capital_required_usd"))
+        # R30C: Allie's executable net is Eddie's EV (its fill probability
+        # fitted on the paper simulator) and her capacity ceiling is a walk
+        # of the displayed book -- neither is live execution evidence
+        # (the decision's modelled net, her labelled fallback, is a walk of
+        # the displayed book too)
+        ev_cls = (e.get("execution_evidence") or {}).get("fitted_on")
+        from_eddie = str(out.get("net_basis") or "").startswith("EDDIE")
+        net_cls = (ev_cls if from_eddie else EE.NO_FILL_EVIDENCE
+                   if out.get("net_basis") else None)
+        eli = e.get("live_interval") or {}
+        if from_eddie and eli.get("status") == "MEASURED":
+            net_live = dict(eli.get("expected_executable_ev_usd") or {},
+                            status="MEASURED", fitted_on=net_cls,
+                            basis="Eddie's EV at its LIVE interval")
+        else:
+            net_live = {"status": "UNAVAILABLE", "fitted_on": net_cls,
+                        "why": (eli.get("why") or "EDDIE_LIVE_INTERVAL_"
+                                "UNAVAILABLE") if from_eddie else (
+                            "MODELLED_NET_IS_A_WALK_OF_THE_DISPLAYED_BOOK: "
+                            "fitted on no fill, so no fill model exists to "
+                            "widen it; it is not live execution evidence"
+                            if out.get("net_basis") else
+                            "NO_EXECUTABLE_NET")}
+        out["execution_evidence"] = {
+            "executable_net_fitted_on": net_cls,
+            "executable_net_live_interval_usd": net_live,
+            "capacity_fitted_on": (
+                EE.NO_FILL_EVIDENCE if out.get("capacity_basis") else None),
+            "live_use": EE.LIVE_USE.get(net_cls) if net_cls else None,
+            # her `confidence` grades input COMPLETENESS; it says nothing
+            # about live execution, which no ACTUAL fill has measured
+            "confidence_scope": "INPUT_COMPLETENESS_ONLY",
+            "live_execution_confidence": (
+                "NOT_ESTABLISHED_NO_ACTUAL_CANONICAL_FILL"),
+            "actual": {"status": EE.UNMEASURED, "why": EE.R_NO_ACTUAL}}
+        if not fx:
+            cc = dict(out.get("correlation_concentration") or {})
+            cc.update(haircut_status="UNMEASURED",
+                      haircut_why=R_NO_FIXTURE)
+            out["correlation_concentration"] = cc
+            out["unmeasured"] = dict(out.get("unmeasured") or {},
+                                     correlation_haircut=R_NO_FIXTURE)
+        return out
     return await _bounded(conn, go)
 
 
@@ -330,6 +472,85 @@ async def settlement_exception_at_decision(conn, *, decision: dict,
     return await _bounded(conn, go)
 
 
+async def exceptional_at_decision(conn, *, sport, now: float) -> dict:
+    """THE EXCEPTIONAL-SETTLEMENT BOUND V2 reads: EXCEPTIONAL_OUTCOMES
+    (VOID_REFUND and SETTLED_AT_VENUE_PRICE) counts of settled markets
+    (SETTLED_OUTCOMES, recorded at or before the decision, last
+    EXCEPTIONAL_LOOKBACK_DAYS) by sport over the canonical INVESTMENT path
+    (INVESTMENT intent -> its paper ENTRY order -> the group's settlement),
+    and pooled over every paper settlement (any sleeve, labelled so).
+    Cached; bounded."""
+    from . import opportunity_score_v2 as V2
+
+    async def counts():
+        by = {}
+        if await conn.fetchval(
+                "SELECT to_regclass('canonical_decision_intents') IS NOT NULL"):
+            for r in await conn.fetch(
+                    """SELECT i.contract->>'sport_family' AS sport,
+                              count(DISTINCT s.us_market_slug) FILTER (
+                                  WHERE s.outcome = ANY($3::text[])) AS k,
+                              count(DISTINCT s.us_market_slug) AS n
+                         FROM canonical_decision_intents i
+                         JOIN paper_orders o
+                           ON o.idempotency_key = i.decision_id || ':ENTRY'
+                         JOIN paper_settlements s ON s.group_id = o.group_id
+                        WHERE i.sleeve = 'INVESTMENT'
+                          AND s.outcome = ANY($4::text[])
+                          AND s.recorded_at <= to_timestamp($1)
+                          AND s.recorded_at >= to_timestamp($1)
+                                               - make_interval(days => $2)
+                        GROUP BY 1""", float(now),
+                    int(EXCEPTIONAL_LOOKBACK_DAYS),
+                    list(EXCEPTIONAL_OUTCOMES), list(SETTLED_OUTCOMES)):
+                if r["sport"]:
+                    by[str(r["sport"]).lower()] = {"k": int(r["k"]),
+                                                   "n": int(r["n"])}
+        p = await conn.fetchrow(
+            """SELECT count(DISTINCT us_market_slug) FILTER (
+                          WHERE outcome = ANY($3::text[])) AS k,
+                      count(DISTINCT us_market_slug) AS n
+                 FROM paper_settlements
+                WHERE outcome = ANY($4::text[])
+                  AND recorded_at <= to_timestamp($1)
+                  AND recorded_at >= to_timestamp($1)
+                                     - make_interval(days => $2)""",
+            float(now), int(EXCEPTIONAL_LOOKBACK_DAYS),
+            list(EXCEPTIONAL_OUTCOMES), list(SETTLED_OUTCOMES))
+        return {"by_sport": by, "pooled": {"k": int(p["k"] or 0),
+                                           "n": int(p["n"] or 0)}}
+
+    async def go():
+        c = await _cached("v2_exceptional", now, counts)
+        return V2.exceptional_from_counts(
+            scope_counts=c["by_sport"],
+            scope_key=None if not sport else str(sport).lower(),
+            pooled=c["pooled"])
+    got = await _bounded(conn, go)
+    if got.get("status") == "UNAVAILABLE":
+        return {"rate_ucb": None, "why": got.get("why")}
+    return got
+
+
+async def opportunity_v2_at_decision(conn, *, decision: dict,
+                                     eddie_est: dict, allie: dict,
+                                     now: float) -> dict:
+    """OPPORTUNITY SCORE V2 (opportunity_score_v2) at the decision
+    instant, from the same inputs V1 and Allie saw. SHADOW, NO AUTHORITY:
+    it is recorded in the tournament (migration 300), never on the intent,
+    and nothing reads it to decide."""
+    from . import opportunity_score_v2 as V2
+    ex = await exceptional_at_decision(conn, sport=decision.get("sport"),
+                                       now=now)
+    try:
+        return V2.score(V2.inputs_from(eddie_est, allie, ex))
+    except Exception as exc:                                  # noqa: BLE001
+        log.debug("opportunity v2 failed", exc_info=True)
+        return {"status": "UNAVAILABLE", "version": V2.VERSION,
+                "spec_sha": V2.SPEC_SHA, "opportunity_score": None,
+                "why": "V2_FAILED:%s" % type(exc).__name__}
+
+
 async def at_decision(conn, *, decision: dict, book_row: dict | None,
                       cost_usd, p, wire, now: float | None = None,
                       contract: dict | None = None) -> dict:
@@ -350,8 +571,10 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
         if st.get("t") is not None:
             decision = dict(decision, event_start_at=st["t"],
                             event_start_basis="us_premap.game_start")
-    eddie = await eddie_at_decision(conn, decision=decision,
-                                    book_row=book_row, now=at)
+    est = await eddie_estimate_at_decision(conn, decision=decision,
+                                           book_row=book_row, now=at)
+    eddie = (eddie_component(None, est["why"])
+             if est.get("status") == "UNAVAILABLE" else eddie_component(est))
     opp = await opportunity_at_decision(conn, decision=decision, eddie=eddie,
                                         now=at)
     karen = await karen_at_decision(conn, slug=decision.get("us_market_slug"),
@@ -360,6 +583,10 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
                                     now=at)
     exc = await settlement_exception_at_decision(
         conn, decision=decision, contract=contract, p=p, now=at)
+    # R30C: Opportunity Score V2 (shadow tournament only -- the caller
+    # records it beside the intent, never in it)
+    v2 = await opportunity_v2_at_decision(conn, decision=decision,
+                                          eddie_est=est, allie=allie, now=at)
     return {"eddie": eddie, "opportunity_score": opp, "karen": karen,
             "allie": allie, "settlement_exception_risk": exc,
-            "version": VERSION}
+            "opportunity_score_v2": v2, "version": VERSION}
