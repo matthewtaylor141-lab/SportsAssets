@@ -83,8 +83,8 @@ async def _expect(conn, exc, sql, *args):
 
 def _reset_memory():
     loop._COVERAGE.update(last_served={}, ledger=[], cost={},
-                          deferred_events={}, waiting_since={},
-                          waiting_known=False)
+                          deferred_events={}, demand_since={},
+                          demand_known=False)
 
 
 async def _take_lease(conn):
@@ -196,15 +196,15 @@ async def test_rollback_248_drops_only_its_objects_when_empty():
 # 2 · THE WRITER, THE LEASE AND THE MEMORY
 # ═════════════════════════════════════════════════════════════════════
 
-def _comps(now, *, last=None, waiting=None):
-    last, waiting = last or {}, waiting or {}
+def _comps(now, *, last=None, since=None):
+    last, since = last or {}, since or {}
 
     def c(key, fam, ev, start_h, feed, **kw):
         return cov.competition(
             key=key, family=fam, listed=True, active=True,
             events_in_horizon=ev, next_start=now + start_h * HOUR,
             feed_covered=feed, last_served_at=last.get(key),
-            waiting_since=waiting.get(key), **kw)
+            demand_since=since.get(key), **kw)
     return [c(NCAAF, "football", 60, 1.0, False),
             c(NFL, "football", 14, 26.0, False),
             c(MLB, "baseball", 4, 3.0, True, confirmed=True),
@@ -246,7 +246,7 @@ async def test_the_writer_persists_the_cycle_and_reads_its_memory_back():
         mem0 = await loop.coverage_memory(conn, now=time.time())
         assert mem0["writer_lease"] == "NOT_HELD"
         assert mem0["last_served"] == {} and mem0["spent_24h"] == 0
-        assert mem0["measured_cost"] is None and mem0["waiting_since"] == {}
+        assert mem0["measured_cost"] is None and mem0["demand_since"] == {}
 
         # ── THE COLLECTOR: the same writer, holding the lease ────────────
         await _take_lease(conn)
@@ -301,9 +301,10 @@ async def test_the_writer_persists_the_cycle_and_reads_its_memory_back():
                        for v in mem["last_served"].values())
             assert mem["spent_24h"] == pytest.approx(spend)
             assert mem["measured_cost"] == 3.0
-            never = [r["key"] for r in deferred
-                     if r.get("waiting_since") is not None]
-            assert never and set(never) <= set(mem["waiting_since"])
+            # every competition in demand resumes its run in demand
+            in_demand = {r["key"] for r in plan["receipts"]
+                         if r.get("demand_since") is not None}
+            assert in_demand and in_demand == set(mem["demand_since"])
         finally:
             await _drop_lease(conn)
 
@@ -394,9 +395,10 @@ async def test_a_saturday_through_the_database_serves_ncaaf_every_cycle():
                     confirmed=(key == MLB), events_in_horizon=ev,
                     next_start=nxt, feed_covered=feed,
                     last_served_at=mem["last_served"].get(key),
-                    waiting_since=mem["waiting_since"].get(key)))
+                    demand_since=mem["demand_since"].get(key)))
             plan = cov.plan(comps, now=now, cycle_s=CYCLE,
                             spent_24h=mem["spent_24h"],
+                            spend_ledger=mem["ledger"],
                             cost_per_fetch=(mem["measured_cost"]
                                             or cov.CREDITS_PER_FETCH_ESTIMATE),
                             cost_basis=(cov.COST_MEASURED
@@ -452,7 +454,7 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
     base = t_end - (n - 1) * CYCLE
     keys = [NCAAF, NFL, "americanfootball_x1", "americanfootball_x2",
             "americanfootball_x3", "americanfootball_x4"]
-    last, waiting = {}, {}
+    last, since = {}, {}
     try:
         await _take_lease(conn)
         for k in range(n):
@@ -462,7 +464,7 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
                                      events_in_horizon=5,
                                      next_start=now + (i + 1) * HOUR,
                                      last_served_at=last.get(key),
-                                     waiting_since=waiting.get(key))
+                                     demand_since=since.get(key))
                      for i, key in enumerate(keys)]
             plan = cov.plan(comps, now=now, cycle_s=CYCLE)
             assert plan["feasible"] is False
@@ -470,8 +472,8 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
                 cov.settle(plan, key, ok=True, at=now + 1, credits=3.0,
                            basis=cov.COST_MEASURED)
                 last[key] = now
-            waiting = {r["key"]: r["waiting_since"] for r in plan["receipts"]
-                       if r.get("waiting_since") is not None}
+            since = {r["key"]: r["demand_since"] for r in plan["receipts"]
+                     if r.get("demand_since") is not None}
             await loop._persist_coverage_receipts(
                 conn, cycle_id="ovl-%d" % k, cycle_at=now, plan=plan)
         await _drop_lease(conn)
@@ -506,8 +508,11 @@ async def test_league_status_names_the_budget_drop_from_the_receipts():
         for key in keys:
             assert by[key]["served"] >= n // 2, (key, by[key])
             assert by[key]["cycles"] == n, (key, by[key])
+            # R30A fix stage: the stated overload bound counts from the
+            # largest staleness bound a competition can carry (two): its own
+            # bound can relax mid-run (adversarial review, finding 4)
             assert by[key]["starvation_bound_cycles"] == \
-                1 + -(-(len(keys) - 1) // 4)
+                cov.BOUND_CYCLES_MAX + -(-(len(keys) - 1) // 4)
         assert coll["receipts"]["cycles"]["cycles"] == n
         # the league status of a dropped league with no provider events
         league = dropped_last[0]
@@ -644,3 +649,364 @@ def test_only_the_scheduled_cycle_writes_receipts():
     assert "if coverage is not None:" in src
     i = src.index("coverage_receipts = await _persist_coverage_receipts(")
     assert "if coverage is not None:" in src[i - 400:i]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · REPAIRS AFTER THE ADVERSARIAL REVIEW (each test failed first)
+# ═════════════════════════════════════════════════════════════════════
+
+#: Six competitions the real token maps carry, all METERED-DEPENDENT (the
+#: feed is stubbed as covering nothing): demand of six one-cycle bounds
+#: against four calls, so every cycle must spend all four.
+WIRED = [("baseball_mlb", "mlb"), (NCAAF, "cfb"), (NFL, "nfl"),
+         (UNL, "unl"), (BRB, "brb"), (USLC, "uslc")]
+
+
+def _wire_stubs(monkeypatch, *, start_offset_h=2.0):
+    """The scheduler's reads that need a venue catalogue, the held watch
+    and the feed owner, stubbed so `plan_coverage` runs for real on its
+    memory: every token has nine venue events in the horizon, nothing is
+    held, and the feed covers no family."""
+    async def _horizon(conn):
+        return {"read": True, "source": "stub",
+                "by_token": {tok: {"events_in_horizon": 9, "board_events": 9,
+                                   "start_unknown": 0,
+                                   "next_start": _horizon.now
+                                   + start_offset_h * HOUR}
+                             for _, tok in WIRED}}
+    _horizon.now = 0.0
+
+    async def _held(conn, **kw):
+        return {"read": True, "by_key": {}, "unmapped": {},
+                "finished_by_key": {}}
+
+    monkeypatch.setattr(loop, "venue_horizon", _horizon)
+    monkeypatch.setattr(loop, "held_competitions", _held)
+    monkeypatch.setattr(loop, "feed_coverage", lambda: {"families": []})
+    return _horizon
+
+
+def _wired_inputs():
+    catalogue = {"ok": True, "sports": [{"key": k, "active": True}
+                                        for k, _ in WIRED]}
+    selection = {"confirmed_by_provider": [
+        {"key": k, "our_token": t} for k, t in WIRED
+        if k != "baseball_mlb"], "rejected": []}
+    return catalogue, selection
+
+
+class _LeaseHolderNoTable:
+    """A connection that holds the collector's writer lease on a database
+    without migration 248: the in-process memory is the only memory."""
+    async def fetchval(self, sql, *a):
+        if "pg_locks" in sql:
+            return True
+        if "to_regclass" in sql:
+            return False
+        raise AssertionError(sql)
+
+
+@pytest.mark.parametrize("overhead_s", [0.0, 0.05, 2.0])
+async def test_the_spend_ledger_runs_on_the_cycle_clock(monkeypatch,
+                                                        overhead_s):
+    """FINDING 2. The in-process ledger stamped each fetch when it FINISHED
+    while the rolling day is measured from the cycle START, so at the
+    production cadence (900 s start to start) the day held 96 cycles of
+    fetches, not 95: about once a day a cycle saw the whole envelope spent,
+    scheduled nothing -- held positions included -- and blamed
+    'higher-ranked competitions'. Driven here through the REAL wiring --
+    `plan_coverage` on the lease holder's memory, `_record_spend` as the
+    cycle calls it, fetch instants spread through the cycle -- for two and a
+    half days: every cycle spends its four calls."""
+    _reset_memory()
+    horizon = _wire_stubs(monkeypatch)
+    catalogue, selection = _wired_inputs()
+    conn = _LeaseHolderNoTable()
+    t0 = 1791014400.0
+    try:
+        for k in range(240):
+            started = t0 + k * (CYCLE + overhead_s)
+            horizon.now = started
+            plan = await loop.plan_coverage(conn, catalogue=catalogue,
+                                            selection=selection, now=started)
+            assert plan.get("failed") is None, plan
+            assert plan["calls"]["scheduled"] == 4, (
+                k, plan["envelope"], [r["why"] for r in plan["receipts"]
+                                      if r["planned"] != cov.SCHEDULED][:2])
+            for i, (key, _) in enumerate(plan["fetch_order"]):
+                loop._record_spend(key, at=started + 5.0 + 150.0 * i,
+                                   cycle_at=started,
+                                   credits=cov.CREDITS_PER_FETCH_ESTIMATE,
+                                   basis=cov.COST_ESTIMATED)
+            assert plan["envelope"]["spent_24h"] <= \
+                cov.DAILY_CREDIT_ENVELOPE - 80.0 + 1e-9
+    finally:
+        _reset_memory()
+
+
+@pg
+async def test_the_receipts_memory_is_read_on_the_cycle_clock():
+    """FINDING 2, the durable half. The receipts were windowed on the
+    database's now(), the plan on the cycle's own instant -- two clocks for
+    one rolling day. Both now use the cycle's instant, so a cycle (and a
+    test replaying a past Saturday) reads exactly the day before it."""
+    conn, tx, schema = await _isolated()
+    _reset_memory()
+    await _take_lease(conn)
+    try:
+        base = 1791014400.0                       # 2026-10-03T08:00Z
+        for k in range(96):
+            now = base + k * CYCLE
+            plan = cov.plan([cov.competition(
+                key=NCAAF, family="football", listed=True, active=True,
+                events_in_horizon=9, next_start=now + HOUR)], now=now,
+                cycle_s=CYCLE)
+            cov.settle(plan, NCAAF, ok=True, at=now + 3.0, credits=20.0,
+                       basis=cov.COST_ESTIMATED)
+            w = await loop._persist_coverage_receipts(
+                conn, cycle_id="clk-%03d" % k, cycle_at=now, plan=plan)
+            assert w["ok"], w
+        _reset_memory()                           # a restart
+        now = base + 96 * CYCLE
+        mem = await loop.coverage_memory(conn, now=now)
+        assert mem["source"] == "RECEIPTS"
+        # the 95 cycles before this one: cycle 0 is exactly a day old and
+        # out of the half-open day
+        assert mem["spent_24h"] == pytest.approx(95 * 20.0)
+        assert mem["last_served"][NCAAF] == pytest.approx(base + 95 * CYCLE,
+                                                          abs=0.01)
+    finally:
+        _reset_memory()
+        await _drop_lease(conn)
+        await _close(conn, tx)
+
+
+@pg
+async def test_plan_coverage_over_many_cycles_through_the_database(
+        monkeypatch):
+    """FINDING 2 (the untested wiring). The database-backed Saturday rebuilt
+    its plan by hand; nothing drove `plan_coverage` and the lease holder's
+    memory across many cycles. Here 110 cycles run through the real
+    `plan_coverage` -> settle -> `_record_spend` -> `_persist_coverage_
+    receipts` path on the lease, with the process memory kept (as `run`
+    keeps it) for 100 cycles -- past the first full day -- then wiped (a
+    restart): every cycle spends its four calls, the memory read back from
+    the receipts after the restart is the memory the process had, and no
+    rolling day ever exceeds the envelope."""
+    conn, tx, schema = await _isolated()
+    _reset_memory()
+    horizon = _wire_stubs(monkeypatch)
+    catalogue, selection = _wired_inputs()
+    await _take_lease(conn)
+    try:
+        base = 1791014400.0
+        for k in range(110):
+            started = base + k * (CYCLE + 0.05)
+            horizon.now = started
+            if k == 100:
+                before = await loop.coverage_memory(conn, now=started)
+                _reset_memory()                   # a restart
+                after = await loop.coverage_memory(conn, now=started)
+                assert after["source"] == "RECEIPTS"
+                assert after["spent_24h"] == pytest.approx(
+                    before["spent_24h"])
+                assert after["last_served"] == pytest.approx(
+                    before["last_served"])
+            plan = await loop.plan_coverage(conn, catalogue=catalogue,
+                                            selection=selection, now=started)
+            assert plan.get("failed") is None, plan
+            assert plan["inputs"]["writer_lease"] == "HELD"
+            assert plan["calls"]["scheduled"] == 4, (k, plan["envelope"])
+            for i, (key, _) in enumerate(plan["fetch_order"]):
+                spent, basis = loop._charge({"credits_last": None})
+                cov.settle(plan, key, ok=True, at=started + 5.0 + 150 * i,
+                           credits=spent, basis=basis)
+                loop._record_spend(key, at=started + 5.0 + 150 * i,
+                                   cycle_at=started, credits=spent,
+                                   basis=basis)
+            w = await loop._persist_coverage_receipts(
+                conn, cycle_id="wire-%03d" % k, cycle_at=started, plan=plan)
+            assert w["ok"], w
+        days = await conn.fetch(
+            "SELECT a.cycle_at, (SELECT sum(credits_spent) FROM "
+            "collector_coverage_receipts b WHERE b.scope = 'CYCLE' AND "
+            "b.cycle_at > a.cycle_at - interval '24 hours' AND b.cycle_at "
+            "<= a.cycle_at) AS day FROM collector_coverage_receipts a "
+            "WHERE a.scope = 'CYCLE'")
+        assert max(float(r["day"]) for r in days) <= \
+            cov.DAILY_CREDIT_ENVELOPE + 1e-9
+    finally:
+        _reset_memory()
+        await _drop_lease(conn)
+        await _close(conn, tx)
+
+
+async def test_a_discovery_refresh_without_venue_titles_is_refused(
+        monkeypatch):
+    """FINDING 3. The discovery refresh ran the competition fixture check
+    only when the candidate carried venue titles, so a candidate built from
+    the board snapshot (which carries none) registered reactive seeds
+    UNCONFIRMED -- the odds path refuses the same candidate
+    (THE_MAPPING_COULD_NOT_BE_CONFIRMED_AGAINST_ANY_FIXTURE). The refresh
+    now holds every candidate to the same confirmation."""
+    from sportsassets import pinnapi_reactive as reactive
+    _reset_memory()
+    registered = []
+    monkeypatch.setattr(reactive, "ACTIVE", object())
+    monkeypatch.setattr(reactive, "register",
+                        lambda e, **kw: registered.append(e.get("id")))
+    now = 1791014400.0
+
+    async def _events(key, *, api_key, timeout=20.0):
+        return {"ok": True, "status": 200, "credits_last": 0.0,
+                "received_at": now,
+                "events": [{"id": "e1", "home_team": "Alpha FC",
+                            "away_team": "Beta FC",
+                            "commence_time": "2026-10-03T10:00:00Z"}]}
+    monkeypatch.setattr(loop, "fetch_events", _events)
+
+    def _plan():
+        return {"receipts": [{"key": UNL, "family": "soccer",
+                              "planned": cov.DEFERRED_TO_SLOT,
+                              "feed_covered": True, "events_in_horizon": 3}],
+                "envelope": {"cycle_budget": 80.0, "planned_spend": 0.0},
+                "calls": {"budget": 4, "scheduled": 0, "extra": {}},
+                "inputs": {"writer_lease": "HELD"}}
+    try:
+        # NO venue titles (the snapshot board): refused, nothing registered
+        plan = _plan()
+        out = await loop.refresh_unmetered_discovery(
+            plan, {"confirmed_by_provider": [
+                {"key": UNL, "our_token": "unl", "venue_titles": []}]},
+            api_key="k", now=now)
+        r = plan["receipts"][0]
+        assert r["discovery"].startswith("DISCOVERY_REFRESH_REFUSED:"), r
+        assert registered == [] and out["competitions"] == {}
+        # titles that do NOT match the provider's fixtures: refused the same
+        plan = _plan()
+        await loop.refresh_unmetered_discovery(
+            plan, {"confirmed_by_provider": [
+                {"key": UNL, "our_token": "unl",
+                 "venue_titles": ["Gamma vs Delta", "Epsilon vs Zeta"]}]},
+            api_key="k", now=now)
+        assert plan["receipts"][0]["discovery"].startswith(
+            "DISCOVERY_REFRESH_REFUSED:")
+        assert registered == []
+    finally:
+        _reset_memory()
+
+
+async def test_discovery_spend_is_stamped_on_the_cycle_clock(monkeypatch):
+    """FINDING 2. The discovery refresh and the re-fetch appended their spend
+    at time.time(), the clock the rolling day is NOT measured on."""
+    from sportsassets import pinnapi_reactive as reactive
+    _reset_memory()
+    monkeypatch.setattr(reactive, "ACTIVE", object())
+    monkeypatch.setattr(reactive, "register", lambda e, **kw: None)
+    now = 1791014400.0
+
+    async def _events(key, *, api_key, timeout=20.0):
+        return {"ok": False, "status": 500, "credits_last": 2.0,
+                "received_at": now, "events": []}
+    monkeypatch.setattr(loop, "fetch_events", _events)
+    plan = {"receipts": [{"key": UNL, "family": "soccer",
+                          "planned": cov.DEFERRED_TO_SLOT,
+                          "feed_covered": True, "events_in_horizon": 3}],
+            "envelope": {"cycle_budget": 80.0, "planned_spend": 0.0},
+            "calls": {"budget": 4, "scheduled": 0, "extra": {}},
+            "inputs": {"writer_lease": "HELD"}}
+    try:
+        await loop.refresh_unmetered_discovery(
+            plan, {"confirmed_by_provider": []}, api_key="k", now=now)
+        assert loop._COVERAGE["ledger"] == [(now, 2.0)]
+        # the re-fetch's spend, through the helper the cycle calls
+        coverage = cov.plan([cov.competition(
+            key=NCAAF, family="football", listed=True, active=True,
+            events_in_horizon=9, next_start=now + HOUR)], now=now,
+            cycle_s=CYCLE)
+        coverage["inputs"] = {"writer_lease": "HELD"}
+        loop._charge_refetch(coverage, NCAAF, {"credits_last": 3.0},
+                             cycle_at=now)
+        assert loop._COVERAGE["ledger"][-1] == (now, 3.0)
+        r = next(r for r in coverage["receipts"] if r["key"] == NCAAF)
+        assert r["credits_charged"] == 3.0
+        assert r["detail"]["refetches"] == 1
+    finally:
+        _reset_memory()
+
+
+class _HeldConn:
+    """The held watch's query and the venue's start times, for
+    `held_competitions`."""
+    def __init__(self, now):
+        self.now = now
+
+    async def fetch(self, sql, *a):
+        if "paper_fills" in sql:
+            return [{"slug": "aec-cfb-ala-mspst-2026-10-03", "kind": "PAPER"},
+                    {"slug": "aec-unl-esp-fra-2026-10-01", "kind": "PAPER"},
+                    {"slug": "aec-mlb-nyy-bos-2026-10-03", "kind": "PAPER"},
+                    {"slug": "aec-zzz-a-b-2026-10-03", "kind": "PAPER"}]
+        if "us_premap" in sql:
+            return [{"slug": "aec-cfb-ala-mspst-2026-10-03",
+                     "game_start": self.now - 1 * HOUR},
+                    {"slug": "aec-unl-esp-fra-2026-10-01",
+                     "game_start": self.now - 50 * HOUR}]
+        raise AssertionError(sql)
+
+
+async def test_held_positions_on_finished_games_are_counted_apart():
+    """FINDING 1, the read. 'Held' is any paper fill with a positive net
+    quantity and no settlement row -- which includes games that FINISHED
+    and wait to settle. Those are named apart and do not put their
+    competition on the one-cycle held bound; a held game in play (or whose
+    start the venue does not state) still does."""
+    now = 1791014400.0
+    got = await loop.held_competitions(_HeldConn(now), now=now)
+    assert got["read"] is True
+    assert got["by_key"] == {NCAAF: 1, "baseball_mlb": 1}
+    assert got["finished_by_key"] == {UNL: 1}
+    assert got["unmapped"] == {"zzz": 1}
+
+
+def test_a_budget_deferral_stays_inside_dereks_mandate():
+    """FINDING 5. The heartbeat's `requested` is this cycle's fetch order,
+    and Derek's census builds its mandate from it -- so a competition the
+    schedule DEFERRED this cycle (or skipped for want of an event in the
+    horizon) was filed OUTSIDE_MANDATE:LEAGUE_NOT_IN_THE_REQUESTED_SET, a
+    scope label on a scheduling decision, flickering cycle to cycle as the
+    competitions rotate. The heartbeat now carries the schedule's rotation
+    and the census reads it."""
+    from sportsassets.agents import coverage as dcov
+    now = 1791014400.0
+    comps = [cov.competition(key=k, family="football" if "football" in k
+                             else "soccer", listed=True, active=True,
+                             events_in_horizon=5, next_start=now + HOUR)
+             for k in (NFL, UNL, BRB, USLC, "soccer_usa_mls")]
+    comps.append(cov.competition(key=NCAAF, family="football", listed=True,
+                                 active=True, events_in_horizon=0,
+                                 next_start=now + 30 * HOUR))
+    plan = cov.plan(comps, now=now, cycle_s=CYCLE)
+    deferred = [r["key"] for r in plan["receipts"]
+                if r["planned"] == cov.DEFERRED_TO_SLOT]
+    assert deferred
+    sel = {"sports": plan["fetch_order"], "coverage": plan}
+    sel.update(loop.coverage_selection_view(plan))
+    digest = loop._selection_digest({"sports_selection": sel})
+    assert set(digest["requested"]) == {k for k, _ in plan["fetch_order"]}
+    rotation = set(digest["in_rotation"])
+    assert set(deferred) <= rotation and NCAAF in rotation
+    assert digest["schedule"][NCAAF] == cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON
+
+    class _Conn:
+        async def fetchval(self, sql, *a):
+            import json
+            return json.dumps({"at": now, "sports_selection": digest})
+    import asyncio as _a
+    req = _a.run(dcov.requested_set(_Conn(), now=now + 1.0))
+    assert req["fresh"] is True
+    assert set(req["keys"]) >= rotation
+    mand = dcov.mandate(req["keys"])
+    # an NCAAF listing (cfb), its competition outside the horizon this
+    # cycle: not OUTSIDE_MANDATE by league
+    assert "cfb" in mand["league_tokens_by_family"]["football"]

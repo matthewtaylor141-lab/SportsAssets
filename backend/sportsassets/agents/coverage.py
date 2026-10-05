@@ -95,13 +95,26 @@ def _jsonish(v):
 
 
 async def requested_set(conn, *, now: float) -> dict:
-    """THE COMPETITIONS THE COLLECTOR ACTUALLY REQUESTED, from its own
-    heartbeat (`ext_pinnacle_last_cycle.sports_selection.requested`). Stale,
+    """THE COMPETITIONS THE COLLECTOR COVERS, from its own heartbeat
+    (`ext_pinnacle_last_cycle.sports_selection`): the competitions it
+    requested on its current cycle PLUS every competition in its coverage
+    schedule's rotation (`in_rotation`: deferred to a slot by the metered
+    budget, or waiting for a venue event to enter its horizon). Stale,
     absent or unreadable -> no keys, with the reason named: the mandate then
-    falls back to the configured set alone. Never raises."""
+    falls back to the configured set alone. Never raises.
+
+    R30A FIX STAGE (adversarial review, finding 5). `requested` is ONE
+    cycle's fetch order. Once the metered calls rotate between competitions
+    instead of going to a fixed four, a competition the schedule deferred
+    this cycle was filed OUTSIDE_MANDATE:LEAGUE_NOT_IN_THE_REQUESTED_SET --
+    a scope label on a scheduling decision, flickering cycle to cycle. The
+    rotation is the lane's mandate; `schedule` carries each competition's
+    receipt, so a listing nothing has valued yet is named by WHY (deferred
+    to a slot, outside the horizon) rather than as a bare absence."""
     out = {"read": False, "fresh": False, "keys": [], "at": None,
-           "source": "ingestion_state.%s.sports_selection.requested"
-                     % REQUESTED_KEY}
+           "schedule": {},
+           "source": ("ingestion_state.%s.sports_selection.requested + "
+                      "in_rotation" % REQUESTED_KEY)}
     try:
         raw = await conn.fetchval(
             "SELECT value FROM ingestion_state WHERE key = $1", REQUESTED_KEY)
@@ -116,13 +129,19 @@ async def requested_set(conn, *, now: float) -> dict:
     except (TypeError, ValueError):
         return dict(out, why="the heartbeat carries no readable `at`")
     out["at"] = at
-    keys = [str(k) for k in ((v.get("sports_selection") or {})
-                             .get("requested") or []) if k]
+    sel = v.get("sports_selection") or {}
+    keys = [str(k) for k in (sel.get("requested") or []) if k]
+    for k in sel.get("in_rotation") or []:
+        if k and str(k) not in keys:
+            keys.append(str(k))
+    schedule = {str(k): str(r) for k, r in
+                (sel.get("schedule") or {}).items()
+                if k and r} if isinstance(sel.get("schedule"), dict) else {}
     if not 0 <= float(now) - at <= REQUESTED_FRESH_S:
         return dict(out, why=("the heartbeat is %.0f s old, past %.0f s; its "
                               "requested set is not current"
                               % (float(now) - at, REQUESTED_FRESH_S)))
-    return dict(out, fresh=True, keys=keys)
+    return dict(out, fresh=True, keys=keys, schedule=schedule)
 
 
 def mandate(requested_keys=()) -> dict:
@@ -374,6 +393,13 @@ async def census(conn, *, now: float) -> dict:
             else:
                 state = S_NOT_YET
                 reason = "NO_LANE_RECORD_IN_THE_LAST_%dS" % CURRENT_WINDOW_S
+                # WHY nothing is recorded yet, when the collector's schedule
+                # says: deferred to a slot by the metered budget, or no venue
+                # event of the competition in its horizon yet
+                sched = (req.get("schedule") or {}).get(
+                    league_of_row(row).get("provider_key") or "")
+                if sched and sched not in ("SCHEDULED", "FETCHED"):
+                    reason = "%s:COLLECTOR_%s" % (reason, sched)
         elif state == S_UNSUPPORTED:
             funnel["within_mandate"] += 1
         states[state] += 1

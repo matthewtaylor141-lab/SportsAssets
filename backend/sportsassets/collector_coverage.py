@@ -44,7 +44,14 @@ WHAT REPLACES THE TRUNCATION -- AND WHAT DOES NOT CHANGE.
 
   * A competition with no venue event in the decision horizon (next 24 h, or
     started in the last 6 h) costs nothing this cycle
-    (SKIPPED_NO_VENUE_EVENT_IN_HORIZON, with the instant it enters it).
+    (SKIPPED_NO_VENUE_EVENT_IN_HORIZON, with the instant it enters it) --
+    A HELD POSITION'S COMPETITION INCLUDED. Found by the adversarial review:
+    a held competition used to pass whatever its horizon, and "held" is any
+    paper fill with a positive net quantity and no settlement row, so
+    positions on FINISHED games awaiting settlement took a metered call
+    every cycle for a response that no longer lists them (the Saturday
+    board with three of them: NCAAF served in 51 of 96 cycles, 181 of 384
+    calls on competitions with no venue event in the horizon).
   * Each competition in the horizon carries a STALENESS BOUND in cycles: 1
     for a held position's competition and for a competition whose
     decision-time probability depends on the metered fetch (football today);
@@ -52,13 +59,26 @@ WHAT REPLACES THE TRUNCATION -- AND WHAT DOES NOT CHANGE.
     carries in this process (its discovery seeds are refreshed through the
     provider's events endpoint, measured and counted, so the metered slot no
     longer gates its valuations).
+  * THE DEADLINE is counted from the later of the cycle the competition was
+    last served and the cycle before it ENTERED DEMAND (`demand_since`, fed
+    back from the previous plan's receipts): a competition entering the
+    horizon, or re-entering it days after it was last served, may wait
+    exactly its own bound -- never "due now" whatever its bound, and never
+    "long overdue" on a service from a previous run (both found by the
+    adversarial review: they let competitions wait one cycle past a stated
+    bound in plans declared feasible).
   * ORDER, a total order (same inputs, same plan):
       1. EARLIEST DEADLINE -- how far past its bound a competition would be
          if skipped now. This is the starvation protection, so nothing ranks
          above it: a skipped competition's lateness grows every cycle until
-         it outranks everything that is not later still;
+         it outranks everything that is not later still. Among competitions
+         ALREADY PAST their bound, the exact deadline decides (earliest
+         first), so a competition served after another fell due can never be
+         served again before it;
       2. a held position's competition, among the equally due;
-      3. LIVE / IN PLAY (an event started within the horizon's 6 h tail)
+      3. LIVE / IN PLAY (an event started within the horizon's 6 h tail --
+         which can include a game that has already finished: the venue
+         board states no end time, so this is a tie-break, never a bound)
          before pre-match;
       4. metered-dependent before feed-covered;
       5. the most IMMINENT venue start;
@@ -68,22 +88,35 @@ WHAT REPLACES THE TRUNCATION -- AND WHAT DOES NOT CHANGE.
     the cycle in which the same deterministic rule fetches it, found by
     running the rule forward (board, costs and cadence held constant).
 
-THE BOUND, STATED AND PROVED (tests/test_collector_coverage_scheduler.py).
+THE BOUND, STATED PER PLAN AND PROVED (tests/test_collector_coverage_
+scheduler.py, including the adversarial review's changing-board harness).
 With uniform per-call cost and K calls a cycle (K = the smaller of the call
-budget and what the per-cycle credit allowance buys):
+budget and what the per-cycle credit allowance buys), each plan states the
+bound that holds for its demand AS IT STANDS:
 
-  * FEASIBLE demand -- sum over the competitions in the horizon of
-    1 / bound_cycles <= K (and the same in credits) -- every competition is
-    fetched at least once every `bound_cycles` cycles. With bounds of 1 and
-    2 and earliest-deadline-first, n1 bound-1 and n2 bound-2 competitions
-    leave at most max(n1, 2*n1 + n2 - K) due the next cycle, which is <= K
-    exactly when n1 + n2/2 <= K.
-  * OVERLOADED demand (more competitions than the budget can carry within
-    their bounds) -- stated on the plan (`feasible: False`), never hidden --
-    no competition waits more than bound_cycles + ceil((N - 1) / K) cycles,
-    N the competitions in demand: once a competition is past its bound, only
-    competitions at least as late can be ahead of it, each cycle serves K of
-    them and resets them below it, and nothing behind it can overtake it.
+  * FEASIBLE -- sum over the competitions in demand of 1 / bound_cycles <= K
+    (and the same in credits), NOTHING already past its bound, every
+    competition due this cycle fits in this cycle's K, and the 24 h
+    envelope does not cut this cycle below K. Then every competition due is
+    served now, and none waits more than `bound_cycles - 1` cycles in a row.
+    With bounds of 1 and 2 and earliest-deadline-first, n1 bound-1 and n2
+    bound-2 competitions leave at most max(n1, 2*n1 + n2 - K) due the next
+    cycle, which is <= K exactly when n1 + n2/2 <= K.
+  * OVERLOADED (anything else) -- stated on the plan (`feasible: False`, with
+    `feasibility` naming which condition failed), never hidden -- no
+    competition waits more than B + ceil((N - 1) / K) cycles, N the
+    competitions in demand and B = BOUND_CYCLES_MAX (two), the largest bound
+    a competition can carry: its own bound may relax mid-run (a held
+    position closes), so the proof counts from the cycle it falls due under
+    the LARGEST bound. From that cycle, any competition served is
+    re-deadlined at least a cycle after it and can never be served again
+    before it (exact deadlines order those past their bound), a competition
+    entering demand is deadlined after it, and each cycle serves K, so at
+    most N - 1 others can be served first.
+  * When the 24 h envelope cuts a cycle below K, no starvation bound is
+    stated (None, `feasibility` says why): the envelope, not the rule, then
+    decides, and the slot of every deferral is the rule run forward on the
+    ACTUAL rolling ledger.
 """
 from __future__ import annotations
 
@@ -104,8 +137,11 @@ PROVIDER_LISTS_INACTIVE = "PROVIDER_LISTS_INACTIVE"
 PROVIDER_CATALOGUE_UNREAD = "PROVIDER_CATALOGUE_UNREAD"
 #: the forward run of the rule found no slot inside SIMULATION_CYCLES -- the
 #: budget cannot carry the demand (a single call costing more than a cycle's
-#: credit allowance, or the 24 h envelope spent). Named rather than given an
-#: invented slot.
+#: credit allowance, or a rolling ledger that frees no call within the
+#: simulated day). Named rather than given an invented slot. A spent 24 h
+#: envelope whose spend leaves the rolling day inside the simulated day is
+#: NOT this: it is DEFERRED_TO_SLOT at the cycle the ACTUAL ledger frees a
+#: call, with `budget_binding` DAILY_CREDIT_ENVELOPE_EXHAUSTED.
 DEFERRED_NO_SLOT_WITHIN_ENVELOPE = "DEFERRED_NO_SLOT_WITHIN_ENVELOPE"
 
 PLANNED_RECEIPTS = (SCHEDULED, DEFERRED_TO_SLOT,
@@ -115,11 +151,38 @@ PLANNED_RECEIPTS = (SCHEDULED, DEFERRED_TO_SLOT,
 FINAL_RECEIPTS = tuple(r for r in PLANNED_RECEIPTS if r != SCHEDULED) + (
     FETCHED, FETCH_FAILED)
 #: The receipts that are a BUDGET DROP: in the horizon, enabled, and not
-#: fetched because the cycle's budget went to higher-ranked competitions.
+#: fetched because the cycle's budget could not carry it (`budget_binding`
+#: names which limit: the calls, the credit allowance or the 24 h envelope).
 BUDGET_DROPPED = (DEFERRED_TO_SLOT, DEFERRED_NO_SLOT_WITHIN_ENVELOPE)
 
 #: One row per cycle: the declared budget and what the cycle used of it.
 CYCLE_BUDGET = "CYCLE_BUDGET"
+
+#: WHICH LIMIT DEFERRED A COMPETITION (receipt `budget_binding`), so a
+#: deferral's reason is never "went to higher-ranked competitions" when
+#: nothing ranked above it was fetched:
+#:   the cycle's metered calls all went to competitions ranked above it
+BINDING_CALLS = "CALL_BUDGET_USED_BY_HIGHER_RANKED"
+#:   what is left of the cycle's credit allowance cannot buy its call
+BINDING_CYCLE_CREDITS = "CYCLE_CREDIT_ALLOWANCE_EXHAUSTED"
+#:   what is left of the rolling 24 h envelope cannot buy its call
+BINDING_DAILY_ENVELOPE = "DAILY_CREDIT_ENVELOPE_EXHAUSTED"
+
+#: WHY A PLAN IS (NOT) FEASIBLE (plan `feasibility`).
+FEASIBLE = "FEASIBLE"
+F_DEMAND = "DEMAND_EXCEEDS_WHAT_THE_BUDGET_CARRIES_WITHIN_THE_BOUNDS"
+F_BACKLOG = "A_COMPETITION_IS_ALREADY_PAST_ITS_BOUND"
+F_DUE = "MORE_COMPETITIONS_DUE_THIS_CYCLE_THAN_ITS_CALLS"
+F_ENVELOPE = "THE_24H_ENVELOPE_CUTS_THIS_CYCLE_BELOW_ITS_CALLS"
+
+#: The receipts of a competition IN THE SCHEDULE'S ROTATION: enabled and
+#: listed by the provider, whether fetched this cycle, deferred to a slot, or
+#: waiting for its first venue event to enter the horizon. Derek's coverage
+#: census reads them as the collector's mandate, so a scheduling decision is
+#: never filed as a scope decision.
+ROTATION_RECEIPTS = (SCHEDULED, FETCHED, FETCH_FAILED, DEFERRED_TO_SLOT,
+                     DEFERRED_NO_SLOT_WITHIN_ENVELOPE,
+                     SKIPPED_NO_VENUE_EVENT_IN_HORIZON)
 
 # ── per-candidate receipt (MAX_PER_CYCLE) ────────────────────────────
 #: a provider event the cycle's evaluation bound did not reach. Never judged;
@@ -146,14 +209,26 @@ SOON_S = 6 * 3600.0
 BOUND_CYCLES_HELD = 1
 BOUND_CYCLES_METERED_DEPENDENT = 1
 BOUND_CYCLES_FEED_COVERED = 2
+#: The largest staleness bound any competition can carry. The overload bound
+#: is stated with it: a competition's OWN bound can relax in the middle of a
+#: run of deferrals (its held position closes, or the feed starts carrying
+#: its family), which moves its deadline one cycle later -- the adversarial
+#: harness found a competition that fell due under a held bound of one and
+#: then waited one cycle past a starvation bound stated with that one.
+BOUND_CYCLES_MAX = max(BOUND_CYCLES_HELD, BOUND_CYCLES_METERED_DEPENDENT,
+                       BOUND_CYCLES_FEED_COVERED)
 
 #: A cycle that starts this fraction of a cycle early (cadence jitter) is
-#: still the next cycle: deadlines are counted in whole cycles.
+#: still the next cycle: deadlines are counted in whole cycles, and the
+#: rolling day of the envelope ends this much early (`envelope_window_s`).
 DEADLINE_TOLERANCE = 0.1
 
-#: How far forward the rule is run to find a deferred competition's slot: one
-#: day of cycles at the nominal cadence.
-SIMULATION_CYCLES = 96
+#: How far forward the rule is run to find a deferred competition's slot: TWO
+#: days of cycles at the nominal cadence -- one whole rolling day for a spent
+#: envelope to free (the ledger is rolled forward, never assumed full) and
+#: one more for the queue it built to drain. (One day, the first version,
+#: could not find the slot of the fifth competition behind a spent envelope.)
+SIMULATION_CYCLES = 192
 
 # ── the declared budget ───────────────────────────────────────────────
 #: METERED PROVIDER CALLS A CYCLE, AT MOST. The value
@@ -220,6 +295,33 @@ def per_cycle_allowance(daily_envelope: float, cycle_s: float) -> float:
     return float(daily_envelope) * float(cycle_s) / 86400.0
 
 
+def envelope_window_s(cycle_s: float) -> float:
+    """THE ROLLING DAY THE ENVELOPE IS COUNTED OVER, on the CYCLE clock.
+
+    Every spend is stamped with the instant of the cycle that made it (never
+    the instant the fetch finished -- the adversarial review's finding: a
+    fetch stamped mid-cycle stayed in the day one cycle longer than the
+    cycle that made it, so the day held 96 cycles of spend at the 900 s
+    cadence and about once a day a cycle saw the envelope spent and fetched
+    nothing). The day is half-open, (now - window, now], and ends
+    DEADLINE_TOLERANCE of a cycle early, the same tolerance the deadlines
+    use: start-to-start is 900 s plus noise of milliseconds either way
+    (`next_cycle_delay`), so the cycle exactly one day ago must fall out of
+    the day even when this one started a few milliseconds early. At the
+    900 s cadence the day then holds the 95 previous cycles plus this one:
+    96 x the per-cycle allowance is exactly the envelope."""
+    return 86400.0 - DEADLINE_TOLERANCE * float(cycle_s)
+
+
+def spent_in_window(ledger, *, now: float, cycle_s: float) -> float:
+    """Credits in the rolling day ending at `now` (see envelope_window_s).
+    `ledger`: (cycle instant, credits) pairs; an entry after `now` has not
+    been spent yet as far as this cycle is concerned."""
+    w = envelope_window_s(cycle_s)
+    return round(sum(float(c) for a, c in (ledger or ())
+                     if 0.0 <= float(now) - float(a) < w), 6)
+
+
 def _num(v):
     try:
         if v is None or isinstance(v, bool):
@@ -233,7 +335,7 @@ def _num(v):
 def competition(*, key, family, token=None, listed=None, active=None,
                 confirmed=False, held=0, events_in_horizon=None,
                 next_start=None, board_events=None, feed_covered=False,
-                last_served_at=None, waiting_since=None, cost=None,
+                last_served_at=None, demand_since=None, cost=None,
                 start_unknown=0) -> dict:
     """One enabled competition's facts, normalised. Pure.
 
@@ -255,11 +357,13 @@ def competition(*, key, family, token=None, listed=None, active=None,
     in this process now.
     `last_served_at`: the cycle instant the competition was last given its
     metered call.
-    `waiting_since`: for a competition with NO `last_served_at`, the cycle
-    instant it was first deferred in its current run of deferrals (the
-    plan's own receipt carries it; the caller feeds it back), so a
-    never-served competition AGES like any other instead of staying merely
-    "due" for ever."""
+    `demand_since`: the cycle instant its CURRENT RUN IN DEMAND began (the
+    previous plan's receipt carries it; the caller feeds it back, and only
+    for a competition that was in demand in that plan). None = it enters
+    demand now. Its staleness is counted from the later of `last_served_at`
+    and the cycle before `demand_since`, so a never-served competition AGES
+    from the cycle it entered demand, and a competition re-entering the
+    horizon is not treated as overdue on a service from a previous run."""
     return {"key": str(key), "family": str(family or ""),
             "token": None if token is None else str(token),
             "listed": listed, "active": active, "confirmed": bool(confirmed),
@@ -271,14 +375,14 @@ def competition(*, key, family, token=None, listed=None, active=None,
                              else int(board_events)),
             "feed_covered": bool(feed_covered),
             "last_served_at": _num(last_served_at),
-            "waiting_since": _num(waiting_since),
+            "demand_since": _num(demand_since),
             "cost": _num(cost),
             "start_unknown": max(0, int(start_unknown or 0))}
 
 
 _FIELDS = ("key", "family", "token", "listed", "active", "confirmed", "held",
            "events_in_horizon", "next_start", "board_events", "feed_covered",
-           "last_served_at", "waiting_since", "cost", "start_unknown")
+           "last_served_at", "demand_since", "cost", "start_unknown")
 
 
 def _norm(c: dict) -> dict:
@@ -312,19 +416,42 @@ def _gate(c: dict, *, now: float) -> tuple:
     if c["active"] is False:
         return (PROVIDER_LISTS_INACTIVE,
                 "the provider lists this key with active=false")
-    if c["held"] > 0:
-        return (None, "a held position's competition is served whatever its "
-                      "horizon (within the budget)")
     if c["events_in_horizon"] == 0 and c["start_unknown"] > 0:
         return (None, "%d venue event(s) listed with no stated start time: "
                       "not evidence of an empty horizon, so it stays in "
                       "demand" % c["start_unknown"])
     if c["events_in_horizon"] == 0:
-        return (SKIPPED_NO_VENUE_EVENT_IN_HORIZON,
-                "no venue event starts in the next %.0f h or started in the "
-                "last %.0f h, so this competition costs nothing this cycle"
-                % (HORIZON_AHEAD_S / 3600.0, HORIZON_BEHIND_S / 3600.0))
+        why = ("no venue event starts in the next %.0f h or started in the "
+               "last %.0f h, so this competition costs nothing this cycle"
+               % (HORIZON_AHEAD_S / 3600.0, HORIZON_BEHIND_S / 3600.0))
+        if c["held"] > 0:
+            why += ("; %d held position(s) on it, but the provider's odds "
+                    "response lists no game outside that window (a finished "
+                    "game awaiting settlement is not in it), so a metered "
+                    "call would return nothing to manage" % c["held"])
+        return (SKIPPED_NO_VENUE_EVENT_IN_HORIZON, why)
+    if c["held"] > 0:
+        return (None, "a held position's competition, in the horizon: a "
+                      "one-cycle bound")
     return (None, None)
+
+
+def _reference(c: dict, *, now: float, cycle_s: float) -> float:
+    """The instant a competition's staleness is counted from: the later of
+    the cycle it was last served and the cycle BEFORE its current run in
+    demand began (`demand_since`; None = the run begins now)."""
+    since = c["demand_since"] if c["demand_since"] is not None else now
+    entry = min(float(since), float(now)) - float(cycle_s)
+    if c["last_served_at"] is None:
+        return entry
+    return max(float(c["last_served_at"]), entry)
+
+
+def deadline(c: dict, *, now: float, cycle_s: float) -> float:
+    """The cycle instant by which the competition must be served to keep its
+    bound: its reference plus `bound_cycles` cycles."""
+    return _reference(c, now=now, cycle_s=cycle_s) + \
+        bound_cycles(c) * float(cycle_s)
 
 
 def _overdue_cycles(c: dict, *, now: float, cycle_s: float) -> int:
@@ -332,23 +459,15 @@ def _overdue_cycles(c: dict, *, now: float, cycle_s: float) -> int:
     next cycle if it were skipped now (1 = due this cycle; 0 = may wait one
     more cycle; 2+ = already past its bound).
 
-    A NEVER-SERVED competition is DUE (1) the first cycle it is in demand,
-    not infinitely overdue: a competition entering the horizon, or every
-    competition after a restart with no receipts, takes its turn by the same
-    deadline rule -- a sentinel that put it ahead of everything would let a
-    newly listed soccer competition bump a metered-dependent sport whose
-    deadline is this cycle. And it AGES from the cycle it was first deferred
-    (`waiting_since`), one per cycle, exactly as a served competition ages
-    past its bound: without that a never-served competition stayed at 1 for
-    ever and lost every tie to competitions served each cycle -- starvation
-    (found by the random-board test, a competition deferred 3 cycles running
-    against a stated bound of 2)."""
-    if c["last_served_at"] is None:
-        if c["waiting_since"] is None:
-            return 1
-        return max(1, min(1000, 1 + int(math.floor(
-            (now - c["waiting_since"]) / cycle_s + DEADLINE_TOLERANCE))))
-    over = (now - c["last_served_at"]) + cycle_s - bound_cycles(c) * cycle_s
+    Counted from `_reference`, so a competition ENTERING demand now is due
+    exactly when its own bound says (bound 1: this cycle; bound 2: the next)
+    and then ages one per cycle, served or not, like any other. (The first
+    version made every never-served competition "due now" whatever its
+    bound and kept a re-entering competition's old service as its clock;
+    the adversarial review's fuzz found both letting a competition wait one
+    cycle past a stated bound in plans declared feasible.)"""
+    over = (now - _reference(c, now=now, cycle_s=cycle_s)) + cycle_s - \
+        bound_cycles(c) * cycle_s
     return max(-1000, min(1000, int(math.floor(
         (over + DEADLINE_TOLERANCE * cycle_s) / cycle_s))))
 
@@ -356,7 +475,13 @@ def _overdue_cycles(c: dict, *, now: float, cycle_s: float) -> int:
 def _order_key(c: dict, *, now: float, cycle_s: float) -> tuple:
     start = c["next_start"]
     soon = math.inf if start is None else max(now, start)
-    return (-_overdue_cycles(c, now=now, cycle_s=cycle_s),
+    od = _overdue_cycles(c, now=now, cycle_s=cycle_s)
+    return (-od,
+            # PAST ITS BOUND: the exact deadline, earliest first. A
+            # competition served after another fell due is re-deadlined at
+            # least a cycle after it, so it can never be served again first
+            # (the starvation bound's proof needs exactly this).
+            deadline(c, now=now, cycle_s=cycle_s) if od >= 2 else 0.0,
             0 if c["held"] > 0 else 1,
             0 if in_play(c, now=now) else 1,
             1 if c["feed_covered"] else 0,
@@ -368,22 +493,29 @@ def _order_key(c: dict, *, now: float, cycle_s: float) -> tuple:
 
 def _select(demand: list, *, now: float, cycle_s: float, cycle_budget: float,
             daily_remaining: float, cost_of, max_calls: int) -> tuple:
-    """One cycle of the rule: (ordered, scheduled keys, spend). Never more
-    than `max_calls` competitions, never more credits than the cycle's
-    allowance (a held competition: the 24 h remainder)."""
+    """One cycle of the rule: (ordered, scheduled keys, spend, binding).
+    Never more than `max_calls` competitions, never more credits than the
+    cycle's allowance (a held competition: the 24 h remainder). `binding`
+    names, per competition not chosen, the limit that deferred it and what
+    the competitions ranked above it had spent."""
     ordered = sorted(demand, key=lambda c: _order_key(c, now=now,
                                                       cycle_s=cycle_s))
-    spent, chosen = 0.0, []
+    spent, chosen, binding = 0.0, [], {}
     for c in ordered:
         if len(chosen) >= max_calls:
-            break
+            binding[c["key"]] = (BINDING_CALLS, spent, len(chosen))
+            continue
         cost = cost_of(c)
         cap = daily_remaining if c["held"] > 0 else min(cycle_budget,
                                                         daily_remaining)
         if spent + cost <= cap + 1e-9:
             chosen.append(c["key"])
             spent += cost
-    return ordered, chosen, spent
+        elif spent + cost > daily_remaining + 1e-9:
+            binding[c["key"]] = (BINDING_DAILY_ENVELOPE, spent, len(chosen))
+        else:
+            binding[c["key"]] = (BINDING_CYCLE_CREDITS, spent, len(chosen))
+    return ordered, chosen, spent, binding
 
 
 def calls_per_cycle(*, max_calls: int, allowance: float,
@@ -396,9 +528,39 @@ def calls_per_cycle(*, max_calls: int, allowance: float,
                                                      + 1e-9))))
 
 
+def _why_deferred(rank: int, binding: tuple | None, *, cost: float,
+                  max_calls: int, cycle_budget: float,
+                  daily_remaining: float, daily_envelope: float) -> str:
+    """The reason a competition in demand was not fetched, naming the limit
+    that bound -- never 'went to higher-ranked competitions' when nothing
+    ranked above it was fetched (the adversarial review's finding)."""
+    kind, spent_above, n_above = binding or (BINDING_CALLS, 0.0, 0)
+    if kind == BINDING_CALLS:
+        if n_above == 0:
+            return ("rank %d: the declared call budget is %d metered calls a "
+                    "cycle" % (rank, max_calls))
+        return ("rank %d: this cycle's %d metered calls went to the %d "
+                "higher-ranked competition(s)" % (rank, max_calls, n_above))
+    if kind == BINDING_DAILY_ENVELOPE:
+        return ("rank %d: the rolling 24 h envelope (%.1f credits) has %.1f "
+                "left%s, less than this call's %.1f credits; the slot is the "
+                "rule run forward on the actual ledger, the cycle it frees "
+                "a call" % (rank, daily_envelope,
+                            max(0.0, daily_remaining - spent_above),
+                            (" after %.1f planned for %d higher-ranked "
+                             "competition(s)" % (spent_above, n_above))
+                            if n_above else "", cost))
+    return ("rank %d: this cycle's credit allowance (%.1f) has %.1f left%s, "
+            "less than this call's %.1f credits"
+            % (rank, cycle_budget, max(0.0, cycle_budget - spent_above),
+               (" after %d higher-ranked competition(s)" % n_above)
+               if n_above else "", cost))
+
+
 def plan(competitions, *, now: float, cycle_s: float,
          daily_envelope: float = DAILY_CREDIT_ENVELOPE,
          spent_24h: float = 0.0,
+         spend_ledger=None,
          cost_per_fetch: float = CREDITS_PER_FETCH_ESTIMATE,
          cost_basis: str = COST_ESTIMATED,
          max_calls: int = MAX_METERED_CALLS_PER_CYCLE,
@@ -406,13 +568,28 @@ def plan(competitions, *, now: float, cycle_s: float,
     """THIS CYCLE'S PLAN: one planned receipt per competition, and the fetch
     order. Pure and deterministic: the same inputs give the same plan.
 
+    `spend_ledger`: the rolling day's spend as (cycle instant, credits)
+    pairs, so the forward run of the rule knows WHEN spend leaves the day
+    (`envelope_window_s`). Spend in `spent_24h` beyond the ledger has no
+    known instant and is taken as spent NOW -- the latest it can have been,
+    so a promised slot is never earlier than the real ledger allows.
+
     Never raises on a malformed competition: it is normalised by
     `competition()` first, so the caller passes the dicts it built."""
     comps = [_norm(c) for c in (competitions or ())]
     cycle_s = float(cycle_s)
     max_calls = max(0, int(max_calls))
     allowance = per_cycle_allowance(daily_envelope, cycle_s)
-    spent_24h = max(0.0, float(spent_24h or 0.0))
+    window = envelope_window_s(cycle_s)
+    ledger = []
+    for a, c in (spend_ledger or ()):
+        a, c = _num(a), _num(c)
+        if a is not None and c is not None and c > 0 and \
+                0.0 <= now - a < window:
+            ledger.append((a, c))
+    ledger_sum = sum(c for _, c in ledger)
+    spent_24h = max(0.0, float(spent_24h or 0.0), ledger_sum)
+    unknown_instant = spent_24h - ledger_sum
     daily_remaining = max(0.0, float(daily_envelope) - spent_24h)
     cycle_budget = min(allowance, daily_remaining)
 
@@ -443,8 +620,10 @@ def plan(competitions, *, now: float, cycle_s: float,
              "bound_s": bound_cycles(c) * cycle_s,
              "starvation_bound_cycles": None,
              "cost_estimate": cost_of(c), "cost_basis": cost_basis,
-             "next_slot_at": None, "priority_rank": None,
-             "overdue_cycles": None, "waiting_since": None,
+             "next_slot_at": None, "next_service_at": None,
+             "priority_rank": None, "overdue_cycles": None,
+             "deadline_at": None, "demand_since": None,
+             "budget_binding": None,
              "planned": planned, "why": why}
         if planned == SKIPPED_NO_VENUE_EVENT_IN_HORIZON and \
                 c["next_start"] is not None and c["next_start"] > now:
@@ -453,81 +632,114 @@ def plan(competitions, *, now: float, cycle_s: float,
                                     c["next_start"] - HORIZON_AHEAD_S)
         receipts[c["key"]] = r
         if planned is None:
+            # in demand: its run in demand continues, or begins now
+            r["demand_since"] = (c["demand_since"]
+                                 if c["demand_since"] is not None else now)
             demand.append(c)
 
-    ordered, chosen, spend_ = _select(
+    ordered, chosen, spend_, binding = _select(
         demand, now=now, cycle_s=cycle_s, cycle_budget=cycle_budget,
         daily_remaining=daily_remaining, cost_of=cost_of,
         max_calls=max_calls)
+    overdue = {c["key"]: _overdue_cycles(c, now=now, cycle_s=cycle_s)
+               for c in demand}
 
     # ── THE STATED BOUNDS (module docstring) ─────────────────────────
     max_cost = max([cost_of(c) for c in demand] or [float(cost_per_fetch)])
     k = calls_per_cycle(max_calls=max_calls, allowance=allowance,
                         max_cost=max_cost)
+    k_now = calls_per_cycle(max_calls=max_calls, allowance=cycle_budget,
+                            max_cost=max_cost)
     call_util = sum(1.0 / bound_cycles(c) for c in demand)
     credit_util = sum(cost_of(c) / bound_cycles(c) for c in demand)
-    feasible = (call_util <= max_calls + 1e-9
-                and credit_util <= allowance + 1e-9)
+    due = [key for key, od in overdue.items() if od >= 1]
+    if k <= 0 or k_now < k:
+        feasibility = F_ENVELOPE
+    elif not (call_util <= k + 1e-9 and credit_util <= allowance + 1e-9):
+        feasibility = F_DEMAND
+    elif any(od >= 2 for od in overdue.values()):
+        feasibility = F_BACKLOG
+    elif len(due) > k_now:
+        feasibility = F_DUE
+    else:
+        feasibility = FEASIBLE
+    feasible = feasibility == FEASIBLE
     for c in demand:
         r = receipts[c["key"]]
-        if k <= 0:
+        r["deadline_at"] = round(deadline(c, now=now, cycle_s=cycle_s), 3)
+        if feasibility == F_ENVELOPE:
+            # the envelope, not the rule, decides this cycle: no analytic
+            # bound is stated; the slot below is the ledger run forward
             r["starvation_bound_cycles"] = None
         elif feasible:
             r["starvation_bound_cycles"] = bound_cycles(c)
         else:
-            r["starvation_bound_cycles"] = bound_cycles(c) + int(
+            r["starvation_bound_cycles"] = BOUND_CYCLES_MAX + int(
                 math.ceil((len(demand) - 1) / float(k)))
 
     for rank, c in enumerate(ordered):
         r = receipts[c["key"]]
         r["priority_rank"] = rank
-        r["overdue_cycles"] = _overdue_cycles(c, now=now, cycle_s=cycle_s)
+        r["overdue_cycles"] = overdue[c["key"]]
         if c["key"] in chosen:
             r["planned"] = SCHEDULED
-            r["why"] = r["why"] or (
-                "in the horizon, rank %d, within this cycle's budget" % rank)
+            r["why"] = ("rank %d, within this cycle's budget" % rank) + (
+                "; " + r["why"] if r["why"] else "")
         else:
             r["planned"] = DEFERRED_TO_SLOT
-            # a never-served competition's run of deferrals starts now (or
-            # continues): fed back next cycle, it ages the competition
-            if c["last_served_at"] is None:
-                r["waiting_since"] = (c["waiting_since"]
-                                      if c["waiting_since"] is not None
-                                      else now)
-            r["why"] = ("rank %d: this cycle's budget (%d metered calls, "
-                        "%.1f credits; %.1f left of the 24 h envelope) went "
-                        "to higher-ranked competitions"
-                        % (rank, max_calls, cycle_budget, daily_remaining))
+            b = binding.get(c["key"])
+            r["budget_binding"] = (b or (BINDING_CALLS,))[0]
+            r["why"] = _why_deferred(
+                rank, b, cost=cost_of(c), max_calls=max_calls,
+                cycle_budget=cycle_budget, daily_remaining=daily_remaining,
+                daily_envelope=float(daily_envelope))
 
-    # ── WHERE EACH DEFERRED COMPETITION'S SLOT IS ───────────────────
+    # ── WHERE EACH COMPETITION IS NEXT SERVED: the rule run forward ───
+    # Board, costs and cadence held constant; the envelope rolled forward on
+    # the ACTUAL ledger (plus this cycle's planned spend), never assumed
+    # full. A deferred competition's slot is `next_slot_at`; a scheduled
+    # one's next fetch after this one is `next_service_at`.
     deferred = [key for key, r in receipts.items()
                 if r["planned"] == DEFERRED_TO_SLOT]
-    if deferred and simulate:
+    if demand and simulate:
         state = {c["key"]: dict(c) for c in demand}
+        for key in state:
+            state[key]["demand_since"] = receipts[key]["demand_since"]
         for key in chosen:
             state[key]["last_served_at"] = now
-        for key in deferred:
-            state[key]["waiting_since"] = receipts[key]["waiting_since"]
-        waiting = set(deferred)
+        sim = list(ledger)
+        if unknown_instant > 1e-9:
+            sim.append((now, unknown_instant))
+        if spend_ > 0:
+            sim.append((now, spend_))
+        waiting = set(state)
         for step in range(1, SIMULATION_CYCLES + 1):
             t = now + step * cycle_s
-            _, got, _ = _select(list(state.values()), now=t, cycle_s=cycle_s,
-                                cycle_budget=allowance,
-                                daily_remaining=float(daily_envelope),
-                                cost_of=cost_of, max_calls=max_calls)
+            sim = [(a, c) for a, c in sim if t - a < window]
+            rem = max(0.0, float(daily_envelope) - sum(c for _, c in sim))
+            _, got, spent_t, _ = _select(
+                list(state.values()), now=t, cycle_s=cycle_s,
+                cycle_budget=min(allowance, rem), daily_remaining=rem,
+                cost_of=cost_of, max_calls=max_calls)
+            if spent_t > 0:
+                sim.append((t, spent_t))
             for key in got:
                 state[key]["last_served_at"] = t
                 if key in waiting:
-                    receipts[key]["next_slot_at"] = t
+                    receipts[key]["next_service_at"] = t
+                    if key in deferred:
+                        receipts[key]["next_slot_at"] = t
                     waiting.discard(key)
             if not waiting:
                 break
-        for key in waiting:
-            receipts[key]["planned"] = DEFERRED_NO_SLOT_WITHIN_ENVELOPE
-            receipts[key]["why"] = (
-                "no slot within %d cycles at %d calls and %.1f credits a "
-                "cycle: the budget cannot carry this demand"
-                % (SIMULATION_CYCLES, max_calls, allowance))
+        for key in deferred:
+            if receipts[key]["next_slot_at"] is None:
+                receipts[key]["planned"] = DEFERRED_NO_SLOT_WITHIN_ENVELOPE
+                receipts[key]["why"] = (
+                    "no slot within %d cycles at %d calls and %.1f credits a "
+                    "cycle on the actual 24 h ledger: the budget cannot "
+                    "carry this demand" % (SIMULATION_CYCLES, max_calls,
+                                           allowance))
     for r in receipts.values():
         r["final"] = r["planned"] if r["planned"] != SCHEDULED else None
     fetch_order = [(c["key"], c["family"]) for c in ordered
@@ -536,7 +748,9 @@ def plan(competitions, *, now: float, cycle_s: float,
         "version": VERSION, "at": now, "cycle_s": cycle_s,
         "envelope": {"daily_credits": float(daily_envelope),
                      "per_cycle_allowance": round(allowance, 3),
+                     "window_s": window,
                      "spent_24h": round(spent_24h, 3),
+                     "spent_24h_without_instant": round(unknown_instant, 3),
                      "daily_remaining": round(daily_remaining, 3),
                      "cycle_budget": round(cycle_budget, 3),
                      "planned_spend": round(spend_, 3),
@@ -546,10 +760,13 @@ def plan(competitions, *, now: float, cycle_s: float,
         # counts the metered calls beyond the scheduled fetches (re-fetches,
         # unmeasured discovery refreshes), each claimed through `claim_call`.
         "calls": {"budget": max_calls, "scheduled": len(chosen),
-                  "extra": {}, "per_cycle_capacity": k},
+                  "extra": {}, "per_cycle_capacity": k,
+                  "capacity_this_cycle": k_now},
         "utilization_per_cycle": round(credit_util, 3),
         "call_utilization_per_cycle": round(call_util, 3),
         "feasible": feasible,
+        "feasibility": feasibility,
+        "due_this_cycle": len(due),
         "demand": len(demand),
         "receipts": [receipts[c["key"]] for c in comps],
         "fetch_order": fetch_order,
@@ -643,6 +860,7 @@ def cycle_receipt(plan_out: dict) -> dict:
                                  float(env.get("daily_remaining") or 0.0))
                 + 1e-9),
             "feasible": plan_out.get("feasible"),
+            "feasibility": plan_out.get("feasibility"),
             "demand": plan_out.get("demand"),
             "call_utilization_per_cycle":
                 plan_out.get("call_utilization_per_cycle"),
@@ -694,6 +912,32 @@ def reserve_after(order, shares: dict) -> dict:
     return out
 
 
+def candidate_slot(*, cycle_at: float, cycle_s: float, receipt: dict,
+                   position: int, share: int) -> float:
+    """THE SLOT PROMISED TO A PROVIDER EVENT THE EVALUATION BOUND DEFERRED.
+
+    It goes first in its competition's next fetches (oldest deferral
+    first), `share` of them per fetch, so the n-th deferred event is judged
+    within (1 + n // share) fetches, and each fetch comes within the bound
+    the plan STATED for the competition: the starvation bound, which is the
+    staleness bound when the demand is feasible and the larger overload
+    bound when it is not. (The first version used the staleness bound
+    always -- optimistic under overload: the adversarial review's finding.)
+    Where the plan states no starvation bound (the 24 h envelope decides the
+    cycle), the competition's next service from the rule run forward on the
+    actual ledger spaces the fetches; failing that, its staleness bound."""
+    cycles = receipt.get("starvation_bound_cycles")
+    if cycles is None:
+        nxt = receipt.get("next_service_at")
+        if nxt is not None and float(nxt) > float(cycle_at):
+            cycles = max(1, int(math.ceil(
+                (float(nxt) - float(cycle_at)) / float(cycle_s) - 1e-9)))
+        else:
+            cycles = receipt.get("bound_cycles") or BOUND_CYCLES_HELD
+    fetches = 1 + max(0, int(position)) // max(1, int(share))
+    return float(cycle_at) + float(cycle_s) * int(cycles) * fetches
+
+
 def candidate_order_key(event_id, *, commence_epoch, now: float,
                         deferred_since: dict, freshness_key) -> tuple:
     """The order a fetch's events are judged in.
@@ -728,15 +972,17 @@ def digest(plan_out: dict | None) -> dict | None:
         rows.append({k: r.get(k) for k in (
             "key", "token", "planned", "final", "priority_rank",
             "events_in_horizon", "events_start_unknown", "next_start",
-            "in_play", "held",
+            "in_play", "held", "held_finished",
             "feed_covered", "bound_cycles", "starvation_bound_cycles",
             "cycles_since_served", "staleness_s", "next_slot_at",
-            "credits_charged", "credits_basis", "discovery")})
+            "budget_binding", "credits_charged", "credits_basis",
+            "discovery")})
     cyc = cycle_receipt(plan_out) if plan_out.get("calls") else None
     return {"version": plan_out.get("version"),
             "envelope": plan_out.get("envelope"),
             "cycle": cyc,
             "feasible": plan_out.get("feasible"),
+            "feasibility": plan_out.get("feasibility"),
             "utilization_per_cycle": plan_out.get("utilization_per_cycle"),
             "call_utilization_per_cycle":
                 plan_out.get("call_utilization_per_cycle"),

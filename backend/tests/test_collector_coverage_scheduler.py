@@ -88,7 +88,7 @@ def _horizon(starts, now):
     return len(inh), (min(alive) if alive else None)
 
 
-def _board_at(board, now, last, *, held=None, waiting=None):
+def _board_at(board, now, last, *, held=None, since=None):
     out = []
     for key, fam, tok, listed, feed, starts in board:
         ev, nxt = _horizon(starts, now)
@@ -98,7 +98,7 @@ def _board_at(board, now, last, *, held=None, waiting=None):
             held=(held or {}).get(key, 0), events_in_horizon=ev,
             next_start=nxt, feed_covered=feed,
             last_served_at=last.get(key),
-            waiting_since=(waiting or {}).get(key)))
+            demand_since=(since or {}).get(key)))
     return out
 
 
@@ -106,25 +106,23 @@ def _run(board, *, cost, cycles=96, start=SAT, held=None,
          envelope=cov.DAILY_CREDIT_ENVELOPE, max_calls=BUDGET):
     """Drive `cycles` consecutive cycles exactly as the collector does: each
     plan sees the last-served instants of the plans before it, the
-    `waiting_since` its own receipts handed back, and the 24 h ledger of
-    what they spent."""
-    last, waiting, ledger, history = {}, {}, [], []
+    `demand_since` its own receipts handed back, and the 24 h ledger of what
+    they spent, stamped on the cycle clock."""
+    last, since, ledger, history = {}, {}, [], []
     for k in range(cycles):
         now = start + k * CYCLE
-        # the half-open day (now - 24 h, now]: 96 cycle starts at the cadence
-        spent = sum(c for t, c in ledger if now - t < 86400.0)
-        plan = cov.plan(_board_at(board, now, last, held=held,
-                                  waiting=waiting),
+        spent = cov.spent_in_window(ledger, now=now, cycle_s=CYCLE)
+        plan = cov.plan(_board_at(board, now, last, held=held, since=since),
                         now=now, cycle_s=CYCLE, daily_envelope=envelope,
-                        spent_24h=spent, cost_per_fetch=cost,
-                        max_calls=max_calls)
+                        spent_24h=spent, spend_ledger=list(ledger),
+                        cost_per_fetch=cost, max_calls=max_calls)
         for key, _ in plan["fetch_order"]:
             cov.settle(plan, key, ok=True, at=now + 1.0, credits=cost,
                        basis=cov.COST_MEASURED)
             last[key] = now
             ledger.append((now, cost))
-        waiting = {r["key"]: r["waiting_since"] for r in plan["receipts"]
-                   if r.get("waiting_since") is not None}
+        since = {r["key"]: r["demand_since"] for r in plan["receipts"]
+                 if r.get("demand_since") is not None}
         history.append((now, plan))
     return history
 
@@ -247,8 +245,8 @@ def test_an_overloaded_saturday_still_serves_ncaaf_within_its_bound():
         assert cfb_cycles > 80
         assert cfb_served >= cfb_cycles - 5, (cost, cfb_served, cfb_cycles)
         worst = _max_wait(history)
-        # NCAAF's stated starvation bound under this load is three cycles;
-        # it never waited more than one
+        # NCAAF's stated starvation bound under this load is four cycles
+        # (two + ceil(8 / 4)); it never waited more than one
         assert worst.get(NCAAF, 0) <= 1, worst
         for key, *_ in SATURDAY + extra:
             if key in (ARG2, NWSL):                  # the provider lists none
@@ -374,9 +372,16 @@ def test_the_envelope_stops_spend_when_the_day_is_spent():
                              active=True, events_in_horizon=5,
                              next_start=SAT + H)
              for i in range(6)]
+    # R30A FIX STAGE: the held competition has its game IN PLAY. This pin
+    # used a held competition with NO venue event in the horizon -- exactly
+    # the case that took a metered call every cycle for nothing (positions
+    # on finished games awaiting settlement; adversarial review, finding 1)
+    # and is now SKIPPED by name.
     comps.append(cov.competition(key=UNL, family="soccer", listed=True,
-                                 active=True, held=1, events_in_horizon=0,
-                                 last_served_at=SAT - CYCLE))
+                                 active=True, held=1, events_in_horizon=1,
+                                 next_start=SAT - H,
+                                 last_served_at=SAT - CYCLE,
+                                 demand_since=SAT - 4 * CYCLE))
     plan = cov.plan(comps, now=SAT, cycle_s=CYCLE)
     assert plan["fetch_order"][0][0] == UNL                    # held, due
     # 20 credits left of the day: the held competition alone
@@ -388,8 +393,13 @@ def test_the_envelope_stops_spend_when_the_day_is_spent():
                      spent_24h=cov.DAILY_CREDIT_ENVELOPE)
     assert spent["fetch_order"] == []
     for r in spent["receipts"]:
-        # the rule run forward (the envelope rolls over) still gives a slot
+        # the rule run forward (the envelope rolls over) still gives a slot:
+        # with no ledger the day's spend is taken as spent NOW, the latest
+        # it can have been, so the slot is never earlier than the truth
+        # (R30A fix stage: it used to assume a FULL envelope the next cycle)
         assert r["planned"] == cov.DEFERRED_TO_SLOT and r["next_slot_at"]
+        assert r["budget_binding"] == cov.BINDING_DAILY_ENVELOPE
+        assert r["next_slot_at"] - SAT >= cov.envelope_window_s(CYCLE)
 
 
 def test_a_call_dearer_than_a_cycle_allowance_is_named_not_slotted():
@@ -423,11 +433,17 @@ def test_priority_earliest_deadline_dominates_everything_else():
     """A competition whose bound expires this cycle outranks a held, live,
     metered-dependent, imminent, larger one that is not yet due -- that is
     the starvation protection, so nothing ranks above it."""
+    # R30A FIX STAGE: both were in demand before this cycle, which the
+    # scheduler is now TOLD (`demand_since`, fed back from the previous
+    # plan's receipts) instead of inferring from the last service -- the
+    # inference let a competition re-entering the horizon count as overdue
+    # on a service from a previous run (adversarial review, finding 4).
     late = _c("a_late", feed_covered=True, next_start=SAT + 20 * H,
-              events_in_horizon=1, last_served_at=SAT - 3 * CYCLE)
+              events_in_horizon=1, last_served_at=SAT - 3 * CYCLE,
+              demand_since=SAT - 10 * CYCLE)
     fresh = _c("b_fresh", held=1, next_start=SAT - H, family="football",
                events_in_horizon=50, last_served_at=SAT - CYCLE,
-               feed_covered=False)
+               feed_covered=False, demand_since=SAT - 10 * CYCLE)
     # bound 1 for the held one: served last cycle it is due (1); the
     # feed-covered one (bound 2) served three cycles ago is PAST it (2)
     order, plan = _order([fresh, late], max_calls=1)
@@ -437,18 +453,25 @@ def test_priority_earliest_deadline_dominates_everything_else():
 
 
 def test_priority_among_the_equally_due_held_live_metered_imminent_slate():
+    # R30A FIX STAGE: all six are DUE THIS CYCLE, each by its own bound --
+    # the one-cycle ones entering demand now, the two-cycle (feed-covered)
+    # ones in demand since last cycle and never served. (This pin made all
+    # six "never served" and so equally due whatever their bound, which is
+    # the defect the adversarial review's finding 4 removed: a competition
+    # entering demand is due only when its own bound says.)
+    ago = dict(demand_since=SAT - CYCLE)
     held = _c("held", held=1)
     live = _c("live", next_start=SAT - 0.5 * H)
     metered = _c("metered", family="football", feed_covered=False)
-    feed_soon = _c("feed_soon", feed_covered=True, next_start=SAT + H)
+    feed_soon = _c("feed_soon", feed_covered=True, next_start=SAT + H, **ago)
     feed_later_big = _c("feed_later_big", feed_covered=True,
-                        next_start=SAT + 3 * H, events_in_horizon=40)
+                        next_start=SAT + 3 * H, events_in_horizon=40, **ago)
     feed_later_small = _c("feed_later_small", feed_covered=True,
-                          next_start=SAT + 3 * H, events_in_horizon=2)
+                          next_start=SAT + 3 * H, events_in_horizon=2, **ago)
     comps = [feed_later_small, feed_later_big, feed_soon, metered, live,
              held]
     order, plan = _order(comps)
-    # all never served: equally due (1)
+    # all due this cycle by their own bounds: equally due (1)
     assert {_receipt(plan, k)["overdue_cycles"] for k in order} == {1}
     assert order == ["held", "live", "metered", "feed_soon",
                      "feed_later_big", "feed_later_small"]
@@ -458,10 +481,11 @@ def test_priority_among_the_equally_due_held_live_metered_imminent_slate():
 def test_live_first_never_overrides_a_deadline():
     """In play first among the equally due -- but a live competition served
     last cycle (not due) waits behind a pre-match one whose bound expires."""
+    # R30A FIX STAGE: both in demand before this cycle (see above)
     live = _c("live", feed_covered=True, next_start=SAT - H,
-              last_served_at=SAT - CYCLE)
+              last_served_at=SAT - CYCLE, demand_since=SAT - 10 * CYCLE)
     due = _c("due", feed_covered=True, next_start=SAT + 10 * H,
-             last_served_at=SAT - 2 * CYCLE)
+             last_served_at=SAT - 2 * CYCLE, demand_since=SAT - 10 * CYCLE)
     order, _ = _order([live, due], max_calls=1)
     assert order == ["due"]
 
@@ -490,7 +514,13 @@ def test_overload_is_stated_and_no_competition_starves():
     assert all(p["feasible"] is False for _, p in history)
     sb = {r["starvation_bound_cycles"] for _, p in history
           for r in p["receipts"] if _in_demand(r)}
-    assert sb == {1 + math.ceil(8 / BUDGET)}
+    # R30A FIX STAGE: the STATED overload bound counts from the largest
+    # staleness bound a competition can carry (two), because a
+    # competition's own bound can relax mid-run (a held position closes) --
+    # the adversarial harness found a wait one cycle past the bound stated
+    # with the competition's current bound of one. The OBSERVED wait on this
+    # fixed board is still within the tighter figure, asserted below.
+    assert sb == {cov.BOUND_CYCLES_MAX + math.ceil(8 / BUDGET)}
     worst = _max_wait(history)
     assert max(worst.values()) <= 1 + math.ceil(8 / BUDGET) - 1, worst
     # every one of them was served, repeatedly
@@ -650,13 +680,22 @@ def test_an_unread_catalogue_confirms_nothing_but_the_confirmed_and_held():
              cov.competition(key=NCAAF, family="football", listed=None,
                              events_in_horizon=50),
              cov.competition(key=UNL, family="soccer", listed=None, held=2,
+                             events_in_horizon=1),
+             cov.competition(key=BRB, family="soccer", listed=None, held=1,
                              events_in_horizon=0)]
     by = {r["key"]: r for r in cov.plan(comps, now=SAT,
                                         cycle_s=CYCLE)["receipts"]}
     assert by[MLB]["planned"] == cov.SCHEDULED
     assert by[NCAAF]["planned"] == cov.PROVIDER_CATALOGUE_UNREAD
-    # held is served whatever its horizon
+    # a held competition is served though the catalogue is unread...
     assert by[UNL]["planned"] == cov.SCHEDULED
+    # ...but not whatever its horizon. R30A FIX STAGE: this pin read "held
+    # is served whatever its horizon", which spent a metered call every
+    # cycle on positions on finished games awaiting settlement (adversarial
+    # review, finding 1): a held competition with no venue event in the
+    # horizon is now skipped by name.
+    assert by[BRB]["planned"] == cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON
+    assert "held" in by[BRB]["why"]
 
 
 def test_an_inactive_competition_is_refused_separately():
@@ -732,3 +771,261 @@ def test_the_budget_is_unchanged_and_stated_with_its_arithmetic():
     assert 80.0 / cov.CREDITS_PER_FETCH_ESTIMATE == BUDGET
     for k in ("arithmetic", "what_changed", "net_change_in_spend"):
         assert chg[k]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 8 · REPAIRS AFTER THE ADVERSARIAL REVIEW (each test failed first)
+# ═════════════════════════════════════════════════════════════════════
+
+#: A held position's competition whose last venue event started 30 h ago:
+#: a FINISHED game whose paper position waits for its settlement row (the
+#: held watch's query counts any positive net quantity with no settlement).
+#: The provider's odds response no longer lists such a game.
+def _finished_held(i):
+    return ("soccer_held_finished_%d" % i, "soccer", "hf%d" % i, True, True,
+            [SAT - 30 * H])
+
+
+@pytest.mark.parametrize("n_held", [3, 4])
+def test_a_held_competition_with_nothing_in_the_horizon_costs_nothing(n_held):
+    """FINDING 1. A held competition passed the gate whatever its horizon
+    with a one-cycle bound, so held positions on finished games awaiting
+    settlement took a metered call EVERY cycle for a response that cannot
+    list them: on the Saturday board with three of them NCAAF was served in
+    51 of 96 cycles, and 181 of 384 calls went to competitions with no venue
+    event in the horizon. A held competition is now held to the same
+    horizon as every other: nothing to fetch, no call."""
+    board = SATURDAY + [_finished_held(i) for i in range(n_held)]
+    held = {_finished_held(i)[0]: 1 for i in range(n_held)}
+    history = _run(board, cost=cov.CREDITS_PER_FETCH_ESTIMATE, cycles=96,
+                   held=held)
+    cfb_cycles = cfb_served = wasted = 0
+    for now, plan in history:
+        for key, _ in plan["fetch_order"]:
+            r = _receipt(plan, key)
+            # never a metered call on a competition KNOWN to have no venue
+            # event in the horizon (and none listed without a start)
+            wasted += (r["events_in_horizon"] == 0
+                       and not r["events_start_unknown"])
+        for i in range(n_held):
+            r = _receipt(plan, _finished_held(i)[0])
+            assert r["planned"] == cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON, r
+            assert "held" in r["why"], r
+        if _horizon(SATURDAY[0][5], now)[0] > 0:
+            cfb_cycles += 1
+            cfb_served += NCAAF in _fetched(plan)
+    assert wasted == 0
+    assert cfb_cycles == 96 and cfb_served == 96, (cfb_served, cfb_cycles)
+
+
+def test_a_held_competition_in_play_is_still_served_every_cycle():
+    """The held priority stays where it is useful: a held position whose
+    game is in play keeps its competition at a one-cycle bound."""
+    board = SATURDAY + [("soccer_held_live", "soccer", "hl", True, True,
+                         [SAT - 1 * H])]
+    history = _run(board, cost=cov.CREDITS_PER_FETCH_ESTIMATE, cycles=8,
+                   held={"soccer_held_live": 1})
+    for _, plan in history:
+        r = _receipt(plan, "soccer_held_live")
+        assert r["bound_cycles"] == cov.BOUND_CYCLES_HELD
+        assert "soccer_held_live" in _fetched(plan), r
+
+
+def test_a_new_competition_waits_no_longer_than_its_own_bound():
+    """FINDING 4 (minimal reproduction). A never-served competition counted
+    as DUE NOW whatever its bound, so four feed-covered soccer competitions
+    in play (bound two) tied with NCAAF (bound one) and won the in-play
+    tie-break: NCAAF was DEFERRED with a stated bound of one cycle although
+    the demand (4 x 1/2 + 1 = 3 calls) fits in four. A competition entering
+    demand now has its deadline counted from its own bound."""
+    now = SAT
+    comps = [cov.competition(key="soccer_live_%d" % i, family="soccer",
+                             listed=True, active=True, events_in_horizon=2,
+                             next_start=now - 0.5 * H, feed_covered=True)
+             for i in range(4)]
+    comps.append(cov.competition(key=NCAAF, family="football", listed=True,
+                                 active=True, events_in_horizon=50,
+                                 next_start=now + 2 * H))
+    plan = cov.plan(comps, now=now, cycle_s=CYCLE)
+    assert plan["feasible"] is True
+    assert NCAAF in _fetched(plan), _receipt(plan, NCAAF)
+    for r in plan["receipts"]:
+        if r["planned"] == cov.DEFERRED_TO_SLOT:
+            # a bound-two competition may wait ONE cycle: its slot is the next
+            assert r["bound_cycles"] == 2 and \
+                r["next_slot_at"] == now + CYCLE, r
+
+
+def test_a_competition_re_entering_the_horizon_does_not_jump_the_queue():
+    """FINDING 4. A competition re-entering the horizon carried the instant
+    it was last served, days ago, and so counted as long overdue -- ahead of
+    a bound-one competition whose deadline is this cycle. Its staleness is
+    counted from when it entered demand."""
+    now = SAT
+    due = cov.competition(key=NCAAF, family="football", listed=True,
+                          active=True, events_in_horizon=50,
+                          next_start=now + 2 * H, last_served_at=now - CYCLE)
+    back = cov.competition(key=UNL, family="soccer", listed=True,
+                           active=True, events_in_horizon=2,
+                           next_start=now + 20 * H, feed_covered=True,
+                           last_served_at=now - 30 * CYCLE)
+    plan = cov.plan([back, due], now=now, cycle_s=CYCLE, max_calls=1)
+    assert _fetched(plan) == {NCAAF}, plan["receipts"]
+    r = _receipt(plan, UNL)
+    assert r["planned"] == cov.DEFERRED_TO_SLOT
+    # entering demand now, with a two-cycle bound: not overdue at all
+    assert r["overdue_cycles"] == 0
+    # one call for 1 + 1/2 calls of demand: overloaded, and said so; its
+    # slot is within the starvation bound the plan states
+    assert plan["feasible"] is False
+    assert r["next_slot_at"] - now <= r["starvation_bound_cycles"] * CYCLE
+    # with the two calls the demand needs, both are served now
+    both = cov.plan([back, due], now=now, cycle_s=CYCLE, max_calls=2)
+    assert _fetched(both) == {NCAAF, UNL} and both["feasible"] is True
+
+
+def _fuzz_boards(trials, *, max_calls, jitter, held_toggle, seed0=0):
+    """THE VERIFIER'S ADVERSARIAL HARNESS (fuzz_bound2), as a test: boards
+    whose events enter and leave the horizon, held positions toggling,
+    cadence jitter of up to 500 s, uniform cost (the production shape:
+    plan_coverage never sets a per-competition cost). Yields
+    (trial, step, plan) after feeding each plan's receipts back exactly as
+    the collector does."""
+    for trial in range(trials):
+        rng = random.Random(seed0 + trial)
+        board = []
+        for i in range(rng.randint(2, 16)):
+            fam = rng.choice(("soccer", "football", "baseball"))
+            feed = fam != "football" and rng.random() < 0.6
+            first = SAT + rng.uniform(-5, 48) * H
+            k = rng.randint(1, 25)
+            spread = rng.uniform(0, 30)
+            starts = [first + j * spread * H / max(1, k - 1)
+                      for j in range(k)]
+            board.append(("c%d" % i, fam, feed, starts, rng.random() > 0.1))
+        cost = rng.choice((1.0, 3.0, 20.0))
+        last, carry, ledger = {}, {}, []
+        held_keys: set = set()
+        now = SAT
+        for step in range(150):
+            if held_toggle and rng.random() < 0.05:
+                held_keys = {b[0] for b in board if rng.random() < 0.2}
+            comps = []
+            for key, fam, feed, starts, listed in board:
+                ev, nxt = _horizon(starts, now)
+                comps.append(cov.competition(
+                    key=key, family=fam, listed=listed,
+                    active=True if listed else None,
+                    held=1 if key in held_keys else 0,
+                    events_in_horizon=ev, next_start=nxt, feed_covered=feed,
+                    last_served_at=last.get(key), **carry.get(key, {})))
+            spent = sum(c for t, c in ledger if now - t < 86400.0)
+            plan = cov.plan(comps, now=now, cycle_s=CYCLE, spent_24h=spent,
+                            spend_ledger=list(ledger), cost_per_fetch=cost,
+                            max_calls=max_calls)
+            yield trial, step, plan
+            for key, _ in plan["fetch_order"]:
+                last[key] = now
+                ledger.append((now, cost))
+            carry = _carry(plan)
+            now += CYCLE + (rng.uniform(0, 500) if jitter else 0.0)
+
+
+def _carry(plan):
+    """What the collector feeds back from a plan's receipts into the next
+    plan's competitions."""
+    return {r["key"]: {"demand_since": r["demand_since"]}
+            for r in plan["receipts"] if r.get("demand_since") is not None}
+
+
+@pytest.mark.parametrize("max_calls,jitter,held_toggle", [
+    (4, False, False), (4, False, True), (4, True, False), (4, True, True),
+    (2, False, True), (2, True, True), (1, True, True)])
+def test_changing_boards_never_wait_past_a_stated_bound(max_calls, jitter,
+                                                        held_toggle):
+    """FINDING 4 (the fuzz). On fixed boards the stated bounds held; on
+    changing boards the verifier's harness found 14-27 runs of deferrals
+    longer than every bound stated during the run, all of them in plans
+    declared feasible. Every plan now states the bound that holds for its
+    demand AS IT STANDS -- feasible only when nothing is already past its
+    bound and every competition due this cycle fits in it -- and no run of
+    deferrals outlasts the largest bound stated during it."""
+    run, stated, violations, overloaded = {}, {}, [], 0
+    for trial, step, plan in _fuzz_boards(
+            90, max_calls=max_calls, jitter=jitter, held_toggle=held_toggle):
+        if step == 0:
+            run, stated = {}, {}
+        assert len(plan["fetch_order"]) <= max_calls
+        overloaded += plan["feasible"] is False
+        for r in plan["receipts"]:
+            if _in_demand(r) and r["planned"] != cov.SCHEDULED:
+                run[r["key"]] = run.get(r["key"], 0) + 1
+                sb = r["starvation_bound_cycles"]
+                assert sb is not None, (trial, step, r)
+                stated[r["key"]] = max(stated.get(r["key"], 0), sb)
+                if run[r["key"]] > stated[r["key"]] - 1:
+                    violations.append((trial, step, r["key"], run[r["key"]],
+                                       stated[r["key"]], plan["feasible"]))
+                if plan["feasible"]:
+                    assert sb == r["bound_cycles"], r
+            else:
+                run.pop(r["key"], None)
+                stated.pop(r["key"], None)
+    assert violations == [], violations[:10]
+    assert overloaded > 0
+
+
+def test_the_envelope_slot_is_derived_from_the_real_ledger():
+    """FINDING 6. When the 24 h envelope was spent the forward run assumed a
+    FULL envelope from the next cycle on, so the promised slot was not
+    derived from the real spend; and the reason said the budget 'went to
+    higher-ranked competitions' at rank 0, when nothing was fetched at all.
+    The forward run now rolls the actual ledger forward, and the reason
+    names the binding constraint."""
+    now = SAT
+    comps = [cov.competition(key="k%d" % i, family="football", listed=True,
+                             active=True, events_in_horizon=5,
+                             next_start=now + H) for i in range(3)]
+    # the whole envelope spent 1 h ago: it frees when that spend leaves the
+    # rolling day, the first cycle at or after now - 1 h + the window
+    ledger = [(now - H, cov.DAILY_CREDIT_ENVELOPE)]
+    plan = cov.plan(comps, now=now, cycle_s=CYCLE,
+                    spent_24h=cov.DAILY_CREDIT_ENVELOPE, spend_ledger=ledger)
+    assert plan["fetch_order"] == []
+    window = cov.envelope_window_s(CYCLE)
+    frees = now - H + window
+    slot = now + math.ceil((frees - now) / CYCLE) * CYCLE
+    assert slot - now < 86400.0
+    for rank, r in enumerate(sorted(plan["receipts"],
+                                    key=lambda x: x["priority_rank"])):
+        assert r["planned"] == cov.DEFERRED_TO_SLOT
+        assert r["budget_binding"] == cov.BINDING_DAILY_ENVELOPE
+        assert "higher-ranked" not in r["why"], r["why"]
+        assert "24 h envelope" in r["why"]
+        # the rule run forward on the real ledger: the first slot is when
+        # the spend leaves the window, and nothing is promised before it
+        assert r["next_slot_at"] >= slot, (r, slot)
+    assert min(r["next_slot_at"] for r in plan["receipts"]) == slot
+    # a call budget spent on higher-ranked competitions says so
+    full = cov.plan(comps + [cov.competition(
+        key="k%d" % i, family="football", listed=True, active=True,
+        events_in_horizon=5, next_start=now + H) for i in range(3, 6)],
+        now=now, cycle_s=CYCLE)
+    for r in full["receipts"]:
+        if r["planned"] == cov.DEFERRED_TO_SLOT:
+            assert r["budget_binding"] == cov.BINDING_CALLS
+            assert "higher-ranked" in r["why"]
+
+
+def test_the_candidate_slot_uses_the_stated_starvation_bound():
+    """FINDING 7. A provider event the evaluation bound deferred was
+    promised a slot from the competition's STALENESS bound even when the
+    demand was overloaded and only the (larger) starvation bound holds."""
+    rec = {"bound_cycles": 1, "starvation_bound_cycles": 3}
+    assert cov.candidate_slot(cycle_at=SAT, cycle_s=CYCLE, receipt=rec,
+                              position=0, share=10) == SAT + 3 * CYCLE
+    assert cov.candidate_slot(cycle_at=SAT, cycle_s=CYCLE, receipt=rec,
+                              position=25, share=10) == SAT + 9 * CYCLE
+    feasible = {"bound_cycles": 2, "starvation_bound_cycles": 2}
+    assert cov.candidate_slot(cycle_at=SAT, cycle_s=CYCLE, receipt=feasible,
+                              position=0, share=4) == SAT + 2 * CYCLE
