@@ -129,13 +129,20 @@ async def cfb_valuation(conn, *, slug, odds=None, text, decided_at,
         " received_at, probability, decision, admissible, refusals, why, "
         " payout_event, payout_is_complement, buy_intent, ladder_side, "
         " record_purpose, decided_at, event_key, settlement_comparison, "
-        " calibration_only_evidence, settlement_rule) "
+        " calibration_only_evidence, settlement_rule, mapped_outcome) "
         "VALUES ($1,'PINNACLE_DEVIG_V1','EXTERNAL_BOOKMAKER_VALUATION',"
         " 'the-odds-api.com/v4','pinnacle','power','PMUS',NULL,$2,$3,"
         " 'football','h2h','FULL_GAME',$4::jsonb,$13,2,to_timestamp($5),"
         " to_timestamp($5 + 1),$6,'NO_TRADE',false,$7::text[],'synthetic',"
         " $3,false,$8,'ASK','CALIBRATION_ONLY',to_timestamp($9),$10,"
-        " $11::jsonb,$12::jsonb,'FULL_GAME_INCLUDING_OVERTIME') RETURNING id",
+        " $11::jsonb,$12::jsonb,'FULL_GAME_INCLUDING_OVERTIME',$3) "
+        # mapped_outcome (integration with inc-edge): the de-vig writes the
+        # priced outcome's own name on every collector row
+        # (bettor_pinnacle_devig.valuation, out["mapped_outcome"]); the
+        # gross-edge input validation recomputes the probability from it
+        # and refuses a row without it as unverifiable, so the fixture now
+        # carries it as the collector's row does
+        "RETURNING id",
         ext.EXPERIMENT_ID, slug, selection, json.dumps(odds),
         at - float(pin_age_s), float(p),
         ["VENUE_BOOK_CURRENCY_NOT_ESTABLISHED"] + unmet, LONG, at,

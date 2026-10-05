@@ -418,8 +418,12 @@ async def test_a_natively_discovered_fixture_enters_with_no_metered_request(
         attempts = await RI._wait_terminal(e)
         assert [a["state"] for a in attempts] == ["COMPLETED"], attempts
         a = attempts[0]["detail"]
-        vids = a["valuation_ids"]
-        assert len(vids) == 1, a
+        # (integration with inc-edge) each evaluation now ALSO records the
+        # other side of the same contract (the complement, CALIBRATION_ONLY);
+        # this proof is about the priced side, as RI._priced reads it, and
+        # the complement is asserted beside it
+        vids = await RI._priced(e, a["valuation_ids"])
+        assert len(vids) == 1 and len(a["valuation_ids"]) == 2, a
         v = await RI._valuation(e, vids[0])
         assert v["us_market_slug"] == e.game.us_slug
         assert v["provider"] == P.PROVIDER

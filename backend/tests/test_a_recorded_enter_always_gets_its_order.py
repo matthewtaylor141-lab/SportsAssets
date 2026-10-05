@@ -181,7 +181,16 @@ def _hooks(monkeypatch, *, hook_sleep_s: float, calls: list):
     async def canonical(conn, **kw):
         calls.append(("CANONICAL_INTENT", kw["did"]))
         sized, cand, ent = kw["sized"], kw["cand"], kw["ent"]
-        return {"intent_id": "canon:test", "holding_side": kw["side"],
+        # (integration with R30A intent) the canonical intent is built
+        # BEFORE the execution hook and the hook's payload names it by
+        # intent_id + content_sha; the paper adapter refuses an intent past
+        # its expires_at (canonical_intent.intent_expiry_refusal). The stub
+        # carries both, as the real intent does: its window here is the
+        # 30 s probability rule from the decision instant, far beyond the
+        # hook's sleep, so the expiry never decides this proof.
+        return {"intent_id": "canon:test", "content_sha": "0" * 64,
+                "expires_at": float(kw["at"]) + 30.0,
+                "holding_side": kw["side"],
                 "order_intent": cand.get("side"),
                 "us_market_slug": cand["us_market_slug"],
                 "order_type": ent["order_type"],
@@ -190,7 +199,9 @@ def _hooks(monkeypatch, *, hook_sleep_s: float, calls: list):
                 "wire_price": sized["wire"], "decision_id": kw["did"],
                 "strategy": kw["strategy"]}
 
-    async def adapters(conn, intent, *, paper_order, paper_result):
+    # (integration) the R30A adapters hook also receives the decision clock
+    # and the latency stages (`now=`, `stages=`); the stub accepts them
+    async def adapters(conn, intent, *, paper_order, paper_result, **_kw):
         calls.append(("ADAPTERS", intent["decision_id"],
                       bool(paper_result.get("ok"))))
         return {"recorded": True}
@@ -225,11 +236,18 @@ async def test_a_slow_execution_hook_no_longer_strands_the_enter(
         late = cg["order_after_decision_deadline"]
         assert late["decision_deadline_s"] == 2.0 and late["elapsed_s"] > 2.0
         did = cg["decision_id"]
-        # THE CANONICAL ORDER IS INTACT: execution hook, canonical intent,
-        # paper order (the adapters record what the paper order did)
+        # THE CANONICAL ORDER IS INTACT: canonical intent, execution hook,
+        # paper order (the adapters record what the paper order did).
+        # (integration) inc-edge pinned the 96fd349 order, execution hook
+        # first; R30A intent (in the release base) builds the canonical
+        # intent BEFORE the hook so the ACTUAL sibling's execution intent
+        # names it (paper_benchmark "R30A: it is built BEFORE the execution
+        # hook"). The order changed for that measured reason; what this
+        # proof is about -- a slow hook no longer strands the ENTER's paper
+        # order -- is asserted unchanged.
         seq = [c[0] for c in calls if c[1] == did]
-        assert seq == ["EXECUTION_HOOK", "EXECUTION_HOOK_DONE",
-                       "CANONICAL_INTENT", "ADAPTERS"], calls
+        assert seq == ["CANONICAL_INTENT", "EXECUTION_HOOK",
+                       "EXECUTION_HOOK_DONE", "ADAPTERS"], calls
         assert [c for c in calls if c[0] == "ADAPTERS"][0][2] is True
         o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
                                 "decision_id=$1", did)

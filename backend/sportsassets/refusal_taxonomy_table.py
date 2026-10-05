@@ -1562,8 +1562,111 @@ INCIDENT_STREAMS = {
     "GROSS_EDGE_INPUT_VENUE_CONVERSION_NOT_REPRODUCIBLE": (S, INT, "EV"),
 }
 
+#: THE STREAMS MERGED IN THE INCIDENT RELEASE CANDIDATE (integration of
+#: inc-collector, inc-pinnapi and inc-edge onto the R30A + NFL + NCAAF +
+#: catalogue base): the codes the other streams added after this table was
+#: written, each classified from its own words and the module that raises
+#: it. None is ECONOMIC: each says the software could not establish an
+#: identity, a family proof, a settlement clause, an input or a bound of its
+#: own -- the economics were never judged.
+INTEGRATION_STREAMS = {
+    # bettor_market_family (inc-pinnapi): line-market payoff-equivalence
+    # proofs. The book's / venue's captured terms for a family
+    "BOOK_MARKET_RULES_SECTION_NOT_CAPTURED": (S, CAP, "MARKET_FAMILY"),
+    "BOOK_RULES_FOR_THIS_SPORT_NOT_CAPTURED": (S, CAP, "MARKET_FAMILY"),
+    "VENUE_TERMS_FOR_THIS_FAMILY_NOT_CAPTURED": (S, CAP, "MARKET_FAMILY"),
+    # the venue contract's line family / type
+    "VENUE_CONTRACT_TYPE_IS_NOT_A_LINE_FAMILY": (S, MAP, "MARKET_FAMILY"),
+    "VENUE_LINE_TYPE_NOT_IN_THE_FAMILY_TABLE": (S, MAP, "MARKET_FAMILY"),
+    "VENUE_LINE_MARKET_ROWS_DISAGREE_ON_THE_TYPE": (S, MAP, "MARKET_FAMILY"),
+    "PINNACLE_LINE_MATCHES_MORE_THAN_ONE_MARKET": (S, MAP, "MARKET_FAMILY"),
+    "PINNACLE_TEAM_TOTAL_STATES_NO_TEAM": (S, MAP, "MARKET_FAMILY"),
+    # the venue contract's own line, sides and team
+    "VENUE_LINE_CONTRACT_LINE_NOT_READABLE": (S, MAP, "VENUE_MAPPING"),
+    "VENUE_LINE_CONTRACT_SIDES_NOT_ESTABLISHED": (S, MAP, "VENUE_MAPPING"),
+    "VENUE_LINE_SLUG_DISAGREES_WITH_THE_CONTRACT_LINE": (S, MAP, "VENUE_MAPPING"),
+    "VENUE_LINE_TEAM_NOT_ONE_OF_THE_FIXTURE_PARTICIPANTS": (S, MAP, "VENUE_MAPPING"),
+    # the venue's rules text against the book's cited grading
+    "VENUE_LINE_RULES_TEXT_NOT_READ": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_LINE_TEXT_CONFLICTS_WITH_THE_BOOK_GRADING": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_LINE_TEXT_DOES_NOT_STATE_THE_CAPTURED_TERMS": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_LINE_TEXT_LINE_DIFFERS_FROM_THE_CONTRACT_LINE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_LINE_TEXT_TEAM_DIFFERS_FROM_THE_CONTRACT_TEAM": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "LINE_NOT_A_HALF_POINT_PUSH_HANDLING_NOT_PROVEN_EQUIVALENT":
+        (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # the Pinnacle side of a line pair
+    "PINNACLE_LINE_FIXTURE_NOT_HELD": (S, DATA, "PROBABILITY"),
+    "PINNACLE_LINE_PAIR_INCOMPLETE": (S, DATA, "PROBABILITY"),
+    "PINNACLE_LINE_PAIR_POINTS_NOT_MIRRORED": (S, INT, "PROBABILITY"),
+    "PINNACLE_QUOTES_NO_MARKET_OF_THIS_FAMILY_FOR_THE_FIXTURE": (S, DATA, "PROBABILITY"),
+    # the line valuation's reference re-check at the decision (the money
+    # line's PINNAPI_PRIMARY input re-check, for a line)
+    "PINNAPI_LINE_INPUT_CHANGED": (S, FRESH, "FRESHNESS"),
+    # workers/ext_pinnacle_loop's line lane (inc-pinnapi): identity, the
+    # catalogue read and the lane's own per-cycle / per-WS-evaluation bounds
+    "LINE_FIXTURE_NOT_MATCHED_BY_PINNAPI_DISCOVERY": (S, MAP, "EVENT_IDENTITY"),
+    "GLOBAL_CATALOGUE_NOT_CONSULTED_FOR_A_PINNAPI_NATIVE_EVENT": (S, MAP, "VENUE_MAPPING"),
+    "LINE_CATALOGUE_READ_FAILED": (S, DATA, "VENUE_MAPPING"),
+    "LINE_INSTRUMENT_ALREADY_EVALUATED_THIS_CYCLE": (S, INT, "AGENT_EVALUATION"),
+    "LINE_INSTRUMENT_DEFERRED_CYCLE_BOUND": (S, CAP, "AGENT_EVALUATION"),
+    "LINE_INSTRUMENT_DEFERRED_WS_EVALUATION_DEADLINE": (S, CAP, "AGENT_EVALUATION"),
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_CYCLE_BOUND": (S, CAP, "VENUE_MAPPING"),
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_WS_EVALUATION_DEADLINE":
+        (S, CAP, "VENUE_MAPPING"),
+    # the outcome the provider priced is absent from its own quote
+    "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE": (S, DATA, "PROBABILITY"),
+    # pinnapi_feed (inc-pinnapi): the in-play child classification (RC3) and
+    # an unparsed record of a held event (finding 3, fix stage)
+    "CHILD_IS_A_SPECIAL_MARKET": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_NOT_LIVE": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_PARENT_IS_ITSELF_A_CHILD": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_PARENT_NOT_HELD": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_PARTICIPANTS_DIFFER_FROM_PARENT": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_PARTICIPANT_HAS_A_DERIVED_UNITS_SUFFIX": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_SPORT_DIFFERS_FROM_PARENT": (S, MAP, "EVENT_IDENTITY"),
+    "CHILD_UNITS_NOT_REGULAR": (S, MAP, "EVENT_IDENTITY"),
+    "MORE_THAN_ONE_LIVE_PHASE_CHILD": (S, MAP, "EVENT_IDENTITY"),
+    "RECORD_DOES_NOT_NAME_TWO_PARTICIPANTS": (S, DATA, "NORMALIZATION"),
+    "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN": (S, FRESH, "INGESTION"),
+    # pinnapi_feed_runtime / pinnapi_census (inc-pinnapi): the subscription
+    # scope's own validation, the football admission by measurement, and a
+    # matched family with no priceable market (not seeded)
+    "SPORT_CAPACITY_NOT_MEASURED_AGAINST_THE_CACHE_BOUNDS": (S, CAP, "INGESTION"),
+    "SPORT_ID_NOT_AN_INTEGER": (S, DATA, "INGESTION"),
+    "SPORT_ID_NOT_IN_PINNAPI_DOCUMENTATION": (S, CAP, "INGESTION"),
+    "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT": (S, CAP, "NORMALIZATION"),
+    "NOT_SEEDED_NO_PRICEABLE_MARKET_FOR_THE_FAMILY": (S, CAP, "MARKET_FAMILY"),
+    # bettor_venue_native_identity (inc-pinnapi / inc-edge): the draw contract
+    # and the discovered event, as the module's other identity codes
+    "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW": (S, MAP, "EVENT_IDENTITY"),
+    "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS": (S, MAP, "EVENT_IDENTITY"),
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED": (S, MAP, "EVENT_IDENTITY"),
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND": (S, MAP, "EVENT_IDENTITY"),
+    "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME": (S, CAP, "EVENT_IDENTITY"),
+    "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION": (S, MAP, "EVENT_IDENTITY"),
+    # bettor_ncaaf_settlement (P0 incident NCAAF stream): as the NFL rows --
+    # a draw-priced book line is a different market, the fixture date is
+    # identity, every cited-clause mismatch is settlement compatibility, the
+    # no-tie evidence is the probability's premise
+    "NCAAF_BOOK_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE": (S, MAP, "MARKET_FAMILY"),
+    "NCAAF_FIXTURE_DATE_NOT_CONSISTENT_WITH_THE_VENUE_SLUG": (S, MAP, "EVENT_IDENTITY"),
+    "NCAAF_FIXTURE_DATE_NOT_READABLE_FROM_THE_VENUE_SLUG": (S, MAP, "EVENT_IDENTITY"),
+    "NCAAF_NO_TIE_RULE_EVIDENCE_NOT_HELD": (S, DATA, "PROBABILITY"),
+    "NCAAF_BOOK_RULES_CAPTURE_NOT_HELD": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_RULES_TEXT_NOT_RECORDED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_OVERTIME_CLAUSE_NOT_THE_CITED_ONE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_POSTPONEMENT_CLAUSE_NOT_THE_CITED_ONE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_RESULT_SOURCE_CLAUSE_NOT_THE_CITED_ONE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_TEXT_CARRIES_AN_UNCITED_CLAUSE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_TIE_CLAUSE_NOT_THE_CITED_REVIEW_CLAUSE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_VENUE_WINNER_CLAUSE_NOT_THE_CITED_COLLEGE_FOOTBALL_GAME":
+        (S, SET, "SETTLEMENT_COMPATIBILITY"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
-               + list(INCIDENT_STREAMS.items())):
+               + list(INCIDENT_STREAMS.items())
+               + list(INTEGRATION_STREAMS.items())):
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL

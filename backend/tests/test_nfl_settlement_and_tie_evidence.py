@@ -119,9 +119,13 @@ def test_the_tie_rate_evidence_is_the_retrieved_text():
 def test_pinnapi_sport_ids_are_the_providers_own():
     table = PDOC["sport_ids_table"]
     for fam, sid in P.SPORTS.items():
+        # (integration) inc-pinnapi's six-sport map adds basketball, hockey
+        # and tennis; each id is still checked against the provider's own
+        # documented table
         assert table[str(sid)].lower().startswith(
             {"baseball": "baseball", "soccer": "soccer",
-             "football": "football"}[fam]), (fam, sid)
+             "football": "football", "basketball": "basketball",
+             "hockey": "hockey", "tennis": "tennis"}[fam]), (fam, sid)
     assert P.SPORTS["football"] == 5
     assert "num_0` — full match" in PDOC["periods"][0]
     assert "draw?" in PDOC["market_types_row"]

@@ -72,7 +72,24 @@ BASIS = ("COMPLEMENT_SIDE_OF_THE_SAME_BINARY_VENUE_CONTRACT_PAYS_ON_NOT_THE_"
 #: The de-vig sports whose complete outcome set makes 1 - p exact (a copy of
 #: the keys of bettor_pinnacle_devig.SUPPORTED, pinned equal by a test so
 #: this module imports nothing).
-COMPLETE_SET_OUTCOMES = {("soccer", "h2h"): 3, ("baseball", "h2h"): 2}
+#:
+#: (integration) inc-pinnapi added the PROVEN half-point LINE families to
+#: the de-vig's SUPPORTED set (spread / total / team total, two outcomes:
+#: home/away at mirrored points or over/under at one point, no push on a
+#: half point). Their set is complete, so 1 - p is exact for them too and
+#: the copy follows the de-vig's set as the pin requires. Today only the
+#: money-line lane writes complements (h2h rows); the line lane values
+#: both sides of a line itself, so these entries change no record written.
+COMPLETE_SET_OUTCOMES = {
+    ("soccer", "h2h"): 3, ("baseball", "h2h"): 2,
+    ("football", "spread"): 2, ("football", "total"): 2,
+    ("football", "team_total"): 2,
+    ("hockey", "spread"): 2, ("hockey", "total"): 2,
+    ("hockey", "team_total"): 2,
+    ("basketball", "spread"): 2, ("basketball", "total"): 2,
+    ("baseball", "spread"): 2, ("baseball", "total"): 2,
+    ("baseball", "team_total"): 2,
+}
 
 # ── why no complement is written (counted by name, never silent) ──────
 N_HOME_NOT_CALIBRATION_ONLY = "HOME_RECORD_IS_NOT_CALIBRATION_ONLY"

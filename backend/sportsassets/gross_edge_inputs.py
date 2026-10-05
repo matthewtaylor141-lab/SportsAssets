@@ -208,6 +208,9 @@ def declared_conversion(pin: dict) -> dict | None:
 def conversion(*, p, p_book, conv: dict) -> dict:
     """Does the converted `p` follow from `p_book` by the declared
     conversion's own formula and worst-end rule? Re-derived. Pure."""
+    if conv.get("tie_rate_interval") is None \
+            and conv.get("tie_probability_completed") is not None:
+        return _identity_conversion(p=p, p_book=p_book, conv=conv)
     t = _finite(conv.get("tie_rate_used"))
     pay = _finite(conv.get("tie_payout_per_contract"))
     iv = conv.get("tie_rate_interval")
@@ -246,6 +249,38 @@ def conversion(*, p, p_book, conv: dict) -> dict:
                        "p does not follow from the row's probability by the "
                        "declared formula at the worst end of its interval"),
                   **detail)
+
+
+def _identity_conversion(*, p, p_book, conv: dict) -> dict:
+    """THE NCAAF MONEY LINE'S DECLARED CONVERSION (integration of inc-edge
+    with the P0 incident NCAAF stream). bettor_ncaaf_settlement.convert
+    declares a venue conversion with the SAME shape as the NFL's
+    (`applies`, `p`, `p_book_conditional_no_tie`) but with no tie-rate
+    interval: its formula is p_venue = (1 - t) p_book + 0 * t with
+    t = `tie_probability_completed` = 0 by the cited rule that a completed
+    college game cannot end tied, so p_venue = p_book. Re-derived here, never
+    trusted: t must be exactly 0 (any other declared t has no interval to
+    take a worst end from and is refused), the declared book number must be
+    the row's, and the decision's p (and the declaration's own p) must equal
+    the book's number. Pure."""
+    t = _finite(conv.get("tie_probability_completed"))
+    declared_book = _finite(conv.get("p_book_conditional_no_tie"))
+    declared_p = _finite(conv.get("p"))
+    detail = {"tie_probability_completed": t, "p_book": p_book, "value": p,
+              "formula": conv.get("formula"), "p_is": conv.get("p_is")}
+    ok = (t == 0.0 and declared_book is not None and p_book is not None
+          and abs(declared_book - float(p_book)) <= P_TOLERANCE
+          and abs(float(p) - float(p_book)) <= P_TOLERANCE
+          and (declared_p is None
+               or abs(declared_p - float(p)) <= P_TOLERANCE))
+    return _check("VENUE_CONVERSION", ok, R_CONVERSION,
+                  expected=None if p_book is None else float(p_book),
+                  why=("a zero tie probability makes the conversion the "
+                       "identity: p is the row's own probability"
+                       if ok else
+                       "the declared identity conversion does not hold: t is "
+                       "not 0, or p / the declared book number is not the "
+                       "row's probability"), **detail)
 
 
 def _side_levels(md, raw_side: str) -> list:

@@ -396,7 +396,15 @@ def _nfl_record(observed_at, *, slug, now):
     """An NFL money-line valuation exactly as the cycle builds it today: a
     calibration-only record (the venue book's currency is not established)
     whose de-vig refuses MARKET_NOT_IN_SUPPORTED_SET before its aging step,
-    because football is not in the de-vig's measured set."""
+    because football is not in the de-vig's measured set.
+
+    (integration) Since the R30A NFL stream the NFL and college money lines
+    ARE admitted, by their own measurements (bettor_pinnacle_devig.
+    SUPPORTED_BY_LEAGUE nfl / cfb), so an `aec-nfl-` slug no longer refuses
+    before aging. The callers' slugs now name a football league that no
+    measurement admitted (`aec-ufl-`): the same refusal-before-aging path
+    the 13:28Z defect took, which every non-admitted football league still
+    takes."""
     contract = OS._contract(slug, family="football",
                             selection="Philadelphia Eagles")
     q = OS._ev_quote(NFL_ODDS, observed_at=(observed_at or 0.0),
@@ -428,7 +436,7 @@ def _nfl_record(observed_at, *, slug, now):
 
 def test_a_refusal_before_aging_records_the_quotes_source_instant():
     now = time.time()
-    rec = _nfl_record(now - 7.0, slug="aec-nfl-phi-den-x", now=now)
+    rec = _nfl_record(now - 7.0, slug="aec-ufl-phi-den-x", now=now)
     v = rec["valuation"]
     assert v["refusals"][0] == devig.R_UNSUPPORTED_MARKET
     assert v["probability"] is None and rec["probability"] is None
@@ -437,7 +445,7 @@ def test_a_refusal_before_aging_records_the_quotes_source_instant():
     assert v.get("age_s") is None                      # never aged
     assert rec["observed_at"] == pytest.approx(now - 7.0)
     # a quote with no readable instant records none, and still refuses
-    rec2 = _nfl_record(None, slug="aec-nfl-phi-den-x", now=now)
+    rec2 = _nfl_record(None, slug="aec-ufl-phi-den-x", now=now)
     assert rec2["observed_at"] is None
     assert rec2["valuation"]["refusals"][0] == devig.R_UNSUPPORTED_MARKET
 
@@ -451,7 +459,7 @@ def test_the_old_key_collapsed_every_later_nfl_valuation_and_251_keeps_them():
     instant at all is one row per evaluation -- never one row for ever."""
     async def go():
         conn = await H.connect()
-        slug = "aec-nfl-phi-den-2026-10-04-k%d" % int(time.time() * 1000)
+        slug = "aec-ufl-phi-den-2026-10-04-k%d" % int(time.time() * 1000)
         try:
             now = time.time()
             a = _nfl_record(None, slug=slug, now=now)
@@ -907,7 +915,7 @@ def test_the_source_instant_label_is_stored_on_the_row():
     table refuses the label on a row that was aged or priced."""
     async def go():
         conn = await H.connect()
-        slug = "aec-nfl-phi-den-2026-10-04-lbl%d" % int(time.time() * 1000)
+        slug = "aec-ufl-phi-den-2026-10-04-lbl%d" % int(time.time() * 1000)
         try:
             now = time.time()
             rec = _nfl_record(now - 9.0, slug=slug, now=now)

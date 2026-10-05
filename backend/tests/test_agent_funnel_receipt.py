@@ -155,7 +155,10 @@ def test_select_hands_back_its_reason_even_with_no_fallback():
         {"key": "spreads", "outcomes": []}]}])
     assert loop.pinnacle_absence_in_payload(ev2) == \
         loop.R_PINNACLE_HAS_NO_H2H
-    # a sport the feed does not carry names itself
+    # a sport the feed does not carry names itself. (integration) football
+    # is matched since the R30A NFL stream and inc-pinnapi's six-sport scope
+    # (pinnapi_primary.SPORTS), so the unsupported family is one no scope
+    # carries
     class _Auth:
         granted = synced = True
 
@@ -163,7 +166,8 @@ def test_select_hands_back_its_reason_even_with_no_fallback():
         authority = _Auth()
         events = {}
     why2: dict = {}
-    assert PP.select(_Cache(), ev, None, family="football", sharp_books=(),
+    assert "cricket" not in PP.SPORTS
+    assert PP.select(_Cache(), ev, None, family="cricket", sharp_books=(),
                      at=time.time(), runtime_id="r", explain=why2) is None
     assert why2["reason"] == "PINNAPI_PRIMARY_SPORT_UNSUPPORTED"
     assert loop.no_pinnacle_codes(why2, ev)[0] == \

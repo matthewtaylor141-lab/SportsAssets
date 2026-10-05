@@ -828,7 +828,12 @@ PINNAPI_SELECT_REFUSALS = (
     "FEED_MARKET_NOT_IN_CURRENT_STATE", "FEED_QUOTE_FROM_A_PREVIOUS_CONNECTION",
     "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
     "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE", "FEED_QUOTE_OLDER_THAN_LIMIT",
-    "FEED_MARKET_CLOSED")
+    "FEED_MARKET_CLOSED",
+    # (integration) the select refusals the merged streams added: the NFL
+    # stream's draw-priced football line (pinnapi_primary) and inc-pinnapi's
+    # unparsed record of a held event (pinnapi_feed, fix-stage finding 3)
+    "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW",
+    "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN")
 
 #: ── ONE TAXONOMY: THE LANE STAGE OF THE INCIDENT'S CODES IS DERIVED ──
 #:
