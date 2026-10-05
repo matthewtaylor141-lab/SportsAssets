@@ -875,13 +875,39 @@ async def read_paper(conn, *, now: float, account_id: str | None = None) -> dict
                                  {"why": "the active session has recorded no "
                                          "complete equity snapshot yet"})
         sleeves, genuine = await read_sleeves(conn, acct, now=now, bal=bal)
-        return paper_account(bal, now=now, session=session,
-                             day_basis=day_basis, session_basis=session_basis,
-                             stale_mark_after_s=float(L.MARK_STALE_AFTER_S),
-                             genuine_mark_at=genuine, sleeves=sleeves)
+        out = paper_account(bal, now=now, session=session,
+                            day_basis=day_basis, session_basis=session_basis,
+                            stale_mark_after_s=float(L.MARK_STALE_AFTER_S),
+                            genuine_mark_at=genuine, sleeves=sleeves)
+        out["management"] = await read_management(conn, acct, now=now,
+                                                  bal=bal, paper=out)
+        return out
     except Exception as exc:                                    # noqa: BLE001
         return paper_account(None, now=now, error="PAPER_READ_FAILED: %s: %s"
                              % (type(exc).__name__, str(exc)[:160]))
+
+
+async def read_management(conn, acct: str, *, now: float, bal: dict,
+                          paper: dict) -> dict:
+    """THE MANAGEMENT EPOCH (bettor_paper_epoch): the PAPER book re-based to
+    $500,000 at 2026-10-05 00:00 America/New_York, with the full ledger
+    history beside it. A failed read is UNAVAILABLE with its reason and never
+    breaks the account figures."""
+    from .. import bettor_paper_epoch as EP
+    try:
+        async with conn.transaction():
+            m = await EP.read(conn, acct, bal=bal, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": "UNAVAILABLE", "epoch_id": EP.EPOCH_ID,
+                "label": EP.LABEL,
+                "why": "MANAGEMENT_EPOCH_READ_FAILED: %s: %s"
+                       % (type(exc).__name__, str(exc)[:160])}
+    hist = m.get("pre_management_history")
+    if isinstance(hist, dict):
+        hist.update(ledger_equity_usd=paper.get("equity_usd"),
+                    since_funding=paper.get("since_inception"),
+                    ledger_unrealized_pnl_usd=paper.get("unrealized_pnl_usd"))
+    return m
 
 
 async def read_sleeves(conn, acct: str, *, now: float, bal: dict) -> tuple:

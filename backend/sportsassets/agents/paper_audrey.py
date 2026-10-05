@@ -49,6 +49,7 @@ import time
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from .. import bettor_paper_epoch as EP
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
 
@@ -77,6 +78,47 @@ def day_bounds(at: float, tz: str = "America/New_York") -> tuple:
 
 async def _sum(conn, sql, *args) -> float:
     return float(await conn.fetchval(sql, *args) or 0)
+
+
+def management_checks(book: dict, *, ledger_cash_now,
+                      ledger_cash_at_epoch) -> list:
+    """AUDREY'S OWN DERIVATION of the management book from two ledger sums
+    she reads herself: management cash (incl. reserved) = ledger cash now -
+    (ledger cash at the epoch - opening cash) - post-epoch ledger cash held
+    outside. Each check states both sides."""
+    op = book.get("opening") or {}
+    opening = float(book.get("opening_equity_usd") or 0)
+    sides = (float(op.get("available_cash_usd") or 0)
+             + float(op.get("reserved_usd") or 0)
+             + float(op.get("carried_position_mark_value_usd") or 0))
+    held = float((book.get("ledger_reconciliation") or {}).get(
+        "post_epoch_cash_held_outside_usd") or 0)
+    audrey_cash = (float(ledger_cash_now) - (float(ledger_cash_at_epoch)
+                   - float(op.get("cash_including_reserved_usd") or 0))
+                   - held)
+    eq = float(book.get("equity_usd") or 0)
+    pnl = (float(book.get("realized_pnl_usd") or 0)
+           + float(book.get("unrealized_pnl_usd") or 0))
+    audrey_equity = (audrey_cash
+                     + float(book.get("marked_open_position_value_usd") or 0)
+                     + float(book.get("unmarked_carried_at_basis_usd") or 0))
+    return [
+        {"check": "MANAGEMENT_OPENING_EQUALS_OPENING_EQUITY",
+         "available_plus_reserved_plus_carried_usd": round(sides, 6),
+         "opening_equity_usd": opening,
+         "passed": abs(sides - opening) < 0.01},
+        {"check": "MANAGEMENT_CASH_EQUALS_THE_REBASED_LEDGER",
+         "management_cash_including_reserved_usd":
+             book.get("cash_including_reserved_usd"),
+         "audrey_from_ledger_sums_usd": round(audrey_cash, 6),
+         "passed": abs(float(book.get("cash_including_reserved_usd") or 0)
+                       - audrey_cash) < 0.01},
+        {"check": "MANAGEMENT_EQUITY_EQUALS_OPENING_PLUS_PNL",
+         "management_equity_usd": eq,
+         "audrey_equity_from_ledger_usd": round(audrey_equity, 6),
+         "opening_plus_realized_plus_unrealized_usd": round(opening + pnl, 6),
+         "passed": (abs(eq - audrey_equity) < 0.01
+                    and abs(eq - (opening + pnl)) < 0.01)}]
 
 
 async def build_report(conn, *, session: dict, account_id: str, day,
@@ -202,6 +244,17 @@ async def build_report(conn, *, session: dict, account_id: str, day,
          "passed": True}]
     checks[-1]["passed"] = (sum(checks[-1]["fills_by_role"].values())
                             == checks[-1]["fills_total"])
+    # ── THE MANAGEMENT EPOCH, RECONCILED TO THE SAME LEDGER ──────────
+    management = None
+    if float(now) >= EP.EPOCH_START:
+        management = await EP.read(conn, account_id, bal=bal, now=until)
+        e0 = await _sum(
+            conn, "SELECT coalesce(sum(cash_delta_usd),0) FROM paper_ledger "
+                  " WHERE account_id=$1 AND (committed_at < $2 "
+                  "   OR kind = 'INITIAL_FUNDING')", account_id,
+            L._ts(EP.EPOCH_START))
+        checks.extend(management_checks(management, ledger_cash_now=cash_at_end,
+                                        ledger_cash_at_epoch=e0))
     reconciles = all(c["passed"] for c in checks)
     # ── DECISIONS: QUALITY AT DECISION TIME, APART FROM HINDSIGHT ────
     dec = await conn.fetch(
@@ -385,6 +438,14 @@ async def build_report(conn, *, session: dict, account_id: str, day,
         "ledger_by_kind": led,
         "reconciliation": {"checks": checks, "reconciles": reconciles,
                            "one_ledger": "paper_ledger"},
+        "management_epoch": (None if management is None else {
+            k: management.get(k) for k in (
+                "epoch_id", "epoch_start", "label", "opening_equity_usd",
+                "opening", "equity_usd", "cash_usd", "reserved_usd",
+                "marked_open_position_value_usd", "realized_pnl_usd",
+                "unrealized_pnl_usd", "total_pnl_usd", "return_pct",
+                "drawdown_usd", "carried_positions", "carried_unverified",
+                "status", "ledger_reconciliation")}),
     }
     # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, reported in its own
     # labelled section (the decision figures above are the two-model
