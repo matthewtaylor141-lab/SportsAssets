@@ -40,6 +40,9 @@ ALLOWED_PROJECT = {"sportsassets.api.agents_core",
                    # records + paper_sleeve_classifications; its one write
                    # (the backstop) is never called from here
                    "sportsassets.bettor_paper_sleeves",
+                   # the management epoch (2026-10-05): SELECTs over the
+                   # paper ledger tables and a pure re-base; no write
+                   "sportsassets.bettor_paper_epoch",
                    # SMALL LIVE -- BETTOR ORIGINATED status: pure derivation
                    # + SELECTs, no venue / order / execution import
                    "sportsassets.bettor_originated_status"}
