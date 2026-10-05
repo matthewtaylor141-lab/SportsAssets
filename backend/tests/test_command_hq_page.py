@@ -197,3 +197,32 @@ def test_the_model_reads_only_command_routes():
     r = _run(FLOOR)
     assert r["reads"], "nothing was read"
     assert all(p.startswith("/api/command/") for p in r["reads"]), r["reads"]
+
+
+def test_command_defaults_to_the_management_epoch():
+    """The primary money figures are the management epoch (equity/live
+    paper.management: $500,000 at 2026-10-05 00:00 ET); the ledger since
+    funding is shown only as PRE-MANAGEMENT HISTORY, never mixed in."""
+    code = _code(SRC["hq.js"])
+    assert "function mgmt()" in code and "p && p.management" in code
+    # every primary money surface asks for the management book first
+    for fn in ("function capitalHTML(", "function capCurveHTML(",
+               "function capBookHTML(", "function dailyReport(",
+               "function capitalReport("):
+        body = code.split(fn, 1)[1].split("\nfunction ", 1)[0]
+        assert "mgmt()" in body, fn
+    assert "MANAGEMENT START: OCT 5, 2026 · OPENING EQUITY $500,000" in SRC["hq.js"]
+    assert "PRE-MANAGEMENT HISTORY" in SRC["hq.js"]
+    # the KPIs management asked for, all from the management section
+    kp = code.split("function mgKpis(", 1)[1].split("\nfunction ", 1)[0]
+    for k in ("Opening equity", "Current equity", "Realized P&L",
+              "Unrealized P&L", "Total P&L", "Return", "Drawdown", "Cash",
+              "Reserved", "Marked value", "Exposure"):
+        assert "'%s'" % k in kp, k
+    assert "m.equity_usd" in kp and "p.equity_usd" not in kp
+    # an unverified carried position is shown, never hidden
+    assert "EPOCH_OPEN_MARK_UNVERIFIED" in SRC["hq.js"]
+    # the 3D capital wall and ticker follow the same section
+    scr = SRC["hq-screens.js"] if "hq-screens.js" in SRC else (CMD / "hq-screens.js").read_text()
+    assert "function mgmtOf(p)" in scr and "MANAGEMENT EQUITY" in scr
+    assert "PRE-MANAGEMENT HISTORY" in scr

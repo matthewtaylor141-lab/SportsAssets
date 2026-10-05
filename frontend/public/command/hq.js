@@ -140,14 +140,83 @@ function sparkSVG(points, opts) {
     (grid ? '<g class="grid">' + grid + '</g>' : '') + '<path class="area" d="' + area + '"/><path class="line" d="' + d + '"/>' +
     (o.cls === 'curve' ? '<circle class="end" r="4" cx="' + X(last.t).toFixed(1) + '" cy="' + Y(last.v).toFixed(1) + '"/>' : '') + '</svg>';
 }
+/* THE MANAGEMENT EPOCH (equity/live paper.management, bettor_paper_epoch):
+   the primary money figures start at $500,000 on 2026-10-05 00:00 ET. The
+   ledger since funding is PRE-MANAGEMENT HISTORY, shown apart, never mixed
+   in. Absent the section, the old figures are shown only under that label. */
+function mgmt() { const p = HQ.equity().paper, m = p && p.management; return m && (m.status === 'OK' || m.status === 'DOES_NOT_RECONCILE') ? m : null; }
+function mgmtWhy() { const p = HQ.equity().paper, m = p && p.management; return !p ? equityWhy() : !m ? 'the API does not serve the management epoch yet' : (m.status || 'UNAVAILABLE') + (m.why ? ': ' + m.why : ''); }
+const MG_LABEL = 'MANAGEMENT START: OCT 5, 2026 · OPENING EQUITY $500,000';
+function mgLabelHTML(m) { return '<div class="mg-start" title="' + esc((m && m.source) || '') + '">' + esc((m && m.label) || MG_LABEL) + '</div>'; }
+function mgCurve(m) {
+  const cv = HQ.curve();
+  if (!m) return {points: [], why: 'management epoch not served'};
+  if (!m.rebase_exact) return {points: [], why: 'management equity curve not reconstructable: ' + (m.high_water_mark_rule || '')};
+  const off = (m.opening || {}).rebase_offset_usd, t0 = m.epoch_start_at;
+  if (!fin(off)) return {points: [], why: 'no re-base offset served'};
+  const pts = [{t: t0, v: m.opening_equity_usd}].concat(cv.points.filter((x) => x.t >= t0).map((x) => ({t: x.t, v: x.v + off})));
+  return {points: pts, why: cv.why || (cv.status === 'LOADING' ? 'reading equity/curve' : 'fewer than two recorded points since the management start')};
+}
+function mgKpis(m, kv) {
+  const ex = m.exposure || {};
+  return kv('Opening equity', U.usd(m.opening_equity_usd, 0), 'Oct 5, 2026 00:00 ET') +
+    kv('Current equity', U.usd(m.equity_usd, 0), m.status === 'OK' ? 'reconciles to the ledger' : 'DOES NOT RECONCILE', m.status === 'OK' ? '' : 'warn') +
+    kv('Realized P&L', U.signedUsd(m.realized_pnl_usd, 0), 'since management start', tone(m.realized_pnl_usd)) +
+    kv('Unrealized P&L', U.signedUsd(m.unrealized_pnl_usd, 0), 'since management start', tone(m.unrealized_pnl_usd)) +
+    kv('Total P&L', U.signedUsd(m.total_pnl_usd, 0), 'since management start', tone(m.total_pnl_usd)) +
+    kv('Return', pct(m.return_pct), 'on $500,000', tone(m.return_pct)) +
+    kv('Drawdown', fin(m.drawdown_usd) ? U.usd(m.drawdown_usd, 0) : null, 'from HWM ' + (U.usd(m.high_water_mark_usd, 0) || '—') + (fin(m.drawdown_pct) ? ' · ' + m.drawdown_pct.toFixed(2) + '%' : ''), m.drawdown_usd > 0 ? 'neg' : '') +
+    kv('Cash', U.usd(m.cash_usd, 0), 'available') +
+    kv('Reserved', U.usd(m.reserved_usd, 0), 'resting orders') +
+    kv('Marked value', U.usd(m.marked_open_position_value_usd, 0), (ex.open_positions != null ? ex.open_positions + ' open' : '') + (ex.unmarked ? ' · ' + ex.unmarked + ' unmarked at basis' : '')) +
+    kv('Exposure', U.usd(ex.basis_usd, 0), 'management basis of open positions');
+}
+function mgHistoryHTML(m, p) {
+  const h = (m && m.pre_management_history) || {}, si = (h.since_funding || (p && p.since_inception) || {});
+  const eq = h.ledger_equity_usd != null ? h.ledger_equity_usd : p && p.equity_usd;
+  return '<details class="mg-hist"><summary>PRE-MANAGEMENT HISTORY <span class="dim">· the ledger since funding, not in the figures above</span></summary><p>' +
+    esc('Ledger equity ' + (U.usd(eq, 0) || '—') + (si.usd != null ? ' · ' + U.signedUsd(si.usd, 0) + ' (' + pct(si.pct) + ') since funding' : '') +
+      ' · ledger realized ' + (U.signedUsd(h.ledger_realized_pnl_usd != null ? h.ledger_realized_pnl_usd : p && p.realized_pnl_usd, 0) || '—') +
+      ' · ledger fees ' + (U.usd(h.ledger_fees_paid_usd != null ? h.ledger_fees_paid_usd : p && p.fees_paid_usd, 0) || '—') +
+      (h.positions_closed_before_epoch != null ? ' · ' + h.positions_closed_before_epoch + ' positions closed before the start' : '') +
+      '. Every trade, fill, settlement and audit record stays in the ledger.') + '</p></details>';
+}
+function mgUnverifiedHTML(m) {
+  const u = (m && m.unverified_positions) || [];
+  if (!u.length) return '';
+  return '<div class="why warn">' + esc(u.length + ' carried position' + (u.length === 1 ? '' : 's') + ' EPOCH_OPEN_MARK_UNVERIFIED: no defensible midnight mark, so ' + (u.length === 1 ? 'it is' : 'they are') + ' held outside the management figures until reconciled (current marked value ' + (U.usd(u.reduce((a, x) => a + (x.current_marked_value_usd || 0), 0), 0) || '—') + ').') + '</div>';
+}
 function capitalHTML(compact) {
+  const m = mgmt();
+  if (m) return mgCapitalHTML(m, compact);
+  return '<div class="why warn">MANAGEMENT EPOCH NOT SERVED · ' + esc(mgmtWhy()) + '</div>' + ledgerCapitalHTML(compact);
+}
+function mgCapitalHTML(m, compact) {
+  const p = HQ.equity().paper, cv = mgCurve(m);
+  const kv = (k, v, s, cls) => '<div><div class="k">' + esc(k) + '</div><div class="v ' + (cls || '') + '">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</div>' + (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div>';
+  return '<div class="lbl">Management equity <span class="book-tag paper">PAPER · SIMULATED</span></div>' + mgLabelHTML(m) +
+    '<div class="big num">' + esc(U.usd(m.equity_usd, 0) || '—') + '</div>' +
+    '<div class="chg"><span class="' + tone(m.total_pnl_usd) + '">' + esc(U.signedUsd(m.total_pnl_usd, 0) + ' ' + (pct(m.return_pct) || '')) + '</span><span class="dim">since management start</span>' +
+    '<span class="' + (m.drawdown_usd > 0 ? 'neg' : '') + '">' + esc('DD ' + (U.usd(m.drawdown_usd, 0) || '—')) + '</span><span class="dim">from HWM</span></div>' +
+    (cv.points.length > 1 ? sparkSVG(cv.points) : '<div class="why" style="margin-top:10px">' + esc(cv.why) + '</div>') +
+    '<div class="kv">' +
+      kv('Cash', U.usd(m.cash_usd, 0), 'reserved ' + (U.usd(m.reserved_usd, 0) || '—')) +
+      kv('Marked value', U.usd(m.marked_open_position_value_usd, 0), ((m.exposure || {}).open_positions != null ? m.exposure.open_positions + ' open' : null)) +
+      kv('Realized P&L', U.signedUsd(m.realized_pnl_usd, 0), 'since start', tone(m.realized_pnl_usd)) +
+      kv('Unrealized', U.signedUsd(m.unrealized_pnl_usd, 0), 'since start', tone(m.unrealized_pnl_usd)) +
+      (compact ? '' : kv('Opening', U.usd(m.opening_equity_usd, 0), (m.carried_positions || 0) + ' carried at midnight marks') + kv('Exposure', U.usd((m.exposure || {}).basis_usd, 0), 'management basis')) +
+    '</div>' + (m.status !== 'OK' ? '<div class="why warn">management book ' + esc(m.status) + (m.why ? ': ' + esc(m.why) : '') + '</div>' : '') + mgUnverifiedHTML(m) +
+    (compact ? '' : mgHistoryHTML(m, p)) +
+    '<div class="why" style="margin-top:10px">' + esc((p && p.label) || '') + ' · as of ' + esc(U.hm(p && p.source_at)) + '</div>';
+}
+function ledgerCapitalHTML(compact) {
   const q = HQ.equity(), p = q.paper, why = equityWhy();
   if (!p) return '<div class="lbl">Paper equity <span class="book-tag paper">PAPER · SIMULATED</span></div>' + dna(why);
   const dc = p.day_change || {}, si = p.since_inception || {}, ex = p.exposure || {}, op = p.open_positions || {};
   const cv = HQ.curve();
   const unOk = !(fin(op.count) && op.count > 0 && !op.marked);
   const kv = (k, v, s, cls) => '<div><div class="k">' + esc(k) + '</div><div class="v ' + (cls || '') + '">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</div>' + (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div>';
-  return '<div class="lbl">Paper equity <span class="book-tag paper">PAPER · SIMULATED</span></div>' +
+  return '<div class="lbl">PRE-MANAGEMENT HISTORY · ledger equity <span class="book-tag paper">PAPER · SIMULATED</span></div>' +
     '<div class="big num">' + esc(U.usd(p.equity_usd, 0) || '—') + '</div>' +
     '<div class="chg"><span class="' + tone(dc.usd) + '">' + esc(dc.usd != null ? U.signedUsd(dc.usd, 0) + ' ' + (pct(dc.pct) || '') : 'day N/A') + '</span><span class="dim">today ET</span>' +
     '<span class="' + tone(si.usd) + '">' + esc(si.usd != null ? pct(si.pct) : '') + '</span><span class="dim">since start</span></div>' +
@@ -484,14 +553,31 @@ function curveSize() {
   return {w: Math.max(240, Math.round(w)), h: Math.max(120, Math.round(h))};
 }
 function capCurveHTML() {
+  const m = mgmt();
+  if (m) {
+    const cv = mgCurve(m);
+    return '<div class="lbl">Management equity curve · PAPER <em>' + (cv.points.length > 1 ? cv.points.length + ' points since Oct 5, 2026 00:00 ET · step line' : '') + '</em></div>' + mgLabelHTML(m) +
+      (cv.points.length > 1 ? sparkSVG(cv.points, Object.assign({cls: 'curve', grid: true}, curveSize())) : dna(cv.why)) +
+      '<div class="chg"><span>' + esc(U.usd(m.equity_usd)) + '</span><span class="' + tone(m.total_pnl_usd) + '">' + esc(U.signedUsd(m.total_pnl_usd) + ' since management start') + '</span><span class="dim">' + esc('HWM ' + (U.usd(m.high_water_mark_usd, 0) || '—') + ' · ' + (m.high_water_mark_basis || '')) + '</span></div>';
+  }
   const cv = HQ.curve(), p = HQ.equity().paper;
-  return '<div class="lbl">Equity curve · PAPER <em>' + (cv.points.length ? cv.points.length + ' recorded points · step line' : '') + '</em></div>' +
+  return '<div class="lbl">PRE-MANAGEMENT HISTORY · ledger equity curve <em>' + (cv.points.length ? cv.points.length + ' recorded points · step line' : '') + '</em></div>' +
     (cv.points.length > 1 ? sparkSVG(cv.points, Object.assign({cls: 'curve', grid: true}, curveSize())) : dna(cv.why || (cv.status === 'LOADING' ? 'reading equity/curve' : 'fewer than two recorded points'))) +
     (p ? '<div class="chg"><span>' + esc(U.usd(p.equity_usd)) + '</span><span class="' + tone((p.day_change || {}).usd) + '">' + esc((p.day_change || {}).usd != null ? U.signedUsd(p.day_change.usd) + ' today' : '') + '</span><span class="dim">' + esc(p.no_new_mark ? 'NO NEW MARK · ' + (p.no_new_mark_rule || '') : 'last genuine mark ' + U.hm(p.last_genuine_mark_update_at)) + '</span></div>' : '');
 }
 function capBookHTML() {
   const p = HQ.equity().paper;
   if (!p) return '<div class="lbl">The book</div>' + dna(equityWhy());
+  const m = mgmt();
+  if (m) {
+    const kv = (k, v, s, cls) => '<div><div class="k">' + esc(k) + '</div><div class="v ' + (cls || '') + '">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</div>' + (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div>';
+    const op = m.opening || {};
+    return '<div class="lbl">The book · management epoch <span class="book-tag paper">PAPER · SIMULATED</span></div>' + mgLabelHTML(m) +
+      '<div class="kv" style="grid-template-columns:repeat(3,minmax(0,1fr))">' + mgKpis(m, kv) +
+      kv('Carried at open', String(m.carried_positions != null ? m.carried_positions : '—'), 'midnight value ' + (U.usd(op.carried_position_mark_value_usd, 0) || '—')) + '</div>' +
+      '<div class="why">' + esc('Opening: cash ' + (U.usd(op.available_cash_usd, 2) || '—') + ' + reserved ' + (U.usd(op.reserved_usd, 2) || '—') + ' + carried ' + (U.usd(op.carried_position_mark_value_usd, 2) || '—') + ' = ' + (U.usd(m.opening_equity_usd, 2) || '—') + (op.identity_holds ? ' ✓' : ' (does not hold)') + ' · opened today ' + (m.opened_after_epoch || 0) + ' · settled today ' + (m.settled_after_epoch || 0) + ' · fees today ' + (U.usd(m.fees_after_epoch_usd, 0) || '—')) + '</div>' +
+      (m.status !== 'OK' ? '<div class="why warn">management book ' + esc(m.status) + (m.why ? ': ' + esc(m.why) : '') + '</div>' : '') + mgUnverifiedHTML(m) + mgHistoryHTML(m, p);
+  }
   const ex = p.exposure || {}, op = p.open_positions || {};
   const kv = (k, v, s, cls) => '<div><div class="k">' + esc(k) + '</div><div class="v ' + (cls || '') + '">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</div>' + (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div>';
   const C = HQ.reads.capital, cd = C.data && (C.data.data || C.data);
@@ -499,7 +585,7 @@ function capBookHTML() {
   const tv = turnover && (fin(turnover) ? turnover : fin(turnover.value) ? turnover.value : fin(turnover.ratio) ? turnover.ratio : null);
   const chv = ch && (fin(ch) ? ch : fin(ch.value) ? ch.value : fin(ch.total) ? ch.total : null);
   const capWhy = C.status === 'LOADING' ? 'reading profitability/capital' : C.status !== 'OK' && C.status !== 'STALE' ? 'profitability/capital ' + C.status + (C.why ? ': ' + C.why : '') : 'not served by profitability/capital';
-  return '<div class="lbl">The book <span class="book-tag paper">PAPER · SIMULATED</span></div><div class="kv" style="grid-template-columns:repeat(3,minmax(0,1fr))">' +
+  return '<div class="why warn">MANAGEMENT EPOCH NOT SERVED · ' + esc(mgmtWhy()) + '</div><div class="lbl">PRE-MANAGEMENT HISTORY · the ledger <span class="book-tag paper">PAPER · SIMULATED</span></div><div class="kv" style="grid-template-columns:repeat(3,minmax(0,1fr))">' +
     kv('Equity', U.usd(p.equity_usd, 0), 'marked-only ' + (U.usd(p.equity_marked_only_usd, 0) || '—')) +
     kv('Cash', U.usd(p.cash_usd, 0), 'start ' + (U.usd(p.starting_cash_usd, 0) || '—')) +
     kv('Available', U.usd(p.available_usd, 0), 'free to deploy') +
@@ -575,13 +661,23 @@ function dailyReport() {
   const q = HQ.equity(), p = q.paper, a = HQ.attention(), fu = HQ.funnel(), ds = HQ.desks(), rel = HQ.reads.release.data, cv = HQ.coverage();
   const kv = (k, v, s, cls) => '<div><div class="k">' + esc(k) + '</div><div class="v ' + (cls || '') + '">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</div>' + (s ? '<span class="s">' + esc(s) + '</span>' : '') + '</div>';
   const enter = fu.stages && fu.stages.find((s) => s.k === 'entered_events'), fills = fu.stages && fu.stages.find((s) => s.k === 'filled_events'), prov = fu.stages && fu.stages[0];
-  const dc = p && p.day_change || {};
+  const dc = p && p.day_change || {}, m = mgmt();
+  if (m) {
+    const hl = 'Management equity stands at ' + U.usd(m.equity_usd, 0) + ', ' + U.signedUsd(m.total_pnl_usd, 0) + ' (' + pct(m.return_pct) + ') since the management start on Oct 5, 2026 (opening equity $500,000), with ' + (U.usd(m.cash_usd, 0) || 'an unknown amount') + ' cash and ' + (U.usd(m.marked_open_position_value_usd, 0) || 'an unknown amount') + ' in marked open positions.';
+    return '<p class="mg-start">' + esc(m.label || MG_LABEL) + '</p><h2>Headline</h2><p>' + esc(hl) + ' SMALL LIVE is ' + esc((q.small && q.small.status) || 'not readable') + '; nothing on this page can place, cancel or size an order.</p>' +
+      '<h2>The book · management epoch</h2><div class="kv">' + mgKpis(m, kv) + '</div>' + mgUnverifiedHTML(m) +
+      '<h2>Pre-management history</h2><p>' + esc('Ledger equity ' + (U.usd(p.equity_usd, 0) || '—') + ' since funding; ledger realized ' + (U.signedUsd(p.realized_pnl_usd, 0) || '—') + '. Kept for audit, not in the management figures.') + '</p>' +
+      dailyRest(q, a, fu, ds, rel, cv, enter, fills, prov);
+  }
   const headline = !p ? 'The paper book is not readable right now (' + (equityWhy() || 'no reason') + ').' :
     'PAPER equity stands at ' + U.usd(p.equity_usd, 0) + (dc.usd != null ? ', ' + (dc.usd >= 0 ? 'up ' : 'down ') + U.usd(Math.abs(dc.usd), 0) + ' (' + pct(dc.pct) + ') today' : '') + ', with ' + (U.usd(p.available_usd, 0) || 'an unknown amount') + ' available and ' + (U.usd((p.exposure || {}).cost_basis_usd, 0) || 'an unknown amount') + ' deployed across ' + ((p.open_positions || {}).count != null ? p.open_positions.count : 'an unknown number of') + ' open positions.';
   return '<h2>Headline</h2><p>' + esc(headline) + ' SMALL LIVE is ' + esc((q.small && q.small.status) || 'not readable') + '; nothing on this page can place, cancel or size an order.</p>' +
     '<h2>The book</h2><div class="kv">' + (p ? kv('Equity', U.usd(p.equity_usd, 0)) + kv('Today', dc.usd != null ? U.signedUsd(dc.usd, 0) : null, pct(dc.pct), tone(dc.usd)) + kv('Realized', U.signedUsd(p.realized_pnl_usd, 0), null, tone(p.realized_pnl_usd)) + kv('Unrealized', U.signedUsd(p.unrealized_pnl_usd, 0), 'marked only', tone(p.unrealized_pnl_usd)) +
       kv('Available', U.usd(p.available_usd, 0)) + kv('Deployed', U.usd((p.exposure || {}).cost_basis_usd, 0)) + kv('Open positions', String((p.open_positions || {}).count != null ? p.open_positions.count : '—')) + kv('Stale marks', String((p.open_positions || {}).stale_marks != null ? p.open_positions.stale_marks : '—'), null, (p.open_positions || {}).stale_marks ? 'warn' : '') : kv('Equity', null)) + '</div>' +
-    '<h2>Opportunities today</h2><p>' + (prov ? esc((prov.value != null ? Math.round(prov.value).toLocaleString('en-US') : 'An unmeasured number of') + ' provider events today; ' + (enter && enter.value != null ? Math.round(enter.value).toLocaleString('en-US') : 'an unmeasured number') + ' reached ENTER and ' + (fills && fills.value != null ? Math.round(fills.value).toLocaleString('en-US') : 'an unmeasured number') + ' were filled on PAPER' + (fu.partial ? ' (partial: some leagues did not measure every stage)' : '') + '.') : esc('The funnel is not readable: ' + (fu.why || 'no reason'))) + '</p>' +
+    dailyRest(q, a, fu, ds, rel, cv, enter, fills, prov);
+}
+function dailyRest(q, a, fu, ds, rel, cv, enter, fills, prov) {
+  return '<h2>Opportunities today</h2><p>' + (prov ? esc((prov.value != null ? Math.round(prov.value).toLocaleString('en-US') : 'An unmeasured number of') + ' provider events today; ' + (enter && enter.value != null ? Math.round(enter.value).toLocaleString('en-US') : 'an unmeasured number') + ' reached ENTER and ' + (fills && fills.value != null ? Math.round(fills.value).toLocaleString('en-US') : 'an unmeasured number') + ' were filled on PAPER' + (fu.partial ? ' (partial: some leagues did not measure every stage)' : '') + '.') : esc('The funnel is not readable: ' + (fu.why || 'no reason'))) + '</p>' +
     '<h2>What the team did</h2><ul>' + ds.map((d) => '<li><b>' + esc(d.name) + '</b> — ' + esc(d.planned ? 'NOT DEPLOYED · UNVERIFIED (no activity)' : d.label + (d.last && d.last.summary ? ': ' + (d.last.summary.length > 110 ? d.last.summary.slice(0, 108) + '…' : d.last.summary) : '')) + '</li>').join('') + '</ul>' +
     '<h2>Needs management attention</h2>' + (a.items.length ? '<ul>' + a.items.slice(0, 8).map((x) => '<li><b>' + esc(x.sev) + '</b> · ' + esc(x.title) + ' — ' + esc(x.detail || '') + '</li>').join('') + '</ul>' : '<p>' + esc(a.read.length ? 'No blocker in ' + a.read.length + ' of 4 reads.' : 'Reads not complete.') + '</p>') +
     '<h2>Coverage &amp; systems</h2><p>' + esc(cv.rows.length ? cv.rows.length + ' competitions in today\'s league status: ' + Object.keys(cv.counts).map((k) => U.words(k) + ' ' + cv.counts[k]).join(', ') + '.' : 'League status not readable (' + (cv.why || cv.status) + ').') + ' ' +
@@ -596,9 +692,11 @@ function capitalReport() {
   const tot = rows.reduce((a, r) => a + (r.cost || 0), 0) || 0;
   const grp = (fn) => { const m = {}; rows.forEach((r) => { const k = fn(r); m[k] = (m[k] || 0) + (r.cost || 0); }); return Object.entries(m).sort((a, b) => b[1] - a[1]); };
   const tbl = (list) => '<table class="rtbl"><tbody>' + list.slice(0, 6).map(([k, v]) => '<tr><td>' + esc(k) + '</td><td class="r num">' + esc(U.compactUsd(v)) + '</td><td class="r num">' + (tot ? (v / tot * 100).toFixed(0) + '%' : '—') + '</td></tr>').join('') + '</tbody></table>';
-  const fr = freshness();
-  return '<h2>The book</h2><div class="kv">' + kvx('Equity', U.usd(p.equity_usd, 0)) + kvx('Cash', U.usd(p.cash_usd, 0)) + kvx('Available', U.usd(p.available_usd, 0)) + kvx('Reserved', U.usd(p.reserved_usd, 0)) +
-      kvx('Deployed', U.usd(ex.cost_basis_usd, 0), (op.count != null ? op.count : '—') + ' open') + kvx('Marked value', U.usd(ex.marked_value_usd, 0)) + kvx('Realized', U.signedUsd(p.realized_pnl_usd, 0), null, tone(p.realized_pnl_usd)) + kvx('Unrealized', U.signedUsd(p.unrealized_pnl_usd, 0), 'marked only', tone(p.unrealized_pnl_usd)) + '</div>' +
+  const fr = freshness(), m = mgmt();
+  const book = m ? '<p class="mg-start">' + esc(m.label || MG_LABEL) + '</p><h2>The book · management epoch</h2><div class="kv">' + mgKpis(m, kvx) + '</div>' + mgUnverifiedHTML(m) +
+      '<h2>Pre-management history</h2><p>' + esc('Ledger equity ' + (U.usd(p.equity_usd, 0) || '—') + ' · ledger cash ' + (U.usd(p.cash_usd, 0) || '—') + ' · ledger realized ' + (U.signedUsd(p.realized_pnl_usd, 0) || '—') + ' · ledger unrealized ' + (U.signedUsd(p.unrealized_pnl_usd, 0) || '—') + '. Kept for audit, not in the management figures.') + '</p>' : null;
+  return (book || '<h2>The book (pre-management history: the management epoch is not served)</h2><div class="kv">' + kvx('Equity', U.usd(p.equity_usd, 0)) + kvx('Cash', U.usd(p.cash_usd, 0)) + kvx('Available', U.usd(p.available_usd, 0)) + kvx('Reserved', U.usd(p.reserved_usd, 0)) +
+      kvx('Deployed', U.usd(ex.cost_basis_usd, 0), (op.count != null ? op.count : '—') + ' open') + kvx('Marked value', U.usd(ex.marked_value_usd, 0)) + kvx('Realized', U.signedUsd(p.realized_pnl_usd, 0), null, tone(p.realized_pnl_usd)) + kvx('Unrealized', U.signedUsd(p.unrealized_pnl_usd, 0), 'marked only', tone(p.unrealized_pnl_usd)) + '</div>') +
     '<h2>Sleeves</h2>' + (Object.keys(sl).length ? '<table class="rtbl"><thead><tr><th>Sleeve</th><th class="r">Open</th><th class="r">Deployed</th><th class="r">Net P&amp;L</th></tr></thead><tbody>' + Object.keys(sl).map((k) => { const x = sl[k]; return '<tr><td>' + esc(k) + '</td><td class="r num">' + esc(String(x.positions_open != null ? x.positions_open : '—')) + '</td><td class="r num">' + esc(U.compactUsd((x.exposure || {}).cost_basis_usd) || '—') + '</td><td class="r num ' + tone(x.net_pnl_usd) + '">' + esc(U.signedUsd(x.net_pnl_usd, 0) || '—') + '</td></tr>'; }).join('') + '</tbody></table>' : '<p>' + DNA + ' · equity/live carried no sleeves section.</p>') +
     '<h2>Concentration</h2><p class="small">Cost basis of the ' + rows.length + ' served of ' + (op.count != null ? op.count : '?') + ' open positions.</p><div class="rep-2">' + '<div><h3>By league</h3>' + tbl(grp((r) => league(r.market))) + '</div><div><h3>By market family</h3>' + tbl(grp((r) => family(r.market))) + '</div></div>' +
     '<h2>Freshness</h2><ul>' + fr.map((c) => '<li><b>' + esc(c.k) + '</b> — ' + esc(c.v != null ? c.v : 'N/A') + (c.s ? ' · ' + esc(c.s) : '') + '</li>').join('') + '</ul>' +

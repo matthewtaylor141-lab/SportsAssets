@@ -107,8 +107,10 @@ export function capital(ctx, W, H, hq) {
   chip(ctx, 'SEPARATE BOOKS · NEVER SUMMED', W - 70 * s, 104 * s, C.gold, 22 * s, 'right');
   const colW = (W - 200 * s) / 2, x1 = 70 * s, x2 = 70 * s + colW + 60 * s, top = 190 * s;
   ctx.fillStyle = C.line; ctx.fillRect(x2 - 30 * s, top, 2 * s, 640 * s);
-  // PAPER
-  text(ctx, 'PAPER EQUITY', x1, top + 34 * s, C.soft, '700', 26 * s, true);
+  // PAPER -- the MANAGEMENT EPOCH when served (equity/live paper.management)
+  const m = mgmtOf(p);
+  if (m) { capitalWallMgmt(ctx, p, m, u, s, x1, top, colW); } else {
+  text(ctx, 'PAPER EQUITY · PRE-MANAGEMENT HISTORY', x1, top + 34 * s, C.soft, '700', 26 * s, true, colW);
   text(ctx, (p && p.label || '$500,000 PAPER EXPERIMENT') + ' · SIMULATED USD', x1, top + 72 * s, C.dim, '500', 21 * s, true, colW);
   if (p && typeof p.equity_usd === 'number') {
     text(ctx, u.usd(p.equity_usd), x1, top + 210 * s, C.ink, '300', 132 * s, false, colW);
@@ -126,6 +128,7 @@ export function capital(ctx, W, H, hq) {
   const op = p && p.open_positions;
   kv('OPEN POSITIONS', op && op.count != null ? op.count + '  ·  ' + op.marked + ' marked · ' + op.unmarked + ' unmarked' : 'UNAVAILABLE', x1 + colW / 2, top + 540 * s, op && op.count != null ? C.ink : C.warn);
   text(ctx, p && p.equity_treatment ? p.equity_treatment.text : 'equity treatment not read', x1, top + 640 * s, C.dim, '500', 19 * s, true, colW);
+  }
   // SMALL LIVE
   const st = sm && sm.status ? sm.status : (q.status === 'LOADING' ? 'READING' : 'UNAVAILABLE');
   text(ctx, 'SMALL LIVE · BETTOR ORIGINATED', x2, top + 34 * s, C.soft, '700', 26 * s, true, colW);
@@ -473,7 +476,7 @@ const PANELS = {
   },
   composition(ctx, W, H, hq, d, u, s) {
     const p = hq.equity().paper;
-    header(ctx, W, H, 'Paper equity composition', p ? p.status : 'UNAVAILABLE', p ? stColor(p.status) : C.warn);
+    header(ctx, W, H, mgmtOf(p) ? 'Ledger composition · pre-management' : 'Paper equity composition', p ? p.status : 'UNAVAILABLE', p ? stColor(p.status) : C.warn);
     if (!p) { na(ctx, W, H, hq.equity().why || 'not read'); return; }
     const ex = p.exposure || {};
     [['CASH', p.cash_usd], ['MARKED VALUE', ex.marked_value_usd], ['UNMARKED AT COST', ex.unmarked_cost_basis_usd], ['EQUITY (SERVER)', p.equity_usd]].forEach((kv, i) => {
@@ -545,13 +548,33 @@ const PANELS = {
 /* ═════════════════════════ TICKER + CORE ══════════════════════════ */
 /* Returns the ticker strip's text items: real marks and real decisions,
  * each with its own timestamp. */
+/* THE MANAGEMENT EPOCH (bettor_paper_epoch): $500,000 at 2026-10-05 00:00 ET */
+function mgmtOf(p) { const m = p && p.management; return m && (m.status === 'OK' || m.status === 'DOES_NOT_RECONCILE') ? m : null; }
+function capitalWallMgmt(ctx, p, m, u, s, x1, top, colW) {
+  const sg = (v) => v != null ? (v >= 0 ? C.good : C.bad) : C.warn;
+  text(ctx, 'MANAGEMENT EQUITY', x1, top + 34 * s, C.soft, '700', 26 * s, true);
+  text(ctx, (m.label || 'MANAGEMENT START: OCT 5, 2026 · OPENING EQUITY $500,000'), x1, top + 72 * s, '#a9c4ff', '600', 21 * s, true, colW);
+  text(ctx, m.equity_usd != null ? u.usd(m.equity_usd) : 'UNAVAILABLE', x1, top + 210 * s, m.equity_usd != null ? C.ink : C.warn, '300', 132 * s, false, colW);
+  chip(ctx, m.status === 'OK' ? 'RECONCILES' : m.status, x1, top + 278 * s, m.status === 'OK' ? C.good : C.warn, 24 * s);
+  font(ctx, '500', 22 * s); ctx.fillStyle = C.soft;
+  wrap(ctx, 'opening $500,000 = cash + reserved + ' + (m.carried_positions || 0) + ' carried at midnight marks' + (m.carried_unverified ? ' · ' + m.carried_unverified + ' EPOCH_OPEN_MARK_UNVERIFIED held outside' : ''), x1, top + 330 * s, colW, 30 * s, 2);
+  const kv = (k, v, x, y, col) => { text(ctx, k, x, y, C.dim, '600', 20 * s, true); text(ctx, v, x, y + 46 * s, col || C.ink, '500', 40 * s, true, colW / 2 - 20 * s); };
+  kv('TOTAL P&L SINCE START', m.total_pnl_usd != null ? u.signedUsd(m.total_pnl_usd) + (m.return_pct != null ? ' (' + (m.return_pct > 0 ? '+' : '') + m.return_pct.toFixed(2) + '%)' : '') : 'UNAVAILABLE', x1, top + 430 * s, sg(m.total_pnl_usd));
+  kv('REALIZED SINCE START', m.realized_pnl_usd != null ? u.signedUsd(m.realized_pnl_usd) : 'UNAVAILABLE', x1 + colW / 2, top + 430 * s, sg(m.realized_pnl_usd));
+  kv('UNREALIZED SINCE START', m.unrealized_pnl_usd != null ? u.signedUsd(m.unrealized_pnl_usd) : 'UNAVAILABLE', x1, top + 540 * s, sg(m.unrealized_pnl_usd));
+  kv('DRAWDOWN FROM HWM', m.drawdown_usd != null ? u.usd(m.drawdown_usd) : 'UNAVAILABLE', x1 + colW / 2, top + 540 * s, m.drawdown_usd > 0 ? C.bad : C.ink);
+  const h = m.pre_management_history || {};
+  text(ctx, 'PRE-MANAGEMENT HISTORY: ledger equity ' + (u.usd(h.ledger_equity_usd != null ? h.ledger_equity_usd : p.equity_usd) || '—') + ' since funding · not in these figures', x1, top + 640 * s, C.dim, '500', 19 * s, true, colW);
+}
 export function tickerItems(hq) {
   const u = hq.util, out = [], q = hq.equity();
   hq.tickers().forEach((t) => out.push({c: t.price != null ? C.ink : C.warn,
     s: short(t.market) + ' ' + t.side + '  ' + (t.price != null ? t.price.toFixed(4) + '  ' + u.words(t.state) + ' ' + u.clock(t.at) + (t.pnl != null ? '  uPnL ' + u.signedUsd(t.pnl) : '') : 'UNMARKED · ' + (t.why || 'no mark'))}));
   hq.decisions().slice(0, 6).forEach((d) => out.push({c: d.verdict === 'ENTER' ? C.good : '#ff9aa6',
     s: 'DEREK ' + d.verdict + ' ' + short(d.market || d.id) + (d.refusal ? ' · ' + u.words(d.refusal) : '') + '  ' + u.clock(d.at)}));
-  if (q.paper) out.unshift({c: '#a9c4ff', s: 'PAPER EQUITY ' + (u.usd(q.paper.equity_usd) || 'UNAVAILABLE') + ' · ' + q.paper.status + (q.paper.no_new_mark ? ' · NO NEW MARK' : '') + '  ' + u.clock(q.paper.source_at)});
+  const qm = mgmtOf(q.paper);
+  if (qm) out.unshift({c: '#a9c4ff', s: 'MANAGEMENT EQUITY ' + (u.usd(qm.equity_usd) || 'UNAVAILABLE') + ' · ' + (qm.total_pnl_usd != null ? u.signedUsd(qm.total_pnl_usd) + ' since Oct 5 start' : '') + '  ' + u.clock(q.paper.source_at)});
+  else if (q.paper) out.unshift({c: '#a9c4ff', s: 'PAPER LEDGER EQUITY (PRE-MANAGEMENT) ' + (u.usd(q.paper.equity_usd) || 'UNAVAILABLE') + ' · ' + q.paper.status + (q.paper.no_new_mark ? ' · NO NEW MARK' : '') + '  ' + u.clock(q.paper.source_at)});
   if (q.small) out.unshift({c: C.gold, s: 'SMALL LIVE ' + u.words(q.small.status || 'UNAVAILABLE')});
   if (!out.length) out.push({c: C.warn, s: 'MARKET DATA UNAVAILABLE · ' + (q.why || hq.reads.floor.why || 'not read yet')});
   return out;
@@ -580,8 +603,9 @@ export function coreBand(ctx, W, H, hq) {
     ctx.fillStyle = kind === 'paper' ? '#7fa2ff' : C.gold; ctx.fillRect(x0 + 10 * s, 20 * s, w - 20 * s, 4 * s);
     const cx = x0 + w / 2;
     if (kind === 'paper') {
-      text(ctx, 'PAPER EQUITY · SIMULATED', cx, 110 * s, '#b8ccff', '700', 34 * s, true, w - 60 * s, 'center');
-      text(ctx, p && p.equity_usd != null ? u.usd(p.equity_usd) : (p ? p.status : 'UNAVAILABLE'), cx, 260 * s, '#f2f6ff', '300', 112 * s, false, w - 60 * s, 'center');
+      const bm = mgmtOf(p);
+      text(ctx, bm ? 'MANAGEMENT EQUITY · SIMULATED' : 'PAPER LEDGER EQUITY · PRE-MANAGEMENT', cx, 110 * s, '#b8ccff', '700', 34 * s, true, w - 60 * s, 'center');
+      text(ctx, bm && bm.equity_usd != null ? u.usd(bm.equity_usd) : p && p.equity_usd != null ? u.usd(p.equity_usd) : (p ? p.status : 'UNAVAILABLE'), cx, 260 * s, '#f2f6ff', '300', 112 * s, false, w - 60 * s, 'center');
       const st = p ? p.status + (p.no_new_mark ? ' · NO NEW MARK' : '') : (q.why || 'NOT READ');
       text(ctx, st, cx, 350 * s, p ? stColor(p.status) : C.warn, '700', 34 * s, true, w - 60 * s, 'center');
       text(ctx, p && p.source_at ? 'as of ' + u.clock(p.source_at) : '', cx, 420 * s, '#8ea3c4', '500', 30 * s, true, w - 60 * s, 'center');
