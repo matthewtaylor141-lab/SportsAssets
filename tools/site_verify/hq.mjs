@@ -224,6 +224,67 @@ if (process.env.OPS !== "0") {
     await ctx.close();
   }
 }
+// MOBILE COMMAND readback (read-only): /mobile.html signed in on an iPhone (390x844) and an iPad
+// (820x1180) context with iOS user agents. KPI tiles and their books, the SMALL LIVE block, funnel
+// stages, agent cards and portraits, panel DATA NOT AVAILABLE counts, the install sheet hidden, every
+// tab answering a tap, the service worker scope (must be .../mobile.html only), console errors,
+// overflow, every non-GET to /api/command/** (must be none) and the PAPER figures compared with the
+// page's own /api/command/equity/live response (displayed == served). MOBILE=0 skips it.
+report.mobile = [];
+if (process.env.MOBILE !== "0") {
+  const UA_IPHONE = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  const UA_IPAD = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  for (const [label, vw, vh, ua] of [["iphone", 390, 844, UA_IPHONE], ["ipad", 820, 1180, UA_IPAD]]) {
+    const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, userAgent: ua, isMobile: true, hasTouch: true, deviceScaleFactor: 2 });
+    if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
+      r.continue({ headers: { ...r.request().headers(), "x-admin-token": TOKEN } }));
+    // the once-per-device install hint is tested by its own unit; here it must not cover the probe
+    await ctx.addInitScript(() => { try { localStorage.setItem("bt-mobile-install-seen", "1"); } catch (e) {} });
+    const page = await ctx.newPage(); const t0 = Date.now();
+    const net = { errors: [], nonGet: [], api: {}, equity: null, build: null };
+    page.on("console", (m) => { if (m.type() === "error") net.errors.push(m.text().slice(0, 200)); });
+    page.on("pageerror", (e) => net.errors.push("PAGEERROR " + String(e).slice(0, 200)));
+    page.on("request", (q) => { const u = q.url(); if (u.includes("/api/command/")) { const k = u.replace(HOST, "").split("?")[0]; net.api[k] = (net.api[k] || 0) + 1;
+      if (q.method() !== "GET") net.nonGet.push({ t: Date.now() - t0, method: q.method(), url: u.replace(HOST, "").slice(0, 200) }); } });
+    page.on("response", async (r) => { try { const u = r.url();
+      if (u.includes("/api/command/equity/live") && r.status() === 200) { const j = await r.json(); const P = j && j.paper || {};
+        net.equity = { at: Date.now() - t0, status: P.status, realized: P.realized_pnl_usd, available: P.available_usd, cash: P.cash_usd, basis: (P.exposure || {}).cost_basis_usd, small_live: (j.small_live_bettor || {}).status }; }
+      if (/\/build\.json$/.test(u.split("?")[0]) && r.status() === 200) { const j = await r.json(); net.build = { sha: j.sha, deploy_id: j.deploy_id, context: j.context }; }
+    } catch (e) { /* a body read failure only loses the comparison */ } });
+    let status = null;
+    try { status = (await page.goto(HOST + "/mobile.html", { waitUntil: "load", timeout: 60000 }))?.status(); } catch (e) { net.errors.push("GOTO " + String(e).slice(0, 160)); }
+    await page.waitForTimeout(Math.min(60000, +(process.env.MOBILE_WAIT_MS || 15000)));
+    const err = (e) => ({ error: String(e).slice(0, 200) });
+    const dom = await page.evaluate(() => {
+      const q = (s) => document.querySelector(s), qa = (s) => [...document.querySelectorAll(s)], t = (e) => e ? e.innerText.replace(/\s+/g, " ").trim() : null;
+      const txt = document.body.innerText;
+      return { title: document.title, strip: t(q("#mc-system-strip")), mode: t(q("#mc-readiness")),
+        kpis: qa("#mc-kpis .mc-kpi").map(t), funnel: qa("#mc-funnel .mc-funnel-step").map(t), funnelDay: t(q("#mc-funnel-day")),
+        attention: t(q("#mc-attention")) && t(q("#mc-attention")).slice(0, 400), incidentCount: t(q("#mc-incident-count")),
+        agents: qa("#mc-agents .mc-agent-card").map((a) => ({ name: t(a.querySelector("h3")), badge: t(a.querySelector(".mc-badge")), img: !!a.querySelector("img.mc-avatar") && a.querySelector("img.mc-avatar").naturalWidth > 0 })),
+        tape: qa("#mc-tape .mc-tape-item").length, live: qa("#mc-live-events .mc-row").length, opps: qa("#mc-opportunities .mc-row").length, coverage: qa("#mc-coverage .mc-sport").length,
+        release: t(q("#mc-release")), feeds: t(q("#mc-feeds")), mirror: t(q("#mc-mirror")),
+        dna: (txt.match(/DATA NOT AVAILABLE/g) || []).length, bad: ["[object", "NaN", "undefined", "LISTENING", "Ariana"].filter((w) => txt.includes(w)),
+        loneB: qa("body *").filter((e) => e.children.length === 0 && e.textContent.trim() === "B").length,
+        installDisplay: getComputedStyle(q("#mc-install")).display, sheetDisplay: getComputedStyle(q("#mc-sheet")).display,
+        overflowX: document.documentElement.scrollWidth > window.innerWidth + 1, scrollWidth: document.documentElement.scrollWidth, clientWidth: window.innerWidth,
+        brand: !!q("img.mc-brandmark") && q("img.mc-brandmark").naturalWidth > 0 };
+    }).catch(err);
+    await page.screenshot({ path: `${OUT}/mobile_${label}_command.png`, fullPage: true }).catch(() => {});
+    const tabs = {};
+    for (const tb of ["floor", "live", "opportunities", "agents", "system", "command"]) {
+      try { await page.tap(`.mc-tabbar button[data-tab="${tb}"]`, { timeout: 5000 }); await page.waitForTimeout(300);
+            tabs[tb] = await page.evaluate((n) => document.querySelector(".mc-screen.is-active").getAttribute("data-screen") === n, tb);
+            if (tb !== "command") await page.screenshot({ path: `${OUT}/mobile_${label}_${tb}.png`, fullPage: true }).catch(() => {}); }
+      catch (e) { tabs[tb] = "TAP FAILED " + String(e).slice(0, 120); }
+    }
+    const sw = await page.evaluate(async () => { try { return (await navigator.serviceWorker.getRegistrations()).map((r) => r.scope); } catch (e) { return "ERR " + String(e).slice(0, 80); } }).catch(err);
+    report.mobile.push({ label, path: "/mobile.html", status, ms: Date.now() - t0, dom, tabs, swScopes: sw, served: { equity: net.equity, build: net.build },
+                         apiCounts: net.api, errors: net.errors.slice(0, 30), nErrors: net.errors.length, nonGet: net.nonGet });
+    await ctx.close();
+  }
+}
+report.mobile_non_get = report.mobile.flatMap((r) => r.nonGet.map((x) => ({ label: r.label, ...x })));
 report.ops_non_get = report.ops.flatMap((r) => r.nonGet.map((x) => ({ label: r.label, path: r.path, ...x })));
 report.cf_non_get = [
   ...report.runs.flatMap((r) => ((r.cf && r.cf.nonGet) || []).map((x) => ({ label: r.label, path: r.path, ...x }))),
@@ -250,6 +311,7 @@ console.log(`cf non-GET /api/command/** requests: ${(report.cf_non_get || []).le
 for (const r of report.runs) console.log(opsHdrLine(r.label, r.path, r.execHeader));
 for (const r of report.ops || []) console.log(opsLine(r));
 console.log(`ops non-GET /api/command/** requests: ${(report.ops_non_get || []).length}${(report.ops_non_get || []).length ? " " + JSON.stringify(report.ops_non_get.slice(0, 10)) : ""}`);
+for (const r of report.mobile || []) console.log(`== mobile ${r.label} HTTP ${r.status} ${r.ms}ms build=${r.served.build && r.served.build.sha && r.served.build.sha.slice(0, 7)} deploy=${r.served.build && r.served.build.deploy_id} errors=${r.nErrors} nonGet=${r.nonGet.length} sw=${JSON.stringify(r.swScopes)} tabs=${JSON.stringify(r.tabs)} dna=${r.dom && r.dom.dna} bad=${JSON.stringify(r.dom && r.dom.bad)} loneB=${r.dom && r.dom.loneB} overflowX=${r.dom && r.dom.overflowX} install=${r.dom && r.dom.installDisplay} agents=${r.dom && r.dom.agents && r.dom.agents.length}\n   strip: ${r.dom && r.dom.strip}\n   kpis: ${JSON.stringify(r.dom && r.dom.kpis)}\n   served equity: ${JSON.stringify(r.served.equity)}\n   apis: ${JSON.stringify(r.apiCounts)}`);
 
 // ── COMMAND FINAL helpers (hoisted function declarations; read-only) ──────────
 function cfCapture(r, net, t0) {
