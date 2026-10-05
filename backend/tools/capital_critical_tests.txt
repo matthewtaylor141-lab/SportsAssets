@@ -1076,3 +1076,6 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+tests/test_pos_os_authority.py
+tests/test_pos_os_components.py
+tests/test_pos_os_db.py
