@@ -12,6 +12,10 @@ const ROUTES = [
   '/api/command/coverage/first-loss?hours=24',
   '/api/command/archer',
   '/api/command/adriana',
+  '/api/command/profitability/os',
+  '/api/command/execution-calibration',
+  '/api/command/paper/derek',
+  '/api/command/paper/xavier',
 ];
 function trim(v, depth = 0) {
   if (Array.isArray(v)) { const a = v.slice(0, 8).map((x) => trim(x, depth + 1)); return v.length > 8 ? { _len: v.length, _first: a } : a; }
