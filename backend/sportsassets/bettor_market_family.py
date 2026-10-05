@@ -316,17 +316,18 @@ def _total_stmt(unit):
 #: The exceptional conditions, both sides' words, disclosed on every proof.
 _X_POSTPONED_2W = {
     "condition": "POSTPONED_OR_SUSPENDED_AND_NOT_COMPLETED",
-    "venue": ("If the game is delayed, postponed, or suspended and not "
-              "rescheduled to a date within two weeks of the originally "
-              "scheduled date, the market will settle to the last fair "
-              "market price."),
+    "venue_terms": ("If the game is delayed, postponed, or suspended and "
+                    "not rescheduled to a date within two weeks of the "
+                    "originally scheduled date, the market will settle to "
+                    "the last fair market price."),
     "book": "general_not_started"}
 _X_POSTPONED_2D = {
     "condition": "POSTPONED_OR_SUSPENDED_AND_NOT_COMPLETED",
-    "venue": ("If the game is delayed, postponed, suspended, or otherwise "
-              "rescheduled and is not rescheduled to start within two "
-              "calendar days of the originally scheduled date and time, the "
-              "market will settle to the last fair market price."),
+    "venue_terms": ("If the game is delayed, postponed, suspended, or "
+                    "otherwise rescheduled and is not rescheduled to start "
+                    "within two calendar days of the originally scheduled "
+                    "date and time, the market will settle to the last fair "
+                    "market price."),
     "book": "general_not_started"}
 
 EQUIVALENCE = {
@@ -341,9 +342,9 @@ EQUIVALENCE = {
         "exceptional": (
             dict(_X_POSTPONED_2W, book="af_not_started"),
             {"condition": "SUSPENDED_AFTER_55_MINUTES",
-             "venue": _X_POSTPONED_2W["venue"], "book": "af_suspended"},
+             "venue_terms": _X_POSTPONED_2W["venue_terms"], "book": "af_suspended"},
             {"condition": "FEWER_THAN_55_MINUTES_PLAYED",
-             "venue": _X_POSTPONED_2W["venue"], "book": "af_short_game"})},
+             "venue_terms": _X_POSTPONED_2W["venue_terms"], "book": "af_short_game"})},
     ("football", TOTAL): {
         "period": GP_FOOTBALL,
         "statement": _total_stmt("points"), "all_of": (_OT,),
@@ -372,7 +373,7 @@ EQUIVALENCE = {
         "exceptional": (
             _X_POSTPONED_2D,
             {"condition": "FEWER_THAN_55_MINUTES_PLAYED",
-             "venue": _X_POSTPONED_2D["venue"], "book": "hk_minimum"})},
+             "venue_terms": _X_POSTPONED_2D["venue_terms"], "book": "hk_minimum"})},
     ("hockey", TOTAL): {
         "period": GP_HOCKEY,
         "statement": _total_stmt("goals"), "all_of": (_OT, _SO),
@@ -397,7 +398,7 @@ EQUIVALENCE = {
         "exceptional": (
             _X_POSTPONED_2D,
             {"condition": "NBA_FEWER_THAN_43_MINUTES_COMPLETED",
-             "venue": _X_POSTPONED_2D["venue"], "book": "bk_minimum"})},
+             "venue_terms": _X_POSTPONED_2D["venue_terms"], "book": "bk_minimum"})},
     ("basketball", TOTAL): {
         "period": GP_BASKETBALL,
         "statement": _total_stmt("points"), "all_of": (_OT,),
@@ -414,9 +415,9 @@ EQUIVALENCE = {
         "exceptional": (
             dict(_X_POSTPONED_2W, book="bb_suspended"),
             {"condition": "SHORTENED_GAME_DECLARED_OFFICIAL",
-             "venue": ("If the game is shortened but an official final "
-                       "result is declared, the market will settle based on "
-                       "that result."),
+             "venue_terms": ("If the game is shortened but an official "
+                             "final result is declared, the market will "
+                             "settle based on that result."),
              "book": "bb_nine",
              "note": ("a REGULAR-SEASON game called before 9 innings (8.5) "
                       "has no action at the book and is settled by the "

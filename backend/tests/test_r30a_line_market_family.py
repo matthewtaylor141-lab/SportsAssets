@@ -128,6 +128,12 @@ def test_the_venue_capture_is_the_listing_reads():
     # every listed type the venue was read carrying has a family entry
     for m in LISTINGS["markets"]:
         assert m["sportsMarketType"] in MF.VENUE_LINE_TYPES, m["slug"]
+    # the disclosed exceptional terms quote the venue's own listings verbatim
+    prose = " ".join(m["description"] for m in LISTINGS["markets"])
+    for spec in MF.EQUIVALENCE.values():
+        for x in spec["exceptional"]:
+            assert x["venue_terms"] in prose, x["condition"]
+            assert x["book"] in MF.BOOK
 
 
 # ═════════════════════════════════════════════════════════════════════

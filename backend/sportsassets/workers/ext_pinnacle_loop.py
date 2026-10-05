@@ -7756,16 +7756,17 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
     event_key = _sk.get("event_key") or job.get("provider_event_id")
     read_at = time.time()
     _cev = book_currency_evidence(slug)
-    vq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
+    # `lq`: the line instrument's book read (the money line's is `vq`)
+    lq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
                            now=read_at,
                            subscription=_cev.get("subscription"),
                            revalidation=_cev.get("revalidation"))
     report["venue_reads"] += 1
     calibration_only = None
-    if not vq.get("ok"):
-        calibration_only = _calibration_only_basis(vq)
+    if not lq.get("ok"):
+        calibration_only = _calibration_only_basis(lq)
         if calibration_only is None:
-            return vq.get("refusal") or R_NO_VENUE_QUOTE
+            return lq.get("refusal") or R_NO_VENUE_QUOTE
     now = time.time()
     decision_lag_s = round(now - read_at, 3)
     check = MF.validate_pair(cache, pair, evaluated_ms=now * 1000.0,
@@ -7814,20 +7815,20 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
                "line": pair["line"], "settlement_rule": proof["period"]},
         market_state=(_displayed_market_state(calibration_only)
                       if calibration_only is not None else
-                      {"ask": vq["acquisition_price"],
-                       "api_price": vq["api_price"],
-                       "side_consumed": vq["side_consumed"],
-                       "depth": vq["depth"], "readable": True}),
+                      {"ask": lq["acquisition_price"],
+                       "api_price": lq["api_price"],
+                       "side_consumed": lq["side_consumed"],
+                       "depth": lq["depth"], "readable": True}),
         execution_plan=None if calibration_only is not None else
-        _entry_plan(ladder=vq.get("acquisition_ladder"), fee_fn=fee_fn,
-                    observation_age_s=vq.get("age_s"),
+        _entry_plan(ladder=lq.get("acquisition_ladder"), fee_fn=fee_fn,
+                    observation_age_s=lq.get("age_s"),
                     action=_risk_action(inst["intent"]), condition_id=None,
                     event_key=job["venue_event_slug"],
                     venue_market_slug=slug, provider_event_id=event_key,
                     open_book=open_book,
                     event_exposure_measurable=ev_measurable,
                     settlement=srule,
-                    freshness=_entry_freshness(quote, vq, now),
+                    freshness=_entry_freshness(quote, lq, now),
                     calibration=calibration,
                     research_authorised=(research or {}).get(
                         "authorised") is True, now=now),
@@ -7886,7 +7887,7 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
         rec["valuation"]["probability"] = None
         rec["admissible"] = False
         rec["decision"] = "NO_TRADE"
-    rec["venue_quote"] = vq
+    rec["venue_quote"] = lq
     rec["settlement"] = srule
     rec["settlement_comparison"] = {
         "compatibility": "INCOMPATIBLE_EXCEPTIONAL_TERMS",
