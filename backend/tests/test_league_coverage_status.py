@@ -96,12 +96,24 @@ def test_each_status_is_reached_by_its_own_facts():
 
 
 def test_out_of_scope_leagues_are_named_with_the_declared_reason():
+    # INCIDENT RELEASE (verifier finding 1, measured on 9387b69): basketball
+    # and hockey were pinned FAMILY_NOT_IN_COLLECTOR_SCOPE on a note saying
+    # their families were outside the de-vig set and requested by no
+    # collector. inc-pinnapi subscribes all six PinnAPI sports and PinnAPI-
+    # native discovery seeds both families (basketball spread / total and
+    # hockey spread / total / team total are priced), so that note was false:
+    # those leagues are now in scope, MEASURED UNDER their native row
+    # (test_native_discovery_is_reported_under_its_league.py), and tennis --
+    # matched but not seeded -- says so by its own code.
+    for league, tok, fam in (("basketball_nba", "nba", "basketball"),
+                             ("basketball_wnba", "wnba", "basketball"),
+                             ("basketball_ncaab", "cbb", "basketball"),
+                             ("icehockey_nhl", "nhl", "hockey")):
+        sc = C.lane_scope(league, token=tok, family=fam)
+        assert sc["in_scope"] is True, (league, sc)
+        assert sc["measured_under"] == "pinnapi_%s" % fam, (league, sc)
     for league, tok, fam, frag in (
-            ("basketball_nba", "nba", "basketball", "FAMILY_NOT_IN"),
-            ("basketball_wnba", "wnba", "basketball", "FAMILY_NOT_IN"),
-            ("basketball_ncaab", "cbb", "basketball", "FAMILY_NOT_IN"),
-            ("icehockey_nhl", "nhl", "hockey", "FAMILY_NOT_IN"),
-            ("venue:atp", "atp", "tennis", "FAMILY_NOT_IN"),
+            ("venue:atp", "atp", "tennis", "FAMILY_NOT_SEEDED"),
             ("venue:intf", "intf", "soccer", "DELIBERATELY_EXCLUDED"),
             ("venue:engnl", "engnl", "soccer", "MAPPING_REFUTED"),
             ("venue:kbo", "kbo", "baseball", "VENUE_TOKEN_NOT_MAPPED"),
@@ -294,8 +306,12 @@ async def test_the_endpoint_carries_a_status_per_league_and_the_nfl_games():
         assert ls[NFL]["status"] == C.S_REFUSING, ls[NFL]
         assert ls[NFL]["league_name"] == "NFL"
         assert ls[NFL]["counts"]["venue_catalogue_events"] == 2
-        assert ls["basketball_nba"]["status"] == C.S_UNSUPPORTED
-        assert ls["icehockey_nhl"]["status"] == C.S_UNSUPPORTED
+        # verifier finding 1: measured under the native row, not "outside
+        # the collector's scope" (see the scope test above)
+        for k in ("basketball_nba", "icehockey_nhl"):
+            assert ls[k]["status"] == C.S_UNAVAILABLE, ls[k]
+            assert ls[k]["reason"].startswith(
+                "MEASURED_UNDER_THE_PINNAPI_NATIVE_ROW"), ls[k]
         assert ls["venue:kbo"]["status"] == C.S_UNSUPPORTED
         assert "VENUE_TOKEN_NOT_MAPPED" in ls["venue:kbo"]["reason"]
         assert ls[MLB]["status"] == C.S_UNAVAILABLE

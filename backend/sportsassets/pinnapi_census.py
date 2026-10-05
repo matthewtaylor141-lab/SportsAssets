@@ -37,11 +37,32 @@ from typing import Optional
 START_TOLERANCE_S = 90 * 60.0
 IN_PLAY_WINDOW_S = 5 * 3600.0
 MAX_CONTRACTS = 20000
+#: the venue catalogue sweep's own forward window (workers/premap.refresh
+#: fwd_h): the census's population, now stated (see _base_where)
+CENSUS_HORIZON_H = 96
 
+#: ("football", 5) PRECEDES ("americanfootball", 5) ON PURPOSE (R30A).
+#: `sport_family_of` returns the FIRST name for an id, and that name is the
+#: key `bettor_pinnacle_devig.SUPPORTED` is read with: "americanfootball"
+#: first made every held NFL read refuse MARKET_NOT_IN_SUPPORTED_SET. The
+#: order changes nothing for `sport_id_of` (no venue sports_type starting
+#: "americanfootball" also starts "football", or the reverse).
 SPORT_IDS = (("baseball", 6), ("soccer", 1), ("basketball", 3),
-             ("hockey", 4), ("icehockey", 4), ("americanfootball", 5),
-             ("football", 5), ("tennis", 2), ("mma", 8), ("boxing", 9),
-             ("esports", 11), ("golf", 12), ("rugby", 7))
+             ("hockey", 4), ("icehockey", 4), ("football", 5),
+             ("americanfootball", 5), ("tennis", 2), ("mma", 8),
+             ("boxing", 9), ("esports", 11), ("golf", 12), ("rugby", 7))
+
+#: the venue's football money-line sports type (R30A; admitted in
+#: `family_of` only for a league the de-vig admits by measurement: the NFL,
+#: and since the P0 incident the college board, `cfb`). The name is kept:
+#: the venue spells its NFL and college winner types the same way.
+NFL_MONEYLINE_TYPE = "football_team_full_game_winner"
+#: the census refusal for a football money line of a league the de-vig has
+#: NOT admitted (or whose structured league and slug disagree). Renamed in the
+#: P0 incident from FOOTBALL_MONEYLINE_ADMITTED_FOR_THE_NFL_ONLY, which became
+#: untrue the moment the college board was admitted by its own measurement.
+R_FOOTBALL_LEAGUE_NOT_ADMITTED = (
+    "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT")
 
 S_FEED_NOT_SYNCED = "FEED_NOT_SYNCED"
 S_OUT_OF_SCOPE = "OUT_OF_FEED_SCOPE_SPORT"
@@ -71,9 +92,19 @@ def _base_where() -> str:
     types = "\n   ".join(
         "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % p
         for p in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
+    # THE CENSUS'S HORIZON IS STATED, NOT INHERITED (R30A inc-catalogue). The
+    # census counted every row with game_start > now-6h and needed no upper
+    # bound only because the catalogue writer never read past +96 h. The
+    # writer now walks the venue's calendar on both sides of its window
+    # (workers/premap AHEAD / STARTED_EARLIER: futures, next week's slate), and
+    # without this bound those listings -- which the feed does not carry yet
+    # -- would read as NO_FEED_EVENT and push the subscribed rows past
+    # MAX_CONTRACTS. The census keeps measuring the population it always
+    # measured; the catalogue itself is no longer cut to it.
     return ("""game_start > now() - interval '6 hours'
+   AND game_start <= now() + interval '%d hours'
    %s
-   %s""" % (prose, types))
+   %s""" % (CENSUS_HORIZON_H, prose, types))
 
 
 def catalogue_sql(sport_ids=None) -> str:
@@ -121,8 +152,43 @@ def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
     census label only; settlement/price/contract eligibility is downstream.
     """
     st = str(sports_type or '').lower()
+    if st == NFL_MONEYLINE_TYPE:
+        # R30A · THE NFL FULL-GAME MONEY LINE, FOR THE NFL ONLY. The venue's
+        # own type for its NFL winner contract (its listing's
+        # sportsMarketType, tests/fixtures/pmus_nfl_listing_2026_10_04.json).
+        # Football is admitted to the de-vig BY LEAGUE
+        # (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE), so this label is
+        # granted by the same league read the de-vig makes -- the row's
+        # structured team league and its venue-native slug, which must agree
+        # -- and never by the sports type alone: the college board DOES share
+        # the spelling. It is admitted since the P0 incident by its OWN
+        # measurement (SUPPORTED_BY_LEAGUE cfb: research-sql run 37241503567,
+        # 9/9 cfb lines two-way) and its own cited terms
+        # (bettor_ncaaf_settlement); its catalogue rows carry the same clock
+        # line (research-sql run 37241920748, C1/C2: line '00' / '30',
+        # tests/fixtures/pmus_cfb_catalogue_rows_2026_10_04.json), proved by
+        # the same side-aware clock proof below. Before this, every
+        # held NFL contract was MATCHED_UNSUPPORTED_FAMILY
+        # (VENUE_MARKET_TYPE_NOT_PROVED), so the held read, the held-first
+        # queue and the on-demand Xavier read refused all NFL inventory even
+        # with football subscribed.
+        #
+        # THE LINE IS PROVED, NOT IGNORED. Production's NFL catalogue rows
+        # carry a NON-blank line on every row (research-sql run 37231923822,
+        # W2: 28 rows / 14 contracts, line_blank false): the venue question
+        # ("... scheduled for October 4, 2026 at 1:30 PM UTC?") is the clock
+        # the premap sweep stamps. So the NFL type takes the SAME side-aware
+        # clock proof baseball and soccer take below -- a line the side
+        # itself states still vetoes it -- and nothing is stripped.
+        from . import bettor_pinnacle_devig as devig
+        r = row if isinstance(row, dict) else {}
+        league = devig.league_of_contract(
+            {"league": r.get("team_league"),
+             "us_market_slug": r.get("identifier")})
+        if devig.expected_outcomes("football", "h2h", league=league) is None:
+            return ('MONEYLINE', False, R_FOOTBALL_LEAGUE_NOT_ADMITTED)
     if st in ('baseball_team_full_game_winner',
-              'soccer_team_full_time_winner'):
+              'soccer_team_full_time_winner', NFL_MONEYLINE_TYPE):
         if line not in (None, '') and row is not None:
             # Reuse the existing side-aware clock proof. Never just strip
             # numeric zero: real signed/side lines veto this correction.
@@ -291,20 +357,22 @@ def _iso_epoch(v) -> Optional[float]:
 
 
 def feed_event_view(cache) -> dict:
-    """{sport_id: [{id, home, away, start, live}]} from the feed's events
-    (parent matchups only: child records carry periods/props)."""
+    """{sport_id: [{id, quote_id, home, away, start, live, basis}]} -- one
+    entry per FIXTURE, from `pinnapi_feed.fixture_view` (R30A RC3). `id` is
+    the fixture's identity (the prematch parent), `quote_id` the record whose
+    markets price it now (its live-phase child while in play). Before this,
+    every child record was skipped, so an in-play fixture matched only its
+    stale prematch parent; prop and derived-count children (specials,
+    '(Games)', '(Corners)') still price no fixture."""
     from . import pinnapi_feed as F
     out = collections.defaultdict(list)
-    for eid, ev in cache.events.items():
-        if ev.get("parentId"):
-            continue
-        p = F.participants(ev)
-        if not p.get("home") or not p.get("away"):
-            continue
-        out[ev.get("sport_id")].append({
-            "id": eid, "home": p["home"], "away": p["away"],
-            "start": _iso_epoch(ev.get("startTime")),
-            "live": bool(ev.get("isLive"))})
+    view, _skipped = F.fixture_view(cache.events)
+    for fx in view:
+        out[fx.get("sport_id")].append({
+            "id": fx["id"], "quote_id": fx["quote_id"],
+            "home": fx["home"], "away": fx["away"],
+            "start": _iso_epoch(fx.get("startTime")),
+            "live": bool(fx.get("live")), "basis": fx.get("basis")})
     return dict(out)
 
 

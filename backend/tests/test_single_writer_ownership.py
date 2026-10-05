@@ -60,10 +60,21 @@ def test_the_command_centre_maps_exactly_those_keys():
 
 
 def _run_fn(module):
+    """The function that takes and holds the loop's lock: run(), or -- for
+    the decider -- `_hold_once`. PINNED FACT, UPDATED (R30A review):
+    ext_pinnacle_loop.run let a failed re-contention (the database still
+    restarting) raise out of the unsupervised lifespan task; run() now
+    repeats `_hold_once` -- ONE contention attempt: the session, the lock
+    loop, the hold -- inside a try, so the properties pinned below (one
+    session for the hold's life, the lock re-asked in a loop before any
+    cycle) are `_hold_once`'s."""
     tree = ast.parse(inspect.getsource(module))
-    for node in tree.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run":
-            return node
+    fns = {node.name: node for node in tree.body
+           if isinstance(node, ast.AsyncFunctionDef)}
+    if "_hold_once" in fns:
+        return fns["_hold_once"]
+    if "run" in fns:
+        return fns["run"]
     raise AssertionError("%s has no run()" % module.__name__)
 
 
@@ -77,7 +88,16 @@ def test_the_lock_is_taken_on_one_connection_not_per_cycle():
     for m in LOOPS:
         src = ast.unparse(_run_fn(m))
         assert "pg_try_advisory_lock" in src, m.__name__
-        assert src.count("pool.acquire()") == 1, (
+        # ONE SESSION FOR THE LOOP'S LIFE, taken once. The pinned spelling
+        # was `pool.acquire()`; R30A moved every lock holder to
+        # `db.lease_session(pool, ...)` -- the same one session held for life,
+        # opened OUTSIDE the shared pool -- because production showed six lock
+        # holders occupying six of the API pool's ten slots (research-sql run
+        # 37226381750) and starving the reactive audit, the feed heartbeat
+        # and the research tick. The property pinned is unchanged: exactly
+        # one session acquisition in run().
+        assert (src.count("pool.acquire()")
+                + src.count("lease_session(")) == 1, (
             "%s must hold one connection for the loop's life" % m.__name__)
         # the lock is asked for BEFORE any cycle runs
         assert src.index("pg_try_advisory_lock") < src.index("cycle("), (

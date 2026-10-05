@@ -77,6 +77,8 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import canonical_intent as CI
+from .. import decision_hooks as DH
 from .. import xavier_freshness as XF
 from . import derek_policy as DP
 
@@ -647,31 +649,113 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         prot = protective_price(qty=pos["open_qty"],
                                 cost_basis=pos["cost_basis_usd"],
                                 fee_fn=fee_fn, at=at)
-        if chosen in (A_EXIT, A_REDUCE):
-            if standing:
-                # THE EXIT WAITS FOR THE PROTECTION TO BE TERMINAL: its
-                # inventory is committed to the resting sale.
-                for s in standing:
-                    if s["state"] != "CANCEL_PENDING":
-                        await SIM.request_cancel(
-                            conn, s["order_id"], now=at,
-                            reason="EXIT_WAITS_FOR_STANDING_TERMINAL")
-                action = {"taken": "CANCEL_STANDING_BEFORE_EXIT",
-                          "orders": [s["order_id"] for s in standing]}
-            else:
-                cand = sel.get("selected_candidate") or {}
-                w = cand.get("walk") or {}
-                action = await _submit_sale(
-                    conn, ctx, pos=pos, role=chosen, qty=cand.get("qty"),
-                    limit=w.get("worst_price"), wire=w.get("worst_wire"),
-                    review_key="%s:%s:%s" % (group_id, pos["position_key"],
-                                             at))
-        elif (chosen == A_HOLD or (chosen is None and (
-                not fresh or measure.get("stale")
-                or measure.get("p") is None))) and prot.get("ok"):
+        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
+        # ── R30 · THE ONE CANONICAL MANAGEMENT INTENT ───────────────────
+        # Xavier's review decides ONE action (live_parity.management_action);
+        # it is recorded immutably and BOTH adapters consume it: the paper
+        # book below and the SMALL LIVE adapter (SHADOW) after it.
+        decided = CI.management_action(
+            chosen=chosen, fresh=fresh, stale=bool(measure.get("stale")),
+            p_missing=measure.get("p") is None,
+            protection_ok=bool(prot.get("ok")), standing_live=bool(standing),
+            candidate=sel.get("selected_candidate"), protective=prot,
+            open_qty=pos["open_qty"])
+        # R30A · EVERY ALTERNATIVE, VALUED OR WITH ITS REASON (section 8).
+        # Xavier's REALLOCATE comparison is made HERE, once, before the
+        # intent (and handed to the assessment below, which records the
+        # same comparison): HOLD, SELL_EXIT, SELL_REDUCE, CANCEL_PROTECTION_
+        # BEFORE_EXIT, MAINTAIN_STANDING_PROTECTION, INDIRECT_HEDGE,
+        # REALLOCATE and NO_ORDER all enter the intent. Nothing here changes
+        # the action decided above: management_action is unchanged (its
+        # choice is consistent with its own values -- a sale only on fresh
+        # evidence and only when the selector ranked it highest, protection
+        # otherwise), and the set only RECORDS what each alternative was
+        # worth or why it could not be valued.
+        realloc = await XM.paper_reallocation(
+            conn, ctx, group_id=group_id, pos=pos, trigger=trigger, at=at,
+            measure=measure, exit_levels=exit_lv)
+        try:
+            alt_set = CI.management_alternatives(
+                alts=alts, decided=decided, mechanical_selection=chosen,
+                standing_live=bool(standing), protective=prot,
+                open_qty=pos["open_qty"],
+                reallocate=(realloc.get("reallocate")
+                            if realloc.get("reallocate") is not None else
+                            {"blocker": realloc.get("why")
+                             or "REALLOCATE_NOT_COMPARED"}))
+        except Exception:                                       # noqa: BLE001
+            # never fails the review: the intent then builds the set from
+            # the ranking alone (REALLOCATE UNAVAILABLE: not compared)
+            alt_set = None
+        mgmt_policy = {
+            "status": "RECORDED",
+            "small_live_management_policy": mpol,
+            "selection_policy": {k: (policy or {}).get(k) for k in (
+                "policy_key", "version", "source", "why", "approved_by")},
+            "new_exposure": False,
+            "rule": ("management actions here only reduce exposure (a sale "
+                     "or a resting protective sale of held inventory); the "
+                     "LIVE fail-closed policy rule governs NEW exposure")}
+        mintent = None
+        try:
+            mintent = CI.build_management_intent(
+                review_id=rid, group_id=group_id,
+                position_key=pos["position_key"],
+                strategy=pos.get("strategy") or await _strategy(conn, group_id),
+                valuation=XF.valuation_block(
+                    measure, assessed_at=at,
+                    limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])),
+                evidence_state=measure["evidence_state"],
+                recommendation=XF.recorded_recommendation(
+                    evidence_state=measure["evidence_state"], selected=chosen),
+                mechanical_selection=chosen, decided=decided,
+                us_market_slug=pos["us_market_slug"],
+                holding_side=pos["holding_side"], alternatives=alts,
+                reason={"selection_reason": sel.get("selection_reason"),
+                        "refusal": sel.get("refusal"),
+                        "margin_over_runner_up": sel.get(
+                            "margin_over_runner_up"),
+                        "exceptional": list(exceptional)},
+                created_at=at, alternative_set=alt_set, policy=mgmt_policy)
+            rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
+            if rec_hook is None or not await rec_hook(conn, mintent):
+                mintent = None
+        except Exception:                                       # noqa: BLE001
+            mintent = None
+        act = decided["action"]
+        tl = decided.get("target_limit") or {}
+        if act == CI.ACT_CANCEL_FIRST:
+            # THE EXIT WAITS FOR THE PROTECTION TO BE TERMINAL: its
+            # inventory is committed to the resting sale.
+            for s in standing:
+                if s["state"] != "CANCEL_PENDING":
+                    await SIM.request_cancel(
+                        conn, s["order_id"], now=at,
+                        reason="EXIT_WAITS_FOR_STANDING_TERMINAL")
+            action = {"taken": "CANCEL_STANDING_BEFORE_EXIT",
+                      "orders": [s["order_id"] for s in standing]}
+        elif act in (CI.ACT_EXIT, CI.ACT_REDUCE):
+            action = await _submit_sale(
+                conn, ctx, pos=pos, role=chosen, qty=decided["target_qty"],
+                limit=tl.get("limit_price"), wire=tl.get("wire_price"),
+                review_key="%s:%s:%s" % (group_id, pos["position_key"], at))
+        elif act == CI.ACT_PROTECT:
             action = await _maintain_standing(
                 conn, ctx, pos=pos, standing=[dict(s) for s in standing],
                 prot=prot, md=md, at=at, SPO=SPO)
+        elif chosen in (A_EXIT, A_REDUCE):
+            action = {"taken": "NONE", "why": tl.get("why")
+                      or "NO_WALKABLE_SALE"}
+        if mintent is not None:
+            action["canonical_intent_id"] = mintent["intent_id"]
+            ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
+            if ad is not None:
+                try:
+                    action["live_parity"] = await ad(
+                        conn, mintent, taken=dict(action),
+                        open_qty=pos["open_qty"])
+                except Exception as exc:                        # noqa: BLE001
+                    action["live_parity"] = {"error": type(exc).__name__}
         confirmed = await conn.fetchval(
             "SELECT coalesce(sum(qty), 0) FROM paper_fills WHERE group_id=$1"
             "   AND role='STANDING_PROTECTION'", group_id)
@@ -680,7 +764,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                           for s in live)
         exposure = exposure_view(pos, resting_qty=resting_qty,
                                  filled_protection_qty=float(confirmed))
-        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
         # WHAT THE REVIEW RECOMMENDS (owner P0): the selection only on FRESH
         # evidence. On stale / absent evidence the selector's HOLD is merely
         # what was left after the sales were blocked, so the recorded
@@ -732,7 +815,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             conn, ctx, group_id=group_id, pos=pos, review_id=rid,
             trigger=trigger, at=at, measure=measure, alts=alts,
             recommendation=chosen, exit_levels=exit_lv, policy=mpol,
-            due_at=due_at)
+            due_at=due_at, precomputed=realloc)
         # FRESHNESS EXPIRY IS A REVIEW TRIGGER: a fresh probability expires
         # at its own source stamp + the limit; a review is scheduled for
         # that instant (paper_runtime.schedule_expiry_review via the
@@ -745,6 +828,14 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                 sched(pos["us_market_slug"], float(valuation["expires_at"]))
             except Exception:                                   # noqa: BLE001
                 pass
+        # FRESH-EVIDENCE WORK (owner R30, migration 226): a review that
+        # could not decide on fresh evidence enqueues the acquisitions it
+        # needs (probability, venue book, game state, re-review); a later
+        # review closes what it satisfies. Never raises.
+        from . import work_queue as WQ
+        await WQ.after_review(conn, ctx, group_id=group_id, pos=pos,
+                              review_id=rid, recommendation=recorded,
+                              measure=measure, at=at)
         reviews.append({"review_id": rid, "position": pos["position_key"],
                         "recommendation": recorded,
                         "mechanical_selection": chosen,
@@ -811,7 +902,10 @@ async def _submit_sale(conn, ctx, *, pos, role, qty, limit, wire,
                                fee_fn=ctx.get("fee_fn"), now=at)
     return {"taken": "SUBMIT_%s" % role, "ok": got.get("ok"),
             "refusal": got.get("refusal"),
-            "order_id": (got.get("order") or {}).get("order_id")}
+            "order_id": (got.get("order") or {}).get("order_id"),
+            "requested": {k: o.get(k) for k in (
+                "qty", "limit_price", "wire_price", "time_in_force",
+                "order_type", "intent")}}
 
 
 async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
@@ -1070,7 +1164,8 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
     the short side its complement. Otherwise: no payout, the position stays
     open and pending -- a refund is never assumed."""
     from .. import bettor_settlement_terms as ST
-    prices, ev, stated = set(), [], False
+    from .. import bettor_nfl_settlement as NFL
+    prices, ev, stated, tie_stated = set(), [], False, False
     for r in rows:
         try:
             sp = float(str(r.get("settlement_read")).strip())
@@ -1085,17 +1180,57 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
         terms = ST.read_terms(r.get("rules") or "").get("terms") or {}
         if ST.PAY_LAST_FAIR_MARKET_PRICE in terms.values():
             stated = True
+        # R30A: THE NFL TIE. "If the game ends in a tie, the market will
+        # settle to $0.50." is a stated price settlement of an ORDINARILY
+        # COMPLETED game, read from the contract's own text.
+        if NFL.venue_tie_payout(r.get("rules")).get("payout") == 0.5:
+            tie_stated = True
     if not ev:
         return {"price": None, "why": "NO_VENUE_PRICE_SETTLEMENT_RECORDED"}
     if len(prices) > 1:
         return {"price": None, "why": "CONFLICTING_VENUE_SETTLEMENT_PRICES",
                 "evidence": ev}
-    if not stated:
+    tie_price = tie_stated and prices == {0.5}
+    if not stated and not tie_price:
         return {"price": None, "evidence": ev,
                 "why": ("VENUE_SETTLED_AT_A_PRICE_BUT_THE_CONTRACT_TEXT_HELD_"
                         "STATES_NO_PRICE_SETTLEMENT")}
     long_px = prices.pop()
     per = long_px if holding_side == "LONG" else round(1.0 - long_px, 9)
+    if tie_price:
+        # WHICH STATE PAID 0.50 IS RECORDED ONLY AS FAR AS IT IS KNOWN (R30A
+        # review). The venue's settlement read is a PRICE, not a score. When
+        # the contract's text states BOTH the tie settlement and the
+        # last-fair-market-price clause (every captured NFL listing does), a
+        # 0.50 can be an ordinary tied game OR a postponed / suspended game
+        # whose last fair price was 0.50 -- an EXCEPTIONAL state. Writing
+        # TIE_AFTER_OVERTIME / ORDINARY there would state an unverified fact
+        # and move an exceptional settlement into the ordinary class, which
+        # undercounts the exceptional risk that is measured apart. No outcome
+        # source read here reports a final tied score, so the state is named
+        # as not distinguished. Only when the text states the tie settlement
+        # and NO other price settlement is 0.50 the tie by the contract's own
+        # terms. The payout is the venue's published price either way.
+        if stated:
+            state, cls = NFL.S_TIE_OR_LAST_FAIR_PRICE, NFL.AMBIGUOUS
+            why = ("the contract states both a $0.50 tie settlement and a "
+                   "last-fair-market-price settlement; the venue's read is a "
+                   "price only, and no final score is read here, so which "
+                   "state paid is not established")
+        else:
+            state, cls = "TIE_AFTER_OVERTIME", NFL.ORDINARY
+            why = ("the contract's only stated price settlement is the $0.50 "
+                   "tie settlement")
+        return {"price": per, "venue_long_price": long_px, "evidence": ev,
+                "rule": ("the contract's stated $0.50 settlement: each side "
+                         "is paid 0.50 per contract"),
+                "settlement_state": state, "state_class": cls,
+                "state_basis": why,
+                "would_distinguish": ("a final score from an outcome source "
+                                      "(tied after overtime -> "
+                                      "TIE_AFTER_OVERTIME, ordinary; game not "
+                                      "completed -> exceptional)"),
+                "quote": NFL.Q_VENUE_TIE}
     return {"price": per, "venue_long_price": long_px, "evidence": ev,
             "rule": "the contract's stated last-fair-market-price settlement"}
 

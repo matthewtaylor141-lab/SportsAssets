@@ -342,29 +342,71 @@ def test_9_no_order_frame_is_ever_emitted(rig):
             assert verb not in raw.lower(), raw
 
 
+def _hostguard_once():
+    """THE GUARD, EXECUTED EXACTLY ONCE, from its own file (R30A ci, 2026-10-04).
+
+    This test used to arm it with `import sitecustomize` followed by
+    `importlib.reload(sitecustomize)`, then "restore" the socket layer from
+    the module's `_real_*` names. That is right only when the interpreter has
+    ALREADY imported a sitecustomize of its own -- Ubuntu's
+    /usr/lib/python3.12/sitecustomize.py, which every local and release-gate
+    run had preloaded, so the import was a no-op and the reload the guard's
+    single execution. setup-python's interpreter has no sitecustomize. There
+    the import executes the guard, the reload executes it AGAIN in the same
+    module dict, `_real_getaddrinfo` (and `_real_create_connection`,
+    `_real_connect`) now name the FIRST execution's guard -- whose own lookup
+    of `_real_*` reads that same dict -- and the "restore" installed a
+    getaddrinfo / socket.connect that calls itself. Every later socket in the
+    session raised RecursionError: capital-critical run 37230040128 (exact
+    SHA 140969f, Python 3.12.3, Postgres 16) errored or failed 815 tests, every
+    DB proof alphabetically after this file, and the 3.11 backend-tests run
+    hit the same RecursionError in the few late tests that open loopback
+    sockets. Reproduced here by popping the preloaded sitecustomize before
+    the old sequence: getaddrinfo("127.0.0.1") and socket.connect both raise
+    RecursionError afterwards.
+
+    Now the guard file is executed once under a private module name, so its
+    `_real_*` are the interpreter's real functions, and the caller restores
+    the functions IT saved beforehand -- whatever sitecustomize the
+    interpreter has or lacks."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "_rn1_hostguard_under_test", HOSTGUARD / "sitecustomize.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def test_10_no_real_polymarket_hostname_is_ever_contacted(rig):
     rig.run_collector()
     assert not rig.marker.exists()
     # And prove the guard is armed rather than merely silent: it must refuse a
     # real hostname when asked directly, in this same interpreter.
-    sys.path.insert(0, str(HOSTGUARD))
+    saved = (socket.getaddrinfo, socket.create_connection, socket.socket.connect)
     try:
-        import importlib
-
-        import sitecustomize
-        importlib.reload(sitecustomize)
+        guard = _hostguard_once()
+        assert socket.getaddrinfo is guard.getaddrinfo
+        assert socket.socket.connect is guard.connect
         with pytest.raises(Exception) as exc:
             socket.getaddrinfo("api.polymarket.us", 443)
         assert "refusing to contact" in str(exc.value)
         with pytest.raises(Exception):
             socket.getaddrinfo("clob.polymarket.com", 443)
+        with pytest.raises(Exception) as exc:
+            socket.create_connection(("gateway.polymarket.us", 443), 0.2)
+        assert "refusing to contact" in str(exc.value)
+        # ...and it delegates to the REAL layer for anything else: armed, not
+        # self-referential (the defect above)
+        assert guard._real_getaddrinfo is saved[0]
+        assert guard._real_connect is saved[2]
+        assert socket.getaddrinfo("127.0.0.1", 9, type=socket.SOCK_STREAM)
     finally:
-        # Restore the real resolver for the rest of the session.
-        socket.getaddrinfo = sitecustomize._real_getaddrinfo
-        socket.create_connection = sitecustomize._real_create_connection
-        socket.socket.connect = sitecustomize._real_connect
-        sys.path.remove(str(HOSTGUARD))
-        del sys.modules["sitecustomize"]
+        # Restore the resolver and the socket layer this test found.
+        socket.getaddrinfo, socket.create_connection, socket.socket.connect = saved
+    assert (socket.getaddrinfo, socket.create_connection,
+            socket.socket.connect) == saved
+    assert socket.getaddrinfo("127.0.0.1", 9, type=socket.SOCK_STREAM)
 
 
 def test_the_artifact_the_collector_actually_ran_from_has_no_sdk():

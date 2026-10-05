@@ -91,10 +91,13 @@ def test_a_requested_league_is_inside_the_mandate_and_others_are_named():
     assert m["families"] == ["baseball", "football", "soccer"]
     assert m["league_tokens_by_family"] == {"football": ["cfb"],
                                             "soccer": ["brb", "unl"]}
-    # NCAAF is no longer OUTSIDE_MANDATE: it is inside and UNSUPPORTED for the
-    # one reason that is true (no measured probability source for football)
-    assert COV.classify_listing(CFB_ML, mand=m) == (
-        COV.S_UNSUPPORTED, "%s:football" % COV.X_NO_PROBABILITY)
+    # NCAAF is no longer OUTSIDE_MANDATE. PIN UPDATED IN THE P0 INCIDENT
+    # (NCAAF stream): it was inside and UNSUPPORTED because football had no
+    # measured probability source for the college board; that fact
+    # legitimately changed -- the college money line is admitted to the de-vig
+    # by its own measurement (research-sql run 37241503567, N3/N4) -- so the
+    # listing is now inside and supported (no blocking category)
+    assert COV.classify_listing(CFB_ML, mand=m) == (None, None)
     assert COV.classify_listing(UNL_ML, mand=m) == (None, None)
     assert COV.classify_listing(NFL_ML, mand=m) == (
         COV.S_OUTSIDE, "%s:nfl" % COV.X_LEAGUE)
@@ -131,9 +134,14 @@ async def _census_tables(conn, heartbeat):
 async def test_the_census_files_ncaaf_by_the_collectors_requested_set():
     import asyncpg
     import time
+    # PIN UPDATED IN THE P0 INCIDENT: with a fresh requested set the college
+    # listing is inside and supported, so it waits for evaluation
+    # (NOT_YET_EVALUATED) instead of being UNSUPPORTED for want of a measured
+    # probability source (now measured: research-sql run 37241503567)
+    fresh_state = "NOT_YET_EVALUATED"
     for heartbeat, cfb_state in (
             ({"at": time.time() - 60,
-              "sports_selection": {"requested": REQUESTED}}, "UNSUPPORTED"),
+              "sports_selection": {"requested": REQUESTED}}, fresh_state),
             # STALE: the requested set is not current, so the configured set
             # alone stands and the census says why
             ({"at": time.time() - 3 * 3600,
@@ -152,10 +160,11 @@ async def test_the_census_files_ncaaf_by_the_collectors_requested_set():
             assert ncaaf["venue_token"] == "cfb"
             assert ncaaf["states"] == {cfb_state: 1}, ncaaf
             req = got["mandate"]["requested_set"]
-            assert req["fresh"] is (cfb_state == "UNSUPPORTED"), req
-            if cfb_state == "UNSUPPORTED":
+            assert req["fresh"] is (cfb_state == fresh_state), req
+            if cfb_state == fresh_state:
                 br = got["blocked_by_reason"]
-                assert br["UNSUPPORTED:%s:football" % COV.X_NO_PROBABILITY] == 1
+                assert "UNSUPPORTED:%s:football" % COV.X_NO_PROBABILITY \
+                    not in br, br
                 assert br["OUTSIDE_MANDATE:%s:nfl" % COV.X_LEAGUE] == 1
                 assert "OUTSIDE_MANDATE:%s:football" % COV.X_SPORT not in br
         finally:

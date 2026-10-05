@@ -80,6 +80,42 @@ def _cand(ts, stamp=..., slug=GEA, snap_at=None):
                   snap_at=T - 40 if snap_at is None else snap_at)
 
 
+class _ClockFromT:
+    """`time`, with `.time()` running from this file's T (2026-09-09 13:00Z)."""
+
+    def __init__(self, real, start):
+        self._real, self._start = real, start
+
+    def time(self):
+        return T + (self._real.time() - self._start)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+@pytest.fixture(autouse=True)
+def _reads_run_from_t(monkeypatch):
+    """ONE CLOCK FOR THIS FILE'S WORLD (R30A ci, 2026-10-04).
+
+    Every tick here runs at `now=T`, a fixed 2026-09-09 13:00Z, and `_cand`
+    stamps his position snapshot at T - 40. But `mirror_shadow.snapshot_sizes`
+    ages that snapshot on ITS module's `time.time()` -- the wall clock -- and
+    refuses past SNAP_MAX_AGE_S (300 s). So the read saw a snapshot weeks old,
+    counted `snapshot_stale`, and no book opened:
+    test_c8_a_candidate_with_a_fill_inside_the_day_is_read failed with "read,
+    mapped, quoted, opened" on every run (CI 37223385978), whatever the code
+    did. The world's date is the fact that is fixed; the wall clock is the
+    fact that moved. This anchors the two real-clock read stamps to T exactly
+    as test_mirror_live_worker anchors its own to NOW (862a25c), so the
+    freshness gate is exercised on the world's clock, not skipped."""
+    import time as _time
+    from sportsassets.workers import whale_exits
+    clock = _ClockFromT(_time, _time.time())
+    monkeypatch.setattr(whale_exits, "time", clock)
+    monkeypatch.setattr(ms, "time", clock)
+    return clock
+
+
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(ms, "_map_cache", {})

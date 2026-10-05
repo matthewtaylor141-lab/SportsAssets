@@ -152,7 +152,37 @@ def test_no_funded_module_imports_the_paper_modules():
                # (paper ledger + paper_sleeve_classifications) inside a READ
                # ONLY transaction; writes nothing, imports no order, venue,
                # execution or funded module (tests/test_paper_sleeves.py)
-               "api/command_sleeves.py"}
+               "api/command_sleeves.py",
+               # the profitability validation per sleeve (/api/command/
+               # profitability/validation): GET-only, reads
+               # bettor_paper_ledger.positions / balances and
+               # bettor_paper_sleeves.classifications inside a READ ONLY
+               # transaction; writes nothing, imports no order, venue,
+               # execution or funded module
+               # (tests/test_profitability_validation.py)
+               "api/command_validation.py",
+               # (R30A) the confidence ladder (/api/command/confidence-
+               # ladder): GET-only; it imports bettor_paper_ledger (for
+               # ACCOUNT_ID, and command_validation.gather's positions /
+               # balances / sleeves reads), counts paper_decisions per
+               # strategy, and reads the parity ledger and the SMALL LIVE
+               # control, all inside one READ ONLY transaction. It writes
+               # nothing. NOTE (R30A review): it also imports live_parity --
+               # whose module top imports execmirror (the legacy mirror that
+               # holds Venue.place) -- and calls ONLY its read functions
+               # readiness_report / readiness: no venue, order, submit or
+               # control call is made, and execmirror.Venue.place refuses
+               # without a canonical LIVE authorization in any case. No
+               # funded module is imported (tests/test_confidence_ladder.py
+               # pins the route's imports and SQL)
+               "api/command_confidence_ladder.py",
+               # (226, owner R30) Xavier's fresh-evidence work queue: reads
+               # the paper ledger's open positions (to close the requests of
+               # a position that closed) and asks the paper runtime for a
+               # priority book read / a held re-review; it writes ONLY
+               # agent_work_* records and holds no submit, cancel or reserve
+               # call (tests/test_agent_work_state_authority.py)
+               "agents/work_queue.py"}
     assert set(offenders) <= allowed, sorted(set(offenders) - allowed)
     # ...and neither capability module reaches a funded or execution module,
     # directly or through the rest of the capability package

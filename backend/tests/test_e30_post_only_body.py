@@ -763,10 +763,16 @@ def test_e30_the_census_place_the_emit_sites_and_the_records():
     assert "receipt = $4::jsonb" in ml._SQL_ORDER_REFUSED and ml._REFUSAL_RECEIPT_MAX == 4000
     # no migration (061 the newest), no decision word, render-ops.yml untouched
     mig = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert mig[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration(*NEW_NAMES)
     assert "backoff" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "post_only_backoff" not in inspect.getsource(rules.order_decision)
-    assert hashlib.sha256((_render_ops_file()).read_bytes()).hexdigest()[:16] == e27.RENDER_OPS_SHA
+    # R30A ci (2026-10-04): was the whole-file e27.RENDER_OPS_SHA (red since 2026-09-19, see its note);
+    # "render-ops.yml untouched by this lane" is the E-series presets byte for byte
+    from tests import workflow_source as _ws
+    assert _ws.e_series_presets_sha() == e27.E_SERIES_PRESETS_SHA
 
 
 def test_e30_the_untouched_functions_are_byte_for_byte_66144cf_and_the_touched_ones_with_the_lanes_lines_excised():

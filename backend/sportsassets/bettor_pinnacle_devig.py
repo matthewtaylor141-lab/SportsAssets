@@ -176,6 +176,123 @@ DEFAULT_METHOD = METHOD_POWER
 SUPPORTED: dict = {
     ("soccer", "h2h"): 3,      # home / draw / away
     ("baseball", "h2h"): 2,    # no draw in MLB
+    # ── LINE FAMILIES (R30A P0 incident; bettor_market_family) ─────────
+    # A HALF-POINT spread, total or team total is a TWO-WAY market by
+    # construction: home/away at mirrored points, or over/under at one
+    # point, and no outcome between them (no push on a half point). Each is
+    # de-vigged on ITS OWN pair at the contract's identical line -- the
+    # contract and the quote both declare `line`, and `_contract_agrees`
+    # refuses LINE_DOES_NOT_MATCH on any difference. Only the families whose
+    # payoff equivalence bettor_market_family PROVES from both sides' cited
+    # words are listed (a test pins this set equal to its PROVEN set):
+    # soccer (the book's Market Rules section was not captured), tennis (its
+    # sport section was not read) and basketball team totals (no venue
+    # listing captured) are NOT here and refuse MARKET_NOT_IN_SUPPORTED_SET.
+    # No money line is touched by these entries.
+    ("football", "spread"): 2,
+    ("football", "total"): 2,
+    ("football", "team_total"): 2,
+    ("hockey", "spread"): 2,
+    ("hockey", "total"): 2,
+    ("hockey", "team_total"): 2,
+    ("basketball", "spread"): 2,
+    ("basketball", "total"): 2,
+    ("baseball", "spread"): 2,
+    ("baseball", "total"): 2,
+    ("baseball", "team_total"): 2,
+}
+
+#: MARKETS ADMITTED FOR ONE LEAGUE ONLY: (sport, market, venue league token)
+#: -> the number of outcomes a complete set has. Consulted only when
+#: (sport, market) is not in SUPPORTED, so every market above is untouched.
+#:
+#: AMERICAN FOOTBALL, R30A -- ADMITTED BY MEASUREMENT, FOR THE NFL ONLY, AND
+#: WITH ITS MEANING STATED. Measured: research-sql run 37226814972 (job
+#: 111508049692, research/r30a_nfl_measured_outcome_set.sql, read
+#: 2026-10-04T19:03:54Z) read the book's priced set that cand22 kept on every
+#: refused NFL row: 15 of 15 NFL money lines priced EXACTLY two outcomes, the
+#: two teams, zero carrying a Draw, all from Pinnacle, overround
+#: 0.0279..0.0383. The complete set is two.
+#:
+#: WHY THE LEAGUE AND NOT THE SPORT. The measurement read NFL rows; it says
+#: nothing about college football, whose venue terms, tie rule (college
+#: overtime has no tie) and book coverage were never measured by that
+#: stream. So the football key is deliberately NOT added to SUPPORTED, which
+#: every league of the family -- the CFL, the UFL, anything the venue lists
+#: next -- would inherit; each league is admitted by its OWN measurement.
+#:
+#: COLLEGE FOOTBALL, P0 INCIDENT -- ADMITTED BY ITS OWN MEASUREMENT, THE SAME
+#: SHAPE AS THE NFL'S. research-sql run 37241503567 (job 111550976439,
+#: research/incident_ncaaf_settlement_wording.sql sha256 0335ccc4...c853, read
+#: 2026-10-04T22:54:12Z, N3/N4) read the priced set kept on EVERY production
+#: cfb valuation row (all time, no limit): 9 of 9 rows / 9 contracts priced
+#: EXACTLY two outcomes, zero carrying a Draw / Tie / X key, all 9 from book
+#: Pinnacle (provider the-odds-api.com/v4), overround 0.02814..0.05607
+#: (tests/fixtures/ncaaf_production_wording_2026_10_04.json). The complete
+#: set is two. The number is still P(win | no tie) by the same General Rule;
+#: for a college contract that IS the value -- a completed college game is
+#: played to a winner -- and `bettor_ncaaf_settlement.convert` re-checks
+#: every premise of that before the policy uses it.
+#:
+#: WHAT THE NUMBER IS. The book offers no draw price, so by its General
+#: Rules a tie VOIDS the bet ("If a draw is not offered and a draw happens,
+#: then bets on both teams will be voided."): the de-vigged two-way
+#: probability is P(win | no tie). It is NOT the value of the venue's NFL
+#: contract, which pays $0.50 on a tie. That conversion is
+#: `bettor_nfl_settlement.convert`, applied by the policy before any edge;
+#: this source only states the conditioning (CONDITIONAL_ON below) and
+#: refuses a draw-priced football line by name.
+SUPPORTED_BY_LEAGUE: dict = {
+    ("football", "h2h", "nfl"): 2,
+    ("football", "h2h", "cfb"): 2,
+}
+
+
+def league_of_contract(contract) -> str | None:
+    """The contract's VENUE league token, or None when it is not
+    established. Read from the contract's explicit `league` and from its
+    venue-native slug (`aec-<league>-...`); when both are present they must
+    agree, and a disagreement is None -- never one of the two picked. Pure."""
+    c = contract if isinstance(contract, dict) else {}
+    seen = set()
+    lg = str(c.get("league") or "").strip().lower()
+    if lg:
+        seen.add(lg)
+    parts = str(c.get("us_market_slug") or "").strip().lower().split("-")
+    if len(parts) > 2 and parts[0] == "aec" and parts[1]:
+        seen.add(parts[1])
+    return seen.pop() if len(seen) == 1 else None
+
+
+def expected_outcomes(sport, market, *, league=None) -> int | None:
+    """The complete-set count for (sport, market), from SUPPORTED, else from
+    SUPPORTED_BY_LEAGUE for the named league; None = not supported."""
+    n = SUPPORTED.get((sport, market))
+    if n is None and league:
+        n = SUPPORTED_BY_LEAGUE.get((sport, market, str(league).lower()))
+    return n
+
+
+#: WHAT A SUPPORTED MARKET'S DE-VIGGED PROBABILITY IS CONDITIONAL ON, beyond
+#: the bet having action. Only markets whose book rule removes an ordinary
+#: outcome from the sample are listed.
+CONDITIONAL_ON = {
+    ("football", "h2h"): {
+        "condition": "NO_TIE",
+        "book_rule": ("If a “Draw” price is offered in a Money Line "
+                      "market, and the draw happens, then bets on each team "
+                      "lose. If a draw is not offered and a draw happens, "
+                      "then bets on both teams will be voided."),
+        "source_url": "https://www.pinnacle.com/en/future/betting-rules",
+        "retrieved_at": "2026-10-04T18:50:51Z",
+        "page_sha256": ("63d6432114be131dfbab98baf91f8777a98549221a59c288fa7"
+                        "6916c3d8303fd"),
+        "consequence": ("the two-way price is P(win | the game does not end "
+                        "tied); a contract that pays on a tie must convert it "
+                        "(bettor_nfl_settlement.convert) before comparing it "
+                        "with a price, and a college contract is read by "
+                        "bettor_ncaaf_settlement.convert (no tie in a "
+                        "completed game: unchanged, every premise checked)")},
 }
 
 #: Sports in which Pinnacle was ABSENT FROM THE RESPONSES WE HAVE SEEN.
@@ -232,6 +349,10 @@ R_LINE_MISMATCH = "LINE_DOES_NOT_MATCH"
 R_PERIOD_MISMATCH = "PERIOD_DOES_NOT_MATCH"
 R_SETTLEMENT_MISMATCH = "SETTLEMENT_RULE_DOES_NOT_MATCH"
 R_UNKNOWN_METHOD = "DEVIG_METHOD_NOT_DECLARED"
+#: A FOOTBALL line that prices a Draw is the regulation (three-way) market,
+#: a different event from the two-way game line that includes overtime. It
+#: is never de-vigged as the game line, and its draw is never dropped.
+R_DRAW_PRICED_LINE = "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE"
 
 def _epoch(value):
     """Seconds since the epoch, from a number or an ISO-8601 string.
@@ -270,7 +391,7 @@ REFUSALS = (R_UNSUPPORTED_MARKET, R_PINNACLE_ABSENT, R_BOOK_MISSING,
             R_INCOMPLETE_OUTCOMES, R_STALE, R_NO_TIMESTAMP, R_BAD_ODDS,
             R_AMBIGUOUS_MAPPING, R_NO_MAPPING, R_SELECTION_UNMATCHED,
             R_LINE_MISMATCH, R_PERIOD_MISMATCH, R_SETTLEMENT_MISMATCH,
-            R_UNKNOWN_METHOD)
+            R_UNKNOWN_METHOD, R_DRAW_PRICED_LINE)
 
 
 # ── the de-vig, in the standard library ─────────────────────────────
@@ -405,6 +526,52 @@ def _contract_agrees(contract: dict, quote: dict) -> dict:
     return {"ok": True, "refusal": None}
 
 
+# ── the source instant of a quote the de-vig refused before aging ───
+
+#: Basis written beside observed_at when the de-vig refused BEFORE its aging
+#: step: the instant is the quote's own (the provider's last_update / the
+#: feed's change time), recorded so the valuation row has an observation
+#: identity; it was never aged, so no age, no freshness verdict and no
+#: probability is derived from it.
+OBSERVED_AT_NOT_AGED = "QUOTE_SOURCE_INSTANT_NOT_AGED"
+
+
+def _stamp_source_instant(out: dict, quote: dict) -> dict:
+    """THE QUOTE'S OWN INSTANT ON A REFUSAL THAT CAME BEFORE AGING.
+
+    THE DEFECT (P0 incident 2026-10-04, root cause "observation clock
+    collapse on refused de-vig"). Every refusal returned before the aging
+    step (MARKET_NOT_IN_SUPPORTED_SET, PINNACLE_NOT_IN_THIS_PAYLOAD, a
+    contract disagreement, OUTCOME_SET_INCOMPLETE, ODDS_NOT_A_PRICE) left
+    observed_at NULL, and the valuation table's uniqueness key coalesced NULL
+    to -infinity, so the FIRST such valuation of a contract was its only
+    one, for ever: the NFL slate stopped valuing at 13:28Z (146 NFL and 54
+    NCAAF evaluation instances lost that day). The quote's stated instant is
+    therefore recorded on the refusal -- source time, labelled as such and
+    never aged -- so a re-read of an unchanged quote is one row and a moved
+    quote is a new one (migration 105's rule, migration 251's key). A quote
+    whose instant cannot be read records none; nothing here can raise and
+    nothing here changes a refusal or a probability."""
+    if out.get("observed_at") is not None or not isinstance(quote, dict):
+        return out
+    raw = quote.get("observed_at")
+    if raw is None:
+        return out
+    try:
+        at = _epoch(raw)
+    except (TypeError, ValueError):
+        return out
+    try:
+        received = (None if quote.get("received_at") is None
+                    else _epoch(quote["received_at"]))
+    except (TypeError, ValueError):
+        received = None
+    out["observed_at"] = float(at)
+    out["received_at"] = received
+    out["observed_at_basis"] = OBSERVED_AT_NOT_AGED
+    return out
+
+
 # ── the valuation ───────────────────────────────────────────────────
 
 def valuation(*, contract: dict, quote: dict, now: float,
@@ -435,11 +602,28 @@ def valuation(*, contract: dict, quote: dict, now: float,
     if method not in METHODS:
         refusals.append(R_UNKNOWN_METHOD)
         out["why"] = "de-vig method %r is not one of %r" % (method, METHODS)
-        return out
+        return _stamp_source_instant(out, quote)
 
     expected = SUPPORTED.get((sport, market))
+    league = None
+    if expected is None:
+        # A LEAGUE-SCOPED ADMISSION (R30A, NFL) is consulted only after the
+        # family-wide set, so no market in SUPPORTED changes path.
+        league = league_of_contract(contract)
+        expected = expected_outcomes(sport, market, league=league)
+        if expected is not None:
+            out["league"] = league
+            out["admitted_for_league"] = "%s/%s@%s" % (sport, market, league)
     if expected is None:
         refusals.append(R_UNSUPPORTED_MARKET)
+        scoped = sorted("%s/%s@%s" % k for k in SUPPORTED_BY_LEAGUE
+                        if k[0] == sport and k[1] == market)
+        if scoped:
+            # SAID, so a reader of an NCAAF (or league-less) refusal sees
+            # that the family is admitted elsewhere and for which league,
+            # rather than reading the refusal as "football is unsupported".
+            out["supported_for_league_only"] = scoped
+            out["league"] = league
         if sport in PINNACLE_ABSENT:
             # A DIFFERENT FACT with a different remedy: we have seen this
             # sport's responses carry no Pinnacle at all, so the remedy is
@@ -475,7 +659,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
                     "the book's priced set for an UNSUPPORTED market, kept so "
                     "the measured-set rule can be evaluated; no probability "
                     "is derived from it")
-        return out
+        return _stamp_source_instant(out, quote)
     out["expected_outcomes"] = expected
 
     if _norm(quote.get("book")) != BOOK:
@@ -483,23 +667,33 @@ def valuation(*, contract: dict, quote: dict, now: float,
         out["why"] = ("this payload is from %r, not %s. A source named for "
                       "Pinnacle must not silently substitute another book"
                       % (quote.get("book"), BOOK))
-        return out
+        return _stamp_source_instant(out, quote)
 
     agree = _contract_agrees(contract, quote)
     if not agree["ok"]:
         refusals.append(agree["refusal"])
         out["why"] = agree["why"]
-        return out
+        return _stamp_source_instant(out, quote)
 
     outcomes = dict(quote.get("outcomes") or {})
     out["outcomes_priced"] = len(outcomes)
+    if sport == "football" and any(
+            _norm(n) in ("draw", "tie", "x") for n in outcomes):
+        # NAMED BEFORE THE COUNT CHECK, because "3 of 2 outcomes priced"
+        # would hide what the third outcome is: a regulation market.
+        refusals.append(R_DRAW_PRICED_LINE)
+        out["why"] = ("the football line prices a Draw (%s): that is the "
+                      "regulation three-way market, not the two-way game line "
+                      "including overtime the venue contract settles on"
+                      % sorted(outcomes))
+        return out
     if len(outcomes) != expected:
         refusals.append(R_INCOMPLETE_OUTCOMES)
         out["why"] = ("%d of %d outcomes priced. A de-vig normalises over "
                       "the COMPLETE set; over a subset it returns a number "
                       "that still looks like a probability and is not one"
                       % (len(outcomes), expected))
-        return out
+        return _stamp_source_instant(out, quote)
 
     bad = [n for n, o in outcomes.items()
            if not isinstance(o, (int, float)) or float(o) <= 1.0]
@@ -507,7 +701,7 @@ def valuation(*, contract: dict, quote: dict, now: float,
         refusals.append(R_BAD_ODDS)
         out["why"] = ("decimal odds must exceed 1.0; offending outcomes %r"
                       % sorted(bad))
-        return out
+        return _stamp_source_instant(out, quote)
 
     observed_at = quote.get("observed_at")
     if observed_at is None:
@@ -565,6 +759,12 @@ def valuation(*, contract: dict, quote: dict, now: float,
     out["probability"] = out["devigged"][m["outcome"]]
     out["why"] = ("%s de-vig over %d priced outcomes from %s, %.1f s old"
                   % (method, expected, BOOK, age))
+    cond = CONDITIONAL_ON.get((sport, market))
+    if cond is not None:
+        # THE CONDITIONING TRAVELS WITH THE NUMBER, so no consumer can read a
+        # P(win | no tie) as the value of a contract that pays on a tie.
+        out["conditional_on"] = dict(cond)
+        out["why"] += "; conditional on %s" % cond["condition"]
     return out
 
 

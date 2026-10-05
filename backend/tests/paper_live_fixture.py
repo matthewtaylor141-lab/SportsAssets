@@ -128,6 +128,15 @@ async def valuation(conn, *, slug=None, p_pin=0.62, decided_at=None,
     Pinnacle reading is `pin_age_s` old at `decided_at`."""
     at = float(decided_at if decided_at is not None else time.time())
     slug = slug or "%s%s" % (SYN, uuid.uuid4().hex[:10])
+    # THE PINNACLE PRICES THE PROBABILITY CAME FROM, as the real writer
+    # records them (raw_odds + mapped_outcome). A fair two-way book at
+    # 1/p and 1/(1-p) de-vigs (power, zero overround) to exactly p, so the
+    # gross-edge input validation (gross_edge_inputs) can recompute the
+    # probability's orientation from the row as it does on production rows;
+    # this fixture used to write raw_odds '{}' and no mapped outcome, a shape
+    # the collector never writes for a row that carries a probability.
+    p_pin = float(p_pin)
+    raw_odds = {"HOME": 1.0 / p_pin, "AWAY": 1.0 / (1.0 - p_pin)}
     vid = await conn.fetchval(
         "INSERT INTO external_valuations (experiment_id, version, "
         " source_class, provider, book, devig_method, venue, condition_id, "
@@ -136,21 +145,23 @@ async def valuation(conn, *, slug=None, p_pin=0.62, decided_at=None,
         " received_at, probability, decision, admissible, refusals, why, "
         " payout_event, payout_is_complement, buy_intent, ladder_side, "
         " record_purpose, decided_at, event_key, settlement_comparison, "
-        " calibration_only_evidence) "
+        " calibration_only_evidence, mapped_outcome, mapping_match, "
+        " probability_event) "
         "VALUES ($1,'PINNACLE_DEVIG_V1','EXTERNAL_BOOKMAKER_VALUATION',"
         " 'the-odds-api.com/v4','pinnacle','power','PMUS',$2,$2,'HOME',"
-        " 'baseball','h2h','FULL_GAME','{}'::jsonb,2,2,to_timestamp($3),"
+        " 'baseball','h2h','FULL_GAME',$10::jsonb,2,2,to_timestamp($3),"
         " to_timestamp($3 + 1),$4,'NO_TRADE',false,"
         " ARRAY['VENUE_BOOK_CURRENCY_NOT_ESTABLISHED'],'synthetic',"
         " 'HOME',false,$5,'ASK',$6,to_timestamp($7),'e-' || $2,$8::jsonb,"
-        " $9::jsonb) "
+        " $9::jsonb,'HOME','EXACT','HOME') "
         "RETURNING id", ext.EXPERIMENT_ID, slug, at - float(pin_age_s),
-        float(p_pin), LONG, purpose, at,
+        p_pin, LONG, purpose, at,
         json.dumps(settlement_comparison(compatibility), default=str),
         (json.dumps({"usable_for_orders": False,
                      "venue_read_refusal": "VENUE_BOOK_CURRENCY_NOT_"
                                            "ESTABLISHED"})
-         if purpose == "CALIBRATION_ONLY" else None))
+         if purpose == "CALIBRATION_ONLY" else None),
+        json.dumps(raw_odds))
     return {"valuation_id": vid, "slug": slug, "decided_at": at}
 
 

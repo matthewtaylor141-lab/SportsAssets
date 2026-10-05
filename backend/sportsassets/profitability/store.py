@@ -254,24 +254,33 @@ METRIC_SQL = (
     "INSERT INTO pos_metric_observations (observation_id, run_id, book, "
     " metric, computed_at, period_start, period_end, value, sample_n, "
     " ci_low, ci_high, status, why, data_as_of, detail, content_sha256, "
-    " version) VALUES ($1,$2,$3,$4,to_timestamp($5),to_timestamp($6),"
-    " to_timestamp($7),$8,$9,$10,$11,$12,$13,to_timestamp($14),$15::jsonb,"
-    " $16,$17)")
+    " version, sleeve, strategy, policy_versions, classifier_version, "
+    " confidence_scope) VALUES ($1,$2,$3,$4,to_timestamp($5),"
+    " to_timestamp($6),to_timestamp($7),$8,$9,$10,$11,$12,$13,"
+    " to_timestamp($14),$15::jsonb,$16,$17,$18,$19,$20::text[],$21,$22)")
+
+
+def metric_key(m: dict) -> tuple:
+    """A metric row's identity: (book, sleeve, strategy, metric)."""
+    return (m["book"], m.get("sleeve"),
+            m.get("strategy") or C.ALL_STRATEGIES, m["metric"])
 
 
 def metric_sha(m: dict) -> str:
     return C.sha({k: m.get(k) for k in (
-        "book", "metric", "value", "sample_n", "ci_low", "ci_high", "status",
-        "why", "data_as_of")})
+        "book", "sleeve", "strategy", "policy_versions", "metric", "value",
+        "sample_n", "ci_low", "ci_high", "status", "why", "data_as_of")})
 
 
 async def save_metrics(conn, *, run_id, now, metrics, latest_shas,
                        version) -> int:
-    """Insert each metric whose content differs from its latest row."""
+    """Insert each metric whose content differs from its latest row of the
+    SAME scope (book, sleeve, strategy, metric). Every row names its scope
+    (migration 227 refuses one that does not)."""
     args = []
     for m in metrics:
         sh = metric_sha(m)
-        if latest_shas.get((m["book"], m["metric"])) == sh:
+        if latest_shas.get(metric_key(m)) == sh:
             continue
         per = m.get("period") or {}
         args.append((
@@ -282,8 +291,14 @@ async def save_metrics(conn, *, run_id, now, metrics, latest_shas,
             _j({"period": per, "detail": m.get("detail"),
                 "trend": m.get("trend"), "unit": m.get("unit"),
                 "ci_why": m.get("ci_why"), "ci_level": m.get("ci_level"),
-                "higher_is_better": m.get("higher_is_better")}),
-            sh, version))
+                "higher_is_better": m.get("higher_is_better"),
+                "policy_version": m.get("policy_version"),
+                "policy_version_why": m.get("policy_version_why"),
+                "sleeve_role": m.get("sleeve_role")}),
+            sh, version, m.get("sleeve"),
+            m.get("strategy") or C.ALL_STRATEGIES,
+            list(m.get("policy_versions") or []),
+            m.get("classifier_version"), m.get("confidence_scope")))
     if args:
         await conn.executemany(METRIC_SQL, args)
     return len(args)
@@ -314,15 +329,18 @@ FORECAST_SQL = (
     " worst_modelled_drawdown_usd, capital_required_usd, "
     " capital_hours_required, turnover_required_usd, capacity_ceiling_usd, "
     " quantiles, status, why, validation, inputs_sha256, unmeasured, "
-    " version) VALUES ($1,$2,$3,to_timestamp($4),"
+    " version, sleeve, strategy, policy_versions, classifier_version, "
+    " confidence_scope) VALUES ($1,$2,$3,to_timestamp($4),"
     " (to_timestamp($4) AT TIME ZONE 'UTC')::date,to_timestamp($5),"
     " to_timestamp($6),$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,"
     " $20,$21,$22,$23,$24,$25,$26::jsonb,$27,$28,$29::jsonb,$30,$31::jsonb,"
-    " $32) ON CONFLICT (book, issued_day) DO NOTHING")
+    " $32,$33,$34,$35::text[],$36,$37) "
+    "ON CONFLICT (book, sleeve, strategy, issued_day) DO NOTHING")
 
 
 async def save_forecast(conn, *, run_id, fc) -> str | None:
-    """One forecast per book per UTC day (the first one issued stands)."""
+    """One forecast per book, sleeve and strategy per UTC day (the first
+    one issued stands). Every forecast names its scope (migration 227)."""
     fid = _id("posfc")
     res = await conn.execute(
         FORECAST_SQL, fid, fc["book"], run_id, float(fc["issued_at"]),
@@ -337,20 +355,27 @@ async def save_forecast(conn, *, run_id, fc) -> str | None:
         fc.get("turnover_required_usd"), fc.get("capacity_ceiling_usd"),
         None if fc.get("quantiles") is None else _j(fc["quantiles"]),
         fc["status"], fc.get("why"), _j(fc.get("validation") or {}),
-        fc["inputs_sha256"], _j(fc.get("unmeasured") or {}), fc["version"])
+        fc["inputs_sha256"], _j(fc.get("unmeasured") or {}), fc["version"],
+        fc.get("sleeve"), fc.get("strategy") or C.ALL_STRATEGIES,
+        list(fc.get("policy_versions") or []), fc.get("classifier_version"),
+        fc.get("confidence_scope"))
     return fid if res.endswith(" 1") else None
 
 
 async def save_score(conn, sc: dict) -> None:
+    """A score copies its forecast's scope (NULL for a pre-227 book-wide
+    forecast, which is scored against the whole book it forecast)."""
     await conn.execute(
         "INSERT INTO pos_forecast_scores (forecast_id, book, scored_at, "
         " realized_pnl_usd, realized_positions, pit, inside_p10_p90, "
         " realized_positive, brier_positive, abs_error_vs_p50_usd, detail, "
-        " version) VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8,$9,$10,"
-        " $11::jsonb,$12) ON CONFLICT (forecast_id) DO NOTHING",
+        " version, sleeve, strategy, confidence_scope) VALUES ($1,$2,"
+        " to_timestamp($3),$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13,$14,$15)"
+        " ON CONFLICT (forecast_id) DO NOTHING",
         sc["forecast_id"], sc["book"], float(sc["scored_at"]),
         float(sc["realized_pnl_usd"]), int(sc["realized_positions"]),
         sc.get("pit"), bool(sc["inside_p10_p90"]),
         bool(sc["realized_positive"]), float(sc["brier_positive"]),
         float(sc["abs_error_vs_p50_usd"]), _j(sc.get("detail") or {}),
-        sc["version"])
+        sc["version"], sc.get("sleeve"), sc.get("strategy"),
+        sc.get("confidence_scope"))

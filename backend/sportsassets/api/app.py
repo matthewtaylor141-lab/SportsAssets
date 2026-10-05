@@ -758,6 +758,57 @@ try:
     app.include_router(_command_sleeves_router)
 except ImportError:
     log.warning("sleeves: api.command_sleeves not loaded", exc_info=True)
+# ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
+# named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
+try:
+    from .command_live_parity import router as _command_live_parity_router
+    app.include_router(_command_live_parity_router)
+except ImportError:
+    log.warning("live parity: api.command_live_parity not loaded", exc_info=True)
+# ── THE PER-AGENT FUNNEL RECEIPT (P0 incident): /api/command/agent-funnel.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# RECEIVED / ELIGIBLE / REJECTED_SOFTWARE / REJECTED_ECONOMIC / ENTER / ORDER /
+# FILL per agent strategy, every code classified by the one taxonomy. No
+# route here writes; orders and fills are the PAPER account's.
+try:
+    from .command_agent_funnel import router as _command_agent_funnel_router
+    app.include_router(_command_agent_funnel_router)
+except ImportError:
+    log.warning("agent funnel: api.command_agent_funnel not loaded",
+                exc_info=True)
+# ── PROFITABILITY VALIDATION PER SLEEVE: /api/command/profitability/
+# validation (?since=). GET only, COMMAND auth, READ ONLY transaction with a
+# statement timeout; the verdict reads the INVESTMENT sleeve's FORWARD
+# evidence only. No route here writes.
+try:
+    from .command_validation import router as _command_validation_router
+    app.include_router(_command_validation_router)
+except ImportError:
+    log.warning("validation: api.command_validation not loaded",
+                exc_info=True)
+# ── THE CONFIDENCE LADDER (R30A): /api/command/confidence-ladder. GET only,
+# COMMAND auth, one READ ONLY transaction with a statement timeout: levels
+# 0..6 per strategy and overall (INVESTMENT sleeve), the highest level met
+# and the next level's blockers, from the paper ledger, the validation
+# verdict, the parity ledger and the SMALL LIVE control. No route here
+# writes, sends an order or changes a control.
+try:
+    from .command_confidence_ladder import router as _command_ladder_router
+    app.include_router(_command_ladder_router)
+except ImportError:
+    log.warning("confidence ladder: api.command_confidence_ladder not loaded",
+                exc_info=True)
+# ── THE UNIQUE OPPORTUNITY FUNNEL (R30A): /api/command/opportunity-funnel.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# blockers ranked by unique opportunities (fixture / market / side / line /
+# period), repeated decision rows as re-evaluations, near misses and missed
+# executable EV at the strategy's own book freshness. No route here writes.
+try:
+    from .command_opportunity_funnel import router as _command_funnel_router
+    app.include_router(_command_funnel_router)
+except ImportError:
+    log.warning("opportunity funnel: api.command_opportunity_funnel not "
+                "loaded", exc_info=True)
 # ── THE POSITION ROOMS: /api/command/positions/rooms, /room/{group_key}.
 # GET only, COMMAND auth, READ ONLY transaction; one correlated economic
 # position per screen (paper and actual, actual per venue, never summed).
@@ -806,13 +857,31 @@ except ImportError:
                 exc_info=True)
 # ── RELEASE TRUTH: /api/command/release. GET only, COMMAND auth, one READ
 # ONLY transaction with a statement timeout: the API build SHA, the workers'
-# boot SHA, schema_migrations 216-225 and the committed release receipts
+# boot SHA, schema_migrations 216-264 and the committed release receipts
 # (hash-verified). No write, deploy or approval path.
 try:
     from .command_release import router as _command_release_router
     app.include_router(_command_release_router)
 except ImportError:
     log.warning("release: api.command_release not loaded", exc_info=True)
+# ── RUNTIME LOOP HEALTH (R30A, migration 229): /api/command/loop-health.
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# every recurring loop, its single-writer lease (pg_locks holders), last
+# start / success / error and HEALTHY / UNHEALTHY (no success in 3 x cadence).
+try:
+    from .command_loop_health import router as _command_loop_health_router
+    app.include_router(_command_loop_health_router)
+except ImportError:
+    log.warning("loop health: api.command_loop_health not loaded",
+                exc_info=True)
+# ── RUNTIME SLOs (R30A): /api/command/slo. GET only, COMMAND auth, one READ
+# ONLY transaction with a statement timeout: eight SLOs, each target /
+# measured / window / OK | BREACH | UNAVAILABLE(reason). No write path.
+try:
+    from .command_slo import router as _command_slo_router
+    app.include_router(_command_slo_router)
+except ImportError:
+    log.warning("slo: api.command_slo not loaded", exc_info=True)
 from .agent_capabilities import router as _capabilities_router
 app.include_router(_capabilities_router)
 from .slack_agents import router as _slack_agents_router
@@ -10681,10 +10750,23 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
             b["verdict"] = "MIXED_SOME_EVENTS_CARRY_A_SIMULATION_MARKER"
     rows.sort(key=lambda b: (-b["events"], b["league_token"]))
     real = [b for b in rows if b["simulated_events"] == 0]
+    # THE CACHE'S OWN RECEIPT, NOT A CONSTANT (R30A inc-catalogue). This said
+    # `"truncated": False` over a desk cache that every sweep cut at its page
+    # budget (render-ops logs 2026-10-04: `pages=14 events=1400/1400` against
+    # an 18-page board). The sweep now records how it ended; absent a receipt
+    # (a cache filled before this build) the truncation is UNAVAILABLE, never
+    # False.
+    _rcpt = dict(getattr(_pmus, "_desk_cache", {}).get("receipt") or {})
     return {
         "events_read": len(events),
         "competitions": len(rows),
-        "truncated": False,
+        "truncated": (bool(_rcpt.get("truncated")) if _rcpt else None),
+        "truncation_evidence": (_rcpt or {
+            "status": "UNAVAILABLE",
+            "why": "the desk cache carries no sweep receipt yet"}),
+        "complete_catalogue": ("us_premap (workers/premap.refresh reads every "
+                               "page of the board; this endpoint reads the "
+                               "desk's bounded browse cache)"),
         "no_second_venue_sweep": True,
         "source": "pmus.list_desk_events (the cache the desk reads)",
         "real_competition_tokens": [b["league_token"] for b in real],

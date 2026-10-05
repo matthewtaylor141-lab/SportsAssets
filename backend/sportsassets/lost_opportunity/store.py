@@ -174,7 +174,10 @@ HORIZON_COLS = (
     "expected_capacity_usd", "trailing_30d_committed_usd",
     "trailing_30d_capital_turnover", "quantiles", "status", "why",
     "validation",
-    "unmeasured", "basis", "inputs_sha256", "version")
+    "unmeasured", "basis", "inputs_sha256", "version",
+    # the scope (migration 227): every new horizon forecast names it
+    "sleeve", "strategy", "policy_versions", "classifier_version",
+    "confidence_scope")
 _HTS = ("issued_at", "horizon_start", "horizon_end")
 _HJ = ("quantiles", "validation", "unmeasured", "basis")
 
@@ -188,19 +191,26 @@ def _hph():
             out.append("(to_timestamp($%d) AT TIME ZONE 'UTC')::date" % i)
         elif c in _HJ:
             out.append("$%d::jsonb" % i)
+        elif c == "policy_versions":
+            out.append("$%d::text[]" % i)
         else:
             out.append("$%d" % i)
     return ", ".join(out)
 
 
 HORIZON_SQL = ("INSERT INTO lol_horizon_forecasts (%s) VALUES (%s) "
-               "ON CONFLICT (book, horizon, issued_day) DO NOTHING "
-               "RETURNING forecast_id" % (", ".join(HORIZON_COLS), _hph()))
+               "ON CONFLICT (book, sleeve, strategy, horizon, issued_day) "
+               "DO NOTHING RETURNING forecast_id"
+               % (", ".join(HORIZON_COLS), _hph()))
 
 
 async def save_horizon(conn, *, run_id, fc) -> str | None:
+    """One horizon forecast per book, sleeve, strategy and horizon per UTC
+    day (the first one issued stands)."""
     r = dict(fc, forecast_id=_id("lolhfc"), run_id=run_id,
              issued_day=fc["issued_at"])
+    r["strategy"] = r.get("strategy") or C.ALL_STRATEGIES
+    r["policy_versions"] = list(r.get("policy_versions") or [])
     args = []
     for c in HORIZON_COLS:
         v = r.get(c)
@@ -213,13 +223,16 @@ async def save_horizon(conn, *, run_id, fc) -> str | None:
 
 
 async def save_horizon_score(conn, sc) -> None:
+    """A score copies its forecast's scope (NULL for a pre-227 one)."""
     await conn.execute(
         "INSERT INTO lol_horizon_forecast_scores (forecast_id, book, "
         " horizon, scored_at, realized_pnl_usd, realized_positions, pit, "
         " inside_p10_p90, realized_positive, brier_positive, "
-        " abs_error_vs_p50_usd, version) VALUES ($1,$2,$3,to_timestamp($4),"
-        " $5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (forecast_id) DO NOTHING",
+        " abs_error_vs_p50_usd, version, sleeve, strategy, confidence_scope)"
+        " VALUES ($1,$2,$3,to_timestamp($4),$5,$6,$7,$8,$9,$10,$11,$12,$13,"
+        " $14,$15) ON CONFLICT (forecast_id) DO NOTHING",
         sc["forecast_id"], sc["book"], sc["horizon"], float(sc["scored_at"]),
         sc["realized_pnl_usd"], sc["realized_positions"], sc["pit"],
         sc["inside_p10_p90"], sc["realized_positive"], sc["brier_positive"],
-        sc["abs_error_vs_p50_usd"], sc["version"])
+        sc["abs_error_vs_p50_usd"], sc["version"], sc.get("sleeve"),
+        sc.get("strategy"), sc.get("confidence_scope"))

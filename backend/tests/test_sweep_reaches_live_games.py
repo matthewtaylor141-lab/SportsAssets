@@ -74,7 +74,27 @@ class TestPlayedGamesLeaveTheCandidatePool:
         assert "IS NULL" in s[max(0, i - 400):i]
 
 
+class _PinnedDate(dt.date):
+    """dt.date whose today() is this file's TODAY."""
+
+    @classmethod
+    def today(cls):
+        return TODAY
+
+
 class TestALiveGameOutranksAFinishedOne:
+    @pytest.fixture(autouse=True)
+    def _one_clock(self, monkeypatch):
+        """ONE CLOCK FOR BOTH SIDES. TODAY is fixed at import; the key
+        reads `_dt.date.today()` when it is called. Run 37244944534
+        collected at 23:47Z and sorted after 00:00Z, so the key's today
+        was the day after the slugs' and four of these failed. The key is
+        still the real one, imported; only the date it reads is pinned to
+        the one the slugs were built from."""
+        monkeypatch.setattr(cs, "_dt", type("_PinnedClock", (), {
+            "date": _PinnedDate, "datetime": dt.datetime,
+            "timedelta": dt.timedelta, "timezone": dt.timezone}))
+
     def test_todays_game_sorts_ahead_of_an_older_one(self):
         old = (TODAY - dt.timedelta(days=1)).isoformat()
         now = TODAY.isoformat()

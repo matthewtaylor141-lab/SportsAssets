@@ -155,6 +155,13 @@ E31_GONE = ("_exit_take", "_ioc_reread", "_entry_take", "_take_band", "_short_ta
 # tables that could carry a price observation, plus its one help token) -- 139c20e220d75bd3 ->
 # 0ad40506f7460915; no existing preset moved and the take-band statements are byte for byte
 RENDER_OPS_SHA = "0ad40506f7460915"
+# R30A ci (2026-10-04): RENDER_OPS_SHA is kept as the RECORD -- it is what the squashed tree 14e65d2
+# (2026-09-19) produces -- and is no longer compared with the live file: later lanes added 39 presets,
+# an action, the FLAGS list and the runner flags, and 4c20f8c / f28ba22 moved the comments and the
+# script out, so the whole-file hash has been red since 2026-09-19 with none of the E-series presets
+# moved. What is compared is the hash of exactly those presets (tests/workflow_source.
+# e_series_presets_sha): 7cfb0a1382f001aa at 14e65d2 and at 0ebdd33 alike.
+E_SERIES_PRESETS_SHA = "7cfb0a1382f001aa"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
@@ -921,8 +928,12 @@ def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites
     # no migration (061 the newest); render-ops.yml as this lane leaves it (take-band's third statement); 059's
     # comment as lane 2 left it
     files = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
-    assert _sha_file(_render_ops_file()) == RENDER_OPS_SHA
+    # R30A ci (2026-10-04): this was `files[-1] == 064`, the GLOBALLY newest file -- red since
+    # 065 landed. The lane's property, re-expressed in tests/migration_epochs.py:
+    from tests import migration_epochs as MIG
+    MIG.assert_lane_added_no_migration("short_take_in_band", "take_band_short", "take_tolerance", "MIRROR_TAKE_BAND")
+    from tests import workflow_source as _ws
+    assert _ws.e_series_presets_sha() == E_SERIES_PRESETS_SHA  # was the whole-file RENDER_OPS_SHA; see its note
     assert _sha_file(ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql") == MIGRATION_059_SHA
     sql = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "'take_in_band' is" in sql and "reserved for the entry band" in sql

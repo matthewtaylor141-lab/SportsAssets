@@ -7,9 +7,21 @@
 # verification path that can be withdrawn mid-change is not a
 # verification path.
 #
-# This runs the identical suite on every push. It needs no database and
-# no secrets: the tests run against stub pools by design, which is also
-# why 1,800+ of them finish in ~20 seconds.
+# This runs the identical suite on every push. It needs no secrets.
+#
+# THE PRODUCTION IMAGE'S ENVIRONMENT, NOT THE INDEX'S (R30A, 2026-10-04).
+# Run 37223385978 on 0c08b0a went red with 91 failures, a third of them
+# environmental: Python 3.11.16 with `pip install -e ".[dev]"` resolving
+# anthropic 1.11.0 / pycryptodome 3.24.0 / python-dotenv 1.2.4 / uvloop 0.23.0
+# / websockets 17.2 (the image runs the lock on 3.12.3), ~25 DB proofs failing
+# "RN1X_TEST_DSN is not set", and RecursionErrors that do not reproduce on the
+# image's interpreter. A suite that is red for its own environment cannot
+# say anything about the code. So this job now stands on the same ground as
+# capital-critical.yml: Python 3.12.3, backend/requirements.lock plus the
+# gate's pinned test tools, a PostgreSQL 16 service built by production's
+# migration runner, and RN1X_TEST_DSN set. Nothing is skipped or excused here:
+# pytest's own exit status is still the step's (the capital-critical job adds
+# the quarantine-aware verdict on top).
 name: backend-tests
 on:
   push:
@@ -32,7 +44,21 @@ jobs:
     # been superseded, so the absence of a CI verdict was attributed to
     # pushing too often rather than to a cap the suite no longer fits
     # under. 10,100 tests take ~22 minutes.
-    timeout-minutes: 35
+    timeout-minutes: 50
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: backend_tests
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      PGPASSWORD: postgres
+      BT_DSN: postgresql://postgres:postgres@127.0.0.1:5432/backend_tests
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,12 +68,50 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
-      - name: Install
+          # the image's interpreter (backend/Dockerfile FROM ...3.12.3-slim@sha256)
+          python-version: "3.12.3"
+      - name: Install the image's lock and the gate's test tools
         run: |
+          set -euo pipefail
           cd backend
-          pip install --quiet -e ".[dev]"
+          python -m pip install --quiet --no-cache-dir -r requirements.lock -r requirements-test.lock
+          python -m pip check
+          python -c "from sportsassets import runtime_manifest as RM; print(RM.log_line(RM.check()))"
+      - name: Build the database with production's migration runner
+        env:
+          DATABASE_URL: ${{ env.BT_DSN }}
+        run: |
+          set -euo pipefail
+          cd backend
+          # the scratch-database proofs run as the development server's
+          # `sportsassets` role and skip without it
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE sportsassets LOGIN PASSWORD 'sportsassets' CREATEDB"
+          # THE SERVER'S OWN LOG STAYS QUIET. The suite drives thousands of
+          # deliberate refusals (CHECK violations, append-only triggers); the
+          # service container logged every one, and the runner prints that log
+          # after the last step, so the first run's (37228505615) last 5,000
+          # lines were all server noise and the test result above them could
+          # not be read through the API. Statement-level server logging only.
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'panic'" \
+            -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" \
+            -c "SELECT pg_reload_conf()"
+          # `us_premap` is the collector's table (workers/premap._ensure_table);
+          # no migration creates it and four alter it
+          python - <<'PY'
+          import asyncio
+          from sportsassets.db import get_pool, close_pool
+          from sportsassets.workers import premap
+
+          async def main():
+              pool = await get_pool()
+              await premap._ensure_table(pool)
+              await close_pool()
+
+          asyncio.run(main())
+          PY
+          python -m sportsassets.scripts.migrate
       - name: Run the suite
         # FAILING NODE IDS ARE PART OF THE RESULT (c28, 2026-10-04). The
         # previous `| tail -30` kept only the summary, so a red run could not
@@ -55,11 +119,14 @@ jobs:
         # for fd6cc5b and 8e62749 had to record CI as UNREADABLE. The full
         # console and a junit report are now an artifact, and every FAILED /
         # ERROR id is printed. pytest's own exit status is still the step's.
+        env:
+          RN1X_TEST_DSN: ${{ env.BT_DSN }}
+          RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
         run: |
           cd backend
           # the default shell is bash -e: capture the status, do not die on it
           rc=0
-          python -m pytest tests -q --tb=short -rfE \
+          python -m pytest tests -q -p no:cacheprovider --tb=short -rfE \
             --junitxml="$RUNNER_TEMP/backend-tests-junit.xml" \
             > "$RUNNER_TEMP/backend-tests-console.txt" 2>&1 || rc=$?
           tail -30 "$RUNNER_TEMP/backend-tests-console.txt"

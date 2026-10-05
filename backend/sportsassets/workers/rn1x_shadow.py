@@ -68,7 +68,7 @@ from .. import bettor_rn1x_policy as pol
 from .. import bettor_rn1x_run as runner
 from .. import bettor_rn1x_store as store
 from .. import bettor_mgmt_select as _sel
-from ..db import get_pool, heartbeat
+from ..db import get_pool, heartbeat, lease_session
 
 log = logging.getLogger(__name__)
 
@@ -3109,7 +3109,9 @@ async def run(pool_factory=None) -> None:
              "CONTROL ROW decides whether it runs -- absence is not "
              "permission.")
     pool = await get()
-    async with pool.acquire() as conn:
+    # ITS OWN SESSION, not a slot of the shared pool (db.lease_session: six
+    # lock holders held six of the API pool's ten slots in production).
+    async with lease_session(pool, name="rn1x_shadow") as conn:
         # THE LOCK IS SESSION-SCOPED, so it must be held on ONE
         # connection for the loop's whole life -- not acquired and
         # returned to the pool each cycle, which would release it.

@@ -343,6 +343,9 @@ async def test_with_the_switch_flipped_the_real_adapter_runs_and_places_it(
         await _seed(conn)
         pmus, sent = _substitute_transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
             conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
@@ -399,6 +402,9 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         # tolerance is 2%, so 20.00 is far outside)
         pmus, sent = _substitute_transport(monkeypatch, preview_cost=20.00)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
             conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
@@ -436,6 +442,9 @@ async def test_the_adapters_execution_gate_is_a_separate_boundary(monkeypatch):
         sent: list = []
         monkeypatch.setattr(pmus, "_get_client", lambda: _Client(sent))
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         # THE REAL EXCEPTION TYPE. `Denied` is what the gate raises, from
@@ -490,6 +499,9 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
     try:
         pmus, sent = _substitute_transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         # A PAUSED ACCOUNT
@@ -560,6 +572,9 @@ async def test_the_scheduled_entry_is_fitted_to_the_approved_rails_and_says_so(
     try:
         pmus, sent = _substitute_transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        # R30A: the canonical-origination boundary, stated as satisfied
+        from tests.admission_fixture import assume_canonical_funded_origination
+        assume_canonical_funded_origination(monkeypatch)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         await _clean(conn)
         await _seed(conn)

@@ -1,0 +1,38 @@
+{
+ "_what": "PinnAPI's public documentation, the excerpts pinnapi_primary.SPORTS and the full-game market selection rest on. Verbatim.",
+ "url": "https://pinnapi.com/llms-full.txt",
+ "read_by": {
+  "workflow": "fetch-docs",
+  "run_id": 37226335697,
+  "job_id": 111506643056,
+  "retrieved_at": "2026-10-04T18:56:20Z",
+  "bytes": 56250,
+  "sha256": "162705debe68ec5ec7e4779defcb3720be1dedd8bf85f731e0cda9fc7ebd394d"
+ },
+ "sport_ids_heading": "## Sport IDs\nStable integer mapping. Use these in `sport_id` query params throughout the API.",
+ "sport_ids_table": {
+  "1": "Soccer",
+  "2": "Tennis",
+  "3": "Basketball",
+  "4": "Hockey",
+  "5": "Football",
+  "6": "Baseball",
+  "7": "Rugby (Union + League)",
+  "8": "MMA (UFC, Bellator, ONE, etc.)",
+  "9": "Boxing",
+  "10": "Other (Volleyball, Handball)",
+  "11": "Esports (Dota 2, CS2, League of Legends, etc.)",
+  "12": "Golf (PGA, DP World Tour, LIV — head-to-heads)"
+ },
+ "market_types_row": "| `money_line` | `{ home, away, draw? }` | 3-way (or 2-way) match result. Decimal odds. |",
+ "periods": [
+  "`num_0` — full match",
+  "`num_1` — 1st half (or 1st set in tennis)",
+  "`num_2` — 2nd half / 2nd set",
+  "`num_3` — 3rd quarter / 3rd set",
+  "`num_4` — 4th quarter / 4th set",
+  "`num_5` — extra time"
+ ],
+ "period_0_example": "\"num_0\": {\n \"number\": 0,\n \"description\": \"Game\",\n \"money_line\": { \"home\": 2.45, \"away\": 1.55 },",
+ "coverage_sentence": "Coverage: Soccer, Tennis, Basketball, Hockey, Football, Baseball, Rugby, MMA, Boxing, an \"Other\" bucket (Volleyball, Handball), Esports, and Golf (head-to-heads / outrights)."
+}

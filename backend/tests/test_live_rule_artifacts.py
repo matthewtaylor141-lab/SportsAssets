@@ -19,6 +19,13 @@ back, so no approval record ever persists.
       the lane, Venue.place ZERO times; an owner-approved matching artifact
       admits the rule (one fake placement); a superseded approval and a stale
       verdict are refused inside the lane before any claim
+
+R30A: the book gate's approval has TWO parts (sportsassets/live_approvals.py):
+the rule artifact approved here AND the owner's approval of the gate's
+enforced configuration in `live_approvals`, matched to this build's config
+sha. Each place below that expects the rule admitted therefore also records
+that second part (inside the same rolled-back transaction) and first shows
+that the artifact approval ALONE admits nothing.
 """
 from __future__ import annotations
 
@@ -34,6 +41,7 @@ import pytest
 
 from sportsassets import actual_admission as AA
 from sportsassets import execution_intent as EI
+from sportsassets import live_approvals as LAP
 from sportsassets import live_book_currency as LBC
 from sportsassets import live_rule_artifacts as LRA
 
@@ -225,6 +233,10 @@ async def test_204_is_idempotent_and_approval_needs_a_non_agent_owner_record():
         await sp.start()
         await conn.execute(APPROVE, "APPROVED", "owner@example", now,
                            STATEMENT)
+        # R30A: the artifact approval alone admits nothing; the gate's
+        # configuration approval is the second part
+        assert await LRA.approved_live_book_rules(conn) == frozenset()
+        await AF.record_test_gate_approvals(conn, [LAP.GATE_BOOK])
         assert await LRA.approved_live_book_rules(conn) == {RID}
         # the approval record is write-once; the text still immutable
         await _expect(conn, R, "UPDATE live_rule_artifacts SET "
@@ -273,6 +285,16 @@ async def test_approved_by_artifact_with_matching_hash_is_the_only_way_in(
         assert await LRA.approved_live_book_rules(conn) == frozenset()
         await conn.execute(APPROVE, "APPROVED", "owner@example", _now(),
                            STATEMENT)
+        # R30A: artifact approved, gate configuration not yet -> nothing
+        assert await LRA.approved_live_book_rules(conn) == frozenset()
+        await AF.record_test_gate_approvals(conn, [LAP.GATE_BOOK])
+        assert await LRA.approved_live_book_rules(conn) == {RID}
+        # R30A: an ENFORCED CONSTANT CHANGED (a new config sha) -> the stored
+        # configuration approval no longer matches and admits nothing
+        monkeypatch.setattr(LBC, "MAX_RECEIPT_AGE_S",
+                            LBC.MAX_RECEIPT_AGE_S + 1.0)
+        assert await LRA.approved_live_book_rules(conn) == frozenset()
+        monkeypatch.undo()
         assert await LRA.approved_live_book_rules(conn) == {RID}
         # THE CODE'S RULE TEXT MOVED (a new hash) -> the old approval admits
         # nothing
@@ -338,10 +360,19 @@ async def _intent(conn, facts, slug, *, qty=2702, wire=0.55):
 
 
 async def _production_env(monkeypatch):
-    """The fake-venue lane with the code constant EMPTY, as in production."""
+    """The fake-venue lane with the code constants EMPTY, as in production
+    (R30A: the settlement gate's constant too)."""
     e = await _env(monkeypatch)
     monkeypatch.setattr(AA, "APPROVED_LIVE_BOOK_RULES", frozenset())
+    monkeypatch.setattr(AA, "APPROVED_SETTLEMENT_GATES", frozenset())
     return e
+
+
+async def _owner_approves(conn):
+    """Inside the test's rolled-back transaction: the rule artifact AND
+    (R30A) both live gates' configuration approvals."""
+    await conn.execute(APPROVE, "APPROVED", "owner@example", _now(), STATEMENT)
+    await AF.record_test_gate_approvals(conn)
 
 
 @pg
@@ -378,8 +409,7 @@ async def test_an_owner_approved_matching_artifact_admits_the_rule(monkeypatch):
     tx = e.conn.transaction()
     await tx.start()
     try:
-        await e.conn.execute(APPROVE, "APPROVED", "owner@example", _now(),
-                             STATEMENT)
+        await _owner_approves(e.conn)
         slug = "mlb-lra-%s" % uuid.uuid4().hex[:6]
         it = await _intent(e.conn, _live_facts(slug), slug)
         assert it["live_eligible"] is True, it["live_eligibility"]
@@ -403,8 +433,7 @@ async def test_a_superseded_approval_or_a_moved_hash_is_refused_in_the_lane(
     tx = e.conn.transaction()
     await tx.start()
     try:
-        await e.conn.execute(APPROVE, "APPROVED", "owner@example", _now(),
-                             STATEMENT)
+        await _owner_approves(e.conn)
         slug = "mlb-lra-%s" % uuid.uuid4().hex[:6]
         a = await _intent(e.conn, _live_facts(slug), slug)
         b = await _intent(e.conn, _live_facts(slug), slug)
@@ -434,8 +463,7 @@ async def test_a_stale_live_verdict_is_refused_before_any_claim(monkeypatch):
     tx = e.conn.transaction()
     await tx.start()
     try:
-        await e.conn.execute(APPROVE, "APPROVED", "owner@example", _now(),
-                             STATEMENT)
+        await _owner_approves(e.conn)
         slug = "mlb-lra-%s" % uuid.uuid4().hex[:6]
         it = await _intent(
             e.conn, _live_facts(slug, evaluated_at=time.time() - 5.0), slug)

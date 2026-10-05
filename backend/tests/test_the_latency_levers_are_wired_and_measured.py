@@ -148,7 +148,13 @@ def test_lever_b_drops_nothing():
     still iterates the full length and `MAX_PER_CYCLE` is the only bound.
     """
     assert "for _i in range(len(events)):" in CYCLE_SRC
-    assert "if evaluated >= MAX_PER_CYCLE:" in CYCLE_SRC
+    # R30A: the bound is still MAX_PER_CYCLE, now SHARED BY RESERVE across the
+    # cycle's competitions -- each may evaluate while evaluated is below
+    # MAX_PER_CYCLE less what later competitions are owed -- so whoever is
+    # iterated last is not starved when it bites. It remains the only bound.
+    assert "_eval_cap = MAX_PER_CYCLE - _eval_reserve.get(sport_key, 0)" \
+        in CYCLE_SRC
+    assert "if evaluated >= _eval_cap:" in CYCLE_SRC
     # No slicing of the event list anywhere near the sort.
     seg = CYCLE_SRC[CYCLE_SRC.index("events.sort("):
                     CYCLE_SRC.index("for _i in range(len(events)):")]

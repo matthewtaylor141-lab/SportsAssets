@@ -130,6 +130,8 @@ import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from .. import bettor_ncaaf_settlement as _NCAAF
+
 AGENT_ID = "DEREK"
 POLICY_KEY = "DEREK_ENTRY_POLICY"
 #: ── THE POLICY VERSIONS. V1 is retained for replay and comparison only. ──
@@ -215,6 +217,23 @@ R_NOT_ENTRY = "NOT_AN_ENTRY_DECISION_RECORD"
 R_IDENTITY = "FIXTURE_IDENTITY_NOT_ESTABLISHED"
 R_NOT_REAL = "REAL_EVENT_NOT_ESTABLISHED"
 R_SETTLEMENT = "SETTLEMENT_NOT_SUPPORTED"
+
+
+def strict_settlement_reasons(cand: dict) -> list:
+    """THE PRECISE CLAUSES BEHIND A STRICT SETTLEMENT REFUSAL, where the two
+    texts are cited (P0 incident, NCAAF): for a college money line, the
+    clauses of its own text that are not the cited ones, then every condition
+    the cited venue and book texts pay differently or leave unstated
+    (bettor_ncaaf_settlement.strict_policy_codes; never empty). They ride
+    BEHIND SETTLEMENT_NOT_SUPPORTED -- the category every reader keys on -- so
+    the decision names what is missing instead of a generic bucket. Every
+    other contract: [] (nothing changes). Pure."""
+    c = cand if isinstance(cand, dict) else {}
+    if not _NCAAF.is_ncaaf(c.get("sport_family"),
+                           _NCAAF.league_of_slug(c.get("us_market_slug"))):
+        return []
+    return _NCAAF.strict_policy_codes(
+        (c.get("settlement") or {}).get("venue_rules_text"))
 R_NO_PINNACLE = "NO_QUALIFIED_PINNACLE_PROBABILITY"
 R_STALE = "PROBABILITY_EVIDENCE_STALE"
 R_FRESHNESS_UNKNOWN = "PROBABILITY_EVIDENCE_FRESHNESS_UNKNOWN"
@@ -491,7 +510,11 @@ def candidate_from_rec(rec: dict, *, now: float) -> dict:
                        or fmeta.get("game_pk"),
                        "official_date": fmeta.get("official_date"),
                        "home_team": fmeta.get("home_team"),
-                       "away_team": fmeta.get("away_team")},
+                       "away_team": fmeta.get("away_team"),
+                       # the contract's own rules text, read only to name
+                       # the precise strict-settlement clauses
+                       # (strict_settlement_reasons)
+                       "venue_rules_text": scmp.get("venue_rules_text")},
         "payout_binding_ok": (None if rec.get("payout_binding") is None
                               else bool((rec.get("payout_binding") or {})
                                         .get("ok"))),
@@ -587,7 +610,8 @@ def candidate_from_row(row: dict) -> dict:
                        "fixture_read": scmp.get("fixture_read"),
                        "game_pk": scmp.get("fixture_game_pk"),
                        "official_date": None, "home_team": None,
-                       "away_team": None},
+                       "away_team": None,
+                       "venue_rules_text": scmp.get("venue_rules_text")},
         "payout_binding_ok": None,
         "admissible": bool(r.get("admissible")),
         "refusals": refusals,
@@ -1542,13 +1566,19 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
 
     # 3 · SETTLEMENT
     st = cand["settlement"]
+    precise = strict_settlement_reasons(cand)
     sev = {"compatibility": st.get("compatibility"),
            "overall_established": st.get("overall_established"),
            "unmet": st.get("unmet"),
            "lane_refusals": by_check.get(C_SETTLEMENT, [])}
+    if precise:
+        # THE CITED COMPARISON'S OWN CLAUSES (NCAAF): what the strict policy
+        # lacks, by name. A cited payout difference is never overridden by a
+        # recorded COMPATIBLE.
+        sev["precise_reasons"] = precise
     if st.get("compatibility") == "COMPATIBLE" and \
             st.get("overall_established") is True and \
-            not by_check.get(C_SETTLEMENT):
+            not by_check.get(C_SETTLEMENT) and not precise:
         checks.append(_check(C_SETTLEMENT, PASS,
                              "venue and book settlement terms compared "
                              "COMPATIBLE and every rule established",
@@ -1556,10 +1586,11 @@ def evaluate(cand: dict, *, model: dict, params: dict | None = None,
                              evidence=sev))
     elif st.get("compatibility") == "INCOMPATIBLE" or \
             by_check.get(C_SETTLEMENT) or st.get("overall_established") is \
-            False:
+            False or precise:
         checks.append(_check(C_SETTLEMENT, FAIL,
                              "settlement not supported: %s" % (
-                                 by_check.get(C_SETTLEMENT)
+                                 precise
+                                 or by_check.get(C_SETTLEMENT)
                                  or st.get("unmet")
                                  or st.get("compatibility")),
                              refusal=R_SETTLEMENT, dependency=DEP_EVIDENCE,
@@ -2066,9 +2097,14 @@ async def catalogue_row(conn, slug) -> dict | None:
     if not slug:
         return None
     try:
+        # game_start_epoch (R30A): the venue's scheduled kickoff instant, read
+        # only to check an NFL contract's date mapping (slug date == the
+        # kickoff's America/New_York day); it classifies nothing else.
         r = await conn.fetchrow(
             "SELECT market_slug, event_slug, event_title, question, "
-            "       sports_type FROM us_premap WHERE market_slug = $1 "
+            "       sports_type, "
+            "       extract(epoch FROM game_start)::float8 AS game_start_epoch"
+            "  FROM us_premap WHERE market_slug = $1 "
             " ORDER BY updated_at DESC LIMIT 1", str(slug))
         return None if r is None else dict(r)
     except Exception:                                          # noqa: BLE001

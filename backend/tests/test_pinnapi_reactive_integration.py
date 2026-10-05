@@ -217,6 +217,14 @@ async def _clean(conn, game, eid):
         await conn.execute(
             "DELETE FROM external_valuations WHERE us_market_slug=$1",
             game.us_slug)
+        # the venue event's fixed event key (migration 261, append-only):
+        # the synthetic game's venue event slug is dated, so a key fixed by
+        # one proof would otherwise be inherited by the next proof that day
+        if await conn.fetchval(
+                "SELECT to_regclass('venue_fixture_event_keys')") is not None:
+            await conn.execute(
+                "DELETE FROM venue_fixture_event_keys "
+                " WHERE venue_event_slug=$1", game.event_slug)
     await conn.execute(
         "DELETE FROM pinnapi_reactive_attempts WHERE event_id=$1", str(eid))
 
@@ -227,6 +235,28 @@ async def _counts(conn) -> dict:
         if await conn.fetchval("SELECT to_regclass($1)", t) is not None:
             out[t] = await conn.fetchval('SELECT count(*) FROM "%s"' % t)
     return out
+
+
+#: THE DISCOVERY QUOTE SITS INSIDE THE VENUE SPREAD (P0 incident, inc-edge).
+#: Each valuation now also values the OTHER side of its contract, so the
+#: discovery cycle's the-odds-api quote is decided on both sides. Its
+#: synthetic prices (2.20 / 1.72, p(home) ~ 0.436 on this module's book of
+#: bid 0.50 / offer 0.52) left the other side 4.5 pp under its offer and it
+#: entered at discovery -- correctly, by the unchanged rules -- which is not
+#: what these proofs are about: the reactive WS change. At 2.00 / 1.92
+#: (p(home) ~ 0.49) neither side of the contract clears the threshold at
+#: discovery, exactly as the priced side alone never did; every WS-path
+#: assertion below is unchanged.
+DISCOVERY_PRICES = (2.00, 1.92)
+
+
+def _inside_the_spread(ev):
+    for b in ev.get("bookmakers") or []:
+        for m in b.get("markets") or []:
+            outs = m.get("outcomes") or []
+            if len(outs) == 2:
+                outs[0]["price"], outs[1]["price"] = DISCOVERY_PRICES
+    return ev
 
 
 class Env:
@@ -256,6 +286,14 @@ async def env(monkeypatch, new_strategies_off):
                         G.PaperMarketDataClient(e.venue))
     monkeypatch.setattr(RT, "paper_pass_hook",
                         lambda **kw: {"scheduled": False})
+    # (integration) no background entry-fill read on the process-wide db
+    # pool: an ENTER through the real cycle starts `schedule_entry_fill` by
+    # default, which opened db's global pool on this test's loop and left it
+    # for a later db.close_pool to trip on ("Event loop is closed"; the k6b
+    # proof that uses this harness set it -- located with a teardown spy over
+    # the suite prefix). Stubbed exactly like the paper-pass hook above.
+    monkeypatch.setattr(PR, "schedule_entry_fill",
+                        lambda ids, **kw: {"scheduled": False})
     PD._CONTEXT_CACHE.clear()
     PB._CONTEXT_CACHE.clear()
     monkeypatch.setenv(S.ENV_FLAG, "on")
@@ -272,7 +310,8 @@ async def env(monkeypatch, new_strategies_off):
     # provider + venue at their transport boundaries (VN.substitute), with
     # this file's venue in place of its static client
     e.fetches = []
-    e.discovery = lambda now: [VN.odds_event(e.game, "rx%d" % e.eid, at=now)]
+    e.discovery = lambda now: [_inside_the_spread(
+        VN.odds_event(e.game, "rx%d" % e.eid, at=now))]
     VN.substitute(monkeypatch, slugs=[e.game.us_slug],
                   odds_by_sport={"baseball_mlb": lambda now: e.discovery(now)})
     real_fetch = loop.fetch_odds
@@ -355,6 +394,20 @@ async def _valuation(e, vid):
         "SELECT * FROM external_valuations WHERE id=$1", vid)
 
 
+async def _priced(e, vids) -> list:
+    """THE PRICED OUTCOME'S valuation ids, in order. P0 incident (inc-edge):
+    each evaluation now ALSO records the other side of the same contract --
+    the complement, 1 - p over the complete set, CALIBRATION_ONLY -- so an
+    attempt carries two valuation ids where these proofs were written for
+    one. The proofs below are about the priced side; the complement is
+    asserted where an attempt is first read
+    (test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook)."""
+    return [r["id"] for r in await e.conn.fetch(
+        "SELECT id FROM external_valuations WHERE id = ANY($1::bigint[]) "
+        "   AND NOT coalesce(payout_is_complement, false) ORDER BY id",
+        list(vids))]
+
+
 async def _decisions(e, vids) -> list:
     return [dict(r) for r in await e.conn.fetch(
         "SELECT * FROM paper_decisions WHERE session_id=$1 "
@@ -392,9 +445,16 @@ async def test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook(
     assert [r["state"] for r in rows] == ["COMPLETED"], rows
     a = rows[0]["detail"]
     assert a["result"]["state"] == "WS_PAPER_EVALUATED", a["result"]
-    vids = a["valuation_ids"]
+    vids = await _priced(e, a["valuation_ids"])
     assert len(vids) == 1, a
-    assert a["result"]["valuation_ids"] == vids
+    assert a["result"]["valuation_ids"] == a["valuation_ids"]
+    # ...and the OTHER side of the same contract, valued from the same read
+    # (P0 incident, inc-edge): one complement row beside the priced one
+    comp = [r for r in [await _valuation(e, x) for x in a["valuation_ids"]]
+            if r["payout_is_complement"]]
+    assert len(comp) == 1 and len(a["valuation_ids"]) == 2, a
+    assert comp[0]["record_purpose"] == "CALIBRATION_ONLY"
+    assert comp[0]["us_market_slug"] == e.game.us_slug
     assert (a["received_at"] <= a["queued_at"] <= a["evaluation_started_at"]
             <= a["finished_at"]), a
 
@@ -441,7 +501,7 @@ def _single_source(e):
     does by the time a WS change arrives: the PinnAPI quote's own outcome
     count is 1 and nothing else is offered as a second book."""
     def only_pinnacle(now):
-        ev = VN.odds_event(e.game, "rx%d" % e.eid, at=now)
+        ev = _inside_the_spread(VN.odds_event(e.game, "rx%d" % e.eid, at=now))
         ev["bookmakers"] = [b for b in ev["bookmakers"]
                             if b["key"] == "pinnacle"]
         return [ev]
@@ -454,7 +514,7 @@ async def test_a_fresh_single_source_pinnapi_valuation_reaches_paper_enter(env):
     _single_source(e)
     rows = await _one_reactive(e)
     assert [r["state"] for r in rows] == ["COMPLETED"], rows
-    vids = rows[0]["detail"]["valuation_ids"]
+    vids = await _priced(e, rows[0]["detail"]["valuation_ids"])
     assert len(vids) == 1, rows[0]["detail"]
     v = await _valuation(e, vids[0])
     # THE ROW STATES THE FACTS: PinnAPI, one book, the general floor unmet
@@ -538,7 +598,7 @@ async def test_a_stale_venue_book_never_enters(env):
     rows = await _one_reactive(e)
     a = rows[0]["detail"]
     assert rows[0]["state"] == "COMPLETED", rows
-    ds = _cg(await _decisions(e, a["valuation_ids"]))
+    ds = _cg(await _decisions(e, await _priced(e, a["valuation_ids"])))
     assert len(ds) == 1, ds
     assert ds[0]["verdict"] == "REFUSE"
     assert ds[0]["refusal"] == PB.R_BOOK_NOT_CURRENT, ds[0]["refusals"]
@@ -554,7 +614,7 @@ async def test_insufficient_venue_depth_never_enters(env):
     e.venue.bids = [(0.50, 0.4)]
     rows = await _one_reactive(e)
     a = rows[0]["detail"]
-    ds = _cg(await _decisions(e, a["valuation_ids"]))
+    ds = _cg(await _decisions(e, await _priced(e, a["valuation_ids"])))
     assert len(ds) == 1, ds
     assert ds[0]["verdict"] == "REFUSE"
     assert ds[0]["refusal"] == PB.R_NO_QTY, ds[0]["refusals"]
@@ -570,7 +630,7 @@ async def test_an_adverse_executable_price_never_enters(env):
     e.venue.bids = [(0.40, 400)]                  # home side now costs 0.60
     rows = await _one_reactive(e)
     a = rows[0]["detail"]
-    ds = _cg(await _decisions(e, a["valuation_ids"]))
+    ds = _cg(await _decisions(e, await _priced(e, a["valuation_ids"])))
     assert len(ds) == 1, ds
     assert ds[0]["verdict"] == "REFUSE"
     assert ds[0]["refusal"] == PB.R_EDGE, ds[0]["refusals"]
@@ -659,7 +719,7 @@ async def test_feed_epoch_changed_during_evaluation_removes_the_ws_probability(
     first = rows[0]
     assert first["state"] == "COMPLETED", rows
     assert first["detail"]["version"][0] == 1      # epoch-1 trigger
-    vids = first["detail"]["valuation_ids"]
+    vids = await _priced(e, first["detail"]["valuation_ids"])
     assert len(vids) == 1, first
     v = await _valuation(e, vids[0])
     ref = H.j(v["settlement_comparison"])["reference_input"]
@@ -711,7 +771,7 @@ async def test_identical_frames_make_one_attempt(env):
     await asyncio.sleep(0.5)
     rows = await _attempts(e)
     assert [r["state"] for r in rows] == ["COMPLETED"], rows
-    assert len(rows[0]["detail"]["valuation_ids"]) == 1
+    assert len(await _priced(e, rows[0]["detail"]["valuation_ids"])) == 1
     assert await _enters_on_contract(e) == 1
 
 
@@ -730,7 +790,7 @@ async def _burst_then_one_more(e):
     assert R.ACTIVE.counts["COALESCED"] == 2
     rows = await _wait_terminal(e)
     assert len(rows) == 1, rows
-    v = await _valuation(e, rows[0]["detail"]["valuation_ids"][0])
+    v = await _valuation(e, (await _priced(e, rows[0]["detail"]["valuation_ids"]))[0])
     ref = H.j(v["settlement_comparison"])["reference_input"]
     assert ref["raw_odds"] == {"home": -150, "away": 130}   # the newest
     assert rows[0]["detail"]["version"][2] == [["away", 130], ["home", -150]]
@@ -741,8 +801,9 @@ async def _burst_then_one_more(e):
     rows = await _wait_terminal(e, n=2)
     assert len(rows) == 2 and rows[0]["attempt_id"] != rows[1]["attempt_id"]
     assert all(r["state"] == "COMPLETED" for r in rows), rows
-    second = rows[1]["detail"]["valuation_ids"]
-    assert len(second) == 1 and second != rows[0]["detail"]["valuation_ids"]
+    second = await _priced(e, rows[1]["detail"]["valuation_ids"])
+    assert len(second) == 1 and second != await _priced(
+        e, rows[0]["detail"]["valuation_ids"])
     return rows
 
 
@@ -781,8 +842,8 @@ async def test_a_held_contract_under_the_owner_policy_records_a_named_refusal_no
     rows = await _burst_then_one_more(e)
     orders = await _entry_orders(e)
     assert len(orders) == 1, orders
-    d1 = _cg(await _decisions(e, rows[0]["detail"]["valuation_ids"]))
-    d2 = _cg(await _decisions(e, rows[1]["detail"]["valuation_ids"]))
+    d1 = _cg(await _decisions(e, await _priced(e, rows[0]["detail"]["valuation_ids"])))
+    d2 = _cg(await _decisions(e, await _priced(e, rows[1]["detail"]["valuation_ids"])))
     assert [d["verdict"] for d in d1] == ["ENTER"], d1
     assert orders[0]["decision_id"] == d1[0]["decision_id"]
     assert len(d2) == 1
@@ -823,7 +884,7 @@ async def test_a_burst_coalesces_and_a_held_contract_gets_no_second_entry_order(
     assert misses, "the decision-level read was not reached"
     orders = await _entry_orders(e)
     assert len(orders) == 1, orders
-    d2 = _cg(await _decisions(e, rows[1]["detail"]["valuation_ids"]))
+    d2 = _cg(await _decisions(e, await _priced(e, rows[1]["detail"]["valuation_ids"])))
     assert len(d2) == 1 and d2[0]["verdict"] == "ENTER", d2
     assert not [o for o in orders if o["decision_id"] == d2[0]["decision_id"]]
     f = await _finding(e, d2[0]["decision_id"])

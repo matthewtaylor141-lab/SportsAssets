@@ -49,9 +49,17 @@ def _facts(**over):
 # THE PURE RULE
 # ═════════════════════════════════════════════════════════════════════
 
+# R30A: the settlement-compatibility gate admits only under an approval of its
+# current configuration (live_approvals; production approves none). The pure
+# cases below state it as approved so each one still tests its own facts; the
+# gate's own refusal is the last test of this section.
+GATES = frozenset({AA.SETTLEMENT_GATE_ID})
+
+
 def test_complete_facts_under_an_approved_live_rule_are_admissible():
     got = AA.evaluate(_facts(), slug=SLUG, order_intent="ORDER_INTENT_BUY_LONG",
-                      approved_book_rules={AF.TEST_RULE})
+                      approved_book_rules={AF.TEST_RULE},
+                      approved_settlement_gates=GATES)
     assert got["verdict"] == AA.LIVE_ADMISSIBLE, got["refusals"]
     assert len(got["requirements"]) == 11 and len(got["runtime_requirements"]) == 6
 
@@ -103,9 +111,25 @@ NEGATIVES = [
 
 @pytest.mark.parametrize("name,over,code", NEGATIVES, ids=[n for n, _, _ in NEGATIVES])
 def test_every_missing_requirement_fails_closed(name, over, code):
-    got = AA.evaluate(_facts(**over), slug=SLUG, approved_book_rules={AF.TEST_RULE})
+    got = AA.evaluate(_facts(**over), slug=SLUG, approved_book_rules={AF.TEST_RULE},
+                      approved_settlement_gates=GATES)
     assert got["verdict"] == AA.NOT_ADMISSIBLE
     assert code in got["refusals"], (name, got["refusals"])
+
+
+def test_compatible_settlement_without_the_gate_approval_is_refused():
+    """R30A: COMPATIBLE settlement facts admit only while the settlement gate's
+    configuration is approved; production's constant is empty."""
+    assert AA.APPROVED_SETTLEMENT_GATES == frozenset()
+    for approved in (None, frozenset(), frozenset({"SOME_OTHER_GATE"})):
+        got = AA.evaluate(_facts(), slug=SLUG, approved_book_rules={AF.TEST_RULE},
+                          approved_settlement_gates=approved)
+        assert got["verdict"] == AA.NOT_ADMISSIBLE
+        assert got["refusals"] == [AA.R_SETTLEMENT], got["refusals"]
+        req = [r for r in got["requirements"]
+               if r["requirement"] == "settlement_live_admissible"]
+        assert req and req[0]["gate_approved"] is False
+        assert req[0]["why"] == "SETTLEMENT_GATE_APPROVAL_ABSENT_OR_STALE"
 
 
 def test_facts_bound_to_another_contract_are_refused():
@@ -152,6 +176,9 @@ class _Env:
 async def _env(monkeypatch, *, cap=25, fingerprint_of=KID):
     conn = await asyncpg.connect(H.DSN)
     AF.approve_test_rule(monkeypatch)
+    # R30A: the canonical SMALL LIVE authorization, stated as an assumption
+    # (refused without it: tests/test_live_parity_convergence.py)
+    AF.assume_canonical_live_authorization(monkeypatch)
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     e = _Env()

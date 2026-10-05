@@ -82,6 +82,19 @@ def _wire(monkeypatch, acct, transport):
     monkeypatch.setitem(PR._CLIENT, "client", PL.client(transport))
     monkeypatch.setattr(RT, "paper_pass_hook",
                         lambda **kw: {"scheduled": False})
+    # (integration) NO BACKGROUND ENTRY-FILL READ FROM THIS PROOF. The cycle's
+    # paper hook calls decide_valuation with no injected schedule_fill, which
+    # in production starts `schedule_entry_fill` -- a background task on the
+    # process-wide db pool. On the release candidate this cycle reaches an
+    # ENTER with an order (one entry-fill read is scheduled; measured), so
+    # the task opened the global pool on
+    # this test's event loop and left it behind; the next test to call
+    # db.close_pool (test_eddie_scout_api_pages_slack) then failed with
+    # "Event loop is closed" (CI runs 37262090186 / 37262958942, reproduced
+    # locally by running the suite prefix). The fill read is not what this
+    # proof is about; it is stubbed exactly like the paper-pass hook above.
+    monkeypatch.setattr(PR, "schedule_entry_fill",
+                        lambda ids, **kw: {"scheduled": False})
     PD._CONTEXT_CACHE.clear()
     PB._CONTEXT_CACHE.clear()
 

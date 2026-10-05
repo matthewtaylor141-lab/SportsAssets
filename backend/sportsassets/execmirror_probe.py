@@ -149,10 +149,15 @@ class _Reader:
     __slots__ = ("_c",)
 
     def __init__(self, key_id: str, secret_key: str):
+        # THE SDK'S OWN RETRIES OFF (R30A): this was `max_retries=1`, a
+        # hidden second GET after the SDK's own sleep on every 429 / 5xx /
+        # timeout, on the same credential the execution mirror trades with,
+        # against venue_sdk's decision that ours is the only retry.
         from polymarket_us import PolymarketUS
+        from . import venue_sdk
         object.__setattr__(self, "_c", PolymarketUS(
             key_id=key_id, secret_key=secret_key, timeout=TIMEOUT_S,
-            max_retries=1))
+            **venue_sdk.client_kwargs()))
 
     def balances(self):
         return self._c.account.balances()

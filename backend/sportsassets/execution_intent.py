@@ -39,6 +39,21 @@ THE ACTUAL LANE keeps every gate and adds no serialization:
 
 Every step stamps a high-resolution timeline (UTC epoch nanoseconds plus a
 monotonic perf_counter_ns) on the intent for the latency report.
+
+R30A CONVERGENCE (audit P0 #2): THE ACTUAL LANE ORIGINATES NOTHING OUTSIDE A
+CANONICAL INTENT. paper_benchmark.decide_one now builds the canonical decision
+intent BEFORE this hook runs and names it on the payload
+(evidence.canonical_intent = {intent_id, content_sha}); `create` records the
+name. Immediately before its claim (step 4b) the lane calls
+live_parity.authorize_live_exposure: the canonical intent must exist, verify,
+be the one named, carry the SAME order (slug, intent, side, strategy and
+version, order form, wire, limit, quantity -- an order re-priced from another
+book is another decision), be unexpired, pass the LIVE policy and the live
+gates, and come with the canonical SMALL LIVE adapter's authorization, which
+SHADOW never issues. The authorization (when one ever exists) is handed to
+execmirror.Venue.place, which refuses any new order without it. The book
+currency and settlement gates stay, and their approvals are versioned and
+hash-matched (live_rule_artifacts + live_approvals).
 """
 from __future__ import annotations
 
@@ -54,8 +69,10 @@ from . import actual_admission as AA
 from . import decision_hooks
 from . import execmirror as M
 from . import execmirror_probe as EP
+from . import live_approvals as LAP
 from . import live_book_currency as LBC
 from . import live_book_evidence as LBE
+from . import live_parity as LP
 from . import live_rule_artifacts as LRA
 from . import p5_c12_proof as C12P
 from . import venue_pace
@@ -145,10 +162,18 @@ async def create(conn, *, decision_id: str, valuation_id, strategy: str,
     # whose stored sha256 is this code's (live_rule_artifacts; any failure
     # -> the constant alone).
     approved_rules = await LRA.approved_live_book_rules(conn)
+    # R30A: the settlement-compatibility gate admits only under an owner
+    # approval of its CURRENT configuration (live_approvals; none -> refused)
+    approved_settle = await LAP.approved_settlement_gates(conn)
     adm = AA.evaluate((evidence or {}).get("admission_facts"), slug=slug,
                       order_intent=order_intent,
-                      approved_book_rules=approved_rules)
-    why = dict(why, strategy_approved=approved, admission=adm)
+                      approved_book_rules=approved_rules,
+                      approved_settlement_gates=approved_settle)
+    why = dict(why, strategy_approved=approved, admission=adm,
+               # R30A: the canonical decision intent this execution intent
+               # executes (the ACTUAL lane re-verifies it before its claim;
+               # none -> it can never submit)
+               canonical_intent=(evidence or {}).get("canonical_intent"))
     eligible = approved and adm["verdict"] == AA.LIVE_ADMISSIBLE
     if not approved:
         state, refusal = A_PAPER_ONLY, M.STRATEGY_NOT_LIVE_ELIGIBLE
@@ -272,10 +297,12 @@ class ActualLane:
         # the approved live book rules, re-read NOW (an approval withdrawn or
         # a code hash that moved since the intent was written never admits)
         approved_rules = await LRA.approved_live_book_rules(conn)
+        approved_settle = await LAP.approved_settlement_gates(conn)
         adm = AA.evaluate(ev.get("admission_facts"),
                           slug=it["us_market_slug"],
                           order_intent=it["order_intent"],
-                          approved_book_rules=approved_rules)
+                          approved_book_rules=approved_rules,
+                          approved_settlement_gates=approved_settle)
         if adm["verdict"] != AA.LIVE_ADMISSIBLE:
             return await self._refuse(conn, it, adm["refusal"], t,
                                       admission_refusals=adm["refusals"],
@@ -334,7 +361,8 @@ class ActualLane:
                             slug=it["us_market_slug"],
                             order_intent=it["order_intent"],
                             live_qty=size["live_qty"],
-                            approved_book_rules=approved_rules)
+                            approved_book_rules=approved_rules,
+                            approved_settlement_gates=approved_settle)
         if adm_q["verdict"] != AA.LIVE_ADMISSIBLE:
             return await self._refuse(conn, it, adm_q["refusal"], t,
                                       admission_refusals=adm_q["refusals"],
@@ -346,6 +374,34 @@ class ActualLane:
         if plan.state != "PLANNED":
             return await self._refuse(conn, it, plan.exclusion, t,
                                       **{k: str(v) for k, v in plan.detail.items()})
+        # 4b · R30A CONVERGENCE: NO ORIGINATION OUTSIDE A CANONICAL INTENT.
+        # Before anything is claimed: the canonical decision intent of THIS
+        # decision must exist, verify, be the one this execution intent
+        # names, carry the same order (an ACTUAL order re-priced from another
+        # book is a different decision and is refused), be unexpired, pass
+        # the LIVE policy and the live gates, and come with the canonical
+        # SMALL LIVE adapter's authorization -- which is never issued in
+        # SHADOW. So in this release the ACTUAL lane refuses here, every
+        # time, and Venue.place (which refuses without that authorization)
+        # is never reached.
+        _mark(t, "canonical_check_start")
+        canon = await LP.authorize_live_exposure(
+            conn, decision_id=it["decision_id"],
+            named=ev.get("canonical_intent") or {},
+            order={"us_market_slug": it["us_market_slug"],
+                   "order_intent": it["order_intent"],
+                   "holding_side": it["holding_side"],
+                   "strategy": it["strategy"],
+                   "strategy_version": it["policy_version"],
+                   "time_in_force": it["time_in_force"],
+                   "order_type": it["order_type"],
+                   "wire_price": it["wire_price"],
+                   "limit_price": it["limit_price"],
+                   "target_qty": it["paper_target_qty"]},
+            now=now)
+        if not canon.get("ok"):
+            return await self._refuse(conn, it, canon["refusal"], t,
+                                      canonical=canon.get("detail"))
         # 5 · THE CLAIM: at most one actual submission per intent
         mid = "ei:" + intent_id
         claimed = await conn.fetchval(
@@ -377,19 +433,41 @@ class ActualLane:
         # 6 · SUBMIT NOW (priority lane of the venue gate in this process)
         _mark(t, "submit_start")
         t0 = time.perf_counter_ns()
+        # the canonical authorization travels to the venue adapter, which
+        # refuses any new order without one (execmirror.Venue.place)
+        auth_kw = ({"canonical_live_authorization": canon["token"]}
+                   if canon.get("token") is not None else {})
         try:
             with venue_pace.priority_claims():
-                resp = await asyncio.to_thread(self.mirror.venue().place, plan.params)
+                resp = await asyncio.to_thread(self.mirror.venue().place,
+                                               plan.params, **auth_kw)
         except Exception as exc:                              # noqa: BLE001
             state = M._classify(exc)            # REJECTED, or UNKNOWN to reconcile
             _mark(t, "submit_error")
-            await conn.execute(
+            err = {"error": type(exc).__name__,
+                   "status": getattr(exc, "status_code", None),
+                   "detail": EP._error(exc)["detail"]}
+            # FENCED ON THE CLAIM (R30A chaos review): a lane that outlived
+            # its SUBMITTING lease finds recovery has taken the row over and
+            # must not overwrite what recovery established from the venue;
+            # its answer is recorded (and acted on only where it is evidence
+            # the row lacks) by execmirror.late_submit_answer
+            wrote = await conn.fetchval(
                 """UPDATE execmirror_orders SET state = $2, error = $3::jsonb,
-                     latency_ms = $4, updated_at = now() WHERE mirror_id = $1""",
-                mid, state, _j({"error": type(exc).__name__,
-                                "status": getattr(exc, "status_code", None),
-                                "detail": EP._error(exc)["detail"]}),
+                     latency_ms = $4, updated_at = now()
+                   WHERE mirror_id = $1 AND state = 'SUBMITTING'
+                   RETURNING mirror_id""",
+                mid, state, _j(err),
                 (time.perf_counter_ns() - t0) // 1_000_000)
+            if not wrote:
+                got = await M.late_submit_answer(conn, mid, vid=None,
+                                                 classified=state, error=err,
+                                                 now=self.mirror._now())
+                await M._event(conn, "ACTUAL_SUBMIT_" + state, mirror_id=mid,
+                               intent_id=intent_id, error=EP._error(exc),
+                               late=got)
+                await self._late_timeline(conn, intent_id, t, got)
+                return {"state": "LATE_" + state, "late": got}
             await self._finish(conn, intent_id, t,
                                A_REJECTED if state == "REJECTED" else A_UNKNOWN,
                                refusal=("VENUE_REJECTED" if state == "REJECTED"
@@ -400,12 +478,25 @@ class ActualLane:
         _mark(t, "ack")
         vid = (resp or {}).get("id")
         lat_ms = (time.perf_counter_ns() - t0) // 1_000_000
-        await conn.execute(
+        wrote = await conn.fetchval(
             """UPDATE execmirror_orders SET state = $2, venue_order_id = $3,
                  accepted_at = now(), latency_ms = $4, updated_at = now(),
-                 detail = detail || $5::jsonb WHERE mirror_id = $1""",
+                 detail = detail || $5::jsonb
+               WHERE mirror_id = $1 AND state = 'SUBMITTING'
+               RETURNING mirror_id""",
             mid, "OPEN" if vid else "UNKNOWN", vid, lat_ms,
             _j({"submit_executions": len((resp or {}).get("executions") or [])}))
+        if not wrote:
+            got = await M.late_submit_answer(
+                conn, mid, vid=vid, classified="OPEN" if vid else "UNKNOWN",
+                error=None, now=self.mirror._now())
+            if got == "RECORDED_LATE_ACKNOWLEDGEMENT":
+                await self.mirror._refresh(conn, {"mirror_id": mid,
+                                                  "venue_order_id": vid})
+                await self.mirror.live_handoffs(conn)
+            await self._late_timeline(conn, intent_id, t, got)
+            return {"state": "LATE_" + ("ACK" if vid else "UNKNOWN"),
+                    "late": got, "venue_order_id": vid, "mirror_id": mid}
         await M._event(conn, "ACTUAL_ACCEPTED" if vid else "SUBMISSION_AMBIGUOUS",
                        mirror_id=mid, intent_id=intent_id, venue_order_id=vid,
                        latency_ms=lat_ms)
@@ -429,10 +520,24 @@ class ActualLane:
                 "venue_order_id": vid, "mirror_id": mid}
 
     async def _finish(self, conn, intent_id, t, state, refusal=None) -> None:
+        """The lane's own outcome onto its intent -- only while the intent
+        still says the lane's submission is in flight (SUBMITTING): an intent
+        recovery has already decided from venue evidence is never rewritten
+        by the lane (R30A chaos review: the lease fence, on the intent)."""
         await conn.execute(
             """UPDATE execution_intents SET actual_state = $2, actual_refusal = $3,
                  timeline = timeline || $4::jsonb, updated_at = now()
-               WHERE intent_id = $1""", intent_id, state, refusal, _j(t))
+               WHERE intent_id = $1 AND actual_state = $5""",
+            intent_id, state, refusal, _j(t), A_SUBMITTING)
+
+    async def _late_timeline(self, conn, intent_id, t, outcome) -> None:
+        """A late answer's latency marks still reach the intent's timeline
+        (evidence only: the intent's state is the venue evidence's, set by
+        execmirror.late_submit_answer / recovery, never the late lane's)."""
+        await conn.execute(
+            """UPDATE execution_intents SET timeline = timeline || $2::jsonb,
+                 updated_at = now() WHERE intent_id = $1""",
+            intent_id, _j(dict(t, late_answer=outcome)))
 
     async def _buying_power(self, conn) -> tuple[Any, float | None]:
         """The retail account's buying power: the runner's live figure when it
@@ -501,6 +606,10 @@ def start(get_pool, mirror) -> "ActualLane":
     # the decision's one resident stream observation: the actual lane's
     # facts are priced from it when it is current (P5 C12)
     decision_hooks.LIVE_BOOK_STREAM = LBE.observe
+    # R30 LIVE PARITY: the canonical decision / management intents and the
+    # two execution adapters (SMALL LIVE is SHADOW) with their parity ledger
+    from . import live_parity
+    live_parity.install(get_pool, process="api")
     return LANE
 
 
@@ -510,3 +619,5 @@ def stop() -> None:
     decision_hooks.DECISION_HOOK = None
     decision_hooks.LIVE_BOOK_EVIDENCE = None
     decision_hooks.LIVE_BOOK_STREAM = None
+    from . import live_parity
+    live_parity.uninstall()

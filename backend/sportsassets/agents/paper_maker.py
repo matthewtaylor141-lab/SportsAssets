@@ -60,6 +60,7 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 from . import paper_benchmark as PB
 from . import paper_derek as PD
@@ -164,7 +165,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     min_edge_pp = max(float(params["values"]["min_gross_edge_pp"]),
                       PB.CG_MIN_EDGE_PP_V2)
     min_edge = min_edge_pp / 100.0
-    match = PB.completed_game_match(cand, row)
+    match = PB.completed_game_match(cand, row, catalogue=cat)
     refusals.extend(match["refusals"])
     real = DP._realism(cand, cat)
     if real["status"] == DP.FAIL:
@@ -175,6 +176,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                real_event=real, displayed_quote_used_as_price=False)
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
+    # R30A: an NFL line's P(win | no tie) is valued as the venue contract
+    # (tie pays 0.50) at the worst cited tie rate, before any edge or EV.
+    conv_refusal = PB.apply_venue_conversion(pin, match)
+    if conv_refusal and conv_refusal not in refusals:
+        refusals.append(conv_refusal)
     cross = await PB.cross_strategy_exposure(
         conn, account_id=ctx["account_id"], strategy=STRATEGY,
         slug=cand.get("us_market_slug"), fixture=cand.get("fixture"))
@@ -196,6 +202,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     p = pin.get("p")
     obs, md, levels, price = None, None, [], {}
     qty, econ, book_age, queue = 0, None, None, None
+    gross_inputs: dict | None = None
     if not refusals:
         bk = await PB.book_for(conn, ctx, cand["us_market_slug"],
                                basis=STRATEGY)
@@ -221,6 +228,27 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         elif book_age > PB.BOOK_MAX_AGE_S:
             refusals.append(PB.R_BOOK_NOT_CURRENT)
         else:
+            # THE INPUTS OF p - L, VALIDATED FIRST (P0 incident; review of
+            # 7bd084b: the maker judged its edge on inputs nothing checked).
+            # The resting price is derived from the best ask of the side a
+            # BUY consumes, so the same receipt applies: p is the held
+            # side's, the ask is that side's best tradable level, the fee
+            # evaluates, the Pinnacle and book ages are inside their
+            # unchanged rules. A failed input refuses by name (SOFTWARE) and
+            # no resting price is searched; no threshold moves.
+            gross_inputs = GEI.validate(
+                p=p, side=side, row=row, levels=levels,
+                consumed_side=lv["side"], md=md,
+                fee_per_contract=(lambda px: PB.fee_per_contract(
+                    fee_fn, px, at)),
+                pin=pin, decided_at=at, edge_at=float(clock()),
+                book_observed_at=obs.get("observed_at"),
+                book_max_age_s=PB.BOOK_MAX_AGE_S,
+                threshold_edge_pp=min_edge_pp)
+        if gross_inputs is not None and not gross_inputs["ok"]:
+            refusals.extend(r for r in gross_inputs["refusals"]
+                            if r not in refusals)
+        elif gross_inputs is not None:
             price = resting_price(
                 levels, p=p, min_edge=min_edge,
                 fee_pc=lambda px: PB.fee_per_contract(fee_fn, px, at))
@@ -293,6 +321,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "expiry_s": MAKER_TTL_S, "cancel_conditions": CANCEL_CONDITIONS,
         "fill_rule": SIM.ASSUMPTIONS["resting"],
         "book_age_s": book_age, "book_max_age_s": PB.BOOK_MAX_AGE_S,
+        "gross_edge_inputs": gross_inputs,
         "book_currency": PB.BOOK_CURRENCY,
         "exceptional_terms": match.get("exceptional_terms"),
         "label": PB.ECONOMICS_LABEL, "refusals": refusals,
@@ -309,8 +338,15 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     book_age is not None and book_age <= PB.BOOK_MAX_AGE_S),
          "value": book_age, "threshold": PB.BOOK_MAX_AGE_S,
          "units": "seconds"},
+        {"condition": "gross_edge_inputs_validated",
+         "passed": (None if gross_inputs is None
+                    else bool(gross_inputs["ok"])),
+         "refusals": ([] if gross_inputs is None
+                      else list(gross_inputs["refusals"])),
+         "version": GEI.VERSION},
         {"condition": "edge_at_least_min_gross_edge_pp_at_the_resting_price",
-         "passed": None if not levels else price.get("limit") is not None,
+         "passed": (None if not levels or not (gross_inputs or {}).get("ok")
+                    else price.get("limit") is not None),
          "value": price.get("gross_edge_pp"), "threshold": min_edge_pp,
          "units": "percentage points"},
         {"condition": "positive_ev_after_fees_if_filled",
@@ -327,6 +363,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "economics_label": PB.ECONOMICS_LABEL, "p_pinnacle": p,
         "conditions": conditions, "gross_edge_pp": price.get(
             "gross_edge_pp"), "best_ask_gross_edge_pp": best_gross,
+        "gross_edge_inputs": GEI.summary(gross_inputs),
         "net_expected_profit_usd": (econ or {}).get(
             "expected_net_profit_if_filled_usd"),
         "fees_usd": (econ or {}).get("fees_if_filled_usd"),
@@ -391,6 +428,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision).
+    PD.enter_recorded(ctx, did)
     # ── THE RESTING ORDER (persisted at once; not a fill) ─────────────
     lim = float(price["limit"])
     wire = lim if side == "LONG" else round(1.0 - lim, 6)
@@ -484,7 +523,10 @@ async def step_maintain(conn, ctx: dict) -> dict:
         contract = None
         if r["valuation_id"] is not None:
             contract = await conn.fetchrow(
-                "SELECT buy_intent, payout_event, payout_is_complement "
+                "SELECT buy_intent, payout_event, payout_is_complement, "
+                "       sport_family, us_market_slug, raw_odds, "
+                "       settlement_comparison->>'venue_rules_text' "
+                "         AS venue_rules_text "
                 "  FROM external_valuations WHERE id=$1",
                 int(r["valuation_id"]))
         v = None
@@ -499,9 +541,24 @@ async def step_maintain(conn, ctx: dict) -> dict:
                 bool(contract["payout_is_complement"]))
         age = (None if v is None or v["observed_at"] is None
                else round(at - L._epoch(v["observed_at"]), 3))
+        p_new = None if v is None else float(v["probability"])
+        conv = (PB.held_venue_conversion(dict(contract))
+                if p_new is not None and contract is not None else None)
+        if conv is not None:
+            # R30A: the standing bid is re-checked on the SAME scale it was
+            # placed on -- an NFL line's P(win | no tie) as the venue
+            # contract's value (tie pays 0.50) at the worst cited tie rate,
+            # for a game established as regular season; an NCAAF line's (P0
+            # incident) unchanged, its contract's cited clauses re-checked. A
+            # conversion that cannot be made leaves no probability, and
+            # check_resting then cancels on the missing reading
+            # (C_UNVERIFIED).
+            pin_like = {"p": p_new}
+            why = PB.apply_venue_conversion(pin_like, conv)
+            p_new = None if why else pin_like["p"]
         chk = check_resting(
             limit=float(r["limit_price"]),
-            p_new=None if v is None else float(v["probability"]),
+            p_new=p_new,
             reading_age_s=age, min_edge=min_edge,
             fee_pc=lambda px: PB.fee_per_contract(fee_fn, px, at),
             enabled=bool(en.get("enabled")))

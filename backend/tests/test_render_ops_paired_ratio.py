@@ -27,6 +27,12 @@ from tests import test_render_ops_hourly as hourly
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
+
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
 SETTLED = "b.state = 'closed' AND b.settled_pnl IS NOT NULL"
 WINDOW = ("FROM mirror_books b WHERE b.whale = 'rn1' AND (b.opened_at >= now() - interval '24 hours'"
           " OR b.closed_at >= now() - interval '24 hours')")
@@ -131,7 +137,7 @@ def test_the_since_arms_are_the_bare_presets_with_the_clock_on_every_books_windo
 
 
 def test_the_help_line_lists_the_patterns_in_case_order_and_the_paired_day_collapse_is_untouched():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     assert line.rstrip().endswith("patterns: book=<id>, paired-day=<YYYY-MM-DDTHH:MM[:SS]Z>,"
                                   " paired-ratio=<YYYY-MM-DDTHH:MM[:SS]Z>, tennis-witness=<YYYY-MM-DD>[:<surname>,<surname>...]\"; exit 1 ;;")

@@ -267,7 +267,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                  training=True)
     refusals: list = []
     # ── THE SAFEGUARDS (never relaxed) ──────────────────────────────
-    match = PB.completed_game_match(cand, row)
+    match = PB.completed_game_match(cand, row, catalogue=cat)
     refusals.extend(match["refusals"])
     real = DP._realism(cand, cat)
     if real["status"] == DP.FAIL:
@@ -278,6 +278,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                real_event=real, displayed_quote_used_as_price=False)
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
+    # R30A: an NFL line's P(win | no tie) is valued as the venue contract
+    # (tie pays 0.50) at the worst cited tie rate, before any edge or EV.
+    conv_refusal = PB.apply_venue_conversion(pin, match)
+    if conv_refusal and conv_refusal not in refusals:
+        refusals.append(conv_refusal)
     cross = await PB.cross_strategy_exposure(
         conn, account_id=ctx["account_id"], strategy=STRATEGY,
         slug=cand.get("us_market_slug"), fixture=cand.get("fixture"))
@@ -488,6 +493,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: its paper order is owed (PD.bounded_decision).
+    PD.enter_recorded(ctx, did)
     # ── ONE DECISION -> ONE EXECUTION INTENT: PAPER ONLY ───────────────
     # Exploration is training: the executing process's hook records the
     # intent with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE); the

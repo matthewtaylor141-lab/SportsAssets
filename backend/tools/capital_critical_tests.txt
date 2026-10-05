@@ -502,6 +502,18 @@ tests/test_pinnapi_reactive_integration.py
 # unknown/un-promoted versions never reach the live adapter.
 tests/test_execmirror.py
 tests/test_execmirror_probe.py
+tests/test_live_parity.py
+tests/test_live_parity_through_the_paper_pass.py
+# (R30A) ONE ORIGIN OF LIVE EXPOSURE: the canonical SMALL LIVE adapter's
+# authorization is never issued in SHADOW; the production venue adapter, the
+# ACTUAL sibling and the funded acquisition path each refuse new exposure
+# outside a canonical intent (expired, mismatched, unnamed, policy or gate
+# unapproved) before any claim, write or client call.
+tests/test_live_parity_convergence.py
+# (R30A) OWNER LIVE APPROVALS: a live gate's enforced configuration and a
+# LIVE policy are admitted only by a named human's hash-matched approval;
+# a changed constant invalidates it; nothing in the application writes one.
+tests/test_live_approvals.py
 # Small Live · Paper vs Actual management view (/api/command/small-live): decision -> paper -> mirror -> venue fill rows, exclusion reasons, filters, null-not-zero, KALSHI NOT_CONNECTED, command read guard.
 tests/test_small_live_view.py
 # Kalshi venue adapter (credential-free, fail-closed): RSA-PSS signing on a
@@ -706,6 +718,34 @@ tests/test_xavier_freshness_scorecard.py
 # claimed only where both documents agree, and the real cycle on the 14-game
 # 2026-10-04 slate ending every game in a recorded, named outcome.
 tests/test_nfl_slate_reaches_a_recorded_outcome.py
+# R30A NFL P0: the integration repaired, not allowlisted. Cited book and
+# venue settlement terms compared as PAYOUTS per state (regulation / OT win,
+# tie after OT, postponement and suspension as exceptional, Pro Bowl
+# excluded); the book's P(win | no tie) converted to the venue's $0.50-tie
+# value at the worst end of a cited Clopper-Pearson tie-rate interval; the
+# NFL alone admitted to the de-vig (college football unchanged); the PinnAPI
+# full-game two-way line (sport 5, period 0) with a draw-priced line refused;
+# hot NFL fixtures as a tier of the existing reactive scheduler (30 s
+# unchanged); and the REAL paper pass: ENTER with a canonical intent and a
+# SHADOW adapter row, below-edge at the worst tie rate, stale probability,
+# settlement mismatch, tie settled at 0.5, London / Sunday-night dating and
+# the Pro Bowl excluded.
+tests/test_nfl_settlement_and_tie_evidence.py
+tests/test_nfl_through_the_paper_pass.py
+# P0 incident, NCAAF settlement: the college money line compared as PAYOUTS
+# per state from CITED texts (the venue's cfb wording, one wording on every
+# production row; Pinnacle's American Football + General Rules; the college
+# overtime rule, secondary source stated); the venue text read clause by
+# clause (each missing / varied / contradicted / extra clause its own
+# refusal); the book's two-way price used unchanged only while every premise
+# holds (a completed college game cannot end tied); the college board
+# admitted to the de-vig by its own measurement; the strict policy's
+# refusal naming each payout difference; and the REAL paper pass: ENTER ->
+# PAPER order -> simulated PAPER fill with a canonical intent and a SHADOW
+# adapter row, each unproven clause refused, withdrawn evidence refused,
+# the 30 s rule unchanged, Xavier on the entry's reading.
+tests/test_ncaaf_settlement_evidence.py
+tests/test_ncaaf_through_the_paper_pass.py
 # cand24 B: one status per league (HEALTHY / REFUSING_BY_POLICY /
 # EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT / UNAVAILABLE), an Audrey alert
 # for every coverage incident (NULL is not absence), the per-game NFL
@@ -825,3 +865,202 @@ tests/test_command_release_authority.py
 # append-only tables; bundles differ per agent and never widen the
 # registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
+# (R30A ci) THE EXACT-SHA CAPITAL-CRITICAL VERDICT: tools/ci_verdict.py rejects
+# every unquarantined failure or error, malformed / expired / stale quarantine
+# entries, any critical test that fails, errors, skips, xfails or is
+# quarantined, and an empty run; capital-critical.yml runs the whole suite on
+# the exact pushed SHA in the image's 3.12.3 + lock + Postgres 16 environment.
+tests/test_ci_verdict.py
+# (R30A, migration 227) EVERY PRODUCTION-CONFIDENCE NUMBER IS INVESTMENT-ONLY:
+# a TRAINING (or BENCHMARK, or UNCLASSIFIED) win or loss cannot move a
+# north-star metric, forecast, horizon forecast, production capacity rate,
+# INVESTMENT profit line, twin ladder input, scorecard sample or the
+# Opportunity Score's calibration; production capacity uses the strategy's
+# executable book freshness (the entry rule's bound), the 300 s research
+# number stays labelled research; 227 refuses unscoped rows and a TRAINING
+# row labelled PRODUCTION_CONFIDENCE; its rollback refuses while scoped rows
+# exist.
+tests/test_investment_only_confidence.py
+# (R30A) THE CONFIDENCE LADDER (GET /api/command/confidence-ladder): levels
+# 0..6 exactly as the owner's audit names them, never a skipped level;
+# level 2 from validation's forward event-clustered checks plus power from
+# the observed variance (no invented sample count); level 3 is live_parity's
+# gate; levels 4-6 NOT_REACHED while SMALL LIVE is SHADOW; a TRAINING win or
+# loss moves no INVESTMENT level; GET-only, READ ONLY, no write.
+tests/test_confidence_ladder.py
+# (R30A) THE UNIQUE OPPORTUNITY FUNNEL (GET /api/command/opportunity-funnel):
+# blockers ranked by unique opportunities (fixture / market / side / line /
+# period), repeated decision rows counted as re-evaluations; executable EV
+# only at the strategy's own book freshness and a fresh probability, else
+# UNAVAILABLE with its reason; proven over decisions the real completed-game
+# paper pass recorded; GET-only, READ ONLY, no write.
+tests/test_opportunity_funnel.py
+# R30A RUNTIME: the API pool starvation root cause. Six single-writer loops
+# held six of the API pool's ten slots in production (research-sql run
+# 37226381750); each now holds its lock on a session of its own
+# (db.lease_session), ext_pinnacle and the execution mirror re-prove the lock
+# before every pass (db.advisory_held) and contend again on a dead session,
+# and the reactive scheduler takes ONE connection per job (no orphaned
+# STARTED attempt, a job without a connection refused before it starts).
+tests/test_r30a_pool_starvation_root_cause.py
+# R30A RUNTIME DEFECTS: the research tick names its failing step (and
+# records it in loop health); every INSERT of a heartbeat-shaped
+# ingestion_state key serialises with a default and never slices serialised
+# JSON; service_heartbeats has one writer (db.py); the gamma paginator stops
+# at the offset the API serves (the recurring 422) and names a truncation.
+tests/test_r30a_runtime_defects.py
+# R30A EVENT-LOOP STALLS: the API loop was held 2-4 s at a time in the
+# minutes of every timeout class (the loop watchdog, render-ops run
+# 37231102537). The feed cache finds an event's quotes through a per-event
+# index (replayed frame by frame against the scanning implementation), the
+# held refresh builds one feed view per pass, the census matches off-loop.
+tests/test_r30a_loop_stalls.py
+# R30A WORKER RELIABILITY: every recurring loop inventoried with its lease;
+# every capital-critical loop holds a lock or is a child fenced by the
+# writer's backend pid (a fenced-out servicing pass / reactive job does
+# nothing); UNHEALTHY when no success within 3 x cadence or a critical armed
+# loop's lock is held by no backend; migration 229; GET /api/command/
+# loop-health is GET-only, command-authenticated and READ ONLY.
+tests/test_r30a_loop_health.py
+# R30A SLOs: GET /api/command/slo -- eight SLOs, each target / measured /
+# window / OK | BREACH | UNAVAILABLE(reason), on production-shaped rows; no
+# cutover / no table / no SHA is UNAVAILABLE, never a manufactured zero;
+# targets pinned to the system's own bounds.
+tests/test_r30a_runtime_slo.py
+# R30A CHAOS / RECOVERY (program section 28): the one venue state machine
+# (execution_intent.ActualLane + execmirror.Mirror) driven through its fake
+# venue with faults at the transport and the database. A timeout after send
+# stays UNKNOWN, is never re-sent, and is decided only by venue evidence --
+# the open orders, then the account's own trade log (an IOC that traded is
+# recovered and booked, never written off as REJECTED); an unreadable log or
+# an unattributable own trade keeps it UNKNOWN. Duplicate / stale order-record
+# reads never book a fill twice and never move cum backwards; a lane killed
+# mid-submit is decided after its lease with no second submission (also for
+# two racing lanes); a DB failure after the venue accepted is recovered,
+# booked and handed to Xavier; a partial fill during a working cancel is
+# counted and the cancel is not forgotten; a restart resolves every UNKNOWN.
+# Review round: the trade log is served in the venue's own page shapes and
+# read by the REAL execmirror.Venue.own_trades (an empty body, a None, eof
+# "false", an unfinished page or a row naming no market / type / time keeps
+# a filled IOC UNKNOWN, never REJECTED), and it refuses exactly the pages the
+# funded lane's strict reader refuses; a lane that outlives its lease never
+# overwrites recovery (its late answer is an event, a late acknowledgement
+# records the order a premature NOT_FOUND wrote off, a late ambiguous end
+# reopens it); absence is not concluded while a send can still be on the
+# wire; same-shape attempts are paired earliest first and wait on a live
+# same-shape claim; a permanently lower venue read is recorded once, leaves
+# the poll queue and is reconciled; an adopted order carries the venue's own
+# instant, not the reconciliation time.
+tests/test_chaos_the_venue_state_machine_recovers.py
+# R30A SDK RETRIES / 429 / AMBIGUOUS POST (program section 21), counted on
+# the wire under the installed venue SDK through an httpx.MockTransport: the
+# SDK never retries a POST even at its default; every client built from an
+# order credential (pmus, execmirror.Venue, the execmirror probe reader) has
+# the SDK's retries off, so a 429 is one dispatch and a named RateLimitError;
+# a 429 at the execution mirror trips venue_pace's shared circuit;
+# pmus.submit_fok makes exactly one create whatever the venue answers and
+# raises it by name (a post-only 429 refusal carries status_code 429 and
+# error_type RateLimitError); a 429 on submit_fok's preview or create (IOC and
+# post-only) and on close_position trips the shared circuit at the adapter's
+# transport (venue_request_gate.PacedTransport), for every funded / copy /
+# desk caller, and a non-429 failure does not; no
+# order adapter loops around its send; no module builds the SDK with retries
+# on (order modules found by AST, the reference form included, with a
+# mutation check); Kalshi's session has no retry adapter.
+tests/test_order_posts_are_sent_once_and_429s_are_named.py
+# R30A CHAOS: a provider that goes silent and a settlement that arrives late.
+# The real PinnAPI owner loses its socket (authority revoked, quotes
+# unreadable); the feed runtime's real heartbeat writer publishes it and the
+# agents' work-state reader blocks Xavier on market data (never IDLE, never
+# REVIEWING on a dead feed); the completed-game policy refuses to ENTER on the
+# silent provider's last price (PROBABILITY_EVIDENCE_STALE, no order, no
+# intent) and enters once a fresh reading lands; a stale review waits and
+# enqueues reacquisition with no sale. A delayed settlement: the real writer
+# (join_outcomes over read_resolution over the real SDK client) records the
+# attempt and no outcome, the real reader books nothing and the position
+# stays open and owned; on arrival it is booked once through the ledger.
+tests/test_chaos_provider_disconnect_and_delayed_settlement.py
+# R30A PRODUCTION-SHAPED CONTRACTS (program section 22): the production
+# writer persists, the production reader reads the persisted row (jsonb as
+# asyncpg returns it, Decimals, timestamptz) -- no hand-built reader input.
+# K1 paper decision -> canonical intent -> both adapters -> parity ledger ->
+# the readiness gate after a recorded cutover; K2 Xavier's review -> a
+# management intent consumed by exactly both adapters, verified from its row
+# by canonical_intent.verify_management_intent and the intent route; K3 paper order / fill /
+# settlement -> ledger positions -> INVESTMENT profitability validation; K4
+# the actual lane's order record (incl. one recovered from the trade log) ->
+# Audrey's reconciliation and the management views; K5 agent_work_requests ->
+# the floor workspace queue and the identity work state; K6 PinnAPI ingest ->
+# the collector's valuation record -> the completed-game sole authority
+# (nothing once authority is revoked or past 30 s); K6b a WS frame -> the real
+# reactive collector cycle persists the PinnAPI valuation -> the real
+# completed-game decision on that row (ENTER fresh; refused past 30 s and
+# after authority revocation); K7 the entry-evidence route returns the
+# collector's jsonb as objects.
+tests/test_contract_writers_round_trip_to_their_readers.py
+# R30A P0 INCIDENT, inc-catalogue (migration 249): the venue catalogue holds
+# the full tradable board -- every page (a venue page-size cap is detected, a
+# shifting board is caught by the overlap, an exhausted budget is TRUNCATED by
+# name), every market of every event, live and pregame with the venue's own
+# state, futures on both sides of the sweep window, no side key collapsed --
+# every request behind venue_pace, one append-only receipt per refresh; the
+# boards carry every token and fixture; the desk names its truncation.
+# Second pass: the calendar lane runs outside the sweep lock and in slices,
+# never re-admits a finished game, keeps futures only while their event runs;
+# one bad listing or a refusing database still ends in a reconciled receipt;
+# every request (failed probe rungs, detail reads) is receipted; the desk is
+# PageWalk-paged, paced and backs off after a 429 or a refused partial.
+tests/test_venue_catalogue_is_complete.py
+tests/test_venue_catalogue_readers_and_receipts.py
+# (248) THE COLLECTOR'S COVERAGE SCHEDULER AND RECEIPTS (P0 incident
+# 2026-10-04): the four metered calls a cycle are scheduled earliest deadline
+# first instead of truncated (NCAAF served every cycle of a Saturday slate
+# beside MLB, the NFL and soccer; no competition waits past its stated bound;
+# never more calls or credits than declared), and every cycle's receipts are
+# appended to collector_coverage_receipts and read by coverage_integrity.
+tests/test_collector_coverage_scheduler.py
+tests/test_collector_coverage_receipts.py
+# R30A P0 INCIDENT (inc-pinnapi): the six-sport PinnAPI scope inside the
+# provider's documented limits, the feed clock that never guesses an age (the
+# 30 s rule unchanged), in-play children pricing their fixture; PinnAPI-native
+# discovery with a named receipt per fixture and one fixed event key per venue
+# fixture (migration 261); line markets priced only where both sides' cited
+# words prove the payoff equivalent, half-point and exact line only, de-vigged
+# on their own pair, and entered only by the completed-game paper policy.
+tests/test_r30a_pinnapi_scope_clock_inplay.py
+tests/test_r30a_pinnapi_native_discovery.py
+tests/test_r30a_line_market_family.py
+# (251) P0 INCIDENT inc-edge: the OTHER side of each binary venue contract is
+# valued from the same de-vig as 1 - p (complete outcome set), sealed
+# CALIBRATION_ONLY (never admissible, no executable price), kept by the
+# side-aware uniqueness key, decided by the real paper pass under the
+# unchanged 0.5 pp / fee rules, and measured by Xavier on 1 - p.
+tests/test_the_other_side_of_the_contract_is_valued.py
+# (251) P0 INCIDENT inc-edge: one valuation per observation per side without
+# the NULL collapse (the de-vig records the quote's source instant on a
+# pre-aging refusal); the gross edge's inputs validated per decision
+# (orientation recomputed from the row's own prices, the BUY side of the book
+# on the adapter's cent grid, a declared venue conversion re-derived, fee,
+# Pinnacle age at the decision instant, book bound) for CG, Derek V2 and the
+# maker -- a failing input is a SOFTWARE refusal, never BELOW_MIN_GROSS_EDGE;
+# thresholds unchanged; the source-instant label is stored on the row.
+tests/test_gross_edge_inputs_are_validated.py
+# P0 INCIDENT inc-edge: a quote the provider delivered inside 30 s and our own
+# queue made stale can be refreshed on demand -- OFF by default (no extra
+# metered credit until the owner sets the bound); the 30 s rule, its clock
+# and its instant unchanged; provider-stale quotes never refreshed.
+tests/test_quote_stale_on_arrival_is_not_self_inflicted.py
+# P0 INCIDENT inc-edge (router): the per-agent funnel receipt over the real
+# writers' records, every code SOFTWARE / ECONOMIC by the one taxonomy
+# (unknown = UNCLASSIFIED, never economic); GET /api/command/agent-funnel is
+# read-only; NO_PINNACLE_ON_EVENT recorded by cause.
+tests/test_agent_funnel_receipt.py
+tests/test_refusal_taxonomy.py
+# P0 INCIDENT inc-sim / router (merged): the paper simulator fills on the first
+# READABLE book in the order's window and expires only at expires_at; a
+# recorded ENTER always gets its PAPER order or a named ENTER_WITHOUT_ORDER; a
+# failed collector venue read still reaches the agents as a no-price record.
+tests/test_paper_simulator_skips_unreadable_books.py
+tests/test_r30a_entry_fill_window.py
+tests/test_a_recorded_enter_always_gets_its_order.py
+tests/test_a_failed_venue_read_still_reaches_the_agents.py

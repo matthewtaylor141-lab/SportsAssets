@@ -933,19 +933,68 @@ async def _record_paper_thesis(conn, ctx, group_id) -> dict:
     return await record_thesis(conn, t)
 
 
+async def paper_reallocation(conn, ctx: dict, *, group_id: str, pos: dict,
+                             trigger: str, at: float, measure: dict,
+                             exit_levels: list) -> dict:
+    """XAVIER'S REALLOCATE COMPARISON FOR ONE PAPER POSITION, computed ONCE
+    per review, BEFORE the canonical management intent is built (R30A
+    section 8: the intent records every alternative, REALLOCATE included),
+    and handed to paper_review_hook so the assessment records the very same
+    comparison. The thesis is read (and, on the first fill, written) here
+    exactly as the assessment always did. Never raises: a failure is the
+    alternative's UNAVAILABLE reason.
+    {reallocate, thesis, liquidation_usd, walk, hours}."""
+    from . import paper_xavier as PX
+    try:
+        thesis = await thesis_for(conn, K_PAPER, group_id)
+        if thesis is None and trigger == T_FIRST:
+            await record_paper_thesis(conn, ctx, group_id)
+            thesis = await thesis_for(conn, K_PAPER, group_id)
+        q = float(pos["open_qty"])
+        w = PX._exit_walk(exit_levels or [], q, ctx.get("fee_fn"), at)
+        sold = float(w["sold"])
+        liq = round(w["proceeds_usd"] - w["fees_usd"], 6) if sold > 0 else None
+        fresh = measure.get("evidence_state") == E_FRESH
+        hours = horizon_h(at=at, event_start_at=(thesis or {}).get(
+            "event_start_at"))
+        best = None
+        if fresh:
+            # the markets this account HOLDS now (net open, not settled)
+            held = {r["us_market_slug"] for r in await conn.fetch(
+                "SELECT f.us_market_slug FROM paper_fills f WHERE "
+                " f.account_id=$1 AND NOT EXISTS (SELECT 1 FROM "
+                " paper_settlements s WHERE s.account_id=f.account_id AND "
+                " s.us_market_slug=f.us_market_slug) GROUP BY "
+                " f.us_market_slug HAVING sum(CASE WHEN f.direction='BUY' "
+                " THEN f.qty ELSE -f.qty END) > 0", ctx["account_id"])}
+            best = await best_opportunity(conn, at=at, exclude_slugs=held)
+        re = reallocation(evidence_state=measure.get("evidence_state"), qty=q,
+                          p=measure.get("p") if fresh else None,
+                          liquidation_usd=liq, hours=hours, best=best)
+        return {"reallocate": re, "thesis": thesis, "liquidation_usd": liq,
+                "walk": w, "hours": hours}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"reallocate": None, "thesis": None, "liquidation_usd": None,
+                "walk": None, "hours": None,
+                "why": "REALLOCATE_COMPARISON_FAILED:%s" % type(exc).__name__}
+
+
 async def paper_review_hook(conn, ctx: dict, *, group_id: str, pos: dict,
                             review_id: str, trigger: str, at: float,
                             measure: dict, alts: dict, recommendation,
                             exit_levels: list, policy: dict,
-                            due_at=None) -> dict:
+                            due_at=None, precomputed: dict | None = None
+                            ) -> dict:
     """THE ASSESSMENT OF ONE PAPER REVIEW. Never raises; changes nothing
-    the review decided."""
+    the review decided. `precomputed` is paper_reallocation's result when
+    the review already compared REALLOCATE (the canonical intent's set): the
+    assessment then records that same comparison instead of a second one."""
     try:
         return await _paper_review_hook(
             conn, ctx, group_id=group_id, pos=pos, review_id=review_id,
             trigger=trigger, at=at, measure=measure, alts=alts,
             recommendation=recommendation, exit_levels=exit_levels,
-            policy=policy, due_at=due_at)
+            policy=policy, due_at=due_at, precomputed=precomputed)
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "why": "ASSESSMENT_FAILED:%s"
                 % type(exc).__name__, "detail": str(exc)[:200]}
@@ -953,12 +1002,17 @@ async def paper_review_hook(conn, ctx: dict, *, group_id: str, pos: dict,
 
 async def _paper_review_hook(conn, ctx, *, group_id, pos, review_id, trigger,
                              at, measure, alts, recommendation, exit_levels,
-                             policy, due_at) -> dict:
+                             policy, due_at, precomputed=None) -> dict:
     from . import paper_xavier as PX
-    thesis = await thesis_for(conn, K_PAPER, group_id)
-    if thesis is None and trigger == T_FIRST:
-        await record_paper_thesis(conn, ctx, group_id)
+    pre = precomputed if (precomputed or {}).get("reallocate") is not None \
+        else None
+    if pre is not None:
+        thesis = pre.get("thesis")
+    else:
         thesis = await thesis_for(conn, K_PAPER, group_id)
+        if thesis is None and trigger == T_FIRST:
+            await record_paper_thesis(conn, ctx, group_id)
+            thesis = await thesis_for(conn, K_PAPER, group_id)
     backstop = float(ctx["config"]["cadence"].get("xavier_backstop_s", 60.0))
     if trigger == T_FIRST and due_at is None:
         due_at = await conn.fetchval(
@@ -991,22 +1045,25 @@ async def _paper_review_hook(conn, ctx, *, group_id, pos, review_id, trigger,
                  "worst_price")},
              "liquidation_value_usd": liq, "marks": marks}
     fresh = measure.get("evidence_state") == E_FRESH
-    hours = horizon_h(at=at, event_start_at=(thesis or {}).get(
-        "event_start_at"))
-    best = None
-    if fresh:
-        # the markets this account HOLDS now (net open, not settled)
-        held = {r["us_market_slug"] for r in await conn.fetch(
-            "SELECT f.us_market_slug FROM paper_fills f WHERE "
-            " f.account_id=$1 AND NOT EXISTS (SELECT 1 FROM "
-            " paper_settlements s WHERE s.account_id=f.account_id AND "
-            " s.us_market_slug=f.us_market_slug) GROUP BY f.us_market_slug "
-            " HAVING sum(CASE WHEN f.direction='BUY' THEN f.qty "
-            "                 ELSE -f.qty END) > 0", ctx["account_id"])}
-        best = await best_opportunity(conn, at=at, exclude_slugs=held)
-    re = reallocation(evidence_state=measure.get("evidence_state"), qty=q,
-                      p=measure.get("p") if fresh else None,
-                      liquidation_usd=liq, hours=hours, best=best)
+    if pre is not None:
+        re = pre["reallocate"]
+    else:
+        hours = horizon_h(at=at, event_start_at=(thesis or {}).get(
+            "event_start_at"))
+        best = None
+        if fresh:
+            # the markets this account HOLDS now (net open, not settled)
+            held = {r["us_market_slug"] for r in await conn.fetch(
+                "SELECT f.us_market_slug FROM paper_fills f WHERE "
+                " f.account_id=$1 AND NOT EXISTS (SELECT 1 FROM "
+                " paper_settlements s WHERE s.account_id=f.account_id AND "
+                " s.us_market_slug=f.us_market_slug) GROUP BY "
+                " f.us_market_slug HAVING sum(CASE WHEN f.direction='BUY' "
+                " THEN f.qty ELSE -f.qty END) > 0", ctx["account_id"])}
+            best = await best_opportunity(conn, at=at, exclude_slugs=held)
+        re = reallocation(evidence_state=measure.get("evidence_state"),
+                          qty=q, p=measure.get("p") if fresh else None,
+                          liquidation_usd=liq, hours=hours, best=best)
     th = classify_thesis(thesis, evidence=measure, at=at)
     a = assessment(kind=K_PAPER, group_id=group_id, review_id=review_id,
                    thesis=thesis, at=at, lat=lat, evidence=measure,

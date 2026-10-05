@@ -1,0 +1,19 @@
+# THE TEST-ONLY TOOLS, PINNED TO THE GATE ENVIRONMENT (R30A ci, 2026-10-04).
+#
+# requirements.lock is the runtime closure the image installs. The suite also
+# needs pyproject's dev tools, and `pip install -e ".[dev]"` resolves those
+# (and, through them, the runtime set) to whatever the index has that minute
+# -- which is how backend-tests ran anthropic 1.11.0, pycryptodome 3.24.0,
+# python-dotenv 1.2.4, uvloop 0.23.0 and websockets 17.2 on Python 3.11.16
+# while the image ran the lock on 3.12.3 (CI 37223385978,
+# test_this_environment_is_the_locked_one). These are the exact versions the
+# gate environment (/tmp/claude-0/gatevenv312, Python 3.12.3) holds beside the
+# lock, read with `pip freeze`. CI installs `-r requirements.lock -r
+# requirements-test.lock` together and runs `pip check`, so nothing here may
+# move a locked runtime version.
+grpcio-tools==1.84.0
+pglast==8.4
+pytest-asyncio==1.4.0
+pytest-timeout==2.4.0
+ruff==0.16.9
+setuptools==84.0.0

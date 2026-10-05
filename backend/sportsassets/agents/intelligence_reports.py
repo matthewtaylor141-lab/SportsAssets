@@ -10,7 +10,27 @@ LIMIT = 500
 # Generic REFUSED is NOT enough: calibration-only rows can still reach Derek.
 PRE_VALUATION_CODES = {'NO_PINNACLE_ON_EVENT','QUOTE_STALE_ON_ARRIVAL',
                        'NO_VENUE_NATIVE_CONTRACT_IN_PREMAP','WS_REFERENCE_NOT_USABLE',
-                       'WS_TRIGGER_SUPERSEDED'}
+                       'WS_TRIGGER_SUPERSEDED',
+                       # NO_PINNACLE_ON_EVENT by cause (P0 incident): the WS
+                       # refusal reason or the discovery payload's absence
+                       # now leads such an event; it stops at the same point.
+                       'THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK',
+                       'THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET',
+                       'PINNAPI_PRIMARY_CLOCK_INVALID',
+                       'PINNAPI_PRIMARY_RUNTIME_UNIDENTIFIED',
+                       'PINNAPI_PRIMARY_SPORT_UNSUPPORTED',
+                       'PINNAPI_PRIMARY_FIXTURE_UNPROVED',
+                       'PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS',
+                       'PINNAPI_PRIMARY_NO_EXACT_FIXTURE',
+                       'PINNAPI_PRIMARY_NOT_FULL_GAME_H2H',
+                       'PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES',
+                       'PINNAPI_PRIMARY_PHASE_UNPROVED',
+                       'FEED_OWNERSHIP_NOT_HELD', 'FEED_EPOCH_NOT_RESYNCHRONIZED',
+                       'FEED_MARKET_NOT_IN_CURRENT_STATE',
+                       'FEED_QUOTE_FROM_A_PREVIOUS_CONNECTION',
+                       'FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE',
+                       'FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE',
+                       'FEED_QUOTE_OLDER_THAN_LIMIT', 'FEED_MARKET_CLOSED'}
 
 # Global ingestion evidence: deliberately not presented as account decisions.
 OPPORTUNITIES_SQL = """SELECT id,cycle_id,cycle_at,sport_key,family,provider_event_id,

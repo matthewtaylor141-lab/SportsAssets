@@ -66,8 +66,24 @@ class TestTheTrimIsPeriodic:
         assert "create_task(_trim_loop())" in src
 
     def test_it_is_cancelled_on_shutdown(self):
+        """RE-EXPRESSED AT R30A (2026-10-04). This pinned the literal
+        `trim_task.cancel()`. 6c9a9fb (2026-09-23, the autonomy audit patch)
+        rewrote shutdown so every background task is collected into ONE
+        list, cancelled in a loop and AWAITED before the pool closes -- the
+        desk's advisory lock has to be released first. The trim task is in
+        that list; the literal call no longer exists, so the pin failed on
+        every run since (CI 37223385978). The property -- the trim loop is
+        cancelled on shutdown, and now also awaited -- is asserted on the
+        shutdown block itself."""
         src = inspect.getsource(app_mod.lifespan)
-        assert "trim_task.cancel()" in src
+        shutdown = src[src.rindex("finally:"):]
+        listed = shutdown[shutdown.index("tasks = [t for t in ("):
+                          shutdown.index("if t is not None]")]
+        assert "trim_task" in listed
+        assert "for task in tasks:\n            task.cancel()" in shutdown
+        assert shutdown.index("task.cancel()") < shutdown.index(
+            "await asyncio.gather(*tasks, return_exceptions=True)") \
+            < shutdown.index("await close_pool()")
 
     def test_a_failed_trim_does_not_kill_the_loop(self):
         src = inspect.getsource(app_mod.lifespan)

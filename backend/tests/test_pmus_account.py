@@ -41,10 +41,23 @@ def _sell(slug, ts_iso, qty="10", price="0.62", rp="1.80", nested=True):
     return {"type": "ACTIVITY_TYPE_TRADE", "trade": t}
 
 
-def test_a_position_we_sold_is_settled_on_the_day_of_the_sale():
+def test_a_position_we_sold_is_settled_on_the_day_of_the_sale(monkeypatch):
     """Owner report 2026-09-02: sells did not show on the ledger and the
     P&L was wrong. Only resolution activities were read as settlements;
-    a position closed by the exit path never resolves."""
+    a position closed by the exit path never resolves.
+
+    THE CLOCK IS THE SALE'S DAY (R30A ci, 2026-10-04). `_daily` is the
+    owner's ROLLING seven days, measured from `time.time()`. The sales here
+    are dated 2026-09-02, so the assertion on `system_daily` held only while
+    the wall clock was within a week of that date: from 2026-09-09 the row
+    fell out of the window and the test failed (CI 37223385978) with the
+    normalizer unchanged. The fact that changed is today's date, not the
+    behaviour, so the clock is fixed an hour after the sale; the window
+    itself is pinned by test_the_display_epoch_floors_the_card."""
+    import time as _t
+    from datetime import datetime, timezone
+    sale_day = datetime(2026, 9, 2, 14, 0, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(_t, "time", lambda: sale_day)
     balances = {"balances": [{"currentBalance": {"value": "100"}, "assetNotional": {"value": "0"}}]}
     positions = {"aec-x-y": {"netPosition": "0", "realized": {"value": "1.80"},
                              "cost": {"value": "5.0"}, "cashValue": {"value": "0"},

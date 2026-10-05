@@ -482,10 +482,20 @@ def test_only_the_global_catalogues_own_misses_are_offered_to_it():
     assert may(["NO_VENUE_CONTRACT_FOR_EVENT"])
     assert may(["VENUE_MAPPING_AMBIGUOUS"])
     assert may(["VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
-    # a CLOSED or SEGMENT finding beside it means the fixture WAS found
-    assert not may(["VENUE_MARKET_CLOSED_OR_RESOLVED",
-                    "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
-    assert not may(["VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME"])
+    # UPDATED, R30A P0 incident (normalization/identity root cause RC6, merged
+    # from the inc-discovery stream): this test pinned that a CLOSED or
+    # SEGMENT finding in the GLOBAL catalogue means "the fixture WAS found".
+    # The production receipt measured that it does not: the global catalogue
+    # is matched on names alone and is date-blind, so its segment or closed
+    # row was an inning market, a half, or YESTERDAY's series game -- 5 events
+    # in 72 h (MLB, Serie B, UNL) and ~21 h of one MLB playoff game's coverage
+    # were lost to it. The venue-native resolver re-applies its own FULL_MATCH
+    # period rule, realism and re-seen window, so those refusals are now
+    # offered to the venue's own catalogue (ext_pinnacle_loop.
+    # VENUE_NATIVE_MAY_REPLACE, whose comment carries the evidence).
+    assert may(["VENUE_MARKET_CLOSED_OR_RESOLVED",
+                "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"])
+    assert may(["VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME"])
     assert not may(["TEAM_NAMES_COLLIDE_AFTER_NORMALISATION"])
     assert not may([])
     # NO PROVIDER PRICE CAN NEVER BE REPAIRED BY A CATALOGUE
@@ -745,6 +755,19 @@ def substitute(monkeypatch, *, slugs, odds_by_sport, received_at=None,
     monkeypatch.setattr(loop, "fetch_sport_catalogue", fake_catalogue)
     monkeypatch.setattr(loop, "fetch_odds", fake_odds)
     monkeypatch.setattr(loop, "fetch_scores", fake_scores)
+
+    # R30A · THE COVERAGE SCHEDULER SKIPS A COMPETITION WITH NO VENUE EVENT IN
+    # THE NEXT 24 H, and the captures these tests replay are dated 2026-09-29
+    # (MLB `aec-mlb-cws-hou-2026-09-29`) while the cycle runs on the real
+    # clock -- so the venue's own catalogue correctly shows them as past, and
+    # MLB would no longer be fetched. Before R30A MLB was fetched every cycle
+    # whatever its board said (240 cycles in 7 days with no event in 24 h).
+    # The subject here is identity, not scheduling, so the horizon is stated
+    # UNREAD, exactly as on a failed read: the competition stays in demand.
+    async def _horizon_unread(conn):
+        return {"read": False, "by_token": {}, "source": "substituted",
+                "error": "SUBSTITUTED_BY_THE_TEST"}
+    monkeypatch.setattr(loop, "venue_horizon", _horizon_unread)
     monkeypatch.setattr(loop, "_fetch_schedule_blocking",
                         lambda d: {"ok": True, "url": "substituted",
                                    "payload": {"dates": []}})
@@ -1001,8 +1024,13 @@ async def test_no_pinnacle_is_never_repaired_by_the_venue_catalogue(monkeypatch)
         monkeypatch.setattr(V, "resolve_venue_native", spy)
         out = await loop.cycle(conn)
         row = _ev(out, "np")
-        assert row["codes"] == ["NO_PINNACLE_ON_EVENT"]
-        assert row["first_refusal"] == "NO_PINNACLE_ON_EVENT"
+        # P0 INCIDENT (attribution): the generic NO_PINNACLE_ON_EVENT is now
+        # recorded BY CAUSE -- the PinnAPI refusal (no feed owner here), then
+        # the discovery payload's absence -- and still nothing else: the
+        # venue catalogue is never asked (below).
+        assert row["codes"] == ["FEED_OWNERSHIP_NOT_HELD",
+                                loop.R_PAYLOAD_HAS_NO_PINNACLE]
+        assert row["first_refusal"] == "FEED_OWNERSHIP_NOT_HELD"
         assert row["mapped_by"] is None and row["us_market_slug"] is None
         assert row["provider_lag_s"] is None
         assert calls == []
@@ -1113,10 +1141,13 @@ async def test_none_of_the_captures_21_no_pinnacle_events_is_repaired(
                 if str(r["provider_event_id"]).startswith(PREFIX + "nopin-")]
         assert len(rows) == 21
         for r in rows:
-            assert r["codes"] == ["NO_PINNACLE_ON_EVENT"], r
+            # (P0 incident) by cause, not the generic NO_PINNACLE_ON_EVENT
+            assert r["codes"] == ["FEED_OWNERSHIP_NOT_HELD",
+                                  loop.R_PAYLOAD_HAS_NO_PINNACLE], r
             assert r["mapped_by"] is None and r["us_market_slug"] is None
         assert calls == []
-        assert out["refusals"]["NO_PINNACLE_ON_EVENT"] == 21
+        assert out["refusals"][loop.R_PAYLOAD_HAS_NO_PINNACLE] == 21
+        assert "NO_PINNACLE_ON_EVENT" not in out["refusals"]
         for k in keys:
             fn = out["funnel_by_provider_sport"][k]
             assert fn["mapping_confirmation"]["ok"] is True, fn

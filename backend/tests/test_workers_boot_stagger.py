@@ -147,7 +147,7 @@ def _fake_main(monkeypatch, loops):
     so a main() that stopped passing boot_delay records 'not passed',
     not a coincidental 0.0."""
     handed: list = []
-    booted = {"n": 0}
+    booted = {"n": 0, "bound": 0}
 
     async def _supervise(name, factory, *, boot_delay="not passed"):
         handed.append((name, factory, boot_delay))
@@ -155,6 +155,24 @@ def _fake_main(monkeypatch, loops):
     async def _record_boot():
         booted["n"] += 1
 
+    # THE GATE BINDING IS RECORDED, NOT RUN AGAINST A DATABASE (R30A ci,
+    # 2026-10-04). main() awaits _bind_execution_gate() -> execution_gate.
+    # bind_current_loop() -> db.get_pool(), whose connect retries sleep
+    # 1, 2, 4, 8, 15 ... seconds through asyncio.sleep -- the very function
+    # _record_sleeps patches. Whenever no database "sportsassets" answered,
+    # those retries landed in the timeline ("main() itself sleeps nowhere"
+    # failed) or, unrecorded, spent ~105 s of real time; the test passed
+    # only when an earlier test in the session had left a pool in
+    # db._pool. It failed alone and in release gate f40. What main() is
+    # pinned to do with the gate -- bind it once, before any loop -- is
+    # asserted on the recorder; binding itself is test_execution_gate's.
+    async def _bind():
+        booted["bound"] += 1
+        assert not handed, "the gate is bound before any loop is handed out"
+        return True
+
+    from sportsassets import execution_gate as _gate
+    monkeypatch.setattr(_gate, "bind_current_loop", _bind)
     monkeypatch.setattr(all_mod, "LOOPS", loops)
     monkeypatch.setattr(all_mod, "supervise", _supervise)
     monkeypatch.setattr(all_mod, "_record_boot", _record_boot)
@@ -181,7 +199,7 @@ def test_main_hands_each_loop_its_index_times_the_stagger_in_loops_order(monkeyp
 
     assert all_mod.BOOT_STAGGER_S == 0.75
     assert handed == [("first", first, 0.0), ("second", second, 0.75), ("third", third, 1.5)]
-    assert booted["n"] == 1
+    assert booted["n"] == 1 and booted["bound"] == 1
     assert timeline == [], "main() itself sleeps nowhere; the boot marker is not delayed"
 
 

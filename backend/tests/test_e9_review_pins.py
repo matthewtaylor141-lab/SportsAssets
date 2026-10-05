@@ -58,12 +58,26 @@ GTC_TIF = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 YML = _render_ops_file()
 
 
-async def _spin(until, n=2000):
-    """Yield to the loop until `until()` holds (the fakes never sleep)."""
+async def _spin(until, n=2000, seconds=10.0):
+    """Yield to the loop until `until()` holds.
+
+    "The fakes never sleep" is true of the fakes, not of the tick: its venue
+    reads go through `asyncio.to_thread` (`_paced`, the positions walk), so
+    reaching step O waits on a REAL thread. 2,000 bare yields take a few
+    milliseconds; on a loaded host the thread had not been scheduled by then
+    and the fold tests failed "the full tick is inside step O" about one run
+    in three (R30A ci, 2026-10-04, six streams on four cores) with no change
+    in the code under test. The yields come first, as before; then the wait
+    continues on the clock, bounded, and the condition must still hold."""
     for _ in range(n):
         if until():
             return True
         await asyncio.sleep(0)
+    deadline = asyncio.get_running_loop().time() + seconds
+    while asyncio.get_running_loop().time() < deadline:
+        if until():
+            return True
+        await asyncio.sleep(0.001)
     return until()
 
 
@@ -527,7 +541,23 @@ def test_review_q6_a_wake_past_the_gap_runs_the_fast_tick_first_and_the_full_tic
     The fold: the full tick WAITS on the fast tick's hold, the fast tick
     answers the market (its placement), and the full tick then reads it
     woken first with the rest standing -- one placement. One loop,
-    cooperative; no thread, no call_soon_threadsafe."""
+    cooperative; no thread, no call_soon_threadsafe.
+
+    THE WORLD STARTS WITH NO WAKE PENDING (R30A ci, 2026-10-04). The test
+    before this one (q5_the_wake_never_raises...) ends with a real wake --
+    `_WAKE` set, `_WOKEN` and `_FAST_WOKEN` holding the market -- and nothing
+    clears them, because only a full tick does (tick_once clears all three).
+    Inherited, `wait_for(_WAKE.wait())` returns before `notify` is called, so
+    main resumes before the fast run has popped the market and the first
+    assertion fails. It passed in CI on 3.11 (run 37223385978) and fails in
+    file order on 3.12.3, the production interpreter, while passing alone --
+    consistent with 3.12's `wait_for` no longer running the wait in an inner
+    task (it uses `asyncio.timeout`), which removed the scheduling hop that
+    hid the leak. The clean slate is what a full tick leaves, which is
+    the state this scenario begins from."""
+    ml._WAKE.clear()
+    ml._WOKEN.clear()
+    ml._FAST_WOKEN.clear()
     ran = []
     orig = ml.fast_tick_once
 

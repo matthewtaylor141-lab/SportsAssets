@@ -459,8 +459,13 @@ def test_e11_the_only_priority_claimant_is_the_mirrors_tick_by_ast_and_the_shado
                        # actual entry lane's single venue submission
                        ("execution_intent.py", "_run")}
     ei = (PKG / "execution_intent.py").read_text()
+    # R30A (convergence): the place call now also hands the venue adapter the
+    # canonical authorization (`**auth_kw`, execmirror.Venue.place refuses a
+    # new order without it), so the call spans a line; the pinned fact -- the
+    # single submission sits inside the priority claim -- is unchanged
     assert ei.index("with venue_pace.priority_claims():") < ei.index(
-        "resp = await asyncio.to_thread(self.mirror.venue().place, plan.params)")
+        "resp = await asyncio.to_thread(self.mirror.venue().place,") < ei.index(
+        "plan.params, **auth_kw)")
     react = (PKG / "pinnapi_reactive.py").read_text()
     assert react.index("with venue_pace.priority_claims():") < react.index("return await cycle(conn, stream_seed=seed)")
     em = (PKG / "execmirror.py").read_text()

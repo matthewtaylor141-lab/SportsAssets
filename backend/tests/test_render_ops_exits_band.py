@@ -36,6 +36,12 @@ from tests.test_render_ops_fills_missed import World, _f
 from tests.workflow_source import render_ops_file as _render_ops_file
 
 YML = _render_ops_file()
+
+# R30A ci (2026-10-04): the tests marked below slice the preset by the comment
+# headers that 4c20f8c (2026-09-21) moved verbatim into RENDER_OPS_NOTES.md,
+# leaving an anchor line; they read the workflow with those notes put back
+# (tests/workflow_source.render_ops_documented_text). The SQL is unchanged.
+from tests.workflow_source import render_ops_documented_text as _ro_documented
 CAUSES = "('replace_cent', 'replace_qty', 'replace_side', 'ttl', 'replace_unread')"
 # FILL lane 8: replaced_n on the exit_rest / cover row = the bucket's replaced count, on both sides of the split
 REPLACED_N = ("sum(count(*) FILTER (WHERE replaced)) OVER (PARTITION BY regexp_replace(decision, '_replaced$', ''), bucket)"
@@ -59,7 +65,7 @@ def _statements(sql: str) -> list[str]:
 
 
 def test_exits_band_is_three_read_only_statements_the_first_two_on_one_chain():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     block = text[text.index("exits-band) SQL="):text.index("# CLOSED WHILE HE TRADED")]
     assert "need_confirm" not in block and "$ARG" not in block and "HEAD=" not in block
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
@@ -185,7 +191,7 @@ def test_exits_band_measures_the_cents_past_his_price_on_each_side_and_buckets_t
 
 
 def test_exits_band_sits_after_take_band_with_the_help_line_regenerated_and_stays_out_of_the_hourly():
-    text = YML.read_text()
+    text = _ro_documented()  # the notes put back (R30A ci)
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)

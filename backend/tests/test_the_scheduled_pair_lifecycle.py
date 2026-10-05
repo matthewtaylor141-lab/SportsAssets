@@ -210,6 +210,9 @@ def _transport(monkeypatch, **kw):
     # gate. All three are off in the shipped code; a test below asserts that.
     monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
     monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+    # R30A: the canonical-origination boundary, stated as satisfied
+    from tests.admission_fixture import assume_canonical_funded_origination
+    assume_canonical_funded_origination(monkeypatch)
     return pmus, sent, client
 
 

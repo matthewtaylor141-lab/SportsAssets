@@ -38,6 +38,7 @@ from __future__ import annotations
 from . import bettor_entry_gate as gate
 from . import bettor_pinnacle_devig as devig
 from . import bettor_valuation_purpose as vp
+from . import refusal_taxonomy as _taxonomy
 
 EXPERIMENT_ID = "EXT_PINNACLE_DEVIG_V1_SHADOW"
 
@@ -193,8 +194,34 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             "one outcome is the other two together, never the opposing "
             "team alone"),
         "raw_odds": val.get("raw_odds"),
-        "observed_at": val.get("observed_at"),
-        "received_at": val.get("received_at"),
+        # THE PROVIDER'S OWN INSTANT, EVEN WHEN THE DE-VIG REFUSED FIRST
+        # (P0 incident root cause RC5 of the fair-value segment; no schema
+        # change). `devig.valuation` sets observed_at
+        # only after its support, book, outcome-set and odds checks, so a row
+        # it refused earlier (football's MARKET_NOT_IN_SUPPORTED_SET) carried
+        # NULL -- and the one-per-observation index coalesced every such row
+        # of a contract onto one key for ever: NFL valuations stopped at
+        # 13:28Z on 2026-10-04, before the kickoffs. The quote's own provider
+        # stamp is the same fact the de-vig would have recorded; it is taken
+        # here when the de-vig did not reach it, and stays None only when the
+        # quote carries no readable stamp (the database then labels our own
+        # receipt or recording time instead, never NULL).
+        #
+        # (integration) inc-edge repaired the same defect inside the de-vig
+        # (`_stamp_source_instant`, which also writes observed_at_basis
+        # QUOTE_SOURCE_INSTANT_NOT_AGED); this fallback now only fires for a
+        # valuation that did not come through those refusals, and labels its
+        # instant the same way (see `_observed_basis` below) so migration
+        # 251's column never stores a never-aged source instant unlabelled.
+        "observed_at": (val.get("observed_at")
+                        if val.get("observed_at") is not None
+                        else _provider_instant(quote.get("observed_at"))),
+        # which clock that is: None for an aged reading, the de-vig's
+        # QUOTE_SOURCE_INSTANT_NOT_AGED for a refusal before aging
+        "observed_at_basis": _observed_basis(val, quote),
+        "received_at": (val.get("received_at")
+                        if val.get("received_at") is not None
+                        else _provider_instant(quote.get("received_at"))),
         "age_s": val.get("age_s"),
         "mapped_outcome": val.get("mapped_outcome"),
         "order_submitted": False,
@@ -362,6 +389,33 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     return _with_purpose(rec, record_purpose, calibration_only_evidence)
 
 
+def _provider_instant(value):
+    """A quote's own stamp as epoch seconds (the de-vig's parser), or None
+    when there is none or it does not read as a finite instant. Pure."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(devig._epoch(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return out if out == out and out not in (float("inf"),
+                                             float("-inf")) else None
+
+
+def _observed_basis(val: dict, quote: dict):
+    """observed_at_basis for the record `build` writes: the de-vig's own
+    label when the de-vig set observed_at; QUOTE_SOURCE_INSTANT_NOT_AGED when
+    observed_at is the quote's provider stamp taken by `build`'s fallback (a
+    never-aged source instant: the valuation carries no age and no
+    probability, the rows migration 251's CHECK admits); else None. Pure."""
+    if val.get("observed_at") is not None:
+        return val.get("observed_at_basis")
+    if (_provider_instant((quote or {}).get("observed_at")) is not None
+            and val.get("age_s") is None and val.get("probability") is None):
+        return devig.OBSERVED_AT_NOT_AGED
+    return None
+
+
 def _with_purpose(rec: dict, purpose, evidence) -> dict:
     """Stamp the record's purpose and, for anything but an entry decision,
     seal it. An ENTRY_DECISION record is returned with the purpose added and
@@ -491,7 +545,11 @@ INSERT = """
          -- WHAT THE ROW IS FOR (migration 144): ENTRY_DECISION with no
          -- evidence -- exactly the column default -- or CALIBRATION_ONLY with
          -- the refused read and the displayed price it was compared at.
-         record_purpose, calibration_only_evidence)
+         record_purpose, calibration_only_evidence,
+         -- WHICH CLOCK observed_at IS (migration 251): NULL for an aged
+         -- reading; QUOTE_SOURCE_INSTANT_NOT_AGED when the de-vig refused
+         -- before aging and stamped the quote's own source instant only.
+         observed_at_basis)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18::jsonb,$19,$20,$21,
             CASE WHEN $22::double precision IS NULL THEN NULL
@@ -501,7 +559,7 @@ INSERT = """
             $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,
             $37,$38,$39,$40,$41,$42,$43,$44,
             $45::jsonb,$46::jsonb,$47::jsonb,$48::jsonb,
-            $49,$50::jsonb)
+            $49,$50::jsonb,$51)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -653,7 +711,14 @@ async def persist(conn, rec: dict) -> int | None:
         (None if rec.get("settlement_comparison") is None
          else json.dumps(rec["settlement_comparison"], default=str)),
         # ── WHAT THE ROW IS FOR (migration 144) ───────────────────────
-        purpose, evidence_json)
+        purpose, evidence_json,
+        # ── WHICH CLOCK observed_at IS (migration 251) ────────────────
+        # The source instant of a quote the de-vig refused before aging is
+        # LABELLED on the row, so source time is never read as an aged
+        # observation (owner: "clearly distinguish source-time from
+        # observation-time"). The table's CHECK refuses the label on a row
+        # that carries an age or a probability.
+        rec.get("observed_at_basis"))
 
 
 #: THE CENSUS READS BELOW ARE REPORTING, over EVERY record purpose (migration
@@ -749,6 +814,73 @@ IDENTITY_CENSUS = """
 # them, and a candidate is counted at the EARLIEST stage that refused it.
 # A candidate carries several refusals; the earliest one is the only one
 # that describes where it actually stopped.
+#: EVERY REASON pinnapi_primary.select CAN REFUSE THE WS PRICE (its own
+#: PINNAPI_PRIMARY_* codes and the feed cache's FEED_* read refusals), spelled
+#: here so this module imports neither; pinned equal to their sources by
+#: tests/test_agent_funnel_receipt.py.
+PINNAPI_SELECT_REFUSALS = (
+    "PINNAPI_PRIMARY_CLOCK_INVALID", "PINNAPI_PRIMARY_RUNTIME_UNIDENTIFIED",
+    "PINNAPI_PRIMARY_SPORT_UNSUPPORTED", "PINNAPI_PRIMARY_FIXTURE_UNPROVED",
+    "PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS", "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+    "PINNAPI_PRIMARY_NOT_FULL_GAME_H2H", "PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES",
+    "PINNAPI_PRIMARY_PHASE_UNPROVED",
+    "FEED_OWNERSHIP_NOT_HELD", "FEED_EPOCH_NOT_RESYNCHRONIZED",
+    "FEED_MARKET_NOT_IN_CURRENT_STATE", "FEED_QUOTE_FROM_A_PREVIOUS_CONNECTION",
+    "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+    "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE", "FEED_QUOTE_OLDER_THAN_LIMIT",
+    "FEED_MARKET_CLOSED",
+    # (integration) the select refusals the merged streams added: the NFL
+    # stream's draw-priced football line (pinnapi_primary) and inc-pinnapi's
+    # unparsed record of a held event (pinnapi_feed, fix-stage finding 3)
+    "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW",
+    "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN")
+
+#: ── ONE TAXONOMY: THE LANE STAGE OF THE INCIDENT'S CODES IS DERIVED ──
+#:
+#: REVIEW OF 7bd084b. These codes were hand-listed below -- every
+#: pinnapi_primary.select refusal at 1_PROBABILITY -- while the refusal
+#: taxonomy calls FEED_QUOTE_OLDER_THAN_LIMIT, FEED_QUOTE_AGE_UNKNOWN_NO_
+#: OBSERVED_CHANGE or PINNAPI_PRIMARY_CLOCK_INVALID freshness plumbing: two
+#: answers for one code. Their lane stage is now DERIVED from the taxonomy
+#: entry (`lane_stage_of`), so the two cannot disagree on what failed.
+#:
+#: THE TWO AXES, kept apart on purpose. The taxonomy says WHAT failed (class,
+#: family, funnel stage). The lane stage says WHERE in the collector's own
+#: pipeline the candidate stopped, and coverage_integrity ranks it
+#: (REACH_SQL: >= 3 is "normalized", 3 without a venue-absence code is
+#: "venue discovered", >= 4 "mapped"). Every code below is raised by the
+#: PROVIDER read or the collector's VENUE BOOK read, before the lane's venue
+#: identity (3_IDENTITY) -- so a provider-side fixture or phase refusal is
+#: never staged as venue identity or settlement scope, which would count an
+#: event the venue was never consulted for as discovered or mapped. Hence:
+#: a freshness-plumbing refusal, or any venue-book refusal, stops at the
+#: lane's freshness / book stage (2_FRESHNESS); every other one at its
+#: probability stage (1_PROBABILITY).
+LANE_STAGE_DERIVED_CODES = PINNAPI_SELECT_REFUSALS + (
+    "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK",
+    "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET",
+    # the collector's failed venue read (P0 incident 2026-10-04,
+    # ext_pinnacle_loop.CALIBRATION_ONLY_AFTER_READ_FAILURE): the lane's two
+    # codes and the precise refusal beside them
+    "VENUE_BOOK_READ_FAILED", "VENUE_BOOK_READ_RETURNED_ERROR",
+    "VENUE_GATE_COOLDOWN", "VENUE_RATE_LIMITED", "VENUE_TIMEOUT",
+    "VENUE_NOT_FOUND", "VENUE_ERROR")
+
+
+def lane_stage_of(code) -> str | None:
+    """The collector lane's stage of a provider-read or venue-book-read
+    refusal, from the ONE refusal taxonomy (see LANE_STAGE_DERIVED_CODES):
+    2_FRESHNESS for freshness plumbing or the venue book, else
+    1_PROBABILITY. None for a code the taxonomy does not know."""
+    k = _taxonomy.lookup(code)
+    if k is None:
+        return None
+    _cls, family, stage = k
+    if family == "FRESHNESS_PLUMBING" or stage == "VENUE_BOOK":
+        return "2_FRESHNESS"
+    return "1_PROBABILITY"
+
+
 STAGES = (
     ("1_PROBABILITY", (
         "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED",
@@ -758,7 +890,19 @@ STAGES = (
         # NO PROVIDER PRICE AT ALL: the book does not quote this event yet.
         # No catalogue or alias can repair it, which is why it is a
         # probability-stage refusal and never an identity one (map4 D9).
-        "NO_PINNACLE_ON_EVENT")),
+        "NO_PINNACLE_ON_EVENT",
+        # R30A: a draw-priced football line is the regulation market, never
+        # de-vigged as the two-way game line (bettor_pinnacle_devig).
+        "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE",
+        # ...NOW RECORDED BY CAUSE (P0 incident, ext_pinnacle_loop.
+        # no_pinnacle_codes): what the discovery payload lacked, and the
+        # PinnAPI refusal that left no WS price (2,534 rows/day had been
+        # recorded NO_PINNACLE_ON_EVENT whatever the cause). Their stage is
+        # derived (LANE_STAGE_DERIVED_CODES): the payload's absence and a
+        # provider-side identity or capability refusal here, a freshness
+        # refusal at 2_FRESHNESS.
+        ) + tuple(c for c in LANE_STAGE_DERIVED_CODES
+                  if lane_stage_of(c) == "1_PROBABILITY")),
     ("2_FRESHNESS", (
         "QUOTE_STALE",
         "VENUE_BOOK_STALE",
@@ -771,7 +915,15 @@ STAGES = (
         # to whichever LATER stage also refused it.
         "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
         "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT",
-        "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION")),
+        "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION",
+        # A FAILED VENUE READ now also leaves a (no-price) calibration-only
+        # record (P0 incident 2026-10-04, ext_pinnacle_loop.
+        # CALIBRATION_ONLY_AFTER_READ_FAILURE): the lane's two codes and the
+        # precise refusal beside them, all where the venue read stops a
+        # candidate -- never a later stage the trace also met -- and the
+        # PinnAPI freshness refusals; both derived (LANE_STAGE_DERIVED_CODES).
+        ) + tuple(c for c in LANE_STAGE_DERIVED_CODES
+                  if lane_stage_of(c) == "2_FRESHNESS")),
     ("3_IDENTITY", (
         # THE GLOBAL CATALOGUE COULD NOT NAME ONE MONEYLINE ROW (map4 D9).
         "VENUE_MAPPING_AMBIGUOUS",
@@ -792,6 +944,16 @@ STAGES = (
         "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED",
         "VENUE_NATIVE_MATCH_RAISED",
         "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM",
+        # EVERY OUTCOME OF THE EVENT (P0 incident repair, 2026-10-04): the
+        # away and draw contracts are resolved too, and each has its own
+        # identity refusals (bettor_venue_native_identity).
+        "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION",
+        "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME",
+        "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND",
+        "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS",
+        "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED",
+        "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW",
+        "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE",
         "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
         "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
         "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN",
@@ -818,6 +980,11 @@ STAGES = (
         "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED",
         "OVERTIME_RULE_NOT_ESTABLISHED",
         "SETTLEMENT_TERMS_CONFLICT",
+        # A LINE MARKET'S EXCEPTIONAL TERMS (postponement, suspension, short
+        # game) are settled differently by the two sides; every line
+        # valuation carries it, so no strict or funded reader may treat a
+        # line as settlement-compatible (bettor_market_family)
+        "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER",
         "SETTLEMENT_SCOPE_NOT_ESTABLISHED",
         "UNRESOLVED_SETTLEMENT_SEMANTICS")),
     ("5_EXECUTION_ESTIMATE", (
@@ -901,6 +1068,9 @@ EVALUABILITY_OF = {
     # capability gap to make the funnel look better.
     "SETTLEMENT_TERMS_CONFLICT": DECIDED,
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
+    # both sides' exceptional-state terms were read and they differ: a
+    # stated difference, decided (bettor_market_family)
+    "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER": DECIDED,
     "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
     # A SEGMENT SCOPE IS A DECISION: the contract pays on part of the
     # fixture, and this lane prices whole fixtures.
@@ -978,11 +1148,29 @@ EVALUABILITY_OF = {
     # cand22: a college school contained in another (Ohio / Ohio State) with
     # the venue nickname absent from the provider name -- refused, not mapped.
     "VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM": COULD_NOT_EVALUATE,
+    # EVERY OUTCOME (P0 incident repair): the away / draw contract could not
+    # be shown -- an unknown designation, no draw in a two-way family, no or
+    # two team-less contracts, a draw contract whose own identifier, sides or
+    # question do not establish the draw, or the discovered venue event
+    # missing from the window. Each is a comparison not made, not a verdict.
+    "VENUE_NATIVE_PRICED_OUTCOME_NOT_A_DESIGNATION": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_FAMILY_HAS_NO_DRAW_OUTCOME": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_FOUND": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_AMBIGUOUS": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DRAW_CONTRACT_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW": COULD_NOT_EVALUATE,
+    "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE": COULD_NOT_EVALUATE,
 
     # ── EXTERNAL DEPENDENCY: the missing input is theirs ──────────────
     # THE PROVIDER DOES NOT QUOTE IT (yet). Measured 2026-09-29: UNL fixtures
     # 42-117 h out and Serie B at ~95 h simply carry no Pinnacle h2h.
     "NO_PINNACLE_ON_EVENT": EXTERNAL_DEPENDENCY,
+    # ...by cause (P0 incident): the discovery payload's absence is theirs;
+    # a PinnAPI refusal of the WS price is ours (the feed, its scope, its
+    # identity or its clocks), below.
+    "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK": EXTERNAL_DEPENDENCY,
+    "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET": EXTERNAL_DEPENDENCY,
+    **{c: COULD_NOT_EVALUATE for c in PINNAPI_SELECT_REFUSALS},
     # The catalogue lists only line markets for this fixture: no moneyline
     # exists there to price, the same kind of absence as no contract at all.
     "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": EXTERNAL_DEPENDENCY,
@@ -995,6 +1183,15 @@ EVALUABILITY_OF = {
     "VENUE_BOOK_NOT_READ": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_FAILED": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_RETURNED_ERROR": EXTERNAL_DEPENDENCY,
+    # THE PRECISE VENUE-READ REFUSALS (P0 incident 2026-10-04). The venue's
+    # own answers are theirs ...
+    "VENUE_RATE_LIMITED": EXTERNAL_DEPENDENCY,
+    "VENUE_TIMEOUT": EXTERNAL_DEPENDENCY,
+    "VENUE_NOT_FOUND": EXTERNAL_DEPENDENCY,
+    "VENUE_ERROR": EXTERNAL_DEPENDENCY,
+    # ... but a refusal by OUR OWN request gate is ours: no request was
+    # sent, so the remedy is our pacing, not a conversation with the venue.
+    "VENUE_GATE_COOLDOWN": COULD_NOT_EVALUATE,
     "VENUE_DOES_NOT_LIST_THIS_FIXTURE": EXTERNAL_DEPENDENCY,
     "NO_VENUE_CONTRACT_FOR_EVENT": EXTERNAL_DEPENDENCY,
     "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": EXTERNAL_DEPENDENCY,

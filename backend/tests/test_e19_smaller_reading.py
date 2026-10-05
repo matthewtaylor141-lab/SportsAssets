@@ -547,7 +547,11 @@ def test_e19_the_fills_vs_venue_preset_carries_both_keys_and_the_venues_figures_
     assert "drift-16|fills-vs-venue|books-new|" in line
     # FILL lane 4 placed fill-answers between closed-while-he-traded and hourly
     # E31 (FILL lane 31): the read-only `maker-rests` token sits between take-band and exits-band
-    assert "nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    # R30A ci (2026-10-04), the E38 note applied here too: the tail was `|fill-answers|hourly (got` until
+    # E38's measurement presets (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) and data-audit
+    # landed between them. The relative order of the presets named is what this pins; hourly last is below
+    # and in test_render_ops_hourly.py.
+    assert "nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|" in line
     assert names[-1] == "hourly"
     body = text[text.index("fills-vs-venue) SQL="):text.index("books-new) SQL=")]
     sql = body.split('SQL="', 1)[1].split('"; TO=', 1)[0]

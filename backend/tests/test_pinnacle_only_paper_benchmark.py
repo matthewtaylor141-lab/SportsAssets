@@ -122,7 +122,37 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # executing process's decision hook. It imports NOTHING and
                    # does no I/O (pinned below); the benchmark never imports
                    # an execution, venue or funded module through it.
-                   "decision_hooks"}
+                   "decision_hooks",
+                   # R30A: the NFL settlement evidence and tie conversion.
+                   # Standard library only (math, re, datetime, zoneinfo --
+                   # pinned below): cited quotes, a binomial interval and a
+                   # date read, no I/O and no execution, venue or funded path.
+                   "bettor_nfl_settlement",
+                   # R30A: the canonical decision intent the benchmark builds
+                   # before its hook and whose validity window it checks
+                   # before the paper submit. canonical_intent is PURE: it
+                   # imports only the standard library (pinned below), so no
+                   # execution, venue or funded module is reachable through
+                   # it.
+                   "canonical_intent",
+                   # P0 incident: the NCAAF settlement evidence and its
+                   # identity conversion. Standard library (re) plus the pure
+                   # NFL module above (pinned below): cited quotes and a
+                   # clause reader, no I/O and no execution, venue or funded
+                   # path.
+                   "bettor_ncaaf_settlement",
+                   # R30A P0 incident: the LINE-MARKET family proofs the
+                   # completed-game match re-runs for a spread / total / team
+                   # total row. Pure (no socket, database, venue, funded or
+                   # order path): it imports only the de-vig and the feed
+                   # cache's pure reader (pinned below).
+                   "bettor_market_family",
+                   # (P0 incident) the gross-edge input validation: pure
+                   # arithmetic over the row, the book and the fee function
+                   # it is handed; imports only the de-vig arithmetic and the
+                   # book level parser (pinned in
+                   # tests/test_gross_edge_inputs_are_validated.py)
+                   "gross_edge_inputs"}
 
 
 def _imports(path: pathlib.Path) -> list:
@@ -136,6 +166,21 @@ def _imports(path: pathlib.Path) -> list:
     return out
 
 
+def test_the_canonical_intent_module_is_pure():
+    """R30A: the benchmark may import canonical_intent only because it
+    imports nothing beyond the standard library."""
+    from sportsassets import canonical_intent as CI
+    # ROUND_FLOOR (decimal, standard library): R30A review -- the validity
+    # window is floored to the millisecond (canonical_intent._floor_ms),
+    # never rounded up past the 30 s rule
+    stdlib = {"__future__", "annotations", "datetime", "decimal", "hashlib",
+              "json", "math", "re", "time", "typing", "uuid", "Decimal",
+              "Any", "ROUND_HALF_UP", "ROUND_FLOOR", "InvalidOperation"}
+    leaves = {n.split(".")[-1] for n in _imports(pathlib.Path(CI.__file__))
+              if n}
+    assert leaves <= stdlib, sorted(leaves - stdlib)
+
+
 def test_the_benchmark_imports_only_paper_and_pure_policy_modules():
     names = _imports(BENCH)
     # every import statement in the file, top level AND inside functions
@@ -145,10 +190,37 @@ def test_the_benchmark_imports_only_paper_and_pure_policy_modules():
     assert not bad, bad
 
 
+def test_the_line_market_family_is_pure():
+    from sportsassets import bettor_market_family as MF
+    names = _imports(pathlib.Path(MF.__file__))
+    leaves = {n.split(".")[-1] for n in names if n}
+    assert leaves <= {"__future__", "annotations", "hashlib", "math", "re",
+                      "unicodedata", "typing", "Optional",
+                      "bettor_pinnacle_devig", "pinnapi_feed"}, leaves
+    bad = [n for n in names if any(f in (n or "").lower() for f in FORBIDDEN)]
+    assert not bad, bad
+
+
 def test_the_decision_hook_registry_imports_nothing():
     from sportsassets import decision_hooks
     assert _imports(pathlib.Path(decision_hooks.__file__)) == []
     assert decision_hooks.DECISION_HOOK is None or callable(decision_hooks.DECISION_HOOK)
+
+
+def test_the_nfl_settlement_module_imports_only_the_standard_library():
+    from sportsassets import bettor_nfl_settlement
+    imports = set(_imports(pathlib.Path(bettor_nfl_settlement.__file__)))
+    assert imports <= {"__future__", "annotations", "math", "re", "datetime",
+                       "zoneinfo", "ZoneInfo"}, imports
+
+
+def test_the_ncaaf_settlement_module_imports_only_pure_modules():
+    from sportsassets import bettor_ncaaf_settlement
+    imports = set(_imports(pathlib.Path(bettor_ncaaf_settlement.__file__)))
+    # `from . import bettor_nfl_settlement` reads as module "" + its name;
+    # that module is itself pinned to the standard library above
+    assert imports <= {"__future__", "annotations", "re", "",
+                       "bettor_nfl_settlement"}, imports
 
 
 def test_owner_limits_helper_is_pure_configuration_only():

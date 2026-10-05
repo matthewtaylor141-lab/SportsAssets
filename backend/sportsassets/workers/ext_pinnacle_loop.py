@@ -42,11 +42,18 @@ import asyncio
 import contextvars
 import hashlib
 import logging
+import math
 import os
 import re
 import time
 
+from .. import bettor_complement_valuation as CV
 from .. import bettor_entry_execution as entryx
+from ..db import advisory_held as _db_advisory_held
+from ..db import advisory_held_by as _db_advisory_held_by
+from .. import loop_health as _LH
+from ..db import lease_session
+from .. import collector_coverage as cov
 from .. import bettor_entry_inventory as inv
 from .. import bettor_research_shadow as rsh
 from .. import bettor_external_shadow as ext
@@ -493,8 +500,13 @@ def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
                 {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO,
                  "why": "both sides normalise to the same team"})
             continue
-        venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
-                      "day": days.get(title)})
+        # A title that names fixtures on several days (a return leg under the
+        # same title) is one venue fixture PER DAY (R30A): each is matched on
+        # its own date, so neither meeting erases the other.
+        tdays = days.get(title)
+        for tday in (tdays if isinstance(tdays, (list, tuple)) else [tdays]):
+            venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
+                          "day": tday})
         if a_drop or b_drop:
             out["normalisation"].append(
                 {"venue": str(title)[:60],
@@ -627,10 +639,37 @@ VENUE_BOARD_SNAPSHOT_MEASURED = (
     ("par2", 4), ("mls", 3), ("lmx", 3), ("uru1", 3), ("nwsl", 2),
 )
 
+#: ── THE BOARD'S BOUNDS (R30A P0 incident, inc-catalogue) ───────────────
+#:
+#: THE BOARD KEPT ITS FIRST THIRTY TOKENS AND TWELVE TITLES, AND BOTH CUTS
+#: REACHED MAPPED COMPETITIONS. research-sql run 37233672878 (K5a, 2026-10-04
+#: 20:51Z): the venue's real soccer board carried 47 league tokens; `LIMIT 30`
+#: dropped 17 of them -- among them `mls` (row 38) and `uslc` (row 44), both
+#: mapped in VENUE_TOKEN_TO_PROVIDER_KEY -- so on a quiet day those two
+#: competitions could never become a candidate, and nothing named why (ties at
+#: one event broke on the planner's whim). And the fixture titles that travel
+#: with each candidate were the first TWELVE in alphabetical order: `unl` listed
+#: 25 fixtures, `ncaaws` 74, `u21eq` 24, so `confirm_mapping_by_fixtures` saw
+#: under half of the Nations League board and could refuse a competition whose
+#: provider fixtures all sat in the alphabet's second half.
+#:
+#: The token bound is now a size the board cannot reach in practice (it holds
+#: one row per competition), and the titles carried are every fixture up to a
+#: bound far above any measured slate. Both bounds are still bounds: a board
+#: that FILLS one is reported (`board_truncated`, `titles_truncated`), never
+#: read as complete.
+BOARD_TOKEN_LIMIT = 500
+BOARD_TITLES_CARRIED = 1000
+#: The board ranks the slate inside the catalogue sweep's own forward window
+#: (premap fwd_h = 96 h) -- the horizon it always ranked, now stated.
+BOARD_HORIZON_H = 96
+
 #: The venue's REAL soccer board, by its own league token, newest first. The
 #: simulated exclusion is `bettor_venue_realism`'s, applied in SQL so a
 #: competition of 168 eBattles events cannot outrank a real one.
-def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
+def _board_sql(family_prefix: str = "soccer",
+               title_limit: int = BOARD_TITLES_CARRIED,
+               token_limit: int = BOARD_TOKEN_LIMIT) -> str:
     """The board query, with its exclusions GENERATED from the classifier.
 
     `family_prefix` is the venue `sports_type` family the board ranks
@@ -653,7 +692,8 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
     input, and are asserted to be plain lowercase words before interpolation.
     """
     assert family_prefix.isalpha() and family_prefix.islower(), family_prefix
-    assert isinstance(title_limit, int) and 0 < title_limit <= 200, title_limit
+    assert isinstance(title_limit, int) and 0 < title_limit <= 5000, title_limit
+    assert isinstance(token_limit, int) and 0 < token_limit <= 5000, token_limit
     for m in vreal.SIMULATED_MARKERS:
         assert m.replace("-", "").isalpha() and m.islower(), m
     for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES:
@@ -671,6 +711,9 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
     return ("""
     SELECT split_part(market_slug, '-', 2)  AS token,
            count(DISTINCT event_slug)        AS events,
+           -- every distinct fixture title, so a carried list shorter than this
+           -- is a truncation the reader can name (R30A)
+           count(DISTINCT left(event_title, 80)) AS title_count,
            (array_agg(DISTINCT left(event_title, 80)))[1:%(n)d] AS titles,
            -- THE FIXTURE DATES, PER TITLE. Codex: the scheduled caller never
            -- supplied `venue_event_days`, so the date comparison in
@@ -686,10 +729,15 @@ def _board_sql(family_prefix: str = "soccer", title_limit: int = 12) -> str:
        """ % {"n": title_limit, "fam": family_prefix} + types + """
        """ + prose + """
        AND game_start > now() - interval '6 hours'
+       -- the slate the metered budget is spent on: the sweep's own window.
+       -- The catalogue now also holds futures and next week's fixtures
+       -- (premap AHEAD); ranking competitions by those would hand the
+       -- provider budget to fixtures it does not price yet (R30A)
+       AND game_start <= now() + interval '%(horizon)d hours'
      GROUP BY 1
-     ORDER BY 2 DESC
-     LIMIT 30
-""")
+     ORDER BY 2 DESC, 1
+     LIMIT %(tokens)d
+""" % {"tokens": token_limit, "horizon": BOARD_HORIZON_H})
 
 
 VENUE_SOCCER_BOARD_SQL = _board_sql()
@@ -752,17 +800,86 @@ async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     # {token: {title: 'YYYY-MM-DD'}}, from the venue's own game_start.
     days: dict = {}
     for r in rows:
-        per: dict = {}
-        for pair in (r["title_days"] or []):
-            title, _, day = str(pair).partition("\u0001")
-            if title and day:
-                per[title] = day
-        days[str(r["token"])] = per
+        days[str(r["token"])] = title_days_of(r["title_days"])
     out["title_days"] = days
+    out.update(board_bounds(rows))
     out["why"] = ("the venue's own league tokens for REAL soccer events "
                   "starting within the last 6 hours or later, simulated "
                   "competitions excluded by the venue's own words")
     return out
+
+
+def title_days_of(pairs) -> dict:
+    """{title: 'YYYY-MM-DD'} from the board's `title<U+0001>day` pairs -- and
+    {title: ['YYYY-MM-DD', 'YYYY-MM-DD']} when ONE title names fixtures on
+    several days. Pure.
+
+    TWO FIXTURES, ONE TITLE, TWO DATES (R30A, adversarial review): this was
+    `per[title] = day`, so the last pair won and a return leg -- the same two
+    clubs, the same title, another date -- erased the first fixture's date
+    from the confirmation (a provider fixture on the erased date then read as
+    "the same two teams on different days"). The SQL already returns every
+    distinct (title, day) pair; every date is kept. A single date stays a
+    string, exactly as every reader and pin has it."""
+    per: dict = {}
+    for pair in (pairs or []):
+        title, _, day = str(pair).partition("\u0001")
+        if not (title and day):
+            continue
+        cur = per.get(title)
+        if cur is None:
+            per[title] = day
+        elif isinstance(cur, list):
+            if day not in cur:
+                cur.append(day)
+                cur.sort()
+        elif cur != day:
+            per[title] = sorted({cur, day})
+    return per
+
+
+def board_bounds(rows, *, token_limit: int = BOARD_TOKEN_LIMIT,
+                 title_limit: int = BOARD_TITLES_CARRIED) -> dict:
+    """The board's own completeness, stated beside it (R30A). Pure.
+
+    `board_truncated` when the read returned its token bound (a competition may
+    lie beyond it); `titles_truncated` names every token whose carried titles
+    are fewer than its distinct fixture titles. A row without `title_count`
+    (an older reader, a test fake) is reported as not measured, never as
+    complete."""
+    rows = list(rows or [])
+    cut, unmeasured, same_title, pairs_cut = [], [], [], []
+    for r in rows:
+        get = r.get if hasattr(r, "get") else (lambda k, _r=r: _r[k])
+
+        def _opt(k):
+            try:
+                return get(k)
+            except (KeyError, IndexError):
+                return None
+
+        n = _opt("title_count")
+        pairs = list(_opt("title_days") or [])
+        # every title naming fixtures on more than one day, by name (R30A)
+        for title, days in title_days_of(pairs).items():
+            if isinstance(days, list) and len(same_title) < 50:
+                same_title.append({"token": str(get("token")),
+                                   "title": title, "days": list(days)})
+        if len(pairs) >= title_limit:
+            pairs_cut.append(str(get("token")))
+        if n is None:
+            unmeasured.append(str(get("token")))
+            continue
+        carried = len(get("titles") or [])
+        if int(n) > carried:
+            cut.append({"token": str(get("token")), "titles": int(n),
+                        "carried": carried})
+    return {"board_bound": {"tokens": token_limit, "titles": title_limit},
+            "board_truncated": len(rows) >= token_limit,
+            "titles_truncated": cut,
+            "title_days_truncated": pairs_cut,
+            "same_title_fixtures": same_title,
+            "titles_count_unmeasured": unmeasured}
 
 
 def candidates_from_board(board, titles=None, title_days=None, *,
@@ -856,10 +973,13 @@ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY = {
     "nfl": "americanfootball_nfl",
 }
 
-#: More titles than soccer's 12: one Saturday's `cfb` slate is ~100 events,
-#: listed alphabetically, and the confirmation needs a title the provider
-#: still lists (finished games drop out of the provider's feed).
-VENUE_FOOTBALL_TITLES_CARRIED = 120
+#: More titles than soccer's old 12: one Saturday's `cfb` slate is ~100
+#: events, listed alphabetically, and the confirmation needs a title the
+#: provider still lists (finished games drop out of the provider's feed).
+#: R30A: both boards now carry every fixture up to BOARD_TITLES_CARRIED (a
+#: Saturday with FBS and FCS listed would pass 120), with the cut named by
+#: `board_bounds` if a slate ever reaches it.
+VENUE_FOOTBALL_TITLES_CARRIED = BOARD_TITLES_CARRIED
 VENUE_FOOTBALL_BOARD_SQL = _board_sql("football",
                                       VENUE_FOOTBALL_TITLES_CARRIED)
 
@@ -889,13 +1009,9 @@ async def venue_football_competitions(conn) -> dict:
                          for r in rows}
         days: dict = {}
         for r in rows:
-            per: dict = {}
-            for pair in (r["title_days"] or []):
-                title, _, day = str(pair).partition("\u0001")
-                if title and day:
-                    per[title] = day
-            days[str(r["token"])] = per
+            days[str(r["token"])] = title_days_of(r["title_days"])
         out["title_days"] = days
+        out.update(board_bounds(rows))
     except Exception as exc:                                   # noqa: BLE001
         out.update(board=[], titles={}, title_days={},
                    evidence="READ_UNPARSEABLE", error=type(exc).__name__)
@@ -946,14 +1062,29 @@ R_PROVIDER_LISTS_IT_INACTIVE = "PROVIDER_LISTS_THIS_COMPETITION_AS_INACTIVE"
 #: former fetches (soccer_epl, ~20 credits a cycle, ~2k/day) could never reach a
 #: venue contract, so the SPEND THAT CAN REACH A CONTRACT rises from roughly
 #: 40 credits a cycle to 80.
-MAX_METERED_SPORTS_PER_CYCLE = 4
-#: UNCHANGED BY cand24 (the NFL). The NFL competes for the same four keys by
-#: the same rule -- the confirmed MLB key first, then measured venue coverage.
-#: On the 2026-10-04 board (cfb 34, unl 26, nfl 15, brb 8 events) that requests
-#: MLB, NCAAF, UNL and NFL, and Brazil Serie B -- with no event in the next 24 h
-#: -- is the one `budget_dropped`, by name. MLB (the postseason) is never
-#: ranked out. Raising the cap to 5 would cost ~20 credits a cycle, ~1.9k a day
-#: at the 900 s cadence; it is not raised.
+MAX_METERED_SPORTS_PER_CYCLE = cov.MAX_METERED_CALLS_PER_CYCLE
+#: ── R30A: THE BUDGET STAYS; THE FIRST-COME TRUNCATION IS GONE ───────
+#:
+#: WHAT THE TRUNCATION DID, MEASURED. `select_sports` spent these four calls
+#: on the confirmed MLB key first and then on venue-board coverage counted
+#: over the board's whole UNBOUNDED future, and cut the ranked list at four.
+#: Over the 7 days to 2026-10-04 20:47Z (research-sql
+#: incident_collector_cap_a, run 37233454453; 458 scheduled cycles) that left
+#: NCAAF unfetched in 137 of the 153 cycles with a venue `cfb` event in the
+#: next 24 h, the NFL in 69 of 131, and USL Championship in all 194 -- while
+#: 910 of the 1,518 metered fetches went to competitions with NO venue event
+#: in the next 24 h (brb 333, unl 242, mlb 240, uwcl 80, cfb 15). A fixed
+#: ranking truncated with no rotation is starvation by construction: the same
+#: competitions lost every cycle.
+#:
+#: WHAT REPLACES IT. The number above is unchanged and is still the most
+#: metered calls a cycle makes (now counting re-fetches and discovery
+#: refreshes too), beside the daily credit envelope that is today's stated
+#: spend. WHO gets the calls is `collector_coverage.plan`: earliest deadline
+#: first over the competitions with a venue event in the next 24 h, each
+#: served within a stated staleness bound, with a receipt (migration 248) for
+#: every competition not fetched. Raising the count is an owner resource
+#: decision this change does not make.
 METERED_BUDGET_CHANGE = {
     "before": {"keys": 3, "credits_per_cycle": "~60", "per_day": "~5.8k",
                "keys_named": ["soccer_epl", "soccer_mexico_ligamx",
@@ -963,6 +1094,8 @@ METERED_BUDGET_CHANGE = {
     "net": ("about +1,900 credits a day; reachable spend rises from ~40 to ~80 "
             "credits a cycle once the unreachable EPL fetch is removed"),
     "cadence_s": 900.0,
+    # R30A: the count is replaced by the envelope; the spend does not change.
+    "r30a": cov.ENVELOPE_CHANGE,
 }
 
 #: The set used when the unmetered catalogue read FAILS. It carries only what is
@@ -1010,9 +1143,16 @@ def provider_keys_for_family(family: str) -> list:
     return keys
 
 
-def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
-                  candidates=None) -> dict:
+def select_sports(catalogue, *, budget=None, candidates=None) -> dict:
     """Confirmed keys, plus candidates the PROVIDER ITSELF lists as active.
+
+    R30A: NO TRUNCATION BY DEFAULT. `budget=None` (what the cycle passes)
+    confirms every candidate and drops none: WHICH confirmed competitions this
+    cycle fetches within the unchanged MAX_METERED_SPORTS_PER_CYCLE calls, and
+    when the rest are next served, is `collector_coverage.plan`'s decision --
+    earliest deadline first, with a receipt for each. An explicit integer
+    `budget` keeps the old first-come semantics for a caller that asks for
+    them by name; the scheduled cycle never does.
 
     Pure. `catalogue` is `fetch_sport_catalogue`'s result -- the unmetered
     `/v4/sports` read -- and a failed or empty read yields the confirmed set
@@ -1031,7 +1171,7 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
     """
     out: dict = {"sports": list(SPORTS_CONFIRMED),
                  "rejected": [], "confirmed_by_provider": [],
-                 "budget": int(budget),
+                 "budget": None if budget is None else int(budget),
                  "budget_dropped": [],
                  "catalogue_read": bool((catalogue or {}).get("ok")),
                  "never_requested": ["soccer_epl"],
@@ -1095,7 +1235,8 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
              "provider_title": row.get("title")})
     # ORDER IS MEASURED COVERAGE, and the cap is applied after confirmation so
     # a candidate the provider does not list cannot consume a budget slot.
-    room = max(0, int(budget) - len(out["sports"]))
+    room = (len(out["confirmed_by_provider"]) if budget is None
+            else max(0, int(budget) - len(out["sports"])))
     for i, ok in enumerate(out["confirmed_by_provider"]):
         fam = next(c["family"] for c in cands
                    if c["key"] == ok["key"])
@@ -1108,8 +1249,856 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
                          "budget of %d keys is already spent" % int(budget))})
     out["why"] = ("the confirmed set, plus every candidate the provider's own "
                   "unmetered catalogue lists as active, ordered by measured US "
-                  "venue coverage and capped at the metered budget")
+                  "venue coverage" + (
+                      "; which of them a cycle fetches is the coverage "
+                      "scheduler's decision, receipted" if budget is None
+                      else " and capped at the requested count"))
     return out
+
+# ── R30A · THE COVERAGE SCHEDULER, WIRED INTO THE CYCLE ─────────────────
+#
+# `collector_coverage` is pure. These are the reads it needs (the venue's own
+# horizon per competition, the held positions' competitions, whether the
+# subscribed feed carries a family's price in this process, and the
+# receipts' 24 h memory), the plan built from them, the discovery refresh,
+# and the receipts. Each read NEVER RAISES: an unread input is named on the
+# plan and is never read as zero.
+
+#: Every venue league token this lane maps to a provider key, with its family.
+def mapped_tokens() -> dict:
+    out = {}
+    for key, toks in VENUE_LEAGUE_TOKENS_CONFIRMED.items():
+        for t in toks:
+            out[t] = (key, family_for_provider_key(key))
+    for t, key in VENUE_TOKEN_TO_PROVIDER_KEY.items():
+        out[t] = (key, "soccer")
+    for t, key in VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.items():
+        out[t] = (key, "football")
+    return out
+
+
+def _realism_exclusions() -> tuple:
+    """(sports_type exclusions, prose exclusions) as SQL, GENERATED from
+    `bettor_venue_realism` exactly as `_board_sql` generates them, so the
+    horizon read and the board agree on what a real competition is (pinned
+    by a test). Fixed identifiers from source, asserted plain before
+    interpolation."""
+    for m in vreal.SIMULATED_MARKERS:
+        assert m.replace("-", "").isalpha() and m.islower(), m
+    for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES:
+        assert pfx.rstrip("_").isalpha() and pfx.islower(), pfx
+    prose = "\n       ".join(
+        "AND lower(coalesce(event_title, '') || ' ' "
+        "|| coalesce(question, '')) NOT LIKE '%%%s%%'" % m
+        for m in vreal.SIMULATED_MARKERS)
+    types = "\n       ".join(
+        "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % pfx
+        for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
+    return types, prose
+
+
+def _horizon_sql() -> str:
+    """One bounded read: per mapped token, the venue's events in the decision
+    horizon, its events listed at all from the horizon's 6 h tail on, and
+    its next start (the earliest start not older than the tail, so a start
+    at or before now means an event in play). The same real-competition
+    rule as the board (`_realism_exclusions`).
+
+    A market the venue lists WITHOUT a start time (`game_start` NULL: the
+    venue sent no gameStartTime) is counted apart, as `start_unknown`, when
+    the venue sweep refreshed it within the last day (`updated_at`, set on
+    every premap upsert) -- a row no sweep has touched for a day is no longer
+    listed. Such an event cannot be placed in or out of the horizon, so it
+    keeps its competition in demand instead of letting a zero count skip it
+    (collector_coverage.competition `start_unknown`)."""
+    toks = sorted(mapped_tokens())
+    for t in toks:
+        assert t.isalnum() and t.islower(), t
+    types, prose = _realism_exclusions()
+    return ("""
+    SELECT split_part(market_slug, '-', 2) AS token,
+           count(DISTINCT event_slug) FILTER (
+               WHERE game_start <= now() + make_interval(secs => %(ahead)d))
+             AS in_horizon,
+           count(DISTINCT event_slug) FILTER (WHERE game_start IS NOT NULL)
+             AS board_events,
+           count(DISTINCT event_slug) FILTER (WHERE game_start IS NULL)
+             AS start_unknown,
+           extract(epoch FROM min(game_start)) AS next_start
+      FROM us_premap
+     WHERE split_part(market_slug, '-', 2) IN (%(toks)s)
+       AND (sports_type LIKE 'soccer%%' OR sports_type LIKE 'football%%'
+            OR sports_type LIKE 'baseball%%')
+       """ % {"ahead": int(cov.HORIZON_AHEAD_S),
+              "toks": ", ".join("'%s'" % t for t in toks)}
+            + types + """
+       """ + prose + """
+       AND (game_start > now() - make_interval(secs => %d)
+            OR (game_start IS NULL
+                AND updated_at > now() - make_interval(secs => %d)))
+     GROUP BY 1
+""" % (int(cov.HORIZON_BEHIND_S), int(cov.HORIZON_AHEAD_S)))
+
+
+async def venue_horizon(conn) -> dict:
+    """{token: {events_in_horizon, board_events, start_unknown,
+    next_start}}. Never raises; a failed read is `read: False` and the
+    scheduler treats every horizon as UNKNOWN (in demand), never as empty."""
+    out: dict = {"read": False, "by_token": {}, "source": "us_premap"}
+    try:
+        rows = await conn.fetch(VENUE_HORIZON_SQL)
+        for r in rows:
+            nxt = r["next_start"]
+            out["by_token"][str(r["token"])] = {
+                "events_in_horizon": int(r["in_horizon"] or 0),
+                "board_events": int(r["board_events"] or 0),
+                "start_unknown": int(r["start_unknown"] or 0),
+                "next_start": None if nxt is None else float(nxt)}
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(by_token={}, error=type(exc).__name__)
+        return out
+    out["read"] = True
+    return out
+
+
+#: The venue's own start time of each held contract (one bounded read).
+HELD_STARTS_SQL = """
+    SELECT market_slug AS slug, extract(epoch FROM max(game_start))
+             AS game_start
+      FROM us_premap
+     WHERE market_slug = ANY($1::text[])
+     GROUP BY market_slug
+"""
+
+
+async def held_competitions(conn, *, now: float | None = None) -> dict:
+    """The competitions of every OPEN paper and actual position, through the
+    held watch's own query (pinnapi_held.HELD_SLUGS_SQL) and the one league
+    identity (`provider_key_for_venue_token`). Never raises.
+
+    A HELD GAME THAT HAS FINISHED IS COUNTED APART (`finished_by_key`). The
+    held watch's query counts any paper fill with a positive net quantity
+    and no settlement row, which includes games that ended and wait for
+    their settlement; the provider's odds response no longer lists those, so
+    they must not put their competition on the one-cycle held bound (the
+    adversarial review's finding: three such competitions took 181 of 384
+    metered calls in a simulated day). Finished = the venue's own start is
+    older than the decision horizon's tail (the same 6 h the board and the
+    horizon read use). A held contract whose start the venue does not state,
+    or whose start could not be read, stays HELD: unknown is not finished."""
+    out: dict = {"read": False, "by_key": {}, "unmapped": {},
+                 "finished_by_key": {}, "starts_read": False}
+    try:
+        from .. import pinnapi_held as PH
+        rows = await conn.fetch(PH.HELD_SLUGS_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    slugs = sorted({str(r["slug"] or "") for r in rows if r["slug"]})
+    starts: dict = {}
+    if slugs and now is not None:
+        try:
+            for r in await conn.fetch(HELD_STARTS_SQL, slugs):
+                if r["game_start"] is not None:
+                    starts[str(r["slug"])] = float(r["game_start"])
+            out["starts_read"] = True
+        except Exception as exc:                               # noqa: BLE001
+            out["starts_error"] = type(exc).__name__
+    for r in rows:
+        slug = str(r["slug"] or "")
+        parts = slug.split("-")
+        token = parts[1] if len(parts) > 1 else ""
+        key = provider_key_for_venue_token(token)
+        if key is None:
+            out["unmapped"][token or "(none)"] = \
+                out["unmapped"].get(token or "(none)", 0) + 1
+            continue
+        gs = starts.get(slug)
+        if now is not None and gs is not None and \
+                gs <= float(now) - cov.HORIZON_BEHIND_S:
+            out["finished_by_key"][key] = \
+                out["finished_by_key"].get(key, 0) + 1
+            continue
+        out["by_key"][key] = out["by_key"].get(key, 0) + 1
+    out["read"] = True
+    return out
+
+
+def feed_coverage() -> dict:
+    """WHICH FAMILIES' PINNACLE PRICE THE SUBSCRIBED FEED CARRIES IN THIS
+    PROCESS NOW: the feed owner exists, its epoch is granted and resynced, and
+    the family's PinnAPI sport id (pinnapi_primary.SPORTS) is subscribed.
+    Anything else is not covered -- the metered fetch is then what supplies
+    the decision-time probability, and the scheduler bounds it at one
+    cycle."""
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_primary as primary
+        owner = feed._STATE.get("owner")
+        if owner is None:
+            return {"families": [], "why": "FEED_NOT_RUNNING_IN_THIS_PROCESS"}
+        auth = owner.cache.authority
+        if not (auth.granted and auth.synced):
+            return {"families": [], "why": "FEED_EPOCH_NOT_GRANTED_AND_SYNCED",
+                    "sport_ids": sorted(owner.sport_ids)}
+        sids = set(owner.sport_ids)
+        fams = sorted(f for f, sid in primary.SPORTS.items() if sid in sids)
+        return {"families": fams, "sport_ids": sorted(sids),
+                "primary_families": sorted(primary.SPORTS)}
+    except Exception as exc:                                   # noqa: BLE001
+        return {"families": [], "why": "FEED_STATE_UNREADABLE",
+                "error": type(exc).__name__}
+
+
+#: IN-PROCESS COVERAGE MEMORY, behind the receipts table: the cycle instant
+#: each competition was last served (given its metered call, whether the
+#: provider then answered or failed), the spend ledger (CYCLE instant,
+#: credits -- every spend is stamped with the instant of the cycle that made
+#: it, the clock the rolling day is measured on: collector_coverage.
+#: envelope_window_s), the measured per-request costs, the provider events
+#: the evaluation bound deferred (per competition: event id -> first
+#: deferred at), and each in-demand competition's `demand_since` as the last
+#: plan handed it back (`demand_known` once a plan has run in this
+#: process).
+#:
+#: WRITTEN AND READ ONLY BY THE LEASE HOLDER (`_lease_held`): the schedule and
+#: the envelope belong to the one scheduled collector. A cycle run without the
+#: collector's single-writer lease -- a test harness driving `cycle` on a
+#: shared database, an operator's one-off run -- neither marks a competition
+#: served nor spends the collector's envelope, in this process or in the
+#: receipts (migration 248 `writer_lease`). Found finishing R30A: test cycles
+#: (whose stubbed fetches carry no usage header, so each is charged the
+#: 20-credit estimate) accumulated 2,460 credits of "spend" in one evening on
+#: the shared test database, which would have exhausted the 7,680 envelope
+#: within three runs and left later cycles fetching nothing.
+_COVERAGE: dict = {"last_served": {}, "ledger": [], "cost": {},
+                   "deferred_events": {}, "demand_since": {},
+                   "demand_known": False}
+
+#: THE ONE METERED REQUEST SHAPE (h2h x regions eu,uk,us; unchanged), named
+#: on every receipt so a measured cost is only ever reused for the same shape.
+ODDS_REQUEST_SHAPE = "H2H_REGIONS_EU_UK_US"
+#: The measured cost of the events endpoint, under this key in `_COVERAGE`.
+EVENTS_COST_KEY = "EVENTS_ENDPOINT"
+
+#: LAST SERVED = the last cycle that GAVE the competition its call (FETCHED or
+#: FETCH_FAILED). A provider failure is retried within the competition's
+#: bound like any other turn; counting only successes would put a key the
+#: provider refuses every time permanently first and let it take a call every
+#: cycle -- a starvation of everything else.
+#:
+#: ON THE CYCLE'S OWN CLOCK. The rolling day is (cycle instant - window,
+#: cycle instant] -- $2 is the cycle's instant, $3 the window
+#: (collector_coverage.envelope_window_s) -- exactly the day the plan and
+#: the in-process ledger use. (The first version windowed on the database's
+#: now(), a second clock for the same day: the adversarial review's
+#: finding.)
+COVERAGE_MEMORY_SQL = """
+    SELECT competition,
+           extract(epoch FROM max(cycle_at) FILTER (
+               WHERE receipt IN ('FETCHED', 'FETCH_FAILED'))) AS last_served,
+           coalesce(sum(credits_charged), 0) AS spent,
+           max(credits_charged) FILTER (
+               WHERE receipt = 'FETCHED' AND request_shape = $1
+                 AND credits_basis = 'MEASURED_PROVIDER_USAGE_HEADER'
+                 AND NOT (detail ? 'refetches'))
+             AS measured,
+           max((detail->>'discovery_cost')::float8) FILTER (
+               WHERE detail ? 'discovery_cost') AS discovery_cost
+      FROM collector_coverage_receipts
+     WHERE cycle_at > to_timestamp($2) - make_interval(secs => $3)
+       AND cycle_at <= to_timestamp($2)
+       AND scope = 'COMPETITION'
+       AND writer_lease = 'HELD'
+     GROUP BY 1
+"""
+#: THE ROLLING DAY'S LEDGER from the receipts: spend per cycle instant.
+COVERAGE_LEDGER_SQL = """
+    SELECT extract(epoch FROM cycle_at) AS at,
+           coalesce(sum(credits_charged), 0) AS credits
+      FROM collector_coverage_receipts
+     WHERE cycle_at > to_timestamp($1) - make_interval(secs => $2)
+       AND cycle_at <= to_timestamp($1)
+       AND scope = 'COMPETITION'
+       AND writer_lease = 'HELD'
+     GROUP BY cycle_at
+    HAVING coalesce(sum(credits_charged), 0) > 0
+"""
+#: Each competition's run in demand, from the LATEST lease-held cycle only:
+#: a competition absent from that cycle is not in demand now, whatever an
+#: older receipt said.
+COVERAGE_DEMAND_SQL = """
+    SELECT competition, (detail->>'demand_since')::float8 AS demand_since
+      FROM collector_coverage_receipts
+     WHERE scope = 'COMPETITION' AND writer_lease = 'HELD'
+       AND detail ? 'demand_since'
+       AND cycle_id = (
+           SELECT cycle_id FROM collector_coverage_receipts
+            WHERE scope = 'CYCLE' AND writer_lease = 'HELD'
+              AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
+              AND cycle_at <= to_timestamp($1)
+            ORDER BY cycle_at DESC, id DESC LIMIT 1)
+"""
+
+
+def _ledger_by_cycle(entries) -> dict:
+    """{cycle instant (ms precision): credits} from (instant, credits)
+    pairs, summed per instant."""
+    out: dict = {}
+    for a, c in entries or ():
+        k = round(float(a), 3)
+        out[k] = out.get(k, 0.0) + float(c)
+    return out
+
+
+async def coverage_memory(conn, *, now: float) -> dict:
+    """Last-served instants, the rolling day's ledger and spend, the
+    measured costs, and each competition's run in demand: the receipts
+    table where it exists (so a restart resets nothing), the in-process
+    memory otherwise. Never raises.
+
+    ONE CLOCK. Every figure is the rolling day ending at the cycle's own
+    instant `now` (collector_coverage.envelope_window_s), with every spend
+    stamped by the cycle that made it -- in the process and in the receipts.
+    Where both hold a cycle's spend, the larger is taken (a receipt write
+    that failed leaves only the process's figure; a restart leaves only the
+    receipts').
+
+    THE LEASE HOLDER'S MEMORY ONLY. The receipts read is the rows written
+    under the collector's single-writer lease (`writer_lease = 'HELD'`); the
+    in-process memory is used only when THIS connection holds the lease. A
+    reader without it (a test harness, a one-off run) still sees the
+    collector's own spend -- so it can never be told the envelope is emptier
+    than the collector has made it -- but nothing a lease-less cycle did."""
+    lease = await _writer_lease(conn)
+    held = lease == "HELD"
+    window = cov.envelope_window_s(CYCLE_S)
+    led = [(a, c) for a, c in _COVERAGE["ledger"]
+           if 0.0 <= now - a < window]
+    if held:
+        _COVERAGE["ledger"] = [(a, c) for a, c in _COVERAGE["ledger"]
+                               if now - a < window]
+    else:
+        led = []
+    by_cycle = _ledger_by_cycle(led)
+    mem = {"source": "PROCESS" if held else "NONE_NOT_THE_LEASE_HOLDER",
+           "writer_lease": lease,
+           "window_s": window,
+           "last_served": dict(_COVERAGE["last_served"]) if held else {},
+           "ledger": sorted(by_cycle.items()),
+           "spent_24h": round(sum(by_cycle.values()), 6),
+           "measured_cost": ((_COVERAGE["cost"].get(ODDS_REQUEST_SHAPE)
+                              or {}).get("value") if held else None),
+           "discovery_cost": ((_COVERAGE["cost"].get(EVENTS_COST_KEY)
+                               or {}).get("value") if held else None),
+           "demand_since": dict(_COVERAGE["demand_since"]) if held else {}}
+    try:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('collector_coverage_receipts') IS NOT NULL")
+        if not exists:
+            mem["table"] = "COVERAGE_RECEIPTS_TABLE_ABSENT"
+            return mem
+        rows = await conn.fetch(COVERAGE_MEMORY_SQL, ODDS_REQUEST_SHAPE,
+                                float(now), window)
+        ledger_rows = await conn.fetch(COVERAGE_LEDGER_SQL, float(now),
+                                       window)
+        demand_rows = await conn.fetch(COVERAGE_DEMAND_SQL, float(now),
+                                       window)
+    except Exception as exc:                                   # noqa: BLE001
+        mem["table"] = "COVERAGE_RECEIPTS_READ_FAILED:%s" % type(exc).__name__
+        return mem
+    measured, disc = [], []
+    for r in rows:
+        k = str(r["competition"])
+        if r["last_served"] is not None:
+            mem["last_served"][k] = max(float(r["last_served"]),
+                                        mem["last_served"].get(k, 0.0))
+        if r["measured"] is not None:
+            measured.append(float(r["measured"]))
+        if r["discovery_cost"] is not None:
+            disc.append(float(r["discovery_cost"]))
+    for r in ledger_rows:
+        k = round(float(r["at"]), 3)
+        by_cycle[k] = max(by_cycle.get(k, 0.0), float(r["credits"] or 0.0))
+    # after a restart, the latest lease-held cycle's runs in demand resume;
+    # a process that has planned since owns the complete picture (including
+    # which competitions LEFT demand)
+    if not (held and _COVERAGE["demand_known"]):
+        mem["demand_since"] = {str(r["competition"]): float(r["demand_since"])
+                               for r in demand_rows
+                               if r["demand_since"] is not None}
+    mem.update(source="RECEIPTS", table="READ",
+               ledger=sorted(by_cycle.items()),
+               spent_24h=round(sum(by_cycle.values()), 6))
+    # the DEAREST measured cost of the last 24 h: conservative, so a cheap
+    # outlier can never let the plan schedule more than the budget buys
+    if measured:
+        mem["measured_cost"] = max(measured + ([mem["measured_cost"]]
+                                               if mem["measured_cost"]
+                                               is not None else []))
+    if disc and mem["discovery_cost"] is None:
+        mem["discovery_cost"] = max(disc)
+        if held:
+            _COVERAGE["cost"][EVENTS_COST_KEY] = {"value": max(disc),
+                                                  "at": None}
+    return mem
+
+
+def _lease_held(plan) -> bool:
+    """Whether this cycle's plan was built on the collector's single-writer
+    lease: only then does the cycle write the in-process coverage memory."""
+    return ((plan or {}).get("inputs") or {}).get("writer_lease") == "HELD"
+
+
+def _header_credits(value):
+    """The provider's per-request usage header as a number, or None."""
+    try:
+        if value is None:
+            return None
+        out = float(str(value).strip())
+        return out if math.isfinite(out) and out >= 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _charge(got: dict) -> tuple:
+    """(credits, basis) for one provider response: the provider's own usage
+    header when it sent one, else the stated upper estimate."""
+    spent = _header_credits((got or {}).get("credits_last"))
+    if spent is not None:
+        return spent, cov.COST_MEASURED
+    return cov.CREDITS_PER_FETCH_ESTIMATE, cov.COST_ESTIMATED
+
+
+def _record_spend(key: str, *, at: float, cycle_at: float, credits: float,
+                  basis: str) -> None:
+    """A scheduled fetch's turn and spend, in the lease holder's memory.
+
+    THE LEDGER IS STAMPED WITH THE CYCLE INSTANT `cycle_at`, not the instant
+    the fetch finished (`at`, kept for the measured cost): the rolling day
+    is measured from cycle starts, and a fetch stamped mid-cycle stayed in
+    the day one cycle longer than the cycle that made it -- so at the 900 s
+    cadence the day held 96 cycles of spend and about once a day a cycle saw
+    the envelope spent and fetched nothing (the adversarial review's
+    finding 2)."""
+    _COVERAGE["last_served"][key] = cycle_at
+    _COVERAGE["ledger"].append((float(cycle_at), float(credits)))
+    if basis == cov.COST_MEASURED:
+        _COVERAGE["cost"][ODDS_REQUEST_SHAPE] = {"value": float(credits),
+                                                 "at": at}
+
+
+def _charge_refetch(coverage: dict, sport_key: str, again: dict, *,
+                    cycle_at: float) -> float:
+    """A MID-CYCLE RE-FETCH IS SPEND TOO: charged on the competition's
+    receipt and, for the lease holder, in the ledger -- stamped with the
+    cycle instant, the clock the rolling day is measured on. Returns the
+    credits charged."""
+    spent, _basis = _charge(again)
+    for r in coverage.get("receipts") or ():
+        if r["key"] == sport_key:
+            r["credits_charged"] = float(r.get("credits_charged") or 0.0) \
+                + spent
+            r.setdefault("detail", {})["refetches"] = \
+                (r.get("detail") or {}).get("refetches", 0) + 1
+    if _lease_held(coverage):
+        _COVERAGE["ledger"].append((float(cycle_at), spent))
+    return spent
+
+
+async def plan_coverage(conn, *, catalogue, selection, now: float) -> dict:
+    """THIS CYCLE'S COVERAGE PLAN over every enabled competition. Never
+    raises: a failure to plan falls back to the confirmed set, named."""
+    try:
+        horizon = await venue_horizon(conn)
+        held = await held_competitions(conn, now=now)
+        feed = feed_coverage()
+        mem = await coverage_memory(conn, now=now)
+        cat_ok = bool((catalogue or {}).get("ok"))
+        listed = {str((row or {}).get("key") or ""): row
+                  for row in ((catalogue or {}).get("sports") or [])
+                  if (row or {}).get("key")}
+        comps: dict = {}
+
+        def add(key, family, token, *, confirmed=False):
+            if not key or key in comps:
+                return
+            toks = venue_league_tokens(key) or ((token,) if token else ())
+            unknown = 0
+            if not horizon["read"] or not toks:
+                # UNREAD, or no venue token to read it by: UNKNOWN, never 0
+                ev = board = nxt = None
+            else:
+                hs = [horizon["by_token"][t] for t in toks
+                      if horizon["by_token"].get(t)]
+                ev = sum(h["events_in_horizon"] for h in hs)
+                board = sum(h["board_events"] for h in hs)
+                # listed with no stated start: keeps it in demand
+                unknown = sum(int(h.get("start_unknown") or 0) for h in hs)
+                starts = [h["next_start"] for h in hs
+                          if h["next_start"] is not None]
+                nxt = min(starts) if starts else None
+            row = listed.get(key)
+            fam = family or family_for_provider_key(key) or ""
+            comps[key] = cov.competition(
+                key=key, family=fam, token=(toks[0] if toks else token),
+                listed=(None if not cat_ok else row is not None),
+                active=(None if row is None else row.get("active") is not False),
+                confirmed=confirmed, held=held["by_key"].get(key, 0),
+                events_in_horizon=ev, next_start=nxt, board_events=board,
+                start_unknown=unknown,
+                feed_covered=fam in feed.get("families", []),
+                last_served_at=mem["last_served"].get(key),
+                demand_since=mem["demand_since"].get(key))
+
+        for key, fam in SPORTS_CONFIRMED:
+            add(key, fam, None, confirmed=True)
+        for c in selection.get("confirmed_by_provider") or []:
+            add(c.get("key"), family_for_provider_key(c.get("key")),
+                c.get("our_token"))
+        for r in selection.get("rejected") or []:
+            add(r.get("key"), family_for_provider_key(r.get("key")),
+                r.get("our_token"))
+        # every held competition gets its receipt; a held position on a
+        # FINISHED game (finished_by_key) does not make it "held" -- it is
+        # then served, skipped or deferred like any other competition
+        for key in sorted(set(held["by_key"])
+                          | set(held.get("finished_by_key") or {})):
+            add(key, family_for_provider_key(key), None)
+        cost, basis = ((mem["measured_cost"], cov.COST_MEASURED)
+                       if mem.get("measured_cost") is not None
+                       else (cov.CREDITS_PER_FETCH_ESTIMATE,
+                             cov.COST_ESTIMATED))
+        out = cov.plan(list(comps.values()), now=now, cycle_s=CYCLE_S,
+                       spent_24h=mem["spent_24h"],
+                       spend_ledger=mem.get("ledger") or [],
+                       cost_per_fetch=cost, cost_basis=basis,
+                       max_calls=MAX_METERED_SPORTS_PER_CYCLE)
+        fin = held.get("finished_by_key") or {}
+        for r in out["receipts"]:
+            if fin.get(r["key"]):
+                r["held_finished"] = int(fin[r["key"]])
+        # the plan hands each in-demand competition its `demand_since`; fed
+        # back next cycle it is the start of that competition's run in
+        # demand, which its deadline is counted from (the lease holder's
+        # memory only). Replaced whole: a competition absent from it has
+        # left demand.
+        if mem.get("writer_lease") == "HELD":
+            _COVERAGE["demand_since"] = {
+                r["key"]: r["demand_since"] for r in out["receipts"]
+                if r.get("demand_since") is not None}
+            _COVERAGE["demand_known"] = True
+        out["inputs"] = {
+            "venue_horizon": {k: horizon.get(k) for k in ("read", "error")},
+            "held": {k: held.get(k) for k in (
+                "read", "by_key", "finished_by_key", "unmapped",
+                "starts_read", "error", "starts_error")},
+            "feed": feed,
+            "memory": {k: mem.get(k) for k in (
+                "source", "table", "window_s", "spent_24h", "measured_cost",
+                "discovery_cost")},
+            # the collector's single-writer lease, read on THIS connection
+            "writer_lease": mem.get("writer_lease"),
+            "request_shape": ODDS_REQUEST_SHAPE}
+        return out
+    except Exception as exc:                                   # noqa: BLE001
+        log.warning("ext_pinnacle: coverage plan failed", exc_info=True)
+        return {"version": cov.VERSION, "failed": type(exc).__name__,
+                "receipts": [], "envelope": None,
+                "fetch_order": [(k, f) for k, f in SPORTS_CONFIRMED],
+                "why": ("the coverage plan could not be built (%s); the "
+                        "confirmed set alone is fetched this cycle, as when "
+                        "the catalogue is unread" % type(exc).__name__)}
+
+
+def _in_horizon(ev: dict, *, now: float) -> bool:
+    at = fmeta_mod._epoch((ev or {}).get("commence_time"))
+    return (at is not None and now - cov.HORIZON_BEHIND_S <= float(at)
+            <= now + cov.HORIZON_AHEAD_S)
+
+
+async def refresh_unmetered_discovery(plan: dict, selection: dict, *,
+                                      api_key: str, now: float) -> dict:
+    """KEEP THE FEED-COVERED COMPETITIONS DISCOVERABLE WHILE THEY WAIT.
+
+    THE COUPLING THIS BREAKS. The reactive (PinnAPI) evaluation of an event
+    needs a discovery seed -- provider event id, the two teams, the start --
+    and the ONLY writer of seeds was the metered /odds fetch. So a deferred
+    metered slot would also have starved the valuations of sports whose
+    Pinnacle price the subscribed feed already carries: the reactive
+    scheduler's own counter read NO_CONFIRMED_DISCOVERY 15,105 at
+    2026-10-04T20:47Z (research-sql run 37233454453, C3b) -- feed price
+    changes on events nobody had discovered.
+
+    For every feed-covered competition in the horizon that this cycle's plan
+    DEFERRED, the provider's events endpoint (no market) refreshes the seeds
+    of its events in the horizon, after the same fixture confirmation a
+    metered fetch gets. ITS COST IS MEASURED, NOT ASSUMED: until the
+    provider's own usage header has shown it to be zero, each refresh
+    CLAIMS one of the cycle's metered calls (`collector_coverage.claim_call`)
+    and is skipped by name when none is left -- the call budget is never
+    exceeded on an assumption. Only while the reactive scheduler runs in this
+    process: a seed nobody can use is not worth a request. Never raises."""
+    from .. import pinnapi_reactive as reactive
+    out: dict = {"ran": False, "competitions": {}, "credits": 0.0,
+                 "metered_calls": 0}
+    if not plan.get("receipts"):
+        out["why"] = "NO_COVERAGE_PLAN"
+        return out
+    if reactive.ACTIVE is None:
+        out["why"] = "REACTIVE_SCHEDULER_NOT_RUNNING_IN_THIS_PROCESS"
+        return out
+    env = plan.get("envelope") or {}
+    left = float(env.get("cycle_budget") or 0.0) - float(
+        env.get("planned_spend") or 0.0)
+    cands = {c.get("key"): c for c in selection.get("confirmed_by_provider")
+             or []}
+    out["ran"] = True
+    for r in plan["receipts"]:
+        if not (r["planned"] == cov.DEFERRED_TO_SLOT and r["feed_covered"]
+                and (r["events_in_horizon"] is None
+                     or r["events_in_horizon"] > 0)):
+            continue
+        known = (_COVERAGE["cost"].get(EVENTS_COST_KEY) or {}).get("value")
+        if known is None or known > 0:
+            if known is not None and known > left + 1e-9:
+                r["discovery"] = "DISCOVERY_REFRESH_COSTS_CREDITS_NONE_LEFT"
+                continue
+            if not cov.claim_call(plan, cov.CALL_EVENTS):
+                r["discovery"] = "DISCOVERY_REFRESH_NO_METERED_CALL_LEFT"
+                continue
+            out["metered_calls"] += 1
+        got = await fetch_events(r["key"], api_key=api_key)
+        spent = _header_credits(got.get("credits_last"))
+        if spent is not None:
+            if _lease_held(plan):
+                _COVERAGE["cost"][EVENTS_COST_KEY] = {"value": spent,
+                                                      "at": time.time()}
+            r.setdefault("detail", {})["discovery_cost"] = spent
+            if spent > 0:
+                left -= spent
+                out["credits"] += spent
+                r["discovery_credits"] = spent
+                if _lease_held(plan):
+                    # stamped with the CYCLE instant: the clock the rolling
+                    # day is measured on (collector_coverage.
+                    # envelope_window_s)
+                    _COVERAGE["ledger"].append((float(now), spent))
+        if not got.get("ok"):
+            r["discovery"] = "DISCOVERY_REFRESH_FAILED:%s" % (
+                got.get("status") or got.get("error") or "UNKNOWN")
+            continue
+        events = [e for e in got.get("events") or []
+                  if _in_horizon(e, now=now)]
+        cand = cands.get(r["key"])
+        # THE SAME FIXTURE CONFIRMATION THE ODDS PATH APPLIES, to every
+        # provider-confirmed candidate -- WITH OR WITHOUT venue titles. The
+        # first version ran it only when titles were present, so a candidate
+        # built from the board snapshot (which carries none) registered
+        # reactive seeds UNCONFIRMED where the odds path refuses it
+        # (THE_MAPPING_COULD_NOT_BE_CONFIRMED_AGAINST_ANY_FIXTURE): the
+        # adversarial review's finding 3. No titles is unconfirmable, and
+        # unconfirmable is refused.
+        if cand is not None:
+            conf = confirm_mapping_by_fixtures(
+                provider_events=got.get("events") or [],
+                venue_event_titles=cand.get("venue_titles") or [],
+                venue_event_days=cand.get("venue_title_days") or {},
+                family=r["family"])
+            if not conf["ok"]:
+                r["discovery"] = "DISCOVERY_REFRESH_REFUSED:%s" % (
+                    conf.get("refusal"),)
+                continue
+        for e in events:
+            reactive.register(e, sport_key=r["key"], family=r["family"],
+                              received_at=got.get("received_at") or now)
+        r["discovery"] = "DISCOVERY_SEEDS_REFRESHED"
+        r["discovery_events"] = len(events)
+        out["competitions"][r["key"]] = len(events)
+    out["credits"] = round(out["credits"], 6)
+    return out
+
+
+async def _writer_lease(conn) -> str:
+    """Whether THIS connection holds the collector's single-writer lease
+    (the session advisory lock LOCK_KEY that `run` takes before any cycle):
+    HELD / NOT_HELD / UNREAD:<error>. Recorded on the cycle's receipt, so a
+    reader can tell the lease holder's receipts from any others."""
+    try:
+        held = await conn.fetchval(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = "
+            "'advisory' AND granted AND pid = pg_backend_pid() "
+            "AND classid = $1::bigint::oid AND objid = $2::bigint::oid "
+            "AND objsubid = 1)",
+            (LOCK_KEY >> 32) & 0xFFFFFFFF, LOCK_KEY & 0xFFFFFFFF)
+        return "HELD" if held else "NOT_HELD"
+    except Exception as exc:                                   # noqa: BLE001
+        return "UNREAD:%s" % type(exc).__name__
+
+
+async def _persist_coverage_receipts(conn, *, cycle_id: str, cycle_at: float,
+                                     plan: dict | None,
+                                     candidates=()) -> dict:
+    """ONE BUDGET ROW PER CYCLE, ONE ROW PER COMPETITION, plus one per
+    deferred provider event; appended, never updated. Never raises: an
+    unwritable ledger is reported on the cycle and the cycle goes on."""
+    import json
+
+    if not isinstance(plan, dict) or not plan.get("receipts"):
+        return {"ok": True, "rows": 0, "why": "NO_COVERAGE_PLAN"}
+    try:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('collector_coverage_receipts') IS NOT NULL")
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "rows": 0,
+                "refusal": "COVERAGE_RECEIPTS_READ_FAILED",
+                "error": type(exc).__name__}
+    if not exists:
+        return {"ok": False, "rows": 0,
+                "refusal": "COVERAGE_RECEIPTS_TABLE_ABSENT",
+                "why": "migration 248 is not applied here"}
+    ident = _code_identity() or {}
+    writer = ident.get("build") or ident.get("source_sha256_12")
+    lease = await _writer_lease(conn)
+
+    def ts(v):
+        return None if v is None else float(v)
+
+    cyc = cov.cycle_receipt(plan)
+    env = plan.get("envelope") or {}
+    # (cycle_id, cycle_at, writer, writer_lease, version, scope,
+    #  competition, venue_token,
+    #  family, provider_event_id, planned, receipt, priority_rank,
+    #  held_positions, feed_covered, in_play, venue_events_in_horizon,
+    #  next_venue_start, last_served_at, cycles_since_served, bound_cycles,
+    #  starvation_bound_cycles, next_slot_at, credits_charged, credits_basis,
+    #  request_shape, provider_events, discovery, calls_budget, calls_made,
+    #  credits_allowance, credits_spent, why, detail)
+    rows = [(
+        cycle_id, float(cycle_at), writer, lease, cov.VERSION, "CYCLE", "(cycle)",
+        None, None, None, cov.CYCLE_BUDGET, cov.CYCLE_BUDGET, None, 0, False,
+        False, None, None, None, None, None, None, None, 0.0, None, None,
+        None, None, int(cyc["calls_budget"]), int(cyc["calls_made"]),
+        ts(cyc.get("credits_allowance")), float(cyc["credits_spent"]),
+        ("%d of %d metered calls, %.1f credits of %.1f; %s"
+         % (cyc["calls_made"], cyc["calls_budget"], cyc["credits_spent"],
+            float(cyc.get("credits_allowance") or 0.0),
+            "feasible" if cyc.get("feasible") else
+            "demand exceeds the budget's bounds (starvation bound applies)")),
+        json.dumps(dict(cyc, writer_lease=lease, envelope=env,
+                        feasibility=plan.get("feasibility"),
+                        due_this_cycle=plan.get("due_this_cycle"),
+                        inputs=plan.get("inputs")), default=str))]
+    for r in plan["receipts"]:
+        final = r.get("final") or (cov.FETCH_FAILED
+                                   if r["planned"] == cov.SCHEDULED
+                                   else r["planned"])
+        detail = dict(r.get("detail") or {})
+        if r["planned"] == cov.SCHEDULED and r.get("final") is None:
+            detail["unsettled"] = ("scheduled and never fetched this cycle; "
+                                   "recorded FETCH_FAILED with no spend")
+        detail["overdue_cycles"] = r.get("overdue_cycles")
+        if r.get("events_start_unknown"):
+            detail["events_start_unknown"] = r["events_start_unknown"]
+        # the start of its run in demand (read back after a restart), its
+        # deadline, the limit that deferred it, and a held position on a
+        # finished game it carries
+        for _k in ("demand_since", "deadline_at", "budget_binding",
+                   "next_service_at", "held_finished"):
+            if r.get(_k) is not None:
+                detail[_k] = r[_k]
+        rows.append((
+            cycle_id, float(cycle_at), writer, lease, cov.VERSION, "COMPETITION",
+            r["key"], r.get("token"), r.get("family"), None,
+            r["planned"], final, r.get("priority_rank"), int(r["held"]),
+            bool(r["feed_covered"]), bool(r.get("in_play")),
+            r.get("events_in_horizon"), ts(r.get("next_start")),
+            ts(r.get("last_served_at")), r.get("cycles_since_served"),
+            r.get("bound_cycles"), r.get("starvation_bound_cycles"),
+            ts(r.get("next_slot_at")) if final in (
+                cov.DEFERRED_TO_SLOT, cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON)
+            else None,
+            float(r.get("credits_charged") or 0.0)
+            + float(r.get("discovery_credits") or 0.0),
+            r.get("credits_basis") or (cov.COST_MEASURED
+                                       if r.get("discovery_credits") else None),
+            ODDS_REQUEST_SHAPE if final in (cov.FETCHED, cov.FETCH_FAILED)
+            else None,
+            r.get("provider_events"), r.get("discovery"),
+            None, None, None, None,
+            str(r.get("why") or "")[:400], json.dumps(detail, default=str)))
+    for c in candidates or ():
+        rows.append((
+            cycle_id, float(cycle_at), writer, lease, cov.VERSION, "CANDIDATE",
+            c["sport_key"], c.get("token"), c.get("family"),
+            str(c["event_id"]), cov.CANDIDATE_DEFERRED_TO_SLOT,
+            cov.CANDIDATE_DEFERRED_TO_SLOT, c.get("queue_position"), 0,
+            bool(c.get("feed_covered")), False, None,
+            ts(c.get("commence_epoch")), None, None, None, None,
+            float(c["next_slot_at"]), 0.0, None, None, None, None,
+            None, None, None, None,
+            str(c.get("why") or "")[:400],
+            json.dumps({k: c.get(k) for k in ("deferred_since", "home",
+                                              "away", "share")},
+                       default=str)))
+    try:
+        await conn.executemany(
+            "INSERT INTO collector_coverage_receipts (cycle_id, cycle_at, "
+            " writer, writer_lease, scheduler_version, scope, competition, "
+            " venue_token, family, provider_event_id, planned, receipt, "
+            " priority_rank, held_positions, feed_covered, in_play, "
+            " venue_events_in_horizon, next_venue_start, last_served_at, "
+            " cycles_since_served, bound_cycles, starvation_bound_cycles, "
+            " next_slot_at, credits_charged, credits_basis, request_shape, "
+            " provider_events, discovery, calls_budget, calls_made, "
+            " credits_allowance, credits_spent, why, detail) "
+            "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, $10, "
+            " $11, $12, $13, $14, $15, $16, $17, to_timestamp($18), "
+            " to_timestamp($19), $20, $21, $22, to_timestamp($23), $24, $25, "
+            " $26, $27, $28, $29, $30, $31, $32, $33, $34::jsonb)", rows)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "rows": 0,
+                "refusal": "COVERAGE_RECEIPTS_WRITE_FAILED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    return {"ok": True, "rows": len(rows), "cycle_id": cycle_id,
+            "writer_lease": lease}
+
+
+def coverage_selection_view(plan: dict) -> dict:
+    """The plan in the shape `sports_selection` already carried for its
+    readers (coverage_integrity reads `requested`, `budget_dropped` and
+    `budget`): what this cycle fetches, the declared call budget, and every
+    DEFERRED competition with its reason and slot -- never a bare drop."""
+    deferred = [{"key": r["key"], "venue_events": r.get("events_in_horizon"),
+                 "receipt": r["planned"], "next_slot_at": r.get("next_slot_at"),
+                 "cycles_since_served": r.get("cycles_since_served"),
+                 "budget_binding": r.get("budget_binding"),
+                 "why": r.get("why")}
+                for r in plan.get("receipts") or ()
+                if r["planned"] in cov.BUDGET_DROPPED]
+    return {"sports": list(plan.get("fetch_order") or []),
+            "budget": (plan.get("calls") or {}).get(
+                "budget", MAX_METERED_SPORTS_PER_CYCLE),
+            "budget_dropped": deferred,
+            "schedule": schedule_of(plan)}
+
+
+def schedule_of(plan: dict | None) -> dict:
+    """{competition: receipt} for every competition IN THE SCHEDULE'S
+    ROTATION (collector_coverage.ROTATION_RECEIPTS): fetched this cycle,
+    deferred to a slot, or waiting for a venue event to enter the horizon.
+    Derek's coverage census reads it as the collector's mandate, so a
+    competition the schedule deferred THIS cycle is not filed
+    OUTSIDE_MANDATE -- the adversarial review's finding 5: `requested` is
+    one cycle's fetch order, and with rotation a league drifted in and out
+    of the mandate cycle to cycle."""
+    out = {}
+    for r in (plan or {}).get("receipts") or ():
+        rec = r.get("final") or r.get("planned")
+        if rec in cov.ROTATION_RECEIPTS:
+            out[str(r["key"])] = rec
+    return out
+
 
 #: One cycle per this many seconds. The provider bills per request x
 #: market x region, so the cadence IS the budget: three sports at roughly
@@ -1169,6 +2158,48 @@ ODDS_REFETCH_IS_NOT_A_RETRY = (
     "evaluated in this sport. It never re-decides an evaluated event, and "
     "when it fails the existing quote is kept and ages normally, so the "
     "freshness rule refuses it by name instead of the sport being dropped")
+
+#: ── QUOTE_STALE_ON_ARRIVAL WAS OURS: REFRESH ON DEMAND (P0 incident) ──
+#:
+#: THE MEASURED DEFECT (production 2026-10-04, NFL ~600 QUOTE_STALE_ON_ARRIVAL
+#: rows a day; ~1,034 candidate-rows/day across leagues whose provider lag was
+#: inside 30 s and whose quote was nonetheless refused). `received_at` is
+#: stamped once per sport fetch and the candidates behind it wait on paced
+#: venue reads, ~5-6 s per queue position, so a quote the provider handed us
+#: INSIDE the 30 s rule went past it in our own queue. EVENTS_PER_ODDS_FETCH
+#: (a fixed share) stays at its default; this refresh is targeted instead: it
+#: fires ONLY for a candidate whose provider lag at receipt was inside the
+#: limit and whose age at arrival is over it -- exactly the case our own
+#: delay caused -- and it re-reads the provider so the candidate is judged on
+#: a quote of the provider's own current instant. The 30 s rule, its clock
+#: (the provider's last_update) and the instant it is applied at are
+#: unchanged; a quote the provider itself delivered stale is never refreshed
+#: (that is a coverage fact, refused by name as before). Bounded per sport per
+#: cycle; the credit cost is measured on the cycle row.
+#:
+#: OFF BY DEFAULT -- THE METERED BUDGET IS THE OWNER'S (review of 7bd084b).
+#: Every refresh is a metered the-odds-api fetch: at a bound of 4, up to 16
+#: more per 4-sport cycle against the 4 made today, and the incident's root
+#: causes treat that budget as an owner resource decision (RC8: raising
+#: MAX_METERED_SPORTS_PER_CYCLE is "owner resource decision"). It also does
+#: not remove the cause -- our serial, paced venue reads -- it re-reads the
+#: provider, which only helps when the provider's last_update moved, so
+#: credits go to STILL_STALE outcomes too. At 0 nothing extra is fetched:
+#: each candidate our delay made stale is counted (`capped`: one refresh the
+#: owner's bound would have made) and refused QUOTE_STALE_ON_ARRIVAL by name
+#: exactly as before, so the owner sees what enabling it costs and saves.
+#: The owner enables it by setting this bound (4 is the proposed value).
+ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT = 0
+ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT = 4
+ADAPTIVE_ODDS_REFETCH_RULE = (
+    "refreshes the provider quote only for a candidate the provider handed "
+    "over inside the freshness limit and our own processing pushed past it; "
+    "the limit, its clock and its instant are unchanged; a provider-stale "
+    "quote is never refreshed; at most adaptive_refetch_max_per_sport per "
+    "sport per cycle, which is 0 (off) until the owner sets it: every "
+    "refresh is a metered fetch and the metered budget is the owner's "
+    "resource decision (each candidate it would have refreshed is counted "
+    "as capped)")
 
 #: The venue read is the slow part; bound it so one hanging book cannot
 #: hold the cycle open.
@@ -1448,16 +2479,39 @@ R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
 #: global match ignores dates (VENUE_MAPPING_AMBIGUOUS, the MLB series case),
 #: or only line markets (VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE). Each
 #: is a statement about the GLOBAL catalogue, and `bettor_venue_native_identity`
-#: asks the venue's own. Every code must be one of these: a CLOSED or SEGMENT
-#: code beside them says the fixture was found and was unusable, which the
-#: venue-native path has no business overriding. And identity, only when the
-#: US catalogue crossing found NOTHING (NO_VENUE_NATIVE_CONTRACT_IN_PREMAP) --
-#: never a realism, intent or period refusal, which are findings about a
-#: contract that was found.
+#: asks the venue's own. And identity, only when the US catalogue crossing
+#: found NOTHING (NO_VENUE_NATIVE_CONTRACT_IN_PREMAP) -- never a realism,
+#: intent or period refusal, which are findings about a contract that was
+#: found.
+#:
+#: ── VENUE-NATIVE FIRST: A GLOBAL SEGMENT OR CLOSED ROW NO LONGER BLOCKS ──
+#:
+#: THIS USED TO EXCLUDE CLOSED AND SEGMENT, on the reasoning that such a code
+#: "says the fixture was found and was unusable". The production identity
+#: receipt (P0 incident, 2026-10-04) showed what it actually says: the GLOBAL
+#: catalogue is matched on names alone and is date-blind, so its segment or
+#: closed row is an inning market, a half, or YESTERDAY's series game -- a
+#: different global row, not a finding about the venue's own contract for
+#: this fixture. 5 events in 72 h (MLB, Serie B, UNL) and ~21 h of one MLB
+#: playoff game's scheduled coverage were lost to it. The venue's own
+#: catalogue is the counterparty, and `bettor_venue_native_identity`
+#: re-applies its own gates to what it finds -- the FULL_MATCH period rule,
+#: realism on every row of the event, the re-seen window that drops closed
+#: contracts, both teams one-to-one inside the start tolerance -- so nothing
+#: the global code was guarding against can pass through it. The global
+#: codes stay on the event as context (`global_refusal_replaced`).
 #:
 #: NO_PINNACLE_ON_EVENT IS NOT HERE AND CANNOT BE: it is refused before the
 #: mapping is attempted. No catalogue can repair a missing provider price.
-VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE)
+#:
+#: GLOBAL_CATALOGUE_NOT_CONSULTED is the PinnAPI-native discovery's own: its
+#: event was matched to ONE venue event by exact structured names
+#: (pinnapi_discovery), so the date-blind global search is not run at all and
+#: the venue-native resolver is asked for that event directly.
+R_GLOBAL_NOT_CONSULTED = "GLOBAL_CATALOGUE_NOT_CONSULTED_FOR_A_PINNAPI_NATIVE_EVENT"
+VENUE_NATIVE_MAY_REPLACE = (vmap.R_NO_CONTRACT, vmap.R_AMBIGUOUS, vmap.R_LINE,
+                            vmap.R_SEGMENT, vmap.R_CLOSED,
+                            R_GLOBAL_NOT_CONSULTED)
 VENUE_NATIVE_MAY_REPLACE_IDENTITY = (R_NO_PREMAP,)
 
 
@@ -1513,6 +2567,10 @@ def family_for_provider_key(key):
     if k in VENUE_TOKEN_TO_PROVIDER_KEY.values():
         return "soccer"
     return None
+
+
+#: The horizon read, built once the token maps above it exist.
+VENUE_HORIZON_SQL = _horizon_sql()
 
 
 def venue_native_may_replace(codes) -> bool:
@@ -1603,6 +2661,112 @@ R_BOOK_CURRENCY_CONTRADICTED = "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT"
 #: describe, and the candidate stops where it always did.
 CALIBRATION_ONLY_AFTER = (R_BOOK_CURRENCY_NOT_ESTABLISHED,
                           R_BOOK_CURRENCY_CONTRADICTED)
+
+#: ── A FAILED VENUE READ STILL REACHES THE AGENTS (P0 incident 2026-10-04) ──
+#:
+#: THE GAP THIS CLOSES, measured in production on 191b299. When the collector's
+#: OWN venue book read failed -- VENUE_BOOK_READ_FAILED (our request gate's
+#: cooldown refusal, the await timing out) or VENUE_BOOK_READ_RETURNED_ERROR (a
+#: 429, a timeout, a 404, any venue error) -- no valuation was written at all,
+#: not even calibration-only, so NO paper agent ever received the opportunity:
+#: 165 PinnAPI-triggered evaluations a day (19.5% of reactive completions,
+#: mostly HELD events, which starved Xavier's fresh evidence) and 48+ discovery
+#: events a day. Yet no paper strategy prices from the collector's read: each
+#: reads its OWN book at its decision (`paper_book_observations`) and refuses by
+#: name when it cannot.
+#:
+#: So after exactly these two refusals the same evaluate/persist path runs and
+#: the record is sealed CALIBRATION_ONLY, with NO displayed price (none was
+#: read: `displayed_quote.acquisition_price` NULL, `executable_price` NULL by
+#: migration 144's CHECK) and a PRECISE `venue_read_refusal`:
+#:
+#:   VENUE_GATE_COOLDOWN  our venue request gate refused to dispatch (a 429
+#:                        cooldown longer than the wait it may hold)
+#:   VENUE_RATE_LIMITED   the venue answered 429 / a rate-limit error
+#:   VENUE_TIMEOUT        no answer in time (the await or the transport)
+#:   VENUE_NOT_FOUND      the venue answered 404 / not found
+#:   VENUE_ERROR          any other failure, named in the diagnostic
+#:
+#: The event stays REFUSED under its venue-read code in the tally and the
+#: ledger, exactly as before; nothing trades on a NULL price -- the record is
+#: inadmissible three times over (`_seal_calibration_only`, migration 144's
+#: CHECKs, and every consumer that reads `record_purpose`).
+VR_GATE_COOLDOWN = "VENUE_GATE_COOLDOWN"
+VR_RATE_LIMITED = "VENUE_RATE_LIMITED"
+VR_TIMEOUT = "VENUE_TIMEOUT"
+VR_NOT_FOUND = "VENUE_NOT_FOUND"
+VR_ERROR = "VENUE_ERROR"
+VENUE_READ_REFUSALS = (VR_GATE_COOLDOWN, VR_RATE_LIMITED, VR_TIMEOUT,
+                       VR_NOT_FOUND, VR_ERROR)
+CALIBRATION_ONLY_AFTER_READ_FAILURE = (R_VENUE_READ_FAILED,
+                                       R_VENUE_READ_ERROR)
+NO_BOOK_READ = ("NO_BOOK_WAS_READ: the venue read failed, so nothing was "
+                "displayed and there is no price of any kind")
+
+
+def venue_read_refusal(vq) -> str | None:
+    """THE PRECISE REASON A COLLECTOR BOOK READ FAILED, from the failed
+    `venue_quote` itself (its diagnostic carries our gate's refusal or the
+    venue's status and error type). None unless the read failed or errored."""
+    vq = vq if isinstance(vq, dict) else {}
+    if vq.get("refusal") not in CALIBRATION_ONLY_AFTER_READ_FAILURE:
+        return None
+    from .. import venue_request_gate as grt
+    gate_codes = {v for k, v in vars(grt).items()
+                  if k.startswith("R_") and isinstance(v, str)}
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    err = str(vq.get("venue_error") or vq.get("exception")
+              or diag.get("error_type") or diag.get("exception")
+              or diag.get("code") or "")
+    if (vq.get("refused_by") == "OUR_REQUEST_GATE"
+            or diag.get("stage") == "REQUEST_GATE"
+            or diag.get("refusal") in gate_codes or err in gate_codes):
+        return VR_GATE_COOLDOWN
+    status = diag.get("http_status")
+    if status is None:
+        status = diag.get("status")
+    try:
+        status = None if status is None else int(status)
+    except (TypeError, ValueError):
+        status = None
+    name = err.lower().replace("_", "")
+    if diag.get("is_rate_limited") or status == 429 or "ratelimit" in name:
+        return VR_RATE_LIMITED
+    if status == 404 or "notfound" in name:
+        return VR_NOT_FOUND
+    if diag.get("is_timeout") or "timeout" in name:
+        return VR_TIMEOUT
+    return VR_ERROR
+
+
+def _read_failure_basis(vq) -> dict | None:
+    """The calibration-only basis of a FAILED read: no book, no displayed
+    price, the precise refusal and what the venue (or our gate) said. None
+    for any other refusal, so every other candidate stops where it did."""
+    code = venue_read_refusal(vq)
+    if code is None:
+        return None
+    diag = vq.get("diagnostic") if isinstance(vq.get("diagnostic"),
+                                              dict) else {}
+    return {"refusal": vq["refusal"], "venue_read_refusal": code,
+            "no_book_read": True,
+            "displayed": {"ok": False, "acquisition_price": None,
+                          "api_price": None, "side_consumed": None,
+                          "depth": None, "usable_for_orders": False,
+                          "what_this_is": NO_BOOK_READ},
+            "book_currency": {"verdict": "NOT_READ", "mechanism": None,
+                              "mechanisms_unavailable": None,
+                              "partial": None,
+                              "why": "no book was read, so no currency "
+                                     "question arises"},
+            "venue_read_why": vq.get("why"),
+            "venue_read_diagnostic": {
+                k: diag.get(k) for k in (
+                    "stage", "code", "status", "http_status", "exception",
+                    "error_type", "is_rate_limited", "is_timeout",
+                    "retry_after_s", "refusal", "request_id")
+                if diag.get(k) is not None}}
 #: The named counter the spec asks for: valuations recorded inadmissible, for
 #: calibration only. Reported beside the tally, never inside it -- the event's
 #: own outcome stays REFUSED under the currency code, so "written" cannot
@@ -1675,6 +2839,12 @@ async def fetch_odds(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
     The key is passed in rather than read here so that the only place it
     is looked up is `credential_present`, and it is never interpolated
     into a log line or an exception message.
+
+    R30A: `credits_last` is the provider's own cost for THIS request (its
+    `x-requests-last` header), so the coverage receipts record what each
+    metered call actually cost instead of inferring it from the key's
+    cumulative usage, which other consumers share. The request itself is
+    unchanged.
     """
     import httpx
 
@@ -1685,15 +2855,53 @@ async def fetch_odds(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
         r = await client.get(url, params=params)
         used = r.headers.get("x-requests-used")
         remaining = r.headers.get("x-requests-remaining")
+        last = _header_credits(r.headers.get("x-requests-last"))
         if r.status_code != 200:
             # The body can echo the query string, so it is NOT included.
             return {"ok": False, "status": r.status_code,
                     "refusal": R_PROVIDER_ERROR,
                     "credits_used": used, "credits_remaining": remaining,
-                    "events": []}
+                    "credits_last": last, "events": []}
         return {"ok": True, "status": 200, "events": r.json(),
                 "credits_used": used, "credits_remaining": remaining,
-                "received_at": time.time()}
+                "credits_last": last, "received_at": time.time()}
+
+
+async def fetch_events(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
+    """THE PROVIDER'S EVENT LIST FOR ONE COMPETITION, WITHOUT ODDS. Never
+    raises.
+
+    The discovery identity the reactive (PinnAPI) path needs -- provider
+    event id, the two team names, the commence time -- is exactly what this
+    endpoint returns, and it carries no market. Its cost is READ, not
+    assumed: `credits_last` is the provider's own header, and the coverage
+    scheduler counts the call against the metered budget until that header
+    has shown it to be zero. A transport error is the same answer as a
+    non-200: no events, and the competition's discovery simply was not
+    refreshed this cycle.
+    """
+    import httpx
+
+    url = ("https://api.the-odds-api.com/v4/sports/%s/events/" % sport_key)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(url, params={"apiKey": api_key})
+            meta = {"credits_used": r.headers.get("x-requests-used"),
+                    "credits_remaining": r.headers.get("x-requests-remaining"),
+                    "credits_last": _header_credits(
+                        r.headers.get("x-requests-last"))}
+            if r.status_code != 200:
+                # The body can echo the query string, so it is NOT included.
+                return dict(meta, ok=False, status=r.status_code,
+                            refusal=R_PROVIDER_ERROR, events=[])
+            rows = r.json() or []
+            return dict(meta, ok=True, status=200,
+                        events=[e for e in rows if isinstance(e, dict)],
+                        received_at=time.time())
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "status": None, "refusal": R_PROVIDER_ERROR,
+                "events": [], "error": type(exc).__name__,
+                "credits_last": None, "received_at": time.time()}
 
 
 def _read_resolution_blocking(slug: str) -> dict:
@@ -1976,11 +3184,14 @@ def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
 
 
 def primary_pinnacle_h2h(event: dict, *, received_at: float,
-                         family: str, at: float) -> dict | None:
+                         family: str, at: float,
+                         explain: dict | None = None) -> dict | None:
     """Preferred live WS source, with the original collector as fallback.
 
     Reads the existing owner in this process; never opens another socket.
     Discovery/independent-book evidence stays with the original event.
+    `explain` receives the WS refusal reason when the WS price is not used
+    (pinnapi_primary.select), so a None is never left unexplained.
     """
     from .. import pinnapi_feed_runtime as feed
     from .. import pinnapi_primary as primary
@@ -1989,7 +3200,58 @@ def primary_pinnacle_h2h(event: dict, *, received_at: float,
         owner.cache if owner else None, event,
         pinnacle_h2h(event, received_at=received_at), family=family,
         sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
-        runtime_id=feed._STATE.get("runtime_id"))
+        runtime_id=feed._STATE.get("runtime_id"), explain=explain)
+
+
+#: ── WHY AN EVENT HAS NO USABLE PINNACLE PRICE, BY NAME (P0 incident) ──
+#:
+#: THE MISLABEL (production 2026-10-04, 2,534 rows/day). When the PinnAPI read
+#: was refused (no exact fixture, sport not subscribed, age unknown, stale, no
+#: feed authority) AND the-odds-api payload carried no Pinnacle h2h, the event
+#: was recorded NO_PINNACLE_ON_EVENT -- as if the book had no price. The cause
+#: is now recorded as the codes that produced it, in order: the WS refusal
+#: reason (pinnapi_primary.select, e.g. PINNAPI_PRIMARY_SPORT_UNSUPPORTED,
+#: PINNAPI_PRIMARY_NO_EXACT_FIXTURE, FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE,
+#: FEED_OWNERSHIP_NOT_HELD), then what the discovery payload lacked. Both are
+#: classified in refusal_taxonomy_table; NO_PINNACLE_ON_EVENT remains only for
+#: a WS read that refused without a reason, which select() never does.
+R_PAYLOAD_HAS_NO_PINNACLE = "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK"
+R_PINNACLE_HAS_NO_H2H = "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET"
+R_NO_PINNACLE_ON_EVENT = "NO_PINNACLE_ON_EVENT"
+
+
+def pinnacle_absence_in_payload(event) -> str | None:
+    """What the discovery payload lacked for a Pinnacle h2h, by name, or None
+    when it carries one."""
+    books = (event or {}).get("bookmakers") or []
+    pin = next((b for b in books if (b or {}).get("key") == devig.BOOK),
+               None)
+    if pin is None:
+        return R_PAYLOAD_HAS_NO_PINNACLE
+    if not any((m or {}).get("key") == "h2h"
+               for m in (pin.get("markets") or [])):
+        return R_PINNACLE_HAS_NO_H2H
+    return None
+
+
+def no_pinnacle_codes(explain, event) -> list:
+    """The codes recorded for an event with no usable Pinnacle price, in
+    order: the WS refusal reason, then the discovery payload's absence."""
+    ws = (explain or {}).get("reason")
+    legacy = pinnacle_absence_in_payload(event)
+    codes = [c for c in (ws, legacy) if c]
+    return codes or [R_NO_PINNACLE_ON_EVENT]
+
+
+def no_pinnacle_stage(codes) -> str:
+    """THE LANE STAGE OF AN EVENT WITH NO USABLE PINNACLE PRICE: the stage of
+    its BINDING code -- the first, the WS refusal when there is one -- from
+    the one taxonomy (`ext.STAGE_OF`, derived by `ext.lane_stage_of`), so a
+    WS price refused as stale stops at 2_FRESHNESS and a provider-side
+    identity refusal or the payload's absence at 1_PROBABILITY (review of
+    7bd084b: every such event was staged 1_PROBABILITY whatever the cause)."""
+    first = next(iter(codes or []), None)
+    return ext.STAGE_OF.get(first) or "1_PROBABILITY"
 
 
 def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
@@ -2000,6 +3262,221 @@ def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
         owner.cache if owner else None, quote, at=at,
         max_age_s=PINNACLE_MAX_AGE_S,
         runtime_id=feed._STATE.get("runtime_id"))
+
+
+#: The marker `pinnapi_read_refusal` hands `pinnapi_primary.select` as a
+#: fallback, so the WS refusal reason select would otherwise discard comes back.
+_PINNAPI_REFUSAL_PROBE = "__pinnapi_read_refusal_probe__"
+
+
+def pinnapi_read_refusal(event: dict, *, family: str, at: float) -> str:
+    """WHY THE LEASED WS CACHE GAVE NO PRICE FOR THIS EVENT, by name.
+
+    `primary.select` returns None when the WS read refuses and there is no
+    fallback, and the reason is lost -- the event then reads as if Pinnacle had
+    no price at all. A PinnAPI-native event was DISCOVERED in that very feed,
+    so "no Pinnacle" is never true of it: its refusal is the WS read's own
+    (FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE, FEED_QUOTE_OLDER_THAN_LIMIT,
+    PINNAPI_PRIMARY_NO_EXACT_FIXTURE, ...). This asks the same select with a
+    marker fallback and reads the reason off it. Read-only; never raises."""
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_primary as primary
+        owner = feed._STATE.get("owner")
+        got = primary.select(
+            owner.cache if owner else None, event,
+            {_PINNAPI_REFUSAL_PROBE: True}, family=family,
+            sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
+            runtime_id=feed._STATE.get("runtime_id"))
+    except Exception as exc:                                   # noqa: BLE001
+        return "PINNAPI_READ_RAISED:%s" % type(exc).__name__
+    if isinstance(got, dict) and got.get(_PINNAPI_REFUSAL_PROBE):
+        return str((got.get("reference_input") or {}).get("fallback_reason")
+                   or "PINNAPI_READ_REFUSED_WITHOUT_A_REASON")
+    return "PINNAPI_READ_SUCCEEDED_ON_RECHECK"
+
+
+# ── EVERY OUTCOME OF THE EVENT (P0 incident repair, 2026-10-04) ─────────
+#
+# THE DEFECT. The cycle priced exactly one outcome per provider event, the
+# provider's HOME team: `resolve_venue_identity` was called with
+# `priced_outcome=quote['home']`, `resolve_venue_native` hard-coded
+# `priced = home`, and the valuation carried `selection=quote['home']`. The
+# away contract of every mapped event and the soccer draw contract were never
+# resolved, valued or decided -- 57 opportunities a day from the mapped events
+# instead of ~140 (31 two-way events x 2 + 26 soccer events x 3, production
+# funnel receipt 2026-10-04), with no threshold anywhere involved.
+#
+# NOW every outcome of the complete de-vigged set is asked, one at a time, in
+# this order: home, away, and the draw on a three-way (soccer) book. Each gets
+# its own venue contract (through the SAME resolvers), its own book read, its
+# own valuation row and its own paper decision. The probability of each is the
+# de-vig's own number for that outcome -- the set is normalised once over all
+# outcomes, so p(away) is never 1 - p(home) on a three-way book.
+OUTCOME_DESIGNATIONS_THREE_WAY = ("home", "away", "draw")
+OUTCOME_DESIGNATIONS_TWO_WAY = ("home", "away")
+#: The family whose full-time result is three-way (draw is its own outcome,
+#: bettor_pinnacle_devig.SUPPORTED[('soccer', 'h2h')] == 3).
+THREE_WAY_FAMILIES = frozenset(("soccer",))
+R_PRICED_OUTCOME_ABSENT = "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE"
+
+
+def outcome_designations(family) -> tuple:
+    """The outcomes one event is priced on, in the order they are asked."""
+    return (OUTCOME_DESIGNATIONS_THREE_WAY if family in THREE_WAY_FAMILIES
+            else OUTCOME_DESIGNATIONS_TWO_WAY)
+
+
+def outcome_items(events, family):
+    """(event index, designation) for every outcome of every event, events in
+    their given order and outcomes in `outcome_designations` order. Lazy, so a
+    re-fetch that replaces later events in the list is seen."""
+    for i in range(len(events)):
+        for d in outcome_designations(family):
+            yield i, d
+
+
+def priced_outcome_name(quote: dict, designation: str):
+    """The provider quote's OWN name for one designation -- its home team, its
+    away team, or the one outcome of the priced set that is the draw -- or
+    None when the quote does not carry it. Never a guess: the draw is the
+    single price key whose tokens are exactly {'draw'}."""
+    q = quote or {}
+    if designation == "home":
+        return q.get("home")
+    if designation == "away":
+        return q.get("away")
+    if designation == "draw":
+        hits = [n for n in (q.get("prices") or {})
+                if _team_tokens(n)[0] == frozenset(("draw",))]
+        return hits[0] if len(hits) == 1 else None
+    return None
+
+
+def native_identity_of(event) -> dict | None:
+    """The PinnAPI-native discovery's identity carried on an event dict
+    (`pinnapi_discovery`): the venue event slug it matched, the venue league
+    token(s) confirmed for its provider league, the provider sport key the
+    fixture-scope source is keyed on. None for a discovery-provider event."""
+    n = event.get("pinnapi_native") if isinstance(event, dict) else None
+    return n if isinstance(n, dict) else None
+
+
+def league_tokens_for(sport_key, event) -> tuple:
+    """The venue league token(s) the venue-native search is confined to: the
+    discovery's confirmed token for a PinnAPI-native event, else the provider
+    competition's own (`venue_league_tokens`)."""
+    n = native_identity_of(event)
+    if n is not None:
+        return tuple(str(t) for t in (n.get("venue_league_tokens") or ()))
+    return venue_league_tokens(sport_key)
+
+
+# ── ONE FIXTURE, ONE EVENT KEY, WHICHEVER DISCOVERY FOUND IT ─────────────
+#
+# A venue-native valuation has no global condition, so the paper ledger counts
+# its FIXTURE as "event:<event_key>" (agents.derek_policy.fixture_of) -- and
+# that key is what the fixture rails compare: exclusive fixture ownership
+# across strategies, one live entry per fixture, exploration's fixture lock and
+# its sampling draw. Before the P0 repair every event key came from the one
+# discovery provider. Now a fixture can be discovered by the-odds-api (its
+# event id) OR by the PinnAPI feed (`pinnapi:<matchup id>`), and the same venue
+# event could reach the ledger under two keys -- two "fixtures" -- letting a
+# second strategy hold another contract of a fixture a first already holds.
+# That would loosen a rail, which this repair must never do.
+#
+# So the event key of a venue-native valuation is the FIRST key already
+# recorded for any contract of the same VENUE event (us_premap.event_slug) in
+# this experiment; only a venue event never valued before takes the provider's
+# own id. Read through the one-per-observation index's leading columns
+# (experiment, '' condition, slug), so it is an index lookup. The answer is
+# then FIXED in `venue_fixture_event_keys` (migration 261, one row per venue
+# event, insert-once): two writers racing on a never-valued event -- the
+# scheduled cycle and a reactive worker -- both read back the one row that
+# won, so they can never record two keys for one fixture.
+FIXTURE_KEY_READ_SQL = """
+    SELECT event_key, basis FROM venue_fixture_event_keys
+     WHERE venue_event_slug = $1
+"""
+FIXTURE_KEY_INSERT_SQL = """
+    INSERT INTO venue_fixture_event_keys
+        (venue_event_slug, event_key, basis, first_provider_event_id)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (venue_event_slug) DO NOTHING
+"""
+STICKY_EVENT_KEY_SQL = """
+    SELECT v.event_key
+      FROM external_valuations v
+     WHERE v.experiment_id = $1
+       AND coalesce(v.condition_id, '') = ''
+       AND coalesce(v.us_market_slug, '') = ANY($2::text[])
+       AND v.event_key IS NOT NULL
+     ORDER BY v.decided_at ASC, v.id ASC
+     LIMIT 1
+"""
+VENUE_EVENT_SLUGS_SQL = """
+    SELECT DISTINCT market_slug FROM us_premap
+     WHERE event_slug = $1 AND market_slug IS NOT NULL
+     LIMIT 64
+"""
+
+
+async def sticky_event_key(conn, *, venue_event_slug, proposed, cache=None
+                           ) -> dict:
+    """{'event_key', 'basis', 'proposed'} for a venue-native valuation: the
+    first event key recorded for the venue event, else `proposed`. A failed
+    read keeps `proposed` and says so. Never raises."""
+    out = {"event_key": proposed, "proposed": proposed,
+           "venue_event_slug": venue_event_slug,
+           "basis": "PROVIDER_EVENT_ID_FIRST_VALUATION_OF_THIS_VENUE_EVENT"}
+    if not venue_event_slug:
+        out["basis"] = "PROVIDER_EVENT_ID_NO_VENUE_EVENT_KEY"
+        return out
+    if cache is not None and venue_event_slug in cache:
+        out.update(cache[venue_event_slug])
+        return out
+    slug = str(venue_event_slug)
+    try:
+        fixed = await conn.fetchrow(FIXTURE_KEY_READ_SQL, slug)
+    except Exception:                                          # noqa: BLE001
+        # migration 261 absent: the history read below still applies, only
+        # the insert-once fixing (the race guard) is unavailable
+        fixed, table = None, False
+    else:
+        table = True
+    if fixed is None:
+        try:
+            slugs = [r["market_slug"] for r in await conn.fetch(
+                VENUE_EVENT_SLUGS_SQL, slug)]
+            got = (await conn.fetchval(STICKY_EVENT_KEY_SQL,
+                                       ext.EXPERIMENT_ID, slugs)
+                   if slugs else None)
+        except Exception as exc:                               # noqa: BLE001
+            out["basis"] = "PROVIDER_EVENT_ID_STICKY_READ_FAILED:%s" % (
+                type(exc).__name__)
+            return out
+        if got is not None and str(got) != str(proposed):
+            out.update(event_key=str(got),
+                       basis="FIRST_EVENT_KEY_RECORDED_FOR_THIS_VENUE_EVENT")
+        elif got is not None:
+            out["basis"] = "SAME_AS_THE_FIRST_EVENT_KEY_RECORDED"
+        if table and out["event_key"] is not None:
+            try:
+                await conn.execute(FIXTURE_KEY_INSERT_SQL, slug,
+                                   str(out["event_key"]), out["basis"],
+                                   None if proposed is None else str(proposed))
+                fixed = await conn.fetchrow(FIXTURE_KEY_READ_SQL, slug)
+            except Exception as exc:                           # noqa: BLE001
+                out["fixing"] = "NOT_FIXED:%s" % type(exc).__name__
+    if fixed is not None:
+        out["event_key"] = fixed["event_key"]
+        out["basis"] = ("FIXED_FOR_THIS_VENUE_EVENT:%s" % fixed["basis"]
+                        if str(fixed["event_key"]) != str(proposed)
+                        else fixed["basis"])
+        out["fixed_in"] = "venue_fixture_event_keys"
+    if cache is not None:
+        cache[venue_event_slug] = {k: out[k] for k in ("event_key", "basis")}
+    return out
 
 
 # ── the venue side, read in the same cycle ──────────────────────────
@@ -2852,8 +4329,73 @@ def _displayed_market_state(basis: dict) -> dict:
             "side_consumed": d.get("side_consumed"),
             "depth": d.get("depth"),
             "readable": bool(d.get("ok")),
-            "ask_basis": ("DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
+            # A FAILED READ DISPLAYED NOTHING: no price, and it says so.
+            "ask_basis": ("NO_BOOK_WAS_READ__NO_PRICE"
+                          if (basis or {}).get("no_book_read") else
+                          "DISPLAYED_ON_A_BOOK_WHOSE_CURRENCY_IS_NOT_"
                           "ESTABLISHED__NOT_USABLE_FOR_ORDERS")}
+
+
+def complement_record(rec: dict, *, contract: dict, ev_quote: dict,
+                      quote: dict, vq: dict, fee_fn, now: float,
+                      outcome_books, extra, reference_check,
+                      decision_lag_s, state_gates_for=None) -> tuple:
+    """THE OTHER SIDE OF THE CONTRACT `rec` VALUED, as (record, None), or
+    (None, the named reason none is written).
+
+    `rec` is the HOME calibration-only record exactly as the cycle built
+    and persisted it. The complement is the SAME `ext.evaluate` on the SAME
+    quote dict (`ev_quote`), contract identity and decision instant, with
+    the other intent and `payout_is_complement=True` -- the lane's one
+    inversion, so its probability is 1 - p(selection) over the complete
+    outcome set and its payout event NOT(selection). Its displayed price is
+    the other side of the SAME refused read
+    (`displayed_not_for_orders_other_side`), and it is sealed
+    CALIBRATION_ONLY: never admissible, no executable price, no size. The
+    settlement comparison and the venue rules text are the contract's own
+    (one contract, two sides) and are carried over; the PinnAPI provenance
+    is re-stamped by `pinnapi_primary.stamp_record`, which removes the
+    probability when the decision-instant check failed, exactly as on the
+    home record. Pure apart from `ext.evaluate` (no I/O)."""
+    other = (vq or {}).get("displayed_not_for_orders_other_side")
+    ok, why = CV.applies(rec, contract, other)
+    if not ok:
+        return None, why
+    home_ev = dict(rec.get("calibration_only_evidence") or {})
+    evidence = CV.complement_evidence(home_ev, other, decision_instant=now,
+                                      decision_lag_s=decision_lag_s)
+    out = ext.evaluate(
+        contract=CV.complement_contract(contract), quote=dict(ev_quote),
+        market_state=_displayed_market_state(
+            {"displayed": evidence["displayed_quote"],
+             "no_book_read": bool(evidence.get("no_book_read"))}),
+        execution_plan=None,
+        execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
+                            "crossing": True},
+        size=None,
+        risk={"permitted": False, "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
+        fee_fn=fee_fn, now=now, outcome_books=outcome_books, armed=True,
+        payout_is_complement=True, extra_refusals=list(extra or []),
+        record_purpose=ext.PURPOSE_CALIBRATION_ONLY,
+        calibration_only_evidence=evidence)
+    cev = out["calibration_only_evidence"]
+    if state_gates_for is not None:
+        cev["state_gates"] = state_gates_for(out.get("probability"))
+    for k in ("freshness", "rails"):
+        if k in home_ev:
+            cev[k] = home_ev[k]
+    out["venue_quote"] = vq
+    out["mapping"] = rec.get("mapping")
+    out["settlement"] = rec.get("settlement")
+    scmp = dict(rec.get("settlement_comparison") or {})
+    scmp.pop("reference_input", None)
+    scmp["complement_of_the_priced_side"] = {
+        "basis": CV.BASIS, "version": CV.VERSION,
+        "home_buy_intent": contract.get("buy_intent")}
+    out["settlement_comparison"] = scmp
+    from .. import pinnapi_primary as primary
+    primary.stamp_record(out, quote, reference_check)
+    return out, None
 
 
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
@@ -2952,6 +4494,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
                 "why": "venue read error: %s" % book["error"],
                 "venue_error": _sanitize(book["error"], limit=80),
+                # OUR GATE NAMED AS OURS (`venue_read_refusal`).
+                "refused_by": book.get("refused_by"),
                 "diagnostic": diag}
 
     read_at = time.time()
@@ -3131,6 +4675,17 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         "displayed_not_for_orders": _displayed_not_for_orders(
             book, intent=intent, slug=slug, read_at=read_at,
             currency=currency, venue_ts=vt, venue_clock_basis=age_basis),
+        # AND WHAT THE SAME BOOK DISPLAYED ON THE OTHER SIDE, for the
+        # complement record (`bettor_complement_valuation`): the other side
+        # of this binary contract is valued from this one read -- a pure
+        # parse of the payload already in hand, no second request, under
+        # the same no-order key and flag.
+        "displayed_not_for_orders_other_side": (
+            _displayed_not_for_orders(
+                book, intent=CV.other_intent(intent), slug=slug,
+                read_at=read_at, currency=currency, venue_ts=vt,
+                venue_clock_basis=age_basis)
+            if CV.other_intent(intent) else None),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
         "http_observation": book.get("http_observation")}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
@@ -7007,9 +8562,15 @@ async def _servicing_heartbeat(conn, res: dict) -> None:
         log.warning("ext_pinnacle: servicing heartbeat failed", exc_info=True)
 
 
+class _FencedOut(Exception):
+    """A servicing pass the writer lock did not cover (counted, not raised
+    out of the loop)."""
+
+
 async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
                           sleep=None, clock=None,
-                          max_passes: int | None = None) -> None:
+                          max_passes: int | None = None,
+                          fence=None) -> None:
     """THE SERVICING TASK: management and recovery on their own cadence.
 
     Started by `run` after the writer lock is held; cancelled with it. Each
@@ -7017,6 +8578,14 @@ async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
     lock and writes SERVICING_KEY. NOTHING RAISES OUT OF A PASS: a failed pass
     is counted, logged and followed by the next one on schedule. `sleep`,
     `clock` and `max_passes` exist so a test can drive it on controlled time.
+
+    FENCED (R30A): `fence(sconn)`, given by `run`, re-proves on the pass's
+    own connection that the writer's backend still holds LOCK_KEY before
+    anything is serviced. A pass it does not confirm -- False, or no answer
+    -- services NOTHING, is counted `fenced_out` and logged, and the next
+    pass asks again: a lost lock never manages a position, and a transient
+    failure of the check never stops management for good. Each pass also
+    records its health (loop_health: ext_pinnacle.servicing).
     """
     sleep = sleep or asyncio.sleep
     clock = clock or time.monotonic
@@ -7031,18 +8600,48 @@ async def _servicing_loop(pool, *, interval_s: float = SERVICING_INTERVAL_S,
             try:
                 async with pool.acquire(
                         timeout=SERVICING_ACQUIRE_TIMEOUT_S) as sconn:
+                    if fence is not None:
+                        try:
+                            # bounded: no answer in FENCE_TIMEOUT_S is a
+                            # refused pass (R30A review), never a stuck one
+                            async with asyncio.timeout(FENCE_TIMEOUT_S):
+                                fenced_in = await fence(sconn)
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:                      # noqa: BLE001
+                            fenced_in = False
+                        if not fenced_in:
+                            st["fenced_out"] = st.get("fenced_out", 0) + 1
+                            log.error("ext_pinnacle: servicing pass refused: "
+                                      "the writer lock is not held by this "
+                                      "process's writer backend")
+                            await _LH.record(
+                                sconn, "ext_pinnacle.servicing",
+                                process="api", phase=_LH.ERROR,
+                                error="FENCED_OUT_WRITER_LOCK_NOT_HELD")
+                            raise _FencedOut()
                     res = await _service_once(
                         sconn, now=time.time(), source=SOURCE_SERVICING_TASK,
                         review_interval_s=interval_s)
                     await _servicing_heartbeat(sconn, res)
+                    await _LH.record(sconn, "ext_pinnacle.servicing",
+                                     process="api", phase=_LH.SUCCESS)
             except asyncio.CancelledError:
                 raise
+            except _FencedOut:
+                pass
             except Exception as exc:                           # noqa: BLE001
                 st["errors"] += 1
                 st["last_error"] = "%s: %s" % (type(exc).__name__,
                                                str(exc)[:200])
                 log.warning("ext_pinnacle: servicing pass failed",
                             exc_info=True)
+                try:
+                    await _LH.record(pool, "ext_pinnacle.servicing",
+                                     process="api", phase=_LH.ERROR,
+                                     error=exc)
+                except Exception:                              # noqa: BLE001
+                    pass
             elapsed = clock() - t0
             await sleep(max(SERVICING_MIN_GAP_S, float(interval_s) - elapsed))
     finally:
@@ -7232,9 +8831,581 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     return out
 
 
+def _step_rss(at: dict) -> dict:
+    """RSS at each cycle step boundary and the step's delta, in MB; a
+    boundary /proc could not be read is None and its deltas are None."""
+    order = ("start", "serviced", "entry", "persisted", "joined",
+             "calibrated", "observed")
+    names = {"serviced": "servicing_in_cycle", "entry": "entry_lane",
+             "persisted": "candidate_outcomes", "joined": "outcome_join",
+             "calibrated": "calibration_measurement",
+             "observed": "pair_observation"}
+    out = {"at_start": at.get("start"), "at_end": at.get("observed"),
+           "delta": {}}
+    for a, b in zip(order, order[1:]):
+        x, y = at.get(a), at.get(b)
+        out["delta"][names[b]] = (None if x is None or y is None
+                                  else round(y - x, 1))
+    return out
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE LINE-MARKET LANE: SPREADS, TOTALS AND TEAM TOTALS (R30A P0 incident)
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEFECT. This cycle priced one market per event, the full-game money
+# line, although the venue lists spread, total and team-total contracts on
+# the same games (NFL 574 / 406 / 476 a day, NCAAF 4,034 / 3,312 / 2,852, all
+# half-point) and the leased PinnAPI cache already holds Pinnacle's own
+# spread, total and team-total markets for every subscribed fixture.
+#
+# WHAT RUNS. For each event this cycle reaches whose VENUE event is known --
+# a PinnAPI-native event (its discovery names the venue event) or any event
+# the venue-native resolver mapped -- every line contract the venue lists on
+# that event is read from the catalogue and put through
+# `bettor_market_family`, in this order, each refusing by name:
+#
+#   1 the contract: a known line family, exactly one LONG and one SHORT side,
+#     its team one of the fixture's matched participants, its line readable
+#     and agreeing with the slug, a HALF-POINT line, a family whose payoff
+#     equivalence is proven (soccer / tennis / basketball team totals refuse
+#     with their precise reasons);
+#   2 Pinnacle's market at the IDENTICAL line and side for that fixture, from
+#     the WS cache, inside the unchanged 30 s rule (LINE_DOES_NOT_MATCH, or
+#     the cache's own freshness code, otherwise) -- free, before any venue
+#     read;
+#   3 the contract's OWN rules text, read now, proving the ordinary-completion
+#     payoff equivalent to the book's cited rules (`bettor_market_family.
+#     prove`); a contract whose text is not the captured wording is never
+#     priced;
+#   4 the venue book for that side (`venue_quote`, the h2h lane's read), and
+#     the same calibration-only rule when its currency is not established;
+#   5 the Pinnacle pair re-validated at the decision instant (same record,
+#     epoch, change, prices, points, still inside 30 s) -- a changed input
+#     removes the probability, exactly as the h2h reference check does;
+#   6 `ext.evaluate` on the pair's own two-way de-vig at the identical line,
+#     persisted, and handed to the paper policies like any valuation.
+#
+# NOTHING IS LOOSENED. The strict lane refuses every line valuation
+# (LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER: the postponement and short-game
+# terms differ, see bettor_market_family); only the completed-game paper
+# policy, which prices conditional on ordinary completion by design, can act,
+# and it re-proves the grading from the row. The gross-edge, net-EV,
+# freshness, depth, sizing and risk rules are the ones every valuation meets.
+#
+# BOUNDED, BECAUSE VENUE READS ARE SHARED. A scheduled cycle spends at most
+# MAX_LINE_INSTRUMENTS_PER_CYCLE venue book reads on lines, AFTER every
+# money-line event (so no money-line evaluation waits for a line read). A
+# WS-triggered evaluation spends at most MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+# and never one it cannot finish inside the evaluation's own deadline. What
+# the bound defers is COUNTED by name (LINE_INSTRUMENT_DEFERRED_*), never
+# dropped silently. Pinnacle's main lines are taken before its alternates.
+MAX_LINE_INSTRUMENTS_PER_CYCLE = 12
+MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION = 2
+#
+# EVERY VENUE REQUEST IS COUNTED AND BOUNDED (adversarial verification,
+# finding 5, fix stage 2026-10-05). The caps above count INSTRUMENTS (one book
+# read each). But an instrument also reads its contract's rules text (a paced
+# venue request unless the hourly rules cache holds it), and a team total
+# whose slug does not bind its team was read for its text while the contracts
+# were SCANNED -- before the cap, before the WS-deadline check, uncounted:
+# an unbounded number of paced requests on a busy slate. Now the lane's
+# report counts every request it makes (`venue_requests` = `venue_reads`, the
+# book reads, + `venue_rules_reads`, the uncached rules reads) and bounds the
+# total: at most two requests per instrument the cap admits (its rules read
+# and its book read), the scan's text reads included. Nothing is dropped: a
+# read the bound or the deadline does not allow is deferred BY NAME.
+MAX_LINE_VENUE_REQUESTS_PER_CYCLE = 2 * MAX_LINE_INSTRUMENTS_PER_CYCLE
+MAX_LINE_VENUE_REQUESTS_PER_WS_EVALUATION = \
+    2 * MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+#: the time one line instrument needs (catalogue read, rules read, paced book
+#: read, recheck, persist, paper decision); a WS evaluation with less than
+#: this left before its deadline defers the instrument rather than letting
+#: the whole evaluation time out
+LINE_INSTRUMENT_BUDGET_S = 5.0
+#: the line contracts read per venue event (rows; two per market)
+MAX_LINE_ROWS_PER_EVENT = 160
+#: a catalogue row not re-listed within three sweeps is not a current listing
+#: (bettor_venue_native_identity.RESEEN_WITHIN_S)
+LINE_ROWS_RESEEN_S = 3 * 1800
+R_LINE_NO_IDENTITY = "LINE_FIXTURE_NOT_MATCHED_BY_PINNAPI_DISCOVERY"
+R_LINE_ROWS_READ = "LINE_CATALOGUE_READ_FAILED"
+R_LINE_DEFERRED_CYCLE = "LINE_INSTRUMENT_DEFERRED_CYCLE_BOUND"
+R_LINE_DEFERRED_WS = "LINE_INSTRUMENT_DEFERRED_WS_EVALUATION_DEADLINE"
+#: a team total whose slug binds no team needs its TEXT read to be proven;
+#: that read is a venue request, deferred by name like an instrument
+R_LINE_TT_TEXT_DEFERRED_CYCLE = \
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_CYCLE_BOUND"
+R_LINE_TT_TEXT_DEFERRED_WS = \
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_WS_EVALUATION_DEADLINE"
+R_LINE_INSTRUMENT_EVALUATED = "LINE_INSTRUMENT_ALREADY_EVALUATED_THIS_CYCLE"
+LINE_IDENTITY_RESOLVER = "BETTOR_LINE_MARKET_FAMILY_V1"
+
+LINE_ROWS_SQL = """
+    SELECT identifier, market_slug, event_slug, side_norm, intent, line,
+           signed, team_name, team_safe_name, team_abbr, team_id,
+           sports_type, question, kind
+      FROM us_premap
+     WHERE event_slug = $1
+       AND market_slug IS NOT NULL
+       AND sports_type = ANY($2::text[])
+       AND updated_at > now() - make_interval(secs => $3)
+     ORDER BY market_slug, intent
+     LIMIT $4
+"""
+
+
+def line_job_for(event, *, sport_key, family, venue_event_slug,
+                 identity=None) -> dict | None:
+    """A line-lane job for one event whose venue event is known, or None.
+    The fixture identity comes from the PinnAPI-native discovery: the event's
+    own (a native event carries it) or the latest discovery's record for the
+    venue event. Pure apart from that in-process read."""
+    if not venue_event_slug:
+        return None
+    ident = identity
+    nat = native_identity_of(event)
+    if ident is None and nat is not None and nat.get("venue_records"):
+        ident = {"fixture_id": nat.get("fixture_id"),
+                 "venue_records": nat.get("venue_records"),
+                 "venue_event_slug": nat.get("venue_event_slug"),
+                 "family": nat.get("family")}
+    if ident is None:
+        from .. import pinnapi_discovery as PD
+        ident = PD.identity_for(venue_event_slug)
+    return {"event": event, "sport_key": sport_key, "family": family,
+            "venue_event_slug": str(venue_event_slug), "identity": ident,
+            "provider_event_id": (event or {}).get("id")}
+
+
+def _line_markets_digest(lm) -> dict | None:
+    """The line lane's report for the heartbeat: every count, the bounded
+    sample, never the full list of valuation ids."""
+    if not isinstance(lm, dict):
+        return None
+    return {k: v for k, v in lm.items() if k != "valuation_ids"}
+
+
+def _line_report() -> dict:
+    return {"version": None, "jobs": 0, "contracts": 0,
+            "by_state": {}, "by_sport_family_state": {},
+            "instruments_eligible": 0, "instruments_evaluated": 0,
+            "venue_reads": 0, "venue_rules_reads": 0, "venue_requests": 0,
+            "valuations_written": 0,
+            "calibration_only_written": 0, "duplicates": 0, "deferred": 0,
+            "valuation_ids": [], "sample": []}
+
+
+def _rules_cached(slug, *, now=None) -> bool:
+    """True when the hourly rules cache answers this contract's text read
+    without a venue request (`_read_venue_rules_blocking`'s own rule)."""
+    hit = _RULES_CACHE.get(slug)
+    if hit is None:
+        return False
+    at = float(now if now is not None else time.time())
+    return (at - float(hit.get("read_at") or 0.0)) <= RULES_CACHE_TTL_S
+
+
+def _count_rules_read(report, vevid) -> None:
+    """A rules read the cache did not answer is a venue request: counted."""
+    rr = (vevid or {}).get("rules_read") or {}
+    if not rr.get("from_cache"):
+        report["venue_rules_reads"] += 1
+        report["venue_requests"] += 1
+
+
+def _line_count(report, code, *, sport=None, family=None, n=1) -> None:
+    code = str(code)
+    report["by_state"][code] = report["by_state"].get(code, 0) + n
+    if sport or family:
+        k = "%s|%s|%s" % (sport or "?", family or "?", code)
+        report["by_sport_family_state"][k] = \
+            report["by_sport_family_state"].get(k, 0) + n
+
+
+async def line_market_pass(conn, *, jobs, fee_fn, open_book, ev_measurable,
+                           calibration, research, stream_seed=None,
+                           fixture_keys=None, now=None) -> dict:
+    """THE LINE-MARKET LANE for the events this cycle reached (see the block
+    comment above). Never raises: a failure is counted by name and the cycle's
+    money-line results stand. Returns the lane's report; valuation ids written
+    are appended to `stream_seed['valuation_ids']` on a WS evaluation."""
+    from .. import bettor_market_family as MF
+    from .. import pinnapi_feed_runtime as feed
+
+    report = _line_report()
+    report["version"] = MF.VERSION
+    owner = feed._STATE.get("owner")
+    cache = owner.cache if owner is not None else None
+    if stream_seed is not None:
+        trig = stream_seed.get("trigger") or {}
+        started = trig.get("evaluation_started_at")
+        deadline_s = trig.get("deadline_s")
+        deadline_at = (float(started) + float(deadline_s)
+                       if started is not None and deadline_s is not None
+                       else None)
+        cap = MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+        req_cap = MAX_LINE_VENUE_REQUESTS_PER_WS_EVALUATION
+        if deadline_at is None:
+            # NO DEADLINE KNOWN, NO LINE READ: a WS evaluation must never
+            # risk timing out the money-line work it already did.
+            cap = req_cap = 0
+    else:
+        deadline_at = None
+        cap = MAX_LINE_INSTRUMENTS_PER_CYCLE
+        req_cap = MAX_LINE_VENUE_REQUESTS_PER_CYCLE
+    report["instrument_cap"] = cap
+    report["venue_request_cap"] = req_cap
+    eligible, seen_events = [], set()
+    t0 = time.time() if now is None else float(now)
+    for job in jobs or ():
+        slug = job.get("venue_event_slug")
+        if not slug or slug in seen_events:
+            continue
+        seen_events.add(slug)
+        report["jobs"] += 1
+        ident = job.get("identity")
+        if not ident or not ident.get("venue_records") \
+                or ident.get("fixture_id") is None:
+            _line_count(report, R_LINE_NO_IDENTITY, family=job.get("family"))
+            continue
+        try:
+            rows = [dict(r) for r in await conn.fetch(
+                LINE_ROWS_SQL, slug, list(MF.VENUE_LINE_TYPES),
+                int(LINE_ROWS_RESEEN_S), int(MAX_LINE_ROWS_PER_EVENT))]
+        except Exception as exc:                               # noqa: BLE001
+            _line_count(report, "%s:%s" % (R_LINE_ROWS_READ,
+                                           type(exc).__name__),
+                        family=job.get("family"))
+            continue
+        by_market: dict = {}
+        for r in rows:
+            by_market.setdefault(str(r.get("market_slug")), []).append(r)
+        parts = ident.get("venue_records")
+        for mslug, mrows in sorted(by_market.items()):
+            report["contracts"] += 1
+            c = MF.market_contract(mrows, participants=parts)
+            if not c.get("ok"):
+                _line_count(report, c.get("refusal"), sport=c.get("sport"),
+                            family=c.get("family"))
+                continue
+            proof = None
+            if c.get("designation") is None and c["family"] == MF.TEAM_TOTAL:
+                # A TEAM TOTAL WHOSE TEAM THE SLUG DID NOT BIND: the
+                # contract's own words name it (`prove`), read before the
+                # book pair is looked up, so the pair is the named team's.
+                # The read is a venue request unless the hourly cache holds
+                # it: bounded by the lane's request cap and, in a WS
+                # evaluation, by its deadline -- deferred by name otherwise.
+                if not _rules_cached(mslug):
+                    if report["venue_requests"] + 1 > req_cap:
+                        report["deferred"] += 1
+                        _line_count(report, (
+                            R_LINE_TT_TEXT_DEFERRED_WS
+                            if stream_seed is not None
+                            else R_LINE_TT_TEXT_DEFERRED_CYCLE),
+                            sport=c["sport"], family=c["family"])
+                        continue
+                    if deadline_at is not None and \
+                            time.time() + LINE_INSTRUMENT_BUDGET_S > \
+                            deadline_at:
+                        report["deferred"] += 1
+                        _line_count(report, R_LINE_TT_TEXT_DEFERRED_WS,
+                                    sport=c["sport"], family=c["family"])
+                        continue
+                vevid = await venue_settlement_evidence(conn, mslug)
+                _count_rules_read(report, vevid)
+                proof = MF.prove(contract=c,
+                                 venue_text=(vevid or {}).get("rules_text"),
+                                 participants=parts)
+                if not proof.get("established"):
+                    _line_count(report, proof.get("refusal"),
+                                sport=c["sport"], family=c["family"])
+                    continue
+                c = dict(c, designation=proof.get("designation"))
+            pair = MF.pinnacle_pair(cache, fixture_id=ident["fixture_id"],
+                                    contract=c,
+                                    evaluated_ms=time.time() * 1000.0,
+                                    max_age_s=PINNACLE_MAX_AGE_S)
+            if not pair.get("ok"):
+                _line_count(report, pair.get("refusal"), sport=c["sport"],
+                            family=c["family"])
+                continue
+            _line_count(report, "PINNACLE_LINE_MATCHED_%s" % (
+                "ALTERNATE" if pair.get("alternate") else "MAIN"),
+                sport=c["sport"], family=c["family"])
+            for inst in c["instruments"]:
+                eligible.append((pair, c, inst, job, proof))
+    report["instruments_eligible"] = len(eligible)
+    eligible.sort(key=lambda it: MF.instrument_order(it[:3]))
+    done: set = set()
+    for pair, c, inst, job, proof in eligible:
+        key = (c["market_slug"], inst["intent"])
+        if key in done:
+            report["duplicates"] += 1
+            _line_count(report, R_LINE_INSTRUMENT_EVALUATED,
+                        sport=c["sport"], family=c["family"])
+            continue
+        # the requests this instrument needs: its book read, and its rules
+        # read unless the hourly cache answers it
+        need = 1 + (0 if _rules_cached(c["market_slug"]) else 1)
+        if report["venue_reads"] >= cap or \
+                report["venue_requests"] + need > req_cap:
+            report["deferred"] += 1
+            _line_count(report, (R_LINE_DEFERRED_WS if stream_seed is not None
+                                 else R_LINE_DEFERRED_CYCLE),
+                        sport=c["sport"], family=c["family"])
+            continue
+        if deadline_at is not None and \
+                time.time() + LINE_INSTRUMENT_BUDGET_S > deadline_at:
+            report["deferred"] += 1
+            _line_count(report, R_LINE_DEFERRED_WS, sport=c["sport"],
+                        family=c["family"])
+            continue
+        done.add(key)
+        try:
+            code = await _line_instrument(
+                conn, MF, cache=cache, pair=pair, contract=c, inst=inst,
+                job=job, proof=proof, report=report, fee_fn=fee_fn,
+                open_book=open_book, ev_measurable=ev_measurable,
+                calibration=calibration, research=research,
+                stream_seed=stream_seed, fixture_keys=fixture_keys)
+        except Exception as exc:                               # noqa: BLE001
+            code = "LINE_INSTRUMENT_RAISED:%s" % type(exc).__name__
+        _line_count(report, code, sport=c["sport"], family=c["family"])
+    report["took_s"] = round(time.time() - t0, 3)
+    return report
+
+
+async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
+                           proof, report, fee_fn, open_book, ev_measurable,
+                           calibration, research, stream_seed,
+                           fixture_keys) -> str:
+    """ONE line instrument (a contract and a side), steps 3-6 of the lane.
+    Returns the code it ended on (counted by the caller)."""
+    c, slug = contract, contract["market_slug"]
+    vevid = await venue_settlement_evidence(conn, slug)
+    _count_rules_read(report, vevid)
+    rules_text = (vevid or {}).get("rules_text")
+    if proof is None:
+        proof = MF.prove(contract=c, venue_text=rules_text,
+                         participants=(job.get("identity") or {})
+                         .get("venue_records"))
+    if not proof.get("established"):
+        return proof.get("refusal") or MF.R_VENUE_TEXT_UNRECOGNISED
+    sel = pair["selection"] if inst["pays_on"] == "selection" \
+        else pair["other"]
+    # ONE FIXTURE, ONE EVENT KEY: the same venue event's key the money line
+    # carries, so a fixture rail sees a line position and a VENUE-NATIVE
+    # money-line position on one game as ONE fixture (`sticky_event_key`,
+    # migration 261). SCOPE (adversarial verification P1, fix stage
+    # 2026-10-05, not yet resolved): a money line mapped through the GLOBAL
+    # catalogue carries a condition id, and the paper ledger keys it
+    # "condition:<id>" (agents.derek_policy.fixture_of), not
+    # "event:<key>" -- so for such a game the rails would see the line
+    # position and the money-line position as two fixtures.
+    _sk = await sticky_event_key(conn, venue_event_slug=job["venue_event_slug"],
+                                 proposed=job.get("provider_event_id"),
+                                 cache=fixture_keys)
+    event_key = _sk.get("event_key") or job.get("provider_event_id")
+    read_at = time.time()
+    _cev = book_currency_evidence(slug)
+    # `lq`: the line instrument's book read (the money line's is `vq`)
+    lq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
+                           now=read_at,
+                           subscription=_cev.get("subscription"),
+                           revalidation=_cev.get("revalidation"))
+    report["venue_reads"] += 1
+    report["venue_requests"] += 1
+    calibration_only = None
+    if not lq.get("ok"):
+        calibration_only = _calibration_only_basis(lq)
+        if calibration_only is None:
+            return lq.get("refusal") or R_NO_VENUE_QUOTE
+    now = time.time()
+    decision_lag_s = round(now - read_at, 3)
+    check = MF.validate_pair(cache, pair, evaluated_ms=now * 1000.0,
+                             max_age_s=PINNACLE_MAX_AGE_S)
+    srule = {"overall_established": False,
+             "unmet": [MF.R_EXCEPTIONAL_DIFFER],
+             "refusal": MF.R_EXCEPTIONAL_DIFFER,
+             "book_rule": proof["period"], "rules": {},
+             "fixture_metadata": {}, "line_proof": proof}
+    extra = [MF.R_EXCEPTIONAL_DIFFER]
+    if calibration_only is not None:
+        extra = [calibration_only["refusal"]] + extra
+    if not check.get("ok"):
+        extra = [check.get("reason") or MF.R_INPUT_CHANGED] + extra
+    quote = {"observed_at": pair["observed_at"],
+             "received_at": pair["received_at"]}
+    contract_row = {
+        "venue": "PMUS", "condition_id": None, "us_market_slug": slug,
+        "contract_identity_basis": "VENUE_NATIVE_US_SLUG",
+        "identity_resolver": LINE_IDENTITY_RESOLVER,
+        "buy_intent": inst["intent"], "selection": sel,
+        "payout_event": sel,
+        "payout_event_basis": (
+            "THE_VENUE_LINE_SIDE'S_OWN_OUTCOME: on a half-point line the "
+            "short side's NOT(proposition) is exactly the pair's other "
+            "outcome"),
+        "probability_event": sel, "resolver_asked_for": sel,
+        "matched_side_norm": inst.get("side_norm"),
+        "matched_identifier": slug, "matched_by": LINE_IDENTITY_RESOLVER,
+        "ladder_side": "BID" if inst["intent"] == MF.INTENT_SHORT else "ASK",
+        "sport_family": c["sport"], "market": c["family"],
+        "period": "FULL_GAME",
+        "period_basis": ("THE_VENUE_TYPE_IS_A_FULL_GAME_LINE (%s) AND THE "
+                         "BOOK MARKET IS PERIOD 0" % c.get("sports_type")),
+        "period_evidence": {"sports_type": c.get("sports_type"),
+                            "book_period": 0},
+        "line": c["line"], "settlement_rule": proof["period"],
+        "event_key": event_key}
+    rec = ext.evaluate(
+        contract=contract_row,
+        quote={"book": devig.BOOK, "outcomes": dict(pair["outcomes"]),
+               "observed_at": pair["observed_at"],
+               "received_at": pair["received_at"],
+               "event_key": event_key, "period": "FULL_GAME",
+               "period_basis": "PINNACLE_MARKET_PERIOD_0",
+               "line": pair["line"], "settlement_rule": proof["period"]},
+        market_state=(_displayed_market_state(calibration_only)
+                      if calibration_only is not None else
+                      {"ask": lq["acquisition_price"],
+                       "api_price": lq["api_price"],
+                       "side_consumed": lq["side_consumed"],
+                       "depth": lq["depth"], "readable": True}),
+        execution_plan=None if calibration_only is not None else
+        _entry_plan(ladder=lq.get("acquisition_ladder"), fee_fn=fee_fn,
+                    observation_age_s=lq.get("age_s"),
+                    action=_risk_action(inst["intent"]), condition_id=None,
+                    event_key=job["venue_event_slug"],
+                    venue_market_slug=slug, provider_event_id=event_key,
+                    open_book=open_book,
+                    event_exposure_measurable=ev_measurable,
+                    settlement=srule,
+                    freshness=_entry_freshness(quote, lq, now),
+                    calibration=calibration,
+                    research_authorised=(research or {}).get(
+                        "authorised") is True, now=now),
+        execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
+                            "crossing": True},
+        size=None, risk={"permitted": False,
+                         "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
+        fee_fn=fee_fn, now=now,
+        # PINNACLE ALONE, ONE BOOK: no other provider is read for a line, so
+        # the multi-book floor refuses here exactly as on a native money line
+        # and the completed-game policy's PinnAPI-sole-authority rule decides
+        outcome_books=1, armed=True, payout_is_complement=False,
+        extra_refusals=extra,
+        record_purpose=(ext.PURPOSE_ENTRY_DECISION
+                        if calibration_only is None
+                        else ext.PURPOSE_CALIBRATION_ONLY),
+        calibration_only_evidence=(
+            None if calibration_only is None else {
+                "venue_read_refusal": calibration_only["refusal"],
+                "venue_read_why": _sanitize(
+                    calibration_only.get("venue_read_why") or "", limit=240),
+                "book_currency": calibration_only["book_currency"],
+                "displayed_quote": calibration_only["displayed"],
+                "decision_instant_epoch_s": now,
+                "decision_lag_s": decision_lag_s}))
+    reference = {
+        "version": MF.VERSION, "provider": "pinnapi.com/raw-websocket",
+        "runtime_id": None, "feed_event_id": pair.get("fixture_id"),
+        "quote_event_id": pair.get("quote_event_id"),
+        "market_key": pair.get("key"), "market_type": c["family"],
+        "alternate": pair.get("alternate"), "stream": pair.get("stream"),
+        "raw_odds": pair.get("raw_odds"), "points": pair.get("points"),
+        "outcome_designations": pair.get("designations"),
+        "epoch": pair.get("epoch"), "change_ms": pair.get("change_ms"),
+        "source_change_ms": pair.get("source_change_ms"),
+        "provenance": pair.get("provenance"), "decision_check": check,
+        "discovery_event_id": job.get("provider_event_id"),
+        "family": job.get("family")}
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        reference["runtime_id"] = feed._STATE.get("runtime_id")
+    except Exception:                                          # noqa: BLE001
+        pass
+    if stream_seed is not None:
+        reference["evaluation_trigger"] = {
+            k: (stream_seed.get("trigger") or {}).get(k) for k in (
+                "attempt_id", "received_at", "queued_at",
+                "evaluation_started_at")}
+    rec["provider"] = "pinnapi.com/raw-websocket"
+    rec["valuation"]["provider"] = "pinnapi.com/raw-websocket"
+    if not check.get("ok"):
+        # A CHANGED OR STALE PINNACLE INPUT REMOVES THE PROBABILITY, not just
+        # admission: paper policies read probabilities past other refusals
+        # (the h2h lane's `pinnapi_primary.stamp_record` rule).
+        rec["probability"] = rec["probability_of_selection"] = None
+        rec["valuation"]["probability"] = None
+        rec["admissible"] = False
+        rec["decision"] = "NO_TRADE"
+    rec["venue_quote"] = lq
+    rec["settlement"] = srule
+    rec["settlement_comparison"] = {
+        "compatibility": "INCOMPATIBLE_EXCEPTIONAL_TERMS",
+        "overall_established": False,
+        "blockers": [MF.R_EXCEPTIONAL_DIFFER],
+        "line_market": {
+            "contract": {k: c.get(k) for k in (
+                "market_slug", "event_slug", "sport", "family", "line",
+                "designation", "team", "sports_type", "period")},
+            "participants": (job.get("identity") or {}).get("venue_records"),
+            "fixture_id": (job.get("identity") or {}).get("fixture_id"),
+            "proof": proof},
+        "reference_input": reference,
+        "venue_rules_read": bool(rules_text),
+        "venue_rules_source": (vevid or {}).get("rules_source"),
+        "venue_rules_text": (str(rules_text)[:4000] if rules_text else None),
+        "venue_rules_sha256": MF.rules_sha256(rules_text)}
+    if calibration_only is not None:
+        try:
+            vid = await ext.persist(conn, rec)
+        except Exception as exc:                               # noqa: BLE001
+            return "LINE_CALIBRATION_ONLY_PERSIST:%s" % type(exc).__name__
+        if vid is None:
+            return "LINE_ALREADY_RECORDED"
+        report["calibration_only_written"] += 1
+    else:
+        try:
+            vid = await ext.persist(conn, rec)
+        except Exception as exc:                               # noqa: BLE001
+            return "LINE_PERSIST:%s" % type(exc).__name__
+        if vid is None:
+            return "LINE_ALREADY_RECORDED"
+        report["valuations_written"] += 1
+    report["instruments_evaluated"] += 1
+    report["valuation_ids"].append(vid)
+    if len(report["sample"]) < 8:
+        report["sample"].append({
+            "valuation_id": vid, "us_market_slug": slug,
+            "intent": inst["intent"], "selection": sel,
+            "line": c["line"], "family": c["family"], "sport": c["sport"],
+            "alternate": pair.get("alternate"),
+            "probability": rec.get("probability"),
+            "refusals": list(rec.get("refusals") or [])[:6]})
+    if stream_seed is not None:
+        stream_seed["valuation_ids"].append(vid)
+    await _paper_valuation(conn, vid)
+    return ("LINE_VALUATION_RECORDED_CALIBRATION_ONLY"
+            if calibration_only is not None else "LINE_VALUATION_RECORDED")
+
+
 async def cycle(conn, *, stream_seed=None) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
+    # WHERE THE CYCLE'S MEMORY WENT (R30A runtime): the API was OOM-killed
+    # at its 2 GiB limit seven times on 2026-10-04 (render-ops events run
+    # 37231548727) and its RSS stepped up in the minutes of this cycle's
+    # entry lane and outcome join (17:19-17:23 Z: 326 -> 1,043 MB; 17:36-
+    # 17:37 Z: 1,081 -> 1,562 MB; render-ops logs run 37231656397). What is
+    # missing to root-cause it is WHICH step allocates: RSS is read at each
+    # step boundary below (procmem.rss_mb, /proc, None where unreadable --
+    # never a guess) and rides the heartbeat beside step_timing_s.
+    from .. import procmem as _procmem
+    _rss_at = {"start": _procmem.rss_mb()}
     # ── AGENTS (core, migration 152): DEREK IS EVALUATING ──────────────
     if stream_seed is None:
         await _derek_heartbeat_start(conn, now=started)
@@ -7242,6 +9413,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # cycle cluster on one or two dates; asking per candidate would be the
     # same answer many times over.
     fixture_cache: dict = {}
+    # venue event slug -> its fixed event key (`sticky_event_key`), per cycle
+    fixture_keys: dict = {}
+    # THE LINE-MARKET LANE'S WORK (see `line_market_pass`): one job per event
+    # whose venue event is known, run after every money-line event
+    line_jobs: list = []
 
     # ── SERVICING FIRST, BEFORE ANY ENTRY-SIDE GATE ─────────────────
     #
@@ -7282,6 +9458,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         funded_service = _svc.get("funded_service")
         xavier_review = _svc.get("xavier_review")
     _t_serviced = time.time()
+    _rss_at["serviced"] = _procmem.rss_mb()
 
     # ── A CYCLE THAT ENTERS NOTHING STILL SERVICED, SO IT STILL BEATS ──
     #
@@ -7463,6 +9640,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                             "confirmed_by_provider": []}
         sports_for_cycle = tuple(sports_selection["sports"])
         markets = []
+        coverage = None
     else:
         _cat = await fetch_sport_catalogue(api_key=api_key)
         _board = await venue_soccer_competitions(conn)
@@ -7484,13 +9662,32 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 football_candidates(_fboard)))
         sports_selection["venue_board"] = _board
         sports_selection["venue_football_board"] = _fboard
-        # FOOTBALL IS ITERATED LAST. Its budget slot is earned by coverage
-        # above, but the sports this lane already valued keep their place in
-        # the loop -- and with it their share of the per-cycle bounds
-        # (MAX_PER_CYCLE, MAX_CALIBRATION_ONLY_PER_CYCLE) and the paced venue
-        # reads -- exactly as before this change. Stable: no other order moves.
-        sports_for_cycle = tuple(sorted(sports_selection["sports"],
-                                        key=lambda kf: kf[1] == "football"))
+        # ── R30A · WHICH CONFIRMED COMPETITIONS THIS CYCLE FETCHES ──────
+        #
+        # Not the first four of a fixed ranking. `collector_coverage.plan`
+        # gives the unchanged MAX_METERED_SPORTS_PER_CYCLE calls to the
+        # enabled competitions (every candidate the catalogue confirms, the
+        # confirmed set, and every held position's competition) earliest
+        # deadline first, so each is served within its stated bound, and
+        # receipts the rest (migration 248). The fetch ORDER is the plan's
+        # priority order -- earliest deadline, held, in play, metered-
+        # dependent, the soonest venue event, the largest slate -- and it
+        # replaces "football last": the per-cycle evaluation bound below is
+        # shared by reserve, not by who comes first (MAX_PER_CYCLE deferred
+        # nothing in the 7 days measured, and must not starve whoever is
+        # iterated last when it does).
+        coverage = await plan_coverage(conn, catalogue=_cat,
+                                       selection=sports_selection,
+                                       now=started)
+        sports_selection["coverage"] = coverage
+        sports_selection.update(coverage_selection_view(coverage))
+        sports_for_cycle = tuple(coverage.get("fetch_order") or ())
+        # Feed-covered competitions this plan deferred keep their discovery
+        # seeds through the events endpoint (counted against the call budget
+        # until its measured cost is zero).
+        sports_selection["unmetered_discovery"] = \
+            await refresh_unmetered_discovery(coverage, sports_selection,
+                                              api_key=api_key, now=started)
         labels = sorted({lbl for _, fam in sports_for_cycle
                          for lbl in VENUE_SPORT_LABELS.get(fam, ())})
         markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
@@ -7520,6 +9717,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # inferred from the credit count. Both are 0 at the default setting.
     odds_refetches = 0
     odds_refetch_failures = 0
+    # the on-demand refresh of a quote OUR delay made stale (by outcome)
+    # (`budget_spent`: a refresh the cycle's metered call budget had no call
+    # left for -- not made; verifier finding 2)
+    adaptive_refetch = {"fired": 0, "saved": 0, "still_stale": 0,
+                        "failed": 0, "capped": 0, "budget_spent": 0}
 
     # ── THE LATENCY MEASUREMENT, ACCUMULATED OVER THE WHOLE CYCLE ──────
     #
@@ -7582,12 +9784,51 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # belongs to stays REFUSED under its venue-read code.
     cal_only: dict = {"attempted": 0, "recorded": 0, "already_recorded": 0,
                       "not_recorded_cycle_bound": 0, "persist_errors": {},
-                      "refusals": {}, "rows": []}
+                      "refusals": {}, "rows": [],
+                      # THE OTHER SIDE OF EACH RECORDED CONTRACT
+                      # (`bettor_complement_valuation`), counted apart from
+                      # the home records above so `recorded` keeps meaning
+                      # one record per refused read.
+                      "complement_recorded": 0,
+                      "complement_already_recorded": 0,
+                      "complement_not_recorded": {},
+                      "complement_persist_errors": {},
+                      # FAILED READS taken to a no-price record, by refusal
+                      "after_read_failure": {}}
+
+    # ── R30A · THE EVALUATION BOUND, SHARED BY RESERVE, NEVER BY ORDER ──
+    #
+    # A `break` on the spent MAX_PER_CYCLE stood at the top of this loop, so
+    # once the bound was spent every competition iterated after it was not
+    # even FETCHED -- and football was iterated last by design. Measured, the
+    # bound has not bitten (0 DEFERRED rows of 23,602 judged, 7 days to
+    # 2026-10-04), so this changes no observed outcome; it removes the
+    # mechanism. Each scheduled competition is owed a max-min fair share of
+    # MAX_PER_CYCLE (`collector_coverage.evaluation_shares`, demand = its
+    # venue events in the horizon) and a competition may evaluate while
+    # `evaluated < MAX_PER_CYCLE - reserve_after[it]`: an early competition
+    # can use what later ones cannot, never what they are owed. The bound
+    # itself is NOT raised: the entry lane measured p50 44-88 s and p90 at
+    # most 117 s a cycle (research-sql incident_collector_cap_b, run
+    # 37233834969), but the same cycle's outcome join took 641 s (heartbeat
+    # 2026-10-04T20:48:57Z, elapsed 805 s of the 900 s cadence) -- there is
+    # no measured cycle-time headroom to spend on a larger bound.
+    _cov_rows = {r["key"]: r for r in ((coverage or {}).get("receipts")
+                                       or ())}
+    _eval_shares = cov.evaluation_shares(
+        [(k, (_cov_rows.get(k) or {}).get("events_in_horizon")
+          if (_cov_rows.get(k) or {}).get("events_in_horizon") is not None
+          else MAX_PER_CYCLE) for k, _ in sports_for_cycle], MAX_PER_CYCLE)
+    _eval_reserve = cov.reserve_after([k for k, _ in sports_for_cycle],
+                                      _eval_shares)
+    # One receipt per provider event the bound deferred (persisted with the
+    # competition receipts), and its slot.
+    candidate_deferrals: list = []
 
     for sport_key, family in sports_for_cycle:
         _close_event()
-        if evaluated >= MAX_PER_CYCLE:
-            break
+        # THIS competition's ceiling: the bound less what later ones are owed.
+        _eval_cap = MAX_PER_CYCLE - _eval_reserve.get(sport_key, 0)
         step = funnel.setdefault(sport_key, {
             "family": family,
             "venue_labels": list(VENUE_SPORT_LABELS.get(family, ())),
@@ -7628,6 +9869,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         credits["used"] = got.get("credits_used") or credits["used"]
         credits["remaining"] = (got.get("credits_remaining")
                                 or credits["remaining"])
+        if coverage is not None:
+            # THE RECEIPT, SETTLED WITH WHAT THE FETCH COST: the provider's
+            # own per-request header when it sent one, the stated upper
+            # estimate otherwise. The ledger is what the envelope reads.
+            _spent, _basis = _charge(got)
+            _fetched_at = time.time()
+            cov.settle(coverage, sport_key, ok=bool(got.get("ok")),
+                       at=_fetched_at, credits=_spent, basis=_basis,
+                       events=len(got.get("events") or []),
+                       detail={"status": got.get("status")})
+            if _lease_held(coverage):
+                _record_spend(sport_key, at=_fetched_at, cycle_at=started,
+                              credits=_spent, basis=_basis)
         if not got.get("ok"):
             tally[R_PROVIDER_ERROR] = tally.get(R_PROVIDER_ERROR, 0) + 1
             _step_refuse(R_PROVIDER_ERROR)
@@ -7694,6 +9948,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # because `received_at` is stamped per fetch and the accumulated
         # processing delay is what it governs.
         served_by_this_fetch = 0
+        adaptive_this_sport = 0
         # BY INDEX OVER A LOCAL LIST, so a re-fetch can actually replace the
         # events still to come. `for event in got["events"]` binds the list
         # once, so rebinding `got` inside it would have changed nothing --
@@ -7734,6 +9989,24 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         events.sort(key=lambda e: (_ages[id(e)] is None,
                                    -(_ages[id(e)] or 0.0),
                                    str((e or {}).get("id") or "")))
+        # R30A · WHO GOES FIRST WHEN THE EVALUATION BOUND BITES. A second,
+        # STABLE sort over the freshest-first order above: events this bound
+        # deferred in an earlier cycle first (oldest deferral first -- what
+        # makes a deferral's next slot real), then events in play or starting
+        # within 6 h (time to event). The freshest-first order holds within
+        # each class, and the key reads only identities and clocks.
+        _prev_deferred = _COVERAGE["deferred_events"].setdefault(sport_key,
+                                                                 {})
+        if stream_seed is None:
+            _live_ids = {str((e or {}).get("id")) for e in events}
+            for _gone in [k for k in _prev_deferred if k not in _live_ids]:
+                _prev_deferred.pop(_gone, None)
+        _now_sort = time.time()
+        events.sort(key=lambda e: cov.candidate_order_key(
+            (e or {}).get("id"),
+            commence_epoch=fmeta_mod._epoch((e or {}).get("commence_time")),
+            now=_now_sort, deferred_since=_prev_deferred,
+            freshness_key=()))
 
         # ── LEVER C · WITHIN-CYCLE DEDUPLICATION ────────────────────
         #
@@ -7757,7 +10030,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # `received_at` is stamped per fetch.
         vq_cache: dict = {}
         for _i in range(len(events)):
-            if evaluated >= MAX_PER_CYCLE:
+            if evaluated >= _eval_cap:
                 # ── WHAT PRIORITISATION DEFERRED, REPORTED BY IDENTITY ──
                 #
                 # Owner requirement: "report which candidates were
@@ -7792,6 +10065,44 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "why": WHY_DEFERRED})
                 deferred_total += max(0, len(events) - _i)
                 _close_event()
+                # R30A · EVERY DEFERRED EVENT GETS A SLOT AND A SEED. Its
+                # competition's next fetch is within the bound the plan
+                # STATED for it (the starvation bound: the staleness bound
+                # when the demand is feasible, the larger overload bound when
+                # it is not -- collector_coverage.candidate_slot); this event
+                # goes FIRST in that fetch (the sort above), so with this
+                # competition's share of the bound per fetch the k-th
+                # deferred event is judged within (1 + k // share) fetches.
+                # Its discovery seed is registered now: the reactive (feed)
+                # path may value it before then.
+                _row = _cov_rows.get(sport_key) or {}
+                _share = max(1, int(_eval_shares.get(sport_key) or 1))
+                _t_def = time.time()
+                for _n, _k in enumerate(range(_i, len(events))):
+                    _e = events[_k] if isinstance(events[_k], dict) else {}
+                    _eid = _e.get("id")
+                    if _eid is None:
+                        continue
+                    _since = _prev_deferred.setdefault(str(_eid), _t_def)
+                    if stream_seed is None:
+                        from .. import pinnapi_reactive as reactive
+                        reactive.register(_e, sport_key=sport_key,
+                                          family=family,
+                                          received_at=received_at)
+                    candidate_deferrals.append({
+                        "sport_key": sport_key, "family": family,
+                        "token": _row.get("token"), "event_id": _eid,
+                        "queue_position": _k,
+                        "feed_covered": bool(_row.get("feed_covered")),
+                        "commence_epoch": fmeta_mod._epoch(
+                            _e.get("commence_time")),
+                        "home": _e.get("home_team"),
+                        "away": _e.get("away_team"),
+                        "deferred_since": _since, "share": _share,
+                        "next_slot_at": cov.candidate_slot(
+                            cycle_at=started, cycle_s=CYCLE_S,
+                            receipt=_row, position=_n, share=_share),
+                        "why": WHY_DEFERRED})
                 for _k in range(_i, len(events)):
                     _e = events[_k] if isinstance(events[_k], dict) else {}
                     event_ledger.append({
@@ -7812,11 +10123,24 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # Lowered deliberately, it bounds our OWN contribution to
             # `pinnacle_age_s` at roughly that many events' worth of paced
             # venue reads instead of the whole cycle's.
-            if stream_seed is None and served_by_this_fetch >= EVENTS_PER_ODDS_FETCH:
+            if stream_seed is None and served_by_this_fetch >= EVENTS_PER_ODDS_FETCH \
+                    and not (coverage is not None
+                             and not cov.claim_call(coverage,
+                                                    cov.CALL_REFETCH)):
+                # R30A: A RE-FETCH IS A METERED CALL, claimed against the
+                # cycle's declared budget like any other; with none left the
+                # quote is kept and ages normally (QUOTE_STALE names it), so
+                # the budget is never exceeded to refresh a price.
                 again = await fetch_odds(sport_key, api_key=api_key)
                 credits["used"] = again.get("credits_used") or credits["used"]
                 credits["remaining"] = (again.get("credits_remaining")
                                         or credits["remaining"])
+                if coverage is not None:
+                    # A RE-FETCH IS SPEND TOO, on the same receipt and in the
+                    # same ledger, stamped with the cycle instant (never
+                    # fires at the default knob).
+                    _charge_refetch(coverage, sport_key, again,
+                                    cycle_at=started)
                 odds_refetches += 1
                 served_by_this_fetch = 0
                 if again.get("ok") and again.get("received_at") is not None:
@@ -7839,25 +10163,73 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     # a provider hiccup into missing coverage.
                     odds_refetch_failures += 1
             event = events[_i]
+            # judged now: no longer a deferred event of this competition
+            _prev_deferred.pop(str((event or {}).get("id")), None)
             _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
+            # A PINNAPI-NATIVE EVENT NAMES ITS VENUE EVENT ALREADY: its line
+            # contracts are queued here, before any money-line refusal below
+            # can `continue` past them (a stale or superseded money line says
+            # nothing about the spread's own price).
+            _nat_line = native_identity_of(event)
+            if _nat_line is not None:
+                _lj = line_job_for(event, sport_key=sport_key, family=family,
+                                   venue_event_slug=_nat_line.get(
+                                       "venue_event_slug"))
+                if _lj is not None:
+                    line_jobs.append(_lj)
+            _ws_why: dict = {}
             quote = primary_pinnacle_h2h(
-                event, received_at=received_at, family=family, at=time.time())
+                event, received_at=received_at, family=family, at=time.time(),
+                explain=_ws_why)
             if stream_seed is None:
                 from .. import pinnapi_reactive as reactive
                 reactive.register(event, sport_key=sport_key, family=family,
                                   received_at=received_at)
             elif (quote or {}).get("reference_input", {}).get("provider") != "pinnapi.com/raw-websocket":
                 tally["WS_REFERENCE_NOT_USABLE"] = tally.get("WS_REFERENCE_NOT_USABLE", 0) + 1
+                # WHICH WS REFUSAL (P0 incident RC7): the fallback carries
+                # it when there was one; with none (a PinnAPI-native seed
+                # has no other provider) the read is asked again for its
+                # reason, so the event never reads as "no Pinnacle".
+                # (integration) inc-edge's `explain` reason comes first: it
+                # is the same select's refusal, captured without a re-read.
+                _ws_reason = (_ws_why.get("reason")
+                              or ((quote or {}).get("reference_input") or {})
+                              .get("fallback_reason")
+                              or pinnapi_read_refusal(event, family=family,
+                                                      at=time.time()))
+                _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_reason
+                tally[_ws_code] = tally.get(_ws_code, 0) + 1
+                _step_refuse(_ws_code)
+                # THE WS REASON, KEPT (it was discarded here): why the
+                # reactive evaluation's own trigger could not be used.
+                if _ws_why.get("reason"):
+                    tally[_ws_why["reason"]] = \
+                        tally.get(_ws_why["reason"], 0) + 1
+                    _event_fields({"ws_refusal": _ws_why["reason"]})
                 continue
             if quote is None:
-                tally["NO_PINNACLE_ON_EVENT"] = \
-                    tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
-                _step_refuse("NO_PINNACLE_ON_EVENT")
+                # NO USABLE PINNACLE PRICE, BY CAUSE (no_pinnacle_codes): the
+                # WS refusal reason, then what the discovery payload lacked.
+                _np = no_pinnacle_codes(_ws_why, event)
+                for _c in _np:
+                    tally[_c] = tally.get(_c, 0) + 1
+                    _step_refuse(_c)
+                _event_fields({"stage": no_pinnacle_stage(_np),
+                               "ws_refusal": _ws_why.get("reason"),
+                               "payload_absence":
+                                   pinnacle_absence_in_payload(event),
+                               "formerly_recorded_as":
+                                   R_NO_PINNACLE_ON_EVENT})
                 continue
             if stream_seed is not None:
                 source = quote["reference_input"]
-                version = (source["epoch"], source["source_change_ms"],
+                # the change instant the cache dated the quote by (R30A
+                # RC4: equal to source_change_ms unless the changing frame
+                # carried no provider stamp), as pinnapi_reactive.version_of
+                version = (source["epoch"],
+                           source.get("change_ms", source["source_change_ms"]),
                            tuple(sorted(source["raw_odds"].items())))
                 if version != stream_seed["trigger"]["version"]:
                     tally["WS_TRIGGER_SUPERSEDED"] = 1
@@ -7885,8 +10257,18 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _first["our_processing_s"])
 
             # ── the venue contract, exactly or not at all ───────────
-            mapped = vmap.map_event(home=quote["home"], away=quote["away"],
-                                    markets=markets)
+            # A PINNAPI-NATIVE EVENT (pinnapi_discovery) was matched to ONE
+            # venue event by its structured participants: the date-blind
+            # global catalogue is not consulted at all, and the venue's own
+            # resolver is asked for THAT event only (every check of its
+            # still runs; an event outside its window refuses by name).
+            _native = native_identity_of(event)
+            if _native is not None:
+                mapped = {"mapped": False, "refusals": [R_GLOBAL_NOT_CONSULTED],
+                          "pinnapi_native": dict(_native)}
+            else:
+                mapped = vmap.map_event(home=quote["home"],
+                                        away=quote["away"], markets=markets)
             ident = None
             if not mapped["mapped"]:
                 # ── THE VENUE'S OWN CATALOGUE, WHEN THE GLOBAL ONE HAS NO ROW ──
@@ -7908,7 +10290,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         commence_time=quote.get("commence_time"),
                         family=family, now=time.time(),
                         competition=sport_key,
-                        league_tokens=venue_league_tokens(sport_key))
+                        league_tokens=league_tokens_for(sport_key, event),
+                        event_slug=(_native or {}).get("venue_event_slug"))
                 if vn is not None and vn.get("ok"):
                     replaced = list(mapped["refusals"])
                     mapped = venue_native_mapping(vn, replaced=replaced,
@@ -7917,6 +10300,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _venue_native_took_it(replaced)
                 else:
                     for code in mapped["refusals"]:
+                        if code == R_GLOBAL_NOT_CONSULTED:
+                            continue        # not a refusal: not asked
                         tally[code] = tally.get(code, 0) + 1
                         _step_refuse(code)
                     if vn is not None:
@@ -7999,6 +10384,34 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "why": _sanitize(ident.get("why") or "", limit=200)})
                 continue
 
+            # ── ONE FIXTURE, ONE EVENT KEY (P0 incident; migration 261) ──
+            # A venue-native contract's fixture is keyed by its event key,
+            # and a fixture may now be discovered by either provider. The
+            # key is the first one recorded for this VENUE event, fixed once
+            # in venue_fixture_event_keys, so the fixture rails never see
+            # one fixture as two (see `sticky_event_key`).
+            if mapped.get("mapped_by") == vnat.MAPPED_BY_VENUE_NATIVE:
+                _sk = await sticky_event_key(
+                    conn, venue_event_slug=(ident.get("venue_native")
+                                            or {}).get("event_slug"),
+                    proposed=quote.get("event_id"), cache=fixture_keys)
+                if (_sk.get("event_key") is not None
+                        and str(_sk["event_key"]) != str(quote.get("event_id"))):
+                    quote = dict(quote, event_id=_sk["event_key"],
+                                 provider_event_id=quote.get("event_id"),
+                                 fixture_event_key=_sk)
+                # A METERED EVENT THE VENUE-NATIVE RESOLVER MAPPED: its venue
+                # event is now known, so its line contracts are queued too
+                # (priced against the fixture PinnAPI discovery matched to it)
+                if native_identity_of(event) is None:
+                    _lj = line_job_for(
+                        event, sport_key=sport_key, family=family,
+                        venue_event_slug=((ident.get("venue_native") or {})
+                                          .get("event_slug")
+                                          or ident.get("venue_event_key")))
+                    if _lj is not None:
+                        line_jobs.append(_lj)
+
             # ── LEVER A · SKIP WHAT IS ALREADY PAST THE LIMIT ───────
             #
             # Checked HERE: after the free work (parse, map, identity) and
@@ -8030,6 +10443,85 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             _pe = _quote_epoch(quote)
             reference_received_at = quote["received_at"]
             _arr = time.time()
+            # ── OUR DELAY MADE IT STALE: REFRESH IT, ON DEMAND ──────────
+            # (ADAPTIVE_ODDS_REFETCH_RULE). Only a the-odds-api quote (a
+            # PinnAPI quote is already read at the decision instant), only
+            # when the provider delivered it inside the limit, only while
+            # the per-sport bound holds; a refresh that fails or is still
+            # over the limit leaves the candidate to be refused by name.
+            if (stream_seed is None and _pe is not None
+                    and (_arr - _pe) > PINNACLE_MAX_AGE_S
+                    and reference_received_at is not None
+                    and (float(reference_received_at) - _pe)
+                    <= PINNACLE_MAX_AGE_S
+                    and ((quote.get("reference_input") or {}).get("provider")
+                         != "pinnapi.com/raw-websocket")):
+                if adaptive_this_sport >= ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT:
+                    adaptive_refetch["capped"] += 1
+                    _event_fields({"adaptive_odds_refetch": (
+                        "CAPPED" if ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT > 0
+                        else "OFF_PENDING_THE_OWNERS_METERED_BUDGET")})
+                elif (coverage is not None
+                      and not cov.claim_call(coverage, cov.CALL_REFETCH)):
+                    # A METERED CALL, CLAIMED LIKE THE FIXED RE-FETCH ABOVE
+                    # (incident release, verifier finding 2): with no call
+                    # left in the cycle's declared budget the refresh is not
+                    # made; the quote is kept and refused
+                    # QUOTE_STALE_ON_ARRIVAL by name below.
+                    adaptive_refetch["budget_spent"] += 1
+                    _event_fields({"adaptive_odds_refetch":
+                                   "METERED_BUDGET_SPENT"})
+                else:
+                    adaptive_this_sport += 1
+                    adaptive_refetch["fired"] += 1
+                    odds_refetches += 1
+                    again = await fetch_odds(sport_key, api_key=api_key)
+                    credits["used"] = (again.get("credits_used")
+                                       or credits["used"])
+                    credits["remaining"] = (again.get("credits_remaining")
+                                            or credits["remaining"])
+                    if coverage is not None:
+                        # ITS CREDITS ON THE SAME RECEIPT AND IN THE SAME
+                        # ENVELOPE LEDGER as every other fetch, stamped with
+                        # the cycle instant (verifier finding 2)
+                        _charge_refetch(coverage, sport_key, again,
+                                        cycle_at=started)
+                    fresh_ev = None
+                    if again.get("ok") and again.get("received_at") is not None:
+                        # THE NEW RECEIPT INSTANT AND THE NEW PAYLOAD'S OWN
+                        # PRICES, together, for this candidate and every one
+                        # still to come in this sport (as the fixed re-fetch
+                        # above does).
+                        received_at = again["received_at"]
+                        served_by_this_fetch = 1
+                        fresh = {(e or {}).get("id"): e
+                                 for e in (again["events"] or [])
+                                 if isinstance(e, dict) and (e or {}).get("id")}
+                        for _j in range(_i + 1, len(events)):
+                            _r = fresh.get((events[_j] or {}).get("id"))
+                            if _r is not None:
+                                events[_j] = _r
+                        fresh_ev = fresh.get((event or {}).get("id"))
+                    q2 = (primary_pinnacle_h2h(
+                        fresh_ev, received_at=received_at, family=family,
+                        at=time.time()) if fresh_ev is not None else None)
+                    if (q2 is not None and q2.get("home") == quote.get("home")
+                            and q2.get("away") == quote.get("away")):
+                        events[_i] = event = fresh_ev
+                        quote = q2
+                        _pe = _quote_epoch(quote)
+                        reference_received_at = quote["received_at"]
+                        _arr = time.time()
+                        outcome = ("SAVED" if _pe is not None
+                                   and (_arr - _pe) <= PINNACLE_MAX_AGE_S
+                                   else "STILL_STALE")
+                    else:
+                        outcome = "FAILED"
+                        odds_refetch_failures += 1
+                    adaptive_refetch[{"SAVED": "saved",
+                                      "STILL_STALE": "still_stale",
+                                      "FAILED": "failed"}[outcome]] += 1
+                    _event_fields({"adaptive_odds_refetch": outcome})
             _event_fields(arrival_split(_pe, reference_received_at, _arr))
             if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
                 lat["skipped_stale_on_arrival"] += 1
@@ -8269,6 +10761,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 # admission block below is reachable.
                 calibration_only = _calibration_only_basis(vq)
                 if calibration_only is None:
+                    # A FAILED READ IS RECORDED TOO, with no price and its
+                    # precise refusal, so the agents still receive the
+                    # opportunity (CALIBRATION_ONLY_AFTER_READ_FAILURE).
+                    calibration_only = _read_failure_basis(vq)
+                    if calibration_only is not None:
+                        _vq_entry["venue_read_refusal"] = \
+                            calibration_only["venue_read_refusal"]
+                        cal_only["after_read_failure"][
+                            calibration_only["venue_read_refusal"]] = \
+                            cal_only["after_read_failure"].get(
+                                calibration_only["venue_read_refusal"],
+                                0) + 1
+                if calibration_only is None:
                     continue
                 if (evaluated + cal_only["attempted"]
                         >= MAX_CALIBRATION_ONLY_PER_CYCLE):
@@ -8360,9 +10865,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             if calibration_only is not None:
                 # THE VENUE READ'S OWN REFUSAL LEADS the record's refusals: it
                 # is where this candidate stopped as an entry, and every later
-                # code is what the trace met after it.
-                extra = [calibration_only["refusal"]] + [
-                    c for c in extra if c != calibration_only["refusal"]]
+                # code is what the trace met after it. A FAILED read's precise
+                # refusal follows it (VENUE_RATE_LIMITED, ...).
+                lead = [calibration_only["refusal"]] + (
+                    [calibration_only["venue_read_refusal"]]
+                    if calibration_only.get("no_book_read") else [])
+                extra = lead + [c for c in extra if c not in lead]
 
             # Independent-book depth is re-aged too; a cached discovery
             # payload must not supply stale corroboration for a WS price.
@@ -8422,9 +10930,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 "settlement_rule": srule["book_rule"],
                 "event_key": quote["event_id"],
             }
-            rec = ext.evaluate(
-                contract=contract,
-                quote={# THE BOOK IS DECLARED, and the source checks it.
+            # THE QUOTE THE VALUATION READS, named once: the complement of
+            # this record (`bettor_complement_valuation`) is valued from the
+            # SAME dict, so the two can never price different inputs.
+            ev_quote = {
+                       # THE BOOK IS DECLARED, and the source checks it.
                        # Omitting it made the valuation refuse every event
                        # with PINNACLE_NOT_IN_THIS_PAYLOAD -- correctly,
                        # since an undeclared book is exactly the silent
@@ -8446,7 +10956,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        "period": ident["period"],
                        "period_basis": "THE_FEED_H2H_MARKET_IS_FULL_MATCH",
                        "line": None,
-                       "settlement_rule": srule["book_rule"]},
+                       "settlement_rule": srule["book_rule"]}
+            rec = ext.evaluate(
+                contract=contract,
+                quote=ev_quote,
                 # THE ACQUISITION PRICE, NOT THE API PRICE. For a LONG
                 # these are the same number; for a SHORT the API price is
                 # YES-denominated and the cost is its complement, and
@@ -8530,15 +11043,31 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                 if calibration_only is None
                                 else ext.PURPOSE_CALIBRATION_ONLY),
                 calibration_only_evidence=(
-                    None if calibration_only is None else {
-                        "venue_read_refusal": calibration_only["refusal"],
+                    None if calibration_only is None else dict({
+                        # THE PRECISE REFUSAL: the currency code for a read
+                        # book; VENUE_GATE_COOLDOWN / _RATE_LIMITED /
+                        # _TIMEOUT / _NOT_FOUND / _ERROR for a failed read.
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        # the lane's own code for where the read stopped
+                        "venue_read_lane_refusal": calibration_only["refusal"],
                         "venue_read_why": _sanitize(
                             calibration_only.get("venue_read_why") or "",
                             limit=240),
                         "book_currency": calibration_only["book_currency"],
                         "displayed_quote": calibration_only["displayed"],
                         "decision_instant_epoch_s": now,
-                        "decision_lag_s": decision_lag_s}))
+                        "decision_lag_s": decision_lag_s},
+                        **({"no_book_read": True, "displayed_price": None,
+                            "venue_read_diagnostic": calibration_only.get(
+                                "venue_read_diagnostic"),
+                            "agents_read_their_own_book": (
+                                "no paper strategy prices from this record: "
+                                "each reads its own book at its decision "
+                                "and refuses by name when it cannot")}
+                           if calibration_only.get("no_book_read")
+                           else {}))))
             if calibration_only is None:
                 evaluated += 1
                 step["evaluated"] += 1
@@ -8703,7 +11232,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         "us_market_slug": ident.get("us_market_slug"),
                         "event_key": quote.get("event_id"),
                         "probability": rec.get("probability"),
-                        "venue_read_refusal": calibration_only["refusal"],
+                        "venue_read_refusal": calibration_only.get(
+                            "venue_read_refusal") or calibration_only[
+                            "refusal"],
+                        "venue_read_lane_refusal": calibration_only[
+                            "refusal"],
                         "displayed_price_not_for_orders": (
                             calibration_only["displayed"]
                             .get("acquisition_price"))})
@@ -8712,6 +11245,52 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 if stream_seed is not None:
                     stream_seed["valuation_ids"].append(cal_id)
                 await _paper_valuation(conn, cal_id)
+                # ── THE OTHER SIDE OF THE SAME CONTRACT (P0 incident) ──────
+                #
+                # The lane prices the provider's HOME team only, so the other
+                # side of this binary contract -- the away team on an MLB
+                # money line, NO on a soccer per-side contract -- was never
+                # valued, and its paper strategies could never buy it. It is
+                # valued here from the SAME de-vig, quote, identity, read and
+                # decision instant, as 1 - p (complete outcome set), sealed
+                # CALIBRATION_ONLY exactly like this record, and decided by
+                # the paper strategies like any other row. Never raises into
+                # the cycle; every outcome is counted by name.
+                comp, comp_why = complement_record(
+                    rec, contract=contract, ev_quote=ev_quote, quote=quote,
+                    vq=vq, fee_fn=fee_fn, now=now,
+                    outcome_books=quote["depth"].get(str(quote["home"])),
+                    extra=extra, reference_check=reference_check,
+                    decision_lag_s=decision_lag_s,
+                    state_gates_for=(lambda p: entryx.state_from_evidence(
+                        freshness=_cfr,
+                        settlement=_settlement_compatibility(srule),
+                        probability=p, calibration=calibration)))
+                if comp is None:
+                    cal_only["complement_not_recorded"][comp_why] = \
+                        cal_only["complement_not_recorded"].get(
+                            comp_why, 0) + 1
+                    _vq_entry["complement_record"] = comp_why
+                    continue
+                try:
+                    comp_id = await ext.persist(conn, comp)
+                except Exception as exc:                       # noqa: BLE001
+                    name = "COMPLEMENT_PERSIST:" + type(exc).__name__
+                    cal_only["complement_persist_errors"][name] = \
+                        cal_only["complement_persist_errors"].get(
+                            name, 0) + 1
+                    _vq_entry["complement_record"] = name
+                    continue
+                if comp_id is None:
+                    cal_only["complement_already_recorded"] += 1
+                    _vq_entry["complement_record"] = "ALREADY_RECORDED"
+                    continue
+                cal_only["complement_recorded"] += 1
+                _vq_entry["complement_record"] = "RECORDED"
+                _vq_entry["complement_valuation_id"] = comp_id
+                if stream_seed is not None:
+                    stream_seed["valuation_ids"].append(comp_id)
+                await _paper_valuation(conn, comp_id)
                 continue
             try:
                 row_id = await ext.persist(conn, rec)
@@ -8887,14 +11466,43 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                              else float(rec["edge"]) > 0.0)})
 
     _close_event()
+    # ── THE LINE-MARKET LANE, AFTER EVERY MONEY-LINE EVENT ─────────────
+    # Bounded and never fatal (see `line_market_pass`); its report rides the
+    # cycle result and the heartbeat.
+    try:
+        line_markets = await line_market_pass(
+            conn, jobs=line_jobs, fee_fn=fee_fn, open_book=open_book,
+            ev_measurable=_ev_measurable, calibration=calibration,
+            research=research, stream_seed=stream_seed,
+            fixture_keys=fixture_keys)
+    except Exception as exc:                                   # noqa: BLE001
+        line_markets = {"error": "LINE_MARKET_PASS_RAISED:%s"
+                        % type(exc).__name__}
     _t_entry = time.time()
+    _rss_at["entry"] = _procmem.rss_mb()
     candidate_outcomes = _reconcile_event_ledger(event_ledger, funnel)
     candidate_outcomes["persisted"] = await _persist_candidate_outcomes(
         conn, cycle_at=started, rows=event_ledger)
+    # R30A · THE COVERAGE RECEIPTS, under the same cycle id as the outcome
+    # rows: one per competition (what was fetched, deferred to which slot,
+    # skipped, refused, and what each fetch cost) and one per provider event
+    # the evaluation bound deferred.
+    coverage_receipts = None
+    if coverage is not None:
+        _unsettled = cov.unsettled(coverage)
+        if _unsettled:
+            tally["COVERAGE_SCHEDULED_BUT_NOT_FETCHED"] = len(_unsettled)
+        coverage_receipts = await _persist_coverage_receipts(
+            conn, cycle_id=str((candidate_outcomes.get("persisted") or {})
+                               .get("cycle_id") or os.urandom(16).hex()),
+            cycle_at=started, plan=coverage,
+            candidates=candidate_deferrals)
     _t_persisted = time.time()
+    _rss_at["persisted"] = _procmem.rss_mb()
     if stream_seed is not None:
         return {"ran": True, "state": "WS_PAPER_EVALUATED", "written": written,
                 "refusals": dict(tally), "candidate_outcomes": candidate_outcomes,
+                "line_markets": line_markets,
                 "valuation_ids": list(stream_seed["valuation_ids"])}
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
@@ -8902,6 +11510,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
     _t_joined = time.time()
+    _rss_at["joined"] = _procmem.rss_mb()
     # THE CALIBRATION MEASUREMENT, SCHEDULED, right after the join that
     # feeds it. At most once per CALIBRATION_MEASURE_EVERY_S; see
     # `_scheduled_calibration_measurement`. It writes only a completed
@@ -8909,9 +11518,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     calibration_measurement = await _scheduled_calibration_measurement(
         conn, now=time.time())
     _t_calibrated = time.time()
+    _rss_at["calibrated"] = _procmem.rss_mb()
     pair_observation = await _pair_observation_pass(conn, observable,
                                                     now=time.time())
     _t_observed = time.time()
+    _rss_at["observed"] = _procmem.rss_mb()
     # WHERE THE CYCLE'S TIME WENT, per step, so the cadence can be read from
     # the heartbeat rather than inferred from `elapsed_s` alone. `servicing`
     # is ~0 while the servicing task is alive: the cycle then services nothing.
@@ -8922,9 +11533,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         "outcome_join": round(_t_joined - _t_persisted, 3),
         "calibration_measurement": round(_t_calibrated - _t_joined, 3),
         "pair_observation": round(_t_observed - _t_calibrated, 3)}
+    step_rss_mb = _step_rss(_rss_at)
 
     out = {"ran": True, "state": "LIVE",
            "step_timing_s": step_timing_s,
+           "step_rss_mb": step_rss_mb,
            "pair_observation": pair_observation,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
@@ -9033,6 +11646,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "is_the_default": EVENTS_PER_ODDS_FETCH >= MAX_PER_CYCLE,
                "odds_refetches": odds_refetches,
                "odds_refetch_failures": odds_refetch_failures,
+               # the on-demand refresh of quotes OUR delay made stale
+               "adaptive_refetch": dict(adaptive_refetch),
+               "adaptive_refetch_rule": ADAPTIVE_ODDS_REFETCH_RULE,
+               "adaptive_refetch_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT,
+               "adaptive_refetch_proposed_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT,
                "what_it_is_for": (
                    "399 of 1,126 evaluation rows produced no fair value and "
                    "every one failed at QUOTE_STALE. 296 of those 399 were "
@@ -9055,6 +11675,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            # candidate it refused with the reason. A short funnel used to be
            # indistinguishable from a narrow sport set.
            "sports_selection": sports_selection,
+           # R30A: THE COVERAGE PLAN, settled, and where its receipts went.
+           "collector_coverage": cov.digest(coverage),
+           "collector_coverage_receipts": coverage_receipts,
+           "candidate_deferrals": len(candidate_deferrals),
            "funnel_by_provider_sport": funnel,
            # EVERY MAPPED CANDIDATE, RECONCILED TO ITS FIRST REFUSAL.
            "mapped_candidate_ledger": ledger,
@@ -9062,6 +11686,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            # outcome -- and whether the rows add up to the funnel.
            "candidate_outcomes": candidate_outcomes,
            "event_ledger": event_ledger,
+           # THE LINE-MARKET LANE: every line contract of the events above,
+           # counted by sport / family / precise state, and what it wrote
+           "line_markets": line_markets,
            # THE CYCLE'S OWN LABEL, and the distinction it protects.
            # "zero positive edge" is a claim ABOUT THE MARKET. It can only
            # be made when candidates actually reached the economics. When
@@ -9852,6 +12479,7 @@ def _selection_digest(out: dict) -> dict:
     fboard = dict(sel.get("venue_football_board") or {})
     return {
         "requested": [k for k, _ in (sel.get("sports") or [])],
+        # the declared metered-call budget per cycle (unchanged by R30A)
         "metered_budget": sel.get("budget"),
         "rejected": [{"key": r.get("key"), "our_token": r.get("our_token"),
                       "refusal": r.get("refusal")}
@@ -9864,9 +12492,27 @@ def _selection_digest(out: dict) -> dict:
                  k: (c.get("fixture_confirmation") or {}).get(k)
                  for k in ("ok", "refusal", "matches", "examined")}}
             for c in (sel.get("confirmed_by_provider") or [])][:12],
+        # R30A: a deferral, never a drop -- each carries its receipt and the
+        # slot the scheduler will serve it in.
         "budget_dropped": [{"key": d.get("key"),
-                            "venue_events": d.get("venue_events")}
+                            "venue_events": d.get("venue_events"),
+                            "receipt": d.get("receipt"),
+                            "next_slot_at": d.get("next_slot_at"),
+                            "cycles_since_served":
+                                d.get("cycles_since_served"),
+                            "why": d.get("why")}
                            for d in (sel.get("budget_dropped") or [])][:12],
+        "unmetered_discovery": {
+            k: (sel.get("unmetered_discovery") or {}).get(k)
+            for k in ("ran", "why", "competitions", "credits",
+                      "metered_calls")},
+        # R30A fix stage: THE SCHEDULE'S ROTATION -- every competition the
+        # coverage plan fetched, deferred to a slot, or holds until a venue
+        # event enters its horizon, with that receipt. `requested` above is
+        # this cycle's fetch order only; a reader that wants the lane's
+        # mandate (Derek's coverage census) reads this.
+        "in_rotation": sorted(schedule_of(sel.get("coverage"))),
+        "schedule": schedule_of(sel.get("coverage")),
         "never_requested": sel.get("never_requested") or [],
         "catalogue_read": sel.get("catalogue_read"),
         "venue_board": {"read": board.get("read"),
@@ -9974,6 +12620,13 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # EXPIRED_SNAPSHOT) with it, so a set derived from an expired
                 # snapshot cannot be read as current coverage.
                 "sports_selection": _selection_digest(out),
+                # R30A · THE COVERAGE PLAN: the envelope and what it spent,
+                # one compact row per competition (planned / final receipt,
+                # rank, horizon, bound, next slot, credits), and where the
+                # durable receipts were written.
+                "collector_coverage": out.get("collector_coverage"),
+                "collector_coverage_receipts":
+                    out.get("collector_coverage_receipts"),
                 # and, for the refusals that have a message, the message.
                 "venue_errors": out.get("venue_errors") or [],
                 # EVERY MAPPED CANDIDATE AGAINST ITS FIRST REFUSAL, so a
@@ -9986,6 +12639,9 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # themselves are in `ext_candidate_outcomes`, one per event
                 # per cycle, so this heartbeat stays bounded.
                 "candidate_outcomes": out.get("candidate_outcomes"),
+                # THE LINE-MARKET LANE (R30A P0 incident): its counts by
+                # sport / family / precise state, bounded (no id list)
+                "line_markets": _line_markets_digest(out.get("line_markets")),
                 "cycle_label": out.get("cycle_label"),
                 "cycle_label_note": out.get("cycle_label_note"),
                 # THE LATENCY MEASUREMENT, PERSISTED. See
@@ -10114,6 +12770,35 @@ def next_cycle_delay(*, ran: bool, elapsed_s: float) -> float:
     return max(IDLE_POLL_S, CYCLE_S - max(0.0, float(elapsed_s)))
 
 
+#: FENCING (R30A): the writer's per-pass proof, on its own session, that it
+#: still holds LOCK_KEY must answer within this; no answer is a lost lock.
+#: The CHILDREN's proof (`_child_fence`, asked on a servicing pass's or a
+#: reactive job's own connection) has the same bound: an unanswered pg_locks
+#: read is a refused pass, never a pass that waits for ever.
+FENCE_TIMEOUT_S = 5.0
+
+#: RE-CONTENTION THAT CANNOT FAIL OUT OF `run` (R30A review, 2026-10-04).
+#: Losing the lease and contending again on a database that is still
+#: restarting raised the connect error straight out of `run`: the API
+#: lifespan task that runs it is not supervised, so the entry lane, the
+#: servicing child (held-position management) and the reactive scheduler
+#: stayed down until the next deploy. Every contention attempt now fails
+#: INTO the loop: logged with its exception, recorded in loop health, and
+#: retried after IDLE_POLL_S doubled per consecutive failure up to this cap
+#: (60, 120, 240, 300, 300 ... s). A hold that ran resets the doubling.
+CONTEND_BACKOFF_MAX_S = 300.0
+
+
+def contend_delay(consecutive_failures: int) -> float:
+    """Seconds before the next contention: IDLE_POLL_S after a hold that
+    ended normally (0 failures), doubling per consecutive failed attempt,
+    never above CONTEND_BACKOFF_MAX_S."""
+    n = max(0, int(consecutive_failures))
+    if n == 0:
+        return IDLE_POLL_S
+    return min(CONTEND_BACKOFF_MAX_S, IDLE_POLL_S * (2 ** min(n - 1, 16)))
+
+
 async def run(get_pool) -> None:
     """The long-running task. Armed from the API's startup.
 
@@ -10128,9 +12813,66 @@ async def run(get_pool) -> None:
     present and enforces nothing. The contention is re-asked every
     IDLE_POLL_S so a standby can actually take over -- a standby that
     never asks again cannot.
+    FENCED, AND IT CONTENDS AGAIN WHEN IT LOSES (R30A, 2026-10-04). Before
+    this, `run` took the lock once and then looped on that one session for
+    ever: a session that died (a database restart, a dropped connection)
+    failed every cycle with "cycle failed" and never asked again, while the
+    servicing task, the reactive scheduler and the feed it had started kept
+    writing on OTHER connections without the lock -- and once the server
+    freed the key another process could take it. Now every pass first
+    proves, on the lock session itself (`db.advisory_held`: this backend's
+    own granted pg_locks row for LOCK_KEY), that it is still the writer; a
+    lost or unanswerable lock ends the hold before anything is written: the
+    children stop in the same `finally` a shutdown runs, the session closes,
+    and the contention starts again on a fresh session after IDLE_POLL_S.
+
+    ITS OWN SESSION (`db.lease_session`): the lock no longer occupies one of
+    the shared pool's ten slots (six lock holders held six of them in
+    production, research run 37226381750).
+
+    NOTHING IN A CONTENTION ATTEMPT ESCAPES `run` (see CONTEND_BACKOFF_MAX_S):
+    the pool, the lease session, the standby probe and the hold itself are
+    one attempt inside one try; a failure stops the children (the hold's own
+    `finally`), is logged and recorded, and the next attempt follows after
+    `contend_delay`. Only cancellation leaves.
     """
+    failures = 0
+    while True:
+        lost_why = None
+        try:
+            lost_why = await _hold_once(get_pool)
+            failures = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                               # noqa: BLE001
+            failures += 1
+            lost_why = "CONTENTION_FAILED:%s" % type(exc).__name__
+            log.error("ext_pinnacle: contention attempt failed (%d in a "
+                      "row)", failures, exc_info=True)
+            try:
+                _pool = await asyncio.wait_for(get_pool(), FENCE_TIMEOUT_S)
+                await _LH.record(_pool, "ext_pinnacle.entry_cycle",
+                                 process="api", phase=_LH.ERROR, error=exc)
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                pass
+        delay = contend_delay(failures)
+        log.error("ext_pinnacle: writer lease ended (%s); children stopped, "
+                  "contending again in %ss", lost_why, delay)
+        await asyncio.sleep(delay)
+
+
+async def _hold_once(get_pool) -> str | None:
+    """ONE contention attempt: open the lease session, wait as STANDBY until
+    the lock is granted, then hold it -- start the children, run the entry
+    cycles -- until the fence says the lock is gone. Returns why the hold
+    ended; RAISES on any failure to open, probe or hold (the caller, `run`,
+    logs it and contends again). The children always stop in this
+    function's `finally`."""
     pool = await get_pool()
-    async with pool.acquire() as conn:
+    lost_why = None
+    async with lease_session(pool, name="ext_pinnacle") as conn:
         while not await conn.fetchval(
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("ext_pinnacle STANDBY: another process holds the "
@@ -10144,6 +12886,28 @@ async def run(get_pool) -> None:
                 key=STANDBY_KEY)
             await asyncio.sleep(IDLE_POLL_S)
         log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+        # THE WRITER'S FENCING TOKEN: this lock session's backend pid.
+        # The children (servicing, the reactive scheduler) write on
+        # their own pool connections, so each re-proves before a pass
+        # or a job that THIS backend still holds LOCK_KEY
+        # (db.advisory_held_by). Unreadable -> None -> every child pass
+        # is refused until the next hold, fail closed.
+        try:
+            writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+        except Exception:                                  # noqa: BLE001
+            writer_pid = None
+
+        async def _child_fence(cconn, _pid=writer_pid):
+            # BOUNDED (R30A review): an unanswered pg_locks read raises
+            # TimeoutError after FENCE_TIMEOUT_S, which every caller counts
+            # as fenced out -- a stalled check never blocks a child for ever
+            if _pid is None:
+                return False
+            async with asyncio.timeout(FENCE_TIMEOUT_S):
+                return await _db_advisory_held_by(cconn, LOCK_KEY, _pid)
+        await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                         process="api", phase=_LH.START,
+                         detail={"writer_pid": writer_pid})
         # ── AGENTS (core, migration 152): THE THREE IDENTITIES, ONCE ─────
         # By the writer only (a standby never reaches here), with this
         # process's code identity. Never fatal.
@@ -10208,7 +12972,7 @@ async def run(get_pool) -> None:
         # PINNAPI_FEED=off keeps it from starting at all. Never raises.
         from .. import pinnapi_feed_runtime as _feed
         try:
-            _writer_pid = await conn.fetchval("SELECT pg_backend_pid()")
+            _writer_pid = writer_pid
             log.info("ext_pinnacle: pinnapi feed %s", (await
                      _feed.start_default(pool, writer_pid=_writer_pid,
                                          writer_lock_key=LOCK_KEY)
@@ -10218,6 +12982,9 @@ async def run(get_pool) -> None:
                         exc_info=True)
         from .. import pinnapi_reactive as _reactive
         reactive_task = _reactive.start(pool, cycle=cycle)
+        if _reactive.ACTIVE is not None:
+            # each job re-proves the writer lock on its own connection
+            _reactive.ACTIVE.fence = _child_fence
         # ── MANAGEMENT AND RECOVERY, ON THEIR OWN CADENCE ────────────────
         #
         # AFTER THE LOCK, so only the writer services (a standby never
@@ -10225,10 +12992,26 @@ async def run(get_pool) -> None:
         # read already obeys a stored prohibition. It lives exactly as long
         # as this loop. See "ONE EXECUTION AUTHORITY, ON ITS OWN CADENCE".
         servicing = asyncio.get_running_loop().create_task(
-            _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S))
+            _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S,
+                            fence=_child_fence))
         try:
             while True:
                 delay = IDLE_POLL_S
+                # ── FENCING: still the writer? ─────────────────
+                # On the lock session itself, before anything in
+                # this pass is written. A lost key, a dead session
+                # or no answer in FENCE_TIMEOUT_S all end the hold.
+                try:
+                    async with asyncio.timeout(FENCE_TIMEOUT_S):
+                        held = await _db_advisory_held(conn, LOCK_KEY)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:              # noqa: BLE001
+                    held, lost_why = False, "FENCE_UNANSWERED:%s" % (
+                        type(exc).__name__)
+                if not held:
+                    lost_why = lost_why or "WRITER_LOCK_NOT_HELD"
+                    break
                 try:
                     # ── THE OTHER HALF OF DURABILITY ─────────────────────
                     # A 429 is observed on a synchronous market-data path
@@ -10248,6 +13031,10 @@ async def run(get_pool) -> None:
                     t_cycle = time.monotonic()
                     out = await cycle(conn)
                     log.info("ext_pinnacle: %s", out)
+                    await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                     process="api", phase=_LH.SUCCESS,
+                                     detail={"state": out.get("state"),
+                                             "ran": out.get("ran")})
                     if out.get("ran"):
                         # START TO START, as the budget above is written
                         # ("~7.2k/day at 15 minutes"). Sleeping the full
@@ -10259,8 +13046,11 @@ async def run(get_pool) -> None:
                             ran=True, elapsed_s=time.monotonic() - t_cycle)
                 except asyncio.CancelledError:
                     raise
-                except Exception:                              # noqa: BLE001
+                except Exception as exc:                       # noqa: BLE001
                     log.warning("ext_pinnacle: cycle failed", exc_info=True)
+                    await _LH.record(conn, "ext_pinnacle.entry_cycle",
+                                     process="api", phase=_LH.ERROR,
+                                     error=exc)
                 await asyncio.sleep(delay)
         finally:
             await _reactive.stop(reactive_task)
@@ -10280,3 +13070,4 @@ async def run(get_pool) -> None:
             except (asyncio.CancelledError, Exception):        # noqa: BLE001
                 pass
             _SERVICING["task_active"] = False
+    return lost_why

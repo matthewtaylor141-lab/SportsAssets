@@ -247,6 +247,9 @@ _GATE_ARMED_MODULES = frozenset({
     "test_s4_review_pins",       # pinned wire shapes
     "test_side_intent",          # which side the intent selects
     "test_calibration_adapter",  # the adapter's own wire contract
+    # R30A: how many creates submit_fok puts on the (mocked) wire per call
+    # when the venue answers 429 / 5xx / a timeout / a dropped connection
+    "test_order_posts_are_sent_once_and_429s_are_named",
 })
 
 

@@ -176,6 +176,10 @@ def league_name(key: str) -> str:
         return LEAGUE_NAMES[k]
     if k.startswith("UNATTRIBUTED"):
         return k
+    if k.startswith("pinnapi_"):
+        # PinnAPI-native discovery's row for the leagues of a family the lane
+        # maps no key for (pinnapi_discovery.sport_key_for)
+        return "PINNAPI_NATIVE:%s" % k[len("pinnapi_"):].upper()
     return (k.split("_", 1)[-1] or k).upper()
 
 
@@ -944,7 +948,15 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
 #   HEALTHY                 provider events reach decisions and at least one
 #                           ENTER
 #   REFUSING_BY_POLICY      reaches decisions, every one REFUSED by a named
-#                           policy (football today: SETTLEMENT_NOT_SUPPORTED)
+#                           policy (NFL until R30A: SETTLEMENT_NOT_SUPPORTED
+#                           everywhere; since R30A the completed-game policy
+#                           prices the NFL tie from cited evidence and the
+#                           strict policy still refuses settlement by name --
+#                           bettor_nfl_settlement.STRICT_POLICY_MISSING; NCAAF
+#                           the same since the P0 incident: the completed-game
+#                           policy reads the cited college contract and the
+#                           strict refusal names each payout difference --
+#                           bettor_ncaaf_settlement.STRICT_CODES)
 #   EXPLICITLY_UNSUPPORTED  not in the collector's scope by its declared maps
 #                           (ext_pinnacle_loop), the reason named
 #   COVERAGE_INCIDENT       provider events > 0 and an expected stage zero
@@ -970,32 +982,59 @@ STATUS_STAGES = ("normalized", "venue_discovered", "mapped",
 COLLECTOR_KEY = "ext_pinnacle_last_cycle"
 COLLECTOR_FRESH_S = 3 * 900.0
 
-#: Families the collector prices at all; anything else is out of scope by
-#: declaration, and says why.
+#: Families out of scope by declaration, and why.
+#: INCIDENT RELEASE (verifier finding 1): the basketball / hockey / tennis
+#: notes said those families were outside the de-vig set and requested by no
+#: collector. inc-pinnapi subscribes all six PinnAPI sports, PinnAPI-native
+#: discovery seeds every family with a priced market (the de-vig set now
+#: carries basketball spread / total and hockey spread / total / team total),
+#: and tennis is matched but not seeded -- so those notes were false and
+#: `lane_scope` now derives the answer for a PinnAPI family from the code
+#: (`native_scope`). What remains here is out of scope whatever PinnAPI does.
 FAMILY_SCOPE_NOTE = {
-    "basketball": "no basketball provider key is requested by the collector "
-                  "(ext_pinnacle_loop maps none) and basketball h2h is not in "
-                  "the measured de-vig set",
-    "hockey": "no hockey provider key is requested by the collector and "
-              "hockey h2h is not in the measured de-vig set",
-    "tennis": "no tennis provider key is requested by the collector and "
-              "tennis is not in the measured de-vig set",
     "futures": "an outright/futures listing is not a fixture",
 }
+
+
+def native_scope() -> dict:
+    """PinnAPI-native discovery's families, read from the code it runs:
+    {"families": the primary selector's sports (pinnapi_primary.SPORTS),
+     "seeded": those with a priced market
+     (pinnapi_feed_runtime.families_with_a_priced_market)}. Empty sets when
+    either cannot be read -- never a guessed scope."""
+    try:
+        from .. import pinnapi_primary as P
+        from .. import pinnapi_feed_runtime as FR
+        fams = {str(f) for f in P.SPORTS}
+        return {"families": fams,
+                "seeded": fams & {str(f) for f in
+                                  FR.families_with_a_priced_market()}}
+    except Exception:                                           # noqa: BLE001
+        return {"families": set(), "seeded": set()}
 
 
 def lane_scope(league: str, *, token: str | None = None,
                family: str | None = None) -> dict:
     """Is this league in the collector's declared scope? {"in_scope", "why"}.
-    Read from ext_pinnacle_loop's maps -- the same identity the cycle uses.
-    Pure."""
+    Read from ext_pinnacle_loop's maps -- the same identity the cycle uses --
+    and, for PinnAPI families, from what PinnAPI-native discovery seeds.
+    `via` names a native-discovery scope; `measured_under` names the native
+    row a league's provider events are counted under when the lane maps no
+    key of its own (pinnapi_discovery.sport_key_for). Pure."""
     from ..workers import ext_pinnacle_loop as L
     from .. import bettor_venue_realism as vreal
+    from .. import pinnapi_discovery as PD
     keys = ({k for k, _ in L.SPORTS_CONFIRMED}
             | set(L.VENUE_TOKEN_TO_PROVIDER_KEY.values())
             | set(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values()))
     if league in keys:
         return {"in_scope": True, "why": None}
+    nat = native_scope()
+    if league.startswith("pinnapi_") and \
+            league[len("pinnapi_"):] in nat["seeded"]:
+        # a native discovery row (a token the lane maps no key for)
+        return {"in_scope": True, "why": None,
+                "via": "PINNAPI_NATIVE_DISCOVERY"}
     tok = str(token or "").lower()
     fam = str(family or "").lower()
     if tok in L.VENUE_TOKENS_DELIBERATELY_EXCLUDED:
@@ -1013,13 +1052,29 @@ def lane_scope(league: str, *, token: str | None = None,
     if fam in FAMILY_SCOPE_NOTE:
         return {"in_scope": False, "why": "FAMILY_NOT_IN_COLLECTOR_SCOPE: %s"
                 % FAMILY_SCOPE_NOTE[fam]}
+    lane_families = {L.family_for_provider_key(k) for k in keys}
+    if fam in nat["seeded"] and fam not in lane_families:
+        # a family the metered lane has no key for at all (basketball,
+        # hockey): native discovery seeds it, under its native key
+        return {"in_scope": True, "why": None,
+                "via": "PINNAPI_NATIVE_DISCOVERY",
+                "measured_under": PD.sport_key_for(fam)}
+    if fam in nat["families"] and fam not in nat["seeded"]:
+        return {"in_scope": False, "why": (
+            "FAMILY_NOT_SEEDED_NO_PRICED_MARKET: PinnAPI-native discovery "
+            "matches %s fixtures but seeds none, because no %s market family "
+            "is priced (pinnapi_feed_runtime.families_with_a_priced_market: "
+            "the de-vig set and the proven line families)" % (fam, fam))}
     if league.startswith("UNATTRIBUTED"):
         return {"in_scope": False, "why": "UNATTRIBUTED: the record's provider "
                 "event has no league in the collection ledger"}
     return {"in_scope": False, "why": (
         "VENUE_TOKEN_NOT_MAPPED: %s has no provider key in the collector's "
         "maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY "
-        "/ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)" % (tok or league))}
+        "/ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)" % (tok or league)
+        + ("; PinnAPI-native discovery reports any fixture of it it matches "
+           "under %s" % PD.sport_key_for(fam) if fam in nat["seeded"]
+           else ""))}
 
 
 def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
@@ -1043,16 +1098,41 @@ def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
         return dict(out, status=S_UNAVAILABLE, reason="PROVIDER_STAGE_UNMEASURED: "
                     + str((row.get("unavailable") or {}).get(
                         "provider_events") or "no ledger read"))
+    if prov == 0 and scope.get("measured_under"):
+        # NOT A METERED-COLLECTOR QUESTION (verifier finding 1): the lane has
+        # no key for this family; native discovery counts its fixtures under
+        # one native row, so this league's own row cannot carry them
+        return dict(out, status=S_UNAVAILABLE, reason=(
+            "MEASURED_UNDER_THE_PINNAPI_NATIVE_ROW: %s carries this family's "
+            "natively discovered provider events; the lane maps no provider "
+            "key to this league, so a per-league count is not measured; "
+            "venue lists %s event(s)" % (
+                scope["measured_under"],
+                "an unmeasured number of"
+                if row.get("venue_catalogue_events") is None
+                else row.get("venue_catalogue_events"))))
     if prov == 0:
         c = collector or {}
         venue = row.get("venue_catalogue_events")
+        # R30A: the collector's durable per-cycle receipts (migration 248),
+        # when read, say what happened to THIS league in the last 24 h -- not
+        # only in the one cycle the heartbeat describes.
+        rec = ((c.get("receipts") or {}).get("by_competition") or {}).get(
+            league) or {}
+        last = rec.get("last_receipt")
         if not c.get("fresh"):
             why = "COLLECTOR_HEARTBEAT_NOT_CURRENT"
         elif league in (c.get("rejected") or {}):
             why = "PROVIDER_REFUSED: %s" % c["rejected"][league]
         elif league in (c.get("budget_dropped") or ()):
-            why = ("NOT_REQUESTED_METERED_BUDGET_SPENT: the cycle's %s keys "
-                   "went to higher venue coverage" % c.get("budget", "?"))
+            why = ("NOT_REQUESTED_METERED_BUDGET_SPENT: the cycle's %s "
+                   "metered calls went to higher-priority competitions"
+                   % c.get("budget", "?")) + _receipt_note(rec)
+        elif last == "SKIPPED_NO_VENUE_EVENT_IN_HORIZON":
+            why = ("NOT_REQUESTED_NO_VENUE_EVENT_IN_THE_COLLECTOR_HORIZON"
+                   + _receipt_note(rec))
+        elif last == "FETCH_FAILED":
+            why = "REQUESTED_THE_PROVIDER_CALL_FAILED" + _receipt_note(rec)
         elif league in (c.get("requested") or ()):
             why = "REQUESTED_THE_PROVIDER_RETURNED_NO_EVENTS"
         else:
@@ -1137,11 +1217,209 @@ VENUE_TOKENS_SQL = """
 """
 
 
+# ── THE COLLECTOR'S COVERAGE RECEIPTS (migration 248, R30A) ─────────────
+#
+# THE DEFECT THESE REPLACE AS THE DESK'S SOURCE. `budget_dropped` lived on
+# ONE heartbeat row that every cycle overwrote, so the desk could say what the
+# LAST cycle dropped and nothing about the day: NCAAF was unfetched in 137 of
+# the 153 cycles with a venue cfb event in the next 24 h (research-sql run
+# 37233454453) and no record of it existed until it was reconstructed by
+# hand. The scheduled cycle now appends one receipt per competition per cycle
+# (requested / served / budget-dropped with its reason and promised slot /
+# skipped, cycles since served) and one budget row per cycle (calls made
+# against the declared budget). Read-only here; never raises.
+#
+# THE COLLECTOR IS THE LEASE HOLDER. Only rows written under the collector's
+# single-writer lease (`writer_lease = 'HELD'`) are the collector's receipts;
+# a cycle run without the lease (a test harness, a one-off run) is counted
+# apart (`cycles_without_lease`) and never mixed into the desk's figures.
+
+COVERAGE_RECEIPTS_WINDOW_S = 86400.0
+COVERAGE_RECEIPTS_SQL = """
+    SELECT competition,
+           count(*) AS cycles,
+           count(*) FILTER (WHERE planned = 'SCHEDULED') AS requested,
+           count(*) FILTER (WHERE receipt = 'FETCHED') AS served,
+           count(*) FILTER (WHERE receipt = 'FETCH_FAILED') AS fetch_failed,
+           count(*) FILTER (WHERE receipt IN (
+               'DEFERRED_TO_SLOT', 'DEFERRED_NO_SLOT_WITHIN_ENVELOPE'))
+             AS budget_dropped,
+           count(*) FILTER (WHERE receipt = 'SKIPPED_NO_VENUE_EVENT_IN_HORIZON')
+             AS skipped_no_venue_event,
+           count(*) FILTER (WHERE receipt IN (
+               'PROVIDER_DOES_NOT_LIST', 'PROVIDER_LISTS_INACTIVE',
+               'PROVIDER_CATALOGUE_UNREAD')) AS provider_refused,
+           (array_agg(receipt ORDER BY cycle_at DESC, id DESC))[1]
+             AS last_receipt,
+           (array_agg(why ORDER BY cycle_at DESC, id DESC))[1] AS last_why,
+           (array_agg(cycles_since_served ORDER BY cycle_at DESC, id DESC))[1]
+             AS cycles_since_served,
+           (array_agg(extract(epoch FROM next_slot_at)
+                      ORDER BY cycle_at DESC, id DESC))[1] AS next_slot_at,
+           (array_agg(bound_cycles ORDER BY cycle_at DESC, id DESC))[1]
+             AS bound_cycles,
+           (array_agg(starvation_bound_cycles
+                      ORDER BY cycle_at DESC, id DESC))[1]
+             AS starvation_bound_cycles,
+           extract(epoch FROM max(cycle_at)) AS last_cycle_at,
+           extract(epoch FROM max(cycle_at) FILTER (WHERE receipt = 'FETCHED'))
+             AS last_fetched_at,
+           coalesce(sum(credits_charged), 0) AS credits
+      FROM collector_coverage_receipts
+     WHERE scope = 'COMPETITION'
+       AND writer_lease = 'HELD'
+       AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
+       AND cycle_at <= to_timestamp($1)
+     GROUP BY competition
+"""
+COVERAGE_CYCLES_SQL = """
+    SELECT count(*) FILTER (WHERE writer_lease = 'HELD') AS cycles,
+           count(*) FILTER (WHERE writer_lease = 'HELD'
+                              AND calls_made > calls_budget) AS over_budget,
+           max(calls_made) FILTER (WHERE writer_lease = 'HELD')
+             AS max_calls_made,
+           max(calls_budget) FILTER (WHERE writer_lease = 'HELD')
+             AS calls_budget,
+           coalesce(sum(credits_spent) FILTER (WHERE writer_lease = 'HELD'),
+                    0) AS credits_spent,
+           extract(epoch FROM max(cycle_at) FILTER (
+               WHERE writer_lease = 'HELD')) AS last_cycle_at,
+           (array_agg(cycle_id ORDER BY cycle_at DESC, id DESC) FILTER (
+               WHERE writer_lease = 'HELD'))[1] AS last_cycle_id,
+           count(*) FILTER (WHERE writer_lease <> 'HELD')
+             AS cycles_without_lease
+      FROM collector_coverage_receipts
+     WHERE scope = 'CYCLE'
+       AND cycle_at > to_timestamp($1) - make_interval(secs => $2)
+       AND cycle_at <= to_timestamp($1)
+"""
+COVERAGE_LAST_CYCLE_SQL = """
+    SELECT competition, planned, receipt, why, cycles_since_served,
+           extract(epoch FROM next_slot_at) AS next_slot_at,
+           venue_events_in_horizon
+      FROM collector_coverage_receipts
+     WHERE scope = 'COMPETITION' AND cycle_id = $1
+       AND writer_lease = 'HELD'
+     ORDER BY priority_rank NULLS LAST, competition
+"""
+#: The receipts that are a BUDGET DROP (collector_coverage.BUDGET_DROPPED).
+RECEIPT_BUDGET_DROPPED = ("DEFERRED_TO_SLOT",
+                          "DEFERRED_NO_SLOT_WITHIN_ENVELOPE")
+
+
+def _num_or_none(v):
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+async def collector_receipts(conn, *, now: float,
+                             window_s: float = COVERAGE_RECEIPTS_WINDOW_S
+                             ) -> dict:
+    """The collector's coverage receipts over the last `window_s`: per
+    competition requested / served / fetch_failed / budget_dropped / skipped
+    counts with the latest receipt, its reason, its promised slot and the
+    cycles since it was last served; the cycles' budget rows (calls made
+    against the declared budget, any cycle over it); and the latest cycle's
+    rows. Never raises: an absent table is MIGRATION_248_NOT_APPLIED, a
+    failed read is named -- never an empty, healthy-looking answer."""
+    out: dict[str, Any] = {
+        "read": False, "window_s": window_s,
+        "source": "collector_coverage_receipts (migration 248)",
+        "lease": "only rows written under the collector's single-writer "
+                 "lease (writer_lease = 'HELD')",
+        "by_competition": {}, "cycles": None, "last_cycle": None,
+        "cycles_without_lease": None}
+    if not await _regclass(conn, "collector_coverage_receipts"):
+        out["why"] = "MIGRATION_248_NOT_APPLIED"
+        return out
+    try:
+        async with conn.transaction():
+            comp = await conn.fetch(COVERAGE_RECEIPTS_SQL, float(now),
+                                    float(window_s))
+            cyc = await conn.fetchrow(COVERAGE_CYCLES_SQL, float(now),
+                                      float(window_s))
+            last = []
+            if cyc is not None and cyc["last_cycle_id"] is not None:
+                last = await conn.fetch(COVERAGE_LAST_CYCLE_SQL,
+                                        cyc["last_cycle_id"])
+    except Exception as exc:                                    # noqa: BLE001
+        out["why"] = "%s:%s" % (R_READ_FAILED, type(exc).__name__)
+        return out
+    for r in comp:
+        out["by_competition"][str(r["competition"])] = {
+            "cycles": int(r["cycles"]), "requested": int(r["requested"]),
+            "served": int(r["served"]),
+            "fetch_failed": int(r["fetch_failed"]),
+            "budget_dropped": int(r["budget_dropped"]),
+            "skipped_no_venue_event": int(r["skipped_no_venue_event"]),
+            "provider_refused": int(r["provider_refused"]),
+            "last_receipt": r["last_receipt"], "last_why": r["last_why"],
+            "cycles_since_served": r["cycles_since_served"],
+            "next_slot_at": _num_or_none(r["next_slot_at"]),
+            "bound_cycles": r["bound_cycles"],
+            "starvation_bound_cycles": r["starvation_bound_cycles"],
+            "last_cycle_at": _num_or_none(r["last_cycle_at"]),
+            "last_fetched_at": _num_or_none(r["last_fetched_at"]),
+            "credits": float(r["credits"] or 0.0)}
+    # cycles run WITHOUT the writer lease in the window: recorded, named,
+    # and kept out of every figure above
+    out["cycles_without_lease"] = (0 if cyc is None
+                                   else int(cyc["cycles_without_lease"] or 0))
+    if cyc is not None and int(cyc["cycles"] or 0) > 0:
+        out["cycles"] = {
+            "cycles": int(cyc["cycles"]),
+            "over_budget": int(cyc["over_budget"] or 0),
+            "max_calls_made": cyc["max_calls_made"],
+            "calls_budget": cyc["calls_budget"],
+            "credits_spent": float(cyc["credits_spent"] or 0.0),
+            "last_cycle_at": _num_or_none(cyc["last_cycle_at"]),
+            "last_cycle_id": cyc["last_cycle_id"],
+            "writer_lease": "HELD",
+            "cycles_without_lease": out["cycles_without_lease"]}
+        out["last_cycle"] = [
+            {"competition": r["competition"], "planned": r["planned"],
+             "receipt": r["receipt"], "why": r["why"],
+             "cycles_since_served": r["cycles_since_served"],
+             "next_slot_at": _num_or_none(r["next_slot_at"]),
+             "venue_events_in_horizon": r["venue_events_in_horizon"]}
+            for r in last]
+    out["read"] = True
+    return out
+
+
+def _receipt_note(rec: dict) -> str:
+    """'; budget-dropped in 3 of 96 cycles in 24 h, served in 93, ...' from
+    one competition's receipts summary, or '' when there is none."""
+    if not rec:
+        return ""
+    bits = ["budget-dropped in %d of %d cycles in 24 h, served in %d"
+            % (rec.get("budget_dropped") or 0, rec.get("cycles") or 0,
+               rec.get("served") or 0)]
+    if rec.get("cycles_since_served") is not None:
+        bits.append("%s cycle(s) since served" % rec["cycles_since_served"])
+    else:
+        bits.append("not served in the receipts' window")
+    if rec.get("next_slot_at") is not None:
+        bits.append("next slot %s" % _dt.datetime.fromtimestamp(
+            rec["next_slot_at"], _dt.timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"))
+    return "; " + ", ".join(bits)
+
+
 async def collector_selection(conn, *, now: float) -> dict:
     """The collector's last cycle selection, for naming why a league has no
-    provider events. Never raises."""
+    provider events. Never raises.
+
+    R30A: the durable coverage receipts are read beside the heartbeat. When
+    their latest cycle is current, `requested` and `budget_dropped` come from
+    THAT record (what the cycle actually requested and dropped, with the
+    reason and the promised slot in `budget_dropped_why`); the heartbeat is
+    the fallback on a database without migration 248."""
     out = {"fresh": False, "requested": [], "rejected": {},
-           "budget_dropped": [], "budget": None, "at": None}
+           "budget_dropped": [], "budget": None, "at": None,
+           "source": "HEARTBEAT"}
     try:
         raw = await conn.fetchval(
             "SELECT value FROM ingestion_state WHERE key = $1", COLLECTOR_KEY)
@@ -1157,7 +1435,48 @@ async def collector_selection(conn, *, now: float) -> dict:
                    budget=sel.get("metered_budget"))
     except Exception as exc:                                    # noqa: BLE001
         out["why"] = type(exc).__name__
+    rec = await collector_receipts(conn, now=now)
+    out["receipts"] = rec
+    cyc = rec.get("cycles") or {}
+    last_at = cyc.get("last_cycle_at")
+    if rec.get("read") and last_at is not None and \
+            0 <= now - last_at <= COLLECTOR_FRESH_S:
+        last = rec.get("last_cycle") or []
+        out.update(
+            source="COVERAGE_RECEIPTS", fresh=True,
+            at=max(last_at, out["at"] or 0.0),
+            requested=[r["competition"] for r in last
+                       if r["planned"] == "SCHEDULED"],
+            budget_dropped=[r["competition"] for r in last
+                            if r["receipt"] in RECEIPT_BUDGET_DROPPED],
+            budget_dropped_why={
+                r["competition"]: {"receipt": r["receipt"], "why": r["why"],
+                                   "next_slot_at": r["next_slot_at"],
+                                   "cycles_since_served":
+                                       r["cycles_since_served"]}
+                for r in last if r["receipt"] in RECEIPT_BUDGET_DROPPED},
+            budget=cyc.get("calls_budget", out["budget"]))
     return out
+
+
+#: The family a provider competition key names by its own prefix (the
+#: provider's `<sport>_<league>` convention) or a native row by its suffix --
+#: used only when no ledger row, venue row or lane map names one, so a
+#: declared league with no record (basketball_nba on a quiet day) is still
+#: scoped by its family rather than as an unmapped token.
+_KEY_PREFIX_FAMILY = (("americanfootball_", "football"),
+                      ("baseball_", "baseball"),
+                      ("basketball_", "basketball"),
+                      ("icehockey_", "hockey"), ("soccer_", "soccer"),
+                      ("tennis_", "tennis"), ("pinnapi_", None))
+
+
+def _family_of_key(key) -> str | None:
+    k = str(key or "")
+    for pre, fam in _KEY_PREFIX_FAMILY:
+        if k.startswith(pre):
+            return fam if fam is not None else (k[len(pre):] or None)
+    return None
 
 
 async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
@@ -1203,7 +1522,7 @@ async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                 r.setdefault(c, 0 if ledger_read else None)
         toks = tokens_of.get(key) or []
         fam = r.get("sport_family") or fam_of.get(key) or \
-            L.family_for_provider_key(key)
+            L.family_for_provider_key(key) or _family_of_key(key)
         scope = lane_scope(key, token=(toks[0] if toks else
                                        key.split(":", 1)[-1]), family=fam)
         st = classify_status(r, scope=scope, collector=coll,
@@ -1221,14 +1540,28 @@ async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                         "venue_discovered", "mapped_events",
                         "settlement_supported", "evaluated_events",
                         "decided_events", "entered_events", "refused_events",
-                        "venue_catalogue_events")}})
+                        "venue_catalogue_events")},
+                    # R30A: the collector's 24 h receipts for this league
+                    # (requested / served / budget-dropped / cycles since
+                    # served), None where the collector has no receipt for it
+                    "collector_receipt": (
+                        ((coll.get("receipts") or {}).get("by_competition")
+                         or {}).get(key))})
     summary = {s: 0 for s in LEAGUE_STATUSES}
     for o in out:
         summary[o["status"]] += 1
     return {"day": day.isoformat(), "tz": tz, "statuses": out,
             "summary": summary, "status_vocabulary": list(LEAGUE_STATUSES),
-            "collector": {k: coll.get(k) for k in (
-                "fresh", "at", "requested", "budget_dropped", "budget")},
+            "collector": dict(
+                {k: coll.get(k) for k in (
+                    "fresh", "at", "requested", "budget_dropped", "budget",
+                    "source", "budget_dropped_why")},
+                # R30A: the durable receipts behind it -- the cycles' budget
+                # rows (calls made against the declared budget, any cycle
+                # over it) and per-competition 24 h counts
+                receipts={k: (coll.get("receipts") or {}).get(k) for k in (
+                    "read", "why", "window_s", "cycles", "by_competition",
+                    "cycles_without_lease")}),
             "venue_read": None if not isinstance(venue, str) else venue}
 
 
@@ -1260,7 +1593,7 @@ RECON_LEDGER_SQL = """
            (array_agg(outcome ORDER BY cycle_at DESC))[1] AS outcome,
            max(cycle_at) AS last_cycle
       FROM ext_candidate_outcomes
-     WHERE sport_key = $1 AND provider_event_id IS NOT NULL
+     WHERE sport_key = ANY($1::text[]) AND provider_event_id IS NOT NULL
        AND cycle_at >= to_timestamp($2) AND cycle_at < to_timestamp($3)
      GROUP BY provider_event_id
 """ % REACH_SQL
@@ -1316,7 +1649,15 @@ async def reconcile_league(conn, *, token: str, day: _dt.date, tz: str,
                       start, end)
     if isinstance(exp, str):
         return dict(out, status="UNAVAILABLE", why=exp, games=[], missing=[])
-    led = await _read(conn, ("ext_candidate_outcomes",), RECON_LEDGER_SQL, key,
+    # THE METERED KEY AND THE NATIVE ONE (verifier finding 1): a natively
+    # discovered game is filed under the seed's key -- the lane's key for a
+    # token it maps, `pinnapi_<family>` otherwise (and before the incident
+    # release's fix). Each game below is still matched by its exact venue
+    # slug, or by its start and both nicknames, so the wider read cannot
+    # lend one league's row to another's game.
+    from .. import pinnapi_discovery as PD
+    led = await _read(conn, ("ext_candidate_outcomes",), RECON_LEDGER_SQL,
+                      [key, PD.sport_key_for(fam)],
                       start - lookback_s, min(end, now + 1.0))
     slugs = [e["market_slug"] for e in exp]
     vals = await _read(conn, ("external_valuations",), RECON_VALUATION_SQL,

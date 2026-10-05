@@ -357,6 +357,26 @@ R_SAME_STRATEGY_LIVE = "THIS_STRATEGY_ALREADY_HAS_A_LIVE_ENTRY_ON_THIS_FIXTURE"
 #: would add another ~$1,000 to the same position on every valuation; that is
 #: an add to an existing position, not a new ~$1,000 initial position.
 R_SAME_CONTRACT_HELD = "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT"
+#: THE OTHER SIDE OF A CONTRACT THIS STRATEGY HOLDS: RECORDED, NOT REFUSED.
+#: Since each valuation also values the other side of its binary contract
+#: (bettor_complement_valuation), a strategy holding one side can be handed
+#: the other. The first version of the incident branch refused that entry
+#: (at the decision and under the lock) -- a new paper risk-admission rule
+#: nobody approved (review of 7bd084b; owner 2026-10-04: do NOT change risk
+#: limits). The decision RECORDS the held other side instead
+#: (`opposite_side_held`), so the owner can decide whether to add such a
+#: rule; the account lock applies only its existing checks.
+OPPOSITE_SIDE_HELD_IS = (
+    "RECORDED_FOR_THE_OWNER_GATES_NOTHING: this strategy already holds the "
+    "other side of this binary contract. Holding both pays exactly 1 at "
+    "settlement, so the pair locks in (1 - the two costs - fees) -- a gain "
+    "when the later side is cheap enough, a loss otherwise -- and the later "
+    "entry acts as a partial exit of the first. No rule refuses it: adding "
+    "one is a risk-admission change for the owner to decide.")
+
+
+def other_side(holding_side) -> str | None:
+    return {"LONG": "SHORT", "SHORT": "LONG"}.get(str(holding_side or ""))
 
 
 async def same_contract_held(conn, account_id: str, strategy, slug,
@@ -645,9 +665,14 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
                             fee, filled_at: float, basis: str,
                             book_obs_id=None, book_observed_at=None,
                             evidence: dict | None = None,
-                            key: str) -> dict:
+                            key: str, event_detail: dict | None = None
+                            ) -> dict:
     """ONE SIMULATED FILL. The caller holds the transaction AND the account
     lock (`bettor_paper_simulator` does). Idempotent on `key`.
+
+    `event_detail` is added to the FILL event's detail (never over the fill's
+    own fields): the simulator names there the unreadable observations it
+    skipped before the book this fill was taken on.
 
     BUY: FILL debits cost + fees of the filled qty and releases the filled
     share of the reservation; the fill that completes the order releases
@@ -733,9 +758,10 @@ async def apply_fill_locked(conn, *, order: dict, qty, price, wire_price,
         cur["order_id"], q, new_state, release, _ts(filled_at))
     await event(conn, order_id=cur["order_id"], kind="FILL", at=filled_at,
                 simulator_version=cur["simulator_version"],
-                detail={"fill_id": fid, "qty": f(q), "price": f(px),
-                        "fee_usd": f(fe), "basis": basis,
-                        "book_obs_id": book_obs_id})
+                detail=dict(event_detail or {},
+                            fill_id=fid, qty=f(q), price=f(px),
+                            fee_usd=f(fe), basis=basis,
+                            book_obs_id=book_obs_id))
     return {"ok": True, "duplicate": False, "fill_id": fid, "qty": f(q),
             "price": f(px), "fee_usd": f(fe), "state": new_state,
             "ledger_entry": entry, "first_fill": D(cur["filled_qty"]) == 0}

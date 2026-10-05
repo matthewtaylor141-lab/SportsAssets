@@ -1,0 +1,223 @@
+# THE CAPITAL-CRITICAL SUITE, ON THE EXACT PUSHED SHA (R30A, program section 21).
+#
+# Owner audit P0.6: "No real capital while the primary exact-SHA capital suite
+# is red." The normal backend-tests run on the R29 SHA was red -- 91 failures
+# on Python 3.11.16 with packages resolved from the index, no database, and a
+# matched-baseline habit that accepted whatever was already failing. This job
+# answers one question for one commit: does the WHOLE suite pass, in the
+# production image's environment, with every failure either fixed or named in
+# an expiring machine-readable quarantine? "Unexpected failures = REJECT."
+#
+#   * the exact SHA: checked out by `github.sha`, printed, and compared with
+#     what is actually on disk before anything runs
+#   * the image's interpreter (3.12.3, Dockerfile FROM by digest) and the
+#     image's lock (backend/requirements.lock), plus the gate's pinned test
+#     tools (backend/requirements-test.lock); `pip check` and the runtime
+#     manifest must both pass before the suite starts
+#   * a real PostgreSQL 16, built by production's own migration runner
+#     (`python -m sportsassets.scripts.migrate`); RN1X_TEST_DSN points the DB
+#     proofs at it, so they run instead of failing "RN1X_TEST_DSN is not set"
+#   * the WHOLE suite with a junit report; then tools/ci_verdict.py (stdlib
+#     only) decides, and its verdict JSON is printed and kept as an artifact
+#
+# It deploys nothing, needs no secret and reaches no production system.
+name: capital-critical
+on:
+  push:
+    branches:
+      - claude/release-api
+      - claude/r30-live-parity
+      - "claude/r30a-*"
+      - "claude/r30b-*"
+      - "claude/r30c-*"
+      - "claude/r30d-*"
+    paths:
+      - "backend/**"
+      - "tools/**"
+      - ".github/workflows/capital-critical.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: capital-critical-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  suite:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: capital_critical
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 20
+    env:
+      PGPASSWORD: postgres
+      CC_DSN: postgresql://postgres:postgres@127.0.0.1:5432/capital_critical
+    steps:
+      - name: The exact SHA under test
+        run: |
+          echo "event=${GITHUB_EVENT_NAME} ref=${GITHUB_REF} sha=${GITHUB_SHA}"
+          echo "### capital-critical on \`${GITHUB_SHA}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          # the whole history: several pins read `git show <sha>:<path>` /
+          # `git log` (a depth-1 checkout answered exit 128, runs 262-264)
+          fetch-depth: 0
+
+      - name: The checkout IS that SHA
+        run: |
+          got=$(git rev-parse HEAD)
+          echo "HEAD=$got"
+          [ "$got" = "$GITHUB_SHA" ] || { echo "::error::checked out $got, not $GITHUB_SHA"; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "::error::the checkout is not clean"; git status --porcelain; exit 1; }
+
+      - uses: actions/setup-python@v5
+        with:
+          # backend/Dockerfile: FROM python:3.12.3-slim@sha256:... -- the
+          # interpreter the image runs and runtime_manifest.EXPECTED_PYTHON
+          python-version: "3.12.3"
+
+      - name: Install the image's lock and the gate's test tools, nothing resolved
+        run: |
+          set -euo pipefail
+          cd backend
+          python -m pip install --quiet --no-cache-dir -r requirements.lock -r requirements-test.lock
+          python -m pip check
+          python - <<'PY'
+          import platform, sys
+          from sportsassets import runtime_manifest as RM
+          r = RM.check()
+          print(RM.log_line(r))
+          print("python", platform.python_version(), sys.executable)
+          sys.exit(0 if r["ok"] else 1)
+          PY
+
+      - name: Build the database with production's migration runner
+        env:
+          DATABASE_URL: ${{ env.CC_DSN }}
+        run: |
+          set -euo pipefail
+          cd backend
+          psql -h 127.0.0.1 -U postgres -d capital_critical -tAc "SHOW server_version"
+          # the scratch-database proofs (D1, E12, E18, the loss-sum and S1 SQL
+          # pins) create a throwaway database as the `sportsassets` role the
+          # development server has, and SKIP without it; a skip is a proof that
+          # did not run, so the role exists here exactly as it does there
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE sportsassets LOGIN PASSWORD 'sportsassets' CREATEDB"
+          # THE SERVER'S OWN LOG STAYS QUIET. The suite drives thousands of
+          # deliberate refusals (CHECK violations, append-only triggers); the
+          # service container logged every one, and the runner prints that log
+          # after the last step, so the first run's (37228505615) last 5,000
+          # lines were all server noise and the test result above them could
+          # not be read through the API. Statement-level server logging only.
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET log_min_messages = 'panic'" \
+            -c "ALTER SYSTEM SET log_min_error_statement = 'panic'" \
+            -c "SELECT pg_reload_conf()"
+          # `us_premap` is the COLLECTOR's table: production built it with
+          # workers/premap._ensure_table long before migrations 031/055/106/153
+          # altered it, and no migration creates it. The same DDL runs here, so
+          # every migration applies -- none is skipped.
+          python - <<'PY'
+          import asyncio
+          from sportsassets.db import get_pool, close_pool
+          from sportsassets.workers import premap
+
+          async def main():
+              pool = await get_pool()
+              await premap._ensure_table(pool)
+              await close_pool()
+
+          asyncio.run(main())
+          PY
+          python -m sportsassets.scripts.migrate
+          want=$(ls migrations/*.sql | wc -l)
+          got=$(psql -h 127.0.0.1 -U postgres -d capital_critical -tAc "SELECT count(*) FROM schema_migrations")
+          echo "migrations applied: $got of $want"
+          [ "$got" = "$want" ] || { echo "::error::only $got of $want migrations applied"; exit 1; }
+
+      - name: Run the whole suite
+        id: suite
+        env:
+          RN1X_TEST_DSN: ${{ env.CC_DSN }}
+          # a held capacity slot is an ENVIRONMENT failure here, never a skip
+          RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
+        run: |
+          cd backend
+          rc=0
+          python -m pytest tests -q -p no:cacheprovider --tb=short -rfE \
+            -o junit_family=xunit1 \
+            --junitxml="$RUNNER_TEMP/capital-critical-junit.xml" \
+            > "$RUNNER_TEMP/capital-critical-console.txt" 2>&1 || rc=$?
+          # the tracebacks themselves, bounded: the artifact cannot be
+          # fetched through every client, and run 37230040128's 815
+          # RecursionErrors named no frame until the cause was found by hand
+          echo "== errors and failures (tracebacks, first 3000 lines) =="
+          awk '/^=+ (ERRORS|FAILURES) =+$/{p=1} /^=+ short test summary info =+$/{p=0} p' \
+            "$RUNNER_TEMP/capital-critical-console.txt" | head -3000
+          tail -40 "$RUNNER_TEMP/capital-critical-console.txt"
+          echo "== failing node ids =="
+          grep -E '^(FAILED|ERROR) ' "$RUNNER_TEMP/capital-critical-console.txt" || echo "(none)"
+          echo "pytest_rc=$rc" >> "$GITHUB_OUTPUT"
+          echo "pytest exit status: $rc"
+
+      - name: The verdict (unexpected failures = REJECT)
+        run: |
+          cd backend
+          rc=0
+          python tools/ci_verdict.py \
+            --junit "$RUNNER_TEMP/capital-critical-junit.xml" \
+            --quarantine tests/quarantine.json \
+            --critical tools/capital_critical_tests.txt \
+            --sha "$GITHUB_SHA" --root . \
+            --out "$RUNNER_TEMP/capital-critical-verdict.json" || rc=$?
+          prc="${{ steps.suite.outputs.pytest_rc }}"
+          # pytest itself: 0 all passed, 1 tests failed (the verdict judges
+          # those). Anything else -- interrupted, internal error, usage error,
+          # nothing collected -- is not a completed run and cannot be accepted.
+          case "$prc" in
+            0|1) ;;
+            *) echo "::error::pytest exited $prc: not a completed run"; rc=1 ;;
+          esac
+          python - "$RUNNER_TEMP/capital-critical-verdict.json" >> "$GITHUB_STEP_SUMMARY" <<'PY' || true
+          import json, sys
+          v = json.load(open(sys.argv[1]))
+          print("verdict **%s**  tests %s  unexpected %d  quarantined %d  expired %d  stale %d  critical violations %d"
+                % (v["verdict"], v["counts"].get("tests"), len(v["unexpected"]), len(v["quarantined"]),
+                   len(v["expired"]), len(v["stale"]), len(v["critical"]["violations"])))
+          PY
+          # each reason as an annotation too: readable from the check run
+          # through the API even when the log is not
+          python - "$RUNNER_TEMP/capital-critical-verdict.json" <<'PY' || true
+          import json, sys
+          v = json.load(open(sys.argv[1]))
+          names = v["unexpected"] + [x["test"] for x in v["critical"]["violations"]] \
+              + [x["test"] for x in v["stale"]] + [x["test"] for x in v["expired"]]
+          for n in names[:40]:
+              print("::error title=capital-critical %s::%s" % (v["verdict"], n))
+          PY
+          exit $rc
+
+      - name: Keep the junit report, the console and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capital-critical-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/capital-critical-junit.xml
+            ${{ runner.temp }}/capital-critical-console.txt
+            ${{ runner.temp }}/capital-critical-verdict.json
+          if-no-files-found: warn
+          retention-days: 30

@@ -112,6 +112,12 @@ def _steps(out):
 # 1 · THE WHOLE LIFECYCLE
 # ═════════════════════════════════════════════════════════════════════
 
+
+def _json_codes(row):
+    import json as _j
+    c = row["codes"]
+    return _j.loads(c) if isinstance(c, str) else list(c)
+
 @pg
 @pytest.mark.asyncio
 async def test_the_schedule_enters_manages_exits_and_reconciles_from_empty(
@@ -597,7 +603,16 @@ async def test_every_provider_event_is_recorded_with_its_identity_and_outcome(
 
         n = rows["odds-emptybook-no-pinnacle"]
         assert n["outcome"] == "REFUSED"
-        assert n["first_refusal"] == "NO_PINNACLE_ON_EVENT"
+        # P0 INCIDENT (attribution): this pinned the generic
+        # NO_PINNACLE_ON_EVENT, the label 2,534 production rows/day carried
+        # whatever the cause. The event is now recorded BY CAUSE, in order:
+        # the PinnAPI refusal (no feed owner in this process) and what the
+        # discovery payload lacked (no Pinnacle book); it stops at the same
+        # stage, unmapped, as before.
+        assert n["first_refusal"] == "FEED_OWNERSHIP_NOT_HELD"
+        assert _json_codes(n) == ["FEED_OWNERSHIP_NOT_HELD",
+                                  loop.R_PAYLOAD_HAS_NO_PINNACLE]
+        assert n["stage"] == "1_PROBABILITY"
         assert n["global_slug"] is None and n["us_market_slug"] is None
 
         u = rows["odds-emptybook-unlisted"]
@@ -614,7 +629,8 @@ async def test_every_provider_event_is_recorded_with_its_identity_and_outcome(
             for c in _json.loads(r["codes"]) if isinstance(r["codes"], str) \
                     else r["codes"]:
                 attributed[c] = attributed.get(c, 0) + 1
-        for code in ("NO_PINNACLE_ON_EVENT", u["first_refusal"]):
+        for code in ("FEED_OWNERSHIP_NOT_HELD", loop.R_PAYLOAD_HAS_NO_PINNACLE,
+                     u["first_refusal"]):
             assert attributed.get(code) == out["refusals"].get(code), \
                 (code, attributed, out["refusals"])
 

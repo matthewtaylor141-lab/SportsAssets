@@ -1,7 +1,7 @@
 """CAPITAL-CRITICAL: THE RELEASE-TRUTH READ HAS NO AUTHORITY, AND TELLS THE TRUTH.
 
 GET /api/command/release (api/command_release.py) reports the API build SHA,
-the workers' boot SHA, schema_migrations 216-225 and the committed release
+the workers' boot SHA, schema_migrations 216-264 and the committed release
 receipts. This proves the boundary the way test_command_floor_authority.py
 does for the floor:
 
@@ -249,11 +249,44 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
             assert tracked[n]["applied_at"]
         assert sch["max_version"] >= "221"
         assert 224 in sch["numbers_absent"] or tracked.get(224)
+        # THE INCIDENT RELEASE'S MIGRATIONS ARE TRACKED (216..264), and the
+        # reserved-but-unused stream slots are REPORTED ABSENT, not hidden:
+        # this database carries every migration of this build, so the absent
+        # numbers are exactly the ones no file in the build uses
+        assert sch["tracked_range"] == [216, 264]
+        for n in (248, 249, 251, 260, 261, 264):
+            assert tracked[n]["status"] == "APPLIED", n
+            assert tracked[n]["in_this_build"] is True, n
+        assert sch["numbers_absent"] == EXPECTED_ABSENT_216_264
         assert out["running_build_gated"] is False    # f33 is VOID
         assert out["running_build_receipts"]
     finally:
         await tr.rollback()
         await conn.close()
+
+
+#: 216..264 with no migration file in this build: reserved stream slots the
+#: streams did not use (the R30A brief's assignments: 228 NFL, 230 intent,
+#: 231 chaos, 232-247 R30B/R30C/addendum/LAB, 250 router, 252 NFL
+#: continuation, 253-259 control plane, 262 inc-sim, 263 inc-families).
+EXPECTED_ABSENT_216_264 = ([228] + list(range(230, 248)) + [250]
+                           + list(range(252, 260)) + [262, 263])
+
+
+def test_the_tracked_range_covers_every_migration_in_this_build():
+    """INCIDENT RELEASE: TRACKED_FROM / TRACKED_TO were 216 / 226, so the
+    release check could not see migrations 227-264 at all. The range now
+    reaches the build's highest migration, and the absent numbers inside it
+    are exactly the unused reserved slots (30 of them)."""
+    from sportsassets.api import command_release as R
+    assert (R.TRACKED_FROM, R.TRACKED_TO) == (216, 264)
+    nums = sorted(R._num(f) for f in R.build_migrations())
+    assert nums[-1] == R.TRACKED_TO, "a migration above the tracked range"
+    present = {n for n in nums if R.TRACKED_FROM <= n <= R.TRACKED_TO}
+    absent = [k for k in range(R.TRACKED_FROM, R.TRACKED_TO + 1)
+              if k not in present]
+    assert absent == EXPECTED_ABSENT_216_264
+    assert len(absent) == 30
 
 
 # ── §5 listed ────────────────────────────────────────────────────────

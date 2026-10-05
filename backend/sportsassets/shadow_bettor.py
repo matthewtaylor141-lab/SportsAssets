@@ -571,9 +571,18 @@ UNIVERSE_SQL = """
       FROM us_premap p
      WHERE p.updated_at > now() - ($1 || ' seconds')::interval
        AND p.market_slug IS NOT NULL
+       AND (p.game_start IS NULL
+            OR (p.game_start >= now() - interval '12 hours'
+                                - ($1 || ' seconds')::interval
+                AND p.game_start <= now() + interval '96 hours'))
      ORDER BY p.updated_at DESC
      LIMIT $2
 """
+# THE UNIVERSE'S HORIZON IS STATED (R30A inc-catalogue). Ordered by updated_at
+# and cut at $2, this read would hand its whole limit to the calendar lane's
+# rows (futures, next week's slate) for the minutes after each calendar
+# refresh, because they are the most recently written. The bound keeps the
+# population it always had: the catalogue sweep's own window.
 
 
 async def universe(pool, *, fresh_s=7200, limit=40) -> list:

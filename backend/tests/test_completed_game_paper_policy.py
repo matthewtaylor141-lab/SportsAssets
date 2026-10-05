@@ -443,8 +443,19 @@ async def test_the_active_entry_policies_read_back(both_on):
         assert rows[PB.CG_POLICY["control_key"]]["enabled"] is True
         assert rows[PB.CONTROL_KEY]["enabled"] is False
         assert rows[PB.CONTROL_KEY]["updated_by"] == "migration 184"
+        # DEREK'S TWO-MODEL STRATEGY MAY ENTER ON PAPER (an intended change,
+        # pinned at integration). This line pinned migration 182's state --
+        # the row absent or OFF ("only the benchmark opens new entries").
+        # Migration 264 is the owner's decision of 2026-10-04 (P0 incident,
+        # decision 2): PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2 ON, PAPER execution
+        # only, every threshold / limit / live permission unchanged and SMALL
+        # LIVE SHADOW (tests/test_derek_paper_entries_reenabled proves the
+        # migration itself). The production selection read back here is now
+        # the completed-game policy AND Derek V2 on, the strict benchmark off.
         two = rows.get("PAPER_ENTRIES:DEREK_ENTRY_POLICY_V2")
-        assert two is None or two["enabled"] is False
+        assert two is not None and two["enabled"] is True, two
+        assert two["updated_by"] == "migration 264", two
+        assert (await PD.entries_switch(conn))["enabled"] is True
         assert (await PB.enablement(conn, PB.CG_POLICY))["enabled"] is True
         assert (await PB.enablement(conn))["enabled"] is False
     finally:

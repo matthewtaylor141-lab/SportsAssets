@@ -38,8 +38,13 @@ except ImportError:
 @pytest.fixture(autouse=True)
 def _approved_test_book_rule(monkeypatch):
     """These tests exercise the lane past admission: the fixture facts name
-    a test-only live book rule, approved only for the duration of a test."""
+    a test-only live book rule, approved only for the duration of a test.
+    R30A: they also state the canonical SMALL LIVE authorization as an
+    assumption (the ACTUAL lane refuses without it; FakeVenue stands in for
+    execmirror.Venue, which refuses without it too) -- the refusals are
+    proven in tests/test_live_parity_convergence.py."""
     AF.approve_test_rule(monkeypatch)
+    AF.assume_canonical_live_authorization(monkeypatch)
 
 DSN = os.environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
@@ -251,6 +256,18 @@ class FakeVenue:
                 if o["state"] in ("ORDER_STATE_NEW", "ORDER_STATE_PARTIALLY_FILLED")
                 and (not slugs or o["marketSlug"] in slugs)]
 
+    def own_trades(self, slug, since):
+        # The account's own trade log (portfolio activities). Added with the
+        # R30A recovery repair: an ambiguous attempt that is no longer open is
+        # concluded NOT_FOUND only after this log shows no own trade of it (an
+        # IOC that traded leaves no open order), so the double models it. Every
+        # executed order on the market; the matcher skips mapped ones.
+        return [{"order_id": vid, "intent": o["intent"], "price": o["price"],
+                 "quantity": o["quantity"], "traded_qty": o["cumQuantity"],
+                 "at": None}
+                for vid, o in self.orders.items()
+                if o["marketSlug"] == slug and o["cumQuantity"] > 0]
+
     def balances(self):
         return [{"currency": "USD", "currentBalance": self.bp, "buyingPower": self.bp}]
 
@@ -276,6 +293,10 @@ async def _conn():
 
 async def _setup(conn, monkeypatch, *, cap=25, ago_s=5):
     AF.approve_test_rule(monkeypatch)
+    # R30A: the same stated assumption as the autouse fixture above, here too
+    # because other modules (the Xavier ACTUAL-position tests) build their
+    # world through this helper
+    AF.assume_canonical_live_authorization(monkeypatch)
     monkeypatch.setenv(EP.KEY_ID_ENV, KID)
     monkeypatch.setenv(EP.SECRET_ENV, SEC)
     from tests.paper_harness import new_account
