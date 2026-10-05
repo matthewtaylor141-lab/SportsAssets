@@ -1,7 +1,7 @@
 {
  "host": "https://command.bettortoken.com",
- "candidate": "c513ecd45358b110e0791f471915327e63307638",
- "started": "2026-10-05T13:43:42.947Z",
+ "candidate": "3100ab27a60cbe0ca1729589a540801548d83573",
+ "started": "2026-10-05T13:53:08.331Z",
  "views": [
   {
    "name": "1_command_1440",
@@ -24,20 +24,17 @@
      0,
      0,
      0,
-     0,
-     0,
      1,
-     0,
      0,
      0
     ],
-    "drawCalls": 472,
-    "triangles": 202876,
+    "drawCalls": 471,
+    "triangles": 202874,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 76.1
+    "frameMs": 70.1
    },
    "errors": []
   },
@@ -62,8 +59,6 @@
      0,
      0,
      0,
-     0,
-     0,
      1,
      0,
      0,
@@ -71,10 +66,7 @@
      0,
      0,
      0,
-     0,
      1,
-     0,
-     0,
      0
     ],
     "drawCalls": 472,
@@ -83,7 +75,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 85.2
+    "frameMs": 84.6
    },
    "errors": []
   },
@@ -108,16 +100,6 @@
      0,
      0,
      0,
-     0,
-     0,
-     1,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
      1,
      0,
      0,
@@ -128,6 +110,9 @@
      1,
      0,
      0,
+     0,
+     0,
+     1,
      0
     ],
     "drawCalls": 495,
@@ -136,7 +121,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 88.6
+    "frameMs": 91.4
    },
    "errors": []
   },
@@ -155,6 +140,11 @@
     "fps": [
      0,
      0,
+     0,
+     1,
+     0,
+     0,
+     0,
      1,
      0,
      0,
@@ -162,17 +152,12 @@
      0,
      0,
      0,
-     0,
      1,
      0,
      0,
      0,
      0,
-     0,
-     0,
      1,
-     0,
-     0,
      0,
      0,
      0,
@@ -190,7 +175,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 94.6
+    "frameMs": 96
    },
    "errors": []
   },
@@ -209,16 +194,16 @@
     "fps": [
      0,
      0,
+     0,
+     0,
+     0,
+     0,
      1,
      0,
      0,
      0,
      0,
-     0,
-     0,
      1,
-     0,
-     0,
      0,
      0,
      0,
@@ -244,7 +229,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 94.5
+    "frameMs": 95.1
    },
    "errors": []
   },
@@ -263,6 +248,7 @@
     "fps": [
      0,
      0,
+     1,
      0,
      0,
      0,
@@ -289,8 +275,7 @@
      0,
      0,
      0,
-     0,
-     1
+     0
     ],
     "drawCalls": 306,
     "triangles": 184908,
@@ -298,7 +283,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 90.8
+    "frameMs": 95.7
    },
    "errors": []
   },
@@ -318,12 +303,6 @@
      0,
      0,
      0,
-     1,
-     0,
-     0,
-     0,
-     0,
-     0,
      0,
      0,
      1,
@@ -334,10 +313,16 @@
      0,
      0,
      0,
-     0,
      1,
      0,
      0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     0,
+     1,
      0,
      0,
      0,
@@ -358,7 +343,7 @@
   },
   {
    "name": "8_mobile_command_390",
-   "sw": 401,
+   "sw": 390,
    "cw": 390,
    "nan": 0,
    "undef": 0,
@@ -371,7 +356,7 @@
   },
   {
    "name": "9_mobile_capital_risk_390",
-   "sw": 401,
+   "sw": 390,
    "cw": 390,
    "nan": 0,
    "undef": 0,
@@ -384,7 +369,7 @@
   }
  ],
  "proxied": {
-  "get": 71,
+  "get": 75,
   "refused": [],
   "status": {
    "/api/command/release": 200,
@@ -402,5 +387,5 @@
   "errors": [],
   "nonGet": []
  },
- "finished": "2026-10-05T13:49:12.361Z"
+ "finished": "2026-10-05T13:59:00.069Z"
 }
