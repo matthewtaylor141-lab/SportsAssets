@@ -749,6 +749,22 @@ IDENTITY_CENSUS = """
 # them, and a candidate is counted at the EARLIEST stage that refused it.
 # A candidate carries several refusals; the earliest one is the only one
 # that describes where it actually stopped.
+#: EVERY REASON pinnapi_primary.select CAN REFUSE THE WS PRICE (its own
+#: PINNAPI_PRIMARY_* codes and the feed cache's FEED_* read refusals), spelled
+#: here so this module imports neither; pinned equal to their sources by
+#: tests/test_agent_funnel_receipt.py.
+PINNAPI_SELECT_REFUSALS = (
+    "PINNAPI_PRIMARY_CLOCK_INVALID", "PINNAPI_PRIMARY_RUNTIME_UNIDENTIFIED",
+    "PINNAPI_PRIMARY_SPORT_UNSUPPORTED", "PINNAPI_PRIMARY_FIXTURE_UNPROVED",
+    "PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS", "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+    "PINNAPI_PRIMARY_NOT_FULL_GAME_H2H", "PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES",
+    "PINNAPI_PRIMARY_PHASE_UNPROVED",
+    "FEED_OWNERSHIP_NOT_HELD", "FEED_EPOCH_NOT_RESYNCHRONIZED",
+    "FEED_MARKET_NOT_IN_CURRENT_STATE", "FEED_QUOTE_FROM_A_PREVIOUS_CONNECTION",
+    "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+    "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE", "FEED_QUOTE_OLDER_THAN_LIMIT",
+    "FEED_MARKET_CLOSED")
+
 STAGES = (
     ("1_PROBABILITY", (
         "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED",
@@ -758,7 +774,15 @@ STAGES = (
         # NO PROVIDER PRICE AT ALL: the book does not quote this event yet.
         # No catalogue or alias can repair it, which is why it is a
         # probability-stage refusal and never an identity one (map4 D9).
-        "NO_PINNACLE_ON_EVENT")),
+        "NO_PINNACLE_ON_EVENT",
+        # ...NOW RECORDED BY CAUSE (P0 incident, ext_pinnacle_loop.
+        # no_pinnacle_codes): what the discovery payload lacked, and the
+        # PinnAPI refusal that left no WS price (2,534 rows/day had been
+        # recorded NO_PINNACLE_ON_EVENT whatever the cause). The event stops
+        # here: no usable Pinnacle probability.
+        "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK",
+        "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET")
+        + PINNAPI_SELECT_REFUSALS),
     ("2_FRESHNESS", (
         "QUOTE_STALE",
         "VENUE_BOOK_STALE",
@@ -995,6 +1019,12 @@ EVALUABILITY_OF = {
     # THE PROVIDER DOES NOT QUOTE IT (yet). Measured 2026-09-29: UNL fixtures
     # 42-117 h out and Serie B at ~95 h simply carry no Pinnacle h2h.
     "NO_PINNACLE_ON_EVENT": EXTERNAL_DEPENDENCY,
+    # ...by cause (P0 incident): the discovery payload's absence is theirs;
+    # a PinnAPI refusal of the WS price is ours (the feed, its scope, its
+    # identity or its clocks), below.
+    "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK": EXTERNAL_DEPENDENCY,
+    "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET": EXTERNAL_DEPENDENCY,
+    **{c: COULD_NOT_EVALUATE for c in PINNAPI_SELECT_REFUSALS},
     # The catalogue lists only line markets for this fixture: no moneyline
     # exists there to price, the same kind of absence as no contract at all.
     "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": EXTERNAL_DEPENDENCY,

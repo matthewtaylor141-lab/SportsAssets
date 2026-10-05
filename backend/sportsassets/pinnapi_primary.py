@@ -104,13 +104,23 @@ def book_depth(event, prices, sharp_books, *, at, max_age_s):
 
 
 def select(cache, event, fallback, *, family, sharp_books, at,
-           max_age_s=30.0, runtime_id=None):
+           max_age_s=30.0, runtime_id=None, explain=None):
     """Prefer one complete current WS outcome set; otherwise named fallback.
 
     A fallback keeps its original clocks. It still faces all the collector's
     freshness rules; selecting it never certifies it as currently usable.
+
+    `explain` (a dict, optional) receives the WS refusal reason whenever the
+    WS price is not used -- ALSO when there is no fallback and None is
+    returned. Without it that reason was discarded and the collector recorded
+    the event as NO_PINNACLE_ON_EVENT, as if Pinnacle had no price (P0
+    incident: 2,534 rows/day whose cause was a feed refusal -- no exact
+    fixture, sport not subscribed, age unknown -- not an absent price).
     """
     def fail(reason, provenance=None):
+        if isinstance(explain, dict):
+            explain["reason"] = reason
+            explain["provenance"] = provenance
         if fallback is None:
             return None
         out = dict(fallback)

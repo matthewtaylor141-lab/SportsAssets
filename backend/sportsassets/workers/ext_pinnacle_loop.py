@@ -2109,11 +2109,14 @@ def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
 
 
 def primary_pinnacle_h2h(event: dict, *, received_at: float,
-                         family: str, at: float) -> dict | None:
+                         family: str, at: float,
+                         explain: dict | None = None) -> dict | None:
     """Preferred live WS source, with the original collector as fallback.
 
     Reads the existing owner in this process; never opens another socket.
     Discovery/independent-book evidence stays with the original event.
+    `explain` receives the WS refusal reason when the WS price is not used
+    (pinnapi_primary.select), so a None is never left unexplained.
     """
     from .. import pinnapi_feed_runtime as feed
     from .. import pinnapi_primary as primary
@@ -2122,7 +2125,47 @@ def primary_pinnacle_h2h(event: dict, *, received_at: float,
         owner.cache if owner else None, event,
         pinnacle_h2h(event, received_at=received_at), family=family,
         sharp_books=SHARP_BOOKS, at=at, max_age_s=PINNACLE_MAX_AGE_S,
-        runtime_id=feed._STATE.get("runtime_id"))
+        runtime_id=feed._STATE.get("runtime_id"), explain=explain)
+
+
+#: ── WHY AN EVENT HAS NO USABLE PINNACLE PRICE, BY NAME (P0 incident) ──
+#:
+#: THE MISLABEL (production 2026-10-04, 2,534 rows/day). When the PinnAPI read
+#: was refused (no exact fixture, sport not subscribed, age unknown, stale, no
+#: feed authority) AND the-odds-api payload carried no Pinnacle h2h, the event
+#: was recorded NO_PINNACLE_ON_EVENT -- as if the book had no price. The cause
+#: is now recorded as the codes that produced it, in order: the WS refusal
+#: reason (pinnapi_primary.select, e.g. PINNAPI_PRIMARY_SPORT_UNSUPPORTED,
+#: PINNAPI_PRIMARY_NO_EXACT_FIXTURE, FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE,
+#: FEED_OWNERSHIP_NOT_HELD), then what the discovery payload lacked. Both are
+#: classified in refusal_taxonomy_table; NO_PINNACLE_ON_EVENT remains only for
+#: a WS read that refused without a reason, which select() never does.
+R_PAYLOAD_HAS_NO_PINNACLE = "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK"
+R_PINNACLE_HAS_NO_H2H = "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET"
+R_NO_PINNACLE_ON_EVENT = "NO_PINNACLE_ON_EVENT"
+
+
+def pinnacle_absence_in_payload(event) -> str | None:
+    """What the discovery payload lacked for a Pinnacle h2h, by name, or None
+    when it carries one."""
+    books = (event or {}).get("bookmakers") or []
+    pin = next((b for b in books if (b or {}).get("key") == devig.BOOK),
+               None)
+    if pin is None:
+        return R_PAYLOAD_HAS_NO_PINNACLE
+    if not any((m or {}).get("key") == "h2h"
+               for m in (pin.get("markets") or [])):
+        return R_PINNACLE_HAS_NO_H2H
+    return None
+
+
+def no_pinnacle_codes(explain, event) -> list:
+    """The codes recorded for an event with no usable Pinnacle price, in
+    order: the WS refusal reason, then the discovery payload's absence."""
+    ws = (explain or {}).get("reason")
+    legacy = pinnacle_absence_in_payload(event)
+    codes = [c for c in (ws, legacy) if c]
+    return codes or [R_NO_PINNACLE_ON_EVENT]
 
 
 def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
@@ -8066,19 +8109,36 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             event = events[_i]
             _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
+            _ws_why: dict = {}
             quote = primary_pinnacle_h2h(
-                event, received_at=received_at, family=family, at=time.time())
+                event, received_at=received_at, family=family, at=time.time(),
+                explain=_ws_why)
             if stream_seed is None:
                 from .. import pinnapi_reactive as reactive
                 reactive.register(event, sport_key=sport_key, family=family,
                                   received_at=received_at)
             elif (quote or {}).get("reference_input", {}).get("provider") != "pinnapi.com/raw-websocket":
                 tally["WS_REFERENCE_NOT_USABLE"] = tally.get("WS_REFERENCE_NOT_USABLE", 0) + 1
+                # THE WS REASON, KEPT (it was discarded here): why the
+                # reactive evaluation's own trigger could not be used.
+                if _ws_why.get("reason"):
+                    tally[_ws_why["reason"]] = \
+                        tally.get(_ws_why["reason"], 0) + 1
+                    _event_fields({"ws_refusal": _ws_why["reason"]})
                 continue
             if quote is None:
-                tally["NO_PINNACLE_ON_EVENT"] = \
-                    tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
-                _step_refuse("NO_PINNACLE_ON_EVENT")
+                # NO USABLE PINNACLE PRICE, BY CAUSE (no_pinnacle_codes): the
+                # WS refusal reason, then what the discovery payload lacked.
+                _np = no_pinnacle_codes(_ws_why, event)
+                for _c in _np:
+                    tally[_c] = tally.get(_c, 0) + 1
+                    _step_refuse(_c)
+                _event_fields({"stage": "1_PROBABILITY",
+                               "ws_refusal": _ws_why.get("reason"),
+                               "payload_absence":
+                                   pinnacle_absence_in_payload(event),
+                               "formerly_recorded_as":
+                                   R_NO_PINNACLE_ON_EVENT})
                 continue
             if stream_seed is not None:
                 source = quote["reference_input"]

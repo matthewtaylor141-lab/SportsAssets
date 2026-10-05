@@ -1543,6 +1543,11 @@ INCIDENT_STREAMS = {
     "VENUE_TIMEOUT": (S, DATA, "VENUE_BOOK"),
     "VENUE_NOT_FOUND": (S, DATA, "VENUE_BOOK"),
     "VENUE_ERROR": (S, DATA, "VENUE_BOOK"),
+    # NO_PINNACLE_ON_EVENT by cause: what the discovery payload lacked
+    # (the WS refusal reasons beside it are pinnapi_feed / pinnapi_primary
+    # codes, classified above)
+    "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK": (S, DATA, "PROBABILITY"),
+    "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET": (S, DATA, "PROBABILITY"),
     "GROSS_EDGE_INPUT_PROBABILITY_NOT_A_PROBABILITY": (S, DATA, "EV"),
     "GROSS_EDGE_INPUT_PROBABILITY_NOT_ORIENTED_TO_THE_HELD_SIDE":
         (S, INT, "EV"),
