@@ -286,6 +286,14 @@ async def env(monkeypatch, new_strategies_off):
                         G.PaperMarketDataClient(e.venue))
     monkeypatch.setattr(RT, "paper_pass_hook",
                         lambda **kw: {"scheduled": False})
+    # (integration) no background entry-fill read on the process-wide db
+    # pool: an ENTER through the real cycle starts `schedule_entry_fill` by
+    # default, which opened db's global pool on this test's loop and left it
+    # for a later db.close_pool to trip on ("Event loop is closed"; the k6b
+    # proof that uses this harness set it -- located with a teardown spy over
+    # the suite prefix). Stubbed exactly like the paper-pass hook above.
+    monkeypatch.setattr(PR, "schedule_entry_fill",
+                        lambda ids, **kw: {"scheduled": False})
     PD._CONTEXT_CACHE.clear()
     PB._CONTEXT_CACHE.clear()
     monkeypatch.setenv(S.ENV_FLAG, "on")
