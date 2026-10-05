@@ -309,6 +309,58 @@ if (process.env.MOBILE !== "0") {
     await ctx.close();
   }
 }
+// COMMAND CENTER V2 readback (read-only): the promoted V2 shell at / signed in at 1440x900 and
+// 390x844, every hash view in turn (overflow, NaN / undefined / [object Object], UNAVAILABLE count,
+// heading, console errors), the served /build.json, the preserved routes (/classic.html,
+// /v2.html, /mobile.html, /floor) by HTTP status, the content type the .mjs modules are served
+// with, and every non-GET to /api/** (must be none). V2=0 skips it.
+report.v2 = [];
+if (process.env.V2 !== "0") {
+  const VIEWS = ["command", "floor", "events", "opportunities", "orders", "agents", "arbitrage", "capital", "risk", "reports", "system"];
+  for (const [label, vw, vh, mobile] of [["desktop", 1440, 900, false], ["phone", 390, 844, true]]) {
+    const ctx = await browser.newContext({ viewport: { width: vw, height: vh }, isMobile: mobile, hasTouch: mobile });
+    if (TOKEN) await ctx.route(HOST + "/api/command/**", (r) =>
+      r.continue({ headers: { ...r.request().headers(), "x-admin-token": TOKEN } }));
+    const page = await ctx.newPage(); const t0 = Date.now();
+    const net = { errors: [], nonGet: [], build: null, mjs: {} };
+    page.on("console", (m) => { if (m.type() === "error") net.errors.push(m.text().slice(0, 200)); });
+    page.on("pageerror", (e) => net.errors.push("PAGEERROR " + String(e).slice(0, 200)));
+    page.on("request", (q) => { if (q.url().includes("/api/") && q.method() !== "GET") net.nonGet.push({ t: Date.now() - t0, method: q.method(), url: q.url().replace(HOST, "").slice(0, 200) }); });
+    page.on("response", async (r) => {
+      const u = r.url().split("?")[0];
+      if (/\.mjs$/.test(u)) net.mjs[u.replace(HOST, "")] = r.status() + " " + (r.headers()["content-type"] || "");
+      if (/\/build\.json$/.test(u) && r.status() === 200) { try { const j = await r.json(); net.build = { sha: j.sha, deploy_id: j.deploy_id, context: j.context, commit_ref: j.commit_ref }; } catch (e) {} }
+    });
+    let status = null;
+    try { status = (await page.goto(HOST + "/", { waitUntil: "load", timeout: 60000 }))?.status(); } catch (e) { net.errors.push("GOTO " + String(e).slice(0, 160)); }
+    await page.waitForTimeout(10000);
+    const shell = await page.evaluate(() => ({ title: document.title, v2: !!document.querySelector('script[src*="v2/app.mjs"]'),
+      ref: (document.querySelector('script[src*="v2/app.mjs"]') || {}).src || null })).catch((e) => ({ error: String(e).slice(0, 200) }));
+    const views = [];
+    for (const v of VIEWS) {
+      const before = net.errors.length;
+      await page.evaluate((v) => { location.hash = v; }, v).catch(() => {});
+      await page.waitForTimeout(2500);
+      const r = await page.evaluate(() => { const t = document.body.innerText;
+        return { overflowX: document.documentElement.scrollWidth > document.documentElement.clientWidth, nan: (t.match(/\bNaN\b/g) || []).length,
+          undef: (t.match(/\bundefined\b/g) || []).length, objObj: (t.match(/\[object Object\]/g) || []).length,
+          unavailable: (t.match(/unavailable|not available/gi) || []).length, chars: t.length,
+          h: ((document.querySelector("main h1, main h2, h1, h2") || {}).innerText || "").slice(0, 80),
+          sample: t.replace(/\s+/g, " ").slice(0, 400) }; }).catch((e) => ({ error: String(e).slice(0, 200) }));
+      await page.screenshot({ path: `${OUT}/v2_${v}_${label}.png` }).catch(() => {});
+      views.push({ view: v, ...r, errors: net.errors.slice(before) });
+    }
+    if (!net.build) net.build = await page.evaluate(async () => { try { const r = await fetch("/build.json", { cache: "no-store" }); return { via: "probe GET", http: r.status, json: await r.json() }; } catch (e) { return { via: "probe GET", error: String(e).slice(0, 120) }; } }).catch(() => null);
+    const routes = {};
+    for (const p of ["/classic.html", "/v2.html", "/mobile.html", "/floor", "/v2/app.mjs"]) {
+      routes[p] = await page.evaluate(async (p) => { try { const r = await fetch(p, { cache: "no-store" }); const t = await r.text();
+        return { http: r.status, type: r.headers.get("content-type"), bytes: t.length, title: (t.match(/<title>([^<]*)<\/title>/i) || [null, null])[1] }; } catch (e) { return { error: String(e).slice(0, 120) }; } }, p).catch(() => null);
+    }
+    report.v2.push({ label, status, ms: Date.now() - t0, shell, build: net.build, mjs: net.mjs, routes, views,
+                     errors: net.errors.slice(0, 30), nErrors: net.errors.length, nonGet: net.nonGet });
+    await ctx.close();
+  }
+}
 report.mobile_non_get = report.mobile.flatMap((r) => r.nonGet.map((x) => ({ label: r.label, ...x })));
 report.ops_non_get = report.ops.flatMap((r) => r.nonGet.map((x) => ({ label: r.label, path: r.path, ...x })));
 report.cf_non_get = [
@@ -336,6 +388,13 @@ console.log(`cf non-GET /api/command/** requests: ${(report.cf_non_get || []).le
 for (const r of report.runs) console.log(opsHdrLine(r.label, r.path, r.execHeader));
 for (const r of report.ops || []) console.log(opsLine(r));
 console.log(`ops non-GET /api/command/** requests: ${(report.ops_non_get || []).length}${(report.ops_non_get || []).length ? " " + JSON.stringify(report.ops_non_get.slice(0, 10)) : ""}`);
+for (const r of report.v2 || []) {
+  console.log(`== v2 ${r.label} HTTP ${r.status} ${r.ms}ms shell=${JSON.stringify(r.shell)} build=${JSON.stringify(r.build)} errors=${r.nErrors} nonGet=${r.nonGet.length}`);
+  console.log(`   mjs: ${JSON.stringify(r.mjs)}`);
+  console.log(`   routes: ${JSON.stringify(r.routes)}`);
+  for (const v of r.views) console.log(`   #${v.view} overflowX=${v.overflowX} nan=${v.nan} undef=${v.undef} objObj=${v.objObj} unavailable=${v.unavailable} chars=${v.chars} errors=${(v.errors || []).length} h="${v.h}" :: ${(v.sample || "").slice(0, 220)}`);
+  for (const e of r.errors.slice(0, 8)) console.log("   err: " + e);
+}
 for (const r of report.mobile || []) console.log(`== mobile ${r.label} HTTP ${r.status} ${r.ms}ms build=${r.served.build && r.served.build.sha && r.served.build.sha.slice(0, 7)} deploy=${r.served.build && r.served.build.deploy_id} errors=${r.nErrors} nonGet=${r.nonGet.length} sw=${JSON.stringify(r.swScopes)} tabs=${JSON.stringify(r.tabs)} dna=${r.dom && r.dom.dna} bad=${JSON.stringify(r.dom && r.dom.bad)} loneB=${r.dom && r.dom.loneB} overflowX=${r.dom && r.dom.overflowX} install=${r.dom && r.dom.installDisplay} agents=${r.dom && r.dom.agents && r.dom.agents.length}\n   strip: ${r.dom && r.dom.strip}\n   kpis: ${JSON.stringify(r.dom && r.dom.kpis)}\n   served equity: ${JSON.stringify(r.served.equity)}\n   apis: ${JSON.stringify(r.apiCounts)}`);
 
 // ── COMMAND FINAL helpers (hoisted function declarations; read-only) ──────────
