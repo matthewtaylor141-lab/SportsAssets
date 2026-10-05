@@ -355,3 +355,6 @@ body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc,
   .sheet p, .sheet li, .sheet h1, .kv .v, .kv dd { color: #111 !important; }
   .sheet h2 { color: #0b4a9e; }
 }
+/* the desk panel takes the right of the floor: the legend steps aside */
+body.desk-open .floor-legend [data-render="legend"] { display: none; }
+.floor-counts [data-watch] { white-space: nowrap; height: 32px; }
