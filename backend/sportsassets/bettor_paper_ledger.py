@@ -510,6 +510,26 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
             return {"ok": True, "duplicate": True, "order": order_view(prior)}
         cs = await cash_state(conn, acct)
         reserve = Decimal(0)
+        lifecycle = None
+        if o["direction"] == "BUY" and o.get("role") == "ENTRY":
+            # THE STRATEGY LIFECYCLE (migration 290), UNDER THE LOCK: an
+            # ADDITIONAL gate on top of the allowlist and the entry switch.
+            # SHADOW_ONLY / QUARANTINED / RETIRED refuse; REDUCED_SIZE caps
+            # the reservation; a stale-management rate above its declared
+            # threshold refuses. It can only lower the quantity, never raise
+            # it, and it reads no cap. Unreadable = refused.
+            from . import bettor_strategy_lifecycle as LC
+            lifecycle = await LC.entry_gate(
+                conn, account_id=acct, strategy=o["strategy"], qty=f(qty),
+                limit=f(limit), at=at, max_fee_per_contract=f(
+                    max_fee_for(1, limit, at=at, fee_fn=fee_fn)))
+            if lifecycle.get("refusal"):
+                return {"ok": False, "refusal": lifecycle["refusal"],
+                        "under_lock": True, "lifecycle": lifecycle,
+                        "available_usd": f(cs["available"])}
+            if D(lifecycle["qty"]) < qty:
+                qty = D(lifecycle["qty"])
+                o["qty"] = f(qty)
         if o["direction"] == "BUY":
             reserve = reservation_for(qty, limit, at=at, fee_fn=fee_fn)
             chk = await _check_caps(conn, o, reserve=reserve, cs=cs,
@@ -536,6 +556,25 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
                 chk = await locked_check(conn, o, reserve)
                 if chk:
                     return dict(chk, ok=False, reservation_usd=f(reserve),
+                                available_usd=f(cs["available"]))
+            if o.get("role") == "ENTRY":
+                # NO ALLOCATION GROWTH WHERE MANAGEMENT IS STALE
+                # (bettor_paper_freshness.allocation_refusal): a strategy
+                # whose markable open positions cannot be freshly managed
+                # above the predeclared rate opens no new entry. Under the
+                # same lock, recorded (migration 270); tightening only.
+                from . import bettor_paper_freshness as _PMF
+                chk = await _PMF.allocation_refusal(
+                    conn, account_id=acct, strategy=o["strategy"], now=at)
+                if chk:
+                    await _PMF.record_refusal(
+                        conn, account_id=acct, kind=_PMF.K_ENTRY,
+                        refusal=chk["refusal"], at=at,
+                        strategy=o["strategy"], group_id=o.get("group_id"),
+                        us_market_slug=o.get("us_market_slug"),
+                        order_key=key, detail=chk)
+                    return dict(chk, ok=False, under_lock=True,
+                                reservation_usd=f(reserve),
                                 available_usd=f(cs["available"]))
         else:
             held = await held_uncommitted(
@@ -573,7 +612,12 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
         await event(conn, order_id=o["order_id"], kind="SUBMITTED", at=at,
                     simulator_version=o["simulator_version"],
                     detail={"reservation_usd": f(reserve),
-                            "state": state})
+                            "state": state,
+                            **({"lifecycle": {
+                                k: lifecycle.get(k) for k in (
+                                    "state", "capped", "qty",
+                                    "lifecycle_event_id")}}
+                               if lifecycle else {})})
         if o["order_type"] == "RESTING":
             await event(conn, order_id=o["order_id"], kind="ACKNOWLEDGED",
                         at=at, simulator_version=o["simulator_version"],

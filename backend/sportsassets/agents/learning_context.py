@@ -2,6 +2,14 @@
 
 Selection is deterministic and inspectable. A lesson is an observation with a
 scope and date, not an instruction, validated model, or proof of profitability.
+
+MEMORY USEFULNESS REACHES THIS PATH (owner R30 section 19, migration 301; R30B
+review: the supersession record had changed nothing an agent actually read).
+A lesson SUPERSEDED on forward INVESTMENT-sleeve evidence (agent_lesson_
+supersessions, weight 0, written only by agents/lesson_usage.py's evaluator)
+is excluded here and named in `rejected`; a DOWNWEIGHTED one ranks below an
+equally relevant lesson at full weight. The weight is read, never written,
+and grants nothing: it only orders observations for a conversation.
 """
 from __future__ import annotations
 
@@ -55,8 +63,21 @@ def _terms(text):
     return words - {'what','when','which','with','this','that','have','does','from','about'}
 
 
-def select(rows, *, account_id, agent, question, now):
-    """Rank the latest scoped versions; exclude malformed/future/no-evidence rows."""
+#: each lesson's weight at an instant (1.0 before any supersession), the
+#: same rule as lesson_usage.WEIGHT_AT_SQL
+WEIGHTS_SQL = """
+SELECT DISTINCT ON (s.lesson_id) s.lesson_id, s.weight
+FROM agent_lesson_supersessions s
+WHERE s.lesson_table = 'paper_agent_lessons' AND s.lesson_id = ANY($1::text[])
+  AND s.decided_at <= to_timestamp($2)
+ORDER BY s.lesson_id, s.decided_at DESC, s.recorded_at DESC
+"""
+
+
+def select(rows, *, account_id, agent, question, now, weights=None):
+    """Rank the latest scoped versions; exclude malformed/future/no-evidence
+    rows and lessons superseded on forward evidence (`weights`: lesson_id ->
+    current weight; absent = 1.0)."""
     if not math.isfinite(now):
         raise ValueError('finite observation time required')
     latest={}
@@ -87,17 +108,21 @@ def select(rows, *, account_id, agent, question, now):
                 or not r.get('lesson_id') or not r.get('statement')
                 or not r.get('evidence_category')):
             rejected.append('MISSING_EVIDENCE');continue
+        weight=float((weights or {}).get(r.get('lesson_id'),1.0))
+        if weight<=0:
+            rejected.append('SUPERSEDED_BY_FORWARD_EVIDENCE');continue
         overlap=len(_terms(question)&_terms(r['kind']+' '+r['statement']))
         r.update(age_s=now-stamp,historical=now-stamp>STALE_AFTER_S,
+                 lesson_weight=weight,
                  relevance_terms=overlap,record_count=count,
                  statement=r['statement'][:MAX_STATEMENT],
                  statement_shortened=len(r['statement'])>MAX_STATEMENT)
         ranked.append(r)
-    ranked.sort(key=lambda r:(-r['relevance_terms'],r['historical'],r['age_s'],r['lesson_id']))
+    ranked.sort(key=lambda r:(-r['relevance_terms'],-r['lesson_weight'],r['historical'],r['age_s'],r['lesson_id']))
     chosen=ranked[:MAX_LESSONS]
     return {'lessons':chosen,'considered':len(rows[:MAX_CANDIDATES]),
             'rejected':rejected,'candidate_limit':MAX_CANDIDATES,
-            'selection':'question relevance, recent evidence, deterministic tie-break',
+            'selection':'question relevance, lesson weight (forward evidence), recent evidence, deterministic tie-break',
             'authority':'OBSERVATIONS_ONLY_NO_POLICY_CHANGE',
             'limitations':'Bounded retrieval, not exhaustive memory. Historical observations need revalidation. Simulation, counterfactuals and audits do not establish live profitability.'}
 
@@ -106,4 +131,13 @@ async def retrieve(conn, *, account_id, agent, question, now):
     import asyncio
     async with asyncio.timeout(2.0):
         rows=await conn.fetch(LESSON_QUERY,account_id,agent.upper(),MAX_CANDIDATES)
-    return select(rows,account_id=account_id,agent=agent,question=question,now=now)
+        weights={}
+        ids=[r['lesson_id'] for r in rows if r['lesson_id']]
+        # (a bool from the database; migration 301 absent: no weights)
+        if ids and (await conn.fetchval(
+                "SELECT to_regclass('agent_lesson_supersessions') IS NOT NULL"
+                )) is True:
+            weights={w['lesson_id']:float(w['weight']) for w in
+                     await conn.fetch(WEIGHTS_SQL,ids,float(now))}
+    return select(rows,account_id=account_id,agent=agent,question=question,now=now,
+                  weights=weights)

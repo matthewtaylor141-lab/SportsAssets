@@ -1676,6 +1676,7 @@ POS_JS = r"""
       {label: 'Execution loss', keys: ['expected_execution_loss_pp'], num: 1},
       {label: 'Net executable edge', keys: ['expected_net_executable_edge_pp'], num: 1},
       {label: 'Fill probability', keys: ['expected_fill_probability'], num: 1},
+      {label: 'Fill fitted on', render: function (r) { var fe = r.fill_probability_evidence || {}; return esc(fe.fitted_on || 'UNLABELLED') + '<div class="mute">' + esc(fe.live_use || 'not proof of live execution') + (fe.live_ci_low !== undefined && fe.live_ci_low !== null ? ' · live ' + esc(fe.live_ci_low) + '–' + esc(fe.live_ci_high) : '') + '</div>'; }},
       {label: 'Time to fill (s)', keys: ['expected_time_to_fill_s'], num: 1},
       {label: 'Capital-hours', keys: ['expected_capital_hours'], num: 1},
       {label: 'Max size', keys: ['max_executable_qty'], num: 1}, {label: 'EV (USD)', keys: ['expected_executable_ev_usd'], num: 1},

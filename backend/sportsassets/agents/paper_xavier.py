@@ -109,6 +109,11 @@ R_NO_MEASURE = "NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION"
 #: position is held and its cost-recovery protection (priced from quantity,
 #: basis and fees only, never `p`) is maintained instead.
 B_STALE_MEASURE = "MEASURE_STALE_OR_ABSENT_NO_DISCRETIONARY_SALE"
+#: A DISCRETIONARY SALE IS NEVER RANKED ON AN INCOMPLETE MANAGEMENT PACKET
+#: (xavier_packet): a fresh probability alone is not enough -- the qty must
+#: reconcile, the book must be current with exit depth, the settlement
+#: identity and the protection state known.
+B_PACKET_INCOMPLETE = "MANAGEMENT_PACKET_INCOMPLETE_NO_DISCRETIONARY_SALE"
 #: THE EVIDENCE STATE OF THE PROBABILITY EVERY REVIEW STANDS ON, exactly
 #: one, on `measure.evidence_state`. FRESH only when the measure is current
 #: AND its own source stamp is within the Pinnacle freshness limit
@@ -431,6 +436,49 @@ def protective_price(*, qty: float, cost_basis: float, fee_fn, at,
 # THE REVIEW
 # ═════════════════════════════════════════════════════════════════════
 
+async def management_packet(conn, ctx: dict, *, pos: dict, measure: dict,
+                            standing, at: float) -> tuple:
+    """(packet, gate) for one position (xavier_packet). Each read in its
+    own savepoint; a read that fails leaves its element MISSING (never
+    assumed present)."""
+    from .. import bettor_paper_freshness as PMF
+    from .. import xavier_packet as XPK
+    acct = ctx["account_id"]
+    key = pos["position_key"]
+    res = ident = None
+    mk = {"class": None, "mark": {}}
+    try:
+        async with conn.transaction():
+            res = (await PMF.residuals(conn, acct, [pos])).get(key)
+    except Exception:                                           # noqa: BLE001
+        res = None
+    try:
+        async with conn.transaction():
+            mk = await PMF.position_mark(
+                conn, account_id=acct, slug=pos["us_market_slug"],
+                holding_side=pos["holding_side"], now=at)
+    except Exception:                                           # noqa: BLE001
+        mk = {"class": None, "mark": {}}
+    try:
+        async with conn.transaction():
+            ident = (await PMF.identities(conn, acct, [pos])).get(key)
+    except Exception:                                           # noqa: BLE001
+        ident = None
+    try:
+        prot = PMF.protection_state([dict(s) for s in standing],
+                                    pos["open_qty"])
+    except Exception:                                           # noqa: BLE001
+        prot = None
+    packet = XPK.build(
+        residual=res, evidence_state=measure.get("evidence_state"),
+        probability_source=measure.get("probability_source")
+        or measure.get("source"),
+        valuation_id=measure.get("valuation_id"), mark=mk.get("mark"),
+        mark_class=mk.get("class"), settlement=ident, protection=prot)
+    packet["book"]["reason"] = mk.get("reason")
+    return packet, XPK.gate(packet)
+
+
 async def _latest_book(conn, slug: str):
     return await conn.fetchrow(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
@@ -603,13 +651,39 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             measure, at=at, qty=pos["open_qty"],
             limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])))
         fresh = measure["evidence_state"] == E_FRESH
+        # ── THE MANAGEMENT PACKET (xavier_packet) ───────────────────────
+        # A management action (HOLD / EXIT / REDUCE / a hedge) needs the
+        # reconciled qty, a FRESH probability, a current executable book
+        # with exit depth, the settlement identity and the protection
+        # state. Missing any -> a recorded refusal naming each element; the
+        # cost-recovery protection is still maintained, no sale is ranked.
+        standing = await conn.fetch(
+            "SELECT * FROM paper_orders WHERE group_id=$1 "
+            "   AND us_market_slug=$2 AND holding_side=$3 "
+            "   AND role='STANDING_PROTECTION' AND state = ANY($4::text[])",
+            group_id, pos["us_market_slug"], pos["holding_side"],
+            list(L.OPEN_STATES))
+        packet, pgate = await management_packet(
+            conn, ctx, pos=pos, measure=measure, standing=standing, at=at)
+        manageable = fresh and pgate["complete"]
+        measure["management_packet"] = {
+            "complete": pgate["complete"], "missing": pgate["missing"],
+            "mark_class": packet["book"]["mark_class"],
+            "version": packet["version"]}
         alts = alternatives(pos=pos, levels=exit_lv, p=measure.get("p"),
                             fee_fn=fee_fn, at=at)
-        if not fresh or measure.get("stale") or measure.get("p") is None:
+        if not manageable or measure.get("stale") or \
+                measure.get("p") is None:
+            blocker = (B_STALE_MEASURE if (not fresh or measure.get("stale")
+                                           or measure.get("p") is None)
+                       else B_PACKET_INCOMPLETE)
             keep = [c for c in alts["candidates"]
                     if c["action"] not in (A_EXIT, A_REDUCE)]
             alts["not_rankable"] = alts["not_rankable"] + [
-                dict(c, blocker=B_STALE_MEASURE) for c in alts["candidates"]
+                dict(c, blocker=blocker,
+                     **({} if blocker == B_STALE_MEASURE else
+                        {"packet_missing": pgate["missing"]}))
+                for c in alts["candidates"]
                 if c["action"] in (A_EXIT, A_REDUCE)]
             alts["candidates"] = keep
         policy = await XP.load(conn)
@@ -637,13 +711,10 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                                                or "ABSENT"))
         if not fresh:
             exceptional.append(measure["evidence_state"])
+        if not pgate["complete"]:
+            exceptional.append(pgate["refusal"])
+            exceptional.extend(pgate["missing"])
         # ── STANDING PROTECTION AND THE ACTION ──────────────────────
-        standing = await conn.fetch(
-            "SELECT * FROM paper_orders WHERE group_id=$1 "
-            "   AND us_market_slug=$2 AND holding_side=$3 "
-            "   AND role='STANDING_PROTECTION' AND state = ANY($4::text[])",
-            group_id, pos["us_market_slug"], pos["holding_side"],
-            list(L.OPEN_STATES))
         action: dict[str, Any] = {"taken": "NONE"}
         chosen = sel.get("selected")
         prot = protective_price(qty=pos["open_qty"],
@@ -655,7 +726,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         # it is recorded immutably and BOTH adapters consume it: the paper
         # book below and the SMALL LIVE adapter (SHADOW) after it.
         decided = CI.management_action(
-            chosen=chosen, fresh=fresh, stale=bool(measure.get("stale")),
+            chosen=chosen, fresh=manageable,
+            stale=bool(measure.get("stale")),
             p_missing=measure.get("p") is None,
             protection_ok=bool(prot.get("ok")), standing_live=bool(standing),
             candidate=sel.get("selected_candidate"), protective=prot,
@@ -696,6 +768,18 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             "rule": ("management actions here only reduce exposure (a sale "
                      "or a resting protective sale of held inventory); the "
                      "LIVE fail-closed policy rule governs NEW exposure")}
+        # WHAT THE REVIEW RECOMMENDS (owner P0): the selection only on FRESH
+        # evidence AND a complete management packet. On stale / absent
+        # evidence the selector's HOLD is merely what was left after the
+        # sales were blocked, so the recorded recommendation is
+        # WAITING_FOR_FRESH_EVIDENCE (or MANAGEMENT_UNAVAILABLE_STALE_INPUT);
+        # on a fresh probability with an incomplete packet it is
+        # MANAGEMENT_UNAVAILABLE_STALE_INPUT with the packet refusal recorded
+        # -- the protection is still maintained, no discretionary sale.
+        recorded = XF.recorded_recommendation(
+            evidence_state=measure["evidence_state"], selected=chosen)
+        if fresh and not pgate["complete"]:
+            recorded = XF.REC_UNAVAILABLE
         mintent = None
         try:
             mintent = CI.build_management_intent(
@@ -706,8 +790,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                     measure, assessed_at=at,
                     limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])),
                 evidence_state=measure["evidence_state"],
-                recommendation=XF.recorded_recommendation(
-                    evidence_state=measure["evidence_state"], selected=chosen),
+                recommendation=recorded,
                 mechanical_selection=chosen, decided=decided,
                 us_market_slug=pos["us_market_slug"],
                 holding_side=pos["holding_side"], alternatives=alts,
@@ -715,7 +798,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         "refusal": sel.get("refusal"),
                         "margin_over_runner_up": sel.get(
                             "margin_over_runner_up"),
-                        "exceptional": list(exceptional)},
+                        "exceptional": list(exceptional),
+                        "management_packet": pgate},
                 created_at=at, alternative_set=alt_set, policy=mgmt_policy)
             rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
             if rec_hook is None or not await rec_hook(conn, mintent):
@@ -764,14 +848,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                           for s in live)
         exposure = exposure_view(pos, resting_qty=resting_qty,
                                  filled_protection_qty=float(confirmed))
-        # WHAT THE REVIEW RECOMMENDS (owner P0): the selection only on FRESH
-        # evidence. On stale / absent evidence the selector's HOLD is merely
-        # what was left after the sales were blocked, so the recorded
-        # recommendation is WAITING_FOR_FRESH_EVIDENCE (or
-        # MANAGEMENT_UNAVAILABLE_STALE_INPUT) -- the protection above is
-        # still maintained and no discretionary sale is possible.
-        recorded = XF.recorded_recommendation(
-            evidence_state=measure["evidence_state"], selected=chosen)
         valuation = XF.valuation_block(
             measure, assessed_at=at,
             limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
@@ -784,13 +860,16 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
             " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
             rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
-            recorded, sel.get("refusal"), json.dumps(alts, default=str),
+            recorded, (pgate["refusal"] if not pgate["complete"]
+                       else sel.get("refusal")),
+            json.dumps(alts, default=str),
             json.dumps(dict({k: sel.get(k) for k in (
                 "selected", "refusal", "selection_reason",
                 "margin_over_runner_up", "decision_policy", "tie_break",
                 "hold_is_priced", "limits_applied")},
                 management_policy=mpol,
                 mechanical_selection=chosen,
+                management_packet=dict(packet, gate=pgate),
                 recommendation_state=XF.write_state(
                     evidence_state=measure["evidence_state"],
                     recommendation=recorded),
@@ -814,8 +893,20 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         mg = await XM.paper_review_hook(
             conn, ctx, group_id=group_id, pos=pos, review_id=rid,
             trigger=trigger, at=at, measure=measure, alts=alts,
-            recommendation=chosen, exit_levels=exit_lv, policy=mpol,
+            recommendation=(chosen if pgate["complete"] else recorded),
+            exit_levels=exit_lv, policy=mpol,
             due_at=due_at, precomputed=realloc)
+        if not pgate["complete"]:
+            # THE REFUSAL, RECORDED (migration 270) with every missing
+            # element -- never a silent HOLD on stale data.
+            from .. import bettor_paper_freshness as PMF
+            await PMF.record_refusal(
+                conn, account_id=acct, kind=PMF.K_PACKET,
+                refusal=pgate["refusal"], at=at,
+                strategy=pos.get("strategy"), group_id=group_id,
+                position_key=pos["position_key"],
+                us_market_slug=pos["us_market_slug"], review_id=rid,
+                missing=pgate["missing"], detail=packet)
         # FRESHNESS EXPIRY IS A REVIEW TRIGGER: a fresh probability expires
         # at its own source stamp + the limit; a review is scheduled for
         # that instant (paper_runtime.schedule_expiry_review via the
@@ -839,6 +930,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         reviews.append({"review_id": rid, "position": pos["position_key"],
                         "recommendation": recorded,
                         "mechanical_selection": chosen,
+                        "packet_complete": pgate["complete"],
+                        "packet_missing": pgate["missing"],
                         "recommendation_state": mg.get(
                             "recommendation_state"),
                         "valuation_expires_at": valuation.get("expires_at"),

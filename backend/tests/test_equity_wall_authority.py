@@ -45,7 +45,12 @@ ALLOWED_PROJECT = {"sportsassets.api.agents_core",
                    "sportsassets.bettor_paper_epoch",
                    # SMALL LIVE -- BETTOR ORIGINATED status: pure derivation
                    # + SELECTs, no venue / order / execution import
-                   "sportsassets.bettor_originated_status"}
+                   "sportsassets.bettor_originated_status",
+                   # (270) paper mark freshness: SELECTs over the paper
+                   # observations / ledger / orders and the refresh-run
+                   # record; its one write (record_refusal) is never called
+                   # from here
+                   "sportsassets.bettor_paper_freshness"}
 FORBIDDEN = ("execmirror", "kalshi_venue", "kalshi_orders", "kalshi_account",
              "pmus", "clob", "executor", "execution", "funded_execution",
              "funded_management", "order", "submit", "smalllive", "live_",

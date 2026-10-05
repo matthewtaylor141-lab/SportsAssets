@@ -276,7 +276,7 @@ def test_the_refusal_codes_are_classified():
 
 def test_266_is_the_next_migration_and_its_seed_is_generated_from_code():
     nums = sorted(int(p.name[:3]) for p in MIG.glob("*.sql"))
-    assert nums[-1] == 266 and nums.count(266) == 1
+    assert nums.count(266) == 1 and 266 in nums
     row = I.identity_row("ARCHER")
     assert "$q$%s$q$" % row["content_sha"] in UP
     assert "$q$%s$q$" % I.voice_sha(I.VOICE_SPEC["ARCHER"]) in UP
@@ -758,3 +758,107 @@ def test_every_eddie_seed_and_record_name_is_json_safe():
     # the manifests stay valid JSON under both names
     for name in ("archer-manifest.json", "eddie-manifest.json"):
         json.loads((ROOT.parent / "research" / name).read_text())
+
+
+# ════════════════════════════════════════════════════════════════════
+# 7 · 302: THE RENAME CARRIED INTO 301'S OBJECTS (R30 tails)
+# ════════════════════════════════════════════════════════════════════
+
+UP_302 = (MIG / "302_archer_r30_tails.sql").read_text()
+DOWN_302 = (MIG / "rollback" / "302_archer_r30_tails.down.sql").read_text()
+
+
+def test_302_sorts_after_301_and_widens_every_301_agent_object():
+    names = sorted(p.name for p in MIG.glob("*.sql"))
+    assert names.index("302_archer_r30_tails.sql") > names.index(
+        "301_agent_operations.sql")
+    for name in ("agent_work_requests_owner_kind_ck",
+                 "agent_work_requests_collaborator_ck",
+                 "agent_lesson_retrievals_agent_ck",
+                 "agent_lesson_retrievals_source_ck",
+                 "agent_lesson_supersessions_agent_ck",
+                 "improvement_clusters_agents_ck",
+                 "improvement_cluster_events_owner_ck",
+                 "FUNCTION agent_ops_is_machine_actor"):
+        assert name in UP_302 and name in DOWN_302, name
+    assert "kind = 'EXECUTION_ESTIMATE' AND agent_id IN ('EDDIE', 'ARCHER')" \
+        in UP_302
+    assert "update " not in UP_302.lower() and "delete from" not in \
+        UP_302.lower()
+    assert "rollback refused" in DOWN_302
+
+
+def test_302s_machine_actor_test_is_the_current_one_archer_included():
+    """301 copied the then-current machine-actor list (265's); the current
+    one is 266's (ARCHER added), and 302's copy equals it."""
+    import re as _re
+
+    def body(path, name):
+        s = path.read_text()
+        i = s.index("AS $$", s.index("FUNCTION " + name))
+        return _re.sub(r"\s+", " ", s[i:s.index("$$;", i)])
+    assert body(MIG / "302_archer_r30_tails.sql",
+                "agent_ops_is_machine_actor") == body(
+        MIG / "266_archer_execution_agent_rename.sql",
+        "improve_is_machine_actor")
+
+
+def test_the_r30_agent_lists_name_archer_never_the_alias():
+    from sportsassets.agents import agent_scorecards as SC
+    from sportsassets.agents import agent_work as AW
+    assert "ARCHER" in SC.AGENTS and "EDDIE" not in SC.AGENTS
+    owners = {a for spec in AW.KINDS.values() for a in spec["agents"]} \
+        if hasattr(AW, "KINDS") else set()
+    assert "EDDIE" not in owners
+
+
+@pg
+@pytest.mark.asyncio
+async def test_301s_tables_accept_archer_and_refuse_new_alias_rows():
+    import asyncpg
+    conn, tx = await _tx()
+    try:
+        await conn.execute(UP_302)                         # idempotent
+        assert await conn.fetchval(
+            "SELECT agent_ops_is_machine_actor('ARCHER')") is True
+        assert await conn.fetchval(
+            "SELECT agent_ops_is_machine_actor('archer-bot')") is True
+        for tbl in ("agent_lesson_retrievals", "agent_lesson_supersessions",
+                    "improvement_clusters", "improvement_cluster_events",
+                    "agent_work_requests"):
+            assert await conn.fetchval(
+                "SELECT count(*) FROM pg_trigger WHERE tgname = "
+                " 'agent_historical_alias_trg' AND tgrelid = $1::regclass",
+                tbl) == 1, tbl
+        defs = {r["conname"]: r["d"] for r in await conn.fetch(
+            "SELECT conname, pg_get_constraintdef(oid) AS d FROM pg_constraint"
+            " WHERE conname = ANY($1::text[])",
+            ["agent_work_requests_owner_kind_ck",
+             "agent_work_requests_collaborator_ck",
+             "agent_lesson_retrievals_agent_ck",
+             "agent_lesson_supersessions_agent_ck",
+             "improvement_clusters_agents_ck",
+             "improvement_cluster_events_owner_ck"])}
+        assert len(defs) == 6
+        for k, d in defs.items():
+            assert "ARCHER" in d and "EDDIE" in d, k
+        sp = conn.transaction()
+        await sp.start()
+        with pytest.raises(asyncpg.PostgresError,
+                           match="EDDIE_IS_A_HISTORICAL_ALIAS"):
+            await conn.execute(
+                "INSERT INTO improvement_clusters (owner_agent) "
+                "VALUES ('EDDIE')")
+        await sp.rollback()
+        # with no ARCHER record in 301's tables the rollback runs, twice
+        if not await conn.fetchval(
+                "SELECT EXISTS (SELECT 1 FROM agent_work_requests "
+                " WHERE 'ARCHER' IN (agent_id, coalesce(collaborator,'')))"):
+            await conn.execute(DOWN_302)
+            await conn.execute(DOWN_302)
+            assert await conn.fetchval(
+                "SELECT agent_ops_is_machine_actor('ARCHER')") is False
+            await conn.execute(UP_302)
+    finally:
+        await tx.rollback()
+        await conn.close()

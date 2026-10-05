@@ -14,6 +14,10 @@ async def remove_adriana_rows(conn) -> None:
         "   AND t.table_schema = c.table_schema "
         " WHERE c.table_schema = 'public' AND c.column_name = 'agent_id' "
         "   AND t.table_type = 'BASE TABLE'")
+    # agent_status references agent_identities: remove it first
+    tables = sorted(tables, key=lambda r: (
+        r["table_name"] == "agent_identities",
+        r["table_name"] != "agent_status"))
     for r in tables:
         t = r["table_name"]
         if not await conn.fetchval(

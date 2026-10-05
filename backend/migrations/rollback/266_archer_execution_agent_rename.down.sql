@@ -73,14 +73,12 @@ DO $$
 DECLARE
     r record;
 BEGIN
-    IF to_regprocedure('agent_historical_alias_guarded_tables()') IS NULL THEN
-        RETURN;
-    END IF;
-    FOR r IN SELECT * FROM agent_historical_alias_guarded_tables() LOOP
-        IF to_regclass(r.tbl) IS NOT NULL THEN
-            EXECUTE format('DROP TRIGGER IF EXISTS agent_historical_alias_trg'
-                           ' ON %I', r.tbl);
-        END IF;
+    -- every table carrying the guard (a later migration, e.g. 302, may
+    -- have attached it to more tables than 266 listed)
+    FOR r IN SELECT tgrelid::regclass::text AS tbl FROM pg_trigger
+              WHERE tgname = 'agent_historical_alias_trg' LOOP
+        EXECUTE format('DROP TRIGGER IF EXISTS agent_historical_alias_trg'
+                       ' ON %s', r.tbl);
     END LOOP;
 END $$;
 DROP FUNCTION IF EXISTS agent_historical_alias_guarded_tables();

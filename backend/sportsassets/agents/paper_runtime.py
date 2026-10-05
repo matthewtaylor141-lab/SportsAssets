@@ -232,6 +232,15 @@ def default_steps() -> list:
         steps.append(("maker_maintain", PMK.step_maintain))
     steps.append(("simulate", step_simulate))
     try:
+        # PAPER TURNAROUND (migration 290): the predeclared loss / drawdown
+        # rules applied to every strategy on the MAIN paper account, at most
+        # every RUN_EVERY_S, BEFORE this pass's entries. Records demotions
+        # only (never a promotion, never an order or a cap).
+        from .. import bettor_strategy_lifecycle as LC
+        steps.append(("turnaround", LC.step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy
@@ -320,6 +329,30 @@ def default_steps() -> list:
         steps.append(("audrey_coverage", COV.step))
         steps.append(("audrey_postmortems", PMT.step))
         steps.append(("improvement_driver", IDRV.step))
+    except ImportError:
+        pass
+    try:
+        # THE AGENTS' DURABLE WORK QUEUES (owner R30 section 17, migration
+        # 301): on the main account's pass, at most every minute, Derek's
+        # candidates awaiting fresh evidence, Allie's allocation reviews and
+        # Audrey's open reconciliations are enqueued with their owner, SLA,
+        # blocker, evidence needed and collaborator, and closed by the
+        # records that resolve them. Writes only agent_work_* records.
+        from . import agent_work as AWQ
+        # ROOT-CAUSE CLUSTERS (owner R30 section 20): repeated Karen /
+        # Audrey findings opened as ONE engineering item each, and a linked
+        # fix's measured effect -- before the queue step, which enqueues
+        # Audrey's triage of every open cluster
+        from . import improvement_clusters as RCC
+        steps.append(("root_cause_clusters", RCC.step))
+        steps.append(("agent_work_queues", AWQ.step))
+        # MEMORY USEFULNESS (owner R30 section 19): which lessons were in
+        # each new decision's context (point in time), and, hourly, their
+        # forward INVESTMENT-sleeve evidence -- a lesson with harmful
+        # evidence is downweighted / superseded (append-only; a weight only
+        # falls; no decision reads it to trade)
+        from . import lesson_usage as LU
+        steps.append(("lesson_usage", LU.step))
     except ImportError:
         pass
     try:
@@ -564,6 +597,16 @@ def schedule(get_pool, *, trigger: str, **kw) -> dict:
         # NOT A PASS: the process is not configured for paper trading. No
         # task, no connection, no write.
         return {"scheduled": False, "why": S.R_ENV_OFF}
+    # THE HELD-MARK REFRESH (agents.paper_mark_refresh): every held market
+    # re-read inside the mark SLA, on its own connection and its own
+    # explicit, bounded read budget -- never the pass's lock or read cap.
+    # Scheduled on every servicing / cycle tick (coalesced, at most one run
+    # per MIN_RUN_INTERVAL_S), whether or not a pass is already running.
+    try:
+        from . import paper_mark_refresh as _PMR
+        _PMR.schedule(get_pool, trigger=trigger)
+    except Exception:                                           # noqa: BLE001
+        log.warning("held-mark refresh not scheduled", exc_info=True)
     t = _TASK.get("task")
     if t is not None and not t.done():
         _TASK["coalesced"] += 1

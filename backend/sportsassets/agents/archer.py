@@ -51,6 +51,7 @@ from typing import Any
 
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import execution_evidence as EE
 from . import pos_authority as PA
 from . import pos_evidence as _PE  # noqa: F401  (registers evidence kinds)
 from . import registry as R
@@ -405,6 +406,19 @@ def estimate(candidate: dict, book_row: dict | None, history: dict, *,
     if book_row and book_row.get("obs_id") is not None:
         refs.append({"kind": "paper_book_observations",
                      "id": str(book_row["obs_id"])})
+    # WHAT THIS ESTIMATE WAS FITTED ON (R30C): persisted inside `inputs`
+    # (jsonb, no schema change) and carried on the canonical intent -- with
+    # the LIVE interval of the net executable edge and the EV (the point
+    # values above are the paper simulator's; a LIVE reader gets a wider
+    # range, never the point alone).
+    evidence = execution_evidence(history, style)
+    fpv, adv_v = evidence["fill_probability"], evidence["adverse_selection_pp"]
+    evidence["live_interval"] = EE.live_executable_bounds(
+        net_pp=net, adverse_pp=adverse_used,
+        adverse_live=(adv_v.get("live_ci_low"), adv_v.get("live_ci_high")),
+        fill_live=(fpv.get("live_ci_low"), fpv.get("live_ci_high")),
+        qty=qty if style == MAKER else q_exec,
+        fitted_on=evidence["fitted_on"])
     return {
         "estimate_id": estimate_id_for(candidate["decision_id"]),
         "decision_id": str(candidate["decision_id"]),
@@ -451,7 +465,9 @@ def estimate(candidate: dict, book_row: dict | None, history: dict, *,
             "planned_qty": _r(qty if style == MAKER else q_exec, 4),
             "history": {k: history.get(k) for k in (
                 "fill_rate", "time_to_fill", "adverse_selection",
-                "latency")}},
+                "latency", "evidence_class")},
+            "execution_evidence": evidence},
+        "execution_evidence": evidence,
         "evidence_refs": refs, "authority": AUTHORITY,
         "production_effect": "NONE"}
 
@@ -564,6 +580,16 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
         filled = sum(1 for r in o if r.get("state") == "FILLED")
         out["fill_rate"][style] = _rate(filled, len(o),
                                         "TERMINAL_ORDERS")
+        # R30C: the INDEPENDENT EVENTS the rate rests on (orders on one
+        # fixture are not independent of each other) -- carried beside the
+        # rate so its interval can be clustered. The rate itself and its
+        # MIN_HISTORY gate are unchanged.
+        if o and any("cluster" in r for r in o):
+            cp = EE.clustered_proportion(
+                [r.get("state") == "FILLED" for r in o],
+                [r.get("cluster") for r in o])
+            out["fill_rate"][style].update(clusters=cp["clusters"],
+                                           n_eff=cp["n_eff"])
         t = sorted(float(r["ttf_s"]) for r in fills
                    if _style_of(r.get("order_type")) == style
                    and _num(r.get("ttf_s")) is not None
@@ -573,18 +599,28 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
              "why": None} if len(t) >= MIN_HISTORY else
             {"value": None, "n": len(t),
              "why": "FILL_TIMES_BELOW_%d (n=%d)" % (MIN_HISTORY, len(t))})
-        mk = [float(r["markout_pp"]) for r in markouts
-              if _style_of(r.get("order_type")) == style
-              and _num(r.get("markout_pp")) is not None]
+        mrows = [r for r in markouts
+                 if _style_of(r.get("order_type")) == style
+                 and _num(r.get("markout_pp")) is not None]
+        mk = [float(r["markout_pp"]) for r in mrows]
+        # the spread of the markouts travels with their mean, so a LIVE
+        # reader can put an interval on it (R30C execution evidence); with
+        # event keys, the cluster-robust standard error too
         out["adverse_selection"][style] = (
             {"value": round(max(0.0, statistics.fmean(mk)), 6),
              "raw_mean_pp": round(statistics.fmean(mk), 6), "n": len(mk),
+             "sd_pp": (round(statistics.stdev(mk), 6) if len(mk) > 1
+                       else None),
              "why": None,
              "basis": "max(0, mean(mid at fill - mid %d..%d s later))"
                       % (MARKOUT_FROM_S, MARKOUT_TO_S)}
             if len(mk) >= MIN_HISTORY else
             {"value": None, "n": len(mk),
              "why": "MARKOUTS_BELOW_%d (n=%d)" % (MIN_HISTORY, len(mk))})
+        if len(mk) >= MIN_HISTORY and any("cluster" in r for r in mrows):
+            cm = EE.clustered_mean(mk, [r.get("cluster") for r in mrows])
+            out["adverse_selection"][style].update(
+                clusters=cm["clusters"], se_clustered_pp=cm["se"])
     lat = sorted(float(r["submit_s"]) for r in orders
                  if _num(r.get("submit_s")) is not None
                  and float(r["submit_s"]) >= 0)
@@ -596,7 +632,74 @@ def summarise_history(orders: list, fills: list, markouts: list) -> dict:
                               % (MIN_HISTORY, len(lat))})
     out["queue"] = {"n": sum(1 for r in orders
                              if _num(r.get("queue_ahead_qty")) is not None)}
+    # EVERY RATE ABOVE IS FITTED ON THE PAPER SIMULATOR'S ORDERS AND FILLS
+    # (paper_orders / paper_fills, event_source CHECKed SIMULATOR). Said on
+    # the history itself, so no estimate built from it travels without the
+    # label (execution_evidence; owner audit 2026-10-04).
+    out["evidence_class"] = EE.PAPER_SIMULATION
     return out
+
+
+#: WHAT EACH OF ARCHER'S EXECUTION INPUTS IS FITTED ON (R30C). The fill rate,
+#: time to fill and markouts come from the paper simulator's own orders and
+#: fills; spread and slippage are a walk of the decision's DISPLAYED book
+#: and were fitted on no fill; cancel / replace and recovery are not
+#: estimated at all. No ACTUAL (canonical venue) fill exists while SMALL
+#: LIVE is SHADOW.
+EXECUTION_EVIDENCE_CLASS = EE.PAPER_SIMULATION
+FITTED_ON = {
+    "fill_probability": EE.PAPER_SIMULATION,
+    "time_to_fill": EE.PAPER_SIMULATION,
+    "adverse_selection": EE.PAPER_SIMULATION,
+    "spread_cost": EE.NO_FILL_EVIDENCE,
+    "slippage": EE.NO_FILL_EVIDENCE,
+    "max_executable_qty": EE.NO_FILL_EVIDENCE,
+    "cancel_replace": EE.UNMEASURED,
+    "recovery": EE.UNMEASURED,
+}
+
+
+def execution_evidence(history: dict, style: str) -> dict:
+    """THE PROVENANCE AN ESTIMATE CARRIES: what each input was fitted on, the
+    fitted fill rate and markout of the chosen style with their class
+    interval AND their LIVE (widened) interval, and why ACTUAL is
+    unmeasured. Pure. A LIVE reader of the canonical intent sees, beside
+    `expected_fill_probability`, that it is the paper simulator's rate and
+    how much wider it must be read for live use."""
+    cls = (history or {}).get("evidence_class") or EE.PAPER_SIMULATION
+    key = MAKER if style == MAKER else TAKER
+    fr = ((history or {}).get("fill_rate") or {}).get(key) or {}
+    adv = ((history or {}).get("adverse_selection") or {}).get(key) or {}
+    ttf = ((history or {}).get("time_to_fill") or {}).get(key) or {}
+    # a rate Archer declared unmeasured (below MIN_HISTORY) carries NO
+    # interval: proportion_view never re-derives it from the numerator
+    fill = EE.proportion_view(fr.get("value"), fr.get("numerator"),
+                              fr.get("denominator"), cls,
+                              n_eff=fr.get("n_eff"),
+                              clusters=fr.get("clusters"))
+    if fr.get("value") is None:
+        fill.update(why=fr.get("why") or "NO_FILL_HISTORY")
+    if adv.get("value") is None:
+        mark = EE.mean_view(None, None, adv.get("n"), cls)
+        mark.update(why=adv.get("why") or "NO_MARKOUT_HISTORY")
+    else:
+        mark = EE.mean_view(adv.get("raw_mean_pp"), adv.get("sd_pp"),
+                            adv.get("n"), cls,
+                            se=adv.get("se_clustered_pp"),
+                            clusters=adv.get("clusters"))
+    return EE.provenance(
+        cls, basis=("Archer's recorded history: paper_orders terminal fill "
+                    "rates, paper_fills times to fill and %d-%d s markouts "
+                    "against paper_book_observations (last %d days)"
+                    % (MARKOUT_FROM_S, MARKOUT_TO_S,
+                       HISTORY_LOOKBACK_S // 86400)),
+        n=fr.get("denominator"),
+        extra={"style": key, "fitted_on_by_input": dict(FITTED_ON),
+               "fill_probability": fill,
+               "adverse_selection_pp": mark,
+               "time_to_fill_s": {"value": ttf.get("value"),
+                                  "n": ttf.get("n"), "fitted_on": cls,
+                                  "why": ttf.get("why")}})
 
 
 def _mid_of(bids, offers, side) -> float | None:
@@ -611,7 +714,8 @@ async def history_stats(conn, *, now: float) -> dict:
     lo = now - HISTORY_LOOKBACK_S
     orders = [dict(r) for r in await conn.fetch(
         "SELECT order_type, state, queue_ahead_qty, "
-        "       extract(epoch FROM created_at - decided_at) AS submit_s "
+        "       extract(epoch FROM created_at - decided_at) AS submit_s, "
+        "       coalesce(fixture, us_market_slug) AS cluster "
         "  FROM paper_orders WHERE created_at BETWEEN to_timestamp($1) "
         "   AND to_timestamp($2) ORDER BY created_at DESC LIMIT $3",
         lo, now, HISTORY_LIMIT)]
@@ -624,6 +728,7 @@ async def history_stats(conn, *, now: float) -> dict:
         " ORDER BY o.created_at DESC LIMIT $3", lo, now, HISTORY_LIMIT)]
     rows = await conn.fetch(
         "SELECT f.fill_id, f.holding_side, f.price, o.order_type, "
+        "       coalesce(o.fixture, f.us_market_slug) AS cluster, "
         "       b0.bids AS b0b, b0.offers AS b0o, b1.bids AS b1b, "
         "       b1.offers AS b1o "
         "  FROM paper_fills f JOIN paper_orders o USING (order_id) "
@@ -645,7 +750,8 @@ async def history_stats(conn, *, now: float) -> dict:
         if m0 is None or m1 is None:
             continue
         markouts.append({"order_type": r["order_type"],
-                         "markout_pp": m0 - m1, "fill_id": r["fill_id"]})
+                         "markout_pp": m0 - m1, "fill_id": r["fill_id"],
+                         "cluster": r["cluster"]})
     out = summarise_history(orders, fills, markouts)
     out["read_at"] = now
     return out
@@ -931,6 +1037,9 @@ def _row(r) -> dict:
 
 
 def _with_links(e: dict) -> dict:
+    # R30C: every estimate read for display says what its fill probability
+    # was fitted on (agent pages, desk, API)
+    e["fill_probability_evidence"] = EE.fill_probability_label(e)
     e["evidence"] = [dict(x, href=None) for x in (e.get("evidence_refs")
                                                   or [])]
     e["evidence"].append({"kind": "eddie_execution_estimates",
@@ -1231,6 +1340,8 @@ async def desk(conn) -> dict:
             "expected_net_executable_edge_pp": cur[
                 "expected_net_executable_edge_pp"],
             "expected_fill_probability": cur["expected_fill_probability"],
+            # R30C: what the fill probability was fitted on, beside it
+            "fill_probability_evidence": EE.fill_probability_label(cur),
             "expected_slippage_pp": cur["expected_slippage_pp"],
             "expected_capital_hours": cur["expected_capital_hours"],
             "max_executable_qty": cur["max_executable_qty"],

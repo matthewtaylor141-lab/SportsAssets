@@ -560,12 +560,44 @@ def team_profile(name, family=None, nickname=None) -> dict:
     return out
 
 
-def same_college_team(provider: dict, venue: dict) -> dict:
+def same_college_team(provider: dict, venue: dict, *,
+                      exact_school_confirms: bool = False) -> dict:
     """`same_team`, plus the football guard: the venue's own nickname must be
-    in the provider's name. Pure."""
+    in the provider's name. Pure.
+
+    `exact_school_confirms` (coverage census, 2026-10-05; the caller passes
+    it only for a venue event PinnAPI-native discovery already matched to
+    this provider fixture by EXACT structured identity): a provider name
+    whose tokens EQUAL the venue's school tokens (its participant record
+    without the nickname) -- Pinnacle's "Troy" for the venue's "troy" +
+    "trojans" -- is the venue's own school record, token for
+    token. The guard exists for CONTAINMENT ("Ohio" inside "Ohio State"),
+    which equality cannot be: "Ohio" still never confirms "ohio state". The
+    other conditions of `same_team` (equal squad qualifiers, a shared
+    distinctive token) and the caller's one-to-one assignment of BOTH teams,
+    start tolerance and league token all still apply.
+
+    THE LOSS THIS CLOSES. Pinnacle names a college team by its school only
+    (the discovery's receipts and its tests: "Troy", "Southern Miss",
+    "Ohio"), so every PinnAPI-native NCAAF seed -- the one path that prices a
+    college game from a current WS quote -- was refused here with
+    VENUE_NATIVE_NICKNAME_DOES_NOT_CONFIRM_THE_TEAM, on every game, while
+    the metered path's own names never match a WS fixture: NCAAF reached no
+    valuation."""
     got = same_team(provider, venue)
     nick = venue.get("nickname_tokens") or frozenset()
     got["venue_nickname"] = sorted(nick)
+    school = frozenset(venue["tokens"]) - frozenset(nick)
+    if got["same"] and exact_school_confirms and school and \
+            provider["tokens"] == school and \
+            not (nick and nick <= provider["tokens"]):
+        got.update(confirmed_by="EXACT_SCHOOL_TOKENS_ON_THE_DISCOVERED_EVENT",
+                   why=("the provider's name is the venue's school %s (its "
+                        "record without the nickname %s) token for token, on "
+                        "the venue event discovery matched by exact "
+                        "structured identity" % (sorted(school),
+                                                 sorted(nick))))
+        return got
     if got["same"] and not (nick and nick <= provider["tokens"]):
         got.update(same=False, nickname_blocked=True,
                    why=("the venue's nickname %s is not in the provider's "
@@ -807,8 +839,14 @@ def match_event(*, home, away, commence_epoch, family, rows,
             nk = ev.get("nicknames") or {}
             pa = team_profile(a, family, nickname=nk.get(a))
             pb = team_profile(b, family, nickname=nk.get(b))
-            h_a, h_b = same_college_team(hp, pa), same_college_team(hp, pb)
-            a_a, a_b = same_college_team(ap, pa), same_college_team(ap, pb)
+            # ONLY ON THE DISCOVERED EVENT may an exact school stand in for
+            # the nickname (same_college_team): two independent exact
+            # identities then agree; a metered name still needs its nickname
+            _xs = event_slug is not None
+            h_a = same_college_team(hp, pa, exact_school_confirms=_xs)
+            h_b = same_college_team(hp, pb, exact_school_confirms=_xs)
+            a_a = same_college_team(ap, pa, exact_school_confirms=_xs)
+            a_b = same_college_team(ap, pb, exact_school_confirms=_xs)
             for v in (h_a, h_b, a_a, a_b):
                 if v.get("nickname_blocked") and \
                         ev["event_slug"] not in nickname_blocked:

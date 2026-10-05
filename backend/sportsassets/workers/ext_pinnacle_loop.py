@@ -10202,6 +10202,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_reason
                 tally[_ws_code] = tally.get(_ws_code, 0) + 1
                 _step_refuse(_ws_code)
+                # ITS LEDGER STAGE (coverage census, 2026-10-05): the row was
+                # written with none, so coverage_integrity ranked it 0 --
+                # never normalized -- whatever the WS reason was. Staged as
+                # the wrapped reason stages (ext.ledger_stage_of, the rule
+                # `no_pinnacle_stage` applies to a refused WS read).
+                _event_fields({"stage": ext.ledger_stage_of(_ws_code)})
                 # THE WS REASON, KEPT (it was discarded here): why the
                 # reactive evaluation's own trigger could not be used.
                 if _ws_why.get("reason"):
@@ -10299,15 +10305,29 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     ident = vn
                     _venue_native_took_it(replaced)
                 else:
+                    _id_codes = []
                     for code in mapped["refusals"]:
                         if code == R_GLOBAL_NOT_CONSULTED:
                             continue        # not a refusal: not asked
                         tally[code] = tally.get(code, 0) + 1
                         _step_refuse(code)
+                        _id_codes.append(code)
                     if vn is not None:
                         code = vn.get("refusal") or vnat.R_NO_EVENT
                         tally[code] = tally.get(code, 0) + 1
                         _step_refuse(code)
+                        _id_codes.append(code)
+                    # ITS LEDGER STAGE (coverage census, 2026-10-05): this
+                    # row was written with none, so an event that HAD a
+                    # price and stopped at venue identity ranked 0 in
+                    # coverage_integrity -- counted as never normalized
+                    # (every PinnAPI-native basketball seed, every Serie B
+                    # fixture the venue does not list). Staged by its first
+                    # identity code; a provider-side code stages nothing.
+                    _id_stage = (ext.ledger_stage_of(_id_codes[0])
+                                 if _id_codes else None)
+                    if _id_stage is not None:
+                        _event_fields({"stage": _id_stage})
                     continue
             else:
                 _event_fields({"mapped_by": vnat.MAPPED_BY_GLOBAL})

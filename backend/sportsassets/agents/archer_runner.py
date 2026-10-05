@@ -13,7 +13,12 @@ lifespan). Every pass:
      that filled on paper;
   5. assembles the candidate-review workflow (pos_workflow) for the
      estimated candidates and attaches results;
-  6. heartbeats the outcome (DECISION_RECORDED when it wrote an estimate,
+  6. syncs his DURABLE WORK QUEUE (agents/agent_work.py, migration 301):
+     every ENTER decision still owed an estimate is an EXECUTION_ESTIMATE
+     item (a refusal is a BLOCKED attempt naming it), every filled estimate
+     still owed an outcome an OUTCOME_CALIBRATION item; landed estimates /
+     outcomes complete them with their ids;
+  7. heartbeats the outcome (DECISION_RECORDED when it wrote an estimate,
      IDLE when there was nothing, FAILED when every phase failed) and
      finishes the run, with a service heartbeat `agent_archer`.
 
@@ -106,6 +111,20 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
             summary["refused"][c["decision_id"]] = got.get("refusal")
     outs = await _phase(summary, "outcomes", E.record_outcomes(conn, now=at))
     summary["outcomes"] = (outs or {}).get("recorded", [])
+    # THE DURABLE QUEUE (migration 301): what this pass tried and could not
+    # finish is an ATTEMPT on the item, with its blocker
+    from . import agent_work as AW
+    summary["work_queue"] = await _phase(summary, "work_queue", AW.sync_for(
+        conn, "archer_runner", now=at, attempts={
+            AW.K_ESTIMATE: {d: {"outcome": AW.O_BLOCKED,
+                                "blocker": str(r or "ESTIMATE_REFUSED"),
+                                "next_in_s": INTERVAL_S}
+                            for d, r in summary["refused"].items()},
+            AW.K_CALIBRATION: {e: {"outcome": AW.O_BLOCKED,
+                                   "blocker": str(err).split(":")[0][:200],
+                                   "next_in_s": INTERVAL_S}
+                               for e, err in ((outs or {}).get("errors")
+                                              or {}).items()}}))
     ids = await _phase(summary, "review_candidates", conn.fetch(
         "SELECT e.decision_id FROM eddie_execution_estimates e "
         " LEFT JOIN pos_candidate_reviews v ON v.decision_id = e.decision_id"

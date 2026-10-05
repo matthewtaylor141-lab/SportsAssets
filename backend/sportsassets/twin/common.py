@@ -21,6 +21,16 @@ from ..intel import common as IC
 LABEL = "RESEARCH"
 COUNTERFACTUAL = "COUNTERFACTUAL"
 BOOKS = ("PAPER", "ACTUAL")
+#: R30C · THE EXECUTION-EVIDENCE CLASS OF EACH BOOK'S FILLS. PAPER fills are
+#: the paper simulator's (PAPER_SIMULATION, never proof of live execution);
+#: the twin's ACTUAL book reads execmirror_fills -- real venue fills of the
+#: LEGACY execution-mirror lane (ACTUAL, but NOT the canonical SMALL LIVE
+#: path, which has none while it is SHADOW). Literals, because the twin may
+#: import nothing outside itself, intel and quality_stats; pinned equal to
+#: execution_evidence by tests/test_execution_calibration.py.
+EXECUTION_EVIDENCE_CLASS = {"PAPER": "PAPER_SIMULATION", "ACTUAL": "ACTUAL"}
+ACTUAL_BOOK_PATH = ("LEGACY_EXECUTION_MIRROR (execution_intents -> "
+                    "execmirror_fills), not the canonical SMALL LIVE path")
 AUTHORITY = "RESEARCH_NO_AUTHORITY"
 DISCLOSURE = (
     "RESEARCH: computed from the recorded stream, persisted to twin_* tables "

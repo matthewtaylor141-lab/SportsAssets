@@ -217,9 +217,16 @@ def test_nothing_outside_the_layer_reads_or_imports_it():
     # its import closure holds no venue / order / paper / funded module
     # (tests/test_lost_opportunity_is_research_only.py pins both); the
     # write check below applies to it too.
+    # (claude/pos-complete) the profitability OS page (sportsassets/pos_os,
+    # GET /api/command/profitability/os) SELECTs the latest MODEL_TOURNAMENT
+    # snapshot and poslearn_experiments in a READ ONLY transaction to show
+    # the tournament's verdicts and audit experiment governance; it writes
+    # nothing and its import closure holds no venue / order / paper module
+    # (tests/test_pos_os_authority.py pins both).
     research_readers = {PKG / "agents" / "improvement_pipeline.py",
                         PKG / "agents" / "improvement_stages.py",
-                        PKG / "lost_opportunity" / "reads.py"}
+                        PKG / "lost_opportunity" / "reads.py"} | set(
+                            (PKG / "pos_os").glob("*.py"))
     for p in PKG.rglob("*.py"):
         if p.parent == PKG / "poslearn" or p == API or p in research_readers:
             continue
