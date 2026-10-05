@@ -67,6 +67,25 @@ DECISION_LOGIC_FILES = (
     # premise -- paper_benchmark's ENTER imports it, so a change to it
     # changes the decision and must restart the forward window
     "bettor_ncaaf_settlement.py",
+    # P0 incident inc-edge (pinned at integration): the gross edge's INPUT
+    # validation -- paper_benchmark's and paper_derek's decisions refuse
+    # (SOFTWARE) when the row's probability, the book's best level or the
+    # fee do not reproduce, and compute no edge verdict on a failed input,
+    # so a change to it changes which candidates can ENTER
+    "gross_edge_inputs.py",
+    # P0 incident inc-pinnapi (pinned at integration): the line-market
+    # (spread / total / team total) payoff-equivalence proofs and their
+    # 30 s re-check -- the completed-game match re-runs `prove` /
+    # `book_grading` for every line row and paper_derek re-validates a line
+    # valuation's reference with `validate_reference` at the decision, so a
+    # change to it changes which line contracts are priced and entered.
+    #
+    # NOT pinned, deliberately: refusal_taxonomy.py / refusal_taxonomy_table.py
+    # (inc-edge) only LABEL a refusal code SOFTWARE / ECONOMIC and its funnel
+    # stage, for records and GET /api/command/agent-funnel; no decision root
+    # imports them and no ENTER, size, freshness or management decision reads
+    # them (bettor_external_shadow uses them for a row's stage label only).
+    "bettor_market_family.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",
