@@ -480,18 +480,38 @@ def test_the_nfl_enters_the_de_vig_set_conditional_on_no_tie():
     assert 0.33 < val["probability"] < 0.36
     assert val["conditional_on"]["condition"] == "NO_TIE"
     assert "draw is not offered" in val["conditional_on"]["book_rule"]
-    # the same prices on a college contract stay outside, as before
+    # PIN UPDATED IN THE P0 INCIDENT (NCAAF stream): the same prices on a
+    # college contract stayed outside because no college row had been
+    # measured. They now enter by the college board's OWN measurement
+    # (research-sql run 37241503567, N3/N4: 9/9 cfb lines two-way, no Draw;
+    # SUPPORTED_BY_LEAGUE cfb), with the same NO_TIE conditioning -- and a
+    # football league measured by nobody (the CFL here) stays outside, named.
     cfb = devig.valuation(
         contract={"sport_family": "football", "market": "h2h",
                   "selection": "Washington Commanders",
-                  "us_market_slug": "aec-cfb-ind-was-2026-10-04"},
+                  "us_market_slug": "aec-cfb-ind-was-2026-10-04",
+                  "event_key": "e1", "period": "FULL_GAME"},
+        quote={"book": "pinnacle", "event_key": "e1", "period": "FULL_GAME",
+               "observed_at": 0.0,
+               "outcomes": {"Washington Commanders": 2.8,
+                            "Indianapolis Colts": 1.48}},
+        now=1.0)
+    assert cfb["refusals"] == []
+    assert cfb["admitted_for_league"] == "football/h2h@cfb"
+    assert cfb["probability"] == pytest.approx(val["probability"])
+    assert cfb["conditional_on"]["condition"] == "NO_TIE"
+    cfl = devig.valuation(
+        contract={"sport_family": "football", "market": "h2h",
+                  "selection": "Washington Commanders",
+                  "us_market_slug": "aec-cfl-ind-was-2026-10-04"},
         quote={"book": "pinnacle",
                "outcomes": {"Washington Commanders": 2.8,
                             "Indianapolis Colts": 1.48}},
         now=1.0)
-    assert cfb["probability"] is None
-    assert cfb["refusals"] == [devig.R_UNSUPPORTED_MARKET]
-    assert cfb["supported_for_league_only"] == ["football/h2h@nfl"]
+    assert cfl["probability"] is None
+    assert cfl["refusals"] == [devig.R_UNSUPPORTED_MARKET]
+    assert cfl["supported_for_league_only"] == ["football/h2h@cfb",
+                                                "football/h2h@nfl"]
     # a contract whose explicit league and slug disagree is not established
     assert devig.league_of_contract(
         {"league": "nfl", "us_market_slug": "aec-cfb-x-y-2026-10-04"}) is None

@@ -1,0 +1,58 @@
+{
+ "_what": "THE COLLEGE-FOOTBALL OVERTIME RULE (a game tied after regulation is played to a winner), as retrieved -- the evidence bettor_ncaaf_settlement.NO_TIE_RULE_EVIDENCE rests on. Verbatim wikitext sentences of one revision; nothing interpreted here.",
+ "_source_class": "SECONDARY (an encyclopedia summary of the NCAA rule). The NCAA's own rules book was sought twice; see primary_source_attempts: the old PDF path is a 404 and the current book is a checkout download only.",
+ "source": "Wikipedia, 'Overtime (sports)'",
+ "revision": {
+  "revid": 1377048726,
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37241519094,
+   "job_id": 111551331365,
+   "retrieved_at": "2026-10-04T22:53:31Z",
+   "url": "https://en.wikipedia.org/w/api.php?action=parse&page=Overtime_(sports)&prop=sections|revid&format=json",
+   "bytes": 7226,
+   "sha256": "cd4fe87eed027494226e1c39952b55a76087f5423a7296605086455e095e8a18"
+  },
+  "section_index": 10,
+  "section_line": "College, high school, and Canadian football"
+ },
+ "section_college": {
+  "url": "https://en.wikipedia.org/w/api.php?action=parse&oldid=1377048726&section=10&prop=wikitext&format=json",
+  "read_by": {
+   "workflow": "fetch-docs",
+   "run_id": 37241934626,
+   "job_id": 111552230343,
+   "retrieved_at": "2026-10-04T22:59:10Z",
+   "bytes": 11968,
+   "sha256": "6e0c280c7bb6f71dd138235322307a61c6bf03e24a1838e6c27afc34230dc02d"
+  },
+  "heading": "===College, high school, and Canadian football===",
+  "scope_sentence": "In [[college football|college]] (since the [[1996 NCAA Division I-A football season|1996 season]]) and [[high school football]], as well as the [[Canadian Football League]] (since the 2000 season) and the short-lived [[Alliance of American Football]], an ''overtime procedure'' is used to determine the winner.",
+  "repeat_sentence": "If the score remains tied at the end of the first overtime period, the procedure is repeated.",
+  "until_winner_sentence": "In American college and high school football, the overtime periods are continued until a winner is determined.",
+  "ncaa_two_point_sentence": "In [[College football|NCAA football]], since 2021, teams must attempt a [[two-point conversion]] after a touchdown in double overtime; all overtime procedures thereafter consist of two-point conversion attempts and are scored as such.",
+  "points_count_sentence": "All points scored in overtime count as if they were scored in regulation.",
+  "contrast_cfl_sentence": "Before 2026, the CFL limited overtime procedures to two in regular-season games; if the scores were still level, the game was a tie.",
+  "contrast_note": "the same section names the leagues whose overtime CAN end level (the CFL before 2026, the AAF's regular season); it names no such limit for college football"
+ },
+ "primary_source_attempts": [
+  {
+   "url": "https://www.ncaapublications.com/productdownloads/FR25.pdf",
+   "result": "HTML page titled '404 Not Found – NCAA Publications' ('Sorry! page you are looking can’t be found.'), not a PDF",
+   "bytes": 137030,
+   "sha256": "85b5e50a90b5153cc4863948c34c70893b57e6d3bcd4c4d3ca4fa41404d21eca",
+   "workflow": "fetch-docs",
+   "run_id": 37241681952,
+   "job_id": 111551624059,
+   "retrieved_at": "2026-10-04T22:54:54Z"
+  },
+  {
+   "url": "https://www.ncaapublications.com/collections/rules-books",
+   "result": "the publisher's catalogue lists '2025 NCAA Football Rules Book - PDF Download' (and the 2024 book) as $0.00 cart products (/products/2025-ncaa-football-rules-book): a checkout download, not a public URL a read-only runner can fetch",
+   "workflow": "fetch-docs",
+   "run_id": 37242123927,
+   "job_id": 111552778129,
+   "retrieved_at": "2026-10-04T23:02:33Z"
+  }
+ ]
+}

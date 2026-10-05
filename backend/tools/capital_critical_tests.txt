@@ -732,6 +732,20 @@ tests/test_nfl_slate_reaches_a_recorded_outcome.py
 # the Pro Bowl excluded.
 tests/test_nfl_settlement_and_tie_evidence.py
 tests/test_nfl_through_the_paper_pass.py
+# P0 incident, NCAAF settlement: the college money line compared as PAYOUTS
+# per state from CITED texts (the venue's cfb wording, one wording on every
+# production row; Pinnacle's American Football + General Rules; the college
+# overtime rule, secondary source stated); the venue text read clause by
+# clause (each missing / varied / contradicted / extra clause its own
+# refusal); the book's two-way price used unchanged only while every premise
+# holds (a completed college game cannot end tied); the college board
+# admitted to the de-vig by its own measurement; the strict policy's
+# refusal naming each payout difference; and the REAL paper pass: ENTER ->
+# PAPER order -> simulated PAPER fill with a canonical intent and a SHADOW
+# adapter row, each unproven clause refused, withdrawn evidence refused,
+# the 30 s rule unchanged, Xavier on the entry's reading.
+tests/test_ncaaf_settlement_evidence.py
+tests/test_ncaaf_through_the_paper_pass.py
 # cand24 B: one status per league (HEALTHY / REFUSING_BY_POLICY /
 # EXPLICITLY_UNSUPPORTED / COVERAGE_INCIDENT / UNAVAILABLE), an Audrey alert
 # for every coverage incident (NULL is not absence), the per-game NFL

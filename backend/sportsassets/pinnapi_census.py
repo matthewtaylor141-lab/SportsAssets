@@ -52,9 +52,17 @@ SPORT_IDS = (("baseball", 6), ("soccer", 1), ("basketball", 3),
              ("americanfootball", 5), ("tennis", 2), ("mma", 8),
              ("boxing", 9), ("esports", 11), ("golf", 12), ("rugby", 7))
 
-#: the venue's NFL money-line sports type (R30A; admitted in `family_of`
-#: for the NFL league only)
+#: the venue's football money-line sports type (R30A; admitted in
+#: `family_of` only for a league the de-vig admits by measurement: the NFL,
+#: and since the P0 incident the college board, `cfb`). The name is kept:
+#: the venue spells its NFL and college winner types the same way.
 NFL_MONEYLINE_TYPE = "football_team_full_game_winner"
+#: the census refusal for a football money line of a league the de-vig has
+#: NOT admitted (or whose structured league and slug disagree). Renamed in the
+#: P0 incident from FOOTBALL_MONEYLINE_ADMITTED_FOR_THE_NFL_ONLY, which became
+#: untrue the moment the college board was admitted by its own measurement.
+R_FOOTBALL_LEAGUE_NOT_ADMITTED = (
+    "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT")
 
 S_FEED_NOT_SYNCED = "FEED_NOT_SYNCED"
 S_OUT_OF_SCOPE = "OUT_OF_FEED_SCOPE_SPORT"
@@ -152,8 +160,14 @@ def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
         # (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE), so this label is
         # granted by the same league read the de-vig makes -- the row's
         # structured team league and its venue-native slug, which must agree
-        # -- and never by the sports type alone: the college board could share
-        # the spelling, and its terms were never compared. Before this, every
+        # -- and never by the sports type alone: the college board DOES share
+        # the spelling. It is admitted since the P0 incident by its OWN
+        # measurement (SUPPORTED_BY_LEAGUE cfb: research-sql run 37241503567,
+        # 9/9 cfb lines two-way) and its own cited terms
+        # (bettor_ncaaf_settlement); its catalogue rows carry the same clock
+        # line (research-sql run 37241920748, C1/C2: line '00' / '30',
+        # tests/fixtures/pmus_cfb_catalogue_rows_2026_10_04.json), proved by
+        # the same side-aware clock proof below. Before this, every
         # held NFL contract was MATCHED_UNSUPPORTED_FAMILY
         # (VENUE_MARKET_TYPE_NOT_PROVED), so the held read, the held-first
         # queue and the on-demand Xavier read refused all NFL inventory even
@@ -172,8 +186,7 @@ def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
             {"league": r.get("team_league"),
              "us_market_slug": r.get("identifier")})
         if devig.expected_outcomes("football", "h2h", league=league) is None:
-            return ('MONEYLINE', False,
-                    'FOOTBALL_MONEYLINE_ADMITTED_FOR_THE_NFL_ONLY')
+            return ('MONEYLINE', False, R_FOOTBALL_LEAGUE_NOT_ADMITTED)
     if st in ('baseball_team_full_game_winner',
               'soccer_team_full_time_winner', NFL_MONEYLINE_TYPE):
         if line not in (None, '') and row is not None:

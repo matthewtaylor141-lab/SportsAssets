@@ -192,11 +192,23 @@ SUPPORTED: dict = {
 #:
 #: WHY THE LEAGUE AND NOT THE SPORT. The measurement read NFL rows; it says
 #: nothing about college football, whose venue terms, tie rule (college
-#: overtime has no tie) and book coverage were never measured by this
-#: stream. NCAAF therefore stays exactly where it was --
-#: MARKET_NOT_IN_SUPPORTED_SET with its priced set recorded -- and the
-#: football key is deliberately NOT added to SUPPORTED, which every
-#: league of the family would inherit.
+#: overtime has no tie) and book coverage were never measured by that
+#: stream. So the football key is deliberately NOT added to SUPPORTED, which
+#: every league of the family -- the CFL, the UFL, anything the venue lists
+#: next -- would inherit; each league is admitted by its OWN measurement.
+#:
+#: COLLEGE FOOTBALL, P0 INCIDENT -- ADMITTED BY ITS OWN MEASUREMENT, THE SAME
+#: SHAPE AS THE NFL'S. research-sql run 37241503567 (job 111550976439,
+#: research/incident_ncaaf_settlement_wording.sql sha256 0335ccc4...c853, read
+#: 2026-10-04T22:54:12Z, N3/N4) read the priced set kept on EVERY production
+#: cfb valuation row (all time, no limit): 9 of 9 rows / 9 contracts priced
+#: EXACTLY two outcomes, zero carrying a Draw / Tie / X key, all 9 from book
+#: Pinnacle (provider the-odds-api.com/v4), overround 0.02814..0.05607
+#: (tests/fixtures/ncaaf_production_wording_2026_10_04.json). The complete
+#: set is two. The number is still P(win | no tie) by the same General Rule;
+#: for a college contract that IS the value -- a completed college game is
+#: played to a winner -- and `bettor_ncaaf_settlement.convert` re-checks
+#: every premise of that before the policy uses it.
 #:
 #: WHAT THE NUMBER IS. The book offers no draw price, so by its General
 #: Rules a tie VOIDS the bet ("If a draw is not offered and a draw happens,
@@ -208,6 +220,7 @@ SUPPORTED: dict = {
 #: refuses a draw-priced football line by name.
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,
+    ("football", "h2h", "cfb"): 2,
 }
 
 
@@ -253,7 +266,9 @@ CONDITIONAL_ON = {
         "consequence": ("the two-way price is P(win | the game does not end "
                         "tied); a contract that pays on a tie must convert it "
                         "(bettor_nfl_settlement.convert) before comparing it "
-                        "with a price")},
+                        "with a price, and a college contract is read by "
+                        "bettor_ncaaf_settlement.convert (no tie in a "
+                        "completed game: unchanged, every premise checked)")},
 }
 
 #: Sports in which Pinnacle was ABSENT FROM THE RESPONSES WE HAVE SEEN.

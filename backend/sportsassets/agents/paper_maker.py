@@ -508,15 +508,17 @@ async def step_maintain(conn, ctx: dict) -> dict:
         age = (None if v is None or v["observed_at"] is None
                else round(at - L._epoch(v["observed_at"]), 3))
         p_new = None if v is None else float(v["probability"])
-        conv = (PB.held_nfl_conversion(dict(contract))
+        conv = (PB.held_venue_conversion(dict(contract))
                 if p_new is not None and contract is not None else None)
         if conv is not None:
             # R30A: the standing bid is re-checked on the SAME scale it was
             # placed on -- an NFL line's P(win | no tie) as the venue
             # contract's value (tie pays 0.50) at the worst cited tie rate,
-            # for a game established as regular season. A conversion that
-            # cannot be made leaves no probability, and check_resting then
-            # cancels on the missing reading (C_UNVERIFIED).
+            # for a game established as regular season; an NCAAF line's (P0
+            # incident) unchanged, its contract's cited clauses re-checked. A
+            # conversion that cannot be made leaves no probability, and
+            # check_resting then cancels on the missing reading
+            # (C_UNVERIFIED).
             pin_like = {"p": p_new}
             why = PB.apply_venue_conversion(pin_like, conv)
             p_new = None if why else pin_like["p"]

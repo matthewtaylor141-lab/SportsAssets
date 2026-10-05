@@ -362,12 +362,32 @@ def test_nfl_terms_are_established_from_the_venues_own_text():
     assert not set(NFL.REFUSALS) & set(m["refusals"]), m["refusals"]
 
 
-def test_the_college_board_is_left_where_it_was():
+def test_the_college_board_takes_its_own_terms_never_the_nfls():
+    """PIN UPDATED IN THE P0 INCIDENT (NCAAF stream). This test pinned the
+    college board at NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT because nothing
+    had cited its contract. That fact legitimately changed: the college
+    contract is now compared clause by clause from its OWN cited texts
+    (bettor_ncaaf_settlement; tests/test_ncaaf_settlement_evidence.py). What
+    this test protected still holds and is asserted: the college board never
+    borrows the NFL's terms -- its grading period is the college one, no NFL
+    check runs on it, no NFL tie conversion is carried, and the college text
+    on an NFL slug does not establish the NFL grading."""
     cfb = CFB_LISTING["markets"][0]
     m = PB.completed_game_match(_cand(cfb["slug"]),
                                 _row(cfb["slug"], cfb["description"]))
-    assert PB.R_FAMILY in m["refusals"]
-    assert m["venue_conversion"] is None
+    assert PB.R_FAMILY not in m["refusals"], m["refusals"]
+    names = {c["check"]: c for c in m["checks"]}
+    gp = names["ordinary_completion_grading_period"]
+    assert gp["passed"] and gp["book"]["period"] == PB.GP_FOOTBALL_NCAAF
+    assert gp["book"]["period"] != PB.GP_FOOTBALL_NFL
+    assert not any(n.startswith("nfl_") for n in names), sorted(names)
+    assert m["venue_conversion"]["league"] == "cfb"
+    assert "phase" not in m["venue_conversion"]
+    assert not set(NFL.REFUSALS) & set(m["refusals"]), m["refusals"]
+    nfl_slug = "aec-nfl-ind-was-2026-10-04"
+    on_nfl = PB.completed_game_match(_cand(nfl_slug),
+                                     _row(nfl_slug, cfb["description"]))
+    assert PB.R_GP_UNKNOWN in on_nfl["refusals"], on_nfl["refusals"]
 
 
 def test_pro_bowl_and_mis_dated_slugs_are_refused():
@@ -483,15 +503,25 @@ def test_the_census_admits_every_production_nfl_row_and_no_college_row():
         got = CEN.family_of(r["kind"], r["line"], r["sports_type"], r)
         assert got == ("MONEYLINE", True, "PROVED_CLOCK_ARTIFACT"), (r, got)
     r = rows[0]
-    # the same row as a college contract, or with the leagues disagreeing
+    # with the leagues disagreeing, the league absent, or a league no one
+    # measured, the type alone admits nothing. PIN UPDATED IN THE P0 INCIDENT
+    # (NCAAF stream): a consistent COLLEGE row (structured league and slug
+    # both cfb) is admitted now, by the college board's own measurement and
+    # cited terms -- its production rows are pinned in
+    # tests/test_ncaaf_settlement_evidence.py -- and the refusal code, which
+    # said "NFL only", says what it means.
     for over in ({"team_league": "cfb"},
-                 {"team_league": "cfb",
-                  "identifier": "aec-cfb-ala-aub-2026-10-04"},
+                 {"team_league": "cfl",
+                  "identifier": "aec-cfl-ala-aub-2026-10-04"},
                  {"team_league": None, "identifier": None}):
         got = CEN.family_of(r["kind"], r["line"], r["sports_type"],
                             dict(r, **over))
         assert got == ("MONEYLINE", False,
-                       "FOOTBALL_MONEYLINE_ADMITTED_FOR_THE_NFL_ONLY"), over
+                       CEN.R_FOOTBALL_LEAGUE_NOT_ADMITTED), over
+    got = CEN.family_of(r["kind"], r["line"], r["sports_type"],
+                        dict(r, team_league="cfb",
+                             identifier="aec-cfb-ala-aub-2026-10-04"))
+    assert got == ("MONEYLINE", True, "PROVED_CLOCK_ARTIFACT")
     # a REAL line the side states is never erased by the clock proof
     got = CEN.family_of(r["kind"], "3.5", r["sports_type"], r)
     assert got == ("UNKNOWN", False, "WINNER_WITH_UNEXPECTED_LINE")
@@ -608,32 +638,51 @@ def test_a_held_nfl_contract_is_read_from_the_feed_end_to_end(monkeypatch):
     assert off["ok"] is False and off["reason"] == CEN.S_OUT_OF_SCOPE
 
 
-def test_a_held_college_contract_stays_unsupported(monkeypatch):
+def test_a_held_college_contract_is_read_and_an_unmeasured_league_is_not(
+        monkeypatch):
+    """PIN UPDATED IN THE P0 INCIDENT (NCAAF stream). This test pinned a held
+    COLLEGE contract as unsupported because the college board had no
+    measurement and no cited terms. Both now exist (SUPPORTED_BY_LEAGUE cfb,
+    research-sql run 37241503567; bettor_ncaaf_settlement), so a held college
+    contract is read like a held NFL one -- the NO_TIE conditioning travels
+    with the number, and the reader (paper_benchmark.held_venue_conversion)
+    re-checks the college contract's cited clauses. What the test protected
+    still holds and is asserted: a football league NO ONE measured (the CFL
+    here) stays unsupported at every held reader."""
     import types
-    rows = [dict(r, team_league="cfb",
-                 identifier="aec-cfb-det-car-2026-10-04",
-                 event_slug="cfb-det-car-2026-10-04")
-            for r in PROD_ROWS["rows"]
-            if r["identifier"] == "aec-nfl-det-car-2026-10-04"]
-    lions = next(r for r in rows if r["side_norm"] == "lions")
-    cache, at = _held_cache(lions["game_start"],
-                            [{"designation": "home", "price": 170},
-                             {"designation": "away", "price": -200}])
-    monkeypatch.setitem(FR._STATE, "owner", types.SimpleNamespace(
-        cache=cache, sport_ids=[5]))
-    got = FR.held_quote(lions, event_rows=rows, payout_event="Detroit Lions",
-                        payout_is_complement=False, at=at, max_age_s=30.0,
-                        sport_ids=[5], synced=True,
-                        view=CEN.feed_event_view(cache))
-    assert got["ok"] is False and got["reason"] == CEN.S_UNSUPPORTED
-    eid, why = asyncio.run(FR.held_event_id(
-        _CatalogueConn(lions, rows), lions["identifier"]))
-    assert eid is None and why == CEN.S_UNSUPPORTED
-    from sportsassets import pinnapi_held as PH
-    watch = PH.HeldWatch(clock=lambda: at)
-    asyncio.run(PH.refresh(_CatalogueConn(lions, rows), watch=watch))
-    assert not watch.is_held(77)
-    assert watch.unmatched == {lions["identifier"]: CEN.S_UNSUPPORTED}
+    for league, admitted in (("cfb", True), ("cfl", False)):
+        rows = [dict(r, team_league=league,
+                     identifier="aec-%s-det-car-2026-10-04" % league,
+                     event_slug="%s-det-car-2026-10-04" % league)
+                for r in PROD_ROWS["rows"]
+                if r["identifier"] == "aec-nfl-det-car-2026-10-04"]
+        lions = next(r for r in rows if r["side_norm"] == "lions")
+        cache, at = _held_cache(lions["game_start"],
+                                [{"designation": "home", "price": 170},
+                                 {"designation": "away", "price": -200}])
+        monkeypatch.setitem(FR._STATE, "owner", types.SimpleNamespace(
+            cache=cache, sport_ids=[5]))
+        got = FR.held_quote(lions, event_rows=rows,
+                            payout_event="Detroit Lions",
+                            payout_is_complement=False, at=at,
+                            max_age_s=30.0, sport_ids=[5], synced=True,
+                            view=CEN.feed_event_view(cache))
+        eid, why = asyncio.run(FR.held_event_id(
+            _CatalogueConn(lions, rows), lions["identifier"]))
+        from sportsassets import pinnapi_held as PH
+        watch = PH.HeldWatch(clock=lambda: at)
+        asyncio.run(PH.refresh(_CatalogueConn(lions, rows), watch=watch))
+        if admitted:
+            assert got["ok"] is True, (league, got)
+            assert got["conditional_on"]["condition"] == "NO_TIE"
+            assert (eid, why) == (77, None)
+            assert watch.is_held(77)
+        else:
+            assert got["ok"] is False and got["reason"] == CEN.S_UNSUPPORTED
+            assert eid is None and why == CEN.S_UNSUPPORTED
+            assert not watch.is_held(77)
+            assert watch.unmatched == {lions["identifier"]:
+                                       CEN.S_UNSUPPORTED}
 
 
 def test_held_nfl_reads_use_the_de_vig_spelling_and_the_nfl_type():
@@ -641,7 +690,11 @@ def test_held_nfl_reads_use_the_de_vig_spelling_and_the_nfl_type():
     # admitted for the NFL only; the family-wide set is unchanged
     assert ("football", "h2h") not in devig.SUPPORTED
     assert devig.expected_outcomes("football", "h2h", league="nfl") == 2
-    assert devig.expected_outcomes("football", "h2h", league="cfb") is None
+    # PIN UPDATED IN THE P0 INCIDENT: the college board is admitted by its
+    # own measurement (research-sql run 37241503567); an unmeasured football
+    # league is not
+    assert devig.expected_outcomes("football", "h2h", league="cfb") == 2
+    assert devig.expected_outcomes("football", "h2h", league="cfl") is None
     assert CEN.sport_id_of("football_team_full_game_winner") == 5
     assert "football_team_full_game_winner" in FR.HELD_FULL_GAME_TYPES
 
