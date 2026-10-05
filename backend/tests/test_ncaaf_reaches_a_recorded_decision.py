@@ -456,6 +456,10 @@ async def test_ncaaf_reaches_a_recorded_paper_decision_never_silence(
         unlisted = next(r for r in rows
                         if r["provider_event_id"] == "ncaaf-ulm-sala")
         assert V.R_NO_EVENT in unlisted["codes"], unlisted
+        # ITS LEDGER STAGE (coverage census, 2026-10-05): the venue-native
+        # identity refusal used to write NO stage, so the funnel counted an
+        # event that HAD a Pinnacle price as never normalized
+        assert unlisted["stage"] == "3_IDENTITY", unlisted
         per = out["candidate_outcomes"]["per_sport"][NCAAF]
         assert per == {"provider_events": 3, "rows": 3, "reconciles": True}
     finally:

@@ -1076,3 +1076,11 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+# Coverage failures + first-loss census (2026-10-05): the event ledger stages
+# venue-identity and WS-unusable refusals (and the funnel derives the stage
+# for rows written without one), a sticky-key valuation is attributed by its
+# venue contract, the per-event first-loss census and its read-only route,
+# and a PinnAPI-native college seed's school-only names map on the
+# discovered venue event (containment still refused).
+tests/test_coverage_first_loss_census.py
+tests/test_ncaaf_native_seed_identity.py

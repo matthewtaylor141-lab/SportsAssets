@@ -714,6 +714,17 @@ try:
     app.include_router(_command_quality_router)
 except ImportError:
     log.warning("quality: api.command_quality not loaded", exc_info=True)
+# ── THE FIRST-LOSS CENSUS: /api/command/coverage/first-loss (?hours=).
+# GET only, COMMAND auth, one READ ONLY transaction with a statement timeout:
+# per provider event, the first chain stage it was lost at, its code and
+# class (SOFTWARE / ECONOMIC / EXTERNAL), per competition and sport.
+try:
+    from .command_coverage_first_loss import \
+        router as _command_coverage_first_loss_router
+    app.include_router(_command_coverage_first_loss_router)
+except ImportError:
+    log.warning("coverage: api.command_coverage_first_loss not loaded",
+                exc_info=True)
 # ── INSTITUTIONAL REPORTS ON THE PAPER ACCOUNT: /api/command/paper/reports/*
 # Read-only, COMMAND auth (same dependency as the paper experiment read).
 try:

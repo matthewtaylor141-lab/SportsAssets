@@ -209,15 +209,38 @@ async def _regclass(conn, name: str) -> bool:
 # THE READS (one per source; each returns {league: {col: n}} or raises)
 # ═════════════════════════════════════════════════════════════════════
 
+def _ledger_stage_case() -> str:
+    """THE STAGE OF A LEDGER ROW WRITTEN WITHOUT ONE (coverage census,
+    2026-10-05): a SQL CASE over the row's first refusal, generated from the
+    one lane-stage table (bettor_external_shadow.LEDGER_STAGE_OF), for the
+    stages at or past venue identity -- the only ones the ranking below can
+    change (a stage 1 or 2 ranks below `normalized` either way). Every code
+    and stage is a fixed identifier, asserted before it is inlined."""
+    import re
+    from .. import bettor_external_shadow as ext
+    pairs = sorted((c, s) for c, s in ext.LEDGER_STAGE_OF.items()
+                   if str(s)[:1] in "345678")
+    for c, s in pairs:
+        assert re.fullmatch(r"[A-Z0-9_]+", c), c
+        assert re.fullmatch(r"[3-8]_[A-Z_]+", s), s
+    return ("CASE split_part(coalesce(first_refusal, ''), ':', 1) %s END"
+            % " ".join("WHEN '%s' THEN '%s'" % cs for cs in pairs))
+
+
+#: The row's stage: as written, else derived from its first refusal (rows
+#: the venue-native identity refusal and the WS-unusable branch wrote with
+#: no stage before the 2026-10-05 fix are still in the window).
+LEDGER_STAGE_EXPR = "coalesce(stage, %s)" % _ledger_stage_case()
+
 REACH_SQL = """
     CASE
       WHEN outcome IN ('ADMITTED', 'ALREADY_RECORDED') THEN 99
-      WHEN outcome = 'REFUSED' AND stage ~ '^[1-8]_' THEN
-           greatest(substr(stage, 1, 1)::int,
+      WHEN outcome = 'REFUSED' AND %(st)s ~ '^[1-8]_' THEN
+           greatest(substr(%(st)s, 1, 1)::int,
                     CASE WHEN us_market_slug IS NOT NULL THEN 4 ELSE 0 END)
       WHEN us_market_slug IS NOT NULL THEN 4
       ELSE 0
-    END"""
+    END""" % {"st": LEDGER_STAGE_EXPR}
 
 PROVIDER_SQL = """
     WITH r AS (
@@ -252,10 +275,26 @@ EVENT_LEAGUE_CTE = """
            WHERE provider_event_id IS NOT NULL
              AND cycle_at >= to_timestamp($1) - interval '14 days'
              AND cycle_at < to_timestamp($2) + interval '1 day'
-           ORDER BY provider_event_id, cycle_at DESC)"""
+           ORDER BY provider_event_id, cycle_at DESC),
+    ms AS (SELECT DISTINCT ON (us_market_slug) us_market_slug, sport_key
+             FROM ext_candidate_outcomes
+            WHERE us_market_slug IS NOT NULL
+              AND cycle_at >= to_timestamp($1) - interval '14 days'
+              AND cycle_at < to_timestamp($2) + interval '1 day'
+            ORDER BY us_market_slug, cycle_at DESC)"""
 
-LEAGUE_EXPR = ("coalesce(m.sport_key, 'UNATTRIBUTED:' || "
+#: THE VALUATION'S LEAGUE: its event key's ledger league, else (coverage
+#: census, 2026-10-05) the league of the ledger rows that recorded ITS VENUE
+#: CONTRACT. A venue-native valuation carries the fixture's STICKY event key
+#: (migration 261: the first key recorded for the venue event -- a
+#: "pinnapi:<id>" native seed, or another day's provider id), which need not
+#: be any ledger row's provider_event_id in the lookback, so the valuation
+#: fell to UNATTRIBUTED:<family> and its league read 0 evaluated although
+#: the ledger recorded the very contract under that league.
+LEAGUE_EXPR = ("coalesce(m.sport_key, ms.sport_key, 'UNATTRIBUTED:' || "
                "coalesce(ev.sport_family, 'unknown'))")
+#: the join every downstream read adds beside `m`
+MS_JOIN = "LEFT JOIN ms ON ms.us_market_slug = ev.us_market_slug"
 
 EVALUATED_SQL = """
     WITH %s
@@ -263,10 +302,11 @@ EVALUATED_SQL = """
                                                  ev.id::text)) AS n
       FROM external_valuations ev
       LEFT JOIN m ON m.provider_event_id = ev.event_key
+      %s
      WHERE ev.record_purpose IN ('ENTRY_DECISION', 'CALIBRATION_ONLY')
        AND ev.decided_at >= to_timestamp($1) AND ev.decided_at < to_timestamp($2)
      GROUP BY 1
-""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
+""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR, MS_JOIN)
 
 DECISIONS_SQL = """
     WITH %s,
@@ -276,6 +316,7 @@ DECISIONS_SQL = """
           FROM paper_decisions pd
           JOIN external_valuations ev ON ev.id = pd.valuation_id
           LEFT JOIN m ON m.provider_event_id = ev.event_key
+      %s
          WHERE pd.decided_at >= to_timestamp($1)
            AND pd.decided_at < to_timestamp($2)
          GROUP BY 1, 2)
@@ -283,7 +324,7 @@ DECISIONS_SQL = """
            count(*) FILTER (WHERE entered) AS entered,
            count(*) FILTER (WHERE NOT entered) AS refused
       FROM d GROUP BY league
-""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
+""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR, MS_JOIN)
 
 ORDERS_SQL = """
     WITH %s
@@ -293,10 +334,11 @@ ORDERS_SQL = """
       JOIN paper_decisions pd ON pd.decision_id = po.decision_id
       JOIN external_valuations ev ON ev.id = pd.valuation_id
       LEFT JOIN m ON m.provider_event_id = ev.event_key
+      %s
      WHERE po.role = 'ENTRY'
        AND po.created_at >= to_timestamp($1) AND po.created_at < to_timestamp($2)
      GROUP BY 1
-""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
+""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR, MS_JOIN)
 
 FILLS_SQL = """
     WITH %s
@@ -307,10 +349,11 @@ FILLS_SQL = """
       JOIN paper_decisions pd ON pd.decision_id = po.decision_id
       JOIN external_valuations ev ON ev.id = pd.valuation_id
       LEFT JOIN m ON m.provider_event_id = ev.event_key
+      %s
      WHERE po.role = 'ENTRY'
        AND pf.filled_at >= to_timestamp($1) AND pf.filled_at < to_timestamp($2)
      GROUP BY 1
-""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
+""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR, MS_JOIN)
 
 ACTUAL_SQL = """
     WITH %s
@@ -328,9 +371,10 @@ ACTUAL_SQL = """
       FROM execution_intents ei
       LEFT JOIN external_valuations ev ON ev.id = ei.valuation_id
       LEFT JOIN m ON m.provider_event_id = ev.event_key
+      %s
      WHERE ei.decided_at >= to_timestamp($1) AND ei.decided_at < to_timestamp($2)
      GROUP BY 1
-""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR)
+""" % (EVENT_LEAGUE_CTE, LEAGUE_EXPR, MS_JOIN)
 
 CATALOGUE_SQL = """
     SELECT lower(split_part(coalesce(event_slug, ''), '-', 1)) AS token,
