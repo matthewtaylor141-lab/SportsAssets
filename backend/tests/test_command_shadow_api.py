@@ -29,10 +29,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 FRONT = ROOT / "frontend" / "public" / "command"
 SHADOW_JS = (FRONT / "shadow.js").read_text()
 APP_JS = (FRONT / "app.js").read_text()
-# The legacy COMMAND shell (Shadow, equity wall, motion layer, the legacy
-# views) moved byte-for-byte to classic.html when Command Center V2 was
-# promoted to index.html (2026-10-05); these checks follow the shell there.
-INDEX = (FRONT / "classic.html").read_text()
+INDEX = (FRONT / "index.html").read_text()
 
 ROUTES = ("/api/command/shadow/summary", "/api/command/shadow/decisions",
           "/api/command/shadow/positions", "/api/command/shadow/executions",

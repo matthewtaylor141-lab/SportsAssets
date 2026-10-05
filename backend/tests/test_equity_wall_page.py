@@ -20,9 +20,7 @@ import re
 ROOT = pathlib.Path(__file__).resolve().parents[2] / "frontend" / "public" / "command"
 JS = (ROOT / "equity-wall.js").read_text()
 CSS = (ROOT / "equity-wall.css").read_text()
-# The legacy COMMAND shell moved byte-for-byte to classic.html when Command
-# Center V2 was promoted to index.html (2026-10-05).
-INDEX = (ROOT / "classic.html").read_text()
+INDEX = (ROOT / "index.html").read_text()
 
 
 def _code(src: str) -> str:

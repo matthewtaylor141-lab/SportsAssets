@@ -1,40 +1,82 @@
 <!doctype html>
 <html lang="en">
 <head>
- <meta charset="utf-8">
- <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
- <meta name="theme-color" content="#f3f6fa">
- <meta name="robots" content="noindex,nofollow">
- <title>BETTOR · Command</title>
- <link rel="icon" href="brand/bettortoken-app-icon-32.png" type="image/png">
- <link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png">
- <link rel="stylesheet" href="v2/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#05090e">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<meta name="description" content="BETTOR headquarters: the live trading floor. Every agent's desk shows its recorded state, heartbeat and collaboration.">
+<title>BETTOR · Trading Floor</title>
+<link rel="stylesheet" href="floor.css">
+<link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
+<link rel="stylesheet" href="hq3-live.css" data-hq3="css">
+<link rel="stylesheet" href="meeting-release.css" data-meeting="css">
+<link rel="stylesheet" href="hq5-workspace.css" data-hq5="css">
+<link rel="stylesheet" href="hq6-complete.css" data-hq6="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
+<link rel="stylesheet" href="command-final.css" data-command-final="css">
+<link rel="stylesheet" href="command-ops.css" data-command-ops="css">
 </head>
-<body data-initial-view="floor">
- <a class="skip" href="#main">Skip to workspace</a>
- <div id="test-banner" hidden>LOCAL TEST SCENARIO · NOT PRODUCTION · ALL FIGURES ILLUSTRATIVE</div>
- <div id="shell">
-  <aside class="sidebar" id="sidebar" aria-label="Command navigation">
-   <a href="#command" class="brand"><img src="brand/bettortoken-logo-white.png" alt="BettorToken"><span>COMMAND / V2</span></a>
-   <div class="nav-label">YOUR WORKSPACE</div><nav id="navigation"></nav>
-   <div class="sidebar-bottom"><div class="office-mark"><span class="signal"></span> One connected desk</div><p>Every number has a source.<br>Every action has a record.</p><button data-action="sources" class="sidebar-link">View data sources ↗</button></div>
-  </aside>
-  <div class="workspace">
-   <header class="topbar">
-    <button class="icon-button menu-toggle" data-action="menu" aria-label="Open navigation" aria-expanded="false"></button>
-    <div class="breadcrumb">BETTOR HQ <span>/</span> <strong id="page-name">Command</strong></div>
-    <div class="topbar-actions"><span class="read-badge">READ-ONLY WORKSPACE</span><button class="icon-button" data-action="refresh" aria-label="Refresh due feeds"></button><button class="button light" data-action="report">Export report</button><button class="avatar-button" data-action="workspace" aria-label="Workspace information">BT</button></div>
-   </header>
-   <div id="modebar" class="modebar" role="status">Connecting to recorded operating data…</div>
-   <main id="main" tabindex="-1"><div class="boot">Opening your workspace…</div></main>
-   <div id="tape" class="ticker" aria-label="Recorded activity tape"></div>
+<body class="fl">
+<a class="fl-skip" href="#roster">Skip to the agent list</a>
+<div class="fl-screen">
+<header class="fl-top">
+  <a class="fl-brand" href="/" title="Back to the COMMAND homepage"><span aria-hidden="true">&#8592;</span> <span class="fl-brand-word" role="img" aria-label="BettorToken"></span><span class="fl-brand-sub">COMMAND</span></a>
+  <div class="fl-title">
+    <span class="fl-eyebrow">Headquarters</span>
+    <h1>Trading Floor</h1>
   </div>
- </div>
- <nav class="mobile-nav" id="mobile-nav" aria-label="Quick navigation"></nav>
- <dialog id="drawer" class="drawer" aria-labelledby="drawer-title"><div class="drawer-top"><span class="eyebrow">BETTOR / EVIDENCE</span><button class="icon-button" data-action="close" aria-label="Close details">×</button></div><h2 id="drawer-title"></h2><div id="drawer-body"></div></dialog>
- <div id="toast" role="status" aria-live="polite"></div>
- <noscript><main class="nojs"><h1>BETTOR Command</h1><p>This workspace needs JavaScript to read operating data. No orders can be placed from this frontend.</p><a href="mobile.html">Mobile Command</a></main></noscript>
- <script src="unlock.js"></script>
- <script type="module" src="v2/app.mjs"></script>
+  <div class="fl-status" id="fl-status" role="status" aria-live="polite">
+    <span class="fl-pill" data-tone="off"><i></i><span>Connecting…</span></span>
+  </div>
+  <div class="fl-tools">
+    <button type="button" class="fl-btn" id="fl-view" aria-pressed="false" title="Switch between the 3D floor and the floor map">Floor map</button>
+    <button type="button" class="fl-btn" id="fl-reset" title="Back to the overview">Overview</button>
+  </div>
+</header>
+
+<div class="fl-fixture" id="fl-fixture" hidden>FIXTURE DATA · rendered from a labelled test payload · not production</div>
+
+<main class="fl-main">
+  <section class="fl-stage" id="fl-stage" aria-label="Trading floor">
+    <div class="fl-wall" id="fl-wall" aria-label="Central wall">
+      <article class="wall-screen" data-screen="feed" id="ws-feed"></article>
+      <article class="wall-screen equity" data-screen="equity" id="ws-equity"></article>
+      <article class="wall-screen" data-screen="health" id="ws-health"></article>
+    </div>
+    <div class="fl-counts" id="fl-counts" aria-label="Desks by state"></div>
+    <div class="fl-tip" id="fl-tip" role="tooltip" hidden></div>
+    <div class="fl-loading" id="fl-loading"><div class="fl-loading-mark" role="img" aria-label="BettorToken"></div><span>Opening the floor…</span></div>
+    <p class="fl-hint" id="fl-hint">Drag to look around · click a desk to focus · click it again to open the workspace</p>
+    <div class="fl-map" id="fl-map" hidden></div>
+  </section>
+  <aside class="fl-panel" id="fl-panel" aria-label="Agent summary" hidden tabindex="-1"></aside>
+</main>
+
+<nav class="fl-roster" id="roster" aria-label="Agents on the floor"></nav>
+</div>
+
+<section class="fl-wallflow" id="fl-wallflow" aria-label="Central wall screens"></section>
+
+<footer class="fl-foot">
+  <p>Every desk state is derived from recorded rows (<code>GET /api/command/floor</code>): heartbeats, runs, decisions, reviews, challenges and hand-offs, each with its timestamp. Nothing moves unless a record says so. PAPER and ACTUAL figures are separate and never summed. Read-only: no control on this page places, cancels or approves anything.</p>
+  <p class="fl-credits" id="fl-credits">Characters: Microsoft Rocketbox (MIT, © 2020 Microsoft) — <a href="team-demo/assets/models/ROCKETBOX_LICENSE.md">licence</a>. Every agent is a distinct licensed character: Derek Business_Male_03, Xavier Business_Male_05, Audrey Business_Female_04, Karen Business_Female_02, Allie Business_Female_03, Eddie Business_Male_04 (headset prop), Scout Business_Male_06. Rendering: three.js (MIT) — <a href="team-demo/assets/THREE_LICENSE.txt">licence</a>.</p>
+</footer>
+
+<noscript><p class="fl-noscript">The trading floor needs JavaScript. The agent pages are at <a href="/derek">/derek</a>, <a href="/xavier">/xavier</a>, <a href="/audrey">/audrey</a> and <a href="/karen">/karen</a>.</p></noscript>
+<script src="floor-core.js"></script>
+<script type="module" src="floor.js"></script>
+<script src="hq2-shell.js" data-hq2="shell"></script>
+<script src="hq3-live.js" data-hq3="js"></script>
+<script src="meeting-release.js" data-meeting="js"></script>
+<script src="hq5-workspace.js" data-hq5="js"></script>
+<script src="hq6-complete.js" data-hq6="js"></script>
+<script src="command-final.js" data-command-final="js"></script>
+<script src="command-ops.js" data-command-ops="js"></script>
 </body>
 </html>
