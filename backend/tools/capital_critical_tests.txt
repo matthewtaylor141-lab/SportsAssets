@@ -766,19 +766,25 @@ tests/test_profitability_economics.py
 tests/test_profitability_capacity.py
 tests/test_profitability_metrics_forecast.py
 tests/test_profitability_warehouse_cycle.py
-# Eddie (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
+# Archer (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
 # RESEARCH_SHADOW_ONLY), claude/pos-agents, migration 217: persisted
 # identities with NO venue / order / cancel / capital / approval / promotion
 # authority (registry deny lists + pos_authority.may + a first-firing trigger
 # on every approval, control, order, intent and fill table that refuses
 # either as an actor column or as the session's declared acting agent);
-# Eddie's hard rule (no executing recommendation with expected executable
+# Archer's hard rule (no executing recommendation with expected executable
 # EV <= 0, in code AND a CHECK); Scout's compliant-source guard and a frozen
 # prospective tournament he cannot judge or promote.
-tests/test_eddie_scout_identity_and_no_authority.py
-tests/test_eddie_execution_estimates.py
+tests/test_archer_scout_identity_and_no_authority.py
+tests/test_archer_execution_estimates.py
 tests/test_scout_features_and_tournament.py
-tests/test_eddie_scout_api_pages_slack.py
+tests/test_archer_scout_api_pages_slack.py
+# (266) the execution agent renamed EDDIE -> ARCHER: one active execution
+# identity, the same zero submit / cancel / credential / capital authority
+# under either name (code and database), EDDIE kept only as a historical
+# alias (append-only rows, labelled on read), the migration idempotent and
+# its rollback refused while ARCHER has records.
+tests/test_archer_rename.py
 # Adriana (Head of Arbitrage, SHADOW_ONLY), claude/adriana, migration 265:
 # the eighth identity with NO venue / order / cancel / credential / capital /
 # approval authority (registry deny lists, pos_authority, the same first-
@@ -793,7 +799,7 @@ tests/test_adriana_arb_engine.py
 # The profitability operating system, part 3 (claude/pos-learn, migration
 # 218): the model tournament (M0 raw PinnAPI champion vs calibrated,
 # microstructure, Scout / cross-market placeholders and sport-specific
-# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / EDDIE
+# challengers), the agent tournament (DEREK / XAVIER / ALLOCATOR / ARCHER
 # variants on one shared opportunity set), the edge-confidence and avoidance
 # meta-models, the seeded randomized SHADOW experiment platform. SHADOW /
 # RESEARCH: no probability, threshold, sizing, allowlist, order or capital
@@ -849,7 +855,7 @@ tests/test_lost_opportunity_ledger.py
 # append-only RESEARCH / SHADOW_NO_AUTHORITY; /api/command/profitability/
 # sleeves is GET-only, READ ONLY, behind a command session. SMALL LIVE --
 # BETTOR ORIGINATED is never ACTIVE without a BETTOR-originated,
-# venue-acknowledged order; mirror / RN1 / copy orders never count; Eddie's
+# venue-acknowledged order; mirror / RN1 / copy orders never count; Archer's
 # EXECUTE_NOW recommendations are never orders; the legacy mirror label
 # follows its real control row; no control row is changed.
 tests/test_paper_sleeves.py
@@ -874,7 +880,7 @@ tests/test_command_release_authority.py
 # (224) THE SEVEN AGENTS' IDENTITY, MEMORY, EXPERIENCE AND EVENTS: GET-only
 # reads in a READ ONLY transaction; the memory learner writes only its own
 # append-only tables; bundles differ per agent and never widen the
-# registry (Karen / Scout / Eddie boundaries); no voice is borrowed.
+# registry (Karen / Scout / Archer boundaries); no voice is borrowed.
 tests/test_agent_identity_api_authority.py
 # (R30A ci) THE EXACT-SHA CAPITAL-CRITICAL VERDICT: tools/ci_verdict.py rejects
 # every unquarantined failure or error, malformed / expired / stale quarantine

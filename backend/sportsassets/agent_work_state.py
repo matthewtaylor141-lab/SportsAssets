@@ -7,7 +7,7 @@ THE SIX STATES (one per agent, derived only from recorded rows):
 
   WORKING                     a run is recorded in progress, or the agent
                               recorded an output inside ACTIVE_WINDOW_S
-                              (producers: Derek, Eddie, Scout, the Chief
+                              (producers: Derek, Archer, Scout, the Chief
                               Allocator)
   REVIEWING                   the same evidence for a reviewing role
                               (Xavier, Audrey, Karen); for Xavier also: every
@@ -29,7 +29,7 @@ THE SIX STATES (one per agent, derived only from recorded rows):
                               absent, unreadable or older than
                               MARKET_DATA_MAX_AGE_S). Only agents whose work
                               reads market data can be blocked on it: Xavier,
-                              Derek, Eddie. Karen, Audrey, Scout and the Chief
+                              Derek, Archer. Karen, Audrey, Scout and the Chief
                               Allocator read no live market data, so this
                               state is never theirs (tested).
   HANDOFF_PENDING             work handed to the agent, recorded, and not yet
@@ -57,8 +57,8 @@ THE HAND-OFF PREDICATES, PER AGENT (each a recorded row, named in `basis`):
                   resolved
   XAVIER          an open position (net filled quantity, not settled; ACTUAL:
                   smalllive_handoffs OPEN) with NO review recorded
-  EDDIE           paper ENTER decisions inside his lookback (EDDIE_LOOKBACK_S
-                  = agents.eddie_runner.LOOKBACK_S) with no execution estimate
+  ARCHER           paper ENTER decisions inside his lookback (ARCHER_LOOKBACK_S
+                  = agents.archer_runner.LOOKBACK_S) with no execution estimate
   CHIEF_ALLOCATOR paper ENTER decisions recorded after her latest allocation
                   run started (that run could not have ranked them)
 
@@ -89,12 +89,12 @@ HANDOFF = "HANDOFF_PENDING"
 IDLE = "IDLE_NO_OPEN_WORK"
 WORK_STATES = (WORKING, REVIEWING, WAITING, BLOCKED, HANDOFF, IDLE)
 
-AGENTS = ("DEREK", "KAREN", "SCOUT", "EDDIE", "CHIEF_ALLOCATOR", "AUDREY",
+AGENTS = ("DEREK", "KAREN", "SCOUT", "ARCHER", "CHIEF_ALLOCATOR", "AUDREY",
           "XAVIER", "ADRIANA")
 BUSY = {"XAVIER": REVIEWING, "AUDREY": REVIEWING, "KAREN": REVIEWING}
 #: the agents whose open work reads live market data, and which data
 MARKET_SOURCES = {"XAVIER": ("feed", "venue"), "DEREK": ("feed", "venue"),
-                  "EDDIE": ("venue",), "ADRIANA": ("venue",)}
+                  "ARCHER": ("venue",), "ADRIANA": ("venue",)}
 #: = agents.karen.EVALUATOR_FOR (read, not imported; a test pins equality)
 EVALUATOR_FOR = {"DEREK": "AUDREY", "XAVIER": "AUDREY",
                  "CHIEF_ALLOCATOR": "AUDREY", "AUDREY": "XAVIER"}
@@ -120,7 +120,7 @@ FEED_HEARTBEAT_KEY = "pinnapi_feed_last"
 FEED_HEARTBEAT_S = 30.0
 FEED_OK_STATES = ("OWNER_SYNCED",)
 WAITING_STATUSES = ("WAITING_FOR_EVIDENCE", "WAITING_FOR_PROVIDER")
-EDDIE_LOOKBACK_S = 2 * 86400.0   # = agents.eddie_runner.LOOKBACK_S
+ARCHER_LOOKBACK_S = 2 * 86400.0   # = agents.archer_runner.LOOKBACK_S
 MAX_POSITIONS = 500
 SAMPLE_IDS = 5
 
@@ -329,8 +329,8 @@ def _generic(agent: str, facts: dict, now: float) -> dict:
     hs = _handoffs(facts)
     srcs = MARKET_SOURCES.get(agent)
     # Derek's and Adriana's standing work always reads the books (Derek's
-    # the feed too); Eddie's only when decisions are waiting for his estimate
-    market_work = agent in ("DEREK", "ADRIANA") or (agent == "EDDIE" and any(
+    # the feed too); Archer's only when decisions are waiting for his estimate
+    market_work = agent in ("DEREK", "ADRIANA") or (agent == "ARCHER" and any(
         h["kind"] == "ENTER_DECISION_WITHOUT_ESTIMATE" for h in hs))
     if srcs and market_work:
         ms = market_status(facts.get("market"), now)
@@ -715,7 +715,7 @@ async def _read_positions(s: _Sections, now: float) -> dict:
 
 async def _read_handoffs(s: _Sections, now: float) -> dict:
     """{agent: [handoff rows]} from agent_tasks, karen_challenges, paper
-    ENTER decisions (Eddie, the Chief Allocator)."""
+    ENTER decisions (Archer, the Chief Allocator)."""
     out: dict = {a: [] for a in AGENTS}
 
     async def tasks(conn):
@@ -733,7 +733,7 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
             " WHERE state IN ('OPEN', 'RESPONDED') "
             " GROUP BY target_agent, state")]
 
-    async def eddie(conn):
+    async def archer(conn):
         return dict(await conn.fetchrow(
             "SELECT count(*) AS n, min(d.decided_at) AS oldest, "
             "       (array_agg(d.decision_id ORDER BY d.decided_at))[1:5] "
@@ -743,7 +743,7 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
             "                        AND to_timestamp($2) "
             "   AND NOT EXISTS (SELECT 1 FROM eddie_execution_estimates e "
             "                    WHERE e.decision_id = d.decision_id)",
-            now - EDDIE_LOOKBACK_S, now))
+            now - ARCHER_LOOKBACK_S, now))
 
     async def allocator(conn):
         last = await conn.fetchrow(
@@ -780,11 +780,11 @@ async def _read_handoffs(s: _Sections, now: float) -> dict:
                 "kind": "CHALLENGE_ANSWER_TO_EVALUATE:%s" % tgt,
                 "table": "karen_challenges", "count": int(r["n"]),
                 "oldest_at": _ep(r["oldest"]), "ids": list(r["ids"] or [])})
-    e = await s.run("work.eddie_pending", ("paper_decisions",
+    e = await s.run("work.archer_pending", ("paper_decisions",
                                            "eddie_execution_estimates"),
-                    eddie)
+                    archer)
     if e and int(e["n"] or 0):
-        out["EDDIE"].append({
+        out["ARCHER"].append({
             "kind": "ENTER_DECISION_WITHOUT_ESTIMATE",
             "table": "paper_decisions", "count": int(e["n"]),
             "oldest_at": _ep(e["oldest"]), "ids": list(e["ids"] or [])})
@@ -809,7 +809,7 @@ async def _read_outputs(s: _Sections) -> dict:
             ("KAREN", "karen_challenges", "challenge",
              "SELECT challenge_id AS id, challenged_at AS at "
              "  FROM karen_challenges ORDER BY challenged_at DESC LIMIT 1"),
-            ("EDDIE", "eddie_execution_estimates", "execution estimate",
+            ("ARCHER", "eddie_execution_estimates", "execution estimate",
              "SELECT estimate_id AS id, estimated_at AS at "
              "  FROM eddie_execution_estimates ORDER BY estimated_at DESC "
              " LIMIT 1"),

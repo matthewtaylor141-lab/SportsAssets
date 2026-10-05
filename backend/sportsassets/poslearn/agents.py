@@ -23,7 +23,14 @@ selection. Pure; no I/O.
                         documented future formula EV x EDGE_CONFIDENCE x
                         LIQUIDITY x CALIBRATION x RISK_BUDGET -- in SHADOW
                         only; EDGE_CONFIDENCE unavailable -> $0 (declared).
-  EDDIE      execution. Being built in parallel (claude/pos-agents). The
+  EDDIE      execution -- the agent is ARCHER since migration 266; this
+                        tournament group, its variant subjects (EDDIE_V1,
+                        EDDIE_CHALLENGER_A / _B) and the feature
+                        eddie_exec_uncertainty keep their REGISTERED names:
+                        they identify frozen specs, registrations and
+                        results in the learning registry, which a rename
+                        would orphan. Being built in parallel
+                        (claude/pos-agents). The
                         interface is a READ of `eddie_execution_estimates`
                         (to_regclass); absent -> the three EDDIE variants are
                         registered AWAITING_INTERFACE and skipped cleanly.

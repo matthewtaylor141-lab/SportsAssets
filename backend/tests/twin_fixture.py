@@ -101,7 +101,7 @@ def scenario_books():
 
 
 def stream(*, raw=None, books=None, karen=(), allocations=(), regimes=(),
-           eddie=None, scout=None, iface_why=None, basis="PAPER",
+           archer=None, scout=None, iface_why=None, basis="PAPER",
            theses=()):
     raw = copy.deepcopy(raw or scenario_raw())
     b = E.build_paper(raw, vals={}, prem={}, theses=list(theses))
@@ -110,9 +110,9 @@ def stream(*, raw=None, books=None, karen=(), allocations=(), regimes=(),
                     books=copy.deepcopy(books if books is not None
                                         else scenario_books()),
                     regimes=list(regimes), allocations=list(allocations),
-                    karen=list(karen), eddie=eddie, scout=scout,
+                    karen=list(karen), archer=archer, scout=scout,
                     iface_why=iface_why or {
-                        "EDDIE": "INTERFACE_ABSENT:pos_iface_eddie_execution",
+                        "ARCHER": "INTERFACE_ABSENT:pos_iface_eddie_execution",
                         "SCOUT": "INTERFACE_ABSENT:pos_iface_scout_feature_"
                                  "effects"},
                     window=(T0 - 86400.0, T0 + 86400.0))

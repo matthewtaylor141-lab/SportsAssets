@@ -208,11 +208,22 @@ async def research_transfer() -> dict:
     return await _read(fn)
 
 
+#: (266) historical agent id -> the agent it names now; pinned equal to
+#: registry.HISTORICAL_ALIASES by a test (this module imports no registry)
+TWIN_ALIASES = {"EDDIE": "ARCHER"}
+
+
 @router.get(BASE + "/profitability/scorecards",
             dependencies=[Depends(require_read)])
 async def profitability_scorecards(
-        agent: str = Query(default="", pattern="^(|DEREK|XAVIER|EDDIE|SCOUT|"
-                           "KAREN|ALLOCATOR|AUDREY)$")) -> dict:
+        agent: str = Query(default="", pattern="^(|DEREK|XAVIER|ARCHER|EDDIE|"
+                           "SCOUT|KAREN|ALLOCATOR|AUDREY)$")) -> dict:
+    # (266) EDDIE is ARCHER's historical alias: either name reads both, and a
+    # run scored before the rename shows its EDDIE rows as ARCHER's, labelled
+    canon = TWIN_ALIASES.get(agent, agent)
+    want = ([canon] + sorted(a for a, c in TWIN_ALIASES.items()
+                             if c == canon)) if agent else []
+
     async def fn(conn):
         rid = await conn.fetchval(
             "SELECT run_id FROM twin_agent_scorecards "
@@ -225,10 +236,14 @@ async def profitability_scorecards(
             "       basis, unit, label, "
             "       extract(epoch FROM computed_at)::float8 AS computed_at "
             "  FROM twin_agent_scorecards WHERE run_id = $1 "
-            "   AND ($2 = '' OR agent = $2) ORDER BY agent, metric, book",
-            rid, agent)]
+            "   AND (cardinality($2::text[]) = 0 OR agent = ANY($2::text[])) "
+            " ORDER BY agent, metric, book",
+            rid, want)]
         by: dict = {}
         for r in rows:
+            if r["agent"] in TWIN_ALIASES:
+                r = dict(r, historical_alias=r["agent"],
+                         agent=TWIN_ALIASES[r["agent"]])
             by.setdefault(r["agent"], []).append(r)
         return _env("OK", None, run_id=rid,
                     computed_at=rows[0]["computed_at"] if rows else None,

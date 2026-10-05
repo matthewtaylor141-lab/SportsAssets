@@ -750,7 +750,7 @@ async def test_a_failed_read_is_unavailable_not_zeros(monkeypatch):
     assert "database down" in got["why"]
 
 
-# ── cand27 integration: Eddie's execution estimate and the attribution ──
+# ── cand27 integration: Archer's execution estimate and the attribution ──
 
 OWNER_ATTRIBUTIONS = (
     "SETTLEMENT", "IDENTITY_MAPPING", "FRESHNESS", "LIQUIDITY",
@@ -791,10 +791,10 @@ def test_a_hindsight_winner_is_never_false_for_any_refusal_code():
         assert won["classification"] == lost["classification"], code
 
 
-# (R30A) Eddie's estimate carries the age of the book HE priced
+# (R30A) Archer's estimate carries the age of the book HE priced
 # (eddie_execution_estimates.book_age_s); the Opportunity Score V2 uses it
 # only within the strategy's executable freshness standard.
-EDDIE = {"estimate_id": "eddie:1", "estimator_version": "EDDIE_V1",
+ARCHER = {"estimate_id": "archer:1", "estimator_version": "EDDIE_V1",
          "estimated_at": 1.0, "expected_fill_probability": 0.6,
          "expected_net_executable_edge_pp": -0.4,
          "expected_executable_ev_usd": -0.01, "recommendation":
@@ -802,29 +802,29 @@ EDDIE = {"estimate_id": "eddie:1", "estimator_version": "EDDIE_V1",
          "book_obs_id": 7, "book_age_s": 2.0}
 
 
-def test_eddie_on_a_book_older_than_the_entry_rule_is_not_the_fill_estimate():
-    """R30A: Eddie's estimator accepts books up to 120 s; the score's P(fill)
-    may not. A stale (or age-unknown) Eddie book falls back to the CAPACITY
+def test_archer_on_a_book_older_than_the_entry_rule_is_not_the_fill_estimate():
+    """R30A: Archer's estimator accepts books up to 120 s; the score's P(fill)
+    may not. A stale (or age-unknown) Archer book falls back to the CAPACITY
     snapshot's production rate, and the basis says why."""
     from sportsassets.profitability import capacity as CPM
-    stale = dict(EDDIE, book_age_s=CPM.EXECUTABLE_BOOK_MAX_AGE_S + 50.0)
+    stale = dict(ARCHER, book_age_s=CPM.EXECUTABLE_BOOK_MAX_AGE_S + 50.0)
     fp, basis, src = SC.execution_input(stale, 0.8, "snapshot",
                                         strategy=X.DEREK)
     assert (fp, src) == (0.8, SC.CAPACITY_SNAPSHOT)
     assert "OLDER_THAN_THE_STRATEGY_EXECUTABLE_FRESHNESS" in basis
-    unknown = dict(EDDIE, book_age_s=None)
+    unknown = dict(ARCHER, book_age_s=None)
     fp, basis, src = SC.execution_input(unknown, 0.8, "snapshot")
     assert (fp, src) == (0.8, SC.CAPACITY_SNAPSHOT)
-    assert "EDDIE_BOOK_AGE_UNKNOWN" in basis
+    assert "ARCHER_BOOK_AGE_UNKNOWN" in basis
     fp, basis, src = SC.execution_input(stale, None, "NO_SNAPSHOT")
     assert fp is None and src is None
 
 
-def test_execution_confidence_comes_from_eddie_when_he_measured_it():
-    fp, basis, src = SC.execution_input(EDDIE, 0.8, "snapshot")
-    assert (fp, src) == (0.6, SC.EDDIE) and "eddie:1" in basis
+def test_execution_confidence_comes_from_archer_when_he_measured_it():
+    fp, basis, src = SC.execution_input(ARCHER, 0.8, "snapshot")
+    assert (fp, src) == (0.6, SC.ARCHER) and "archer:1" in basis
     fp, basis, src = SC.execution_input(
-        dict(EDDIE, expected_fill_probability=None, fill_why="NO_HISTORY"),
+        dict(ARCHER, expected_fill_probability=None, fill_why="NO_HISTORY"),
         0.8, "snapshot")
     assert (fp, basis, src) == (0.8, "snapshot", SC.CAPACITY_SNAPSHOT)
     assert SC.execution_input(None, None, "NO_SNAPSHOT") == (
@@ -835,23 +835,23 @@ def test_execution_confidence_comes_from_eddie_when_he_measured_it():
             "event_start_at": 1002.0 * HOUR}
     lags = [(0.0, 3 * HOUR)] * 6
     got = SC.score(cand, fill_probability=0.6, fill_basis=basis,
-                   fill_source=SC.EDDIE, idle_capital_usd=1000.0,
-                   lag_samples=lags, ctx={"eddie": EDDIE})
+                   fill_source=SC.ARCHER, idle_capital_usd=1000.0,
+                   lag_samples=lags, ctx={"archer": ARCHER})
     ex = got["components"]["EXECUTION_CONFIDENCE"]
-    assert ex["value"] == 0.6 and ex["source"] == SC.EDDIE
+    assert ex["value"] == 0.6 and ex["source"] == SC.ARCHER
     assert ex["in_score"] is True
-    assert ex["eddie"]["status"] == "MEASURED"
-    assert ex["eddie"]["recommendation"] == "SKIP_EXECUTION"
+    assert ex["archer"]["status"] == "MEASURED"
+    assert ex["archer"]["recommendation"] == "SKIP_EXECUTION"
     assert got["opportunity_score"] == pytest.approx(5.0 * 0.6 / 1000.0)
     none = SC.score(cand, fill_probability=None, idle_capital_usd=1000.0,
-                    lag_samples=lags, ctx={"eddie_why": "TABLE_ABSENT"})
+                    lag_samples=lags, ctx={"archer_why": "TABLE_ABSENT"})
     ex = none["components"]["EXECUTION_CONFIDENCE"]
     assert ex["value"] is None and ex["why"] and ex["source"] is None
-    assert ex["eddie"] == {"status": "UNAVAILABLE", "why": "TABLE_ABSENT"}
+    assert ex["archer"] == {"status": "UNAVAILABLE", "why": "TABLE_ABSENT"}
 
 
 @pg
-async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
+async def test_scores_read_archers_estimate_and_the_expand_view_shows_it(
         monkeypatch):
     from sportsassets.api import command_lost_opportunity as API
 
@@ -874,14 +874,14 @@ async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
                            '{"rates": {"fill_probability": {"value": 0.8, '
                            '"n": 40, "basis": "TEST"}}}')
         await _capacity_row(conn, d, now=now)
-        eid = F.uid("eddie")
+        eid = F.uid("archer")
         await conn.execute(
             "INSERT INTO eddie_execution_estimates (estimate_id, decision_id,"
             " estimator_version, estimated_at, decided_at, us_market_slug, "
             " holding_side, expected_fill_probability, "
             " expected_net_executable_edge_pp, expected_executable_ev_usd, "
             " recommendation, recommendation_reason, unmeasured, "
-            " evidence_refs, book_age_s) VALUES ($1,$2,'EDDIE_TEST',"
+            " evidence_refs, book_age_s) VALUES ($1,$2,'ARCHER_TEST',"
             " to_timestamp($3),to_timestamp($4),$5,'LONG',0.55,-0.3,-0.02,"
             " 'SKIP_EXECUTION','NET_EDGE_NOT_POSITIVE',$6::jsonb,$7::jsonb,"
             " 2.0)", eid,
@@ -899,14 +899,14 @@ async def test_scores_read_eddies_estimate_and_the_expand_view_shows_it(
         comps = P.j(r["components"])
         ex = comps["EXECUTION_CONFIDENCE"]
         assert ex["value"] == pytest.approx(0.55)
-        assert ex["source"] == SC.EDDIE and eid in ex["basis"]
-        assert ex["eddie"]["estimate_id"] == eid
+        assert ex["source"] == SC.ARCHER and eid in ex["basis"]
+        assert ex["archer"]["estimate_id"] == eid
         assert r["opportunity_score"] == pytest.approx(
             5.0 * 0.55 * 1.0 / (200.0 * r["expected_hold_h"]))
         served = await API.opportunity_scores(status="", limit=50)
         row = next(x for x in served["data"]["rows"]
                    if x["candidate_id"] == d["decision_id"])
-        e = row["expand"]["eddie_execution"]
+        e = row["expand"]["archer_execution"]
         assert e["status"] == "OK" and e["estimate_id"] == eid
         assert e["recommendation"] == "SKIP_EXECUTION"
         assert e["authority"] == "SHADOW_ONLY"

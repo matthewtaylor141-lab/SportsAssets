@@ -19,7 +19,7 @@
  *                 character stands still, eyes lowered, lights dimmed, and
  *                 the screens behind show NO HEARTBEAT.
  *
- * EDDIE AND SCOUT (migration 217) stand at their own desks: Eddie's is an
+ * ARCHER AND SCOUT (migration 217) stand at their own desks: Archer's is an
  * institutional execution desk (order-book / depth screens), Scout's a
  * research desk (information, sports-feed and weather / data panels). Their
  * screens are drawn ONLY from the desk record the page passes in
@@ -107,7 +107,7 @@ const PERSONAS = {
       speaking: [{R: 'OPEN', dur: 1.4}, {L: 'OPEN', R: 'EXPLAIN', dur: 1.6}]},
     gestureEvery: [4, 7.5],
   },
-  eddie: {
+  archer: {
     // institutional execution: charcoal suit, steel-blue accent, precise
     accent: 0x5fb7ff, scale: 1.0, seed: 41, desk: 'execution',
     skin: 0x8d5a3b, hair: 0x15100d, iris: 0x2b1a10, lips: 0x80493d, brow: 0x15100d,
@@ -717,7 +717,7 @@ function buildRoom(scene, P, renderer) {
 }
 
 // ════════════════════════════════════════════════════════════════════
-// THE DESKS (Eddie, Scout): original procedural geometry; every screen is
+// THE DESKS (Archer, Scout): original procedural geometry; every screen is
 // redrawn from the desk RECORD the page passes in -- nothing is invented
 // ════════════════════════════════════════════════════════════════════
 const NM = 'NOT MEASURED';
@@ -874,7 +874,7 @@ export function mount(stage, opts) {
   }
 
   const env = buildRoom(scene, P, renderer);
-  // Eddie's / Scout's own desk, its screens drawn from the desk record only
+  // Archer's / Scout's own desk, its screens drawn from the desk record only
   const desk = P.desk ? buildDesk(env.room, P) : null;
   if (desk) { for (const sc of desk.screens) env.screens.push(sc); desk.update((opts && opts.desk) || null); }
   const rig = buildCharacter(P);

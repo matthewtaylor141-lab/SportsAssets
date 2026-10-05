@@ -17,7 +17,7 @@ twin world is COUNTERFACTUAL and its basis book is named in the metric
   XAVIER     incremental P&L vs HOLD, drawdown reduction (frozen value-add),
              capital-hours released, fees created, good-exit rate, value of
              REALLOCATE (UNAVAILABLE: REALLOCATE is shadow only)
-  EDDIE      slippage saved, spread captured, fill improvement, adverse
+  ARCHER      slippage saved, spread captured, fill improvement, adverse
              selection avoided, execution alpha, capital-hours saved
              (through pos_iface_eddie_execution; absent -> UNAVAILABLE)
   SCOUT      features proposed / validated, incremental Brier / log-loss,
@@ -220,10 +220,10 @@ def xavier(streams: dict, value_add: list) -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# EDDIE / SCOUT (interfaces)
+# ARCHER / SCOUT (interfaces)
 # ═════════════════════════════════════════════════════════════════════
 
-EDDIE_METRICS = ("slippage_saved_per_contract", "spread_captured",
+ARCHER_METRICS = ("slippage_saved_per_contract", "spread_captured",
                  "fill_improvement", "adverse_selection_avoided",
                  "execution_alpha", "capital_hours_saved")
 SCOUT_METRICS = ("features_proposed", "features_validated",
@@ -232,11 +232,11 @@ SCOUT_METRICS = ("features_proposed", "features_validated",
                  "feature_decay")
 
 
-def eddie(rows, why) -> list:
+def archer(rows, why) -> list:
     b = "COUNTERFACTUAL"
     if rows is None:
-        return [M("EDDIE", m, book=b, basis="pos_iface_eddie_execution",
-                  reason=why) for m in EDDIE_METRICS]
+        return [M("ARCHER", m, book=b, basis="pos_iface_eddie_execution",
+                  reason=why) for m in ARCHER_METRICS]
     g = lambda r, k: C.num(r.get(k))
     diff = lambda a, c: [g(r, a) - g(r, c) for r in rows
                          if g(r, a) is not None and g(r, c) is not None]
@@ -254,23 +254,23 @@ def eddie(rows, why) -> list:
           if g(r, "capital_hours_saved") is not None]
     basis = "pos_iface_eddie_execution vs the baseline execution"
     return [
-        _mean_metric("EDDIE", "slippage_saved_per_contract",
+        _mean_metric("ARCHER", "slippage_saved_per_contract",
                      diff("baseline_vwap", "eddie_vwap"), book=b, basis=basis,
                      unit="usd/contract", why_empty="NO_COMPARABLE_ROW"),
-        _mean_metric("EDDIE", "spread_captured", spread, book=b, basis=basis,
+        _mean_metric("ARCHER", "spread_captured", spread, book=b, basis=basis,
                      unit="share of spread", why_empty="NO_SPREAD_COLUMN_"
                      "OR_ROW"),
-        _mean_metric("EDDIE", "fill_improvement",
+        _mean_metric("ARCHER", "fill_improvement",
                      diff("eddie_fill_ratio", "baseline_fill_ratio"), book=b,
                      basis=basis, unit="fill ratio",
                      why_empty="NO_FILL_RATIO_COLUMN_OR_ROW"),
-        _mean_metric("EDDIE", "adverse_selection_avoided",
+        _mean_metric("ARCHER", "adverse_selection_avoided",
                      diff("eddie_markout_pc", "baseline_markout_pc"), book=b,
                      basis=basis, unit="usd/contract",
                      why_empty="NO_MARKOUT_COLUMN_OR_ROW"),
-        _mean_metric("EDDIE", "execution_alpha", alpha, book=b, basis=basis,
+        _mean_metric("ARCHER", "execution_alpha", alpha, book=b, basis=basis,
                      unit="usd/decision", why_empty="NO_COMPARABLE_ROW"),
-        M("EDDIE", "capital_hours_saved", book=b, basis=basis,
+        M("ARCHER", "capital_hours_saved", book=b, basis=basis,
           unit="usd-hours", value=sum(ch) if ch else None,
           numerator=sum(ch) if ch else None, denominator=len(ch) or None,
           sample=len(ch), min_sample=MIN_N,
@@ -570,9 +570,9 @@ async def load(conn, *, now: float, since: float) -> dict:
 
 
 def compute(*, streams: dict, results: dict, traces: dict, db: dict,
-            eddie_rows, eddie_why, scout_rows, scout_why) -> list:
+            archer_rows, archer_why, scout_rows, scout_why) -> list:
     rows = (derek(streams) + xavier(streams, db["value_add"])
-            + eddie(eddie_rows, eddie_why)
+            + archer(archer_rows, archer_why)
             + scout(scout_rows, scout_why, streams, results)
             + karen(db["karen"], results, traces)
             + allocator(results, traces) + audrey(db["audrey"]))

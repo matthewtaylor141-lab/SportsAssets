@@ -11,7 +11,7 @@ or paper-writer module (tests/test_position_rooms_authority.py).
       (POLYMARKET, KALSHI) and never summed, nor summed with PAPER
   GET /api/command/positions/room/{group_key}
       one room in full: legs, orders, if-it-fills, scenarios, Xavier,
-      Eddie, Audrey, Karen, game state
+      Archer, Audrey, Karen, game state
 
 A failed read is HTTP 503 with a named reason -- never a page of zeros.
 """

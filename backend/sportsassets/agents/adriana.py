@@ -39,7 +39,7 @@ Adriana (Head of Arbitrage, SHADOW_ONLY) runs one census pass at a time:
      scan row carries the full counts and how many were recorded, so no cap
      is silent), all in one transaction declared as ADRIANA: the database
      refuses any order, intent, fill, approval or control write in it.
-  7. COLLABORATE through records only: a HANDOFF to Eddie (execution
+  7. COLLABORATE through records only: a HANDOFF to Archer (execution
      review) and a REVIEW_REQUEST to Karen (challenge) per new opportunity;
      a daily REVIEW_REQUEST to Audrey citing the latest census; and one
      open task per structural blocker (terms not established, a venue with
@@ -493,7 +493,7 @@ async def collaborate(conn, *, scan_id: str, opportunity_ids: list,
     for oid in opportunity_ids:
         ref = [{"kind": "adriana_arb_opportunities", "id": oid}]
         h = await M.record_message(
-            conn, from_agent=AGENT, to_agent=R.EDDIE, message_kind="HANDOFF",
+            conn, from_agent=AGENT, to_agent=R.ARCHER, message_kind="HANDOFF",
             subject_type="adriana_arb_opportunities", subject_id=oid,
             summary="Proven after costs in SHADOW: review the executability "
                     "of both legs (depth, leg order, partial-fill recovery).",
@@ -579,7 +579,7 @@ async def workroom_posts(conn, *, limit: int = 3) -> list:
             " ORDER BY decided_at DESC LIMIT $1", limit):
         out.append(("opportunity:%s" % o["opportunity_id"], (
             "Adriana · %s on %s · %d sets · $%.2f worst-case net after costs "
-            "(SHADOW)\nNext: Eddie reviews executability, Karen challenges. "
+            "(SHADOW)\nNext: Archer reviews executability, Karen challenges. "
             "Nothing is ordered." % (o["structure_kind"], o["event_key"],
                                     o["max_qty"],
                                     float(o["net_profit_usd"])))))

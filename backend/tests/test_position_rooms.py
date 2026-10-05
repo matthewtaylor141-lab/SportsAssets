@@ -296,18 +296,18 @@ def test_order_without_limit_and_room_without_xavier():
     x = {p["group_id"]: p for p in r["xavier"]}
     assert x[F.G_NYY]["status"] == "UNAVAILABLE"
     assert x[F.G_NYY]["why"] == P.R_NO_XAVIER
-    assert r["eddie"] == {"status": "UNAVAILABLE", "why": "EDDIE_NOT_DEPLOYED",
-                          "source": r["eddie"]["source"]}
+    assert r["archer"] == {"status": "UNAVAILABLE", "why": "ARCHER_NOT_DEPLOYED",
+                          "source": r["archer"]["source"]}
     assert r["scenarios"]["skipped"][0]["reason"] == P.R_NO_LIMIT
     assert r["economic"]["expected_pnl_usd"] is None
 
 
-def test_eddie_rows_are_read_when_deployed():
+def test_archer_rows_are_read_when_deployed():
     raw = F.raw_paper()
-    raw["eddie"] = {"present": True, "rows": [{
+    raw["archer"] = {"present": True, "rows": [{
         "estimate_id": "ee:1", "decision_id": "paper_dec_fx_entry",
         "recommendation": "REST_LIMIT", "estimated_at": F.NOW - 60}]}
-    e = _evt(raw)["eddie"]
+    e = _evt(raw)["archer"]
     assert e["status"] == "OK" and e["estimates"][0]["estimate_id"] == "ee:1"
 
 

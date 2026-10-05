@@ -3,7 +3,7 @@
 ONE ANSWER TO "WAS THIS A SOFTWARE PROBLEM OR AN ECONOMIC DECISION?" for every
 refusal code the code base can write. The owner (2026-10-04): "I specifically
 want to know whether we have hundreds of valid candidates upstream and only a
-few are reaching Derek/Eddie/Xavier", and "there must be no generic
+few are reaching Derek/Archer/Xavier", and "there must be no generic
 'unsupported' bucket if a more precise reason can be identified". Before this
 module every report re-derived the split on its own -- a keyword list in
 lost_opportunity.classify, a CASE expression in each research SQL file, a

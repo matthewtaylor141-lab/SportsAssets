@@ -89,7 +89,7 @@ def _wire(monkeypatch, acct, transport):
     # ENTER with an order (one entry-fill read is scheduled; measured), so
     # the task opened the global pool on
     # this test's event loop and left it behind; the next test to call
-    # db.close_pool (test_eddie_scout_api_pages_slack) then failed with
+    # db.close_pool (test_archer_scout_api_pages_slack) then failed with
     # "Event loop is closed" (CI runs 37262090186 / 37262958942, reproduced
     # locally by running the suite prefix). The fill read is not what this
     # proof is about; it is stubbed exactly like the paper-pass hook above.

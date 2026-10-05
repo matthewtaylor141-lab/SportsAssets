@@ -458,18 +458,18 @@ async def lifespan(_: FastAPI):
         peer_task = asyncio.create_task(_PEER.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("karen: peer responder not armed", exc_info=True)
-    # Eddie (Head of Execution) and Scout (Market Intelligence), migration
+    # Archer (Head of Execution) and Scout (Market Intelligence), migration
     # 217: SHADOW / RESEARCH ONLY. Each writes only its own records, each
     # write transaction declared as that agent (the database refuses any
     # order, intent, fill, approval or control write); bounded per pass;
-    # never raises into this process. Kill switches EDDIE_RUNNER_ENABLED=0
+    # never raises into this process. Kill switches ARCHER_RUNNER_ENABLED=0
     # and SCOUT_RUNNER_ENABLED=0.
-    eddie_task = scout_task = None
+    archer_task = scout_task = None
     try:
-        from ..agents import eddie_runner as _EDDIE
-        eddie_task = asyncio.create_task(_EDDIE.run(_cap_pool))
+        from ..agents import archer_runner as _ARCHER
+        archer_task = asyncio.create_task(_ARCHER.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
-        log.warning("eddie: runner not armed", exc_info=True)
+        log.warning("archer: runner not armed", exc_info=True)
     try:
         from ..agents import scout_runner as _SCOUT
         scout_task = asyncio.create_task(_SCOUT.run(_cap_pool))
@@ -582,7 +582,7 @@ async def lifespan(_: FastAPI):
         log.exception("twin research runner failed to arm")
     # ── THE IMPROVEMENT PIPELINE RUNNER (migration 221) ──────────────
     # Seeds improvement items from real signals (upheld Karen challenges,
-    # Audrey findings, coverage incidents, Eddie SKIP_EXECUTION, false
+    # Audrey findings, coverage incidents, Archer SKIP_EXECUTION, false
     # refusals, tournament verdicts) and mirrors the stages the agents have
     # already recorded. Writes only its own improve_* tables; never a human
     # or engineering step; no push, merge, deploy, order or capital path.
@@ -608,7 +608,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             eddie_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
+                             archer_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
                              improve_task,
                              *watchdog_tasks)
                  if t is not None]
@@ -680,8 +680,8 @@ try:
 except ImportError:
     log.warning("agents: api.agents_karen not loaded", exc_info=True)
 try:
-    # Eddie and Scout (migration 217): /api/command/eddie, /api/command/scout,
-    # /api/command/agents/{eddie,scout} and /api/command/pos/reviews. Reads
+    # Archer and Scout (migration 217): /api/command/archer, /api/command/scout,
+    # /api/command/agents/{archer,scout} and /api/command/pos/reviews. Reads
     # only; there is no write route.
     from .agents_pos import router as _agents_pos_router
     app.include_router(_agents_pos_router)

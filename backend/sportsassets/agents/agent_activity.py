@@ -6,7 +6,7 @@
                    Not an "XP score".
   relationships()  each counterpart, with every interaction kind (Karen's
                    challenges and their outcomes, Audrey's evaluations,
-                   Derek -> Xavier hand-offs, Eddie's estimates of Derek's
+                   Derek -> Xavier hand-offs, Archer's estimates of Derek's
                    decisions, the candidate-review chain, collaboration-loop
                    stages, agent-to-agent messages, relationship memories)
                    and its evidence.
@@ -34,6 +34,7 @@ from .. import xavier_freshness as XF
 from . import agent_context as AC
 from . import agent_memory as M
 from . import identity as I
+from . import registry as R
 
 VERSION = "AGENT_ACTIVITY_V1"
 
@@ -224,7 +225,7 @@ EXPERIENCE: dict[str, list] = {
          " WHERE a.shadow_usd > 0",
          "shadow-funded candidates whose paper position settled"),
     ],
-    "EDDIE": [
+    "ARCHER": [
         ("estimates_recorded", "Execution estimates", "SHADOW",
          ("eddie_execution_estimates",),
          "SELECT count(*) FROM eddie_execution_estimates",
@@ -348,17 +349,33 @@ def validate_event(e: dict) -> str | None:
         return R_NO_BASIS
     if _ep(e.get("at")) is None:
         return "EVENT_HAS_NO_RECORDED_TIME"
-    if I.agent_of(e.get("agent")) is None:
+    if _agent_of(e.get("agent")) is None:
         return I.R_UNKNOWN_AGENT
     return None
+
+
+def _agent_of(v) -> str | None:
+    """I.agent_of, and a historical alias (EDDIE, 266) as the agent it now
+    names (ARCHER) -- a historical row is shown, never dropped."""
+    a = I.agent_of(v)
+    if a is None and R.historical_alias(v):
+        return R.canonical_agent_id(v)
+    return a
 
 
 def _ev(kind, agent, at, table, rid, summary, *, counterpart=None,
         extra=None) -> dict:
     e = {"event_id": "%s:%s:%s" % (kind, table, rid), "kind": kind,
-         "agent": I.agent_of(agent), "counterpart": I.agent_of(counterpart),
+         "agent": _agent_of(agent), "counterpart": _agent_of(counterpart),
          "at": _ep(at), "summary": summary,
          "basis": {"table": table, "id": str(rid)}}
+    # (266) a row written under the historical alias says so explicitly
+    aliased = [k for k, v in (("agent", agent), ("counterpart", counterpart))
+               if R.historical_alias(v)]
+    if aliased:
+        e["historical_alias"] = R.historical_alias(
+            agent if "agent" in aliased else counterpart)
+        e["historical_alias_columns"] = aliased
     if extra:
         e.update(extra)
     return e
@@ -519,7 +536,7 @@ async def _src_messages(conn, lo, hi, n, asc):
 
 
 async def _src_estimates(conn, lo, hi, n, asc):
-    return [_ev("EXECUTION_ESTIMATE", "EDDIE", r["estimated_at"],
+    return [_ev("EXECUTION_ESTIMATE", "ARCHER", r["estimated_at"],
                 "eddie_execution_estimates", r["estimate_id"],
                 "Estimated decision %s: %s (SHADOW)" % (
                     r["decision_id"], r["recommendation"]),
@@ -597,7 +614,7 @@ async def _src_pos_steps(conn, lo, hi, n, asc):
                 "SELECT review_id, seq, step, agent, status, at "
                 "  FROM pos_candidate_review_steps WHERE "
                 + _win("at", asc), lo, hi, n)
-            if I.agent_of(r["agent"])]
+            if _agent_of(r["agent"])]
 
 
 EVENT_SOURCES = (
@@ -695,7 +712,7 @@ async def relationships(conn, agent: str, *, now: float | None = None
     sections: dict = {}
 
     def add(cp, kind, direction, n, latest, evidence, source, **kw):
-        cp = I.agent_of(cp)
+        cp = _agent_of(cp)
         if not cp or cp == a or not n:
             return
         rel = acc.setdefault(cp, {"counterpart": cp, "interactions": [],
@@ -762,13 +779,13 @@ async def relationships(conn, agent: str, *, now: float | None = None
         return True
 
     async def estimates():
-        if a not in ("DEREK", "EDDIE"):
+        if a not in ("DEREK", "ARCHER"):
             return True
         r = await conn.fetchrow(
             "SELECT count(*) AS n, max(estimated_at) AS last, "
             "  (array_agg(estimate_id ORDER BY estimated_at DESC))[1:3] "
             "  AS ids FROM eddie_execution_estimates")
-        add("EDDIE" if a == "DEREK" else "DEREK", "EXECUTION_ESTIMATE",
+        add("ARCHER" if a == "DEREK" else "DEREK", "EXECUTION_ESTIMATE",
             "RECEIVED" if a == "DEREK" else "GIVEN", r["n"], r["last"],
             [{"kind": "eddie_execution_estimates", "id": i}
              for i in (r["ids"] or [])], "eddie_execution_estimates")
@@ -776,12 +793,14 @@ async def relationships(conn, agent: str, *, now: float | None = None
 
     async def pos_chain():
         rows = await conn.fetch(
-            "SELECT p.agent AS prev, s.agent AS cur, count(*) AS n, "
+            "SELECT agent_canonical_id(p.agent) AS prev, "
+            "       agent_canonical_id(s.agent) AS cur, count(*) AS n, "
             "       max(s.at) AS last "
             "  FROM pos_candidate_review_steps s "
             "  JOIN pos_candidate_review_steps p "
             "    ON p.review_id = s.review_id AND p.seq = s.seq - 1 "
-            " WHERE s.agent=$1 OR p.agent=$1 GROUP BY 1, 2", a)
+            " WHERE agent_canonical_id(s.agent)=$1 "
+            "    OR agent_canonical_id(p.agent)=$1 GROUP BY 1, 2", a)
         for r in rows:
             mine = r["cur"] == a
             add(r["prev"] if mine else r["cur"], "CANDIDATE_REVIEW",
@@ -791,14 +810,14 @@ async def relationships(conn, agent: str, *, now: float | None = None
 
     async def loop():
         rows = await conn.fetch(
-            "SELECT CASE WHEN upper(s.actor)=$1 THEN upper(f.proposer) "
-            "            ELSE upper(s.actor) END AS cp, "
-            "       CASE WHEN upper(s.actor)=$1 THEN 'GIVEN' "
+            "SELECT CASE WHEN agent_canonical_id(s.actor)=$1 THEN agent_canonical_id(f.proposer) "
+            "            ELSE agent_canonical_id(s.actor) END AS cp, "
+            "       CASE WHEN agent_canonical_id(s.actor)=$1 THEN 'GIVEN' "
             "            ELSE 'RECEIVED' END AS dir, count(*) AS n, "
             "       max(s.at) AS last FROM agent_finding_stages s "
             "  JOIN agent_findings f USING (finding_id) "
-            " WHERE upper(s.actor) <> upper(f.proposer) "
-            "   AND (upper(s.actor)=$1 OR upper(f.proposer)=$1) "
+            " WHERE agent_canonical_id(s.actor) <> agent_canonical_id(f.proposer) "
+            "   AND (agent_canonical_id(s.actor)=$1 OR agent_canonical_id(f.proposer)=$1) "
             " GROUP BY 1, 2", a)
         for r in rows:
             add(r["cp"], "COLLABORATION_LOOP", r["dir"], r["n"], r["last"],
@@ -807,13 +826,17 @@ async def relationships(conn, agent: str, *, now: float | None = None
 
     async def messages():
         rows = await conn.fetch(
-            "SELECT CASE WHEN from_agent=$1 THEN to_agent ELSE from_agent "
-            "       END AS cp, CASE WHEN from_agent=$1 THEN 'GIVEN' "
+            "SELECT CASE WHEN agent_canonical_id(from_agent)=$1 "
+            "            THEN agent_canonical_id(to_agent) "
+            "            ELSE agent_canonical_id(from_agent) "
+            "       END AS cp, CASE WHEN agent_canonical_id(from_agent)=$1 "
+            "            THEN 'GIVEN' "
             "       ELSE 'RECEIVED' END AS dir, message_kind, count(*) AS n,"
             "       max(created_at) AS last, "
             "       (array_agg(message_id ORDER BY created_at DESC))[1:3] "
             "       AS ids FROM agent_conversation_messages "
-            " WHERE from_agent=$1 OR to_agent=$1 GROUP BY 1, 2, 3", a)
+            " WHERE agent_canonical_id(from_agent)=$1 "
+            "    OR agent_canonical_id(to_agent)=$1 GROUP BY 1, 2, 3", a)
         for r in rows:
             add(r["cp"], r["message_kind"], r["dir"], r["n"], r["last"],
                 [{"kind": "agent_conversation_messages", "id": i}
@@ -826,7 +849,8 @@ async def relationships(conn, agent: str, *, now: float | None = None
             "       max(learned_at) AS last, "
             "       (array_agg(memory_id ORDER BY learned_at DESC))[1:3] "
             "       AS ids FROM agent_memory_events "
-            " WHERE agent_id=$1 AND memory_kind='RELATIONSHIP' "
+            " WHERE agent_canonical_id(agent_id)=$1 "
+            "   AND memory_kind='RELATIONSHIP' "
             "   AND facts ? 'counterpart' GROUP BY 1", a)
         for r in rows:
             add(r["cp"], "RELATIONSHIP_MEMORY", "OWN", r["n"], r["last"],
@@ -892,8 +916,8 @@ async def evaluation(conn, agent: str, *, now: float | None = None) -> dict:
         "  AS cited, "
         "  count(*) FILTER (WHERE memory_kind='SELF_CORRECTION') AS sc, "
         "  count(*) FILTER (WHERE subject_type = ANY($2::text[])) AS inm "
-        "  FROM agent_memory_events WHERE agent_id=$1", a,
-        list(M.MANDATE[a])))
+        "  FROM agent_memory_events WHERE agent_id = ANY($1::text[])",
+        R.ids_with_aliases(a), list(M.MANDATE[a])))
     n = int(mem["n"]) if mem else 0
     if st != OK:
         rows.append(_dim("citation_evidence_coverage", st, why=why))
@@ -988,7 +1012,7 @@ async def evaluation(conn, agent: str, *, now: float | None = None) -> dict:
                              definition="Brier score of p_blended over "
                                         "settled ENTER decisions (lower is "
                                         "better)"))
-    elif a == "EDDIE":
+    elif a == "ARCHER":
         st3, c, why3 = await _guarded(
             conn, ("eddie_execution_outcomes",), lambda: conn.fetchrow(
                 "SELECT count(*) AS n, avg(abs(realized_execution_loss_pp - "

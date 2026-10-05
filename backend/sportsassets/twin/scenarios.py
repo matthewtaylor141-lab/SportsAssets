@@ -82,8 +82,8 @@ CATALOG = (
     {"scenario_key": "EDDIE_ALTERNATE_EXECUTION", "version": 1,
      "world": "EDDIE_EXECUTION", "params": {},
      "assumptions": ["requires pos_iface_eddie_execution (217); the "
-                     "recorded P&L with Eddie's fill VWAP and fee for the "
-                     "recorded quantity; no Eddie row at decision -> the "
+                     "recorded P&L with Archer's fill VWAP and fee for the "
+                     "recorded quantity; no Archer row at decision -> the "
                      "recorded execution"]},
     {"scenario_key": "SCOUT_FEATURE_INCLUDED", "version": 1,
      "world": "SCOUT_FEATURE",

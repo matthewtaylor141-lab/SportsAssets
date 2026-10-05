@@ -70,7 +70,7 @@ async def test_identities_and_permissions_are_persisted_with_versions():
         assert got["ok"] is True, got
         rows = {r["agent_id"]: dict(r) for r in await conn.fetch(
             "SELECT * FROM agent_identities")}
-        assert set(rows) == {"DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE",
+        assert set(rows) == {"DEREK", "XAVIER", "AUDREY", "KAREN", "ARCHER",
                              "SCOUT", "ADRIANA"}
         for aid, row in rows.items():
             perms = R._j(row["tool_permissions"])

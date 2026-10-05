@@ -484,7 +484,7 @@ async def test_the_reads_serve_research_envelopes(monkeypatch):
         trf = await CT.research_transfer()
         assert trf["status"] == "OK" and trf["transfer_assumed"] is False
         cards = await CT.profitability_scorecards(agent="")
-        assert set(cards["agents"]) == {"DEREK", "XAVIER", "EDDIE", "SCOUT",
+        assert set(cards["agents"]) == {"DEREK", "XAVIER", "ARCHER", "SCOUT",
                                         "KAREN", "ALLOCATOR", "AUDREY"}
         lad = await CT.profitability_ladder()
         assert lad["status"] == "OK" and lad["never_skips_a_level"] is True

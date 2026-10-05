@@ -16,7 +16,7 @@ WHAT IT DOES, every INTERVAL_S in the API process (api/app.py lifespan):
                                COVERAGE_INCIDENT or CRITICAL, one item per
                                (league, stage, kind)
        EDDIE_SKIP_EXECUTION    eddie_execution_estimates SKIP_EXECUTION, one
-                               item per UTC day (owner: Eddie)
+                               item per UTC day (owner: Archer)
        FALSE_REFUSAL           lol_ledger FALSE_REFUSAL (only when the lost-
                                opportunity table exists), one item per defect
        TOURNAMENT_VERDICT      scout_feature_tournaments VALIDATED (owner
@@ -341,7 +341,7 @@ async def seed_audrey(conn, *, now: float) -> list:
     return out
 
 
-async def seed_eddie(conn, *, now: float) -> list:
+async def seed_archer(conn, *, now: float) -> list:
     if not await _regclass(conn, "eddie_execution_estimates"):
         return []
     rows = await conn.fetch(
@@ -359,12 +359,15 @@ async def seed_eddie(conn, *, now: float) -> list:
     for day, rs in groups.items():
         edges = [r["expected_net_executable_edge_pp"] for r in rs
                  if r["expected_net_executable_edge_pp"] is not None]
+        # (266) the source kind and key keep their historical spelling:
+        # they ARE the item's identity (UNIQUE (source_kind, source_key))
+        # and a day already seeded before the rename must not seed twice
         out.append(_cand(
             "EDDIE_SKIP_EXECUTION", "eddie_skip:%s" % day,
             {"kind": "eddie_execution_estimates", "id": rs[0]["estimate_id"]},
-            "Eddie SKIP_EXECUTION on %d Derek candidate(s) (%s)" % (
+            "Archer SKIP_EXECUTION on %d Derek candidate(s) (%s)" % (
                 len(rs), day),
-            "Eddie's SHADOW estimates recorded SKIP_EXECUTION for %d Derek "
+            "Archer's SHADOW estimates recorded SKIP_EXECUTION for %d Derek "
             "ENTER candidate(s) on %s (UTC): the expected net executable "
             "edge after fees, spread, slippage and adverse selection did not "
             "support executing%s. First reason recorded: %s" % (
@@ -372,7 +375,7 @@ async def seed_eddie(conn, *, now: float) -> list:
                 " (median %.2f pp over %d measured)" % (
                     sorted(edges)[len(edges) // 2], len(edges))
                 if edges else "", str(rs[0]["recommendation_reason"])[:400]),
-            "EDDIE",
+            "ARCHER",
             [{"kind": "eddie_execution_estimates", "id": r["estimate_id"]}
              for r in rs],
             ("execution", "SKIP_EXECUTION")))
@@ -411,7 +414,7 @@ async def seed_false_refusals(conn, *, now: float) -> list:
 
 def _variant_owner(subject: str, kind: str) -> str:
     s = str(subject or "").upper()
-    for a in ("DEREK", "XAVIER", "EDDIE", "AUDREY", "SCOUT"):
+    for a in ("DEREK", "XAVIER", "ARCHER", "AUDREY", "SCOUT"):
         if s.startswith(a):
             return a
     if s.startswith("ALLOCATOR") or s.startswith("CHIEF_ALLOCATOR"):
@@ -476,7 +479,7 @@ async def seed_tournaments(conn, *, now: float) -> list:
 
 
 SOURCES = (("karen", seed_karen), ("coverage", seed_coverage),
-           ("audrey", seed_audrey), ("eddie", seed_eddie),
+           ("audrey", seed_audrey), ("archer", seed_archer),
            ("false_refusal", seed_false_refusals),
            ("tournament", seed_tournaments))
 

@@ -2056,8 +2056,14 @@ async def test_the_database_applies_the_same_named_human_rule():
             assert db is CI.is_named_human(actor), actor
         assert await conn.fetchval(
             "SELECT live_parity_named_human(NULL)") is False
-        # the CHECKs use the function; the function carries the pattern
-        assert CI.NON_HUMAN_ACTOR_PATTERN in UP
+        # the CHECKs use the function; the function carries the pattern --
+        # as migration 266 (the EDDIE -> ARCHER rename) last redefined it
+        assert CI.NON_HUMAN_ACTOR_PATTERN in (
+            MIG / "266_archer_execution_agent_rename.sql").read_text()
+        for robot in ("archer", "eddie", "Archer-bot"):
+            assert await conn.fetchval("SELECT live_parity_named_human($1)",
+                                       robot) is False, robot
+            assert CI.is_named_human(robot) is False, robot
         for ck in ("lpc_named_human_ck CHECK (live_parity_named_human(",
                    "la_named_human_ck CHECK (live_parity_named_human(",
                    "OR live_parity_named_human(actor))",

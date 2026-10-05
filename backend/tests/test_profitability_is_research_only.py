@@ -301,7 +301,7 @@ async def test_migration_216_is_idempotent_and_its_rollback_drops_only_pos():
     try:
         await conn.execute(up)
         await conn.execute(up)
-        # migration 217 (Eddie/Scout) also owns pos_* objects
+        # migration 217 (Archer/Scout) also owns pos_* objects
         # (pos_candidate_review*, pos_iface_*): the rollback of 216 must drop
         # EVERY relation 216 creates and NONE of anyone else's
         own = sorted(set(re.findall(

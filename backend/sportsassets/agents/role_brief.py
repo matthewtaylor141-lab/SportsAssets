@@ -30,8 +30,8 @@ SQL = {
  WHERE (account_id=$1 OR account_id IS NULL)
  AND challenged_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2)
  ORDER BY challenged_at DESC,challenge_id LIMIT 101""",
- # Eddie's SHADOW estimates of this account's paper candidates (217)
- 'EDDIE': """SELECT e.estimate_id,e.estimated_at,e.decision_id,e.recommendation,
+ # Archer's SHADOW estimates of this account's paper candidates (217)
+ 'ARCHER': """SELECT e.estimate_id,e.estimated_at,e.decision_id,e.recommendation,
  e.theoretical_edge_pp,e.expected_net_executable_edge_pp,e.expected_fill_probability,
  e.execution_style FROM eddie_execution_estimates e
  JOIN paper_decisions d ON d.decision_id=e.decision_id WHERE d.account_id=$1
@@ -51,7 +51,7 @@ FOCUS = {
  'DEREK': 'Find the largest recorded blocker by distinct contract/side within each strategy/version. Propose one measurable repair; do not infer missed profits or new fills from ENTER signals.',
  'XAVIER': 'Review held-position freshness and recorded alternatives. Compare HOLD, EXIT, REDUCE or a hedge only when current executable prices and settlement compatibility support them; never invent a cross-venue hedge.',
  'AUDREY': 'Prioritize recorded findings and testable causes. Separate peer claims from evidence; evaluate any proposed change on a frozen forward cohort before claiming improvement.',
- 'EDDIE': 'Head of execution, SHADOW ONLY. Preserve Derek\'s theoretical edge between decision and fill: compare taker and resting execution on spread, slippage, fees, adverse selection, fill probability and capital-hours from recorded books and fills; name every unmeasured input. Never recommend executing when the expected executable EV is <= 0 or unmeasured. You do not predict outcomes and hold no order, cancel, venue or capital authority.',
+ 'ARCHER': 'Head of execution, SHADOW ONLY. Preserve Derek\'s theoretical edge between decision and fill: compare taker and resting execution on spread, slippage, fees, adverse selection, fill probability and capital-hours from recorded books and fills; name every unmeasured input. Never recommend executing when the expected executable EV is <= 0 or unmeasured. You do not predict outcomes and hold no order, cancel, venue or capital authority.',
  'SCOUT': 'Market intelligence, RESEARCH SHADOW ONLY. Propose external features only from sources that passed the declared compliance check, with source, timestamps, event identity, confidence, freshness, provenance and licensing. A feature is worth something only if a frozen, prospective test against PinnAPI shows out-of-sample improvement; otherwise it is REJECTED. You decide no trade and can never validate or promote your own feature.',
  'KAREN': 'Red team. Ask "What are we missing?" and "Prove it." of Derek, Xavier, Audrey and the Chief Allocator, but only with records that exist: cite the decision, intent, review, reconciliation, allocation or audit id. Attack assumptions and methodology, never people; political ideology has zero influence on any finding. Let the challenged agent answer; an independent evaluator decides; never resolve your own challenge. You hold no order, approval, activation, limit or promotion authority.',
 }
@@ -135,7 +135,7 @@ def summarize(agent, rows, now, account_id):
                       challenges=selected[:12],source_ids=[r['challenge_id'] for r in selected[:10]],
                       authority='NONE',
                       limitation='A challenge is a grounded question, not a proven defect: only an UPHELD outcome recorded by someone other than Karen counts as one.')
-    elif agent=='EDDIE':
+    elif agent=='ARCHER':
         result.update(by_recommendation=dict(Counter(r.get('recommendation') or 'UNKNOWN' for r in selected)),
                       estimates=selected[:12],source_ids=[r['estimate_id'] for r in selected[:10]],
                       authority='SHADOW_ONLY',

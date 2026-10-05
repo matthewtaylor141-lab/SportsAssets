@@ -82,7 +82,7 @@ def test_next_required_names_who_must_act():
     assert lbl(S.FORWARD_RESULT, [deg]) == \
         "AWAITING ROLLBACK DECISION (HUMAN)"
     assert lbl(S.CLOSED).startswith("CLOSED")
-    # Eddie's evaluator is Audrey; Audrey's is Xavier
+    # Archer's evaluator is Audrey; Audrey's is Xavier
     it = dict(_item(S.EXPERIMENT), owner_agent="AUDREY")
     assert S.next_required(it, [])["label"] == \
         "AWAITING INDEPENDENT EVALUATION (XAVIER)"
@@ -177,7 +177,7 @@ async def test_the_machine_actor_predicate_matches_the_database():
                   "Abbot", "claude", "SYSTEM", "release-bot", "agent:derek",
                   "Derek-agent", "github-actions[bot]", "deploy-runner",
                   "IMPROVEMENT_PIPELINE", "ci", "", "Karen red team",
-                  "scout research", "Eddie Ruiz", "pipeline:x", "Scheduler"):
+                  "scout research", "Archer Ruiz", "pipeline:x", "Scheduler"):
             db = await conn.fetchval("SELECT improve_is_machine_actor($1)", v)
             assert db == S.is_machine_actor(v), v
     finally:

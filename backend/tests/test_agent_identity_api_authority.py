@@ -19,8 +19,8 @@ money, change a control or widen an agent's authority:
      bounded statement timeout; a write inside it is refused by Postgres and
      the identity card runs to completion inside it.
   §4 BUNDLES. Role-specific tool bundles differ per agent; Karen holds no
-     authority tool, Scout no order-mutation tool, Eddie no capital or
-     approval tool; Eddie stays SHADOW_ONLY, Scout RESEARCH_SHADOW_ONLY,
+     authority tool, Scout no order-mutation tool, Archer no capital or
+     approval tool; Archer stays SHADOW_ONLY, Scout RESEARCH_SHADOW_ONLY,
      Karen challenge-only; Xavier's bundle requires the current review
      identity. A bundle never widens the registry.
   §5 VOICE. The speech route refuses a voice another agent already speaks
@@ -209,7 +209,7 @@ def test_the_routes_are_get_only_and_require_a_command_session():
     for p, methods in registered.items():
         assert methods <= {"GET", "HEAD"}, (p, methods)
     client = TestClient(APP.app, raise_server_exceptions=False)
-    for slug in ("derek", "xavier", "audrey", "karen", "allocator", "eddie",
+    for slug in ("derek", "xavier", "audrey", "karen", "allocator", "archer",
                  "scout"):
         for leaf in ("identity", "identity/versions", "memories",
                      "experience", "relationships", "events", "evaluation",
@@ -267,7 +267,7 @@ async def test_the_request_path_is_a_read_only_transaction(monkeypatch):
         assert ev["rejected_without_durable_basis"] == 0
         for fn in (A.agent_experience, A.agent_relationships,
                    A.agent_evaluation, A.agent_context):
-            assert (await fn("eddie", _R()))["agent"] == "EDDIE"
+            assert (await fn("archer", _R()))["agent"] == "ARCHER"
         m = await A.agent_memories("scout", _R(), kind=None, before=None,
                                    limit=10, include_superseded=True)
         assert m["agent"] == "SCOUT"
@@ -294,11 +294,11 @@ def test_every_agent_has_a_different_bundle():
     assert "read.all" not in bundles["DEREK"]["tools"]
 
 
-def test_karen_scout_eddie_boundaries_and_xavier_context():
+def test_karen_scout_archer_boundaries_and_xavier_context():
     from sportsassets.agents import agent_context as AC
     from sportsassets.agents import identity as I
     from sportsassets.agents import registry as R
-    k, s, e, x = (AC.bundle(a) for a in ("KAREN", "SCOUT", "EDDIE",
+    k, s, e, x = (AC.bundle(a) for a in ("KAREN", "SCOUT", "ARCHER",
                                          "XAVIER"))
     assert not set(k["tools"]) & AC.AUTHORITY_TOOLS
     assert k["order_path"] is None
@@ -310,7 +310,7 @@ def test_karen_scout_eddie_boundaries_and_xavier_context():
     assert not set(e["tools"]) & AC.ORDER_MUTATION_TOOLS
     assert e["authority_status"] == "SHADOW_ONLY"
     for t in AC.CAPITAL_APPROVAL_TOOLS:
-        assert not I.permits("EDDIE", t), t
+        assert not I.permits("ARCHER", t), t
     for t in AC.ORDER_MUTATION_TOOLS:
         assert not I.permits("SCOUT", t) and not I.permits("KAREN", t), t
         assert not I.permits("CHIEF_ALLOCATOR", t), t
@@ -334,7 +334,7 @@ def test_karen_scout_eddie_boundaries_and_xavier_context():
 
 def test_memory_and_messages_cannot_carry_authority():
     from sportsassets.agents import agent_memory as M
-    c = {"agent_id": "EDDIE", "memory_kind": M.LESSON,
+    c = {"agent_id": "ARCHER", "memory_kind": M.LESSON,
          "subject_type": "execution_calibration", "subject_id": "x",
          "summary": "s", "confidence": 0.9, "deriver": "t",
          "evidence_refs": [{"kind": "eddie_execution_outcomes", "id": "o"}]}

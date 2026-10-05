@@ -935,7 +935,7 @@ async def read_small_live(conn, *, now: float) -> dict:
                        % (type(exc).__name__, str(exc)[:160])}
     small = dict(got["small_live"])
     small["legacy_mirror"] = got["legacy_mirror"]
-    small["eddie_funnel"] = got["eddie_funnel"]
+    small["archer_funnel"] = got["archer_funnel"]
     return small
 
 

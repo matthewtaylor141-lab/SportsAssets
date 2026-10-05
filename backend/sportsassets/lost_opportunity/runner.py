@@ -194,12 +194,12 @@ async def run_component(conn, *, now=None, pos_run_id=None, econs=None,
                 "edge_confidence": ec if ec is not None else {
                     "value": None, "why": sctx["edge_confidence_why"]
                     or "NO_EDGE_CONFIDENCE_FORECAST_FOR_THIS_VALUATION"}}
-            eddie = sctx["eddie"].get(str(c.get("candidate_id")))
-            ctx["eddie"], ctx["eddie_why"] = eddie, sctx["eddie_why"]
+            archer = sctx["archer"].get(str(c.get("candidate_id")))
+            ctx["archer"], ctx["archer_why"] = archer, sctx["archer_why"]
             cap = R.as_of(snaps["CAPITAL"], c["decided_at"])
             fpe = R.as_of(snaps["CAPACITY"], c["decided_at"])
             fp, fbasis, fsrc = SC.execution_input(
-                eddie, None if fpe is None else fpe[1],
+                archer, None if fpe is None else fpe[1],
                 ("NO_CAPACITY_SNAPSHOT_AT_OR_BEFORE_DECISION"
                  if fpe is None else fpe[2]), strategy=c.get("strategy"))
             got = SC.score(

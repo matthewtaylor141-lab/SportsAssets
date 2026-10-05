@@ -13,7 +13,7 @@ WHAT A STATE MEANS. Every state is DERIVED from real rows with their
 timestamps -- nothing here is invented for animation:
 
   NOT_DEPLOYED  the agent's tables / identity do not exist on this database
-                (Eddie and Scout until migration 217 ships)
+                (Archer and Scout until migration 217 ships)
   STALE         no heartbeat, or the latest heartbeat is older than the
                 agent's stale bound (3 x its recorded cadence, floor 15 min)
   WORKING_ON    a run is in progress inside the heartbeat window
@@ -42,7 +42,7 @@ COLLABORATION EDGES are real rows inside the window (default one hour):
 Karen's challenges (raised / answered / resolved), collaboration-loop stages
 recorded by one agent on another's finding (migration 203), Derek -> Xavier
 paper hand-offs, the candidate-review workflow's consecutive steps and
-Eddie's estimates of Derek's decisions (migration 217, read only when the
+Archer's estimates of Derek's decisions (migration 217, read only when the
 tables exist) and the agents' durable hand-off / memory hand-off messages
 (agent_conversation_messages, migration 224). Each edge carries its
 evidence ids.
@@ -125,7 +125,7 @@ BUSY_STATE = {"KAREN": "CHALLENGING", "AUDREY": "REVIEWING",
               "XAVIER": "REVIEWING"}
 
 # ── THE EIGHT DESKS: THE CANDIDATE-REVIEW ORDER, THEN ADRIANA ───────────
-# Derek -> Karen -> Scout -> Eddie -> Allocator -> Audrey -> Xavier is the
+# Derek -> Karen -> Scout -> Archer -> Allocator -> Audrey -> Xavier is the
 # order of pos_candidate_review_steps (migration 217); the floor seats them
 # along the arc in that order so the review flows across the room.
 SEATS = (
@@ -162,10 +162,10 @@ SEATS = (
      "may_not": ["Adopt or promote a feature into a model",
                  "Judge his own tournament (the evaluator decides)",
                  "Any order, capital or venue action"]},
-    {"agent": "EDDIE", "slug": "eddie", "display_name": "Eddie",
+    {"agent": "ARCHER", "slug": "archer", "display_name": "Archer",
      "title": "Head of Execution · shadow only",
      "authority_level": "SHADOW_ONLY",
-     "workspace": "/eddie", "kind": "POS_AGENT",
+     "workspace": "/archer", "kind": "POS_AGENT",
      "deploy_table": "eddie_execution_estimates",
      "may": ["Estimate executable edge, fill probability and slippage for "
              "Derek's decisions (SHADOW)",
@@ -217,7 +217,7 @@ SEATS = (
      "may": ["Read recorded venue books, the catalogue and settlement terms",
              "Record arbitrage opportunities and refusals with their "
              "evidence (SHADOW)",
-             "Hand an opportunity to Eddie for an execution review and ask "
+             "Hand an opportunity to Archer for an execution review and ask "
              "Karen to challenge it"],
      "may_not": ["Place, cancel or route any order on any venue",
                  "Hold or read any venue credential",
@@ -226,6 +226,9 @@ SEATS = (
 )
 SEAT_BY_AGENT = {s["agent"]: s for s in SEATS}
 SEAT_BY_SLUG = {s["slug"]: s for s in SEATS}
+#: (266) a historical seat address -> the seat it names now; pinned equal to
+#: registry.HISTORICAL_ALIASES by a test (this module imports no registry)
+SEAT_ALIASES = {"eddie": "archer"}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -629,7 +632,7 @@ async def _allocator(rd: _Reads, now: float) -> dict:
     return await rd.run("intel_runs", ("intel_runs",), fn) or {}
 
 
-async def _eddie(rd: _Reads, now: float) -> dict:
+async def _archer(rd: _Reads, now: float) -> dict:
     async def fn(conn):
         agg = await conn.fetchrow(
             "SELECT count(*) AS n FROM eddie_execution_estimates "
@@ -834,8 +837,8 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
             prev = r
         return out
 
-    async def eddie(conn):
-        return [{"from": "DEREK", "to": "EDDIE", "kind": "EXECUTION_ESTIMATE",
+    async def archer(conn):
+        return [{"from": "DEREK", "to": "ARCHER", "kind": "EXECUTION_ESTIMATE",
                  "at": r["estimated_at"],
                  "evidence": _ref("eddie_execution_estimates",
                                   r["estimate_id"]),
@@ -869,7 +872,7 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
             ("edges.paper_handoffs", ("paper_handoffs",), handoffs),
             ("edges.candidate_review", ("pos_candidate_review_steps",),
              pos_steps),
-            ("edges.eddie_estimates", ("eddie_execution_estimates",), eddie)):
+            ("edges.archer_estimates", ("eddie_execution_estimates",), archer)):
         raw.extend(await rd.run(name, tables, fn, default=[]) or [])
     return raw
 
@@ -911,12 +914,12 @@ async def build_floor(conn, *, now: float | None = None,
     aud = await _audrey(rd, now)
     ch = await _challenges(rd, now)
     alloc = await _allocator(rd, now)
-    eddie_deployed = (await rd.exists("eddie_execution_estimates")
-                      and "EDDIE" in status)
+    archer_deployed = (await rd.exists("eddie_execution_estimates")
+                      and "ARCHER" in status)
     scout_deployed = await rd.exists("scout_features") and "SCOUT" in status
     adriana_deployed = (await rd.exists("adriana_arb_scans")
                         and "ADRIANA" in status)
-    eddie = await _eddie(rd, now) if eddie_deployed else {}
+    archer = await _archer(rd, now) if archer_deployed else {}
     scout = await _scout(rd, now) if scout_deployed else {}
     adriana = await _adriana(rd, now) if adriana_deployed else {}
     slack = await _slack(rd, now)
@@ -1138,19 +1141,19 @@ async def build_floor(conn, *, now: float | None = None,
                 _m("Shadow sleeve allocated", _money(al.get("shadow_usd"))
                    if al else None, "intel_allocations",
                    (lr or {}).get("started_at"), "NO_ALLOCATOR_RUN")]
-        elif a == "EDDIE" and deployed:
-            le = eddie.get("last")
+        elif a == "ARCHER" and deployed:
+            le = archer.get("last")
             if le:
                 focus = last_output = dict(_ref(
                     "eddie_execution_estimates", le["estimate_id"],
-                    "/api/command/eddie/estimates/%s" % le["estimate_id"],
+                    "/api/command/archer/estimates/%s" % le["estimate_id"],
                     le["estimated_at"]), decision_id=le["decision_id"],
                     summary="%s · decision %s" % (le["recommendation"],
                                                   le["decision_id"]))
                 signals.append({"at": le["estimated_at"], "hint":
                                 "WORKING_ON", "label": "Estimated execution: "
                                 + last_output["summary"], "ref": focus})
-            monitor = [_m("Estimates (24h)", eddie.get("n24"),
+            monitor = [_m("Estimates (24h)", archer.get("n24"),
                           "eddie_execution_estimates",
                           (le or {}).get("estimated_at"),
                           rd.sections.get("eddie_execution_estimates",
@@ -1563,6 +1566,13 @@ async def floor_index(response: Response) -> dict:
             dependencies=[Depends(require_read)])
 async def floor_agent(agent: str, response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
+    # (266) a historical alias (eddie) reads the seat it now names (archer)
+    # and says so -- the same payload plus alias_of / historical_alias
+    canon = SEAT_ALIASES.get(str(agent).lower())
+    if canon:
+        got = await floor_agent(canon, response)
+        return dict(got or {}, alias_of=canon,
+                    historical_alias=str(agent).upper())
     if str(agent).lower() not in SEAT_BY_SLUG:
         raise HTTPException(status_code=404, detail={
             "reason": "NOT_A_FLOOR_AGENT", "agents": sorted(SEAT_BY_SLUG)})

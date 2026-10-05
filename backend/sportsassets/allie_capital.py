@@ -3,7 +3,7 @@
 The Chief Allocator's allocation that every canonical decision intent carries.
 Capital efficiency is what DETERMINES the amount -- not a label:
 
-  1  expected executable net profit      Eddie's executable EV (after fees,
+  1  expected executable net profit      Archer's executable EV (after fees,
                                          slippage, fill probability); the
                                          decision's modelled net only as a
                                          labelled fallback
@@ -14,7 +14,7 @@ Capital efficiency is what DETERMINES the amount -- not a label:
   5  expected profit per capital-hour    (1) / (4)
   6  profit per $1,000 per hour          (5) x 1,000
   7  capacity ceiling                    executable depth at a positive edge
-                                         (Eddie's max executable quantity x
+                                         (Archer's max executable quantity x
                                          limit), else the displayed depth
                                          within the limit
   8  correlation / concentration effect  open exposure already on the same

@@ -10,8 +10,10 @@
     GET /api/command/agents/{agent}/evaluation         evaluation matrix
     GET /api/command/agents/{agent}/context            role bundle + context
 
-`{agent}` is a slug (derek, xavier, audrey, karen, allocator, eddie, scout)
-or an agent id (CHIEF_ALLOCATOR ...); anything else is 404 NOT_AN_AGENT.
+`{agent}` is a slug (derek, xavier, audrey, karen, allocator, archer, scout,
+adriana) or an agent id (CHIEF_ALLOCATOR ...); anything else is 404
+NOT_AN_AGENT. A historical alias (eddie, migration 266) reads the agent it
+now names (archer) and the answer says so: alias_of + historical_alias.
 
 Read-only, COMMAND session auth (agents_core.require_read: 401 without a
 session), GET only. Every request runs inside ONE `BEGIN READ ONLY`
@@ -37,6 +39,7 @@ from ..agents import agent_activity as AA
 from ..agents import agent_context as AC
 from ..agents import agent_memory as M
 from ..agents import identity as I
+from ..agents import registry as R
 from ..agent_work_state import read_work_states as _read_work_states
 from .agents_core import _pool, require_read
 
@@ -49,10 +52,22 @@ STATEMENT_TIMEOUT_MS = 5000
 
 def _agent(agent: str) -> str:
     a = I.agent_of(agent)
+    if a is None and R.historical_alias(agent):
+        a = R.canonical_agent_id(agent)
     if a is None:
         raise HTTPException(status_code=404, detail={
             "reason": "NOT_AN_AGENT", "agents": sorted(I.BY_SLUG)})
     return a
+
+
+def _tag(agent, got):
+    """(266) an answer for a historical alias (/agents/eddie/...) is the
+    canonical agent's, and says so: alias_of + historical_alias."""
+    alias = R.historical_alias(agent) if agent else None
+    if alias and isinstance(got, dict):
+        return dict(got, alias_of=I.SLUGS[R.canonical_agent_id(alias)],
+                    historical_alias=alias)
+    return got
 
 
 async def _read_only(fn):
@@ -288,8 +303,9 @@ async def agents_stream(response: Response,
             dependencies=[Depends(require_read)])
 async def agent_identity(agent: str, response: Response) -> dict:
     a = _agent(agent)
-    return await _serve(response, lambda conn: build_identity(conn, a),
-                        "AGENT_IDENTITY_READ_FAILED")
+    got = await _serve(response, lambda conn: build_identity(conn, a),
+                       "AGENT_IDENTITY_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/identity/versions",
@@ -307,7 +323,8 @@ async def agent_identity_versions(agent: str, response: Response) -> dict:
         return {"schema": "bettor.agent.identity_versions.v1", "agent": a,
                 "status": AA.OK if vers else AA.EMPTY, "versions": vers,
                 "immutable": True}
-    return await _serve(response, fn, "AGENT_IDENTITY_READ_FAILED")
+    got = await _serve(response, fn, "AGENT_IDENTITY_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/memories",
@@ -346,23 +363,26 @@ async def agent_memories(agent: str, response: Response,
                 "reader": M.OPERATOR,
                 "privacy": "the owner's Command session reads every agent's "
                            "memory; an agent reads only its own"}
-    return await _serve(response, fn, "AGENT_MEMORY_READ_FAILED")
+    got = await _serve(response, fn, "AGENT_MEMORY_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/experience",
             dependencies=[Depends(require_read)])
 async def agent_experience(agent: str, response: Response) -> dict:
     a = _agent(agent)
-    return await _serve(response, lambda conn: AA.experience(conn, a),
-                        "AGENT_EXPERIENCE_READ_FAILED")
+    got = await _serve(response, lambda conn: AA.experience(conn, a),
+                       "AGENT_EXPERIENCE_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/relationships",
             dependencies=[Depends(require_read)])
 async def agent_relationships(agent: str, response: Response) -> dict:
     a = _agent(agent)
-    return await _serve(response, lambda conn: AA.relationships(conn, a),
-                        "AGENT_RELATIONSHIPS_READ_FAILED")
+    got = await _serve(response, lambda conn: AA.relationships(conn, a),
+                       "AGENT_RELATIONSHIPS_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/events",
@@ -372,16 +392,18 @@ async def agent_events(agent: str, response: Response,
                                                  max_length=200),
                        limit: int = Query(default=50, ge=1, le=200)) -> dict:
     a = _agent(agent)
-    return await _serve(response, lambda conn: AA.events(
+    got = await _serve(response, lambda conn: AA.events(
         conn, agent=a, since=since, limit=limit), "AGENT_EVENTS_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/evaluation",
             dependencies=[Depends(require_read)])
 async def agent_evaluation(agent: str, response: Response) -> dict:
     a = _agent(agent)
-    return await _serve(response, lambda conn: AA.evaluation(conn, a),
-                        "AGENT_EVALUATION_READ_FAILED")
+    got = await _serve(response, lambda conn: AA.evaluation(conn, a),
+                       "AGENT_EVALUATION_READ_FAILED")
+    return _tag(agent, got)
 
 
 @router.get("/api/command/agents/{agent}/context",
@@ -393,4 +415,5 @@ async def agent_context(agent: str, response: Response) -> dict:
         got = await AC.build_context(conn, a)
         return dict(got, schema="bettor.agent.context.v1", agent=a,
                     read_only=True)
-    return await _serve(response, fn, "AGENT_CONTEXT_READ_FAILED")
+    got = await _serve(response, fn, "AGENT_CONTEXT_READ_FAILED")
+    return _tag(agent, got)

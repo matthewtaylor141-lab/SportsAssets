@@ -11,7 +11,7 @@ view filters on it; nothing here decides anything.
 THE INTERFACES of the parallel streams are read only through the
 pos_iface_* views, and only when they exist with the required columns:
 
-  pos_iface_eddie_execution        (217 EDDIE)  decision_id, at, qty,
+  pos_iface_eddie_execution        (217 ARCHER)  decision_id, at, qty,
       baseline_vwap, eddie_vwap, baseline_fee_usd, eddie_fee_usd
       [optional: baseline_fill_ratio, eddie_fill_ratio, baseline_markout_pc,
        eddie_markout_pc, spread_pc, capital_hours_saved]
@@ -28,7 +28,7 @@ MAX_DECISIONS = 5000
 MAX_ROWS = 20000
 
 IFACE = {
-    "EDDIE": ("pos_iface_eddie_execution",
+    "ARCHER": ("pos_iface_eddie_execution",
               ("decision_id", "at", "qty", "baseline_vwap", "eddie_vwap",
                "baseline_fee_usd", "eddie_fee_usd"),
               ("baseline_fill_ratio", "eddie_fill_ratio",

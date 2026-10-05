@@ -2,7 +2,7 @@
 
 THE OWNER'S QUESTION (2026-10-04): "I specifically want to know whether we
 have hundreds of valid candidates upstream and only a few are reaching
-Derek/Eddie/Xavier." Every report answered it differently, and an agent's
+Derek/Archer/Xavier." Every report answered it differently, and an agent's
 refusals were read as "the agent said no" whether the agent had judged the
 economics or the software had failed to give it inputs it could judge.
 

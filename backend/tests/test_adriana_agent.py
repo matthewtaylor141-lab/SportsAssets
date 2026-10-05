@@ -179,7 +179,7 @@ def test_the_slack_bridge_fails_closed_without_her_own_app(monkeypatch):
     assert ident["why"] == "ADRIANA_SLACK_APP_NOT_CONFIGURED"
     assert S.impersonation({"agent": "adriana", "source_key": "adriana:x"}) \
         == "ADRIANA_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT"
-    assert S.impersonation({"agent": "eddie", "source_key": "adriana:x"}) \
+    assert S.impersonation({"agent": "archer", "source_key": "adriana:x"}) \
         == "IMPERSONATION_REFUSED_ADRIANA_CONTENT_ON_ANOTHER_TOKEN"
     # someone else's token is never hers
     monkeypatch.setenv("SLACK_ADRIANA_BOT_TOKEN", "xoxb-shared")

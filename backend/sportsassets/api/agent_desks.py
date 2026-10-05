@@ -1,12 +1,12 @@
-"""EDDIE'S AND SCOUT'S DESKS ON THEIR COMMAND CENTRE PAGES (migration 217).
+"""ARCHER'S AND SCOUT'S DESKS ON THEIR COMMAND CENTRE PAGES (migration 217).
 
 Each page leads with the agent's desk: the live 3D character at an original,
-procedural desk (cc_characters.js -- Eddie an institutional execution desk
+procedural desk (cc_characters.js -- Archer an institutional execution desk
 with order-book / depth screens, Scout a research desk with sports-feed,
 feature-test and weather / data panels) and, beside it, the desk panels.
 
 EVERY VALUE ON THE DESK COMES FROM THE AGENT'S ENDPOINT. The page's data
-module reads /api/command/eddie or /scout (the shared BOOT_JS) and hands the
+module reads /api/command/archer or /scout (the shared BOOT_JS) and hands the
 JSON to `DESK.render`, which fills the panels, sets the character's pose
 from the persisted heartbeat (`cc:mode`, the same rule as the other agents:
 stale or FAILED is UNAVAILABLE) and redraws the 3D screens (`cc:desk`). A
@@ -20,7 +20,7 @@ RESEARCH SHADOW ONLY in words.
 from __future__ import annotations
 
 DESK_META = {
-    "eddie": {"name": "Eddie", "role": "Head of Execution",
+    "archer": {"name": "Archer", "role": "Head of Execution",
               "authority": "SHADOW ONLY · NO ORDER, CANCEL, VENUE OR "
                            "CAPITAL AUTHORITY",
               "blurb": ("Preserves Derek's theoretical edge between decision "
@@ -41,10 +41,10 @@ DESK_META = {
               "accent": "#6fd39a"},
 }
 
-#: The desk panels, in order: (key, label). Eddie's and Scout's lists are
+#: The desk panels, in order: (key, label). Archer's and Scout's lists are
 #: the owner's acceptance standard.
 PANELS = {
-    "eddie": (("heartbeat", "Heartbeat"), ("current_task", "Current task"),
+    "archer": (("heartbeat", "Heartbeat"), ("current_task", "Current task"),
               ("alerts", "Alerts"),
               ("analysis", "Current execution analysis"),
               ("candidate", "Candidate contract"),
@@ -97,10 +97,10 @@ DESK_CSS = r"""
 .pd-blurb{margin:8px 0 0;font-size:13px;color:var(--ink-2)}
 body[data-cc-mode=unavailable] .pd-stage{filter:saturate(.4)}
 /* phone width: long identity chips (versions, mandates) wrap, never scroll */
-body.ag-eddie .ident>div,body.ag-scout .ident>div{min-width:0;flex:1 1 auto}
-body.ag-eddie .chip,body.ag-scout .chip{white-space:normal;overflow-wrap:anywhere;max-width:100%}
-body.ag-eddie .mandate,body.ag-scout .mandate{overflow-wrap:anywhere}
-body.ag-eddie main,body.ag-scout main{overflow-x:clip}
+body.ag-archer .ident>div,body.ag-scout .ident>div{min-width:0;flex:1 1 auto}
+body.ag-archer .chip,body.ag-scout .chip{white-space:normal;overflow-wrap:anywhere;max-width:100%}
+body.ag-archer .mandate,body.ag-scout .mandate{overflow-wrap:anywhere}
+body.ag-archer main,body.ag-scout main{overflow-x:clip}
 @media (max-width:980px){.pd{grid-template-columns:1fr}.pd-stage{position:relative;top:0;height:440px;min-height:340px}}
 @media (max-width:560px){.pd-panels{grid-template-columns:1fr}.pd-ov h1{font-size:26px}.pd-stage{height:340px;min-height:300px}}
 """
@@ -111,7 +111,7 @@ def _fallback_svg(kind: str) -> str:
     only. The screens are blank frames here -- the numbers live in the desk
     panels, drawn from the record."""
     acc = DESK_META[kind]["accent"]
-    if kind == "eddie":
+    if kind == "archer":
         frames = ('<rect x="40" y="150" width="150" height="90" rx="6"/>'
                   '<rect x="225" y="70" width="190" height="110" rx="6"/>'
                   '<rect x="450" y="150" width="150" height="90" rx="6"/>')
@@ -200,7 +200,7 @@ var DESK = (function () {
       finding: d.recent_finding ? esc(d.recent_finding) : nm('no finding recorded yet'),
       economic: isObj(d.economic_score) ? (d.economic_score.value === null || d.economic_score.value === undefined ? nm(d.economic_score.why) : esc(num(d.economic_score.value, 2)) + ' USD<div class="s">' + esc(d.economic_score.name) + '</div>') : nm('no score in this record')};
   }
-  function eddie(d, json) {
+  function archer(d, json) {
     var f = common(d, json), a = d.current_analysis, u = isObj(a) && isObj(a.unmeasured) ? a.unmeasured : {};
     var pv = d.predicted_vs_realized;
     if (!isObj(a)) {
@@ -239,7 +239,7 @@ var DESK = (function () {
     json = isObj(json) ? json : {};
     var d = isObj(json.desk) ? json.desk : (isObj(json.sections) && isObj(json.sections.desk) && isObj(json.sections.desk.data) ? json.sections.desk.data : null);
     if (!d) return {_unavailable: 'the endpoint returned no desk record'};
-    return kind === 'eddie' ? eddie(d, json) : scout(d, json);
+    return kind === 'archer' ? archer(d, json) : scout(d, json);
   }
   function setAll(html) {
     if (typeof document === 'undefined') return;

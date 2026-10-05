@@ -20,7 +20,7 @@ AUTHORITY (migration 221).
      statement timeout (a write inside it is refused).
   §5 THE SLACK DIGEST (slack_bridge.publish_improvement_posts) only queues
      READY rows in agent_slack_delivery through the per-agent path: Karen /
-     Eddie / Scout content carries their dedicated source-key prefix and is
+     Archer / Scout content carries their dedicated source-key prefix and is
      queued only when their own identity is configured.
   §6 LISTED on the capital-critical list.
 """
@@ -340,7 +340,7 @@ def test_the_slack_digest_uses_the_per_agent_path_only():
     assert "publish_improvement_posts(conn)" in claim
     from sportsassets.agents import improvement_stages as S
     for who, cls, agent in (("KAREN", S.CHALLENGER, "karen"),
-                            ("EDDIE", S.OWNER_AGENT, "eddie"),
+                            ("ARCHER", S.OWNER_AGENT, "archer"),
                             ("IMPROVEMENT_PIPELINE", S.RUNNER, "audrey"),
                             ("Matt Taylor", S.HUMAN, "audrey")):
         assert S.slack_agent({"actor": who, "actor_class": cls}) == agent

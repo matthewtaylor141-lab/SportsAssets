@@ -4,7 +4,7 @@ Owner requirement (2026-10-04): "Management must be able to open EVERY active
 position and understand the entire correlated economic position from one
 screen." A room links ENTRY -> current holding -> correlated/complementary
 instruments -> proposed / standing / partially filled / filled orders ->
-remaining exposure -> current venue markets -> Xavier's assessment -> Eddie's
+remaining exposure -> current venue markets -> Xavier's assessment -> Archer's
 execution assessment -> Audrey -> Karen -> game state.
 
 WHAT A ROOM IS. Every leg (a held slice: paper group x venue market x held
@@ -137,7 +137,7 @@ R_NO_LIMIT = "THE_ORDER_CARRIES_NO_LIMIT_PRICE"
 R_NO_OUTCOMES = "SETTLEMENT_OUTCOMES_NOT_ESTABLISHED_FOR_THIS_ROOM"
 R_FEES_HYPO = ("FEES_NOT_ESTIMATED_FOR_A_HYPOTHETICAL_FILL: maker/taker and "
                "the fill date are unknown until it fills")
-R_EDDIE = "EDDIE_NOT_DEPLOYED"
+R_ARCHER = "ARCHER_NOT_DEPLOYED"
 R_NO_SCORE = ("NO_AUTHORITATIVE_LIVE_SCORE_SOURCE: the league schedule read "
               "(bettor_fixture_metadata.parse_games / bettor_soccer_fixture) "
               "carries the event STATE but no score, inning, period or clock; "
@@ -904,7 +904,7 @@ def outcome_probabilities(panels: list, legs: list, outcomes) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 5 · XAVIER, KAREN, AUDREY, EDDIE, GAME STATE (pure projections)
+# 5 · XAVIER, KAREN, AUDREY, ARCHER, GAME STATE (pure projections)
 # ═════════════════════════════════════════════════════════════════════
 
 ALT_NAMES = {"VERIFIED_HEDGE": "HEDGE"}
@@ -1250,14 +1250,14 @@ def audrey_view(findings: list, recon: list, postmortems: list) -> dict:
                        "smalllive_reconciliations, position_postmortems")}
 
 
-def eddie_view(present: bool, rows: list) -> dict:
+def archer_view(present: bool, rows: list) -> dict:
     if not present:
-        return {"status": "UNAVAILABLE", "why": R_EDDIE,
+        return {"status": "UNAVAILABLE", "why": R_ARCHER,
                 "source": "eddie_execution_estimates (migration 217) is "
                           "not in this database"}
     if not rows:
         return {"status": "NO_ESTIMATE",
-                "why": "no Eddie execution estimate names this room's "
+                "why": "no Archer execution estimate names this room's "
                        "decisions or markets",
                 "source": "eddie_execution_estimates"}
     keep = ("estimate_id", "decision_id", "us_market_slug", "holding_side",
@@ -1751,7 +1751,7 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
              if r.get("group_id") in groups and r.get("venue") == venue]
     a_pm = [p for p in au.get("postmortems") or []
             if p.get("group_id") in groups]
-    ed = raw.get("eddie") or {}
+    ed = raw.get("archer") or {}
     slugs_sides = {(o["instrument"]["slug"], o["holding_side"])
                    for o in orders} | {(lg["instrument"]["slug"],
                                         lg["holding_side"]) for lg in legs}
@@ -1796,7 +1796,7 @@ def _finish_room(rm: dict, raw: dict, ident_of, now: float) -> dict:
         "economic": economic, "scenarios": sc,
         "xavier": xpanels, "karen": karen_view(k_rows),
         "audrey": audrey_view(a_find, a_rec, a_pm),
-        "eddie": eddie_view(bool(ed.get("present")), e_rows),
+        "archer": archer_view(bool(ed.get("present")), e_rows),
         "game_state": gs,
         "freshness": {"youngest_book_age_s": min(freshest)
                       if freshest else None,
@@ -1884,7 +1884,7 @@ def summarize(room: dict) -> dict:
         "game_live": room["game_state"].get("live"),
         "freshness": room["freshness"], "active": room["active"],
         "karen": room["karen"]["status"], "audrey": room["audrey"]["status"],
-        "eddie": room["eddie"]["status"]}
+        "archer": room["archer"]["status"]}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -2344,7 +2344,7 @@ async def _audrey(conn, subjects: list, groups: list) -> dict:
     return out
 
 
-async def _eddie(conn, decision_ids: list, slugs: list) -> dict:
+async def _archer(conn, decision_ids: list, slugs: list) -> dict:
     if not await _exists(conn, "eddie_execution_estimates"):
         return {"present": False, "rows": []}
     rows = await conn.fetch(
@@ -2424,7 +2424,7 @@ async def load(conn, *, book: str, venue: str, now: float | None = None,
     subjects = sorted(set(groups) | set(dec)
                       | {o["order_ref"] for o in base["orders"]})
     raw["audrey"] = await _audrey(conn, subjects, groups)
-    raw["eddie"] = await _eddie(conn, dec, slugs)
+    raw["archer"] = await _archer(conn, dec, slugs)
     events = sorted({r["event_slug"] for r in raw["premap"]
                      if r.get("event_slug")})
     raw["game_state"] = await _game_state(conn, events, dec)

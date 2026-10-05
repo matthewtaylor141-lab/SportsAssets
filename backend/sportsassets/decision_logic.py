@@ -95,7 +95,7 @@ DECISION_LOGIC_FILES = (
     "bettor_xavier_standing_orders.py", "xavier_freshness.py",
     "bettor_funded_decision.py",
     # the agent components inside the intent
-    "agents/eddie.py", "lost_opportunity/score.py",
+    "agents/archer.py", "lost_opportunity/score.py",
     "lost_opportunity/reads.py", "profitability/economics.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the

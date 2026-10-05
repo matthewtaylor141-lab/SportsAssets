@@ -17,7 +17,7 @@ Every pass:
      his default peers) for each feature that has observations;
   9. heartbeats the outcome and finishes the run (service `agent_scout`).
 
-Bounded and failure-isolated like Eddie's runner. Writes only Scout's
+Bounded and failure-isolated like Archer's runner. Writes only Scout's
 records (declared as SCOUT, so the database refuses any order / approval /
 control write) plus the evaluator's verdict.
 

@@ -215,7 +215,7 @@ async def test_the_rooms_and_the_room_on_a_real_database(monkeypatch):
         # T0 books are old against the real clock: STALE, never fresh
         assert room["legs"][0]["current"]["freshness"] == "STALE"
         assert room["game_state"]["status"] == "UNAVAILABLE"
-        assert room["eddie"]["status"] in ("UNAVAILABLE", "NO_ESTIMATE")
+        assert room["archer"]["status"] in ("UNAVAILABLE", "NO_ESTIMATE")
 
         act = await CP.position_rooms(Response(), book="ACTUAL")
         assert set(act["venues"]) == {"POLYMARKET", "KALSHI"}

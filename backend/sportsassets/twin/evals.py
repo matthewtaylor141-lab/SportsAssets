@@ -4,20 +4,20 @@ check below is a predicate over stored rows (an id that resolves, a column
 that is present, a recommendation consistent with its recorded evidence
 state), never a reading of free text.
 
-PER AGENT (Derek, Xavier, Eddie, Scout, Karen, Allocator, Audrey), each of
+PER AGENT (Derek, Xavier, Archer, Scout, Karen, Allocator, Audrey), each of
 TOOL_SELECTION, EVIDENCE_GROUNDING (cited ids resolve), INSTRUCTION_
 ADHERENCE, COMPLETENESS, UNSUPPORTED_CLAIMS, AUTHORITY_COMPLIANCE and
 ECONOMIC_CONTRIBUTION -- or UNAVAILABLE with the reason a dimension has no
-persisted record to judge for that agent (EDDIE and SCOUT are UNAVAILABLE
+persisted record to judge for that agent (ARCHER and SCOUT are UNAVAILABLE
 until their interface views exist).
 
 HANDOFFS (HANDOFF_QUALITY): DEREK->ALLOCATOR (an ENTER decision reaches a
-shadow allocation run after it), ALLOCATOR->EDDIE and EDDIE->XAVIER
+shadow allocation run after it), ALLOCATOR->ARCHER and ARCHER->XAVIER
 (interface), DEREK->XAVIER (an entered position is handed off and
 reviewed), XAVIER->AUDREY (a closed position has a postmortem).
 
 MACRO (FAILURE_ORIGIN): each ENTER decision of the window is traced
-Derek -> Allocator -> Execution (Eddie when present, else the recorded
+Derek -> Allocator -> Execution (Archer when present, else the recorded
 fill) -> Xavier -> Audrey/Karen over the persisted records. Every stage
 the record reaches is judged (the shadow allocator does not gate
 execution, so a miss there does not hide the later stages); the FIRST
@@ -38,7 +38,7 @@ DIMENSIONS = ("TOOL_SELECTION", "EVIDENCE_GROUNDING",
               "UNSUPPORTED_CLAIMS", "AUTHORITY_COMPLIANCE",
               "ECONOMIC_CONTRIBUTION")
 AGENT_DIMENSIONS = tuple(d for d in DIMENSIONS if d != "HANDOFF_QUALITY")
-AGENTS = ("DEREK", "XAVIER", "EDDIE", "SCOUT", "KAREN", "ALLOCATOR",
+AGENTS = ("DEREK", "XAVIER", "ARCHER", "SCOUT", "KAREN", "ALLOCATOR",
           "AUDREY")
 STAGES = ("DEREK", "ALLOCATOR", "EXECUTION", "XAVIER", "AUDREY")
 MIN_N = 10
@@ -308,7 +308,7 @@ def iface_agent(agent: str, rows, why, decision_ok: dict) -> list:
 # HANDOFFS AND THE MACRO TRACE
 # ═════════════════════════════════════════════════════════════════════
 
-def handoffs(db: dict, positions: list, eddie_rows, eddie_why) -> list:
+def handoffs(db: dict, positions: list, archer_rows, archer_why) -> list:
     out = []
     ent = [d for d in (db.get("decisions") or []) if d["verdict"] == "ENTER"]
     al_runs = db.get("allocation_runs")
@@ -326,20 +326,20 @@ def handoffs(db: dict, positions: list, eddie_rows, eddie_why) -> list:
                            "rule": "an ENTER decision decided before the "
                                    "latest shadow allocation run appears "
                                    "as its candidate"}))
-    if eddie_rows is None:
-        for h in ("ALLOCATOR->EDDIE", "EDDIE->XAVIER"):
+    if archer_rows is None:
+        for h in ("ALLOCATOR->ARCHER", "ARCHER->XAVIER"):
             out.append(row("HANDOFF", h, "HANDOFF_QUALITY", None,
-                           why=eddie_why))
+                           why=archer_why))
     else:
-        have = {r["decision_id"] for r in eddie_rows}
+        have = {r["decision_id"] for r in archer_rows}
         fills = {p["decision_id"] for p in positions}
-        out.append(row("HANDOFF", "ALLOCATOR->EDDIE", "HANDOFF_QUALITY",
+        out.append(row("HANDOFF", "ALLOCATOR->ARCHER", "HANDOFF_QUALITY",
                        [(d, d in have) for d in sorted(
                            db.get("allocated_decisions") or set())],
                        why="NO_ALLOCATED_DECISION"))
-        out.append(row("HANDOFF", "EDDIE->XAVIER", "HANDOFF_QUALITY",
+        out.append(row("HANDOFF", "ARCHER->XAVIER", "HANDOFF_QUALITY",
                        [(d, d in fills) for d in sorted(have)],
-                       why="NO_EDDIE_ROW"))
+                       why="NO_ARCHER_ROW"))
     handed = db.get("handoff_groups") or set()
     reviewed = db.get("reviewed_groups") or set()
     out.append(row("HANDOFF", "DEREK->XAVIER", "HANDOFF_QUALITY",
@@ -376,7 +376,7 @@ def _judge(st: dict, stage_res: dict):
     return judge
 
 
-def macro(db: dict, positions: list, eddie_rows) -> dict:
+def macro(db: dict, positions: list, archer_rows) -> dict:
     """Trace each ENTER decision through the persisted workflow; the first
     failing stage is the failure origin."""
     pos = {p["decision_id"]: p for p in positions}
@@ -384,8 +384,8 @@ def macro(db: dict, positions: list, eddie_rows) -> dict:
     alloc = db.get("allocated_decisions") or set()
     reviewed = db.get("reviewed_groups") or set()
     pm = db.get("postmortem_groups")
-    eddie_ids = None if eddie_rows is None else {r["decision_id"]
-                                                 for r in eddie_rows}
+    archer_ids = None if archer_rows is None else {r["decision_id"]
+                                                 for r in archer_rows}
     stage_res = {s: [] for s in STAGES}
     origins: Counter = Counter()
     traces = []
@@ -405,9 +405,9 @@ def macro(db: dict, positions: list, eddie_rows) -> dict:
                   else d["decision_id"] in alloc,
                   "shadow allocation candidate after the decision")
         p = pos.get(d["decision_id"])
-        ex_ok = p is not None or (eddie_ids is not None
-                                  and d["decision_id"] in eddie_ids)
-        if judge("EXECUTION", ex_ok, "entry fill (or Eddie plan)") == \
+        ex_ok = p is not None or (archer_ids is not None
+                                  and d["decision_id"] in archer_ids)
+        if judge("EXECUTION", ex_ok, "entry fill (or Archer plan)") == \
                 "PASS" and p is not None:
             if judge("XAVIER", p["group_id"] in reviewed,
                      "Xavier reviewed the position") == "PASS":
@@ -590,15 +590,15 @@ async def decisions_exist(conn, ids) -> dict:
     return {i: i in got for i in ids}
 
 
-def compute(*, db: dict, positions: list, eddie_rows, eddie_why, scout_rows,
+def compute(*, db: dict, positions: list, archer_rows, archer_why, scout_rows,
             scout_why, decision_ok: dict) -> dict:
     paper = [p for p in positions if p["book"] == "PAPER"]
     rows = (derek(db, paper) + xavier(db, positions) + karen(db)
             + audrey(db) + allocator_agent(db)
-            + iface_agent("EDDIE", eddie_rows, eddie_why, decision_ok)
+            + iface_agent("ARCHER", archer_rows, archer_why, decision_ok)
             + iface_agent("SCOUT", scout_rows, scout_why, decision_ok))
-    rows += handoffs(db, paper, eddie_rows, eddie_why)
-    m = macro(db, paper, eddie_rows)
+    rows += handoffs(db, paper, archer_rows, archer_why)
+    m = macro(db, paper, archer_rows)
     rows += m["rows"]
     return {"rows": rows, "macro": {"origins": m["origins"],
                                     "traces": m["traces"]}}

@@ -68,7 +68,7 @@ def test_the_six_owner_states_exactly():
     assert W.WORK_STATES == (
         "WORKING", "REVIEWING", "WAITING_FOR_FRESH_EVIDENCE",
         "BLOCKED_ON_MARKET_DATA", "HANDOFF_PENDING", "IDLE_NO_OPEN_WORK")
-    assert set(W.AGENTS) == {"DEREK", "KAREN", "SCOUT", "EDDIE",
+    assert set(W.AGENTS) == {"DEREK", "KAREN", "SCOUT", "ARCHER",
                              "CHIEF_ALLOCATOR", "AUDREY", "XAVIER",
                              "ADRIANA"}
 
@@ -247,7 +247,7 @@ CASES = {
           "status": _status("WAITING_FOR_PROVIDER")}, W.WAITING),
         ({"market": MARKET_OK, "outputs": OUT}, W.WORKING),
         ({"market": MARKET_OK}, W.IDLE)],
-    "EDDIE": [
+    "ARCHER": [
         ({"status": RUN}, W.WORKING),
         ({"market": VENUE_DOWN,
           "handoffs": _h("ENTER_DECISION_WITHOUT_ESTIMATE")}, W.BLOCKED),
@@ -339,7 +339,7 @@ def test_the_blocked_basis_names_the_failing_read():
     got = W.derive("DEREK", {"market": FEED_DOWN}, now=NOW)
     assert got["basis"][0]["table"] == "ingestion_state:pinnapi_feed_last"
     assert got["basis"][0]["why"] == "FEED_WRITER_LOCK_LOST"
-    got = W.derive("EDDIE", {"market": VENUE_DOWN, "handoffs": _h(
+    got = W.derive("ARCHER", {"market": VENUE_DOWN, "handoffs": _h(
         "ENTER_DECISION_WITHOUT_ESTIMATE")}, now=NOW)
     assert got["basis"][0]["table"] == "paper_book_observations"
 
@@ -348,7 +348,7 @@ def test_the_blocked_basis_names_the_failing_read():
 # §4 NO FAKE WORKING
 # ═════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("agent", ["DEREK", "EDDIE", "SCOUT", "KAREN"])
+@pytest.mark.parametrize("agent", ["DEREK", "ARCHER", "SCOUT", "KAREN"])
 def test_no_fake_working(agent):
     base = {"market": MARKET_OK}
     for facts in (
@@ -369,11 +369,11 @@ def test_no_fake_working(agent):
 
 def test_the_constants_mirror_their_sources():
     from sportsassets import pinnapi_feed_runtime as FR
-    from sportsassets.agents import eddie_runner as ER
+    from sportsassets.agents import archer_runner as ER
     from sportsassets.agents import karen as K
     from sportsassets.api import command_floor as FL
     assert W.EVALUATOR_FOR == dict(K.EVALUATOR_FOR)
-    assert W.EDDIE_LOOKBACK_S == ER.LOOKBACK_S
+    assert W.ARCHER_LOOKBACK_S == ER.LOOKBACK_S
     assert W.FEED_HEARTBEAT_S == FR.HEARTBEAT_S
     assert W.FEED_HEARTBEAT_KEY == FR.HEARTBEAT_KEY
     assert W.ACTIVE_WINDOW_S == FL.ACTIVE_WINDOW_S

@@ -4,12 +4,12 @@ Every qualified ENTER decision's canonical intent (live_parity) carries, AS OF
 THE DECISION INSTANT, from the decision's own inputs:
 
   derek              the verdict, policy decision and economics that made it
-  eddie              Eddie's executable-EV estimate (agents/eddie.estimate --
+  eddie              Archer's executable-EV estimate (agents/archer.estimate --
                      the same pure estimator his runner uses), with the hard
                      rule applied
   opportunity_score  LOL_OPPORTUNITY_SCORE_V1 (lost_opportunity/score.score --
                      the same pure scorer) on the decision's executable EV and
-                     capacity, Eddie's fill probability, the latest PAPER idle
+                     capacity, Archer's fill probability, the latest PAPER idle
                      capital snapshot and the recorded settlement lags
   allie              the Chief Allocator's rule (intel/allocator.allocate --
                      the same pure greedy allocation) applied to this
@@ -17,13 +17,20 @@ THE DECISION INSTANT, from the decision's own inputs:
   karen              Karen's review state of this market and strategy: open
                      challenges at the decision instant
 
+THE `eddie` KEY KEEPS ITS STORAGE NAME (migration 266 renamed the agent
+EDDIE -> ARCHER): it is the canonical_decision_intents.eddie column and part
+of every recorded intent's content hash and of the live-parity record, so a
+rename here would make yesterday's intents unreadable to today's comparison.
+Its labels (fill_source "EDDIE", "EDDIE_ESTIMATE_AT_DECISION") are kept for
+the same reason; they name the same execution estimator, now Archer's.
+
 Each component is MEASURED or carries an explicit UNAVAILABLE reason --
 never a manufactured value. Components are evidence on the intent; none of
 them changes the paper decision, its order or the live proposal (both
 adapters read the same intent, so they see the same components).
 
 Bounded: every read runs in its own savepoint under a short timeout, and the
-slow-moving inputs (Eddie's fill history, settlement lags, the capital
+slow-moving inputs (Archer's fill history, settlement lags, the capital
 snapshot, Allie's latest run) are cached for CACHE_S.
 """
 from __future__ import annotations
@@ -89,7 +96,7 @@ def derek_component(*, verdict, policy_version, policy_decision, refusals,
 def eddie_component(est: dict | None, why: str | None = None) -> dict:
     if not est or est.get("status") == "UNAVAILABLE":
         return _un(why or (est or {}).get("why") or "NO_EDDIE_ESTIMATE")
-    from .agents import eddie as E
+    from .agents import archer as E
     rec, overridden = E.enforce_hard_rule(
         est.get("recommendation"),
         net_pp=est.get("expected_net_executable_edge_pp"),
@@ -111,7 +118,7 @@ def eddie_component(est: dict | None, why: str | None = None) -> dict:
 
 async def eddie_at_decision(conn, *, decision: dict, book_row: dict | None,
                             now: float) -> dict:
-    from .agents import eddie as E
+    from .agents import archer as E
 
     async def hist():
         return await E.history_stats(conn, now=now)
@@ -197,7 +204,7 @@ async def karen_at_decision(conn, *, slug: str, strategy: str,
 async def allie_at_decision(conn, *, decision: dict, eddie: dict,
                             now: float) -> dict:
     """ALLIE'S CAPITAL-EFFICIENCY ALLOCATION (allie_capital.allocate) from the
-    decision's own inputs, Eddie's executable EV and depth, the recorded
+    decision's own inputs, Archer's executable EV and depth, the recorded
     settlement lags, the paper book's open exposure on the fixture, idle
     capital, recent INVESTMENT candidates (the hurdle) and the rails."""
     from . import allie_capital as AC

@@ -608,7 +608,7 @@ READERS = {
     "twin/reads.py": (
         "RESEARCH_BY_ID_OUTCOMES_AND_SPORT_BOTH_PURPOSES_NEVER_SELECTS", 2),
     "twin/evals.py": ("EVIDENCE_REFERENCE_EXISTENCE_BY_ID_NO_SELECTION", 1),
-    # (217) EDDIE / SCOUT AND THEIR WORKFLOW: Scout reaches a game through a
+    # (217) ARCHER / SCOUT AND THEIR WORKFLOW: Scout reaches a game through a
     # valuation's condition_id (game identity) and, for his feature
     # tournaments, freezes the PinnAPI baseline probability as then known and
     # later joins its outcome BY ID -- research forecasting, both purposes,

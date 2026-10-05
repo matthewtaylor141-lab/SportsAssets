@@ -19,7 +19,7 @@ agents_core.require_read (401 without a session).
                                 and `expand` (Pinnacle probability and age,
                                 market price, gross edge, fees, executable
                                 edge, capacity, settlement, Derek thesis,
-                                Karen challenge, Eddie, allocator, Xavier,
+                                Karen challenge, Archer, allocator, Xavier,
                                 Audrey -- UNAVAILABLE parts name why)
       data.counts / unavailable_by_reason / formula / unit
   GET /api/command/profitability/forecast-horizons
@@ -54,7 +54,7 @@ router = APIRouter()
 BASE = "/api/command/profitability"
 STATEMENT_TIMEOUT_MS = 8000
 CLASSIFIER_VERSION = "LOL_CLASSIFIER_V1"
-#: V2 (R30A): executable-freshness capacity, freshness-checked Eddie fill
+#: V2 (R30A): executable-freshness capacity, freshness-checked Archer fill
 #: estimate, INVESTMENT-only calibration and fill rates (lost_opportunity/
 #: score.py). V1 rows stay in the table, append-only, and are not served as
 #: the current score.
@@ -71,7 +71,7 @@ LEDGER_DISCLOSURE = (
     "EV under the policy's own thresholds after fees AND a named defect.")
 SCORE_FORMULA = ("expected net executable EV (pos_capacity, conditional on "
                  "fill, counted only when its book meets the strategy's "
-                 "executable freshness) x fill probability (Eddie's estimate "
+                 "executable freshness) x fill probability (Archer's estimate "
                  "on an executable-fresh book, else the CAPACITY snapshot's "
                  "PRODUCTION rate: INVESTMENT strategies' PAPER-simulated "
                  "entries) x capacity factor (min(1, idle PAPER capital / "
@@ -396,14 +396,14 @@ async def _expand(conn, rows: list) -> None:
     """The expandable view of each opportunity, read at request time from
     the records that already exist (decision, capacity, Karen, Audrey,
     allocator, Xavier); every part absent is UNAVAILABLE with its reason.
-    Eddie's execution assessment is his latest eddie_execution_estimates
+    Archer's execution assessment is his latest eddie_execution_estimates
     row for the decision (migration 217, SHADOW_ONLY)."""
     ids = [r["candidate_id"] for r in rows if r.get("candidate_id")]
     caps = [r["capacity_id"] for r in rows if r.get("capacity_id")]
     dec, cap, kar, aud, alloc, xav = {}, {}, {}, {}, {}, {}
-    eddie, eddie_why = {}, None
+    archer, archer_why = {}, None
     if not await _has(conn, "eddie_execution_estimates"):
-        eddie_why = ("EDDIE_EXECUTION_ESTIMATES_ABSENT (migration 217 not "
+        archer_why = ("ARCHER_EXECUTION_ESTIMATES_ABSENT (migration 217 not "
                      "applied)")
     elif ids:
         for e in await conn.fetch(
@@ -420,7 +420,7 @@ async def _expand(conn, rows: list) -> None:
                 "  FROM eddie_execution_estimates "
                 " WHERE decision_id = ANY($1::text[]) "
                 " ORDER BY decision_id, estimated_at DESC", ids):
-            eddie[e["decision_id"]] = dict(e)
+            archer[e["decision_id"]] = dict(e)
     if ids:
         for d in await conn.fetch(
                 "SELECT decision_id, verdict, refusal, refusals, p_pinnacle, "
@@ -534,17 +534,17 @@ async def _expand(conn, rows: list) -> None:
         k = kar.get(r.get("candidate_id"))
         ex["karen_challenge"] = (dict(k, status="OK") if k else
                                  _na("NO_KAREN_CHALLENGE_ON_THIS_DECISION"))
-        e = eddie.get(r.get("candidate_id"))
+        e = archer.get(r.get("candidate_id"))
         if e:
-            ex["eddie_execution"] = dict(
+            ex["archer_execution"] = dict(
                 {k: (f(v) if k.startswith("expected_") or k == "book_age_s"
                      else v) for k, v in e.items()},
                 status="OK", authority="SHADOW_ONLY",
                 basis="eddie_execution_estimates (migration 217), latest "
                       "estimate of this decision")
         else:
-            ex["eddie_execution"] = _na(
-                eddie_why or "NO_EDDIE_ESTIMATE_FOR_THIS_DECISION")
+            ex["archer_execution"] = _na(
+                archer_why or "NO_ARCHER_ESTIMATE_FOR_THIS_DECISION")
         a = alloc.get(r.get("candidate_id"))
         ex["allocator"] = (dict(a, status="OK", basis="intel_allocations "
                                 "(SHADOW) latest run") if a else dict(

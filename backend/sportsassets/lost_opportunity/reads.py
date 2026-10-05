@@ -342,7 +342,7 @@ async def score_context(conn, *, cands: list, since: float) -> dict:
     migration 218 is present."""
     out = {"calibration": [], "regimes": [], "valuations": {},
            "edge_confidence": {}, "edge_confidence_why": None,
-           "eddie": {}, "eddie_why": None}
+           "archer": {}, "archer_why": None}
     for r in await conn.fetch(
             "SELECT extract(epoch FROM computed_at)::float8 AS t, value, "
             "       status, why, sample_n, detail->>'unit' AS unit "
@@ -394,33 +394,33 @@ async def score_context(conn, *, cands: list, since: float) -> dict:
                 "value": C.num(r["edge_confidence"]),
                 "basis": "poslearn_forecasts %s at %s (SHADOW)" % (
                     r["registration_id"], r["t"])}
-    out["eddie"], out["eddie_why"] = await eddie_estimates(
+    out["archer"], out["archer_why"] = await archer_estimates(
         conn, [c.get("candidate_id") for c in cands])
     return out
 
 
-#: Eddie's (migration 217, SHADOW_ONLY) execution estimate of one paper
+#: Archer's (migration 217, SHADOW_ONLY) execution estimate of one paper
 #: decision, computed from that decision's recorded book and inputs.
-EDDIE_COLS = (
+ARCHER_COLS = (
     "estimate_id", "decision_id", "estimator_version", "book_obs_id",
     "book_age_s", "expected_fill_probability",
     "expected_net_executable_edge_pp", "expected_execution_loss_pp",
     "expected_executable_ev_usd", "expected_time_to_fill_s",
     "max_executable_qty", "execution_style", "recommendation",
     "recommendation_reason")
-EDDIE_NUM = (
+ARCHER_NUM = (
     "book_age_s", "expected_fill_probability",
     "expected_net_executable_edge_pp", "expected_execution_loss_pp",
     "expected_executable_ev_usd", "expected_time_to_fill_s",
     "max_executable_qty")
 
 
-async def eddie_estimates(conn, decision_ids) -> tuple:
-    """({decision_id: estimate}, why-absent). The latest Eddie estimate per
+async def archer_estimates(conn, decision_ids) -> tuple:
+    """({decision_id: estimate}, why-absent). The latest Archer estimate per
     decision; ({}, reason) without migration 217."""
     ids = sorted({str(i) for i in decision_ids if i})
     if not await PR.has(conn, "eddie_execution_estimates"):
-        return {}, ("EDDIE_EXECUTION_ESTIMATES_ABSENT (migration 217 not "
+        return {}, ("ARCHER_EXECUTION_ESTIMATES_ABSENT (migration 217 not "
                     "applied)")
     if not ids:
         return {}, None
@@ -432,9 +432,9 @@ async def eddie_estimates(conn, decision_ids) -> tuple:
             "  FROM eddie_execution_estimates "
             " WHERE decision_id = ANY($1::text[]) "
             " ORDER BY decision_id, estimated_at DESC LIMIT $2"
-            % ", ".join(EDDIE_COLS), ids, MAX_SCORES_PER_CYCLE):
+            % ", ".join(ARCHER_COLS), ids, MAX_SCORES_PER_CYCLE):
         d = dict(r)
-        for k in EDDIE_NUM:
+        for k in ARCHER_NUM:
             d[k] = C.num(d.get(k))
         got[str(r["decision_id"])] = d
     return got, None

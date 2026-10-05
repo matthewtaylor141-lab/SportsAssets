@@ -167,7 +167,7 @@ async def test_the_database_refuses_in_sample_or_premature_classification():
 
 # ── §2 scorecards ────────────────────────────────────────────────────
 
-AGENTS = ("DEREK", "XAVIER", "EDDIE", "SCOUT", "KAREN", "ALLOCATOR",
+AGENTS = ("DEREK", "XAVIER", "ARCHER", "SCOUT", "KAREN", "ALLOCATOR",
           "AUDREY")
 
 
@@ -182,8 +182,8 @@ def _cards(st=None, **kw):
         traces[(sc["scenario_key"], "PAPER")] = r["rows"]
     db = kw.get("db") or {"value_add": [], "karen": None, "audrey": {}}
     return SCD.compute(streams={"PAPER": st}, results=results,
-                       traces=traces, db=db, eddie_rows=None,
-                       eddie_why="INTERFACE_ABSENT:pos_iface_eddie_execution",
+                       traces=traces, db=db, archer_rows=None,
+                       archer_why="INTERFACE_ABSENT:pos_iface_eddie_execution",
                        scout_rows=None,
                        scout_why="INTERFACE_ABSENT:pos_iface_scout")
 
@@ -223,8 +223,8 @@ def test_derek_and_xavier_economics_on_the_synthetic_stream():
     good = rows[("XAVIER", "good_exit_rate")]
     assert (good["numerator"], good["denominator"]) == (1, 1)
     assert rows[("XAVIER", "reallocate_value")]["status"] == "UNAVAILABLE"
-    for m in SCD.EDDIE_METRICS:
-        e = rows[("EDDIE", m)]
+    for m in SCD.ARCHER_METRICS:
+        e = rows[("ARCHER", m)]
         assert e["value"] is None and e["reason"].startswith(
             "INTERFACE_ABSENT")
 
@@ -567,10 +567,10 @@ async def test_evals_judge_persisted_records_through_the_cycle():
         gr = rows[("AGENT", "DEREK", "EVIDENCE_GROUNDING")]
         assert bad["decision_id"] in gr["failures"]
         assert gr["n_passed"] < gr["n_evaluated"]
-        ed = rows[("AGENT", "EDDIE", "EVIDENCE_GROUNDING")]
+        ed = rows[("AGENT", "ARCHER", "EVIDENCE_GROUNDING")]
         assert ed["status"] == "UNAVAILABLE"
         # without migration 217 the view is absent; with it (integrated) the
-        # view exists but this test database holds no Eddie estimate row
+        # view exists but this test database holds no Archer estimate row
         iface = await conn.fetchval(
             "SELECT to_regclass('pos_iface_eddie_execution') IS NOT NULL")
         assert ed["reason"].startswith(
