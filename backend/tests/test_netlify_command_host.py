@@ -117,63 +117,38 @@ class TestEveryFileTheCommandPageNeedsIsReachable:
     and are rewritten into /command/ -- but only if they are really
     there."""
 
-    #: The entry documents these checks cover: the 3D headquarters at
-    #: index.html (the Command entry) and the legacy shell kept
-    #: byte-for-byte at classic.html (the old index.html, always covered here).
-    ENTRIES = ("index.html", "classic.html")
-
-    def _referenced(self, name="index.html"):
-        html = (COMMAND / name).read_text()
+    def _referenced(self):
+        html = (COMMAND / "index.html").read_text()
         return re.findall(r'(?:src|href)="([^":?#]+)"', html)
-
-    def _all_referenced(self):
-        return [(n, r) for n in self.ENTRIES for r in self._referenced(n)]
 
     def test_index_html_exists_to_be_served(self):
         assert (COMMAND / "index.html").is_file()
 
     def test_every_referenced_file_is_committed(self):
-        for name in self.ENTRIES:
-            assert self._referenced(name), (
-                "%s referenced nothing -- the regex is wrong" % name)
-        for name, ref in self._all_referenced():
+        refs = self._referenced()
+        assert refs, "index.html referenced nothing -- the regex is wrong"
+        for ref in refs:
             if ref.startswith(("http://", "https://", "//", "#")):
                 continue
-            assert (COMMAND / ref).is_file(), (name, ref)
+            assert (COMMAND / ref).is_file(), ref
 
     def test_the_reference_are_relative_so_the_rewrite_reaches_them(self):
-        for name, ref in self._all_referenced():
+        for ref in self._referenced():
             if ref.startswith(("http", "//", "#")):
                 continue
             # a leading slash would resolve to the host root and rewrite
             # to /command//... rather than /command/<file>
-            assert not ref.startswith("/"), (name, ref)
+            assert not ref.startswith("/"), ref
 
     def test_the_access_step_and_the_motion_layer_both_travel(self):
-        for name in self.ENTRIES:
-            assert "unlock.js" in self._referenced(name), (
-                "the sign-in would be dropped from %s" % name)
-        # the motion layer belongs to the legacy shell, which keeps it whole;
-        # the headquarters keeps the shared reduced-motion stylesheet
-        refs = self._referenced("classic.html")
+        refs = self._referenced()
+        assert "unlock.js" in refs, "the sign-in would be dropped"
         assert "motion.js" in refs and "motion.css" in refs
-        assert "motion.css" in self._referenced("index.html")
-
-    def test_the_3d_headquarters_is_the_command_entry(self):
-        """index.html is the 3D headquarters (its module, its stylesheet, the
-        shared floor read layer and the Mobile Command view models, behind
-        the existing sign-in); the legacy shell is kept whole at
-        classic.html so no legacy view is lost."""
-        refs = self._referenced("index.html")
-        for need in ("hq.js", "hq.css", "unlock.js", "floor-core.js", "mobile-command.js"):
-            assert need in refs, need
-        assert "app.js" in self._referenced("classic.html")
-        assert "shadow.js" in self._referenced("classic.html")
 
     def test_the_react_app_is_not_referenced_from_command(self):
         """If COMMAND pulled anything out of the React build, the host
         rule would 404 it -- and the page would be broken rather than
         standalone."""
-        for _name, ref in self._all_referenced():
+        for ref in self._referenced():
             assert not ref.startswith("assets/index-"), ref
             assert "/dist/" not in ref, ref
