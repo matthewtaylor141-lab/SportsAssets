@@ -1,11 +1,11 @@
 /* BETTOR HEADQUARTERS · THE 3D COMMAND CENTER (three.js r185, vendored).
  *
  * The primary experience of COMMAND: one cinematic headquarters in which the
- * eight desks (seven agents and Ariana's Arbitrage Desk) stand in a horseshoe
+ * eight desks (seven agents and Adriana's Arbitrage Desk) stand in a horseshoe
  * around the capital core, under the BETTOR wall, with the live opportunity
  * wall, the capital wall and the risk / status wall behind. Ported from the
  * cinematic floor (claude/ui-floor-int 545e4a9) onto the accepted production
- * foundation, with the camera closer, the room lit brighter, Ariana's desk and
+ * foundation, with the camera closer, the room lit brighter, Adriana's desk and
  * one camera move per COMMAND section (hq.js drives it).
  *
  * Every visible behaviour maps to a recorded fact (hq-model.js):
@@ -26,8 +26,8 @@
  *   opportunity wall                        floor feed[] + opportunities[]
  *   capital wall, ticker ring, markets      equity/live paper (real marks)
  *   risk / status wall                      release, equity, coverage, floor
- *   Ariana's desk                           NOT DEPLOYED · UNVERIFIED until the
- *                                           floor API serves an ARIANA seat; dark,
+ *   Adriana's desk                          NOT DEPLOYED · UNVERIFIED until the
+ *                                           floor API serves an ADRIANA seat; dark,
  *                                           still, no avatar, no figure
  *
  * Characters: the licensed Microsoft Rocketbox models in the repo
@@ -60,7 +60,7 @@ const damp = (a, b, k, dt) => a + (b - a) * (1 - Math.exp(-k * dt));
 
 /* THE FLOOR PLAN. Angle from north (the BETTOR wall), clockwise; the eight
  * desks form a horseshoe that opens toward the establishing camera. */
-const SEAT_ANGLE = {derek: -126, karen: -90, scout: -54, allocator: -18, ariana: 18, eddie: 54, audrey: 90, xavier: 126};
+const SEAT_ANGLE = {derek: -126, karen: -90, scout: -54, allocator: -18, adriana: 18, eddie: 54, audrey: 90, xavier: 126};
 const R_DESK = 9.3;
 const DESK_TOP = 0.74;
 const SEAT_TOP = 0.47;
@@ -73,14 +73,15 @@ export const CREDITS = {
   karen: 'Rocketbox Business_Female_02 (MIT, © 2020 Microsoft)',
   allocator: 'Rocketbox Business_Female_03 (MIT, © 2020 Microsoft)',
   eddie: 'Rocketbox Business_Male_04, with a headset prop (MIT, © 2020 Microsoft)',
-  scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)'
+  scout: 'Rocketbox Business_Male_06 (MIT, © 2020 Microsoft)',
+  adriana: 'Rocketbox Business_Female_01 (MIT, © 2020 Microsoft)'
 };
 // which licensed model each seat wears: its OWN file, never another agent's
 // body, never a tint (models/manifest.json entries, when present, win)
 export const CAST = {
   derek: {model: 'derek', tint: null}, xavier: {model: 'xavier', tint: null}, audrey: {model: 'audrey', tint: null},
   karen: {model: 'karen', tint: null}, allocator: {model: 'allie', tint: null}, eddie: {model: 'eddie', tint: null},
-  scout: {model: 'scout', tint: null}
+  scout: {model: 'scout', tint: null}, adriana: {model: 'adriana', tint: null}
 };
 
 export function webglAvailable() {
@@ -417,7 +418,7 @@ export async function createHQ(host, opts) {
     core.cage = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.IcosahedronGeometry(0.56, 1)), new THREE.LineBasicMaterial({color: new THREE.Color('#9fbcff').multiplyScalar(1.6), transparent: true, opacity: 0.6}));
     core.cage.position.y = 2.95; scene.add(core.cage);
     // the holographic band: PAPER | SMALL LIVE | PAPER | SMALL LIVE (never one figure)
-    core.band = screen(new THREE.CylinderGeometry(1.7, 1.7, 0.95, 96, 1, true), 4096, 366, (ctx, w, h) => S.coreBand(ctx, w, h, HQ), ['equity'], {transparent: true, additive: true, gain: 1.1});
+    core.band = screen(new THREE.CylinderGeometry(1.7, 1.7, 0.95, 96, 1, true), 4096, 366, (ctx, w, h) => S.coreBand(ctx, w, h, HQ), ['equity'], {transparent: true, additive: true, gain: 0.82});
     core.band.mesh.position.y = 1.72; scene.add(core.band.mesh);
     for (const y of [1.22, 2.22]) { const t = new THREE.Mesh(new THREE.TorusGeometry(1.7, 0.012, 6, 128), core.rimMat); t.rotation.x = Math.PI / 2; t.position.y = y; scene.add(t); }
     // equity pulse ring (fires only when /equity/live seq changes)
@@ -665,7 +666,8 @@ export async function createHQ(host, opts) {
   function buildEdges() {
     while (edgeGroup.children.length) { const m = edgeGroup.children.pop(); m.geometry.dispose(); m.material.dispose(); }
     edgeMats.length = 0;
-    const list = HQ.edges(), nowS = Date.now() / 1000, win = (HQ.reads.floor.data && HQ.reads.floor.data.window_s) || 3600;
+    // the newest four recorded hand-offs lead; older ones fade to a thin trace
+    const list = HQ.edges().slice().sort((a, b) => (b.at || 0) - (a.at || 0)), nowS = Date.now() / 1000, win = (HQ.reads.floor.data && HQ.reads.floor.data.window_s) || 3600;
     list.forEach((e, i) => {
       const A = desks[e.from], Bd = desks[e.to]; if (!A || !Bd) return;
       const p0 = A.top.clone(), p3 = Bd.top.clone();
@@ -676,10 +678,10 @@ export async function createHQ(host, opts) {
       const age = e.at ? Math.max(0, nowS - e.at) : win;
       const fresh = clamp(1 - age / win, 0.15, 1);
       const mat = new THREE.ShaderMaterial({transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
-        uniforms: {uA: {value: new THREE.Color(A.seat.accent)}, uB: {value: new THREE.Color(Bd.seat.accent)}, uT: {value: 0}, uK: {value: 0.32 + fresh * 0.9}, uFlow: {value: reduced ? 0 : 1}},
+        uniforms: {uA: {value: new THREE.Color(A.seat.accent)}, uB: {value: new THREE.Color(Bd.seat.accent)}, uT: {value: 0}, uK: {value: i < 4 ? 0.9 + fresh * 0.8 : 0.07 + fresh * 0.08}, uFlow: {value: reduced || i >= 4 ? 0 : 1}},
         vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix*modelViewMatrix*vec4(position,1.); }',
         fragmentShader: 'uniform vec3 uA; uniform vec3 uB; uniform float uT; uniform float uK; uniform float uFlow; varying vec2 vUv; void main(){ vec3 c = mix(uA, uB, vUv.x); float base = 0.28; float p = fract(vUv.x * 2.0 - uT * 0.35); float pulse = uFlow * smoothstep(0.0, 0.08, p) * (1.0 - smoothstep(0.08, 0.22, p)); float edge = 1.0 - abs(vUv.y - 0.5) * 2.0; gl_FragColor = vec4(c * (base + pulse * 1.8) * uK * edge, 1.0); }'});
-      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 64, 0.016 + Math.min(4, e.count) * 0.004, 8, false), mat);
+      const tube = new THREE.Mesh(new THREE.TubeGeometry(curve, 64, i < 4 ? 0.026 + Math.min(4, e.count) * 0.004 : 0.008, 8, false), mat);
       tube.layers.set(LAYER_NO_REFLECT);
       edgeGroup.add(tube); edgeMats.push(mat);
     });
@@ -861,7 +863,7 @@ export async function createHQ(host, opts) {
     // each desk's OWN model: its manifest entry (by its own slug; the Chief
     // Allocator may be listed as 'allie'); without a manifest, its own file (CAST)
     const plan = HQ.SEATS.map((s) => {
-      if (s.planned) return null;   // Ariana: no model until her backend (and her licensed portrait) are deployed
+      if (s.planned) return null;   // Adriana: seated only once the floor API serves her seat
       const e = chars[s.slug] || (s.slug === 'allocator' ? (chars.allie || chars.chief_allocator) : null);
       if (e) return e.model && e.test_asset === false ? {slug: s.slug, entry: e} : null;
       return !manifest && CAST[s.slug] ? {slug: s.slug, entry: {model: CAST[s.slug].model + '.glb'}} : null;
@@ -899,10 +901,10 @@ export async function createHQ(host, opts) {
     const q = HQ.equity(), p = q.paper;
     const col = !p ? '#7a8496' : p.status === 'OK' ? '#6f9bff' : p.status === 'STALE' ? '#e8b25e' : '#7a8496';
     core.beamMat.uniforms.uColor.value.set(col);
-    core.beamMat.uniforms.uK.value = !p ? 0.35 : p.status === 'OK' ? 1 : 0.6;
-    core.orbMat.emissive.set(col); core.orbMat.emissiveIntensity = !p ? 0.4 : p.status === 'OK' ? 1.1 : 0.6;
-    core.rimMat.color.set(col).multiplyScalar(p && p.status === 'OK' ? 2.6 : 1.3);
-    coreLight.color.set(col); coreLight.intensity = p && p.status === 'OK' ? 7 : 4;
+    core.beamMat.uniforms.uK.value = !p ? 0.25 : p.status === 'OK' ? 0.55 : 0.4;
+    core.orbMat.emissive.set(col); core.orbMat.emissiveIntensity = !p ? 0.25 : p.status === 'OK' ? 0.5 : 0.35;
+    core.rimMat.color.set(col).multiplyScalar(p && p.status === 'OK' ? 1.35 : 0.9);
+    coreLight.color.set(col); coreLight.intensity = p && p.status === 'OK' ? 3.5 : 2.5;
     if (q.changedAt && q.changedAt !== core.lastChange) { core.lastChange = q.changedAt; if (!reduced) core.pulseT = 0; core.pulse.material.color.set(col).multiplyScalar(2); }
     requestRender();
   }
@@ -991,14 +993,14 @@ export async function createHQ(host, opts) {
   if (HIGH) {
     const vs = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
     const qScene = new THREE.Scene(), qCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2)); quad.frustumCulled = false; qScene.add(quad);
-    const down = new THREE.ShaderMaterial({uniforms: {src: {value: null}, texel: {value: new THREE.Vector2()}, pre: {value: 0}, thr: {value: 1.05}}, vertexShader: vs, depthTest: false, depthWrite: false,
+    const down = new THREE.ShaderMaterial({uniforms: {src: {value: null}, texel: {value: new THREE.Vector2()}, pre: {value: 0}, thr: {value: 1.4}}, vertexShader: vs, depthTest: false, depthWrite: false,
       fragmentShader: 'uniform sampler2D src; uniform vec2 texel; uniform float pre; uniform float thr; varying vec2 vUv;\n' +
         'vec3 s(vec2 uv){ vec3 c = texture2D(src, uv).rgb; if (pre > 0.5) { float b = max(c.r, max(c.g, c.b)); float k = 0.5; float soft = clamp(b - thr + k, 0.0, 2.0 * k); soft = soft * soft / (4.0 * k + 1e-4); c *= max(soft, b - thr) / max(b, 1e-4); c = min(c, vec3(24.0)); } return c; }\n' +
         'void main(){ vec2 o = texel; vec3 c = s(vUv) * 4.0 + s(vUv - o) + s(vUv + o) + s(vUv + vec2(o.x, -o.y)) + s(vUv - vec2(o.x, -o.y)); gl_FragColor = vec4(c / 8.0, 1.0); }'});
     const up = new THREE.ShaderMaterial({uniforms: {src: {value: null}, base: {value: null}, texel: {value: new THREE.Vector2()}}, vertexShader: vs, depthTest: false, depthWrite: false,
       fragmentShader: 'uniform sampler2D src; uniform sampler2D base; uniform vec2 texel; varying vec2 vUv;\n' +
         'void main(){ vec2 o = texel; vec3 c = texture2D(src, vUv + vec2(-o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(-o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, o.y * 2.0)).rgb + texture2D(src, vUv + vec2(o.x, o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(o.x * 2.0, 0.0)).rgb + texture2D(src, vUv + vec2(o.x, -o.y)).rgb * 2.0 + texture2D(src, vUv + vec2(0.0, -o.y * 2.0)).rgb + texture2D(src, vUv + vec2(-o.x, -o.y)).rgb * 2.0; gl_FragColor = vec4(c / 12.0 + texture2D(base, vUv).rgb, 1.0); }'});
-    const comp = new THREE.ShaderMaterial({uniforms: {tScene: {value: null}, tBloom: {value: null}, k: {value: 0.3}}, vertexShader: vs, depthTest: false, depthWrite: false,
+    const comp = new THREE.ShaderMaterial({uniforms: {tScene: {value: null}, tBloom: {value: null}, k: {value: 0.16}}, vertexShader: vs, depthTest: false, depthWrite: false,
       fragmentShader: 'uniform sampler2D tScene; uniform sampler2D tBloom; uniform float k; varying vec2 vUv;\n' +
         'void main(){ vec3 c = texture2D(tScene, vUv).rgb + texture2D(tBloom, vUv).rgb * k; vec2 d = vUv - 0.5; float v = 1.0 - smoothstep(0.35, 0.95, length(d * vec2(1.15, 1.0))); c *= mix(0.62, 1.0, v); gl_FragColor = vec4(c, 1.0);\n#include <tonemapping_fragment>\n#include <colorspace_fragment>\n}'});
     const LV = 5, rtOpt = {type: THREE.HalfFloatType, depthBuffer: false};
@@ -1115,7 +1117,7 @@ export async function createHQ(host, opts) {
     }
     if (core.pulseT < 1) {
       core.pulseT = Math.min(1, core.pulseT + dt / 2.6);
-      const s = 3.4 + core.pulseT * 6.5; core.pulse.scale.setScalar(s); core.pulse.material.opacity = (1 - core.pulseT) * 0.8;
+      const s = 3.4 + core.pulseT * 6.5; core.pulse.scale.setScalar(s); core.pulse.material.opacity = (1 - core.pulseT) * 0.45;
     }
     if (shadowDirty && HIGH) { renderer.shadowMap.needsUpdate = true; shadowDirty = false; }
     renderer.info.autoReset = false; renderer.info.reset();

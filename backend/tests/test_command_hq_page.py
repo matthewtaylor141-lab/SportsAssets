@@ -7,12 +7,13 @@ what it must never do:
     read goes through BTFloor.read / BTFloor.poller, which refuse other paths);
   - invent a number or an activity: no Math.random anywhere in the scene,
     its screens, its model or its controller;
-  - give Ariana's Arbitrage Desk any state the floor API did not serve: until
-    an ARIANA seat is served it is NOT DEPLOYED · UNVERIFIED, never active;
+  - give Adriana's Arbitrage Desk any state the floor API did not serve:
+    until an ADRIANA seat is served it is NOT DEPLOYED · UNVERIFIED, never
+    active; once served it is her desk, with the floor API's state;
   - add PAPER and SMALL LIVE together, or carry an order / cancel / limit
     control.
 
-The model is executed in node against a fake BTFloor so the Ariana rule and
+The model is executed in node against a fake BTFloor so the Adriana rule and
 the work-state translation are tested as behaviour, not text.
 """
 import json
@@ -110,7 +111,8 @@ globalThis.setTimeout = (f) => f(); globalThis.setInterval = () => 0;
 import(path).then((m) => {
   const hq = m.createModel(B); hq.start();
   const d = (s) => { const x = hq.desk(s); return {planned: x.planned, label: x.label, active: x.active, code: x.code}; };
-  console.log(JSON.stringify({slugs: hq.SEATS.map((s) => s.slug), ariana: d('ariana'), derek: d('derek'), xavier: d('xavier'), reads}));
+  console.log(JSON.stringify({slugs: hq.SEATS.map((s) => s.slug), adriana: d('adriana'), derek: d('derek'), xavier: d('xavier'),
+    adrianaPlanned: hq.BY_SLUG.adriana.planned, reads}));
 });
 """
 
@@ -130,17 +132,59 @@ FLOOR = {"agents": [
     "edges": [], "feed": []}
 
 
-def test_ariana_is_a_desk_but_not_deployed_until_the_floor_serves_her():
+def test_adriana_is_a_desk_but_not_deployed_until_the_floor_serves_her():
     r = _run(FLOOR)
-    assert r["slugs"] == ["derek", "karen", "scout", "allocator", "ariana", "eddie", "audrey", "xavier"]
-    assert r["ariana"] == {"planned": True, "label": "NOT DEPLOYED · UNVERIFIED", "active": False, "code": "NOT_DEPLOYED"}
+    assert r["slugs"] == ["derek", "karen", "scout", "allocator", "adriana", "eddie", "audrey", "xavier"]
+    assert r["adriana"] == {"planned": True, "label": "NOT DEPLOYED · UNVERIFIED", "active": False, "code": "NOT_DEPLOYED"}
+    assert r["adrianaPlanned"] is True
 
 
-def test_a_served_ariana_seat_replaces_the_placeholder():
+def test_a_served_adriana_seat_replaces_the_placeholder():
     floor = json.loads(json.dumps(FLOOR))
-    floor["agents"].append({"agent": "ARIANA", "slug": "ariana", "state": "WORKING_ON", "work_state": "WORKING", "deployed": True})
+    floor["agents"].append({"agent": "ADRIANA", "slug": "adriana", "state": "WORKING_ON", "work_state": "WORKING", "deployed": True})
     r = _run(floor)
-    assert r["ariana"]["planned"] is False and r["ariana"]["code"] == "WORKING" and r["ariana"]["active"] is True
+    assert r["adriana"]["planned"] is False and r["adriana"]["code"] == "WORKING" and r["adriana"]["active"] is True
+    # the seat itself is no longer planned: the scene seats her model
+    assert r["adrianaPlanned"] is False
+    # an UNDEPLOYED served seat (the migration not applied) is not active
+    floor["agents"][-1].update(deployed=False, work_state=None, state="NOT_DEPLOYED")
+    r = _run(floor)
+    assert r["adriana"]["code"] == "NOT_DEPLOYED" and r["adriana"]["active"] is False
+
+
+def test_adriana_wears_her_own_licensed_model_and_portrait():
+    m = json.loads((CMD / "team-demo" / "assets" / "models" / "manifest.json").read_text())["characters"]["adriana"]
+    assert m["model"] == "adriana.glb" and m["test_asset"] is False and m["license_spdx"] == "MIT"
+    assert "Business_Female_01" in m["licensed_from"]
+    others = json.loads((CMD / "team-demo" / "assets" / "models" / "manifest.json").read_text())["characters"]
+    assert all(v["model"] != "adriana.glb" and "Business_Female_01" not in v["licensed_from"]
+               for k, v in others.items() if k != "adriana")
+    assert (CMD / "team-demo" / "assets" / "models" / "portraits" / "adriana.jpg").is_file()
+    scene = SRC["hq-scene.js"]
+    assert "adriana: {model: 'adriana', tint: null}" in scene and "adriana: 18" in scene
+
+
+def test_critical_attention_and_freshness_dominate_every_view():
+    code = _code(SRC["hq.js"])
+    assert "function alertHTML()" in code and "has-critical" in code
+    assert "function freshness()" in code and 'data-render="fresh"' in INDEX
+    assert 'id="hq-alert"' in INDEX
+    # freshness cells are recorded counts or N/A with the reason -- never a default
+    assert "Management" in code and "WAITING_FOR_FRESH_EVIDENCE" in code
+
+
+def test_the_opportunity_book_spells_out_each_contract_and_groups_duplicates():
+    code = _code(SRC["hq.js"])
+    for col in ("Contract · family · line · period", "Freshness", "Settlement", "Exec. depth"):
+        assert col in code, col
+    assert "function groupMkt(" in code and "×N" in SRC["hq.js"]
+
+
+def test_the_report_selector_and_branded_pdf():
+    code = _code(SRC["hq.js"])
+    for rid in ("daily", "capital", "markets", "team"):
+        assert "id: '%s'" % rid in code, rid
+    assert "print-brand" in code and "brand/bettortoken-logo.png" in code and "window.print()" in code
 
 
 def test_the_work_state_is_translated_one_to_one_and_only_work_is_active():

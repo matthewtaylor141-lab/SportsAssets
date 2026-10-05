@@ -33,6 +33,10 @@
     <div class="hq-status" id="hq-status" aria-live="polite"></div>
   </header>
 
+  <!-- a CRITICAL management-attention item dominates every view; the
+       freshness strip keeps stale marks / stale management in sight -->
+  <div id="hq-alert" aria-live="assertive"></div>
+  <div id="hq-fresh" data-render="fresh" aria-label="Freshness"></div>
   <div id="hq-hint">Drag to look around · click a desk to enter it · keys 1–5 switch views</div>
   <div id="hq-tags" aria-label="Desks on the floor"></div>
 

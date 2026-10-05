@@ -13,6 +13,7 @@
  *   curve     /api/command/equity/curve?book=PAPER&window=1d   60 s  equity history (PAPER)
  *   capital   /api/command/profitability/capital  read on demand (Capital / Risk view)
  *   xavier    /api/command/floor/xavier           60 s  Xavier's recorded assessments
+ *   adriana   /api/command/floor/adriana          60 s  her census, opportunities, refusals (only once served)
  *
  * TRUTH RULES:
  *   - no invented number: a missing value is UNAVAILABLE with its reason, an
@@ -20,9 +21,10 @@
  *   - desk states are the floor API's states (work_state first, then state),
  *     translated one to one; only an active state on a fresh read may drive
  *     work motion or a lit desk;
- *   - Ariana's Arbitrage Desk is a PHYSICAL desk only: until the floor API
- *     serves an ARIANA seat it reads NOT DEPLOYED · UNVERIFIED and nothing on
- *     it moves or glows;
+ *   - Adriana's Arbitrage Desk is a PHYSICAL desk only until the floor API
+ *     serves an ADRIANA seat: it reads NOT DEPLOYED · UNVERIFIED and nothing
+ *     on it moves or glows. Once served, her seat is a desk like any other --
+ *     its state, mission, outputs and monitor are the floor API's;
  *   - PAPER and SMALL LIVE (and each legacy venue) stay separate figures: no
  *     line of this file adds one book to another. */
 
@@ -33,19 +35,20 @@ const ZONE = {
   karen: ['Adversarial review', 'Red team'],
   scout: ['Research & signals', 'Market intelligence'],
   allocator: ['Capital allocation', 'Chief Allocator'],
-  ariana: ['Arbitrage desk', 'Arbitrage'],
+  adriana: ['Arbitrage desk', 'Head of Arbitrage'],
   eddie: ['Execution & microstructure', 'Head of Execution'],
   audrey: ['Audit & reconciliation', 'Risk & audit'],
   xavier: ['Portfolio management', 'Portfolio Manager']
 };
 
-/* Ariana: a planned eighth desk. Static identity only -- never a state. */
-export const ARIANA = {agent: 'ARIANA', slug: 'ariana', name: 'Ariana', short: 'Arbitrage',
-  role: 'Arbitrage desk · cross-venue pricing', accent: '#7fd6ff', planned: true,
-  plannedWhy: 'The arbitrage backend is not deployed on the serving API: no ARIANA seat in GET /api/command/floor. Nothing on this desk is live.'};
+/* Adriana: the eighth desk. Until the floor API serves her seat this is a
+ * static identity only -- never a state. */
+export const ADRIANA = {agent: 'ADRIANA', slug: 'adriana', name: 'Adriana', short: 'Arbitrage',
+  role: 'Head of Arbitrage · cross-venue arbitrage · shadow only', accent: '#7fd6ff', planned: true,
+  plannedWhy: 'The serving API has no ADRIANA seat in GET /api/command/floor: nothing on this desk is live until it does.'};
 
 /* the floor plan: the desk order around the horseshoe, west to east */
-export const ORDER = ['derek', 'karen', 'scout', 'allocator', 'ariana', 'eddie', 'audrey', 'xavier'];
+export const ORDER = ['derek', 'karen', 'scout', 'allocator', 'adriana', 'eddie', 'audrey', 'xavier'];
 
 /* THE FLOOR API STATE -> what the headquarters shows. One to one. */
 export const STATE = {
@@ -68,10 +71,10 @@ export const STATE = {
 export function createModel(B, opts) {
   const o = Object.assign({curve: true}, opts || {});
   const base = B.SEATS.map((s) => Object.assign({}, s));
-  // Ariana's desk sits between the Chief Allocator and Execution
-  const all = base.concat([ARIANA]);
+  // Adriana's desk sits between the Chief Allocator and Execution
+  const all = base.concat(base.some((s) => s.slug === 'adriana') ? [] : [ADRIANA]);
   const SEATS = ORDER.map((slug) => all.find((s) => s.slug === slug)).filter(Boolean).map((s) => ({
-    agent: s.agent, slug: s.slug, name: s.name, accent: s.accent, planned: !!s.planned,
+    agent: s.agent, slug: s.slug, name: s.name, accent: s.accent, planned: !!s.planned, staticPlanned: !!s.planned,
     zone: (ZONE[s.slug] || [s.short])[0], role: (ZONE[s.slug] || [null, s.short])[1], title: s.role, href: '/' + s.slug}));
   const BY_SLUG = {}, BY_AGENT = {};
   SEATS.forEach((s) => { BY_SLUG[s.slug] = s; BY_AGENT[s.agent] = s; });
@@ -108,6 +111,13 @@ export function createModel(B, opts) {
     else if (s.data) { s.status = 'STALE'; s.why = res.why || res.status; }
   };
 
+  /* a planned seat the floor API now serves is a desk like any other: its
+   * planned flag follows the latest floor read (never the other way round on
+   * a failed read -- an unread floor leaves the flag as it was) */
+  function syncPlanned() {
+    const f = R.floor.data; if (!f || R.floor.status !== 'OK') return;
+    SEATS.forEach((s) => { if (s.staticPlanned) s.planned = !(f.agents || []).some((a) => a.slug === s.slug || a.agent === s.agent); });
+  }
   const signedOutCbs = [];
   function onRead(kind, s, extra) {
     return (u) => {
@@ -125,13 +135,13 @@ export function createModel(B, opts) {
   }
   const pollers = {};
   function start() {
-    pollers.floor = B.poller('/api/command/floor', 30000, onRead('floor', R.floor));
+    pollers.floor = B.poller('/api/command/floor', 30000, onRead('floor', R.floor, syncPlanned));
     pollers.equity = B.poller('/api/command/equity/live', 15000, onRead('equity', R.equity));
     pollers.derek = B.poller('/api/command/paper/derek?limit=40', 30000, onRead('derek', R.derek));
     pollers.release = B.poller('/api/command/release', 60000, onRead('release', R.release));
     setTimeout(() => { pollers.coverage = B.poller('/api/command/coverage?days=2', 120000, onRead('coverage', R.coverage)); }, 1200);
     if (o.curve) setTimeout(() => { pollers.curve = B.poller('/api/command/equity/curve?book=PAPER&window=1d', 60000, onRead('curve', R.curve)); }, 1800);
-    const xv = () => { if (!document.hidden) readDetail('xavier'); };
+    const xv = () => { if (document.hidden) return; readDetail('xavier'); if (BY_SLUG.adriana && !BY_SLUG.adriana.planned) readDetail('adriana'); };
     setTimeout(xv, 2500); setInterval(xv, 60000);
   }
   function readDetail(slug) {
@@ -190,10 +200,10 @@ export function createModel(B, opts) {
       label: planned ? 'NOT DEPLOYED · UNVERIFIED' : meta.label, color: meta.color, tone: meta.tone, active: !!meta.active && floorFresh() && !planned,
       shadow: /SHADOW/.test(level), authority: level,
       mission: a ? (a.title || a.role || seat.title) : seat.title,
-      detail: planned ? ARIANA.plannedWhy : a ? (a.work_detail || a.state_detail || '') : (R.floor.why || 'The floor has not been read yet.'),
+      detail: planned ? ADRIANA.plannedWhy : a ? (a.work_detail || a.state_detail || '') : (R.floor.why || 'The floor has not been read yet.'),
       since: a ? (a.work_since || a.state_since) : null,
       heartbeatAt: a && a.heartbeat ? a.heartbeat.at : null,
-      deployed: planned ? false : a ? a.deployed !== false : null, deployWhy: planned ? 'ARIANA_BACKEND_NOT_DEPLOYED' : a ? a.deploy_why : null,
+      deployed: planned ? false : a ? a.deployed !== false : null, deployWhy: planned ? 'ADRIANA_SEAT_NOT_SERVED' : a ? a.deploy_why : null,
       monitor: a ? (a.monitor || []) : [],
       last: a ? (a.last_output || a.focus || null) : null,
       attention, challenges: ch,
@@ -232,6 +242,17 @@ export function createModel(B, opts) {
     (ls.statuses || []).forEach((r) => { counts[r.status] = (counts[r.status] || 0) + 1; });
     return {status: R.coverage.status, day: ls.day, tz: ls.tz, rows: ls.statuses || [], counts, readAt: R.coverage.lastOk};
   }
+  /* Adriana's recorded census output (GET /api/command/floor/adriana): her
+   * proven opportunities and her refusals, as recorded -- never inferred */
+  function adrianaWork() {
+    const x = R.detail.adriana, d = x && x.data;
+    if (!d) return {status: x ? x.status : 'LOADING', why: x && x.why, opportunities: [], refusals: [], timeline: []};
+    const outs = d.outputs || [];
+    return {status: 'OK', readAt: x.lastOk,
+      opportunities: outs.filter((r) => r.kind === 'adriana_arb_opportunities').map((r) => Object.assign({}, r, {at: epoch(r.at)})),
+      refusals: outs.filter((r) => r.kind === 'adriana_arb_refusals').map((r) => Object.assign({}, r, {at: epoch(r.at)})),
+      timeline: (d.timeline || []).map((e) => Object.assign({}, e, {at: epoch(e.at)}))};
+  }
   function xavierDecisions() {
     const x = R.detail.xavier, d = x && x.data;
     if (!d) return {status: x ? x.status : 'LOADING', why: x && x.why, rows: []};
@@ -267,7 +288,8 @@ export function createModel(B, opts) {
 
   return {SEATS, BY_SLUG, BY_AGENT, STATE, reads: R, start, refresh, readCapital, subscribe: (fn) => subs.push(fn), onSignedOut: (fn) => signedOutCbs.push(fn),
     attention, funnel,
-    desk, desks: () => SEATS.map((s) => desk(s.slug)), edges, collaborators, equity, tickers, decisions, ranking, coverage, xavierDecisions, curve, fixture,
+    desk, desks: () => SEATS.map((s) => desk(s.slug)), edges, collaborators, equity, tickers, decisions, ranking, coverage, xavierDecisions, adrianaWork, curve, fixture,
+    readDetail, firstFloor: () => new Promise((res) => { if (R.floor.status !== 'LOADING') { res(); return; } subs.push((k) => { if (k === 'floor') res(); }); }),
     selected: () => selected, setSelected: (s) => { selected = s; },
     util: {usd, signedUsd, compactUsd, clock, hm, ago, epoch, words, fin, esc: B.esc, age: B.age}};
 }

@@ -315,7 +315,7 @@ export const DESK_SCREENS = {
   karen: ['challenges', 'status', 'edges'],
   scout: ['coverage', 'status', 'metrics'],
   allocator: ['ranking', 'status', 'metrics'],
-  ariana: ['status', 'status', 'status'],
+  adriana: ['metrics', 'status', 'edges'],
   eddie: ['marks', 'smalllive', 'status', 'positions', 'metrics', 'edges'],
   audrey: ['audit', 'composition', 'status', 'edges'],
   xavier: ['xavier', 'positions', 'status']
@@ -682,7 +682,7 @@ export function riskWall(ctx, W, H, hq) {
   text(ctx, 'GET release · equity/live · coverage · floor · derived by the Mobile Command attention rule', 60 * s, H - 36 * s, C.dim, '500', 19 * s, true, W - 120 * s);
 }
 
-/* ARIANA'S DESK, until the arbitrage backend is deployed: a physical desk whose
+/* ADRIANA'S DESK, until the floor API serves her seat: a physical desk whose
  * board says so. Nothing here is a figure; nothing here moves. */
 export function plannedBoard(ctx, W, H, hq, slug) {
   const d = hq.desk(slug), s = H / 864;
