@@ -1,7 +1,7 @@
 {
  "host": "https://command.bettortoken.com",
- "expect": "867e83806a52b398bad75a322dd7fcb1a74ead51",
- "started": "2026-10-05T21:13:13.379Z",
+ "expect": "5511498f28acf6b22ccf1bf22bbfe68343715331",
+ "started": "2026-10-05T21:29:11.841Z",
  "views": [
   {
    "name": "1_command_1440",
@@ -20,18 +20,28 @@
      0,
      0,
      0,
+     1,
+     1,
+     1,
      0,
      1,
      1,
-     0
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1
     ],
-    "drawCalls": 471,
-    "triangles": 202874,
+    "drawCalls": 472,
+    "triangles": 202876,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 59.7
+    "frameMs": 82.5
    },
    "errors": []
   },
@@ -52,6 +62,18 @@
      0,
      0,
      0,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
      0,
      1,
      1,
@@ -61,16 +83,18 @@
      0,
      0,
      0,
+     1,
+     1,
      0,
      0
     ],
-    "drawCalls": 495,
-    "triangles": 203002,
+    "drawCalls": 496,
+    "triangles": 203004,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 79.3
+    "frameMs": 89.7
    },
    "errors": []
   },
@@ -87,6 +111,16 @@
     "avatars": 7,
     "edges": 15,
     "fps": [
+     1,
+     0,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     0,
      0,
      0,
      0,
@@ -99,15 +133,11 @@
      0,
      0,
      0,
+     1,
      0,
      0,
      0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
+     1,
      0,
      0,
      0
@@ -118,7 +148,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 90
+    "frameMs": 93
    },
    "errors": []
   },
@@ -137,6 +167,10 @@
     "fps": [
      0,
      0,
+     0,
+     0,
+     0,
+     0,
      1,
      1,
      0,
@@ -144,35 +178,31 @@
      0,
      0,
      0,
+     1,
+     0,
+     0,
+     0,
+     1,
      0,
      0,
      0,
      0,
      0,
+     1,
+     1,
+     1,
+     1,
      0,
      0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0
+     1
     ],
-    "drawCalls": 144,
-    "triangles": 160736,
+    "drawCalls": 146,
+    "triangles": 161248,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 92.5
+    "frameMs": 92.7
    },
    "errors": []
   },
@@ -192,22 +222,7 @@
      0,
      0,
      0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
+     1,
      0,
      0,
      0,
@@ -217,16 +232,31 @@
      0,
      0,
      0,
+     1,
+     1,
+     1,
+     1,
      0,
-     0
+     0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     0,
+     1,
+     1,
+     1
     ],
-    "drawCalls": 112,
-    "triangles": 157662,
+    "drawCalls": 114,
+    "triangles": 158174,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 94.2
+    "frameMs": 96.8
    },
    "errors": []
   },
@@ -237,7 +267,7 @@
    "nan": 0,
    "undef": 0,
    "objObj": 0,
-   "dna": 0,
+   "dna": 1,
    "characters": "0",
    "scene": {
     "avatars": 7,
@@ -246,33 +276,33 @@
      0,
      0,
      0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
+     1,
+     1,
+     1,
      1,
      0,
      0,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
      0,
-     0,
-     0,
-     0,
+     1,
+     1,
+     1,
+     1,
+     1,
      0,
      1,
      0,
+     1,
+     1,
+     1,
      0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0
+     2
     ],
     "drawCalls": 306,
     "triangles": 184908,
@@ -280,7 +310,7 @@
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 96
+    "frameMs": 93.2
    },
    "errors": []
   },
@@ -297,11 +327,27 @@
     "avatars": 7,
     "edges": 15,
     "fps": [
+     1,
+     1,
+     1,
+     1,
+     1,
+     1,
      0,
+     1,
+     1,
+     1,
+     1,
+     1,
      0,
+     1,
      0,
+     1,
+     1,
+     1,
      0,
-     0,
+     2,
+     1,
      1,
      0,
      0,
@@ -310,31 +356,15 @@
      0,
      0,
      0,
-     1,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     1,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0,
-     0
+     1
     ],
-    "drawCalls": 181,
-    "triangles": 168358,
+    "drawCalls": 183,
+    "triangles": 168870,
     "tier": "high",
     "dpr": 1,
     "reflections": true,
     "bloom": true,
-    "frameMs": 95.1
+    "frameMs": 93
    },
    "errors": []
   },
@@ -358,7 +388,7 @@
    "nan": 0,
    "undef": 0,
    "objObj": 0,
-   "dna": 0,
+   "dna": 1,
    "characters": null,
    "scene": null,
    "errors": [],
@@ -367,18 +397,18 @@
  ],
  "build": {
   "schema": "bt.frontend.build.v1",
-  "sha": "867e83806a52b398bad75a322dd7fcb1a74ead51",
+  "sha": "5511498f28acf6b22ccf1bf22bbfe68343715331",
   "sha_why": null,
   "branch": "claude/session-njaewf",
   "context": "production",
-  "deploy_id": "6ac3f0502b3cc1000891fefc",
-  "build_id": "6ac3f0502b3cc1000891fefa",
+  "deploy_id": "6ac4154071110a00084920ee",
+  "build_id": "6ac4154071110a00084920ec",
   "site": "polymarkettracker1",
   "source": "NETLIFY",
-  "built_at": "2026-10-05T18:45:56.231Z"
+  "built_at": "2026-10-05T21:23:31.387Z"
  },
  "adriana": {
-  "at": "2026-10-05T21:13:13.606Z",
+  "at": "2026-10-05T21:29:12.238Z",
   "floor_http": 200,
   "seat": null,
   "adriana_edges": [],
@@ -390,15 +420,15 @@
   "top_refusals": []
  },
  "api": {
-  "at": "2026-10-05T21:13:17.886Z",
+  "at": "2026-10-05T21:29:16.967Z",
   "routes": {
    "/api/command/release": {
     "http": 200,
     "body": {
      "version": "COMMAND_RELEASE_V1",
      "read_only": true,
-     "generated_at": "2026-10-05T21:13:18+00:00",
-     "generated_at_epoch": 1791234798.0068886,
+     "generated_at": "2026-10-05T21:29:17+00:00",
+     "generated_at_epoch": 1791235757.729149,
      "api": {
       "status": "OK",
       "sha": "fd2bff3a0c9ee226f99656881c600ec989a34cb8",
@@ -1006,13 +1036,13 @@
     "body": {
      "paper": {
       "status": "OK",
-      "equity_usd": 478734.66,
-      "cash_usd": 381925.86,
-      "realized_pnl_usd": -12360.71,
-      "unrealized_pnl_usd": -8904.63,
+      "equity_usd": 478263.62,
+      "cash_usd": 383217.42,
+      "realized_pnl_usd": -12854.74,
+      "unrealized_pnl_usd": -8881.64,
       "since_inception": {
-       "usd": -21265.34,
-       "pct": -4.2531,
+       "usd": -21736.38,
+       "pct": -4.3473,
        "since": null,
        "basis_equity_usd": 500000,
        "basis_at": null,
@@ -1020,10 +1050,10 @@
        "why": null
       },
       "open_positions": {
-       "count": 240,
-       "marked": 224,
-       "unmarked": 16,
-       "stale_marks": 198
+       "count": 234,
+       "marked": 222,
+       "unmarked": 12,
+       "stale_marks": 200
       },
       "management": {
        "epoch_id": "MGMT_2026_10_05",
@@ -1046,35 +1076,35 @@
        },
        "carried_positions": 17,
        "carried_unverified": 4,
-       "opened_after_epoch": 412,
-       "settled_after_epoch": 64,
-       "equity_usd": 482013.59,
-       "cash_usd": 385350.56,
-       "cash_including_reserved_usd": 385350.56,
+       "opened_after_epoch": 419,
+       "settled_after_epoch": 69,
+       "equity_usd": 481543.4,
+       "cash_usd": 386642.12,
+       "cash_including_reserved_usd": 386642.12,
        "reserved_usd": 0,
-       "marked_open_position_value_usd": 88285.43,
-       "unmarked_carried_at_basis_usd": 8377.6,
+       "marked_open_position_value_usd": 88817.73,
+       "unmarked_carried_at_basis_usd": 6083.55,
        "exposure": {
-        "basis_usd": 105079.68,
-        "marked_value_usd": 88285.43,
-        "unmarked_basis_usd": 8377.6,
-        "open_positions": 237,
-        "unmarked": 16,
-        "stale_marks": 197
+        "basis_usd": 103321.64,
+        "marked_value_usd": 88817.73,
+        "unmarked_basis_usd": 6083.55,
+        "open_positions": 231,
+        "unmarked": 12,
+        "stale_marks": 199
        },
-       "realized_pnl_usd": -9569.76,
-       "unrealized_pnl_usd": -8416.65,
-       "total_pnl_usd": -17986.41,
-       "return_pct": -3.5973,
-       "fees_after_epoch_usd": 6113.65,
+       "realized_pnl_usd": -10036.24,
+       "unrealized_pnl_usd": -8420.36,
+       "total_pnl_usd": -18456.6,
+       "return_pct": -3.6913,
+       "fees_after_epoch_usd": 6280.76,
        "rebase_exact": false,
        "high_water_mark_usd": 500000,
        "high_water_mark_at": 1791172800,
        "high_water_mark_basis": "OPENING_EQUITY",
        "high_water_mark_points_used": 0,
        "high_water_mark_rule": "max of the opening equity and the current equity only: the snapshots cannot be re-based exactly while 4 carried position(s) are EPOCH_OPEN_MARK_UNVERIFIED or $39.98 of post-epoch ledger cash is held outside",
-       "drawdown_usd": 17986.41,
-       "drawdown_pct": 3.5973,
+       "drawdown_usd": 18456.6,
+       "drawdown_pct": 3.6913,
        "identity": {
         "rule": "EQUITY = OPENING_EQUITY + REALIZED + UNREALIZED",
         "gap_usd": 0,
@@ -1082,11 +1112,11 @@
        },
        "ledger_reconciliation": {
         "rule": "cash by per-position post-epoch flows = ledger cash - (ledger cash at the epoch - opening cash) - post-epoch ledger cash held outside",
-        "cash_by_flows_usd": 385350.5557,
-        "cash_by_ledger_usd": 385350.5557,
+        "cash_by_flows_usd": 386642.1182,
+        "cash_by_ledger_usd": 386642.1182,
         "gap_usd": 0,
         "reconciles": true,
-        "ledger_cash_now_usd": 381925.86,
+        "ledger_cash_now_usd": 383217.42,
         "post_epoch_cash_held_outside_usd": 39.98
        },
        "unverified_positions": [
@@ -1114,8 +1144,8 @@
          "qty_at_epoch": 85,
          "open_qty_now": 85,
          "historical_cost_usd": 42.27,
-         "current_mark_price": 0.45,
-         "current_marked_value_usd": 38.25,
+         "current_mark_price": 0.44,
+         "current_marked_value_usd": 37.4,
          "post_epoch_cash_held_outside_usd": 0
         },
         {
@@ -1149,7 +1179,7 @@
        ],
        "historical_positions": 43,
        "rows": {
-        "_len": 429,
+        "_len": 436,
         "_first": [
          {
           "position_key": "paperpos:paper_acct_main:papercggrp:02007520b0ac7a65a3e7e9a9:atc-svk2-lip-sam-2026-10-05-lip:SHORT",
@@ -1261,9 +1291,9 @@
           "management_avg_basis_per_contract": 0.242149,
           "open_qty": 242,
           "mark_state": "MARKED",
-          "marked_value_usd": 24.2,
+          "marked_value_usd": 43.56,
           "realized_pnl_usd": 0,
-          "unrealized_pnl_usd": -34.4,
+          "unrealized_pnl_usd": -15.04,
           "fees_after_epoch_usd": 2.98
          }
         ]
@@ -1274,24 +1304,24 @@
        "why": null,
        "pre_management_history": {
         "what": "the paper ledger since its funding: every trade, fill, fee, settlement and correction, unchanged and queryable; not mixed into the management figures",
-        "ledger_realized_pnl_usd": -12360.71,
-        "ledger_fees_paid_usd": 7354.68,
-        "ledger_cash_usd": 381925.86,
-        "ledger_available_usd": 381925.86,
+        "ledger_realized_pnl_usd": -12854.74,
+        "ledger_fees_paid_usd": 7521.79,
+        "ledger_cash_usd": 383217.42,
+        "ledger_available_usd": 383217.42,
         "positions_closed_before_epoch": 43,
-        "ledger_equity_usd": 478734.66,
+        "ledger_equity_usd": 478263.62,
         "since_funding": {
-         "usd": -21265.34,
-         "pct": -4.2531,
+         "usd": -21736.38,
+         "pct": -4.3473,
          "since": null,
          "basis_equity_usd": 500000,
          "basis_at": null,
          "basis": "starting cash of the fictional $500,000 account",
          "why": null
         },
-        "ledger_unrealized_pnl_usd": -8904.63
+        "ledger_unrealized_pnl_usd": -8881.64
        },
-       "computed_at": 1791234798.1654515
+       "computed_at": 1791235758.039826
       }
      }
     },
@@ -1307,40 +1337,40 @@
       "money": "FICTIONAL_USD_NOT_REAL_MONEY",
       "real_money_submission": "DISABLED"
      },
-     "as_of": 1791234799.4885554,
+     "as_of": 1791235763.482663,
      "paper_only": "paper totals; never mixed with funded totals",
      "daily_reports": {
       "status": "OK",
       "why": null,
       "data": [
        {
-        "report_id": "paperrep:f60b373b249b39149743ab35",
+        "report_id": "paperrep:48527c5e970e433c1b533673",
         "session_id": "paper_session_20261001T014716Z",
         "account_id": "paper_acct_main",
         "report_day": "2026-10-05",
         "reporting_tz": "America/New_York",
-        "version": 66,
-        "generated_at": 1791234081.572102,
+        "version": 67,
+        "generated_at": 1791235040.547788,
         "final": false,
         "reconciles": true,
         "report": {
          "pnl": {
           "net_usd": null,
-          "fees_usd": 6062.42,
+          "fees_usd": 6150.95,
           "unrealized_usd": null,
           "valuation_method": "TOP_OF_BOOK_EXIT_PRICE: what closing one contract would receive at the best displayed level of the side a close consumes (bettor_book_snapshot.exit_ladder), from the paper path's latest observed book; no depth adjustment",
-          "realized_total_usd": -11340.9714,
+          "realized_total_usd": -12113.3932,
           "floors_are_not_realized": true
          },
          "equity": {
-          "cash_usd": 383299.9299,
+          "cash_usd": 382789.9695,
           "ending_usd": null,
-          "ending_basis": "INCOMPLETE: 16 open position(s) have no available mark; total equity is not stated and the marked-only figure excludes them",
-          "reserved_usd": 424.42,
+          "ending_basis": "INCOMPLETE: 12 open position(s) have no available mark; total equity is not stated and the marked-only figure excludes them",
+          "reserved_usd": 0,
           "starting_usd": 496693.1942,
-          "available_usd": 382875.5099,
+          "available_usd": 382789.9695,
           "starting_basis": "the last complete equity snapshot at or before the day's start",
-          "ending_excluding_unmarked_usd": 470716.835
+          "ending_excluding_unmarked_usd": 472962.1474
          },
          "labels": {
           "money": "FICTIONAL_USD_NOT_REAL_MONEY",
@@ -1351,11 +1381,11 @@
          "window": {
           "end": 1791259200,
           "start": 1791172800,
-          "through": 1791234081.5721023
+          "through": 1791235040.5477877
          },
          "breadth": {
           "definition": "distinct us_market_slug with a filled purchase that day; repeat orders or both sides of one market count once",
-          "distinct_markets": 120,
+          "distinct_markets": 121,
           "distinct_fixtures": 107
          },
          "targets": {
@@ -1371,7 +1401,7 @@
           },
           "distinct_markets": {
            "met": false,
-           "actual": 120,
+           "actual": 121,
            "objective": [
             200,
             400
@@ -1383,52 +1413,52 @@
           },
           "acquisition_volume": {
            "met": false,
-           "actual_usd": 171657.6286,
+           "actual_usd": 175194.509,
            "objective_usd": 250000,
-           "shortfall_usd": 78342.3714
+           "shortfall_usd": 74805.491
           }
          },
          "version": "PAPER_AUDREY_V1",
          "drawdown": {
           "basis": "peak-to-trough over paper_equity_snapshots (one per paper pass), marks as in bettor_paper_ledger.MARK_METHOD",
-          "snapshots": 907,
+          "snapshots": 923,
           "peak_equity_usd": 496694.3142,
           "max_drawdown_pct": 4.145318,
           "max_drawdown_usd": 20589.5603,
           "current_equity_usd": 476104.7539,
           "current_drawdown_usd": 20589.5603,
-          "skipped_incomplete_marks": 339
+          "skipped_incomplete_marks": 355
          },
          "data_gaps": {
-          "book_reads": 13900,
+          "book_reads": 14213,
           "stale_marks": {
-           "_len": 186,
+           "_len": 189,
            "_first": [
             "paperpos:paper_acct_main:papercggrp:14bd981874295b8316fc1a7e:atc-unl-alb-smr-2026-10-06-alb:LONG",
-            "paperpos:paper_acct_main:papercggrp:8a13d806dc791a3d68954ee6:atc-u21eq-ger-geo-2026-10-06-ger:LONG",
+            "paperpos:paper_acct_main:papercggrp:1a49163a2b1cf10194a0929c:atc-par2-jun-sol-2026-10-05-jun:LONG",
             "paperpos:paper_acct_main:papercggrp:af410b0f19f2288796d912b9:aec-npb-clm-ssl-2026-10-06:LONG",
             "paperpos:paper_acct_main:papercggrp:d1139ba62d923fbe5756d64f:atc-brb-pop-juv-2026-10-06-pop:LONG",
+            "paperpos:paper_acct_main:papercggrp:d7cd67b25966cda8be6f6e99:atc-u21eq-esp-rou-2026-10-06-esp:LONG",
             "paperpos:paper_acct_main:papercggrp:da95830266fd0f641219f5ff:atc-intf-jor-ven-2026-10-06-jor:LONG",
             "paperpos:paper_acct_main:paperexpgrp:00c8dfe1f31dd1a3f6122072:aec-npb-clm-ssl-2026-10-06:SHORT",
-            "paperpos:paper_acct_main:paperexpgrp:026fe8873e06c754aab4f90e:atc-unl-lux-bul-2026-10-06-lux:SHORT",
-            "paperpos:paper_acct_main:paperexpgrp:02d7a34b9239ff5042a2afc3:atc-u21eq-bul-sco-2026-10-06-bul:SHORT"
+            "paperpos:paper_acct_main:paperexpgrp:026fe8873e06c754aab4f90e:atc-unl-lux-bul-2026-10-06-lux:SHORT"
            ]
           },
-          "unreadable_books": 2606,
+          "unreadable_books": 2700,
           "unmarked_positions": {
-           "_len": 16,
+           "_len": 12,
            "_first": [
             "paperpos:paper_acct_main:papercggrp:ed00c75c53dd2777b78365f4:atc-u21eq-swe-mkd-2026-10-05-swe:LONG",
             "paperpos:paper_acct_main:paperexpgrp:3169d01c2b36f50ab14a3729:atc-lal2-cor-cdt-2026-10-05-cor:SHORT",
             "paperpos:paper_acct_main:paperexpgrp:541f548fabd4f73339e2c12e:atc-unl-nir-geo-2026-10-05-nir:LONG",
-            "paperpos:paper_acct_main:paperexpgrp:7b24f4b17bfd7ecdd9eeebdf:atc-unl-fra-bel-2026-10-05-fra:SHORT",
             "paperpos:paper_acct_main:paperexpgrp:8eac7ea622813193de47c12c:atc-u21eq-swe-mkd-2026-10-05-swe:SHORT",
             "paperpos:paper_acct_main:paperexpgrp:a4732f0be355577557b8e7ed:atc-intf-uga-cdr-2026-10-05-cdr:LONG",
             "paperpos:paper_acct_main:paperexpgrp:ab50039e97eb0d1f7db23f80:atc-unl-mne-arm-2026-10-05-mne:LONG",
-            "paperpos:paper_acct_main:paperexpgrp:c9c99f3beb7e404cf914a5ee:atc-nor1-mfk-kil-2026-10-05-mfk:LONG"
+            "paperpos:paper_acct_main:paperexpgrp:c9c99f3beb7e404cf914a5ee:atc-nor1-mfk-kil-2026-10-05-mfk:LONG",
+            "paperpos:paper_acct_main:papergrp:15261a4c364824529dc68262:atc-u21eq-swe-mkd-2026-10-05-swe:LONG"
            ]
           },
-          "session_passes_total": 6938,
+          "session_passes_total": 6954,
           "qualification_gaps_every_decision": [
            "MODEL_APPROVAL",
            "SOURCE_CALIBRATION",
@@ -1438,56 +1468,56 @@
           ]
          },
          "decisions": {
-          "_len": 17,
+          "_len": 18,
           "_first": [
            {
             "reason": "BELOW_MIN_GROSS_EDGE",
-            "markets": 105,
+            "markets": 106,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 3137
+            "decisions": 3218
            },
            {
             "reason": "SETTLEMENT_NOT_SUPPORTED",
             "markets": 32,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 1173
+            "decisions": 1183
            },
            {
             "reason": "ENTER",
             "markets": 57,
             "verdict": "ENTER",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 723
+            "decisions": 750
            },
            {
             "reason": "PINNAPI_PRIMARY_INPUT_CHANGED",
-            "markets": 31,
+            "markets": 34,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 596
+            "decisions": 622
            },
            {
             "reason": "FEED_QUOTE_OLDER_THAN_LIMIT",
-            "markets": 61,
+            "markets": 62,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 217
+            "decisions": 224
            },
            {
             "reason": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
-            "markets": 17,
+            "markets": 19,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 117
+            "decisions": 122
            },
            {
             "reason": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
-            "markets": 21,
+            "markets": 22,
             "verdict": "REFUSE",
             "strategy": "DEREK_ENTRY_POLICY_V2",
-            "decisions": 70
+            "decisions": 75
            },
            {
             "reason": "NO_QUALIFIED_PINNACLE_PROBABILITY",
@@ -1499,54 +1529,54 @@
           ]
          },
          "hindsight": {
-          "won": 18,
-          "lost": 44,
+          "won": 20,
+          "lost": 48,
           "void": 0,
           "basis": "authoritative settlements booked this day, with corrections; never used to re-score a decision",
-          "payout_usd": 13868.89,
+          "payout_usd": 16408.62,
           "corrections": 0,
-          "settlements": 62
+          "settlements": 68
          },
          "data_label": "LIVE MARKET DATA / SIMULATED EXECUTION",
          "report_day": "2026-10-05",
          "reporting_tz": "America/New_York",
          "open_exposure": {
-          "cost_basis_usd": 105359.0987,
-          "open_positions": 238,
-          "reserved_for_open_orders_usd": 424.42
+          "cost_basis_usd": 105096.6373,
+          "open_positions": 236,
+          "reserved_for_open_orders_usd": 0
          },
          "sale_proceeds": {
           "EXIT": 1580.965,
           "REDUCE": 553.8919,
-          "total_usd": 50608.1935,
+          "total_usd": 51095.3835,
           "never_acquisition": true,
-          "STANDING_PROTECTION": 48473.3366
+          "STANDING_PROTECTION": 48960.5266
          },
          "ledger_by_kind": {
           "FILL": {
-           "n": 448,
-           "cash": -171657.6286,
-           "reserved": -172923.531988
+           "n": 459,
+           "cash": -175194.509,
+           "reserved": -176480.740254
           },
           "SALE": {
-           "n": 297,
-           "cash": 50608.1935,
+           "n": 302,
+           "cash": 51095.3835,
            "reserved": 0
           },
           "SETTLEMENT": {
-           "n": 62,
-           "cash": 13868.89,
+           "n": 68,
+           "cash": 16408.62,
            "reserved": 0
           },
           "ORDER_SUBMITTED": {
-           "n": 443,
+           "n": 451,
            "cash": 0,
-           "reserved": 194002.14
+           "reserved": 197749.65
           },
           "RESERVATION_RELEASED": {
-           "n": 78,
+           "n": 80,
            "cash": 0,
-           "reserved": -20654.188012
+           "reserved": -21268.909746
           }
          },
          "reconciliation": {
@@ -1556,28 +1586,28 @@
             {
              "check": "ACQUISITION_EQUALS_LEDGER_FILL_DEBITS",
              "passed": true,
-             "acquisition_from_fills_usd": 171657.6286,
-             "ledger_fill_debits_for_these_fills_usd": 171657.6286
+             "acquisition_from_fills_usd": 175194.509,
+             "ledger_fill_debits_for_these_fills_usd": 175194.509
             },
             {
              "check": "SALE_PROCEEDS_EQUAL_LEDGER_SALE_CREDITS",
              "passed": true,
-             "sale_proceeds_from_fills_usd": 50608.1935,
-             "ledger_sale_credits_for_these_fills_usd": 50608.1935
+             "sale_proceeds_from_fills_usd": 51095.3835,
+             "ledger_sale_credits_for_these_fills_usd": 51095.3835
             },
             {
              "note": "both as of the report's generation",
              "check": "CASH_EQUALS_THE_LEDGER_SUM",
              "passed": true,
-             "ledger_sum_usd": 383299.9299,
-             "balances_cash_usd": 383299.9299
+             "ledger_sum_usd": 382789.9695,
+             "balances_cash_usd": 382789.9695
             },
             {
              "note": "all settlements to date, as of the report's generation",
              "check": "SETTLEMENTS_EQUAL_LEDGER_SETTLEMENT_AND_CORRECTIONS",
              "passed": true,
-             "latest_settlement_payouts_usd": 18028.9,
-             "ledger_settlement_and_correction_credits_usd": 18028.9
+             "latest_settlement_payouts_usd": 20568.63,
+             "ledger_settlement_and_correction_credits_usd": 20568.63
             },
             {
              "check": "RUNNING_BALANCES_AGREE_WITH_THE_SUM",
@@ -1586,7 +1616,7 @@
             {
              "check": "EVERY_FILL_HAS_ONE_ROLE_NO_DOUBLE_COUNT",
              "passed": true,
-             "fills_total": 745,
+             "fills_total": 761,
              "fills_by_role": "…"
             },
             {
@@ -1598,8 +1628,8 @@
             {
              "check": "MANAGEMENT_CASH_EQUALS_THE_REBASED_LEDGER",
              "passed": true,
-             "audrey_from_ledger_sums_usd": 386724.6249,
-             "management_cash_including_reserved_usd": 386724.63
+             "audrey_from_ledger_sums_usd": 386214.6645,
+             "management_cash_including_reserved_usd": 386214.67
             }
            ]
           },
@@ -1607,7 +1637,7 @@
           "reconciles": true
          },
          "xavier_reviews": {
-          "_len": 24,
+          "_len": 26,
           "_first": [
            {
             "n": 1,
@@ -1620,12 +1650,12 @@
             "recommendation": "EXIT"
            },
            {
-            "n": 12,
+            "n": 13,
             "trigger": "FRESHNESS_EXPIRY",
             "recommendation": "EXIT"
            },
            {
-            "n": 306,
+            "n": 310,
             "trigger": "MARKET_EVENT",
             "recommendation": "EXIT"
            },
@@ -1640,13 +1670,13 @@
             "recommendation": "EXIT"
            },
            {
-            "n": 10,
-            "trigger": "FILL_EVENT",
-            "recommendation": "HOLD"
+            "n": 1,
+            "trigger": "VALUATION_CHANGE",
+            "recommendation": "EXIT"
            },
            {
-            "n": 177,
-            "trigger": "FIRST_FILL",
+            "n": 10,
+            "trigger": "FILL_EVENT",
             "recommendation": "HOLD"
            }
           ]
@@ -1666,62 +1696,62 @@
            "cash_including_reserved_usd": 493945.15,
            "carried_position_mark_value_usd": 6054.85
           },
-          "cash_usd": 386300.21,
+          "cash_usd": 386214.67,
           "epoch_id": "MGMT_2026_10_05",
-          "equity_usd": 482403.93,
-          "return_pct": -3.5192,
+          "equity_usd": 482364.81,
+          "return_pct": -3.527,
           "epoch_start": "2026-10-05 00:00:00 America/New_York",
-          "drawdown_usd": 17596.07,
-          "reserved_usd": 424.42,
-          "total_pnl_usd": -17596.07,
-          "realized_pnl_usd": -8557.04,
+          "drawdown_usd": 17635.19,
+          "reserved_usd": 0,
+          "total_pnl_usd": -17635.19,
+          "realized_pnl_usd": -9322.44,
           "carried_positions": 17,
           "carried_unverified": 4,
           "opening_equity_usd": 500000,
-          "unrealized_pnl_usd": -9039.03,
+          "unrealized_pnl_usd": -8312.75,
           "ledger_reconciliation": {
            "rule": "cash by per-position post-epoch flows = ledger cash - (ledger cash at the epoch - opening cash) - post-epoch ledger cash held outside",
            "gap_usd": 0,
            "reconciles": true,
-           "cash_by_flows_usd": 386724.6257,
-           "cash_by_ledger_usd": 386724.6257,
-           "ledger_cash_now_usd": 383299.93,
+           "cash_by_flows_usd": 386214.6653,
+           "cash_by_ledger_usd": 386214.6653,
+           "ledger_cash_now_usd": 382789.97,
            "post_epoch_cash_held_outside_usd": 39.98
           },
-          "marked_open_position_value_usd": 87301.7
+          "marked_open_position_value_usd": 90066.59
          },
          "shortfall_causes": {
           "_len": 9,
           "_first": [
            {
             "cause": "BELOW_MIN_GROSS_EDGE",
-            "markets": 105,
-            "decisions": 3137
+            "markets": 106,
+            "decisions": 3218
            },
            {
             "cause": "SETTLEMENT_NOT_SUPPORTED",
             "markets": 32,
-            "decisions": 1173
+            "decisions": 1183
            },
            {
             "cause": "PINNAPI_PRIMARY_INPUT_CHANGED",
-            "markets": 31,
-            "decisions": 596
+            "markets": 34,
+            "decisions": 622
            },
            {
             "cause": "FEED_QUOTE_OLDER_THAN_LIMIT",
-            "markets": 61,
-            "decisions": 217
+            "markets": 62,
+            "decisions": 224
            },
            {
             "cause": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
-            "markets": 17,
-            "decisions": 117
+            "markets": 19,
+            "decisions": 122
            },
            {
             "cause": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
-            "markets": 21,
-            "decisions": 70
+            "markets": 22,
+            "decisions": 75
            },
            {
             "cause": "NO_QUALIFIED_PINNACLE_PROBABILITY",
@@ -1736,10 +1766,10 @@
           ]
          },
          "acquisition_volume": {
-          "total_usd": 171657.6286,
+          "total_usd": 175194.509,
           "definition": "simulated cost of FILLED purchases (qty x price + fees), entries and hedges separately; sale proceeds reported separately and never counted",
           "hedges_usd": 0,
-          "entries_usd": 171657.6286
+          "entries_usd": 175194.509
          },
          "execution_assumptions": {
           "resting": [
@@ -1761,58 +1791,58 @@
          },
          "optimistic_sensitivity": {
           "basis": "decision-time book, no delay, no consumption ledger, touch fills: a bound, never the primary result",
-          "gross_usd": 475080.88579999976,
-          "filled_qty": 752532,
-          "primary_acquisition_usd": 171657.6286
+          "gross_usd": 499642.8941999999,
+          "filled_qty": 790694,
+          "primary_acquisition_usd": 175194.509
          },
          "pinnacle_exploration_paper": {
           "fills": {
-           "qty": 199574.1,
-           "fills": 242,
-           "fees_usd": 2908.02,
+           "qty": 201740.1,
+           "fills": 247,
+           "fees_usd": 2937,
            "strategy": "PINNACLE_EXPLORATION_PAPER",
-           "acquisition_usd": 98730.3811,
-           "distinct_markets": 120
+           "acquisition_usd": 100357.9711,
+           "distinct_markets": 121
           },
           "version": "PINNACLE_EXPLORATION_PAPER_V3",
           "strategy": "PINNACLE_EXPLORATION_PAPER",
           "decisions": {
-           "_len": 12,
+           "_len": 13,
            "_first": [
             {
              "reason": "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT",
              "markets": 96,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 4751
+             "decisions": 4871
             },
             {
              "reason": "PINNAPI_PRIMARY_INPUT_CHANGED",
-             "markets": 31,
+             "markets": 34,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 518
+             "decisions": 541
             },
             {
              "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-             "markets": 60,
+             "markets": 62,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 293
+             "decisions": 300
             },
             {
              "reason": "ENTER",
-             "markets": 120,
+             "markets": 121,
              "verdict": "ENTER",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 253
+             "decisions": 257
             },
             {
              "reason": "FEED_QUOTE_OLDER_THAN_LIMIT",
-             "markets": 46,
+             "markets": 48,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 168
+             "decisions": 176
             },
             {
              "reason": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
@@ -1830,150 +1860,150 @@
             },
             {
              "reason": "PINNAPI_PRIMARY_CLOCK_INVALID",
-             "markets": 12,
+             "markets": 13,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_EXPLORATION_PAPER",
-             "decisions": 20
+             "decisions": 21
             }
            ]
           },
           "positions": {
-           "open": 186,
-           "count": 287,
+           "open": 184,
+           "count": 291,
            "strategy": "PINNACLE_EXPLORATION_PAPER",
-           "realized_pnl_usd": -3996.8594,
-           "open_cost_basis_usd": 76010.7076
+           "realized_pnl_usd": -5515.1194,
+           "open_cost_basis_usd": 75794.4776
           },
           "disclosure": "PINNACLE_EXPLORATION_PAPER: TRAINING / SIMULATED EXECUTION on a fictional account. Positions are taken to generate forward experience (fills, management, settlement, audit) and MAY FAIL the investment policy's edge and after-fee requirements; their expected value is recorded and may be negative -- a research cost, not investment performance and not a profitable opportunity. Same data and execution safeguards as the investment policy. No real money, no real venue order.",
           "one_ledger": "paper_ledger (the benchmark shares the account's single cash ledger; no separate funding)",
           "orders_by_state": {
-           "FILLED": 281,
-           "EXPIRED": 1820,
+           "FILLED": 288,
+           "EXPIRED": 1858,
            "RESTING": 170,
-           "CANCELED": 596,
-           "CANCEL_PENDING": 3
+           "CANCELED": 618,
+           "CANCEL_PENDING": 1
           },
           "entries_at_decision_time": {
            "basis": "what was known at each decision; not scored on outcomes",
-           "entries": 253,
+           "entries": 257,
            "strategy": "PINNACLE_EXPLORATION_PAPER",
-           "expected_net_usd": -6809.025716386,
-           "mean_best_level_edge_pp": -6.46545819766008
+           "expected_net_usd": -6853.5346314299995,
+           "mean_best_level_edge_pp": -6.3771358012334645
           },
-          "handoffs_to_xavier_total": 287,
+          "handoffs_to_xavier_total": 291,
           "included_in_account_totals": true
          },
          "pinnacle_completed_game_paper": {
           "fills": {
-           "qty": 20679.62,
-           "fills": 51,
-           "fees_usd": 289.15,
+           "qty": 22639.62,
+           "fills": 55,
+           "fees_usd": 320.89,
            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-           "acquisition_usd": 11154.459,
-           "distinct_markets": 17
+           "acquisition_usd": 12261.759,
+           "distinct_markets": 20
           },
           "version": "PINNACLE_COMPLETED_GAME_PAPER_V3",
           "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
           "decisions": {
-           "_len": 16,
+           "_len": 17,
            "_first": [
             {
              "reason": "BELOW_MIN_GROSS_EDGE",
-             "markets": 122,
+             "markets": 123,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 3558
+             "decisions": 3641
             },
             {
              "reason": "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT",
-             "markets": 18,
+             "markets": 21,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 1189
+             "decisions": 1226
             },
             {
              "reason": "PINNAPI_PRIMARY_INPUT_CHANGED",
-             "markets": 31,
+             "markets": 34,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 488
+             "decisions": 508
             },
             {
              "reason": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
              "markets": 47,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 302
+             "decisions": 306
             },
             {
              "reason": "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
-             "markets": 61,
+             "markets": 63,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 296
+             "decisions": 303
             },
             {
              "reason": "FEED_QUOTE_OLDER_THAN_LIMIT",
-             "markets": 39,
+             "markets": 40,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 122
+             "decisions": 127
             },
             {
              "reason": "BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE",
              "markets": 15,
              "verdict": "REFUSE",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 54
+             "decisions": 56
             },
             {
              "reason": "ENTER",
-             "markets": 20,
+             "markets": 23,
              "verdict": "ENTER",
              "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-             "decisions": 41
+             "decisions": 44
             }
            ]
           },
           "positions": {
-           "open": 8,
-           "count": 48,
+           "open": 10,
+           "count": 51,
            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-           "realized_pnl_usd": -397.9544,
-           "open_cost_basis_usd": 3202.1066
+           "realized_pnl_usd": -397.1344,
+           "open_cost_basis_usd": 4255.2666
           },
           "disclosure": "PINNACLE_COMPLETED_GAME_PAPER: EXPERIMENTAL PAPER EXECUTION on a fictional account. The reference probability is the de-vigged Pinnacle probability alone. Its economics are CONDITIONAL on the game being ordinarily completed and are NOT risk-adjusted or proven positive EV: the venue's and the book's terms for postponed, abandoned or suspended games are not established as compatible and are carried as disclosed research risks, with their frequencies unmeasured. Every fill is SIMULATED (PAPER_SIM_V1). It does not qualify any strategy for real money. No real money, no real venue order.",
           "one_ledger": "paper_ledger (the benchmark shares the account's single cash ledger; no separate funding)",
           "qualification": "NONE: this experiment does not qualify or promote any strategy for real-money trading",
           "orders_by_state": {
-           "FILLED": 53,
-           "EXPIRED": 100,
-           "RESTING": 8,
+           "FILLED": 57,
+           "EXPIRED": 104,
+           "RESTING": 10,
            "CANCELED": 147
           },
           "entry_assumptions": {
-           "entries": 90,
+           "entries": 93,
            "conditional_on": "ORDINARY_COMPLETION",
            "economics_label": "CONDITIONAL_EXPERIMENTAL_NOT_RISK_ADJUSTED",
-           "conditional_ev_sum_usd": 7094.225028,
+           "conditional_ev_sum_usd": 7097.291683,
            "exceptional_probabilities": "UNMEASURED"
           },
           "actual_simulated_pnl": {
            "basis": "the one paper ledger; fills and settlements as booked",
-           "realized_usd": -397.9544,
-           "pending_positions": 8,
+           "realized_usd": -397.1344,
+           "pending_positions": 10,
            "unrealized_marked_usd": 0
           },
           "exceptional_outcomes": [],
           "exceptional_effect_usd": 0,
           "entries_at_decision_time": {
            "basis": "what was known at each decision; not scored on outcomes",
-           "entries": 41,
+           "entries": 44,
            "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
-           "expected_net_usd": 1151.179625419,
-           "mean_best_level_edge_pp": 3.3652999982195113
+           "expected_net_usd": 1154.2462798830002,
+           "mean_best_level_edge_pp": 3.278495615931817
           },
-          "handoffs_to_xavier_total": 48,
+          "handoffs_to_xavier_total": 51,
           "included_in_account_totals": true
          },
          "pinnacle_only_paper_benchmark": {
@@ -2010,10 +2040,10 @@
          },
          "decision_quality_at_decision_time": {
           "basis": "what was known at each decision; not scored on outcomes",
-          "entries": 723,
+          "entries": 750,
           "strategy": "DEREK_ENTRY_POLICY_V2",
-          "expected_net_usd": 30208.738490615982,
-          "mean_gross_edge_pp": 5.573782456427378
+          "expected_net_usd": 31828.232459164985,
+          "mean_gross_edge_pp": 5.582416358542658
          },
          "decisions_vs_alternatives_at_decision_time": {
           "basis": "alternatives captured AT the decision (NO_TRADE and the opposite side of the same market on the same measure); a question of decision quality, answerable without outcomes",
@@ -2022,8 +2052,8 @@
           "opposite_side_edge_exceeded_the_evaluated_side": 16
          }
         },
-        "digest": "b53995f33aec6d62874b43a31c638a96e10fa8575f2ba0c49564091eb0301a0b",
-        "recorded_at": 1791234082.438134
+        "digest": "385bb58b998740a6fabcd72c8c9ed4240f344a8a9e7b42b33107ed4820854a58",
+        "recorded_at": 1791235041.410685
        },
        {
         "report_id": "paperrep:82f6123919dd22a0808bbd0c",
@@ -3274,61 +3304,85 @@
       "why": null,
       "data": [
        {
-        "finding_id": "paperfind:8072370dedf71ede237f5583",
+        "finding_id": "paperfind:f41a1abd23c5635d4e31dfd5",
         "session_id": "paper_session_20261001T014716Z",
         "account_id": "paper_acct_main",
-        "found_at": 1791234744.194838,
+        "found_at": 1791235715.331279,
         "kind": "PAPER_RISK_REFUSED_THE_ORDER",
         "severity": "INFO",
-        "subject": "paperdec:f512a4e170c283f530b03726",
+        "subject": "paperdec:b6ba026d9eb679da4ef0adfe",
         "detail": {
-         "at": 1791234744.6859312,
+         "at": 1791235715.6314564,
          "by": [
           {
            "state": "OPEN_POSITION",
-           "group_id": "papergrp:ba54694ef8d3cf5573fe5903"
+           "group_id": "papergrp:77487581a37d03977dea25c5"
           }
          ],
          "refusal": "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT",
          "under_lock": true,
-         "decision_id": "paperdec:f512a4e170c283f530b03726",
-         "available_usd": 381925.8599,
-         "reservation_usd": 740.65
+         "decision_id": "paperdec:b6ba026d9eb679da4ef0adfe",
+         "available_usd": 383217.4224,
+         "reservation_usd": 996.19
         },
         "improvement_task_id": null,
-        "recorded_at": 1791234744.861815
+        "recorded_at": 1791235715.760021
        },
        {
-        "finding_id": "paperfind:9a74825134ce7ce841902cf5",
+        "finding_id": "paperfind:3ff497a6418200cb42ab288a",
         "session_id": "paper_session_20261001T014716Z",
         "account_id": "paper_acct_main",
-        "found_at": 1791234699.793782,
-        "kind": "STALE_MARK",
-        "severity": "INFO",
-        "subject": "paperpos:paper_acct_main:paperexpgrp:d2454d3eb61caac53c8b0abd:atc-lpa-rie-cac-2026-10-05-rie:SHORT",
+        "found_at": 1791235620.485588,
+        "kind": "ENTER_WITHOUT_ORDER",
+        "severity": "WARNING",
+        "subject": "paperdec:68d34a545326ac86476d2479",
         "detail": {
-         "stale_after_s": 300
+         "why": "a recorded ENTER has no paper order naming it and no order refusal: its order sequence was cut after the decision row was written (grace exceeded, an outer cancellation or a process restart). Nothing is placed late: the decision's book and price are gone",
+         "fixture": "event:pinnapi:1637502726",
+         "named_by": "paper_derek.step_enter_backstop",
+         "strategy": "DEREK_ENTRY_POLICY_V2",
+         "decided_at": 1791235522.264686,
+         "decision_id": "paperdec:68d34a545326ac86476d2479",
+         "threshold_s": 60,
+         "valuation_id": 13223,
+         "policy_version": "DEREK_ENTRY_POLICY_V2",
+         "us_market_slug": "atc-arg2-chi-mai-2026-10-03-chi",
+         "age_at_detection_s": 98.221,
+         "order_refusal_recorded": false
         },
         "improvement_task_id": null,
-        "recorded_at": 1791234739.795611
+        "recorded_at": 1791235620.497701
        },
        {
-        "finding_id": "paperfind:795f3bcd7d6554fc4f3ed92a",
+        "finding_id": "paperfind:60962b5bd83dd29276eb3109",
         "session_id": "paper_session_20261001T014716Z",
         "account_id": "paper_acct_main",
-        "found_at": 1791234699.793782,
-        "kind": "STALE_MARK",
+        "found_at": 1791235600.388549,
+        "kind": "PAPER_EVENT_MANAGEMENT_FILL",
         "severity": "INFO",
-        "subject": "paperpos:paper_acct_main:papergrp:ba54694ef8d3cf5573fe5903:atc-lpa-rie-cac-2026-10-05-rie:SHORT",
+        "subject": "paperfill:f0b60596f16786714134bb30",
         "detail": {
-         "stale_after_s": 300
+         "qty": 50,
+         "role": "STANDING_PROTECTION",
+         "event": "XAVIER_MANAGEMENT_FILL",
+         "price": 0.76,
+         "passed": true,
+         "fee_usd": 0.63,
+         "fill_id": "paperfill:f0b60596f16786714134bb30",
+         "group_id": "papergrp:60ec60ddc5140875af524b7f",
+         "order_id": "paperord:bcbc0b7a6559d9f437ba740c",
+         "direction": "SELL",
+         "filled_at": 1791235616.483403,
+         "ledger_seq": 1835,
+         "ledger_kind": "SALE",
+         "expected_cash_delta_usd": 37.37
         },
         "improvement_task_id": null,
-        "recorded_at": 1791234739.860315
+        "recorded_at": 1791235639.310245
        }
       ]
      },
-     "last_updated_at": 1791234475.731392
+     "last_updated_at": 1791235762.650671
     },
     "head": null
    },
@@ -3373,5 +3427,5 @@
   "errors": [],
   "nonGet": []
  },
- "finished": "2026-10-05T21:20:03.214Z"
+ "finished": "2026-10-05T21:33:49.082Z"
 }
