@@ -286,7 +286,8 @@ body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc,
   body.hq { overflow: auto; overflow-x: hidden; background: radial-gradient(140% 60% at 50% 0%, #0f2140 0%, #060c18 55%, #040912 100%) fixed; }
   #hq-stage, #hq-tags, #hq-hint, .hq-foot, #hq-caption { display: none !important; }
   #hq-top { position: sticky; height: var(--top); padding: 0 14px; background: rgba(4,9,18,.86); backdrop-filter: blur(14px); border-bottom: 1px solid var(--hair); gap: 10px; }
-  .hq-brand { min-width: 0; } .hq-brand img { height: 22px; } .hq-brand small { display: none; }
+  .hq-brand { min-width: 0; flex: 0 1 auto; } .hq-brand img { height: 18px; } .hq-brand small { display: none; }
+  .hq-status { overflow: hidden; flex: 0 1 auto; } .hq-pill { padding: 0 7px; font-size: 9.5px; gap: 5px; height: 24px; }
   #hq-nav, .hq-status .hide-phone { display: none; }
   .hq-status { gap: 6px; }
   main#hq-hud { padding: 12px 14px 96px; }

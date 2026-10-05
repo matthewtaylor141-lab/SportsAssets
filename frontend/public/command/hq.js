@@ -83,7 +83,7 @@ function sparkSVG(points, opts) {
   let grid = '';
   if (o.grid) {
     for (let i = 0; i <= 3; i++) { const v = hi - (hi - lo) * i / 3, y = Y(v); if (i === 3) { grid += '<line x1="0" x2="' + o.w + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/>'; continue; } grid += '<line x1="0" x2="' + o.w + '" y1="' + y.toFixed(1) + '" y2="' + y.toFixed(1) + '"/><text x="4" y="' + (y - 4).toFixed(1) + '">' + esc(U.compactUsd(v)) + '</text>'; }
-    grid += '<text x="4" y="' + (o.h - 4) + '">' + esc(U.hm(t0)) + '</text><text x="' + (o.w - 4) + '" y="' + (o.h - 4) + '" text-anchor="end">' + esc(U.hm(t1)) + '</text>';
+    grid += '<text x="4" y="' + (o.h - 4) + '">' + esc((t1 - t0 > 43200 ? new Date(t0 * 1000).toISOString().slice(5, 10) + ' ' : '') + U.hm(t0)) + '</text><text x="' + (o.w - 4) + '" y="' + (o.h - 4) + '" text-anchor="end">' + esc(U.hm(t1)) + '</text>';
   }
   const last = points[points.length - 1];
   return '<svg class="' + o.cls + '" viewBox="0 0 ' + o.w + ' ' + o.h + '" preserveAspectRatio="none" role="img" aria-label="PAPER equity, ' + points.length + ' recorded points from ' + esc(U.hm(t0)) + ' to ' + esc(U.hm(t1)) + '">' +
