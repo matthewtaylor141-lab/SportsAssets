@@ -62,6 +62,11 @@ DECISION_LOGIC_FILES = (
     # paper_benchmark's ENTER and paper_xavier's measure both import it, so
     # a change to it changes the decision and must restart the forward window
     "bettor_nfl_settlement.py",
+    # NCAAF money line (P0 incident NCAAF stream, pinned at integration): the
+    # cited venue and Pinnacle clauses per payout state and the no-tie
+    # premise -- paper_benchmark's ENTER imports it, so a change to it
+    # changes the decision and must restart the forward window
+    "bettor_ncaaf_settlement.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",
