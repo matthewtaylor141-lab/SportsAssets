@@ -215,6 +215,11 @@ def default_steps() -> list:
             steps.append(("maker_entry", PMK.step))
             steps.append(("exploration", PEX.step))
         steps.append(("simulate_after_delay", PD.step_after_delay))
+        # EVERY RECORDED ENTER HAS AN ORDER OR A NAMED FINDING (P0 incident
+        # 2026-10-04): an ENTER older than PD.ENTER_WITHOUT_ORDER_AFTER_S
+        # with no paper order and no order refusal -> ENTER_WITHOUT_ORDER.
+        # Records only; never places a late order.
+        steps.append(("enter_backstop", PD.step_enter_backstop))
     except ImportError:
         pass
     try:
@@ -820,8 +825,11 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
         try:
             dctx = dict(ctx, deadline=time.monotonic()
                         + VALUATION_HOOK_TIMEOUT_S)
-            rec = await asyncio.wait_for(PD.decide_one(conn, dctx, dict(row)),
-                                         VALUATION_HOOK_TIMEOUT_S)
+            # THE DEADLINE BOUNDS THE DECISION; a recorded ENTER's order
+            # completes (PD.bounded_decision, P0 incident 2026-10-04).
+            rec = await PD.bounded_decision(
+                lambda c: PD.decide_one(conn, c, dict(row)), dctx,
+                timeout_s=VALUATION_HOOK_TIMEOUT_S)
             await _record_hook_failure(
                 conn, ctx=ctx, valuation_id=vid,
                 strategy="DEREK_ENTRY_POLICY_V2",
@@ -834,6 +842,9 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                 strategy="DEREK_ENTRY_POLICY_V2",
                 res={"error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
                      "timeout": isinstance(exc, asyncio.TimeoutError),
+                     # set when an ENTER was recorded and its order outran
+                     # the grace (PD.EnterOrderGraceExceeded)
+                     "decision_id": getattr(exc, "decision_id", None),
                      "elapsed_s": round(time.monotonic() - t_derek, 3)})
             if not bench_on:
                 raise

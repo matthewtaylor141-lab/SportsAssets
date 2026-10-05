@@ -488,6 +488,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return dict(rec, duplicate=True)
     if verdict != DP.ENTER:
         return rec
+    # THE ENTER IS RECORDED: its paper order is owed (PD.bounded_decision).
+    PD.enter_recorded(ctx, did)
     # ── ONE DECISION -> ONE EXECUTION INTENT: PAPER ONLY ───────────────
     # Exploration is training: the executing process's hook records the
     # intent with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE); the

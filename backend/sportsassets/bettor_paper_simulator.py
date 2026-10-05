@@ -6,9 +6,15 @@ observed through the read-only market-data client
 (`paper_book_observations`); it never touches the venue.
 
 ── MARKETABLE ORDERS (IOC / FOK) ──────────────────────────────────────────
-  * DELAY. The order is evaluated on the FIRST book observed at or after
-    decided_at + decision_to_execution_delay_s (`eligible_at`). No such book
-    before `expires_at` -> EXPIRED with NO fill, reservation released.
+  * DELAY. The order is evaluated on the FIRST READABLE book observed at or
+    after decided_at + decision_to_execution_delay_s (`eligible_at`) and at
+    or before `expires_at`. An observation row that carries an error (our
+    request gate refused the read, our own deadline cut it, the venue
+    answered an error) holds NO book: it is skipped, named on the order's
+    event, and never fills or expires the order. No readable book before
+    `expires_at` -> EXPIRED at `expires_at` with NO fill, reservation
+    released, and the reason says which (nothing observed, or only
+    unreadable reads -- with their counts by who refused them).
   * SIDE SEMANTICS. The ladder is the side the intent consumes
     (`bettor_book_snapshot.acquisition_ladder` / `exit_ladder`): BUY_LONG
     lifts offers, BUY_SHORT hits bids at cost 1 - bid, SELL of a long hits
@@ -60,7 +66,8 @@ BASIS_WALK = "DEPTH_WALK_WITHIN_LIMIT"
 BASIS_CROSS = "CROSSING_LIQUIDITY_AFTER_QUEUE"
 
 ASSUMPTIONS = {
-    "marketable": ["NEXT_BOOK_AT_OR_AFTER_DECISION_PLUS_DELAY",
+    "marketable": ["NEXT_READABLE_BOOK_AT_OR_AFTER_DECISION_PLUS_DELAY",
+                   "AN_UNREADABLE_OBSERVATION_IS_SKIPPED_NEVER_A_FILL",
                    "DISPLAYED_DEPTH_IS_EXECUTABLE_AT_THAT_BOOK",
                    "NO_HIDDEN_LIQUIDITY", "ADAPTER_CENT_GRID",
                    "CONSUMED_LEVELS_NEVER_REUSED"],
@@ -81,6 +88,92 @@ R_NO_CROSS = "NO_LIQUIDITY_CROSSED_THE_LIMIT"
 R_QUEUE_AHEAD = "CROSSING_LIQUIDITY_WENT_TO_THE_QUEUE_AHEAD"
 R_GTD_EXPIRED = "GOOD_TILL_DATE_EXPIRED"
 R_BOOK_UNREADABLE = "THE_OBSERVED_BOOK_WAS_UNREADABLE"
+
+# ── AN UNREADABLE OBSERVATION IS EVIDENCE OF NOTHING, NOT A VERDICT ─────────
+#
+# THE DEFECT THIS CLOSES (P0 incident 2026-10-04, measured in production on
+# 191b299). `_marketable` took the FIRST paper_book_observations row at or
+# after `eligible_at` -- errored or not -- and an errored row expired the
+# order AT ONCE with THE_OBSERVED_BOOK_WAS_UNREADABLE. Most of those rows
+# record a read that never left our process: the venue request gate refused
+# it because a 429 cooldown outlasted the pass deadline, or our own pass
+# deadline cut it. 44 paper entry orders a day (61% of all of them) expired
+# that way, while orders that met a readable in-window book filled 20 of 24.
+# The order's own window (`expires_at`, 90 s) was never used.
+#
+# So an errored row is SKIPPED: the order is evaluated on the first READABLE
+# observation inside [eligible_at, expires_at], with exactly the same walk,
+# limit, depth and consumption rules; every skipped row is named on the
+# order's terminal event; and an order that met no readable book expires
+# only at `expires_at`, saying which reads failed and who refused them:
+#
+#   GATE_REFUSED   our venue request gate refused to dispatch (cooldown
+#                  longer than the deadline, deadline already passed, hold
+#                  longer than the undeadlined cap) -- venue_request_gate.R_*
+#   DEADLINE_CUT   our own read deadline cut the wait
+#                  (bettor_paper_guard.R_BOOK_READ_DEADLINE)
+#   VENUE_ERROR    anything else: the venue answered an error, timed out,
+#                  rate-limited, or returned no market data
+#
+# The codes are spelled here, not imported: this module stays importable
+# without the venue modules, and a test pins them equal to their sources.
+R_NO_READABLE_BOOK_YET = \
+    "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET"
+R_NO_READABLE_BOOK = "NO_READABLE_BOOK_BEFORE_EXPIRY"
+U_GATE_REFUSED = "GATE_REFUSED"
+U_DEADLINE_CUT = "DEADLINE_CUT"
+U_VENUE_ERROR = "VENUE_ERROR"
+UNREADABLE_CLASSES = (U_GATE_REFUSED, U_DEADLINE_CUT, U_VENUE_ERROR)
+GATE_REFUSAL_CODES = frozenset({
+    "VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE",
+    "DECISION_DEADLINE_PASSED_BEFORE_DISPATCH",
+    "VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP"})
+DEADLINE_CUT_CODES = frozenset({"PAPER_BOOK_READ_DEADLINE_EXCEEDED"})
+#: At most this many skipped rows are NAMED on an event (all are counted).
+MAX_SKIPPED_NAMED = 20
+#: At most this many unreadable rows are read per evaluation (one slug's
+#: window is ~90 s of paced reads, so this bounds a pathological table only).
+MAX_SKIPPED_SCANNED = 500
+
+
+def unreadable_class(error) -> str:
+    """WHO REFUSED AN UNREADABLE READ: our gate, our deadline, or the venue."""
+    e = str(error or "")
+    if e in GATE_REFUSAL_CODES:
+        return U_GATE_REFUSED
+    if e in DEADLINE_CUT_CODES:
+        return U_DEADLINE_CUT
+    return U_VENUE_ERROR
+
+
+def unreadable_summary(rows) -> dict:
+    """The skipped observations: counted by class and by error, and NAMED
+    (obs id, receipt instant, error, class, source) up to MAX_SKIPPED_NAMED.
+    Pure; `rows` are paper_book_observations rows (or dicts) with an error."""
+    counts = {c: 0 for c in UNREADABLE_CLASSES}
+    by_error: dict = {}
+    named = []
+    for r in rows or []:
+        err = str(r["error"])
+        cls = unreadable_class(err)
+        counts[cls] += 1
+        by_error[err] = by_error.get(err, 0) + 1
+        if len(named) < MAX_SKIPPED_NAMED:
+            at = r["observed_at"]
+            named.append({"book_obs_id": r["obs_id"],
+                          "observed_at": (L._epoch(at) if hasattr(
+                              at, "timestamp") else at),
+                          "error": err, "class": cls,
+                          "source": dict(r).get("source"),
+                          "read_basis": dict(r).get("read_basis")})
+    total = sum(counts.values())
+    return {"total": total, "gate_refused": counts[U_GATE_REFUSED],
+            "deadline_cut": counts[U_DEADLINE_CUT],
+            "venue_error": counts[U_VENUE_ERROR], "by_error": by_error,
+            "named": named, "named_truncated": total > len(named),
+            "skipped_is": ("an observation row with an error holds no book; "
+                           "it was skipped, never used as a fill or an "
+                           "expiry")}
 
 
 def intent_of(direction: str, holding_side: str) -> str:
@@ -372,7 +465,7 @@ async def simulate_order(conn, order_id: str, *, now: float,
 
 
 async def _apply_takes(conn, o, *, takes, obs, basis, now, fee_fn,
-                       evidence) -> list:
+                       evidence, event_detail=None) -> list:
     out = []
     side = side_consumed(o["direction"], o["holding_side"])
     for t in takes:
@@ -391,36 +484,64 @@ async def _apply_takes(conn, o, *, takes, obs, basis, now, fee_fn,
                                            "displayed": t["qty"],
                                            "taken": t["take"]}),
             key="%s:obs%d:%s" % (o["order_id"], obs["obs_id"],
-                                 _wk(t["wire"])))
+                                 _wk(t["wire"])),
+            event_detail=event_detail)
         out.append(got)
     return out
 
 
-async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
-    oid = o["order_id"]
+async def window_observations(conn, o) -> dict:
+    """THE ORDER'S WINDOW, READ ONCE: the FIRST READABLE observation in
+    [eligible_at, expires_at] (receipt instant, then obs id) and every
+    UNREADABLE observation in the window before it (bounded)."""
+    slug, t0, t1 = o["us_market_slug"], o["eligible_at"], o["expires_at"]
     obs = await conn.fetchrow(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
-        "   AND observed_at >= $2 AND observed_at <= $3 "
-        " ORDER BY observed_at LIMIT 1", o["us_market_slug"],
-        o["eligible_at"], o["expires_at"])
+        "   AND observed_at >= $2 AND observed_at <= $3 AND error IS NULL "
+        " ORDER BY observed_at, obs_id LIMIT 1", slug, t0, t1)
+    if obs is None:
+        bad = await conn.fetch(
+            "SELECT obs_id, observed_at, source, read_basis, error "
+            "  FROM paper_book_observations WHERE us_market_slug=$1 "
+            "   AND observed_at >= $2 AND observed_at <= $3 "
+            "   AND error IS NOT NULL ORDER BY observed_at, obs_id LIMIT $4",
+            slug, t0, t1, MAX_SKIPPED_SCANNED)
+    else:
+        bad = await conn.fetch(
+            "SELECT obs_id, observed_at, source, read_basis, error "
+            "  FROM paper_book_observations WHERE us_market_slug=$1 "
+            "   AND observed_at >= $2 AND error IS NOT NULL "
+            "   AND (observed_at, obs_id) < ($3, $4) "
+            " ORDER BY observed_at, obs_id LIMIT $5",
+            slug, t0, obs["observed_at"], obs["obs_id"], MAX_SKIPPED_SCANNED)
+    skipped = unreadable_summary(bad)
+    skipped["scan_capped_at"] = (MAX_SKIPPED_SCANNED
+                                 if len(bad) >= MAX_SKIPPED_SCANNED else None)
+    return {"readable": obs, "skipped": skipped}
+
+
+async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
+    oid = o["order_id"]
+    win = await window_observations(conn, o)
+    obs, skipped = win["readable"], win["skipped"]
     if obs is None:
         if float(now) >= L._epoch(o["expires_at"]):
+            # EXPIRED ONLY AT EXPIRES_AT, and the reason says which: nothing
+            # was observed in the window, or only reads that held no book --
+            # named, and counted by who refused them.
+            reason = (R_NO_READABLE_BOOK if skipped["total"]
+                      else R_NO_BOOK_IN_WINDOW)
             rel = await L.release_remainder_locked(
-                conn, order_id=oid, reason=R_NO_BOOK_IN_WINDOW, at=now,
-                state="EXPIRED")
-            return {"order_id": oid, "state": "EXPIRED",
-                    "refusal": R_NO_BOOK_IN_WINDOW, "released": rel}
+                conn, order_id=oid, reason=reason, at=now, state="EXPIRED",
+                detail=({"unreadable_books_skipped": skipped}
+                        if skipped["total"] else None))
+            return {"order_id": oid, "state": "EXPIRED", "refusal": reason,
+                    "released": rel, "unreadable_books_skipped": skipped}
         return {"order_id": oid, "state": o["state"], "pending": True,
-                "refusal": R_NO_BOOK_YET}
+                "refusal": (R_NO_READABLE_BOOK_YET if skipped["total"]
+                            else R_NO_BOOK_YET),
+                "unreadable_books_skipped": skipped}
     md = _md(obs)
-    if md is None:
-        # AN UNREADABLE BOOK IS EVIDENCE OF NOTHING: the order is released
-        # rather than filled or re-tried on a later, different book.
-        rel = await L.release_remainder_locked(
-            conn, order_id=oid, reason=R_BOOK_UNREADABLE, at=now,
-            state="EXPIRED", detail={"book_obs_id": obs["obs_id"]})
-        return {"order_id": oid, "state": "EXPIRED",
-                "refusal": R_BOOK_UNREADABLE, "released": rel}
     lv = levels_for(md, direction=o["direction"],
                     holding_side=o["holding_side"])
     consumed = await _consumed(conn, o["us_market_slug"], lv["side"],
@@ -436,9 +557,14 @@ async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
                 "levels_excluded_off_cent_grid": lv["excluded_off_cent_grid"],
                 "assumptions": ASSUMPTIONS["marketable"],
                 "simulator_version": o["simulator_version"]}
+    # THE SKIPPED READS TRAVEL WITH THE OUTCOME: on the fill's evidence and
+    # FILL event, and on the release event of an unfilled remainder.
+    extra = ({"unreadable_books_skipped": skipped} if skipped["total"]
+             else {})
+    evidence.update(extra)
     fills = await _apply_takes(conn, o, takes=got["takes"], obs=obs,
                                basis=BASIS_WALK, now=now, fee_fn=fee_fn,
-                               evidence=evidence)
+                               evidence=evidence, event_detail=extra)
     state = "FILLED" if got.get("complete") else None
     rel = None
     if not got.get("complete"):
@@ -446,12 +572,13 @@ async def _marketable(conn, o, *, now: float, fee_fn) -> dict:
         rel = await L.release_remainder_locked(
             conn, order_id=oid, reason=reason, at=now,
             state=("CANCELED" if fills else "EXPIRED"),
-            detail={"book_obs_id": obs["obs_id"],
-                    "filled_qty": got["filled"]})
+            detail=dict({"book_obs_id": obs["obs_id"],
+                         "filled_qty": got["filled"]}, **extra))
         state = rel.get("state")
     return {"order_id": oid, "state": state, "filled_qty": got["filled"],
             "fills": fills, "refusal": got.get("refusal"),
             "released": rel, "book_obs_id": obs["obs_id"],
+            "unreadable_books_skipped": skipped,
             "first_fill": any(x.get("first_fill") for x in fills
                               if x.get("ok") and not x.get("duplicate"))}
 
