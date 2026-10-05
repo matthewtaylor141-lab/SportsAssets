@@ -239,17 +239,10 @@ def test_the_epoch_is_midnight_new_york_on_october_5_2026():
                         "$500,000")
 
 
-FRONT = pathlib.Path(__file__).resolve().parents[2] / "frontend" / "public" \
-    / "command"
-
-
-@pytest.mark.skipif(not (FRONT / "hq.js").exists(),
-                    reason="the 3D Command frontend is not in this tree")
-def test_command_defaults_to_the_management_epoch():
-    js = (FRONT / "hq.js").read_text()
-    assert "p.management" in js or "paper.management" in js
-    assert "MANAGEMENT START" in js or "mg.label" in js
-    assert "PRE-MANAGEMENT HISTORY" in js
+# The Command Center default (hq.js reads paper.management first, shows the
+# label and PRE-MANAGEMENT HISTORY) is proven where the frontend lives:
+# backend/tests/test_command_hq_page.py::test_command_defaults_to_the_management_epoch
+# on the Command branch.
 
 
 # ── 4. AGAINST THE REAL LEDGER (RN1X_TEST_DSN) ──────────────────────────
