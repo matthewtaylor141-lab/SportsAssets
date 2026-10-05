@@ -113,7 +113,9 @@ if (!process.env.ONLY || process.env.ONLY === "desktop") {
     "/api/command/agents/audrey", "/api/command/agents/eddie", "/api/command/agents/scout",
     "/api/command/agents/derek/identity", "/api/command/agents/xavier/identity", "/api/command/agents/audrey/identity",
     "/api/command/agents/karen/identity", "/api/command/agents/allocator/identity", "/api/command/agents/eddie/identity",
-    "/api/command/agents/scout/identity"].join(",")).split(",");
+    "/api/command/agents/scout/identity",
+    "/api/command/paper/operations?agent=derek&limit=40", "/api/command/paper/derek?limit=40",
+    "/api/command/paper/experiment"].join(",")).split(",");
   report.probes = {};
   for (const u of probes) {
     report.probes[u] = await page.evaluate(async (u) => {
