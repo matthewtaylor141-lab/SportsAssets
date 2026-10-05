@@ -960,3 +960,68 @@ def test_the_source_instant_label_is_stored_on_the_row():
             await conn.close()
 
     asyncio.run(go())
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE IDENTITY CONVERSION IS THE NCAAF ONE, ON AN NCAAF ROW (incident
+# release, verifier finding 6)
+# ═════════════════════════════════════════════════════════════════════
+#
+# `conversion` took the identity path (p_venue = p_book, t = 0) from the
+# declaration's OWN fields -- no interval, `tie_probability_completed`
+# present -- not from the league. An NFL-shaped declaration carrying t = 0
+# and no interval would have validated as the identity, skipping the NFL's
+# worst-end re-derivation. Only our own code builds declarations, so it was
+# not reachable, but the validator must not let a declaration choose its own
+# check: the identity path now requires the NCAAF settlement's own version
+# AND a row on the NCAAF venue league token; anything else takes the
+# worst-end path, which refuses a declaration with no interval.
+
+def _identity_pin(p_book, *, version=None):
+    from sportsassets import bettor_ncaaf_settlement as NC
+    rec = {"applies": True, "version": version or NC.VERSION, "p": p_book,
+           "refusal": None, "p_book_conditional_no_tie": p_book,
+           "p_is": NC.P_IS_EQUIVALENT, "tie_probability_completed": 0.0,
+           "formula": "p_venue = (1 - t) * p_book + 0 * t"}
+    return {"p": p_book, "qualified": True, "age_s": 3.0, "limit_s": 30.0,
+            "p_book_conditional_no_tie": p_book, "venue_conversion": rec,
+            "p_is": NC.P_IS_EQUIVALENT}
+
+
+def _validate_on(slug, p, pin):
+    row = dict(_nfl_row(), us_market_slug=slug)
+    md = {"offers": [{"px": {"value": "0.55"}, "qty": "100"}],
+          "bids": [{"px": {"value": "0.53"}, "qty": "100"}]}
+    return GEI.validate(
+        p=p, side="LONG", row=row,
+        levels=[{"price": 0.55, "wire": 0.55, "qty": 100.0}],
+        consumed_side="offers", md=md, fee_per_contract=lambda px: 0.01,
+        pin=pin, decided_at=1000.0, edge_at=1000.1,
+        book_observed_at=999.5, book_max_age_s=30.0)
+
+
+def test_the_ncaaf_identity_conversion_validates_on_an_ncaaf_row():
+    p_book = _nfl_row()["probability"]
+    pin = _identity_pin(p_book)
+    r = _validate_on("aec-cfb-frest-washst-2026-10-03", pin["p"], pin)
+    assert r["ok"], r["refusals"]
+    checks = {c["check"]: c for c in r["checks"]}
+    assert checks["VENUE_CONVERSION"]["passed"]
+
+
+def test_a_declaration_cannot_choose_the_identity_check_for_itself():
+    from sportsassets import bettor_ncaaf_settlement as NC
+    assert GEI.IDENTITY_CONVERSION_VERSION == NC.VERSION
+    assert GEI.IDENTITY_CONVERSION_LEAGUE == NC.LEAGUE
+    p_book = _nfl_row()["probability"]
+    # an NFL-shaped declaration with t = 0 and no interval, on an NFL row
+    pin = _identity_pin(p_book, version="NFL_SETTLEMENT_V1")
+    r = _validate_on("aec-nfl-kc-lv-2026-10-04", pin["p"], pin)
+    assert r["refusals"] == [GEI.R_CONVERSION], r
+    # the NCAAF declaration on a row that is not an NCAAF contract
+    pin = _identity_pin(p_book)
+    r = _validate_on("aec-nfl-kc-lv-2026-10-04", pin["p"], pin)
+    assert r["refusals"] == [GEI.R_CONVERSION], r
+    # a row with no venue slug cannot establish the league either
+    r = _validate_on(None, pin["p"], pin)
+    assert r["refusals"] == [GEI.R_CONVERSION], r

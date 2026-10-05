@@ -84,6 +84,15 @@ async def test_264_flips_only_migration_182s_row_and_rolls_back_honestly():
         row = (await _rows(conn))[KEY]
         assert row["enabled"] is False and row["updated_by"] == "rollback 264"
         assert "only the PINNACLE_ONLY_PAPER_BENCHMARK" not in row["why"]
+        # ROLLBACK THEN RE-APPLY (incident release, verifier finding 5, a
+        # design note): the rollback is itself a later decision, so 264 run
+        # again does NOT switch Derek's entries back on -- it flips only a row
+        # still carrying migration 182's state. A schema-only round trip
+        # (pg_dump -s) cannot show this; turning entries on again after a
+        # rollback is an explicit paper_control decision, never a re-run.
+        await conn.execute(UP)
+        row = (await _rows(conn))[KEY]
+        assert row["enabled"] is False and row["updated_by"] == "rollback 264"
     finally:
         await tx.rollback()
         await conn.close()

@@ -231,3 +231,90 @@ def test_the_risk_wrapper_is_classified_by_the_code_it_wraps():
     # a code that wraps nothing is classified as itself
     assert RT.classify_wrapped("BELOW_MIN_GROSS_EDGE", "X")["class"] == \
         "ECONOMIC"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# CODES NOT NAMED R_* (incident release, verifier finding 3)
+# ═════════════════════════════════════════════════════════════════════
+#
+# The enumeration above reads R_*-named constants only. The NCAAF stream's
+# five strict-policy codes are named S_* (bettor_ncaaf_settlement.
+# STRICT_CODES) and ride behind SETTLEMENT_NOT_SUPPORTED on EVERY NCAAF
+# strict decision (derek_policy, paper_derek, paper_benchmark), so the agent
+# funnel's per-code `by_class` counted them UNCLASSIFIED: RT.summarize over
+# SETTLEMENT_NOT_SUPPORTED + the five gave {'SOFTWARE': 2... 'UNCLASSIFIED':
+# 5}. The fallback literals the PinnAPI re-read and the line lane emit were
+# unclassified too.
+
+def _strict_codes() -> dict:
+    """{code: module:NAME} for every code a module lists in a module-level
+    `STRICT_CODES` tuple (the strict settlement policy's precise refusals,
+    whatever their constants are named), resolved through that module's own
+    string constants."""
+    out: dict = {}
+    for path in sorted(ROOT.rglob("*.py")):
+        if "__pycache__" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        consts = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) \
+                    and isinstance(node.value, ast.Constant) \
+                    and isinstance(node.value.value, str):
+                consts[node.targets[0].id] = node.value.value
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 \
+                    and isinstance(node.targets[0], ast.Name) \
+                    and node.targets[0].id == "STRICT_CODES" \
+                    and isinstance(node.value, ast.Tuple):
+                for e in node.value.elts:
+                    if isinstance(e, ast.Name) and e.id in consts:
+                        out[consts[e.id]] = "%s:%s" % (path.name, e.id)
+                    elif isinstance(e, ast.Constant):
+                        out[e.value] = "%s:<literal>" % path.name
+    return out
+
+
+def test_the_ncaaf_strict_codes_are_classified_settlement():
+    from sportsassets import bettor_ncaaf_settlement as NC
+    found = _strict_codes()
+    assert set(NC.STRICT_CODES) <= set(found), found
+    for code, where in found.items():
+        got = RT.classify(code)
+        assert got["classified"], (code, where)
+        assert (got["class"], got["family"], got["stage"]) == (
+            RT.SOFTWARE, "SETTLEMENT", "SETTLEMENT_COMPATIBILITY"), (code, got)
+    # the agent funnel's per-code view of an NCAAF strict refusal
+    s = RT.summarize({c: 1 for c in ["SETTLEMENT_NOT_SUPPORTED"]
+                      + list(NC.STRICT_CODES)})
+    assert s["by_class"] == {"SOFTWARE": 6}, s
+    assert not s["unclassified"]
+
+
+#: the literal codes the merged streams emit without a constant: the PinnAPI
+#: re-read's fallbacks (ext_pinnacle_loop) and the line lane's report states
+#: (ext_pinnacle_loop line lane, bettor_market_family.census)
+EMITTED_LITERALS = {
+    "PINNAPI_READ_RAISED:ValueError": ("SOFTWARE", "INTEGRITY"),
+    "PINNAPI_READ_REFUSED_WITHOUT_A_REASON": ("SOFTWARE", "DATA"),
+    "LINE_INSTRUMENT_RAISED:KeyError": ("SOFTWARE", "INTEGRITY"),
+    "PINNACLE_LINE_NOT_READ": ("SOFTWARE", "DATA"),
+    "LINE_CENSUS_RAISED:TypeError": ("SOFTWARE", "INTEGRITY"),
+    "LINE_PERSIST:UniqueViolationError": ("SOFTWARE", "INTEGRITY"),
+}
+
+
+def test_the_streams_literal_codes_are_classified():
+    for code, (cls, fam) in EMITTED_LITERALS.items():
+        got = RT.classify(code)
+        assert got["classified"], code
+        assert (got["class"], got["family"]) == (cls, fam), (code, got)
+    # each is still emitted where the verifier found it (a renamed literal
+    # must be reclassified, not silently orphaned)
+    src = {p.name: p.read_text(encoding="utf-8") for p in (
+        ROOT / "workers" / "ext_pinnacle_loop.py",
+        ROOT / "bettor_market_family.py")}
+    for code in EMITTED_LITERALS:
+        lit = RT.normalize(code)
+        assert any('"%s' % lit in t for t in src.values()), lit

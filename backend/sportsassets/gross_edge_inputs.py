@@ -205,10 +205,36 @@ def declared_conversion(pin: dict) -> dict | None:
     return conv
 
 
-def conversion(*, p, p_book, conv: dict) -> dict:
+#: THE ONE DECLARATION THE IDENTITY CHECK BELONGS TO (incident release,
+#: verifier finding 6): bettor_ncaaf_settlement's VERSION and LEAGUE, pinned
+#: equal by test (kept as constants so this module stays pure).
+IDENTITY_CONVERSION_VERSION = "BETTOR_NCAAF_SETTLEMENT_V1"
+IDENTITY_CONVERSION_LEAGUE = "cfb"
+
+
+def league_token_of(row: dict) -> str | None:
+    """The venue league token of the valuation row's contract: the second
+    dash-separated part of its venue market slug (`aec-cfb-...` -> `cfb`),
+    or None when the row carries no slug."""
+    parts = str((row or {}).get("us_market_slug") or "").lower().split("-")
+    return parts[1] if len(parts) > 2 and parts[1] else None
+
+
+def conversion(*, p, p_book, conv: dict, league: str | None = None) -> dict:
     """Does the converted `p` follow from `p_book` by the declared
-    conversion's own formula and worst-end rule? Re-derived. Pure."""
-    if conv.get("tie_rate_interval") is None \
+    conversion's own formula and worst-end rule? Re-derived. Pure.
+
+    THE CHECK IS CHOSEN BY THE CONTRACT, NOT BY THE DECLARATION (verifier
+    finding 6). The identity path was taken from the declaration's own
+    fields (no interval, a tie probability present), so an NFL-shaped
+    declaration carrying t = 0 and no interval would have skipped the NFL's
+    worst-end re-derivation. It is now taken only for the NCAAF settlement's
+    own declaration (`version`) on a row of the NCAAF venue league
+    (`league`, from the row's venue slug); every other declaration takes the
+    worst-end path, which refuses one with no interval."""
+    if conv.get("version") == IDENTITY_CONVERSION_VERSION \
+            and league == IDENTITY_CONVERSION_LEAGUE \
+            and conv.get("tie_rate_interval") is None \
             and conv.get("tie_probability_completed") is not None:
         return _identity_conversion(p=p, p_book=p_book, conv=conv)
     t = _finite(conv.get("tie_rate_used"))
@@ -398,7 +424,8 @@ def validate(*, p, side, row: dict, levels: list, consumed_side, md,
                               "(0, 1), or is not the row's value (nor a "
                               "declared conversion of it)")))
     if p_ok and conv is not None:
-        checks.append(conversion(p=pf, p_book=p_row, conv=conv))
+        checks.append(conversion(p=pf, p_book=p_row, conv=conv,
+                                 league=league_token_of(row)))
     if p_ok:
         checks.append(orientation(p=p_row, side=side, row=row))
     checks.extend(price_side(side=side, levels=levels,

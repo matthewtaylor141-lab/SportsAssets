@@ -857,7 +857,7 @@ except ImportError:
                 exc_info=True)
 # ── RELEASE TRUTH: /api/command/release. GET only, COMMAND auth, one READ
 # ONLY transaction with a statement timeout: the API build SHA, the workers'
-# boot SHA, schema_migrations 216-226 and the committed release receipts
+# boot SHA, schema_migrations 216-264 and the committed release receipts
 # (hash-verified). No write, deploy or approval path.
 try:
     from .command_release import router as _command_release_router

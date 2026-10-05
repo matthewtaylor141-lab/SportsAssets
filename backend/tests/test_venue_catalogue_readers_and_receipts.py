@@ -467,6 +467,8 @@ async def test_249_rolls_back_cleanly_with_no_receipt_and_reapplies():
     try:
         await conn.execute(UP)
         await conn.execute(DOWN)
+        # a second run is a no-op (verifier finding 4; see rollback 248)
+        await conn.execute(DOWN)
         assert await conn.fetchval(
             "SELECT to_regclass('venue_catalogue_receipts')") is None
         cols = {r["column_name"] for r in await conn.fetch(

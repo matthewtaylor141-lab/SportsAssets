@@ -676,10 +676,39 @@ def seed_event(receipt: dict) -> dict:
                 "live": receipt.get("live")}}
 
 
-def sport_key_for(family) -> str:
+def sport_key_for(family, league_tokens=None) -> str:
     """The collector's sport key for a PinnAPI-native seed (its funnel row
-    and event-ledger key): never a metered provider key."""
-    return "pinnapi_%s" % family
+    and event-ledger key).
+
+    THE LANE'S OWN LEAGUE IDENTITY (incident release, verifier finding 1).
+    This returned `pinnapi_<family>` for every seed, so the reactive cycle
+    filed natively served games under `pinnapi_football` and the coverage
+    report showed NCAAF / NFL with NO_PROVIDER_EVENTS (read as a spent
+    metered budget) and the served rows as an unmapped venue token; which
+    key a fixture carried also depended on which seeder ran last. A seed
+    whose confirmed venue league token(s) resolve, through
+    `ext_pinnacle_loop.provider_key_for_venue_token` (the one league identity
+    the cycle, the census and coverage_integrity share), to exactly ONE
+    provider key that the lane prices under the seed's own family now
+    carries that key -- the key a metered seed of the same fixture carries,
+    so the cycle treats both alike. Anything else (no token, two keys, a
+    family mismatch, or a token the lane maps no key for, e.g. `nba`) keeps
+    `pinnapi_<family>`. Never a guess."""
+    native = "pinnapi_%s" % family
+    toks = [str(t).strip().lower() for t in (league_tokens or ()) if t]
+    if not toks:
+        return native
+    try:
+        from .workers import ext_pinnacle_loop as L
+        keys = {L.provider_key_for_venue_token(t) for t in toks}
+        if len(keys) != 1 or None in keys:
+            return native
+        (key,) = keys
+        if L.family_for_provider_key(key) != str(family):
+            return native
+        return key
+    except Exception:                                           # noqa: BLE001
+        return native
 
 
 def digest(result: dict) -> dict:

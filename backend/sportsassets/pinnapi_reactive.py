@@ -202,8 +202,10 @@ class Scheduler:
         """Seed one fixture. Called after competition confirmation (the
         metered cycle) or after a MATCHED PinnAPI-native discovery receipt
         (`native`, pinnapi_discovery). A native registration never replaces
-        a live seed the metered cycle registered for the same fixture: that
-        seed's event carries independent books that corroborate the price.
+        a live seed the metered cycle registered for the same fixture WITH
+        BOOKS: that seed's event carries independent books that corroborate
+        the price. A book-less seed (the unmetered `/events` refresh) never
+        replaces a live native one, and a native one replaces it.
         `index` (`pinnapi_primary.fixture_index` of this cache, built once by
         a pass that registers many seeds) spares a full fixture-view rebuild
         per seed. Returns what happened, by name."""
@@ -216,10 +218,24 @@ class Scheduler:
             return 'SEED_TOO_LARGE'
         eid = hit[0]
         old = self.seeds.get(eid)
-        if (native and old is not None and self._seed_live(eid, old)
-                and not (old.get('event') or {}).get('pinnapi_native')):
+        old_ev = (old or {}).get('event') or {}
+        live = old is not None and self._seed_live(eid, old)
+        # THE METERED SEED WINS ONLY WHEN IT CARRIES BOOKS (incident release,
+        # verifier finding 1). The collector's unmetered `/events` refresh
+        # registers book-less seeds as metered (native=False); on the premise
+        # above they displaced native seeds -- which carry the discovery's
+        # venue identity -- and lost to none, so the seeder that ran last
+        # decided the fixture's identity and ledger key. A book-less seed
+        # corroborates nothing: it neither displaces a live native seed nor
+        # survives one, whichever registers first.
+        if (native and live and not old_ev.get('pinnapi_native')
+                and old_ev.get('bookmakers')):
             self.counts['NATIVE_KEPT_METERED_SEED'] += 1
             return 'NATIVE_KEPT_METERED_SEED'
+        if (not native and live and old_ev.get('pinnapi_native')
+                and not (event or {}).get('bookmakers')):
+            self.counts['BOOKLESS_SEED_KEPT_NATIVE_SEED'] += 1
+            return 'BOOKLESS_SEED_KEPT_NATIVE_SEED'
         if native:
             self.counts['NATIVE_SEEDED'] += 1
         self.seeds[eid] = dict(event=copy.deepcopy(event), sport_key=sport_key,

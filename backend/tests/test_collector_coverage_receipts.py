@@ -179,6 +179,16 @@ async def test_rollback_248_drops_only_its_objects_when_empty():
     conn, tx, schema = await _isolated()
     try:
         await conn.execute(DOWN)
+        # A SECOND RUN IS A NO-OP (incident release, verifier finding 4): the
+        # guard `to_regclass(..) IS NOT NULL AND EXISTS (SELECT .. FROM t)`
+        # does not short-circuit in PL/pgSQL, so a re-run raised
+        # UndefinedTable once the table was gone. Run with the private schema
+        # ALONE on the path, so the name cannot resolve to the shared
+        # database's own public table (this test's isolation, not the
+        # rollback's subject).
+        await conn.execute("SET LOCAL search_path TO %s" % schema)
+        await conn.execute(DOWN)
+        await conn.execute("SET LOCAL search_path TO %s, public" % schema)
         assert await conn.fetchval(
             "SELECT to_regclass('%s.collector_coverage_receipts')"
             % schema) is None

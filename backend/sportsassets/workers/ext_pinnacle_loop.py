@@ -9718,8 +9718,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     odds_refetches = 0
     odds_refetch_failures = 0
     # the on-demand refresh of a quote OUR delay made stale (by outcome)
+    # (`budget_spent`: a refresh the cycle's metered call budget had no call
+    # left for -- not made; verifier finding 2)
     adaptive_refetch = {"fired": 0, "saved": 0, "still_stale": 0,
-                        "failed": 0, "capped": 0}
+                        "failed": 0, "capped": 0, "budget_spent": 0}
 
     # ── THE LATENCY MEASUREMENT, ACCUMULATED OVER THE WHOLE CYCLE ──────
     #
@@ -10459,6 +10461,16 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _event_fields({"adaptive_odds_refetch": (
                         "CAPPED" if ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT > 0
                         else "OFF_PENDING_THE_OWNERS_METERED_BUDGET")})
+                elif (coverage is not None
+                      and not cov.claim_call(coverage, cov.CALL_REFETCH)):
+                    # A METERED CALL, CLAIMED LIKE THE FIXED RE-FETCH ABOVE
+                    # (incident release, verifier finding 2): with no call
+                    # left in the cycle's declared budget the refresh is not
+                    # made; the quote is kept and refused
+                    # QUOTE_STALE_ON_ARRIVAL by name below.
+                    adaptive_refetch["budget_spent"] += 1
+                    _event_fields({"adaptive_odds_refetch":
+                                   "METERED_BUDGET_SPENT"})
                 else:
                     adaptive_this_sport += 1
                     adaptive_refetch["fired"] += 1
@@ -10468,6 +10480,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                        or credits["used"])
                     credits["remaining"] = (again.get("credits_remaining")
                                             or credits["remaining"])
+                    if coverage is not None:
+                        # ITS CREDITS ON THE SAME RECEIPT AND IN THE SAME
+                        # ENVELOPE LEDGER as every other fetch, stamped with
+                        # the cycle instant (verifier finding 2)
+                        _charge_refetch(coverage, sport_key, again,
+                                        cycle_at=started)
                     fresh_ev = None
                     if again.get("ok") and again.get("received_at") is not None:
                         # THE NEW RECEIPT INSTANT AND THE NEW PAYLOAD'S OWN

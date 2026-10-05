@@ -370,7 +370,11 @@ async def _discovery_once(pool) -> dict:
             # The receipt stays MATCHED; the seed is counted by name.
             reg[R_NOT_SEEDED_NO_PRICED_MARKET] += 1
             continue
-        reg[RX.register(ev, sport_key=PD.sport_key_for(fam), family=fam,
+        # keyed by the lane's own league identity of the confirmed venue
+        # token (pinnapi_discovery.sport_key_for; verifier finding 1)
+        key = PD.sport_key_for(
+            fam, ev["pinnapi_native"].get("venue_league_tokens"))
+        reg[RX.register(ev, sport_key=key, family=fam,
                         received_at=t0, native=True, index=index)
             or "NO_SCHEDULER"] += 1
     out["registered"] = dict(reg)

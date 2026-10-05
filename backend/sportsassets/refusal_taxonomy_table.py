@@ -1662,6 +1662,31 @@ INTEGRATION_STREAMS = {
     "NCAAF_VENUE_TIE_CLAUSE_NOT_THE_CITED_REVIEW_CLAUSE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "NCAAF_VENUE_WINNER_CLAUSE_NOT_THE_CITED_COLLEGE_FOOTBALL_GAME":
         (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # INCIDENT RELEASE (verifier finding 3). bettor_ncaaf_settlement.
+    # STRICT_CODES: the strict policy's precise clauses, written behind
+    # SETTLEMENT_NOT_SUPPORTED on every NCAAF strict decision (derek_policy,
+    # paper_derek, paper_benchmark). Named S_* in their module, so the R_*
+    # enumeration never saw them and the agent funnel counted them
+    # UNCLASSIFIED. Each says the cited texts do not pay the same on both
+    # sides of a condition: settlement compatibility, never economics.
+    "NCAAF_STRICT_POSTPONEMENT_PAYOUTS_DIFFER": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_STRICT_SUSPENSION_PAYOUTS_DIFFER": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_STRICT_TIED_RESULT_VENUE_PAYOUT_NOT_STATED":
+        (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_STRICT_FORFEIT_PAYOUTS_DIFFER": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NCAAF_STRICT_VENUE_CHANGE_VENUE_PAYOUT_NOT_STATED":
+        (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # literals the merged streams emit without a constant (verifier finding
+    # 3): the PinnAPI re-read's fallbacks (ext_pinnacle_loop: the read raised;
+    # the selector refused and named no reason) and the line lane's report
+    # states (an instrument evaluation or the census raised, a Pinnacle line
+    # pair that could not be read, a valuation write that failed)
+    "PINNAPI_READ_RAISED": (S, INT, "PROBABILITY"),
+    "PINNAPI_READ_REFUSED_WITHOUT_A_REASON": (S, DATA, "PROBABILITY"),
+    "LINE_INSTRUMENT_RAISED": (S, INT, "AGENT_EVALUATION"),
+    "PINNACLE_LINE_NOT_READ": (S, DATA, "PROBABILITY"),
+    "LINE_CENSUS_RAISED": (S, INT, "MARKET_FAMILY"),
+    "LINE_PERSIST": (S, INT, "AGENT_EVALUATION"),
 }
 
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())

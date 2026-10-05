@@ -176,6 +176,10 @@ def league_name(key: str) -> str:
         return LEAGUE_NAMES[k]
     if k.startswith("UNATTRIBUTED"):
         return k
+    if k.startswith("pinnapi_"):
+        # PinnAPI-native discovery's row for the leagues of a family the lane
+        # maps no key for (pinnapi_discovery.sport_key_for)
+        return "PINNAPI_NATIVE:%s" % k[len("pinnapi_"):].upper()
     return (k.split("_", 1)[-1] or k).upper()
 
 
@@ -978,32 +982,59 @@ STATUS_STAGES = ("normalized", "venue_discovered", "mapped",
 COLLECTOR_KEY = "ext_pinnacle_last_cycle"
 COLLECTOR_FRESH_S = 3 * 900.0
 
-#: Families the collector prices at all; anything else is out of scope by
-#: declaration, and says why.
+#: Families out of scope by declaration, and why.
+#: INCIDENT RELEASE (verifier finding 1): the basketball / hockey / tennis
+#: notes said those families were outside the de-vig set and requested by no
+#: collector. inc-pinnapi subscribes all six PinnAPI sports, PinnAPI-native
+#: discovery seeds every family with a priced market (the de-vig set now
+#: carries basketball spread / total and hockey spread / total / team total),
+#: and tennis is matched but not seeded -- so those notes were false and
+#: `lane_scope` now derives the answer for a PinnAPI family from the code
+#: (`native_scope`). What remains here is out of scope whatever PinnAPI does.
 FAMILY_SCOPE_NOTE = {
-    "basketball": "no basketball provider key is requested by the collector "
-                  "(ext_pinnacle_loop maps none) and basketball h2h is not in "
-                  "the measured de-vig set",
-    "hockey": "no hockey provider key is requested by the collector and "
-              "hockey h2h is not in the measured de-vig set",
-    "tennis": "no tennis provider key is requested by the collector and "
-              "tennis is not in the measured de-vig set",
     "futures": "an outright/futures listing is not a fixture",
 }
+
+
+def native_scope() -> dict:
+    """PinnAPI-native discovery's families, read from the code it runs:
+    {"families": the primary selector's sports (pinnapi_primary.SPORTS),
+     "seeded": those with a priced market
+     (pinnapi_feed_runtime.families_with_a_priced_market)}. Empty sets when
+    either cannot be read -- never a guessed scope."""
+    try:
+        from .. import pinnapi_primary as P
+        from .. import pinnapi_feed_runtime as FR
+        fams = {str(f) for f in P.SPORTS}
+        return {"families": fams,
+                "seeded": fams & {str(f) for f in
+                                  FR.families_with_a_priced_market()}}
+    except Exception:                                           # noqa: BLE001
+        return {"families": set(), "seeded": set()}
 
 
 def lane_scope(league: str, *, token: str | None = None,
                family: str | None = None) -> dict:
     """Is this league in the collector's declared scope? {"in_scope", "why"}.
-    Read from ext_pinnacle_loop's maps -- the same identity the cycle uses.
-    Pure."""
+    Read from ext_pinnacle_loop's maps -- the same identity the cycle uses --
+    and, for PinnAPI families, from what PinnAPI-native discovery seeds.
+    `via` names a native-discovery scope; `measured_under` names the native
+    row a league's provider events are counted under when the lane maps no
+    key of its own (pinnapi_discovery.sport_key_for). Pure."""
     from ..workers import ext_pinnacle_loop as L
     from .. import bettor_venue_realism as vreal
+    from .. import pinnapi_discovery as PD
     keys = ({k for k, _ in L.SPORTS_CONFIRMED}
             | set(L.VENUE_TOKEN_TO_PROVIDER_KEY.values())
             | set(L.VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY.values()))
     if league in keys:
         return {"in_scope": True, "why": None}
+    nat = native_scope()
+    if league.startswith("pinnapi_") and \
+            league[len("pinnapi_"):] in nat["seeded"]:
+        # a native discovery row (a token the lane maps no key for)
+        return {"in_scope": True, "why": None,
+                "via": "PINNAPI_NATIVE_DISCOVERY"}
     tok = str(token or "").lower()
     fam = str(family or "").lower()
     if tok in L.VENUE_TOKENS_DELIBERATELY_EXCLUDED:
@@ -1021,13 +1052,29 @@ def lane_scope(league: str, *, token: str | None = None,
     if fam in FAMILY_SCOPE_NOTE:
         return {"in_scope": False, "why": "FAMILY_NOT_IN_COLLECTOR_SCOPE: %s"
                 % FAMILY_SCOPE_NOTE[fam]}
+    lane_families = {L.family_for_provider_key(k) for k in keys}
+    if fam in nat["seeded"] and fam not in lane_families:
+        # a family the metered lane has no key for at all (basketball,
+        # hockey): native discovery seeds it, under its native key
+        return {"in_scope": True, "why": None,
+                "via": "PINNAPI_NATIVE_DISCOVERY",
+                "measured_under": PD.sport_key_for(fam)}
+    if fam in nat["families"] and fam not in nat["seeded"]:
+        return {"in_scope": False, "why": (
+            "FAMILY_NOT_SEEDED_NO_PRICED_MARKET: PinnAPI-native discovery "
+            "matches %s fixtures but seeds none, because no %s market family "
+            "is priced (pinnapi_feed_runtime.families_with_a_priced_market: "
+            "the de-vig set and the proven line families)" % (fam, fam))}
     if league.startswith("UNATTRIBUTED"):
         return {"in_scope": False, "why": "UNATTRIBUTED: the record's provider "
                 "event has no league in the collection ledger"}
     return {"in_scope": False, "why": (
         "VENUE_TOKEN_NOT_MAPPED: %s has no provider key in the collector's "
         "maps (ext_pinnacle_loop SPORTS_CONFIRMED / VENUE_TOKEN_TO_PROVIDER_KEY "
-        "/ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)" % (tok or league))}
+        "/ VENUE_FOOTBALL_TOKEN_TO_PROVIDER_KEY)" % (tok or league)
+        + ("; PinnAPI-native discovery reports any fixture of it it matches "
+           "under %s" % PD.sport_key_for(fam) if fam in nat["seeded"]
+           else ""))}
 
 
 def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
@@ -1051,6 +1098,19 @@ def classify_status(row: dict, *, scope: dict, collector: dict | None = None,
         return dict(out, status=S_UNAVAILABLE, reason="PROVIDER_STAGE_UNMEASURED: "
                     + str((row.get("unavailable") or {}).get(
                         "provider_events") or "no ledger read"))
+    if prov == 0 and scope.get("measured_under"):
+        # NOT A METERED-COLLECTOR QUESTION (verifier finding 1): the lane has
+        # no key for this family; native discovery counts its fixtures under
+        # one native row, so this league's own row cannot carry them
+        return dict(out, status=S_UNAVAILABLE, reason=(
+            "MEASURED_UNDER_THE_PINNAPI_NATIVE_ROW: %s carries this family's "
+            "natively discovered provider events; the lane maps no provider "
+            "key to this league, so a per-league count is not measured; "
+            "venue lists %s event(s)" % (
+                scope["measured_under"],
+                "an unmeasured number of"
+                if row.get("venue_catalogue_events") is None
+                else row.get("venue_catalogue_events"))))
     if prov == 0:
         c = collector or {}
         venue = row.get("venue_catalogue_events")
@@ -1399,6 +1459,26 @@ async def collector_selection(conn, *, now: float) -> dict:
     return out
 
 
+#: The family a provider competition key names by its own prefix (the
+#: provider's `<sport>_<league>` convention) or a native row by its suffix --
+#: used only when no ledger row, venue row or lane map names one, so a
+#: declared league with no record (basketball_nba on a quiet day) is still
+#: scoped by its family rather than as an unmapped token.
+_KEY_PREFIX_FAMILY = (("americanfootball_", "football"),
+                      ("baseball_", "baseball"),
+                      ("basketball_", "basketball"),
+                      ("icehockey_", "hockey"), ("soccer_", "soccer"),
+                      ("tennis_", "tennis"), ("pinnapi_", None))
+
+
+def _family_of_key(key) -> str | None:
+    k = str(key or "")
+    for pre, fam in _KEY_PREFIX_FAMILY:
+        if k.startswith(pre):
+            return fam if fam is not None else (k[len(pre):] or None)
+    return None
+
+
 async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                               now: float) -> dict:
     """Status per league for one day: the funnel's own rows, plus every league
@@ -1442,7 +1522,7 @@ async def league_status_table(conn, *, rows: list, day: _dt.date, tz: str,
                 r.setdefault(c, 0 if ledger_read else None)
         toks = tokens_of.get(key) or []
         fam = r.get("sport_family") or fam_of.get(key) or \
-            L.family_for_provider_key(key)
+            L.family_for_provider_key(key) or _family_of_key(key)
         scope = lane_scope(key, token=(toks[0] if toks else
                                        key.split(":", 1)[-1]), family=fam)
         st = classify_status(r, scope=scope, collector=coll,
@@ -1513,7 +1593,7 @@ RECON_LEDGER_SQL = """
            (array_agg(outcome ORDER BY cycle_at DESC))[1] AS outcome,
            max(cycle_at) AS last_cycle
       FROM ext_candidate_outcomes
-     WHERE sport_key = $1 AND provider_event_id IS NOT NULL
+     WHERE sport_key = ANY($1::text[]) AND provider_event_id IS NOT NULL
        AND cycle_at >= to_timestamp($2) AND cycle_at < to_timestamp($3)
      GROUP BY provider_event_id
 """ % REACH_SQL
@@ -1569,7 +1649,15 @@ async def reconcile_league(conn, *, token: str, day: _dt.date, tz: str,
                       start, end)
     if isinstance(exp, str):
         return dict(out, status="UNAVAILABLE", why=exp, games=[], missing=[])
-    led = await _read(conn, ("ext_candidate_outcomes",), RECON_LEDGER_SQL, key,
+    # THE METERED KEY AND THE NATIVE ONE (verifier finding 1): a natively
+    # discovered game is filed under the seed's key -- the lane's key for a
+    # token it maps, `pinnapi_<family>` otherwise (and before the incident
+    # release's fix). Each game below is still matched by its exact venue
+    # slug, or by its start and both nicknames, so the wider read cannot
+    # lend one league's row to another's game.
+    from .. import pinnapi_discovery as PD
+    led = await _read(conn, ("ext_candidate_outcomes",), RECON_LEDGER_SQL,
+                      [key, PD.sport_key_for(fam)],
                       start - lookback_s, min(end, now + 1.0))
     slugs = [e["market_slug"] for e in exp]
     vals = await _read(conn, ("external_valuations",), RECON_VALUATION_SQL,

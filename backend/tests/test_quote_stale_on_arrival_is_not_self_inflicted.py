@@ -124,9 +124,11 @@ async def test_by_default_no_extra_metered_credit_is_spent(monkeypatch):
         assert out["ran"] is True, out.get("why")
         assert len(calls) == 1                     # no extra metered fetch
         fr = out["odds_freshness"]
+        # (+ `budget_spent`, the outcome added when the refresh became a
+        # claimed metered call -- verifier finding 2; additive, 0 here)
         assert fr["adaptive_refetch"] == {"fired": 0, "saved": 0,
                                           "still_stale": 0, "failed": 0,
-                                          "capped": 1}
+                                          "capped": 1, "budget_spent": 0}
         assert fr["adaptive_refetch_max_per_sport"] == 0
         assert "owner" in fr["adaptive_refetch_rule"]
         assert out["refusals"].get(loop.R_QUOTE_STALE_ON_ARRIVAL) == 1
@@ -155,7 +157,7 @@ async def test_a_quote_our_delay_made_stale_is_refreshed_and_judged(
         fr = out["odds_freshness"]
         assert fr["adaptive_refetch"] == {"fired": 1, "saved": 1,
                                           "still_stale": 0, "failed": 0,
-                                          "capped": 0}
+                                          "capped": 0, "budget_spent": 0}
         assert loop.R_QUOTE_STALE_ON_ARRIVAL not in out["refusals"]
         assert out["latency"]["stale_on_arrival_due_to_our_processing"] == 0
         assert out["latency"]["limit_s"] == loop.PINNACLE_MAX_AGE_S == 30.0
@@ -246,3 +248,77 @@ def test_the_rule_is_stated_and_the_limit_is_unchanged():
     # the metered budget is the owner's: off until the owner sets a bound
     assert loop.ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT == 0
     assert "owner" in loop.ADAPTIVE_ODDS_REFETCH_RULE
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE ADAPTIVE REFRESH IS A METERED CALL LIKE ANY OTHER (incident release,
+# verifier finding 2)
+# ═════════════════════════════════════════════════════════════════════
+#
+# The fixed re-fetch beside it claims a call from the cycle's declared budget
+# (`collector_coverage.claim_call(..., CALL_REFETCH)`) and charges its
+# credits on the competition's receipt and in the 24 h envelope ledger
+# (`_charge_refetch`). The adaptive refresh did neither: with the owner's
+# pending bound of 4 approved, its calls would have bypassed the per-cycle
+# call budget and the envelope, and the receipts would have undercounted
+# calls and credits. Off by default either way (bound 0, pinned above).
+
+@pg
+@pytest.mark.asyncio
+async def test_an_adaptive_refresh_is_claimed_and_charged_on_the_receipt(
+        monkeypatch):
+    from sportsassets import collector_coverage as cov
+    monkeypatch.setattr(loop, "ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT", 4)
+    claimed = []
+    real_claim = cov.claim_call
+
+    def spy(plan_out, kind):
+        got = real_claim(plan_out, kind)
+        claimed.append((kind, got))
+        return got
+    monkeypatch.setattr(cov, "claim_call", spy)
+    conn, F, venue, out, calls, handed = await _run(
+        monkeypatch, [(-40.0, -45.0), (0.0, -2.0)])
+    try:
+        assert out["ran"] is True, out.get("why")
+        assert len(calls) == 2
+        assert out["odds_freshness"]["adaptive_refetch"]["fired"] == 1
+        assert (cov.CALL_REFETCH, True) in claimed
+        cc = out["collector_coverage"]
+        assert cc["cycle"]["calls_by_kind"].get(cov.CALL_REFETCH) == 1, cc
+        assert cc["cycle"]["budget_respected"] is True
+        (mlb,) = [r for r in cc["competitions"] if r["key"] == "baseball_mlb"]
+        # the refresh's credits are on the competition's receipt too
+        assert float(mlb["credits_charged"] or 0.0) > 0.0
+    finally:
+        await F.clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_adaptive_refresh_with_no_call_left_is_not_made(monkeypatch):
+    """No metered call left this cycle: the refresh is NOT made, the quote is
+    kept and refused QUOTE_STALE_ON_ARRIVAL by name, counted as
+    `budget_spent` -- the budget is never exceeded to refresh a price."""
+    from sportsassets import collector_coverage as cov
+    monkeypatch.setattr(loop, "ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT", 4)
+    real_claim = cov.claim_call
+
+    def spent(plan_out, kind):
+        if kind == cov.CALL_REFETCH:
+            return False
+        return real_claim(plan_out, kind)
+    monkeypatch.setattr(cov, "claim_call", spent)
+    conn, F, venue, out, calls, handed = await _run(
+        monkeypatch, [(-40.0, -45.0), (0.0, -2.0)])
+    try:
+        assert out["ran"] is True, out.get("why")
+        assert len(calls) == 1                     # no refresh was made
+        fr = out["odds_freshness"]["adaptive_refetch"]
+        assert fr["fired"] == 0 and fr["budget_spent"] == 1, fr
+        assert out["refusals"].get(loop.R_QUOTE_STALE_ON_ARRIVAL) == 1
+        assert handed == []
+    finally:
+        await F.clean(conn)
+        await conn.close()
