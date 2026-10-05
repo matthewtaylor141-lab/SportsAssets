@@ -25,6 +25,7 @@ from sportsassets.agents import paper_audrey as PA
 from sportsassets.agents import paper_xavier as PX
 
 from tests import paper_harness as H
+from tests import paper_live_fixture as PL
 
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 
@@ -289,6 +290,9 @@ async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
         g = G(a, "stalem")
         e = H.order(a, key="e", qty=100, limit=0.40, slug=s, at=H.T0,
                     group_id=g)
+        # the settlement identity Xavier's management packet requires
+        e["decision_id"] = await PL.entry_identity(conn, a, slug=s,
+                                                   at=H.T0)
         ge = await L.submit_order(conn, e, fee_fn=H.zero_fee, now=H.T0)
         await H.observe(conn, s, H.T0 + 3, offers=[(0.40, 100)],
                         bids=[(0.38, 100)])

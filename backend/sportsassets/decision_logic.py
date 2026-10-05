@@ -94,6 +94,13 @@ DECISION_LOGIC_FILES = (
     "agents/xavier_management.py", "agents/xavier_small_live_policy.py",
     "bettor_xavier_standing_orders.py", "xavier_freshness.py",
     "bettor_funded_decision.py",
+    # (270) paper mark freshness: Xavier's management packet (no HOLD /
+    # EXIT / REDUCE / hedge without reconciled qty, a fresh probability, a
+    # current book with exit depth, settlement identity and protection
+    # state) and the allocation rail bettor_paper_ledger.submit_order applies
+    # to every ENTRY (no growth where management is stale) -- both change
+    # which actions and entries happen, so a change restarts the window
+    "xavier_packet.py", "bettor_paper_freshness.py",
     # the agent components inside the intent
     "agents/eddie.py", "lost_opportunity/score.py",
     "lost_opportunity/reads.py", "profitability/economics.py")

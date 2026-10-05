@@ -564,6 +564,16 @@ def schedule(get_pool, *, trigger: str, **kw) -> dict:
         # NOT A PASS: the process is not configured for paper trading. No
         # task, no connection, no write.
         return {"scheduled": False, "why": S.R_ENV_OFF}
+    # THE HELD-MARK REFRESH (agents.paper_mark_refresh): every held market
+    # re-read inside the mark SLA, on its own connection and its own
+    # explicit, bounded read budget -- never the pass's lock or read cap.
+    # Scheduled on every servicing / cycle tick (coalesced, at most one run
+    # per MIN_RUN_INTERVAL_S), whether or not a pass is already running.
+    try:
+        from . import paper_mark_refresh as _PMR
+        _PMR.schedule(get_pool, trigger=trigger)
+    except Exception:                                           # noqa: BLE001
+        log.warning("held-mark refresh not scheduled", exc_info=True)
     t = _TASK.get("task")
     if t is not None and not t.done():
         _TASK["coalesced"] += 1

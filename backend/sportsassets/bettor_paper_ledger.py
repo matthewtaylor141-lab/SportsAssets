@@ -537,6 +537,25 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
                 if chk:
                     return dict(chk, ok=False, reservation_usd=f(reserve),
                                 available_usd=f(cs["available"]))
+            if o.get("role") == "ENTRY":
+                # NO ALLOCATION GROWTH WHERE MANAGEMENT IS STALE
+                # (bettor_paper_freshness.allocation_refusal): a strategy
+                # whose markable open positions cannot be freshly managed
+                # above the predeclared rate opens no new entry. Under the
+                # same lock, recorded (migration 270); tightening only.
+                from . import bettor_paper_freshness as _PMF
+                chk = await _PMF.allocation_refusal(
+                    conn, account_id=acct, strategy=o["strategy"], now=at)
+                if chk:
+                    await _PMF.record_refusal(
+                        conn, account_id=acct, kind=_PMF.K_ENTRY,
+                        refusal=chk["refusal"], at=at,
+                        strategy=o["strategy"], group_id=o.get("group_id"),
+                        us_market_slug=o.get("us_market_slug"),
+                        order_key=key, detail=chk)
+                    return dict(chk, ok=False, under_lock=True,
+                                reservation_usd=f(reserve),
+                                available_usd=f(cs["available"]))
         else:
             held = await held_uncommitted(
                 conn, acct, group_id=o["group_id"],

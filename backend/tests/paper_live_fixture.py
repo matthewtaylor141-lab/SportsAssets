@@ -292,3 +292,28 @@ def set_policy_control(control_key: str, enabled: bool) -> None:
         finally:
             await c.close()
     asyncio.run(_go())
+
+
+async def entry_identity(conn, acct: dict, *, slug: str, at: float,
+                         side: str = "LONG", p: float = 0.62) -> str:
+    """A SYNTHETIC entry decision for a harness order, so the position has
+    the settlement identity Xavier's management packet requires
+    (xavier_packet.P_SETTLEMENT: the entry valuation's payout event and
+    complement flag). Returns the decision_id to put on the ENTRY order."""
+    v = await valuation(conn, slug=slug, decided_at=at, p_pin=p)
+    did = "paperident:%s" % uuid.uuid4().hex[:24]
+    await conn.execute(
+        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+        " decided_at, valuation_id, us_market_slug, holding_side, intent, "
+        " fixture, label, verdict, refusal, refusals, p_internal, "
+        " internal_model, p_pinnacle, pinnacle, p_blended, proposed_qty, "
+        " limit_price, qualification_gaps, policy_version, policy_decision, "
+        " simulator_version, strategy, economics) VALUES ($1,$2,$3,"
+        " to_timestamp($4),$5,$6,$7,$8,'fx-1','{}'::jsonb,'ENTER',NULL,'{}',"
+        " NULL,'{}'::jsonb,$9,'{}'::jsonb,NULL,100,0.40,'[]'::jsonb,"
+        " 'TEST_IDENTITY','{}'::jsonb,'TEST','DEREK_ENTRY_POLICY_V2',"
+        " '{}'::jsonb)",
+        did, acct["session_id"], acct["account_id"], float(at),
+        v["valuation_id"], slug, side,
+        LONG if side == "LONG" else "ORDER_INTENT_BUY_SHORT", float(p))
+    return did

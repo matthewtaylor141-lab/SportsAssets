@@ -22,6 +22,12 @@ FRESH, INT = "FRESHNESS_PLUMBING", "INTEGRITY"
 EDGE, EV, PRICE, DEPTH, RAIL = "EDGE", "EV", "PRICE", "DEPTH", "RISK_RAIL"
 
 TABLE = {
+    # (270) paper mark freshness: the allocation rail (no ENTRY growth for a
+    # strategy whose open positions cannot be freshly managed; fail-closed
+    # when the rate cannot be read) and Xavier's incomplete management packet
+    "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
+    "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
+    "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),

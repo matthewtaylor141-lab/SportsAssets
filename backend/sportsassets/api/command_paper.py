@@ -257,6 +257,29 @@ async def _readmodel(name: str, conn, **kw) -> dict:
     return await getattr(RM, name)(conn, **kw)
 
 
+@router.get("/api/command/paper/freshness",
+            dependencies=[Depends(require_read)])
+async def paper_freshness(limit: int = Query(500, ge=0, le=5000)) -> dict:
+    """EVERY OPEN PAPER POSITION, CLASSIFIED (bettor_paper_freshness): FRESH /
+    QUIET_VALID / STALE / FEED_GAP / UNMARKED / EXTERNAL_UNAVAILABLE, each
+    count with its rule, the fresh and stale-management rates, the latest
+    held-mark refresh run, and per position the mark source / time / age,
+    the valuation id, the executable bid / ask and exit depth, the residual
+    qty reconciled with the ledger, the settlement fingerprint and the
+    protection state. Read only (a READ ONLY transaction); a failed read is
+    UNAVAILABLE, never zero."""
+    from .. import bettor_paper_freshness as PMF
+    from .. import bettor_paper_ledger as L
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), freshness=_unavailable_schema())
+        async with conn.transaction(readonly=True):
+            await conn.execute("SET LOCAL statement_timeout = 8000")
+            got = await PMF.read(conn, L.ACCOUNT_ID, rows_limit=limit)
+        return dict(_labels(), freshness=got)
+
+
 @router.get("/api/command/paper/session",
             dependencies=[Depends(require_read)])
 async def paper_session() -> dict:
