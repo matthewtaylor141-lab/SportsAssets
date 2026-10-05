@@ -5,14 +5,27 @@
 -- hold: a complement-side valuation beside its priced side, or two
 -- valuations of one contract side that both carry no source instant. Those
 -- rows are the record of what the lane valued and of what the paper
--- strategies decided on them, and are never deleted as cleanup. With none
--- present, migration 106's index is restored exactly.
+-- strategies decided on them, and are never deleted as cleanup. It refuses
+-- too while any row carries the observed_at_basis label (dropping the
+-- column would erase which clock those rows' observed_at is). With none
+-- present, migration 106's index is restored exactly and the label column
+-- and its CHECK are removed.
 DO $$
 BEGIN
     IF EXISTS (SELECT 1 FROM external_valuations
                 WHERE payout_is_complement) THEN
         RAISE EXCEPTION 'external_valuations holds complement-side '
                         'valuations (migration 251); rollback refused';
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+                WHERE table_name = 'external_valuations'
+                  AND column_name = 'observed_at_basis') THEN
+        IF EXISTS (SELECT 1 FROM external_valuations
+                    WHERE observed_at_basis IS NOT NULL) THEN
+            RAISE EXCEPTION 'external_valuations holds rows labelled with '
+                            'their observed_at clock (migration 251); '
+                            'rollback refused';
+        END IF;
     END IF;
     IF EXISTS (SELECT 1 FROM external_valuations
                 GROUP BY experiment_id, coalesce(condition_id, ''),
@@ -42,3 +55,7 @@ COMMENT ON INDEX external_valuations_one_per_observation IS
     'observation instant). The identity half is a coalesce over BOTH '
     'identifier columns, so a venue-native contract and a global one are '
     'different keys rather than colliding on the empty string.';
+
+ALTER TABLE external_valuations
+    DROP CONSTRAINT IF EXISTS external_valuations_observed_at_basis_known;
+ALTER TABLE external_valuations DROP COLUMN IF EXISTS observed_at_basis;

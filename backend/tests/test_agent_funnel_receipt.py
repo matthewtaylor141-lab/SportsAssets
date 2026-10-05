@@ -84,6 +84,7 @@ def test_the_receipt_buckets_every_decision_by_the_one_taxonomy():
     assert rc == {"RECEIVED": 15, "NOT_DECIDED": 2, "REJECTED_SOFTWARE": 5,
                   "ELIGIBLE": 9, "REJECTED_ECONOMIC": 7,
                   "REJECTED_UNCLASSIFIED": 1, "ENTER": 2, "ORDER": 2,
+                  "ORDER_REFUSED_BY_RISK": 0, "ORDER_PENDING": 0,
                   "ENTER_WITHOUT_ORDER": 0, "FILL": 1}
     assert cg["checks"]["decided"] == 13
     assert all(v for k, v in cg["checks"].items() if k != "decided")
@@ -193,7 +194,11 @@ def test_every_select_refusal_is_staged_classified_and_pinned_to_its_source():
         sorted(want - set(ext.PINNAPI_SELECT_REFUSALS))
     for c in list(ext.PINNAPI_SELECT_REFUSALS) + [
             loop.R_PAYLOAD_HAS_NO_PINNACLE, loop.R_PINNACLE_HAS_NO_H2H]:
-        assert ext.STAGE_OF[c] == "1_PROBABILITY", c
+        # staged by the ONE taxonomy (review of 7bd084b): freshness
+        # plumbing at 2_FRESHNESS, every other provider-read refusal at
+        # 1_PROBABILITY -- never the venue-side stages (section 5)
+        assert ext.STAGE_OF[c] == ext.lane_stage_of(c), c
+        assert ext.STAGE_OF[c] in ("1_PROBABILITY", "2_FRESHNESS"), c
         assert ext.EVALUABILITY_OF[c] in (ext.EXTERNAL_DEPENDENCY,
                                           ext.COULD_NOT_EVALUATE), c
         assert RT.classify(c)["classified"], c
@@ -399,3 +404,187 @@ def test_the_route_is_get_only_and_requires_a_command_session():
     client = TestClient(APP.app, raise_server_exceptions=False)
     assert client.get(API.PATH).status_code == 401
     assert client.post(API.PATH).status_code in (401, 405)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4 · THE REVIEW OF 7bd084b: AN ENTER WITHOUT AN ORDER IS NOT ONE THING
+# ═════════════════════════════════════════════════════════════════════
+#
+# The receipt counted EVERY ENTER with no paper_orders row as
+# ENTER_WITHOUT_ORDER (SOFTWARE / INTEGRITY), including (a) an ENTER whose
+# order the paper risk check refused -- `submit_order` writes no order row,
+# only a PAPER_RISK_REFUSED_THE_ORDER finding naming its own refusal -- and
+# (b) an ENTER younger than the backstop's 60 s whose order is still in
+# flight. Both contradicted the receipt's own docstring and
+# `paper_derek.step_enter_backstop`, which excludes both
+# (scratchpad incedge_v/funnel_repro.py: receipt 1, backstop 0).
+
+def test_the_funnels_order_constants_are_the_backstops():
+    assert AF.ENTER_WITHOUT_ORDER_AFTER_S == PD.ENTER_WITHOUT_ORDER_AFTER_S
+    assert AF.R_ORDER_REFUSED == PD.R_ORDER_REFUSED
+
+
+def test_a_risk_refused_or_pending_order_is_not_an_enter_without_order():
+    r = AF.receipt(
+        decisions=[{"strategy": CG, "sport": "soccer", "complement": False,
+                    "verdict": "ENTER", "refusals": [], "n": 5}],
+        received=[{"strategy": CG, "n": 5}], not_decided=[],
+        orders=[{"strategy": CG, "entered": 5, "orders": 1,
+                 "enter_without_order": 1, "order_pending": 1,
+                 "order_refused": 2, "filled_orders": 0}],
+        order_outcomes=[],
+        order_refusals=[
+            {"strategy": CG, "refusal": "ABOVE_THE_PER_FIXTURE_"
+             "CONCENTRATION_CAP", "n": 1},
+            {"strategy": CG, "refusal": "THE_ORDER_IS_MALFORMED", "n": 1}])
+    cg = next(a for a in r["agents"] if a["strategy"] == CG)
+    rc = cg["receipt"]
+    assert rc["ENTER"] == 5 and rc["ORDER"] == 1
+    assert rc["ENTER_WITHOUT_ORDER"] == 1
+    assert rc["ORDER_REFUSED_BY_RISK"] == 2
+    assert rc["ORDER_PENDING"] == 1
+    assert cg["checks"]["orders_refusals_pending_and_missing_cover_enter"]
+    # the wrapper is classified by the code it wraps: a cap is economic, a
+    # malformed order is the software's
+    by = {x["code"]: x for x in cg["order_refused_by_risk"]}
+    assert by["ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP"]["class"] == \
+        RT.ECONOMIC
+    assert by["THE_ORDER_IS_MALFORMED"]["class"] == RT.SOFTWARE
+    assert all(x["wrapped_by"] == AF.R_ORDER_REFUSED
+               for x in cg["order_refused_by_risk"])
+
+
+@pg
+async def test_the_receipt_separates_risk_refusals_pending_and_missing_orders(
+        cg_on):
+    """Through the real pass: an ENTER whose order the paper risk check
+    refuses (the account's max_concurrent_groups is 0) is ORDER_REFUSED_BY_
+    RISK, classified by the cap it names; an ENTER seconds old with no order
+    yet is ORDER_PENDING; only an ENTER past the backstop's 60 s with neither
+    is ENTER_WITHOUT_ORDER -- exactly the ENTERs the backstop names."""
+    conn = await H.connect()
+    slug = "atc-unl-gre-ger-2026-10-04-gre"
+    try:
+        now = time.time() + 5.0
+        t0 = time.time() - 300.0
+        await PL.purge_everything(conn)
+        await PL.purge_research_models(conn)
+        acct = await PL.new_account(
+            conn, "funnelrisk", now=now,
+            cfg=PL.config(risk={"max_concurrent_groups": 0}))
+        rec, contract, evq, vq, extra = OS._home_record(
+            slug, ODDS, OFFERS, BIDS, now=now - 2.0)
+        comp, why = OS._complement(rec, contract, evq, vq, extra,
+                                   now=now - 2.0)
+        assert why is None
+        cid = await ext.persist(conn, copy.deepcopy(comp))
+        t = PL.Transport(now)
+        t.books[slug] = {"offers": OFFERS, "bids": BIDS}
+        client = PL.client(t)
+        t.t = max(t.t, now)
+        out = await PR.paper_pass(conn, now=now,
+                                  account_id=acct["account_id"],
+                                  market_data=client, config=acct["config"],
+                                  force=True, fee_fn=None, sleep=_nosleep)
+        assert out["ran"] and not out["errors"], out["errors"]
+        enter = await conn.fetchrow(
+            "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
+            " valuation_id=$2 AND strategy=$3", acct["session_id"], cid, CG)
+        assert enter["verdict"] == "ENTER"
+        f = await conn.fetchrow(
+            "SELECT detail FROM paper_audrey_findings WHERE subject=$1 AND "
+            " kind=$2", enter["decision_id"], PD.R_ORDER_REFUSED)
+        assert H.j(f["detail"])["refusal"] == \
+            "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS"
+        assert await conn.fetchval("SELECT count(*) FROM paper_orders WHERE "
+                                   " decision_id=$1",
+                                   enter["decision_id"]) == 0
+
+        async def copy_enter(suffix, decided_at):
+            did = enter["decision_id"] + suffix
+            await conn.execute(
+                "INSERT INTO paper_decisions (decision_id, session_id, "
+                " account_id, decided_at, valuation_id, us_market_slug, "
+                " holding_side, intent, fixture, label, verdict, refusal, "
+                " refusals, internal_model, pinnacle, qualification_gaps, "
+                " policy_version, simulator_version, strategy) VALUES ($1,"
+                " $2,$3,to_timestamp($4),NULL,$5,$6,$7,$8,'{}'::jsonb,"
+                " 'ENTER',NULL,'{}'::text[],$9,$10,$11,$12,$13,$14)",
+                did, enter["session_id"], enter["account_id"], decided_at,
+                enter["us_market_slug"], enter["holding_side"],
+                enter["intent"], enter["fixture"], enter["internal_model"],
+                enter["pinnacle"], enter["qualification_gaps"],
+                enter["policy_version"], enter["simulator_version"],
+                enter["strategy"])
+            return did
+        # an ENTER whose order is still in flight (5 s old) and one that
+        # has had neither an order nor a refusal for two minutes
+        pending = await copy_enter("p", time.time() - 5.0)
+        orphan = await copy_enter("o", time.time() - 120.0)
+        got = await AF.read(conn, since=t0, until=time.time() + 60.0,
+                            account_id=acct["account_id"])
+        cg = next(a for a in got["agents"] if a["strategy"] == CG)
+        rc = cg["receipt"]
+        assert rc["ENTER"] == 3 and rc["ORDER"] == 0
+        assert rc["ORDER_REFUSED_BY_RISK"] == 1
+        assert rc["ORDER_PENDING"] == 1
+        assert rc["ENTER_WITHOUT_ORDER"] == 1
+        by = {x["code"]: x for x in cg["order_refused_by_risk"]}
+        assert by["ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS"]["class"] == \
+            RT.ECONOMIC
+        # THE SAME ENTERs THE BACKSTOP NAMES: the orphan, and only it
+        bs = await PD.step_enter_backstop(
+            conn, {"account_id": acct["account_id"], "now": time.time()})
+        assert bs["decision_ids"] == [orphan], (bs, pending)
+        assert client.mutation_attempts == 0
+    finally:
+        await PL.purge_everything(conn)
+        await OS._clean(conn, slug)
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · ONE TAXONOMY: THE COLLECTOR LANE'S STAGE IS DERIVED FROM IT
+# ═════════════════════════════════════════════════════════════════════
+#
+# bettor_external_shadow.STAGES staged every pinnapi_primary.select refusal
+# at 1_PROBABILITY, while the taxonomy names FEED_QUOTE_OLDER_THAN_LIMIT,
+# FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE and PINNAPI_PRIMARY_CLOCK_INVALID
+# freshness plumbing: two answers for one code. The lane stage is now
+# DERIVED from the taxonomy entry (`ext.lane_stage_of`), so they cannot
+# disagree on what kind of failure it is.
+
+def test_the_lane_stage_of_every_incident_code_is_derived_from_the_taxonomy():
+    codes = (list(ext.PINNAPI_SELECT_REFUSALS)
+             + [loop.R_PAYLOAD_HAS_NO_PINNACLE, loop.R_PINNACLE_HAS_NO_H2H]
+             + list(loop.VENUE_READ_REFUSALS)
+             + list(loop.CALIBRATION_ONLY_AFTER_READ_FAILURE))
+    for c in codes:
+        assert ext.STAGE_OF[c] == ext.lane_stage_of(c), c
+    # the freshness-plumbing refusals stop at the lane's freshness stage
+    for c in ("FEED_QUOTE_OLDER_THAN_LIMIT",
+              "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+              "PINNAPI_PRIMARY_CLOCK_INVALID"):
+        assert RT.lookup(c)[1] == "FRESHNESS_PLUMBING"
+        assert ext.STAGE_OF[c] == "2_FRESHNESS", c
+    # a provider-side identity or capability refusal is BEFORE the lane's
+    # venue identity (3_IDENTITY counts toward "normalized"/"venue
+    # discovered" in coverage_integrity): it stays at the probability stage
+    for c in ("PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+              "PINNAPI_PRIMARY_SPORT_UNSUPPORTED",
+              "PINNAPI_PRIMARY_PHASE_UNPROVED", "FEED_OWNERSHIP_NOT_HELD"):
+        assert ext.STAGE_OF[c] == "1_PROBABILITY", c
+    assert ext.STAGE_OF["NO_PINNACLE_ON_EVENT"] == "1_PROBABILITY"
+
+
+def test_a_no_pinnacle_event_is_staged_by_its_binding_cause():
+    ev = {"id": "e", "home_team": "A FC", "away_team": "B FC",
+          "commence_time": "2026-10-04T18:00:00Z", "bookmakers": []}
+    stale = {"reason": "FEED_QUOTE_OLDER_THAN_LIMIT"}
+    codes = loop.no_pinnacle_codes(stale, ev)
+    assert loop.no_pinnacle_stage(codes) == "2_FRESHNESS"
+    assert loop.no_pinnacle_stage(
+        loop.no_pinnacle_codes({"reason": "PINNAPI_PRIMARY_NO_EXACT_"
+                                          "FIXTURE"}, ev)) == "1_PROBABILITY"
+    assert loop.no_pinnacle_stage(loop.no_pinnacle_codes({}, ev)) == \
+        "1_PROBABILITY"

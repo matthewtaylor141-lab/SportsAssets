@@ -38,6 +38,7 @@ from __future__ import annotations
 from . import bettor_entry_gate as gate
 from . import bettor_pinnacle_devig as devig
 from . import bettor_valuation_purpose as vp
+from . import refusal_taxonomy as _taxonomy
 
 EXPERIMENT_ID = "EXT_PINNACLE_DEVIG_V1_SHADOW"
 
@@ -194,6 +195,9 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             "team alone"),
         "raw_odds": val.get("raw_odds"),
         "observed_at": val.get("observed_at"),
+        # which clock that is: None for an aged reading, the de-vig's
+        # QUOTE_SOURCE_INSTANT_NOT_AGED for a refusal before aging
+        "observed_at_basis": val.get("observed_at_basis"),
         "received_at": val.get("received_at"),
         "age_s": val.get("age_s"),
         "mapped_outcome": val.get("mapped_outcome"),
@@ -491,7 +495,11 @@ INSERT = """
          -- WHAT THE ROW IS FOR (migration 144): ENTRY_DECISION with no
          -- evidence -- exactly the column default -- or CALIBRATION_ONLY with
          -- the refused read and the displayed price it was compared at.
-         record_purpose, calibration_only_evidence)
+         record_purpose, calibration_only_evidence,
+         -- WHICH CLOCK observed_at IS (migration 251): NULL for an aged
+         -- reading; QUOTE_SOURCE_INSTANT_NOT_AGED when the de-vig refused
+         -- before aging and stamped the quote's own source instant only.
+         observed_at_basis)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18::jsonb,$19,$20,$21,
             CASE WHEN $22::double precision IS NULL THEN NULL
@@ -501,7 +509,7 @@ INSERT = """
             $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,
             $37,$38,$39,$40,$41,$42,$43,$44,
             $45::jsonb,$46::jsonb,$47::jsonb,$48::jsonb,
-            $49,$50::jsonb)
+            $49,$50::jsonb,$51)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -653,7 +661,14 @@ async def persist(conn, rec: dict) -> int | None:
         (None if rec.get("settlement_comparison") is None
          else json.dumps(rec["settlement_comparison"], default=str)),
         # ── WHAT THE ROW IS FOR (migration 144) ───────────────────────
-        purpose, evidence_json)
+        purpose, evidence_json,
+        # ── WHICH CLOCK observed_at IS (migration 251) ────────────────
+        # The source instant of a quote the de-vig refused before aging is
+        # LABELLED on the row, so source time is never read as an aged
+        # observation (owner: "clearly distinguish source-time from
+        # observation-time"). The table's CHECK refuses the label on a row
+        # that carries an age or a probability.
+        rec.get("observed_at_basis"))
 
 
 #: THE CENSUS READS BELOW ARE REPORTING, over EVERY record purpose (migration
@@ -765,6 +780,52 @@ PINNAPI_SELECT_REFUSALS = (
     "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE", "FEED_QUOTE_OLDER_THAN_LIMIT",
     "FEED_MARKET_CLOSED")
 
+#: ── ONE TAXONOMY: THE LANE STAGE OF THE INCIDENT'S CODES IS DERIVED ──
+#:
+#: REVIEW OF 7bd084b. These codes were hand-listed below -- every
+#: pinnapi_primary.select refusal at 1_PROBABILITY -- while the refusal
+#: taxonomy calls FEED_QUOTE_OLDER_THAN_LIMIT, FEED_QUOTE_AGE_UNKNOWN_NO_
+#: OBSERVED_CHANGE or PINNAPI_PRIMARY_CLOCK_INVALID freshness plumbing: two
+#: answers for one code. Their lane stage is now DERIVED from the taxonomy
+#: entry (`lane_stage_of`), so the two cannot disagree on what failed.
+#:
+#: THE TWO AXES, kept apart on purpose. The taxonomy says WHAT failed (class,
+#: family, funnel stage). The lane stage says WHERE in the collector's own
+#: pipeline the candidate stopped, and coverage_integrity ranks it
+#: (REACH_SQL: >= 3 is "normalized", 3 without a venue-absence code is
+#: "venue discovered", >= 4 "mapped"). Every code below is raised by the
+#: PROVIDER read or the collector's VENUE BOOK read, before the lane's venue
+#: identity (3_IDENTITY) -- so a provider-side fixture or phase refusal is
+#: never staged as venue identity or settlement scope, which would count an
+#: event the venue was never consulted for as discovered or mapped. Hence:
+#: a freshness-plumbing refusal, or any venue-book refusal, stops at the
+#: lane's freshness / book stage (2_FRESHNESS); every other one at its
+#: probability stage (1_PROBABILITY).
+LANE_STAGE_DERIVED_CODES = PINNAPI_SELECT_REFUSALS + (
+    "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK",
+    "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET",
+    # the collector's failed venue read (P0 incident 2026-10-04,
+    # ext_pinnacle_loop.CALIBRATION_ONLY_AFTER_READ_FAILURE): the lane's two
+    # codes and the precise refusal beside them
+    "VENUE_BOOK_READ_FAILED", "VENUE_BOOK_READ_RETURNED_ERROR",
+    "VENUE_GATE_COOLDOWN", "VENUE_RATE_LIMITED", "VENUE_TIMEOUT",
+    "VENUE_NOT_FOUND", "VENUE_ERROR")
+
+
+def lane_stage_of(code) -> str | None:
+    """The collector lane's stage of a provider-read or venue-book-read
+    refusal, from the ONE refusal taxonomy (see LANE_STAGE_DERIVED_CODES):
+    2_FRESHNESS for freshness plumbing or the venue book, else
+    1_PROBABILITY. None for a code the taxonomy does not know."""
+    k = _taxonomy.lookup(code)
+    if k is None:
+        return None
+    _cls, family, stage = k
+    if family == "FRESHNESS_PLUMBING" or stage == "VENUE_BOOK":
+        return "2_FRESHNESS"
+    return "1_PROBABILITY"
+
+
 STAGES = (
     ("1_PROBABILITY", (
         "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED",
@@ -778,11 +839,12 @@ STAGES = (
         # ...NOW RECORDED BY CAUSE (P0 incident, ext_pinnacle_loop.
         # no_pinnacle_codes): what the discovery payload lacked, and the
         # PinnAPI refusal that left no WS price (2,534 rows/day had been
-        # recorded NO_PINNACLE_ON_EVENT whatever the cause). The event stops
-        # here: no usable Pinnacle probability.
-        "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK",
-        "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET")
-        + PINNAPI_SELECT_REFUSALS),
+        # recorded NO_PINNACLE_ON_EVENT whatever the cause). Their stage is
+        # derived (LANE_STAGE_DERIVED_CODES): the payload's absence and a
+        # provider-side identity or capability refusal here, a freshness
+        # refusal at 2_FRESHNESS.
+        ) + tuple(c for c in LANE_STAGE_DERIVED_CODES
+                  if lane_stage_of(c) == "1_PROBABILITY")),
     ("2_FRESHNESS", (
         "QUOTE_STALE",
         "VENUE_BOOK_STALE",
@@ -800,14 +862,10 @@ STAGES = (
         # record (P0 incident 2026-10-04, ext_pinnacle_loop.
         # CALIBRATION_ONLY_AFTER_READ_FAILURE): the lane's two codes and the
         # precise refusal beside them, all where the venue read stops a
-        # candidate -- never a later stage the trace also met.
-        "VENUE_BOOK_READ_FAILED",
-        "VENUE_BOOK_READ_RETURNED_ERROR",
-        "VENUE_GATE_COOLDOWN",
-        "VENUE_RATE_LIMITED",
-        "VENUE_TIMEOUT",
-        "VENUE_NOT_FOUND",
-        "VENUE_ERROR")),
+        # candidate -- never a later stage the trace also met -- and the
+        # PinnAPI freshness refusals; both derived (LANE_STAGE_DERIVED_CODES).
+        ) + tuple(c for c in LANE_STAGE_DERIVED_CODES
+                  if lane_stage_of(c) == "2_FRESHNESS")),
     ("3_IDENTITY", (
         # THE GLOBAL CATALOGUE COULD NOT NAME ONE MONEYLINE ROW (map4 D9).
         "VENUE_MAPPING_AMBIGUOUS",

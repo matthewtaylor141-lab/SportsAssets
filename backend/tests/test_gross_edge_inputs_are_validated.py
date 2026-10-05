@@ -459,14 +459,25 @@ def test_the_old_key_collapsed_every_later_nfl_valuation_and_251_keeps_them():
             tr = conn.transaction()
             await tr.start()
             try:
-                # the rollback's own guard needs a table 106 can index
+                # the rollback's own guard needs a table 106 can index (and
+                # no row labelled with its clock, which it refuses to drop)
                 await conn.execute(
                     "DELETE FROM external_valuations WHERE "
-                    "payout_is_complement OR observed_at IS NULL")
+                    "payout_is_complement OR observed_at IS NULL "
+                    "OR observed_at_basis IS NOT NULL")
                 await conn.execute((MIG / "rollback" /
                                     "251_external_valuations_one_per_"
                                     "observation_per_side.down.sql")
                                    .read_text())
+                assert await conn.fetchval(
+                    "SELECT count(*) FROM information_schema.columns WHERE "
+                    " table_name='external_valuations' AND "
+                    " column_name='observed_at_basis'") == 0
+                # THE KEY is what this half reproduces: the writer under test
+                # also writes 251's label column, put back bare (no CHECK)
+                # inside this rolled-back transaction
+                await conn.execute("ALTER TABLE external_valuations ADD "
+                                   "COLUMN observed_at_basis text")
                 assert await ext.persist(conn, copy.deepcopy(a))
                 # BEFORE: the second evaluation is swallowed as a duplicate
                 assert await ext.persist(conn, copy.deepcopy(b)) is None
@@ -534,6 +545,410 @@ def test_251_builds_over_history_without_rewriting_a_row():
             finally:
                 await tr.rollback()
         finally:
+            await conn.close()
+
+    asyncio.run(go())
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 4 · THE REVIEW OF 7bd084b: WHAT THE VALIDATION ITSELF GOT WRONG
+# ═════════════════════════════════════════════════════════════════════
+#
+# Two checks would have turned real candidates into SOFTWARE refusals:
+#
+#   OFF-CENT BOOKS. PRICE_SIDE compared the ladder's first level with the
+#   best RAW level, but the simulator's ladder (`levels_for`) drops every
+#   level whose wire price is not a whole cent -- the adapter formats every
+#   price %.2f (ADAPTER_CENT_GRID), so such a level cannot be traded by us.
+#   The venue quotes them: MLB tick 0.005, NFL tick 0.001 (pmx.py). A book
+#   whose best offer was 0.535 was refused GROSS_EDGE_INPUT_PRICE_NOT_THE_
+#   BUY_SIDE_OF_THE_BOOK although the ladder correctly started at 0.54.
+#
+#   A DECLARED VENUE CONVERSION. The in-flight NFL stream (wt_r30a_nfl
+#   966903f, paper_benchmark.apply_venue_conversion) replaces pin["p"] for
+#   an NFL money line with (1 - t) p + 0.5 t BEFORE the edge, keeping the
+#   book's number as p_book_conditional_no_tie. PROBABILITY required p to
+#   equal the row's stored value within 1e-9, so after integration every
+#   NFL decision would have been refused -- 0 NFL ENTERs, the original P0.
+
+OFF_CENT_OFFERS = [OS._lv(0.155, 40.0)] + OS.GRE_OFFERS
+OFF_CENT_BIDS = [OS._lv(0.155, 60.0)] + OS.GRE_BIDS
+
+
+def test_an_off_cent_best_level_the_adapter_cannot_trade_is_not_a_defect():
+    rec, comp = _home_and_complement()
+    md, lv = _levels(OFF_CENT_OFFERS, OS.GRE_BIDS, "LONG")
+    assert lv["excluded_off_cent_grid"] == 1
+    assert lv["levels"][0]["price"] == 0.16
+    r = _validate(rec, side="LONG", offers=OFF_CENT_OFFERS)
+    assert r["ok"], r["refusals"]
+    ps = next(c for c in r["checks"] if c["check"] == "PRICE_SIDE")
+    assert ps["value"] == ps["expected"] == 0.16
+    # the level the adapter cannot trade is NAMED on the receipt, not hidden
+    assert ps["off_cent_levels_better_than_the_first_tradable"] == [
+        {"price": 0.155, "qty": 40.0}]
+    # the SHORT side: a sub-cent best BID (0.155) is not ours to hit either
+    c = _validate(comp, side="SHORT", bids=OFF_CENT_BIDS)
+    assert c["ok"], c["refusals"]
+    ps = next(x for x in c["checks"] if x["check"] == "PRICE_SIDE")
+    assert ps["value"] == pytest.approx(0.85)          # 1 - best cent bid
+    assert ps["expected"] == pytest.approx(0.85)
+    # a ladder that skips a TRADABLE better level is still refused
+    _md, right = _levels(OS.GRE_OFFERS, OS.GRE_BIDS, "LONG")
+    assert GEI.R_PRICE_SIDE in _validate(
+        rec, side="LONG", offers=OFF_CENT_OFFERS,
+        levels=right["levels"][1:])["refusals"]
+
+
+def test_the_verifiers_mlb_off_cent_reproduction_now_validates():
+    """scratchpad incedge_v/offcent.py, verbatim in substance: p = 0.573,
+    offers 0.535 x 40 and 0.54 x 100 (MLB tick 0.005): the ladder starts at
+    0.54 (a 3.3 pp edge) and every input validates."""
+    import json
+    from sportsassets import bettor_paper_simulator as SIM
+    md = {"offers": [{"px": {"value": "0.535"}, "qty": "40"},
+                     {"px": {"value": "0.54"}, "qty": "100"}],
+          "bids": [{"px": {"value": "0.52"}, "qty": "100"}]}
+    lv = SIM.levels_for(md, direction="BUY", holding_side="LONG")
+    odds = {"Home": 1.70, "Away": 2.25}
+    names = sorted(odds)
+    p = dict(zip(names, devig.devig([odds[n] for n in names],
+                                    devig.DEFAULT_METHOD)))["Home"]
+    row = {"contract_selection": "Home", "payout_event": "Home",
+           "payout_is_complement": False, "buy_intent": LONG,
+           "raw_odds": json.dumps(odds), "mapped_outcome": "Home",
+           "devig_method": devig.DEFAULT_METHOD, "probability": p}
+    r = GEI.validate(p=p, side="LONG", row=row, levels=lv["levels"],
+                     consumed_side=lv["side"], md=md,
+                     fee_per_contract=lambda px: 0.01,
+                     pin={"age_s": 5.0, "limit_s": 30.0, "qualified": True},
+                     decided_at=1000.0, edge_at=1000.5,
+                     book_observed_at=999.0, book_max_age_s=30.0)
+    assert r["ok"], r["refusals"]
+    assert lv["levels"][0]["price"] == 0.54
+
+
+def test_the_cent_grid_is_the_simulators_own():
+    """One rule, never two: the validation's grid predicate agrees with the
+    simulator's on every tick the venue quotes."""
+    from sportsassets import bettor_paper_simulator as SIM
+    for milli in range(1, 1000):
+        px = milli / 1000.0
+        assert GEI.on_adapter_grid(px) == SIM._cent(px), px
+
+
+NFL_TWO_WAY = {"Kansas City Chiefs": 1.60, "Denver Broncos": 2.45}
+
+
+def _nfl_row():
+    import json
+    names = sorted(NFL_TWO_WAY)
+    p = dict(zip(names, devig.devig([NFL_TWO_WAY[n] for n in names],
+                                    devig.DEFAULT_METHOD)))[
+        "Kansas City Chiefs"]
+    return {"contract_selection": "Kansas City Chiefs",
+            "payout_event": "Kansas City Chiefs",
+            "payout_is_complement": False, "buy_intent": LONG,
+            "raw_odds": json.dumps(NFL_TWO_WAY),
+            "mapped_outcome": "Kansas City Chiefs",
+            "devig_method": devig.DEFAULT_METHOD, "probability": p}
+
+
+def _nfl_converted_pin(p_book, *, t=0.004, lo=0.001):
+    """THE PIN EXACTLY AS THE NFL STREAM LEAVES IT (wt_r30a_nfl 966903f,
+    paper_benchmark.apply_venue_conversion + bettor_nfl_settlement.
+    venue_value): pin["p"] is the venue payout equivalent at the worst end
+    of the cited tie-rate interval, the book's number is kept beside it."""
+    worst = round((1.0 - t) * p_book + 0.5 * t, 12)
+    rec = {"applies": True, "version": "NFL_SETTLEMENT_V1", "p": worst,
+           "refusal": None, "p_book_conditional_no_tie": p_book,
+           "tie_payout_per_contract": 0.5, "tie_rate_used": t,
+           "tie_rate_end_used": "HIGHEST", "tie_rate_interval": [lo, t],
+           "p_venue_at_interval_ends": [
+               round((1.0 - lo) * p_book + 0.5 * lo, 12), worst],
+           "formula": "p_venue = (1 - t) * p_book + 0.50 * t"}
+    return {"p": worst, "qualified": True, "age_s": 3.0, "limit_s": 30.0,
+            "p_book_conditional_no_tie": p_book, "venue_conversion": rec,
+            "p_is": ("VENUE_PAYOUT_EQUIVALENT_AT_THE_WORST_END_OF_THE_CITED_"
+                     "TIE_RATE_INTERVAL")}
+
+
+def _nfl_validate(p, pin):
+    md = {"offers": [{"px": {"value": "0.55"}, "qty": "100"}],
+          "bids": [{"px": {"value": "0.53"}, "qty": "100"}]}
+    return GEI.validate(
+        p=p, side="LONG", row=_nfl_row(),
+        levels=[{"price": 0.55, "wire": 0.55, "qty": 100.0}],
+        consumed_side="offers", md=md, fee_per_contract=lambda px: 0.01,
+        pin=pin, decided_at=1000.0, edge_at=1000.1,
+        book_observed_at=999.5, book_max_age_s=30.0)
+
+
+def test_a_declared_venue_conversion_is_reproduced_not_refused():
+    """scratchpad incedge_v/nflconv.py: row 0.61014, converted 0.609699 was
+    refused NOT_A_PROBABILITY. A conversion the decision DECLARES, from the
+    row's own probability, by its stated formula, validates -- and is
+    re-derived, never trusted."""
+    row = _nfl_row()
+    pin = _nfl_converted_pin(row["probability"])
+    r = _nfl_validate(pin["p"], pin)
+    assert r["ok"], r["refusals"]
+    checks = {c["check"]: c for c in r["checks"]}
+    assert checks["PROBABILITY"]["passed"]
+    assert checks["PROBABILITY"]["stored_on_the_row"] == row["probability"]
+    assert checks["VENUE_CONVERSION"]["passed"]
+    assert checks["ORIENTATION"]["expected"] == pytest.approx(
+        row["probability"], abs=1e-12)        # the BOOK's number, oriented
+
+
+def test_a_conversion_that_does_not_reproduce_is_a_software_refusal():
+    row = _nfl_row()
+    # the converted value does not follow from its own formula
+    pin = _nfl_converted_pin(row["probability"])
+    pin["p"] = pin["venue_conversion"]["p"] = pin["p"] + 0.01
+    assert _nfl_validate(pin["p"], pin)["refusals"] == [GEI.R_CONVERSION]
+    # a tie rate outside its own declared interval
+    pin = _nfl_converted_pin(row["probability"])
+    pin["venue_conversion"]["tie_rate_interval"] = [0.0, 0.002]
+    assert _nfl_validate(pin["p"], pin)["refusals"] == [GEI.R_CONVERSION]
+    # the conversion was applied to a number that is not the row's
+    pin = _nfl_converted_pin(row["probability"] - 0.02)
+    assert _nfl_validate(pin["p"], pin)["refusals"] == [GEI.R_PROBABILITY]
+    # a moved p with NO declared conversion is still not the row's value
+    plain = {"age_s": 3.0, "limit_s": 30.0, "qualified": True}
+    assert _nfl_validate(row["probability"] - 0.0004, plain)[
+        "refusals"] == [GEI.R_PROBABILITY]
+    # a conversion that says it does not apply changes nothing
+    pin = _nfl_converted_pin(row["probability"])
+    pin["venue_conversion"]["applies"] = False
+    assert _nfl_validate(pin["p"], pin)["refusals"] == [GEI.R_PROBABILITY]
+    assert RT.classify(GEI.R_CONVERSION)["class"] == RT.SOFTWARE
+
+
+# ── DEREK V2 AND THE MAKER: THE SAME RECEIPT ─────────────────────────
+#
+# The validation covered paper_benchmark.decide_one only (CG, PINNACLE_ONLY).
+# Derek V2 still emitted BELOW_MIN_GROSS_EDGE with no receipt
+# (derek_policy.R_BELOW) and the maker judged p - L on the resting price
+# with none (paper_maker.resting_price).
+
+def _derek_ctx(acct, client, now):
+    ctx = {"session": {"session_id": acct["session_id"],
+                       "config": acct["config"]},
+           "session_id": acct["session_id"], "account_id": acct["account_id"],
+           "config": acct["config"], "market_data": client, "books_read": 0,
+           "now": now, "deadline": time.monotonic() + 30, "first_fills": [],
+           "fills": 0, "fee_fn": None,
+           # THE RESEARCH MODEL, injected at its seam (`_context` serves
+           # ctx["derek"] as is): fitting one is the Derek harness's proof;
+           # this proof is about the inputs of the edge it is blended into.
+           "derek": {"model": {"ok": True, "refusal": None,
+                               "model_id": "test-model", "features": [],
+                               "model_version": "v-test",
+                               "approval_status": "CANDIDATE"},
+                     "model_attempt": None,
+                     "void": {"status": "UNMEASURED"}, "calibration": {}}}
+    ctx["clock"] = lambda: ctx["now"]
+    return ctx
+
+
+@pg
+async def test_derek_v2_refuses_unvalidated_inputs_as_software(monkeypatch):
+    """The double-inverted complement row through Derek's real decision and
+    writer: before, BELOW_MIN_GROSS_EDGE (economic); now the orientation
+    check's code (SOFTWARE), with its receipt, and no economic verdict."""
+    conn = await H.connect()
+    monkeypatch.setattr(PD, "score", lambda model, **kw: {
+        "ok": True, "p": 0.20, "features": {}, "feature_basis": "test"})
+    try:
+        now = time.time() + 3.0
+        await PL.purge_everything(conn)
+        _rec, comp = _home_and_complement(now - 1.0)
+        # Derek is the STRICT settlement policy: the soccer per-side text's
+        # postponement clause is a genuine payout difference it refuses
+        # (SETTLEMENT_NOT_SUPPORTED, before any book read). These rows carry
+        # a COMPATIBLE comparison so the decision reaches its gross edge,
+        # which is what this proof is about.
+        scmp = PL.settlement_comparison("COMPATIBLE")
+        bad = copy.deepcopy(comp)
+        bad["probability"] = OS.GRE_P_STORED
+        bad["settlement_comparison"] = scmp
+        vid = await ext.persist(conn, bad)
+        okrec = copy.deepcopy(_rec)
+        okrec["settlement_comparison"] = scmp
+        good = await ext.persist(conn, okrec)
+        row = await conn.fetchrow("SELECT * FROM external_valuations "
+                                  " WHERE id=$1", vid)
+        acct = await PL.new_account(conn, "geiderek", now=now)
+        t = PL.Transport(now)
+        t.books[SLUG] = {"offers": OS.GRE_OFFERS, "bids": OS.GRE_BIDS}
+        client = PL.client(t)
+        t.t = max(t.t, now)
+        rec = await PD.decide_one(conn, _derek_ctx(acct, client, now),
+                                  dict(row))
+        d = await conn.fetchrow("SELECT * FROM paper_decisions WHERE "
+                                " decision_id=$1", rec["decision_id"])
+        assert d["verdict"] == "REFUSE"
+        assert list(d["refusals"]) == [GEI.R_ORIENTATION], d["refusals"]
+        assert "BELOW_MIN_GROSS_EDGE" not in list(d["refusals"])
+        receipt = H.j(d["pinnacle"])["gross_edge_inputs"]
+        assert receipt["version"] == GEI.VERSION and receipt["ok"] is False
+        assert RT.decision_class(d["verdict"], d["refusals"]) == \
+            RT.REJECTED_SOFTWARE
+        # the well-formed home row: validated, then judged economically
+        grow = await conn.fetchrow("SELECT * FROM external_valuations "
+                                   " WHERE id=$1", good)
+        acct2 = await PL.new_account(conn, "geiderek2", now=now)
+        rec2 = await PD.decide_one(conn, _derek_ctx(acct2, client, now),
+                                   dict(grow))
+        d2 = await conn.fetchrow("SELECT * FROM paper_decisions WHERE "
+                                 " decision_id=$1", rec2["decision_id"])
+        r2 = H.j(d2["pinnacle"])["gross_edge_inputs"]
+        assert r2["ok"] is True, r2["refusals"]
+        assert H.j(d2["policy_decision"])["gross_edge_inputs"]["ok"] is True
+        assert not set(d2["refusals"]) & set(GEI.REFUSALS)
+        assert client.mutation_attempts == 0
+    finally:
+        await PL.purge_everything(conn)
+        await OS._clean(conn, SLUG)
+        await conn.close()
+
+
+@pytest.fixture
+def maker_only(monkeypatch):
+    monkeypatch.setenv(PB.ENV_FLAG, "on")
+    monkeypatch.setenv(PL.S.ENV_FLAG, "on")
+    PB._CONTEXT_CACHE.clear()
+    PD._CONTEXT_CACHE.clear()
+    for k in (CG, PB.MAKER_STRATEGY, PB.EXPLORE_STRATEGY, PB.CONTROL_KEY):
+        PL.set_policy_control(k, k == PB.MAKER_STRATEGY)
+    yield
+    # the migrated launch selection: CG and exploration on, maker and the
+    # strict benchmark off
+    for k in (CG, PB.MAKER_STRATEGY, PB.EXPLORE_STRATEGY, PB.CONTROL_KEY):
+        PL.set_policy_control(k, k in (CG, PB.EXPLORE_STRATEGY))
+    PB._CONTEXT_CACHE.clear()
+
+
+@pg
+async def test_the_maker_refuses_unvalidated_inputs_as_software(maker_only):
+    conn = await H.connect()
+    try:
+        now = time.time() + 5.0
+        await PL.purge_everything(conn)
+        await PL.purge_research_models(conn)
+        rec, comp = _home_and_complement(now - 2.0)
+        bad = copy.deepcopy(comp)
+        bad["probability"] = OS.GRE_P_STORED
+        t = PL.Transport(now)
+        t.books[SLUG] = {"offers": OS.GRE_OFFERS, "bids": OS.GRE_BIDS}
+        client = PL.client(t)
+
+        async def one_pass(tag, record):
+            acct = await PL.new_account(conn, tag, now=now)
+            vid = await ext.persist(conn, copy.deepcopy(record))
+            assert vid
+            t.t = max(t.t, now)
+            out = await PR.paper_pass(conn, now=now,
+                                      account_id=acct["account_id"],
+                                      market_data=client,
+                                      config=acct["config"], force=True,
+                                      fee_fn=None, sleep=_nosleep)
+            assert out["ran"] and not out["errors"], out["errors"]
+            return await conn.fetchrow(
+                "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
+                " strategy=$2 AND valuation_id=$3", acct["session_id"],
+                PB.MAKER_STRATEGY, vid)
+        # the double-inverted row alone (one maker entry per fixture would
+        # otherwise answer first, for whichever row the pass decided first)
+        d = await one_pass("geimaker", bad)
+        assert list(d["refusals"]) == [GEI.R_ORIENTATION], d["refusals"]
+        receipt = H.j(d["economics"])["gross_edge_inputs"]
+        assert receipt["ok"] is False
+        assert H.j(d["economics"])["resting_price"] in ({}, None)
+        # the well-formed home row: validated, then priced by the maker rule
+        h = await one_pass("geimaker2", rec)
+        assert H.j(h["economics"])["gross_edge_inputs"]["ok"] is True
+        assert not set(h["refusals"]) & set(GEI.REFUSALS)
+        assert client.mutation_attempts == 0
+    finally:
+        await PL.purge_everything(conn)
+        await OS._clean(conn, SLUG)
+        await conn.close()
+
+
+@pg
+async def test_an_off_cent_production_book_is_decided_on_its_economics(cg_on):
+    """The recorded Greece row on a book whose best offer is a sub-cent
+    0.155: still BELOW_MIN_GROSS_EDGE on the tradable 0.16 (economics), not
+    a SOFTWARE price-side refusal."""
+    conn = await H.connect()
+    try:
+        rec, _ = _home_and_complement(time.time() + 3.0)
+        acct, (d,) = await _decide(conn, [rec], offers=OFF_CENT_OFFERS,
+                                   bids=OS.GRE_BIDS, label="geioffcent")
+        assert d["refusals"] == [PB.R_EDGE], d["refusals"]
+        assert H.j(d["economics"])["gross_edge_inputs"]["ok"] is True
+        assert RT.decision_class(d["verdict"], d["refusals"]) == \
+            RT.REJECTED_ECONOMIC
+    finally:
+        await PL.purge_everything(conn)
+        await OS._clean(conn, SLUG)
+        await conn.close()
+
+
+# ── THE SOURCE-INSTANT LABEL IS STORED ON THE ROW ────────────────────
+
+@pg
+def test_the_source_instant_label_is_stored_on_the_row():
+    """bettor_pinnacle_devig sets observed_at_basis QUOTE_SOURCE_INSTANT_NOT_
+    AGED on a refusal before aging; the persisted row now carries it (it was
+    dropped by `persist`, so only age_s NULL told the cases apart), and the
+    table refuses the label on a row that was aged or priced."""
+    async def go():
+        conn = await H.connect()
+        slug = "aec-nfl-phi-den-2026-10-04-lbl%d" % int(time.time() * 1000)
+        try:
+            now = time.time()
+            rec = _nfl_record(now - 9.0, slug=slug, now=now)
+            assert rec["observed_at_basis"] == devig.OBSERVED_AT_NOT_AGED
+            vid = await ext.persist(conn, copy.deepcopy(rec))
+            row = await conn.fetchrow(
+                "SELECT observed_at_basis, age_s, probability, "
+                " extract(epoch from observed_at) AS obs "
+                " FROM external_valuations WHERE id=$1", vid)
+            assert row["observed_at_basis"] == devig.OBSERVED_AT_NOT_AGED
+            assert row["age_s"] is None and row["probability"] is None
+            assert float(row["obs"]) == pytest.approx(now - 9.0, abs=1e-3)
+            # a valued (aged) record carries no label
+            rec2, _ = _home_and_complement(now)
+            vid2 = await ext.persist(conn, copy.deepcopy(rec2))
+            assert await conn.fetchval(
+                "SELECT observed_at_basis FROM external_valuations "
+                " WHERE id=$1", vid2) is None
+            import asyncpg
+            with pytest.raises(asyncpg.CheckViolationError):
+                await conn.execute(
+                    "UPDATE external_valuations SET observed_at_basis=$2 "
+                    " WHERE id=$1", vid2, devig.OBSERVED_AT_NOT_AGED)
+            # and the rollback refuses rather than erase the label
+            tr = conn.transaction()
+            await tr.start()
+            try:
+                await conn.execute(
+                    "DELETE FROM external_valuations WHERE "
+                    "payout_is_complement OR observed_at IS NULL")
+                with pytest.raises(asyncpg.RaiseError,
+                                   match="labelled with their observed_at"):
+                    await conn.execute((MIG / "rollback" /
+                                        "251_external_valuations_one_per_"
+                                        "observation_per_side.down.sql")
+                                       .read_text())
+            finally:
+                await tr.rollback()
+        finally:
+            await OS._clean(conn, slug)
+            await OS._clean(conn, SLUG)
             await conn.close()
 
     asyncio.run(go())

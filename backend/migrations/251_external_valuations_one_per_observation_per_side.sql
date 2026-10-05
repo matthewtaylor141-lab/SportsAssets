@@ -35,12 +35,25 @@
 --    "observation clock collapse on refused de-vig"). The de-vig now records
 --    the quote's own source instant on those refusals
 --    (bettor_pinnacle_devig.valuation, observed_at_basis
---    QUOTE_SOURCE_INSTANT_NOT_AGED), so a re-read of an unchanged quote is
+--    QUOTE_SOURCE_INSTANT_NOT_AGED -- stored on the row, item 3), so a
+--    re-read of an unchanged quote is
 --    still one row and a moved quote is a new one -- exactly migration
 --    105's rule. Only a row with NO instant of any kind falls back to our
 --    receipt instant and then to the decision instant: with no provider
 --    clock, our own observation is the only honest identity it has (one row
 --    per evaluation, never one row for ever).
+--
+-- 3. WHICH CLOCK observed_at IS, ON THE ROW (review of this migration's
+--    first draft: the de-vig set the label but `persist` dropped it, so on
+--    the stored row only age_s NULL told a never-aged source instant from
+--    an aged reading). New column observed_at_basis: NULL for every aged
+--    reading (and for every row written before this migration), or
+--    'QUOTE_SOURCE_INSTANT_NOT_AGED' -- the provider's own instant of a
+--    quote the de-vig refused before aging, so it never carries an age or a
+--    probability. The CHECK holds exactly that. It is added NOT VALID
+--    because the column is new: every existing row holds NULL, so the
+--    validation scan of this large table would prove nothing; every row
+--    written from here on is checked (the precedent of 106 and 108).
 --
 -- HISTORY IS KEPT AS IT IS. The `observed_at IS NULL` term keeps every
 -- NULL-instant row apart from every timed row, and among NULL-instant rows
@@ -71,3 +84,29 @@ COMMENT ON INDEX external_valuations_one_per_observation IS
     'instant is keyed on our receipt / decision instant instead of '
     'collapsing onto -infinity for ever (the NFL slate stopped valuing at '
     '13:28Z on 2026-10-04).';
+
+ALTER TABLE external_valuations
+    ADD COLUMN IF NOT EXISTS observed_at_basis text;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                    WHERE conname = 'external_valuations_observed_at_basis_known'
+                      AND conrelid = 'external_valuations'::regclass) THEN
+        ALTER TABLE external_valuations
+            ADD CONSTRAINT external_valuations_observed_at_basis_known
+            CHECK (observed_at_basis IS NULL
+                   OR (observed_at_basis = 'QUOTE_SOURCE_INSTANT_NOT_AGED'
+                       AND observed_at IS NOT NULL
+                       AND age_s IS NULL
+                       AND probability IS NULL))
+            NOT VALID;
+    END IF;
+END $$;
+
+COMMENT ON COLUMN external_valuations.observed_at_basis IS
+    'Which clock observed_at is. NULL: an aged reading (or a row written '
+    'before migration 251). QUOTE_SOURCE_INSTANT_NOT_AGED: the quote''s own '
+    'source instant, recorded on a de-vig refusal that came before the aging '
+    'step -- never aged, so no age, freshness verdict or probability is '
+    'derived from it.';

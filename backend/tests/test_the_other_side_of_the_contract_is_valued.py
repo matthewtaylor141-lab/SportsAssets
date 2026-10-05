@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import pathlib
 import time
 
@@ -415,12 +414,20 @@ def test_the_old_key_swallowed_the_complement_and_251_keeps_it():
                        "251_external_valuations_one_per_observation_per_"
                        "side.down.sql").read_text()
                 # (rolled back) the rows 106's key cannot hold -- other
-                # proofs' complements and no-instant rows -- are cleared so
-                # the rollback's own guard lets it apply here
+                # proofs' complements and no-instant rows -- and rows
+                # labelled with their clock (which the rollback refuses to
+                # erase) are cleared so the rollback's own guard lets it
+                # apply here
                 await conn.execute(
                     "DELETE FROM external_valuations WHERE "
-                    "payout_is_complement OR observed_at IS NULL")
+                    "payout_is_complement OR observed_at IS NULL "
+                    "OR observed_at_basis IS NOT NULL")
                 await conn.execute(old)
+                # THE KEY is what this half reproduces: the writer under test
+                # also writes 251's label column, put back bare (no CHECK)
+                # inside this rolled-back transaction
+                await conn.execute("ALTER TABLE external_valuations ADD "
+                                   "COLUMN observed_at_basis text")
                 assert await ext.persist(conn, copy.deepcopy(rec))
                 assert await ext.persist(conn, copy.deepcopy(comp)) is None
             finally:
@@ -488,7 +495,8 @@ def test_the_rollback_refuses_while_complement_rows_exist():
             try:
                 await conn.execute(
                     "DELETE FROM external_valuations WHERE "
-                    "payout_is_complement OR observed_at IS NULL")
+                    "payout_is_complement OR observed_at IS NULL "
+                    "OR observed_at_basis IS NOT NULL")
                 await conn.execute(down)
                 d = await conn.fetchval(
                     "SELECT indexdef FROM pg_indexes WHERE indexname="
@@ -655,14 +663,18 @@ async def test_a_qualifying_other_side_enters_and_xavier_measures_it(cg_on):
 
 
 @pg
-async def test_a_strategy_never_holds_both_sides_of_one_contract(
+async def test_holding_the_other_side_is_recorded_and_gates_nothing(
         cg_on, monkeypatch):
     """BOTH SIDES ARE NOW VALUED, so a strategy holding one side of a binary
-    contract could be handed the other: holding both pays exactly 1 whatever
-    happens -- a locked spread-and-fees loss, or an exit dressed as a new
-    entry (exits are management's). Under the owner's capital policy (the
-    same scope as THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT) the decision is a
-    named REFUSE and the account lock refuses the order too."""
+    contract can be handed the other. The first version of this branch
+    REFUSED that entry (THIS_STRATEGY_HOLDS_THE_OTHER_SIDE_OF_THIS_CONTRACT,
+    at the decision and under the account lock) -- a new paper risk-admission
+    rule the owner did not ask for (review of 7bd084b; owner 2026-10-04: "do
+    NOT change ... concentration / sizing / risk limits"). It only tightened,
+    but a rule is the owner's to add. So the fact is RECORDED on the decision
+    (`opposite_side_held`, with what it means) for the owner's decision, and
+    the risk rules are exactly the base's: the later side is decided on its
+    own economics and the account lock applies only its existing checks."""
     from sportsassets import bettor_paper_ledger as L
     from sportsassets import bettor_paper_limits as LIMITS
     conn = await H.connect()
@@ -699,7 +711,8 @@ async def test_a_strategy_never_holds_both_sides_of_one_contract(
             " valuation_id=$2 AND strategy=$3", acct["session_id"], cid, CG)
         assert c["verdict"] == "ENTER" and c["holding_side"] == "SHORT"
         # 2 · a later valuation makes the HOME side (LONG, Greece) clear the
-        # threshold on its own book: it is refused by name, not entered
+        # threshold on its own book: decided on its economics, the held
+        # other side RECORDED beside it, no new refusal
         now2 = now + 30.0
         rec2, *_ = _home_record(slug, {"Draw": 3.10, "Greece": 2.60,
                                        "Germany": 2.90}, offers, bids,
@@ -716,20 +729,18 @@ async def test_a_strategy_never_holds_both_sides_of_one_contract(
             "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
             " valuation_id=$2 AND strategy=$3", acct["session_id"], hid, CG)
         assert h is not None and h["holding_side"] == "LONG"
-        assert h["verdict"] == "REFUSE"
-        assert L.R_OPPOSITE_SIDE_HELD in list(h["refusals"]), h["refusals"]
-        assert H.j(h["pinnacle"])["opposite_side_held"]
-        assert await conn.fetchval(
-            "SELECT count(*) FROM paper_orders WHERE account_id=$1 AND "
-            " us_market_slug=$2 AND holding_side='LONG'",
-            acct["account_id"], slug) == 0
-        # 3 · and the account lock refuses such an order outright
+        assert h["verdict"] == "ENTER", h["refusals"]
+        pin = H.j(h["pinnacle"])
+        assert pin["opposite_side_held"], pin.get("opposite_side_held")
+        assert pin["opposite_side_held_is"] == L.OPPOSITE_SIDE_HELD_IS
+        assert not hasattr(L, "R_OPPOSITE_SIDE_HELD")
+        # 3 · and the account lock applies only its existing rules: the
+        # same order is not refused for holding the other side
         o = H.order(acct, key="box-long", slug=slug, qty=10, limit=0.30,
                     holding_side="LONG", at=now2, fixture=None)
         o["strategy"] = CG
         got = await L.submit_order(conn, o, fee_fn=H.zero_fee, now=now2)
-        assert got["ok"] is False
-        assert got["refusal"] == L.R_OPPOSITE_SIDE_HELD and got["under_lock"]
+        assert "OTHER_SIDE" not in str(got.get("refusal") or ""), got
         assert client.mutation_attempts == 0
     finally:
         await PL.purge_everything(conn)

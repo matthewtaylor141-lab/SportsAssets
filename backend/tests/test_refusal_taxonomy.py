@@ -61,7 +61,8 @@ def test_every_refusal_constant_in_the_code_base_is_classified():
     consts = _constants()
     assert len(consts) > 1000, "the enumeration found too few constants"
     missing = {c: where for c, where in consts.items()
-               if c not in TT.TABLE and c not in TT.NOT_REFUSAL}
+               if c not in TT.TABLE and c not in TT.NOT_REFUSAL
+               and c not in TT.WRAPPERS}
     assert not missing, (
         "UNCLASSIFIED REFUSAL CODES -- add each to "
         "sportsassets/refusal_taxonomy_table.py with its class, family and "
@@ -81,6 +82,7 @@ def test_every_row_is_a_valid_class_family_and_stage():
         assert RT.normalize(code) == code, "key is not normalized: %r" % code
     assert not bad, bad
     assert not set(TT.TABLE) & set(TT.NOT_REFUSAL)
+    assert not set(TT.WRAPPERS) & (set(TT.TABLE) | set(TT.NOT_REFUSAL))
     assert all(isinstance(v, str) and len(v) > 10
                for v in TT.NOT_REFUSAL.values())
 
@@ -185,3 +187,47 @@ def test_the_taxonomy_is_pure():
                 mods |= {a.name for a in n.names}
         assert mods <= {"__future__", "annotations", "re", ".",
                         "refusal_taxonomy_table"}, (name, mods)
+
+
+#: REVIEW OF 7bd084b: these were ECONOMIC / RISK_RAIL. Each says the software
+#: does not have, or could not read, something it needs -- DATA, which the
+#: taxonomy's own definition puts under SOFTWARE.
+DATA_GAPS_ARE_NOT_RISK_RAILS = (
+    "ACCOUNT_ID_NOT_SUPPLIED", "ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED",
+    "ACCOUNT_WIDE_EXPOSURE_WAS_NOT_SUPPLIED",
+    "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED", "R_ACCOUNT_EXPOSURE_UNREADABLE",
+    "THE_APPROVED_LIMIT_SET_WAS_NOT_SUPPLIED_TO_COMPARE",
+    "LIVE_POLICY_ROW_MISSING_OR_UNREADABLE")
+
+
+def test_a_data_gap_is_software_never_a_risk_rail():
+    for code in DATA_GAPS_ARE_NOT_RISK_RAILS:
+        got = RT.classify(code)
+        assert (got["class"], got["family"]) == ("SOFTWARE", "DATA"), got
+        assert RT.decision_class("REFUSE", [code]) == RT.REJECTED_SOFTWARE
+    # the rails that ARE deliberate stay economic
+    for code in ("ABOVE_THE_PER_ORDER_CAP", "ABOVE_THE_MAXIMUM_CONCURRENT_"
+                 "GROUPS", "THIS_STRATEGY_ALREADY_HOLDS_THIS_CONTRACT"):
+        assert RT.classify(code)["class"] == "ECONOMIC", code
+
+
+def test_the_risk_wrapper_is_classified_by_the_code_it_wraps():
+    w = "PAPER_RISK_REFUSED_THE_ORDER"
+    alone = RT.classify(w)
+    assert not alone["classified"] and alone["class"] == RT.UNCLASSIFIED
+    assert "WRAPPER" in alone["why"]
+    # never economic on its own
+    assert RT.decision_class("REFUSE", [w]) == RT.REJECTED_UNCLASSIFIED
+    cap = RT.classify_wrapped(w, "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP")
+    assert cap["class"] == "ECONOMIC" and cap["wrapped_by"] == w
+    for inner in ("THE_ORDER_IS_MALFORMED", "NOT_A_PAPER_IDENTIFIER",
+                  "THE_PAPER_ACCOUNT_DOES_NOT_EXIST"):
+        k = RT.classify_wrapped(w, inner)
+        assert k["class"] == "SOFTWARE" and k["wrapped_by"] == w, inner
+    none = RT.classify_wrapped(w, None)
+    assert none["class"] == RT.UNCLASSIFIED and none["wrapped_by"] == w
+    assert RT.classify_wrapped(w, "A_CODE_NOBODY_CLASSIFIED")["class"] == \
+        RT.UNCLASSIFIED
+    # a code that wraps nothing is classified as itself
+    assert RT.classify_wrapped("BELOW_MIN_GROSS_EDGE", "X")["class"] == \
+        "ECONOMIC"

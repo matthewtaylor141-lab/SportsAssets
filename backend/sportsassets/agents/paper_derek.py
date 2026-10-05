@@ -56,6 +56,7 @@ from typing import Any
 from .. import bettor_paper_guard as G
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
+from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 
 VERSION = "PAPER_DEREK_V1"
@@ -473,6 +474,8 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     if not model.get("ok"):
         refusals.append(model.get("refusal") or R_NO_RESEARCH_MODEL)
     obs, md, levels, internal = None, None, [], None
+    gross_inputs: dict | None = None
+    fee_fn = ctx.get("fee_fn")
     if not refusals:
         # THE BOOK IS READ ONLY FOR A CANDIDATE THAT COULD STILL ENTER.
         if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
@@ -490,19 +493,48 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         elif obs.get("error") or not levels:
             refusals.append(R_NO_BOOK)
         else:
-            internal = score(model, price=levels[0]["price"],
-                             payout_is_complement=bool(
-                                 cand.get("payout_is_complement")))
-            if not internal.get("ok"):
-                refusals.append(internal["refusal"])
+            # THE GROSS EDGE'S INPUTS, VALIDATED BEFORE V2 JUDGES THE EDGE
+            # (P0 incident; review of 7bd084b: only the completed-game
+            # policy carried the receipt, so Derek still recorded
+            # BELOW_MIN_GROSS_EDGE on inputs nothing had checked). The same
+            # checks as every policy: the Pinnacle p is the held side's (the
+            # de-vig recomputed from the row's own prices), the price is the
+            # side a BUY consumes, the fee evaluates, the Pinnacle age is
+            # inside its unchanged rule. This policy reads its own book
+            # inside the decision and has no book-age bound; none is added
+            # (book_max_age_s None: the age is recorded, an unknown receipt
+            # instant fails). A failed input is a SOFTWARE refusal by name
+            # and the V2 combination is not run on it -- never an economic
+            # verdict on unvalidated numbers. No threshold moves.
+            gross_inputs = GEI.validate(
+                p=pin.get("p"), side=side, row=row, levels=levels,
+                consumed_side=lv["side"], md=md,
+                fee_per_contract=(lambda px: float(L._fee(fee_fn, 1, px,
+                                                          at))),
+                pin=pin, decided_at=at,
+                edge_at=(float(ctx["clock"]()) if ctx.get("clock")
+                         else at),
+                book_observed_at=obs.get("observed_at"),
+                book_max_age_s=None,
+                threshold_edge_pp=round(float(ent["min_gross_edge_pp"])
+                                        * 100.0, 9))
+            pin["gross_edge_inputs"] = gross_inputs
+            if not gross_inputs["ok"]:
+                refusals.extend(r for r in gross_inputs["refusals"]
+                                if r not in refusals)
+            else:
+                internal = score(model, price=levels[0]["price"],
+                                 payout_is_complement=bool(
+                                     cand.get("payout_is_complement")))
+                if not internal.get("ok"):
+                    refusals.append(internal["refusal"])
     # ── THE V2 COMBINATION, on the observed book ─────────────────────
     params = {"min_gross_edge_pp": float(ent["min_gross_edge_pp"]),
               "min_net_ev_usd": float(ent["min_net_ev_usd"])}
     pd, econ, sized = None, None, {"qty": 0, "limit": None}
     p_int = (internal or {}).get("p")
     p_blend = DP.blend(p_int, pin.get("p")) if p_int is not None else None
-    fee_fn = ctx.get("fee_fn")
-    if levels and p_blend is not None:
+    if levels and p_blend is not None and (gross_inputs or {}).get("ok"):
         maxfee1 = float(L.max_fee_for(1, 0.5, at=at, fee_fn=fee_fn))
         sized = size_and_limit(
             levels, p_blended=p_blend,
@@ -536,6 +568,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                 "compatibility") == "COMPATIBLE"),
             policy_version=DP.POLICY_V2)
         pd["instrument"] = label
+        pd["gross_edge_inputs"] = GEI.summary(gross_inputs)
         refusals.extend(r for r in pd["refusals"] if r not in refusals)
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)

@@ -836,12 +836,15 @@ tests/test_the_other_side_of_the_contract_is_valued.py
 # (251) P0 INCIDENT inc-edge: one valuation per observation per side without
 # the NULL collapse (the de-vig records the quote's source instant on a
 # pre-aging refusal); the gross edge's inputs validated per decision
-# (orientation recomputed from the row's own prices, the BUY side of the book,
-# fee, Pinnacle age at the decision instant, book bound) -- a failing input is
-# a SOFTWARE refusal, never BELOW_MIN_GROSS_EDGE; thresholds unchanged.
+# (orientation recomputed from the row's own prices, the BUY side of the book
+# on the adapter's cent grid, a declared venue conversion re-derived, fee,
+# Pinnacle age at the decision instant, book bound) for CG, Derek V2 and the
+# maker -- a failing input is a SOFTWARE refusal, never BELOW_MIN_GROSS_EDGE;
+# thresholds unchanged; the source-instant label is stored on the row.
 tests/test_gross_edge_inputs_are_validated.py
 # P0 INCIDENT inc-edge: a quote the provider delivered inside 30 s and our own
-# queue made stale is refreshed on demand (bounded); the 30 s rule, its clock
+# queue made stale can be refreshed on demand -- OFF by default (no extra
+# metered credit until the owner sets the bound); the 30 s rule, its clock
 # and its instant unchanged; provider-stale quotes never refreshed.
 tests/test_quote_stale_on_arrival_is_not_self_inflicted.py
 # P0 INCIDENT inc-edge (router): the per-agent funnel receipt over the real

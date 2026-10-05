@@ -209,12 +209,17 @@ def test_an_entry_decision_writes_the_same_row_as_before():
     asyncio.run(ext.persist(r, default))
     (sql, args), = r.calls
     assert sql is ext.INSERT
-    assert len(args) == 50
+    # 51, not 50: migration 251 added ONE column, observed_at_basis (which
+    # clock observed_at is). It is NULL for every aged reading, so an entry
+    # decision's row is the row it always was plus one NULL; the 48 golden
+    # values and the purpose pair below are unchanged.
+    assert len(args) == 51
     now = json.loads(json.dumps(list(args[:48]), default=str))
     assert len(now) == len(GOLDEN_ENTRY_VALUES_AT_BASE) == 48
     for i, (a, b) in enumerate(zip(now, GOLDEN_ENTRY_VALUES_AT_BASE)):
         assert _same(a, b), (i, a, b)
-    assert args[48:] == (vp.ENTRY_DECISION, None)
+    assert args[48:50] == (vp.ENTRY_DECISION, None)
+    assert args[50] is None                      # observed_at_basis ($51)
 
 
 def test_a_calibration_record_is_written_with_its_purpose_and_evidence():
@@ -223,7 +228,8 @@ def test_a_calibration_record_is_written_with_its_purpose_and_evidence():
     asyncio.run(ext.persist(r, rec))
     (sql, args), = r.calls
     assert sql is ext.INSERT
-    assert len(args) == 50
+    # 51: migration 251's observed_at_basis is the last value (see above)
+    assert len(args) == 51
     assert args[48] == vp.CALIBRATION_ONLY
     assert json.loads(args[49])["usable_for_orders"] is False
     # the executable-price and size columns go down empty
@@ -1293,7 +1299,10 @@ async def test_with_currency_established_the_entry_path_is_unchanged(
         r = _Recorder()
         await ext.persist(r, rec)
         assert r.calls[0][0] is ext.INSERT
-        assert r.calls[0][1][48:] == (vp.ENTRY_DECISION, None)
+        # [48:50]: migration 251 appended observed_at_basis ($51), NULL for
+        # an aged reading -- the purpose pair itself is unchanged
+        assert r.calls[0][1][48:50] == (vp.ENTRY_DECISION, None)
+        assert r.calls[0][1][50] is None
         row = await conn.fetchrow(
             "SELECT record_purpose, calibration_only_evidence, admissible, "
             "decision, executable_price, proposed_size, execution_estimate "

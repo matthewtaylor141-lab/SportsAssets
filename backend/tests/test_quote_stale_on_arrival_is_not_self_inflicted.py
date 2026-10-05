@@ -7,10 +7,19 @@ sport fetch and the candidates behind it wait on paced venue reads (~5-6 s per
 queue position). The provider handed the quote over in time; our own queue
 made it stale.
 
-THE REPAIR: an on-demand provider refresh for exactly that case
-(`ADAPTIVE_ODDS_REFETCH_RULE`). Proved here through the REAL scheduled cycle
-(`ext_pinnacle_loop.cycle`) over the production-shaped single-event fixture,
-with the provider's HTTP substituted:
+THE MECHANISM: an on-demand provider refresh for exactly that case
+(`ADAPTIVE_ODDS_REFETCH_RULE`) -- OFF BY DEFAULT (review of 7bd084b). Each
+refresh is a metered the-odds-api fetch: up to 4 more per sport per cycle
+(16 more on a 4-sport cycle, against 4 today), and the incident's root
+causes treat the metered budget as the OWNER's resource decision (RC8). It
+also re-reads the provider rather than removing our serial, paced venue
+reads, so it spends credits on STILL_STALE outcomes too. At the default (0)
+no extra credit is spent: every candidate our delay made stale is COUNTED
+(`capped`, "would refresh") and refused QUOTE_STALE_ON_ARRIVAL by name, so
+the owner sees exactly what enabling it would cost and save. Proved here
+through the REAL scheduled cycle (`ext_pinnacle_loop.cycle`) over the
+production-shaped single-event fixture, with the provider's HTTP substituted
+(the enabled cases set the bound explicitly, as the owner would):
 
   * provider fresh at receipt, stale on arrival through our delay -> one
     refresh, the candidate is judged on the provider's current quote (its
@@ -103,11 +112,41 @@ async def _run(monkeypatch, answers):
 
 @pg
 @pytest.mark.asyncio
+async def test_by_default_no_extra_metered_credit_is_spent(monkeypatch):
+    """THE DEFAULT (review of 7bd084b): the same our-delay-made-it-stale
+    candidate is NOT refreshed -- one provider fetch, as today -- and is
+    refused QUOTE_STALE_ON_ARRIVAL by name, counted as one refresh the
+    owner's setting would have made."""
+    assert loop.ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT == 0
+    conn, F, venue, out, calls, handed = await _run(
+        monkeypatch, [(-40.0, -45.0), (0.0, -2.0)])
+    try:
+        assert out["ran"] is True, out.get("why")
+        assert len(calls) == 1                     # no extra metered fetch
+        fr = out["odds_freshness"]
+        assert fr["adaptive_refetch"] == {"fired": 0, "saved": 0,
+                                          "still_stale": 0, "failed": 0,
+                                          "capped": 1}
+        assert fr["adaptive_refetch_max_per_sport"] == 0
+        assert "owner" in fr["adaptive_refetch_rule"]
+        assert out["refusals"].get(loop.R_QUOTE_STALE_ON_ARRIVAL) == 1
+        assert out["latency"]["stale_on_arrival_due_to_our_processing"] == 1
+        assert handed == []
+        assert venue.creates_sent() == []
+    finally:
+        await F.clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
 async def test_a_quote_our_delay_made_stale_is_refreshed_and_judged(
         monkeypatch):
-    """Received 40 s ago with a 5 s provider lag (fresh at receipt), 45 s old
-    at arrival: our delay. One refresh; the candidate is judged on the
-    provider's current quote and recorded with ITS last_update."""
+    """ENABLED (the owner's bound, 4): received 40 s ago with a 5 s
+    provider lag (fresh at receipt), 45 s old at arrival: our delay. One
+    refresh; the candidate is judged on the provider's current quote and
+    recorded with ITS last_update."""
+    monkeypatch.setattr(loop, "ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT", 4)
     conn, F, venue, out, calls, handed = await _run(
         monkeypatch, [(-40.0, -45.0), (0.0, -2.0)])
     try:
@@ -168,6 +207,7 @@ async def test_a_quote_the_provider_delivered_stale_is_never_refreshed(
 async def test_a_refresh_still_over_the_limit_is_refused_by_name(monkeypatch):
     """The refresh returns a quote that is again ours-stale: refused
     QUOTE_STALE_ON_ARRIVAL; the limit is not bent to admit it."""
+    monkeypatch.setattr(loop, "ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT", 4)
     conn, F, venue, out, calls, handed = await _run(
         monkeypatch, [(-40.0, -45.0), (-40.0, -45.0)])
     try:
@@ -203,3 +243,6 @@ def test_the_rule_is_stated_and_the_limit_is_unchanged():
     assert loop.EVENTS_PER_ODDS_FETCH == loop.MAX_PER_CYCLE   # default kept
     assert "unchanged" in loop.ADAPTIVE_ODDS_REFETCH_RULE
     assert "never refreshed" in loop.ADAPTIVE_ODDS_REFETCH_RULE
+    # the metered budget is the owner's: off until the owner sets a bound
+    assert loop.ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT == 0
+    assert "owner" in loop.ADAPTIVE_ODDS_REFETCH_RULE

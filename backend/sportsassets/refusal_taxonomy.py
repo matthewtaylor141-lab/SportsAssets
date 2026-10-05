@@ -115,11 +115,28 @@ def classify(code) -> dict:
     row = T.TABLE.get(c) if c is not None else None
     if row is None:
         why = ("DECLARED_NOT_A_REFUSAL_CODE: %s" % T.NOT_REFUSAL[c]
-               if c in T.NOT_REFUSAL else "NOT_IN_THE_REFUSAL_TAXONOMY")
+               if c in T.NOT_REFUSAL else
+               "A_WRAPPER_IS_CLASSIFIED_BY_THE_CODE_IT_WRAPS: %s"
+               % T.WRAPPERS[c] if c in T.WRAPPERS
+               else "NOT_IN_THE_REFUSAL_TAXONOMY")
         return {"code": c, "class": UNCLASSIFIED, "family": None,
                 "stage": None, "classified": False, "why": why}
     return {"code": c, "class": row[0], "family": row[1], "stage": row[2],
             "classified": True}
+
+
+def classify_wrapped(code, inner) -> dict:
+    """A wrapper code (`refusal_taxonomy_table.WRAPPERS`, e.g. PAPER_RISK_
+    REFUSED_THE_ORDER) classified by the code it carries (`inner`), named as
+    `wrapped_by`; an unknown or absent inner code is UNCLASSIFIED, never
+    economic. Any other code is classified as itself."""
+    c = normalize(code)
+    if c not in T.WRAPPERS:
+        return classify(code)
+    k = classify(inner) if normalize(inner) else {
+        "code": None, "class": UNCLASSIFIED, "family": None, "stage": None,
+        "classified": False, "why": "THE_WRAPPER_CARRIES_NO_INNER_CODE"}
+    return dict(k, wrapped_by=c)
 
 
 def decision_class(verdict, refusals) -> str:
@@ -181,4 +198,5 @@ def describe() -> dict:
             "families": {k: list(v) for k, v in FAMILIES.items()},
             "stages": list(STAGES), "codes": len(T.TABLE),
             "declared_not_refusals": len(T.NOT_REFUSAL),
+            "wrappers": sorted(T.WRAPPERS),
             "codes_by_class_and_family": by}

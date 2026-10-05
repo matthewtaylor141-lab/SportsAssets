@@ -30,15 +30,15 @@ TABLE = {
     "ACCEPTANCE_EXISTING_POSITION_LOOKUP_FAILED": (S, DATA, "PROBABILITY"),
     "ACCOUNT_ACCOUNTING_IS_NOT_RESOLVED": (E, RAIL, "RISK_ADMISSION"),
     "ACCOUNT_ID_NOT_IN_THE_CANONICAL_REGISTRY": (E, RAIL, "RISK_ADMISSION"),
-    "ACCOUNT_ID_NOT_SUPPLIED": (E, RAIL, "RISK_ADMISSION"),
+    "ACCOUNT_ID_NOT_SUPPLIED": (S, DATA, "RISK_ADMISSION"),
     "ACCOUNT_IS_NOT_ACTIVE": (E, RAIL, "RISK_ADMISSION"),
     "ACCOUNT_IS_PAUSED": (E, RAIL, "RISK_ADMISSION"),
     "ACCOUNT_OR_ORDER_STATE_STALE": (S, FRESH, "RISK_ADMISSION"),
     "ACCOUNT_STATE_NOT_CURRENT": (S, FRESH, "RISK_ADMISSION"),
-    "ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED": (E, RAIL, "ORDER"),
-    "ACCOUNT_WIDE_EXPOSURE_WAS_NOT_SUPPLIED": (E, RAIL, "ORDER"),
+    "ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED": (S, DATA, "ORDER"),
+    "ACCOUNT_WIDE_EXPOSURE_WAS_NOT_SUPPLIED": (S, DATA, "ORDER"),
     "ACQUISITION_LADDER_NOT_READABLE": (S, DATA, "ORDER"),
-    "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED": (E, RAIL, "RISK_ADMISSION"),
+    "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED": (S, DATA, "RISK_ADMISSION"),
     "ACTION_HAS_NO_VENUE_TRANSLATION": (S, CAP, "MANAGEMENT"),
     "ACTUAL_LANE_DISABLED": (E, RAIL, "RISK_ADMISSION"),
     "ACTUAL_LANE_STOPPED": (E, RAIL, "RISK_ADMISSION"),
@@ -637,7 +637,6 @@ TABLE = {
     "PAPER_BENCHMARK_ENVIRONMENT_FLAG_IS_NOT_ON": (E, RAIL, "RISK_ADMISSION"),
     "PAPER_BOOK_READ_DEADLINE_EXCEEDED": (S, FRESH, "ORDER"),
     "PAPER_PATH_VENUE_MUTATION_REFUSED_BEFORE_TRANSMISSION": (S, INT, "ORDER"),
-    "PAPER_RISK_REFUSED_THE_ORDER": (E, RAIL, "RISK_ADMISSION"),
     "PAPER_SESSION_ENVIRONMENT_FLAG_IS_NOT_ON": (E, RAIL, "RISK_ADMISSION"),
     "PAPER_SESSION_NOT_ENABLED": (E, RAIL, "RISK_ADMISSION"),
     "PAYOUT_IDENTITY_NOT_STATED_ON_THE_ROW": (S, SET, "MANAGEMENT"),
@@ -732,7 +731,7 @@ TABLE = {
     "ROW_CARRIES_NO_PROBABILITY": (S, DATA, "MANAGEMENT"),
     "ROW_PRICES_A_DIFFERENT_PAYOUT_EVENT": (S, SET, "MANAGEMENT"),
     "RUNTIME_CLOCK_NOT_SUPPLIED": (S, FRESH, "PROBABILITY"),
-    "R_ACCOUNT_EXPOSURE_UNREADABLE": (E, RAIL, "RISK_ADMISSION"),
+    "R_ACCOUNT_EXPOSURE_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
     "R_ACCOUNT_ISOLATION_NOT_DEMONSTRATED": (E, RAIL, "RISK_ADMISSION"),
     "SAME_BOOK_EVIDENCE_INCONCLUSIVE": (S, DATA, "FRESHNESS"),
     "SAME_DAY_RUN_IS_THE_SCHEDULED_STEPS": (S, CAP, "PROBABILITY"),
@@ -870,7 +869,7 @@ TABLE = {
     "THE_AGENT_POLICY_VERSIONS_TABLE_IS_NOT_IN_THIS_DATABASE": (S, CAP, "MANAGEMENT"),
     "THE_AGENT_TASK_TABLES_ARE_NOT_IN_THIS_DATABASE": (S, CAP, "OUT_OF_FUNNEL"),
     "THE_APPROVAL_BASIS_CHANGED_SINCE_EVALUATION": (E, RAIL, "OUT_OF_FUNNEL"),
-    "THE_APPROVED_LIMIT_SET_WAS_NOT_SUPPLIED_TO_COMPARE": (E, RAIL, "ORDER"),
+    "THE_APPROVED_LIMIT_SET_WAS_NOT_SUPPLIED_TO_COMPARE": (S, DATA, "ORDER"),
     "THE_APPROVED_MODELS_TRAINING_RECORDS_NO_LONGER_REPRODUCE": (S, INT, "PROBABILITY"),
     "THE_APPROVER_PROPOSED_OR_EVALUATED_THIS_CANDIDATE": (E, RAIL, "OUT_OF_FUNNEL"),
     "THE_ARTIFACT_TESTS_DID_NOT_PASS": (S, CAP, "OUT_OF_FUNNEL"),
@@ -1466,7 +1465,7 @@ SIBLING_STREAMS = {
     "HEDGE_LEG_NOT_SETTLED": (S, DATA, "ACCOUNTING"),
     "IDENTITY_NOT_ESTABLISHED_SAME_COMPETITION_IN_THE_WINDOW": (S, MAP, "RISK_ADMISSION"),
     "LIVE_GATE_APPROVAL_ABSENT_OR_STALE": (E, RAIL, "RISK_ADMISSION"),
-    "LIVE_POLICY_ROW_MISSING_OR_UNREADABLE": (E, RAIL, "RISK_ADMISSION"),
+    "LIVE_POLICY_ROW_MISSING_OR_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
     "LIVE_POLICY_SHA_MISMATCH": (E, RAIL, "RISK_ADMISSION"),
     "LIVE_POLICY_VERSION_NOT_APPROVED": (E, RAIL, "RISK_ADMISSION"),
     "LIVE_SHADOW_FILL_IS_TAUTOLOGICAL_AT_LIVE_SCALE": (S, CAP, "FILL"),
@@ -1537,10 +1536,6 @@ INCIDENT_STREAMS = {
     "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET":
         (S, FRESH, "FILL"),
     "ENTER_WITHOUT_ORDER": (S, INT, "ORDER"),
-    # a strategy never holds both sides of one binary contract (the owner's
-    # same-contract rule, now that both sides are valued)
-    "THIS_STRATEGY_HOLDS_THE_OTHER_SIDE_OF_THIS_CONTRACT":
-        (E, RAIL, "RISK_ADMISSION"),
     # our own venue request gate refused to dispatch (pacing, not the venue)
     "VENUE_GATE_COOLDOWN": (S, CAP, "VENUE_BOOK"),
     "VENUE_RATE_LIMITED": (S, DATA, "VENUE_BOOK"),
@@ -1562,11 +1557,37 @@ INCIDENT_STREAMS = {
     "GROSS_EDGE_INPUT_FEE_NOT_EVALUABLE": (S, DATA, "EV"),
     "GROSS_EDGE_INPUT_PINNACLE_AGE_NOT_WITHIN_LIMIT": (S, FRESH, "EV"),
     "GROSS_EDGE_INPUT_BOOK_AGE_NOT_WITHIN_LIMIT": (S, FRESH, "EV"),
+    # a declared venue conversion of the row's probability (the NFL money
+    # line's tie conversion) that its own formula does not reproduce
+    "GROSS_EDGE_INPUT_VENUE_CONVERSION_NOT_REPRODUCIBLE": (S, INT, "EV"),
 }
 
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())):
     TABLE.setdefault(_k, _v)
+
+#: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
+#: although each says the software lacks or could not read something (an
+#: account id not supplied, exposure that could not be measured or was not
+#: supplied, an action whose exposure effect is not identified, an approved
+#: limit set not supplied, a live-policy row missing or unreadable). By the
+#: taxonomy's own definition DATA the software does not have or could not
+#: read is SOFTWARE: they are now SOFTWARE / DATA at the same stage, so a
+#: refusal carrying one is never reported REJECTED_ECONOMIC.
+
+#: A REFUSAL THAT WRAPS ANOTHER: its class is the class of the code it
+#: carries, so the code alone is never classified (classify() reports it
+#: UNCLASSIFIED by name; refusal_taxonomy.classify_wrapped reads the inner
+#: code). PAPER_RISK_REFUSED_THE_ORDER is the finding a paper strategy
+#: writes when `bettor_paper_ledger.submit_order` refuses its order, with the
+#: ledger's own refusal at detail.refusal -- a cap or the same-contract rule
+#: (ECONOMIC) but also THE_ORDER_IS_MALFORMED, NOT_A_PAPER_IDENTIFIER or
+#: THE_PAPER_ACCOUNT_DOES_NOT_EXIST (SOFTWARE). It was a single ECONOMIC row.
+WRAPPERS = {
+    "PAPER_RISK_REFUSED_THE_ORDER":
+        "detail.refusal of the paper_audrey_findings row: the paper ledger's "
+        "own refusal of the order (bettor_paper_ledger.submit_order)",
+}
 
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.

@@ -24,7 +24,16 @@ writers already keep -- nothing new is written:
                       counted as economic
   ENTER               decided ENTER
   ORDER               PAPER orders created for those ENTERs
-  ENTER_WITHOUT_ORDER ENTERs with no paper order (the backstop's finding)
+  ORDER_REFUSED_BY_RISK  ENTERs whose order the paper risk check refused
+                      (`submit_order` writes no order row, only the
+                      PAPER_RISK_REFUSED_THE_ORDER finding naming its own
+                      refusal) -- each classified by the code it wraps: a
+                      cap is ECONOMIC, a malformed order SOFTWARE
+  ORDER_PENDING       ENTERs younger than the backstop's threshold with no
+                      order and no refusal yet: the order is in flight
+  ENTER_WITHOUT_ORDER ENTERs past that threshold with neither an order nor
+                      a refusal -- exactly the ENTERs the backstop
+                      (`paper_derek.step_enter_backstop`) names
   FILL                PAPER orders with at least one simulated fill
 
 Every code is classified by the ONE taxonomy (`refusal_taxonomy`): SOFTWARE
@@ -51,7 +60,17 @@ MAX_CODES = 60
 
 STAGES = ("RECEIVED", "NOT_DECIDED", "REJECTED_SOFTWARE", "ELIGIBLE",
           "REJECTED_ECONOMIC", "REJECTED_UNCLASSIFIED", "ENTER", "ORDER",
-          "ENTER_WITHOUT_ORDER", "FILL")
+          "ORDER_REFUSED_BY_RISK", "ORDER_PENDING", "ENTER_WITHOUT_ORDER",
+          "FILL")
+
+#: THE BACKSTOP'S OWN DEFINITIONS (paper_derek.ENTER_WITHOUT_ORDER_AFTER_S /
+#: R_ORDER_REFUSED), spelled here so this module imports no paper module;
+#: pinned equal by tests/test_agent_funnel_receipt.py. REVIEW OF 7bd084b:
+#: every ENTER with no order row was counted ENTER_WITHOUT_ORDER (SOFTWARE /
+#: INTEGRITY), including risk-refused orders and orders still in flight,
+#: which the backstop -- and this receipt's own docstring -- exclude.
+ENTER_WITHOUT_ORDER_AFTER_S = 60.0
+R_ORDER_REFUSED = "PAPER_RISK_REFUSED_THE_ORDER"
 
 #: The evaluation-attempt outcomes that are NOT a decision (paper_evaluation_
 #: attempts.outcome), each a software failure by the taxonomy.
@@ -99,11 +118,28 @@ NOT_DECIDED_SQL = (
     "                      AND d.strategy = a.strategy) "
     " GROUP BY 1, 2 ORDER BY 1, 2")
 
+#: $4 the risk-refusal finding kind, $5 the backstop threshold (s). An ENTER
+#: is PENDING while younger than the threshold at the receipt's instant (the
+#: window's end, never later than now()).
+_RISK_REFUSED = (
+    "EXISTS (SELECT 1 FROM paper_audrey_findings f "
+    "         WHERE f.account_id = d.account_id AND f.kind = $4 "
+    "           AND f.subject = d.decision_id)")
+_PAST_THRESHOLD = (
+    "d.decided_at <= least(to_timestamp($2), now()) "
+    "                - make_interval(secs => $5::float8)")
+
 ORDERS_SQL = (
     "SELECT d.strategy, "
     "       count(DISTINCT d.decision_id) AS entered, "
     "       count(DISTINCT o.order_id) AS orders, "
-    "       count(DISTINCT d.decision_id) FILTER (WHERE o.order_id IS NULL) "
+    "       count(DISTINCT d.decision_id) FILTER (WHERE o.order_id IS NULL "
+    "         AND " + _RISK_REFUSED + ") AS order_refused, "
+    "       count(DISTINCT d.decision_id) FILTER (WHERE o.order_id IS NULL "
+    "         AND NOT " + _RISK_REFUSED + " AND NOT " + _PAST_THRESHOLD + ")"
+    "         AS order_pending, "
+    "       count(DISTINCT d.decision_id) FILTER (WHERE o.order_id IS NULL "
+    "         AND NOT " + _RISK_REFUSED + " AND " + _PAST_THRESHOLD + ")"
     "         AS enter_without_order, "
     "       count(DISTINCT o.order_id) FILTER (WHERE EXISTS ("
     "         SELECT 1 FROM paper_fills f WHERE f.order_id = o.order_id)) "
@@ -114,6 +150,21 @@ ORDERS_SQL = (
     "   AND d.decided_at >= to_timestamp($1) AND d.decided_at < to_timestamp($2) "
     "   AND " + _ACCT % "d" + " "
     " GROUP BY 1 ORDER BY 1")
+
+#: The code each risk-refusal finding wraps (detail.refusal), per strategy,
+#: for ENTERs with no order: classified by the code it wraps.
+ORDER_REFUSALS_SQL = (
+    "SELECT d.strategy, coalesce(f.detail->>'refusal', '') AS refusal, "
+    "       count(DISTINCT d.decision_id) AS n "
+    "  FROM paper_decisions d "
+    "  JOIN paper_audrey_findings f ON f.account_id = d.account_id "
+    "   AND f.kind = $4 AND f.subject = d.decision_id "
+    " WHERE d.verdict = 'ENTER' "
+    "   AND d.decided_at >= to_timestamp($1) AND d.decided_at < to_timestamp($2) "
+    "   AND " + _ACCT % "d" + " "
+    "   AND NOT EXISTS (SELECT 1 FROM paper_orders o "
+    "                    WHERE o.decision_id = d.decision_id) "
+    " GROUP BY 1, 2 ORDER BY 1, 3 DESC LIMIT %d" % MAX_GROUPS)
 
 ORDER_OUTCOMES_SQL = (
     "SELECT d.strategy, o.state, coalesce(o.terminal_reason, '') AS reason, "
@@ -165,8 +216,8 @@ def _bump(d: dict, k, n: int) -> None:
 
 
 def receipt(*, decisions, received, not_decided, orders, order_outcomes,
-            upstream=(), valuations=()) -> dict:
-    """THE RECEIPT, from the grouped rows the five SELECTs return. Pure."""
+            upstream=(), valuations=(), order_refusals=()) -> dict:
+    """THE RECEIPT, from the grouped rows the SELECTs return. Pure."""
     agents: dict = {}
 
     def agent(name) -> dict:
@@ -174,6 +225,7 @@ def receipt(*, decisions, received, not_decided, orders, order_outcomes,
             "strategy": str(name), "receipt": _empty(),
             "not_decided_by_outcome": {}, "by_sport": {}, "codes": {},
             "binding": {}, "unfilled_order_reasons": {},
+            "order_refused_by_risk": [],
             "complement_side": {"decided": 0, "enter": 0}})
 
     for r in received:
@@ -222,8 +274,17 @@ def receipt(*, decisions, received, not_decided, orders, order_outcomes,
     for r in orders:
         a = agent(r["strategy"])
         a["receipt"]["ORDER"] = int(r["orders"])
+        a["receipt"]["ORDER_REFUSED_BY_RISK"] = int(r.get("order_refused")
+                                                    or 0)
+        a["receipt"]["ORDER_PENDING"] = int(r.get("order_pending") or 0)
         a["receipt"]["ENTER_WITHOUT_ORDER"] = int(r["enter_without_order"])
         a["receipt"]["FILL"] = int(r["filled_orders"])
+    for r in order_refusals:
+        # THE WRAPPER CLASSIFIED BY THE CODE IT CARRIES (refusal_taxonomy.
+        # classify_wrapped): a cap is economic, a malformed order is ours
+        agent(r["strategy"])["order_refused_by_risk"].append(dict(
+            RT.classify_wrapped(R_ORDER_REFUSED, r["refusal"] or None),
+            n=int(r["n"])))
     for r in order_outcomes:
         a = agent(r["strategy"])
         key = "%s:%s" % (r["state"], r["reason"] or "NO_TERMINAL_REASON")
@@ -245,8 +306,9 @@ def receipt(*, decisions, received, not_decided, orders, order_outcomes,
             "decided": decided,
             "eligible_is_economic_plus_enter":
                 r["ELIGIBLE"] == r["REJECTED_ECONOMIC"] + r["ENTER"],
-            "orders_plus_enter_without_order_cover_enter":
-                r["ORDER"] + r["ENTER_WITHOUT_ORDER"] >= r["ENTER"],
+            "orders_refusals_pending_and_missing_cover_enter":
+                r["ORDER"] + r["ORDER_REFUSED_BY_RISK"] + r["ORDER_PENDING"]
+                + r["ENTER_WITHOUT_ORDER"] >= r["ENTER"],
             "fills_within_orders": r["FILL"] <= r["ORDER"]}
 
     up_by_outcome: dict = {}
@@ -293,7 +355,10 @@ async def read(conn, *, since: float, until: float,
     received = await conn.fetch(RECEIVED_SQL, *args)
     not_decided = await conn.fetch(NOT_DECIDED_SQL, *args,
                                    list(NOT_DECIDED_OUTCOMES))
-    orders = await conn.fetch(ORDERS_SQL, *args)
+    orders = await conn.fetch(ORDERS_SQL, *args, R_ORDER_REFUSED,
+                              float(ENTER_WITHOUT_ORDER_AFTER_S))
+    order_refusals = await conn.fetch(ORDER_REFUSALS_SQL, *args,
+                                      R_ORDER_REFUSED)
     order_outcomes = await conn.fetch(ORDER_OUTCOMES_SQL, *args)
     upstream = await conn.fetch(UPSTREAM_SQL, float(since), float(until))
     valuations = await conn.fetch(VALUATIONS_SQL, float(since), float(until))
@@ -303,7 +368,8 @@ async def read(conn, *, since: float, until: float,
                   orders=[dict(r) for r in orders],
                   order_outcomes=[dict(r) for r in order_outcomes],
                   upstream=[dict(r) for r in upstream],
-                  valuations=[dict(r) for r in valuations])
+                  valuations=[dict(r) for r in valuations],
+                  order_refusals=[dict(r) for r in order_refusals])
     out.update(since=float(since), until=float(until),
                account_id=account_id,
                decision_groups_truncated=len(decisions) >= MAX_GROUPS)

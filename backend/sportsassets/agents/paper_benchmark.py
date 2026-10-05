@@ -1563,10 +1563,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         if held_same:
             refusals.append(L.R_SAME_CONTRACT_HELD)
         else:
-            # ...AND ITS OTHER SIDE (L.R_OPPOSITE_SIDE_HELD): both sides of a
-            # binary contract are now valued, and holding both is a locked
-            # loss or an exit dressed as an entry. Read here so the decision
-            # is a named REFUSE; the lock re-checks it in submit_order.
+            # ...AND ITS OTHER SIDE, RECORDED (L.OPPOSITE_SIDE_HELD_IS): both
+            # sides of a binary contract are now valued, so a held other side
+            # is named on the decision for the owner -- it refuses nothing
+            # (no new risk-admission rule without the owner; review of
+            # 7bd084b). An unreadable answer is recorded as such.
             opp = L.other_side(side)
             try:
                 held_other = (await L.same_contract_held(
@@ -1576,7 +1577,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 held_other = [{"error": type(exc).__name__}]
             pin["opposite_side_held"] = held_other
             if held_other:
-                refusals.append(L.R_OPPOSITE_SIDE_HELD)
+                pin["opposite_side_held_is"] = L.OPPOSITE_SIDE_HELD_IS
     p = pin.get("p")
     obs, md, levels, edges = None, None, [], []
     sized: dict = {"qty": 0, "limit": None, "wire": None}

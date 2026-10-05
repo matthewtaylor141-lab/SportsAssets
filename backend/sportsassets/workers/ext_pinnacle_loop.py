@@ -1187,15 +1187,31 @@ ODDS_REFETCH_IS_NOT_A_RETRY = (
 #: (the provider's last_update) and the instant it is applied at are
 #: unchanged; a quote the provider itself delivered stale is never refreshed
 #: (that is a coverage fact, refused by name as before). Bounded per sport per
-#: cycle; the credit cost is measured on the cycle row (credits headroom
-#: measured 2026-09-28: ~1,100 days at current use).
-ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT = 4
+#: cycle; the credit cost is measured on the cycle row.
+#:
+#: OFF BY DEFAULT -- THE METERED BUDGET IS THE OWNER'S (review of 7bd084b).
+#: Every refresh is a metered the-odds-api fetch: at a bound of 4, up to 16
+#: more per 4-sport cycle against the 4 made today, and the incident's root
+#: causes treat that budget as an owner resource decision (RC8: raising
+#: MAX_METERED_SPORTS_PER_CYCLE is "owner resource decision"). It also does
+#: not remove the cause -- our serial, paced venue reads -- it re-reads the
+#: provider, which only helps when the provider's last_update moved, so
+#: credits go to STILL_STALE outcomes too. At 0 nothing extra is fetched:
+#: each candidate our delay made stale is counted (`capped`: one refresh the
+#: owner's bound would have made) and refused QUOTE_STALE_ON_ARRIVAL by name
+#: exactly as before, so the owner sees what enabling it costs and saves.
+#: The owner enables it by setting this bound (4 is the proposed value).
+ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT = 0
+ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT = 4
 ADAPTIVE_ODDS_REFETCH_RULE = (
     "refreshes the provider quote only for a candidate the provider handed "
     "over inside the freshness limit and our own processing pushed past it; "
     "the limit, its clock and its instant are unchanged; a provider-stale "
-    "quote is never refreshed; at most %d per sport per cycle"
-    % ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT)
+    "quote is never refreshed; at most adaptive_refetch_max_per_sport per "
+    "sport per cycle, which is 0 (off) until the owner sets it: every "
+    "refresh is a metered fetch and the metered budget is the owner's "
+    "resource decision (each candidate it would have refreshed is counted "
+    "as capped)")
 
 #: The venue read is the slow part; bound it so one hanging book cannot
 #: hold the cycle open.
@@ -2166,6 +2182,17 @@ def no_pinnacle_codes(explain, event) -> list:
     legacy = pinnacle_absence_in_payload(event)
     codes = [c for c in (ws, legacy) if c]
     return codes or [R_NO_PINNACLE_ON_EVENT]
+
+
+def no_pinnacle_stage(codes) -> str:
+    """THE LANE STAGE OF AN EVENT WITH NO USABLE PINNACLE PRICE: the stage of
+    its BINDING code -- the first, the WS refusal when there is one -- from
+    the one taxonomy (`ext.STAGE_OF`, derived by `ext.lane_stage_of`), so a
+    WS price refused as stale stops at 2_FRESHNESS and a provider-side
+    identity refusal or the payload's absence at 1_PROBABILITY (review of
+    7bd084b: every such event was staged 1_PROBABILITY whatever the cause)."""
+    first = next(iter(codes or []), None)
+    return ext.STAGE_OF.get(first) or "1_PROBABILITY"
 
 
 def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
@@ -8133,7 +8160,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 for _c in _np:
                     tally[_c] = tally.get(_c, 0) + 1
                     _step_refuse(_c)
-                _event_fields({"stage": "1_PROBABILITY",
+                _event_fields({"stage": no_pinnacle_stage(_np),
                                "ws_refusal": _ws_why.get("reason"),
                                "payload_absence":
                                    pinnacle_absence_in_payload(event),
@@ -8330,7 +8357,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                          != "pinnapi.com/raw-websocket")):
                 if adaptive_this_sport >= ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT:
                     adaptive_refetch["capped"] += 1
-                    _event_fields({"adaptive_odds_refetch": "CAPPED"})
+                    _event_fields({"adaptive_odds_refetch": (
+                        "CAPPED" if ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT > 0
+                        else "OFF_PENDING_THE_OWNERS_METERED_BUDGET")})
                 else:
                     adaptive_this_sport += 1
                     adaptive_refetch["fired"] += 1
@@ -9471,6 +9500,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "adaptive_refetch_rule": ADAPTIVE_ODDS_REFETCH_RULE,
                "adaptive_refetch_max_per_sport":
                    ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT,
+               "adaptive_refetch_proposed_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_PROPOSED_MAX_PER_SPORT,
                "what_it_is_for": (
                    "399 of 1,126 evaluation rows produced no fair value and "
                    "every one failed at QUOTE_STALE. 296 of those 399 were "
