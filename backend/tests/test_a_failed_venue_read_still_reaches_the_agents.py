@@ -216,7 +216,9 @@ async def test_a_failed_read_writes_a_no_price_calibration_row_and_nothing_trade
             "estimated_edge_per_contract, proposed_size, execution_estimate, "
             "risk_verdict, exposure_observed, calibration_only_evidence, "
             "us_market_slug, event_key FROM external_valuations "
-            "WHERE condition_id=$1", F.CONDITION)
+            # THE PRICED SIDE'S ROW (merged with inc-edge: the failed read
+            # also records the OTHER side of the contract, asserted below)
+            "WHERE condition_id=$1 AND NOT payout_is_complement", F.CONDITION)
         assert row["record_purpose"] == vp.CALIBRATION_ONLY
         assert row["admissible"] is False and row["decision"] == "NO_TRADE"
         refusals = list(row["refusals"])
@@ -239,8 +241,32 @@ async def test_a_failed_read_writes_a_no_price_calibration_row_and_nothing_trade
         assert ev["compared_at_the_displayed_price"]["price"] is None
         assert ev["book_currency"]["verdict"] == "NOT_READ"
 
-        # ── THE AGENTS ARE HANDED THE ROW ─────────────────────────────────
-        assert handed == [row["id"]]
+        # ── THE OTHER SIDE OF THE SAME CONTRACT, NO PRICE EITHER ──────────
+        # (merged with inc-edge, bettor_complement_valuation.read_failed):
+        # the failed read is the same opportunity's other outcome too --
+        # written with no price, the same precise refusal, 1 - p.
+        assert out["calibration_only"]["complement_recorded"] == 1
+        comp = await conn.fetchrow(
+            "SELECT id, record_purpose, admissible, refusals, probability, "
+            "executable_price, buy_intent, payout_event, contract_selection, "
+            "calibration_only_evidence FROM external_valuations "
+            "WHERE condition_id=$1 AND payout_is_complement", F.CONDITION)
+        assert comp["record_purpose"] == vp.CALIBRATION_ONLY
+        assert comp["admissible"] is False
+        assert comp["executable_price"] is None
+        assert list(comp["refusals"])[:2] == [lane, precise]
+        assert comp["probability"] == pytest.approx(
+            1.0 - row["probability"], abs=1e-12)
+        assert comp["payout_event"] == "NOT(%s)" % comp["contract_selection"]
+        cev = json.loads(comp["calibration_only_evidence"])
+        assert cev["no_book_read"] is True and cev["displayed_price"] is None
+        assert cev["venue_read_refusal"] == precise
+        assert cev["venue_read_lane_refusal"] == lane
+        assert cev["displayed_quote"]["acquisition_price"] is None
+        assert cev["usable_for_orders"] is False
+
+        # ── THE AGENTS ARE HANDED BOTH ROWS ───────────────────────────────
+        assert handed == [row["id"], comp["id"]]
 
         # ── NOTHING TRADED ────────────────────────────────────────────────
         assert await conn.fetchval(

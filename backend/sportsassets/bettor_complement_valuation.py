@@ -119,10 +119,26 @@ def applies(rec: dict, contract: dict, other_displayed) -> tuple:
     if (want is None or int(val.get("expected_outcomes") or 0) != want
             or int(val.get("outcomes_priced") or 0) != want):
         return False, N_OUTCOME_SET
+    if read_failed(rec):
+        # A FAILED VENUE READ (P0 incident; ext_pinnacle_loop.
+        # CALIBRATION_ONLY_AFTER_READ_FAILURE): no book was read, so neither
+        # side displays anything, and the home record is written with no
+        # price so the paper agents still receive the opportunity (each reads
+        # its OWN book at its decision). The other side of the same contract
+        # is the same opportunity's other outcome and is written the same
+        # way: no price, the same precise refusal.
+        return True, None
     od = other_displayed if isinstance(other_displayed, dict) else {}
     if not od.get("ok") or od.get("acquisition_price") is None:
         return False, N_OTHER_SIDE_EMPTY
     return True, None
+
+
+def read_failed(rec: dict) -> bool:
+    """Whether the HOME record is the no-price record of a FAILED venue read
+    (its evidence says no book was read)."""
+    ev = (rec or {}).get("calibration_only_evidence") or {}
+    return bool(isinstance(ev, dict) and ev.get("no_book_read"))
 
 
 def complement_contract(contract: dict) -> dict:
@@ -156,16 +172,28 @@ def complement_evidence(home_evidence: dict, other_displayed: dict, *,
     DISPLAYED price of the side the complement consumes -- flagged unusable
     for orders exactly as the home record's is."""
     ev = dict(home_evidence or {})
-    shown = dict(other_displayed or {})
+    failed = bool(ev.get("no_book_read"))
+    # A FAILED READ DISPLAYED NOTHING ON EITHER SIDE: the complement carries
+    # the home record's own no-price quote, never a price of any kind.
+    shown = dict((ev.get("displayed_quote") if failed else other_displayed)
+                 or {})
     shown["usable_for_orders"] = False
-    return {"venue_read_refusal": ev.get("venue_read_refusal"),
-            "venue_read_why": ev.get("venue_read_why"),
-            "book_currency": ev.get("book_currency"),
-            "displayed_quote": shown,
-            "decision_instant_epoch_s": decision_instant,
-            "decision_lag_s": decision_lag_s,
-            "complement": {"version": VERSION, "basis": BASIS,
-                           "same_read_as_the_home_record": True}}
+    out = {"venue_read_refusal": ev.get("venue_read_refusal"),
+           "venue_read_why": ev.get("venue_read_why"),
+           "book_currency": ev.get("book_currency"),
+           "displayed_quote": shown,
+           "decision_instant_epoch_s": decision_instant,
+           "decision_lag_s": decision_lag_s,
+           "complement": {"version": VERSION, "basis": BASIS,
+                          "same_read_as_the_home_record": True}}
+    if ev.get("venue_read_lane_refusal") is not None:
+        out["venue_read_lane_refusal"] = ev["venue_read_lane_refusal"]
+    if failed:
+        for k in ("no_book_read", "displayed_price", "venue_read_diagnostic",
+                  "agents_read_their_own_book"):
+            if k in ev:
+                out[k] = ev[k]
+    return out
 
 
 def describe() -> dict:

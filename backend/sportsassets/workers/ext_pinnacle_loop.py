@@ -1171,6 +1171,32 @@ ODDS_REFETCH_IS_NOT_A_RETRY = (
     "when it fails the existing quote is kept and ages normally, so the "
     "freshness rule refuses it by name instead of the sport being dropped")
 
+#: ── QUOTE_STALE_ON_ARRIVAL WAS OURS: REFRESH ON DEMAND (P0 incident) ──
+#:
+#: THE MEASURED DEFECT (production 2026-10-04, NFL ~600 QUOTE_STALE_ON_ARRIVAL
+#: rows a day; ~1,034 candidate-rows/day across leagues whose provider lag was
+#: inside 30 s and whose quote was nonetheless refused). `received_at` is
+#: stamped once per sport fetch and the candidates behind it wait on paced
+#: venue reads, ~5-6 s per queue position, so a quote the provider handed us
+#: INSIDE the 30 s rule went past it in our own queue. EVENTS_PER_ODDS_FETCH
+#: (a fixed share) stays at its default; this refresh is targeted instead: it
+#: fires ONLY for a candidate whose provider lag at receipt was inside the
+#: limit and whose age at arrival is over it -- exactly the case our own
+#: delay caused -- and it re-reads the provider so the candidate is judged on
+#: a quote of the provider's own current instant. The 30 s rule, its clock
+#: (the provider's last_update) and the instant it is applied at are
+#: unchanged; a quote the provider itself delivered stale is never refreshed
+#: (that is a coverage fact, refused by name as before). Bounded per sport per
+#: cycle; the credit cost is measured on the cycle row (credits headroom
+#: measured 2026-09-28: ~1,100 days at current use).
+ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT = 4
+ADAPTIVE_ODDS_REFETCH_RULE = (
+    "refreshes the provider quote only for a candidate the provider handed "
+    "over inside the freshness limit and our own processing pushed past it; "
+    "the limit, its clock and its instant are unchanged; a provider-stale "
+    "quote is never refreshed; at most %d per sport per cycle"
+    % ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT)
+
 #: The venue read is the slow part; bound it so one hanging book cannot
 #: hold the cycle open.
 VENUE_TIMEOUT_S = 10.0
@@ -2997,7 +3023,8 @@ def complement_record(rec: dict, *, contract: dict, ev_quote: dict,
     out = ext.evaluate(
         contract=CV.complement_contract(contract), quote=dict(ev_quote),
         market_state=_displayed_market_state(
-            {"displayed": evidence["displayed_quote"]}),
+            {"displayed": evidence["displayed_quote"],
+             "no_book_read": bool(evidence.get("no_book_read"))}),
         execution_plan=None,
         execution_estimate={"p_fill": None, "basis": "P_FILL_NOT_IDENTIFIED",
                             "crossing": True},
@@ -7704,6 +7731,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # inferred from the credit count. Both are 0 at the default setting.
     odds_refetches = 0
     odds_refetch_failures = 0
+    # the on-demand refresh of a quote OUR delay made stale (by outcome)
+    adaptive_refetch = {"fired": 0, "saved": 0, "still_stale": 0,
+                        "failed": 0, "capped": 0}
 
     # ── THE LATENCY MEASUREMENT, ACCUMULATED OVER THE WHOLE CYCLE ──────
     #
@@ -7888,6 +7918,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # because `received_at` is stamped per fetch and the accumulated
         # processing delay is what it governs.
         served_by_this_fetch = 0
+        adaptive_this_sport = 0
         # BY INDEX OVER A LOCAL LIST, so a re-fetch can actually replace the
         # events still to come. `for event in got["events"]` binds the list
         # once, so rebinding `got` inside it would have changed nothing --
@@ -8224,6 +8255,67 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             _pe = _quote_epoch(quote)
             reference_received_at = quote["received_at"]
             _arr = time.time()
+            # ── OUR DELAY MADE IT STALE: REFRESH IT, ON DEMAND ──────────
+            # (ADAPTIVE_ODDS_REFETCH_RULE). Only a the-odds-api quote (a
+            # PinnAPI quote is already read at the decision instant), only
+            # when the provider delivered it inside the limit, only while
+            # the per-sport bound holds; a refresh that fails or is still
+            # over the limit leaves the candidate to be refused by name.
+            if (stream_seed is None and _pe is not None
+                    and (_arr - _pe) > PINNACLE_MAX_AGE_S
+                    and reference_received_at is not None
+                    and (float(reference_received_at) - _pe)
+                    <= PINNACLE_MAX_AGE_S
+                    and ((quote.get("reference_input") or {}).get("provider")
+                         != "pinnapi.com/raw-websocket")):
+                if adaptive_this_sport >= ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT:
+                    adaptive_refetch["capped"] += 1
+                    _event_fields({"adaptive_odds_refetch": "CAPPED"})
+                else:
+                    adaptive_this_sport += 1
+                    adaptive_refetch["fired"] += 1
+                    odds_refetches += 1
+                    again = await fetch_odds(sport_key, api_key=api_key)
+                    credits["used"] = (again.get("credits_used")
+                                       or credits["used"])
+                    credits["remaining"] = (again.get("credits_remaining")
+                                            or credits["remaining"])
+                    fresh_ev = None
+                    if again.get("ok") and again.get("received_at") is not None:
+                        # THE NEW RECEIPT INSTANT AND THE NEW PAYLOAD'S OWN
+                        # PRICES, together, for this candidate and every one
+                        # still to come in this sport (as the fixed re-fetch
+                        # above does).
+                        received_at = again["received_at"]
+                        served_by_this_fetch = 1
+                        fresh = {(e or {}).get("id"): e
+                                 for e in (again["events"] or [])
+                                 if isinstance(e, dict) and (e or {}).get("id")}
+                        for _j in range(_i + 1, len(events)):
+                            _r = fresh.get((events[_j] or {}).get("id"))
+                            if _r is not None:
+                                events[_j] = _r
+                        fresh_ev = fresh.get((event or {}).get("id"))
+                    q2 = (primary_pinnacle_h2h(
+                        fresh_ev, received_at=received_at, family=family,
+                        at=time.time()) if fresh_ev is not None else None)
+                    if (q2 is not None and q2.get("home") == quote.get("home")
+                            and q2.get("away") == quote.get("away")):
+                        events[_i] = fresh_ev
+                        quote = q2
+                        _pe = _quote_epoch(quote)
+                        reference_received_at = quote["received_at"]
+                        _arr = time.time()
+                        outcome = ("SAVED" if _pe is not None
+                                   and (_arr - _pe) <= PINNACLE_MAX_AGE_S
+                                   else "STILL_STALE")
+                    else:
+                        outcome = "FAILED"
+                        odds_refetch_failures += 1
+                    adaptive_refetch[{"SAVED": "saved",
+                                      "STILL_STALE": "still_stale",
+                                      "FAILED": "failed"}[outcome]] += 1
+                    _event_fields({"adaptive_odds_refetch": outcome})
             _event_fields(arrival_split(_pe, reference_received_at, _arr))
             if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
                 lat["skipped_stale_on_arrival"] += 1
@@ -9314,6 +9406,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "is_the_default": EVENTS_PER_ODDS_FETCH >= MAX_PER_CYCLE,
                "odds_refetches": odds_refetches,
                "odds_refetch_failures": odds_refetch_failures,
+               # the on-demand refresh of quotes OUR delay made stale
+               "adaptive_refetch": dict(adaptive_refetch),
+               "adaptive_refetch_rule": ADAPTIVE_ODDS_REFETCH_RULE,
+               "adaptive_refetch_max_per_sport":
+                   ADAPTIVE_ODDS_REFETCH_MAX_PER_SPORT,
                "what_it_is_for": (
                    "399 of 1,126 evaluation rows produced no fair value and "
                    "every one failed at QUOTE_STALE. 296 of those 399 were "
