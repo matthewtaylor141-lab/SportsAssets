@@ -117,38 +117,63 @@ class TestEveryFileTheCommandPageNeedsIsReachable:
     and are rewritten into /command/ -- but only if they are really
     there."""
 
-    def _referenced(self):
-        html = (COMMAND / "index.html").read_text()
+    #: The entry documents these checks cover: Command Center V2 (index /
+    #: floor, promoted 2026-10-05, and its v2 preview copies) and the legacy
+    #: shell kept byte-for-byte at classic.html (the old index.html, always
+    #: covered here). The legacy floor, kept at classic-floor.html, was never
+    #: under these checks and is not put under them by a move.
+    ENTRIES = ("index.html", "floor.html", "v2.html", "v2-floor.html",
+               "classic.html")
+
+    def _referenced(self, name="index.html"):
+        html = (COMMAND / name).read_text()
         return re.findall(r'(?:src|href)="([^":?#]+)"', html)
+
+    def _all_referenced(self):
+        return [(n, r) for n in self.ENTRIES for r in self._referenced(n)]
 
     def test_index_html_exists_to_be_served(self):
         assert (COMMAND / "index.html").is_file()
 
     def test_every_referenced_file_is_committed(self):
-        refs = self._referenced()
-        assert refs, "index.html referenced nothing -- the regex is wrong"
-        for ref in refs:
+        for name in self.ENTRIES:
+            assert self._referenced(name), (
+                "%s referenced nothing -- the regex is wrong" % name)
+        for name, ref in self._all_referenced():
             if ref.startswith(("http://", "https://", "//", "#")):
                 continue
-            assert (COMMAND / ref).is_file(), ref
+            assert (COMMAND / ref).is_file(), (name, ref)
 
     def test_the_reference_are_relative_so_the_rewrite_reaches_them(self):
-        for ref in self._referenced():
+        for name, ref in self._all_referenced():
             if ref.startswith(("http", "//", "#")):
                 continue
             # a leading slash would resolve to the host root and rewrite
             # to /command//... rather than /command/<file>
-            assert not ref.startswith("/"), ref
+            assert not ref.startswith("/"), (name, ref)
 
     def test_the_access_step_and_the_motion_layer_both_travel(self):
-        refs = self._referenced()
-        assert "unlock.js" in refs, "the sign-in would be dropped"
+        for name in self.ENTRIES:
+            assert "unlock.js" in self._referenced(name), (
+                "the sign-in would be dropped from %s" % name)
+        # the motion layer belongs to the legacy shell, which keeps it
+        refs = self._referenced("classic.html")
         assert "motion.js" in refs and "motion.css" in refs
+
+    def test_command_center_v2_is_the_promoted_entry(self):
+        """index.html and floor.html are the V2 shell (one app module, its
+        stylesheet, the existing sign-in); the legacy shell is kept whole
+        at classic.html so no legacy view is lost."""
+        for name in ("index.html", "floor.html"):
+            refs = self._referenced(name)
+            assert "v2/app.mjs" in refs and "v2/style.css" in refs, name
+        assert "app.js" in self._referenced("classic.html")
+        assert "shadow.js" in self._referenced("classic.html")
 
     def test_the_react_app_is_not_referenced_from_command(self):
         """If COMMAND pulled anything out of the React build, the host
         rule would 404 it -- and the page would be broken rather than
         standalone."""
-        for ref in self._referenced():
+        for _name, ref in self._all_referenced():
             assert not ref.startswith("assets/index-"), ref
             assert "/dist/" not in ref, ref

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="description" content="BettorToken Command — a read-only institutional workspace for portfolio, execution and research oversight.">
+  <title>BettorToken | Management Office</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="motion.css">
+  <link rel="stylesheet" href="shadow.css">
+  <link rel="stylesheet" href="office.css">
+  <link rel="stylesheet" href="management-v6.css">
+  <link rel="stylesheet" href="experiment.css">
+  <link rel="stylesheet" href="equity-wall.css">
+  <link rel="stylesheet" href="floor-entry.css">
+<link rel="stylesheet" href="hq2-brand.css" data-hq2="brand">
+<link rel="stylesheet" href="hq2-equity.css" data-hq2="equity-css">
+<link rel="stylesheet" href="hq3-live.css" data-hq3="css">
+<link rel="stylesheet" href="meeting-release.css" data-meeting="css">
+<link rel="stylesheet" href="hq4-company.css" data-hq4="css">
+<link rel="stylesheet" href="hq5-workspace.css" data-hq5="css">
+<link rel="stylesheet" href="hq6-complete.css" data-hq6="css">
+<!-- bt-brand: the one BettorToken brand source (brand/install_brand.py) -->
+<link rel="icon" href="brand/favicon.ico" sizes="any" data-brand="icon">
+<link rel="icon" type="image/png" sizes="32x32" href="brand/bettortoken-app-icon-32.png" data-brand="icon32">
+<link rel="apple-touch-icon" href="brand/bettortoken-app-icon-180.png" data-brand="touch">
+<link rel="stylesheet" href="brand/brand.css" data-brand="css">
+<link rel="stylesheet" href="command-final.css" data-command-final="css">
+<link rel="stylesheet" href="command-ops.css" data-command-ops="css">
+</head>
+<body>
+  <a class="skip-link" href="#pagebody">Skip to dashboard</a>
+  <!-- LEGACY MIRROR VALIDATION · PAPER vs ACTUAL (the old 1:1,000 execution
+       mirror, not the target Small Live system): a plain anchor, so the live execution
+       view stays reachable even if app.js fails. -->
+  <a class="live-jump" href="live.html"
+     style="position:fixed;right:14px;bottom:14px;z-index:40;
+            padding:9px 14px;border-radius:999px;
+            border:1px solid #1d4437;background:#102b22;color:#3ddc97;
+            font:600 13px/1 ui-sans-serif,system-ui,sans-serif;
+            text-decoration:none">Legacy mirror validation · paper vs actual →</a>
+  <div id="app"><div class="boot"><div class="boot-mark" role="img" aria-label="BettorToken"></div><p>Opening Command…</p></div></div>
+  <div id="overlay-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="config.js"></script>
+  <!-- Access, kept separate from the app on purpose: a sign-in step must not
+       be able to break navigation or reporting. It acts only on a 401/403
+       from the feed and never holds a credential. -->
+  <script src="unlock.js"></script>
+  <script src="core.js"></script>
+  <script src="report.js"></script>
+  <!-- Motion Edition 1.1. Presentation only: it reads BTCore and decorates
+       views. It loads BEFORE app.js because app.js looks for it, and AFTER
+       core.js because it uses BTCore.esc. It is not in the access path. -->
+  <script src="motion.js"></script>
+  <!-- THE SHADOW ENVIRONMENT. Its own read-only data contract against
+       /api/command/shadow/*, its own polling, and no fixture of any kind:
+       an empty prospective ledger renders as LISTENING · 0, never as
+       invented activity. It loads BEFORE app.js because app.js looks for
+       window.BTShadow, and AFTER core.js because it uses BTCore.endpoint
+       -- the guard that refuses any host but this one. -->
+  <script src="shadow.js"></script>
+  <script src="app.js"></script>
+  <!-- THE EXPERIMENT: its own read (GET /api/command/paper/experiment), its
+       own polling; office.js places its section on the homepage. -->
+  <script src="experiment.js"></script>
+  <script src="office.js"></script>
+  <script src="management-v6.js"></script>
+  <!-- THE TRADING FLOOR'S FRONT DOOR (floor.html): additive, wraps
+       BTOffice.render after management-v6.js. -->
+  <script src="floor-entry.js"></script>
+  <script src="paper.js"></script>
+  <!-- THE LIVE EQUITY WALL: $500,000 PAPER EXPERIMENT (by sleeve), SMALL LIVE — BETTOR ORIGINATED
+       and the LEGACY MIRROR VALIDATION accounts
+       (per venue), never summed. Its own read (GET /api/command/equity/*),
+       one shared poll loop; it places itself above the paper slot and
+       exposes window.BTEquityWall for the trading floor. AFTER paper.js
+       because it wraps BTPaper.mount to keep its place on re-render. -->
+  <script src="equity-wall.js"></script>
+
+  <!-- A FAILED SCRIPT LOAD MUST NOT LOOK LIKE AN EMPTY PAGE.
+       ==================================================================
+       OBSERVED 2026-09-23T22:34:18Z: this host served /app.js and
+       /core.js as 503 with ZERO bytes while /, /index.html, /shadow.js
+       (122,070 B) and /shadow.css all answered 200. It had recovered by
+       22:40. So the two scripts the shell cannot start without were the
+       ones missing, and the page rendered blank with nothing said.
+
+       WHAT IT IS NOT. Not size: shadow.js is twice app.js and loaded
+       fine. Not the rewrite rule: every one of these files reaches the
+       CDN through the same forced `command.bettortoken.com/* ->
+       /command/:splat` rewrite, including the ones that succeeded. Not
+       our origin: a status-200 rewrite is served by Netlify's own CDN and
+       never touches the API. On the evidence it is a transient
+       per-asset fault inside that CDN, which is not something this
+       repository can fix and is NOT claimed as fixed.
+
+       WHAT THIS DOES, which is within our control: it turns a silent
+       blank page into a stated one, and retries ONCE. A manager who
+       opens COMMAND during such a window now sees which file failed and
+       that a reload is worth trying, instead of an empty screen that
+       looks like the system is down. -->
+  <script>
+  (function () {
+    var REQUIRED = ["core.js", "app.js"];
+    function present() {
+      // CHECK THE GLOBALS, NOT LOAD EVENTS. A script that arrived with
+      // zero bytes fires `load` and defines nothing, so a load handler
+      // would report success for exactly the fault seen at 22:34:18Z.
+      //
+      // The two names are read out of the files: core.js ends with
+      // `root.BTCore = api`, app.js sets `window.BettorCommand`. Testing
+      // a global that nothing defines would raise this overlay on every
+      // healthy load, which is worse than the fault it reports.
+      var missing = [];
+      if (!window.BTCore) { missing.push("core.js"); }
+      if (!window.BettorCommand) { missing.push("app.js"); }
+      return missing;
+    }
+    function complain(missing) {
+      try { console.error("COMMAND assets failed to load:", missing); }
+      catch (e) { /* console may be absent */ }
+      var d = document.createElement("div");
+      d.setAttribute("role", "alert");
+      d.style.cssText = "position:fixed;inset:0;display:flex;" +
+        "align-items:center;justify-content:center;padding:24px;" +
+        "font:14px/1.6 ui-sans-serif,system-ui,sans-serif;" +
+        "background:#0b0d10;color:#e6e8eb;z-index:99999;text-align:center";
+      d.innerHTML =
+        '<div style="max-width:34rem">' +
+        '<div style="font-size:1.1rem;margin-bottom:.75rem">' +
+        'COMMAND could not finish loading</div>' +
+        '<div style="opacity:.8">These files did not arrive: <code>' +
+        missing.join("</code>, <code>") + '</code>.</div>' +
+        '<div style="opacity:.8;margin-top:.75rem">This has been seen as ' +
+        'a brief content-delivery fault that clears on its own. A reload ' +
+        'usually works. No data has been lost and nothing was ' +
+        'submitted.</div>' +
+        '<button id="bt-reload" style="margin-top:1.25rem;padding:.5rem ' +
+        '1rem;border-radius:.375rem;border:1px solid #3a4048;' +
+        'background:#151a1f;color:inherit;cursor:pointer">Reload</button>' +
+        '</div>';
+      document.body.appendChild(d);
+      var b = document.getElementById("bt-reload");
+      if (b) { b.addEventListener("click", function () {
+        location.reload();
+      }); }
+    }
+    // One retry, then say so. A retry loop would hammer the CDN during
+    // exactly the window when it is already failing.
+    var tried = false;
+    function check() {
+      var missing = present();
+      if (!missing.length) { return; }
+      if (!tried) {
+        tried = true;
+        missing.forEach(function (f) {
+          var s = document.createElement("script");
+          s.src = f + "?retry=1";
+          document.body.appendChild(s);
+        });
+        setTimeout(check, 2500);
+        return;
+      }
+      complain(missing);
+    }
+    setTimeout(check, 1500);
+  }());
+  </script>
+<script src="hq2-shell.js" data-hq2="shell"></script>
+<script src="hq2-equity.js" data-hq2="equity-js"></script>
+<script src="hq3-live.js" data-hq3="js"></script>
+<script src="meeting-release.js" data-meeting="js"></script>
+<script src="hq4-company.js" data-hq4="js"></script>
+<script src="hq5-workspace.js" data-hq5="js"></script>
+<script src="hq6-complete.js" data-hq6="js"></script>
+<script src="command-final.js" data-command-final="js"></script>
+<script src="command-ops.js" data-command-ops="js"></script>
+</body>
+</html>
