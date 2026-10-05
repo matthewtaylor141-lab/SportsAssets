@@ -237,6 +237,62 @@ async def test_a_strategy_does_not_re_enter_the_contract_it_holds(monkeypatch):
 
 @pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 @pytest.mark.asyncio
+async def test_an_order_naming_no_strategy_is_checked_under_the_default_strategy(
+        monkeypatch):
+    """Production 2026-10-05 (525bc44): Derek's entry orders named no
+    strategy, so the row took the column default (DEREK_ENTRY_POLICY_V2)
+    while the same-contract read saw None and found nothing held -- one
+    contract was re-entered 15 times. An unnamed order is checked under the
+    strategy its row carries: the second entry on a held contract and side is
+    refused under the lock, exactly as for a named strategy."""
+    conn = await H.connect()
+    try:
+        acct = await H.new_account(conn, "unnamedstrategy")
+        monkeypatch.setattr(P, "ACCOUNT_ID", acct["account_id"])
+        caps = legacy_config()["risk"]
+
+        def unnamed(key, slug="contract-u"):
+            o = H.order(acct, key=key, slug=slug, fixture="fx-u", qty=2000,
+                        limit=.5)
+            assert "strategy" not in o
+            return o
+
+        first = await L.submit_order(conn, unnamed("u1"), caps=caps,
+                                     fee_fn=H.flat_fee(0), now=H.T0)
+        assert first["ok"], first
+        stored = await conn.fetchval(
+            "SELECT strategy FROM paper_orders WHERE order_id=$1",
+            first["order"]["order_id"])
+        assert stored == L.DEFAULT_STRATEGY == D.STRATEGY
+        again = await L.submit_order(conn, unnamed("u2"), caps=caps,
+                                     fee_fn=H.flat_fee(0), now=H.T0)
+        assert again["ok"] is False
+        assert again["refusal"] == L.R_SAME_CONTRACT_HELD and again["under_lock"]
+        # naming the default strategy explicitly meets the same holder
+        named = unnamed("u3")
+        named["strategy"] = D.STRATEGY
+        named_again = await L.submit_order(conn, named, caps=caps,
+                                           fee_fn=H.flat_fee(0), now=H.T0)
+        assert named_again["refusal"] == L.R_SAME_CONTRACT_HELD
+        # another contract is still allowed
+        other = await L.submit_order(conn, unnamed("u4", "contract-v"),
+                                     caps=caps, fee_fn=H.flat_fee(0), now=H.T0)
+        assert other["ok"], other
+    finally:
+        await conn.close()
+
+
+def test_derek_entry_order_names_its_strategy():
+    """Derek's ENTRY order carries its strategy explicitly (the ledger's
+    default is the backstop, not the contract)."""
+    import inspect
+    src = inspect.getsource(D)
+    i = src.index('"idempotency_key": "%s:ENTRY" % did')
+    assert '"strategy": STRATEGY' in src[i:i + 900]
+
+
+@pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
+@pytest.mark.asyncio
 async def test_two_concurrent_entries_on_one_contract_exactly_one_wins(monkeypatch):
     """CONCURRENCY: two connections submit the same strategy/contract/side
     at once. The account lock serializes them; the second sees the first's

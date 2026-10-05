@@ -474,6 +474,13 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
     same fixture, however their decisions interleave.
     `one_live_entry_per_fixture` adds this strategy's own live entry."""
     o = dict(order)
+    # THE STRATEGY THE ROW WILL CARRY. An order that names none is stored
+    # under the column default (DEFAULT_STRATEGY, migration 182), so every
+    # check under the lock reads it under that same strategy: an unnamed
+    # strategy must never read as "nothing held" (production 2026-10-05:
+    # Derek's orders named none, and the same-contract rule let one contract
+    # be re-entered 15 times).
+    o["strategy"] = o.get("strategy") or DEFAULT_STRATEGY
     at = float(now if now is not None else time.time())
     caps = dict(caps or {})
     key = str(o.get("idempotency_key") or "")
