@@ -1,0 +1,155 @@
+"""The 3D headquarters (frontend/public/command/hq*.js): the Command entry.
+
+It is a presentation layer over the existing read path, so these checks pin
+what it must never do:
+
+  - send anything but a GET, or read anything outside /api/command/ (every
+    read goes through BTFloor.read / BTFloor.poller, which refuse other paths);
+  - invent a number or an activity: no Math.random anywhere in the scene,
+    its screens, its model or its controller;
+  - give Ariana's Arbitrage Desk any state the floor API did not serve: until
+    an ARIANA seat is served it is NOT DEPLOYED · UNVERIFIED, never active;
+  - add PAPER and SMALL LIVE together, or carry an order / cancel / limit
+    control.
+
+The model is executed in node against a fake BTFloor so the Ariana rule and
+the work-state translation are tested as behaviour, not text.
+"""
+import json
+import pathlib
+import re
+import shutil
+import subprocess
+
+import pytest
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+CMD = ROOT / "frontend" / "public" / "command"
+FILES = ("hq.js", "hq-model.js", "hq-scene.js", "hq-screens.js")
+SRC = {name: (CMD / name).read_text() for name in FILES}
+INDEX = (CMD / "index.html").read_text()
+
+
+def _code(src: str) -> str:
+    """The source without its comments (block and line)."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", src)
+
+
+@pytest.mark.parametrize("name", FILES)
+def test_no_random_number_anywhere_in_the_headquarters(name):
+    assert "Math.random" not in _code(SRC[name]), name
+
+
+@pytest.mark.parametrize("name", FILES)
+def test_the_headquarters_only_ever_reads(name):
+    code = _code(SRC[name])
+    assert not re.search(r"method\s*:\s*['\"](POST|PUT|PATCH|DELETE)", code, re.I), name
+    assert "XMLHttpRequest" not in code and "sendBeacon" not in code, name
+    # the scene, screens and controller never fetch the API themselves: every
+    # API read goes through the model (BTFloor.read / BTFloor.poller)
+    if name != "hq-model.js":
+        assert not re.search(r"fetch\(\s*['\"]/api/", code), name
+
+
+def test_every_model_read_is_a_command_read():
+    code = _code(SRC["hq-model.js"])
+    paths = re.findall(r"B\.(?:poller|read)\(\s*'([^']+)'", code)
+    assert paths, "the model reads nothing -- the regex is wrong"
+    for p in paths:
+        assert p.startswith("/api/command/"), p
+    assert "fetch(" not in code
+
+
+def test_no_order_cancel_limit_or_capital_control():
+    for name in FILES:
+        code = _code(SRC[name]).lower()
+        for word in ("/orders/submit", "/cancel", "submit_order", "cancel_order", "set_limit", "allocate("):
+            assert word not in code, (name, word)
+    assert "no order, cancel, limit or capital control" in INDEX
+
+
+def test_paper_and_small_live_are_never_summed():
+    for name in FILES:
+        code = _code(SRC[name])
+        assert not re.search(r"paper[^;\n]{0,80}\+[^;\n]{0,40}small[^;\n]{0,40}equity", code, re.I), name
+
+
+def test_the_entry_loads_the_shared_read_layer_and_the_sign_in():
+    for need in ('src="unlock.js"', 'src="floor-core.js"', 'src="mobile-command.js"', 'src="hq.js"'):
+        assert need in INDEX, need
+    # the floor read layer and the view models load before the module
+    assert INDEX.index('floor-core.js') < INDEX.index('hq.js')
+    assert INDEX.index('mobile-command.js') < INDEX.index('hq.js')
+
+
+def test_the_five_places_and_nothing_else():
+    nav = re.search(r'<nav id="hq-nav".*?</nav>', INDEX, re.S).group(0)
+    assert re.findall(r'data-go="([a-z]+)"', nav) == ["command", "floor", "markets", "capital", "reports"]
+
+
+NODE = shutil.which("node")
+HARNESS = r"""
+const path = process.argv[1];
+globalThis.window = globalThis;
+globalThis.document = {hidden: false, addEventListener() {}};
+const reads = [];
+const SEATS = [
+  {agent: 'DEREK', slug: 'derek', name: 'Derek', short: 'CIO', role: 'CIO', accent: '#9fe3bf'},
+  {agent: 'KAREN', slug: 'karen', name: 'Karen', short: 'Red team', role: 'Red team', accent: '#ff9a8f'},
+  {agent: 'SCOUT', slug: 'scout', name: 'Scout', short: 'Intel', role: 'Intel', accent: '#f5b072'},
+  {agent: 'EDDIE', slug: 'eddie', name: 'Eddie', short: 'Exec', role: 'Exec', accent: '#6fe0d2'},
+  {agent: 'CHIEF_ALLOCATOR', slug: 'allocator', name: 'Allie', short: 'Alloc', role: 'Alloc', accent: '#ecc66d'},
+  {agent: 'AUDREY', slug: 'audrey', name: 'Audrey', short: 'Audit', role: 'Audit', accent: '#cdb6f6'},
+  {agent: 'XAVIER', slug: 'xavier', name: 'Xavier', short: 'PM', role: 'PM', accent: '#9fd2f2'}];
+const floor = JSON.parse(process.argv[2]);
+const B = {SEATS, esc: (s) => String(s), age: (s) => s + 's', ago: () => 'ago', edgeLabel: (k) => k, isFixture: () => false,
+  read: (p) => { reads.push(p); return Promise.resolve({status: 'UNAVAILABLE', why: 'test', at: 0}); },
+  poller: (p, every, cb) => { reads.push(p); if (p === '/api/command/floor') cb({current: {status: 'OK', data: floor, at: 1}}); return {refresh() {}}; }};
+globalThis.setTimeout = (f) => f(); globalThis.setInterval = () => 0;
+import(path).then((m) => {
+  const hq = m.createModel(B); hq.start();
+  const d = (s) => { const x = hq.desk(s); return {planned: x.planned, label: x.label, active: x.active, code: x.code}; };
+  console.log(JSON.stringify({slugs: hq.SEATS.map((s) => s.slug), ariana: d('ariana'), derek: d('derek'), xavier: d('xavier'), reads}));
+});
+"""
+
+
+def _run(floor):
+    if not NODE:
+        pytest.skip("node is not installed")
+    out = subprocess.run([NODE, "--input-type=module", "-e", HARNESS, str(CMD / "hq-model.js"), json.dumps(floor)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+FLOOR = {"agents": [
+    {"agent": "DEREK", "slug": "derek", "state": "WORKING_ON", "work_state": "WORKING", "deployed": True},
+    {"agent": "XAVIER", "slug": "xavier", "state": "REVIEWING", "work_state": "BLOCKED_ON_MARKET_DATA", "deployed": True}],
+    "edges": [], "feed": []}
+
+
+def test_ariana_is_a_desk_but_not_deployed_until_the_floor_serves_her():
+    r = _run(FLOOR)
+    assert r["slugs"] == ["derek", "karen", "scout", "allocator", "ariana", "eddie", "audrey", "xavier"]
+    assert r["ariana"] == {"planned": True, "label": "NOT DEPLOYED · UNVERIFIED", "active": False, "code": "NOT_DEPLOYED"}
+
+
+def test_a_served_ariana_seat_replaces_the_placeholder():
+    floor = json.loads(json.dumps(FLOOR))
+    floor["agents"].append({"agent": "ARIANA", "slug": "ariana", "state": "WORKING_ON", "work_state": "WORKING", "deployed": True})
+    r = _run(floor)
+    assert r["ariana"]["planned"] is False and r["ariana"]["code"] == "WORKING" and r["ariana"]["active"] is True
+
+
+def test_the_work_state_is_translated_one_to_one_and_only_work_is_active():
+    r = _run(FLOOR)
+    assert r["derek"]["code"] == "WORKING" and r["derek"]["active"] is True
+    assert r["xavier"]["code"] == "BLOCKED_ON_MARKET_DATA" and r["xavier"]["active"] is False
+
+
+def test_the_model_reads_only_command_routes():
+    r = _run(FLOOR)
+    assert r["reads"], "nothing was read"
+    assert all(p.startswith("/api/command/") for p in r["reads"]), r["reads"]
