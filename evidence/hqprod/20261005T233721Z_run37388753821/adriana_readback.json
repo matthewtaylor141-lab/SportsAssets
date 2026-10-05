@@ -1,5 +1,5 @@
 {
- "at": "2026-10-05T22:32:58.780Z",
+ "at": "2026-10-05T23:30:10.522Z",
  "floor_http": 200,
  "seat": {
   "deployed": true,
@@ -8,59 +8,51 @@
   "work_state": "BLOCKED_ON_MARKET_DATA",
   "work_detail": "Market data failing: VENUE_BOOK_READS_FAILING",
   "heartbeat": {
-   "at": 1791239516.096655,
-   "age_s": 62.9,
+   "at": 1791242861.704284,
+   "age_s": 157.1,
    "stale_after_s": 900,
    "source": "agent_status.last_heartbeat_at"
   },
   "monitor": [
    {
     "label": "Census passes (24h)",
-    "value": 2,
+    "value": 13,
     "source": "adriana_arb_scans",
-    "as_of": 1791239516.039859,
+    "as_of": 1791242857.848023,
     "why": null
    },
    {
     "label": "Proven after costs (24h)",
     "value": 0,
     "source": "adriana_arb_opportunities",
-    "as_of": 1791239516.039859,
+    "as_of": 1791242857.848023,
     "why": null
    },
    {
     "label": "Refused (last pass)",
     "value": 0,
     "source": "adriana_arb_scans",
-    "as_of": 1791239516.039859,
+    "as_of": 1791242857.848023,
     "why": null
    },
    {
     "label": "Fresh books (last pass)",
     "value": 0,
     "source": "adriana_arb_scans",
-    "as_of": 1791239516.039859,
+    "as_of": 1791242857.848023,
     "why": null
    }
   ],
   "last_output": {
    "kind": "adriana_arb_scans",
-   "id": "adr-scan-1791239513716",
+   "id": "adr-scan-1791242854363",
    "href": "/api/command/adriana",
-   "at": 1791239516.039859,
+   "at": 1791242857.848023,
    "summary": "Census OK · 0 structures · 0 proven · 0 refused"
   },
   "authority": "SHADOW_ONLY"
  },
- "adriana_edges": [
-  {
-   "from": "ADRIANA",
-   "to": "AUDREY",
-   "kind": "REVIEW_REQUEST",
-   "count": 1,
-   "at": 1791239198.503787
-  }
- ],
+ "adriana_edges": [],
  "workspace_http": 200,
  "agent": {
   "agent_id": "ADRIANA",
@@ -115,11 +107,11 @@
   "activity": "CENSUS_RECORDED",
   "waiting_on": null,
   "dependencies": null,
-  "last_heartbeat_at": 1791239516.096655,
-  "last_run_started_at": 1791239513.716654,
-  "last_run_finished_at": 1791239516.096655,
-  "last_run_elapsed_s": 2.38,
-  "runs": 2,
+  "last_heartbeat_at": 1791242861.704284,
+  "last_run_started_at": 1791242854.363283,
+  "last_run_finished_at": 1791242861.704284,
+  "last_run_elapsed_s": 7.341,
+  "runs": 13,
   "errors": 0,
   "last_error": null,
   "cadence": {
@@ -128,9 +120,9 @@
   "role": "HEAD_OF_ARBITRAGE"
  },
  "census": {
-  "scan_id": "adr-scan-1791239513716",
-  "started_at": 1791239513.716654,
-  "finished_at": 1791239516.039859,
+  "scan_id": "adr-scan-1791242854363",
+  "started_at": 1791242854.363283,
+  "finished_at": 1791242857.848023,
   "status": "OK",
   "why": null,
   "engine_version": "ADRIANA_CENSUS_V1+ADRIANA_ARB_ENGINE_V1",
@@ -152,7 +144,7 @@
     "fee_schedule": "bettor_fee_schedule (dated, per order)"
    }
   },
-  "markets_read": 3,
+  "markets_read": 7,
   "books_fresh": 0,
   "structures_considered": 0,
   "opportunities": 0,
@@ -163,13 +155,13 @@
   "by_code": {
    "by_code": {},
    "skipped": {
-    "BOOK_READ_FAILED": 20,
+    "BOOK_READ_FAILED": 14,
     "SLUG_GRAMMAR_NOT_READ": 10,
-    "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED": 76
+    "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED": 75
    },
    "by_primary_code": {},
    "conditional_candidates": 0,
-   "same_market_pairs_not_considered": 3
+   "same_market_pairs_not_considered": 7
   },
   "limits": {
    "max_age_s": 30,
@@ -213,9 +205,9 @@
   "n": 0
  },
  "refusals": {
-  "status": "EMPTY",
-  "why": "NO_REFUSAL_RECORDED",
-  "n": 0
+  "status": "OK",
+  "why": null,
+  "n": 4
  },
  "blockers": {
   "status": "OK",
@@ -225,9 +217,46 @@
  "census_passes": {
   "status": "OK",
   "why": null,
-  "n": 2
+  "n": 12
  },
- "top_refusals": [],
+ "top_refusals": [
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "PAYOFF_FLOOR_BELOW_COST",
+   "codes": [
+    "PAYOFF_FLOOR_BELOW_COST",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  },
+  {
+   "primary_code": "STALE_BOOK",
+   "codes": [
+    "STALE_BOOK",
+    "VOID_TERMS_NOT_ESTABLISHED"
+   ],
+   "event_key": "nfl-atl-no-2026-10-05|SPREAD|FULL",
+   "kind": "MIDDLE_FLOOR"
+  }
+ ],
  "authority": {
   "submit": false,
   "cancel": false,
