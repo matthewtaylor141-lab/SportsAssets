@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import { chromium } from 'playwright';
 import { adrianaReadback } from './adriana_readback.mjs';
+import { apiReadback } from './api_readback.mjs';
 const HOST = process.env.HOST || 'https://command.bettortoken.com';
 const TOKEN = process.env.ADMIN_TOKEN || '';
 const OUT = process.env.OUT || 'site_verify_out';
@@ -20,6 +21,7 @@ for (let i = 0; i < 60; i++) {
 }
 console.log('build.json ' + JSON.stringify(report.build));
 report.adriana = await adrianaReadback(HOST, TOKEN, OUT);
+report.api = await apiReadback(HOST, TOKEN, OUT);
 console.log('adriana ' + JSON.stringify({ seat: report.adriana.seat && { deployed: report.adriana.seat.deployed, state: report.adriana.seat.state, work_state: report.adriana.seat.work_state }, workspace: report.adriana.workspace_http, census: report.adriana.census && { scan: report.adriana.census.scan_id, status: report.adriana.census.status, structures: report.adriana.census.structures_considered, opportunities: report.adriana.census.opportunities, refused: report.adriana.census.refusals_total } }));
 const browser = await chromium.launch({ args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'] });
 async function auth(ctx) { if (TOKEN) await ctx.route(HOST + '/api/command/**', (r) => r.continue({ headers: { ...r.request().headers(), 'x-admin-token': TOKEN } })); }
