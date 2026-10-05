@@ -1040,10 +1040,18 @@ def test_nothing_on_the_decision_path_reads_the_tournament_or_v2():
     for p in PKG.rglob("*.py"):
         if "opportunity_score_v2" in p.read_text():
             users.append(str(p.relative_to(PKG)))
+    # (R30 tails integration) decision_logic.py names the FILE in the
+    # pinned decision-logic hash list (a change to it restarts the forward
+    # window); it hashes the source and reads no value
     assert set(users) <= {"canonical_components.py", "live_parity.py",
                           "opportunity_tournament.py",
                           "execution_calibration.py",
-                          "opportunity_score_v2.py"}, users
+                          "opportunity_score_v2.py",
+                          "decision_logic.py"}, users
+    import re as _re
+    dl = (PKG / "decision_logic.py").read_text()
+    assert _re.findall(r"opportunity_score_v2\S*", dl) == [
+        'opportunity_score_v2.py")'], "decision_logic only pins the file"
     lp = (PKG / "live_parity.py").read_text()
     assert lp.count('comps.get("opportunity_score_v2")') == 1
     assert "opportunity_score_v2" not in (

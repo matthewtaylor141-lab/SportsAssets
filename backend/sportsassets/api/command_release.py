@@ -52,10 +52,12 @@ VERSION = "COMMAND_RELEASE_V1"
 STATEMENT_TIMEOUT_MS = 3000
 #: INCIDENT RELEASE: 216..264 (was 216..226), so the release check sees the
 #: R30A and incident migrations (227, 229, 248, 249, 251, 260, 261, 264);
-#: 216..265 since ADRIANA (migration 265).
-#: Numbers inside the range that no migration uses (reserved stream slots)
-#: are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 265
+#: 216..265 since ADRIANA (migration 265); 216..301 since the R30 tails
+#: (R30C exec 300, R30B agents 301 -- the streams' 233 / 234 renumbered into
+#: the 300-309 block). Numbers inside the range that no migration uses
+#: (reserved stream slots, 266..299) are reported in `numbers_absent`, never
+#: hidden.
+TRACKED_FROM, TRACKED_TO = 216, 301
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

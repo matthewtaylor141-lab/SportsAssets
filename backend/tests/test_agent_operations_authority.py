@@ -286,3 +286,47 @@ def test_memory_never_grants_authority():
                 assert not re.search(r"\b(INSERT\s+INTO|UPDATE\s+[a-z_]+"
                                      r"\s+SET|DELETE\s+FROM)", q, re.I), rel
         assert "agent_lesson_retrievals" not in path.read_text(), rel
+
+
+# ── (R30 tails integration) the current rails win over the stream's copies ──
+
+MIGS = ROOT.parent / "migrations"
+
+
+def _fn_body(path, name) -> str:
+    s = path.read_text()
+    i = s.index("AS $$", s.index("FUNCTION " + name))
+    return re.sub(r"\s+", " ", s[i:s.index("$$;", i)])
+
+
+def _registry(path) -> dict:
+    s = path.read_text()
+    i = s.index("FUNCTION pos_agents_authority_guarded_tables")
+    return dict(re.findall(r"\('([a-z_]+)',\s+ARRAY\[([^\]]*)\]",
+                           s[i:s.index("$$;", i)]))
+
+
+def test_301_machine_actor_test_is_the_current_one_adriana_included():
+    """R30B copied 221's machine-actor list before migration 265 added
+    ADRIANA; the copy in 301 is the CURRENT definition, so ADRIANA (or
+    'adriana-arb') can never stand as the named person who links a fix,
+    assigns an owner or decides a supersession."""
+    cur = _fn_body(MIGS / "265_adriana_arbitrage_agent.sql",
+                   "improve_is_machine_actor")
+    ours = _fn_body(MIGS / "301_agent_operations.sql",
+                    "agent_ops_is_machine_actor")
+    assert ours == cur
+    assert "'ADRIANA'" in ours and "|ADRIANA)" in ours
+
+
+def test_301_and_its_rollback_keep_every_registry_row_of_the_current_225():
+    """R30B re-declared the authority-guard registry from 225 before R30A
+    added live_parity_cutover / live_approvals; 301 and its rollback keep
+    every current 225 row with the same columns (dropping either would take
+    the no-authority registry off the owner's live approvals)."""
+    cur = _registry(MIGS / "225_live_parity.sql")
+    for f in (MIGS / "301_agent_operations.sql",
+              MIGS / "rollback" / "301_agent_operations.down.sql"):
+        got = _registry(f)
+        assert {k: got.get(k) for k in cur} == cur, f.name
+    assert {"live_parity_cutover", "live_approvals"} <= set(cur)

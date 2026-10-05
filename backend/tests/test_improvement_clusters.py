@@ -57,6 +57,12 @@ from sportsassets.agents import registry as R
 from tests import agent_ops_fixture as F
 
 pg = F.pg
+#: (R30 tails integration) the rule-measurement proofs read EVERY
+#: paper_xavier_reviews row of their before / after windows, and a shared
+#: test database keeps the rows test_xavier_thesis_reallocate_value_add
+#: commits at 2026-09-25 -- inside F.NOW's "before" window (seen: the
+#: before rate diluted, PARTIALLY_EFFECTIVE read as FIX_LINKED). They run at
+#: the stream's own isolated time base, as fc1923a moved the scorecards.
 NOW = F.NOW
 H = 3600.0
 SHA = "a" * 40
@@ -143,9 +149,16 @@ async def test_the_stale_hold_flood_becomes_one_root_cause_item(monkeypatch):
 
 @pg
 async def test_a_linked_fix_is_measured_on_the_rule_itself(monkeypatch):
+    # (R30 tails integration) this proof reads EVERY paper_xavier_reviews
+    # row of its before / after windows, and a shared test database keeps
+    # the rows test_xavier_thesis_reallocate_value_add commits at 2026-09-25
+    # -- inside F.NOW's "before" window (seen locally: the before rate
+    # diluted, FIX_PARTIALLY_EFFECTIVE read as FIX_LINKED). It runs at the
+    # stream's isolated time base, as fc1923a moved the scorecards.
+    NOW = F.ISOLATED
     conn, tx = await F.tx()
     try:
-        a, pos = await _replay(conn, monkeypatch)
+        a, pos = await _replay(conn, monkeypatch, at=NOW)
         await IC.refresh(conn, now=NOW + 120)
         cid = IC.cluster_id_for(IC.cluster_key("KAREN", DET, "XAVIER"))
         await AW.sync_for(conn, "paper_pass", now=NOW + 130)

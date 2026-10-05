@@ -564,12 +564,18 @@ CREATE TRIGGER agent_lesson_supersessions_append_only_trg
 -- WHO IS A MACHINE, and NO AUTHORITY KEYS: copies of 221's
 -- improve_is_machine_actor / improve_no_authority under this migration's
 -- own names, so 301's CHECKs depend on nothing 221's rollback drops.
+-- (R30 tails integration) The machine test is copied from the CURRENT
+-- definition, migration 265's (ADRIANA added: never a human approver,
+-- reviewer or engineer of a change); the R30B stream had copied 221's
+-- pre-265 list, which would have let 'ADRIANA' / 'adriana-arb' stand as the
+-- named person linking a fix or deciding a supersession.
 CREATE OR REPLACE FUNCTION agent_ops_is_machine_actor(v text)
 RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
     SELECT v IS NULL
         OR btrim(v) = ''
         OR upper(btrim(v)) IN ('DEREK', 'XAVIER', 'AUDREY', 'KAREN', 'EDDIE',
                                'SCOUT', 'ALLOCATOR', 'CHIEF_ALLOCATOR',
+                               'ADRIANA',
                                'CALIBRATION_ENGINE', 'MODEL_TOURNAMENT',
                                'CLAUDE', 'SYSTEM', 'RUNNER', 'MIGRATION',
                                'ROOT', 'POSTGRES', 'BOT', 'AGENT', 'CI',
@@ -578,7 +584,7 @@ RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
                                'POS_LEARN_RUNNER', 'POS_WORKFLOW', 'UNKNOWN',
                                'ANONYMOUS', 'SERVICE', 'AUTOMATION', 'CRON')
         OR upper(btrim(v)) ~ '^(AGENT|AGENTS|BOT|SLACK|SYSTEM|ROLE|CLAUDE|MIGRATION|POS_LEARN|POSLEARN|RUNNER|INTEL|AUTOMATION|SERVICE|IMPROVEMENT|PIPELINE|GITHUB|CI|CRON|WORKER|DEPLOY)([:/ ._-]|$)'
-        OR upper(btrim(v)) ~ '(DEREK|XAVIER|AUDREY|KAREN|EDDIE|SCOUT|ALLOCATOR)[ ._:-]*(AGENT|BOT|V[0-9]|CHALLENGER|RED[ ._-]*TEAM|EXECUTION|RESEARCH|INTEL)'
+        OR upper(btrim(v)) ~ '(DEREK|XAVIER|AUDREY|KAREN|EDDIE|SCOUT|ALLOCATOR|ADRIANA)[ ._:-]*(AGENT|BOT|V[0-9]|CHALLENGER|RED[ ._-]*TEAM|EXECUTION|RESEARCH|INTEL|ARB|ARBITRAGE)'
         OR lower(btrim(v)) ~ '\[bot\]'
         OR lower(btrim(v)) ~ '(^|[^a-z])(bot|runner|daemon|scheduler)$'
 $$;
