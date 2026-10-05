@@ -1094,6 +1094,7 @@ tests/test_capital_eligibility.py
 tests/test_strategy_lifecycle.py
 tests/test_paper_mark_freshness_classifier.py
 tests/test_paper_mark_refresh_coverage.py
+tests/test_paper_mark_refresh_cooldown.py
 tests/test_xavier_management_packet.py
 tests/test_pos_os_authority.py
 tests/test_pos_os_components.py

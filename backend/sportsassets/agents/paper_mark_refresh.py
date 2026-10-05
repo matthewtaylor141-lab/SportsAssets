@@ -49,6 +49,33 @@ reads an hour in steady state (each market re-read every ~180-240 s), so the
 budget covers ~200 held markets; beyond that the shortfall is RECORDED
 (SKIPPED_HOURLY_BUDGET -> FEED_GAP), never hidden and never relabelled.
 
+THE VENUE COOLDOWN, MEASURED IN PRODUCTION (2026-10-05, research-sql run
+37384642567). The authenticated book endpoint answers 429 with a
+`Retry-After` of 7-10 s; the workers process had 158 of 463 dispatches
+rate-limited and the request gate refused 1,405 more. Every read of runs 1-21
+asked for an 8 s deadline, so whenever a hold was in force the gate refused it
+(VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE) and the run burned its whole
+read cap in under a second: 0-1 reads OK out of 90, every run. The repair,
+which waits for the venue instead of asking it for more:
+
+  * THE COOLDOWN IS WAITED OUT INSIDE THE RUN'S OWN BUDGET. This run has no
+    decision deadline; its bound is RUN_BUDGET_S. A hold no longer than
+    MAX_COOLDOWN_WAIT_S that leaves a full read inside the run is slept
+    (asynchronously, on this run's own task) and the read then dispatches
+    after the venue's window. A longer hold stops the REST lane for this run:
+    every remaining due market is recorded SKIPPED_VENUE_COOLDOWN with the
+    seconds left and the reason -- FEED_GAP, never fresh, and no doomed
+    request or refusal row is written for it.
+  * THE PUSHED BOOK IS USED WHEN THE PROCESS HOLDS ONE. When the retail
+    market-data subscription (bettor_market_subscription) is running in this
+    process, every held market is asked for (`want`) and a due market whose
+    stream book passes the stream's own eligibility at the SLA bounds
+    (`book_at`: current connection, open, venue clock AND our receipt both
+    <= SLA_S) is recorded with ITS receipt instant (HELD_MARK_STREAM) -- no
+    venue request, nothing made fresher than it is. A quiet market whose last
+    pushed book is older than the SLA is NOT inferred current; it falls to
+    the REST lane like any other.
+
 PAPER ONLY. It reads books and writes paper_book_observations and its own run
 record; it places, cancels and changes no order, limit or threshold.
 """
@@ -83,9 +110,14 @@ PER_READ_TIMEOUT_S = 8.0
 #: a book this process read at most this long ago answers without a venue
 #: request (recorded with its original receipt instant)
 HARVEST_MAX_AGE_S = 60.0
+#: the longest venue hold this run sleeps out before its next read (the
+#: measured Retry-After is 7-10 s); a longer hold stops the REST lane
+MAX_COOLDOWN_WAIT_S = 15.0
 READ_BASIS = "HELD_MARK_REFRESH"
 HARVEST_BASIS = "HELD_MARK_REFRESH_SHARED_READ"
 SOURCE = "PAPER_MARKET_DATA_CLIENT"
+STREAM_BASIS = "HELD_MARK_STREAM"
+STREAM_SOURCE = "PAPER_MARKET_STREAM"
 
 O_READ_OK = "READ_OK"
 O_READ_FAILED = "READ_FAILED"
@@ -94,6 +126,8 @@ O_SKIP_TERMINAL = "SKIPPED_EXTERNAL_TERMINAL"
 O_SKIP_RUN_CAP = "SKIPPED_RUN_READ_CAP"
 O_SKIP_HOURLY = "SKIPPED_HOURLY_BUDGET"
 O_SKIP_TIME = "SKIPPED_RUN_TIME_BUDGET"
+O_SKIP_COOLDOWN = "SKIPPED_VENUE_COOLDOWN"
+O_STREAM = "STREAM_BOOK"
 
 _HOURLY: dict = {"reads": []}
 
@@ -107,6 +141,9 @@ def budget() -> dict:
             "min_run_interval_s": MIN_RUN_INTERVAL_S,
             "per_read_timeout_s": PER_READ_TIMEOUT_S,
             "harvest_max_age_s": HARVEST_MAX_AGE_S,
+            "max_cooldown_wait_s": MAX_COOLDOWN_WAIT_S,
+            "stream": "bettor_market_subscription (when running here): "
+                      "book_at at the SLA bounds, its own receipt instant",
             "pace": "venue_pace (process-wide gap, normal lane) + "
                     "venue_request_gate (429 cooldowns)"}
 
@@ -122,6 +159,58 @@ def _default_recent(slug: str, *, max_age_s: float):
     try:
         from ..workers import ext_pinnacle_loop as LOOP
         return LOOP.recent_book(slug, max_age_s=max_age_s)
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def _default_gate() -> dict:
+    """The process's venue not-before hold (venue_request_gate.gate_state):
+    {blocking, seconds_left, reason}. Never raises; unknown is not blocking
+    (the gate itself still refuses at dispatch)."""
+    try:
+        from .. import venue_request_gate as GRT
+        return GRT.gate_state()
+    except Exception:                                           # noqa: BLE001
+        return {"blocking": False, "seconds_left": 0.0, "reason": None}
+
+
+class _SubscriptionBooks:
+    """The retail market-data subscription's books, at the SLA bounds."""
+
+    def __init__(self, sub, msub):
+        self._sub = sub
+        self._msub = msub
+
+    def want(self, slugs) -> dict:
+        return self._msub.want(list(slugs))
+
+    def book(self, slug: str, *, now: float):
+        st = getattr(self._sub, "stream", None)
+        if st is None:
+            return None
+        got = st.book_at(slug, max_source_age_s=PMF.SLA_S,
+                         max_receipt_age_s=PMF.SLA_S)
+        if not got or not got.get("eligible") or not got.get("book"):
+            return None
+        bk = got["book"]
+        return {"marketData": {"bids": bk.get("bids") or [],
+                               "offers": bk.get("offers") or [],
+                               "state": got.get("venue_state"),
+                               "transactTime": got.get("source_ts")},
+                "observed_at": float(now) - float(got["receipt_age_s"]),
+                "stream_receipt_age_s": got["receipt_age_s"],
+                "stream_source_age_s": got.get("source_age_s")}
+
+
+def _default_stream():
+    """The retail market-data subscription running in THIS process, or None
+    (BETTOR_MARKET_SUBSCRIPTION off, no market-data key, not started)."""
+    try:
+        from .. import bettor_market_subscription as MSUB
+        sub = MSUB.active()
+        if sub is None or getattr(sub, "stream", None) is None:
+            return None
+        return _SubscriptionBooks(sub, MSUB)
     except Exception:                                           # noqa: BLE001
         return None
 
@@ -157,7 +246,8 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                   run_budget_s: float = RUN_BUDGET_S,
                   max_reads: int = MAX_READS_PER_RUN,
                   hourly_budget: int = MAX_VENUE_READS_PER_HOUR,
-                  recent=None, trigger: str = "SCHEDULED") -> dict:
+                  recent=None, trigger: str = "SCHEDULED", gate=None,
+                  sleep=None, stream=None) -> dict:
     """ONE BOUNDED HELD-MARK REFRESH RUN for `account_id`. Records every due
     market's outcome. Never raises (CancelledError excepted)."""
     from . import paper_derek as PD
@@ -168,12 +258,18 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
     deadline = t0 + float(run_budget_s)
     md = market_data if market_data is not None else G.PaperMarketDataClient()
     recent = recent if recent is not None else _default_recent
+    gate = gate if gate is not None else _default_gate
+    sleep = sleep if sleep is not None else asyncio.sleep
+    books = stream if stream is not None else _default_stream()
     out: dict[str, Any] = {"version": VERSION, "account_id": account_id,
                            "trigger": trigger, "at": at, "held_markets": 0,
                            "due": 0, "not_due": 0, "harvested": 0,
                            "read_attempted": 0, "read_ok": 0,
                            "read_failed": 0, "skipped_budget": 0,
-                           "skipped_terminal": 0, "outcomes": {},
+                           "skipped_terminal": 0, "skipped_cooldown": 0,
+                           "stream_books": 0, "cooldown_waited_s": 0.0,
+                           "stream": "RUNNING" if books else "NOT_RUNNING",
+                           "outcomes": {},
                            "budget": budget()}
     run_id = None
     has_log = await PMF._has(conn, "paper_mark_refresh_runs")
@@ -198,6 +294,12 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
         out.update(held_markets=len(held), due=len(pl["due"]),
                    not_due=len(pl["not_due"]),
                    skipped_terminal=len(pl["terminal"]))
+        if books is not None:
+            try:
+                out["stream_want"] = books.want(list(expo))
+            except Exception as exc:                            # noqa: BLE001
+                out["stream_want"] = {"error": type(exc).__name__}
+        cooldown_stop = None
         for slug, evd in pl["terminal"].items():
             out["outcomes"][slug] = {"outcome": O_SKIP_TERMINAL,
                                      "why": evd["market_state"],
@@ -220,17 +322,57 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                 out["outcomes"][slug] = {"outcome": O_HARVESTED,
                                          "obs_id": rec.get("obs_id")}
                 continue
+            # 4b. THE PUSHED BOOK, at the SLA bounds, with its receipt instant
+            pushed = None
+            if books is not None:
+                try:
+                    pushed = books.book(slug, now=float(clock()))
+                except Exception:                               # noqa: BLE001
+                    pushed = None
+            if pushed is not None and (
+                    ok_at is None
+                    or float(pushed.get("observed_at") or 0) > ok_at):
+                rec = await SIM.record_book(
+                    conn, slug=slug, read=pushed, source=STREAM_SOURCE,
+                    read_basis=STREAM_BASIS)
+                out["harvested"] += 1
+                out["stream_books"] += 1
+                out["outcomes"][slug] = {
+                    "outcome": O_STREAM, "obs_id": rec.get("obs_id"),
+                    "receipt_age_s": pushed.get("stream_receipt_age_s")}
+                continue
             # 6. THE BOUNDS, checked before each venue read
-            stop = None
-            if out["read_attempted"] >= int(max_reads):
+            stop, why = None, None
+            if cooldown_stop is not None:
+                stop, why = O_SKIP_COOLDOWN, cooldown_stop
+            elif out["read_attempted"] >= int(max_reads):
                 stop = O_SKIP_RUN_CAP
             elif hourly_used(float(clock())) >= int(hourly_budget):
                 stop = O_SKIP_HOURLY
             elif deadline - time.monotonic() <= PD.BOOK_READ_RESERVE_S:
                 stop = O_SKIP_TIME
+            if stop is None:
+                # 5a. THE VENUE'S HOLD: waited out inside this run's budget,
+                #     or the REST lane stops for the run (recorded, no request)
+                g = gate() or {}
+                hold = float(g.get("seconds_left") or 0.0) \
+                    if g.get("blocking") else 0.0
+                if hold > 0.0:
+                    room = (deadline - time.monotonic()
+                            - PD.BOOK_READ_RESERVE_S - PER_READ_TIMEOUT_S)
+                    if hold > MAX_COOLDOWN_WAIT_S or hold > room:
+                        cooldown_stop = "%.1fs_left:%s" % (
+                            hold, g.get("reason") or "VENUE_HOLD")
+                        stop, why = O_SKIP_COOLDOWN, cooldown_stop
+                    else:
+                        await sleep(hold + 0.05)
+                        out["cooldown_waited_s"] = round(
+                            out["cooldown_waited_s"] + hold + 0.05, 3)
             if stop is not None:
                 out["skipped_budget"] += 1
-                out["outcomes"][slug] = {"outcome": stop, "why": stop}
+                if stop == O_SKIP_COOLDOWN:
+                    out["skipped_cooldown"] += 1
+                out["outcomes"][slug] = {"outcome": stop, "why": why or stop}
                 continue
             # 5. ONE PACED, GATED VENUE READ
             rctx = {"market_data": md,
@@ -308,7 +450,8 @@ async def run_once(get_pool, *, trigger: str,
     _TASK["last"] = {k: res.get(k) for k in (
         "ran", "refusal", "error", "run_id", "held_markets", "due",
         "read_attempted", "read_ok", "read_failed", "skipped_budget",
-        "harvested", "elapsed_s")}
+        "harvested", "skipped_cooldown", "stream_books", "cooldown_waited_s",
+        "stream", "elapsed_s")}
     return res
 
 
