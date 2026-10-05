@@ -359,3 +359,4 @@ body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc,
 /* the desk panel takes the right of the floor: the legend steps aside */
 body.desk-open .floor-legend [data-render="legend"] { display: none; }
 .floor-counts [data-watch] { white-space: nowrap; height: 32px; }
+@media (max-width: 760px) { .floor-counts { flex-wrap: wrap; gap: 12px 18px; } .floor-counts > div:last-child { flex-basis: 100%; } }
