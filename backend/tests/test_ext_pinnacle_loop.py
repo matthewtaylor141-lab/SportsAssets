@@ -297,6 +297,23 @@ def _stub_venue_board(monkeypatch, *tokens):
 
     monkeypatch.setattr(loop, "venue_soccer_competitions", _board)
 
+    # R30A · THE SAME BOARD, READ BY THE COVERAGE SCHEDULER. The collector
+    # now asks the venue catalogue a second question -- which competitions
+    # have an event in the next 24 h -- and skips (by name, at no cost) one
+    # that has none. That read is the same `us_premap` dependence this helper
+    # exists to remove, so it is stubbed to agree with the board above: each
+    # stubbed token's nine listed events are in the horizon, the first two
+    # hours out. Every other token reads as listing nothing, exactly as the
+    # board says.
+    async def _horizon(conn):
+        return {"read": True, "source": "stub",
+                "by_token": {t: {"events_in_horizon": 9, "board_events": 9,
+                                 "start_unknown": 0,
+                                 "next_start": time.time() + 7200.0}
+                             for t in tokens}}
+
+    monkeypatch.setattr(loop, "venue_horizon", _horizon)
+
 
 def _stub_sport_catalogue(monkeypatch, *keys):
     """Confirm these provider keys without a network call.

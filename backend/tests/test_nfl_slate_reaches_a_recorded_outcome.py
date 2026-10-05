@@ -168,7 +168,7 @@ def test_nfl_is_one_league_everywhere():
 
 
 # ═════════════════════════════════════════════════════════════════════
-# 2 · THE BUDGET, UNCHANGED, ON TODAY'S MEASURED BOARD
+# 2 · THE BUDGET, UNCHANGED, ON TODAY'S MEASURED BOARD (R30A: SCHEDULED)
 # ═════════════════════════════════════════════════════════════════════
 
 #: The boards the collector read at 2026-10-04T04:26Z (heartbeat
@@ -187,32 +187,59 @@ CATALOGUE = {"ok": True, "sports": [{"key": k, "active": True} for k in (
     "soccer_brazil_serie_b")]}
 
 
-def test_the_budget_ranks_nfl_by_venue_coverage_and_drops_serie_b_by_name():
-    assert loop.MAX_METERED_SPORTS_PER_CYCLE == 4
+def test_the_schedule_serves_nfl_and_skips_serie_b_with_no_event_in_the_horizon():
+    """THE 2026-10-04 BOARD (cfb 34, unl 26, nfl 15, brb 8 events).
+
+    WHAT THIS TEST PINNED BEFORE R30A, AND WHY IT CHANGED. Under first-come
+    truncation of a fixed ranking `select_sports` requested MLB, NCAAF, UNL
+    and NFL and named Brazil Serie B `budget_dropped`; once the Saturday
+    slate aged off, NCAAF was the one dropped. Measured over the following
+    week (research-sql run 37233454453) the same rule left NCAAF unfetched in
+    137 of 153 cycles with a venue cfb event in the next 24 h. The budget is
+    unchanged (four metered calls); the truncation is gone: `select_sports`
+    confirms every candidate, and `collector_coverage.plan` gives the four
+    calls earliest deadline first. Serie B still is not fetched on this
+    board -- because it has no venue event in the next 24 h, which costs
+    nothing and says so by name -- and NCAAF is no longer the price of the
+    NFL."""
     fb = loop.football_candidates(FOOTBALL_BOARD)
     assert [(c["key"], c["our_token"]) for c in fb] == [(NCAAF, "cfb"),
                                                         (NFL, "nfl")]
     merged = loop.merge_candidates(loop.candidates_from_board(SOCCER_BOARD),
                                    fb)
     sel = loop.select_sports(CATALOGUE, candidates=merged)
-    assert sel["sports"] == [("baseball_mlb", "baseball"), (NCAAF, "football"),
-                             ("soccer_uefa_nations_league", "soccer"),
-                             (NFL, "football")]
-    assert [d["key"] for d in sel["budget_dropped"]] == \
-        ["soccer_brazil_serie_b"]
-    assert "budget" in sel["budget_dropped"][0]["why"]
-    # MLB (the postseason) is the confirmed key: it can never be ranked out
-    assert sel["sports"][0] == ("baseball_mlb", "baseball")
-    # once the Saturday college slate has aged off the board (game_start
-    # older than 6 h), the NFL outranks NCAAF's few listings
-    later = dict(FOOTBALL_BOARD, board=[("nfl", 14), ("cfb", 3)])
-    sel2 = loop.select_sports(CATALOGUE, candidates=loop.merge_candidates(
-        loop.candidates_from_board(SOCCER_BOARD),
-        loop.football_candidates(later)))
-    assert [k for k, _ in sel2["sports"]] == [
-        "baseball_mlb", "soccer_uefa_nations_league", NFL,
+    # every catalogue-confirmed candidate, nothing truncated, nothing dropped
+    assert [k for k, _ in sel["sports"]] == [
+        "baseball_mlb", NCAAF, "soccer_uefa_nations_league", NFL,
         "soccer_brazil_serie_b"]
-    assert [d["key"] for d in sel2["budget_dropped"]] == [NCAAF]
+    assert sel["budget_dropped"] == [] and sel["budget"] is None
+    from sportsassets import collector_coverage as cov
+    now = 1_791_100_000.0
+    horizon = {"baseball_mlb": (3, now + 4 * 3600), NCAAF: (34, now + 3600),
+               "soccer_uefa_nations_league": (26, now + 2 * 3600),
+               NFL: (15, now + 5 * 3600),
+               "soccer_brazil_serie_b": (0, now + 40 * 3600)}
+    comps = [cov.competition(key=k, family=f, listed=True, active=True,
+                             confirmed=(k == "baseball_mlb"),
+                             events_in_horizon=horizon[k][0],
+                             next_start=horizon[k][1])
+             for k, f in sel["sports"]]
+    plan = cov.plan(comps, now=now, cycle_s=loop.CYCLE_S)
+    got = {r["key"]: r for r in plan["receipts"]}
+    assert [k for k, _ in plan["fetch_order"]] == [
+        NCAAF, "soccer_uefa_nations_league", "baseball_mlb", NFL]
+    assert got["soccer_brazil_serie_b"]["planned"] == \
+        cov.SKIPPED_NO_VENUE_EVENT_IN_HORIZON
+    # it enters the horizon 24 h before its first event, and says when
+    assert got["soccer_brazil_serie_b"]["next_slot_at"] == now + 16 * 3600
+    assert plan["envelope"]["planned_spend"] <= \
+        plan["envelope"]["per_cycle_allowance"]
+    # once the Saturday slate has aged off, NCAAF with three listings is still
+    # served -- the NFL is not bought with it
+    horizon[NCAAF] = (3, now + 3600)
+    comps2 = [dict(c, events_in_horizon=horizon[c["key"]][0]) for c in comps]
+    plan2 = cov.plan(comps2, now=now, cycle_s=loop.CYCLE_S)
+    assert {NCAAF, NFL} <= {k for k, _ in plan2["fetch_order"]}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -696,10 +723,30 @@ async def test_every_nfl_game_ends_in_a_recorded_named_outcome(monkeypatch):
 
         out = await loop.cycle(conn)
 
-        # 1 · requested within the unchanged budget, and fetched
+        # 1 · requested within the unchanged budget, and fetched. R30A: the
+        # four calls are scheduled rather than truncated, so the pin is the
+        # budget's own receipt (calls and credits) and the NFL receipt.
         requested = [k for k, _ in out["sports_selection"]["sports"]]
         assert NFL in requested, out["sports_selection"]
         assert len(requested) <= loop.MAX_METERED_SPORTS_PER_CYCLE
+        cc = out["collector_coverage"]
+        assert cc["cycle"]["calls_made"] <= cc["cycle"]["calls_budget"] == \
+            loop.MAX_METERED_SPORTS_PER_CYCLE, cc
+        assert cc["spent_this_cycle"] <= cc["envelope"]["cycle_budget"], cc
+        assert {r["key"]: r["final"] for r in cc["competitions"]}[NFL] == \
+            "FETCHED", cc
+        # ...and the cycle APPENDED its receipts (migration 248) under the
+        # outcome rows' cycle id. This harness drives `cycle` without the
+        # collector's single-writer lease, so the rows say NOT_HELD and the
+        # collector's schedule memory is untouched by them.
+        rec = out["collector_coverage_receipts"]
+        assert rec["ok"] is True and rec["writer_lease"] == "NOT_HELD", rec
+        assert rec["rows"] == 1 + len(cc["competitions"]), rec
+        assert await conn.fetchval(
+            "SELECT receipt FROM collector_coverage_receipts WHERE "
+            "cycle_id = $1 AND scope = 'COMPETITION' AND competition = $2",
+            rec["cycle_id"], NFL) == "FETCHED"
+        assert NFL not in loop._COVERAGE["last_served"]
         assert NFL in calls["odds"]
         step = out["funnel_by_provider_sport"][NFL]
         assert step["family"] == "football"
