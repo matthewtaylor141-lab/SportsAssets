@@ -7523,6 +7523,22 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
 # dropped silently. Pinnacle's main lines are taken before its alternates.
 MAX_LINE_INSTRUMENTS_PER_CYCLE = 12
 MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION = 2
+#
+# EVERY VENUE REQUEST IS COUNTED AND BOUNDED (adversarial verification,
+# finding 5, fix stage 2026-10-05). The caps above count INSTRUMENTS (one book
+# read each). But an instrument also reads its contract's rules text (a paced
+# venue request unless the hourly rules cache holds it), and a team total
+# whose slug does not bind its team was read for its text while the contracts
+# were SCANNED -- before the cap, before the WS-deadline check, uncounted:
+# an unbounded number of paced requests on a busy slate. Now the lane's
+# report counts every request it makes (`venue_requests` = `venue_reads`, the
+# book reads, + `venue_rules_reads`, the uncached rules reads) and bounds the
+# total: at most two requests per instrument the cap admits (its rules read
+# and its book read), the scan's text reads included. Nothing is dropped: a
+# read the bound or the deadline does not allow is deferred BY NAME.
+MAX_LINE_VENUE_REQUESTS_PER_CYCLE = 2 * MAX_LINE_INSTRUMENTS_PER_CYCLE
+MAX_LINE_VENUE_REQUESTS_PER_WS_EVALUATION = \
+    2 * MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
 #: the time one line instrument needs (catalogue read, rules read, paced book
 #: read, recheck, persist, paper decision); a WS evaluation with less than
 #: this left before its deadline defers the instrument rather than letting
@@ -7537,6 +7553,12 @@ R_LINE_NO_IDENTITY = "LINE_FIXTURE_NOT_MATCHED_BY_PINNAPI_DISCOVERY"
 R_LINE_ROWS_READ = "LINE_CATALOGUE_READ_FAILED"
 R_LINE_DEFERRED_CYCLE = "LINE_INSTRUMENT_DEFERRED_CYCLE_BOUND"
 R_LINE_DEFERRED_WS = "LINE_INSTRUMENT_DEFERRED_WS_EVALUATION_DEADLINE"
+#: a team total whose slug binds no team needs its TEXT read to be proven;
+#: that read is a venue request, deferred by name like an instrument
+R_LINE_TT_TEXT_DEFERRED_CYCLE = \
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_CYCLE_BOUND"
+R_LINE_TT_TEXT_DEFERRED_WS = \
+    "LINE_TEAM_TOTAL_TEXT_READ_DEFERRED_WS_EVALUATION_DEADLINE"
 R_LINE_INSTRUMENT_EVALUATED = "LINE_INSTRUMENT_ALREADY_EVALUATED_THIS_CYCLE"
 LINE_IDENTITY_RESOLVER = "BETTOR_LINE_MARKET_FAMILY_V1"
 
@@ -7589,9 +7611,28 @@ def _line_report() -> dict:
     return {"version": None, "jobs": 0, "contracts": 0,
             "by_state": {}, "by_sport_family_state": {},
             "instruments_eligible": 0, "instruments_evaluated": 0,
-            "venue_reads": 0, "valuations_written": 0,
+            "venue_reads": 0, "venue_rules_reads": 0, "venue_requests": 0,
+            "valuations_written": 0,
             "calibration_only_written": 0, "duplicates": 0, "deferred": 0,
             "valuation_ids": [], "sample": []}
+
+
+def _rules_cached(slug, *, now=None) -> bool:
+    """True when the hourly rules cache answers this contract's text read
+    without a venue request (`_read_venue_rules_blocking`'s own rule)."""
+    hit = _RULES_CACHE.get(slug)
+    if hit is None:
+        return False
+    at = float(now if now is not None else time.time())
+    return (at - float(hit.get("read_at") or 0.0)) <= RULES_CACHE_TTL_S
+
+
+def _count_rules_read(report, vevid) -> None:
+    """A rules read the cache did not answer is a venue request: counted."""
+    rr = (vevid or {}).get("rules_read") or {}
+    if not rr.get("from_cache"):
+        report["venue_rules_reads"] += 1
+        report["venue_requests"] += 1
 
 
 def _line_count(report, code, *, sport=None, family=None, n=1) -> None:
@@ -7625,14 +7666,17 @@ async def line_market_pass(conn, *, jobs, fee_fn, open_book, ev_measurable,
                        if started is not None and deadline_s is not None
                        else None)
         cap = MAX_LINE_INSTRUMENTS_PER_WS_EVALUATION
+        req_cap = MAX_LINE_VENUE_REQUESTS_PER_WS_EVALUATION
         if deadline_at is None:
             # NO DEADLINE KNOWN, NO LINE READ: a WS evaluation must never
             # risk timing out the money-line work it already did.
-            cap = 0
+            cap = req_cap = 0
     else:
         deadline_at = None
         cap = MAX_LINE_INSTRUMENTS_PER_CYCLE
+        req_cap = MAX_LINE_VENUE_REQUESTS_PER_CYCLE
     report["instrument_cap"] = cap
+    report["venue_request_cap"] = req_cap
     eligible, seen_events = [], set()
     t0 = time.time() if now is None else float(now)
     for job in jobs or ():
@@ -7671,7 +7715,27 @@ async def line_market_pass(conn, *, jobs, fee_fn, open_book, ev_measurable,
                 # A TEAM TOTAL WHOSE TEAM THE SLUG DID NOT BIND: the
                 # contract's own words name it (`prove`), read before the
                 # book pair is looked up, so the pair is the named team's.
+                # The read is a venue request unless the hourly cache holds
+                # it: bounded by the lane's request cap and, in a WS
+                # evaluation, by its deadline -- deferred by name otherwise.
+                if not _rules_cached(mslug):
+                    if report["venue_requests"] + 1 > req_cap:
+                        report["deferred"] += 1
+                        _line_count(report, (
+                            R_LINE_TT_TEXT_DEFERRED_WS
+                            if stream_seed is not None
+                            else R_LINE_TT_TEXT_DEFERRED_CYCLE),
+                            sport=c["sport"], family=c["family"])
+                        continue
+                    if deadline_at is not None and \
+                            time.time() + LINE_INSTRUMENT_BUDGET_S > \
+                            deadline_at:
+                        report["deferred"] += 1
+                        _line_count(report, R_LINE_TT_TEXT_DEFERRED_WS,
+                                    sport=c["sport"], family=c["family"])
+                        continue
                 vevid = await venue_settlement_evidence(conn, mslug)
+                _count_rules_read(report, vevid)
                 proof = MF.prove(contract=c,
                                  venue_text=(vevid or {}).get("rules_text"),
                                  participants=parts)
@@ -7703,7 +7767,11 @@ async def line_market_pass(conn, *, jobs, fee_fn, open_book, ev_measurable,
             _line_count(report, R_LINE_INSTRUMENT_EVALUATED,
                         sport=c["sport"], family=c["family"])
             continue
-        if report["venue_reads"] >= cap:
+        # the requests this instrument needs: its book read, and its rules
+        # read unless the hourly cache answers it
+        need = 1 + (0 if _rules_cached(c["market_slug"]) else 1)
+        if report["venue_reads"] >= cap or \
+                report["venue_requests"] + need > req_cap:
             report["deferred"] += 1
             _line_count(report, (R_LINE_DEFERRED_WS if stream_seed is not None
                                  else R_LINE_DEFERRED_CYCLE),
@@ -7738,6 +7806,7 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
     Returns the code it ended on (counted by the caller)."""
     c, slug = contract, contract["market_slug"]
     vevid = await venue_settlement_evidence(conn, slug)
+    _count_rules_read(report, vevid)
     rules_text = (vevid or {}).get("rules_text")
     if proof is None:
         proof = MF.prove(contract=c, venue_text=rules_text,
@@ -7748,8 +7817,14 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
     sel = pair["selection"] if inst["pays_on"] == "selection" \
         else pair["other"]
     # ONE FIXTURE, ONE EVENT KEY: the same venue event's key the money line
-    # carries, so every fixture rail sees a line position and a money-line
-    # position on one game as ONE fixture (`sticky_event_key`, migration 261)
+    # carries, so a fixture rail sees a line position and a VENUE-NATIVE
+    # money-line position on one game as ONE fixture (`sticky_event_key`,
+    # migration 261). SCOPE (adversarial verification P1, fix stage
+    # 2026-10-05, not yet resolved): a money line mapped through the GLOBAL
+    # catalogue carries a condition id, and the paper ledger keys it
+    # "condition:<id>" (agents.derek_policy.fixture_of), not
+    # "event:<key>" -- so for such a game the rails would see the line
+    # position and the money-line position as two fixtures.
     _sk = await sticky_event_key(conn, venue_event_slug=job["venue_event_slug"],
                                  proposed=job.get("provider_event_id"),
                                  cache=fixture_keys)
@@ -7762,6 +7837,7 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
                            subscription=_cev.get("subscription"),
                            revalidation=_cev.get("revalidation"))
     report["venue_reads"] += 1
+    report["venue_requests"] += 1
     calibration_only = None
     if not lq.get("ok"):
         calibration_only = _calibration_only_basis(lq)

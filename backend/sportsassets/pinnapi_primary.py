@@ -52,14 +52,37 @@ def name(value):
     return " ".join(re.findall(r"[^\W_]+", text))
 
 
-def match_event(cache, event, family):
+def fixture_index(cache) -> dict:
+    """{(sport id, frozenset of the two folded names): [(fixture id, home,
+    away, start)]} over ONE `fixture_view` of the cache, in its order.
+
+    THE REGISTRATION COST (adversarial verification, finding 1, fix stage
+    2026-10-05): `match_event` rebuilt the whole fixture view for every
+    reactive registration -- ~7 ms per seed on 2,600 cached events, every
+    discovery pass, on the API's event loop. A pass that registers many
+    seeds builds this once; `match_event(index=...)` then answers exactly
+    what the full scan answers (the same two names, the same sport, the same
+    start tolerance), by lookup."""
+    view, _skipped = F.fixture_view(cache.events)
+    out: dict = {}
+    for fx in view:
+        h, a = name(fx.get("home")), name(fx.get("away"))
+        if not h or not a or h == a:
+            continue
+        out.setdefault((fx.get("sport_id"), frozenset((h, a))), []).append(
+            (fx["id"], h, a, epoch(fx.get("startTime"))))
+    return out
+
+
+def match_event(cache, event, family, *, index=None):
     """((fixture id, {home, away} labels), None) for the ONE fixture whose
     two participants are exactly the event's, starting within the
     tolerance; else (None, named reason). R30A RC3: a fixture is read from
     `pinnapi_feed.fixture_view`, so a prematch matchup whose game is in play
     is still matched (its live-phase child prices it), and a live game
     whose parent left the cache is its own fixture -- a child record is no
-    longer skipped for carrying a parentId."""
+    longer skipped for carrying a parentId. `index` (`fixture_index` of the
+    same cache) replaces the scan with a lookup; the answer is the same."""
     sid = SPORTS.get(family)
     start = epoch(event.get("commence_time"))
     home, away = name(event.get("home_team")), name(event.get("away_team"))
@@ -68,15 +91,16 @@ def match_event(cache, event, family):
     if start is None or not home or not away or home == away:
         return None, "PINNAPI_PRIMARY_FIXTURE_UNPROVED"
     hits = []
-    view, _skipped = F.fixture_view(cache.events)
-    for fx in view:
-        eid = fx["id"]
-        if fx.get("sport_id") != sid:
-            continue
-        other_start = epoch(fx.get("startTime"))
+    if index is not None:
+        candidates = index.get((sid, frozenset((home, away))), ())
+    else:
+        view, _skipped = F.fixture_view(cache.events)
+        candidates = [(fx["id"], name(fx.get("home")), name(fx.get("away")),
+                       epoch(fx.get("startTime"))) for fx in view
+                      if fx.get("sport_id") == sid]
+    for eid, h, a, other_start in candidates:
         if other_start is None or abs(start - other_start) > START_TOLERANCE_S:
             continue
-        h, a = name(fx.get("home")), name(fx.get("away"))
         if h != a and {home, away} == {h, a}:
             hits.append((eid, {"home": event["home_team"] if home == h
                                else event["away_team"],

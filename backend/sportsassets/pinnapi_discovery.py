@@ -59,8 +59,10 @@ each refusing by its own name. Pure apart from the bounded catalogue read.
 """
 from __future__ import annotations
 
+import bisect
 import collections
 import math
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -110,6 +112,12 @@ HORIZON_AHEAD_S = 4 * 86400.0
 MAX_VENUE_ROWS = 20000
 #: receipts kept per state for the heartbeat (counts are never sampled)
 RECEIPT_SAMPLE = 8
+
+#: WHETHER THE PASS EXAMINED EVERY FIXTURE (`discover(deadline=...)`): a pass
+#: stopped by its CPU deadline publishes no seed and no line identity,
+#: because DUPLICATE_CANDIDATES over a partial pass cannot be trusted
+PASS_COMPLETE = "COMPLETE"
+PASS_OVER_BUDGET = "DISCOVERY_PASS_OVER_CPU_BUDGET"
 
 
 def _norm_sql() -> str:
@@ -277,33 +285,74 @@ def _renderings(rec) -> set:
 
 # ── THE COMPARISON ─────────────────────────────────────────────────────
 
-def _exact(provider_name: str, rec: dict) -> bool:
-    return _fold(provider_name) in set(rec.get("exact") or ())
+class _Memo:
+    """One pass's folds and team profiles (adversarial verification, finding
+    1, fix stage 2026-10-05). The comparison re-folded and re-profiled the
+    same strings for every fixture x venue event pair -- 13.8 of 13.9 s of a
+    300 x 100 pass in `team_profile` -- although a string's profile never
+    changes within a pass. Each distinct (text, rule) is computed once; the
+    results are exactly the uncached functions' (they are pure)."""
+
+    __slots__ = ("folds", "profiles")
+
+    def __init__(self):
+        self.folds: dict = {}
+        self.profiles: dict = {}
+
+    def fold(self, text) -> str:
+        got = self.folds.get(text)
+        if got is None:
+            got = self.folds[text] = _fold(text)
+        return got
+
+    def profile(self, text, football: bool) -> dict:
+        key = (text, football)
+        got = self.profiles.get(key)
+        if got is None:
+            from . import bettor_venue_native_identity as vnat
+            got = self.profiles[key] = (vnat.team_profile(text, "football")
+                                        if football
+                                        else vnat.team_profile(text))
+        return got
 
 
-def _fallback(provider_name: str, rec: dict, family: str) -> Optional[dict]:
+def _exact(provider_name: str, rec: dict, memo=None) -> bool:
+    f = memo.fold(provider_name) if memo is not None else _fold(
+        provider_name)
+    return f in (rec.get("exact") or ())
+
+
+def _fallback_renderings(rec: dict, memo=None) -> list:
+    """The renderings the controlled fallback compares, in its order: the
+    record's own team name, then every other exact rendering."""
+    tn = rec.get("team_name")
+    ftn = memo.fold(tn) if memo is not None else _fold(tn)
+    return [r for r in [tn] + [x for x in (rec.get("exact") or ())
+                               if x != ftn] if r]
+
+
+def _fallback(provider_name: str, rec: dict, family: str,
+              memo=None) -> Optional[dict]:
     """The controlled fallback, or None. Football: token EQUALITY of the
     canonical profiles (the NFL table and the college rewrites are the
     venue-native resolver's own); every other sport: that resolver's
     containment rule with a shared distinctive token and equal squad
-    qualifiers, against each of the record's renderings."""
+    qualifiers, against each of the record's renderings. `memo` (one
+    pass's `_Memo`) only caches the pure fold and profile calls."""
     from . import bettor_venue_native_identity as vnat
-    for rendering in [rec.get("team_name")] + [
-            r for r in (rec.get("exact") or ()) if r != _fold(
-                rec.get("team_name"))]:
-        if not rendering:
-            continue
-        if family == "football":
-            p = vnat.team_profile(provider_name, "football")
-            v = vnat.team_profile(rendering, "football")
+    memo = memo if memo is not None else _Memo()
+    football = family == "football"
+    for rendering in _fallback_renderings(rec, memo):
+        p = memo.profile(provider_name, football)
+        v = memo.profile(rendering, football)
+        if football:
             if p["tokens"] and p["tokens"] == v["tokens"] and \
                     p["qualifiers"] == v["qualifiers"]:
                 return {"rule": "FOOTBALL_CANONICAL_TOKENS_EQUAL",
                         "rendering": rendering,
                         "tokens": sorted(p["tokens"])}
             continue
-        got = vnat.same_team(vnat.team_profile(provider_name),
-                             vnat.team_profile(rendering))
+        got = vnat.same_team(p, v)
         if got.get("same"):
             return {"rule": "CONTAINED_WITH_A_SHARED_DISTINCTIVE_TOKEN",
                     "rendering": rendering,
@@ -311,7 +360,8 @@ def _fallback(provider_name: str, rec: dict, family: str) -> Optional[dict]:
     return None
 
 
-def _assign(home, away, ev, family, *, allow_fallback) -> Optional[dict]:
+def _assign(home, away, ev, family, *, allow_fallback,
+            memo=None) -> Optional[dict]:
     """The one-to-one assignment of the fixture's two participants to the
     venue event's two records, or None. Exact first; the fallback only
     when `allow_fallback` and only for a participant with no exact
@@ -324,11 +374,12 @@ def _assign(home, away, ev, family, *, allow_fallback) -> Optional[dict]:
         how = []
         ok = True
         for name, rec in ((home, recs[a]), (away, recs[b])):
-            if _exact(name, rec):
+            if _exact(name, rec, memo):
                 how.append({"by": MATCHED_BY_EXACT,
                             "venue": rec["team_name"]})
                 continue
-            fb = _fallback(name, rec, family) if allow_fallback else None
+            fb = (_fallback(name, rec, family, memo) if allow_fallback
+                  else None)
             if fb is None:
                 ok = False
                 break
@@ -342,14 +393,83 @@ def _assign(home, away, ev, family, *, allow_fallback) -> Optional[dict]:
     return best
 
 
-def _touches(name, ev, family) -> bool:
-    return any(_exact(name, rec) or _fallback(name, rec, family) is not None
+def _touches(name, ev, family, memo=None) -> bool:
+    return any(_exact(name, rec, memo) or
+               _fallback(name, rec, family, memo) is not None
                for rec in ev["participants"])
 
 
-def match_fixture(fx: dict, venue: list, *, family: str) -> dict:
+class VenueIndex:
+    """ONE SPORT'S VENUE EVENTS, INDEXED ONCE PER PASS (adversarial
+    verification, finding 1, fix stage 2026-10-05).
+
+    THE DEFECT. Every fixture with no exact match ran the controlled fallback
+    against EVERY venue event inside the tolerance, and then -- to tell
+    TIME_MISMATCH from the rest -- against every venue event of the sport:
+    fixtures x venue events comparisons, each re-profiling both names. 1,300
+    x 400 (production's soccer scale) was 29.67 s of blocking CPU per 60 s
+    pass, on the API's event loop.
+
+    THE INDEX IS A SOUND PREFILTER, NOT A NEW RULE. A venue record can be
+    assigned to a fixture's participant only (a) EXACTLY -- the folded name
+    is one of the record's renderings -- or (b) by the controlled fallback,
+    whose two rules both require a SHARED TOKEN: football's canonical token
+    sets must be EQUAL and non-empty, every other sport's containment needs a
+    shared DISTINCTIVE token (`bettor_venue_native_identity.same_team`,
+    condition 2). So the events a name can touch are exactly among those that
+    list its folded name or share one of its (distinctive) tokens; the
+    unchanged `_assign` / `_touches` then decide on those candidates alone,
+    in the venue's own order -- every receipt is the one the full scan wrote
+    (tests/test_r30a_pinnapi_native_discovery.py replays the pre-fix
+    algorithm and compares)."""
+
+    def __init__(self, venue: list, family: str, memo: Optional[_Memo] = None):
+        self.venue = list(venue or ())
+        self.family = family
+        self.football = family == "football"
+        self.memo = memo if memo is not None else _Memo()
+        self.by_exact = collections.defaultdict(set)
+        self.by_token = collections.defaultdict(set)
+        self.starts = sorted((e["start"], i) for i, e in
+                             enumerate(self.venue) if e["start"] is not None)
+        self._start_keys = [x for x, _ in self.starts]
+        for i, e in enumerate(self.venue):
+            for rec in e["participants"]:
+                for r in rec.get("exact") or ():
+                    self.by_exact[r].add(i)
+                for rend in _fallback_renderings(rec, self.memo):
+                    for t in self._tokens(rend):
+                        self.by_token[t].add(i)
+
+    def _tokens(self, text):
+        p = self.memo.profile(text, self.football)
+        return p["tokens"] if self.football else p["distinctive"]
+
+    def touched(self, name) -> set:
+        """Every venue event a record of which COULD be this name's: a
+        superset of the events `_touches` is true for."""
+        out = set(self.by_exact.get(self.memo.fold(name), ()))
+        for t in self._tokens(name):
+            out |= self.by_token.get(t, set())
+        return out
+
+    def inside(self, start) -> set:
+        """The venue events whose start is within the tolerance (the exact
+        predicate the scan used, applied to a slightly wider bisected
+        range)."""
+        lo = bisect.bisect_left(self._start_keys,
+                                start - START_TOLERANCE_S - 1.0)
+        hi = bisect.bisect_right(self._start_keys,
+                                 start + START_TOLERANCE_S + 1.0)
+        return {i for x, i in self.starts[lo:hi]
+                if abs(x - start) <= START_TOLERANCE_S}
+
+
+def match_fixture(fx: dict, venue: list, *, family: str,
+                  index: Optional[VenueIndex] = None) -> dict:
     """The receipt for ONE feed fixture against its sport's venue events.
-    Pure; never raises."""
+    `index` is the sport's `VenueIndex` for this pass (built here when not
+    given). Pure; never raises."""
     out = {"fixture_id": fx.get("id"), "quote_id": fx.get("quote_id"),
            "sport_id": fx.get("sport_id"), "family": family,
            "league": _league_name(fx.get("league")),
@@ -367,18 +487,26 @@ def match_fixture(fx: dict, venue: list, *, family: str) -> dict:
     if start is None:
         out.update(state=NORMALIZATION_FAILURE, reason=N_START)
         return out
-    inside = [e for e in venue if e["start"] is not None
-              and abs(e["start"] - start) <= START_TOLERANCE_S]
+    idx = index if index is not None else VenueIndex(venue, family)
+    venue, memo = idx.venue, idx.memo
+    t_home, t_away = idx.touched(home), idx.touched(away)
+    within = idx.inside(start)
+    # the candidates, in the venue's own order: an assignment needs BOTH
+    # participants on the event; a partial needs either
+    both = sorted(t_home & t_away)
+    inside = [venue[i] for i in both if i in within]
     # 1 · EXACT STRUCTURED IDENTITY, inside the tolerance
     exact = [(e, a) for e in inside
-             for a in [_assign(home, away, e, family, allow_fallback=False)]
+             for a in [_assign(home, away, e, family, allow_fallback=False,
+                               memo=memo)]
              if a is not None]
     hits = exact
     # 2 · THE CONTROLLED FALLBACK, only where no exact identity exists
     if not hits:
         hits = [(e, a) for e in inside
                 for a in [_assign(home, away, e, family,
-                                  allow_fallback=True)] if a is not None]
+                                  allow_fallback=True, memo=memo)]
+                if a is not None]
     if len(hits) > 1:
         out.update(state=AMBIGUOUS, candidates=[e["slug"] for e, _ in hits][
             :6])
@@ -412,16 +540,19 @@ def match_fixture(fx: dict, venue: list, *, family: str) -> dict:
         return out
     # 3 · WHY NOT: both participants elsewhere in time, one of them here,
     #     or neither anywhere
-    elsewhere = [e for e in venue if e not in inside and e["start"] is not
-                 None and _assign(home, away, e, family, allow_fallback=True)]
+    elsewhere = [venue[i] for i in both if i not in within
+                 and venue[i]["start"] is not None
+                 and _assign(home, away, venue[i], family,
+                             allow_fallback=True, memo=memo)]
     if elsewhere:
         near = min(elsewhere, key=lambda e: abs(e["start"] - start))
         out.update(state=TIME_MISMATCH, venue_event_slug=near["slug"],
                    start_offset_s=round(near["start"] - start, 1),
                    tolerance_s=START_TOLERANCE_S)
         return out
-    partial = [e for e in inside if _touches(home, e, family)
-               or _touches(away, e, family)]
+    partial = [venue[i] for i in sorted((t_home | t_away) & within)
+               if _touches(home, venue[i], family, memo)
+               or _touches(away, venue[i], family, memo)]
     if partial:
         out.update(state=PARTICIPANT_MISMATCH,
                    candidates=[e["slug"] for e in partial][:6])
@@ -430,25 +561,40 @@ def match_fixture(fx: dict, venue: list, *, family: str) -> dict:
     return out
 
 
-def discover(events, venue_rows, *, sport_ids) -> dict:
+def discover(events, venue_rows, *, sport_ids, deadline=None) -> dict:
     """Every subscribed fixture's receipt, counted by sport / league /
     state, and the MATCHED ones as seeds. `events` is the feed cache's
-    events dict; `venue_rows` the rows of `venue_events_sql`. Pure."""
+    events dict (the runtime passes a SNAPSHOT: this runs in a worker
+    thread); `venue_rows` the rows of `venue_events_sql`. Pure.
+
+    `deadline` (a time.monotonic() instant) bounds the pass's CPU: checked
+    before every fixture, so the pass STOPS by itself -- an asyncio timeout
+    cannot interrupt synchronous work, in a thread or on the loop. A pass
+    that ran out names it (`pass_state` PASS_OVER_BUDGET, the fixtures it
+    did not examine) and publishes no seed and no line identity."""
     sports = {int(s) for s in sport_ids}
     venue = venue_events(venue_rows)
     view, skipped = F.fixture_view(events)
+    memo = _Memo()
+    indexes: dict = {}
     receipts = []
-    for fx in view:
+    pass_state, not_examined = PASS_COMPLETE, 0
+    todo = [fx for fx in view if fx.get("sport_id") in sports]
+    for n, fx in enumerate(todo):
+        if deadline is not None and time.monotonic() > deadline:
+            pass_state, not_examined = PASS_OVER_BUDGET, len(todo) - n
+            break
         sid = fx.get("sport_id")
-        if sid not in sports:
-            continue
         fam = FAMILY_OF_SPORT.get(sid)
         if fam is None:
             receipts.append({"fixture_id": fx.get("id"), "sport_id": sid,
                              "state": NORMALIZATION_FAILURE,
                              "reason": N_SPORT})
             continue
-        receipts.append(match_fixture(fx, venue.get(sid, []), family=fam))
+        idx = indexes.get(sid)
+        if idx is None:
+            idx = indexes[sid] = VenueIndex(venue.get(sid, []), fam, memo)
+        receipts.append(match_fixture(fx, idx.venue, family=fam, index=idx))
     # DUPLICATE CANDIDATES: one venue event claimed by two fixtures
     claims = collections.defaultdict(list)
     for r in receipts:
@@ -472,7 +618,9 @@ def discover(events, venue_rows, *, sport_ids) -> dict:
                 "fixture_id", "family", "league", "home", "away", "start",
                 "live", "venue_event_slug", "matched_by", "reason",
                 "candidates", "start_offset_s")})
-    seeds = [seed_event(r) for r in receipts if r["state"] == MATCHED]
+    complete = pass_state == PASS_COMPLETE
+    seeds = ([seed_event(r) for r in receipts if r["state"] == MATCHED]
+             if complete else [])
     matched_venue = {(sid, s) for (sid, s), rs in claims.items()
                      if len(rs) == 1}
     venue_unmatched = sum(1 for sid, evs in venue.items() if sid in sports
@@ -482,9 +630,11 @@ def discover(events, venue_rows, *, sport_ids) -> dict:
     # (a venue event two fixtures claimed is DUPLICATE_CANDIDATES above and
     # is not here), so a line contract of a venue event reached by ANY
     # discovery path is priced against that fixture's Pinnacle markets.
-    by_venue_event = {r["venue_event_slug"]: identity_of(r)
-                      for r in receipts if r["state"] == MATCHED}
+    by_venue_event = ({r["venue_event_slug"]: identity_of(r)
+                       for r in receipts if r["state"] == MATCHED}
+                      if complete else {})
     return {"version": VERSION, "fixtures": len(receipts),
+            "pass_state": pass_state, "fixtures_not_examined": not_examined,
             "by_venue_event": by_venue_event,
             "venue_rows_truncated": len(venue_rows or ()) >= MAX_VENUE_ROWS,
             "states": {s: counts.get(s, 0) for s in STATES},
@@ -537,7 +687,8 @@ def digest(result: dict) -> dict:
     if not isinstance(result, dict):
         return {"state": "UNAVAILABLE"}
     return {k: result.get(k) for k in (
-        "version", "fixtures", "states", "by_sport_league_state",
+        "version", "pass_state", "fixtures_not_examined", "fixtures",
+        "states", "by_sport_league_state",
         "records_pricing_no_fixture", "venue_events",
         "venue_events_without_a_fixture", "venue_rows_truncated",
         "receipt_sample", "registered", "line_census", "computed_at",

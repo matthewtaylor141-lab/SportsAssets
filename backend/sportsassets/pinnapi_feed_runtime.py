@@ -123,6 +123,15 @@ CENSUS_S = 60.0
 #: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
 #: one bounded catalogue read per CENSUS_S, under its own timeout
 DISCOVERY_TIMEOUT_S = 10.0
+#: THE PASS'S OWN CPU DEADLINE (adversarial verification, finding 1, fix
+#: stage 2026-10-05). The matching pass is CPU work; it now runs in a worker
+#: thread (so the WS owner, the reactive deadlines and HTTP keep the event
+#: loop), and `DISCOVERY_TIMEOUT_S` -- an asyncio timeout -- can cancel the
+#: AWAIT but never the thread. So the pass checks this deadline itself and
+#: stops (PASS_OVER_BUDGET, nothing seeded). Measured after the fix: 0.16 s
+#: for 1,300 fixtures x 400 venue events (29.67 s before), 0.62 s for
+#: 2,600 x 1,500 -- the budget is ~8x the largest measured pass.
+DISCOVERY_CPU_BUDGET_S = 5.0
 #: held_moneyline is the only decision read; no order path reads the feed
 DECISION_EFFECT = "XAVIER_HELD_MEASURE_ONLY (read-only, held positions)"
 
@@ -328,15 +337,35 @@ async def _discovery_once(pool) -> dict:
     async with pool.acquire() as c:
         rows = [dict(r) for r in await c.fetch(
             PD.venue_events_sql(o.sport_ids))]
-    out = PD.discover(o.cache.events, rows, sport_ids=o.sport_ids)
+    # OFF THE EVENT LOOP (adversarial verification, finding 1): the pass is
+    # CPU work, so it runs in a worker thread over a SNAPSHOT of the events
+    # taken here, on the loop -- the thread never iterates the live cache
+    # the WS owner writes -- and stops itself at its own CPU deadline.
+    snapshot = {k: dict(v) for k, v in o.cache.events.items()
+                if isinstance(v, dict)}
+    out = await asyncio.to_thread(
+        PD.discover, snapshot, rows, sport_ids=list(o.sport_ids),
+        deadline=time.monotonic() + DISCOVERY_CPU_BUDGET_S)
+    # REGISTRATION, back on the loop, against the CURRENT cache through ONE
+    # fixture index (not one fixture-view rebuild per seed)
     reg = collections.Counter()
+    index = P.fixture_index(o.cache) if out["seeds"] else None
+    priced = families_with_a_priced_market()
     for ev in out["seeds"]:
         fam = ev["pinnapi_native"]["family"]
         if fam not in P.SPORTS:
             reg["FAMILY_NOT_PRICED_BY_THE_PRIMARY_SELECTOR"] += 1
             continue
+        if fam not in priced:
+            # no market of this family can be priced (adversarial
+            # verification P2): a seed would only spend single-worker
+            # evaluations and two audit rows per change, pricing nothing.
+            # The receipt stays MATCHED; the seed is counted by name.
+            reg[R_NOT_SEEDED_NO_PRICED_MARKET] += 1
+            continue
         reg[RX.register(ev, sport_key=PD.sport_key_for(fam), family=fam,
-                        received_at=t0, native=True) or "NO_SCHEDULER"] += 1
+                        received_at=t0, native=True, index=index)
+            or "NO_SCHEDULER"] += 1
     out["registered"] = dict(reg)
     # THE LINE CENSUS (bettor_market_family.census): every line contract the
     # venue lists on a matched fixture, by sport / family / precise state --
@@ -362,6 +391,25 @@ async def _discovery_once(pool) -> dict:
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
     return out
+
+
+#: a MATCHED fixture of a family no market of which can be priced is not
+#: seeded (counted under this name in the pass's `registered`)
+R_NOT_SEEDED_NO_PRICED_MARKET = "NOT_SEEDED_NO_PRICEABLE_MARKET_FOR_THE_FAMILY"
+
+
+def families_with_a_priced_market() -> set:
+    """The families at least one market of which the decision path can
+    price: the de-vig's supported set (money line and the line families it
+    admits) and every line family whose payoff equivalence is proven
+    (bettor_market_family.EQUIVALENCE). Derived, never typed: a family
+    becomes seeded the moment one of its markets is proven. On the R30A
+    evidence that is every subscribed family but tennis (no tennis money line
+    in the de-vig set; tennis spreads and totals NOT_PROVEN)."""
+    from . import bettor_market_family as MF
+    from . import bettor_pinnacle_devig as devig
+    return ({str(k[0]) for k in devig.SUPPORTED}
+            | {str(k[0]) for k in MF.EQUIVALENCE})
 
 
 async def _beat_loop(pool):

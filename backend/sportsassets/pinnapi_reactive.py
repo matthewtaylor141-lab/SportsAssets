@@ -99,14 +99,16 @@ class Scheduler:
         return 0 <= self.clock() - seed['registered_at'] <= ttl
 
     def register(self, event, *, sport_key, family, received_at,
-                 native=False):
+                 native=False, index=None):
         """Seed one fixture. Called after competition confirmation (the
         metered cycle) or after a MATCHED PinnAPI-native discovery receipt
         (`native`, pinnapi_discovery). A native registration never replaces
         a live seed the metered cycle registered for the same fixture: that
         seed's event carries independent books that corroborate the price.
-        Returns what happened, by name."""
-        hit, why = P.match_event(self.cache, event, family)
+        `index` (`pinnapi_primary.fixture_index` of this cache, built once by
+        a pass that registers many seeds) spares a full fixture-view rebuild
+        per seed. Returns what happened, by name."""
+        hit, why = P.match_event(self.cache, event, family, index=index)
         if why:
             self.counts[why] += 1
             return why

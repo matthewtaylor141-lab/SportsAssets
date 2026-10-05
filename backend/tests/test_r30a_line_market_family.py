@@ -1038,6 +1038,127 @@ async def test_the_lane_defers_by_name_and_never_past_a_ws_deadline(
 
 
 @pg
+async def test_every_venue_request_of_the_lane_is_bounded_and_counted(
+        monkeypatch):
+    """ADVERSARIAL VERIFICATION, FINDING 5 (fix stage, 2026-10-05). A team
+    total whose slug does not bind its team is proven from its own text,
+    read while the contracts are SCANNED -- a paced venue request made
+    before the instrument cap and before the WS-deadline check, and never
+    counted in `venue_reads`; and each evaluated instrument costs a rules
+    read plus a book read while the cap counted it as one. Now every venue
+    request is counted (`venue_requests` = book reads + uncached rules
+    reads) and bounded (`venue_request_cap`), and the scan's text read is
+    deferred by name when the bound or the WS deadline does not allow it."""
+    import types as _t
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    reads = []
+
+    def rules(slug, *, now=None):
+        reads.append(slug)
+        return {"ok": False, "slug": slug, "error": "STUBBED_NO_TEXT",
+                "rules_text": None, "from_cache": False,
+                "read_at": time.time()}
+    monkeypatch.setattr(loop, "_read_venue_rules_blocking", rules)
+    conn = await H.connect()
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await pm._ensure_table(conn)
+        ev_slug = "nfl-det-car-r30a-v-%d" % int(time.time())
+        for r in _nfl_rows():
+            await pm._upsert(conn, dict(r, event_slug=ev_slug), [])
+        monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+            cache=nfl_cache()))
+        # no abbreviation on either record: the team total's slug token
+        # ('-tt-car-') binds no participant, so its TEXT must name the team
+        parts = {d: dict(r, team_abbr=None) for d, r in
+                 _participants(NFL_SPREAD).items()}
+        job = loop.line_job_for({"id": "pinnapi:%d" % FID},
+                                sport_key="pinnapi_football",
+                                family="football", venue_event_slug=ev_slug,
+                                identity={"fixture_id": FID,
+                                          "venue_records": parts})
+        common = dict(fee_fn=lambda *a, **k: 0.0, open_book=[],
+                      ev_measurable=None, calibration=None, research={})
+        tt = "football|team_total|"
+        # (a) a WS evaluation whose deadline is spent: NO text read
+        rep = await loop.line_market_pass(
+            conn, jobs=[job], stream_seed={
+                "trigger": {"evaluation_started_at": time.time() - 11.0,
+                            "deadline_s": 12}, "valuation_ids": []},
+            **common)
+        assert reads == [], "no venue request past the WS deadline"
+        assert rep["by_sport_family_state"][
+            tt + loop.R_LINE_TT_TEXT_DEFERRED_WS] == 1, rep
+        assert rep["venue_requests"] == 0
+        # (b) a WS evaluation with no known deadline reads nothing at all
+        rep = await loop.line_market_pass(
+            conn, jobs=[job], stream_seed={"trigger": {},
+                                           "valuation_ids": []}, **common)
+        assert reads == [] and rep["venue_request_cap"] == 0
+        assert rep["by_sport_family_state"][
+            tt + loop.R_LINE_TT_TEXT_DEFERRED_WS] == 1
+        # (c) the scheduled cycle's request bound, when spent, defers it too
+        monkeypatch.setattr(loop, "MAX_LINE_VENUE_REQUESTS_PER_CYCLE", 0)
+        rep = await loop.line_market_pass(conn, jobs=[job], stream_seed=None,
+                                          **common)
+        assert reads == []
+        assert rep["by_sport_family_state"][
+            tt + loop.R_LINE_TT_TEXT_DEFERRED_CYCLE] == 1
+        assert rep["deferred"] >= 1
+        # (d) inside the bound: every request made is counted, rules reads
+        #     included, and the total never exceeds the bound
+        monkeypatch.setattr(loop, "MAX_LINE_VENUE_REQUESTS_PER_CYCLE", 5)
+        rep = await loop.line_market_pass(conn, jobs=[job], stream_seed=None,
+                                          **common)
+        assert len(reads) >= 1
+        assert rep["venue_requests"] == len(reads) == \
+            rep["venue_rules_reads"] + rep["venue_reads"]
+        assert rep["venue_requests"] <= 5 == rep["venue_request_cap"]
+        assert rep["by_state"].get(loop.R_LINE_DEFERRED_CYCLE, 0) >= 1, rep
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+def test_a_market_with_no_stated_period_is_never_the_full_game():
+    """ADVERSARIAL VERIFICATION P3 (fix stage): `(q.period or 0) != 0` read a
+    market whose record names no period as the full game; the money-line
+    selector's rule is `q.period != 0`. A missing period is not proven."""
+    nop = [dict(m) for m in NFL_MARKETS]
+    for m in nop:
+        if m["type"] == "spread":
+            m.pop("period")
+    c = _contract(NFL_SPREAD)
+    pair = MF.pinnacle_pair(nfl_cache(markets=nop), fixture_id=FID,
+                            contract=c, evaluated_ms=time.time() * 1000.0)
+    assert pair["ok"] is False and pair["refusal"] == MF.R_NO_PINNACLE_FAMILY
+    assert MF.pinnacle_pair(nfl_cache(), fixture_id=FID, contract=c,
+                            evaluated_ms=time.time() * 1000.0)["ok"]
+
+
+def test_the_census_walks_the_cached_events_once_per_pass(monkeypatch):
+    """The line census reads many contracts in one synchronous pass on the
+    API's loop; the in-play child index is built once for the pass, not once
+    per contract (each build walks every cached event)."""
+    calls = []
+    real = F.children_by_parent
+
+    def counted(events):
+        calls.append(1)
+        return real(events)
+    monkeypatch.setattr(F, "children_by_parent", counted)
+    ident = {NFL_EVENT: {"fixture_id": FID,
+                         "venue_records": _participants(NFL_SPREAD)}}
+    cache = nfl_cache()
+    calls.clear()
+    got = MF.census(_nfl_rows() * 1, ident, cache,
+                    now_ms=time.time() * 1000.0)
+    assert got["states"].get("EXACT_PINNACLE_LINE_FRESH_NOW_MAIN") == 3
+    assert len(calls) == 1, len(calls)
+
+
+@pg
 async def test_the_census_read_feeds_the_census_on_postgres():
     from sportsassets import pinnapi_discovery as PD
     conn = await H.connect()

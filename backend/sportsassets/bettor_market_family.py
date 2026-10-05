@@ -849,27 +849,45 @@ def _close(a, b) -> bool:
 
 
 def pinnacle_pair(cache, *, fixture_id, contract, evaluated_ms,
-                  max_age_s=30.0) -> dict:
+                  max_age_s=30.0, children=None) -> dict:
     """Pinnacle's two-way market for THIS contract: same family, full game
     (period 0), the contract's team where it names one, and the IDENTICAL
     line on the IDENTICAL side -- read through the cache's one read path, so
     the 30 s rule (measured from the last observed change, unchanged) and
     every authority refusal apply. Exactly one market, or the precise
-    refusal. Pure; never raises."""
+    refusal. Pure; never raises.
+
+    `children` ({parent id: [child ids]}, `pinnapi_feed.children_by_parent`
+    of the same cache) lets a caller that reads MANY contracts in one
+    synchronous pass (the line census) compute the in-play child index once
+    instead of once per contract (adversarial verification, fix stage
+    2026-10-05: each call walked every cached event, on the API's loop)."""
     out = {"version": VERSION, "ok": False, "refusal": None,
            "fixture_id": fixture_id}
     try:
         return _pinnacle_pair(cache, out, fixture_id=fixture_id,
                               contract=dict(contract or {}),
-                              evaluated_ms=evaluated_ms, max_age_s=max_age_s)
+                              evaluated_ms=evaluated_ms, max_age_s=max_age_s,
+                              children=children)
     except Exception as exc:                                   # noqa: BLE001
         out.update(refusal="PINNACLE_LINE_READ_RAISED:%s"
                    % type(exc).__name__)
         return out
 
 
+def _quote_record(cache, fixture_id, children=None) -> tuple:
+    """(the record that prices the fixture now, reason) -- the cache's own
+    `fixture_quote_id`, or the same reading over a precomputed child index."""
+    if children is None:
+        return cache.fixture_quote_id(fixture_id)
+    child, why = F.live_phase_of(cache.events, fixture_id, children)
+    if why:
+        return None, why
+    return (child if child is not None else fixture_id), None
+
+
 def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
-                   max_age_s) -> dict:
+                   max_age_s, children=None) -> dict:
     if cache is None:
         out["refusal"] = F.R_NO_AUTHORITY
         return out
@@ -878,7 +896,7 @@ def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
     if not ev or set(labels) != {"home", "away"}:
         out["refusal"] = R_NO_FIXTURE
         return out
-    qid, why = cache.fixture_quote_id(fixture_id)
+    qid, why = _quote_record(cache, fixture_id, children)
     if why:
         out["refusal"] = why
         return out
@@ -891,7 +909,11 @@ def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
     hits, family_lines = [], []
     for k in cache._keys_of(qid):
         q = cache.quotes.get(k)
-        if q is None or q.market_type != fam or (q.period or 0) != 0:
+        # FULL GAME MEANS A STATED period 0: a market whose record names no
+        # period is not proven full game (the money-line selector's own
+        # `q.period != 0` rule; before, `(q.period or 0)` read it as full
+        # game -- adversarial verification P3, fix stage 2026-10-05)
+        if q is None or q.market_type != fam or q.period != 0:
             continue
         pts = dict(q.points or {})
         if fam == SPREAD:
@@ -1062,6 +1084,10 @@ def census(rows, identities, cache, *, now_ms) -> dict:
             by_market.setdefault((str(r.get("event_slug")),
                                   str(r.get("market_slug"))), []).append(r)
         out["venue_events"] = len({e for e, _ in by_market})
+        # ONE child index for the whole (synchronous) pass, not one walk of
+        # every cached event per contract
+        kids = (F.children_by_parent(cache.events)
+                if cache is not None else None)
         for (ev, _slug), mrows in sorted(by_market.items()):
             ident = (identities or {}).get(ev) or {}
             out["contracts"] += 1
@@ -1074,7 +1100,8 @@ def census(rows, identities, cache, *, now_ms) -> dict:
                 count(C_TEXT_BINDS_TEAM, c["sport"], c["family"])
                 continue
             pair = pinnacle_pair(cache, fixture_id=ident.get("fixture_id"),
-                                 contract=c, evaluated_ms=now_ms)
+                                 contract=c, evaluated_ms=now_ms,
+                                 children=kids)
             if pair.get("ok"):
                 state = C_EXACT_FRESH
             elif pair.get("refusal") in _NOT_FRESH and pair.get("key"):

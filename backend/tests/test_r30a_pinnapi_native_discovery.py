@@ -535,9 +535,371 @@ async def test_migration_261_is_idempotent_and_its_rollback_refuses_a_fixed_key(
         await conn.execute(down)
         assert await conn.fetchval(
             "SELECT to_regclass('venue_fixture_event_keys')") is None
+        # a SECOND rollback is a no-op (fix stage 2026-10-05: its guard read
+        # the dropped table and raised UndefinedTableError -- a PL/pgSQL
+        # `IF a AND b` does not short-circuit the planning of `b`)
+        await conn.execute(down)
         await conn.execute(up)
         assert await conn.fetchval(
             "SELECT to_regclass('venue_fixture_event_keys')") is not None
     finally:
         await tx.rollback()
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §5 THE ADVERSARIAL VERIFIER'S FINDING 1 (fix stage, 2026-10-05)
+# ═════════════════════════════════════════════════════════════════════
+#
+# Discovery was CPU-bound and ran on the API's event loop (beside the WS
+# owner, the scheduled collector and HTTP), and its asyncio timeout could
+# not stop synchronous work: every unmatched fixture ran the controlled
+# fallback against EVERY venue event of its sport (team_profile / fold per
+# pair), and each reactive registration rebuilt the fixture view over the
+# whole cache. Measured (verif/bench_discover.py): 1,300 fixtures x 400
+# venue events = 29.67 s of blocking CPU per 60 s pass; cProfile 13.8 of
+# 13.9 s in _assign -> _fallback -> team_profile.
+
+import random as _random                                         # noqa: E402
+
+_PLACES = ["arsenal", "valencia", "porto", "lyon", "bremen", "malmo",
+           "bergen", "celta", "lazio", "genoa", "braga", "gent", "basel",
+           "zurich", "lille", "nantes", "metz", "brest", "lens", "nice",
+           "rennes", "reims", "caen", "sion", "thun", "aarau", "koln",
+           "mainz", "bochum", "fulham", "leeds", "derby", "wigan", "luton",
+           "exeter", "barnet", "manchester", "madrid", "milan", "sevilla"]
+_WORDS = ["united", "city", "athletic", "real", "sporting", "rovers",
+          "wanderers", "dynamo", "olympic", "racing", "inter", "atletico",
+          "north", "royal", "union", "nacional", "deportivo", "town"]
+
+
+def _reference_match(fx, venue, *, family):
+    """THE PRE-FIX ALGORITHM, verbatim (3f6bd43 match_fixture): every
+    receipt the indexed implementation writes must equal this one's."""
+    out = {"fixture_id": fx.get("id"), "state": None}
+    home, away = str(fx.get("home") or ""), str(fx.get("away") or "")
+    if not home.strip() or not away.strip() or \
+            PD._fold(home) == PD._fold(away):
+        out.update(state=PD.NORMALIZATION_FAILURE, reason=PD.N_PARTICIPANTS)
+        return out
+    if F._derived_suffix(home) or F._derived_suffix(away):
+        out.update(state=PD.NORMALIZATION_FAILURE, reason=PD.N_DERIVED)
+        return out
+    start = PD._epoch(fx.get("startTime"))
+    if start is None:
+        out.update(state=PD.NORMALIZATION_FAILURE, reason=PD.N_START)
+        return out
+    inside = [e for e in venue if e["start"] is not None
+              and abs(e["start"] - start) <= PD.START_TOLERANCE_S]
+    hits = [(e, a) for e in inside for a in [PD._assign(
+        home, away, e, family, allow_fallback=False)] if a is not None]
+    if not hits:
+        hits = [(e, a) for e in inside for a in [PD._assign(
+            home, away, e, family, allow_fallback=True)] if a is not None]
+    if len(hits) > 1:
+        out.update(state=PD.AMBIGUOUS,
+                   candidates=[e["slug"] for e, _ in hits][:6])
+        return out
+    if len(hits) == 1:
+        ev, a = hits[0]
+        if ev["problems"]:
+            out.update(state=PD.AMBIGUOUS, venue_event_slug=ev["slug"])
+            return out
+        fb = any(h["by"] == PD.MATCHED_BY_FALLBACK for h in a["how"])
+        out.update(state=PD.MATCHED, venue_event_slug=ev["slug"],
+                   matched_by=PD.MATCHED_BY_FALLBACK if fb
+                   else PD.MATCHED_BY_EXACT, orientation=a["orientation"],
+                   assignment=a["how"])
+        return out
+    elsewhere = [e for e in venue if e not in inside and e["start"] is not
+                 None and PD._assign(home, away, e, family,
+                                     allow_fallback=True)]
+    if elsewhere:
+        near = min(elsewhere, key=lambda e: abs(e["start"] - start))
+        out.update(state=PD.TIME_MISMATCH, venue_event_slug=near["slug"],
+                   start_offset_s=round(near["start"] - start, 1))
+        return out
+    partial = [e for e in inside if PD._touches(home, e, family)
+               or PD._touches(away, e, family)]
+    if partial:
+        out.update(state=PD.PARTICIPANT_MISMATCH,
+                   candidates=[e["slug"] for e in partial][:6])
+        return out
+    out.update(state=PD.NO_VENUE_COUNTERPART)
+    return out
+
+
+def _slate(seed, n_fixtures, n_venue, *, sport=1):
+    """A production-shaped slate with every receipt state represented:
+    exact names, the venue's own shorter / affiliation-marked renderings
+    (the controlled fallback), a squad qualifier, a city with two clubs,
+    the same pair a day apart, one participant only, and noise."""
+    rnd = _random.Random(seed)
+    stype = {1: "soccer_team_full_time_winner",
+             5: "football_team_full_game_winner"}[sport]
+    base = 1_790_000_000
+
+    def nm():
+        return "%s %s %d" % (rnd.choice(_PLACES).title(),
+                             rnd.choice(_WORDS).title(),
+                             rnd.randint(1, 60))
+    events, rows = {}, []
+    fixtures = []
+    for i in range(n_fixtures):
+        st = base + rnd.randint(0, 4 * 86400)
+        h, a = nm(), nm()
+        fixtures.append((h, a, st))
+        events[10_000_000 + i] = {
+            "id": 10_000_000 + i, "sport_id": sport, "startTime": st,
+            "isLive": False, "units": "Regular",
+            "league": {"name": "L%d" % (i % 40)},
+            "participants": [{"name": h, "alignment": "home"},
+                             {"name": a, "alignment": "away"}]}
+    for j in range(n_venue):
+        slug = "v%d-x-y-2026" % j
+        kind = j % 8
+        h, a, st = fixtures[j % n_fixtures] if j < n_fixtures else (
+            nm(), nm(), base + rnd.randint(0, 4 * 86400))
+        if kind == 0:
+            vh, va = h.lower(), a.lower()                       # exact
+        elif kind == 1:
+            vh, va = h.lower() + " fc", a.lower()               # affiliation
+        elif kind == 2:
+            vh, va = " ".join(h.lower().split()[:1] +
+                              h.lower().split()[2:]), a.lower()  # shorter
+        elif kind == 3:
+            vh, va = h.lower() + " women", a.lower()            # squad
+        elif kind == 4:
+            vh, va, st = h.lower(), a.lower(), st + 86400       # a day off
+        elif kind == 5:
+            vh, va = h.lower(), nm().lower()                    # one only
+        elif kind == 6:
+            vh, va = a.lower(), h.lower()                       # swapped
+        else:
+            vh, va, st = nm().lower(), nm().lower(), st         # noise
+        for k, t in enumerate((vh, va)):
+            rows.append({"event_slug": slug, "team_name": t,
+                         "team_safe_name": None, "team_abbr": None,
+                         "team_id": j * 2 + k, "team_league": "x",
+                         "sports_type": stype, "game_start": st, "rows": 2})
+    # a duplicated venue event (AMBIGUOUS) and a duplicated fixture
+    # (DUPLICATE_CANDIDATES), as the real listings sometimes carry
+    if n_venue > 2:
+        rows += [dict(r, event_slug="dup-" + r["event_slug"],
+                      team_id=900_000 + r["team_id"])
+                 for r in rows if r["event_slug"] == "v0-x-y-2026"]
+    if n_fixtures > 9:
+        events[19_999_999] = dict(events[10_000_008], id=19_999_999)
+    return events, rows
+
+
+@pytest.mark.parametrize("sport,seed", [(1, 7), (1, 11), (5, 3)])
+def test_the_indexed_discovery_writes_exactly_the_receipts_it_did_before(
+        sport, seed):
+    """THE FIX CHANGES NO RECEIPT. Every fixture's state, venue event,
+    candidates, assignment and offset equal the pre-fix algorithm's, on
+    slates that exercise every state and both the exact and the fallback
+    rule (football: token equality; other sports: containment with a shared
+    distinctive token)."""
+    events, rows = _slate(seed, 160, 120, sport=sport)
+    got = PD.discover(events, rows, sport_ids=[sport])
+    assert got["pass_state"] == PD.PASS_COMPLETE
+    venue = PD.venue_events(rows).get(sport, [])
+    view, _ = F.fixture_view(events)
+    want = {fx["id"]: _reference_match(
+        fx, venue, family=PD.FAMILY_OF_SPORT[sport]) for fx in view}
+    states = set()
+    for r in got["receipts"]:
+        w = want[r["fixture_id"]]
+        states.add(w["state"])
+        if r["state"] == PD.DUPLICATE_CANDIDATES:
+            assert w["state"] == PD.MATCHED
+            continue
+        for k, v in w.items():
+            assert r.get(k) == v, (k, r, w)
+    assert {PD.MATCHED, PD.TIME_MISMATCH, PD.PARTICIPANT_MISMATCH,
+            PD.NO_VENUE_COUNTERPART, PD.AMBIGUOUS} <= states, states
+    assert got["states"][PD.DUPLICATE_CANDIDATES] >= 2
+
+
+def test_a_production_scale_pass_is_bounded_cpu(monkeypatch):
+    """1,300 soccer fixtures x 400 venue events (production's soccer scale):
+    29.67 s before the fix. The venue renderings are profiled ONCE per pass
+    (not once per fixture x venue event) and only the candidates that share
+    a name or a token are compared."""
+    from sportsassets import bettor_venue_native_identity as vnat
+    calls = []
+    real = vnat.team_profile
+
+    def counted(*a, **k):
+        calls.append(1)
+        return real(*a, **k)
+    monkeypatch.setattr(vnat, "team_profile", counted)
+    events, rows = _slate(5, 1300, 400, sport=1)
+    t0 = time.monotonic()
+    got = PD.discover(events, rows, sport_ids=[1])
+    took = time.monotonic() - t0
+    assert got["pass_state"] == PD.PASS_COMPLETE
+    assert got["fixtures"] == 1301
+    # each distinct text (a fixture's two names, a venue record's
+    # renderings) is profiled at most once per pass
+    texts = {p["name"] for e in events.values() for p in e["participants"]}
+    texts |= {r["team_name"] for r in rows} | {r["team_name"] + " " for r in
+                                               rows}
+    assert len(calls) <= 2 * len(texts), (len(calls), len(texts))
+    assert took < 5.0, "a bounded pass (it was 29.67 s), took %.2f s" % took
+
+
+def test_a_pass_over_its_cpu_budget_stops_and_seeds_nothing():
+    """The pass checks its own deadline (asyncio.timeout cannot interrupt a
+    synchronous loop or a worker thread): over budget it STOPS, names it,
+    and seeds nothing -- a DUPLICATE_CANDIDATES check over a partial pass
+    could not be trusted, so no partial identity is published."""
+    events, rows = _slate(9, 200, 100, sport=1)
+    got = PD.discover(events, rows, sport_ids=[1],
+                      deadline=time.monotonic() - 1.0)
+    assert got["pass_state"] == PD.PASS_OVER_BUDGET
+    assert got["seeds"] == [] and got["by_venue_event"] == {}
+    assert got["fixtures_not_examined"] == 201
+    assert PD.digest(got)["pass_state"] == PD.PASS_OVER_BUDGET
+    full = PD.discover(events, rows, sport_ids=[1],
+                       deadline=time.monotonic() + 60.0)
+    assert full["pass_state"] == PD.PASS_COMPLETE and full["seeds"]
+
+
+def test_one_fixture_index_registers_every_seed_without_a_rebuild(
+        monkeypatch):
+    """Each registration used to rebuild `fixture_view` over the whole cache
+    (~7 ms per seed on 2,600 events). One index per pass, same answers."""
+    c = cache_of(rec(70, "Carolina Panthers", "Detroit Lions", NFL_START),
+                 rec(71, "Detroit Lions", "Carolina Panthers", NFL_START,
+                     league="NFL2"),
+                 rec(72, "Green Bay Packers", "Chicago Bears", NFL_START))
+    idx = P.fixture_index(c)
+    for ev in ({"home_team": "Carolina Panthers",
+                "away_team": "Detroit Lions", "commence_time": NFL_START},
+               {"home_team": "Chicago Bears",
+                "away_team": "Green Bay Packers", "commence_time": NFL_START},
+               {"home_team": "Chicago Bears",
+                "away_team": "Green Bay Packers",
+                "commence_time": "2026-10-06T00:20:00Z"},
+               {"home_team": "Nobody", "away_team": "Nowhere",
+                "commence_time": NFL_START}):
+        assert P.match_event(c, ev, "football", index=idx) == \
+            P.match_event(c, ev, "football")
+    views = []
+    real = F.fixture_view
+
+    def counted(events):
+        views.append(1)
+        return real(events)
+    monkeypatch.setattr(F, "fixture_view", counted)
+    s = RX.Scheduler(c, _noop, _noop, clock=time.time, held=_NoHeld())
+    seed = {"id": "pinnapi:72", "home_team": "Green Bay Packers",
+            "away_team": "Chicago Bears", "commence_time": NFL_START,
+            "pinnapi_native": {"fixture_id": 72, "family": "football"}}
+    for _ in range(5):
+        assert s.register(seed, sport_key="pinnapi_football",
+                          family="football", received_at=time.time(),
+                          native=True, index=idx) == "SEEDED"
+    assert views == [], "no rebuild of the fixture view per registration"
+
+
+class _RowsConn:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetch(self, sql, *args):
+        return self.rows if "GROUP BY event_slug" in sql else []
+
+
+class _RowsPool:
+    def __init__(self, rows):
+        self.conn = _RowsConn(rows)
+
+    def acquire(self):
+        conn = self.conn
+
+        class Ctx:
+            async def __aenter__(self):
+                return conn
+
+            async def __aexit__(self, *_):
+                return False
+        return Ctx()
+
+
+def test_the_runtime_runs_the_pass_off_the_event_loop(monkeypatch):
+    """`_discovery_once` hands the CPU-bound pass to a worker thread over a
+    SNAPSHOT of the cache's events (the thread never reads the live cache
+    the WS owner writes), under its own CPU deadline, and registers the
+    seeds back on the loop through one fixture index of the current cache."""
+    import asyncio
+    import threading
+    import types as _t
+    from sportsassets import pinnapi_feed_runtime as FR
+    c = cache_of(rec(70, "Carolina Panthers", "Detroit Lions", NFL_START))
+    seen = {}
+    real = PD.discover
+
+    def spy(events, rows, *, sport_ids, deadline=None):
+        seen["thread"] = threading.get_ident()
+        seen["snapshot_is_live_cache"] = events is c.events
+        seen["deadline"] = deadline
+        return real(events, rows, sport_ids=sport_ids, deadline=deadline)
+    monkeypatch.setattr(PD, "discover", spy)
+    regs = []
+
+    def register(ev, **kw):
+        regs.append(kw)
+        return "SEEDED"
+    monkeypatch.setattr(RX, "register", register)
+    monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+        cache=c, sport_ids=[5]))
+
+    async def go():
+        seen["loop"] = threading.get_ident()
+        t0 = time.monotonic()
+        out = await FR._discovery_once(_RowsPool(NFL_ROWS))
+        return out, t0
+    out, t0 = asyncio.run(go())
+    assert seen["thread"] != seen["loop"], "the pass ran on the event loop"
+    assert seen["snapshot_is_live_cache"] is False
+    assert seen["deadline"] is not None and \
+        seen["deadline"] - t0 <= FR.DISCOVERY_CPU_BUDGET_S + 1.0
+    assert FR.DISCOVERY_CPU_BUDGET_S < FR.DISCOVERY_TIMEOUT_S
+    assert out["states"][PD.MATCHED] == 1
+    assert out["registered"] == {"SEEDED": 1}
+    assert regs and isinstance(regs[0].get("index"), dict)
+
+
+def test_a_family_with_no_priceable_market_is_matched_but_not_seeded(
+        monkeypatch):
+    """ADVERSARIAL VERIFICATION P2 (fix stage): tennis fixtures were seeded
+    although no tennis market can be priced (no tennis money line in the
+    de-vig set; tennis spreads / totals NOT_PROVEN), so every in-play tennis
+    change took a single-worker evaluation and wrote two audit rows for
+    nothing. The receipt stays MATCHED; the seed is counted by name."""
+    import asyncio
+    import types as _t
+    from sportsassets import pinnapi_feed_runtime as FR
+    fams = FR.families_with_a_priced_market()
+    assert "tennis" not in fams
+    assert {"soccer", "baseball", "football", "basketball",
+            "hockey"} <= fams
+    start = "2026-10-04T15:00:00Z"
+    c = cache_of(rec(81, "Holger Rune", "Kyrian Jacquet", start,
+                     league="ATP"), sport=2)
+    rows = [vrow("atp-rune-jac-2026-10-04", "holger rune", 1, start,
+                 stype="tennis_match_winner"),
+            vrow("atp-rune-jac-2026-10-04", "kyrian jacquet", 2, start,
+                 stype="tennis_match_winner")]
+    regs = []
+    monkeypatch.setattr(RX, "register",
+                        lambda ev, **kw: regs.append(kw) or "SEEDED")
+    monkeypatch.setitem(FR._STATE, "owner", _t.SimpleNamespace(
+        cache=c, sport_ids=[2]))
+    out = asyncio.run(FR._discovery_once(_RowsPool(rows)))
+    assert out["states"][PD.MATCHED] == 1, out["receipt_sample"]
+    assert regs == []
+    assert out["registered"] == {FR.R_NOT_SEEDED_NO_PRICED_MARKET: 1}

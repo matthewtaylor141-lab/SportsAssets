@@ -121,6 +121,9 @@ R_NO_CHANGE_TIME = "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE"
 R_FUTURE = "FEED_QUOTE_CHANGE_TIME_IN_THE_FUTURE"
 R_STALE = "FEED_QUOTE_OLDER_THAN_LIMIT"
 R_CLOSED = "FEED_MARKET_CLOSED"
+#: the event's latest authoritative list (or live record) did not parse:
+#: the prices it replaced are not known to be current (see `_unreadable`)
+R_LAST_RECORD_UNPARSED = "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN"
 
 # ── WHICH INSTANT A CHANGE IS DATED BY (see TIME above) ──────────────
 #: the changing frame's own provider stamp (the rule since C1)
@@ -421,6 +424,102 @@ def closed_periods(rec: dict) -> set:
             and p.get("status") not in (None, "open")}
 
 
+class EventIndexedQuotes(dict):
+    """(event_id, key) -> Quote, WITH A PER-EVENT KEY INDEX kept on every
+    mutation (R30A runtime, 2026-10-04).
+
+    THE STALL THIS REMOVES. Every per-event operation of the cache found an
+    event's quotes by scanning ALL of them -- `[k for k in self.quotes if
+    k[0] == eid]` -- in `_replace_event` (each event of a snapshot, each
+    prematch_markets frame), `_merge_event` (each live frame), `_drop_event`
+    and `_bound`. With MAX_MARKETS 120,000 quotes, a snapshot of N events is
+    N full scans: the API's own loop watchdog recorded the event loop held
+    for 2.1 s (ended at 4.0 s) and 2.2 s (2.5 s) inside
+    `pinnapi_feed._replace_event <- _apply <- apply <- pinnapi_owner._own`
+    (ingestion_state api.loop_stalls, research-sql run 37231263685), and
+    while the loop is held every 2-3 s budget in the process expires -- the
+    reactive audit, the research tick, the feed heartbeat (render-ops logs
+    15:40-20:10Z: loop stalls >= 2 s in the same minutes as all three
+    timeout classes). Now an event's keys come from `by_event`, O(its own
+    markets), whatever the cache holds.
+
+    THE INDEX CANNOT DRIFT: it is maintained here, on the dict's own
+    mutation methods, so every writer -- the cache, and the tests that set
+    or clear `cache.quotes` directly -- keeps it exact. Iteration order, the
+    values and every read are the plain dict's (tests replay frame sequences
+    against the scanning implementation and compare).
+
+    R30A inc-pinnapi (fix stage, 2026-10-05): the SAME class, verbatim, so
+    the two streams converge on one store. On this branch the scan was worse
+    than the runtime stream measured: the matchup-version confirmation
+    (`_version_confirm`) ran it once per RECORD of every prematch_matchups
+    frame -- every 5 s per sport -- 1.18 s of loop time per frame at 1,300
+    events / 32,500 quotes (adversarial verification, verif/bench_matchups.py;
+    base 96fd349: 0.00 s)."""
+
+    __slots__ = ("by_event",)
+
+    def __init__(self, *a, **kw):
+        super().__init__()
+        self.by_event: dict = {}
+        if a or kw:
+            self.update(*a, **kw)
+
+    @staticmethod
+    def _eid(k):
+        return k[0] if isinstance(k, tuple) and k else k
+
+    def _unindex(self, k):
+        eid = self._eid(k)
+        keys = self.by_event.get(eid)
+        if keys is not None:
+            keys.discard(k)
+            if not keys:
+                del self.by_event[eid]
+
+    def __setitem__(self, k, v):
+        super().__setitem__(k, v)
+        self.by_event.setdefault(self._eid(k), set()).add(k)
+
+    def __delitem__(self, k):
+        super().__delitem__(k)
+        self._unindex(k)
+
+    _MISSING = object()
+
+    def pop(self, k, default=_MISSING):
+        if k in self:
+            v = super().pop(k)
+            self._unindex(k)
+            return v
+        if default is EventIndexedQuotes._MISSING:
+            raise KeyError(k)
+        return default
+
+    def popitem(self):
+        k, v = super().popitem()
+        self._unindex(k)
+        return k, v
+
+    def clear(self):
+        super().clear()
+        self.by_event.clear()
+
+    def setdefault(self, k, default=None):
+        if k not in self:
+            self[k] = default
+        return self[k]
+
+    def update(self, *a, **kw):
+        for k, v in dict(*a, **kw).items():
+            self[k] = v
+
+    def keys_of(self, eid) -> list:
+        """This event's quote keys (a list copy: safe to delete while
+        iterating), O(its own markets)."""
+        return list(self.by_event.get(eid, ()))
+
+
 # ── IN-PLAY: WHICH CHILD RECORD IS THE LIVE GAME (R30A RC3) ──────────
 #
 # THE DEFECT. Pinnacle's in-play game is a CHILD matchup whose parentId is
@@ -597,7 +696,8 @@ class FeedCache:
         self.confirmations = collections.Counter()
         self.events: "collections.OrderedDict[int, dict]" = \
             collections.OrderedDict()
-        self.quotes: dict = {}          # (event_id, key) -> Quote
+        # (event_id, key) -> Quote, indexed per event (EventIndexedQuotes)
+        self.quotes: EventIndexedQuotes = EventIndexedQuotes()
         self.on_change = None  # synchronous, bounded notification; never I/O
         self._touched = set()
         self.counts = collections.Counter()
@@ -718,20 +818,28 @@ class FeedCache:
             # on this epoch did not carry it opened between the two lists --
             # an observed change at ts. First sight after a reconnect (no
             # earlier authoritative list on this epoch) stays first sight.
+            #
+            # ONLY A LIST THAT PARSED IS AUTHORITATIVE (adversarial
+            # verification, finding 3). The "opened between two lists" rule
+            # holds only when the earlier list is the one IMMEDIATELY before:
+            # a list we could not read may itself have opened the key, so it
+            # breaks the chain -- `_unreadable` clears the flag, and the next
+            # parsed list is first sight again. Before, an unparsed list set
+            # the flag and the next list dated a spread never seen to change
+            # as a change at its own stamp (read `ok`, age 5 s; >= 240 s
+            # understated).
             held = self.events.get(eid) or {}
             versions = {_num(m.get("version")) for m in data
                         if isinstance(m, dict)} - {None}
-            self._replace_event({"id": eid, "markets": data},
-                                stream="prematch", sport=msg.get("sport_id"),
-                                epoch=epoch, frame_ts=ts, rx=rx,
-                                as_change=True, keep_meta=True,
-                                confirm_kind=C_PREMATCH_MARKETS,
-                                new_key_is_change=bool(
-                                    held.get("_authoritative")),
-                                markets_version=(
-                                    versions.pop() if len(versions) == 1
-                                    else _num(held.get("version"))))
-            if eid in self.events:
+            parsed = self._replace_event(
+                {"id": eid, "markets": data}, stream="prematch",
+                sport=msg.get("sport_id"), epoch=epoch, frame_ts=ts, rx=rx,
+                as_change=True, keep_meta=True,
+                confirm_kind=C_PREMATCH_MARKETS,
+                new_key_is_change=bool(held.get("_authoritative")),
+                markets_version=(versions.pop() if len(versions) == 1
+                                 else _num(held.get("version"))))
+            if parsed and eid in self.events:
                 self.events[eid]["_authoritative"] = True
             return "prematch_markets"
         if t == "prematch_matchups":
@@ -761,11 +869,14 @@ class FeedCache:
         if v != mv:
             self.counts["matchup_version_advanced_markets_pending"] += 1
             return
+        n = 0
         for k in self._keys_of(ev["id"]):
             q = self.quotes.get(k)
             if q is not None and q.epoch == epoch:
                 q.confirm(frame_ts=frame_ts, rx=rx, kind=C_MATCHUP_VERSION)
-                self.confirmations[C_MATCHUP_VERSION] += 1
+                n += 1
+        if n:
+            self.confirmations[C_MATCHUP_VERSION] += n
 
     def _keys_of(self, eid) -> list:
         """This event's quote keys. Uses the store's per-event index when
@@ -796,15 +907,47 @@ class FeedCache:
             del self.quotes[k]
         self.counts["events_deleted"] += 1
 
+    def _unreadable(self, eid, *, frame_ts, rx) -> None:
+        """A record for a HELD event did not parse (adversarial
+        verification, finding 3, fix stage 2026-10-05).
+
+        An authoritative prematch_markets list REPLACES the event's markets
+        and a live record may change any of them, so the prices we held for
+        the event are no longer known to be current: before, they stayed
+        readable, and a money line re-priced by a list we could not read
+        still read `ok` inside 30 s of its earlier change. They leave the
+        current state now (counted), the read names why
+        (R_LAST_RECORD_UNPARSED), the "opened between two authoritative
+        lists" chain is broken (`_authoritative` cleared) and no matchup
+        version confirms anything until a list parses. The next record that
+        parses is FIRST SIGHT for every key: no age until a change is
+        observed -- never a guessed one, never a change dated at its stamp."""
+        ev = self.events.get(eid)
+        if ev is None:
+            return
+        n = 0
+        for k in self._keys_of(eid):
+            del self.quotes[k]
+            n += 1
+        if n:
+            self.counts["markets_dropped_by_an_unparsed_record"] += n
+        ev.pop("_authoritative", None)
+        ev["_markets_version"] = None
+        ev["_unparsed_since"] = frame_ts if frame_ts is not None else rx
+
     def _replace_event(self, ev, *, stream, sport, epoch, frame_ts, rx,
                        as_change, keep_meta=False, confirm_kind=None,
                        reconfirm_kind=None, new_key_is_change=False,
-                       markets_version=None):
+                       markets_version=None) -> bool:
+        """Replace the event's markets with the record's. False (and the
+        event's held prices withdrawn, `_unreadable`) when it did not
+        parse."""
         eid = ev["id"]
         parsed = self.extract(ev)
         if parsed is None:
             self.counts["unparsed"] += 1
-            return
+            self._unreadable(eid, frame_ts=frame_ts, rx=rx)
+            return False
         if not keep_meta:
             self._touch_meta(ev, stream=stream, sport=sport)
         else:
@@ -847,7 +990,9 @@ class FeedCache:
                 self.confirmations[kind] += 1
         if eid in self.events:
             self.events[eid]["_markets_version"] = markets_version
+            self.events[eid].pop("_unparsed_since", None)
         self._bound()
+        return True
 
     def _merge_event(self, rec, *, stream, sport, epoch, frame_ts, rx):
         eid = rec["id"]
@@ -859,7 +1004,13 @@ class FeedCache:
         parsed = self.extract(rec)
         if parsed is None:
             self.counts["unparsed"] += 1
+            self._unreadable(eid, frame_ts=frame_ts, rx=rx)
             return
+        # after a record that did not parse, a key this record carries is
+        # FIRST SIGHT, not "a change at this stamp": its earlier price was
+        # withdrawn unseen (`_unreadable`), so nothing says it moved here
+        after_unparsed = (self.events.get(eid) or {}).pop("_unparsed_since",
+                                                          None) is not None
         for key, f in parsed:
             k = (eid, key)
             if not f["open"] or (f["period"] or 0) in closed:
@@ -868,8 +1019,12 @@ class FeedCache:
                 continue
             prev = self.quotes.get(k)
             changed = prev is None or _moved(prev, f)
-            clocks = (_observed_change(frame_ts, rx) if changed
-                      else _carried_change(prev))
+            if prev is None and after_unparsed:
+                clocks = (None, None, None)
+                self.counts["first_sight_after_an_unparsed_record"] += 1
+            else:
+                clocks = (_observed_change(frame_ts, rx) if changed
+                          else _carried_change(prev))
             if changed:
                 self.counts["price_changes"] += 1
                 self.last_change_received_ms = rx
@@ -937,6 +1092,11 @@ class FeedCache:
             return {"ok": False, "reason": R_NOT_SYNCED}
         q = self.quotes.get((event_id, key))
         if q is None:
+            ev = self.events.get(event_id)
+            if isinstance(ev, dict) and \
+                    ev.get("_unparsed_since") is not None:
+                return {"ok": False, "reason": R_LAST_RECORD_UNPARSED,
+                        "unparsed_since_ms": ev.get("_unparsed_since")}
             return {"ok": False, "reason": R_UNKNOWN_MARKET}
         if q.epoch != a.epoch:
             return {"ok": False, "reason": R_OLD_EPOCH}

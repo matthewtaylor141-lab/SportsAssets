@@ -540,3 +540,274 @@ def test_a_live_child_change_reaches_the_seed_of_its_fixture():
     asyncio.run(one())
     assert len(evaluated) == 1
     assert evaluated[0]["trigger"]["version"][1] == (AT - 1) * 1000
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §4 THE ADVERSARIAL VERIFIER'S FINDINGS (fix stage, 2026-10-05)
+# ═════════════════════════════════════════════════════════════════════
+#
+# Each test below FAILED on 3f6bd43 and reproduces a CONFIRMED finding of
+# the adversarial verification of claude/inc-pinnapi (scratchpad
+# verif/repro_unparsed_clock.py, verif/bench_matchups.py, the migration 260
+# rollback reproduction).
+
+SP = {"key": "s;0;s;-3.5", "type": "spread", "period": 0, "status": "open",
+      "prices": [{"designation": "home", "price": -105, "points": -3.5},
+                 {"designation": "away", "price": -105, "points": 3.5}]}
+#: one market with no `type`: extract_markets() rejects the WHOLE record
+UNTYPED = {"key": "s;0;ou;47.5", "status": "open", "prices": []}
+
+
+def _list(c, ep, eid, ts, data):
+    return c.apply({"type": "prematch_markets", "matchup_id": eid,
+                    "sport_id": 5, "ts": ts, "data": data}, epoch=ep,
+                   received_ms=ts)
+
+
+def test_an_unparsed_list_never_dates_a_key_the_next_list_carries():
+    """FINDING 3 (integrity, freshness). An authoritative list that did not
+    parse set `_authoritative`, so the NEXT parsed list dated every key it
+    had not held as an observed change: a spread never seen to change read
+    `ok`, age 5 s, PROVIDER_FRAME_TS -- its age understated by >= 240 s. The
+    "opened between two lists" rule holds only when the earlier list is the
+    one IMMEDIATELY before; a list we could not read breaks that chain."""
+    rec = {"id": 1, "type": "matchup", "startTime": "2026-10-06T00:00:00Z",
+           "isLive": False, "units": "Regular",
+           "participants": [{"name": "A", "alignment": "home"},
+                            {"name": "B", "alignment": "away"}],
+           "markets": [ML]}
+    # (a) the verifier's sequence: snapshot (money line only), L1 carries
+    #     the spread but does not parse, L2 the same spread at the same price
+    c = F.FeedCache()
+    ep = c.new_connection([("prematch", 5)])
+    c.apply({"type": "snapshot", "stream": "prematch", "sport_id": 5,
+             "ts": 1_000_000, "events": [rec]}, epoch=ep,
+            received_ms=1_000_000)
+    assert _list(c, ep, 1, 1_060_000, [ML, SP, UNTYPED]) == \
+        "prematch_markets"
+    assert not c.events[1].get("_authoritative")
+    _list(c, ep, 1, 1_300_000, [ML, SP])
+    got = c.read(1, SP["key"], evaluated_ms=1_305_000, max_age_s=30)
+    assert got["ok"] is False and got["reason"] == F.R_NO_CHANGE_TIME, got
+    assert c.counts.get("new_key_observed_as_change", 0) == 0
+    # (b) a PARSED list before the unparsed one: the chain is still broken
+    #     (the spread may have opened at L1), so L2 is first sight again
+    c = F.FeedCache()
+    ep = c.new_connection([("prematch", 5)])
+    c.apply({"type": "snapshot", "stream": "prematch", "sport_id": 5,
+             "ts": 1_000_000, "events": [rec]}, epoch=ep,
+            received_ms=1_000_000)
+    _list(c, ep, 1, 1_002_000, [ML])
+    assert c.events[1]["_authoritative"] is True
+    _list(c, ep, 1, 1_060_000, [ML, SP, UNTYPED])
+    _list(c, ep, 1, 1_300_000, [ML, SP])
+    got = c.read(1, SP["key"], evaluated_ms=1_305_000, max_age_s=30)
+    assert got["reason"] == F.R_NO_CHANGE_TIME, got
+    # ...and only a THIRD parsed list, after an unbroken pair, dates a key
+    alt = dict(SP, key="s;0;s;-4.5", prices=[
+        {"designation": "home", "price": 110, "points": -4.5},
+        {"designation": "away", "price": -130, "points": 4.5}])
+    _list(c, ep, 1, 1_320_000, [ML, SP, alt])
+    got = c.read(1, alt["key"], evaluated_ms=1_325_000, max_age_s=30)
+    assert got["ok"] is True and got["provenance"]["source_change_ms"] == \
+        1_320_000
+
+
+def test_a_price_an_unparsed_record_superseded_is_never_served():
+    """FINDING 3, the same root: the prices an unreadable authoritative list
+    (or live record) replaced are not known to be current. Before, the
+    cache kept serving them -- a money line changed at t and re-priced by a
+    list at t+3 s we could not read still read `ok` at t+8 s. Now the event's
+    held quotes leave the current state and the read names why; the next
+    record that parses is first sight (no age until a change is observed)."""
+    c = F.FeedCache()
+    ep = c.new_connection([("prematch", 5), ("live", 5)])
+    c.apply({"type": "snapshot", "stream": "prematch", "sport_id": 5,
+             "ts": 1_000_000, "events": [{"id": 9, "markets": [ML]}]},
+            epoch=ep, received_ms=1_000_000)
+    c.apply({"type": "snapshot", "stream": "live", "sport_id": 5,
+             "ts": 1_000_000, "events": []}, epoch=ep, received_ms=1_000_000)
+    _list(c, ep, 9, 1_002_000, [_moved(ML, -130)])
+    assert c.read(9, "s;0;m", evaluated_ms=1_004_000)["ok"] is True
+    _list(c, ep, 9, 1_005_000, [_moved(ML, -150), UNTYPED])
+    got = c.read(9, "s;0;m", evaluated_ms=1_008_000)
+    assert got["ok"] is False and got["reason"] == F.R_LAST_RECORD_UNPARSED
+    assert c.counts["markets_dropped_by_an_unparsed_record"] == 1
+    # the next parsed list re-delivers the money line: first sight, no age
+    _list(c, ep, 9, 1_010_000, [_moved(ML, -150)])
+    assert c.read(9, "s;0;m", evaluated_ms=1_011_000)["reason"] == \
+        F.R_NO_CHANGE_TIME
+    # the same for a live record that does not parse; the next live record
+    # carrying the key is first sight, never "a change at its stamp"
+    c.apply({"type": "live", "sport_id": 5, "op": "upd", "ts": 1_020_000,
+             "rec": {"id": 7, "markets": [_moved(ML, -110)]}}, epoch=ep,
+            received_ms=1_020_000)
+    assert c.read(7, "s;0;m", evaluated_ms=1_021_000)["ok"] is True
+    c.apply({"type": "live", "sport_id": 5, "op": "upd", "ts": 1_022_000,
+             "rec": {"id": 7, "markets": [_moved(ML, -120), UNTYPED]}},
+            epoch=ep, received_ms=1_022_000)
+    assert c.read(7, "s;0;m", evaluated_ms=1_023_000)["reason"] == \
+        F.R_LAST_RECORD_UNPARSED
+    c.apply({"type": "live", "sport_id": 5, "op": "upd", "ts": 1_030_000,
+             "rec": {"id": 7, "markets": [_moved(ML, -120)]}}, epoch=ep,
+            received_ms=1_030_000)
+    assert c.read(7, "s;0;m", evaluated_ms=1_031_000)["reason"] == \
+        F.R_NO_CHANGE_TIME
+    # and once a change is observed again, the 30 s rule applies unchanged
+    c.apply({"type": "live", "sport_id": 5, "op": "upd", "ts": 1_040_000,
+             "rec": {"id": 7, "markets": [_moved(ML, -125)]}}, epoch=ep,
+            received_ms=1_040_000)
+    r = c.read(7, "s;0;m", evaluated_ms=1_041_000)
+    assert r["ok"] is True and r["provenance"]["source_change_ms"] == \
+        1_040_000
+
+
+def _counting_store():
+    """The cache's quote store, counting every FULL iteration."""
+    class _CountingQuotes(F.EventIndexedQuotes):
+        scans = 0
+
+        def __iter__(self):
+            type(self).scans += 1
+            return super().__iter__()
+
+        def keys(self):
+            type(self).scans += 1
+            return super().keys()
+    return _CountingQuotes
+
+
+def _many(n_events, n_markets):
+    out = []
+    for i in range(n_events):
+        ms = [ML] + [dict(SP, key="s;0;s;-%d.5" % m, prices=[
+            {"designation": "home", "price": -105, "points": -m - 0.5},
+            {"designation": "away", "price": -105, "points": m + 0.5}])
+            for m in range(1, n_markets)]
+        out.append({"id": 10_000 + i, "type": "matchup", "version": 77,
+                    "startTime": "2026-10-06T00:00:00Z", "isLive": False,
+                    "units": "Regular",
+                    "participants": [{"name": "A%d" % i, "alignment": "home"},
+                                     {"name": "B%d" % i, "alignment": "away"}],
+                    "markets": ms})
+    return out
+
+
+def test_a_matchups_frame_never_scans_the_whole_quote_store():
+    """FINDING 2 (CPU on the shared event loop). `_version_confirm` found an
+    event's quotes by scanning EVERY cached quote, once per record of every
+    prematch_matchups frame (every 5 s per sport): 1.18 s per frame at 1,300
+    events / 32,500 quotes (base 96fd349: 0.00 s). The store now keeps a
+    per-event index (the R30A runtime stream's EventIndexedQuotes, the same
+    class), so a frame touches only the confirmed events' own quotes."""
+    _CountingQuotes = _counting_store()
+    c = F.FeedCache()
+    assert isinstance(c.quotes, F.EventIndexedQuotes)
+    ep = c.new_connection([("prematch", 1)])
+    c.quotes = _CountingQuotes()
+    evs = _many(300, 10)
+    c.apply({"type": "snapshot", "stream": "prematch", "sport_id": 1,
+             "ts": 1_000_000, "events": evs}, epoch=ep,
+            received_ms=1_000_000)
+    assert len(c.quotes) == 3000
+    _CountingQuotes.scans = 0
+    meta = [{k: v for k, v in e.items() if k != "markets"} for e in evs]
+    c.apply({"type": "prematch_matchups", "sport_id": 1, "ts": 1_005_000,
+             "data": meta}, epoch=ep, received_ms=1_005_000)
+    assert _CountingQuotes.scans == 0, "no full scan per matchups frame"
+    # every quote was confirmed by the unchanged version, and counted once
+    assert all(q.confirmed_by == F.C_MATCHUP_VERSION
+               for q in c.quotes.values())
+    assert c.confirmations[F.C_MATCHUP_VERSION] == 3000
+    # ...and the confirmation is still never an age
+    assert c.read(10_000, "s;0;m", evaluated_ms=1_006_000)["reason"] == \
+        F.R_NO_CHANGE_TIME
+    # the line lane's pair read finds an event's markets without a scan too
+    from sportsassets import bettor_market_family as MF
+    _CountingQuotes.scans = 0
+    MF.pinnacle_pair(c, fixture_id=10_000, contract={
+        "family": "spread", "line": -1.5, "designation": "home"},
+        evaluated_ms=1_006_000)
+    assert _CountingQuotes.scans == 0
+
+
+def test_the_per_event_index_matches_a_scan_across_every_mutation():
+    """The index can never drift from the store: replayed against a scan
+    after snapshots, authoritative lists, live merges, closed periods,
+    deletions, eviction and a reconnect."""
+    def scan(c, eid):
+        return sorted(k for k in dict.keys(c.quotes) if k[0] == eid)
+
+    c = F.FeedCache(max_events=40, max_markets=300)
+    ep = c.new_connection([("prematch", 1), ("live", 1)])
+    evs = _many(30, 6)
+    c.apply({"type": "snapshot", "stream": "prematch", "sport_id": 1,
+             "ts": 1, "events": evs}, epoch=ep, received_ms=1)
+    _list(c, ep, 10_003, 2, [ML])
+    c.apply({"type": "live", "sport_id": 1, "op": "upd", "ts": 3,
+             "rec": {"id": 10_004, "periods": [{"period": 0,
+                                                "status": "settled"}],
+                     "markets": []}}, epoch=ep, received_ms=3)
+    c.apply({"type": "live", "sport_id": 1, "op": "del", "ts": 4,
+             "rec": {"id": 10_005}}, epoch=ep, received_ms=4)
+    c.apply({"type": "snapshot", "stream": "live", "sport_id": 1, "ts": 5,
+             "events": _many(60, 6)[30:]}, epoch=ep, received_ms=5)
+    assert c.counts["events_evicted"] > 0
+    for eid in set(k[0] for k in dict.keys(c.quotes)) | {10_003, 10_004,
+                                                         10_005}:
+        assert sorted(c.quotes.keys_of(eid)) == scan(c, eid)
+    assert set(c.quotes.by_event) == set(k[0] for k in dict.keys(c.quotes))
+    c.new_connection([("prematch", 1)])
+    assert not c.quotes and not c.quotes.by_event
+
+
+@pg
+async def test_migration_260_rollback_leaves_an_operators_later_scope_alone():
+    """FINDING 4. The rollback identified "the row 260 wrote" by its `why`
+    alone, so an operator's later scope edit that kept the `why` (a
+    jsonb_set of sport_ids) was overwritten with 193's row. It now acts only
+    on the exact value 260 wrote."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           R.SCOPE_KEY)
+        await conn.execute("INSERT INTO ingestion_state (key, value) "
+                           "VALUES ($1, $2::jsonb)", R.SCOPE_KEY,
+                           json.dumps(ROW_193))
+        await conn.execute(UP)
+        await conn.execute(
+            "UPDATE ingestion_state SET value = jsonb_set(value, "
+            "'{sport_ids}', '[1, 5, 6]'::jsonb) WHERE key = $1", R.SCOPE_KEY)
+        edited = json.loads(await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", R.SCOPE_KEY))
+        await conn.execute(DOWN)
+        after = json.loads(await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1", R.SCOPE_KEY))
+        assert after == edited and after["sport_ids"] == [1, 5, 6]
+        # the same for a changed stream list, and for the no-193 insert case
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           R.SCOPE_KEY)
+        await conn.execute(UP)
+        await conn.execute(
+            "UPDATE ingestion_state SET value = jsonb_set(value, "
+            "'{streams}', '[\"live\"]'::jsonb) WHERE key = $1", R.SCOPE_KEY)
+        await conn.execute(DOWN)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM ingestion_state WHERE key = $1",
+            R.SCOPE_KEY) == 1
+        # the untouched row 260 wrote still rolls back exactly
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           R.SCOPE_KEY)
+        await conn.execute("INSERT INTO ingestion_state (key, value) "
+                           "VALUES ($1, $2::jsonb)", R.SCOPE_KEY,
+                           json.dumps(ROW_193))
+        await conn.execute(UP)
+        await conn.execute(DOWN)
+        assert json.loads(await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            R.SCOPE_KEY)) == ROW_193
+    finally:
+        await tx.rollback()
+        await conn.close()
