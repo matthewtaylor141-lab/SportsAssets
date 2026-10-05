@@ -1086,3 +1086,6 @@ tests/test_coverage_first_loss_census.py
 tests/test_ncaaf_native_seed_identity.py
 tests/test_capital_eligibility.py
 tests/test_strategy_lifecycle.py
+tests/test_paper_mark_freshness_classifier.py
+tests/test_paper_mark_refresh_coverage.py
+tests/test_xavier_management_packet.py

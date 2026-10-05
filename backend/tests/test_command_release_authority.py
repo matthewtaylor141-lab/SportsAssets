@@ -254,7 +254,7 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
         # this database carries every migration of this build, so the absent
         # numbers are exactly the ones no file in the build uses
         assert sch["tracked_range"] == [216, 290]
-        for n in (248, 249, 251, 260, 261, 264, 265, 290):
+        for n in (248, 249, 251, 260, 261, 264, 265, 270, 290):
             assert tracked[n]["status"] == "APPLIED", n
             assert tracked[n]["in_this_build"] is True, n
         assert sch["numbers_absent"] == EXPECTED_ABSENT_216_264
@@ -271,9 +271,10 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
 #: continuation, 253-259 control plane, 262 inc-sim, 263 inc-families).
 EXPECTED_ABSENT_216_264 = ([228] + list(range(230, 248)) + [250]
                            + list(range(252, 260)) + [262, 263]
-                           # 266..289: other streams' reserved slots below
-                           # PAPER TURNAROUND (290)
-                           + list(range(266, 290)))
+                           # 266..289 less 270 (paper mark freshness):
+                           # parallel lanes' reserved slots below PAPER
+                           # TURNAROUND (290)
+                           + [n for n in range(266, 290) if n != 270])
 
 
 def test_the_tracked_range_covers_every_migration_in_this_build():
@@ -289,7 +290,7 @@ def test_the_tracked_range_covers_every_migration_in_this_build():
     absent = [k for k in range(R.TRACKED_FROM, R.TRACKED_TO + 1)
               if k not in present]
     assert absent == EXPECTED_ABSENT_216_264
-    assert len(absent) == 30 + 24
+    assert len(absent) == 30 + 23
 
 
 # ── §5 listed ────────────────────────────────────────────────────────

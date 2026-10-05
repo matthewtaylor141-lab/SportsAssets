@@ -53,7 +53,8 @@ STATEMENT_TIMEOUT_MS = 3000
 #: INCIDENT RELEASE: 216..264 (was 216..226), so the release check sees the
 #: R30A and incident migrations (227, 229, 248, 249, 251, 260, 261, 264);
 #: 216..265 since ADRIANA (migration 265); 216..290 since PAPER TURNAROUND
-#: (migration 290; 266..289 are other streams' reserved slots).
+#: (migration 290); paper mark freshness took 270; the other numbers in
+#: 266..289 are parallel lanes' reserved slots.
 #: Numbers inside the range that no migration uses (reserved stream slots)
 #: are reported in `numbers_absent`, never hidden.
 TRACKED_FROM, TRACKED_TO = 216, 290

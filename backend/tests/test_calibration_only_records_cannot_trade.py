@@ -668,6 +668,13 @@ READERS = {
     "coverage_first_loss.py": (
         "REPORTING_FIRST_LOSS_CENSUS_BY_EVENT_KEY_OR_CONTRACT_NEVER_SELECTS",
         10),
+    # (270) PAPER MARK FRESHNESS: reads the ENTRY decision's own valuation BY
+    # ID (payout event + complement flag) for an already-HELD position's
+    # settlement identity, and (via xavier_freshness.LATEST_VALUATION_SQL)
+    # the newest valuation id of that held contract for display and Xavier's
+    # management packet. It selects no candidate, sizes and places nothing.
+    "bettor_paper_freshness.py": (
+        "HELD_POSITION_SETTLEMENT_IDENTITY_BY_ENTRY_VALUATION_ID_ONLY", 2),
 }
 
 
