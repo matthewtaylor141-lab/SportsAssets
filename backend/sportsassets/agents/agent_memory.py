@@ -111,6 +111,10 @@ EVIDENCE_TABLES: dict[str, tuple] = {
     "eddie_execution_outcomes": ("eddie_execution_outcomes",
                                  ("outcome_id",)),
     "scout_features": ("scout_features", ("feature_id",)),
+    "adriana_arb_scans": ("adriana_arb_scans", ("scan_id",)),
+    "adriana_arb_opportunities": ("adriana_arb_opportunities",
+                                  ("opportunity_id",)),
+    "adriana_arb_refusals": ("adriana_arb_refusals", ("refusal_id",)),
     "scout_feature_tournaments": ("scout_feature_tournaments",
                                   ("tournament_id",)),
     "intel_runs": ("intel_runs", ("run_id",)),
@@ -133,6 +137,8 @@ MANDATE: dict[str, tuple] = {
     "CHIEF_ALLOCATOR": ("intel_allocations", "karen_challenges"),
     "EDDIE": ("eddie_execution_estimates", "execution_calibration"),
     "SCOUT": ("scout_feature_tournaments", "scout_features"),
+    "ADRIANA": ("adriana_arb_opportunities", "adriana_arb_refusals",
+                "adriana_arb_scans"),
 }
 
 #: Keys a memory's facts may never carry: a memory is not a setting.

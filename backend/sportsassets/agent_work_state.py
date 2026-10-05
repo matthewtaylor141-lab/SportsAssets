@@ -90,11 +90,11 @@ IDLE = "IDLE_NO_OPEN_WORK"
 WORK_STATES = (WORKING, REVIEWING, WAITING, BLOCKED, HANDOFF, IDLE)
 
 AGENTS = ("DEREK", "KAREN", "SCOUT", "EDDIE", "CHIEF_ALLOCATOR", "AUDREY",
-          "XAVIER")
+          "XAVIER", "ADRIANA")
 BUSY = {"XAVIER": REVIEWING, "AUDREY": REVIEWING, "KAREN": REVIEWING}
 #: the agents whose open work reads live market data, and which data
 MARKET_SOURCES = {"XAVIER": ("feed", "venue"), "DEREK": ("feed", "venue"),
-                  "EDDIE": ("venue",)}
+                  "EDDIE": ("venue",), "ADRIANA": ("venue",)}
 #: = agents.karen.EVALUATOR_FOR (read, not imported; a test pins equality)
 EVALUATOR_FOR = {"DEREK": "AUDREY", "XAVIER": "AUDREY",
                  "CHIEF_ALLOCATOR": "AUDREY", "AUDREY": "XAVIER"}
@@ -328,9 +328,9 @@ def _generic(agent: str, facts: dict, now: float) -> dict:
                     [run], since=_ep(run.get("started_at")))
     hs = _handoffs(facts)
     srcs = MARKET_SOURCES.get(agent)
-    # Derek's standing work always reads the feed and the books; Eddie's
-    # only when decisions are waiting for his estimate
-    market_work = agent == "DEREK" or (agent == "EDDIE" and any(
+    # Derek's and Adriana's standing work always reads the books (Derek's
+    # the feed too); Eddie's only when decisions are waiting for his estimate
+    market_work = agent in ("DEREK", "ADRIANA") or (agent == "EDDIE" and any(
         h["kind"] == "ENTER_DECISION_WITHOUT_ESTIMATE" for h in hs))
     if srcs and market_work:
         ms = market_status(facts.get("market"), now)
@@ -823,6 +823,9 @@ async def _read_outputs(s: _Sections) -> dict:
             ("AUDREY", "audrey_audit_reports", "audit report",
              "SELECT report_id AS id, computed_at AS at "
              "  FROM audrey_audit_reports ORDER BY computed_at DESC LIMIT 1"),
+            ("ADRIANA", "adriana_arb_scans", "arbitrage census",
+             "SELECT scan_id AS id, finished_at AS at FROM adriana_arb_scans"
+             " ORDER BY finished_at DESC LIMIT 1"),
             ("CHIEF_ALLOCATOR", "intel_runs", "allocation run",
              "SELECT run_id AS id, finished_at AS at FROM intel_runs "
              " WHERE component = 'ALLOCATOR' AND status = 'OK' "

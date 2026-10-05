@@ -124,7 +124,7 @@ WAITING_STATUSES = ("WAITING_FOR_EVIDENCE", "WAITING_FOR_PROVIDER", "BLOCKED",
 BUSY_STATE = {"KAREN": "CHALLENGING", "AUDREY": "REVIEWING",
               "XAVIER": "REVIEWING"}
 
-# ── THE SEVEN DESKS, IN THE CANDIDATE-REVIEW ORDER ───────────────────────
+# ── THE EIGHT DESKS: THE CANDIDATE-REVIEW ORDER, THEN ADRIANA ───────────
 # Derek -> Karen -> Scout -> Eddie -> Allocator -> Audrey -> Xavier is the
 # order of pos_candidate_review_steps (migration 217); the floor seats them
 # along the arc in that order so the review flows across the room.
@@ -207,6 +207,22 @@ SEATS = (
      "may_not": ["Open a new entry",
                  "Write entry decisions, audits or directives",
                  "Change limits, approvals or submission switches"]},
+    # (265) the eighth desk: not a step of the candidate review, so it sits
+    # after it
+    {"agent": "ADRIANA", "slug": "adriana", "display_name": "Adriana",
+     "title": "Head of Arbitrage · shadow only",
+     "authority_level": "SHADOW_ONLY",
+     "workspace": "/adriana", "kind": "POS_AGENT",
+     "deploy_table": "adriana_arb_scans",
+     "may": ["Read recorded venue books, the catalogue and settlement terms",
+             "Record arbitrage opportunities and refusals with their "
+             "evidence (SHADOW)",
+             "Hand an opportunity to Eddie for an execution review and ask "
+             "Karen to challenge it"],
+     "may_not": ["Place, cancel or route any order on any venue",
+                 "Hold or read any venue credential",
+                 "Allocate, reserve or approve capital",
+                 "Change a size, limit, threshold, fee or freshness rule"]},
 )
 SEAT_BY_AGENT = {s["agent"]: s for s in SEATS}
 SEAT_BY_SLUG = {s["slug"]: s for s in SEATS}
@@ -642,6 +658,35 @@ async def _scout(rd: _Reads, now: float) -> dict:
     return await rd.run("scout_features", ("scout_features",), fn) or {}
 
 
+async def _adriana(rd: _Reads, now: float) -> dict:
+    """Her latest census pass, a day of passes and the newest proven
+    opportunity -- as recorded (265)."""
+    async def fn(conn):
+        agg = await conn.fetchrow(
+            "SELECT count(*) AS n, coalesce(sum(opportunities), 0) AS opp, "
+            "       coalesce(sum(refusals_total), 0) AS ref "
+            "  FROM adriana_arb_scans WHERE finished_at >= to_timestamp($1)",
+            now - DETAIL_WINDOW_S)
+        last = await conn.fetchrow(
+            "SELECT scan_id, started_at, finished_at, status, why, venues, "
+            "       markets_read, books_fresh, structures_considered, "
+            "       opportunities, refusals_total, refusals_recorded, "
+            "       by_code, by_kind FROM adriana_arb_scans "
+            " ORDER BY finished_at DESC LIMIT 1")
+        opp = await conn.fetchrow(
+            "SELECT opportunity_id, scan_id, structure_kind, event_key, "
+            "       venues, max_qty, net_profit_usd, edge_per_set_usd, "
+            "       decided_at FROM adriana_arb_opportunities "
+            " ORDER BY decided_at DESC LIMIT 1")
+        return {"scans24": int(agg["n"]), "opportunities24": int(agg["opp"]),
+                "refusals24": int(agg["ref"]),
+                "last": None if last is None else dict(last),
+                "last_opportunity": None if opp is None else dict(opp)}
+    return await rd.run("adriana_arb_scans",
+                        ("adriana_arb_scans", "adriana_arb_opportunities"),
+                        fn) or {}
+
+
 async def _feed(rd: _Reads, now: float) -> list:
     """The opportunity feed: Derek's latest PAPER decisions, as recorded."""
     async def fn(conn):
@@ -869,8 +914,11 @@ async def build_floor(conn, *, now: float | None = None,
     eddie_deployed = (await rd.exists("eddie_execution_estimates")
                       and "EDDIE" in status)
     scout_deployed = await rd.exists("scout_features") and "SCOUT" in status
+    adriana_deployed = (await rd.exists("adriana_arb_scans")
+                        and "ADRIANA" in status)
     eddie = await _eddie(rd, now) if eddie_deployed else {}
     scout = await _scout(rd, now) if scout_deployed else {}
+    adriana = await _adriana(rd, now) if adriana_deployed else {}
     slack = await _slack(rd, now)
     feed = await _feed(rd, now)
     opportunities = await _opportunities(rd, alloc)
@@ -896,8 +944,9 @@ async def build_floor(conn, *, now: float | None = None,
             ok_table = await rd.exists(seat["deploy_table"])
             deployed = bool(ok_table and a in status)
             deploy_why = (None if deployed else
-                          "MIGRATION_217_NOT_APPLIED" if not ok_table else
-                          "IDENTITY_NOT_REGISTERED")
+                          ("MIGRATION_265_NOT_APPLIED" if a == "ADRIANA"
+                           else "MIGRATION_217_NOT_APPLIED")
+                          if not ok_table else "IDENTITY_NOT_REGISTERED")
         elif seat["kind"] == "INTEL":
             deployed = await rd.exists("intel_runs")
             deploy_why = None if deployed else "MIGRATION_208_NOT_APPLIED"
@@ -1119,6 +1168,46 @@ async def build_floor(conn, *, now: float | None = None,
             monitor = [_m("Features registered", scout.get("features"),
                           "scout_features", (ls or {}).get("proposed_at"),
                           rd.sections.get("scout_features", {}).get("why"))]
+        elif a == "ADRIANA" and deployed:
+            sc, lo = adriana.get("last"), adriana.get("last_opportunity")
+            sec_why = rd.sections.get("adriana_arb_scans", {}).get("why")
+            if lo:
+                focus = last_output = dict(_ref(
+                    "adriana_arb_opportunities", lo["opportunity_id"],
+                    "/api/command/adriana/opportunities/%s"
+                    % lo["opportunity_id"], lo["decided_at"]),
+                    summary="%s · %s · %s · %d sets · $%.2f worst-case "
+                            "net (SHADOW)" % (
+                                lo["structure_kind"], lo["event_key"],
+                                "+".join(lo["venues"] or []),
+                                lo["max_qty"],
+                                float(lo["net_profit_usd"])))
+            if sc:
+                summ = ("Census %s · %d structures · %d proven · %d refused"
+                        % (sc["status"], sc["structures_considered"],
+                           sc["opportunities"], sc["refusals_total"]))
+                scan_ref = dict(_ref("adriana_arb_scans", sc["scan_id"],
+                                     "/api/command/adriana",
+                                     sc["finished_at"]), summary=summ)
+                if last_output is None or (_ep(sc["finished_at"]) or 0) > \
+                        (_ep(last_output.get("at")) or 0):
+                    focus = last_output = scan_ref
+                signals.append({"at": sc["finished_at"], "hint":
+                                "WORKING_ON", "label": summ, "ref": scan_ref})
+            monitor = [
+                _m("Census passes (24h)", adriana.get("scans24"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why),
+                _m("Proven after costs (24h)",
+                   adriana.get("opportunities24"),
+                   "adriana_arb_opportunities", (sc or {}).get("finished_at"),
+                   sec_why),
+                _m("Refused (last pass)", (sc or {}).get("refusals_total"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why or "NO_CENSUS_PASS"),
+                _m("Fresh books (last pass)", (sc or {}).get("books_fresh"),
+                   "adriana_arb_scans", (sc or {}).get("finished_at"),
+                   sec_why or "NO_CENSUS_PASS")]
 
         # A challenge raised against this agent recently is a REVIEWING
         # signal only once it answers (CHALLENGE_ANSWERED edge from it).
@@ -1356,6 +1445,39 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
                                 str(r["claim"])[:160]),
                             "href": "/api/command/karen/challenges/%s"
                             % r["challenge_id"]})
+        elif a == "ADRIANA" and await rd.exists("adriana_arb_scans"):
+            for r in await c.fetch(
+                    "SELECT opportunity_id, structure_kind, event_key, "
+                    "       venues, max_qty, net_profit_usd, decided_at "
+                    "  FROM adriana_arb_opportunities "
+                    " ORDER BY decided_at DESC LIMIT 10"):
+                out.append({"kind": "adriana_arb_opportunities",
+                            "id": r["opportunity_id"],
+                            "at": _ep(r["decided_at"]),
+                            "verdict": "GUARANTEED_AFTER_COSTS",
+                            "summary": "%s · %s · %s · %d sets · $%.2f "
+                                       "worst-case net (SHADOW)" % (
+                                           r["structure_kind"],
+                                           r["event_key"],
+                                           "+".join(r["venues"] or []),
+                                           r["max_qty"],
+                                           float(r["net_profit_usd"])),
+                            "href": "/api/command/adriana/opportunities/%s"
+                            % r["opportunity_id"]})
+            for r in await c.fetch(
+                    "SELECT refusal_id, structure_kind, event_key, venues, "
+                    "       primary_code, decided_at "
+                    "  FROM adriana_arb_refusals "
+                    " ORDER BY decided_at DESC LIMIT 10"):
+                out.append({"kind": "adriana_arb_refusals",
+                            "id": r["refusal_id"],
+                            "at": _ep(r["decided_at"]),
+                            "verdict": "REFUSED",
+                            "summary": "REFUSED %s · %s · %s · %s" % (
+                                r["primary_code"], r["structure_kind"],
+                                r["event_key"] or "NO_EVENT_IDENTITY",
+                                "+".join(r["venues"] or []))})
+            out.sort(key=lambda x: -(x["at"] or 0))
         elif a == "CHIEF_ALLOCATOR" and await rd.exists("intel_runs"):
             for r in await c.fetch(
                     "SELECT run_id, status, started_at, finished_at, "

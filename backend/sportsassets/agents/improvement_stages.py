@@ -89,19 +89,20 @@ RUNNER_STAGES = (EVIDENCE, HYPOTHESIS, PEER_CHALLENGE, OWNER_RESPONSE,
 
 KAREN = "KAREN"
 AGENTS = ("DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT",
-          "CHIEF_ALLOCATOR")
+          "CHIEF_ALLOCATOR", "ADRIANA")
 OWNER_AGENTS = ("DEREK", "XAVIER", "AUDREY", "EDDIE", "SCOUT",
-                "CHIEF_ALLOCATOR")
+                "CHIEF_ALLOCATOR", "ADRIANA")
 EVALUATOR_AGENTS = ("DEREK", "XAVIER", "AUDREY")
 #: the default independent evaluator per owner (karen.EVALUATOR_FOR,
 #: extended to Eddie and Scout: Audrey evaluates both)
 EVALUATOR_FOR = {"DEREK": "AUDREY", "XAVIER": "AUDREY", "AUDREY": "XAVIER",
                  "EDDIE": "AUDREY", "SCOUT": "AUDREY",
-                 "CHIEF_ALLOCATOR": "AUDREY"}
+                 "CHIEF_ALLOCATOR": "AUDREY", "ADRIANA": "AUDREY"}
 #: the default (non-Karen) peer challenger per owner
 #: (collaboration_loop.PEER_ROUTING for Eddie / Scout: Derek first)
 PEER_FOR = {"DEREK": "XAVIER", "XAVIER": "DEREK", "AUDREY": "XAVIER",
-            "EDDIE": "DEREK", "SCOUT": "DEREK", "CHIEF_ALLOCATOR": "DEREK"}
+            "EDDIE": "DEREK", "SCOUT": "DEREK", "CHIEF_ALLOCATOR": "DEREK",
+            "ADRIANA": "EDDIE"}
 
 SOURCE_KINDS = ("KAREN_UPHELD_CHALLENGE", "AUDREY_FINDING",
                 "COVERAGE_INCIDENT", "EDDIE_SKIP_EXECUTION", "FALSE_REFUSAL",
@@ -465,7 +466,8 @@ def slack_agent(event: dict) -> str:
     who = _u(event.get("actor"))
     if event.get("actor_class") in (OWNER_AGENT, PEER_AGENT, CHALLENGER,
                                     INDEPENDENT_EVALUATOR) and who in (
-            "DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT"):
+            "DEREK", "XAVIER", "AUDREY", "KAREN", "EDDIE", "SCOUT",
+            "ADRIANA"):
         return who.lower()
     return "audrey"
 

@@ -35,17 +35,18 @@ import uuid
 import httpx
 
 CONTROL='agent.slack.bridge'
-AGENTS=('derek','xavier','audrey','karen','eddie','scout')
-#: The bridge may be enabled once these are configured; Karen, Eddie and
-#: Scout are optional.
+AGENTS=('derek','xavier','audrey','karen','eddie','scout','adriana')
+#: The bridge may be enabled once these are configured; Karen, Eddie, Scout
+#: and Adriana are optional.
 REQUIRED_AGENTS=('derek','xavier','audrey')
 KAREN='karen'
 KAREN_SOURCE='karen:'
 EDDIE='eddie'
 SCOUT='scout'
+ADRIANA='adriana'
 #: The agents with a DEDICATED app whose content may never travel under
 #: another agent's token: agent -> its source_key prefix.
-DEDICATED={KAREN:KAREN_SOURCE,EDDIE:'eddie:',SCOUT:'scout:'}
+DEDICATED={KAREN:KAREN_SOURCE,EDDIE:'eddie:',SCOUT:'scout:',ADRIANA:'adriana:'}
 QUEUE_CAP=300
 
 def _clean(v):
@@ -206,22 +207,25 @@ async def publish_karen_challenges(conn):
 POS_POSTS_PER_PASS=3
 
 async def publish_pos_posts(conn):
- """THE #agent-workroom PATH FOR EDDIE AND SCOUT: evidence-linked
+ """THE #agent-workroom PATH FOR EDDIE, SCOUT AND ADRIANA: evidence-linked
  collaboration posts read from their records (eddie.workroom_posts /
- scout.workroom_posts -- review / estimate / outcome / tournament ids), once
+ scout.workroom_posts / adriana.workroom_posts -- review / estimate /
+ outcome / tournament / census / opportunity ids), once
  each, at most POS_POSTS_PER_PASS per agent per pass, queued ONLY as that
  agent so they go out under its own token. Nothing is queued until the
  agent's dedicated identity is configured and its own."""
- for agent in (EDDIE,SCOUT):
+ for agent in (EDDIE,SCOUT,ADRIANA):
   if not dedicated_identity(agent)['ok']:continue
   cfg=settings(agent)
   if not cfg['workroom'] or cfg['workroom'] not in cfg['channels']:continue
-  table='eddie_execution_estimates' if agent==EDDIE else 'scout_features'
+  table={EDDIE:'eddie_execution_estimates',SCOUT:'scout_features',ADRIANA:'adriana_arb_scans'}[agent]
   if await conn.fetchval("SELECT to_regclass($1)",table) is None:continue
   if agent==EDDIE:
    from .agents import eddie as M
-  else:
+  elif agent==SCOUT:
    from .agents import scout as M
+  else:
+   from .agents import adriana as M
   for key,text in (await M.workroom_posts(conn,limit=POS_POSTS_PER_PASS))[:POS_POSTS_PER_PASS]:
    source=DEDICATED[agent]+key
    if await conn.fetchval("SELECT 1 FROM agent_slack_delivery WHERE agent=$1 AND team_id=$2 AND source_key=$3",agent,cfg['team'],source):continue
@@ -276,9 +280,9 @@ def impersonation(job):
  if source.startswith(KAREN_SOURCE) and agent!=KAREN:return 'IMPERSONATION_REFUSED_KAREN_CONTENT_ON_ANOTHER_TOKEN'
  if agent==KAREN and not karen_identity()['distinct']:return 'IMPERSONATION_REFUSED_KAREN_TOKEN_NOT_HER_OWN'
  if agent==KAREN and not karen_identity()['configured']:return 'KAREN_SLACK_APP_NOT_CONFIGURED_NOTHING_SENT'
- for owner in (EDDIE,SCOUT):
+ for owner in (EDDIE,SCOUT,ADRIANA):
   if source.startswith(DEDICATED[owner]) and agent!=owner:return 'IMPERSONATION_REFUSED_%s_CONTENT_ON_ANOTHER_TOKEN'%owner.upper()
- for owner in (EDDIE,SCOUT):
+ for owner in (EDDIE,SCOUT,ADRIANA):
   if agent==owner:
    ident=dedicated_identity(owner)
    if not ident['distinct']:return 'IMPERSONATION_REFUSED_%s_TOKEN_NOT_ITS_OWN'%owner.upper()

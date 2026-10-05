@@ -475,6 +475,17 @@ async def lifespan(_: FastAPI):
         scout_task = asyncio.create_task(_SCOUT.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("scout: runner not armed", exc_info=True)
+    # Adriana (Head of Arbitrage), migration 265: SHADOW ONLY. Her census
+    # reads recorded books, writes only her own records (each transaction
+    # declared as ADRIANA: the database refuses any order, intent, fill,
+    # approval or control write), never calls a venue. Kill switch
+    # ADRIANA_RUNNER_ENABLED=0.
+    adriana_task = None
+    try:
+        from ..agents import adriana_runner as _ADRIANA
+        adriana_task = asyncio.create_task(_ADRIANA.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("adriana: runner not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -597,7 +608,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             eddie_task, scout_task, intel_task, pos_task, poslearn_task, twin_task,
+                             eddie_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
                              improve_task,
                              *watchdog_tasks)
                  if t is not None]
@@ -676,6 +687,14 @@ try:
     app.include_router(_agents_pos_router)
 except ImportError:
     log.warning("agents: api.agents_pos not loaded", exc_info=True)
+try:
+    # Adriana (migration 265): /api/command/adriana, /api/command/agents/
+    # adriana, /api/command/adriana/scans and /opportunities/{id}. Reads
+    # only; there is no write route.
+    from .adriana_api import router as _adriana_router
+    app.include_router(_adriana_router)
+except ImportError:
+    log.warning("agents: api.adriana_api not loaded", exc_info=True)
 try:
     from .agents_chat import router as _agents_chat_router
     app.include_router(_agents_chat_router)

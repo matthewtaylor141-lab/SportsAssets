@@ -298,6 +298,11 @@ API_LOOPS = (
                  "feature and window"},
           armed=("env_not_off", "SCOUT_RUNNER_ENABLED", "1"),
           sources=(_hb("agent_scout", *OK_ERROR),)),
+    _spec("agents.adriana_runner", "api", 300.0, critical=False,
+          lease={"kind": "NONE", "why": "SHADOW census passes keyed per "
+                 "scan id"},
+          armed=("env_not_off", "ADRIANA_RUNNER_ENABLED", "1"),
+          sources=(_hb("agent_adriana", *OK_ERROR),)),
     _spec("agents.improvement_pipeline", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "items seeded from source keys "
                  "(UNIQUE); stages mirrored, never decided"},

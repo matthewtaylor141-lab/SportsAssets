@@ -1,9 +1,10 @@
-"""EDDIE AND SCOUT HOLD NO AUTHORITY: ONE SHARED REFUSAL, IN CODE.
+"""EDDIE, SCOUT AND ADRIANA HOLD NO AUTHORITY: ONE SHARED REFUSAL, IN CODE.
 
-Eddie (Head of Execution, SHADOW_ONLY) and Scout (Market Intelligence,
-RESEARCH_SHADOW_ONLY) are persisted agents (migration 217) with NO venue
-submission, order, cancel, capital, approval, activation, policy or
-promotion authority. This module is the code half of that rule:
+Eddie (Head of Execution, SHADOW_ONLY), Scout (Market Intelligence,
+RESEARCH_SHADOW_ONLY) and Adriana (Head of Arbitrage, SHADOW_ONLY, migration
+265) are persisted agents (migration 217) with NO venue submission, order,
+cancel, credential, capital, approval, activation, policy or promotion
+authority. This module is the code half of that rule:
 
   * `may(agent, tool)` -- on the agent's registry allow list, not on its
     deny list, and not a forbidden action or prefix (order.*, dispatch.*,
@@ -23,9 +24,10 @@ import re
 
 from . import registry as R
 
-EDDIE, SCOUT = R.EDDIE, R.SCOUT
+EDDIE, SCOUT, ADRIANA = R.EDDIE, R.SCOUT, R.ADRIANA
 AGENTS = R.SHADOW_AGENTS
-AUTHORITY_STATUS = {EDDIE: "SHADOW_ONLY", SCOUT: "RESEARCH_SHADOW_ONLY"}
+AUTHORITY_STATUS = {EDDIE: "SHADOW_ONLY", SCOUT: "RESEARCH_SHADOW_ONLY",
+                    ADRIANA: "SHADOW_ONLY"}
 
 #: What neither may ever do -- each also on their registry DENY lists.
 FORBIDDEN_ACTIONS = (
@@ -41,7 +43,8 @@ FORBIDDEN_PREFIXES = ("order.", "dispatch.", "request.", "cancel.",
                       "promote.", "submit.")
 
 R_NO_AUTHORITY = {EDDIE: "EDDIE_HAS_NO_AUTHORITY",
-                  SCOUT: "SCOUT_HAS_NO_AUTHORITY"}
+                  SCOUT: "SCOUT_HAS_NO_AUTHORITY",
+                  ADRIANA: "ADRIANA_HAS_NO_AUTHORITY"}
 WHY = {
     EDDIE: ("Eddie estimates execution in SHADOW and recommends; he holds no "
             "venue submission, order, cancel, capital, approval, activation "
@@ -49,6 +52,9 @@ WHY = {
     SCOUT: ("Scout researches and tests features in SHADOW; he holds no "
             "trade, portfolio, policy-approval or feature-promotion "
             "authority and cannot validate his own feature"),
+    ADRIANA: ("Adriana proves or refuses arbitrage structures in SHADOW; she "
+              "holds no venue submission, order, cancel, credential, "
+              "capital, approval, activation or promotion authority"),
 }
 
 _RX = {
@@ -56,6 +62,8 @@ _RX = {
             re.compile(r"EDDIE[ ._:-]*(AGENT|BOT|EXECUTION)")),
     SCOUT: (re.compile(r"^(AGENT|AGENTS|BOT|SLACK|SYSTEM|ROLE)[:/ ._-]+SCOUT([^A-Z]|$)"),
             re.compile(r"SCOUT[ ._:-]*(AGENT|BOT|INTEL|RESEARCH)")),
+    ADRIANA: (re.compile(r"^(AGENT|AGENTS|BOT|SLACK|SYSTEM|ROLE)[:/ ._-]+ADRIANA([^A-Z]|$)"),
+              re.compile(r"ADRIANA[ ._:-]*(AGENT|BOT|ARB|ARBITRAGE)")),
 }
 
 

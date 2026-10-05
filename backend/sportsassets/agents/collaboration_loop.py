@@ -57,7 +57,7 @@ CHALLENGERS_ONLY = ("KAREN",)
 #: (migration 217) Eddie (execution) and Scout (intelligence) propose and
 #: peer-review findings like the operating agents, but NEVER record
 #: RELEASE_ELIGIBILITY: they hold no promotion authority of any kind.
-SHADOW_PARTICIPANTS = ("EDDIE", "SCOUT")
+SHADOW_PARTICIPANTS = ("EDDIE", "SCOUT", "ADRIANA")
 #: Who may propose a finding.
 PROPOSERS = AGENTS + SHADOW_PARTICIPANTS
 
@@ -70,6 +70,9 @@ PEER_ROUTING = {
     "EDDIE": ("DEREK", "XAVIER", "CHIEF_ALLOCATOR", "AUDREY", "KAREN"),
     "SCOUT": ("DEREK", "KAREN", "CALIBRATION_ENGINE", "MODEL_TOURNAMENT",
               "AUDREY", "MODEL_CHALLENGERS"),
+    # (265) Karen attacks every proven structure first; Eddie reviews its
+    # executability; Audrey evaluates; Derek is told what the books imply
+    "ADRIANA": ("KAREN", "EDDIE", "AUDREY", "DEREK"),
 }
 #: The first AGENT (identity, not role) in a shadow agent's routing that is
 #: not the proposer: who is asked to challenge / evaluate its finding.

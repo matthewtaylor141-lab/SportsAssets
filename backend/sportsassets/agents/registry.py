@@ -43,15 +43,19 @@ KAREN = "KAREN"
 #: venue or capital authority.
 EDDIE = "EDDIE"
 SCOUT = "SCOUT"
+#: (migration 265) Adriana, Head of Arbitrage (SHADOW_ONLY): proves or
+#: refuses fixed-payout structures across venues; no order, cancel, venue,
+#: credential or capital authority.
+ADRIANA = "ADRIANA"
 #: The shadow / research agents: no order path, no approval, no promotion.
-SHADOW_AGENTS = (EDDIE, SCOUT)
+SHADOW_AGENTS = (EDDIE, SCOUT, ADRIANA)
 #: The three OPERATING agents (entry, management, audit) -- the ones Karen
 #: challenges, and the only ones that may propose a collaboration-loop
 #: finding or hold an order path.
 OPERATING_AGENTS = (DEREK, XAVIER, AUDREY)
-#: Every registered agent identity, Karen (207), Eddie and Scout (217)
-#: included.
-AGENTS = (DEREK, XAVIER, AUDREY, KAREN, EDDIE, SCOUT)
+#: Every registered agent identity, Karen (207), Eddie and Scout (217) and
+#: Adriana (265) included.
+AGENTS = (DEREK, XAVIER, AUDREY, KAREN, EDDIE, SCOUT, ADRIANA)
 
 # ── STATES (agent_status.state CHECK) ───────────────────────────────────
 S_IDLE = "IDLE"
@@ -140,6 +144,13 @@ TOOLS: dict[str, str] = {
     "write.feature_tournaments": (
         "scout_feature_tournaments spec FREEZE and frozen samples only; the "
         "verdict is the evaluator's, never Scout's"),
+    "write.arb_records": (
+        "adriana_arb_scans / adriana_arb_opportunities / "
+        "adriana_arb_refusals (migration 265): SHADOW arbitrage proofs and "
+        "refusals, never an order"),
+    "write.agent_handoffs": (
+        "agent_conversation_messages HANDOFF / REVIEW_REQUEST rows naming "
+        "one's own record (224), never an instruction to act"),
     "write.loop_findings": ("agent_findings / stages of the collaboration "
                             "loop (203) for one's own findings and peer "
                             "challenges; never RELEASE_ELIGIBILITY"),
@@ -336,6 +347,35 @@ IDENTITIES: dict[str, dict] = {
             "order_path": None,
         },
     },
+    ADRIANA: {
+        "display_name": "Adriana",
+        "role": "HEAD_OF_ARBITRAGE",
+        "authority": "SHADOW_ONLY",
+        "mandate": (
+            "Find structures whose payout is fixed in every outcome -- "
+            "cross-venue complements, YES / NO complements, middles across "
+            "lines and exhaustive outcome baskets -- and prove or refuse each "
+            "one: identical settlement and payoff in every outcome (void, "
+            "postponement and tie included), synchronized fresh books, "
+            "executable depth on every leg, and a positive worst case after "
+            "every fee, slippage allowance and cost at the largest "
+            "profitable matched size. Records every opportunity and every "
+            "refusal in SHADOW. Never calls a structure guaranteed unless "
+            "all of that reconciles. Holds NO authority: no venue "
+            "submission, no order, no cancel, no credential, no capital, no "
+            "approval, no promotion."),
+        "policy_key": "arbitrage",
+        "tool_permissions": {
+            "authority_status": "SHADOW_ONLY",
+            "allowed": ["read.books", "read.catalogue", "read.findings",
+                        "write.arb_records", "write.agent_handoffs",
+                        "write.loop_findings", "write.agent_tasks"],
+            "denied": [*SHADOW_DENIED, "write.execution_estimates",
+                       "write.candidate_reviews", "write.feature_registry",
+                       "write.feature_tournaments", *NEVER_GRANTED],
+            "order_path": None,
+        },
+    },
 }
 
 
@@ -356,6 +396,8 @@ def _model_version(agent_id: str) -> str:
         return "NO_OUTCOME_MODEL_RULE_BASED_EXECUTION_ESTIMATOR"
     if agent_id == SCOUT:
         return "NO_MODEL_PROSPECTIVE_FEATURE_TOURNAMENT"
+    if agent_id == ADRIANA:
+        return "NO_OUTCOME_MODEL_EXHAUSTIVE_PAYOFF_SOLVER"
     return "NO_MODEL_DETERMINISTIC_AUDIT"
 
 
