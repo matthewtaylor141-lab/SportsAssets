@@ -258,11 +258,24 @@ STOP_ERROR = "REQUEST_FAILED"                  # any other failed request
 STOP_NO_VARIANT = "NO_PARAMETER_VARIANT_ANSWERED"
 STOP_WRITE_FAILURES = "CATALOGUE_WRITES_FAILING"  # MAX_CONSECUTIVE_EVENT_FAILURES events in a row failed to write
 STOP_NOT_RUN = "NOT_RUN"                       # an earlier pass stopped the lane (a 429) or the budget was spent
+#: the next offset is past what the venue serves -- a configured ceiling
+#: (`PageWalk(max_offset=...)`) or the venue's own refusal of the offset --
+#: while pages were still full: TRUNCATED, and the window is partitioned
+STOP_OFFSET_CEILING = "OFFSET_CEILING_REACHED"
+#: a truncated time window recursively partitioned until every bucket ended
+#: on a natural end of the venue's board (see WindowPartition)
+STOP_PARTITION_COMPLETE = "PARTITIONED_TO_A_NATURAL_END"
+#: a truncated time window whose partition left buckets unresolved (each
+#: named with its window and why in `partition.unresolved`): TRUNCATED
+STOP_PARTITION_UNRESOLVED = "PARTITION_LEFT_BUCKETS_UNRESOLVED"
 STOPS = (STOP_SHORT_PAGE, STOP_EMPTY_PAGE, STOP_BUDGET, STOP_WALL_TIME,
          STOP_RATE_LIMITED, STOP_ERROR, STOP_NO_VARIANT, STOP_WRITE_FAILURES,
-         STOP_NOT_RUN)
-NATURAL_ENDS = frozenset({STOP_SHORT_PAGE, STOP_EMPTY_PAGE})
-TRUNCATING_STOPS = frozenset({STOP_BUDGET, STOP_WALL_TIME})
+         STOP_NOT_RUN, STOP_OFFSET_CEILING, STOP_PARTITION_COMPLETE,
+         STOP_PARTITION_UNRESOLVED)
+NATURAL_ENDS = frozenset({STOP_SHORT_PAGE, STOP_EMPTY_PAGE,
+                          STOP_PARTITION_COMPLETE})
+TRUNCATING_STOPS = frozenset({STOP_BUDGET, STOP_WALL_TIME, STOP_OFFSET_CEILING,
+                              STOP_PARTITION_UNRESOLVED})
 
 #: How many events of the previous page each next request reads again. Offset
 #: pagination over a board that changes while it is walked (games closing,
@@ -717,13 +730,27 @@ class PageWalk:
 
     def __init__(self, *, limit: int, max_requests: int,
                  overlap: int = PAGE_OVERLAP, start_offset: int = 0,
-                 deadline: float | None = None, clock=None):
+                 deadline: float | None = None, clock=None,
+                 max_offset: int | None = None,
+                 already_read: set | None = None):
         import time as _time
 
         self.limit = max(1, int(limit))
         self.max_requests = max(1, int(max_requests))
         self.overlap = max(0, int(overlap))
         self.deadline = deadline
+        #: the largest offset the venue serves, when one is known: the next
+        #: offset past it stops the walk as OFFSET_CEILING_REACHED (truncated)
+        #: instead of asking for a page the venue refuses
+        self.max_offset = (int(max_offset) if max_offset not in (None, 0)
+                           else None)
+        #: event keys another walk of the SAME enumeration already read (a
+        #: partition's parent window, its sibling buckets): such an event is
+        #: counted (`already_read_elsewhere`) and never returned again, so
+        #: overlapping buckets write and tally every event once. The set is
+        #: shared and grows with every fresh event this walk reads.
+        self._already_read = already_read
+        self.already_read_elsewhere = 0
         self._clock = clock or _time.monotonic
         self._offset = int(start_offset)
         self._next = int(start_offset)
@@ -784,7 +811,25 @@ class PageWalk:
         if self.deadline is not None and self._clock() >= self.deadline:
             self.stopped = STOP_WALL_TIME
             return None
+        if self.max_offset is not None and self._next > self.max_offset:
+            self.stopped = STOP_OFFSET_CEILING
+            return None
         return self._next
+
+    def seen_keys(self) -> set:
+        """Every event key this walk read (a copy)."""
+        return set(self._seen)
+
+    def _elsewhere(self, k) -> bool:
+        """True when another walk of the same enumeration already read `k`
+        (counted); otherwise `k` is claimed for this walk."""
+        if self._already_read is None:
+            return False
+        if k in self._already_read:
+            self.already_read_elsewhere += 1
+            return True
+        self._already_read.add(k)
+        return False
 
     def fail(self, stop: str, why: str | None = None) -> None:
         self.stopped = stop if stop in STOPS else STOP_ERROR
@@ -813,6 +858,8 @@ class PageWalk:
                 continue
             self._seen.add(k)
             self.rewind_catches += 1
+            if self._elsewhere(k):
+                continue
             fresh.append(ev)
         if events:
             self.pages += 1
@@ -857,6 +904,8 @@ class PageWalk:
                 # event there that was NOT on the previous page moved across
                 # the boundary while the board changed -- caught, not skipped
                 self.overlap_catches += 1
+            if self._elsewhere(k):
+                continue
             fresh.append(ev)
         was_confirming = self._confirming
         self._confirming = False
@@ -924,6 +973,8 @@ class PageWalk:
                 "page_size_max_seen": self.page_size_max,
                 "venue_page_cap": self.venue_page_cap,
                 "max_requests": self.max_requests,
+                "max_offset": self.max_offset,
+                "already_read_elsewhere": self.already_read_elsewhere,
                 "stopped": self.stopped, "error": self.error,
                 "natural_end": self.stopped in NATURAL_ENDS,
                 "complete": self.complete,
@@ -977,6 +1028,290 @@ def rollup_slices(slices: list, *, not_read: list | None = None,
     out["complete"] = out["natural_end"] and not summed["shift_unrecovered"]
     if duration_s is not None:
         out["duration_s"] = round(float(duration_s), 3)
+    return out
+
+
+# ── recursive partition of a truncated time window ───────────────────────
+#
+# THE OWNER (2026-10-06): "The catalogue walker must make truncation explicit
+# and recursively partition the enumeration space until completeness is
+# established or the API proves a genuine external limitation. A result
+# marked truncated=true may NEVER be treated as a complete venue universe. No
+# active market may disappear because it fell past an offset ceiling."
+#
+# A time-windowed walk (the WINDOW / FAST pass, each calendar slice) that ends
+# TRUNCATED -- its request budget ran out, or the next offset is past what the
+# venue serves, while pages were still full -- has read only the head of its
+# window in the venue's offset order. WindowPartition splits that
+# [startTimeMin, startTimeMax] window in halves and walks each half with the
+# same PageWalk (and the same writer and tally), recursing into any half that
+# is truncated again, until every bucket ends on a natural end of the board.
+# A bucket still truncated when it is MAX_DEPTH splits deep or no wider than
+# MIN_WINDOW_S cannot be cut further: it is named PROVIDER_BUCKET_REMAINS_
+# TRUNCATED with its window (the venue's genuine limit, proven), and the pass
+# stays TRUNCATED. The partition has its OWN request budget (and the lane's
+# wall-time bound), recorded on the receipt; buckets left unwalked when it is
+# spent are named, never assumed empty. Halves share their midpoint instant
+# (the venue's bounds are treated as inclusive, so nothing falls between two
+# buckets); an event read in two buckets is written and counted once
+# (PageWalk `already_read`). Pure: the caller (premap.refresh) drives it.
+
+P_REMAINS_TRUNCATED = "PROVIDER_BUCKET_REMAINS_TRUNCATED"
+P_UNBOUNDED = "UNBOUNDED_VARIANT_CANNOT_BE_PARTITIONED"
+P_SHIFT = "BOARD_SHIFT_UNRECOVERED_IN_BUCKET"
+P_BUDGET = "PARTITION_BUDGET_EXHAUSTED"
+#: at most this many halvings below the window first walked: a 108 h window
+#: halved 10 times is ~6 min, below MIN_WINDOW_S anyway
+PARTITION_MAX_DEPTH = 10
+#: a bucket no wider than this is not split again (the same floor as
+#: market_plane.catalogue.enumerate_complete)
+PARTITION_MIN_WINDOW_S = 900.0
+#: the receipt lists at most this many buckets (the rest are counted)
+MAX_PARTITION_BUCKETS_LISTED = 256
+_PARTITION_SUM_KEYS = ("requests", "pages_with_events", "events_received",
+                       "duplicates_across_pages", "overlap_catches",
+                       "shift_suspected", "rewind_reads", "rewind_catches",
+                       "probe_requests_failed", "probe_requests_rejected")
+
+
+def split_window(start: float, end: float) -> tuple:
+    """((start, mid), (mid, end)) -- the two halves share their midpoint,
+    rounded to a whole second (the venue's filter is second-resolution)."""
+    a, b = float(start), float(end)
+    mid = float(int((a + b) / 2.0))
+    if not a < mid < b:
+        mid = (a + b) / 2.0
+    return (a, mid), (mid, b)
+
+
+def _bucket_iso(t):
+    return utc_iso(t) if t is not None else None
+
+
+class WindowPartition:
+    """The recursive partition of ONE pass's truncated time window(s), as a
+    planner the caller drives:
+
+        part = WindowPartition(pass_name="WINDOW", budget=120,
+                               bucket_max_requests=120)
+        part.record(lo, hi, 0, root_walk.receipt(), root=True)
+        while (b := part.next_bucket()) is not None:
+            lo, hi, depth, max_requests = b
+            walk = PageWalk(limit=..., max_requests=max_requests,
+                            already_read=shared)
+            ... drive the walk over startTimeMin=lo, startTimeMax=hi ...
+            part.record(lo, hi, depth, walk.receipt())
+
+    `record` decides what a walked bucket means: complete, split into halves
+    (truncated with room to split), or unresolved by name. `next_bucket`
+    hands out the next unwalked bucket nearest-first while the partition's
+    own budget and the deadline last; when either runs out (or a bucket
+    stopped on a 429 / failed request / failing writes) every bucket still
+    pending is named unresolved with why. Never raises."""
+
+    def __init__(self, *, pass_name: str, budget: int,
+                 bucket_max_requests: int,
+                 max_depth: int = PARTITION_MAX_DEPTH,
+                 min_window_s: float = PARTITION_MIN_WINDOW_S,
+                 nearest_high: bool = False,
+                 deadline: float | None = None, clock=None):
+        import time as _time
+
+        self.pass_name = pass_name
+        self.budget = max(0, int(budget))
+        self.bucket_max_requests = max(1, int(bucket_max_requests))
+        self.max_depth = max(0, int(max_depth))
+        self.min_window_s = float(min_window_s)
+        self.nearest_high = bool(nearest_high)
+        self.deadline = deadline
+        self._clock = clock or _time.monotonic
+        self.requests = 0                  # bucket walks only (not the roots)
+        self.pending: list = []            # stack: the next bucket is the last
+        self.buckets: list = []
+        self.buckets_total = 0
+        self.unresolved: list = []
+        self.aborted = None
+        self.splits = 0
+        self.walks = 0
+        self.root_truncated = False
+        self.totals = {k: 0 for k in _PARTITION_SUM_KEYS}
+        self.totals["shift_unrecovered"] = 0
+        self.totals["already_read_elsewhere"] = 0
+        self.totals["new_events"] = 0
+
+    def _unresolved(self, start, end, depth, why, error=None) -> None:
+        self.unresolved.append({"pass": self.pass_name,
+                                "start": _bucket_iso(start),
+                                "end": _bucket_iso(end), "depth": int(depth),
+                                "why": why, **({"error": str(error)[:200]}
+                                               if error else {})})
+
+    def _push_halves(self, start, end, depth) -> None:
+        left, right = split_window(start, end)
+        self.splits += 1
+        # the stack pops the LAST: push the farther half first
+        order = (left, right) if self.nearest_high else (right, left)
+        for a, b in order:
+            self.pending.append((a, b, depth + 1))
+
+    def add_unread(self, start, end) -> None:
+        """A depth-0 window the primary walk never reached (a calendar slice
+        left unread when the pass budget was spent): walked as a bucket,
+        after every bucket already pending (it is farther out)."""
+        self.root_truncated = True
+        self.pending.insert(0, (float(start), float(end), 0))
+
+    def record(self, start, end, depth: int, receipt: dict, *,
+               root: bool = False, new_events: int | None = None) -> None:
+        r = dict(receipt or {})
+        stopped = r.get("stopped")
+        if not root:
+            self.walks += 1
+            self.requests += int(r.get("requests") or 0)
+            for k in self.totals:
+                if k == "new_events":
+                    continue
+                self.totals[k] += int(r.get(k) or 0)
+            if new_events is not None:
+                self.totals["new_events"] += int(new_events)
+        elif stopped in TRUNCATING_STOPS:
+            self.root_truncated = True
+        self.buckets_total += 1
+        if len(self.buckets) < MAX_PARTITION_BUCKETS_LISTED:
+            self.buckets.append({
+                "pass": self.pass_name, "start": _bucket_iso(start),
+                "end": _bucket_iso(end), "depth": int(depth),
+                "root": bool(root),
+                "truncated": stopped in TRUNCATING_STOPS,
+                "stopped": stopped,
+                "requests": int(r.get("requests") or 0),
+                "events": int(r.get("events_unique") or 0),
+                **({"new_events": int(new_events)}
+                   if new_events is not None else {})})
+        if stopped in NATURAL_ENDS:
+            if int(r.get("shift_unrecovered") or 0) and not root:
+                # the bucket ended but a board shift it could not re-read
+                # may have carried an event past it: not established
+                self._unresolved(start, end, depth, P_SHIFT)
+            return
+        if stopped == STOP_WALL_TIME:
+            self._unresolved(start, end, depth, STOP_WALL_TIME)
+            return
+        if stopped in (STOP_BUDGET, STOP_OFFSET_CEILING):
+            if start is None or end is None:
+                self._unresolved(start, end, depth, P_UNBOUNDED)
+            elif (depth >= self.max_depth
+                  or float(end) - float(start) <= self.min_window_s):
+                self._unresolved(start, end, depth, P_REMAINS_TRUNCATED)
+            else:
+                self._push_halves(float(start), float(end), depth)
+            return
+        if root:
+            # the primary walk failed (a 429, a failed request, failing
+            # writes): that is the pass's own stop, not a partition matter
+            return
+        # a bucket walk stopped on a 429, a failed request or failing writes:
+        # no further bucket is walked
+        self._unresolved(start, end, depth, stopped or STOP_ERROR,
+                         r.get("error"))
+        self.aborted = stopped or STOP_ERROR
+
+    def _drain(self, why) -> None:
+        while self.pending:
+            a, b, d = self.pending.pop()
+            self._unresolved(a, b, d, why)
+
+    def abort(self, why: str) -> None:
+        """Walk no further bucket (the lane stopped): every pending bucket
+        is named unresolved with `why`."""
+        self._drain(why)
+
+    def next_bucket(self):
+        """(start, end, depth, max_requests) for the next bucket, or None."""
+        if not self.pending:
+            return None
+        if self.aborted is not None:
+            self._drain(STOP_NOT_RUN)
+            return None
+        left = self.budget - self.requests
+        if left <= 0:
+            self._drain(P_BUDGET)
+            return None
+        if self.deadline is not None and self._clock() >= self.deadline:
+            self._drain(STOP_WALL_TIME)
+            return None
+        a, b, d = self.pending.pop()
+        return a, b, d, min(left, self.bucket_max_requests)
+
+    @property
+    def complete(self) -> bool:
+        return not self.unresolved and not self.pending
+
+    def receipt(self) -> dict:
+        return {"buckets": list(self.buckets),
+                "buckets_total": self.buckets_total,
+                "buckets_listed": len(self.buckets),
+                "unresolved": list(self.unresolved),
+                "complete": self.complete,
+                "budget": self.budget, "requests": self.requests,
+                "bucket_max_requests": self.bucket_max_requests,
+                "max_depth": self.max_depth,
+                "min_window_s": self.min_window_s,
+                "splits": self.splits, "bucket_walks": self.walks,
+                "aborted_by": self.aborted,
+                "walk_totals": dict(self.totals)}
+
+
+def apply_partition(pass_receipt: dict, part: WindowPartition) -> dict:
+    """The pass's receipt after its partition. Pure.
+
+    The bucket walks' requests and pages are added to the pass's own (so the
+    receipt's request total is still every request sent). A pass that was
+    truncated (or left calendar slices unread for budget or time) is
+      * PARTITIONED_TO_A_NATURAL_END -- a natural end, not truncated -- only
+        when every bucket ended on a natural end of the venue's board;
+      * truncated otherwise, every unresolved bucket named with its window
+        and why: WALL_TIME_BUDGET_EXHAUSTED / REQUEST_BUDGET_EXHAUSTED when
+        that is every bucket's cause, PARTITION_LEFT_BUCKETS_UNRESOLVED
+        (PROVIDER_BUCKET_REMAINS_TRUNCATED among them, or mixed causes)
+        otherwise.
+    A pass that was not truncated keeps its own stop."""
+    out = dict(pass_receipt or {})
+    pr = part.receipt()
+    out["partition"] = pr
+    tot = pr["walk_totals"]
+    for k in _PARTITION_SUM_KEYS:
+        out[k] = int(out.get(k) or 0) + int(tot.get(k) or 0)
+    out["partition_requests"] = pr["requests"]
+    if not part.root_truncated:
+        # nothing was truncated: the pass keeps its own stop (a natural end,
+        # or a 429 / failure that is not a partition matter)
+        return out
+    out["stopped_before_partition"] = out.get("stopped")
+    if pr["complete"]:
+        out["stopped"] = STOP_PARTITION_COMPLETE
+        out["truncated"] = False
+        out["natural_end"] = True
+        # the window was read again, bucket by bucket: what the truncated
+        # first read could not re-read is superseded by the buckets' own
+        out["shift_unrecovered"] = int(tot.get("shift_unrecovered") or 0)
+        out["complete"] = out["shift_unrecovered"] == 0
+    else:
+        # one cause for every unresolved bucket keeps its own name (the wall
+        # time, the request budget); mixed causes are named per bucket
+        whys = {u.get("why") for u in pr["unresolved"]} or {None}
+        if whys == {STOP_WALL_TIME}:
+            out["stopped"] = STOP_WALL_TIME
+        elif whys <= {P_BUDGET, STOP_BUDGET}:
+            out["stopped"] = STOP_BUDGET
+        else:
+            out["stopped"] = STOP_PARTITION_UNRESOLVED
+        out["truncated"] = True
+        out["natural_end"] = False
+        out["complete"] = False
+        if part.aborted and not out.get("error"):
+            out["error"] = next((u.get("error") for u in pr["unresolved"]
+                                 if u.get("error")), part.aborted)
     return out
 
 
@@ -1249,8 +1584,34 @@ class CompletenessTally:
         the walk could not recover, and no event that failed to write."""
         return bool(self.passes) and self.write_failures["events"] == 0 and all(
             p.get("stopped") in NATURAL_ENDS
+            and not p.get("truncated")
             and not int(p.get("shift_unrecovered") or 0)
+            and not (p.get("partition") or {}).get("unresolved")
             for p in self.passes.values())
+
+    def partition(self) -> dict:
+        """Every pass's partition buckets and unresolved buckets, in one
+        place (bounded: MAX_PARTITION_BUCKETS_LISTED buckets in all)."""
+        buckets, unresolved, total = [], [], 0
+        for p in self.passes.values():
+            pr = p.get("partition") or {}
+            total += int(pr.get("buckets_total") or 0)
+            for b in pr.get("buckets") or []:
+                if len(buckets) < MAX_PARTITION_BUCKETS_LISTED:
+                    buckets.append(b)
+            unresolved.extend(pr.get("unresolved") or [])
+        return {"buckets": buckets, "buckets_total": total,
+                "unresolved": unresolved, "complete": not unresolved}
+
+    def catalogue_complete(self) -> bool:
+        """THE FIELD THE MARKET PLANE READS. True only when this refresh
+        established its whole enumeration space: every pass on a natural end
+        of the venue's board (`complete`), no pass truncated, and no
+        partition bucket left unresolved. A truncated result is never a
+        complete venue universe."""
+        return (self.complete()
+                and not any(p.get("truncated") for p in self.passes.values())
+                and self.partition()["complete"])
 
     def outcome(self) -> str:
         if not self.passes:
@@ -1281,6 +1642,8 @@ class CompletenessTally:
         return {
             "version": VERSION, "lane": self.lane,
             "outcome": self.outcome(), "complete": self.complete(),
+            "catalogue_complete": self.catalogue_complete(),
+            "partition": self.partition(),
             "requests": requests, "pages_read": pages,
             "requests_outside_page_walks": dict(self.extra_requests),
             "passes": self.passes,
@@ -1316,6 +1679,8 @@ def describe() -> dict:
             "state_sources": list(STATE_SOURCES),
             "drop_reasons": list(DROP_REASONS), "stops": list(STOPS),
             "page_overlap": PAGE_OVERLAP, "max_rewinds": MAX_REWINDS,
+            "partition_max_depth": PARTITION_MAX_DEPTH,
+            "partition_min_window_s": PARTITION_MIN_WINDOW_S,
             "multi_day_min_span_h": MULTI_DAY_MIN_SPAN_H,
             "final_period_words": sorted(FINAL_PERIOD_WORDS),
             "non_sports_categories": sorted(NON_SPORTS_CATEGORIES),

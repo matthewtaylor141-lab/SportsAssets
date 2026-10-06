@@ -959,7 +959,8 @@ def test_migration_311_has_its_rollback_and_is_tracked():
     assert mig.is_file()
     assert (ROOT / "migrations" / "rollback" /
             "311_paper_profitability_stack.down.sql").is_file()
-    assert R.TRACKED_TO == 311
+    # tracked: inside the release range (311 and every later migration)
+    assert R.TRACKED_FROM <= 311 <= R.TRACKED_TO
     assert "MANAGEMENT" in mig.read_text()
 
 

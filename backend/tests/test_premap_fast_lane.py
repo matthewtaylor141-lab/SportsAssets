@@ -29,6 +29,7 @@ state key.
 
 import asyncio
 import inspect
+import json
 
 import pytest
 
@@ -192,9 +193,18 @@ class TestTheWindowIsNarrowAndRealised:
     def test_the_page_budget_is_honoured(self, monkeypatch):
         h = _Harness(pages=99).install(monkeypatch)
         asyncio.run(premap.fast_refresh())
-        # probe + FAST_MAX_PAGES pages; page 0 reuses the probe's rows
-        assert len(h.queries) == premap.FAST_MAX_PAGES
+        # probe + FAST_MAX_PAGES pages; page 0 reuses the probe's rows. The
+        # board never ends, so the window is TRUNCATED and partitioned
+        # (venue_catalogue.WindowPartition) under its OWN explicit budget,
+        # FAST_PARTITION_MAX_PAGES -- never more
+        assert len(h.queries) == (premap.FAST_MAX_PAGES
+                                  + premap.FAST_PARTITION_MAX_PAGES)
         assert len(h.queries) < premap.MAX_EVENT_PAGES
+        last = h.state["premap_last_fast"]
+        last = json.loads(last) if isinstance(last, str) else last
+        assert last["truncated"] is True
+        assert last["catalogue_complete"] is False
+        assert last["partition_unresolved"], "the unread buckets are named"
 
 
 class TestTheAuthoritiesItIsDenied:
