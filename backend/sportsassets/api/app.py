@@ -764,6 +764,16 @@ try:
 except ImportError:
     log.warning("profitability: api.command_profitability_os not loaded",
                 exc_info=True)
+# ── THE CAPITAL READINESS LAB (migration 310): GET
+# /api/command/capital-readiness{,/agents,/shadow-court,/scale}. GET only,
+# COMMAND auth. RESEARCH / SHADOW_NO_AUTHORITY: no order, size or promotion.
+try:
+    from .command_capital_readiness import (
+        router as _command_capital_readiness_router)
+    app.include_router(_command_capital_readiness_router)
+except ImportError:
+    log.warning("capital readiness: api.command_capital_readiness not loaded",
+                exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
 # /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.
