@@ -57,7 +57,8 @@ def test_the_sla_is_the_ledgers_own_and_the_classes_are_exhaustive():
     # the packet's notion of a current book IS the classifier's
     assert tuple(XPK.CURRENT_BOOK_CLASSES) == PMF.FRESHLY_MANAGEABLE
     assert XPK.E_FRESH == PX.E_FRESH == XF.E_FRESH
-    assert 0 < PMF.MAX_STALE_MANAGEMENT_RATE < 1
+    # STRICT (P1): ANY markable position not freshly manageable blocks growth
+    assert PMF.MAX_STALE_MANAGEMENT_RATE == 0.0
 
 
 def test_fresh_and_quiet_valid_need_a_successful_read_inside_the_sla():
@@ -199,11 +200,12 @@ def test_rates_are_null_never_zero_with_nothing_markable():
 def test_the_allocation_threshold_is_predeclared_and_per_strategy():
     fresh = dict(cls(last_ok=obs(1, 5)), strategy="A")
     stale = dict(cls(last_ok=obs(1, 900)), strategy="A")
+    s = PMF.summarize([fresh] * 4)                      # none stale
+    assert s["by_strategy"]["A"]["allocation_blocked"] is False
     s = PMF.summarize([fresh] * 4 + [stale])            # 20% stale
     assert s["by_strategy"]["A"]["stale_management_rate"] == pytest.approx(
         0.2)
-    assert s["by_strategy"]["A"]["allocation_blocked"] is False
-    s = PMF.summarize([fresh] * 3 + [stale] * 2)        # 40% stale
+    # STRICT: one stale markable position is enough to block growth
     assert s["by_strategy"]["A"]["allocation_blocked"] is True
 
 

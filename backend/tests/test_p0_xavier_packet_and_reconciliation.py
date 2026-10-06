@@ -171,39 +171,48 @@ def _pos(k, group, last_fill_at):
 
 
 def test_the_integrity_verdict():
+    """STRICT (P1): ANY applicable position with an incomplete packet or a
+    protection other than PROTECTED_RESTING refuses growth; only a market
+    EXTERNAL_UNAVAILABLE at the venue is not applicable."""
     pos = [_pos("a", "g1", NOW - 3600), _pos("b", "g2", NOW - 3600)]
     good = {"state": "PROTECTED_RESTING"}
     v = PMF.integrity_verdict(positions=pos, packets={"g1": True, "g2": True},
                               protections={"a": good, "b": good}, now=NOW)
-    assert v["refusal"] is None
-    # one of two unprotected -> 50% > 20%
-    v = PMF.integrity_verdict(
-        positions=pos, packets={"g1": True, "g2": True},
-        protections={"a": good, "b": {"state": "UNPROTECTED_NO_STANDING_"
-                                                "ORDER"}}, now=NOW)
-    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
-    # a broken invariant refuses at ANY share
+    assert v["refusal"] is None and v["rule"] == \
+        "STRICT_ANY_APPLICABLE_POSITION"
+    # ONE of ten unprotected is enough
     many = [_pos(str(i), "g%d" % i, NOW - 3600) for i in range(10)]
+    ok_p = {"g%d" % i: True for i in range(10)}
     prot = {str(i): good for i in range(10)}
-    prot["0"] = {"state": "PROTECTION_MULTIPLE_LIVE_ORDERS"}
-    v = PMF.integrity_verdict(positions=many,
-                              packets={"g%d" % i: True for i in range(10)},
+    prot["3"] = {"state": "UNPROTECTED_NO_STANDING_ORDER"}
+    v = PMF.integrity_verdict(positions=many, packets=ok_p,
                               protections=prot, now=NOW)
     assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
-    # packets incomplete above the rate
-    v = PMF.integrity_verdict(positions=pos, packets={"g1": False},
-                              protections={"a": good, "b": good}, now=NOW)
+    for bad in ("PROTECTION_CANCEL_PENDING", "PROTECTION_EXPIRED",
+                "PROTECTION_QTY_DIFFERS_FROM_OPEN_QTY",
+                "PROTECTION_MULTIPLE_LIVE_ORDERS"):
+        prot["3"] = {"state": bad}
+        assert PMF.integrity_verdict(positions=many, packets=ok_p,
+                                     protections=prot, now=NOW)[
+            "refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION, bad
+    # ONE incomplete packet is enough
+    prot["3"] = good
+    v = PMF.integrity_verdict(positions=many, packets=dict(ok_p, g7=False),
+                              protections=prot, now=NOW)
     assert v["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
-    # a position filled 10 s ago and not yet reviewed awaits its first
-    # management: out of the shares (never out of the invariant check)
+    # an unreviewed new fill blocks too (no grace) and is named
     fresh = [_pos("n", "gn", NOW - 10)]
     v = PMF.integrity_verdict(positions=fresh, packets={}, protections={},
                               reviewed_at={}, now=NOW)
-    assert v["refusal"] is None and v["awaiting_first_management"] == ["n"]
-    late = [_pos("n", "gn", NOW - PMF.FIRST_MANAGEMENT_GRACE_S - 1)]
-    v = PMF.integrity_verdict(positions=late, packets={}, protections={},
-                              reviewed_at={}, now=NOW)
-    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
+    assert v["refusal"] is not None
+    assert v["awaiting_first_management"] == ["n"]
+    # a terminal / halted market at the venue is not applicable
+    v = PMF.integrity_verdict(
+        positions=[_pos("x", "gx", NOW - 3600)], packets={},
+        protections={"x": {"state": "UNPROTECTED_NO_STANDING_ORDER"}},
+        now=NOW, classes={"x": PMF.EXTERNAL_UNAVAILABLE})
+    assert v["refusal"] is None
+    assert v["excluded_external_unavailable"] == ["x"]
 
 
 # ═════════════════════════════════════════════════════════════════════
