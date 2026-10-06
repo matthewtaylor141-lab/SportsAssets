@@ -2995,6 +2995,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         contract = await conn.fetchrow(
             "SELECT payout_event, payout_is_complement, observed_at, "
             " received_at, sport_family, us_market_slug, raw_odds, event_key,"
+            " market, line,"
             " settlement_comparison->>'venue_rules_text' AS venue_rules_text"
             "  FROM external_valuations WHERE id=$1",
             int(d["valuation_id"]))
@@ -3007,8 +3008,12 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # twice. A HELD NCAAF POSITION (P0 incident) takes its own conversion --
     # the identity, re-checked against the contract's cited clauses -- so a
     # reading the entry could not have used is never used to manage it.
+    # A LINE CONTRACT TAKES NO TIE CONVERSION: a half-point line cannot
+    # push, and the line lane priced it unconverted at entry (closeout).
+    is_line = contract is not None and str(
+        contract.get("market") or "") in MF.LINE_FAMILIES
     nfl_conv = (held_venue_conversion(contract)
-                if contract is not None
+                if contract is not None and not is_line
                 and pol["kind"] in COMPLETED_GAME_KINDS else None)
 
     def _venue_scale(reading: dict) -> dict:
@@ -3093,9 +3098,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         # the entry valuation's provider fixture travels with the position
         # (pinnapi_feed_runtime.entry_fixture): identity the entry proved
         cur = await feed(
-            conn, pos=(pos if contract is None or not contract.get(
-                "event_key") else dict(pos,
-                                       entry_event_key=contract["event_key"])),
+            conn, pos=(pos if contract is None else dict(
+                pos, entry_event_key=contract.get("event_key"),
+                entry_line=(contract.get("line") if is_line else None))),
             at=at, max_age_s=max_age,
             payout_event=None if contract is None
             else contract["payout_event"],

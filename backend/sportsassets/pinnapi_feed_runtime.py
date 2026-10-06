@@ -861,9 +861,156 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
                        "overround": val["overround"]})
 
 
+# ── XAVIER'S HELD LINE POSITION: THE ENTRY'S OWN PRICING, RE-READ NOW ─────
+#: THE HELD SPREAD / TOTAL / TEAM TOTAL (closeout, production 2026-10-06:
+#: about 30 of 127 open PAPER groups -- NFL / NCAAF / NHL / MLB / WNBA lines
+#: entered by the line-market lane -- refused every review
+#: HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE, because the held read knew
+#: only the money line). The entry priced the line on THIS cache:
+#: bettor_market_family.pinnacle_pair (same family, period 0, the IDENTICAL
+#: half-point line on the IDENTICAL side, through the cache's one read path
+#: and its unchanged 30 s rule) de-vigged by bettor_pinnacle_devig. The held
+#: read runs exactly that again for the held contract: the line, the family
+#: and the payout outcome's name come from the ENTRY VALUATION (the outcome
+#: is Pinnacle's own "<team> <signed line>" / "Over <line>" spelling, so it
+#: must equal exactly one of the two outcome names the pair is built from),
+#: the fixture from the event identity -- or the entry's proven fixture.
+R_HELD_LINE_NOT_ENTRY_LINE = "HELD_LINE_ENTRY_VALUATION_STATES_NO_LINE"
+R_HELD_LINE_OUTCOME = "HELD_LINE_OUTCOME_NOT_ONE_PINNACLE_OUTCOME"
+
+
+def held_line_quote(row: dict, *, event_rows=None, payout_event,
+                    payout_is_complement: bool, at: float, max_age_s: float,
+                    sport_ids, synced: bool, view: dict, cache,
+                    entry_line, entry_event_key=None) -> dict:
+    """P(the held line contract's payout outcome), or a named refusal. Pure
+    apart from the cache's own read path."""
+    from . import bettor_market_family as MF
+    from . import bettor_pinnacle_devig as devig
+    from . import pinnapi_census as C
+    fam = MF.venue_line_family(row.get("sports_type"))
+    if fam.get("refusal"):
+        return {"ok": False, "reason": R_HELD_TYPE_UNPROVED}
+    st = MF.family_status(fam["sport"], fam["family"])
+    if not st.get("proven"):
+        return {"ok": False, "reason": st.get("refusal")
+                or R_HELD_TYPE_UNPROVED}
+    try:
+        line = float(entry_line)
+        start = float(row["game_start"])
+        if not all(math.isfinite(x) for x in (line, start, float(at),
+                                               float(max_age_s))):
+            raise ValueError
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return {"ok": False, "reason": (
+            R_HELD_LINE_NOT_ENTRY_LINE if entry_line is None
+            else R_HELD_TIME_UNPROVED)}
+    if not MF.half_point(line):
+        return {"ok": False, "reason": MF.R_NOT_HALF_POINT}
+    pay = str(payout_event or "")
+    name = pay
+    if payout_is_complement:
+        if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
+            return {"ok": False, "reason": R_BAD_COMPLEMENT}
+        name = pay[4:-1]
+    sid = C.sport_id_of(row.get("sports_type"))
+    if sid is None:
+        return {"ok": False, "reason": C.S_UNMAPPED_SPORT}
+    if sid not in set(sport_ids):
+        return {"ok": False, "reason": C.S_OUT_OF_SCOPE, "sport_id": sid}
+    if not synced:
+        return {"ok": False, "reason": C.S_FEED_NOT_SYNCED, "sport_id": sid}
+    same = [r for r in (event_rows or [])
+            if C.sport_id_of(r.get("sports_type")) == sid
+            and r.get("event_slug") == row.get("event_slug")] or [row]
+    teams, leagues, starts = C.group_event(same)
+    state, eid = C.event_identity(teams, leagues, starts,
+                                  row.get("event_slug"), start,
+                                  view.get(sid, []))
+    if state == C.S_NO_FEED_EVENT:
+        state, eid = C.split_name_identity(same, sid, start,
+                                           view.get(sid, []))
+    identity = IDENTITY_EXACT
+    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
+        fx = entry_fixture(entry_event_key, view, sid)
+        if fx is not None:
+            state, eid, identity = C.S_SUPPORTED, fx["id"], \
+                IDENTITY_ENTRY_FIXTURE
+    if state != C.S_SUPPORTED:
+        return {"ok": False, "reason": state, "sport_id": sid}
+    ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
+    try:
+        feed_start = float(ev["start"])
+        if (not math.isfinite(feed_start) or
+                abs(feed_start - start) > C.START_TOLERANCE_S):
+            raise ValueError("unproved fixture time")
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return {"ok": False, "reason": R_HELD_TIME_UNPROVED,
+                "sport_id": sid, "feed_event_id": eid}
+    where = {"sport_id": sid, "feed_event_id": eid,
+             "identity_basis": identity, "family": fam["family"],
+             "line": line}
+    labels = F.participants((getattr(cache, "events", None) or {})
+                            .get(eid) or {})
+    if set(labels) != {"home", "away"}:
+        return dict(where, ok=False, reason=MF.R_NO_FIXTURE)
+    # the ONE contract (designation, side) whose outcome names the entry's
+    # payout outcome exactly
+    hits = []
+    for des in ((None,) if fam["family"] == MF.TOTAL
+                else ("home", "away")):
+        cand = {"family": fam["family"], "line": line, "designation": des}
+        sel, oth = MF.outcome_names(cand, labels)
+        if name == sel:
+            hits.append((cand, sel))
+        elif name == oth:
+            hits.append((cand, oth))
+    if len(hits) != 1:
+        return dict(where, ok=False, reason=R_HELD_LINE_OUTCOME,
+                    why="%d contracts name %r" % (len(hits), name))
+    cand, outcome = hits[0]
+    pair = MF.pinnacle_pair(cache, fixture_id=eid, contract=cand,
+                            evaluated_ms=float(at) * 1000.0,
+                            max_age_s=float(max_age_s))
+    where.update(market_key=pair.get("key"),
+                 designation=(pair.get("designations") or {}).get(outcome))
+    if not pair.get("ok"):
+        return dict(where, ok=False, reason=pair.get("refusal"),
+                    provenance=pair.get("provenance"))
+    prov = dict(pair.get("provenance") or {})
+    val = devig.valuation(
+        contract={"sport_family": fam["sport"], "market": fam["family"],
+                  "selection": outcome, "event_key": eid,
+                  "period": "FULL_GAME", "line": line,
+                  "league": row.get("team_league"),
+                  "us_market_slug": row.get("identifier")},
+        quote={"book": devig.BOOK, "outcomes": dict(pair["outcomes"]),
+               "observed_at": pair["observed_at"],
+               "received_at": pair["received_at"], "event_key": eid,
+               "period": "FULL_GAME", "line": pair["line"]},
+        now=float(at), max_age_s=float(max_age_s))
+    if val.get("probability") is None:
+        return dict(where, ok=False,
+                    reason=(val.get("refusals") or ["DEVIG_REFUSED"])[0],
+                    why=val.get("why"), provenance=prov)
+    p_sel = float(val["probability"])
+    return dict(where, ok=True,
+                p=(1.0 - p_sel) if payout_is_complement else p_sel,
+                p_selection=p_sel, payout_event=pay,
+                payout_is_complement=bool(payout_is_complement),
+                provenance=dict(prov, stream=pair.get("stream")),
+                devig={"version": devig.VERSION,
+                       "method": val["devig_method"],
+                       "outcomes": val["expected_outcomes"],
+                       "raw_odds": val["raw_odds"],
+                       "devigged": val["devigged"],
+                       "overround": val["overround"]})
+
+
 async def held_moneyline(conn, *, us_market_slug, payout_event,
                          payout_is_complement: bool, at: float,
-                         max_age_s: float, entry_event_key=None) -> dict:
+                         max_age_s: float, entry_event_key=None,
+                         entry_line=None) -> dict:
     """Xavier's read for ONE held contract. No owner in this process ->
     FEED_OWNERSHIP_NOT_HELD before anything else (no catalogue read)."""
     o = _STATE.get("owner")
@@ -895,6 +1042,16 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
     # Include view construction as well; source timestamps stay untouched.
     view = C.feed_event_view(o.cache)
     evaluated_at = float(at) + max(0.0, time.monotonic() - started)
+    if row["sports_type"] not in HELD_FULL_GAME_TYPES:
+        from . import bettor_market_family as MF
+        if not MF.venue_line_family(row["sports_type"]).get("refusal"):
+            return held_line_quote(
+                dict(row), event_rows=event_rows, payout_event=payout_event,
+                payout_is_complement=payout_is_complement, at=evaluated_at,
+                max_age_s=max_age_s, sport_ids=o.sport_ids,
+                synced=bool(o.cache.authority.synced), view=view,
+                cache=o.cache, entry_line=entry_line,
+                entry_event_key=entry_event_key)
     return held_quote(dict(row), event_rows=event_rows,
                       payout_event=payout_event,
                       payout_is_complement=payout_is_complement,

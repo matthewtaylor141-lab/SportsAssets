@@ -5202,7 +5202,60 @@ UNJOINED_SQL = """
      LIMIT $2
 """
 
-#: Bounded per run: each row costs one paced venue read, and the join
+#: ONE VENUE READ PER MARKET, HELD POSITIONS FIRST (closeout, production
+#: 2026-10-06: 14,806 unjoined rows, 7,935 never asked, ~240 reads an hour --
+#: about 60 hours of queue -- while 53 open PAPER positions sat on ENDED games
+#: whose settlement never arrived, so Xavier's value-add (written only when a
+#: position closes) had 7 rows). The settlement is a property of the MARKET,
+#: yet every valuation row of it cost its own venue read (one held market had
+#: 412 rows). Now the queue is read per market: one read answers every
+#: unjoined row of that market, each row still classed on its OWN buy intent
+#: and ladder side (outcome_from_settlement, unchanged). Markets of open,
+#: unsettled PAPER positions are asked first, at most once per
+#: HELD_REASK_S, so an unfinished held game cannot occupy the budget; then
+#: the never-asked / least-recently-asked markets as before. Same WHERE as
+#: UNJOINED_SQL (the queue condition), same per-run venue budget.
+UNJOINED_MARKETS_SQL = """
+    SELECT us_market_slug, max(settlement_read_at) AS last_asked,
+           min(decided_at) AS oldest, count(*) AS rows,
+           (us_market_slug = ANY($3::text[])
+            AND (max(settlement_read_at) IS NULL
+                 OR max(settlement_read_at) < now() - make_interval(
+                        secs => $4::float8))) AS held_due
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND outcome_known = FALSE
+       AND outcome_basis IS NULL
+       AND us_market_slug IS NOT NULL
+       AND decided_at < now() - interval '2 hours'
+     GROUP BY us_market_slug
+     ORDER BY held_due DESC, max(settlement_read_at) ASC NULLS FIRST,
+              min(decided_at) ASC
+     LIMIT $2
+"""
+UNJOINED_ROWS_OF_MARKET_SQL = """
+    SELECT id, us_market_slug, buy_intent, ladder_side,
+           payout_is_complement
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND outcome_known = FALSE
+       AND outcome_basis IS NULL
+       AND us_market_slug = $2
+       AND decided_at < now() - interval '2 hours'
+     ORDER BY id
+     LIMIT $3
+"""
+#: open PAPER positions' markets with no settlement yet
+HELD_UNSETTLED_SQL = """
+    SELECT DISTINCT f.us_market_slug FROM paper_fills f
+     WHERE f.us_market_slug IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM paper_settlements s
+                        WHERE s.us_market_slug = f.us_market_slug)
+"""
+HELD_REASK_S = 600.0
+MAX_ROWS_PER_MARKET = 2000
+
+#: Bounded per run: each MARKET costs one paced venue read, and the join
 #: shares the venue budget with the collector and the entry loop.
 MAX_JOINS_PER_RUN = 60
 
@@ -5463,76 +5516,104 @@ async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
            "pending": 0, "unreadable": 0, "unmatched": 0, "errors": 0,
            "named_winner": 0, "inferred": 0, "side_unknown": 0,
            "unparseable": 0, "neither_side_paid": 0,
-           "limit": int(limit), "by_status": {}, "by_class": {}}
+           "limit": int(limit), "by_status": {}, "by_class": {},
+           "venue_reads": 0, "held_markets_asked": 0}
     try:
-        rows = await conn.fetch(UNJOINED_SQL, ext.EXPERIMENT_ID, int(limit))
+        try:
+            async with conn.transaction():
+                held = [r["us_market_slug"] for r in
+                        await conn.fetch(HELD_UNSETTLED_SQL)]
+        except Exception:                                      # noqa: BLE001
+            held = []           # no paper ledger here: no held priority
+        markets = await conn.fetch(UNJOINED_MARKETS_SQL, ext.EXPERIMENT_ID,
+                                   int(limit), held, HELD_REASK_S)
     except Exception as exc:                                   # noqa: BLE001
         return {"ran": False, "error": "%s" % type(exc).__name__,
                 "why": "the unjoined-valuation read failed"}
-    out["examined"] = len(rows)
-    for r in rows:
+    out["markets"] = len(markets)
+    for m in markets:
+        slug = m["us_market_slug"]
         try:
-            res = await asyncio.to_thread(_read_resolution_blocking,
-                                          r["us_market_slug"])
+            rows = await conn.fetch(UNJOINED_ROWS_OF_MARKET_SQL,
+                                    ext.EXPERIMENT_ID, slug,
+                                    MAX_ROWS_PER_MARKET)
+        except Exception as exc:                               # noqa: BLE001
+            out["errors"] += 1
+            continue
+        if not rows:
+            continue
+        if m["held_due"]:
+            out["held_markets_asked"] += 1
+        try:
+            res = await asyncio.to_thread(_read_resolution_blocking, slug)
         except Exception as exc:                               # noqa: BLE001
             out["errors"] += 1
             out["by_status"]["EXC:" + type(exc).__name__] = \
                 out["by_status"].get("EXC:" + type(exc).__name__, 0) + 1
             continue
+        out["venue_reads"] += 1
+        out["examined"] += len(rows)
         st = str(res.get("status") or "")
         out["by_status"][st] = out["by_status"].get(st, 0) + 1
-
-        got = outcome_from_settlement(res, buy_intent=r["buy_intent"],
-                                      ladder_side=r["ladder_side"])
-        cls = str(got.get("class") or "UNCLASSIFIED")
-        out["by_class"][cls] = out["by_class"].get(cls, 0) + 1
-        at = time.time()
-
-        if got["outcome"] is not None:
-            try:
-                await conn.execute(JOIN_RESOLVED_SQL, r["id"],
-                                   int(got["outcome"]), at, got["basis"],
-                                   got["side_map"], got["settlement_read"])
-                out["resolved"] += 1
-            except Exception:                                  # noqa: BLE001
-                out["errors"] += 1
-            continue
-        if cls == B_CONFIRMED_VOID:
-            try:
-                await conn.execute(JOIN_VOID_SQL, r["id"], B_CONFIRMED_VOID,
-                                   got["side_map"], got["settlement_read"],
-                                   at)
-                out["void"] += 1
-            except Exception:                                  # noqa: BLE001
-                out["errors"] += 1
-            continue
-
-        # NO BASIS IS WRITTEN FOR THE REST -- so they stay in scope for a
-        # later read and out of scope for calibration -- but the ATTEMPT is
-        # stamped, which is what stops a handful of unresolvable fixtures
-        # from consuming the whole per-run budget every run.
-        try:
-            await conn.execute(JOIN_ATTEMPT_SQL, r["id"], got["side_map"],
-                               got["settlement_read"], at)
-        except Exception:                                      # noqa: BLE001
-            out["errors"] += 1
-        if cls == C_NEITHER_SIDE_PAID:
-            out["neither_side_paid"] += 1
-        elif cls == C_NAMED_WINNER:
-            out["named_winner"] += 1
-        elif cls == C_INFERRED:
-            out["inferred"] += 1
-        elif cls == C_SIDE_UNKNOWN:
-            out["side_unknown"] += 1
-        elif cls == C_UNPARSEABLE:
-            out["unparseable"] += 1
-        elif st == lr.PENDING:
-            out["pending"] += 1
-        elif st == lr.UNMATCHED:
-            out["unmatched"] += 1
-        else:
-            out["unreadable"] += 1
+        for r in rows:
+            await _join_row(conn, out, r, res, st)
     return out
+
+
+async def _join_row(conn, out: dict, r, res: dict, st: str) -> None:
+    """ONE valuation row, classed on its own buy intent and ladder side
+    against its market's one venue read (unchanged rules)."""
+    from .. import bettor_live_read as lr
+    got = outcome_from_settlement(res, buy_intent=r["buy_intent"],
+                                  ladder_side=r["ladder_side"])
+    cls = str(got.get("class") or "UNCLASSIFIED")
+    out["by_class"][cls] = out["by_class"].get(cls, 0) + 1
+    at = time.time()
+
+    if got["outcome"] is not None:
+        try:
+            await conn.execute(JOIN_RESOLVED_SQL, r["id"],
+                               int(got["outcome"]), at, got["basis"],
+                               got["side_map"], got["settlement_read"])
+            out["resolved"] += 1
+        except Exception:                                  # noqa: BLE001
+            out["errors"] += 1
+        return
+    if cls == B_CONFIRMED_VOID:
+        try:
+            await conn.execute(JOIN_VOID_SQL, r["id"], B_CONFIRMED_VOID,
+                               got["side_map"], got["settlement_read"],
+                               at)
+            out["void"] += 1
+        except Exception:                                  # noqa: BLE001
+            out["errors"] += 1
+        return
+
+    # NO BASIS IS WRITTEN FOR THE REST -- so they stay in scope for a
+    # later read and out of scope for calibration -- but the ATTEMPT is
+    # stamped, which is what stops a handful of unresolvable fixtures
+    # from consuming the whole per-run budget every run.
+    try:
+        await conn.execute(JOIN_ATTEMPT_SQL, r["id"], got["side_map"],
+                           got["settlement_read"], at)
+    except Exception:                                      # noqa: BLE001
+        out["errors"] += 1
+    if cls == C_NEITHER_SIDE_PAID:
+        out["neither_side_paid"] += 1
+    elif cls == C_NAMED_WINNER:
+        out["named_winner"] += 1
+    elif cls == C_INFERRED:
+        out["inferred"] += 1
+    elif cls == C_SIDE_UNKNOWN:
+        out["side_unknown"] += 1
+    elif cls == C_UNPARSEABLE:
+        out["unparseable"] += 1
+    elif st == lr.PENDING:
+        out["pending"] += 1
+    elif st == lr.UNMATCHED:
+        out["unmatched"] += 1
+    else:
+        out["unreadable"] += 1
 
 
 # ── THE ENTRY LANE'S EXECUTION, SIZING AND RISK ─────────────────────

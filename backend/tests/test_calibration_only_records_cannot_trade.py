@@ -401,7 +401,11 @@ READERS = {
     # so a fixture found by either discovery keeps one event key and the
     # fixture rails never see one game as two. An identity read: it selects
     # no candidate, sizes and places nothing.
-    "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 9),
+    "workers/ext_pinnacle_loop.py": ("WRITER_AND_OUTCOME_JOIN_READS_ALL", 11),
+    # +2 (closeout): the per-market join (UNJOINED_MARKETS_SQL,
+    # UNJOINED_ROWS_OF_MARKET_SQL) -- the same queue condition as
+    # UNJOINED_SQL, every record purpose by design; it writes outcome
+    # columns only
     # SHOULD read calibration-only rows
     "bettor_source_calibration.py": ("CALIBRATION_MEASUREMENT_READS_ALL", 3),
     # (208) the SHADOW intelligence layer: the calibration engine scores
