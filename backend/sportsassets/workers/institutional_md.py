@@ -306,10 +306,31 @@ def _default_gate():
     return grt.gate_state()
 
 
+def evidence_order(symbols, *, focus=None, evidence=None) -> list:
+    """PURE. The order the probe spends its bounded reads in: members whose
+    same-book evidence is not SUPPORTED first (fewest comparable samples
+    first, so the reads spread as the counts grow), then by focus tier (held
+    paper and actual positions before candidates and discovery), then the
+    universe's own order. SUPPORTED members come last -- they keep accruing
+    only with what is left."""
+    focus = focus or {}
+    evidence = evidence or {}
+
+    def key(item):
+        i, s = item
+        ev = evidence.get(s) or {}
+        det = ev.get("detail") or {}
+        rank = (focus.get(s) or {}).get("tier_rank") or 99
+        return (1 if ev.get("status") == "SUPPORTED" else 0,
+                int(det.get("comparable") or 0), int(rank), i)
+    return [s for _i, s in sorted(enumerate(symbols or ()), key=key)]
+
+
 async def probe_same_book(pool, store, symbols, *, process_id,
                           current=None, retail_read=None, focus=None,
                           limit=None, gate=None, clock=time.time,
-                          max_reads=None, quiet_s=None) -> dict:
+                          max_reads=None, quiet_s=None,
+                          evidence=None) -> dict:
     """One same-book sample per symbol (read-only) ->
     institutional_same_book_probe. The blocking reads run off the loop.
     `focus` ({slug: focus-universe member}) stamps each row's tier and why;
@@ -333,8 +354,11 @@ async def probe_same_book(pool, store, symbols, *, process_id,
     quiet = float(SAME_BOOK_MIN_QUIET_S if quiet_s is None else quiet_s)
     deferred: dict = {}
     spent = {"reads": 0}
-    # rotate the starting member so a bounded pass reaches every member
-    if syms:
+    if evidence is not None:
+        # evidence-first order (fewest comparable samples first)
+        syms = evidence_order(syms, focus=focus, evidence=evidence)
+    elif syms:
+        # no evidence read: rotate so a bounded pass reaches every member
         k = _PROBE_CURSOR["i"] % len(syms)
         syms = syms[k:] + syms[:k]
 
@@ -377,7 +401,7 @@ async def probe_same_book(pool, store, symbols, *, process_id,
         return out
 
     rows = await asyncio.to_thread(run_all)
-    if syms:
+    if syms and evidence is None:
         # the next pass starts where this pass's read budget ran out
         _PROBE_CURSOR["i"] = (_PROBE_CURSOR["i"] + spent.get("stop_at", 0)) \
             % len(syms)
@@ -651,9 +675,14 @@ async def run() -> None:
                 m, universe_id=universe.get("universe_id"))
                 for m in probe_members} if probe_members else None)
             try:
+                from .. import paper_market_data as pmd
+                try:
+                    evidence = await pmd.same_book_by_symbol(pool, probe_syms)
+                except Exception:                              # noqa: BLE001
+                    evidence = None
                 stats["sameBook"] = await probe_same_book(
                     pool, store, probe_syms, process_id=recorder.process_id,
-                    focus=focus)
+                    focus=focus, evidence=evidence)
             except Exception as exc:                           # noqa: BLE001
                 stats["sameBookError"] = type(exc).__name__
 

@@ -312,6 +312,23 @@ def test_the_probe_reads_the_stream_as_the_held_mark_use():
         WMD.probe_same_book)
 
 
+def test_the_probe_spends_reads_on_unsupported_symbols_fewest_first():
+    ev = {"a": {"status": "SUPPORTED", "detail": {"comparable": 40}},
+          "b": {"status": "INCONCLUSIVE", "detail": {"comparable": 12}},
+          "c": {"status": "UNTESTED", "detail": {"comparable": 0}},
+          "d": {"status": "INCONCLUSIVE", "detail": {"comparable": 12}}}
+    focus = {"b": {"tier_rank": 5}, "d": {"tier_rank": 3}}
+    assert WMD.evidence_order(["a", "b", "c", "d", "e"], focus=focus,
+                              evidence=ev) == ["c", "e", "d", "b", "a"]
+
+
+def test_the_worker_orders_its_probe_by_the_evidence_reader():
+    import inspect
+    src = inspect.getsource(WMD.run)
+    assert "pmd.same_book_by_symbol(pool, probe_syms)" in src
+    assert "evidence=evidence" in src
+
+
 # ── §4 the restart bootstrap ──────────────────────────────────────────
 
 def test_an_empty_focus_set_backs_off_only_with_no_universe_work():
