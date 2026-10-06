@@ -34,6 +34,9 @@ from sportsassets.agents import paper_mark_refresh as PMR
 
 from tests import paper_harness as H
 
+#: the strict management entry rail runs its production functions here
+MANAGEMENT_RAIL_ENFORCED = True
+
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 STRAT = "PINNACLE_COMPLETED_GAME_PAPER"
 OTHER = "PINNACLE_EXPLORATION_PAPER"

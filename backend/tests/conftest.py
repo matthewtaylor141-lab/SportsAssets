@@ -490,3 +490,30 @@ def _capital_authority_seeded(request, monkeypatch):
 
     monkeypatch.setattr(CA, "forward_economics", _seeded)
     monkeypatch.setattr(CA, "missing_ev_evidence_refusal", lambda o: None)
+
+
+@pytest.fixture(autouse=True)
+def _management_rail_legacy(request, monkeypatch):
+    """THE STRICT MANAGEMENT ENTRY RAIL (P1 closeout): ANY applicable stale
+    position, incomplete Xavier packet or invalid protection blocks a new
+    PAPER entry. Same stance as the gates above: proofs written before the
+    strict rail seed several entries back to back on unprotected, unreviewed
+    synthetic positions to test cash, caps, the simulator and the read
+    models, and every one of them would refuse here while proving nothing
+    about what it exists to check.
+
+    For those modules the rail runs with its PREVIOUS predeclared rate
+    (0.20 stale share) and without the packet / protection integrity verdict
+    -- exactly the rail they were written against. A module that declares
+    `MANAGEMENT_RAIL_ENFORCED = True` (test_p0_xavier_packet_and_
+    reconciliation, test_paper_mark_refresh_coverage, test_paper_mark_
+    freshness_classifier) runs the strict production functions."""
+    if getattr(request.module, "MANAGEMENT_RAIL_ENFORCED", False):
+        return
+    from sportsassets import bettor_paper_freshness as PMF
+
+    async def _not_judged(conn, account_id, strategy, *, now):
+        return {"refusal": None, "strategy": strategy,
+                "seeded": "TEST_SUITE_LEGACY_RAIL"}
+    monkeypatch.setattr(PMF, "MAX_STALE_MANAGEMENT_RATE", 0.20)
+    monkeypatch.setattr(PMF, "strategy_management_integrity", _not_judged)

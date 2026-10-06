@@ -36,6 +36,9 @@ from sportsassets.agents import xavier_management as XM
 from tests import paper_harness as H
 from tests import test_xavier_review_probability_freshness as XRF
 
+#: the strict management entry rail runs its production functions here
+MANAGEMENT_RAIL_ENFORCED = True
+
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 AT = XRF.AT
 QTY = XRF.QTY

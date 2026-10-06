@@ -27,6 +27,10 @@ from sportsassets.agents import paper_xavier as PX
 
 NOW = 1_790_400_000.0
 
+#: the strict management entry rail runs its production functions here
+MANAGEMENT_RAIL_ENFORCED = True
+
+
 
 def md(bids=(), offers=()):
     return {"bids": [{"px": {"value": "%.2f" % p}, "qty": "%s" % q}
