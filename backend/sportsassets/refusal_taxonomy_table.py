@@ -373,6 +373,12 @@ TABLE = {
     # closeout: the held LINE read (pinnapi_feed_runtime.held_line_quote)
     "HELD_LINE_ENTRY_VALUATION_STATES_NO_LINE": (S, MAP, "INGESTION"),
     "HELD_LINE_OUTCOME_NOT_ONE_PINNACLE_OUTCOME": (S, MAP, "INGESTION"),
+    # closeout: the NCAAF funnel's per-event loss reasons (ncaaf_funnel).
+    # SOFTWARE until evidence says otherwise -- none is called external here
+    "PROVIDER_HOLDS_NO_FIXTURE_FOR_THE_VENUE_EVENT": (S, DATA, "EVENT_IDENTITY"),
+    "PROVIDER_FIXTURE_NAMES_IT_BUT_IDENTITY_MISMATCHES": (S, MAP, "EVENT_IDENTITY"),
+    "PROVIDER_DISCOVERY_WATCH_NOT_RECORDED": (S, DATA, "INGESTION"),
+    "COLLECTOR_RECORDED_NO_VALUATION_OR_DECISION_IN_24H": (S, CAP, "INGESTION"),
     "HOLDOUT_BUDGET_EXHAUSTED": (S, CAP, "OUT_OF_FUNNEL"),
     "HOLDS_PROBABILITY_DISAGREES_WITH_THE_RECORD_MANAGEMENT_KEPT": (S, DATA, "PROBABILITY"),
     "HOLD_IS_NOT_PRICED_SO_NOTHING_IS_SELECTED": (S, DATA, "RISK_ADMISSION"),
@@ -2003,6 +2009,9 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    "NO_RECORD_AT_THIS_STAGE":
+        "ncaaf_funnel: the event recorded no code at all (a marker beside a "
+        "named stage loss, never a refusal)",
     "COMPLETE_PAIR":
         "bettor_policy: a policy route name",
     "EPOCH":
