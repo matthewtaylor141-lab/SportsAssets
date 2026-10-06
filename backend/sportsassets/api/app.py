@@ -818,6 +818,17 @@ try:
 except ImportError:
     log.warning("capital authority: api.command_capital_authority not "
                 "loaded", exc_info=True)
+# ── THE FORWARD PAPER / SHADOW PROFITABILITY SCOREBOARD (migration 311):
+# /api/command/paper/profitability-scoreboard. GET only, COMMAND auth, READ
+# ONLY transaction; forward sample, after-cost EV, realized P&L since the
+# bind cutover, calibration, forecast, verdict. No write.
+try:
+    from .command_profitability_scoreboard import (
+        router as _command_profitability_scoreboard_router)
+    app.include_router(_command_profitability_scoreboard_router)
+except ImportError:
+    log.warning("profitability scoreboard: api.command_profitability_"
+                "scoreboard not loaded", exc_info=True)
 # ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
 # named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
 try:

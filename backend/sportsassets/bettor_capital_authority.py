@@ -336,7 +336,8 @@ def capital_evidence(ce: dict | None, *, p=None, limit=None,
         # figures above, the policy's own walk kept here so the ledger
         # re-derives the SAME bound size (never a second shrink)
         **({"pre_bind": ce["pre_bind"],
-            "profitability_bind": ce.get("profitability_bind")}
+            "profitability_bind": ce.get("profitability_bind"),
+            "bind_inputs": ce.get("bind_inputs")}
            if isinstance(ce.get("pre_bind"), dict) else {})}
 
 
@@ -513,7 +514,8 @@ async def ledger_entry_authority(conn, o: dict, *, at: float,
         evidence=ev, qty_in=_num(o.get("qty")),
         slug=o.get("us_market_slug"), side=o.get("holding_side"),
         fixture=o.get("fixture"), order_type=o.get("order_type"), at=at,
-        fee_fn=fee_fn, qty_cap=_num(o.get("qty")))
+        fee_fn=fee_fn, qty_cap=_num(o.get("qty")),
+        order_key=o.get("idempotency_key"))
     bsum = PBIND.summary(b)
     bev = PBIND.bound_evidence(ev, b)
 

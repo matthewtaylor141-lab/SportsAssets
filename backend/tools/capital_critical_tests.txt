@@ -1196,3 +1196,9 @@ tests/test_p1_priced_settlement_difference.py
 tests/test_p1_read_bounded_by_the_probability_deadline.py
 tests/test_p1_wnba_league_team_table.py
 tests/test_p1_held_mark_institutional_bound.py
+# (311) THE PROFITABILITY STACK: every profitability item binds in the PAPER
+# entry / management chain (price-region calibration, freshness decay,
+# spread / management cost, settlement cap, scenario concentration, reprice
+# and management deadbands, automatic quarantine), the counterfactual
+# variant ledger, attribution, the P&L forecast and the forward scoreboard.
+tests/test_profitability_stack_binding.py

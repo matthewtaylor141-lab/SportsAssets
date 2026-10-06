@@ -260,6 +260,18 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # THE PROFITABILITY STACK (migration 311): the automatic QUARANTINE
+        # of a strategy whose calibration, residuals or execution
+        # deteriorated (a lifecycle tightening only; the entry gate then
+        # refuses its new entries) BEFORE this pass's entries, and the
+        # settlement of the counterfactual variant ledger (evidence only).
+        from .. import bettor_paper_profitability_stack as PSTACK
+        steps.append(("profitability_quarantine", PSTACK.quarantine_step))
+        steps.append(("counterfactual_settlement",
+                      PSTACK.counterfactual_step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy

@@ -733,7 +733,8 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
             threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
             book=(None if obs is None else {
                 "book_obs_id": obs.get("obs_id"),
-                "observed_at": obs.get("observed_at")}))
+                "observed_at": obs.get("observed_at")}),
+            p_observed_at=pin.get("at"))
         if econ is not None:
             econ["capital_eligibility"] = ce
         if pd is not None:
@@ -896,8 +897,8 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
 async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
                        cand: dict, side, at: float, fee_fn,
                        settlement: dict | None = None, decision_id=None,
-                       threshold_edge_pp=None, book: dict | None = None
-                       ) -> dict:
+                       threshold_edge_pp=None, book: dict | None = None,
+                       p_observed_at=None) -> dict:
     """THE PAPER PATH'S CAPITAL GATE for one admitted ENTER: the strategy's
     lifecycle state (bettor_strategy_lifecycle.decision_gate: a no-entry
     state refuses by name; REDUCED_SIZE halves the size), then
@@ -952,7 +953,14 @@ async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
             slug=cand.get("us_market_slug"), side=side,
             fixture=cand.get("fixture"),
             order_type=((ctx.get("config") or {}).get("entry") or {}).get(
-                "order_type"), at=at, fee_fn=fee_fn)
+                "order_type"), at=at, fee_fn=fee_fn,
+            # the decision's freshness / settlement inputs, carried to the
+            # ledger on the evidence so it re-derives the same size
+            inputs={"evaluated_at": at, "p_observed_at": p_observed_at,
+                    "book_observed_at": (book or {}).get("observed_at"),
+                    "settlement": {k: (kw["settlement"] or {}).get(k) for k in (
+                        "compatibility", "policy_id", "version", "p",
+                        "q_hi")}})
 
     def bound(ce_full: dict, b: dict) -> dict:
         """The capital-eligibility result restated at the bind's size."""
@@ -972,6 +980,7 @@ async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
                     adverse_selection_usd=fin.get("adverse_selection_usd"),
                     total_executable_ev_usd=fin.get("ev_given_fill_usd"),
                     allocation_usd=fin.get("capital_usd"),
+                    bind_inputs=b.get("bind_inputs"),
                     pre_bind={"qty": ce_full.get("qty"),
                               "fills": ce_full.get("fills"),
                               "adverse_selection_usd": ce_full.get(

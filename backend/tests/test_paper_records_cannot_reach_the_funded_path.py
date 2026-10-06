@@ -204,6 +204,12 @@ def test_no_funded_module_imports_the_paper_modules():
                # funded module (tests/test_capital_authority.py)
                "bettor_capital_authority.py",
                "api/command_capital_authority.py",
+               # (311) the forward profitability scoreboard: GET-only, reads
+               # bettor_paper_profitability_stack.scoreboard_read inside a
+               # READ ONLY transaction; writes nothing, imports no order,
+               # venue, execution or funded module
+               # (tests/test_profitability_stack_binding.py)
+               "api/command_profitability_scoreboard.py",
                # (R30C, 300) the live execution calibration read model
                # (/api/command/execution-calibration): GET-only, reads the
                # PAPER adapter's paper orders / fills / books and walks the
