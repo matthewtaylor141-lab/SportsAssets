@@ -1663,6 +1663,9 @@ INTEGRATION_STREAMS = {
     "SPORT_ID_NOT_AN_INTEGER": (S, DATA, "INGESTION"),
     "SPORT_ID_NOT_IN_PINNAPI_DOCUMENTATION": (S, CAP, "INGESTION"),
     "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT": (S, CAP, "NORMALIZATION"),
+    # P0 coverage: a basketball / hockey full-game winner of a league the
+    # de-vig does not admit (only the NBA / the NHL are)
+    "WINNER_MONEYLINE_LEAGUE_NOT_ADMITTED": (S, CAP, "NORMALIZATION"),
     "NOT_SEEDED_NO_PRICEABLE_MARKET_FOR_THE_FAMILY": (S, CAP, "MARKET_FAMILY"),
     # bettor_venue_native_identity (inc-pinnapi / inc-edge): the draw contract
     # and the discovered event, as the module's other identity codes

@@ -63,6 +63,16 @@ NFL_MONEYLINE_TYPE = "football_team_full_game_winner"
 #: untrue the moment the college board was admitted by its own measurement.
 R_FOOTBALL_LEAGUE_NOT_ADMITTED = (
     "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT")
+#: P0 coverage (2026-10-06): the venue's basketball / hockey full-game winner
+#: types, admitted by the SAME league read the de-vig makes
+#: (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE: the NBA and the NHL only).
+#: Another league of the same spelling (the venue's EuroLeague, KHL, WNBA ...
+#: boards) refuses by this name.
+WINNER_TYPES_ADMITTED_BY_LEAGUE = {
+    "basketball_team_full_game_winner": "basketball",
+    "hockey_team_full_game_winner": "hockey",
+}
+R_WINNER_LEAGUE_NOT_ADMITTED = "WINNER_MONEYLINE_LEAGUE_NOT_ADMITTED"
 
 S_FEED_NOT_SYNCED = "FEED_NOT_SYNCED"
 S_OUT_OF_SCOPE = "OUT_OF_FEED_SCOPE_SPORT"
@@ -187,8 +197,21 @@ def family_of(kind: Optional[str], line, sports_type=None, row=None) -> tuple:
              "us_market_slug": r.get("identifier")})
         if devig.expected_outcomes("football", "h2h", league=league) is None:
             return ('MONEYLINE', False, R_FOOTBALL_LEAGUE_NOT_ADMITTED)
+    if st in WINNER_TYPES_ADMITTED_BY_LEAGUE:
+        # P0 COVERAGE: the NBA / NHL full-game money line, by the same league
+        # read as the NFL's above (structured team league and venue-native
+        # slug, which must agree), then the same side-aware clock proof.
+        from . import bettor_pinnacle_devig as devig
+        r = row if isinstance(row, dict) else {}
+        league = devig.league_of_contract(
+            {"league": r.get("team_league"),
+             "us_market_slug": r.get("identifier")})
+        if devig.expected_outcomes(WINNER_TYPES_ADMITTED_BY_LEAGUE[st], "h2h",
+                                   league=league) is None:
+            return ('MONEYLINE', False, R_WINNER_LEAGUE_NOT_ADMITTED)
     if st in ('baseball_team_full_game_winner',
-              'soccer_team_full_time_winner', NFL_MONEYLINE_TYPE):
+              'soccer_team_full_time_winner', NFL_MONEYLINE_TYPE,
+              *WINNER_TYPES_ADMITTED_BY_LEAGUE):
         if line not in (None, '') and row is not None:
             # Reuse the existing side-aware clock proof. Never just strip
             # numeric zero: real signed/side lines veto this correction.

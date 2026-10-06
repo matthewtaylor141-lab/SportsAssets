@@ -2222,6 +2222,11 @@ PINNACLE_SETTLEMENT = {
     # and 2nd Half-periods include points scored in overtime" (captured with
     # its page hash in bettor_settlement_terms.CAPTURE_RUN_FOOTBALL).
     "football": "FULL_GAME_INCLUDING_OVERTIME",
+    # P0 coverage: the publisher's Basketball / Hockey sections, captured with
+    # their page hash in bettor_settlement_terms.CAPTURE_RUN_LINE_RULES (the
+    # same strings as bettor_venue_settlement.BOOK_SETTLEMENT).
+    "basketball": "FULL_GAME_INCLUDING_ALL_OVERTIMES",
+    "hockey": "FULL_GAME_INCLUDING_OVERTIME_AND_SHOOTOUT",
 }
 
 #: family -> the labels `markets.sport` actually carries. Read out of

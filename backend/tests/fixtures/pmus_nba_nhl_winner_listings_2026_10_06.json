@@ -1,0 +1,440 @@
+{
+ "_what": "THE VENUE'S OWN NBA AND NHL FULL-GAME MONEY-LINE LISTINGS (basketball_team_full_game_winner, hockey_team_full_game_winner) as served by its public gateway: the winner wording paper_benchmark.VENUE_GRADING_TEMPLATES and bettor_venue_settlement.OVERTIME_PROSE read, and the wording census over every open NBA/NHL winner listing at the read.",
+ "_source": "R1: GET https://gateway.polymarket.us/v1/markets?slug=aec-nba-gs-lac-2026-10-04&slug=aec-nhl-uta-nyr-2026-10-04 ; C<offset>: GET https://gateway.polymarket.us/v1/markets?categories=sports&closed=false&limit=500&marketTypes=moneyline&offset=<offset>",
+ "_reader": "Claude Code session container, outbound HTTPS through its agent proxy (read-only public GET, no credential)",
+ "_reads": {
+  "R1": {
+   "retrieved_at": "2026-10-06T03:17:12Z",
+   "response_bytes": 8992,
+   "response_sha256": "60398951bf4babcd349854f954a05e8d39868616c3eabeede5846bcaeee01e03"
+  },
+  "C": {
+   "retrieved_at": "2026-10-06T03:16:04Z",
+   "pages": {
+    "C0": {
+     "offset": 0,
+     "response_bytes": 2145714,
+     "response_sha256": "58bd8bc27dd370618352ac3348d78bee0f8df929579ba95c17afb4a5e015bd82"
+    },
+    "C500": {
+     "offset": 500,
+     "response_bytes": 2020958,
+     "response_sha256": "f8afdfccbc6c31b1b15c33d5d488354a398b395fa80dc80191f103ad6341a97b"
+    },
+    "C1000": {
+     "offset": 1000,
+     "response_bytes": 1977929,
+     "response_sha256": "e6aec0075bf2064c6068f4f704610068a495187d06c5a83adf45104c4b54d063"
+    },
+    "C1500": {
+     "offset": 1500,
+     "response_bytes": 1526391,
+     "response_sha256": "9f7a406f6ddfab1e6a9e13615a9f21d71227cd0ce63483dc22139796c55daaad"
+    }
+   },
+   "markets_returned": 1900
+  }
+ },
+ "_subset": "the fields this repository reads (id, slug, question, description, marketType, sportsMarketType, sportsMarketTypeV2, gameStartTime, status, and per side: description, long, team name/safeName/abbreviation/league/ordering). The sha256 is of each WHOLE response, so this subset is attributable but not byte-reproducible",
+ "wording_census": {
+  "what": "every open NBA / NHL winner listing in the C reads, its description with the two team names and the scheduled instant masked; ONE wording per league, no exception",
+  "listings_by_league_and_type": {
+   "acb/basketball_team_full_game_winner": 1,
+   "bbl/basketball_team_full_game_winner": 9,
+   "bcl/basketball_team_full_game_winner": 16,
+   "denbl/basketball_team_full_game_winner": 2,
+   "eurocup/basketball_team_full_game_winner": 16,
+   "eurolg/basketball_team_full_game_winner": 10,
+   "jpbl/basketball_team_full_game_winner": 11,
+   "kbl/basketball_team_full_game_winner": 3,
+   "khl/hockey_team_full_game_winner": 7,
+   "liiga/hockey_team_full_game_winner": 3,
+   "lnbp/basketball_team_full_game_winner": 14,
+   "nba/basketball_team_full_game_winner": 63,
+   "nbl/basketball_team_full_game_winner": 7,
+   "nhl/hockey_team_full_game_winner": 26,
+   "slnbl/basketball_team_full_game_winner": 1,
+   "snhl/hockey_team_full_game_winner": 1,
+   "svkbl/basketball_team_full_game_winner": 1,
+   "vtb/basketball_team_full_game_winner": 7,
+   "wnba/basketball_team_full_game_winner": 2
+  },
+  "wordings": {
+   "nba/basketball_team_full_game_winner": [
+    {
+     "listings": 63,
+     "masked_description": "This market will settle to the winner of the <A> vs <B> professional basketball game originally scheduled for <WHEN>. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body."
+    }
+   ],
+   "nhl/hockey_team_full_game_winner": [
+    {
+     "listings": 26,
+     "masked_description": "This market will settle to the winner of the <A> vs <B> NHL game scheduled for <WHEN>. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL."
+    }
+   ]
+  },
+  "hockey_team_regulation_winner_listed": 0
+ },
+ "markets": [
+  {
+   "read": "R1",
+   "id": "1142178",
+   "slug": "aec-nhl-uta-nyr-2026-10-04",
+   "question": "Who will win in the upcoming hockey event UTA Mammoth vs NYR Rangers scheduled for October 4, 2026 at 10:00 PM UTC?",
+   "description": "This market will settle to the winner of the UTA Mammoth vs NYR Rangers NHL game scheduled for Oct 4, 2026 at 6:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T22:00:00Z",
+   "status": "MARKET_STATUS_RESOLVED",
+   "marketSides": [
+    {
+     "description": "Mammoth",
+     "long": true,
+     "team": {
+      "name": "Mammoth",
+      "safeName": "Utah Mammoth",
+      "abbreviation": "uta",
+      "league": "nhl",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Rangers",
+     "long": false,
+     "team": {
+      "name": "Rangers",
+      "safeName": "New York Rangers",
+      "abbreviation": "nyr",
+      "league": "nhl",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "R1",
+   "id": "1146244",
+   "slug": "aec-nba-gs-lac-2026-10-04",
+   "question": "Who will win in the upcoming basketball event GS Warriors vs LA Clippers scheduled for October 4, 2026 at 11:00 PM UTC?",
+   "description": "This market will settle to the winner of the GS Warriors vs LA Clippers professional basketball game originally scheduled for Oct 4, 2026 at 7:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-04T23:00:00Z",
+   "status": "MARKET_STATUS_RESOLVED",
+   "marketSides": [
+    {
+     "description": "Warriors",
+     "long": true,
+     "team": {
+      "name": "Warriors",
+      "safeName": "Golden State",
+      "abbreviation": "gs",
+      "league": "nba",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Clippers",
+     "long": false,
+     "team": {
+      "name": "Clippers",
+      "safeName": "Los Angeles C",
+      "abbreviation": "lac",
+      "league": "nba",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1146250",
+   "slug": "aec-nba-bkn-cha-2026-10-06",
+   "question": "Who will win in the upcoming basketball event BKN Nets vs CHA Hornets scheduled for October 6, 2026 at 11:00 PM UTC?",
+   "description": "This market will settle to the winner of the BKN Nets vs CHA Hornets professional basketball game originally scheduled for Oct 6, 2026 at 7:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T23:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Nets",
+     "long": true,
+     "team": {
+      "name": "Nets",
+      "safeName": "Brooklyn",
+      "abbreviation": "bkn",
+      "league": "nba",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Hornets",
+     "long": false,
+     "team": {
+      "name": "Hornets",
+      "safeName": "Charlotte",
+      "abbreviation": "cha",
+      "league": "nba",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1146254",
+   "slug": "aec-nba-lal-gs-2026-10-06",
+   "question": "Who will win in the upcoming basketball event LA Lakers vs GS Warriors scheduled for October 7, 2026 at 2:00 AM UTC?",
+   "description": "This market will settle to the winner of the LA Lakers vs GS Warriors professional basketball game originally scheduled for Oct 6, 2026 at 10:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-07T02:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Lakers",
+     "long": true,
+     "team": {
+      "name": "Lakers",
+      "safeName": "Los Angeles L",
+      "abbreviation": "lal",
+      "league": "nba",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Warriors",
+     "long": false,
+     "team": {
+      "name": "Warriors",
+      "safeName": "Golden State",
+      "abbreviation": "gs",
+      "league": "nba",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1146249",
+   "slug": "aec-nba-lal-sac-2026-10-05",
+   "question": "Who will win in the upcoming basketball event LA Lakers vs SAC Kings scheduled for October 6, 2026 at 2:00 AM UTC?",
+   "description": "This market will settle to the winner of the LA Lakers vs SAC Kings professional basketball game originally scheduled for Oct 5, 2026 at 10:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T02:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Lakers",
+     "long": true,
+     "team": {
+      "name": "Lakers",
+      "safeName": "Los Angeles L",
+      "abbreviation": "lal",
+      "league": "nba",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Kings",
+     "long": false,
+     "team": {
+      "name": "Kings",
+      "safeName": "Sacramento",
+      "abbreviation": "sac",
+      "league": "nba",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1146253",
+   "slug": "aec-nba-den-uta-2026-10-06",
+   "question": "Who will win in the upcoming basketball event DEN Nuggets vs UTA Jazz scheduled for October 7, 2026 at 1:00 AM UTC?",
+   "description": "This market will settle to the winner of the DEN Nuggets vs UTA Jazz professional basketball game originally scheduled for Oct 6, 2026 at 9:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-07T01:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Nuggets",
+     "long": true,
+     "team": {
+      "name": "Nuggets",
+      "safeName": "Denver",
+      "abbreviation": "den",
+      "league": "nba",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Jazz",
+     "long": false,
+     "team": {
+      "name": "Jazz",
+      "safeName": "Utah",
+      "abbreviation": "uta",
+      "league": "nba",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1164086",
+   "slug": "aec-nhl-car-mon-2026-10-06",
+   "question": "Who will win in the upcoming hockey event CAR Hurricanes vs MTL Canadiens scheduled for October 6, 2026 at 11:00 PM UTC?",
+   "description": "This market will settle to the winner of the CAR Hurricanes vs MTL Canadiens NHL game scheduled for Oct 6, 2026 at 7:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T23:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Hurricanes",
+     "long": true,
+     "team": {
+      "name": "Hurricanes",
+      "safeName": "Carolina Hurricanes",
+      "abbreviation": "car",
+      "league": "nhl",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Canadiens",
+     "long": false,
+     "team": {
+      "name": "Canadiens",
+      "safeName": "Montreal Canadiens",
+      "abbreviation": "mon",
+      "league": "nhl",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1164275",
+   "slug": "aec-nhl-nyi-nyr-2026-10-06",
+   "question": "Who will win in the upcoming hockey event NYI Islanders vs NYR Rangers scheduled for October 6, 2026 at 11:30 PM UTC?",
+   "description": "This market will settle to the winner of the NYI Islanders vs NYR Rangers NHL game scheduled for Oct 6, 2026 at 7:30PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T23:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Islanders",
+     "long": true,
+     "team": {
+      "name": "Islanders",
+      "safeName": "New York Islanders",
+      "abbreviation": "nyi",
+      "league": "nhl",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Rangers",
+     "long": false,
+     "team": {
+      "name": "Rangers",
+      "safeName": "New York Rangers",
+      "abbreviation": "nyr",
+      "league": "nhl",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1164466",
+   "slug": "aec-nhl-fla-la-2026-10-06",
+   "question": "Who will win in the upcoming hockey event FLA Panthers vs LAK Kings scheduled for October 7, 2026 at 2:00 AM UTC?",
+   "description": "This market will settle to the winner of the FLA Panthers vs LAK Kings NHL game scheduled for Oct 6, 2026 at 10:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-07T02:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Panthers",
+     "long": true,
+     "team": {
+      "name": "Panthers",
+      "safeName": "Florida Panthers",
+      "abbreviation": "fla",
+      "league": "nhl",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Kings",
+     "long": false,
+     "team": {
+      "name": "Kings",
+      "safeName": "Los Angeles Kings",
+      "abbreviation": "la",
+      "league": "nhl",
+      "ordering": "home"
+     }
+    }
+   ]
+  },
+  {
+   "read": "C0",
+   "id": "1164021",
+   "slug": "aec-nhl-uta-nj-2026-10-06",
+   "question": "Who will win in the upcoming hockey event UTA Mammoth vs NJD Devils scheduled for October 6, 2026 at 11:00 PM UTC?",
+   "description": "This market will settle to the winner of the UTA Mammoth vs NJD Devils NHL game scheduled for Oct 6, 2026 at 7:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-06T23:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Mammoth",
+     "long": true,
+     "team": {
+      "name": "Mammoth",
+      "safeName": "Utah Mammoth",
+      "abbreviation": "uta",
+      "league": "nhl",
+      "ordering": "away"
+     }
+    },
+    {
+     "description": "Devils",
+     "long": false,
+     "team": {
+      "name": "Devils",
+      "safeName": "New Jersey Devils",
+      "abbreviation": "nj",
+      "league": "nhl",
+      "ordering": "home"
+     }
+    }
+   ]
+  }
+ ]
+}

@@ -37,6 +37,7 @@ import pytest
 
 from sportsassets import bettor_external_shadow as ext
 from sportsassets import bettor_venue_mapping as vmap
+from sportsassets.bettor_venue_native_identity import FAMILY_WINNER_TYPES
 from sportsassets import coverage_first_loss as FL
 from sportsassets import refusal_taxonomy as RT
 from sportsassets.agents import coverage_integrity as C
@@ -149,19 +150,68 @@ def test_the_recorded_serie_b_loss_is_external_at_mapping_not_normalization():
     assert set(got["stage_sources"]) == set(FL.CHAIN)
 
 
-def test_a_native_basketball_seed_is_lost_at_mapping_as_a_capability():
-    ev = {"sport_key": "pinnapi_basketball", "family": "basketball",
+def test_a_family_with_no_venue_winner_type_is_lost_at_mapping():
+    """A native seed of a family the venue-native resolver reads no winner
+    type for (tennis today) still stops at MAPPED as a capability. PIN
+    MOVED (P0 coverage, 2026-10-06): this was the PinnAPI-native basketball
+    seed, which no longer stops here -- see the next test."""
+    ev = {"sport_key": "pinnapi_tennis", "family": "tennis",
           "provider_event_id": "pinnapi:77", "outcome": "REFUSED",
           "stage": None, "reach": 3,
           "first_refusal": "VENUE_NATIVE_FAMILY_NOT_SUPPORTED",
           "codes": ["VENUE_NATIVE_FAMILY_NOT_SUPPORTED"]}
     got = FL.census([ev], [], [])
-    b = got["by_competition"]["pinnapi_basketball"]
-    assert b["league_name"] == "PINNAPI_NATIVE:BASKETBALL"
+    b = got["by_competition"]["pinnapi_tennis"]
     assert b["first_loss"]["MAPPED"] == 1 and b["first_loss"]["NORMALIZED"] == 0
     assert b["provider_event_sources"] == {"metered": 0, "pinnapi_native": 1}
     (r,) = b["by_code"]
     assert (r["class"], r["family"]) == ("SOFTWARE", "CAPABILITY")
+
+
+@pytest.mark.parametrize("family,slug", [
+    ("basketball", "aec-nba-gs-lac-2026-10-04"),
+    ("hockey", "aec-nhl-uta-nyr-2026-10-04")])
+def test_a_native_nba_or_nhl_seed_now_maps_and_is_lost_at_settlement(
+        family, slug):
+    """P0 COVERAGE (2026-10-06). The NBA / NHL full-game winners are venue
+    family winner types, so a PinnAPI-native seed is no longer refused
+    VENUE_NATIVE_FAMILY_NOT_SUPPORTED at MAPPED: it resolves its contract and
+    is VALUED. The strict policy then refuses it at SETTLEMENT -- the venue
+    pays the LAST FAIR MARKET PRICE on a postponed game the book VOIDS
+    (VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE on the valuation;
+    SETTLEMENT_NOT_SUPPORTED on the decision), the shape every NFL / NCAAF
+    strict decision has. The completed-game policy's own codes ride beside
+    it; the census files the EARLIEST stage."""
+    assert family in FAMILY_WINNER_TYPES
+    key = "pinnapi_%s" % family
+    ev = {"sport_key": key, "family": family,
+          "provider_event_id": "pinnapi:88", "outcome": "ADMITTED",
+          "stage": None, "reach": 6, "first_refusal": None, "codes": [],
+          "us_market_slug": slug, "slugs": [slug]}
+    vals = [{"id": 1, "event_key": "pinnapi:88", "us_market_slug": slug,
+             "sport_family": family, "record_purpose": "CALIBRATION_ONLY",
+             "refusals": ["VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"]}]
+    decs = [{"valuation_id": 1, "verdict": "REFUSE", "strategy": "S1",
+             "refusal": "SETTLEMENT_NOT_SUPPORTED",
+             "refusals": ["SETTLEMENT_NOT_SUPPORTED"]},
+            {"valuation_id": 1, "verdict": "REFUSE", "strategy": "S2",
+             "refusal": "NO_ACTION_HAS_POSITIVE_NET_EDGE",
+             "refusals": ["NO_ACTION_HAS_POSITIVE_NET_EDGE"]}]
+    got = FL.census([ev], vals, decs)
+    b = got["by_competition"][key]
+    assert b["league_name"] == "PINNAPI_NATIVE:%s" % family.upper()
+    assert b["first_loss"]["MAPPED"] == 0
+    assert b["first_loss"]["SETTLEMENT"] == 1
+    assert b["reached"]["SETTLEMENT"] == 1
+    (r,) = b["by_code"]
+    assert (r["stage"], r["code"], r["class"], r["family"]) == (
+        "SETTLEMENT", "SETTLEMENT_NOT_SUPPORTED", "SOFTWARE", "SETTLEMENT")
+    # the valuation's own code is the same stage and class
+    k = FL.classify("VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE")
+    assert (k["class"], k["family"]) == ("SOFTWARE", "SETTLEMENT")
+    assert FL.chain_stage("VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+                          mapped=True) == "SETTLEMENT"
+    assert _reconciles(b)
 
 
 def test_a_ws_refusal_is_read_through_its_wrapper():

@@ -707,6 +707,24 @@ GP_FOOTBALL_NFL = ("FULL_GAME_INCLUDING_OVERTIME_TIE_AFTER_OVERTIME_IS_A_"
 #: college text can never satisfy the NFL template, nor the reverse.
 GP_FOOTBALL_NCAAF = ("FULL_GAME_INCLUDING_OVERTIME_PLAYED_TO_A_WINNER_NO_"
                      "TIE_STATE_IN_A_COMPLETED_GAME")
+#: P0 COVERAGE, THE NBA MONEY LINE. Both sides grade the game INCLUDING every
+#: overtime (book: "Bets on the Game and 2 nd -Half periods include all
+#: overtimes played in their result."; venue, 63 of 63 open NBA listings:
+#: "Overtime is included if played."), and overtime periods repeat until one
+#: team leads, so a completed game has a winner: the book's two-way price IS
+#: the contract's value, as for baseball. NBA only -- the book's minimum is
+#: stated for the NBA by name and the venue wording is captured for it alone.
+GP_BASKETBALL_NBA = ("FULL_GAME_INCLUDING_ALL_OVERTIMES_PLAYED_TO_A_WINNER_"
+                     "NO_TIE_STATE_IN_A_COMPLETED_GAME")
+#: P0 COVERAGE, THE NHL MONEY LINE. Both sides grade the game INCLUDING
+#: overtime AND the shootout (book: "Unless otherwise specified, Game-period
+#: bets include overtime and penalty shootouts."; venue, 26 of 26 open NHL
+#: listings: "Overtime and any shootout are included if played."), so a
+#: completed game has a winner. NOT the 3-way regulation market, whose
+#: regulation draw is its own outcome (hockey_team_regulation_winner is never
+#: a family winner type and never reaches this match).
+GP_HOCKEY_NHL = ("FULL_GAME_INCLUDING_OVERTIME_AND_SHOOTOUT_PLAYED_TO_A_"
+                 "WINNER_NO_TIE_STATE_IN_A_COMPLETED_GAME")
 
 R_GP_TEXT_ABSENT = "VENUE_RULES_TEXT_NOT_RECORDED_ON_THE_VALUATION_ROW"
 R_GP_UNKNOWN = "ORDINARY_GRADING_PERIOD_NOT_ESTABLISHED"
@@ -748,6 +766,39 @@ VENUE_GRADING_TEMPLATES = {
                     r"\b(?:does|will) not includ\w* overtime\b",
                     r"\bregulation (?:time )?only\b",
                     r"\bat the end of regulation\b")},
+    # P0 coverage: the venue's NBA wording, ONE wording on all 63 open NBA
+    # winner listings read 2026-10-06 (tests/fixtures/
+    # pmus_nba_nhl_winner_listings_2026_10_06.json). Its other basketball
+    # boards (EuroLeague, LNBP, WNBA ...) word the game differently and match
+    # nothing here; book_grading_period answers the NBA alone in any case.
+    "basketball": {
+        "period": GP_BASKETBALL_NBA,
+        "all_of": (r"\bwill settle to the winner of the\b[^.]*"
+                   r"\bprofessional basketball game\b",
+                   r"\bovertime is included if played\b"),
+        "none_of": (r"\bovertime (?:is|will be) (?:not|excluded)\b",
+                    r"\bexclud\w* (?:any )?overtime\b",
+                    r"\b(?:does|will) not includ\w* overtime\b",
+                    r"\bregulation (?:time )?only\b",
+                    r"\bat the end of regulation\b",
+                    r"\bends? in a tie\b")},
+    # P0 coverage: the venue's NHL wording, ONE wording on all 26 open NHL
+    # winner listings (same fixture). The shootout is REQUIRED: a text that
+    # includes overtime and is silent on the shootout does not say how a game
+    # level after overtime is graded.
+    "hockey": {
+        "period": GP_HOCKEY_NHL,
+        "all_of": (r"\bwill settle to the winner of the\b[^.]*\bnhl game\b",
+                   r"\bovertime and any shootout are included if played\b"),
+        "none_of": (r"\bovertime (?:is|will be) (?:not|excluded)\b",
+                    r"\bshootouts? (?:is|are|will be) (?:not|excluded)\b",
+                    r"\bshootouts? (?:does|will) not count\b",
+                    r"\bexclud\w* (?:any |the )?(?:overtime|shootouts?)\b",
+                    r"\b(?:does|will) not includ\w* (?:overtime|"
+                    r"(?:the |any )?shootouts?)\b",
+                    r"\bregulation (?:time )?only\b",
+                    r"\bat the end of regulation\b",
+                    r"\bends? in a tie\b")},
 }
 
 
@@ -821,6 +872,38 @@ def book_grading_period(family, league=None) -> dict | None:
                           "game is played to a winner (the cited no-tie rule), "
                           "so its two-way price is the contract's value, "
                           "unconverted (bettor_ncaaf_settlement.convert)")}
+    # P0 COVERAGE: BASKETBALL AND HOCKEY, PER LEAGUE (the NBA, the NHL), from
+    # the captured sport sections (bettor_settlement_terms.
+    # CAPTURE_RUN_LINE_RULES). Any other league of either family has none
+    # (NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT): the book's basketball minimum
+    # differs outside the NBA and the venue's wording is captured for these
+    # two leagues only.
+    if family == "basketball" and str(league or "").lower() == "nba":
+        t = ST.BOOK_TERMS[("basketball", "h2h", ST.CTX_PRE_GAME)]
+        cap = ST.CAPTURE_RUN_LINE_RULES
+        return {"period": GP_BASKETBALL_NBA,
+                "regulation": t[ST.C_FULL], "overtime": t[ST.C_OVERTIME],
+                "quote": ST._Q_BK_OVERTIME,
+                "source_url": cap["url"], "retrieved_at": cap["retrieved_at"],
+                "page_sha256": cap["sha256"],
+                "basis": ("Pinnacle's Game-period money line grades the game "
+                          "including every overtime, and overtime repeats "
+                          "until one team leads: a completed game has a "
+                          "winner, so the two-way price is the contract's "
+                          "value, unconverted")}
+    if family == "hockey" and str(league or "").lower() == "nhl":
+        t = ST.BOOK_TERMS[("hockey", "h2h", ST.CTX_PRE_GAME)]
+        cap = ST.CAPTURE_RUN_LINE_RULES
+        return {"period": GP_HOCKEY_NHL,
+                "regulation": t[ST.C_FULL], "overtime": t[ST.C_OVERTIME],
+                "quote": ST._Q_HK_OVERTIME,
+                "source_url": cap["url"], "retrieved_at": cap["retrieved_at"],
+                "page_sha256": cap["sha256"],
+                "basis": ("Pinnacle's Game-period money line grades the game "
+                          "including overtime and the penalty shootout: a "
+                          "completed game has a winner, so the two-way price "
+                          "is the contract's value, unconverted; the 3-way "
+                          "regulation market is a different contract")}
     return None
 
 

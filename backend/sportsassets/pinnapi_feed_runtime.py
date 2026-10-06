@@ -573,7 +573,14 @@ HELD_FULL_GAME_TYPES = frozenset((
     # sportsMarketType, tests/fixtures/pmus_nfl_listing_2026_10_04.json). A
     # held NFL position's measure is the period-0 two-way line, converted for
     # the venue's tie payout by the policy that reads it (paper_benchmark).
-    "football_team_full_game_winner"))
+    "football_team_full_game_winner",
+    # P0 coverage: the venue's NBA / NHL full-game winners (its listings'
+    # sportsMarketType, tests/fixtures/
+    # pmus_nba_nhl_winner_listings_2026_10_06.json). The period-0 two-way
+    # line, admitted by league exactly as the cycle's (contract_match ->
+    # pinnapi_census.family_of -> bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE:
+    # NBA / NHL only); every other league of the spelling still refuses.
+    "basketball_team_full_game_winner", "hockey_team_full_game_winner"))
 
 #: the census's own columns, for the ONE held contract
 HELD_CATALOGUE_SQL = """SELECT identifier, side_norm, event_slug, event_title,

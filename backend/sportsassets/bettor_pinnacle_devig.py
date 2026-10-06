@@ -242,9 +242,32 @@ SUPPORTED: dict = {
 #: `bettor_nfl_settlement.convert`, applied by the policy before any edge;
 #: this source only states the conditioning (CONDITIONAL_ON below) and
 #: refuses a draw-priced football line by name.
+#:
+#: THE NBA AND THE NHL, P0 COVERAGE (2026-10-06) -- ADMITTED FOR THOSE TWO
+#: LEAGUES ONLY, BY THE BOOK'S OWN WORDS AND THE FEED'S OWN SHAPE. The book:
+#: "Bets on the Game and 2 nd -Half periods include all overtimes played in
+#: their result." (Basketball) and "Unless otherwise specified, Game-period
+#: bets include overtime and penalty shootouts." (Hockey) -- captured
+#: verbatim, tests/fixtures/pinnacle_line_rules_2026_10_04.json, sha256
+#: 63d64321...3d8303fd. A game graded through every overtime (and, in
+#: hockey, the shootout) has a winner, so the Game-period money line has two
+#: outcomes and no draw (bettor_venue_settlement.TIE_REACHABLE, OT_INCLUDED:
+#: False for both). The line read is PinnAPI's period-0 money line, refused
+#: unless its priced set is EXACTLY {home, away}
+#: (pinnapi_primary.read_quote: PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES), and
+#: `valuation` still refuses OUTCOME_SET_INCOMPLETE on any other count. WHY
+#: THE LEAGUE AND NOT THE SPORT: the venue's winner wording is captured for
+#: the NBA and the NHL only (tests/fixtures/
+#: pmus_nba_nhl_winner_listings_2026_10_06.json; one wording each across
+#: 63 / 26 open listings); the venue's KHL, Liiga, EuroLeague, WNBA ...
+#: boards carry other wordings and the book's basketball section a different
+#: minimum ("In all other competitions ... 35 minutes"), so no other league
+#: inherits this.
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,
     ("football", "h2h", "cfb"): 2,
+    ("basketball", "h2h", "nba"): 2,
+    ("hockey", "h2h", "nhl"): 2,
 }
 
 

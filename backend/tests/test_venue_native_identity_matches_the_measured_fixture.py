@@ -427,11 +427,16 @@ def test_only_the_familys_exact_winner_types_are_read():
         "baseball": ("baseball_team_full_game_winner",),
         # cand22: the college-football full-game winner (segment winners
         # such as football_team_first_half_winner stay absent)
-        "football": ("football_team_full_game_winner",)}
+        "football": ("football_team_full_game_winner",),
+        # P0 coverage: the NBA / NHL full-game winners (the 3-way
+        # hockey_team_regulation_winner and every segment stay absent;
+        # tests/test_nba_nhl_winner_identity_and_settlement.py)
+        "basketball": ("basketball_team_full_game_winner",),
+        "hockey": ("hockey_team_full_game_winner",)}
     half = [dict(r, sports_type="soccer_team_first_half_winner")
             for r in ROWS]
     assert _match(WAL, rows=half)["refusal"] == V.R_NO_EVENT
-    m = V.match_event(home="A", away="B", commence_epoch=0, family="hockey",
+    m = V.match_event(home="A", away="B", commence_epoch=0, family="tennis",
                       rows=ROWS)
     assert m["refusal"] == V.R_FAMILY
 

@@ -203,6 +203,16 @@ FAMILY_WINNER_TYPES = {
     # token is `full_game`; segment winners (`_first_half_winner`,
     # `_first_quarter_winner` ...) are different values and stay absent.
     "football": ("football_team_full_game_winner",),
+    # P0 coverage (2026-10-06): the venue's NBA and NHL full-game winners,
+    # read on its own listings (tests/fixtures/
+    # pmus_nba_nhl_winner_listings_2026_10_06.json: 63 nba + 26 nhl open
+    # listings, every one ONE contract carrying one LONG and one SHORT side,
+    # one per team -- the baseball/football two-way shape). Scope token
+    # `full_game`. NOT the 3-way `hockey_team_regulation_winner` (a regulation
+    # draw is its own outcome there), nor any `_first_period_` /
+    # `_first_half_` / `_first_quarter_` segment: different values, absent.
+    "basketball": ("basketball_team_full_game_winner",),
+    "hockey": ("hockey_team_full_game_winner",),
 }
 
 #: ── FOOTBALL PARTICIPANTS CARRY THE VENUE'S OWN NICKNAME ───────────────
