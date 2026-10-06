@@ -115,6 +115,14 @@ def test_no_funded_module_imports_the_paper_modules():
                # only its own schedule row and agent_slack_delivery, and
                # nothing in Slack can place, change or approve an order
                "slack_updates.py",
+               # (310) the CAPITAL READINESS LAB's feeds and observer read the
+               # paper evaluations / settlements / freshness / integrity in a
+               # transaction they roll back, and append only to the four
+               # migration-310 RESEARCH / SHADOW_NO_AUTHORITY tables; no
+               # order, size, gate or promotion effect (its own static
+               # authority audit forbids the order modules)
+               "capital_readiness/feeds.py",
+               "capital_readiness/observer.py",
                # (209) Audrey's coverage integrity, postmortems and the
                # improvement driver: they read the paper ledger, write their
                # own migration-209 tables, Audrey findings and the
