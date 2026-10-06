@@ -253,12 +253,12 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
         # reserved-but-unused stream slots are REPORTED ABSENT, not hidden:
         # this database carries every migration of this build, so the absent
         # numbers are exactly the ones no file in the build uses
-        assert sch["tracked_range"] == [216, 310]
+        assert sch["tracked_range"] == [216, 311]
         for n in (248, 249, 251, 260, 261, 264, 265, 266, 270, 290, 300,
-                  301, 302, 303, 305, 306, 309, 310):
+                  301, 302, 303, 305, 306, 309, 310, 311):
             assert tracked[n]["status"] == "APPLIED", n
             assert tracked[n]["in_this_build"] is True, n
-        assert sch["numbers_absent"] == EXPECTED_ABSENT_216_310
+        assert sch["numbers_absent"] == EXPECTED_ABSENT_216_311
         assert out["running_build_gated"] is False    # f33 is VOID
         assert out["running_build_receipts"]
     finally:
@@ -289,6 +289,8 @@ EXPECTED_ABSENT_216_306 = EXPECTED_ABSENT_216_301 + [304]
 EXPECTED_ABSENT_216_309 = EXPECTED_ABSENT_216_306 + [307, 308]
 #: (CAPITAL READINESS LAB) 216..310: 310 present, nothing new absent
 EXPECTED_ABSENT_216_310 = EXPECTED_ABSENT_216_309
+#: (P1 profitability stack) 216..311: 310 and 311 present, nothing new absent
+EXPECTED_ABSENT_216_311 = EXPECTED_ABSENT_216_310
 
 
 def test_the_tracked_range_covers_every_migration_in_this_build():
@@ -297,13 +299,13 @@ def test_the_tracked_range_covers_every_migration_in_this_build():
     reaches the build's highest migration, and the absent numbers inside it
     are exactly the unused reserved slots (30 of them)."""
     from sportsassets.api import command_release as R
-    assert (R.TRACKED_FROM, R.TRACKED_TO) == (216, 310)
+    assert (R.TRACKED_FROM, R.TRACKED_TO) == (216, 311)
     nums = sorted(R._num(f) for f in R.build_migrations())
     assert nums[-1] == R.TRACKED_TO, "a migration above the tracked range"
     present = {n for n in nums if R.TRACKED_FROM <= n <= R.TRACKED_TO}
     absent = [k for k in range(R.TRACKED_FROM, R.TRACKED_TO + 1)
               if k not in present]
-    assert absent == EXPECTED_ABSENT_216_310
+    assert absent == EXPECTED_ABSENT_216_311
     assert len(absent) == 30 + 31 + 1 + 2
 
 

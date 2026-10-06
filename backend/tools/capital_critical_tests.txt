@@ -1205,3 +1205,9 @@ tests/test_p1_held_mark_institutional_bound.py
 tests/test_p1_pmx_same_instant_and_probe_pacing.py
 tests/test_capital_readiness_lab.py
 tests/test_p1_pinnapi_input_changed.py
+# (311) THE PROFITABILITY STACK: every profitability item binds in the PAPER
+# entry / management chain (price-region calibration, freshness decay,
+# spread / management cost, settlement cap, scenario concentration, reprice
+# and management deadbands, automatic quarantine), the counterfactual
+# variant ledger, attribution, the P&L forecast and the forward scoreboard.
+tests/test_profitability_stack_binding.py

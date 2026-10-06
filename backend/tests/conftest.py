@@ -557,3 +557,11 @@ def _profitability_bind_seeded(request, monkeypatch):
     monkeypatch.setattr(PBIND, "entry_bind", _entry)
     monkeypatch.setattr(PBIND, "authority_extra", _extra)
     monkeypatch.setattr(PBIND, "management_economics", _mgmt)
+    # (311) the automatic deterioration QUARANTINE reads the same learned
+    # state; seeded to record nothing for the same proofs
+    from sportsassets import bettor_paper_profitability_stack as PSTACK
+
+    async def _no_quarantine(conn, *, account_id=None, now=None, **kw):
+        return {"account_id": account_id, "at": now, "quarantined": [],
+                "strategies": {}, "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
+    monkeypatch.setattr(PSTACK, "evaluate_quarantine", _no_quarantine)

@@ -1882,6 +1882,19 @@ EXEC_GATING_STREAM = {
     "CASH_WAIT_FORWARD_PNL_NOT_ABSOLUTELY_POSITIVE_CI_LOW_NOT_ABOVE_ZERO":
         (E, EV, "RISK_ADMISSION"),
     "REGIME_FORWARD_ECONOMICS_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
+    # (311) THE PROFITABILITY STACK: the account's aggregate exposure to one
+    # event at its scenario cap, a probability older than the freshness
+    # bound, a re-price inside the deadband without a material EV gain
+    # (economic CASH / WAIT), and the management deadband (a discretionary
+    # sale below the minimum expected improvement over HOLD)
+    "CASH_WAIT_SCENARIO_CONCENTRATION_LIMIT_REACHED":
+        (E, RAIL, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_AGE_BEYOND_FRESHNESS_BOUND":
+        (S, FRESH, "RISK_ADMISSION"),
+    "CHURN_REPRICE_INSIDE_DEADBAND_WITHOUT_MATERIAL_EV_GAIN":
+        (E, RAIL, "RISK_ADMISSION"),
+    "MANAGEMENT_ACTION_BELOW_MINIMUM_EXPECTED_IMPROVEMENT":
+        (E, EV, "MANAGEMENT"),
 }
 
 #: THE PROFITABILITY OS VIEW (sportsassets/pos_os): why-codes a read-only
