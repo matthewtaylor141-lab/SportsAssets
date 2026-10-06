@@ -11,7 +11,7 @@ SELECT verdict, service,
        count(*) FILTER (WHERE retail_book->>'transact_time' IS NULL)
            AS retail_clock_null,
        percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM
-           (retail_book->>'transact_time')::timestamptz - stream_venue_ts)))
+           (retail_book->>'transact_time')::timestamptz - stream_venue_ts))
            AS median_retail_minus_stream_s
   FROM institutional_same_book_probe
  WHERE probed_at > now() - interval '90 minutes'
