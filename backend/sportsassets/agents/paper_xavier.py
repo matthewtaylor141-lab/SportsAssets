@@ -1463,7 +1463,21 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
                  "waiting_s": None if da is None else round(at - da, 3)}
                 for (_, _, dg, dt_, da) in due[i:]]
             break
-        got = await review_group(conn, ctx, g, trigger=trig, due_at=d_at)
+        # ONE GROUP'S FAILED REVIEW NEVER STARVES THE REST: before this a
+        # review that raised (e.g. the feed-provenance TypeError fixed in
+        # paper_benchmark.xavier_measure) aborted the whole step, so every
+        # group due after it -- held markets that had just moved first of
+        # all (FEED_CHANGE_PRIORITY) -- went unreviewed in that pass. The
+        # failure is named per group; nothing is assumed reviewed.
+        try:
+            got = await review_group(conn, ctx, g, trigger=trig, due_at=d_at)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                                # noqa: BLE001
+            out.setdefault("review_errors", []).append(
+                {"group_id": g, "trigger": trig,
+                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
+            continue
         out["reviews"] += len(got["reviews"])
         out["by_trigger"][trig] = out["by_trigger"].get(trig, 0) + 1
         if trig == T_FIRST and d_at is not None:

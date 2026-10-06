@@ -2923,6 +2923,10 @@ async def group_strategy(conn, group_id: str) -> str:
 
 
 SOURCE_FEED_CURRENT = "PINNAPI_FEED_CURRENT"
+#: an ok feed read whose provenance names no change instant at all (never
+#: expected: pinnapi_feed.read refuses a quote without one) is not evidence
+#: of currency; the stale measure stands with this named reason
+R_FEED_NO_CHANGE_INSTANT = "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT"
 
 
 async def xavier_measure(conn, ctx: dict, *, pos: dict,
@@ -3091,9 +3095,27 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                         "designation", "provenance", "why", "error")
                         if cur.get(k) is not None})
     prov = cur["provenance"]
+    # THE CHANGE INSTANT THE FEED'S OWN 30 s RULE WAS MEASURED FROM
+    # (pinnapi_feed.Quote.change_ms, carried on the read's provenance as
+    # `change_ms`): the provider stamp of the changing frame, or -- ONLY when
+    # that frame carried no stamp -- our labelled observation of the change
+    # (change_clock LOCAL_OBSERVATION_OF_THE_CHANGE, source_change_ms None).
+    # The held read's de-vig ages the quote on exactly this instant
+    # (pinnapi_feed_runtime.held_quote). Reading `source_change_ms` alone
+    # raised TypeError (None / 1000.0) on every unstamped change, which
+    # aborted the review -- and every review queued after it -- exactly
+    # when the held market had just moved. Not a wider rule: the same
+    # instant, the same limit.
+    change_ms = prov.get("change_ms")
+    if change_ms is None:
+        change_ms = prov.get("source_change_ms")
+    if change_ms is None:
+        # an ok read always has a change instant; anything else is not
+        # evidence of currency -- the stale measure stands, named
+        return dict(stale_out, feed_refusal=R_FEED_NO_CHANGE_INSTANT)
     return _venue_scale(dict(base, p=float(cur["p"]), source=SOURCE_FEED_CURRENT,
                 p_pinnacle=float(cur["p"]),
-                pinnacle_at=prov["source_change_ms"] / 1000.0,
+                pinnacle_at=float(change_ms) / 1000.0,
                 pinnacle_age_s=prov.get("quote_age_s"),
                 pinnacle_received_at=(
                     None if prov.get("received_ms") is None
@@ -3102,6 +3124,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                 feed={"epoch": prov.get("epoch"),
                       "quote_age_s": prov.get("quote_age_s"),
                       "source_change_ms": prov.get("source_change_ms"),
+                      "change_ms": change_ms,
+                      "change_clock": prov.get("change_clock"),
+                      "observed_change_ms": prov.get("observed_change_ms"),
                       "frame_ts_ms": prov.get("frame_ts_ms"),
                       "received_ms": prov.get("received_ms"),
                       "evaluated_ms": prov.get("evaluated_ms"),
