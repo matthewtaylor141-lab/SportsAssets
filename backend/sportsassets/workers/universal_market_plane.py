@@ -34,6 +34,16 @@ INTEGRATION FIXES OVER THE DELIVERED SUPERVISOR (each pinned by a test):
     (PMX documents 1,000 symbols per stream; the account's concurrent-stream
     allowance is not documented here). Overflow is named with the exact
     shards required for the whole subscribable universe.
+
+SETTLEMENT RULE REGISTRY (integration): the coverage pass also computes each
+contract's settlement state from evidence (market_plane.settlement); the
+snapshot carries the settlement counts, the bounded venue x sport x league x
+family breakdown, the NOT_PROVEN -> PROVEN delta and the rules-text counts;
+and a Kalshi SPORTS catalogue step (kalshi_catalogue: credential-free,
+GET-only, cursor-complete, TRUNCATED by name) runs every KALSHI_EVERY_S in a
+background thread, kill switch KALSHI_CATALOGUE=off. Radar still audits the
+PMUS universe; Kalshi rows are counted beside it. No order module is
+imported or reachable.
 """
 from __future__ import annotations
 
@@ -48,6 +58,7 @@ from ..market_plane import freshness as FR
 from ..market_plane import populate as POP
 from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
+from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
 
 log = logging.getLogger(__name__)
@@ -70,12 +81,49 @@ UNLISTED_RETRY_S = 6 * 3600.0
 FRESH_SLA_S = 300.0
 DEFAULT_MAX_STREAMS = 4
 DEFAULT_MAX_PER_STREAM = 1000
+#: (settlement rule registry) the Kalshi SPORTS catalogue step: a
+#: credential-free, GET-only, cursor-complete walk (kalshi_catalogue) every
+#: KALSHI_EVERY_S, run in a background thread so the plane's pass never waits
+#: on it, persisted into the registry (venue KALSHI) and market_plane_rules.
+#: Kill switch KALSHI_CATALOGUE=off. No order path is imported or reachable.
+KALSHI_ENV_FLAG = "KALSHI_CATALOGUE"
+KALSHI_EVERY_S = 1800.0
 
 
 def enabled(env=None) -> bool:
     env = os.environ if env is None else env
     return str(env.get(ENV_FLAG, "on")).strip().lower() not in (
         "off", "0", "false", "no")
+
+
+def kalshi_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(KALSHI_ENV_FLAG, "on")).strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+async def kalshi_step(pool, task, *, now: float, last: float, env=None,
+                      walk=None) -> tuple:
+    """ONE scheduling decision for the Kalshi catalogue: start a walk in a
+    worker thread when due (and none is running), or persist a finished one.
+    Returns (task, last_started, report-or-None). Never raises."""
+    from .. import kalshi_catalogue as KC
+    report = None
+    if task is not None and task.done():
+        try:
+            res = task.result()
+            async with pool.acquire() as c:
+                persisted = await POP.populate_kalshi(c, res, now=now)
+            report = dict(KC.summary(res), persisted=persisted,
+                          finished_at=now)
+        except Exception as exc:                                # noqa: BLE001
+            report = {"error": type(exc).__name__, "finished_at": now,
+                      "complete": False}
+        task = None
+    if task is None and kalshi_enabled(env) and now - last >= KALSHI_EVERY_S:
+        task = asyncio.ensure_future(asyncio.to_thread(walk or KC.walk))
+        last = now
+    return task, last, report
 
 
 def caps(env=None) -> tuple:
@@ -237,11 +285,17 @@ async def run() -> None:
     seen_receipts: dict = {}
     attempted: dict = {}
     state: dict = {"plan": {}, "coverage": {}, "certification": {},
-                   "populate": {}, "catalogue": {}, "refdata": {}}
+                   "populate": {}, "catalogue": {}, "refdata": {},
+                   "kalshi": {"enabled": kalshi_enabled()}}
+    kalshi_task, kalshi_last = None, 0.0
     while True:
         try:
             pool = await get_pool()
             now = time.time()
+            kalshi_task, kalshi_last, krep = await kalshi_step(
+                pool, kalshi_task, now=now, last=kalshi_last)
+            if krep is not None:
+                state["kalshi"] = dict(krep, enabled=kalshi_enabled())
             async with pool.acquire() as c:
                 cat = await POP.catalogue_completeness(c)
                 state["catalogue"] = cat
@@ -333,11 +387,16 @@ async def run() -> None:
                 "sync": sync, "refdata": boot,
                 "populate": {k: v for k, v in (state.get("populate") or {})
                              .items() if k != "excluded"},
+                "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
+                    "enabled", "complete", "stopped", "markets", "requests",
+                    "error")},
                 "fresh": len(fresh)})
             await asyncio.sleep(INTERVAL_S)
         except asyncio.CancelledError:
             if mgr is not None:
                 mgr.stop()
+            if kalshi_task is not None:
+                kalshi_task.cancel()
             raise
         except Exception as exc:                                # noqa: BLE001
             log.exception("universal market plane pass failed")
@@ -444,7 +503,14 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         "           AS refdata_pending, "
         "       count(*) FILTER (WHERE active AND subscription_shard IS NOT "
         "           NULL) AS assigned, "
-        "       count(*) AS total FROM market_plane_registry"))
+        "       count(*) AS total FROM market_plane_registry "
+        # the PMUS universe (the streams, the catalogue and Radar are its);
+        # Kalshi rows are counted on their own below
+        " WHERE venue = 'POLYMARKET_US'"))
+    kalshi_reg = dict(await conn.fetchrow(
+        "SELECT count(*) FILTER (WHERE active) AS active, count(*) AS total "
+        "  FROM market_plane_registry WHERE venue = 'KALSHI'"))
+    rules = await RULES.rules_counts(conn)
     cert = dict(await conn.fetchrow(
         "SELECT count(*) FILTER (WHERE status = 'SUPPORTED') AS supported, "
         "       count(*) FILTER (WHERE status = 'ACCUMULATING') "
@@ -455,9 +521,13 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
     lat = latency_report(mgr, now=now)
     subscribed = len(mgr.subscribed()) if mgr is not None else 0
     reg_active = int(reg.get("active") or 0)
+    # Radar audits the PMUS universe: its coverage counts only (a Kalshi row
+    # is a named ontology gap of another venue, reported beside it)
+    pm_cov = ({"by_state": (cov.get("by_venue") or {})["POLYMARKET_US"]}
+              if "POLYMARKET_US" in (cov.get("by_venue") or {}) else cov)
     rad = RADAR.audit(
         venue_active=max(0, venue_active), registry_active=reg_active,
-        subscribed=subscribed, fresh=len(fresh), coverage=cov,
+        subscribed=subscribed, fresh=len(fresh), coverage=pm_cov,
         catalogue_complete=bool((state.get("catalogue") or {}).get(
             "complete")),
         shard_complete=bool(plan.get("complete", mgr is not None)),
@@ -467,7 +537,13 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         extra.append("PMX_STREAMS_NOT_ARMED:%s" % arming.get("why"))
     if venue_active < 0:
         extra.append("VENUE_CATALOGUE_UNREADABLE")
-    by = cov.get("by_state") or {}
+    by = pm_cov.get("by_state") or {}
+    sbs = ((cov.get("settlement") or {}).get("by_venue") or {}).get(
+        "POLYMARKET_US") or {}
+    for k in ("SETTLEMENT_RULE_EVIDENCE_CONFLICT",
+              "EXTERNAL_SETTLEMENT_DATA_UNAVAILABLE"):
+        if sbs.get(k):
+            extra.append("%s:%d" % (k, sbs[k]))
     if by.get("MAPPED_BUT_SETTLEMENT_NOT_PROVEN"):
         extra.append("SETTLEMENT_PROOF_MISSING:%d"
                      % by["MAPPED_BUT_SETTLEMENT_NOT_PROVEN"])
@@ -509,7 +585,14 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                                                         venue_active)
                                             / venue_active, 3)
                                       if venue_active > 0 else None)},
-        "coverage": {k: v for k, v in cov.items() if k != "rows"},
+        "coverage": {k: v for k, v in cov.items() if k not in (
+            "rows", "settlement")},
+        # (settlement rule registry) the settlement state of every active
+        # contract, its venue x sport x league x family breakdown (bounded),
+        # this pass's NOT_PROVEN -> PROVEN delta, and the rules-text counts
+        "settlement": cov.get("settlement"),
+        "rules": rules,
+        "kalshi": dict(state.get("kalshi") or {}, registry=kalshi_reg),
         "subscription": {"armed": mgr is not None,
                          "arming_why": arming.get("why"),
                          "configured_capacity": {"max_streams": max_streams,

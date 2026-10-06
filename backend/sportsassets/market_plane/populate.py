@@ -30,6 +30,21 @@ terminal states (market_plane.coverage): ontology + canonical identity
 settlement comparison (settlement proven), an EXTERNAL-class refusal from the
 refusal taxonomy (external unavailable -- only with that evidence), and a
 current canonical book. Nothing is inferred beyond that evidence.
+
+SETTLEMENT (settlement rule registry). `coverage_pass` also writes each
+active contract's settlement state (market_plane.settlement: PROVEN
+COMPATIBLE / PROVEN DIFFERENT BUT PRICED / NOT PROVEN / RULE EVIDENCE
+CONFLICT / EXTERNAL SETTLEMENT DATA UNAVAILABLE) from the latest decision
+valuation, the latest paper decision's priced settlement difference and the
+captured current rules text (market_plane_rules), and `settlement proven`
+for the coverage matrix is exactly a PROVEN state. The pass records the
+delta: contracts that moved from MAPPED_BUT_SETTLEMENT_NOT_PROVEN to a
+PROVEN state (and back). Decision-time attest remains the trading authority.
+
+KALSHI. `populate_kalshi` writes the GET-only sports catalogue's markets as
+registry rows (venue KALSHI, contract_id 'kalshi:'+ticker, venue ids only,
+desired_subscription false, a named KALSHI_ONTOLOGY_NOT_MAPPED gap: no sport,
+family or mapping is guessed) and their rules into market_plane_rules.
 """
 from __future__ import annotations
 
@@ -104,7 +119,11 @@ VALUATION_SQL = """
     SELECT DISTINCT ON (us_market_slug) us_market_slug AS slug,
            probability IS NOT NULL                   AS has_probability,
            coalesce(settlement_comparison->>'verdict',
-                    settlement_comparison->>'status')  AS settlement_verdict,
+                    settlement_comparison->>'status',
+                    settlement_comparison->>'compatibility')
+                                                       AS settlement_verdict,
+           settlement_comparison->>'venue_rules_fingerprint'
+                                                       AS decision_rules_fingerprint,
            coalesce(refusals, ARRAY[]::text[])        AS refusals,
            record_purpose, decided_at
       FROM external_valuations
@@ -128,6 +147,29 @@ REST_BOOK_SQL = """
      WHERE observed_at > now() - make_interval(secs => $1)
        AND us_market_slug = ANY($2::text[])
      GROUP BY 1
+"""
+
+#: the latest paper decision's PRICED settlement difference (the recorded
+#: bettor_settlement_difference_policy.eligibility verdict and the policy's
+#: own price) -- evidence for SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED only
+PRICED_SQL = """
+    SELECT DISTINCT ON (us_market_slug) us_market_slug AS slug,
+           pinnacle->'settlement_difference_eligibility' AS eligibility,
+           pinnacle->'settlement_difference_policy'      AS policy,
+           decided_at
+      FROM paper_decisions
+     WHERE decided_at > now() - make_interval(secs => $1)
+       AND us_market_slug = ANY($2::text[])
+       AND pinnacle ? 'settlement_difference_policy'
+     ORDER BY us_market_slug, decided_at DESC
+"""
+
+#: the captured rules rows (no text: the text is loaded only for a contract
+#: whose terms comparison is not cached yet)
+RULES_META_SQL = """
+    SELECT contract_id, venue, rules_published, rules_field, rules_sha256,
+           parse_status, evidence, parser_version, source
+      FROM market_plane_rules WHERE contract_id = ANY($1::text[])
 """
 
 RECEIPTS_SQL = """
@@ -404,25 +446,33 @@ async def catalogue_completeness(conn) -> dict:
 # ── coverage evidence ────────────────────────────────────────────────
 
 def classify(contract: dict, *, valuation=None, candidate=None,
-             fresh_book=False, book_source=None, external_codes=()) -> dict:
+             fresh_book=False, book_source=None, external_codes=(),
+             settlement=None) -> dict:
     """PURE. The coverage evidence for one registry contract -> the input of
-    market_plane.coverage.terminal (and its own reasons)."""
+    market_plane.coverage.terminal (and its own reasons).
+
+    SETTLEMENT PROVEN = the contract's market_plane.settlement state is
+    SETTLEMENT_PROVEN_COMPATIBLE or SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED,
+    from evidence only (`settlement` precomputed by coverage_pass, else
+    computed here from the valuation alone). The former rule also called a
+    contract proven when its valuation merely carried a probability and no
+    SETTLEMENT* refusal -- silence read as agreement; that is gone."""
     from .coverage import terminal
+    from . import settlement as S
     ont = _jsonish(contract.get("ontology")) or {}
     gaps = list(ont.get("gaps") or [])
     mapped = not gaps and bool(contract.get("event_id")) and bool(
         contract.get("sport"))
     v = valuation or {}
-    refusals = [str(x) for x in (v.get("refusals") or [])]
     has_p = bool(v.get("has_probability"))
-    verdict = str(v.get("settlement_verdict") or "")
-    settle_codes = [x for x in refusals if x.startswith("SETTLEMENT")]
-    settlement_proven = bool(v) and (verdict == "COMPATIBLE" or (
-        has_p and not settle_codes and verdict not in ("INCOMPATIBLE",)))
+    st = settlement or S.state_for(contract, valuation=valuation)
+    settlement_proven = st["state"] in S.PROVEN_STATES
     ext = None
     fr = str((candidate or {}).get("first_refusal") or "")
     if fr and fr in set(external_codes) and not has_p:
         ext = "EXTERNAL_EVIDENCE:%s" % fr
+    elif mapped and st["state"] == S.EXTERNAL:
+        ext = "EXTERNAL_SETTLEMENT:%s" % st["why"]
     row = {"contract_id": contract.get("contract_id"),
            "sport": contract.get("sport"),
            "competition": contract.get("competition"),
@@ -431,10 +481,11 @@ def classify(contract: dict, *, valuation=None, candidate=None,
            "mapping_why": ("ONTOLOGY_GAPS:%s" % ",".join(gaps)) if gaps else (
                None if mapped else "EVENT_OR_SPORT_IDENTITY_MISSING"),
            "settlement_proven": settlement_proven,
+           "settlement_state": st["state"],
+           "settlement_basis": st["basis"],
            "settlement_why": None if settlement_proven else (
-               ("SETTLEMENT_REFUSED:%s" % settle_codes[0]) if settle_codes
-               else ("SETTLEMENT_VERDICT:%s" % verdict) if verdict
-               else "NO_SETTLEMENT_COMPARISON_RECORDED"),
+               st["why"] if st["state"] == S.NOT_PROVEN
+               else "%s:%s" % (st["state"], st["why"])),
            "fair_value_source": "PINNACLE_VALUATION" if has_p else None,
            "fair_value_why": None if has_p else (
                "NO_DECISION_VALUATION_IN_WINDOW" if not v
@@ -443,7 +494,7 @@ def classify(contract: dict, *, valuation=None, candidate=None,
            "book_why": None if fresh_book else "NO_CURRENT_CANONICAL_BOOK",
            "external_unavailable": ext}
     t = terminal(row)
-    t.update(book_source=book_source, evidence=row)
+    t.update(book_source=book_source, evidence=row, settlement=st)
     return t
 
 
@@ -462,42 +513,91 @@ def external_codes() -> set:
         return set()
 
 
+async def _fetch_chunked(conn, sql, ids, *args, key="slug"):
+    out = {}
+    for i in range(0, len(ids), 5000):
+        chunk = ids[i:i + 5000]
+        try:
+            for r in await conn.fetch(sql, *args, chunk):
+                out[r[key]] = dict(r)
+        except Exception:                                       # noqa: BLE001
+            pass
+    return out
+
+
+#: the bounded venue x sport x league x family settlement breakdown
+BREAKDOWN_MAX_KEYS = 200
+
+
 async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                         rest_sla_s: float = 300.0, limit: int | None = None
                         ) -> dict:
     """Classify every ACTIVE registry contract and write the changed terminal
-    states. Returns the matrix summary (counts by state, sport, family, why)."""
+    states AND settlement states (market_plane.settlement, evidence only).
+    Returns the matrix summary (counts by state, sport, family, why), the
+    settlement-state counts and breakdown, and this pass's delta: how many
+    contracts moved from MAPPED_BUT_SETTLEMENT_NOT_PROVEN to a PROVEN
+    settlement state (and back)."""
     from .coverage import matrix
+    from . import settlement as S
     at = float(now if now is not None else time.time())
     rows = [dict(r) for r in await conn.fetch(
-        "SELECT contract_id, sport, competition, event_id, family, period, "
-        "       ontology, coverage_state, coverage_why, priority "
+        "SELECT contract_id, venue, sport, competition, event_id, family, "
+        "       period, ontology, coverage_state, coverage_why, priority, "
+        "       settlement_state, settlement_why, settlement_basis, "
+        "       settlement_evidence->>'rules_sha256' AS settlement_rules_sha "
         "  FROM market_plane_registry WHERE active "
         " ORDER BY priority, contract_id" + (" LIMIT %d" % int(limit)
                                              if limit else ""))]
     slugs = [r["contract_id"] for r in rows]
-    vals, cands, rest = {}, {}, {}
-    for i in range(0, len(slugs), 5000):
-        chunk = slugs[i:i + 5000]
-        try:
-            for v in await conn.fetch(VALUATION_SQL, float(VALUATION_WINDOW_S),
-                                      chunk):
-                vals[v["slug"]] = dict(v)
-        except Exception:                                       # noqa: BLE001
-            pass
-        try:
-            for c in await conn.fetch(CANDIDATE_REFUSAL_SQL,
-                                      float(VALUATION_WINDOW_S), chunk):
-                cands[c["slug"]] = dict(c)
-        except Exception:                                       # noqa: BLE001
-            pass
-        try:
-            for b in await conn.fetch(REST_BOOK_SQL, float(rest_sla_s), chunk):
-                rest[b["slug"]] = _epoch(b["observed_at"])
-        except Exception:                                       # noqa: BLE001
-            pass
+    vals = await _fetch_chunked(conn, VALUATION_SQL, slugs,
+                                float(VALUATION_WINDOW_S))
+    cands = await _fetch_chunked(conn, CANDIDATE_REFUSAL_SQL, slugs,
+                                 float(VALUATION_WINDOW_S))
+    rest = {k: _epoch(v["observed_at"]) for k, v in (await _fetch_chunked(
+        conn, REST_BOOK_SQL, slugs, float(rest_sla_s))).items()}
+    priced = {k: {"eligibility": _jsonish(v.get("eligibility")) or {},
+                  "policy": _jsonish(v.get("policy")) or {}}
+              for k, v in (await _fetch_chunked(
+                  conn, PRICED_SQL, slugs, float(VALUATION_WINDOW_S))).items()}
+    rules_ok = True
+    try:
+        await conn.fetchval("SELECT 1 FROM market_plane_rules LIMIT 1")
+    except Exception:                                           # noqa: BLE001
+        rules_ok = False
+    rules = (await _fetch_chunked(conn, RULES_META_SQL, slugs,
+                                  key="contract_id")) if rules_ok else {}
+    for r in rules.values():
+        r["evidence"] = _jsonish(r.get("evidence")) or {}
+    # THE TEXT, ONLY WHERE A TERMS COMPARISON IS STILL TO BE MADE: a never-
+    # attested full-event winner whose (fingerprint, family, league) is not
+    # in this process's comparison cache
+    need = []
+    for r in rows:
+        s = r["contract_id"]
+        rr = rules.get(s)
+        v = vals.get(s) or {}
+        attested = bool(v.get("settlement_verdict")) or any(
+            str(x).startswith("SETTLEMENT") for x in (v.get("refusals") or []))
+        fam = S.h2h_family(r)
+        if rr is None or attested or not rr.get("rules_published") or \
+                rr.get("venue") != VENUE or fam is None:
+            continue
+        if (rr.get("rules_sha256"), fam, r.get("competition")) in \
+                S._TERMS_CACHE:
+            rr["rules_text"] = ""          # cached: the text is not re-read
+        else:
+            need.append(s)
+    texts = await _fetch_chunked(
+        conn, "SELECT contract_id, rules_text FROM market_plane_rules "
+              " WHERE contract_id = ANY($1::text[])", need,
+        key="contract_id") if need else {}
+    for s, t in texts.items():
+        rules[s]["rules_text"] = t.get("rules_text")
     ext = external_codes()
-    results, changed = [], []
+    results, changed, schanged = [], [], []
+    delta = {"to_proven": 0, "from_proven": 0, "to_conflict": 0,
+             "to_external": 0}
     src_counts = {"PMX_GRPC": 0, "RETAIL_PUSH": 0, "REST_RECOVERY": 0,
                   "NONE": 0}
     # THE TWO DENOMINATORS (owner, 2026-10-06): the PRIORITY universe (open
@@ -516,8 +616,12 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         else:
             src, fresh = None, False
         src_counts[src or "NONE"] += 1
+        st = S.state_for(r, valuation=vals.get(s), rules=rules.get(s),
+                         priced=priced.get(s), rules_looked_up=rules_ok)
         t = classify(r, valuation=vals.get(s), candidate=cands.get(s),
-                     fresh_book=fresh, book_source=src, external_codes=ext)
+                     fresh_book=fresh, book_source=src, external_codes=ext,
+                     settlement=st)
+        t["venue"] = r.get("venue")
         results.append(t)
         for tier in (("PRIORITY", "ALL") if (r.get("priority") is not None
                                             and int(r["priority"])
@@ -529,26 +633,168 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         if (t["state"], t["why"]) != (r.get("coverage_state"),
                                      r.get("coverage_why")):
             changed.append((s, t["state"], t["why"], at))
-    if changed:
+        sha = st["evidence"].get("rules_sha256")
+        if (st["state"], st["why"], st["basis"], sha) != (
+                r.get("settlement_state"), r.get("settlement_why"),
+                r.get("settlement_basis"), r.get("settlement_rules_sha")):
+            schanged.append((s, st["state"], st["why"], st["basis"],
+                             json.dumps(st["evidence"], default=str), at))
+            prior_np = (r.get("settlement_state") == S.NOT_PROVEN or (
+                r.get("settlement_state") is None and r.get("coverage_state")
+                == "MAPPED_BUT_SETTLEMENT_NOT_PROVEN"))
+            if st["proven"] and prior_np:
+                delta["to_proven"] += 1
+            if r.get("settlement_state") in S.PROVEN_STATES and \
+                    not st["proven"]:
+                delta["from_proven"] += 1
+            if st["state"] == S.CONFLICT and \
+                    r.get("settlement_state") != S.CONFLICT:
+                delta["to_conflict"] += 1
+            if st["state"] == S.EXTERNAL and \
+                    r.get("settlement_state") != S.EXTERNAL:
+                delta["to_external"] += 1
+    if changed or schanged:
         async with conn.transaction():
             for i in range(0, len(changed), 1000):
                 await conn.executemany(
                     "UPDATE market_plane_registry SET coverage_state = $2, "
                     "       coverage_why = $3, coverage_at = to_timestamp($4) "
                     " WHERE contract_id = $1", changed[i:i + 1000])
+            for i in range(0, len(schanged), 1000):
+                await conn.executemany(
+                    "UPDATE market_plane_registry SET settlement_state = $2, "
+                    "       settlement_why = $3, settlement_basis = $4, "
+                    "       settlement_evidence = $5::jsonb, "
+                    "       settlement_at = to_timestamp($6) "
+                    " WHERE contract_id = $1", schanged[i:i + 1000])
     m = matrix([{"contract_id": t["contract_id"], **t["evidence"]}
                 for t in results])
-    by_sport, by_why = {}, {}
+    by_sport, by_why, by_venue = {}, {}, {}
+    s_by_state = {k: 0 for k in S.STATES}
+    s_by_basis, s_by_why, s_by_venue, brk = {}, {}, {}, {}
     for t in results:
         k = t.get("sport") or "UNKNOWN"
         by_sport.setdefault(k, {}).setdefault(t["state"], 0)
         by_sport[k][t["state"]] += 1
+        vn = t.get("venue") or "UNKNOWN"
+        by_venue.setdefault(vn, {}).setdefault(t["state"], 0)
+        by_venue[vn][t["state"]] += 1
         w = "%s:%s" % (t["state"], t["why"])
         by_why[w] = by_why.get(w, 0) + 1
+        st = t["settlement"]
+        s_by_state[st["state"]] += 1
+        s_by_basis[st["basis"]] = s_by_basis.get(st["basis"], 0) + 1
+        sw = "%s:%s" % (st["state"], (st["why"] or "")[:120])
+        s_by_why[sw] = s_by_why.get(sw, 0) + 1
+        s_by_venue.setdefault(vn, {}).setdefault(st["state"], 0)
+        s_by_venue[vn][st["state"]] += 1
+        bk = "%s|%s|%s|%s" % (vn, k, t.get("competition") or "UNKNOWN",
+                              t.get("family") or "UNKNOWN")
+        brk.setdefault(bk, {}).setdefault(st["state"], 0)
+        brk[bk][st["state"]] += 1
+    top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     m.pop("rows", None)
-    return dict(m, by_sport=by_sport,
+    return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),
                                         key=lambda kv: -kv[1])[:40]),
                 source_counts=src_counts, freshness_tiers=tiers,
                 changed=len(changed),
-                active=len(rows), computed_at=at)
+                active=len(rows), computed_at=at,
+                settlement={
+                    "by_state": s_by_state, "by_basis": s_by_basis,
+                    "by_venue": s_by_venue,
+                    "top_reasons": dict(sorted(s_by_why.items(),
+                                               key=lambda kv: -kv[1])[:40]),
+                    "breakdown_venue_sport_league_family": dict(
+                        top[:BREAKDOWN_MAX_KEYS]),
+                    "breakdown_keys_total": len(brk),
+                    "breakdown_truncated": len(brk) > BREAKDOWN_MAX_KEYS,
+                    "changed": len(schanged), "delta": delta,
+                    "rules_table_read": rules_ok,
+                    "terms_text_loaded": len(texts),
+                    "authority_note": S.AUTHORITY_NOTE})
+
+
+# ── Kalshi (market_plane registry rows from kalshi_catalogue) ────────
+
+KALSHI = "KALSHI"
+
+
+def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
+    """PURE. One Kalshi catalogue market -> its registry row. Venue ids
+    only; NO sport / family / period is assigned (no guessed mapping), so
+    the row stays a named ontology gap; never subscribed on the PMUS
+    streams (desired_subscription false)."""
+    t = (market or {}).get("ticker")
+    if not t:
+        return None
+    ser = dict(market.get("_series") or {})
+    ontology = {"gaps": ["KALSHI_ONTOLOGY_NOT_MAPPED"],
+                "venue_ids": {"ticker": t,
+                              "event_ticker": market.get("event_ticker"),
+                              "series_ticker": ser.get("ticker")},
+                "series": {"title": ser.get("title"),
+                           "tags": list(ser.get("tags") or []),
+                           "category": ser.get("category")},
+                "status": market.get("status"),
+                "market_type": market.get("market_type"),
+                "close_time": market.get("close_time"),
+                "display_only": {"title": market.get("title"),
+                                 "yes_sub_title": market.get("yes_sub_title")},
+                "basis": "VENUE_IDS", "version": O.VERSION}
+    content = {"ontology": ontology, "event_id": market.get("event_ticker"),
+               "competition": ser.get("ticker")}
+    return {"contract_id": "kalshi:%s" % t, "venue": KALSHI, "sport": None,
+            "competition": ser.get("ticker"),
+            "event_id": market.get("event_ticker"),
+            "market_type": market.get("market_type"), "ontology": ontology,
+            "active": True, "desired_subscription": False,
+            "priority": P_REST, "required_reason": "VENUE_ACTIVE",
+            "family": None, "period": None, "event_start": None,
+            "last_seen_at": now, "content_sha": _sha(content)}
+
+
+async def populate_kalshi(conn, result: dict, *, now: float | None = None
+                          ) -> dict:
+    """Upsert every market a kalshi_catalogue walk returned into the
+    registry (CONTRACT_UPSERT only when content changed) and its rules into
+    market_plane_rules. A TRUNCATED walk writes what it read and retires
+    nothing (rows not re-seen age out by ACTIVE_HORIZON_S like any
+    listing). No authority."""
+    from . import rules as RULES
+    at = float(now if now is not None else time.time())
+    ms = [m for m in (result or {}).get("markets") or []
+          if isinstance(m, dict) and m.get("ticker")]
+    have = {r["contract_id"]: r["content_sha"] for r in await conn.fetch(
+        "SELECT contract_id, content_sha FROM market_plane_registry "
+        " WHERE venue = $1", KALSHI)}
+    batch, events = [], []
+    for m in ms:
+        c = kalshi_contract_row(m, now=at)
+        if c is None:
+            continue
+        ch = have.get(c["contract_id"]) != c["content_sha"]
+        batch.append((c["contract_id"], c["venue"], c["sport"],
+                      c["competition"], c["event_id"], c["market_type"],
+                      json.dumps(c["ontology"], default=str), c["active"],
+                      c["desired_subscription"], at, c["priority"],
+                      c["required_reason"], c["family"], c["period"],
+                      c["event_start"], c["last_seen_at"], c["content_sha"],
+                      AUTHORITY))
+        if ch:
+            events.append(("upsert:%s:%s" % (c["contract_id"],
+                                             c["content_sha"][:16]),
+                           c["contract_id"], "CONTRACT_UPSERT",
+                           json.dumps({"venue": KALSHI,
+                                       "series": c["competition"]}),
+                           AUTHORITY))
+    async with conn.transaction():
+        for i in range(0, len(batch), 1000):
+            await conn.executemany(UPSERT_SQL, batch[i:i + 1000])
+        for i in range(0, len(events), 1000):
+            await conn.executemany(EVENT_SQL, events[i:i + 1000])
+    rr = await RULES.upsert(conn, [RULES.kalshi_row(m) for m in ms], now=at)
+    return {"markets": len(ms), "upserted": len(batch),
+            "changed": len(events), "rules": rr,
+            "complete": bool((result or {}).get("complete")),
+            "stopped": (result or {}).get("stopped")}

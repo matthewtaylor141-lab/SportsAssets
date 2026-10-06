@@ -50,9 +50,12 @@ SETTLEMENT_FIELDS = ("overtime_included", "void_rule",
                      "postponement_window_hours", "postponement_payout")
 # A rule stated as IMPOSSIBLE (e.g. draw_rule for a league whose games
 # cannot end level) must be stated so by BOTH sides to compare equal.
+# SCALAR_0_50 (a tie settled at 0.50 per contract, stated in the contract's
+# own rules) is its own payout "0.5": never equal to STAKE_BACK,
+# LAST_FAIR_PRICE, YES ("1") or NO ("0").
 RULE_PAYOFF = {"STAKE_BACK": "STAKE_BACK", "RESOLVES_NO": "0",
                "RESOLVES_YES": "1", "LAST_FAIR_PRICE": "LAST_FAIR_PRICE",
-               "IMPOSSIBLE": "IMPOSSIBLE"}
+               "IMPOSSIBLE": "IMPOSSIBLE", "SCALAR_0_50": "0.5"}
 PROSE_FIELDS = ("title", "subtitle", "yes_sub_title", "no_sub_title",
                 "event_title", "name", "label", "description")
 
@@ -190,7 +193,26 @@ def settlement_compatibility(bettor: dict, kalshi: dict, *,
     """Compare what the BETTOR position and the Kalshi YES position pay in
     every terminal state. LONG: same outcome. SHORT: the complement of the
     BETTOR long vector vs Kalshi YES on the declared complement outcome
-    (re-keyed to the BETTOR outcome's states)."""
+    (re-keyed to the BETTOR outcome's states).
+
+    RULE EVIDENCE (settlement_rule_registry, integration): the CURRENT
+    contract's own rule fields fill ONLY missing structured settlement
+    fields -- the BETTOR side from `rules_text` alone (the per-contract
+    bettor_live_read.read_rules_text read; title / description stay
+    non-evidence here), the Kalshi side from the market object's
+    `rules_primary` / `rules_secondary`. An explicit structured field the
+    parsed rules contradict is never overwritten: the comparison refuses
+    NOT_ESTABLISHED with `settlement.rule_evidence_conflict`."""
+    from . import settlement_rule_registry as _SRR
+    bettor = _SRR.enrich_contract(bettor, venue=_SRR.POLYMARKET_US,
+                                  text_fields=("rules_text",))
+    kalshi = _SRR.enrich_contract(kalshi, venue=_SRR.KALSHI)
+    be = bettor.get("settlement_rule_evidence") or {}
+    ke = kalshi.get("settlement_rule_evidence") or {}
+    if be.get("status") == _SRR.CONFLICT or ke.get("status") == _SRR.CONFLICT:
+        return SettlementVerdict(
+            NOT_ESTABLISHED,
+            missing_fields=["settlement.rule_evidence_conflict"])
     mt = _norm(bettor.get("market_type"))
     bs, ks = bettor.get("settlement") or {}, kalshi.get("settlement") or {}
     missing = []

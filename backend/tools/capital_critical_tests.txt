@@ -1229,3 +1229,9 @@ tests/test_xavier_held_line_read.py
 tests/test_settlement_join_per_market_held_first.py
 # (closeout) the NCAAF funnel names every loss per event; the discovery watch keeps every NCAA receipt
 tests/test_ncaaf_funnel.py
+# (settlement rule registry) per-contract PMUS / Kalshi rule evidence, the
+# GET-only Kalshi sports catalogue, the market plane's settlement state and
+# the 0.50-tie payoff vector: evidence only, no order or capital authority
+tests/test_settlement_rule_registry.py
+tests/test_kalshi_public_rules.py
+tests/test_settlement_rule_registry_integration.py
