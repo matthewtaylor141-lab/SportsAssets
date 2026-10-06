@@ -595,6 +595,22 @@ async def lifespan(_: FastAPI):
             improve_task = asyncio.create_task(_IMPROVE.run(_cap_pool))
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("improvement pipeline runner failed to arm")
+    # ── THE CAPITAL READINESS OBSERVER (migration 310) ───────────────
+    # Post-decision and read-only toward every BETTOR layer: the Decision
+    # Shadow Court over recorded 309 evaluations, agent economics, the
+    # scale twin on measured capacity and the hard-gate readiness verdict,
+    # every 15 min. RESEARCH / SHADOW_NO_AUTHORITY: it appends only to the
+    # four migration-310 tables (capital_readiness/runner.py); no venue,
+    # order, sizing, gate, limit or authority path, and a GREEN verdict
+    # grants nothing. Advisory-locked per cycle, failure-isolated;
+    # CAPITAL_READINESS_OBSERVER=off is the kill switch.
+    readiness_task = None
+    try:
+        from ..capital_readiness import observer as _CRL
+        if _CRL.enabled():
+            readiness_task = asyncio.create_task(_CRL.run(_cap_pool))
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("capital readiness observer failed to arm")
     try:
         yield
     finally:
@@ -609,7 +625,7 @@ async def lifespan(_: FastAPI):
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
                              archer_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
-                             improve_task,
+                             improve_task, readiness_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
