@@ -1191,3 +1191,4 @@ tests/test_command_position_closed_and_ipad.py
 # gate / cache / freshness.
 tests/test_p1_pmx_institutional.py
 tests/test_profitability_bind.py
+tests/test_mirror_shadow_secret_precondition.py
