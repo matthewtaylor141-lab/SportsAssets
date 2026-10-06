@@ -222,7 +222,14 @@ async def _focus_symbols(get_pool, focus) -> list:
             pool, size=W.MAX_INSTRUMENTS)]
     except Exception:                                         # noqa: BLE001
         discovery = []
-    u = await FU.compute(pool, discovery=discovery, limit=MAX_SYMBOLS)
+    # HELD PAPER MARKETS FIRST (P0 market-data freshness): the held-mark
+    # refresh in this process names every held market, due first; those keep
+    # FU.HELD_PAPER_RESERVE slots after the real-money tiers, so their exact
+    # symbols are subscribed and can mark held positions from the stream.
+    # (FU.held_first is a plain process-local list the paper owner fills;
+    # this module imports nothing from the paper path.)
+    u = await FU.compute(pool, discovery=discovery, limit=MAX_SYMBOLS,
+                         held_first=FU.held_first())
     with _LOCK:
         _UNIVERSE.clear()
         _UNIVERSE.update(u)

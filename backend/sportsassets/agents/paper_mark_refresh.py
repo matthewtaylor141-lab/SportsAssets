@@ -76,6 +76,30 @@ which waits for the venue instead of asking it for more:
     pushed book is older than the SLA is NOT inferred current; it falls to
     the REST lane like any other.
 
+THE SOURCE ORDER (P0 market-data freshness, 2026-10-06). Freshness was 0.56:
+the REST endpoint 429s below what ~100 held markets need inside 300 s, and
+every paper reader polled it independently. Each due market now consults,
+in order, and takes the FIRST that answers inside the SLA:
+
+  1. INSTITUTIONAL -- the PMX gRPC resident book (institutional_stream
+     .current), ONLY where this symbol's exact retail->institutional identity
+     AND this symbol's own same-book evidence are proven
+     (paper_market_data.institutional_held_book; never aggregate agreement),
+     recorded HELD_MARK_INSTITUTIONAL_STREAM with ITS receipt instant;
+  2. RETAIL STREAM -- the market-data subscription's pushed book at the SLA
+     bounds (HELD_MARK_STREAM), as before;
+  3. HARVEST -- a book this process already read (HELD_MARK_REFRESH_SHARED_
+     READ), as before;
+  4. PACED REST -- through the process's one paper market-data owner
+     (paper_market_data) in its HELD lane: coalesced with any concurrent read
+     of the slug, ahead of every discovery read, under the shared venue hold.
+So the REST budget is spent only on held markets no stream covers. Every
+held market is registered with the owner (held reads outrank discovery
+wherever they are made) and named, due-first, to the institutional focus
+universe (held symbols subscribed and same-book probed first). The run's
+per-source counts and the owner's telemetry are recorded on the run
+(migration 306).
+
 PAPER ONLY. It reads books and writes paper_book_observations and its own run
 record; it places, cancels and changes no order, limit or threshold.
 """
@@ -91,6 +115,7 @@ from .. import bettor_paper_freshness as PMF
 from .. import bettor_paper_guard as G
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_session as S
+from .. import paper_market_data as PMD
 
 log = logging.getLogger(__name__)
 
@@ -128,6 +153,12 @@ O_SKIP_HOURLY = "SKIPPED_HOURLY_BUDGET"
 O_SKIP_TIME = "SKIPPED_RUN_TIME_BUDGET"
 O_SKIP_COOLDOWN = "SKIPPED_VENUE_COOLDOWN"
 O_STREAM = "STREAM_BOOK"
+INSTITUTIONAL_BASIS = PMD.INSTITUTIONAL_BASIS
+INSTITUTIONAL_SOURCE = PMD.INSTITUTIONAL_SOURCE
+O_INSTITUTIONAL = "INSTITUTIONAL_STREAM_BOOK"
+#: the consultation order (pinned by a test)
+SOURCE_ORDER = ("INSTITUTIONAL_STREAM", "RETAIL_STREAM", "HARVEST",
+                "PACED_REST")
 
 _HOURLY: dict = {"reads": []}
 
@@ -142,7 +173,12 @@ def budget() -> dict:
             "per_read_timeout_s": PER_READ_TIMEOUT_S,
             "harvest_max_age_s": HARVEST_MAX_AGE_S,
             "max_cooldown_wait_s": MAX_COOLDOWN_WAIT_S,
-            "stream": "bettor_market_subscription (when running here): "
+            "source_order": list(SOURCE_ORDER),
+            "institutional": "institutional_stream.current, per symbol: exact "
+                             "identity + this symbol's same-book SUPPORTED + "
+                             "venue clock and receipt <= SLA_S",
+            "rest_owner": "paper_market_data (cache, coalescing, HELD lane)",
+            "stream":"bettor_market_subscription (when running here): "
                       "book_at at the SLA bounds, its own receipt instant",
             "pace": "venue_pace (process-wide gap, normal lane) + "
                     "venue_request_gate (429 cooldowns)"}
@@ -247,9 +283,13 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                   max_reads: int = MAX_READS_PER_RUN,
                   hourly_budget: int = MAX_VENUE_READS_PER_HOUR,
                   recent=None, trigger: str = "SCHEDULED", gate=None,
-                  sleep=None, stream=None) -> dict:
+                  sleep=None, stream=None, institutional=None) -> dict:
     """ONE BOUNDED HELD-MARK REFRESH RUN for `account_id`. Records every due
-    market's outcome. Never raises (CancelledError excepted)."""
+    market's outcome. Never raises (CancelledError excepted).
+
+    `institutional`: a paper_market_data.InstitutionalBooks-like source
+    ({load(conn, slugs), book(slug, now=, sla_s=)}); by default the one the
+    process runs (None when the PMX stream is not running here)."""
     from . import paper_derek as PD
     from .. import bettor_paper_simulator as SIM
     clock = clock or time.time
@@ -261,14 +301,22 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
     gate = gate if gate is not None else _default_gate
     sleep = sleep if sleep is not None else asyncio.sleep
     books = stream if stream is not None else _default_stream()
+    inst = institutional if institutional is not None else \
+        PMD.default_institutional()
     out: dict[str, Any] = {"version": VERSION, "account_id": account_id,
                            "trigger": trigger, "at": at, "held_markets": 0,
                            "due": 0, "not_due": 0, "harvested": 0,
                            "read_attempted": 0, "read_ok": 0,
                            "read_failed": 0, "skipped_budget": 0,
                            "skipped_terminal": 0, "skipped_cooldown": 0,
-                           "stream_books": 0, "cooldown_waited_s": 0.0,
+                           "stream_books": 0, "institutional_books": 0,
+                           "cooldown_waited_s": 0.0,
                            "stream": "RUNNING" if books else "NOT_RUNNING",
+                           "institutional": ("RUNNING" if inst
+                                             else "NOT_RUNNING"),
+                           "sources": {"institutional_stream": 0,
+                                       "retail_stream": 0, "harvest": 0,
+                                       "rest": 0},
                            "outcomes": {},
                            "budget": budget()}
     run_id = None
@@ -294,35 +342,55 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
         out.update(held_markets=len(held), due=len(pl["due"]),
                    not_due=len(pl["not_due"]),
                    skipped_terminal=len(pl["terminal"]))
+        # EVERY HELD MARKET IS REGISTERED WITH THE ONE PAPER OWNER (its reads
+        # outrank discovery wherever they are made) and named, due first, to
+        # the institutional focus universe.
+        try:
+            PMD.set_held([s for s, _ in pl["due"]] + list(pl["not_due"]),
+                         now=at)
+        except Exception:                                       # noqa: BLE001
+            pass
         if books is not None:
             try:
                 out["stream_want"] = books.want(list(expo))
             except Exception as exc:                            # noqa: BLE001
                 out["stream_want"] = {"error": type(exc).__name__}
+        if inst is not None:
+            try:
+                out["institutional_evidence"] = await inst.load(
+                    conn, [s for s, _ in pl["due"]])
+            except Exception as exc:                            # noqa: BLE001
+                out["institutional_evidence"] = {"error": type(exc).__name__}
         cooldown_stop = None
         for slug, evd in pl["terminal"].items():
             out["outcomes"][slug] = {"outcome": O_SKIP_TERMINAL,
                                      "why": evd["market_state"],
                                      "obs_id": evd["obs_id"]}
         for slug, ok_at in pl["due"]:
-            # 4. THE HARVEST: a newer book this process already holds
-            shared = None
-            try:
-                shared = recent(slug, max_age_s=HARVEST_MAX_AGE_S)
-            except Exception:                                   # noqa: BLE001
-                shared = None
-            if shared is not None and isinstance(
-                    shared.get("marketData"), dict) and (
+            # 1. THE INSTITUTIONAL BOOK, only where THIS symbol's identity
+            #    and same-book evidence are proven, at the SLA bounds, with
+            #    ITS receipt instant
+            ibk = None
+            if inst is not None:
+                try:
+                    ibk = inst.book(slug, now=float(clock()), sla_s=PMF.SLA_S)
+                except Exception:                               # noqa: BLE001
+                    ibk = None
+            if ibk is not None and (
                     ok_at is None
-                    or float(shared.get("observed_at") or 0) > ok_at):
+                    or float(ibk.get("observed_at") or 0) > ok_at):
                 rec = await SIM.record_book(
-                    conn, slug=slug, read=dict(shared, shared_read=True),
-                    source=SOURCE, read_basis=HARVEST_BASIS)
+                    conn, slug=slug, read=ibk, source=INSTITUTIONAL_SOURCE,
+                    read_basis=INSTITUTIONAL_BASIS)
                 out["harvested"] += 1
-                out["outcomes"][slug] = {"outcome": O_HARVESTED,
-                                         "obs_id": rec.get("obs_id")}
+                out["institutional_books"] += 1
+                out["sources"]["institutional_stream"] += 1
+                out["outcomes"][slug] = {
+                    "outcome": O_INSTITUTIONAL, "obs_id": rec.get("obs_id"),
+                    "receipt_age_s": ibk.get("institutional_receipt_age_s"),
+                    "source_age_s": ibk.get("institutional_source_age_s")}
                 continue
-            # 4b. THE PUSHED BOOK, at the SLA bounds, with its receipt instant
+            # 2. THE PUSHED RETAIL BOOK, at the SLA bounds, with its receipt
             pushed = None
             if books is not None:
                 try:
@@ -337,9 +405,28 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                     read_basis=STREAM_BASIS)
                 out["harvested"] += 1
                 out["stream_books"] += 1
+                out["sources"]["retail_stream"] += 1
                 out["outcomes"][slug] = {
                     "outcome": O_STREAM, "obs_id": rec.get("obs_id"),
                     "receipt_age_s": pushed.get("stream_receipt_age_s")}
+                continue
+            # 3. THE HARVEST: a newer book this process already holds
+            shared = None
+            try:
+                shared = recent(slug, max_age_s=HARVEST_MAX_AGE_S)
+            except Exception:                                   # noqa: BLE001
+                shared = None
+            if shared is not None and isinstance(
+                    shared.get("marketData"), dict) and (
+                    ok_at is None
+                    or float(shared.get("observed_at") or 0) > ok_at):
+                rec = await SIM.record_book(
+                    conn, slug=slug, read=dict(shared, shared_read=True),
+                    source=SOURCE, read_basis=HARVEST_BASIS)
+                out["harvested"] += 1
+                out["sources"]["harvest"] += 1
+                out["outcomes"][slug] = {"outcome": O_HARVESTED,
+                                         "obs_id": rec.get("obs_id")}
                 continue
             # 6. THE BOUNDS, checked before each venue read
             stop, why = None, None
@@ -381,7 +468,8 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                                     + PD.BOOK_READ_RESERVE_S)}
             _HOURLY["reads"].append(float(clock()))
             out["read_attempted"] += 1
-            got = await PD.read_book_within_deadline(rctx, slug)
+            with PMD.lane(PMD.LANE_HELD):
+                got = await PD.read_book_within_deadline(rctx, slug)
             rec = await SIM.record_book(conn, slug=slug, read=got,
                                         source=SOURCE, read_basis=READ_BASIS)
             if rec.get("error"):
@@ -391,6 +479,7 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                                          "obs_id": rec.get("obs_id")}
             else:
                 out["read_ok"] += 1
+                out["sources"]["rest"] += 1
                 out["outcomes"][slug] = {"outcome": O_READ_OK,
                                          "obs_id": rec.get("obs_id")}
     except asyncio.CancelledError:
@@ -399,22 +488,57 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
         out["error"] = "%s: %s" % (type(exc).__name__, str(exc)[:200])
     out["elapsed_s"] = round(time.monotonic() - t0, 3)
     out["venue_reads_last_hour"] = hourly_used(float(clock()))
+    if inst is not None:
+        out["institutional_refusals"] = dict(
+            getattr(inst, "refusals", {}) or {})
+    try:
+        out["market_data"] = PMD.telemetry()
+    except Exception as exc:                                    # noqa: BLE001
+        out["market_data"] = {"error": type(exc).__name__}
     if run_id is not None:
         try:
-            await conn.execute(
-                "UPDATE paper_mark_refresh_runs SET finished_at = "
-                " to_timestamp($2), held_markets=$3, due=$4, not_due=$5, "
-                " harvested=$6, read_attempted=$7, read_ok=$8, "
-                " read_failed=$9, skipped_budget=$10, skipped_terminal=$11,"
-                " outcomes=$12::jsonb, error=$13 WHERE run_id = $1",
-                run_id, at + out["elapsed_s"], out["held_markets"],
-                out["due"], out["not_due"], out["harvested"],
-                out["read_attempted"], out["read_ok"], out["read_failed"],
-                out["skipped_budget"], out["skipped_terminal"],
-                json.dumps(out["outcomes"], default=str), out.get("error"))
+            sql = ("UPDATE paper_mark_refresh_runs SET finished_at = "
+                   " to_timestamp($2), held_markets=$3, due=$4, not_due=$5, "
+                   " harvested=$6, read_attempted=$7, read_ok=$8, "
+                   " read_failed=$9, skipped_budget=$10, skipped_terminal=$11,"
+                   " outcomes=$12::jsonb, error=$13")
+            args = [run_id, at + out["elapsed_s"], out["held_markets"],
+                    out["due"], out["not_due"], out["harvested"],
+                    out["read_attempted"], out["read_ok"], out["read_failed"],
+                    out["skipped_budget"], out["skipped_terminal"],
+                    json.dumps(out["outcomes"], default=str),
+                    out.get("error")]
+            if await _has_306(conn):
+                # MIGRATION 306: the fields the run already computed and the
+                # record dropped, plus the per-source counts and telemetry
+                sql += (", skipped_cooldown=$14, stream_books=$15, "
+                        " institutional_books=$16, cooldown_waited_s=$17, "
+                        " sources=$18::jsonb, market_data=$19::jsonb")
+                args += [out["skipped_cooldown"], out["stream_books"],
+                         out["institutional_books"],
+                         float(out["cooldown_waited_s"]),
+                         json.dumps(out["sources"]),
+                         json.dumps(out["market_data"], default=str)]
+            await conn.execute(sql + " WHERE run_id = $1", *args)
         except Exception as exc:                                # noqa: BLE001
             out["record_error"] = type(exc).__name__
     return out
+
+
+#: Columns migration 306 adds to paper_mark_refresh_runs.
+COLUMNS_306 = ("skipped_cooldown", "stream_books", "institutional_books",
+               "cooldown_waited_s", "sources", "market_data")
+
+
+async def _has_306(conn) -> bool:
+    try:
+        n = await conn.fetchval(
+            "SELECT count(*) FROM information_schema.columns WHERE "
+            " table_name = 'paper_mark_refresh_runs' AND column_name = "
+            " ANY($1::text[])", list(COLUMNS_306))
+        return int(n or 0) == len(COLUMNS_306)
+    except Exception:                                           # noqa: BLE001
+        return False
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -451,7 +575,8 @@ async def run_once(get_pool, *, trigger: str,
         "ran", "refusal", "error", "run_id", "held_markets", "due",
         "read_attempted", "read_ok", "read_failed", "skipped_budget",
         "harvested", "skipped_cooldown", "stream_books", "cooldown_waited_s",
-        "stream", "elapsed_s")}
+        "stream", "elapsed_s", "institutional_books", "institutional",
+        "sources", "institutional_refusals")}
     return res
 
 

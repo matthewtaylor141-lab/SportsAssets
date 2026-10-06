@@ -207,6 +207,58 @@ def book_mark(obs: dict | None, holding_side: str) -> dict:
             "why": None}
 
 
+#: Where a mark's observation came from (pure, by its recorded basis /
+#: source): the P0 market-data telemetry's per-source held-mark counts.
+MARK_FEEDS = ("INSTITUTIONAL_STREAM", "RETAIL_STREAM", "HARVEST", "REST")
+
+
+def mark_source(obs: dict | None) -> str | None:
+    if not obs:
+        return None
+    basis = str(obs.get("read_basis") or "")
+    src = str(obs.get("source") or "")
+    if basis == "HELD_MARK_INSTITUTIONAL_STREAM" or \
+            src.startswith("PAPER_INSTITUTIONAL_STREAM"):
+        return "INSTITUTIONAL_STREAM"
+    if basis == "HELD_MARK_STREAM" or src.startswith("PAPER_MARKET_STREAM"):
+        return "RETAIL_STREAM"
+    if basis == "HELD_MARK_REFRESH_SHARED_READ" or src.endswith(
+            ":SHARED_READ"):
+        return "HARVEST"
+    return "REST"
+
+
+def feed_summary(rows: list, *, now: float, sla_s: float = SLA_S) -> dict:
+    """PURE: per-source counts of the held marks (the newest successful
+    observation of every open position) -- all of them and the freshly
+    manageable ones -- and the OLDEST held-mark age among markable
+    positions (never-read positions counted apart, never as 0)."""
+    by = {f: 0 for f in MARK_FEEDS}
+    fresh = {f: 0 for f in MARK_FEEDS}
+    oldest, never = None, 0
+    for r in rows:
+        m = r.get("mark") or {}
+        f = m.get("feed")
+        if f in by:
+            by[f] += 1
+            if r.get("class") in FRESHLY_MANAGEABLE:
+                fresh[f] += 1
+        if r.get("class") == EXTERNAL_UNAVAILABLE:
+            continue
+        if m.get("observed_at") is None:
+            never += 1
+            continue
+        age = max(0.0, float(now) - float(m["observed_at"]))
+        oldest = age if oldest is None else max(oldest, age)
+    return {"held_marks_by_source": by,
+            "fresh_marks_by_source": fresh,
+            "oldest_held_mark_age_s": None if oldest is None
+            else round(oldest, 3),
+            "never_read_markable": never, "sla_s": sla_s,
+            "oldest_within_sla": None if oldest is None
+            else oldest <= sla_s}
+
+
 def classify(*, now: float, holding_side: str, last_ok: dict | None,
              prev_ok: dict | None = None, last_attempt: dict | None = None,
              run_outcome: dict | None = None, sla_s: float = SLA_S) -> dict:
@@ -234,7 +286,9 @@ def classify(*, now: float, holding_side: str, last_ok: dict | None,
                     "at"), obs_id=(last_ok or {}).get("obs_id"),
                     source=(None if not last_ok else
                             "paper_book_observations:%s" % last_ok["obs_id"]),
-                    market_state=(last_ok or {}).get("market_state")),
+                    market_state=(last_ok or {}).get("market_state"),
+                    read_basis=(last_ok or {}).get("read_basis"),
+                    feed=mark_source(last_ok)),
                 "evidence": ev}
 
     if last_ok and st in TERMINAL_MARKET_STATES:
@@ -440,10 +494,11 @@ async def _has(conn, name: str) -> bool:
 
 OBS_SQL = """
     SELECT s.slug, o.obs_id, o.observed_at, o.bids, o.offers,
-           o.market_state, o.error, o.rn
+           o.market_state, o.error, o.rn, o.read_basis, o.source
       FROM unnest($1::text[]) AS s(slug)
       CROSS JOIN LATERAL (
           SELECT obs_id, observed_at, bids, offers, market_state, error,
+                 read_basis, source,
                  row_number() OVER (ORDER BY observed_at DESC,
                                     obs_id DESC) AS rn
             FROM (SELECT * FROM paper_book_observations
@@ -471,7 +526,8 @@ async def market_evidence(conn, slugs: list, *, account_id: str) -> dict:
     for r in await conn.fetch(OBS_SQL, slugs):
         rec = {"obs_id": r["obs_id"], "at": _ep(r["observed_at"]),
                "bids": r["bids"], "offers": r["offers"],
-               "market_state": r["market_state"]}
+               "market_state": r["market_state"],
+               "read_basis": r["read_basis"], "source": r["source"]}
         out[r["slug"]]["last_ok" if r["rn"] == 1 else "prev_ok"] = rec
     for r in await conn.fetch(ATTEMPT_SQL, slugs):
         out[r["slug"]]["last_attempt"] = {"obs_id": r["obs_id"],
@@ -500,6 +556,9 @@ async def latest_run(conn, account_id: str) -> dict | None:
     d = dict(r)
     d["outcomes"] = _j(d.get("outcomes")) or {}
     d["budget"] = _j(d.get("budget")) or {}
+    for k in ("sources", "market_data"):              # migration 306
+        if k in d:
+            d[k] = _j(d.get(k)) or {}
     for k in ("started_at", "finished_at", "recorded_at"):
         d[k] = _ep(d.get(k))
     return d
@@ -719,14 +778,16 @@ async def read(conn, account_id: str | None = None, *, now: float | None = None,
         r["class"] in FRESHLY_MANAGEABLE, -(r["mark"].get("age_s") or 1e12)))
     shown = rows_sorted if rows_limit is None else rows_sorted[:rows_limit]
     return dict(summ, status="OK", version=VERSION, account_id=acct,
-                as_of=at, rules=RULES,
+                as_of=at, rules=RULES, feeds=feed_summary(rows, now=at),
                 refresh={"latest_run": None if run is None else {
                     k: run.get(k) for k in (
                         "run_id", "trigger", "started_at", "finished_at",
                         "held_markets", "due", "not_due", "harvested",
                         "read_attempted", "read_ok", "read_failed",
                         "skipped_budget", "skipped_terminal", "budget",
-                        "error")},
+                        "error", "skipped_cooldown", "stream_books",
+                        "institutional_books", "cooldown_waited_s",
+                        "sources")},
                     "why": None if run is not None else
                     "NO_HELD_MARK_REFRESH_RUN_RECORDED"},
                 positions=shown, positions_truncated=len(shown) < len(rows))

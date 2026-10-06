@@ -182,15 +182,17 @@ def _default_transport(slug: str, *, deadline_epoch_s=None,
 
     `not_before_epoch` (R30A): a shared read received BEFORE that instant
     does not answer -- the caller needs a book observed at or after it -- so
-    the venue is read instead (paced and gated exactly as any other read)."""
-    from .workers import ext_pinnacle_loop as L
-    shared = L.recent_book(slug, max_age_s=SHARED_BOOK_MAX_AGE_S)
-    if shared is not None and (
-            not_before_epoch is None
-            or float(shared.get("observed_at") or 0.0)
-            >= float(not_before_epoch)):
-        return shared
-    return L._read_book_blocking(slug, deadline_epoch_s=deadline_epoch_s)
+    the venue is read instead (paced and gated exactly as any other read).
+
+    THE ONE OWNER (P0 market-data freshness, 2026-10-06): the shared read,
+    the venue read and everything between them now go through
+    `paper_market_data.read` -- the process's single paper REST owner: the
+    same shared-read cache, concurrent reads of one slug coalesced into one
+    request, held-position reads dispatched ahead of discovery, and
+    discovery deferred while the venue's Retry-After hold is in force."""
+    from . import paper_market_data as PMD
+    return PMD.read(slug, deadline_epoch_s=deadline_epoch_s,
+                    not_before_epoch=not_before_epoch)
 
 
 def _accepts(transport, name: str) -> bool:
