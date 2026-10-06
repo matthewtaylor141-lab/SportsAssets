@@ -709,14 +709,22 @@ HELD_CATALOGUE_SQL = """SELECT identifier, side_norm, event_slug, event_title,
 
 def held_event_sql() -> str:
     """Every catalogue row of the held contract's event, under the census's
-    own base filter, so the held read groups the same structured team
-    records the census groups (pinnapi_census.event_identity)."""
+    own realism filters, so the held read groups the same structured team
+    records the census groups (pinnapi_census.event_identity).
+
+    WITHOUT THE CENSUS'S START WINDOW (closeout, production 2026-10-06): the
+    census population is game_start in (now-6h, now+96h], and the held read
+    used it too -- so a held NFL position on a game more than 96 h out found
+    NO event rows, fell back to its own single row and refused every review
+    STRUCTURED_PARTICIPANTS_NOT_TWO (16 of 127 open groups). The held
+    contract's event is already identified by its slug; its start is still
+    checked against the provider's (START_TOLERANCE_S) in held_quote."""
     from . import pinnapi_census as C
     return ("""SELECT event_slug, team_name, team_league, sports_type,
        extract(epoch FROM game_start)::float8 AS game_start
   FROM us_premap
  WHERE event_slug = $1 AND %s
- LIMIT 200""" % C._base_where())
+ LIMIT 200""" % C._base_where(horizon=False))
 
 
 def held_quote(row: dict, *, event_rows=None, payout_event,
