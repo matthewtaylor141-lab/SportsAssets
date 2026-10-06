@@ -539,7 +539,15 @@ async def test_a_smaller_loss_reduces_size_and_the_runtime_step_is_main_only():
 
 
 @pg
-async def test_stale_management_refuses_new_entries_until_marks_are_fresh():
+async def test_stale_management_refuses_new_entries_until_marks_are_fresh(
+        monkeypatch):
+    # the lifecycle's stale-mark rule alone is under test here; the paper
+    # freshness management-integrity rail (P0 closeout) has its own tests
+    from sportsassets import bettor_paper_freshness as _PMF
+
+    async def _ok(conn, account_id, strategy, *, now):
+        return {"refusal": None, "strategy": strategy}
+    monkeypatch.setattr(_PMF, "strategy_management_integrity", _ok)
     conn, tr = await _tx()
     try:
         a = await H.new_account(conn, "lcm", now=NOW - 7200)

@@ -492,7 +492,7 @@ READERS = {
     # settled at a price (VENUE_PRICE_SQL): a settlement-evidence read by
     # slug for an already-held paper position, never a candidate selection.
     "agents/paper_xavier.py": (
-        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 8),
+        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 9),
     # (206) XAVIER'S MANAGEMENT RECORD: the entry thesis reads the held
     # position's own decision valuation BY ID (its source stamp, its
     # condition's event start) and the value-add reads venue settlement
@@ -511,7 +511,7 @@ READERS = {
     # valuation row for the market's readable name. Display only.
     "bettor_paper_ops.py": ("PAPER_ONLY_DISPLAY_JOIN_FOR_MARKET_NAMES", 1),
     "agents/paper_benchmark.py": (
-        "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 5),
+        "PAPER_ONLY_READS_BOTH_PURPOSES_SIMULATED_ORDERS_NEVER_FUNDED", 6),
     # (185) THE PAPER LEARNING RECORD: the venue-joined OUTCOME of a paper
     # decision's contract, by slug, for the forward evaluation of a paper
     # improvement proposal (outcomes known by the evaluation instant only),
@@ -632,9 +632,12 @@ READERS = {
     # payout event / complement, the held side's intent) only to decide
     # whether a stored recommendation is still CURRENT (a changed primary
     # valuation makes it INVALID). Display / requeue only: never selects a
-    # candidate, sizes or places anything.
+    # candidate, sizes or places anything. (P0 closeout: +4 mentions -- the
+    # valuation's STORE label "external_valuations" beside the new
+    # xavier_probability_snapshots store, so an id is compared only within
+    # its own table; labels, no read.)
     "xavier_freshness.py": (
-        "HELD_POSITION_NEWER_VALUATION_FOR_RECOMMENDATION_VALIDITY_ONLY", 2),
+        "HELD_POSITION_NEWER_VALUATION_FOR_RECOMMENDATION_VALIDITY_ONLY", 6),
     # (220) THE LOST OPPORTUNITY LEDGER (RESEARCH): reads the valuation row
     # a SETTLED Derek REFUSE decision already links to, BY ID ONLY (venue,
     # payout event, settlement comparison, sport family, event key), to
