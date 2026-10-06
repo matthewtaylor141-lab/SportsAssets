@@ -141,8 +141,8 @@ SELECT 'CANONICALLY_OPEN_LEGACY_CLOSED', g.group_id, g.net::text
 -- 2. Economic-duplicate fill suspects (same order, price, qty, instant on
 --    distinct book observations), with the extra quantity they imply.
 SELECT o.role, f.direction, count(*) AS suspect_groups,
-       sum(n - 1) AS extra_fills,
-       round(sum(qty * (n - 1))::numeric, 6) AS extra_qty
+       sum(f.n - 1) AS extra_fills,
+       round(sum(f.qty * (f.n - 1))::numeric, 6) AS extra_qty
   FROM (SELECT order_id, qty, price, filled_at, max(direction) AS direction,
                count(*) AS n
           FROM paper_fills GROUP BY order_id, qty, price, filled_at
