@@ -487,7 +487,13 @@ READERS = {
     # nothing; it writes only agent_work_* records.
     "agents/work_queue.py": (
         "HELD_PAPER_POSITION_EVIDENCE_BY_ID_NEVER_SELECTS_A_CANDIDATE", 4),
-    "agents/paper_runtime.py": ("PAPER_ONLY_BY_ID_OF_THE_ROW_JUST_WRITTEN", 1),
+    # (P1 input-changed) plus NEWER_VALUATION_SQL: whether a NEWER valuation
+    # of the same contract (slug + side, id greater) exists, so a valuation a
+    # newer price replaced is skipped as superseded. Both purposes, because
+    # the paper hook decides both; it selects no candidate, sizes nothing and
+    # places nothing -- it only lets a valuation NOT be decided.
+    "agents/paper_runtime.py": (
+        "PAPER_ONLY_BY_ID_AND_NEWER_VALUATION_EXISTENCE_NEVER_SELECTS", 2),
     # (184) plus the venue's published settlement PRICE for a contract it
     # settled at a price (VENUE_PRICE_SQL): a settlement-evidence read by
     # slug for an already-held paper position, never a candidate selection.

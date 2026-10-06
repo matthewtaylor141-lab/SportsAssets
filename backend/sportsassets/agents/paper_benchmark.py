@@ -440,6 +440,9 @@ EXPERIMENT_ID = "EXT_PINNACLE_DEVIG_V1_SHADOW"
 GAP_NOT_EVIDENCE = "NOT_EVIDENCE_OF_PROFITABILITY"
 GAP_NO_MODEL = "NO_INTERNAL_MODEL_BY_DESIGN"
 
+#: A valuation the in-cycle hook SKIPPED AS SUPERSEDED for this strategy
+#: (paper_runtime.R_SUPERSEDED: a newer price replaced its own and is itself
+#: valued) is not re-decided by the pass backstop either.
 CANDIDATES_SQL = """
     SELECT v.* FROM external_valuations v
      WHERE v.experiment_id = $1
@@ -448,6 +451,10 @@ CANDIDATES_SQL = """
        AND NOT EXISTS (SELECT 1 FROM paper_decisions d
                         WHERE d.session_id = $4 AND d.valuation_id = v.id
                           AND d.strategy = $6)
+       AND NOT EXISTS (SELECT 1 FROM paper_hook_failures h
+                        WHERE h.session_id = $4 AND h.valuation_id = v.id
+                          AND h.strategy = $6
+                          AND h.error = 'PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE')
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """

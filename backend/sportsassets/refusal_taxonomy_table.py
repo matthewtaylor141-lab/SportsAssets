@@ -1492,6 +1492,13 @@ INLINE = {
     "PINNAPI_PRIMARY_FIXTURE_UNPROVED": (S, MAP, "EVENT_IDENTITY"),
     "PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES": (S, DATA, "PROBABILITY"),
     "PINNAPI_PRIMARY_INPUT_CHANGED": (S, FRESH, "FRESHNESS"),
+    # (P1) a paper valuation whose money-line price a strictly newer, fresh
+    # price of the same market / record / fixture replaced, while that newer
+    # price is itself being valued: skipped by the paper hook (a DEFERRED
+    # hook row, never a paper decision), so it is no first loss; ours
+    # (sequencing), never EXTERNAL
+    "PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE": (
+        S, FRESH, "FRESHNESS"),
     "PINNAPI_PRIMARY_NOT_FULL_GAME_H2H": (S, MAP, "MARKET_FAMILY"),
     "PINNAPI_PRIMARY_NO_EXACT_FIXTURE": (S, MAP, "EVENT_IDENTITY"),
     "PINNAPI_PRIMARY_PHASE_UNPROVED": (S, SET, "SETTLEMENT_COMPATIBILITY"),

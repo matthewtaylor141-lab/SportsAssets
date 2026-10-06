@@ -1203,3 +1203,4 @@ tests/test_p1_wnba_league_team_table.py
 tests/test_p1_held_mark_institutional_bound.py
 tests/test_p1_pmx_same_instant_and_probe_pacing.py
 tests/test_capital_readiness_lab.py
+tests/test_p1_pinnapi_input_changed.py
