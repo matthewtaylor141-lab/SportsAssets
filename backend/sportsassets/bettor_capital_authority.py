@@ -99,7 +99,21 @@ exact refusal; `blocker_census` ranks them by unique opportunity
 ── D. THE ACCEPTANCE READ ────────────────────────────────────────────────
 
 `acceptance_view` (GET /api/command/paper/capital-authority). Actual
-profitability stays DEFERRED_FORWARD_EVIDENCE.
+profitability stays DEFERRED_FORWARD_EVIDENCE. Unrealized PAPER P&L and
+open exposure are NEVER NULL WHEN COMPUTABLE (`complete_marks`: the ledger
+mark, else the known settlement outcome, else the last executable exit,
+else a zero-exit floor, each labelled), and the $500,000 management epoch
+is reconciled to the cent (`management_reconciliation`).
+
+── E. THE PROFITABILITY BIND (migration 309) ─────────────────────────────
+
+`ledger_entry_authority` and `authority` carry bettor_paper_profitability_bind:
+the calibrated all-in executable EV, churn control and the capacity /
+capital-hour / correlation size (refuse or shrink only) run before the
+forward check; the ABSOLUTE-POSITIVE CHAMPION rule (forward CI lower bound
+> 0) and the REGIME AUTHORITY run after it and, like forward UNKNOWN /
+NEGATIVE, route an otherwise eligible decision to a shadow counterfactual
+(NO_CAPITAL_AUTHORITY).
 """
 from __future__ import annotations
 
@@ -110,6 +124,7 @@ import time
 from typing import Any
 
 from . import bettor_capital_eligibility as CE
+from . import bettor_paper_profitability_bind as PBIND
 from . import bettor_strategy_lifecycle as LC
 
 VERSION = "PAPER_CAPITAL_AUTHORITY_V1"
@@ -142,7 +157,10 @@ FORWARD_REFUSAL = {UNKNOWN: R_FORWARD_UNKNOWN, NEGATIVE: R_FORWARD_NEGATIVE}
 #: shadow counterfactual when everything else passed
 NO_CAPITAL_AUTHORITY = (tuple(LC.ENTRY_STATE_REFUSAL.values())
                         + (R_RULE_FIRING_AT_ENTRY, R_FORWARD_UNKNOWN,
-                           R_FORWARD_NEGATIVE))
+                           R_FORWARD_NEGATIVE)
+                        # the profitability bind's regime authority and
+                        # absolute-positive champion rule (migration 309)
+                        + PBIND.AUTHORITY_REFUSALS)
 
 SRC_DECISION = "DECISION_CAPITAL_GATE"
 SRC_LEDGER = "LEDGER_CAPITAL_AUTHORITY"
@@ -313,7 +331,13 @@ def capital_evidence(ce: dict | None, *, p=None, limit=None,
         "adverse_selection_basis": ce.get("adverse_selection_basis"),
         "total_executable_ev_usd": _num(ce.get("total_executable_ev_usd")),
         "levels": list(levels or [])[:20],
-        "book_obs_id": book_obs_id, "book_observed_at": book_observed_at}
+        "book_obs_id": book_obs_id, "book_observed_at": book_observed_at,
+        # the profitability bind's restatement (migration 309): the bound
+        # figures above, the policy's own walk kept here so the ledger
+        # re-derives the SAME bound size (never a second shrink)
+        **({"pre_bind": ce["pre_bind"],
+            "profitability_bind": ce.get("profitability_bind")}
+           if isinstance(ce.get("pre_bind"), dict) else {})}
 
 
 def missing_ev_evidence_refusal(o: dict) -> dict | None:
@@ -430,9 +454,13 @@ async def stopping_rules_now(conn, account_id: str, strategy: str, *,
 
 
 async def authority(conn, *, account_id: str, strategy: str, now: float,
-                    positions: list | None = None) -> dict:
-    """Rules firing NOW + forward economics, for one strategy. {refusal or
-    None, rules, forward}. Fail-closed."""
+                    positions: list | None = None,
+                    context: dict | None = None) -> dict:
+    """Rules firing NOW + forward economics, for one strategy, then (the
+    profitability bind, migration 309) the ABSOLUTE-POSITIVE CHAMPION rule
+    and -- with `context` (the entry's descriptor: sport / family /
+    regime) -- the REGIME AUTHORITY. {refusal or None, rules, forward,
+    bind_authority}. Fail-closed."""
     try:
         pos = positions if positions is not None else await _positions(
             conn, account_id)
@@ -451,31 +479,84 @@ async def authority(conn, *, account_id: str, strategy: str, now: float,
     if not fwd.get("ok"):
         return {"refusal": R_FORWARD_UNREADABLE, "rules": rules,
                 "forward": fwd, "state": rules.get("state")}
-    return {"refusal": fwd.get("refusal"), "rules": rules, "forward": fwd,
-            "state": rules.get("state")}
+    if fwd.get("refusal"):
+        return {"refusal": fwd.get("refusal"), "rules": rules,
+                "forward": fwd, "state": rules.get("state")}
+    try:
+        extra = await PBIND.authority_extra(
+            conn, account_id=account_id, strategy=strategy, forward=fwd,
+            context=context, now=now, positions=pos)
+    except Exception as exc:                                    # noqa: BLE001
+        extra = {"refusal": PBIND.R_REGIME_UNREADABLE,
+                 "why": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+    return {"refusal": extra.get("refusal"), "rules": rules, "forward": fwd,
+            "state": rules.get("state"), "bind_authority": extra}
 
 
-async def ledger_entry_authority(conn, o: dict, *, at: float) -> dict:
+async def ledger_entry_authority(conn, o: dict, *, at: float,
+                                 fee_fn=None) -> dict:
     """UNDER THE ACCOUNT LOCK (submit_order), for one ENTRY BUY that passed
-    the lifecycle gate: executable-EV evidence > 0, no stopping rule firing
-    now, forward economics POSITIVE. {refusal: None, summary} or the
-    refusal. Fail-closed."""
+    the lifecycle gate: executable-EV evidence > 0; THE PROFITABILITY BIND
+    (bettor_paper_profitability_bind.entry_bind: calibrated probability, all-in
+    executable EV with the learned execution costs and residual haircut,
+    churn control, capacity / capital-hour / correlation sizing -- refuse or
+    shrink only); no stopping rule firing now; forward economics POSITIVE;
+    the absolute-positive champion rule; the regime authority. {refusal:
+    None, qty, summary} or the refusal. Every evaluation is recorded
+    (migration 309). Fail-closed."""
     chk = ev_refusal(o)
     if chk:
         return chk
+    ev = o.get("capital_evidence")
+    b = await PBIND.entry_bind(
+        conn, account_id=o["account_id"], strategy=o["strategy"],
+        evidence=ev, qty_in=_num(o.get("qty")),
+        slug=o.get("us_market_slug"), side=o.get("holding_side"),
+        fixture=o.get("fixture"), order_type=o.get("order_type"), at=at,
+        fee_fn=fee_fn, qty_cap=_num(o.get("qty")))
+    bsum = PBIND.summary(b)
+    bev = PBIND.bound_evidence(ev, b)
+
+    async def _record(refusal):
+        await PBIND.record_evaluation(
+            conn, account_id=o["account_id"], strategy=o["strategy"],
+            stage="LEDGER", b=b, refusal=refusal,
+            decision_id=o.get("decision_id"),
+            order_key=o.get("idempotency_key"),
+            slug=o.get("us_market_slug"), side=o.get("holding_side"),
+            fixture=o.get("fixture"), at=at)
+
+    if b.get("refusal"):
+        await _record(b["refusal"])
+        return {"refusal": b["refusal"], "profitability_bind": bsum,
+                "why": b.get("why"), "churn": b.get("churn"),
+                "capital_authority": {"version": VERSION,
+                                      "profitability_bind": bsum}}
     got = await authority(conn, account_id=o["account_id"],
-                          strategy=o["strategy"], now=at)
+                          strategy=o["strategy"], now=at,
+                          context=b.get("descriptor"))
     summary = {"version": VERSION,
                "forward_verdict": (got.get("forward") or {}).get("verdict"),
                "forward_observations": (got.get("forward") or {}).get(
                    "observations"),
                "rules_firing": [r["rule_id"] for r in (
                    got.get("rules") or {}).get("firing") or []],
-               "total_executable_ev_usd": (o.get("capital_evidence") or {}
-                                           ).get("total_executable_ev_usd")}
+               "champion": ((got.get("bind_authority") or {}).get(
+                   "champion") or {}).get("champion"),
+               "regime": (b.get("descriptor") or {}).get("regime"),
+               "regime_verdict": (((got.get("bind_authority") or {}).get(
+                   "regime") or {}).get("forward") or {}).get("verdict"),
+               "profitability_bind": bsum,
+               "total_executable_ev_usd": (
+                   (bev or {}).get("total_executable_ev_usd")
+                   if b.get("all_in") else (ev or {}).get(
+                       "total_executable_ev_usd"))}
+    await _record(got.get("refusal"))
     if got.get("refusal"):
-        return dict(got, capital_authority=summary)
-    return {"refusal": None, "capital_authority": summary}
+        return dict(got, capital_authority=summary, bound_evidence=bev,
+                    profitability_bind=bsum)
+    return {"refusal": None, "capital_authority": summary,
+            "qty": b.get("qty"), "profitability_bind": bsum}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -634,6 +715,25 @@ async def after_ledger_refusal(conn, o: dict, got: dict, *, at: float
     strategy = o.get("strategy") or "DEREK_ENTRY_POLICY_V2"
     ev = o.get("capital_evidence") if isinstance(
         o.get("capital_evidence"), dict) else {}
+    if isinstance(got.get("bound_evidence"), dict):
+        # the order's evidence restated at the profitability bind's size
+        ev = got["bound_evidence"]
+    elif refusal in NO_CAPITAL_AUTHORITY and ev and \
+            got.get("profitability_bind") is None:
+        # a refusal before the bind ran (the lifecycle gate): the shadow is
+        # evaluated under the same bind, and none is recorded when the
+        # bind's economics refuse the decision itself
+        b = await PBIND.entry_bind(
+            conn, account_id=o["account_id"], strategy=strategy, evidence=ev,
+            qty_in=_num(o.get("qty")), slug=o.get("us_market_slug"),
+            side=o.get("holding_side"), fixture=o.get("fixture"),
+            order_type=o.get("order_type"), at=at)
+        out["profitability_bind"] = PBIND.summary(b)
+        if b.get("refusal"):
+            ev = dict(ev, capital_eligible=False,
+                      refusals=[b["refusal"]])
+        else:
+            ev = PBIND.bound_evidence(ev, b)
     label = o.get("label") if isinstance(o.get("label"), dict) else {}
     out["census_id"] = await record_refusal(
         conn, account_id=o["account_id"], strategy=strategy, stage="LEDGER",
@@ -644,7 +744,8 @@ async def after_ledger_refusal(conn, o: dict, got: dict, *, at: float
         qty=o.get("qty"), limit_price=o.get("limit_price"), at=at,
         detail={k: v for k, v in got.items()
                 if k in ("why", "rules", "forward", "lifecycle", "cap",
-                         "capital_authority", "state")})
+                         "capital_authority", "state", "profitability_bind",
+                         "bind_authority", "churn")})
     if refusal in NO_CAPITAL_AUTHORITY:
         decided = _num(o.get("decided_at")) or at
         elig = _num(o.get("eligible_at")) or decided
@@ -1041,6 +1142,129 @@ async def entry_allowed(conn, *, account_id: str, strategy: str,
                                  "costs > 0 on a fresh executable book")}
 
 
+MB_LEDGER = "LEDGER_MARK_LATEST_BOOK"
+MB_SETTLEMENT = "AUTHORITATIVE_SETTLEMENT_OUTCOME_PENDING_LEDGER"
+MB_LAST_EXIT = "LAST_EXECUTABLE_EXIT_PRICE_OBSERVED"
+MB_ZERO_FLOOR = "CONSERVATIVE_ZERO_EXIT_VALUE_FLOOR"
+LAST_EXIT_SCAN = 50
+
+
+async def complete_marks(conn, account_id: str, *, now: float,
+                         positions: list | None = None) -> dict:
+    """EVERY OPEN PAPER POSITION MARKED, NEVER NULL WHEN COMPUTABLE
+    (acceptance read only -- the ledger's own `balances` and every risk
+    control keep their marks). Per position, the first of:
+      1 the ledger's mark (the latest error-free book's exit price);
+      2 the AUTHORITATIVE settlement outcome already known for the contract
+        but not yet booked (xavier_management.settlement_outcome: WON 1,
+        LOST 0, the venue's published price; a VOID at the entry price);
+      3 the newest error-free observation (of the last LAST_EXIT_SCAN) that
+        published an executable exit price for the held side, with its age;
+      4 the conservative floor: zero exit value (the whole basis at risk).
+    Returns {marks: {slug: {side: mark}} for bettor_paper_ledger.balances,
+    basis: {position_key: basis}, counts}."""
+    from . import bettor_paper_freshness as PMF
+    from . import bettor_paper_ledger as L
+    from .agents import xavier_management as XM
+    pos = positions if positions is not None else await L.positions(
+        conn, account_id)
+    open_pos = [p for p in pos if (_num(p.get("open_qty")) or 0) > 1e-9]
+    marks = await L.latest_marks(conn, [p["us_market_slug"]
+                                        for p in open_pos], now=now)
+    basis, counts = {}, {MB_LEDGER: 0, MB_SETTLEMENT: 0, MB_LAST_EXIT: 0,
+                         MB_ZERO_FLOOR: 0}
+    for p in open_pos:
+        slug, side = p["us_market_slug"], p["holding_side"]
+        m = (marks.get(slug) or {}).get(side) or {}
+        if m.get("price") is not None:
+            basis[p["position_key"]] = MB_LEDGER
+            counts[MB_LEDGER] += 1
+            continue
+        mark = None
+        st = await XM.settlement_outcome(conn, slug, side)
+        if st and st.get("outcome") is not None:
+            per = _num(st.get("payout_per_contract"))
+            if per is None and st.get("refund"):
+                bq = _num(p.get("bought_qty")) or 0.0
+                per = (((_num(p.get("acquisition_cost_usd")) or 0.0)
+                        - (_num(p.get("buy_fees_usd")) or 0.0)) / bq
+                       if bq > 0 else None)
+            if per is not None:
+                mark = {"status": "OK", "price": per,
+                        "source": "settlement:%s" % st.get("outcome"),
+                        "method": MB_SETTLEMENT, "stale": False}
+                basis[p["position_key"]] = MB_SETTLEMENT
+        if mark is None:
+            for r in await conn.fetch(
+                    "SELECT obs_id, observed_at, bids, offers "
+                    "  FROM paper_book_observations WHERE us_market_slug=$1 "
+                    "   AND error IS NULL ORDER BY observed_at DESC, "
+                    "   obs_id DESC LIMIT $2", slug, LAST_EXIT_SCAN):
+                bm = PMF.book_mark(dict(r), side)
+                if bm.get("price") is not None:
+                    at = _epoch(r["observed_at"])
+                    mark = {"status": "STALE", "price": bm["price"],
+                            "source": "paper_book_observations:%s"
+                                      % r["obs_id"],
+                            "observed_at": at, "age_s": round(now - at, 3),
+                            "stale": True, "method": MB_LAST_EXIT}
+                    basis[p["position_key"]] = MB_LAST_EXIT
+                    break
+        if mark is None:
+            mark = {"status": "FLOOR", "price": 0.0, "stale": True,
+                    "source": None, "method": MB_ZERO_FLOOR,
+                    "why": m.get("why") or "NO_EXECUTABLE_EXIT_EVER_OBSERVED"}
+            basis[p["position_key"]] = MB_ZERO_FLOOR
+        counts[basis[p["position_key"]]] += 1
+        marks.setdefault(slug, {})[side] = mark
+    return {"marks": marks, "basis": basis, "counts": counts,
+            "rule": ("ledger mark, else the known settlement outcome, else "
+                     "the last executable exit observed, else zero exit "
+                     "value: never null")}
+
+
+async def management_reconciliation(conn, account_id: str, *, bal: dict,
+                                    now: float) -> dict:
+    """THE $500,000 MANAGEMENT EPOCH, reconciled to the cent
+    (bettor_paper_epoch.read on the completely marked balances): opening
+    equity 500,000.00 at 2026-10-05 00:00 America/New_York, realized,
+    unrealized, equity, and the residual EQUITY - (OPENING + REALIZED +
+    UNREALIZED), which must be 0.00. No management field is null."""
+    from . import bettor_paper_epoch as EP
+    async with conn.transaction():
+        m = await EP.read(conn, account_id, bal=bal, now=now)
+    if m.get("status") == "NOT_STARTED":
+        return {"status": "NOT_STARTED", "epoch_id": EP.EPOCH_ID,
+                "epoch_start": EP.EPOCH_START_LOCAL}
+    gap = _num((m.get("identity") or {}).get("gap_usd"))
+    out = {"epoch_id": EP.EPOCH_ID, "epoch_start": EP.EPOCH_START_LOCAL,
+           "epoch_start_at": EP.EPOCH_START,
+           "opening_equity_usd": float(EP.OPENING_EQUITY_USD),
+           "realized_pnl_usd": m.get("realized_pnl_usd"),
+           "unrealized_pnl_usd": m.get("unrealized_pnl_usd"),
+           "total_pnl_usd": m.get("total_pnl_usd"),
+           "equity_usd": m.get("equity_usd"),
+           "cash_usd": m.get("cash_usd"),
+           "reserved_usd": m.get("reserved_usd"),
+           "open_exposure_basis_usd": (m.get("exposure") or {}).get(
+               "basis_usd"),
+           "residual_usd": None if gap is None else round(gap, 2),
+           "identity": "EQUITY = OPENING_EQUITY + REALIZED + UNREALIZED",
+           "ledger_reconciliation_gap_usd": (m.get(
+               "ledger_reconciliation") or {}).get("gap_usd"),
+           "carried_unverified_positions": m.get("carried_unverified"),
+           "unmarked_open_positions": (m.get("exposure") or {}).get(
+               "unmarked"),
+           "management_status": m.get("status")}
+    out["null_fields"] = sorted(k for k, v in out.items() if v is None)
+    out["reconciles_to_the_cent"] = (
+        gap is not None and abs(gap) < 0.005 and not out["null_fields"]
+        and m.get("status") == "OK")
+    out["status"] = ("OK" if out["reconciles_to_the_cent"]
+                     else "DOES_NOT_RECONCILE")
+    return out
+
+
 async def acceptance_view(conn, *, account_id: str, now: float,
                           cutover: float | None = None) -> dict:
     """THE ACCEPTANCE READ. Raises on a failed read (the route turns that
@@ -1052,8 +1276,15 @@ async def acceptance_view(conn, *, account_id: str, now: float,
     co = ({"at": float(cutover), "basis": "REQUESTED"} if cutover is not None
           else await cutover_at(conn))
     since = co["at"] if co["at"] is not None else now
-    bal = await L.balances(conn, account_id, now=now)
     allpos = await L.positions(conn, account_id, include_closed=True)
+    # EVERY OPEN POSITION MARKED (never null when computable): the
+    # acceptance read's balances use the completed marks
+    cm = await complete_marks(conn, account_id, now=now, positions=allpos)
+    bal = await L.balances(conn, account_id, now=now, marks=cm["marks"])
+    management = await management_reconciliation(conn, account_id, bal=bal,
+                                                 now=now)
+    has_bind = await PBIND.schema(conn)
+    models = await PBIND.latest_models(conn, account_id) if has_bind else {}
     names = set(LC.KNOWN_STRATEGIES) | {
         LC.strategy_of(p, L.DEFAULT_STRATEGY) for p in allpos}
     events = [dict(r) for r in await conn.fetch(
@@ -1079,11 +1310,13 @@ async def acceptance_view(conn, *, account_id: str, now: float,
     unreal_by: dict = {}
     for v in bal.get("open_positions") or []:
         s = LC.strategy_of(v, L.DEFAULT_STRATEGY)
-        u = unreal_by.setdefault(s, {"usd": 0.0, "unmarked": 0})
+        u = unreal_by.setdefault(s, {"usd": 0.0, "unmarked": 0, "basis": {}})
         if v.get("unrealized_pnl_usd") is None:
             u["unmarked"] += 1
         else:
             u["usd"] += float(v["unrealized_pnl_usd"])
+        b = cm["basis"].get(v["position_key"]) or MB_LEDGER
+        u["basis"][b] = u["basis"].get(b, 0) + 1
 
     def state_at(s, t):
         st = LC.INITIAL_STATE
@@ -1121,10 +1354,14 @@ async def acceptance_view(conn, *, account_id: str, now: float,
         realized = sum((_num(p.get("realized_pnl_usd")) or 0.0) for p in pos)
         open_cost = sum((_num(p.get("cost_basis_usd")) or 0.0) for p in pos
                         if (_num(p.get("open_qty")) or 0) > 1e-9)
-        u = unreal_by.get(s) or {"usd": 0.0, "unmarked": 0}
+        u = unreal_by.get(s) or {"usd": 0.0, "unmarked": 0, "basis": {}}
         fwd_all = forward_verdict(
             forward_paper_pnls(pos, s, default_strategy=L.DEFAULT_STRATEGY),
             await shadow_pnls(conn, account_id, s))
+        bind_state = (await PBIND.strategy_state(
+            conn, account_id=account_id, strategy=s, now=now, since=since,
+            forward=fwd_all, positions=allpos, models=models)
+            if has_bind else {"status": "MIGRATION_309_NOT_APPLIED"})
         sh_fwd = shadow_forward_metrics(shadows_all.get(s))
         rows[s] = {
             "strategy": s, "lifecycle_state": cur.get("state"),
@@ -1156,8 +1393,12 @@ async def acceptance_view(conn, *, account_id: str, now: float,
             "unrealized_paper_pnl_usd": (round(u["usd"], 6)
                                          if not u["unmarked"] else None),
             "unrealized_paper_pnl_marked_only_usd": round(u["usd"], 6),
+            "unrealized_mark_basis": u["basis"],
             "unmarked_open_positions": u["unmarked"],
             "open_exposure_usd": round(open_cost + reserved.get(s, 0.0), 6),
+            "open_cost_basis_usd": round(open_cost, 6),
+            "reserved_open_entry_usd": round(reserved.get(s, 0.0), 6),
+            "profitability_bind": bind_state,
             "settled_paper_forward_since_cutover": {
                 "closed_positions": len(closed_since),
                 "realized_pnl_usd": (round(sum(
@@ -1183,9 +1424,32 @@ async def acceptance_view(conn, *, account_id: str, now: float,
             **totals},
         "paper": {"realized_pnl_usd": bal.get("realized_pnl_usd"),
                   "unrealized_pnl_usd": bal.get("unrealized_pnl_usd"),
+                  "unrealized_mark_basis": cm["counts"],
+                  "mark_rule": cm["rule"],
+                  "open_exposure_usd": round(
+                      sum((_num(v.get("cost_basis_usd")) or 0.0)
+                          for v in bal.get("open_positions") or [])
+                      + sum(reserved.values()), 6),
+                  "open_position_value_usd": bal.get(
+                      "open_position_value_usd"),
+                  "equity_usd": bal.get("total_equity_usd"),
                   "pnl_class": "PAPER (LIVE MARKET DATA / SIMULATED "
                                "EXECUTION)",
-                  "includes_shadow": False},
+                  "includes_shadow": False,
+                  "management": management},
+        "profitability_bind": {
+            "version": PBIND.VERSION, "schema": has_bind,
+            "models": {k: {"model_id": v.get("model_id"),
+                           "fitted_at": v.get("fitted_at"),
+                           "observations": v.get("observations")}
+                       for k, v in models.items()},
+            "calibration_cells": {
+                k: {kk: c.get(kk) for kk in ("n", "status", "mean_p",
+                                              "observed", "brier")}
+                for k, c in ((models.get("CALIBRATION") or {}).get(
+                    "cells") or {}).items()},
+            "rules": {k: v for k, v in PBIND.describe().items()
+                      if k not in ("at",)}},
         "blocker_census": census,
         "actual_profitability": PROFITABILITY,
         "authority": AUTHORITY}

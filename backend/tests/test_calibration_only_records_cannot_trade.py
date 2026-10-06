@@ -706,6 +706,12 @@ READERS = {
     # decision was already taken on that row; nothing is selected.
     "canonical_components.py": (
         "BY_ID_OF_THE_DECISIONS_OWN_VALUATION_RULES_TEXT_ONLY", 1),
+    # (309) THE PROFITABILITY BIND's calibration fit joins the AUTHORITATIVE
+    # settlement outcome (outcome_basis IS NOT NULL, paper_xavier.outcome_for)
+    # onto its own priced decisions / shadows by slug: settled outcomes only,
+    # no candidate is selected from the table, nothing is sized from a row.
+    "bettor_paper_profitability_bind.py": (
+        "SETTLED_OUTCOMES_FOR_CALIBRATION_NEVER_CANDIDATES", 1),
 }
 
 

@@ -1190,3 +1190,4 @@ tests/test_command_position_closed_and_ipad.py
 # PMUS owner refuses Kalshi tickers; no Kalshi module shares PMUS pacing /
 # gate / cache / freshness.
 tests/test_p1_pmx_institutional.py
+tests/test_profitability_bind.py

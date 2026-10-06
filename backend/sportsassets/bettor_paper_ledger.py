@@ -567,12 +567,21 @@ async def _submit_order(conn, order: dict, *, caps: dict | None = None,
             # > 0, no predeclared stopping rule firing NOW (re-evaluated on
             # the positions, not the stored state), and forward economics
             # POSITIVE. Refuse-only; unreadable = refused.
+            # THE PROFITABILITY BIND (migration 309) runs inside it: the
+            # calibrated all-in EV, churn control and the capacity /
+            # capital-hour / correlation size -- it can only lower the
+            # quantity (below), never raise it.
             from . import bettor_capital_authority as CA
-            authority = await CA.ledger_entry_authority(conn, o, at=at)
+            authority = await CA.ledger_entry_authority(conn, o, at=at,
+                                                        fee_fn=fee_fn)
             if authority.get("refusal"):
                 return dict(authority, ok=False, under_lock=True,
                             lifecycle=lifecycle,
                             available_usd=f(cs["available"]))
+            bq = authority.get("qty")
+            if bq is not None and D(bq) < qty:
+                qty = D(bq)
+                o["qty"] = f(qty)
         if o["direction"] == "BUY":
             reserve = reservation_for(qty, limit, at=at, fee_fn=fee_fn)
             chk = await _check_caps(conn, o, reserve=reserve, cs=cs,

@@ -517,3 +517,43 @@ def _management_rail_legacy(request, monkeypatch):
                 "seeded": "TEST_SUITE_LEGACY_RAIL"}
     monkeypatch.setattr(PMF, "MAX_STALE_MANAGEMENT_RATE", 0.20)
     monkeypatch.setattr(PMF, "strategy_management_integrity", _not_judged)
+
+
+@pytest.fixture(autouse=True)
+def _profitability_bind_seeded(request, monkeypatch):
+    """THE PROFITABILITY BIND (migration 309): the learned-state gates seeded
+    neutral for every proof written before the bind existed.
+
+    Same stance as the capital authority above. The bind fails CLOSED: with
+    no fitted calibration for a contract's sport x family x regime the
+    probability used is the market price (CASH), an unknown regime refuses,
+    the champion rule needs a positive CI lower bound, and churn control
+    refuses a re-entry within its cooldown -- right for the paper book and
+    useless here: older proofs submit bare contracts with no catalogue row
+    and no settled history, so every one would refuse at this gate and pass
+    while proving nothing about the cash, cap, lifecycle and simulator logic
+    they exist to check. Seeded here: `entry_bind` passes the quantity
+    through unchanged, `authority_extra` (champion / regime) refuses
+    nothing, and Xavier's HOLD probability is the raw measure. A module that
+    declares `PROFITABILITY_BIND_ENFORCED = True` (tests/test_profitability_
+    bind.py) runs the production functions."""
+    if getattr(request.module, "PROFITABILITY_BIND_ENFORCED", False):
+        return
+    from sportsassets import bettor_paper_profitability_bind as PBIND
+
+    async def _entry(conn, *, qty_in=None, qty_cap=None, **kw):
+        qs = [x for x in (qty_in, qty_cap) if x is not None]
+        return {"refusal": None, "qty": min(qs) if qs else None,
+                "qty_in": qty_in, "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH",
+                "descriptor": {"regime": "SEEDED"}}
+
+    async def _extra(conn, **kw):
+        return {"refusal": None, "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
+
+    async def _mgmt(conn, *, p_raw=None, **kw):
+        return {"p_raw": p_raw, "p_hold": p_raw, "haircut_per_contract": 0.0,
+                "status": "TEST_SUITE_SEEDED_PASSTHROUGH"}
+
+    monkeypatch.setattr(PBIND, "entry_bind", _entry)
+    monkeypatch.setattr(PBIND, "authority_extra", _extra)
+    monkeypatch.setattr(PBIND, "management_economics", _mgmt)

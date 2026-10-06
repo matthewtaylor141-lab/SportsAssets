@@ -100,6 +100,12 @@ DECISION_LOGIC_FILES = (
     # firing at the entry, or with forward economics UNKNOWN / NEGATIVE --
     # it changes which entries are placed (refuse-only)
     "bettor_capital_authority.py",
+    # (309) THE PROFITABILITY BIND: calibrated all-in EV, churn control,
+    # capacity / capital-hour / correlation size (refuse or shrink only),
+    # the regime authority and the absolute-positive champion rule at the
+    # decision and the ledger; Xavier's HOLD value -- it changes which
+    # entries are placed, at what size, and how a hold is valued
+    "bettor_paper_profitability_bind.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",
