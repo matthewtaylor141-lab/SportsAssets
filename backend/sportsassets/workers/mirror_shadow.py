@@ -1251,7 +1251,10 @@ async def account_positions_walk(pmus, basis_out: dict | None = None
     pages = [0]
 
     def _walk() -> dict[str, float]:
-        client = pmus._get_client()
+        # the READ client: the configured secret decoded in the form it
+        # was given (pmus._get_read_client; "The seed must be exactly 32
+        # bytes long" on every walk, 2026-10-06)
+        client = getattr(pmus, "_get_read_client", pmus._get_client)()
         out: dict[str, float] = {}
         basis: dict[str, dict] = {}
         cursor = ""
