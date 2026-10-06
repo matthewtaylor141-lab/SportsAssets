@@ -323,6 +323,10 @@ def _market_data_telemetry(fresh: dict) -> dict:
             "institutional": ((tel.get("streams") or {}).get(
                 "institutional") or {}).get("updates")},
         "streams": tel.get("streams"),
+        # PER AUTH LANE (AUTHENTICATED / PUBLIC_GATEWAY): requests / min,
+        # 2xx, 429, the last Retry-After seen and the current hold -- each
+        # lane's own; a 429 on one never holds the other
+        "auth_lanes": tel.get("auth_lanes"),
         "rest_fallbacks": last.get("read_attempted"),
         "last_refresh_sources": last.get("sources"),
         "held_marks_by_source": feeds.get("held_marks_by_source"),

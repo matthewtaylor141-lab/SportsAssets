@@ -185,7 +185,8 @@ def book_mark(obs: dict | None, holding_side: str) -> dict:
 
 #: Where a mark's observation came from (pure, by its recorded basis /
 #: source): the P0 market-data telemetry's per-source held-mark counts.
-MARK_FEEDS = ("INSTITUTIONAL_STREAM", "RETAIL_STREAM", "HARVEST", "REST")
+MARK_FEEDS = ("INSTITUTIONAL_STREAM", "RETAIL_STREAM", "HARVEST", "REST",
+              "PUBLIC_GATEWAY")
 
 
 def mark_source(obs: dict | None) -> str | None:
@@ -198,6 +199,9 @@ def mark_source(obs: dict | None) -> str | None:
         return "INSTITUTIONAL_STREAM"
     if basis == "HELD_MARK_STREAM" or src.startswith("PAPER_MARKET_STREAM"):
         return "RETAIL_STREAM"
+    if basis == "HELD_MARK_PUBLIC_GATEWAY" or src.startswith(
+            "PAPER_PUBLIC_GATEWAY"):
+        return "PUBLIC_GATEWAY"
     if basis == "HELD_MARK_REFRESH_SHARED_READ" or src.endswith(
             ":SHARED_READ"):
         return "HARVEST"

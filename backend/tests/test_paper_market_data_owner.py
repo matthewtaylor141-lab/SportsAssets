@@ -630,7 +630,7 @@ async def test_the_refresh_consults_institutional_then_stream_then_harvest_then_
             assert v.calls == [s_rest]          # REST only where no stream
             assert got["sources"] == {"institutional_stream": 1,
                                       "retail_stream": 2, "harvest": 1,
-                                      "rest": 1}
+                                      "rest": 1, "public_gateway": 0}
             assert got["institutional_books"] == 1
             assert inst.refusals.get(PMD.I_SAME_BOOK) == 4
             row = await conn.fetchrow(

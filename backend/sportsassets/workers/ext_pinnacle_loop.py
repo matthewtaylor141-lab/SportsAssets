@@ -11853,7 +11853,7 @@ def _paper_market_data_digest() -> dict:
         return {k: t.get(k) for k in (
             "version", "rest_requests_per_min", "responses_2xx_per_min",
             "responses_429_per_min", "totals", "queue_depth",
-            "held_registered", "venue_hold", "streams")}
+            "held_registered", "venue_hold", "streams", "auth_lanes")}
     except Exception as exc:                                   # noqa: BLE001
         return {"unavailable": type(exc).__name__}
 
