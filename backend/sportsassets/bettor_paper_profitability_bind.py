@@ -85,6 +85,37 @@ THE ITEMS:
    strategy x sport x family; a negative mean residual becomes a
    per-contract EV haircut (a positive one is never credited).
 
+THE PROFITABILITY STACK (migration 311; each a test in tests/test_
+profitability_stack_binding.py), bound in the same `entry_bind` /
+`bind_economics` chain (refuse or shrink only):
+
+ 1b PRICE REGION. The calibration also keeps sport x family x regime x
+   MARKET-PRICE REGION cells (PRICE_REGIONS); a region cell's bin bias is
+   shrunk toward its parent cell by n / (n + K_PRICE_REGION).
+ 5 / 8 SPREAD AND MANAGEMENT / EXIT COST. The expected exit cost per contract
+   = exit rate (learned per strategy, MANAGEMENT model; prior
+   EXIT_RATE_PRIOR) x max(half the observed spread + the exit fee, the
+   learned exit cost), charged on every contract (DEFAULT_SPREAD when no
+   book is readable).
+ 9 SETTLEMENT DIFFERENCE. A contract admitted by the priced settlement-
+   difference policy has p capped at the policy's worst-case value.
+ 10 FRESHNESS DECAY. A per-contract haircut growing linearly with the age
+   of the probability / book to FRESHNESS_MAX_HAIRCUT at FRESHNESS_BOUND_S;
+   a probability older than the bound refuses.
+ 13 MARGINAL-EV SIZING. The capacity frontier charges every per-contract
+   cost above on the marginal contract.
+ 15 SCENARIO CONCENTRATION. The account's aggregate exposure to the event
+   (every strategy and contract) caps the size at SCENARIO_MAX_EXPOSURE_USD.
+ 17 REPRICE DEADBAND. A new entry order into a contract the strategy sent
+   one for within REPRICE_DEADBAND_S needs a material EV gain.
+ 18 MANAGEMENT DEADBAND. `management_economics` carries the minimum expected
+   improvement per contract sold that paper_xavier.alternatives requires of
+   a discretionary EXIT / REDUCE over HOLD.
+ 22 / 23 / 24 Every evaluation records its counterfactual variants
+   (paper_counterfactual_variants) and its subsystem attribution.
+ Quarantine, the variants' settlement, the forecast and the scoreboard:
+   bettor_paper_profitability_stack.
+
 Fail-closed: an unreadable input refuses (R_BIND_UNREADABLE).
 """
 from __future__ import annotations
@@ -157,6 +188,40 @@ MIN_RESIDUAL_OBSERVATIONS = 5
 
 FIT_EVERY_S = 600.0
 
+# ── 1b price region (migration 311 stack) ────────────────────────────
+#: the MARKET PRICE regions a calibration cell is split into; a region cell
+#: is shrunk toward its parent sport x family x regime cell (K_PRICE_REGION
+#: observations in the bin), so a sparse region borrows the coarser bias
+PRICE_REGIONS = (0.0, 0.15, 0.35, 0.65, 0.85, 1.0)
+K_PRICE_REGION = 30.0
+
+# ── 10 freshness decay ───────────────────────────────────────────────
+#: the probability freshness bound (the 30 s rule of the paper path); the EV
+#: haircut grows linearly with the age of the probability / book at the
+#: decision, to FRESHNESS_MAX_HAIRCUT per contract at the bound
+FRESHNESS_BOUND_S = 30.0
+FRESHNESS_MAX_HAIRCUT = 0.01
+
+# ── 5 / 8 spread and management / exit cost ──────────────────────────
+#: prior early-exit share of positions (closed by a SELL, not settlement)
+EXIT_RATE_PRIOR = 0.5
+K_MANAGEMENT = 10.0
+MIN_MANAGEMENT_EXITS = 5
+#: the spread assumed when no book is readable inside SPREAD_BOOK_MAX_S
+DEFAULT_SPREAD = 0.02
+SPREAD_BOOK_MAX_S = 30.0
+#: 18 · the minimum expected improvement per contract sold before a
+#: discretionary EXIT / REDUCE may outrank HOLD (paper_xavier.alternatives)
+MIN_MANAGEMENT_IMPROVEMENT_USD = 0.01
+
+# ── 15 scenario concentration (shrink only) ──────────────────────────
+#: aggregate PAPER exposure (open cost basis + open BUY reservations) of the
+#: ACCOUNT -- every strategy, every contract -- on one event / fixture
+SCENARIO_MAX_EXPOSURE_USD = 3000.0
+
+# ── 17 reprice deadband ──────────────────────────────────────────────
+REPRICE_DEADBAND_S = 900.0
+
 R_CALIBRATED_EV_NOT_POSITIVE = "CASH_WAIT_CALIBRATED_ALL_IN_EV_NOT_POSITIVE"
 R_ALL_IN_EV_NOT_POSITIVE = "CASH_WAIT_ALL_IN_EXECUTABLE_EV_NOT_POSITIVE"
 R_CAPACITY_NONE = "CASH_WAIT_CAPACITY_FRONTIER_NO_POSITIVE_MARGINAL_CONTRACT"
@@ -172,6 +237,10 @@ R_TURNOVER_CAP = "CHURN_STRATEGY_TURNOVER_CAP_PER_HOUR_REACHED"
 R_NO_HOLD_ESTIMATE = "CASH_WAIT_NO_EXPECTED_HOLD_FOR_CAPITAL_HOUR"
 R_BIND_UNREADABLE = "PROFITABILITY_BIND_UNREADABLE"
 R_BIND_NO_EVIDENCE = "PROFITABILITY_BIND_NO_EXECUTABLE_EVIDENCE"
+R_SCENARIO_CONCENTRATION = "CASH_WAIT_SCENARIO_CONCENTRATION_LIMIT_REACHED"
+R_FRESHNESS_BEYOND_BOUND = "CASH_WAIT_PROBABILITY_AGE_BEYOND_FRESHNESS_BOUND"
+R_CHURN_REPRICE_DEADBAND = ("CHURN_REPRICE_INSIDE_DEADBAND_WITHOUT_MATERIAL_"
+                            "EV_GAIN")
 # shadow-routable (no capital authority): see bettor_capital_authority
 R_REGIME_UNKNOWN = "CASH_WAIT_REGIME_UNKNOWN_SHADOW_ONLY"
 R_REGIME_NOT_POSITIVE = "CASH_WAIT_REGIME_FORWARD_ECONOMICS_NOT_POSITIVE"
@@ -185,7 +254,9 @@ REFUSALS = (R_CALIBRATED_EV_NOT_POSITIVE, R_ALL_IN_EV_NOT_POSITIVE,
             R_CAPACITY_NONE, R_CAPITAL_HOUR_BELOW_FLOOR,
             R_CORRELATED_EXPOSURE, R_SIZE_BELOW_ONE, R_CHURN_RECENT_EXIT,
             R_CHURN_FIXTURE_EXIT, R_CHURN_RECENT_REFUSAL, R_TURNOVER_CAP,
-            R_NO_HOLD_ESTIMATE, R_BIND_UNREADABLE, R_BIND_NO_EVIDENCE)
+            R_NO_HOLD_ESTIMATE, R_BIND_UNREADABLE, R_BIND_NO_EVIDENCE,
+            R_SCENARIO_CONCENTRATION, R_FRESHNESS_BEYOND_BOUND,
+            R_CHURN_REPRICE_DEADBAND)
 #: no-capital-authority refusals the bind adds to the authority (a shadow
 #: counterfactual is recorded when everything else passed)
 AUTHORITY_REFUSALS = (R_REGIME_UNKNOWN, R_REGIME_NOT_POSITIVE,
@@ -195,6 +266,8 @@ ALL_REFUSALS = REFUSALS + AUTHORITY_REFUSALS + (R_REGIME_UNREADABLE,)
 T_MODELS = "paper_profitability_models"
 T_EVAL = "paper_profitability_evaluations"
 T_CASH = "paper_cash_decisions"
+T_VARIANTS = "paper_counterfactual_variants"
+T_VARIANT_OUTCOMES = "paper_counterfactual_variant_outcomes"
 
 
 def _num(v):
@@ -338,29 +411,25 @@ def _bin(p: float) -> int:
     return len(CAL_BINS) - 2
 
 
-def fit_calibration(observations: list) -> dict:
-    """observations: [{sport, family, regime, p, y}] with y in [0, 1] the
-    settled payout of the held side. Per cell: n, predicted and observed
-    rate, Brier score, and per probability bin n / mean p / observed."""
-    cells: dict = {}
-    for o in observations or []:
-        p, y = _num(o.get("p")), _num(o.get("y"))
-        if p is None or y is None or not 0.0 <= p <= 1.0:
-            continue
-        k = cell_key(o.get("sport"), o.get("family"), o.get("regime"))
-        c = cells.setdefault(k, {"n": 0, "sum_p": 0.0, "sum_y": 0.0,
-                                 "brier": 0.0, "bins": {}})
-        c["n"] += 1
-        c["sum_p"] += p
-        c["sum_y"] += y
-        c["brier"] += (p - y) ** 2
-        b = c["bins"].setdefault(str(_bin(p)), {"n": 0, "sum_p": 0.0,
-                                                "sum_y": 0.0})
-        b["n"] += 1
-        b["sum_p"] += p
-        b["sum_y"] += y
+def price_region(price) -> str | None:
+    """The market-price region of a contract price (PRICE_REGIONS), e.g.
+    '0.35-0.65'; None without a price."""
+    px = _num(price)
+    if px is None:
+        return None
+    for i in range(len(PRICE_REGIONS) - 1):
+        if px < PRICE_REGIONS[i + 1] or i == len(PRICE_REGIONS) - 2:
+            return "%.2f-%.2f" % (PRICE_REGIONS[i], PRICE_REGIONS[i + 1])
+    return None
+
+
+def region_key(sport, family, regime, region) -> str:
+    return "%s|%s" % (cell_key(sport, family, regime), region)
+
+
+def _cells_of(acc: dict) -> dict:
     out = {}
-    for k, c in cells.items():
+    for k, c in acc.items():
         n = c["n"]
         out[k] = {"n": n, "mean_p": _r(c["sum_p"] / n),
                   "observed": _r(c["sum_y"] / n),
@@ -372,18 +441,63 @@ def fit_calibration(observations: list) -> dict:
                                "mean_p": _r(b["sum_p"] / b["n"]),
                                "observed": _r(b["sum_y"] / b["n"])}
                            for i, b in sorted(c["bins"].items())}}
+    return out
+
+
+def _acc(cells: dict, k: str, p: float, y: float) -> None:
+    c = cells.setdefault(k, {"n": 0, "sum_p": 0.0, "sum_y": 0.0,
+                             "brier": 0.0, "bins": {}})
+    c["n"] += 1
+    c["sum_p"] += p
+    c["sum_y"] += y
+    c["brier"] += (p - y) ** 2
+    b = c["bins"].setdefault(str(_bin(p)), {"n": 0, "sum_p": 0.0,
+                                            "sum_y": 0.0})
+    b["n"] += 1
+    b["sum_p"] += p
+    b["sum_y"] += y
+
+
+def fit_calibration(observations: list) -> dict:
+    """observations: [{sport, family, regime, p, y, price?}] with y in [0, 1]
+    the settled payout of the held side and `price` the market price at the
+    decision. Per cell (sport x family x regime): n, predicted and observed
+    rate, Brier score, and per probability bin n / mean p / observed. Per
+    REGION cell (the same x the market-price region, when a price is
+    known): the same, shrunk toward its parent cell by `calibrate`."""
+    cells: dict = {}
+    regions: dict = {}
+    for o in observations or []:
+        p, y = _num(o.get("p")), _num(o.get("y"))
+        if p is None or y is None or not 0.0 <= p <= 1.0:
+            continue
+        k = cell_key(o.get("sport"), o.get("family"), o.get("regime"))
+        _acc(cells, k, p, y)
+        rg = price_region(o.get("price"))
+        if rg is not None:
+            _acc(regions, region_key(o.get("sport"), o.get("family"),
+                                     o.get("regime"), rg), p, y)
+    out = _cells_of(cells)
     return {"version": VERSION, "kind": "CALIBRATION",
             "key": "sport|family|regime", "bins": list(CAL_BINS),
+            "region_key": "sport|family|regime|price_region",
+            "price_regions": list(PRICE_REGIONS),
+            "k_price_region": K_PRICE_REGION,
             "k_calibration": K_CALIBRATION,
             "min_cell_observations": MIN_CELL_OBSERVATIONS,
             "observations": sum(c["n"] for c in out.values()),
-            "cells": out}
+            "cells": out, "region_cells": _cells_of(regions)}
 
 
 def calibrate(model: dict | None, *, sport, family, regime, p_raw,
               market) -> dict:
     """THE PROBABILITY USED FOR EV: min(p_raw, p_cal) (module docstring).
-    No model / no cell => the market price (CASH by construction)."""
+    No model / no cell => the market price (CASH by construction).
+
+    PRICE REGION: the bin bias of the sport x family x regime cell is
+    refined by the bin bias of its MARKET-PRICE REGION cell (the region of
+    `market`), shrunk toward the parent by n_region_bin / (n_region_bin +
+    K_PRICE_REGION) -- a sparse region borrows the coarser cell's bias."""
     p = _num(p_raw)
     mkt = _num(market)
     key = cell_key(sport, family, regime)
@@ -394,8 +508,18 @@ def calibrate(model: dict | None, *, sport, family, regime, p_raw,
     n_cell = int((cell or {}).get("n") or 0)
     b = ((cell or {}).get("bins") or {}).get(str(_bin(p))) or {}
     n_bin = int(b.get("n") or 0)
-    bias = ((_num(b.get("observed")) or 0.0) - (_num(b.get("mean_p")) or 0.0)
-            if n_bin else 0.0)
+    parent_bias = ((_num(b.get("observed")) or 0.0)
+                   - (_num(b.get("mean_p")) or 0.0) if n_bin else 0.0)
+    rg = price_region(mkt)
+    rcell = ((model or {}).get("region_cells") or {}).get(
+        region_key(sport, family, regime, rg)) if rg else None
+    rb = ((rcell or {}).get("bins") or {}).get(str(_bin(p))) or {}
+    n_rbin = int(rb.get("n") or 0)
+    region_bias = ((_num(rb.get("observed")) or 0.0)
+                   - (_num(rb.get("mean_p")) or 0.0) if n_rbin else None)
+    w_region = n_rbin / (n_rbin + K_PRICE_REGION) if n_rbin else 0.0
+    bias = (w_region * region_bias + (1.0 - w_region) * parent_bias
+            if region_bias is not None else parent_bias)
     w = n_bin / (n_bin + K_CALIBRATION) if n_bin else 0.0
     if n_cell < MIN_CELL_OBSERVATIONS:
         w *= n_cell / float(MIN_CELL_OBSERVATIONS)
@@ -409,8 +533,12 @@ def calibrate(model: dict | None, *, sport, family, regime, p_raw,
     return {"key": key, "p_raw": _r(p), "p_calibrated": _r(p_cal),
             "p_used": _r(used), "market": _r(mkt), "weight": _r(w, 6),
             "bin_bias": _r(bias), "n_cell": n_cell, "n_bin": n_bin,
+            "parent_bin_bias": _r(parent_bias), "price_region": rg,
+            "region_bin_bias": _r(region_bias), "n_region_bin": n_rbin,
+            "region_weight": _r(w_region, 6),
             "status": status, "inflated": False,
-            "rule": "min(p_raw, w (p_raw + bias) + (1 - w) market)"}
+            "rule": ("min(p_raw, w (p_raw + bias) + (1 - w) market); bias = "
+                     "w_r region_bias + (1 - w_r) parent_bias")}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -552,13 +680,176 @@ def residual_haircut(model: dict | None, *, strategy, sport, family) -> dict:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# 5 · SPREAD, 8 · MANAGEMENT / EXIT COST, 9 · SETTLEMENT DIFFERENCE,
+# 10 · FRESHNESS DECAY (pure)
+# ═════════════════════════════════════════════════════════════════════
+
+def fit_management(rows: list) -> dict:
+    """rows: [{strategy, exited: bool, exit_cost_per_contract}] -- one per
+    CLOSED paper position: exited = closed by a SELL (not by settlement);
+    the exit cost per contract = held-side mid at the sale minus the sale
+    price plus its fee per contract (None when no book was readable). Per
+    strategy: the exit rate shrunk toward EXIT_RATE_PRIOR (K_MANAGEMENT
+    positions) and the mean measured exit cost."""
+    groups: dict = {}
+    for r in rows or []:
+        g = groups.setdefault(str(r.get("strategy")),
+                              {"n": 0, "exited": 0, "costs": []})
+        g["n"] += 1
+        if r.get("exited"):
+            g["exited"] += 1
+            c = _num(r.get("exit_cost_per_contract"))
+            if c is not None:
+                g["costs"].append(c)
+    out = {}
+    for s, g in sorted(groups.items()):
+        rate = (g["exited"] + K_MANAGEMENT * EXIT_RATE_PRIOR) / (
+            g["n"] + K_MANAGEMENT)
+        cs = g["costs"]
+        out[s] = {"closed": g["n"], "exited": g["exited"],
+                  "exit_rate_raw": _r(g["exited"] / g["n"]) if g["n"]
+                  else None,
+                  "exit_rate": _r(rate, 6),
+                  "exit_cost_measured": len(cs),
+                  "exit_cost_per_contract": (_r(sum(cs) / len(cs))
+                                             if len(cs) >= MIN_MANAGEMENT_EXITS
+                                             else None)}
+    return {"version": VERSION, "kind": "MANAGEMENT",
+            "exit_rate_prior": EXIT_RATE_PRIOR, "k_management": K_MANAGEMENT,
+            "min_exits": MIN_MANAGEMENT_EXITS,
+            "observations": sum(g["n"] for g in groups.values()),
+            "by_strategy": out}
+
+
+def management_cost(model: dict | None, *, strategy, spread, held_bid,
+                    best, fee_fn) -> dict:
+    """THE EXPECTED MANAGEMENT / EXIT COST PER CONTRACT charged at entry:
+    exit rate x max(half the spread + the exit fee per contract, the
+    learned exit cost per contract). The spread is the observed book's (an
+    unreadable book: DEFAULT_SPREAD); the exit rate is the strategy's
+    learned one (none: EXIT_RATE_PRIOR). Only ever a cost (>= 0)."""
+    row = ((model or {}).get("by_strategy") or {}).get(str(strategy)) or {}
+    rate = _num(row.get("exit_rate"))
+    rate = EXIT_RATE_PRIOR if rate is None else min(1.0, max(0.0, rate))
+    sp = _num(spread)
+    sp_basis = "OBSERVED_BOOK" if sp is not None else "DEFAULT_SPREAD"
+    sp = DEFAULT_SPREAD if sp is None else max(0.0, sp)
+    bid = _num(held_bid)
+    if bid is None:
+        b = _num(best)
+        bid = max(0.01, (b if b is not None else 0.5) - sp)
+    fee1 = abs(float(fee_fn(1.0, float(bid)))) if fee_fn else 0.0
+    learned = _num(row.get("exit_cost_per_contract"))
+    exit_pc = max(sp / 2.0 + fee1, max(0.0, learned or 0.0))
+    return {"exit_rate": _r(rate, 6), "spread": _r(sp),
+            "spread_basis": sp_basis, "half_spread": _r(sp / 2.0),
+            "exit_fee_per_contract": _r(fee1),
+            "learned_exit_cost_per_contract": _r(learned),
+            "exit_cost_per_contract": _r(exit_pc),
+            "charged_per_contract": _r(rate * exit_pc),
+            "basis": ("LEARNED" if row else "PRIOR"),
+            "rule": "exit_rate x max(spread/2 + exit fee, learned exit cost)"}
+
+
+def freshness(inputs: dict | None, *, at: float) -> dict:
+    """THE FRESHNESS DECAY: the age of the probability and of the book at
+    the decision (`inputs.evaluated_at`, else `at`); the EV haircut per
+    contract grows linearly to FRESHNESS_MAX_HAIRCUT at FRESHNESS_BOUND_S
+    (and stays there for an older book). A PROBABILITY older than the bound
+    refuses. Unknown stamps age 0 (the upstream 30 s rule owns them)."""
+    i = inputs or {}
+    t = _num(i.get("evaluated_at"))
+    t = float(at) if t is None else t
+    pa = _num(i.get("p_observed_at"))
+    ba = _num(i.get("book_observed_at"))
+    p_age = None if pa is None else max(0.0, t - pa)
+    b_age = None if ba is None else max(0.0, t - ba)
+    ages = [a for a in (p_age, b_age) if a is not None]
+    age = max(ages) if ages else 0.0
+    h = FRESHNESS_MAX_HAIRCUT * min(1.0, age / FRESHNESS_BOUND_S)
+    return {"p_age_s": _r(p_age, 3), "book_age_s": _r(b_age, 3),
+            "age_s": _r(age, 3), "haircut_per_contract": _r(h),
+            "bound_s": FRESHNESS_BOUND_S,
+            "max_haircut": FRESHNESS_MAX_HAIRCUT,
+            "refused": p_age is not None and p_age > FRESHNESS_BOUND_S}
+
+
+def settlement_terms(inputs: dict | None) -> dict:
+    """THE PRICED SETTLEMENT DIFFERENCE (bettor_settlement_difference_policy)
+    carried on the decision: the policy's worst-case venue value caps the
+    probability (min, never a raise) and q_hi is the priced cost per
+    contract (attribution). Not priced: no cap, no cost."""
+    s = (inputs or {}).get("settlement") or {}
+    try:
+        from . import bettor_settlement_difference_policy as SDP
+        priced = (s.get("compatibility") == SDP.SETTLEMENT_PRICED
+                  and s.get("policy_id") == SDP.POLICY_ID)
+    except Exception:                                           # noqa: BLE001
+        priced = False
+    p_cap, q = _num(s.get("p")), _num(s.get("q_hi"))
+    if not priced or p_cap is None:
+        return {"applies": False, "p_cap": None, "cost_per_contract": 0.0}
+    return {"applies": True, "p_cap": _r(p_cap), "q_hi": _r(q),
+            "cost_per_contract": _r(max(0.0, q or 0.0)),
+            "policy": s.get("policy_id"), "version": s.get("version")}
+
+
+def attribution(fin: dict | None, *, best, mid, p_used, p_raw,
+                settlement_pc=0.0) -> dict:
+    """24 · SUBSYSTEM PROFIT ATTRIBUTION of one all-in result: the expected
+    EV given a fill decomposed into the probability edge over the mid, the
+    calibration adjustment, the settlement-difference cost, the spread and
+    slippage (inside the walked cost), fees, adverse selection, the
+    residual haircut, freshness and management. The terms sum to the EV."""
+    f = fin or {}
+    q = _num(f.get("filled_qty")) or 0.0
+    if q <= 0:
+        return {"filled_qty": 0.0, "terms": {}, "sum_usd": 0.0,
+                "ev_given_fill_usd": f.get("ev_given_fill_usd")}
+    b = _num(best) or 0.0
+    m = _num(mid)
+    m = b if m is None else m
+    st = max(0.0, float(settlement_pc or 0.0))
+    pu = float(p_used)
+    pr = _num(p_raw)
+    pr = pu if pr is None else pr
+    cost = float(f.get("cost_usd") or 0.0)
+    ex = f.get("extra_costs_usd") or {}
+    terms = {
+        "probability_edge_usd": q * (pr + st - m),
+        "calibration_adjustment_usd": q * (pu - pr),
+        "settlement_difference_usd": -q * st,
+        "spread_usd": -q * (b - m),
+        "slippage_usd": -(cost - q * b),
+        "fees_usd": -float(f.get("fees_usd") or 0.0),
+        "adverse_selection_usd": -float(f.get("adverse_selection_usd")
+                                        or 0.0),
+        "residual_haircut_usd": -float(f.get("residual_haircut_usd") or 0.0)}
+    for k, v in sorted(ex.items()):
+        terms["%s_usd" % k] = -float(v or 0.0)
+    terms = {k: _r(v) for k, v in terms.items()}
+    return {"filled_qty": _r(q, 6), "terms": terms,
+            "sum_usd": _r(sum(terms.values())),
+            "ev_given_fill_usd": f.get("ev_given_fill_usd"),
+            "mid": _r(m), "best": _r(b)}
+
+
+# ═════════════════════════════════════════════════════════════════════
 # 2 + 6 · ALL-IN EV, CAPACITY FRONTIER, CAPITAL-HOUR, CORRELATION (pure)
 # ═════════════════════════════════════════════════════════════════════
 
+def _extras(extra_per_contract) -> dict:
+    return {k: max(0.0, float(v or 0.0))
+            for k, v in (extra_per_contract or {}).items()}
+
+
 def all_in(*, fills, p_used, fee_fn, adverse_per_contract,
-           haircut_per_contract, fill_probability, qty=None) -> dict:
+           haircut_per_contract, fill_probability, qty=None,
+           extra_per_contract: dict | None = None) -> dict:
     """The all-in executable EV of walking `fills` ([[price, qty]], price
-    order) up to `qty`; `fee_fn(q, px) -> usd`."""
+    order) up to `qty`; `fee_fn(q, px) -> usd`. `extra_per_contract`
+    ({name: usd per contract}, each >= 0: freshness, management) is charged
+    on every filled contract."""
     left = float("inf") if qty is None else float(qty)
     filled = cost = fees = 0.0
     for px, q in fills or []:
@@ -573,14 +864,18 @@ def all_in(*, fills, p_used, fee_fn, adverse_per_contract,
         left -= t
     a = max(0.0, float(adverse_per_contract or 0.0))
     h = max(0.0, float(haircut_per_contract or 0.0))
+    ex = _extras(extra_per_contract)
     gross = filled * float(p_used)
-    ev = gross - cost - fees - a * filled - h * filled
+    ev = gross - cost - fees - a * filled - h * filled \
+        - sum(ex.values()) * filled
     pf = min(1.0, max(0.0, float(fill_probability if fill_probability
                                  is not None else 1.0)))
     return {"filled_qty": _r(filled, 6), "expected_payout_usd": _r(gross),
             "cost_usd": _r(cost), "fees_usd": _r(fees),
             "adverse_selection_usd": _r(a * filled),
             "residual_haircut_usd": _r(h * filled),
+            "extra_costs_usd": {k: _r(v * filled) for k, v in ex.items()},
+            "vwap": _r(cost / filled) if filled else None,
             "ev_given_fill_usd": _r(ev), "fill_probability": _r(pf, 6),
             "expected_ev_usd": _r(pf * ev),
             "ev_per_contract_usd": _r(ev / filled) if filled else None,
@@ -588,17 +883,20 @@ def all_in(*, fills, p_used, fee_fn, adverse_per_contract,
 
 
 def capacity_frontier(*, fills, p_used, fee_fn, adverse_per_contract,
-                      haircut_per_contract, depth=None) -> dict:
+                      haircut_per_contract, depth=None,
+                      extra_per_contract: dict | None = None) -> dict:
     """The largest whole quantity, walking `fills` in price order, whose
-    MARGINAL contract still has all-in EV > 0, capped at MAX_DEPTH_FRACTION
-    of the displayed executable depth (`depth`, when known)."""
+    MARGINAL contract still has all-in EV > 0 (13 · MARGINAL-EV SIZING:
+    every per-contract cost charged), capped at MAX_DEPTH_FRACTION of the
+    displayed executable depth (`depth`, when known)."""
     a = max(0.0, float(adverse_per_contract or 0.0))
     h = max(0.0, float(haircut_per_contract or 0.0))
+    x = sum(_extras(extra_per_contract).values())
     q_ok = 0.0
     stop = None
     for px, q in fills or []:
         fee1 = abs(float(fee_fn(1.0, float(px))))
-        marginal = float(p_used) - float(px) - fee1 - a - h
+        marginal = float(p_used) - float(px) - fee1 - a - h - x
         if marginal <= 0:
             stop = {"price": float(px), "marginal_ev_per_contract": _r(
                 marginal)}
@@ -660,14 +958,51 @@ def churn_verdict(*, ev_per_contract, prior_ev_per_contract,
 def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
                    calibration: dict | None, execution: dict | None,
                    residuals: dict | None, strategy: str, order_type,
-                   n_correlated: int, qty_cap=None) -> dict:
-    """THE PURE BIND of one entry: calibration -> all-in EV -> capacity ->
-    capital-hour -> correlation. {refusal or None, qty, terms...}.
+                   n_correlated: int, qty_cap=None,
+                   management: dict | None = None,
+                   inputs: dict | None = None, at: float | None = None,
+                   scenario: dict | None = None) -> dict:
+    """THE PURE BIND of one entry: calibration (sport x family x regime x
+    price region; the priced settlement difference caps p) -> all-in EV
+    (walked fills, fees, learned adverse selection, residual haircut,
+    FRESHNESS decay, expected MANAGEMENT / EXIT cost on the observed spread)
+    -> capacity (marginal-EV frontier) -> capital-hour -> correlation ->
+    SCENARIO concentration. {refusal or None, qty, terms, attribution,
+    variants}.
 
     Evidence already bound at the decision carries the policy's own walk as
-    `pre_bind`: the bind is re-derived from it (deterministic: the same
-    inputs give the same size -- never a second shrink) and then capped at
-    `qty_cap` (the order's quantity)."""
+    `pre_bind` (and the decision's `bind_inputs`): the bind is re-derived
+    from it (deterministic: the same inputs give the same size -- never a
+    second shrink) and then capped at `qty_cap` (the order's quantity)."""
+    out = _bind_core(evidence=evidence, qty_in=qty_in, fee_fn=fee_fn,
+                     desc=desc, calibration=calibration, execution=execution,
+                     residuals=residuals, strategy=strategy,
+                     order_type=order_type, n_correlated=n_correlated,
+                     qty_cap=qty_cap, management=management, inputs=inputs,
+                     at=at, scenario=scenario)
+    t = out.get("terms")
+    if t:
+        fin = out.get("all_in") or out.get("all_in_at_policy_size")
+        out["attribution"] = attribution(
+            fin, best=t["best"], mid=t.get("mid"), p_used=t["p_used"],
+            p_raw=t["p_raw"], settlement_pc=t.get("settlement_pc"))
+        out["variants"] = counterfactual_variants(
+            out, fee_fn=fee_fn, execution=execution, strategy=strategy)
+    return out
+
+
+def _merge_inputs(carried, fresh) -> dict:
+    """The decision's carried bind inputs win over the ledger's fresh read
+    (the same inputs give the same size: never a second shrink)."""
+    out = dict(fresh or {})
+    if isinstance(carried, dict):
+        out.update({k: v for k, v in carried.items() if v is not None})
+    return out
+
+
+def _bind_core(*, evidence, qty_in, fee_fn, desc, calibration, execution,
+               residuals, strategy, order_type, n_correlated, qty_cap,
+               management, inputs, at, scenario) -> dict:
     ev = evidence or {}
     pre = ev.get("pre_bind") if isinstance(ev.get("pre_bind"), dict) else None
     if pre and pre.get("fills"):
@@ -685,9 +1020,17 @@ def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
                            "rederived_from_pre_bind": bool(pre)}
     if not fills or p_raw is None:
         return dict(out, refusal=R_BIND_NO_EVIDENCE, qty=0)
+    inp = _merge_inputs(ev.get("bind_inputs"), inputs)
+    out["bind_inputs"] = inp
+    # 9 · the priced settlement difference: its worst-case value caps p
+    stl = settlement_terms(inp)
+    out["settlement"] = stl
+    p_in = min(p_raw, stl["p_cap"]) if stl["applies"] else p_raw
     cal = calibrate(calibration, sport=desc.get("sport"),
                     family=desc.get("family"), regime=desc.get("regime"),
-                    p_raw=p_raw, market=best)
+                    p_raw=p_in, market=best)
+    cal = dict(cal, p_raw=_r(p_raw), p_after_settlement_cap=_r(p_in),
+               p_used=_r(min(p_raw, cal["p_used"])))
     out["calibration"] = cal
     style = style_of(order_type)
     ex = execution_terms(execution, strategy=strategy, style=style)
@@ -701,17 +1044,38 @@ def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
                               ioc_bound_per_contract=_r(bound_pc),
                               charged_adverse_per_contract=_r(adverse_pc)),
                residual=rh)
+    # 10 · freshness decay; 5 / 8 · spread and management / exit cost
+    fr = freshness(inp, at=float(at) if at is not None else 0.0)
+    mg = management_cost(management, strategy=strategy,
+                         spread=inp.get("spread"),
+                         held_bid=inp.get("held_bid"), best=best,
+                         fee_fn=fee_fn)
+    out.update(freshness=fr, management=mg)
+    extra = {"freshness": fr["haircut_per_contract"],
+             "management": mg["charged_per_contract"]}
     p_used = cal["p_used"]
     q_in = min(_num(qty_in) or fq, fq)
-    full = all_in(fills=fills, p_used=p_used, fee_fn=fee_fn,
-                  adverse_per_contract=adverse_pc,
-                  haircut_per_contract=rh["haircut_per_contract"],
-                  fill_probability=ex["fill_probability"], qty=q_in)
+    out["terms"] = {"fills": fills, "best": best,
+                    "mid": _num(inp.get("held_mid")),
+                    "p_raw": p_raw, "p_used": p_used,
+                    "settlement_pc": stl["cost_per_contract"],
+                    "adverse_pc": adverse_pc,
+                    "haircut_pc": rh["haircut_per_contract"],
+                    "extra_pc": extra, "management": mg,
+                    "fill_probability": ex["fill_probability"],
+                    "qty_in": q_in}
+    if fr["refused"]:
+        return dict(out, refusal=R_FRESHNESS_BEYOND_BOUND, qty=0)
+
+    def _ai(q, p=None):
+        return all_in(fills=fills, p_used=p_used if p is None else p,
+                      fee_fn=fee_fn, adverse_per_contract=adverse_pc,
+                      haircut_per_contract=rh["haircut_per_contract"],
+                      fill_probability=ex["fill_probability"], qty=q,
+                      extra_per_contract=extra)
+    full = _ai(q_in)
     out["all_in_at_policy_size"] = full
-    raw = all_in(fills=fills, p_used=p_raw, fee_fn=fee_fn,
-                 adverse_per_contract=adverse_pc,
-                 haircut_per_contract=rh["haircut_per_contract"],
-                 fill_probability=ex["fill_probability"], qty=q_in)
+    raw = _ai(q_in, p_raw)
     out["all_in_uncalibrated_usd"] = raw["ev_given_fill_usd"]
     if (full["ev_given_fill_usd"] or 0.0) <= 0:
         r = (R_CALIBRATED_EV_NOT_POSITIVE
@@ -729,17 +1093,14 @@ def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
     cap = capacity_frontier(fills=fills, p_used=p_used, fee_fn=fee_fn,
                             adverse_per_contract=adverse_pc,
                             haircut_per_contract=rh["haircut_per_contract"],
-                            depth=depth)
+                            depth=depth, extra_per_contract=extra)
     out["capacity"] = cap
     q_cap = min(q_in, cap["qty"])
     out["capacity_factor"] = _r(q_cap / q_in, 6) if q_in else 0.0
     if q_cap < 1:
         return dict(out, refusal=R_CAPACITY_NONE, qty=0,
                     ev_per_contract=full["ev_per_contract_usd"])
-    at_cap = all_in(fills=fills, p_used=p_used, fee_fn=fee_fn,
-                    adverse_per_contract=adverse_pc,
-                    haircut_per_contract=rh["haircut_per_contract"],
-                    fill_probability=ex["fill_probability"], qty=q_cap)
+    at_cap = _ai(q_cap)
     hold = desc.get("expected_hold_hours")
     if hold is None:
         return dict(out, refusal=R_NO_HOLD_ESTIMATE, qty=0,
@@ -759,19 +1120,98 @@ def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
                            + 1e-9))
     if _num(qty_cap) is not None:
         q_out = min(q_out, int(math.floor(float(qty_cap) + 1e-9)))
+    # 15 · scenario concentration: the account's aggregate exposure to the
+    # event (every strategy, every contract) never exceeds the cap
+    scn = scenario_cap(scenario, capital_per_contract=(
+        at_cap["capital_usd"] / q_cap if q_cap else None))
+    out["scenario"] = scn
+    if scn.get("qty_cap") is not None:
+        if scn["qty_cap"] < 1:
+            return dict(out, refusal=R_SCENARIO_CONCENTRATION, qty=0,
+                        ev_per_contract=at_cap["ev_per_contract_usd"])
+        q_out = min(q_out, scn["qty_cap"])
     if q_out < 1:
         return dict(out, refusal=R_SIZE_BELOW_ONE, qty=0,
                     ev_per_contract=at_cap["ev_per_contract_usd"])
-    fin = all_in(fills=fills, p_used=p_used, fee_fn=fee_fn,
-                 adverse_per_contract=adverse_pc,
-                 haircut_per_contract=rh["haircut_per_contract"],
-                 fill_probability=ex["fill_probability"], qty=q_out)
+    fin = _ai(q_out)
     out["all_in"] = fin
     if (fin["ev_given_fill_usd"] or 0.0) <= 0:
         return dict(out, refusal=R_ALL_IN_EV_NOT_POSITIVE, qty=0,
                     ev_per_contract=fin["ev_per_contract_usd"])
     return dict(out, refusal=None, qty=q_out,
                 ev_per_contract=fin["ev_per_contract_usd"])
+
+
+def scenario_cap(scenario: dict | None, *, capital_per_contract) -> dict:
+    """15 · SCENARIO CONCENTRATION: {exposure_usd} of the account on the
+    entry's event -> the largest whole quantity that keeps it within
+    SCENARIO_MAX_EXPOSURE_USD (a smaller `cap_usd` may be passed, never a
+    larger one). Not measured -> no cap from here (the entry path always
+    measures it). Only ever a cap."""
+    s = scenario or {}
+    x = _num(s.get("exposure_usd"))
+    pc = _num(capital_per_contract)
+    cap_usd = _num(s.get("cap_usd"))
+    cap_usd = SCENARIO_MAX_EXPOSURE_USD if cap_usd is None else min(
+        cap_usd, SCENARIO_MAX_EXPOSURE_USD)
+    if x is None or not pc or pc <= 0:
+        return {"qty_cap": None, "exposure_usd": x, "cap_usd": cap_usd,
+                "key": s.get("key")}
+    room = max(0.0, cap_usd - x)
+    return {"qty_cap": int(math.floor(room / pc + 1e-9)),
+            "exposure_usd": _r(x, 6), "cap_usd": cap_usd,
+            "room_usd": _r(room, 6), "key": s.get("key"),
+            "capital_per_contract": _r(pc)}
+
+
+VARIANTS = ("AS_BOUND", "POLICY_SIZE", "HALF_SIZE", "MAKER",
+            "HOLD_TO_SETTLEMENT", "EARLY_EXIT")
+
+
+def counterfactual_variants(b: dict, *, fee_fn, execution: dict | None,
+                            strategy: str) -> list:
+    """22 / 23 · THE COUNTERFACTUAL VARIANTS of one bound decision (refused
+    or entered), valued on the same all-in economics: AS_BOUND (the bound
+    size; 0 when refused), POLICY_SIZE (taker, unshrunk), HALF_SIZE, MAKER
+    (resting one tick inside the best price at the learned maker fill
+    probability and markout), HOLD_TO_SETTLEMENT (no management cost) and
+    EARLY_EXIT (a certain exit at the exit cost). Pure."""
+    t = b.get("terms") or {}
+    fills = t.get("fills") or []
+    if not fills or t.get("p_used") is None:
+        return []
+    q_in = int(math.floor(float(t.get("qty_in") or 0) + 1e-9))
+    extra = dict(t.get("extra_pc") or {})
+    mg = t.get("management") or {}
+
+    def one(name, style, q, *, fl=None, pf=None, adv=None, ex=None):
+        r = all_in(fills=fl or fills, p_used=t["p_used"], fee_fn=fee_fn,
+                   adverse_per_contract=(t["adverse_pc"] if adv is None
+                                         else adv),
+                   haircut_per_contract=t["haircut_pc"],
+                   fill_probability=(t["fill_probability"] if pf is None
+                                     else pf), qty=q,
+                   extra_per_contract=extra if ex is None else ex)
+        return {"variant": name, "style": style, "qty": r["filled_qty"],
+                "vwap": r["vwap"], "p_used": t["p_used"],
+                "fill_probability": r["fill_probability"],
+                "cost_usd": r["cost_usd"], "fees_usd": r["fees_usd"],
+                "expected_ev_usd": r["expected_ev_usd"],
+                "ev_given_fill_usd": r["ev_given_fill_usd"]}
+    out = [one("AS_BOUND", TAKER, int(b.get("qty") or 0)),
+           one("POLICY_SIZE", TAKER, q_in),
+           one("HALF_SIZE", TAKER, q_in // 2)]
+    mk = execution_terms(execution, strategy=strategy, style=MAKER)
+    px = max(0.01, round(float(t["best"]) - 0.01, 6))
+    out.append(one("MAKER", MAKER, q_in, fl=[[px, float(q_in)]],
+                   pf=mk["fill_probability"],
+                   adv=mk["learned_adverse_per_contract"]))
+    out.append(one("HOLD_TO_SETTLEMENT", TAKER, q_in,
+                   ex=dict(extra, management=0.0)))
+    out.append(one("EARLY_EXIT", TAKER, q_in,
+                   ex=dict(extra, management=_num(
+                       mg.get("exit_cost_per_contract")) or 0.0)))
+    return out
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -833,8 +1273,32 @@ async def correlated_count(conn, *, account_id: str, fixture) -> int:
 
 
 async def churn_check(conn, *, account_id: str, strategy: str, slug, side,
-                      fixture, at: float, ev_per_contract) -> dict | None:
-    """Item 3. None when the entry may proceed; else the refusal dict."""
+                      fixture, at: float, ev_per_contract,
+                      order_key=None) -> dict | None:
+    """Item 3 (and 17 · the REPRICE DEADBAND: a new entry into a contract
+    the strategy already sent an entry order for within REPRICE_DEADBAND_S
+    -- a cancel / replace or a re-price -- needs a MATERIAL EV gain over
+    that order's bound EV). None when the entry may proceed; else the
+    refusal dict."""
+    rep = await conn.fetchrow(
+        "SELECT ev_per_contract_usd, evaluated_at, order_key FROM "
+        " paper_profitability_evaluations WHERE account_id=$1 "
+        "   AND strategy=$2 AND us_market_slug=$3 AND holding_side=$4 "
+        "   AND stage='LEDGER' AND verdict='ENTER' AND evaluated_at < $5 "
+        "   AND evaluated_at > $6 "
+        "   AND ($7::text IS NULL OR order_key IS DISTINCT FROM $7::text) "
+        " ORDER BY evaluated_at DESC, eval_id DESC LIMIT 1", account_id,
+        strategy, slug, side, _ts(at), _ts(at - REPRICE_DEADBAND_S),
+        order_key)
+    if rep is not None:
+        v = churn_verdict(ev_per_contract=ev_per_contract,
+                          prior_ev_per_contract=_num(
+                              rep["ev_per_contract_usd"]), kind="REPRICE")
+        if not v["materially_improved"]:
+            return dict(v, refusal=R_CHURN_REPRICE_DEADBAND,
+                        prior_order_key=rep["order_key"],
+                        prior_at=_epoch(rep["evaluated_at"]),
+                        deadband_s=REPRICE_DEADBAND_S)
     hour = await conn.fetchval(
         "SELECT count(*) FROM paper_orders WHERE account_id=$1 "
         "   AND strategy=$2 AND role='ENTRY' AND direction='BUY' "
@@ -897,12 +1361,56 @@ async def churn_check(conn, *, account_id: str, strategy: str, slug, side,
     return None
 
 
+async def book_inputs(conn, *, slug, side, at: float) -> dict:
+    """The held side's spread, mid and best bid from the newest readable
+    book of `slug` inside SPREAD_BOOK_MAX_S before `at` ({} when none)."""
+    if not slug:
+        return {}
+    r = await conn.fetchrow(
+        "SELECT bids, offers, extract(epoch FROM observed_at)::float8 AS t "
+        "  FROM paper_book_observations WHERE us_market_slug = $1 "
+        "   AND error IS NULL AND observed_at <= $2 AND observed_at >= $3 "
+        " ORDER BY observed_at DESC LIMIT 1", slug, _ts(at),
+        _ts(at - SPREAD_BOOK_MAX_S))
+    if r is None:
+        return {}
+    from .intel import common as IC
+    try:
+        v = IC.book_view(_j(r["bids"]) or [], _j(r["offers"]) or [])
+    except Exception:                                           # noqa: BLE001
+        return {}
+    if v.get("spread") is None:
+        return {}
+    short = str(side or "").upper() == "SHORT"
+    return {"spread": _r(v["spread"]),
+            "held_mid": _r(1.0 - v["mid"] if short else v["mid"]),
+            "held_bid": _r(1.0 - v["best_offer"] if short
+                           else v["best_bid"]),
+            "spread_book_at": r["t"]}
+
+
+async def scenario_exposure(conn, *, account_id: str, fixture) -> dict:
+    """15 · the ACCOUNT's aggregate PAPER exposure (open cost basis + open
+    BUY reservations, every strategy and contract) on the event."""
+    from . import bettor_paper_ledger as L
+    if not fixture:
+        return {"exposure_usd": None, "key": None}
+    x = await L._exposure(conn, account_id, fixture=fixture)
+    return {"exposure_usd": float(x), "key": "fixture:%s" % fixture,
+            "cap_usd": SCENARIO_MAX_EXPOSURE_USD}
+
+
 async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
                      qty_in, slug, side, fixture, order_type, at: float,
-                     fee_fn=None, qty_cap=None) -> dict:
-    """THE BIND OF ONE PAPER ENTRY (items 1, 2, 3, 6): {refusal or None,
-    qty (<= qty_in), context (for the regime authority), summary}.
-    Fail-closed: any unreadable input refuses."""
+                     fee_fn=None, qty_cap=None, order_key=None,
+                     inputs: dict | None = None) -> dict:
+    """THE BIND OF ONE PAPER ENTRY: {refusal or None, qty (<= qty_in),
+    context (for the regime authority), summary}. Items 1-15, 17: the
+    calibrated probability (price region, settlement cap), the all-in EV
+    (fees, slippage, learned execution, residual, freshness, spread and
+    management cost), the capacity / capital-hour / correlation / scenario
+    size, churn and the reprice deadband. Fail-closed: any unreadable input
+    refuses."""
     from . import bettor_paper_ledger as L
     if not isinstance(evidence, dict):
         return {"refusal": R_BIND_NO_EVIDENCE, "qty": 0}
@@ -915,13 +1423,21 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
         models = await latest_models(conn, account_id)
         n_corr = await correlated_count(conn, account_id=account_id,
                                         fixture=fixture)
+        fresh = dict(await book_inputs(conn, slug=slug, side=side, at=at),
+                     book_observed_at=_num(evidence.get("book_observed_at")))
+        fresh.update({k: v for k, v in (inputs or {}).items()
+                      if v is not None})
+        scn = await scenario_exposure(conn, account_id=account_id,
+                                      fixture=fixture)
         econ = bind_economics(
             evidence=evidence, qty_in=qty_in,
             fee_fn=lambda q, px: float(L._fee(fee_fn, q, px, at)),
             desc=desc, calibration=models.get("CALIBRATION"),
             execution=models.get("EXECUTION"),
             residuals=models.get("RESIDUAL"), strategy=strategy,
-            order_type=order_type, n_correlated=n_corr, qty_cap=qty_cap)
+            order_type=order_type, n_correlated=n_corr, qty_cap=qty_cap,
+            management=models.get("MANAGEMENT"), inputs=fresh, at=at,
+            scenario=scn)
         econ["models"] = {k: {"model_id": v.get("model_id"),
                               "fitted_at": v.get("fitted_at")}
                           for k, v in models.items()}
@@ -930,7 +1446,8 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
                                    strategy=strategy, slug=slug, side=side,
                                    fixture=fixture, at=at,
                                    ev_per_contract=econ.get(
-                                       "ev_per_contract"))
+                                       "ev_per_contract"),
+                                   order_key=order_key)
             econ["churn"] = ch or {"refusal": None}
             if ch:
                 econ = dict(econ, refusal=ch["refusal"], qty=0)
@@ -967,7 +1484,19 @@ def summary(b: dict | None) -> dict:
             "learned_adverse_per_contract": (b.get("execution") or {}).get(
                 "learned_adverse_per_contract"),
             "fill_probability": (b.get("execution") or {}).get(
-                "fill_probability")}
+                "fill_probability"),
+            "price_region": cal.get("price_region"),
+            "freshness_haircut_per_contract": (b.get("freshness") or {}).get(
+                "haircut_per_contract"),
+            "freshness_age_s": (b.get("freshness") or {}).get("age_s"),
+            "management_cost_per_contract": (b.get("management") or {}).get(
+                "charged_per_contract"),
+            "spread": (b.get("management") or {}).get("spread"),
+            "settlement_cost_per_contract": (b.get("settlement") or {}).get(
+                "cost_per_contract"),
+            "scenario_exposure_usd": (b.get("scenario") or {}).get(
+                "exposure_usd"),
+            "scenario_qty_cap": (b.get("scenario") or {}).get("qty_cap")}
 
 
 def bound_evidence(evidence: dict | None, b: dict | None) -> dict | None:
@@ -991,6 +1520,8 @@ def bound_evidence(evidence: dict | None, b: dict | None) -> dict | None:
                 adverse_selection_usd=fin.get("adverse_selection_usd"),
                 total_executable_ev_usd=fin.get("ev_given_fill_usd"),
                 profitability_bind=summary(b),
+                bind_inputs=b.get("bind_inputs") or evidence.get(
+                    "bind_inputs"),
                 pre_bind=(evidence.get("pre_bind") if isinstance(
                     evidence.get("pre_bind"), dict) else
                     {k: evidence.get(k) for k in (
@@ -1020,7 +1551,7 @@ async def record_evaluation(conn, *, account_id: str, strategy: str,
             p_used = min(p_used, p_raw)
         cal = (b or {}).get("calibration") or {}
         async with conn.transaction():
-            return await conn.fetchval(
+            eid = await conn.fetchval(
                 "INSERT INTO paper_profitability_evaluations (account_id, "
                 " strategy, stage, decision_id, order_key, us_market_slug, "
                 " holding_side, fixture, sport, market_family, regime, "
@@ -1052,10 +1583,59 @@ async def record_evaluation(conn, *, account_id: str, strategy: str,
                 json.dumps(dict(detail or {}, bind=s,
                                 churn=(b or {}).get("churn"),
                                 capacity=(b or {}).get("capacity"),
+                                attribution=(b or {}).get("attribution"),
+                                freshness=(b or {}).get("freshness"),
+                                management=(b or {}).get("management"),
+                                settlement=(b or {}).get("settlement"),
+                                scenario=(b or {}).get("scenario"),
                                 bind_refusal=(b or {}).get("refusal")),
                            default=str), _ts(at))
     except Exception:                                           # noqa: BLE001
         return None
+    await record_variants(conn, account_id=account_id, strategy=strategy,
+                          eval_id=eid, stage=stage, refusal=refusal, b=b,
+                          slug=slug, side=side, fixture=fixture, at=at)
+    return eid
+
+
+async def record_variants(conn, *, account_id: str, strategy: str, eval_id,
+                          stage: str, refusal, b: dict | None, slug, side,
+                          fixture, at: float) -> int:
+    """22 / 23 · THE COUNTERFACTUAL VARIANT LEDGER (migration 311): every
+    variant of an evaluation with executable evidence -- refused trades
+    included -- appended under its own savepoint; never raises."""
+    vs = (b or {}).get("variants") or []
+    if not vs or eval_id is None:
+        return 0
+    n = 0
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('paper_counterfactual_variants') "
+                "IS NOT NULL"):
+            return 0
+        async with conn.transaction():
+            for v in vs:
+                await conn.execute(
+                    "INSERT INTO paper_counterfactual_variants (account_id, "
+                    " strategy, eval_id, stage, verdict, refusal, "
+                    " us_market_slug, holding_side, fixture, variant, style,"
+                    " qty, vwap, p_used, fill_probability, cost_usd, "
+                    " fees_usd, expected_ev_usd, detail, decided_at) VALUES "
+                    " ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,"
+                    " $16,$17,$18,$19::jsonb,$20) ON CONFLICT DO NOTHING",
+                    account_id, strategy, eval_id, stage,
+                    "CASH" if refusal else "ENTER", refusal, slug, side,
+                    fixture, v["variant"], v["style"],
+                    float(v.get("qty") or 0), _num(v.get("vwap")),
+                    _num(v.get("p_used")), _num(v.get("fill_probability")),
+                    _num(v.get("cost_usd")), _num(v.get("fees_usd")),
+                    _num(v.get("expected_ev_usd")),
+                    json.dumps({"ev_given_fill_usd": v.get(
+                        "ev_given_fill_usd")}, default=str), _ts(at))
+                n += 1
+    except Exception:                                           # noqa: BLE001
+        return 0
+    return n
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -1200,6 +1780,10 @@ async def management_economics(conn, *, account_id: str, pos: dict, p_raw,
             "calibration": cal, "descriptor": desc,
             "haircut_per_contract": rh["haircut_per_contract"],
             "residual": rh, "status": "BOUND",
+            # 18 · the minimum expected improvement per contract sold before
+            # a discretionary EXIT / REDUCE may outrank HOLD
+            "min_improvement_per_contract_usd":
+                MIN_MANAGEMENT_IMPROVEMENT_USD,
             "rule": ("HOLD = q x (min(p_raw, p_cal) - residual haircut); "
                      "EXIT / REDUCE = walked proceeds - fees + kept x the "
                      "same HOLD value per contract")}
@@ -1212,7 +1796,11 @@ async def management_economics(conn, *, account_id: str, pos: dict, p_raw,
 DECISIONS_SQL = """
 SELECT d.strategy, d.us_market_slug, d.holding_side,
        extract(epoch FROM d.decided_at)::float8 AS decided_at,
-       coalesce(d.p_blended, d.p_pinnacle, d.p_internal) AS p
+       coalesce(d.p_blended, d.p_pinnacle, d.p_internal) AS p,
+       coalesce(CASE WHEN jsonb_typeof(d.book->'levels'->0->'price')
+                          = 'number'
+                     THEN (d.book->'levels'->0->>'price')::float8 END,
+                d.limit_price::float8) AS price
   FROM paper_decisions d
  WHERE d.account_id = $1 AND d.decided_at >= $2
    AND d.us_market_slug IS NOT NULL AND d.holding_side IS NOT NULL
@@ -1222,6 +1810,7 @@ SELECT d.strategy, d.us_market_slug, d.holding_side,
 
 SHADOW_OBS_SQL = """
 SELECT s.strategy, s.us_market_slug, s.holding_side, s.p,
+       s.limit_price::float8 AS price,
        extract(epoch FROM s.decided_at)::float8 AS decided_at
   FROM paper_shadow_counterfactuals s
  WHERE s.account_id = $1 AND s.decided_at >= $2
@@ -1278,7 +1867,7 @@ async def calibration_observations(conn, account_id: str, *, now: float
             continue            # one observation per contract / side / regime
         seen[k] = {"sport": d["sport"], "family": d["family"],
                    "regime": d["regime"], "p": _num(r["p"]), "y": y,
-                   "source": r["source"]}
+                   "price": _num(r.get("price")), "source": r["source"]}
     return list(seen.values())
 
 
@@ -1422,6 +2011,54 @@ async def residual_observations(conn, account_id: str) -> list:
     return rows
 
 
+MGMT_FILLS_SQL = """
+SELECT f.strategy, f.group_id, f.us_market_slug, f.holding_side, f.qty,
+       f.price, f.fee_usd, b0.bids AS b0_bids, b0.offers AS b0_offers
+  FROM paper_fills f
+  LEFT JOIN LATERAL (
+       SELECT bids, offers FROM paper_book_observations b
+        WHERE b.us_market_slug = f.us_market_slug AND b.error IS NULL
+          AND b.observed_at <= f.filled_at
+          AND b.observed_at >= f.filled_at - make_interval(secs => $3)
+        ORDER BY b.observed_at DESC LIMIT 1) b0 ON true
+ WHERE f.account_id = $1 AND f.direction = 'SELL' AND f.filled_at >= $2
+ ORDER BY f.filled_at DESC LIMIT 5000
+"""
+
+
+async def management_observations(conn, account_id: str, *, now: float
+                                  ) -> list:
+    """One row per CLOSED paper position in the fit window: exited (a SELL
+    closed it, not settlement) and the measured exit cost per contract
+    (held mid at the sale - the sale price + its fee per contract)."""
+    from . import bettor_paper_ledger as L
+    from . import bettor_strategy_lifecycle as LC
+    since = now - FIT_WINDOW_DAYS * 86400.0
+    sells: dict = {}
+    for r in await conn.fetch(MGMT_FILLS_SQL, account_id, _ts(since),
+                              FILL_BOOK_MAX_S):
+        k = (r["group_id"], r["us_market_slug"], r["holding_side"])
+        m = _held_mid(r["b0_bids"], r["b0_offers"], r["holding_side"])
+        q = float(r["qty"] or 0)
+        g = sells.setdefault(k, {"q": 0.0, "c": 0.0, "qm": 0.0})
+        g["q"] += q
+        if m is not None and q > 0:
+            g["c"] += (m - float(r["price"])) * q + float(r["fee_usd"] or 0)
+            g["qm"] += q
+    rows = []
+    for p in await L.positions(conn, account_id, include_closed=True):
+        if LC.closed_at(p) is None or (_num(p.get("first_fill_at")) or 0) \
+                < since:
+            continue
+        k = (p["group_id"], p["us_market_slug"], p["holding_side"])
+        g = sells.get(k)
+        rows.append({"strategy": LC.strategy_of(p, L.DEFAULT_STRATEGY),
+                     "exited": bool(g and g["q"] > 0),
+                     "exit_cost_per_contract": (g["c"] / g["qm"]
+                                                if g and g["qm"] else None)})
+    return rows
+
+
 async def record_model(conn, *, account_id: str, kind: str, payload: dict,
                        at: float) -> int | None:
     try:
@@ -1446,7 +2083,9 @@ async def fit_all(conn, *, account_id: str, now: float) -> dict:
                 conn, account_id, now=now)),
             ("EXECUTION", lambda: execution_observations(
                 conn, account_id, now=now)),
-            ("RESIDUAL", lambda: residual_observations(conn, account_id))):
+            ("RESIDUAL", lambda: residual_observations(conn, account_id)),
+            ("MANAGEMENT", lambda: management_observations(
+                conn, account_id, now=now))):
         try:
             async with conn.transaction():
                 got = await fn()
@@ -1454,6 +2093,8 @@ async def fit_all(conn, *, account_id: str, now: float) -> dict:
                 payload = fit_calibration(got)
             elif kind == "EXECUTION":
                 payload = fit_execution(*got)
+            elif kind == "MANAGEMENT":
+                payload = fit_management(got)
             else:
                 payload = fit_residuals(got)
             payload["fitted_at"] = now
@@ -1652,5 +2293,16 @@ def describe() -> dict:
             "residual": {"k": K_RESIDUAL,
                          "min_observations": MIN_RESIDUAL_OBSERVATIONS,
                          "credits_positive_residual": False},
+            "stack": {"price_regions": list(PRICE_REGIONS),
+                      "k_price_region": K_PRICE_REGION,
+                      "freshness_bound_s": FRESHNESS_BOUND_S,
+                      "freshness_max_haircut": FRESHNESS_MAX_HAIRCUT,
+                      "exit_rate_prior": EXIT_RATE_PRIOR,
+                      "default_spread": DEFAULT_SPREAD,
+                      "min_management_improvement_usd":
+                          MIN_MANAGEMENT_IMPROVEMENT_USD,
+                      "scenario_max_exposure_usd": SCENARIO_MAX_EXPOSURE_USD,
+                      "reprice_deadband_s": REPRICE_DEADBAND_S,
+                      "variants": list(VARIANTS)},
             "refusals": list(ALL_REFUSALS), "paper_only": True,
             "at": time.time()}

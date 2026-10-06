@@ -464,7 +464,8 @@ async def test_probe_rows_persist_every_agreement_field_and_the_tier():
         out = await WMD.probe_same_book(
             _Pool(conn), Store(), [m["retail_slug"] for m in u["members"]],
             process_id=pid, current=b.current, focus=focus,
-            retail_read=fake_retail(retail_md(), calls=calls))
+            retail_read=fake_retail(retail_md(), calls=calls),
+            quiet_s=0.0, gate=lambda: {"blocking": False})
         assert out["written"] == 2 and calls == [SLUG]
         rows = {r["symbol"]: dict(r) for r in await conn.fetch(
             "SELECT * FROM institutional_same_book_probe WHERE "

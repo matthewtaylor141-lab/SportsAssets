@@ -115,6 +115,14 @@ def test_no_funded_module_imports_the_paper_modules():
                # only its own schedule row and agent_slack_delivery, and
                # nothing in Slack can place, change or approve an order
                "slack_updates.py",
+               # (310) the CAPITAL READINESS LAB's feeds and observer read the
+               # paper evaluations / settlements / freshness / integrity in a
+               # transaction they roll back, and append only to the four
+               # migration-310 RESEARCH / SHADOW_NO_AUTHORITY tables; no
+               # order, size, gate or promotion effect (its own static
+               # authority audit forbids the order modules)
+               "capital_readiness/feeds.py",
+               "capital_readiness/observer.py",
                # (209) Audrey's coverage integrity, postmortems and the
                # improvement driver: they read the paper ledger, write their
                # own migration-209 tables, Audrey findings and the
@@ -204,6 +212,12 @@ def test_no_funded_module_imports_the_paper_modules():
                # funded module (tests/test_capital_authority.py)
                "bettor_capital_authority.py",
                "api/command_capital_authority.py",
+               # (311) the forward profitability scoreboard: GET-only, reads
+               # bettor_paper_profitability_stack.scoreboard_read inside a
+               # READ ONLY transaction; writes nothing, imports no order,
+               # venue, execution or funded module
+               # (tests/test_profitability_stack_binding.py)
+               "api/command_profitability_scoreboard.py",
                # (R30C, 300) the live execution calibration read model
                # (/api/command/execution-calibration): GET-only, reads the
                # PAPER adapter's paper orders / fills / books and walks the

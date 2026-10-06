@@ -595,6 +595,22 @@ async def lifespan(_: FastAPI):
             improve_task = asyncio.create_task(_IMPROVE.run(_cap_pool))
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("improvement pipeline runner failed to arm")
+    # ── THE CAPITAL READINESS OBSERVER (migration 310) ───────────────
+    # Post-decision and read-only toward every BETTOR layer: the Decision
+    # Shadow Court over recorded 309 evaluations, agent economics, the
+    # scale twin on measured capacity and the hard-gate readiness verdict,
+    # every 15 min. RESEARCH / SHADOW_NO_AUTHORITY: it appends only to the
+    # four migration-310 tables (capital_readiness/runner.py); no venue,
+    # order, sizing, gate, limit or authority path, and a GREEN verdict
+    # grants nothing. Advisory-locked per cycle, failure-isolated;
+    # CAPITAL_READINESS_OBSERVER=off is the kill switch.
+    readiness_task = None
+    try:
+        from ..capital_readiness import observer as _CRL
+        if _CRL.enabled():
+            readiness_task = asyncio.create_task(_CRL.run(_cap_pool))
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("capital readiness observer failed to arm")
     try:
         yield
     finally:
@@ -609,7 +625,7 @@ async def lifespan(_: FastAPI):
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
                              archer_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
-                             improve_task,
+                             improve_task, readiness_task,
                              *watchdog_tasks)
                  if t is not None]
         for task in tasks:
@@ -764,6 +780,16 @@ try:
 except ImportError:
     log.warning("profitability: api.command_profitability_os not loaded",
                 exc_info=True)
+# ── THE CAPITAL READINESS LAB (migration 310): GET
+# /api/command/capital-readiness{,/agents,/shadow-court,/scale}. GET only,
+# COMMAND auth. RESEARCH / SHADOW_NO_AUTHORITY: no order, size or promotion.
+try:
+    from .command_capital_readiness import (
+        router as _command_capital_readiness_router)
+    app.include_router(_command_capital_readiness_router)
+except ImportError:
+    log.warning("capital readiness: api.command_capital_readiness not loaded",
+                exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
 # /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.
@@ -818,6 +844,17 @@ try:
 except ImportError:
     log.warning("capital authority: api.command_capital_authority not "
                 "loaded", exc_info=True)
+# ── THE FORWARD PAPER / SHADOW PROFITABILITY SCOREBOARD (migration 311):
+# /api/command/paper/profitability-scoreboard. GET only, COMMAND auth, READ
+# ONLY transaction; forward sample, after-cost EV, realized P&L since the
+# bind cutover, calibration, forecast, verdict. No write.
+try:
+    from .command_profitability_scoreboard import (
+        router as _command_profitability_scoreboard_router)
+    app.include_router(_command_profitability_scoreboard_router)
+except ImportError:
+    log.warning("profitability scoreboard: api.command_profitability_"
+                "scoreboard not loaded", exc_info=True)
 # ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
 # named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
 try:

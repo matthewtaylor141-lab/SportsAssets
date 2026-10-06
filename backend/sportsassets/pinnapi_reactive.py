@@ -191,6 +191,9 @@ class Scheduler:
         self.hot_pending = OrderedDict()
         self.hot_streak = 0
         self.held = held if held is not None else PH.WATCH
+        # THE JOB IN FLIGHT, (fixture, version), or None: what
+        # `will_value` reads with the three queues
+        self.running = None
         self.wake = asyncio.Event()
         self.counts = Counter()
         self.closed = False
@@ -385,6 +388,24 @@ class Scheduler:
         self.wake.set()
         return 'QUEUED'
 
+    def will_value(self, eid, version) -> bool:
+        """Whether THIS version of fixture `eid` is going to be valued: it
+        is the change queued for the fixture on any queue (held, hot NFL,
+        discovery), or the job in flight. The paper hook reads it before
+        skipping a valuation whose price this version replaced
+        (`pinnapi_primary.R_SUPERSEDED`): the skip is taken only when the
+        newer price is itself on its way to a valuation. Never raises."""
+        try:
+            if self.closed or version is None:
+                return False
+            for q in (self.held_pending, self.hot_pending, self.pending):
+                tick = q.get(eid)
+                if tick is not None and tick.get('version') == version:
+                    return True
+            return self.running == (eid, version)
+        except Exception:                                       # noqa: BLE001
+            return False
+
     def next_job(self):
         """(event id, tick) to evaluate next: held first; then hot NFL ahead
         of discovery, but never more than HOT_MAX_CONSECUTIVE hot jobs in a
@@ -447,6 +468,7 @@ class Scheduler:
                 job = copy.deepcopy(seed)
                 job.update(valuation_ids=[], trigger=attempt)
                 try:
+                    self.running = (eid, tick.get('version'))
                     async with asyncio.timeout(self.deadline):
                         result = await self.evaluate(job)
                     attempt.update(state='COMPLETED', result=result)
@@ -458,6 +480,7 @@ class Scheduler:
                 except Exception as exc:
                     attempt.update(state='ERROR', error_type=type(exc).__name__)
                 finally:
+                    self.running = None
                     attempt.update(finished_at=self.clock(), valuation_ids=job['valuation_ids'])
                     async with asyncio.timeout(2):
                         await self.audit(attempt)
@@ -558,6 +581,7 @@ async def _run_job_on_one_session(self, eid, tick):
             job = copy.deepcopy(seed)
             job.update(valuation_ids=[], trigger=attempt)
             try:
+                self.running = (eid, tick.get('version'))
                 async with asyncio.timeout(self.deadline):
                     result = await self.evaluate(job, conn)
                 attempt.update(state='COMPLETED', result=result)
@@ -569,6 +593,7 @@ async def _run_job_on_one_session(self, eid, tick):
             except Exception as exc:
                 attempt.update(state='ERROR', error_type=type(exc).__name__)
             finally:
+                self.running = None
                 attempt.update(finished_at=self.clock(), valuation_ids=job['valuation_ids'])
                 await _complete_audit(self, attempt, conn)
         self.counts[attempt['state']] += 1

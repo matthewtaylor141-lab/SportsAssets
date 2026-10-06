@@ -823,6 +823,11 @@ tests/test_position_rooms_authority.py
 # with a bounded statement timeout, SELECT-only SQL, and imports no order,
 # venue, ledger, paper or funded module.
 tests/test_command_floor_authority.py
+# GET /api/command/floor/xavier is bounded (production 499): a fixed number
+# of queries whatever the positions / review history, no review blobs in the
+# payload, a byte bound with named truncation, each position's ONE current
+# review with its packet and protection, CURRENT EXIT / REDUCE shown.
+tests/test_command_floor_xavier_bounded.py
 # Improvement pipeline (claude/pos-improve, migration 221): the bounded
 # self-improvement ledger. The runner has no order / deploy / merge /
 # network / process path and writes only improve_*; the database refuses
@@ -1191,8 +1196,20 @@ tests/test_command_position_closed_and_ipad.py
 tests/test_p1_pmx_institutional.py
 tests/test_profitability_bind.py
 tests/test_mirror_shadow_secret_precondition.py
+tests/test_mirror_shadow_positions_source.py
 tests/test_p1_pinnapi_canonical_names.py
 tests/test_p1_priced_settlement_difference.py
 tests/test_p1_read_bounded_by_the_probability_deadline.py
 tests/test_p1_wnba_league_team_table.py
 tests/test_p1_held_mark_institutional_bound.py
+tests/test_p1_pmx_same_instant_and_probe_pacing.py
+tests/test_capital_readiness_lab.py
+tests/test_p1_pinnapi_input_changed.py
+# (311) THE PROFITABILITY STACK: every profitability item binds in the PAPER
+# entry / management chain (price-region calibration, freshness decay,
+# spread / management cost, settlement cap, scenario concentration, reprice
+# and management deadbands, automatic quarantine), the counterfactual
+# variant ledger, attribution, the P&L forecast and the forward scoreboard.
+tests/test_profitability_stack_binding.py
+# (capital readiness feeds) Shadow Court / agent economics / scale twin / readiness observer: RESEARCH, writes only the 310 tables
+tests/test_capital_readiness_feeds.py

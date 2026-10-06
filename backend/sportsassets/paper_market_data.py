@@ -883,45 +883,11 @@ I_NOT_CURRENT = "INSTITUTIONAL_BOOK_NOT_CURRENT"
 I_STALE = "INSTITUTIONAL_BOOK_OUTSIDE_THE_MARK_SLA"
 I_LEVELS = "INSTITUTIONAL_BOOK_LEVELS_UNREADABLE"
 
-SAME_BOOK_SYMBOL_SQL = """
-    SELECT symbol,
-           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT %s
-                THEN 'NOT_COMPARABLE' ELSE verdict END       AS verdict,
-           count(*)                                          AS n,
-           count(*) FILTER (WHERE NOT stream_changed_in_window) AS n_stable
-      FROM institutional_same_book_probe
-     WHERE probed_at > now() - make_interval(secs => $1)
-       AND symbol = ANY($2::text[])
-     GROUP BY 1, 2
-"""
-
-
-async def same_book_by_symbol(conn, symbols) -> dict:
-    """{symbol: {"status", "detail"}} under p5_runtime.same_book_status, for
-    THESE symbols only (exact-identity samples, the P5 window). Never
-    raises; an absent table or a failed read is {} (nothing proven)."""
-    from . import p5_runtime as P5R
-    syms = sorted({str(s) for s in symbols or () if s})
-    if not syms:
-        return {}
-    try:
-        if not await conn.fetchval(
-                "SELECT to_regclass('institutional_same_book_probe') "
-                "IS NOT NULL"):
-            return {}
-        rows = await conn.fetch(SAME_BOOK_SYMBOL_SQL % P5R.EXACT_SAMPLE_SQL,
-                                float(P5R.SAME_BOOK_WINDOW_S), syms)
-    except Exception:                                          # noqa: BLE001
-        return {}
-    by: dict = {}
-    for r in rows:
-        by.setdefault(r["symbol"], {})[r["verdict"]] = (int(r["n"]),
-                                                        int(r["n_stable"]))
-    out = {}
-    for s, counts in by.items():
-        st, det = P5R.same_book_status(counts)
-        out[s] = {"status": st, "detail": det}
-    return out
+# the per-symbol evidence reader lives with the probe it reads
+# (institutional_same_book), so the workers' probe can order by it without
+# importing this module
+from .institutional_same_book import (  # noqa: E402,F401
+    SAME_BOOK_SYMBOL_SQL, SAME_INSTANT_SQL, same_book_by_symbol)
 
 
 def _iso_epoch(v):

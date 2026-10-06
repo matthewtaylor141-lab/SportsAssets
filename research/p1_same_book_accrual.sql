@@ -6,7 +6,7 @@
 SELECT verdict, incomparable_reason, count(*) AS n,
        count(DISTINCT symbol) AS symbols, max(probed_at) AS newest
   FROM institutional_same_book_probe
- WHERE probed_at > now() - interval '2 hours'
+ WHERE probed_at > now() - interval '30 minutes'
  GROUP BY 1, 2 ORDER BY n DESC;
 
 SELECT symbol,

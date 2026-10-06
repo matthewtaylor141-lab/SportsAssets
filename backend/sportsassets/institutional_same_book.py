@@ -77,6 +77,19 @@ NC_RETAIL = "RETAIL_BOOK_UNREADABLE"
 NC_WINDOW = "READS_NOT_WITHIN_WINDOW"
 NC_EMPTY = "BOTH_BOOKS_EMPTY"
 NC_SCALE = "INSTITUTIONAL_SCALES_UNKNOWN"
+#: THE SAME VENUE INSTANT (production evidence, release 730325f, 90 min):
+#: every pair whose retail `transactTime` EQUALS the stream read's venue
+#: clock agreed (43/43 AGREE_TOP_N); every DISAGREE (19) and every
+#: AGREE_TOUCH_ONLY (39) had the retail book's transactTime 19-28 s OLDER
+#: than the stream's -- a cached retail representation of an earlier book
+#: state, compared against the live one. Two observations of the book at
+#: different venue instants are not a same-book test: such a pair is
+#: NOT_COMPARABLE, named by which side is older. Only pairs at one venue
+#: instant are compared (and must then agree). Stricter, never looser.
+NC_RETAIL_OLDER = "RETAIL_BOOK_OLDER_THAN_STREAM_STATE"
+NC_STREAM_OLDER = "STREAM_STATE_OLDER_THAN_RETAIL_BOOK"
+#: venue clocks equal within this (wire precision: ns vs us)
+SAME_INSTANT_TOLERANCE_S = 0.001
 
 
 class WriteRefused(RuntimeError):
@@ -355,8 +368,28 @@ def _sample(symbol: str, *, record, retail_row=None, books_current,
         return dict(out, verdict=V_NC, verdict_reason=NC_RETAIL)
     if window > max_window_s:
         return dict(out, verdict=V_NC, verdict_reason=NC_WINDOW)
-    c_before = compare(b1, rb, top_n=top_n) if b1 is not None else None
-    c_after = compare(b2, rb, top_n=top_n) if b2 is not None else None
+    # THE SAME VENUE INSTANT: when both clocks are known, only a stream read
+    # at the retail book's transactTime is compared with it
+    r_ts = _epoch_of(md.get("transactTime") or md.get("transact_time"))
+    s_ts = {"before": _epoch_of(_snap_ts(s1)), "after": _epoch_of(_snap_ts(s2))}
+    allowed = {"before": b1 is not None, "after": b2 is not None}
+    if r_ts is not None and any(s_ts[n] is not None for n in s_ts
+                                if allowed[n]):
+        same = {n for n in s_ts if allowed[n] and s_ts[n] is not None
+                and abs(s_ts[n] - r_ts) <= SAME_INSTANT_TOLERANCE_S}
+        if not same:
+            known = [s_ts[n] for n in s_ts if allowed[n] and s_ts[n] is not None]
+            why = NC_RETAIL_OLDER if r_ts < min(known) else (
+                NC_STREAM_OLDER if r_ts > max(known) else NC_RETAIL_OLDER)
+            return dict(out, verdict=V_NC, verdict_reason=why,
+                        venue_instants={"retail": r_ts, "stream_before":
+                                        s_ts["before"], "stream_after":
+                                        s_ts["after"]})
+        allowed = {n: allowed[n] and n in same for n in allowed}
+    c_before = compare(b1, rb, top_n=top_n) \
+        if b1 is not None and allowed["before"] else None
+    c_after = compare(b2, rb, top_n=top_n) \
+        if b2 is not None and allowed["after"] else None
     cands = [(n, c) for n, c in (("after", c_after), ("before", c_before))
              if c is not None]
     best_rank = min(_RANK[c["verdict"]] for _, c in cands)
@@ -371,7 +404,38 @@ def _sample(symbol: str, *, record, retail_row=None, books_current,
                 touch_qty_equal=c.get("touch_qty_equal"),
                 levels_equal=c.get("levels_equal"),
                 diff={"compared_with": name, "levels": c.get("diff") or []},
-                stream_book=_show(b2 if name == "after" else b1, top_n))
+                stream_book=_show(b2 if name == "after" else b1, top_n),
+                # the venue clock of the stream read actually compared
+                stream_venue_ts=_snap_ts(s2 if name == "after" else s1)
+                or out.get("stream_venue_ts"))
+
+
+def _snap_ts(read):
+    return (((read or {}).get("evidence") or {}).get("snapshot") or {}
+            ).get("venue_ts")
+
+
+def _epoch_of(v):
+    """An ISO-8601 / datetime / epoch venue clock -> epoch seconds, or None.
+    Sub-microsecond digits are dropped (the stream carries microseconds)."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.timestamp() if v.tzinfo else None
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip()
+    m = re.match(r"^(.*T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$", t)
+    if not m:
+        return None
+    frac = (m.group(2) or "")[:7]
+    tz = m.group(3) or ""
+    if tz == "Z" or tz == "":
+        tz = "+00:00"
+    try:
+        return datetime.fromisoformat(m.group(1) + frac + tz).timestamp()
+    except ValueError:
+        return None
 
 
 # ── the retail read: keyless, GET-only, gated ─────────────────────────
@@ -557,3 +621,63 @@ async def persist(pool, rows, *, process_id: str, service: str) -> int:
             except Exception:                                 # noqa: BLE001
                 continue
     return n
+
+
+# ── the per-symbol evidence reader (held-mark use) ───────────────────
+
+#: THE SAME VENUE INSTANT, applied to persisted samples too
+#: (institutional_same_book.NC_RETAIL_OLDER): a sample whose retail
+#: transactTime and stream venue clock are both known and differ by more than
+#: SAME_INSTANT_TOLERANCE_S compared two different book states -- it counts
+#: as NOT_COMPARABLE, whatever verdict it was recorded with (the rows written
+#: before the rule included 19 DISAGREE and 39 AGREE_TOUCH_ONLY of exactly
+#: that kind). A CASE, so the cast runs only on a well-formed clock.
+SAME_INSTANT_SQL = r"""
+    (CASE WHEN stream_venue_ts IS NOT NULL
+               AND retail_book->>'transact_time' ~
+                   '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$'
+          THEN abs(extract(epoch FROM ((retail_book->>'transact_time')
+                                       ::timestamptz - stream_venue_ts)))
+               <= 0.001
+          ELSE TRUE END)"""
+
+SAME_BOOK_SYMBOL_SQL = """
+    SELECT symbol,
+           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT (%s AND """ \
+    + SAME_INSTANT_SQL.replace("%", "%%") + """)
+                THEN 'NOT_COMPARABLE' ELSE verdict END       AS verdict,
+           count(*)                                          AS n,
+           count(*) FILTER (WHERE NOT stream_changed_in_window) AS n_stable
+      FROM institutional_same_book_probe
+     WHERE probed_at > now() - make_interval(secs => $1)
+       AND symbol = ANY($2::text[])
+     GROUP BY 1, 2
+"""
+
+
+async def same_book_by_symbol(conn, symbols) -> dict:
+    """{symbol: {"status", "detail"}} under p5_runtime.same_book_status, for
+    THESE symbols only (exact-identity samples, the P5 window). Never
+    raises; an absent table or a failed read is {} (nothing proven)."""
+    from . import same_book_rule as P5R
+    syms = sorted({str(s) for s in symbols or () if s})
+    if not syms:
+        return {}
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('institutional_same_book_probe') "
+                "IS NOT NULL"):
+            return {}
+        rows = await conn.fetch(SAME_BOOK_SYMBOL_SQL % P5R.EXACT_SAMPLE_SQL,
+                                float(P5R.SAME_BOOK_WINDOW_S), syms)
+    except Exception:                                          # noqa: BLE001
+        return {}
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r["symbol"], {})[r["verdict"]] = (int(r["n"]),
+                                                        int(r["n_stable"]))
+    out = {}
+    for s, counts in by.items():
+        st, det = P5R.same_book_status(counts)
+        out[s] = {"status": st, "detail": det}
+    return out

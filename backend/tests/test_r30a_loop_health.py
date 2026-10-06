@@ -97,6 +97,7 @@ def test_every_api_lifespan_runner_is_inventoried():
         "_POSLEARN.run": "position_learning.runner",
         "_TWIN.run": "twin.runner",
         "_IMPROVE.run": "agents.improvement_pipeline",
+        "_CRL.run": "capital_readiness.observer",
         "_WATCHDOG.start": "api.loop_watchdog",
         "_desk_feed_warm_loop": "api.desk_feed_warm",
         "refresh_whale_idents_loop": "api.whale_idents_refresh",

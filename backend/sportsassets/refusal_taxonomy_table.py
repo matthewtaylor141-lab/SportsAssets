@@ -52,6 +52,13 @@ TABLE = {
     # (P1) venue isolation and the mirror shadow's credential precondition
     "NOT_A_POLYMARKET_US_MARKET_KALSHI_TICKER_REFUSED": (S, CAP, "VENUE_BOOK"),
     "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY": (S, DATA, "INGESTION"),
+    # (P1 closeout) the mirror shadow's ledger-derived positions fallback
+    # (mirror_positions_source): topology not the PMX RSA client, ledger
+    # unreadable, neither source readable, a non-read statement refused
+    "PMUS_SLOT_CREDENTIAL_IS_NOT_THE_PMX_RSA_CLIENT": (S, CAP, "INGESTION"),
+    "MIRROR_SHADOW_LEDGER_POSITIONS_UNREADABLE": (S, DATA, "INGESTION"),
+    "MIRROR_SHADOW_NO_POSITIONS_SOURCE_READABLE": (S, DATA, "INGESTION"),
+    "MIRROR_POSITIONS_SOURCE_STATEMENT_IS_NOT_A_READ": (S, CAP, "INGESTION"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
@@ -1492,6 +1499,13 @@ INLINE = {
     "PINNAPI_PRIMARY_FIXTURE_UNPROVED": (S, MAP, "EVENT_IDENTITY"),
     "PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES": (S, DATA, "PROBABILITY"),
     "PINNAPI_PRIMARY_INPUT_CHANGED": (S, FRESH, "FRESHNESS"),
+    # (P1) a paper valuation whose money-line price a strictly newer, fresh
+    # price of the same market / record / fixture replaced, while that newer
+    # price is itself being valued: skipped by the paper hook (a DEFERRED
+    # hook row, never a paper decision), so it is no first loss; ours
+    # (sequencing), never EXTERNAL
+    "PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE": (
+        S, FRESH, "FRESHNESS"),
     "PINNAPI_PRIMARY_NOT_FULL_GAME_H2H": (S, MAP, "MARKET_FAMILY"),
     "PINNAPI_PRIMARY_NO_EXACT_FIXTURE": (S, MAP, "EVENT_IDENTITY"),
     "PINNAPI_PRIMARY_PHASE_UNPROVED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
@@ -1868,6 +1882,19 @@ EXEC_GATING_STREAM = {
     "CASH_WAIT_FORWARD_PNL_NOT_ABSOLUTELY_POSITIVE_CI_LOW_NOT_ABOVE_ZERO":
         (E, EV, "RISK_ADMISSION"),
     "REGIME_FORWARD_ECONOMICS_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
+    # (311) THE PROFITABILITY STACK: the account's aggregate exposure to one
+    # event at its scenario cap, a probability older than the freshness
+    # bound, a re-price inside the deadband without a material EV gain
+    # (economic CASH / WAIT), and the management deadband (a discretionary
+    # sale below the minimum expected improvement over HOLD)
+    "CASH_WAIT_SCENARIO_CONCENTRATION_LIMIT_REACHED":
+        (E, RAIL, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_AGE_BEYOND_FRESHNESS_BOUND":
+        (S, FRESH, "RISK_ADMISSION"),
+    "CHURN_REPRICE_INSIDE_DEADBAND_WITHOUT_MATERIAL_EV_GAIN":
+        (E, RAIL, "RISK_ADMISSION"),
+    "MANAGEMENT_ACTION_BELOW_MINIMUM_EXPECTED_IMPROVEMENT":
+        (E, EV, "MANAGEMENT"),
 }
 
 #: THE PROFITABILITY OS VIEW (sportsassets/pos_os): why-codes a read-only

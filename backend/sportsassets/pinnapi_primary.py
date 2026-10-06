@@ -429,6 +429,98 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
             "receipt_to_evaluation_ms": at * 1000 - p["received_ms"]}
 
 
+#: ── A VALUATION WHOSE PRICE HAS BEEN REPLACED (P1, 2026-10-06) ──────────
+#: PRODUCTION: 98 paper decisions in ~16 min over ~39 in-play markets refused
+#: PINNAPI_PRIMARY_INPUT_CHANGED, across the completed-game, exploration and
+#: Derek strategies. The refusal is CORRECT -- in play Pinnacle re-prices
+#: every few seconds, and `validate` must never value the price a valuation
+#: was built on once the feed holds a different one. What is code-controlled
+#: is the WASTE around it: one reactive job writes a valuation, decides it
+#: with each strategy IN SEQUENCE (each awaiting its own venue book read),
+#: then writes and decides the other side of the contract from the SAME
+#: quote; a book retry decides the same old valuation seconds later; the
+#: paper-pass backstop re-decides what the hook skipped. Meanwhile the feed's
+#: newer price has already been queued on the reactive scheduler (coalesced
+#: per fixture, served next), which values it afresh. Every strategy after
+#: the first price move was recording a SOFTWARE first loss on a valuation
+#: that a newer one was about to replace.
+#:
+#: `supersession` names that case and ONLY that case: the substance check
+#: of `validate` failed (PINNAPI_PRIMARY_INPUT_CHANGED from the price/clock
+#: comparison, not from the record change) while EVERYTHING ELSE about the
+#: input is the same -- the runtime, the fixture, the record that prices it
+#: (so not a phase change: a game going in play is a different record and
+#: keeps its refusal), the market, the stream and the live flag -- and the
+#: feed now holds a STRICTLY NEWER change of that market which itself reads
+#: fresh inside the unchanged 30 s rule. Nothing is valued: the caller skips
+#: the old valuation (it is never decided on its old price, and never on
+#: the new one either) and only when the newer price is itself going to be
+#: valued (queued for evaluation, or a newer valuation of the same contract
+#: already written). An epoch change, a fixture change, a phase change, a
+#: stale or unreadable quote, a lost authority: each keeps its own refusal.
+#:
+#: EPOCH CHURN IS NOT A CAUSE (checked, not assumed): a new socket epoch
+#: CLEARS the cache (`pinnapi_feed.FeedCache.new_connection`, the only
+#: caller of `FeedAuthority.grant`, from `pinnapi_owner`), so every quote on
+#: a new epoch is first sight with no change time and reads
+#: FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE until a frame really changes it
+#: -- an epoch bump with identical substance never reaches the substance
+#: comparison, and the epoch comparison stays.
+R_SUPERSEDED = "PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE"
+
+
+def version_key(q) -> tuple:
+    """A quote's evaluation version, as the reactive scheduler keys it
+    (`pinnapi_reactive.version_of`): (epoch, change instant, prices)."""
+    return (q.epoch, q.change_ms, tuple(sorted(q.prices.items())))
+
+
+def supersession(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
+    """None, or the evidence that this valuation's money-line price has been
+    REPLACED by a strictly newer, fresh price of the same market of the same
+    record of the same fixture (see R_SUPERSEDED). Never raises; any doubt
+    is None (the caller then keeps `validate`'s refusal)."""
+    try:
+        p = quote.get("reference_input") or {}
+        if p.get("provider") != PROVIDER or p.get("version") != VERSION:
+            return None
+        check = validate(cache, quote, at=at, max_age_s=max_age_s,
+                         runtime_id=runtime_id)
+        if check.get("ok") or check.get("reason") != \
+                "PINNAPI_PRIMARY_INPUT_CHANGED":
+            return None
+        qid = p.get("quote_event_id", p["feed_event_id"])
+        now_qid, why = cache.fixture_quote_id(p["feed_event_id"])
+        if why or now_qid != qid:
+            return None                  # a different record: phase change
+        got = cache.read(qid, p["market_key"], evaluated_ms=at * 1000,
+                         max_age_s=max_age_s)
+        if not got.get("ok"):
+            return None                  # the newer price is not usable
+        q = got["quote"]
+        live = cache.events[qid].get("isLive")
+        if (q.stream != p["stream"] or not isinstance(live, bool)
+                or q.stream != ("live" if live else "prematch")
+                or q.market_type != "moneyline" or q.period != 0
+                or q.alternate or q.line is not None
+                or q.sport_id != SPORTS[p["family"]]
+                or q.epoch != p["epoch"]):
+            return None
+        old = p.get("change_ms", p.get("source_change_ms"))
+        if epoch(q.change_ms) is None or epoch(old) is None \
+                or not q.change_ms > old:
+            return None                  # not strictly newer
+        return {"reason": R_SUPERSEDED, "fixture_id": p["feed_event_id"],
+                "quote_event_id": qid, "market_key": p["market_key"],
+                "epoch": q.epoch, "version": version_key(q),
+                "previous_change_ms": old, "newer_change_ms": q.change_ms,
+                "previous_raw_odds": dict(p.get("raw_odds") or {}),
+                "newer_raw_odds": dict(q.prices),
+                "newer_quote_age_s": got["provenance"].get("quote_age_s")}
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 def stamp_record(rec, quote, check):
     """Provider identity and failure must survive the persisted-row boundary."""
     source = dict(quote.get("reference_input") or {})

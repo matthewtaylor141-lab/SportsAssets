@@ -82,6 +82,10 @@ jobs:
           jq -c 'del(.rows) | del(.events)' p0/turnaround.json 2>&1 | cut -c1-8000
           get capital_authority /api/command/paper/capital-authority
           jq -c '.' p0/capital_authority.json 2>&1 | cut -c1-12000
+          get profitability_scoreboard /api/command/paper/profitability-scoreboard
+          jq -c '.' p0/profitability_scoreboard.json 2>&1 | cut -c1-12000
+          get capital_readiness /api/command/capital-readiness
+          jq -c '{status, why, label, authority, readiness: (.readiness | {readiness_status, recommended_capital_usd, blocking_gates, computed_at, source_sha}), agent_championship: .agent_championship.agents, shadow_court, scale_twin: {status: .scale_twin.status, rows: (.scale_twin.rows | length)}}' p0/capital_readiness.json 2>&1 | cut -c1-8000
           get small_live "/api/command/small-live?limit=1"
           jq -c 'del(.rows) | del(.basis)' p0/small_live.json 2>&1 | cut -c1-3000
           exit 0

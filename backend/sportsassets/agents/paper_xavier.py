@@ -124,6 +124,11 @@ B_PACKET_INCOMPLETE = "MANAGEMENT_PACKET_INCOMPLETE_NO_DISCRETIONARY_SALE"
 #: book the alternatives are walked on must be readable, inside the 300 s
 #: executable-mark SLA and show exit depth.
 B_NO_FRESH_EXIT_WALK = "NO_FRESH_EXECUTABLE_EXIT_WALK"
+#: 18 · THE MANAGEMENT DEADBAND (bettor_paper_profitability_bind.
+#: management_economics): a discretionary EXIT / REDUCE whose value does not
+#: beat HOLD by the minimum expected improvement per contract sold is not
+#: rankable -- HOLD stands (the cost-recovery protection is unaffected)
+B_BELOW_MIN_IMPROVEMENT = "MANAGEMENT_ACTION_BELOW_MINIMUM_EXPECTED_IMPROVEMENT"
 #: (= xavier_packet.P_PROTECTION; the packet module is imported lazily)
 XPK_P_PROTECTION = "NO_VALID_ACTIVE_PROTECTION"
 #: a book stamped this far AFTER the review instant is still clock skew
@@ -275,6 +280,9 @@ def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
     hc = max(0.0, float(hold_haircut_per_contract or 0.0))
     if p is not None:
         p = max(0.0, float(p) - hc)
+    hold_value = None if p is None else q * p
+    min_impr = max(0.0, float((economics or {}).get(
+        "min_improvement_per_contract_usd") or 0.0))
     if p is None:
         blocked.append({"action": A_HOLD, "blocker": R_NO_MEASURE,
                         "value_usd": None})
@@ -311,6 +319,12 @@ def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
              "incremental_capital_usd": 0.0, "fees_usd": w["fees_usd"],
              "walk": w, "unmatched_after_qty": round(kept, 6),
              "evidence_quality": "OBSERVED_BOOK_DEPTH"}
+        if value is not None and hold_value is not None and min_impr > 0 \
+                and value - hold_value < min_impr * w["sold"] - 1e-12:
+            blocked.append(dict(c, blocker=B_BELOW_MIN_IMPROVEMENT,
+                                improvement_usd=round(value - hold_value, 6),
+                                required_usd=round(min_impr * w["sold"], 6)))
+            continue
         (cands if value is not None else blocked).append(
             c if value is not None else dict(c, blocker=R_NO_MEASURE))
     blocked.append({"action": A_NETTING, "blocker": B_NETTING_IS_EXIT,
@@ -850,7 +864,8 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             conn, account_id=acct, pos=pos, p_raw=measure.get("p"), at=at)
         measure["management_economics"] = {
             k: mecon.get(k) for k in ("p_raw", "p_hold",
-                                      "haircut_per_contract", "status")}
+                                      "haircut_per_contract", "status",
+                                      "min_improvement_per_contract_usd")}
         alts = alternatives(
             pos=pos, levels=exit_lv,
             p=(mecon.get("p_hold") if measure.get("p") is not None

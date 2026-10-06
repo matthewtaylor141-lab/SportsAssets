@@ -74,10 +74,11 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from .. import mirror_positions_source as MPS
+from .. import venue_pace
 from ..analytics import mirror as mi
 from ..analytics import mirror_live_rules as rules
 from ..db import get_pool, heartbeat
-from .. import venue_pace
 from ..venue_pace import pace
 
 log = logging.getLogger(__name__)
@@ -1381,6 +1382,76 @@ async def account_positions_walk(pmus, basis_out: dict | None = None
         log.warning("mirror_shadow: positions walk failed (%s: %s)%s",
                     type(exc).__name__, str(exc)[:200], " -- 429: pacer penalty on" if limited else "")
         return None, pages[0], limited
+
+
+def _configured_key_id() -> str:
+    from ..config import settings
+    return str(getattr(settings(), "pmus_key_id", "") or "")
+
+
+def _configured_pmx_client_id() -> str:
+    return str(os.environ.get("PMX_CLIENT_ID") or "")
+
+
+_FALLBACK_LOGGED: dict = {}
+_SRC_VENUE = MPS.SRC_VENUE
+
+
+async def tick_positions(pool, pmus, basis_out: dict | None = None
+                         ) -> tuple[dict[str, float] | None, dict]:
+    """THE SHADOW'S positions for one tick, with the SOURCE and its as-of
+    instant: (positions or None, receipt). THE SHADOW ONLY -- mirror_live
+    keeps calling account_positions_walk, whose venue-only rule is
+    unchanged by this.
+
+      * a usable (Ed25519) PMUS secret: the venue walk, exactly as before.
+        A failed walk is None -- no fallback: a venue that answered badly
+        is the venue saying no, and the ledger is not its stand-in.
+      * the PMUS slot holds the PMX RSA client (production 2026-10-06,
+        R_PMUS_SECRET_NOT_ED25519 with an RSA PEM in the slot): the funded
+        account's own ledger (mirror_positions_source), labelled
+        LEDGER_DERIVED_NOT_VENUE_CONFIRMED with its snapshot instant. Read
+        only; no venue call, no order path.
+      * any other unusable secret, or an unreadable ledger: None, named
+        R_NO_POSITIONS_SOURCE with the fallback's own refusal beside it.
+
+    `basis_out` is filled only by the venue walk; the ledger states no venue
+    basis and none is invented."""
+    why = pmus_secret_unusable_reason(pmus)
+    if why is None:
+        positions = await account_positions(pmus, basis_out=basis_out)
+        receipt: dict[str, Any] = {"source": MPS.SRC_VENUE,
+                                   "as_of_epoch": round(time.time(), 3)}
+        if positions is None:
+            receipt["unreadable"] = "venue_walk_failed"
+        return positions, receipt
+    try:
+        secret = _configured_secret()
+    except Exception:                                           # noqa: BLE001
+        secret = None
+    try:
+        kid = _configured_key_id()
+    except Exception:                                           # noqa: BLE001
+        kid = ""
+    topo = MPS.credential_topology(kid, secret or "", _configured_pmx_client_id())
+    base = {"primary": MPS.SRC_VENUE, "primary_refusal": why, **topo}
+    if not MPS.fallback_allowed(topo):
+        return None, dict(base, source=None, refusal=MPS.R_NO_POSITIONS_SOURCE,
+                          fallback_refusal=MPS.R_SLOT_NOT_PMX_RSA)
+    from ..live_executor import ORDER_INTENT_SQL  # the ledger's own sign rule
+    positions, led = await MPS.ledger_positions(pool, ORDER_INTENT_SQL)
+    if positions is None:
+        out = dict(base, **led)
+        out.update(refusal=MPS.R_NO_POSITIONS_SOURCE,
+                   fallback_refusal=led.get("refusal"))
+        return None, out
+    if not _FALLBACK_LOGGED.get(MPS.SRC_LEDGER):
+        _FALLBACK_LOGGED[MPS.SRC_LEDGER] = True
+        log.warning("mirror_shadow: positions read from %s (%s): the PMUS slot "
+                    "holds the PMX RSA client, so the venue walk is refused; "
+                    "the shadow plans on the funded ledger, never orders",
+                    MPS.SRC_LEDGER, MPS.AUTHORITY_LEDGER)
+    return positions, dict(base, **led)
 
 
 _RATE_LIMIT_TEXT = re.compile(r"^\s*(RateLimitError\b|429\b|HTTP 429\b|Too Many Requests\b)", re.I)
@@ -3100,10 +3171,16 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
     # fee-capture fix): no extra venue call, and nothing on an order
     # path reads it -- the shadow records it and that is all
     venue_basis: dict[str, dict] = {}
-    positions = await account_positions(pmus, basis_out=venue_basis)
+    # THE SOURCE TRAVELS WITH THE READING (P1 closeout): the venue walk, or
+    # -- only when the PMUS slot holds the PMX RSA client -- the funded
+    # ledger, named and dated (tick_positions)
+    positions, pos_src = await tick_positions(pool, pmus, basis_out=venue_basis)
+    stats["positions_source"] = pos_src
     if positions is None:
         _backoff_until = now_ts + BACKOFF_S
         stats.update(positions_unreadable=True, abandoned=True, status="degraded")
+        if pos_src.get("refusal"):
+            stats["positions_unreadable_reason"] = pos_src["refusal"]
         log.warning("mirror_shadow: account positions unreadable — abandoning the "
                     "tick, backing off %ss", BACKOFF_S)
         attach_exit_census(stats, now_ts)
@@ -3147,6 +3224,13 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             except Exception as exc:  # noqa: BLE001 — one market, not the tick
                 log.warning("mirror_shadow: %s/%s failed (%s)", w, cid, type(exc).__name__)
                 continue
+            if pos_src.get("source") not in (None, _SRC_VENUE):
+                # a venue_net that came from the ledger says so on the row
+                if not isinstance(row.get("detail"), dict):
+                    row["detail"] = {}
+                row["detail"]["venue_positions_source"] = pos_src.get("source")
+                row["detail"]["venue_positions_authority"] = pos_src.get("authority")
+                row["detail"]["venue_positions_as_of"] = pos_src.get("as_of")
             if knob_unreadable:
                 # the knob this tick planned by is a guess, not the live
                 # lane's: the compared column carries no figure

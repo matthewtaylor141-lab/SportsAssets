@@ -93,6 +93,34 @@ IDENTITY_EVERY_S = 60.0
 STREAM_EVIDENCE_EVERY_S = 60.0
 SAME_BOOK_EVERY_S = 60.0
 
+# THE PROBE'S RETAIL READS ARE PACED BY WHAT CAN BE COMPARED (production,
+# release 730325f, 60 min: 536 of the probe's keyless retail reads answered
+# RateLimitError -- one read per focus member per minute, whatever the venue
+# hold or the stream said -- starving every retail read this process makes).
+# A retail read is now spent only where a same-instant comparison is
+# possible (institutional_same_book.NC_RETAIL_OLDER): never during the
+# shared venue hold, never for a member whose stream book is not current,
+# never while the stream's own book state is younger than the retail cache
+# horizon (the cached retail representation is then an older state -- the
+# 19-28 s offset measured), and at most SAME_BOOK_MAX_READS_PER_PASS per pass,
+# rotating through the eligible members. A deferred member is counted by
+# reason, never persisted as a sample and never a verdict.
+SAME_BOOK_MAX_READS_PER_PASS = 10
+SAME_BOOK_MIN_QUIET_S = 30.0
+D_HOLD = "VENUE_HOLD_IN_FORCE"
+D_BUDGET = "PASS_READ_BUDGET_SPENT"
+D_STREAM = "STREAM_BOOK_NOT_CURRENT"
+D_RECENT = "STREAM_STATE_YOUNGER_THAN_THE_RETAIL_CACHE_HORIZON"
+_PROBE_CURSOR = {"i": 0}
+
+
+class ReadDeferred(Exception):
+    """The probe's retail read is not spent for this member this pass."""
+
+    def __init__(self, reason):
+        super().__init__(reason)
+        self.reason = reason
+
 # THE FOCUS UNIVERSE (institutional_focus_universe), only while the stream is
 # enabled here: what BETTOR holds and evaluates, in priority order, bounded by
 # fu.MAX_MEMBERS (= the API stream's MAX_SYMBOLS, inside the stream's own
@@ -268,9 +296,41 @@ async def record_stream_evidence(pool, recorder, store, books=None) -> dict:
     return {"rows": len(rows), "written": await sevid.persist(pool, rows)}
 
 
+def _venue_age(read, now):
+    ts = samebook._epoch_of(samebook._snap_ts(read))
+    return None if ts is None else float(now) - ts
+
+
+def _default_gate():
+    from .. import venue_request_gate as grt
+    return grt.gate_state()
+
+
+def evidence_order(symbols, *, focus=None, evidence=None) -> list:
+    """PURE. The order the probe spends its bounded reads in: members whose
+    same-book evidence is not SUPPORTED first (fewest comparable samples
+    first, so the reads spread as the counts grow), then by focus tier (held
+    paper and actual positions before candidates and discovery), then the
+    universe's own order. SUPPORTED members come last -- they keep accruing
+    only with what is left."""
+    focus = focus or {}
+    evidence = evidence or {}
+
+    def key(item):
+        i, s = item
+        ev = evidence.get(s) or {}
+        det = ev.get("detail") or {}
+        rank = (focus.get(s) or {}).get("tier_rank") or 99
+        return (1 if ev.get("status") == "SUPPORTED" else 0,
+                int(det.get("comparable") or 0), int(rank), i)
+    return [s for _i, s in sorted(enumerate(symbols or ()), key=key)]
+
+
 async def probe_same_book(pool, store, symbols, *, process_id,
                           current=None, retail_read=None, focus=None,
-                          limit=None) -> dict:
+                          limit=None, gate=None, clock=time.time,
+                          max_reads=None, quiet_s=None,
+                          evidence=None) -> dict:
     """One same-book sample per symbol (read-only) ->
     institutional_same_book_probe. The blocking reads run off the loop.
     `focus` ({slug: focus-universe member}) stamps each row's tier and why;
@@ -288,19 +348,85 @@ async def probe_same_book(pool, store, symbols, *, process_id,
     # the probe reads the stream exactly as that use does
     cur = current or istream.current_for_held_mark
     read = retail_read or samebook.retail_book_read
+    gate_fn = gate or _default_gate
+    budget = int(SAME_BOOK_MAX_READS_PER_PASS if max_reads is None
+                 else max_reads)
+    quiet = float(SAME_BOOK_MIN_QUIET_S if quiet_s is None else quiet_s)
+    deferred: dict = {}
+    spent = {"reads": 0}
+    if evidence is not None:
+        # evidence-first order (fewest comparable samples first)
+        syms = evidence_order(syms, focus=focus, evidence=evidence)
+    elif syms:
+        # no evidence read: rotate so a bounded pass reaches every member
+        k = _PROBE_CURSOR["i"] % len(syms)
+        syms = syms[k:] + syms[:k]
+
+    def defer(reason):
+        deferred[reason] = deferred.get(reason, 0) + 1
+        raise ReadDeferred(reason)
+
+    def paced_read(slug):
+        try:
+            g = gate_fn() or {}
+        except Exception:                                     # noqa: BLE001
+            g = {}
+        if g.get("blocking"):
+            defer(D_HOLD)
+        if spent["reads"] >= budget:
+            defer(D_BUDGET)
+        now = clock()
+        s0 = cur(slug, now=now) or {}
+        if not s0.get("ok"):
+            defer(D_STREAM)
+        age = _venue_age(s0, now)
+        if age is not None and age < quiet:
+            defer(D_RECENT)
+        spent["reads"] += 1
+        return read(slug)
 
     def run_all():
-        return [samebook.sample(
-            s, record=(store.instrument(s) or {}).get("record"),
-            retail_row=retail.get((s, "yes")), books_current=cur,
-            retail_read=read, focus=focus.get(s)) for s in syms]
+        out = []
+        for i, s in enumerate(syms):
+            if spent["reads"] >= budget and "stop_at" not in spent:
+                spent["stop_at"] = i
+            row = samebook.sample(
+                s, record=(store.instrument(s) or {}).get("record"),
+                retail_row=retail.get((s, "yes")), books_current=cur,
+                retail_read=paced_read, focus=focus.get(s))
+            why = str(row.get("verdict_reason") or "")
+            if why.startswith("PROBE_RAISED:ReadDeferred"):
+                continue
+            out.append(row)
+        return out
+
     rows = await asyncio.to_thread(run_all)
+    if syms and evidence is None:
+        # the next pass starts where this pass's read budget ran out
+        _PROBE_CURSOR["i"] = (_PROBE_CURSOR["i"] + spent.get("stop_at", 0)) \
+            % len(syms)
     by: dict = {}
     for r in rows:
         by[r["verdict"]] = by.get(r["verdict"], 0) + 1
     written = await samebook.persist(pool, rows, process_id=process_id,
                                      service=SERVICE)
-    return {"samples": len(rows), "written": written, "by": by}
+    return {"samples": len(rows), "written": written, "by": by,
+            "retail_reads": spent["reads"], "read_budget": budget,
+            "deferred": deferred}
+
+
+def loop_sleep_s(stats: dict) -> float:
+    """The worker loop's pause: the bootstrap backoff only when there is
+    neither a focus set nor focus-universe work (refdata just read, or
+    EXACT members still unsubscribed by the stream)."""
+    st = stats.get("status")
+    if st not in ("no_focus_set", "sweep_failed"):
+        return SWEEP_S
+    boot = stats.get("universeBootstrap") or {}
+    if boot.get("read") or stats.get("universeSubscribed") or \
+            stats.get("universePending"):
+        return SWEEP_S
+    return BOOTSTRAP_BACKOFF_S
 
 
 def bootstrap_universe(client, store, slugs, attempts, *, now=None,
@@ -515,6 +641,10 @@ async def run() -> None:
                 stats["universeBootstrap"] = boot
                 stats["universeSubscribed"] = len(
                     subscribe_universe(store, universe))
+                # members whose refdata is not held yet (still to bootstrap)
+                stats["universePending"] = sum(
+                    1 for s_ in slugs if (store.instrument(s_) or {}).get(
+                        "record") is None and s_ not in u_attempts)
             except Exception as exc:                           # noqa: BLE001
                 stats["focusUniverseError"] = type(exc).__name__
 
@@ -545,9 +675,14 @@ async def run() -> None:
                 m, universe_id=universe.get("universe_id"))
                 for m in probe_members} if probe_members else None)
             try:
+                try:
+                    evidence = await samebook.same_book_by_symbol(
+                        pool, probe_syms)
+                except Exception:                              # noqa: BLE001
+                    evidence = None
                 stats["sameBook"] = await probe_same_book(
                     pool, store, probe_syms, process_id=recorder.process_id,
-                    focus=focus)
+                    focus=focus, evidence=evidence)
             except Exception as exc:                           # noqa: BLE001
                 stats["sameBookError"] = type(exc).__name__
 
@@ -576,6 +711,9 @@ async def run() -> None:
             except Exception as exc:                           # noqa: BLE001
                 log.error("institutional_md: heartbeat failed: %s: %s",
                           type(exc).__name__, exc)
-        await asyncio.sleep(
-            BOOTSTRAP_BACKOFF_S if stats.get("status") in (
-                "no_focus_set", "sweep_failed") else SWEEP_S)
+        # THE RESTART BOOTSTRAP: an empty focus set (no sticky markets after
+        # a restart) is no reason to back off while the focus universe still
+        # has refdata to bootstrap or EXACT members to subscribe -- backing
+        # off 30 s per two bootstraps left the stream IDLE_NO_SYMBOLS_REQUESTED
+        # for minutes after every worker restart
+        await asyncio.sleep(loop_sleep_s(stats))
