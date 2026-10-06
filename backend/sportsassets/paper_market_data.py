@@ -883,9 +883,26 @@ I_NOT_CURRENT = "INSTITUTIONAL_BOOK_NOT_CURRENT"
 I_STALE = "INSTITUTIONAL_BOOK_OUTSIDE_THE_MARK_SLA"
 I_LEVELS = "INSTITUTIONAL_BOOK_LEVELS_UNREADABLE"
 
+#: THE SAME VENUE INSTANT, applied to persisted samples too
+#: (institutional_same_book.NC_RETAIL_OLDER): a sample whose retail
+#: transactTime and stream venue clock are both known and differ by more than
+#: SAME_INSTANT_TOLERANCE_S compared two different book states -- it counts
+#: as NOT_COMPARABLE, whatever verdict it was recorded with (the rows written
+#: before the rule included 19 DISAGREE and 39 AGREE_TOUCH_ONLY of exactly
+#: that kind). A CASE, so the cast runs only on a well-formed clock.
+SAME_INSTANT_SQL = r"""
+    (CASE WHEN stream_venue_ts IS NOT NULL
+               AND retail_book->>'transact_time' ~
+                   '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$'
+          THEN abs(extract(epoch FROM ((retail_book->>'transact_time')
+                                       ::timestamptz - stream_venue_ts)))
+               <= 0.001
+          ELSE TRUE END)"""
+
 SAME_BOOK_SYMBOL_SQL = """
     SELECT symbol,
-           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT %s
+           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT (%s AND """ \
+    + SAME_INSTANT_SQL.replace("%", "%%") + """)
                 THEN 'NOT_COMPARABLE' ELSE verdict END       AS verdict,
            count(*)                                          AS n,
            count(*) FILTER (WHERE NOT stream_changed_in_window) AS n_stable

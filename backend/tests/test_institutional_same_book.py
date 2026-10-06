@@ -313,7 +313,10 @@ async def test_probe_rows_persist_and_orders_placed_is_checked_to_zero():
         out = await WMD.probe_same_book(
             _Pool(conn), Store(), [SLUG, "aec-nfl-x-y-2026-10-04"],
             process_id="institutional_md:test:1:abc", current=b.current,
-            retail_read=fake_retail(retail_md(), calls=calls))
+            retail_read=fake_retail(retail_md(), calls=calls),
+            # the book was just written: the quiet bound (retail cache
+            # horizon) is the pacing test's subject, not this one's
+            quiet_s=0.0, gate=lambda: {"blocking": False})
         assert out["samples"] == 2 and out["written"] == 2
         assert out["by"] == {SB.V_AGREE: 1, SB.V_NC: 1}
         assert calls == [SLUG]          # the unmapped symbol read nothing

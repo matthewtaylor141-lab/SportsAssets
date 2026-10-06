@@ -77,6 +77,19 @@ NC_RETAIL = "RETAIL_BOOK_UNREADABLE"
 NC_WINDOW = "READS_NOT_WITHIN_WINDOW"
 NC_EMPTY = "BOTH_BOOKS_EMPTY"
 NC_SCALE = "INSTITUTIONAL_SCALES_UNKNOWN"
+#: THE SAME VENUE INSTANT (production evidence, release 730325f, 90 min):
+#: every pair whose retail `transactTime` EQUALS the stream read's venue
+#: clock agreed (43/43 AGREE_TOP_N); every DISAGREE (19) and every
+#: AGREE_TOUCH_ONLY (39) had the retail book's transactTime 19-28 s OLDER
+#: than the stream's -- a cached retail representation of an earlier book
+#: state, compared against the live one. Two observations of the book at
+#: different venue instants are not a same-book test: such a pair is
+#: NOT_COMPARABLE, named by which side is older. Only pairs at one venue
+#: instant are compared (and must then agree). Stricter, never looser.
+NC_RETAIL_OLDER = "RETAIL_BOOK_OLDER_THAN_STREAM_STATE"
+NC_STREAM_OLDER = "STREAM_STATE_OLDER_THAN_RETAIL_BOOK"
+#: venue clocks equal within this (wire precision: ns vs us)
+SAME_INSTANT_TOLERANCE_S = 0.001
 
 
 class WriteRefused(RuntimeError):
@@ -355,8 +368,28 @@ def _sample(symbol: str, *, record, retail_row=None, books_current,
         return dict(out, verdict=V_NC, verdict_reason=NC_RETAIL)
     if window > max_window_s:
         return dict(out, verdict=V_NC, verdict_reason=NC_WINDOW)
-    c_before = compare(b1, rb, top_n=top_n) if b1 is not None else None
-    c_after = compare(b2, rb, top_n=top_n) if b2 is not None else None
+    # THE SAME VENUE INSTANT: when both clocks are known, only a stream read
+    # at the retail book's transactTime is compared with it
+    r_ts = _epoch_of(md.get("transactTime") or md.get("transact_time"))
+    s_ts = {"before": _epoch_of(_snap_ts(s1)), "after": _epoch_of(_snap_ts(s2))}
+    allowed = {"before": b1 is not None, "after": b2 is not None}
+    if r_ts is not None and any(s_ts[n] is not None for n in s_ts
+                                if allowed[n]):
+        same = {n for n in s_ts if allowed[n] and s_ts[n] is not None
+                and abs(s_ts[n] - r_ts) <= SAME_INSTANT_TOLERANCE_S}
+        if not same:
+            known = [s_ts[n] for n in s_ts if allowed[n] and s_ts[n] is not None]
+            why = NC_RETAIL_OLDER if r_ts < min(known) else (
+                NC_STREAM_OLDER if r_ts > max(known) else NC_RETAIL_OLDER)
+            return dict(out, verdict=V_NC, verdict_reason=why,
+                        venue_instants={"retail": r_ts, "stream_before":
+                                        s_ts["before"], "stream_after":
+                                        s_ts["after"]})
+        allowed = {n: allowed[n] and n in same for n in allowed}
+    c_before = compare(b1, rb, top_n=top_n) \
+        if b1 is not None and allowed["before"] else None
+    c_after = compare(b2, rb, top_n=top_n) \
+        if b2 is not None and allowed["after"] else None
     cands = [(n, c) for n, c in (("after", c_after), ("before", c_before))
              if c is not None]
     best_rank = min(_RANK[c["verdict"]] for _, c in cands)
@@ -371,7 +404,38 @@ def _sample(symbol: str, *, record, retail_row=None, books_current,
                 touch_qty_equal=c.get("touch_qty_equal"),
                 levels_equal=c.get("levels_equal"),
                 diff={"compared_with": name, "levels": c.get("diff") or []},
-                stream_book=_show(b2 if name == "after" else b1, top_n))
+                stream_book=_show(b2 if name == "after" else b1, top_n),
+                # the venue clock of the stream read actually compared
+                stream_venue_ts=_snap_ts(s2 if name == "after" else s1)
+                or out.get("stream_venue_ts"))
+
+
+def _snap_ts(read):
+    return (((read or {}).get("evidence") or {}).get("snapshot") or {}
+            ).get("venue_ts")
+
+
+def _epoch_of(v):
+    """An ISO-8601 / datetime / epoch venue clock -> epoch seconds, or None.
+    Sub-microsecond digits are dropped (the stream carries microseconds)."""
+    if v is None or v == "":
+        return None
+    if isinstance(v, datetime):
+        return v.timestamp() if v.tzinfo else None
+    if isinstance(v, (int, float)):
+        return float(v)
+    t = str(v).strip()
+    m = re.match(r"^(.*T\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$", t)
+    if not m:
+        return None
+    frac = (m.group(2) or "")[:7]
+    tz = m.group(3) or ""
+    if tz == "Z" or tz == "":
+        tz = "+00:00"
+    try:
+        return datetime.fromisoformat(m.group(1) + frac + tz).timestamp()
+    except ValueError:
+        return None
 
 
 # ── the retail read: keyless, GET-only, gated ─────────────────────────
