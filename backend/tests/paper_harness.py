@@ -113,3 +113,33 @@ async def funded_table_counts(conn) -> dict:
 
 def j(v):
     return json.loads(v) if isinstance(v, str) else v
+
+
+async def protect(conn, ctx: dict, group_id: str, *, at: float,
+                  fee_fn=zero_fee) -> list:
+    """A VALID, ACTIVE, QUANTITY-MATCHED STANDING PROTECTION on every open
+    position of the group, as Xavier's first review places it and the
+    simulator's next step makes it RESTING. Xavier's management packet is
+    complete only on PROTECTED_RESTING (xavier_packet.VALID_PROTECTION_
+    STATES), so a test of a FRESH management decision protects first."""
+    from sportsassets import bettor_xavier_standing_orders as SPO
+    from sportsassets.agents import paper_xavier as PX
+    out = []
+    for pos in await L.positions(conn, ctx["account_id"]):
+        if pos["group_id"] != group_id:
+            continue
+        prot = PX.protective_price(qty=pos["open_qty"],
+                                   cost_basis=pos["cost_basis_usd"],
+                                   fee_fn=fee_fn, at=at)
+        got = await PX._maintain_standing(conn, dict(ctx, now=at,
+                                                     clock=lambda: at),
+                                          pos=pos, standing=[], prot=prot,
+                                          md=None, at=at, SPO=SPO)
+        assert got["taken"] == "PLACE_STANDING" and got["ok"], got
+        await SIM.simulate_order(conn, got["order_id"], now=at + 0.5,
+                                 fee_fn=fee_fn)
+        st = await conn.fetchval("SELECT state FROM paper_orders WHERE "
+                                 " order_id=$1", got["order_id"])
+        assert st == "RESTING", st
+        out.append(got["order_id"])
+    return out

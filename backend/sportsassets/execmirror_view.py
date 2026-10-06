@@ -16,6 +16,7 @@ import json
 from decimal import Decimal
 
 from . import order_state_truth as OST
+from .open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 
 TRAINING_HINTS = ("EXPLOR", "TRAIN")
 
@@ -796,9 +797,11 @@ async def _management(conn, rows: list) -> dict:
                 """SELECT g AS group_id,
                           (SELECT count(*) FROM paper_settlements s WHERE s.group_id = g) AS settled,
                           (SELECT count(*) FROM paper_fills f WHERE f.group_id = g) AS fills,
-                          (SELECT coalesce(sum(qty) FILTER (WHERE direction = 'BUY'), 0)
-                                - coalesce(sum(qty) FILTER (WHERE direction = 'SELL'), 0)
-                             FROM paper_fills f WHERE f.group_id = g) AS open_qty,
+                          -- canonical: bought - sold - latest settlement,
+                          -- per market / side, summed over the group
+                          (SELECT coalesce(sum(c.open_qty), 0)
+                             FROM (""" + CANONICAL_OPEN_POSITIONS_SQL + """) c
+                            WHERE c.group_id = g) AS open_qty,
                           (SELECT sum(cash_delta_usd) FROM paper_ledger l
                             WHERE l.group_id = g
                               AND l.kind IN ('FILL','SALE','SETTLEMENT','CORRECTION')) AS cash

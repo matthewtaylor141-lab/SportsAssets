@@ -290,9 +290,15 @@ def test_nothing_was_written_into_the_settlement_tables():
     # cand22: American Football captured from the same page (fetch-docs run
     # 37161033936, sha256 recorded in CAPTURE_RUN_FOOTBALL), every term
     # cited -- see test_ncaaf_identity_settlement_and_coverage.py
-    assert families == {"baseball", "soccer", "football"}
+    # P0 coverage: Basketball and Hockey from the 2026-10-04 re-read of the
+    # same page (fetch-docs run 37234815185, CAPTURE_RUN_LINE_RULES), every
+    # term cited -- see test_nba_nhl_winner_identity_and_settlement.py
+    assert families == {"baseball", "soccer", "football", "basketball",
+                        "hockey"}
     assert ST.CAPTURED_SCOPE.keys() == {("baseball", "h2h"), ("soccer", "h2h"),
-                                        ("football", "h2h")}
+                                        ("football", "h2h"),
+                                        ("basketball", "h2h"),
+                                        ("hockey", "h2h")}
     # NO FAMILY WITHOUT A SCOPE GATE. A term set with no scope would apply
     # everywhere, which is the overreach the gate exists to stop.
     for family, market, _ctx in ST.BOOK_TERMS:

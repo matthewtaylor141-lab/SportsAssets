@@ -286,6 +286,11 @@ def valuation_block(evidence: dict | None, *, assessed_at=None,
             "expires_at": (None if src is None or lim is None
                            else round(src + lim, 3)),
             "valuation_id": e.get("valuation_id"),
+            # which table the id names: external_valuations (default) or
+            # xavier_probability_snapshots (migration 303)
+            "valuation_store": e.get("valuation_store")
+            or ("external_valuations" if e.get("valuation_id") is not None
+                else None),
             "valuation_version": VERSION,
             "valuation_hash": hashlib.sha256(json.dumps(
                 ident, sort_keys=True, default=str).encode()).hexdigest()[:24]}
@@ -342,7 +347,10 @@ def validity(*, recommendation, evidence_state, valuation: dict | None,
         if base_p is None and "BLEND" not in str(v.get("source") or ""):
             base_p = v.get("probability")
         if lv_at is not None and src is not None and lv_at > src + 1e-6 \
-                and lv.get("id") != v.get("valuation_id") \
+                and not (lv.get("id") == v.get("valuation_id")
+                         and (v.get("valuation_store")
+                              or "external_valuations")
+                         == "external_valuations") \
                 and lv_p is not None and base_p is not None \
                 and abs(float(lv_p) - float(base_p)) \
                 > PROBABILITY_CHANGE_EPS:

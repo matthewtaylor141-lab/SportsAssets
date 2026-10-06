@@ -60,6 +60,7 @@ async def _held(conn, tag, *, entry_age_s=3600, book_age_s=2.0):
     await SIM.simulate_order(conn, got["order"]["order_id"], now=first + 4,
                              fee_fn=H.zero_fee)
     await PX.step_handoff(conn, XRF._ctx(a, first + 5))
+    await XRF._protect(conn, a, g, at=first + 6)
     await H.observe(conn, slug, AT - book_age_s, offers=[(0.82, QTY)],
                     bids=[(0.80, QTY)])
     return a, g, slug
@@ -169,10 +170,16 @@ async def test_a_complete_packet_is_managed_as_before():
         assert pk["settlement"]["fingerprint"].startswith("settle:")
         assert pk["book"]["bid"] == pytest.approx(0.80)
         assert pk["exit_depth"]["at_mark"] == pytest.approx(QTY)
-        # the 0.80 bid out-values holding at 0.71: the sale is placed
+        # the 0.80 bid out-values holding at 0.71: the sale is decided; the
+        # valid standing protection commits the inventory, so the exit first
+        # cancels it (terminal confirmation before the sale -- never two
+        # potentially live sell orders)
         assert rv["recommendation"] in ("EXIT", "REDUCE")
         assert rv["refusal"] != XPK.R_XAVIER_PACKET_INCOMPLETE
-        assert sales == 1
+        assert H.j(rv["action"])["taken"] == "CANCEL_STANDING_BEFORE_EXIT"
+        assert sales == 0
+        assert pk["protection"]["present"] is True
+        assert pk["probability"]["valuation_id"] is not None
         assert not await _refusals(conn, g)
     finally:
         await XRF._purge(conn, slugs)

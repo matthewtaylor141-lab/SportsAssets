@@ -113,6 +113,8 @@ import json
 import time
 from datetime import datetime
 
+from . import open_position_canon as PL
+from .open_position_canon import CANONICAL_OPEN_POSITIONS_SQL  # noqa: F401  (the floor reads it here)
 from . import xavier_freshness as XF
 
 VERSION = "AGENT_WORK_STATE_V1"
@@ -995,16 +997,17 @@ async def _read_positions(s: _Sections, now: float) -> dict:
     out: dict = {"open": None, "positions": [], "why": None}
 
     async def paper(conn):
+        # CANONICALLY OPEN (bettor_paper_ledger.CANONICAL_OPEN_POSITIONS_SQL:
+        # bought - sold - latest settlement > the ledger epsilon, per group
+        # / market / holding side): a fully sold position leaves at once
         rows = await conn.fetch(
-            "SELECT f.group_id, f.us_market_slug, min(f.filled_at) AS ffa "
-            "  FROM paper_fills f WHERE NOT EXISTS ("
-            "       SELECT 1 FROM paper_settlements x "
-            "        WHERE x.group_id = f.group_id "
-            "          AND x.us_market_slug = f.us_market_slug) "
-            " GROUP BY f.group_id, f.us_market_slug "
-            "HAVING sum(CASE WHEN f.direction = 'BUY' THEN f.qty "
-            "                ELSE -f.qty END) > 1e-9 "
-            " ORDER BY min(f.filled_at), f.group_id LIMIT $1",
+            "SELECT c.group_id, c.us_market_slug, min(f.filled_at) AS ffa "
+            "  FROM (" + PL.CANONICAL_OPEN_POSITIONS_SQL + ") c "
+            "  JOIN paper_fills f ON f.group_id = c.group_id "
+            "   AND f.us_market_slug = c.us_market_slug "
+            "   AND f.holding_side = c.holding_side "
+            " GROUP BY c.group_id, c.us_market_slug "
+            " ORDER BY min(f.filled_at), c.group_id LIMIT $1",
             MAX_POSITIONS + 1)
         return [{"position_kind": "PAPER", "group_id": r["group_id"],
                  "slug": r["us_market_slug"],
@@ -1032,14 +1035,11 @@ async def _read_positions(s: _Sections, now: float) -> dict:
         n_paper = await s.run("work.xavier_paper_count",
                               ("paper_fills", "paper_settlements"),
                               lambda c: c.fetchval(
-                                  "SELECT count(*) FROM (SELECT 1 FROM "
-                                  " paper_fills f WHERE NOT EXISTS (SELECT 1"
-                                  " FROM paper_settlements x WHERE "
-                                  " x.group_id = f.group_id AND "
-                                  " x.us_market_slug = f.us_market_slug) "
-                                  " GROUP BY f.group_id, f.us_market_slug "
-                                  "HAVING sum(CASE WHEN f.direction='BUY' "
-                                  " THEN f.qty ELSE -f.qty END) > 1e-9) q"))
+                                  "SELECT count(DISTINCT (group_id, "
+                                  " us_market_slug)) FROM (" + __import__(
+                                      "sportsassets.bettor_paper_ledger",
+                                      fromlist=["x"]).
+                                  CANONICAL_OPEN_POSITIONS_SQL + ") q"))
         pp = pp[:MAX_POSITIONS]
     ap = await s.run("work.xavier_actual_positions", ("smalllive_handoffs",),
                      actual) or []

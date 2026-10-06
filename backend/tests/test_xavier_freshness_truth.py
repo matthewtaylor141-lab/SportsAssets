@@ -402,7 +402,9 @@ async def test_stale_waits_without_selling_and_fresh_input_re_decides():
         # the 0.80 bid out-values holding at the stale 0.62 -- and still:
         assert rv["recommendation"] == XF.REC_WAITING
         sel = _j(rv["selection"])
-        assert sel["mechanical_selection"] == "HOLD"     # what was left
+        # HOLD / EXIT / REDUCE all left the rankable set before the
+        # selector (P0): nothing was ranked on the stale probability
+        assert sel["mechanical_selection"] is None
         assert sel["recommendation_state"] == XF.S_WAITING
         assert sel["valuation"]["limit_s"] == LIMIT
         assert await conn.fetchval(

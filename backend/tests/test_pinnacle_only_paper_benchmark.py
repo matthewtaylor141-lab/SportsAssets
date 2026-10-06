@@ -152,7 +152,13 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # it is handed; imports only the de-vig arithmetic and the
                    # book level parser (pinned in
                    # tests/test_gross_edge_inputs_are_validated.py)
-                   "gross_edge_inputs"}
+                   "gross_edge_inputs",
+                   # (305) PAPER CAPITAL AUTHORITY: the capital evidence the
+                   # benchmark's ENTER carries to the ledger and the refusal
+                   # census it appends; paper-only, refuse-only, no venue,
+                   # order-execution or funded import (pinned in
+                   # tests/test_capital_authority.py)
+                   "bettor_capital_authority"}
 
 
 def _imports(path: pathlib.Path) -> list:

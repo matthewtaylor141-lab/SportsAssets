@@ -241,6 +241,15 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # ZERO-CAPITAL SHADOW LEARNING (migration 305): the counterfactual
+        # outcome of every shadow decision whose contract has settled, at
+        # most every RUN_EVERY_S. Evidence only (never an order, never
+        # cash); labelled SHADOW_COUNTERFACTUAL / NOT_REALIZED_PNL.
+        from .. import bettor_capital_authority as CA
+        steps.append(("shadow_settlement", CA.step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy
@@ -854,8 +863,12 @@ async def entry_fill(conn, order_ids, *, market_data=None, clock=None,
             continue
         rctx = {"market_data": md,
                 "deadline": time.monotonic() + budget}
-        got = await PD.read_book_within_deadline(rctx, slug,
-                                                 not_before_epoch=elig)
+        # A PENDING ENTRY'S FILL READ is a management read: it goes ahead of
+        # discovery in the one paper market-data owner (held reads first).
+        from .. import paper_market_data as _PMD
+        with _PMD.lane(_PMD.LANE_MANAGE):
+            got = await PD.read_book_within_deadline(rctx, slug,
+                                                     not_before_epoch=elig)
         rec = await SIM.record_book(conn, slug=slug, read=got,
                                     source="PAPER_MARKET_DATA_CLIENT",
                                     read_basis=ENTRY_FILL_READ_BASIS)

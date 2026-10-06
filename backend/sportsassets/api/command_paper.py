@@ -277,7 +277,63 @@ async def paper_freshness(limit: int = Query(500, ge=0, le=5000)) -> dict:
         async with conn.transaction(readonly=True):
             await conn.execute("SET LOCAL statement_timeout = 8000")
             got = await PMF.read(conn, L.ACCOUNT_ID, rows_limit=limit)
-        return dict(_labels(), freshness=got)
+        return dict(_labels(), freshness=got,
+                    market_data=_market_data_telemetry(got))
+
+
+def _market_data_telemetry(fresh: dict) -> dict:
+    """THE SHARED PAPER MARKET-DATA PATH, AS THIS PROCESS SEES IT (P0
+    market-data freshness): the one paper REST owner's requests / min, 2xx,
+    429, cache hits, coalesced reads, REST dispatches and queue depth per
+    lane; the retail and institutional stream update counts; the latest
+    held-mark refresh run's per-source counts; and, from the freshness read,
+    held marks by source and the oldest held-mark age. Never raises."""
+    from .. import paper_market_data as PMD
+    try:
+        tel = PMD.telemetry()
+    except Exception as exc:                                    # noqa: BLE001
+        tel = {"unavailable": type(exc).__name__}
+    try:
+        from ..agents import paper_mark_refresh as PMR
+        last = (PMR.status() or {}).get("last") or {}
+    except Exception:                                           # noqa: BLE001
+        last = {}
+    feeds = (fresh or {}).get("feeds") or {}
+    tot = tel.get("totals") or {}
+    return {
+        "version": tel.get("version"),
+        "scope": "THIS_API_PROCESS (paper pass, mark refresh and the retail "
+                 "subscription run here)",
+        "requests_per_min": tel.get("rest_requests_per_min"),
+        "responses_2xx_per_min": tel.get("responses_2xx_per_min"),
+        "responses_429_per_min": tel.get("responses_429_per_min"),
+        "responses_2xx": tot.get("responses_2xx"),
+        "responses_429": tot.get("responses_429"),
+        "rest_dispatches": tot.get("rest_dispatches"),
+        "cache_hits": tot.get("cache_hits"),
+        "coalesced_reads": tot.get("coalesced_reads"),
+        "discovery_deferred_during_hold":
+            tot.get("discovery_deferred_during_hold"),
+        "queue_deadline_refusals": tot.get("queue_deadline_refusals"),
+        "queue_depth": tel.get("queue_depth"),
+        "venue_hold": tel.get("venue_hold"),
+        "stream_updates": {
+            "retail": ((tel.get("streams") or {}).get("retail") or {}).get(
+                "updates"),
+            "institutional": ((tel.get("streams") or {}).get(
+                "institutional") or {}).get("updates")},
+        "streams": tel.get("streams"),
+        # PER AUTH LANE (AUTHENTICATED / PUBLIC_GATEWAY): requests / min,
+        # 2xx, 429, the last Retry-After seen and the current hold -- each
+        # lane's own; a 429 on one never holds the other
+        "auth_lanes": tel.get("auth_lanes"),
+        "rest_fallbacks": last.get("read_attempted"),
+        "last_refresh_sources": last.get("sources"),
+        "held_marks_by_source": feeds.get("held_marks_by_source"),
+        "fresh_marks_by_source": feeds.get("fresh_marks_by_source"),
+        "oldest_held_mark_age_s": feeds.get("oldest_held_mark_age_s"),
+        "never_read_markable": feeds.get("never_read_markable"),
+        "owner": tel}
 
 
 @router.get("/api/command/paper/session",
@@ -288,6 +344,28 @@ async def paper_session() -> dict:
         if not await _schema(conn):
             return dict(_labels(), session=_unavailable_schema())
         return await _readmodel("session_payload", conn)
+
+
+@router.get("/api/command/paper/reconciliation",
+            dependencies=[Depends(require_read)])
+async def paper_reconciliation() -> dict:
+    """THE CANONICAL POSITION RECONCILIATION RECEIPT
+    (bettor_paper_reconciliation): true opens by the one rule (bought - sold
+    - latest settlement > the ledger epsilon), what the legacy readers would
+    have called open that is not (phantom opens), sub-contract remainders,
+    economic-duplicate fill suspects (listed, never rewritten) and any live
+    protection on a closed position. Read only; a failed read is
+    UNAVAILABLE, never zero."""
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_reconciliation as REC
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), reconciliation=_unavailable_schema())
+        async with conn.transaction(readonly=True):
+            await conn.execute("SET LOCAL statement_timeout = 12000")
+            got = await REC.receipt(conn, L.ACCOUNT_ID)
+        return dict(_labels(), reconciliation=got)
 
 
 @router.get("/api/command/paper/derek", dependencies=[Depends(require_read)])

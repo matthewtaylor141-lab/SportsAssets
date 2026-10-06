@@ -807,6 +807,17 @@ try:
 except ImportError:
     log.warning("turnaround: api.command_turnaround not loaded",
                 exc_info=True)
+# ── PAPER CAPITAL AUTHORITY (migration 305): the acceptance read,
+# /api/command/paper/capital-authority. GET only, COMMAND auth, READ ONLY
+# transaction; entry authority, shadow forward evidence (NOT_REALIZED_PNL),
+# PAPER P&L, the blocker census. No write.
+try:
+    from .command_capital_authority import (
+        router as _command_capital_authority_router)
+    app.include_router(_command_capital_authority_router)
+except ImportError:
+    log.warning("capital authority: api.command_capital_authority not "
+                "loaded", exc_info=True)
 # ── R30 LIVE PARITY: /api/command/live-parity (+ /intent/{id}) and the
 # named-human halt clear. SMALL LIVE is SHADOW; nothing here sends an order.
 try:

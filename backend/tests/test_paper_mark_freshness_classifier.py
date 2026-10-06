@@ -240,7 +240,8 @@ def _packet(**over):
               mark_class="FRESH",
               settlement={"fingerprint": "settle:x", "payout_event": "HOME",
                           "payout_is_complement": False},
-              protection={"state": "PROTECTED_RESTING", "known": True})
+              protection={"state": "PROTECTED_RESTING", "known": True,
+                          "active": True, "qty_matched": True})
     kw.update(over)
     return XPK.build(**kw)
 

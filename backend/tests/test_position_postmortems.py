@@ -124,7 +124,16 @@ async def _entry_and_exit(conn, acct, *, slug, key, decision_id, at,
 
 @pg
 @pytest.mark.asyncio
-async def test_closed_paper_and_actual_positions_are_reconstructed_apart():
+async def test_closed_paper_and_actual_positions_are_reconstructed_apart(
+        monkeypatch):
+    # seeded HISTORY through the real writers: the management-integrity rail
+    # (P0 closeout; its own tests are test_p0_xavier_packet_and_
+    # reconciliation) is held at "no refusal" so the seed is not refused
+    from sportsassets import bettor_paper_freshness as _PMF
+
+    async def _ok(conn_, account_id, strategy, *, now):
+        return {"refusal": None, "strategy": strategy}
+    monkeypatch.setattr(_PMF, "strategy_management_integrity", _ok)
     conn = await asyncpg.connect(H.DSN)
     tx = conn.transaction()
     await tx.start()

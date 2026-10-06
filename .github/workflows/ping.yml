@@ -13,6 +13,11 @@ name: ping
 
 on:
   workflow_dispatch:
+    inputs:
+      p0:
+        description: "blank = healthz only; on = also the P0 closeout production readback: GET-only reads of the paper freshness / market-data telemetry, the reconciliation receipt, Xavier's packets, the coverage first-loss census, the PAPER turnaround and capital-authority acceptance, SMALL LIVE and the release alignment (ADMIN_TOKEN, read role; writes nothing)"
+        required: false
+        default: ""
 
 jobs:
   ping:
@@ -41,3 +46,48 @@ jobs:
               || echo "  body (not JSON): $(head -c 400 /tmp/svc.json)"
           fi
           exit 0
+
+      - name: P0 closeout production readback (READ-ONLY)
+        if: ${{ inputs.p0 == 'on' }}
+        shell: bash
+        env:
+          BASE: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          set -u
+          [ -z "${ADMIN_TOKEN:-}" ] && { echo "no ADMIN_TOKEN secret: authenticated reads NOT_ESTABLISHED"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          mkdir -p p0
+          get() {  # name path
+            code=$(curl -s -o "p0/$1.json" -w '%{http_code}' --max-time 90 \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$2" || echo 000)
+            echo "== $1 GET $2 -> HTTP $code ($(wc -c < "p0/$1.json") bytes) at $(date -u +%FT%TZ)"
+          }
+          get release /api/command/release
+          jq -c '{api: .api.sha, workers: .workers.sha, alignment, schema: {status: .schema.status, max_version: .schema.max_version}}' p0/release.json 2>&1 | cut -c1-1500
+          get freshness "/api/command/paper/freshness?limit=0"
+          jq -c '.freshness | {status, counts, fresh_rate, stale_management_rate, classified, markable, freshly_manageable}' p0/freshness.json 2>&1 | cut -c1-3000
+          jq -c '.market_data // .freshness.market_data | del(.owner)' p0/freshness.json 2>&1 | cut -c1-6000
+          get reconciliation /api/command/paper/reconciliation
+          jq -c '.reconciliation | {status, rule, counts}' p0/reconciliation.json 2>&1 | cut -c1-3000
+          jq -c '.reconciliation.sections | {legacy_reader_phantoms, sub_contract_remainders, live_protection_on_closed_positions, economic_duplicate_suspects: [.economic_duplicate_suspects[]? | {order_id, role, qty, price, n, filled_at}]}' p0/reconciliation.json 2>&1 | cut -c1-12000
+          get xavier "/api/command/paper/xavier?limit=200"
+          jq -c '[.. | objects | select(has("management_packet")) | .management_packet | {complete, missing}] | group_by(.complete) | map({complete: .[0].complete, n: length, missing: ([.[].missing[]?] | group_by(.) | map({(.[0]): length}) | add)})' p0/xavier.json 2>&1 | cut -c1-3000
+          get first_loss "/api/command/coverage/first-loss?hours=24"
+          jq -c '{status, totals: (.totals // .summary // .counts), by_class: (.by_class // .first_loss_by_class)}' p0/first_loss.json 2>&1 | cut -c1-6000
+          get turnaround /api/command/paper/turnaround
+          jq -c 'del(.rows) | del(.events)' p0/turnaround.json 2>&1 | cut -c1-8000
+          get capital_authority /api/command/paper/capital-authority
+          jq -c '.' p0/capital_authority.json 2>&1 | cut -c1-12000
+          get small_live "/api/command/small-live?limit=1"
+          jq -c 'del(.rows) | del(.basis)' p0/small_live.json 2>&1 | cut -c1-3000
+          exit 0
+
+      - name: Keep the P0 readback as evidence
+        if: ${{ inputs.p0 == 'on' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: p0-readback
+          path: p0/
+          retention-days: 30

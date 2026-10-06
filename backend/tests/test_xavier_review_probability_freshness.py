@@ -159,9 +159,15 @@ async def _held(conn, tag, *, entry_age_s, p_entry=0.62):
     await SIM.simulate_order(conn, got["order"]["order_id"], now=AT - 56,
                              fee_fn=H.zero_fee)
     await PX.step_handoff(conn, _ctx(a, AT - 55))
+    await _protect(conn, a, g, at=AT - 54)
     await H.observe(conn, slug, AT - 2, offers=[(0.82, QTY)],
                     bids=[(0.80, QTY)])
     return a, g, slug
+
+
+async def _protect(conn, a, g, *, at):
+    """A valid standing protection before the review (paper_harness.protect)."""
+    return (await H.protect(conn, _ctx(a, at), g, at=at))[0]
 
 
 async def _review(conn, a, g):
@@ -251,21 +257,26 @@ async def test_without_fresh_evidence_the_review_says_so_and_never_sells(case):
         assert m["current_hold_value_usd"] is None
         assert m["entry_time_hold_value_usd"] == pytest.approx(
             QTY * m["probability"])
-        hold = _hold(alts)
+        # HOLD, EXIT AND REDUCE ALL LEFT THE RANKABLE SET BEFORE THE
+        # SELECTOR (P0): the stale HOLD is not a candidate at all
+        assert not [c for c in alts["candidates"]
+                    if c["action"] in (PX.A_HOLD, PX.A_EXIT, PX.A_REDUCE)]
+        hold = next(x for x in alts["not_rankable"]
+                    if x["action"] == PX.A_HOLD)
+        assert hold["blocker"] == PX.B_STALE_MEASURE
         assert hold["ev_basis"] == PX.E_STALE and hold["ev_is_current"] is False
         assert hold["expected_net_usd"] is None
         assert hold["entry_time_expected_net_usd"] is not None
         assert PX.E_STALE in H.j(rv["exceptional"])
         # no discretionary sale even though the 0.80 bid out-values holding
         # at the stale probability -- and NO default HOLD either (owner P0):
-        # the review waits for fresh evidence; the selector's mechanical
-        # pick stays on the selection record
+        # the review waits for fresh evidence; the selector ranked nothing
         assert rv["recommendation"] == XFT.REC_WAITING
-        assert H.j(rv["selection"])["mechanical_selection"] == PX.A_HOLD
+        assert H.j(rv["selection"])["mechanical_selection"] is None
         assert sales == 0
         blocked = {x["action"] for x in alts["not_rankable"]
                    if x.get("blocker") == PX.B_STALE_MEASURE}
-        assert "EXIT" in blocked
+        assert {"HOLD", "EXIT", "REDUCE"} <= blocked
         # protection unaffected
         assert H.j(rv["action"])["taken"] in ("PLACE_STANDING",
                                               "KEEP_STANDING")

@@ -592,14 +592,23 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
     recheck_primary_reference(cand, pin, ctx, refusals)
+    ce = None
     if not refusals:
-        # CAPITAL ELIGIBILITY + THE STRATEGY LIFECYCLE (migration 290): an
-        # admitted ENTER gets paper capital only with executable depth,
-        # resolved identity and settlement terms, and a positive total
-        # executable EV; otherwise CASH/WAIT is the recorded decision.
+        # CAPITAL ELIGIBILITY + THE STRATEGY LIFECYCLE (migration 290) + THE
+        # CAPITAL AUTHORITY (migration 305): an admitted ENTER gets paper
+        # capital only with executable depth, resolved identity and
+        # settlement terms, a positive total executable EV, no stopping rule
+        # firing now and POSITIVE forward economics; otherwise CASH/WAIT is
+        # the recorded decision (and a shadow counterfactual when only the
+        # capital authority was missing).
         ce = await capital_gate(
             conn, ctx, strategy=STRATEGY, p=p_blend, levels=levels,
-            sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn)
+            sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn,
+            decision_id=did,
+            threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
+            book=(None if obs is None else {
+                "book_obs_id": obs.get("obs_id"),
+                "observed_at": obs.get("observed_at")}))
         if econ is not None:
             econ["capital_eligibility"] = ce
         if pd is not None:
@@ -696,7 +705,27 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         # VALUATION'S DECISION FIRST. Its record stands; nothing is sent on
         # this computation.
         return dict(rec, duplicate=True)
+    from .. import bettor_capital_authority as CA
+    cevidence = CA.capital_evidence(
+        ce, p=p_blend, limit=sized.get("limit"),
+        threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
+        basis="DEREK_CAPITAL_GATE", levels=levels,
+        book_obs_id=None if obs is None else obs.get("obs_id"),
+        book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
+        await CA.record_refusal(
+            conn, account_id=ctx["account_id"], strategy=STRATEGY,
+            stage="DECISION", refusal=rec["refusal"], refusals=refusals,
+            decision_id=did, slug=cand.get("us_market_slug"),
+            holding_side=side, fixture=cand.get("fixture"),
+            line=cand.get("line"), scope=cand.get("scope"), p=p_blend,
+            best_price=(levels[0]["price"] if levels else None),
+            threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
+            evidence=cevidence,
+            expected_fees_usd=(econ or {}).get("fees_usd"),
+            executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
+            qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
     # THE ENTER IS RECORDED: from here its order is owed, whatever the
     # decision deadline (`bounded_decision`; the backstop names a miss).
@@ -719,7 +748,10 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
              "wire_price": sized["wire"], "decision_id": did,
              "decided_at": at, "eligible_at": at + delay,
              "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
-             "simulator_version": cfg["simulator_version"]}
+             "simulator_version": cfg["simulator_version"],
+             # the decision's executable-EV evidence, re-checked by the
+             # ledger's capital authority under the account lock
+             "capital_evidence": cevidence}
     got = await L.submit_order(conn, order, caps=cfg["risk"],
                                fee_fn=fee_fn, now=at)
     rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
@@ -738,14 +770,25 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
 
 async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
                        cand: dict, side, at: float, fee_fn,
-                       settlement: dict | None = None) -> dict:
+                       settlement: dict | None = None, decision_id=None,
+                       threshold_edge_pp=None, book: dict | None = None
+                       ) -> dict:
     """THE PAPER PATH'S CAPITAL GATE for one admitted ENTER: the strategy's
     lifecycle state (bettor_strategy_lifecycle.decision_gate: a no-entry
-    state refuses by name; REDUCED_SIZE halves the size) and then
-    bettor_capital_eligibility.evaluate on the observed ladder. Shared by
-    Derek and the benchmark policies. `settlement` (default: the candidate's
-    recorded comparison) lets a policy pass the settlement verdict its own
-    contract match established. Never raises: a failure refuses."""
+    state refuses by name; REDUCED_SIZE halves the size), then
+    bettor_capital_eligibility.evaluate on the observed ladder, then the
+    PAPER CAPITAL AUTHORITY (bettor_capital_authority.authority: no stopping
+    rule firing NOW, forward economics POSITIVE). Shared by Derek and the
+    benchmark policies. `settlement` (default: the candidate's recorded
+    comparison) lets a policy pass the settlement verdict its own contract
+    match established. Never raises: a failure refuses.
+
+    ZERO-CAPITAL SHADOW LEARNING (migration 305): a decision refused ONLY for
+    want of capital authority (a no-entry lifecycle state, a firing rule,
+    forward economics UNKNOWN / NEGATIVE) whose capital-eligibility
+    evaluation at its intended size passes is recorded as a
+    SHADOW_COUNTERFACTUAL -- never an order, never cash, never exposure."""
+    from .. import bettor_capital_authority as CA
     from .. import bettor_capital_eligibility as CE
     from .. import bettor_strategy_lifecycle as LC
     try:
@@ -754,20 +797,62 @@ async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
     except Exception as exc:                                    # noqa: BLE001
         lc = {"ok": False, "refusal": LC.R_LIFECYCLE_UNREADABLE,
               "size_factor": 0.0, "why": type(exc).__name__}
+    kw = dict(p=p, levels=levels, qty=sized.get("qty"),
+              limit=sized.get("limit"),
+              fee_fn=lambda q, px: float(L._fee(fee_fn, q, px, at)),
+              settlement=(cand.get("settlement") if settlement is None
+                          else settlement),
+              identity={"us_market_slug": cand.get("us_market_slug"),
+                        "payout_event": cand.get("payout_event"),
+                        "fixture": cand.get("fixture"), "holding_side": side})
+
+    async def shadow(ce_full: dict, refusal: str) -> dict:
+        try:
+            return await CA.shadow_from_decision(
+                conn, ctx, strategy=strategy, decision_id=decision_id,
+                cand=cand, side=side, ce=ce_full, p=p,
+                limit=sized.get("limit"), levels=levels, at=at,
+                refusal=refusal, lifecycle_state=lc.get("state"),
+                threshold_edge_pp=threshold_edge_pp, book=book)
+        except Exception as exc:                                # noqa: BLE001
+            return {"recorded": False, "why": type(exc).__name__}
+
     if lc.get("refusal"):
-        return {"version": CE.VERSION, "capital_eligible": False,
-                "decision": CE.CASH_WAIT, "allocation_usd": 0.0, "qty": 0,
-                "refusals": [lc["refusal"]], "lifecycle": lc}
-    ce = CE.evaluate(
-        p=p, levels=levels, qty=sized.get("qty"), limit=sized.get("limit"),
-        fee_fn=lambda q, px: float(L._fee(fee_fn, q, px, at)),
-        settlement=(cand.get("settlement") if settlement is None
-                    else settlement),
-        identity={"us_market_slug": cand.get("us_market_slug"),
-                  "payout_event": cand.get("payout_event"),
-                  "fixture": cand.get("fixture"), "holding_side": side},
-        size_factor=lc.get("size_factor", 0.0))
+        out = {"version": CE.VERSION, "capital_eligible": False,
+               "decision": CE.CASH_WAIT, "allocation_usd": 0.0, "qty": 0,
+               "refusals": [lc["refusal"]], "lifecycle": lc}
+        if lc["refusal"] in CA.NO_CAPITAL_AUTHORITY:
+            # the counterfactual at the policy's INTENDED size (no lifecycle
+            # factor: the state allows no size), for evidence only
+            full = CE.evaluate(**kw, size_factor=1.0)
+            out["shadow_evaluation"] = {k: full.get(k) for k in (
+                "capital_eligible", "qty", "total_executable_ev_usd",
+                "fees_usd", "adverse_selection_usd", "refusals")}
+            out["shadow"] = await shadow(full, lc["refusal"])
+        return out
+    ce = CE.evaluate(**kw, size_factor=lc.get("size_factor", 0.0))
     ce["lifecycle"] = lc
+    if ce.get("capital_eligible"):
+        try:
+            auth = await CA.authority(conn, account_id=ctx["account_id"],
+                                      strategy=strategy, now=at)
+        except Exception as exc:                                # noqa: BLE001
+            auth = {"refusal": CA.R_FORWARD_UNREADABLE,
+                    "why": type(exc).__name__}
+        ce["capital_authority"] = {
+            "refusal": auth.get("refusal"),
+            "forward_verdict": (auth.get("forward") or {}).get("verdict"),
+            "forward_observations": (auth.get("forward") or {}).get(
+                "observations"),
+            "rules_firing": [r["rule_id"] for r in (
+                auth.get("rules") or {}).get("firing") or []]}
+        if auth.get("refusal"):
+            sh = (await shadow(ce, auth["refusal"])
+                  if auth["refusal"] in CA.NO_CAPITAL_AUTHORITY else None)
+            ce = dict(ce, capital_eligible=False, decision=CE.CASH_WAIT,
+                      allocation_usd=0.0, qty=0, refusals=[auth["refusal"]],
+                      shadow=sh, why=("no capital authority: %s"
+                                      % auth["refusal"]))
     return ce
 
 

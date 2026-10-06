@@ -63,9 +63,15 @@ CATALOGUE = [
     _row("aec-politics-election-2026", None, event="election-2026",
          title="Who wins the election?"),
     # a sport placed IN the mandate for this test, with no probability source
-    _row("aec-nba-bos-nyk-2026-10-01-bos", "basketball_team_full_game_winner",
-         event="nba-bos-nyk-2026-10-01",
-         title="Boston Celtics vs. New York Knicks"),
+    # for THIS league. PIN MOVED (P0 coverage, 2026-10-06): this was an NBA
+    # row; the NBA money line is now admitted to the de-vig by league
+    # (SUPPORTED_BY_LEAGUE), so a league it does NOT admit -- the venue's
+    # WNBA board, whose team record is the city alone -- carries the
+    # unsupported case.
+    _row("aec-wnba-ny-atl-2026-10-01-ny",
+         "basketball_team_full_game_winner",
+         event="wnba-ny-atl-2026-10-01",
+         title="New York vs. Atlanta"),
     # not re-seen by the sweep recently: not listed at all
     _row("aec-mlb-old-2026-09-01-old", "baseball_team_full_game_winner",
          event="mlb-old-2026-09-01", age_s=10 * 3600.0),
@@ -129,7 +135,7 @@ async def test_the_census_partitions_every_listed_contract_and_hides_none(
     asyncpg = pytest.importorskip("asyncpg")
     from sportsassets.workers import ext_pinnacle_loop as L
     # A SPORT IN THE MANDATE WITH NO PROBABILITY SOURCE, so UNSUPPORTED is
-    # exercised (basketball h2h is not in the de-vig's supported set).
+    # exercised (basketball h2h is admitted for the NBA only).
     monkeypatch.setattr(L, "SPORTS", tuple(L.SPORTS) + (
         ("basketball_nba", "basketball"),))
     conn = await asyncpg.connect(DSN)

@@ -57,9 +57,12 @@ STATEMENT_TIMEOUT_MS = 3000
 #: the 300-309 block), and 216..302 since 302 carried the EDDIE -> ARCHER
 #: rename (266) into 301's objects (it must sort after 301). In between:
 #: the rename 266, paper mark freshness 270 and PAPER TURNAROUND 290.
+#: 216..305 since the PAPER CAPITAL AUTHORITY (305: shadow counterfactuals
+#: and the entry-refusal census); 216..306 since the P0 closeout (303
+#: Xavier probability snapshots, 306 paper market-data telemetry; 304 unused).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 302
+TRACKED_FROM, TRACKED_TO = 216, 306
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

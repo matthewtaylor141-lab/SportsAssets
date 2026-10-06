@@ -28,6 +28,27 @@ TABLE = {
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
+    # (P0 closeout) no ENTRY growth while the strategy's open positions'
+    # management packets are incomplete or their protection continuity has
+    # failed (fail-closed when it cannot be read); a fresh exit walk is
+    # required before any management action is rankable
+    "STRATEGY_OPEN_POSITIONS_MANAGEMENT_PACKETS_INCOMPLETE": (
+        S, FRESH, "ORDER"),
+    "STRATEGY_OPEN_POSITIONS_PROTECTION_CONTINUITY_FAILED": (
+        S, INT, "ORDER"),
+    "STRATEGY_MANAGEMENT_INTEGRITY_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
+    "NO_FRESH_EXECUTABLE_EXIT_WALK": (S, FRESH, "MANAGEMENT"),
+    # (P0 closeout) the paper market-data owner and its keyless public-
+    # gateway held-mark lane: a read refused by the shared queue / venue hold
+    # / deadline, or by the lane's own scope (held marks only, GET book only)
+    "PAPER_MARKET_DATA_QUEUE_WAIT_EXCEEDED_THE_DEADLINE": (
+        S, FRESH, "VENUE_BOOK"),
+    "PAPER_DISCOVERY_READ_DEFERRED_DURING_VENUE_HOLD": (
+        S, FRESH, "VENUE_BOOK"),
+    "PAPER_COALESCED_READ_DEADLINE_EXCEEDED": (S, FRESH, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_HOLD_EXCEEDS_THE_DEADLINE": (S, FRESH, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_LANE_SERVES_HELD_MARKS_ONLY": (S, CAP, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_REFUSES_ALL_BUT_GET_BOOK": (S, CAP, "VENUE_BOOK"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
@@ -285,6 +306,9 @@ TABLE = {
     "FEED_MARKET_CLOSED": (S, DATA, "INGESTION"),
     "FEED_MARKET_NOT_IN_CURRENT_STATE": (S, FRESH, "INGESTION"),
     "FEED_OWNERSHIP_NOT_HELD": (S, CAP, "INGESTION"),
+    # P0 first-loss (2026-10-06): the owner's own failures, revoked by name
+    "FEED_OWNER_STRAY_CANCELLATION": (S, CAP, "INGESTION"),
+    "FEED_OWNER_TASK_ENDED_UNEXPECTEDLY": (S, CAP, "INGESTION"),
     "FEED_OWNER_STOPPED": (E, RAIL, "INGESTION"),
     "FEED_PROVIDER_REFUSED": (S, DATA, "INGESTION"),
     "FEED_PROVIDER_SILENT": (S, FRESH, "INGESTION"),
@@ -1663,6 +1687,13 @@ INTEGRATION_STREAMS = {
     "SPORT_ID_NOT_AN_INTEGER": (S, DATA, "INGESTION"),
     "SPORT_ID_NOT_IN_PINNAPI_DOCUMENTATION": (S, CAP, "INGESTION"),
     "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT": (S, CAP, "NORMALIZATION"),
+    # P0 coverage: a basketball / hockey full-game winner of a league the
+    # de-vig does not admit (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE)
+    "WINNER_MONEYLINE_LEAGUE_NOT_ADMITTED": (S, CAP, "NORMALIZATION"),
+    # bettor_venue_native_identity: a basketball / hockey venue event of a
+    # league whose winner is not read (wording not captured, or the WNBA's
+    # city-only team record)
+    "VENUE_NATIVE_LEAGUE_NOT_ADMITTED": (S, CAP, "EVENT_IDENTITY"),
     "NOT_SEEDED_NO_PRICEABLE_MARKET_FOR_THE_FAMILY": (S, CAP, "MARKET_FAMILY"),
     # bettor_venue_native_identity (inc-pinnapi / inc-edge): the draw contract
     # and the discovered event, as the module's other identity codes
@@ -1753,6 +1784,16 @@ EXEC_GATING_STREAM = {
     "STRATEGY_LIFECYCLE_RETIRED_NO_PAPER_ENTRY": (E, RAIL, "RISK_ADMISSION"),
     "STRATEGY_LIFECYCLE_STATE_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
     "STRATEGY_LIFECYCLE_REDUCED_SIZE_BELOW_ONE_CONTRACT": (E, RAIL, "ORDER"),
+    # (305) PAPER CAPITAL AUTHORITY (bettor_capital_authority): forward
+    # economics UNKNOWN / NEGATIVE (routed to a shadow counterfactual), a
+    # predeclared stopping rule firing at the entry instant, an ENTRY with
+    # no capital-eligibility evidence, and the fail-closed unreadable reads
+    "CASH_WAIT_FORWARD_ECONOMICS_UNKNOWN": (E, EV, "RISK_ADMISSION"),
+    "CASH_WAIT_FORWARD_ECONOMICS_NEGATIVE": (E, EV, "RISK_ADMISSION"),
+    "FORWARD_ECONOMICS_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
+    "STRATEGY_STOPPING_RULE_FIRING_AT_ENTRY": (E, RAIL, "RISK_ADMISSION"),
+    "STRATEGY_STOPPING_RULES_UNREADABLE_AT_ENTRY": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_EXECUTABLE_EV_NOT_EVIDENCED": (S, DATA, "ORDER"),
     "STALE_MANAGEMENT_RATE_ABOVE_THE_DECLARED_THRESHOLD":
         (E, RAIL, "RISK_ADMISSION"),
     "STALE_MANAGEMENT_RATE_UNREADABLE": (S, DATA, "RISK_ADMISSION"),

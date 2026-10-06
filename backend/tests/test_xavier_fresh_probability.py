@@ -162,7 +162,9 @@ def test_held_events_win_the_reactive_budget_over_discovery():
     assert s.next_job()[0] == 7
     assert s.counts["HELD_QUEUED"] == 1
     assert s.counts["QUEUE_EVICTED"] == 3          # discovery keeps its cap
-    assert [s.next_job()[0] for _ in range(3)] == [4, 5, 6]
+    # discovery is served newest first (pinnapi_reactive.
+    # DISCOVERY_NEWEST_FIRST_RULE); the cap evicted the oldest (1, 2, 3)
+    assert [s.next_job()[0] for _ in range(3)] == [6, 5, 4]
     assert s.next_job() is None
 
 

@@ -814,9 +814,13 @@ async def _scenario(dsn, rec: Recorder, ev: dict, controls: dict, *,
                             " recommendation, action, measure, exposure "
                             " FROM paper_xavier_reviews WHERE group_id=$1 "
                             " ORDER BY reviewed_at", groups["A"])
-    rec.check("A_first_review_holds_and_places_protection",
+    # the first review finds no standing protection yet: UNPROTECTED is
+    # never packet-present, so it ranks nothing, records MANAGEMENT_
+    # UNAVAILABLE and places the protection (P0 closeout)
+    rec.check("A_first_review_places_protection_without_ranking",
               reviews_a and reviews_a[0]["trigger"] == "FIRST_FILL"
-              and reviews_a[0]["recommendation"] == "HOLD"
+              and reviews_a[0]["recommendation"]
+              == "MANAGEMENT_UNAVAILABLE_STALE_INPUT"
               and reviews_a[0]["action"]["taken"] == "PLACE_STANDING",
               review=reviews_a[:1])
     await run_pass(T0 + 6.0, "T+6_steady")

@@ -752,7 +752,8 @@ def test_held_then_hot_nfl_then_discovery():
         s.changed(_Q(eid, i + 1))
     assert s.counts["HOT_QUEUED"] == 1 and s.counts["HELD_QUEUED"] == 1
     order = [s.next_job()[0] for _ in range(4)]
-    assert order == ["held", "hot", "disc", "cold"]
+    # discovery newest first (pinnapi_reactive.DISCOVERY_NEWEST_FIRST_RULE)
+    assert order == ["held", "hot", "cold", "disc"]
     assert s.next_job() is None
 
 
@@ -795,7 +796,8 @@ def test_waiting_discovery_is_served_while_hot_nfl_events_keep_changing():
             change(h)
         if len([e for e in served if e in disc]) == len(disc):
             break
-    assert [e for e in served if e in disc] == disc       # FIFO, all served
+    # all served, newest first (DISCOVERY_NEWEST_FIRST_RULE)
+    assert [e for e in served if e in disc] == list(reversed(disc))
     assert max(gaps) <= R.HOT_MAX_CONSECUTIVE, gaps
     assert s.counts["HOT_YIELDED_TO_DISCOVERY"] >= len(disc) - 1
     # with no discovery waiting, hot runs back to back (it starves nobody)

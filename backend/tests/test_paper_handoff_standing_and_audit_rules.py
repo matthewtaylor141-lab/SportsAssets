@@ -299,13 +299,17 @@ async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
         await SIM.simulate_order(conn, ge["order"]["order_id"], now=H.T0 + 4,
                                  fee_fn=H.zero_fee)
         await PX.step_handoff(conn, _ctx(a, H.T0 + 5))
+        # the valid standing protection a complete packet needs
+        await H.protect(conn, _ctx(a, H.T0 + 5.2), g, at=H.T0 + 5.2)
         # a book whose bid would make selling worth more than holding at p
         await H.observe(conn, s, H.T0 + 6, offers=[(0.82, 100)],
                         bids=[(0.80, 100)])
 
         async def measure(conn_, ctx_, *, pos, levels_buy):
+            # a fresh reading carries its persisted valuation id (packet)
             return {"p": p, "source": "PINNACLE_ONLY_LATEST" if stale
-                    else "PINNACLE_ONLY_CURRENT", "stale": stale}
+                    else "PINNACLE_ONLY_CURRENT", "stale": stale,
+                    "valuation_id": None if stale else 1}
         monkeypatch.setattr(PX, "_measure", measure)
         out = await PX.review_group(conn, _ctx(a, H.T0 + 7), g,
                                     trigger="SCHEDULED_BACKSTOP")
@@ -320,10 +324,17 @@ async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
         blocked = [x for x in alts["not_rankable"]
                    if x.get("blocker") == PX.B_STALE_MEASURE]
         if expect == "EXIT":
-            assert sales == 1 and not blocked
+            # decided on fresh evidence; the valid protection is cancelled
+            # first (terminal before the sale), so no sale order yet
+            assert not blocked
+            assert H.j(rv["action"])["taken"] == \
+                "CANCEL_STANDING_BEFORE_EXIT"
+            assert sales == 0
         else:
             assert sales == 0, "no sale on stale or absent evidence"
-            assert {x["action"] for x in blocked} <= {"EXIT", "REDUCE"}
+            # HOLD, EXIT and REDUCE all leave the rankable set (P0)
+            assert {x["action"] for x in blocked} <= {"HOLD", "EXIT",
+                                                      "REDUCE"}
             assert stale and (blocked or p is None)
             act = H.j(rv["action"])
             assert act["taken"] in ("PLACE_STANDING", "KEEP_STANDING"), act

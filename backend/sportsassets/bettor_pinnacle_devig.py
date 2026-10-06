@@ -242,10 +242,44 @@ SUPPORTED: dict = {
 #: `bettor_nfl_settlement.convert`, applied by the policy before any edge;
 #: this source only states the conditioning (CONDITIONAL_ON below) and
 #: refuses a draw-priced football line by name.
+#:
+#: BASKETBALL AND HOCKEY, P0 COVERAGE (2026-10-06) -- ADMITTED LEAGUE BY
+#: LEAGUE, BY THE BOOK'S OWN WORDS AND THE FEED'S OWN SHAPE. The book:
+#: "Bets on the Game and 2 nd -Half periods include all overtimes played in
+#: their result." (Basketball) and "Unless otherwise specified, Game-period
+#: bets include overtime and penalty shootouts." (Hockey) -- captured
+#: verbatim, tests/fixtures/pinnacle_line_rules_2026_10_04.json, sha256
+#: 63d64321...3d8303fd. A game graded through every overtime (and, in
+#: hockey, the shootout) has a winner, so the Game-period money line has two
+#: outcomes and no draw (bettor_venue_settlement.TIE_REACHABLE, OT_INCLUDED:
+#: False for both). The line read is PinnAPI's period-0 money line, refused
+#: unless its priced set is EXACTLY {home, away}
+#: (pinnapi_primary.read_quote: PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES), and
+#: `valuation` still refuses OUTCOME_SET_INCOMPLETE on any other count. WHY
+#: THE LEAGUE AND NOT THE SPORT: a league is admitted only where the venue's
+#: OWN winner wording for it is captured and states the full game, overtime
+#: (hockey: and the shootout) included -- the NBA / NHL in
+#: tests/fixtures/pmus_nba_nhl_winner_listings_2026_10_06.json, every other
+#: league the venue listed at the read in
+#: tests/fixtures/pmus_basketball_hockey_winner_listings_2026_10_06.json.
+#: The book's Game-period grading is the same for every competition of each
+#: sport (only the basketball MINIMUM differs -- 43 minutes in the NBA, 35
+#: elsewhere -- an exceptional state, never the ordinary grading). The WNBA
+#: is listed and NOT admitted: its venue team record is the city alone
+#: (bettor_venue_native_identity.LEAGUES_NOT_READ). The leagues equal
+#: bettor_venue_native_identity.ADMITTED_WINNER_LEAGUES (pinned by a test).
+_BASKETBALL_LEAGUES = ("nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl",
+                       "eurocup", "eurolg", "jpbl", "kbl", "lba", "lnbp",
+                       "nbl", "slnbl", "svkbl", "vtb")
+_HOCKEY_LEAGUES = ("nhl", "ahl", "cehl", "khl", "liiga", "snhl")
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,
     ("football", "h2h", "cfb"): 2,
 }
+SUPPORTED_BY_LEAGUE.update(
+    {("basketball", "h2h", lg): 2 for lg in _BASKETBALL_LEAGUES})
+SUPPORTED_BY_LEAGUE.update(
+    {("hockey", "h2h", lg): 2 for lg in _HOCKEY_LEAGUES})
 
 
 def league_of_contract(contract) -> str | None:
