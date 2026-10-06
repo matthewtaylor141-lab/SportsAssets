@@ -96,10 +96,15 @@ HELD_PAPER_RESERVE = 20
 #: priority order (paper_market_data.set_held fills it). A plain list of
 #: slugs: this module imports nothing from the paper path.
 _HELD_FIRST: list = []
+#: How many held slugs are kept: = institutional_stream.MAX_SYMBOLS (a test
+#: pins them equal), the most one process's stream will subscribe. The API
+#: stream subscribes held markets beyond the focus bound up to its own
+#: HELD_SYMBOL_BUDGET (institutional_api_stream).
+HELD_FIRST_MAX = 200
 
 
 def note_held_first(slugs) -> None:
-    _HELD_FIRST[:] = [str(s) for s in slugs or () if s][:4 * MAX_MEMBERS]
+    _HELD_FIRST[:] = [str(s) for s in slugs or () if s][:HELD_FIRST_MAX]
 
 
 def held_first() -> list:

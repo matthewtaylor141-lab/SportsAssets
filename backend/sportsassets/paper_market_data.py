@@ -85,6 +85,24 @@ HELD_TTL_S = 900.0
 R_QUEUE_DEADLINE = "PAPER_MARKET_DATA_QUEUE_WAIT_EXCEEDED_THE_DEADLINE"
 R_DISCOVERY_DEFERRED = "PAPER_DISCOVERY_READ_DEFERRED_DURING_VENUE_HOLD"
 R_COALESCE_DEADLINE = "PAPER_COALESCED_READ_DEADLINE_EXCEEDED"
+#: VENUE ISOLATION. This owner, its cache, its coalescing, its lanes, its
+#: pace / Retry-After state and its held registry are POLYMARKET US only
+#: (retail slugs are lower-case, e.g. `aec-mlb-nyy-bos-2026-10-06`). A
+#: Kalshi market ticker (upper-case, e.g. `KXMLBGAME-26OCT06NYYBOS-NYY`) is
+#: another venue: refused by name before any cache, queue, pace or request,
+#: and never registered as held. Kalshi has its own client, transport and
+#: (absent) book path (kalshi_venue; position_rooms R_KALSHI_BOOK).
+R_FOREIGN_VENUE = "NOT_A_POLYMARKET_US_MARKET_KALSHI_TICKER_REFUSED"
+_KALSHI_TICKER = re.compile(r"^[A-Z0-9][A-Z0-9_.\-]{1,200}$")
+
+
+def is_foreign_ticker(slug) -> bool:
+    """True for an upper-case exchange ticker (Kalshi's shape): it has an
+    upper-case letter and no lower-case one. A Polymarket US slug never
+    does."""
+    s = str(slug or "").strip()
+    return bool(s) and bool(_KALSHI_TICKER.match(s)) and \
+        any(c.isalpha() for c in s)
 
 _lane_ctx: contextvars.ContextVar = contextvars.ContextVar(
     "paper_market_data_lane", default=None)
@@ -294,7 +312,10 @@ class PublicGatewayTransport:
                                               method, path))
         from . import venue_request_gate as _grt
         _grt.check_write_lock(method, path)
-        self._lane.pace()
+        if _prepaced.get():
+            _prepaced.set(False)        # paced by the owner, for ONE request
+        else:
+            self._lane.pace()
         self._lane.note("dispatched")
         resp = self._inner.handle_request(request)
         hdrs = getattr(resp, "headers", None) or {}
@@ -356,7 +377,8 @@ class Owner:
     def __init__(self, *, transport=None, recent=None, gate=None,
                  clock=time.time, max_in_flight: int = MAX_IN_FLIGHT,
                  cache_max_age_s: float = CACHE_MAX_AGE_S,
-                 public_transport=None, public_state=None):
+                 public_transport=None, public_state=None,
+                 same_book_tap=None):
         self._transport = transport
         self._recent = recent
         self._gate = gate
@@ -367,6 +389,9 @@ class Owner:
         self.public = public_state if public_state is not None else \
             AuthLaneState(AUTH_PUBLIC, clock=clock)
         self._public_slot = threading.Lock()
+        # THE HELD-MARK SAME-BOOK TAP (None: the process's default, which is
+        # inert unless the institutional stream runs here; False: off)
+        self._tap = same_book_tap
         self.max_in_flight = int(max_in_flight)
         self.cache_max_age_s = float(cache_max_age_s)
         self._cv = threading.Condition()
@@ -381,7 +406,8 @@ class Owner:
             "reads", "cache_hits", "coalesced_reads", "rest_dispatches",
             "responses_2xx", "responses_429", "responses_other",
             "read_errors", "queue_deadline_refusals",
-            "discovery_deferred_during_hold", "coalesce_deadline_refusals")}
+            "discovery_deferred_during_hold", "coalesce_deadline_refusals",
+            "refused_foreign_venue")}
         self._by_lane = {ln: {"reads": 0, "dispatches": 0,
                               "queue_wait_s": 0.0} for ln in LANES}
 
@@ -390,7 +416,8 @@ class Owner:
         """The held-mark refresh names every held market (in its own
         priority order: due and not stream-covered first)."""
         at = float(now if now is not None else self._clock())
-        order = [str(s) for s in slugs or () if s]
+        order = [str(s) for s in slugs or ()
+                 if s and not is_foreign_ticker(s)]
         with self._cv:
             for s in order:
                 self._held[s] = at
@@ -415,6 +442,18 @@ class Owner:
             return LANE_HELD
         ln = explicit or _lane_ctx.get()
         return ln if ln in _RANK else LANE_DISCOVERY
+
+    def tap_for(self, slug):
+        """The same-book tap for a HELD read of `slug`, or None."""
+        if self._tap is False or not self.is_held(slug):
+            return None
+        tap = self._tap
+        if tap is None:
+            try:
+                tap = default_same_book_tap()
+            except Exception:                                  # noqa: BLE001
+                return None
+        return tap if tap is not None and tap.applies(slug) else None
 
     # ── accounting ───────────────────────────────────────────────────
     def _note(self, kind: str, n: int = 1) -> None:
@@ -509,6 +548,11 @@ class Owner:
         refusal. `auth` = AUTH_PUBLIC sends it through the keyless public
         gateway lane -- refused unless the read is HELD."""
         slug = str(slug or "")
+        if is_foreign_ticker(slug):
+            self._note("refused_foreign_venue")
+            return {"marketData": None, "error": R_FOREIGN_VENUE,
+                    "observed_at": self._clock(), "owner_lane": None,
+                    "refused_by": "PAPER_MARKET_DATA_OWNER"}
         ln = self.lane_for(slug, lane_name)
         auth = AUTH_PUBLIC if auth == AUTH_PUBLIC else AUTH_KEYED
         if auth == AUTH_PUBLIC and not self.is_held(slug):
@@ -598,10 +642,15 @@ class Owner:
             with self._cv:
                 self._by_lane[ln]["dispatches"] += 1
             tr = self._transport or _default_rest
+
+            def call():
+                try:
+                    return tr(slug, deadline_epoch_s=deadline_epoch_s)
+                except TypeError:
+                    return tr(slug)
+            tap = self.tap_for(slug)
             try:
-                out = tr(slug, deadline_epoch_s=deadline_epoch_s)
-            except TypeError:
-                out = tr(slug)
+                out = tap.wrap(slug, call) if tap is not None else call()
             except Exception as exc:                           # noqa: BLE001
                 out = {"marketData": None, "error": type(exc).__name__}
             out = dict(out or {})
@@ -641,10 +690,25 @@ class Owner:
             return refuse(R_QUEUE_DEADLINE)
         try:
             tr = self._public_transport or _default_public_rest
+
+            def call():
+                try:
+                    return tr(slug, lane=self.public)
+                except TypeError:
+                    return tr(slug)
+            tap = self.tap_for(slug)
             try:
-                out = tr(slug, lane=self.public)
-            except TypeError:
-                out = tr(slug)
+                if tap is None:
+                    out = call()
+                else:
+                    # the lane's pace BEFORE stream read #1; the transport
+                    # skips its own pace for this one request
+                    self.public.pace()
+                    tok = _prepaced.set(True)
+                    try:
+                        out = tap.wrap(slug, call)
+                    finally:
+                        _prepaced.reset(tok)
             except Exception as exc:                           # noqa: BLE001
                 out = {"marketData": None, "error": type(exc).__name__}
             out = dict(out or {})
@@ -748,12 +812,34 @@ def stream_updates() -> dict:
                          "why": type(exc).__name__}
     try:
         from . import institutional_stream as IS
-        d = IS.BOOKS.digest()
+        d = IS.digest()
         run = d.get("state") in IS.RUNNING
-        out["institutional"] = {"running": run, "state": d.get("state"),
-                                "updates": d.get("messages") if run else None,
-                                "symbols": d.get("symbols"),
-                                "by_refusal": d.get("by_refusal")}
+        start = d.get("start") or {}
+        inst = {"running": run, "state": d.get("state"),
+                "why": d.get("why"),
+                # the guard's refusal with the colliding env NAMES (never a
+                # value) when the credential was refused
+                "start_detail": start.get("detail"),
+                "updates": d.get("messages") if run else None,
+                "book_updates": d.get("book_updates") if run else None,
+                "connected": d.get("connected"),
+                "connection_seq": d.get("connection_seq"),
+                "symbols": d.get("symbols"),
+                "by_refusal": d.get("by_refusal")}
+        try:
+            from . import institutional_api_stream as IAS
+            dd = IAS.describe()
+            inst["api_stream"] = {k: dd.get(k) for k in (
+                "running", "held_symbol_budget", "held_wanted",
+                "held_subscribed", "bootstrap_backlog", "refdata_reads",
+                "refdata_failures", "last_error")}
+        except Exception as exc:                               # noqa: BLE001
+            inst["api_stream"] = {"error": type(exc).__name__}
+        tap = _TAP.get("tap")
+        inst["same_book_tap"] = (tap.telemetry() if tap is not None else
+                                 {"version": TAP_VERSION, "tapped": 0,
+                                  "state": "NOT_ARMED_IN_THIS_PROCESS"})
+        out["institutional"] = inst
     except Exception as exc:                                   # noqa: BLE001
         out["institutional"] = {"running": False, "updates": None,
                                 "why": type(exc).__name__}
@@ -972,6 +1058,175 @@ def default_institutional():
                                   current_fn=IS.current)
     except Exception:                                          # noqa: BLE001
         return None
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE HELD-MARK SAME-BOOK TAP -- per-symbol evidence at no extra venue read
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHY. A held symbol may be marked from the institutional book only once ITS
+# OWN same-book evidence is SUPPORTED (>= SAME_BOOK_MIN_COMPARABLE comparable
+# samples at >= SAME_BOOK_MIN_AGREE_RATE in the window). The workers' probe
+# takes one sample per focus member per minute with its OWN keyless retail
+# read -- one more request on a gateway that already answers 429. But every
+# held-mark REST read in THIS process already fetches exactly the retail book
+# the probe compares (GET /v1/markets/{slug}/book). The tap makes that read
+# the probe's retail read: `institutional_same_book.sample` runs AROUND it
+# (stream read #1, the held read, stream read #2) -- the same function, the
+# same 1 s window, the same verdicts -- so held symbols accrue evidence at the
+# held-mark cadence, held first, and no request is added.
+#
+# ONLY WHERE IT MEANS SOMETHING: the slug is a registered held market, the
+# institutional stream runs in this process and the slug maps EXACTLY on the
+# refdata this process holds. Otherwise the read runs untouched. The read's
+# own answer is returned unchanged (the tap never alters, retries or delays
+# it beyond the two in-memory stream reads). On the public-gateway lane the
+# lane's pace is taken BEFORE stream read #1 (and the transport then skips
+# its own, once), so the window measures the request, not the pacing.
+# Rows the stream could not answer (identity / stream / scale) are counted,
+# not persisted; everything else is persisted by the held-mark refresh.
+
+TAP_VERSION = "HELD_MARK_SAME_BOOK_TAP_V1"
+TAP_WHY = "HELD_MARK_READ_TAP: the held-mark refresh's own retail read"
+TAP_MAX_PENDING = 2000
+_prepaced: contextvars.ContextVar = contextvars.ContextVar(
+    "paper_public_lane_prepaced", default=False)
+
+
+class SameBookTap:
+    """Wraps one held REST read in an institutional_same_book sample."""
+
+    def __init__(self, *, eligible, current, record_for, clock=time.time,
+                 max_pending: int = TAP_MAX_PENDING):
+        self._eligible = eligible
+        self._current = current
+        self._record_for = record_for
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._pending: deque = deque(maxlen=int(max_pending))
+        self.counts = {"tapped": 0, "persistable": 0, "by_verdict": {}}
+
+    def applies(self, slug) -> bool:
+        try:
+            return bool(self._eligible(slug))
+        except Exception:                                      # noqa: BLE001
+            return False
+
+    def wrap(self, slug, call):
+        """Run `call()` (the held read) inside one same-book sample; return
+        exactly what `call()` returned (or raise what it raised)."""
+        from . import institutional_same_book as SB
+        try:
+            rec = self._record_for(slug)
+        except Exception:                                      # noqa: BLE001
+            rec = None
+        if rec is None:
+            return call()
+        got: dict = {}
+
+        def retail_read(_s):
+            try:
+                out = call()
+            except BaseException as exc:                       # noqa: BLE001
+                got["exc"] = exc
+                raise
+            got["out"] = out
+            o = out if isinstance(out, dict) else {}
+            md = o.get("marketData")
+            err = o.get("error")
+            return {"ok": isinstance(md, dict) and not err,
+                    "marketData": md if isinstance(md, dict) else None,
+                    "error": err}
+
+        row = None
+        try:
+            row = SB.sample(slug, record=rec, books_current=self._current,
+                            retail_read=retail_read, clock=self._clock,
+                            focus={"why": TAP_WHY})
+        except Exception:                                      # noqa: BLE001
+            row = None
+        if "exc" in got:
+            raise got["exc"]
+        if "out" not in got:
+            # the sample stopped before the read (identity not exact here)
+            return call()
+        if row is not None:
+            self._note(row)
+        return got["out"]
+
+    def _note(self, row: dict) -> None:
+        from . import institutional_same_book as SB
+        v = row.get("verdict")
+        why = row.get("verdict_reason")
+        key = v if v != SB.V_NC else "%s:%s" % (v, why)
+        keep = not (v == SB.V_NC and why in (SB.NC_IDENTITY, SB.NC_STREAM,
+                                             SB.NC_SCALE))
+        with self._lock:
+            self.counts["tapped"] += 1
+            self.counts["by_verdict"][key] = \
+                self.counts["by_verdict"].get(key, 0) + 1
+            if keep:
+                self.counts["persistable"] += 1
+                self._pending.append(row)
+
+    def drain(self) -> list:
+        with self._lock:
+            rows = list(self._pending)
+            self._pending.clear()
+        return rows
+
+    def telemetry(self) -> dict:
+        with self._lock:
+            return {"version": TAP_VERSION, "tapped": self.counts["tapped"],
+                    "persistable": self.counts["persistable"],
+                    "pending": len(self._pending),
+                    "by_verdict": dict(self.counts["by_verdict"])}
+
+
+_TAP: dict = {"tap": None}
+
+
+def default_same_book_tap():
+    """The process's tap: eligible only while the institutional stream runs
+    here, for a registered held market that maps EXACTLY on the refdata this
+    process holds. Built once; eligibility is re-checked per read."""
+    if _TAP["tap"] is not None:
+        return _TAP["tap"]
+
+    def eligible(slug):
+        from . import institutional_api_stream as IAS
+        return IAS.running() and IAS._exact_here(slug)
+
+    def record_for(slug):
+        from . import institutional_api_stream as IAS
+        with IAS._LOCK:
+            return (IAS.REFDATA.get(slug) or {}).get("record")
+
+    def current(slug, now=None):
+        from . import institutional_stream as IS
+        return IS.current(slug, now=now)
+
+    _TAP["tap"] = SameBookTap(eligible=eligible, current=current,
+                              record_for=record_for)
+    return _TAP["tap"]
+
+
+async def persist_tap_samples(conn, *, tap=None, process_id=None) -> dict:
+    """The tap's pending samples -> institutional_same_book_probe (one
+    savepoint). Never raises; a failed write is counted, not retried."""
+    t = tap if tap is not None else _TAP["tap"]
+    rows = t.drain() if t is not None else []
+    if not rows:
+        return {"rows": 0, "written": 0}
+    from . import institutional_same_book as SB
+    try:
+        async with conn.transaction():
+            n = await SB.persist(conn, rows, process_id=process_id or (
+                "%s:%s" % (TAP_VERSION, os.getpid())),
+                service="sportsassets-api")
+    except Exception as exc:                                   # noqa: BLE001
+        return {"rows": len(rows), "written": 0, "error": type(exc).__name__}
+    return {"rows": len(rows), "written": n}
 
 
 OWNER = Owner()

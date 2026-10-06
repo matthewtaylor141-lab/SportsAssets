@@ -1182,3 +1182,11 @@ tests/test_venue_key_seed_decoding.py
 tests/test_ops_canary.py
 tests/test_fresh_database_migrates.py
 tests/test_command_position_closed_and_ipad.py
+# P1 PMX institutional (2026-10-06): the market-data identity guard accepts a
+# distinct orderless PMX credential and refuses one equal to the funded or
+# retail execution key (identifier, secret in any encoding, peer
+# fingerprint), naming the colliding env variables; held markets beyond the
+# focus bound are subscribed; held REST reads are same-book samples; the
+# PMUS owner refuses Kalshi tickers; no Kalshi module shares PMUS pacing /
+# gate / cache / freshness.
+tests/test_p1_pmx_institutional.py
