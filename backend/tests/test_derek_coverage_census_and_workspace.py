@@ -65,12 +65,13 @@ CATALOGUE = [
     # a sport placed IN the mandate for this test, with no probability source
     # for THIS league. PIN MOVED (P0 coverage, 2026-10-06): this was an NBA
     # row; the NBA money line is now admitted to the de-vig by league
-    # (SUPPORTED_BY_LEAGUE nba), so a league it does NOT admit -- the venue's
-    # EuroLeague board -- carries the unsupported case.
-    _row("aec-eurolg-rma-fcb-2026-10-01-rma",
+    # (SUPPORTED_BY_LEAGUE), so a league it does NOT admit -- the venue's
+    # WNBA board, whose team record is the city alone -- carries the
+    # unsupported case.
+    _row("aec-wnba-ny-atl-2026-10-01-ny",
          "basketball_team_full_game_winner",
-         event="eurolg-rma-fcb-2026-10-01",
-         title="Real Madrid vs. FC Barcelona"),
+         event="wnba-ny-atl-2026-10-01",
+         title="New York vs. Atlanta"),
     # not re-seen by the sweep recently: not listed at all
     _row("aec-mlb-old-2026-09-01-old", "baseball_team_full_game_winner",
          event="mlb-old-2026-09-01", age_s=10 * 3600.0),

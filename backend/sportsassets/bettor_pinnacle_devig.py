@@ -243,8 +243,8 @@ SUPPORTED: dict = {
 #: this source only states the conditioning (CONDITIONAL_ON below) and
 #: refuses a draw-priced football line by name.
 #:
-#: THE NBA AND THE NHL, P0 COVERAGE (2026-10-06) -- ADMITTED FOR THOSE TWO
-#: LEAGUES ONLY, BY THE BOOK'S OWN WORDS AND THE FEED'S OWN SHAPE. The book:
+#: BASKETBALL AND HOCKEY, P0 COVERAGE (2026-10-06) -- ADMITTED LEAGUE BY
+#: LEAGUE, BY THE BOOK'S OWN WORDS AND THE FEED'S OWN SHAPE. The book:
 #: "Bets on the Game and 2 nd -Half periods include all overtimes played in
 #: their result." (Basketball) and "Unless otherwise specified, Game-period
 #: bets include overtime and penalty shootouts." (Hockey) -- captured
@@ -256,19 +256,30 @@ SUPPORTED: dict = {
 #: unless its priced set is EXACTLY {home, away}
 #: (pinnapi_primary.read_quote: PINNAPI_PRIMARY_INCOMPLETE_OUTCOMES), and
 #: `valuation` still refuses OUTCOME_SET_INCOMPLETE on any other count. WHY
-#: THE LEAGUE AND NOT THE SPORT: the venue's winner wording is captured for
-#: the NBA and the NHL only (tests/fixtures/
-#: pmus_nba_nhl_winner_listings_2026_10_06.json; one wording each across
-#: 63 / 26 open listings); the venue's KHL, Liiga, EuroLeague, WNBA ...
-#: boards carry other wordings and the book's basketball section a different
-#: minimum ("In all other competitions ... 35 minutes"), so no other league
-#: inherits this.
+#: THE LEAGUE AND NOT THE SPORT: a league is admitted only where the venue's
+#: OWN winner wording for it is captured and states the full game, overtime
+#: (hockey: and the shootout) included -- the NBA / NHL in
+#: tests/fixtures/pmus_nba_nhl_winner_listings_2026_10_06.json, every other
+#: league the venue listed at the read in
+#: tests/fixtures/pmus_basketball_hockey_winner_listings_2026_10_06.json.
+#: The book's Game-period grading is the same for every competition of each
+#: sport (only the basketball MINIMUM differs -- 43 minutes in the NBA, 35
+#: elsewhere -- an exceptional state, never the ordinary grading). The WNBA
+#: is listed and NOT admitted: its venue team record is the city alone
+#: (bettor_venue_native_identity.LEAGUES_NOT_READ). The leagues equal
+#: bettor_venue_native_identity.ADMITTED_WINNER_LEAGUES (pinned by a test).
+_BASKETBALL_LEAGUES = ("nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl",
+                       "eurocup", "eurolg", "jpbl", "kbl", "lba", "lnbp",
+                       "nbl", "slnbl", "svkbl", "vtb")
+_HOCKEY_LEAGUES = ("nhl", "ahl", "cehl", "khl", "liiga", "snhl")
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,
     ("football", "h2h", "cfb"): 2,
-    ("basketball", "h2h", "nba"): 2,
-    ("hockey", "h2h", "nhl"): 2,
 }
+SUPPORTED_BY_LEAGUE.update(
+    {("basketball", "h2h", lg): 2 for lg in _BASKETBALL_LEAGUES})
+SUPPORTED_BY_LEAGUE.update(
+    {("hockey", "h2h", lg): 2 for lg in _HOCKEY_LEAGUES})
 
 
 def league_of_contract(contract) -> str | None:

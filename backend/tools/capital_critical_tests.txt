@@ -1097,6 +1097,12 @@ tests/test_ncaaf_native_seed_identity.py
 # overtime (and the shootout); strict settlement INCOMPATIBLE by name
 # (postponement: book voids, venue pays the last fair market price).
 tests/test_nba_nhl_winner_identity_and_settlement.py
+# P0 coverage, the remaining mapping first losses (2026-10-06): every
+# basketball / hockey league the venue lists admitted by its own captured
+# wording (WNBA refused by name: city-only team record); identical names are
+# an identity (Goias / Athletic Club); a native seed's own fixture id breaks
+# a same-names tie; "&" / "and" one spelling; the NCAAF school-only seeds.
+tests/test_coverage_mapping_first_losses.py
 tests/test_capital_eligibility.py
 tests/test_strategy_lifecycle.py
 tests/test_paper_mark_freshness_classifier.py

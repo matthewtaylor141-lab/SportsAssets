@@ -65,9 +65,9 @@ R_FOOTBALL_LEAGUE_NOT_ADMITTED = (
     "FOOTBALL_MONEYLINE_LEAGUE_NOT_ADMITTED_BY_MEASUREMENT")
 #: P0 coverage (2026-10-06): the venue's basketball / hockey full-game winner
 #: types, admitted by the SAME league read the de-vig makes
-#: (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE: the NBA and the NHL only).
-#: Another league of the same spelling (the venue's EuroLeague, KHL, WNBA ...
-#: boards) refuses by this name.
+#: (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE: the leagues whose own venue
+#: wording is captured). Another league of the same spelling (the venue's
+#: WNBA board, or one not yet captured) refuses by this name.
 WINNER_TYPES_ADMITTED_BY_LEAGUE = {
     "basketball_team_full_game_winner": "basketball",
     "hockey_team_full_game_winner": "hockey",

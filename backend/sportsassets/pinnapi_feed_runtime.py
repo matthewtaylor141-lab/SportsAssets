@@ -579,7 +579,7 @@ HELD_FULL_GAME_TYPES = frozenset((
     # pmus_nba_nhl_winner_listings_2026_10_06.json). The period-0 two-way
     # line, admitted by league exactly as the cycle's (contract_match ->
     # pinnapi_census.family_of -> bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE:
-    # NBA / NHL only); every other league of the spelling still refuses.
+    # the captured leagues); every other league of the spelling refuses.
     "basketball_team_full_game_winner", "hockey_team_full_game_winner"))
 
 #: the census's own columns, for the ONE held contract

@@ -708,28 +708,28 @@ CAPTURED_SCOPE = {
                           "leagues_covered": ("NCAA", "NFL"),
                           "not_covered": ("NFL Pro Bowl",)},
     # BASKETBALL / HOCKEY (P0 coverage, capture CAPTURE_RUN_LINE_RULES): each
-    # sport section states one Game-period rule set with no phase or format
-    # carve-out. The basketball minimum is stated for the NBA by name (every
-    # other competition has a different one), and the hockey section names
-    # one NHL exception, the All-Star Game -- so the money line is admitted
-    # for those leagues only, upstream (bettor_pinnacle_devig.
-    # SUPPORTED_BY_LEAGUE: nba / nhl).
+    # sport section states one Game-period rule set for every competition,
+    # with no phase or format carve-out; the basketball minimum is stated per
+    # competition (NBA 43, others 35 -- both void), and the hockey section
+    # names one exception, the NHL All-Star Game, and a sub-sport (3-on-3
+    # basketball) with its own rules. Which LEAGUES are read is decided
+    # upstream, by the venue's own captured wording (bettor_pinnacle_devig.
+    # SUPPORTED_BY_LEAGUE).
     ("basketball", "h2h"): {"phases": (), "formats": (),
                             "phase_independent": True,
                             "phase_independent_because": (
-                                "In the NBA, all bets on the Game-period "
-                                "will be voided if fewer than 43 minutes are "
-                                "completed."),
-                            "leagues_covered": ("NBA",),
-                            "not_covered": ("every other basketball "
-                                            "competition (35-minute "
-                                            "minimum)",)},
+                                "Bets on the Game and 2 nd -Half periods "
+                                "include all overtimes played in their "
+                                "result."),
+                            "leagues_covered": ("NBA", "every other "
+                                                "competition"),
+                            "not_covered": ("3 on 3 Basketball",)},
     ("hockey", "h2h"): {"phases": (), "formats": (),
                         "phase_independent": True,
                         "phase_independent_because": (
                             "Unless otherwise specified, Game-period bets "
                             "include overtime and penalty shootouts."),
-                        "leagues_covered": ("NHL",),
+                        "leagues_covered": ("every competition",),
                         "not_covered": ("NHL All-Star Game",)},
 }
 
@@ -1408,8 +1408,13 @@ CAPTURE_RUN_LINE_RULES = {
 
 _Q_BK_OVERTIME = ("Bets on the Game and 2 nd -Half periods include all "
                   "overtimes played in their result.")
+#: BOTH minimums, one sentence pair: the NBA's 43 minutes and every other
+#: competition's 35. The trigger differs by league; the payout (void) does
+#: not, so one cited term serves every admitted league.
 _Q_BK_MINIMUM = ("In the NBA, all bets on the Game-period will be voided if "
-                 "fewer than 43 minutes are completed.")
+                 "fewer than 43 minutes are completed. In all other "
+                 "competitions, bets on the Game-period will be voided if "
+                 "fewer than 35 minutes are completed.")
 _Q_HK_OVERTIME = ("Unless otherwise specified, Game-period bets include "
                   "overtime and penalty shootouts.")
 _Q_HK_MINIMUM = ("Bets on Match markets require a minimum of 55 minutes to "
@@ -1433,7 +1438,7 @@ _BASKETBALL_H2H_TERMS = {
         "note": "every overtime INCLUDED"},
     # fewer than 43 minutes (the NBA's own minimum): void
     C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
-        "Basketball", _Q_BK_MINIMUM, "NBA minimum sentence")},
+        "Basketball", _Q_BK_MINIMUM, "minimum sentences (NBA 43, others 35)")},
     C_NOT_PLAYED: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
         "General Rules", _Q_GENERAL_NOT_STARTED, "not-started rule")},
 }

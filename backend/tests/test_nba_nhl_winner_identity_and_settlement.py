@@ -337,9 +337,9 @@ def _val(slug, outcomes, selection, *, league=None, family=None):
 def test_the_nba_and_nhl_money_lines_are_admitted_by_league_only():
     assert devig.expected_outcomes("basketball", "h2h", league="nba") == 2
     assert devig.expected_outcomes("hockey", "h2h", league="nhl") == 2
-    for fam, lg in (("basketball", "wnba"), ("basketball", "eurolg"),
-                    ("basketball", None), ("hockey", "khl"),
-                    ("hockey", "liiga"), ("hockey", None)):
+    for fam, lg in (("basketball", "wnba"), ("basketball", "xbl"),
+                    ("basketball", None), ("hockey", "xhl"),
+                    ("hockey", "wnba"), ("hockey", None)):
         assert devig.expected_outcomes(fam, "h2h", league=lg) is None
     # the family-wide set is untouched
     assert ("basketball", "h2h") not in devig.SUPPORTED
@@ -369,9 +369,9 @@ def test_the_probability_is_the_payout_events_two_way_price():
 def test_another_league_a_disagreeing_league_or_a_draw_priced_set_refuses():
     odds = {"A": 1.8, "B": 2.1}
     assert devig.R_UNSUPPORTED_MARKET in _val(
-        "aec-khl-cska-ska-2026-10-06", odds, "A", family="hockey")["refusals"]
+        "aec-xhl-cska-ska-2026-10-06", odds, "A", family="hockey")["refusals"]
     assert devig.R_UNSUPPORTED_MARKET in _val(
-        "aec-eurolg-rma-fcb-2026-10-06", odds, "A",
+        "aec-wnba-ny-atl-2026-10-06", odds, "A",
         family="basketball")["refusals"]
     # the structured league and the slug disagree: no league at all
     assert devig.R_UNSUPPORTED_MARKET in _val(
@@ -441,8 +441,8 @@ NHL_TEXT = MARKETS["aec-nhl-uta-nyr-2026-10-04"]["description"]
 
 def test_any_other_wording_league_or_family_establishes_nothing():
     # another league of the family has no book grading here
-    for fam, lg in (("basketball", "wnba"), ("basketball", "eurolg"),
-                    ("hockey", "khl"), ("basketball", None)):
+    for fam, lg in (("basketball", "wnba"), ("basketball", "xbl"),
+                    ("hockey", "xhl"), ("basketball", None)):
         assert PB.book_grading_period(fam, lg) is None
     # an NHL text silent on the shootout is not the NHL wording
     no_so = NHL_TEXT.replace("Overtime and any shootout are included if "
@@ -526,9 +526,9 @@ def test_the_census_admits_nba_and_nhl_rows_and_no_other_league():
         got = CEN.family_of(r["kind"], r["line"], r["sports_type"], r)
         assert got == ("MONEYLINE", True, "PROVED_CLOCK_ARTIFACT"), (r, got)
     r = _rows(MARKETS["aec-nhl-uta-nyr-2026-10-04"])[0]
-    for over in ({"team_league": "khl",
-                  "identifier": "aec-khl-uta-nyr-2026-10-04"},
-                 {"team_league": "ahl"},
+    for over in ({"team_league": "xhl",
+                  "identifier": "aec-xhl-uta-nyr-2026-10-04"},
+                 {"team_league": "wnba"},
                  {"team_league": None, "identifier": None}):
         got = CEN.family_of(r["kind"], r["line"], r["sports_type"],
                             dict(r, **over))
