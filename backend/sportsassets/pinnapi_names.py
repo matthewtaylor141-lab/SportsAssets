@@ -306,28 +306,72 @@ def shares_a_token(a, b, family) -> bool:
     return bool((aa and aa in tb) or (ab and ab in ta))
 
 
+#: ── NOT YET POSTED: NO CANDIDATE AT THE START (software census closure) ──
+#:
+#: THE NAMING-GAP QUESTION IS ASKED AT THE START, NOT A DAY AWAY. A feed
+#: record can only ever be THIS fixture under other names if it starts inside
+#: the match tolerance (`pinnapi_primary.START_TOLERANCE_S`): the identity
+#: refuses any other start whatever the names say, so a record naming a team
+#: at another start time (its previous or next game) can never be matched by
+#: any normalisation and is not a naming gap. `absence` therefore also
+#: reports, over EVERY record of the sport:
+#:
+#:   named_near_start  records starting inside the tolerance (or with no
+#:                     readable start) that share a token or an acronym with
+#:                     either participant -- a candidate the names might hide
+#:   named_elsewhere   records naming a participant token, all starting
+#:                     OUTSIDE the tolerance (name + start, up to 4)
+#:   no_candidate_near_start  the feed holds records of the sport, has
+#:                     evicted nothing, and named_near_start is empty
+#:
+#: `no_candidate_near_start` alone decides nothing: the collector calls the
+#: fixture NOT YET POSTED (an EXTERNAL absence) only when the metered
+#: provider's payload ALSO carries no Pinnacle book for the event -- two
+#: independent sources agreeing that Pinnacle has not published it
+#: (ext_pinnacle_loop.no_pinnacle_codes). Any record near the start that
+#: shares a token keeps PINNAPI_PRIMARY_NO_EXACT_FIXTURE, ours.
+NEAR_START_SAMPLE = 4
+
+
 def absence(records, *, sport_id, start, home, away, family,
-            evicted=0) -> dict:
+            evicted=0, tolerance_s=None) -> dict:
     """Is the fixture ABSENT from the feed (see the module docstring)? Over
     the feed's raw records (`cache.events` values). {"absent": bool,
-    "why": ..., "sport_records": n, "sharing": [up to 4 names]}. Pure."""
+    "why": ..., "sport_records": n, "sharing": [up to 4 names]}, plus, when
+    `tolerance_s` is given, the near-start scan (NEAR_START_SAMPLE above).
+    Pure."""
     sport_records, sharing = 0, []
+    near, elsewhere = [], []
+    tol = None if tolerance_s is None else float(tolerance_s)
     for ev in records or ():
         if not isinstance(ev, dict) or ev.get("sport_id") != sport_id:
             continue
         sport_records += 1
         st = _epoch(ev.get("startTime"))
-        if st is not None and abs(st - float(start)) > ABSENCE_WINDOW_S:
-            continue
         names = [str(p.get("name")) for p in (ev.get("participants") or [])
                  if isinstance(p, dict) and p.get("name")]
-        for n in names:
-            if shares_a_token(n, home, family) or \
-                    shares_a_token(n, away, family):
-                if len(sharing) < 4 and n not in sharing:
-                    sharing.append(n)
+        named = [n for n in names if shares_a_token(n, home, family)
+                 or shares_a_token(n, away, family)]
+        if tol is not None and named:
+            if st is None or abs(st - float(start)) <= tol:
+                for n in named:
+                    if len(near) < NEAR_START_SAMPLE and n not in near:
+                        near.append(n)
+            elif len(elsewhere) < NEAR_START_SAMPLE:
+                elsewhere.append({"names": names, "start_epoch_s": st,
+                                  "offset_s": round(st - float(start), 1)})
+        if st is not None and abs(st - float(start)) > ABSENCE_WINDOW_S:
+            continue
+        for n in named:
+            if len(sharing) < 4 and n not in sharing:
+                sharing.append(n)
     out = {"sport_records": sport_records, "sharing": sharing,
            "window_s": ABSENCE_WINDOW_S, "evicted": int(evicted or 0)}
+    if tol is not None:
+        out.update(near_start_window_s=tol, named_near_start=near,
+                   named_elsewhere=elsewhere,
+                   no_candidate_near_start=bool(
+                       sport_records > 0 and not evicted and not near))
     if sharing:
         return dict(out, absent=False,
                     why=("feed records within %.0f h name a participant "

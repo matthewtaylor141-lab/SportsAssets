@@ -1219,3 +1219,8 @@ tests/test_universal_market_plane.py
 tests/test_market_plane_integration.py
 tests/test_mirror_shadow_quote_client.py
 tests/test_xavier_packet_fresh_inputs.py
+# (software census closure) QUOTE_STALE split by the row's measured provider lag; NO_EXACT_FIXTURE -> NOT_YET_POSTED only when two sources agree; the lane wrapper classed by its carried code; a read book's valid empty side is ECONOMIC
+tests/test_software_census_closure.py
+# (closeout) Xavier held read: the held event grouped beyond the census window; the entry's proven PinnAPI fixture
+tests/test_held_event_beyond_census_horizon.py
+tests/test_market_plane_dedicated_service.py

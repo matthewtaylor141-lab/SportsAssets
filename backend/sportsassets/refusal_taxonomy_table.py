@@ -1912,12 +1912,42 @@ POS_OS_STREAM = {
     "POS_OS_NO_RECORDED_MID_AT_FILL": (S, DATA, "FILL"),
 }
 
+#: THE SOFTWARE CENSUS CLOSURE (live release 55eb7c82 first-loss census).
+#: Each is SOFTWARE by this table's two-class vocabulary (the data is not
+#: ours to have); the first-loss census classes each EXTERNAL by
+#: bettor_external_shadow.EVALUABILITY_OF, on the evidence its emitter
+#: records:
+#:   QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER  the metered quote's lag at our
+#:       receipt (provider_lag_s, on the row) already past the 30 s rule, and
+#:       the PinnAPI read refused for an EXTERNAL reason (that reason rides
+#:       beside it) -- ext_pinnacle_loop.QUOTE_STALE_AS_DELIVERED_RULE
+#:   PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED    no feed record at the start
+#:       shares a token with either team AND the metered payload carries no
+#:       Pinnacle book (THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK beside it) --
+#:       ext_pinnacle_loop.R_FIXTURE_NOT_YET_POSTED
+#:   PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES  the evidence
+#:       code beside it: the feed lists a participant only at other starts
+SOFTWARE_CENSUS_CLOSURE = {
+    "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER": (S, FRESH, "FRESHNESS"),
+    "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": (S, DATA, "PROBABILITY"),
+    "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES": (
+        S, DATA, "PROBABILITY"),
+    # ECONOMIC by its evidence: the paper decision's book read SUCCEEDED and
+    # the side it would buy from is published, well formed and empty (no
+    # executable depth: the market's state, recorded on the observation) --
+    # paper_derek.no_book_refusal; a failed / malformed read keeps
+    # THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY (SOFTWARE)
+    "THE_OBSERVED_BOOK_HAS_NO_LEVEL_ON_THE_SIDE_BOUGHT": (
+        E, DEPTH, "VENUE_BOOK"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())
                + list(INTEGRATION_STREAMS.items())
                + list(COVERAGE_CENSUS.items())
                + list(EXEC_GATING_STREAM.items())
-               + list(POS_OS_STREAM.items())):
+               + list(POS_OS_STREAM.items())
+               + list(SOFTWARE_CENSUS_CLOSURE.items())):
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
