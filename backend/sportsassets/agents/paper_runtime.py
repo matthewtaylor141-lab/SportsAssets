@@ -250,6 +250,16 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # THE PROFITABILITY BIND'S LEARNED INPUTS (migration 309): the
+        # sport x family x regime calibration, the learned execution
+        # economics and the expected-vs-realized residuals, refitted at most
+        # every FIT_EVERY_S BEFORE this pass's entries read them. Records
+        # models only.
+        from .. import bettor_paper_profitability_bind as PBIND
+        steps.append(("profitability_fit", PBIND.step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy
@@ -272,6 +282,11 @@ def default_steps() -> list:
             from . import paper_explore as PEX
             steps.append(("maker_entry", PMK.step))
             steps.append(("exploration", PEX.step))
+        # THE EXPLICIT CASH DECISION (migration 309): every strategy that
+        # evaluated candidates this pass and entered none records CASH with
+        # its binding refusals and best refused candidate.
+        from .. import bettor_paper_profitability_bind as _PBIND
+        steps.append(("cash_fallback", _PBIND.cash_step))
         steps.append(("simulate_after_delay", PD.step_after_delay))
         # EVERY RECORDED ENTER HAS AN ORDER OR A NAMED FINDING (P0 incident
         # 2026-10-04): an ENTER older than PD.ENTER_WITHOUT_ORDER_AFTER_S

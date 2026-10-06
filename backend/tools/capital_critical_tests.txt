@@ -1172,3 +1172,4 @@ tests/test_agent_scorecards.py
 # protection; fully sold -> closed everywhere; no duplicate resting fills; no
 # new PAPER ENTRY while protection continuity / packets have failed.
 tests/test_p0_xavier_packet_and_reconciliation.py
+tests/test_profitability_bind.py
