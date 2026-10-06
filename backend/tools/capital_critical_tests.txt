@@ -1191,6 +1191,7 @@ tests/test_command_position_closed_and_ipad.py
 tests/test_p1_pmx_institutional.py
 tests/test_profitability_bind.py
 tests/test_mirror_shadow_secret_precondition.py
+tests/test_mirror_shadow_positions_source.py
 tests/test_p1_pinnapi_canonical_names.py
 tests/test_p1_priced_settlement_difference.py
 tests/test_p1_read_bounded_by_the_probability_deadline.py

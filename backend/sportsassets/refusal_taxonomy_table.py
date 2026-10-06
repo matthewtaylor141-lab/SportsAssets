@@ -52,6 +52,13 @@ TABLE = {
     # (P1) venue isolation and the mirror shadow's credential precondition
     "NOT_A_POLYMARKET_US_MARKET_KALSHI_TICKER_REFUSED": (S, CAP, "VENUE_BOOK"),
     "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY": (S, DATA, "INGESTION"),
+    # (P1 closeout) the mirror shadow's ledger-derived positions fallback
+    # (mirror_positions_source): topology not the PMX RSA client, ledger
+    # unreadable, neither source readable, a non-read statement refused
+    "PMUS_SLOT_CREDENTIAL_IS_NOT_THE_PMX_RSA_CLIENT": (S, CAP, "INGESTION"),
+    "MIRROR_SHADOW_LEDGER_POSITIONS_UNREADABLE": (S, DATA, "INGESTION"),
+    "MIRROR_SHADOW_NO_POSITIONS_SOURCE_READABLE": (S, DATA, "INGESTION"),
+    "MIRROR_POSITIONS_SOURCE_STATEMENT_IS_NOT_A_READ": (S, CAP, "INGESTION"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
