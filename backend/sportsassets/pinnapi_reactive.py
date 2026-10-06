@@ -56,6 +56,30 @@ HOT_AFTER_KICKOFF_S = 4 * 3600
 #: window (one entry per event, later changes coalesce). Held events still
 #: go first, exactly as before R30A.
 HOT_MAX_CONSECUTIVE = 2
+#: ── DISCOVERY CHANGES: NEWEST FIRST (P0 first-loss, 2026-10-06) ──────────
+#: MEASURED (research-sql run 37413249749): of the PinnAPI valuations the
+#: lane refused FEED_QUOTE_OLDER_THAN_LIMIT in 24 h (the code behind
+#: PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE on the census's NPB and
+#: NBA events), the change reached the queue 0.1-0.3 s after it happened,
+#: then WAITED in this FIFO queue 22-25 s (p50; p90 25-29 s) for the single
+#: worker before its evaluation started, and the evaluation (its paced venue
+#: read) took ~10 s: 32-36 s old at the decision. NPB Hanshin-Hiroshima:
+#: queued 15:39:13.28Z, started 15:39:35.28Z, refused at 33.3 s. NBA
+#: Bucks-Timberwolves spread: queued 22:57:48.29Z, started 22:58:17.04Z,
+#: refused at 32.3 s. The quote was fresh when it arrived; our queue made
+#: it stale -- every job served oldest-first starts ~one queue-wait old.
+#: Served NEWEST first, a change starts within a job of arriving, and an
+#: older one the worker could not reach in time is refused at its start by
+#: the cache's own 30 s read (unchanged; nothing is forecast or skipped
+#: early) -- the same work, spent on changes that can still be decided
+#: fresh. Discovery only: held events keep their own first-served queue and
+#: the hot NFL tier its FIFO and bounded share. The cap still evicts the
+#: OLDEST entry. No limit, clock or worker count changes.
+DISCOVERY_NEWEST_FIRST_RULE = (
+    "discovery changes are evaluated newest first: an older change the "
+    "single worker could not reach in time is refused at its start by the "
+    "cache's unchanged 30 s read, instead of making every later change wait "
+    "behind it; held events and the hot NFL tier keep their own order")
 #: THE JOB'S CONNECTION (R30A, 2026-10-04). Production, 15:47-18:47Z
 #: (render-ops logs run 37225745383): the audit failed 12 times -- 10 with
 #: the TimeoutError inside asyncpg Pool._acquire, 2 (16:00:53, 17:46:10)
@@ -312,6 +336,9 @@ class Scheduler:
             self.seen.pop(old, None)
             self.counts['QUEUE_EVICTED'] += 1
         self.pending[eid] = tick
+        # NEWEST CHANGE FIRST (DISCOVERY_NEWEST_FIRST_RULE): a coalesced
+        # change is this fixture's newest, so it moves to the newest end
+        self.pending.move_to_end(eid)
         self.wake.set()
 
     def request_held(self, eid) -> str:
@@ -374,7 +401,8 @@ class Scheduler:
             self.counts['HOT_YIELDED_TO_DISCOVERY'] += 1
         if self.pending:
             self.hot_streak = 0
-            return self.pending.popitem(last=False)
+            # DISCOVERY_NEWEST_FIRST_RULE: the newest change, not the oldest
+            return self.pending.popitem(last=True)
         return None
 
     async def run(self):
