@@ -352,9 +352,143 @@ CURSOR_SQL = (
     "    ON c.lane = $1 AND c.market_id = j.market_id")
 
 
-async def cursors(conn, boots: dict, lane: str = LANE) -> dict:
+#: the decision-only live lane's owner control (ingestion_state): when it is
+#: off the lane is STOPPED and writes no journal, so its cursors cannot be
+#: compared across a restart -- the RUNNING lanes' durable cursors are
+#: checked instead (active_lane_cursors), never a pass by default
+OBSERVATION_CONTROL_KEY = "bettor_live_observation"
+
+
+async def _observation_on(c) -> bool | None:
+    v = await c.fetchval("SELECT value FROM ingestion_state WHERE key = $1",
+                         OBSERVATION_CONTROL_KEY)
+    if v is None:
+        return None
+    v = json.loads(v) if isinstance(v, str) else v
+    return v is True or (isinstance(v, dict) and bool(v.get("on")))
+
+
+def _epoch_of(v):
+    if v is None:
+        return None
+    if hasattr(v, "timestamp"):
+        return v.timestamp()
+    try:
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")
+                                      ).timestamp()
+    except ValueError:
+        return None
+
+
+async def active_lane_cursors(conn, wboot: dict) -> dict:
+    """THE RUNNING LANES' DURABLE CURSORS ACROSS THE LATEST RESTART (the
+    workers' boot marker):
+
+      catalogue   venue_catalogue_receipts per lane: ids and finish instants
+                  move forward together (never a regression) and at least
+                  one refresh FINISHED after the boot (the cursor advanced
+                  after the restart -- it did not restart from nothing
+                  silently, it carried on)
+      registry    the market plane's durable registry (migration 312) did not
+                  shrink at the restart: the active count of the first
+                  snapshot after the boot is not below the last snapshot
+                  before it by more than catalogue churn (RESTART_LOSS_TOL);
+                  NOT_APPLICABLE before the plane has a pre-boot snapshot
+    PASS only on evidence; FAIL on a regression; else NOT_ESTABLISHED."""
+    boot_at = _epoch_of((wboot or {}).get("at"))
+    out = {"source": "venue_catalogue_receipts + market_plane_events "
+                     "SNAPSHOT, across ingestion_state.workers_boot",
+           "boot_at": (wboot or {}).get("at"),
+           "rule": "every running lane's cursor moved forward after the "
+                   "restart and none moved backwards"}
+    if boot_at is None:
+        return dict(out, state=UNKNOWN, why="workers boot instant unreadable")
+
+    async def cat(c):
+        if not await _has(c, "venue_catalogue_receipts"):
+            return {"status": "ABSENT", "state": UNKNOWN}
+        rows = await c.fetch(
+            "SELECT lane, id, started_at, finished_at "
+            "  FROM venue_catalogue_receipts "
+            " WHERE finished_at > now() - interval '24 hours' "
+            " ORDER BY lane, id")
+        regress, after, lanes = 0, 0, {}
+        prev = {}
+        for r in rows:
+            ln = r["lane"]
+            lanes[ln] = lanes.get(ln, 0) + 1
+            p = prev.get(ln)
+            if p is not None and r["finished_at"] < p:
+                regress += 1
+            prev[ln] = r["finished_at"]
+            if r["started_at"].timestamp() >= boot_at:
+                after += 1
+        st = FAIL if regress else (PASS if after else UNKNOWN)
+        return {"status": "OK", "state": st, "receipts_24h": len(rows),
+                "by_lane": lanes, "regressions": regress,
+                "refreshes_after_boot": after,
+                "why": None if st == PASS else (
+                    "%d receipt(s) finished before an earlier one" % regress
+                    if regress else "no catalogue refresh finished since "
+                    "the restart yet")}
+    out["catalogue"] = await _section(conn, cat)
+
+    async def reg(c):
+        if not await _has(c, "market_plane_events"):
+            return {"status": "ABSENT", "state": "NOT_APPLICABLE"}
+        before = await c.fetchrow(
+            "SELECT payload->'universe'->>'represented' AS n, at "
+            "  FROM market_plane_events WHERE kind = 'SNAPSHOT' "
+            "   AND at < to_timestamp($1) ORDER BY at DESC LIMIT 1", boot_at)
+        after = await c.fetchrow(
+            "SELECT payload->'universe'->>'represented' AS n, at "
+            "  FROM market_plane_events WHERE kind = 'SNAPSHOT' "
+            "   AND at >= to_timestamp($1) ORDER BY at ASC LIMIT 1", boot_at)
+        if before is None or before["n"] is None:
+            return {"status": "OK", "state": "NOT_APPLICABLE",
+                    "why": "no market-plane snapshot before this boot"}
+        if after is None or after["n"] is None:
+            return {"status": "OK", "state": UNKNOWN,
+                    "why": "no market-plane snapshot since the boot yet"}
+        b, a = int(before["n"]), int(after["n"])
+        lost = b > 0 and a < b * (1.0 - RESTART_LOSS_TOL)
+        return {"status": "OK", "state": FAIL if lost else PASS,
+                "active_before_boot": b, "active_after_boot": a,
+                "tolerance": RESTART_LOSS_TOL,
+                "why": ("the registry lost %d active contracts at the "
+                        "restart" % (b - a)) if lost else None}
+    out["registry"] = await _section(conn, reg)
+    states = [out["catalogue"].get("state"), out["registry"].get("state")]
+    if FAIL in states:
+        out["state"] = FAIL
+    elif out["catalogue"].get("state") == PASS and \
+            out["registry"].get("state") in (PASS, "NOT_APPLICABLE"):
+        out["state"] = PASS
+    else:
+        out["state"] = UNKNOWN
+    return out
+
+
+#: catalogue churn allowed between the last pre-boot and first post-boot
+#: snapshot before a smaller registry counts as restart loss
+RESTART_LOSS_TOL = 0.05
+
+
+async def cursors(conn, boots: dict, lane: str = LANE,
+                  wboot: dict | None = None) -> dict:
     items = (boots or {}).get("newest_first") or []
     if len(items) < 2:
+        try:
+            on = await _section(conn, lambda c: _wrap_obs(c))
+        except Exception:                                      # noqa: BLE001
+            on = {}
+        if on.get("observation_on") is False:
+            got = await active_lane_cursors(conn, wboot or {})
+            return dict(got, lane_checked="RUNNING_LANES",
+                        decision_only_lane="STOPPED_BY_CONTROL (%s=false): "
+                        "it writes no journal, so the running lanes' "
+                        "cursors are compared" % OBSERVATION_CONTROL_KEY,
+                        journal_boots_seen=len(items))
         return _unavailable("fewer than two boots in the journal: there is no "
                             "restart to compare across", boots_seen=len(items))
     cur, prev = items[0], items[1]
@@ -391,6 +525,10 @@ async def cursors(conn, boots: dict, lane: str = LANE) -> dict:
                        "%d cursor(s) regressed across the restart" % regress)
         return out
     return await _section(conn, fn)
+
+
+async def _wrap_obs(c):
+    return {"status": "OK", "observation_on": await _observation_on(c)}
 
 
 # ── retention ────────────────────────────────────────────────────────
@@ -513,6 +651,19 @@ async def no_order(conn, wboot: dict, lane: str = LANE) -> dict:
     since = cut.get("recorded_at")
     out["cutover"] = {k: (_iso(v) if k == "recorded_at" else v)
                       for k, v in cut.items()}
+    out["window_basis"] = "LIVE_PARITY_CUTOVER"
+    if since is None:
+        # NO HUMAN-RECORDED CUTOVER (live_parity_cutover requires a named
+        # human; none was ever recorded): the window is THIS RELEASE's own
+        # boot (the workers' boot marker) -- evidence that no venue order
+        # was placed while the running release has been up. Narrower than a
+        # cutover window and named as such; never fabricated.
+        b = _epoch_of((wboot or {}).get("at"))
+        if b is not None:
+            since = datetime.fromtimestamp(b, tz=timezone.utc)
+            out["window_basis"] = ("CURRENT_RELEASE_BOOT (no live-parity "
+                                   "cutover recorded by a named human)")
+            out["window_since"] = _iso(since)
 
     async def controls(c):
         res = {}
@@ -567,7 +718,8 @@ async def no_order(conn, wboot: dict, lane: str = LANE) -> dict:
     if out["controls"].get("state") == FAIL:
         reasons.append("a live control is enabled and not stopped")
     if since is None:
-        unknown.append("no cutover recorded, so 'since cutover' is undefined")
+        unknown.append("no cutover recorded and the release boot instant is "
+                       "unreadable, so the window is undefined")
     for name, o in orders.items():
         if o.get("status") == "OK" and (o.get("since_cutover") or 0) > 0:
             reasons.append("%s: %s venue order(s) since the cutover"
@@ -594,7 +746,7 @@ async def build(conn, *, lane: str = LANE, before: dict | None = None,
              "workers_boot": wb, "heartbeats": await heartbeats(conn),
              "api": api}
     ck = await checkpoint(conn, jb, lane)
-    cu = await cursors(conn, jb, lane)
+    cu = await cursors(conn, jb, lane, wboot=wb)
     rt = await retention(conn)
     no = await no_order(conn, wb, lane)
     checks = {"checkpoint_by_current_boot": ck.get("state", UNKNOWN),
