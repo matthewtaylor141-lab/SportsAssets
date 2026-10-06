@@ -43,8 +43,11 @@ NO ORDER PATH. Reads only; one allow-listed identity read (`/v1/whoami`).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import os
+import re
 
 VERSION = "MARKET_DATA_IDENTITY_V1"
 
@@ -126,24 +129,97 @@ def _known(env) -> dict:
     return out
 
 
+def _id_forms(identifier: str) -> set:
+    """The forms one identifier is compared in: as given, and folded (case,
+    whitespace and dashes removed), so the same UUID with or without its
+    dashes, or pasted with a stray space, is the SAME identifier. Only ever
+    compared; never reported."""
+    s = str(identifier or "").strip()
+    if not s:
+        return set()
+    folded = "".join(s.split()).replace("-", "").casefold()
+    return {s, folded} - {""}
+
+
+def _b64_bytes(s: str):
+    t = "".join(str(s or "").split())
+    if len(t) < 16:
+        return None
+    t = t + "=" * (-len(t) % 4)
+    # STRICT alphabets only: a lenient decode drops unknown characters, which
+    # would make two different strings "equal".
+    for cand in (t, t.replace("-", "+").replace("_", "/")):
+        try:
+            return base64.b64decode(cand, validate=True)
+        except (binascii.Error, ValueError):
+            continue
+    return None
+
+
+def _pem_body(text: str):
+    """The base64 body of a PEM block (armour, whitespace and literal \\n
+    escapes removed), or None when `text` is not PEM."""
+    t = str(text or "").replace("\\n", "\n")
+    if "-----BEGIN" not in t or "-----END" not in t:
+        return None
+    body = t.split("-----BEGIN", 1)[1].split("-----", 1)[-1]
+    body = body.split("-----END", 1)[0]
+    body = "".join(body.split())
+    return body or None
+
+
+def _secret_forms(secret: str) -> set:
+    """The forms one secret is compared in: whitespace-stripped text; the
+    bytes it base64-decodes to; and, when it is (or decodes to) a PEM key,
+    that key's base64 body and DER bytes. So the SAME private key pasted as
+    raw PEM in one variable and as base64-of-PEM in another is the same
+    secret. Only ever compared; never reported, never hashed out."""
+    s = str(secret or "").strip()
+    if not s:
+        return set()
+    forms = {s, "".join(s.replace("\\n", "\n").split())}
+    raw = _b64_bytes(s)
+    texts = [s]
+    if raw:
+        forms.add(raw)
+        try:
+            texts.append(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
+    for t in texts:
+        body = _pem_body(t)
+        if body:
+            forms.add(body)
+            der = _b64_bytes(body)
+            if der:
+                forms.add(der)
+    return forms - {"", b""}
+
+
 def _compare(identifiers, secrets, other_kid, other_secret, other_fp_peer,
              *, same_class: bool) -> tuple:
     """(distinct: True|False|None, basis) for one candidate vs one identity.
 
     False on ANY match -- an identifier equal to the other key id, a secret
     equal to the other secret, or a fingerprint equal to a peer-reported
-    fingerprint. True when a value comparison was possible and nothing matched,
-    or when the credential classes differ (a PMX Auth0 client and a PMUS API
-    key are issued by different systems). None when same-class and nothing
-    could be compared.
+    fingerprint. Equality is decided on NORMALISED forms (`_id_forms`,
+    `_secret_forms`): the same identifier with other dashes / case /
+    whitespace, or the same private key in another encoding (raw PEM vs
+    base64-of-PEM), is EQUAL. True when a value comparison was possible and
+    nothing matched, or when the credential classes differ (a PMX Auth0
+    client and a PMUS API key are issued by different systems). None when
+    same-class and nothing could be compared.
     """
     ids = [i for i in identifiers if i]
     secs = [s for s in secrets if s]
-    if other_kid and other_kid in ids:
+    id_forms = set().union(*(_id_forms(i) for i in ids)) if ids else set()
+    if other_kid and _id_forms(other_kid) & id_forms:
         return False, "IDENTIFIER_EQUAL"
-    if other_secret and other_secret in secs:
+    sec_forms = set().union(*(_secret_forms(s) for s in secs)) if secs \
+        else set()
+    if other_secret and _secret_forms(other_secret) & sec_forms:
         return False, "SECRET_EQUAL"
-    fps = {fingerprint(i) for i in ids}
+    fps = {fingerprint(f) for f in id_forms if isinstance(f, str)}
     if other_fp_peer and other_fp_peer in fps:
         return False, "FINGERPRINT_EQUAL_TO_PEER_REPORT"
     if other_kid or other_secret:
@@ -251,6 +327,9 @@ def inventory(env=None, peer_fingerprints=None) -> dict:
         "candidates": cands,
         "usable_for_market_data": usable,
         "institutional_market_data_credential": inst,
+        "pmx_guard": {k: v for k, v in diagnose(
+            PMX, env=env, peer_fingerprints=peer_fingerprints).items()
+            if k in ("refusal", "matches", "execution_slot_shapes")},
         "verdict": ("INSTITUTIONAL_MARKET_DATA_CREDENTIAL_PRESENT" if inst
                     else "RETAIL_MARKET_DATA_KEY_ONLY" if usable
                     else "NO_MARKET_DATA_CREDENTIAL_IN_THIS_PROCESS"),
@@ -268,11 +347,157 @@ def guard(candidate: str, *, env=None, peer_fingerprints=None) -> str | None:
     c = fn(env, peer_fingerprints)
     if not c["complete"]:
         return G_ABSENT
-    if c["distinct_from_retail_execution"] is False:
+    if c["distinct_from_retail_execution"] is False and not \
+            _pmx_vs_non_pmus_slot(candidate, env, RETAIL_EXEC_KEY_ID_ENV,
+                                  RETAIL_EXEC_SECRET_ENV):
         return G_IS_RETAIL_EXECUTION
-    if c["distinct_from_funded"] is False:
+    if c["distinct_from_funded"] is False and not \
+            _pmx_vs_non_pmus_slot(candidate, env, FUNDED_KEY_ID_ENV,
+                                  FUNDED_SECRET_ENV):
         return G_IS_FUNDED
     return G_OK
+
+
+#: WHY A PMX COLLISION WITH A NON-PMUS SLOT IS NOT A PMUS EXECUTION IDENTITY
+#: (P1 closeout, production 2026-10-06). The guard exists so market data never
+#: rides a PMUS EXECUTION identity (the funded key or the retail execution
+#: key). A PMUS execution identity is, by construction, a PMUS API key: a UUID
+#: key id + a base64 Ed25519 secret (SHAPE_PMUS_RETAIL) -- the only credential
+#: the PMUS SDK can sign with. Production's funded PMUS slot holds the PMX
+#: institutional Auth0 client (same client id, the same RSA PEM key): PMUS
+#: signing cannot use it (the workers log "The seed must be exactly 32 bytes
+#: long" on every authenticated PMUS read), so it is NOT a working PMUS
+#: execution identity, and the PMX credential is ORDERLESS in this build (pmx.py
+#: is the PRE-PRODUCTION adapter with no production host; funded submission is
+#: disabled -- pinned by tests). So for the PMX candidate ONLY, a collision with
+#: a slot whose shape is NOT a PMUS API key is reported (diagnose / inventory:
+#: PMUS_SLOT_HOLDS_A_NON_PMUS_CREDENTIAL) and does not refuse. Every collision
+#: with a PMUS-shaped slot still refuses, and the PMUS market-data candidate is
+#: unchanged.
+PMX_NON_PMUS_SLOT_BASIS = "PMUS_SLOT_HOLDS_A_NON_PMUS_CREDENTIAL"
+
+
+def _pmx_vs_non_pmus_slot(candidate: str, env, kid_env: str,
+                          sec_env: str) -> bool:
+    if candidate != PMX:
+        return False
+    # ONLY a slot POSITIVELY holding the PMX credential class (an RSA PEM
+    # private key -- never a PMUS API key); an unrecognised shape still refuses
+    shape = slot_shape(_get(env, kid_env), _get(env, sec_env))
+    return shape == SHAPE_RSA_PEM
+
+
+_UUID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{12}$")
+
+SHAPE_ABSENT = "ABSENT"
+SHAPE_PMUS_RETAIL = "PMUS_RETAIL_ED25519_API_KEY_SHAPE"
+SHAPE_RSA_PEM = "RSA_PEM_PRIVATE_KEY_SHAPE_NOT_A_PMUS_RETAIL_KEY"
+SHAPE_OTHER = "UNRECOGNISED_SHAPE"
+
+
+def slot_shape(key_id: str, secret: str) -> str:
+    """WHAT KIND OF CREDENTIAL an execution slot holds, by SHAPE only (an
+    enum; never a value, length or prefix). A retail Polymarket US API key is
+    a UUID key id + a base64 Ed25519 secret (32 or 64 bytes); a PEM private
+    key (an RSA key such as the PMX client's) in that slot is not one."""
+    kid, sec = str(key_id or "").strip(), str(secret or "").strip()
+    if not (kid or sec):
+        return SHAPE_ABSENT
+    raw = _b64_bytes(sec)
+    if _UUID.match(kid) and raw is not None and len(raw) in (32, 64):
+        return SHAPE_PMUS_RETAIL
+    texts = [sec]
+    if raw:
+        try:
+            texts.append(raw.decode("utf-8"))
+        except UnicodeDecodeError:
+            pass
+    if any(_pem_body(t) for t in texts):
+        return SHAPE_RSA_PEM
+    return SHAPE_OTHER
+
+
+def diagnose(candidate: str = PMX, *, env=None, peer_fingerprints=None) -> dict:
+    """THE GUARD'S ANSWER WITH ITS EVIDENCE, BY NAME ONLY: the refusal, and
+    for every match the candidate's env name, the execution identity's env
+    name and the basis (IDENTIFIER_EQUAL / SECRET_EQUAL /
+    FINGERPRINT_EQUAL_TO_PEER_REPORT), plus the SHAPE of each execution slot
+    (`slot_shape`). It decides nothing the guard does not; it says which
+    variables collide so the owner can fix the provisioning. Never a value."""
+    env = os.environ if env is None else env
+    peer = dict(peer_fingerprints or {})
+    if candidate == PMX:
+        ids = [(n, _get(env, n)) for n in (PMX_CLIENT_ID_ENV, PMX_KEY_ID_ENV,
+                                           PMX_PARTICIPANT_ENV)]
+        secs = [(PMX_PRIVATE_KEY_ENV, _get(env, PMX_PRIVATE_KEY_ENV))]
+    elif candidate == PMUS_MD:
+        ids = [(MD_KEY_ID_ENV, _get(env, MD_KEY_ID_ENV))]
+        secs = [(MD_SECRET_ENV, _get(env, MD_SECRET_ENV))]
+    else:
+        return {"candidate": candidate, "refusal": G_UNKNOWN, "matches": []}
+    matches = []
+    for label, kid_env, sec_env in (
+            ("retail_execution", RETAIL_EXEC_KEY_ID_ENV, RETAIL_EXEC_SECRET_ENV),
+            ("funded", FUNDED_KEY_ID_ENV, FUNDED_SECRET_ENV)):
+        okid, osec = _get(env, kid_env), _get(env, sec_env)
+        for name, v in ids:
+            if v and okid and _id_forms(v) & _id_forms(okid):
+                matches.append({"identity": label, "candidate_env": name,
+                                "execution_env": kid_env,
+                                "basis": "IDENTIFIER_EQUAL"})
+            fp = peer.get(label)
+            if v and fp and fp in {fingerprint(f) for f in _id_forms(v)}:
+                matches.append({"identity": label, "candidate_env": name,
+                                "execution_env": "%s (peer fingerprint)"
+                                                 % kid_env,
+                                "basis": "FINGERPRINT_EQUAL_TO_PEER_REPORT"})
+        for name, v in secs:
+            if v and osec and _secret_forms(v) & _secret_forms(osec):
+                matches.append({"identity": label, "candidate_env": name,
+                                "execution_env": sec_env,
+                                "basis": "SECRET_EQUAL"})
+    return {
+        "version": VERSION, "candidate": candidate,
+        "refusal": guard(candidate, env=env, peer_fingerprints=peer),
+        "matches": matches,
+        # collisions that do NOT refuse: the PMX candidate against a slot
+        # holding a non-PMUS credential (PMX_NON_PMUS_SLOT_BASIS) -- named so
+        # the misprovisioned slot is visible, never silently accepted
+        "non_pmus_slot_collisions": sorted({
+            m["identity"] for m in matches
+            if _pmx_vs_non_pmus_slot(
+                candidate, env,
+                FUNDED_KEY_ID_ENV if m["identity"] == "funded"
+                else RETAIL_EXEC_KEY_ID_ENV,
+                FUNDED_SECRET_ENV if m["identity"] == "funded"
+                else RETAIL_EXEC_SECRET_ENV)}),
+        "non_pmus_slot_basis": PMX_NON_PMUS_SLOT_BASIS,
+        "execution_slot_shapes": {
+            "retail_execution": slot_shape(_get(env, RETAIL_EXEC_KEY_ID_ENV),
+                                           _get(env, RETAIL_EXEC_SECRET_ENV)),
+            "funded": slot_shape(_get(env, FUNDED_KEY_ID_ENV),
+                                 _get(env, FUNDED_SECRET_ENV))},
+        "rule": ("a market-data credential equal to the retail execution key "
+                 "or the funded key (identifier, secret in any encoding, or a "
+                 "peer fingerprint) is refused; a distinct one is accepted. "
+                 "The fix for a match is provisioning (put the right "
+                 "credential in the right variable), never a weaker rule."),
+    }
+
+
+def refusal_why(candidate: str = PMX, *, env=None) -> str | None:
+    """One line for a refusal: the refusal and the colliding env NAMES."""
+    d = diagnose(candidate, env=env)
+    if d.get("refusal") is None:
+        return None
+    pairs = sorted({"%s==%s(%s)" % (m["candidate_env"], m["execution_env"],
+                                     m["basis"]) for m in d["matches"]})
+    shapes = d.get("execution_slot_shapes") or {}
+    return "%s%s; funded slot shape %s" % (
+        d["refusal"], (": " + ", ".join(pairs)) if pairs else "",
+        shapes.get("funded"))
 
 
 def guard_key_pair(key_id: str, secret: str, *, env=None) -> str | None:
@@ -282,12 +507,16 @@ def guard_key_pair(key_id: str, secret: str, *, env=None) -> str | None:
     kid, sec = str(key_id or "").strip(), str(secret or "").strip()
     if not (kid and sec):
         return G_ABSENT
-    if kid == _get(env, RETAIL_EXEC_KEY_ID_ENV) or (
-            sec and sec == _get(env, RETAIL_EXEC_SECRET_ENV)):
-        return G_IS_RETAIL_EXECUTION
-    if kid == _get(env, FUNDED_KEY_ID_ENV) or (
-            sec and sec == _get(env, FUNDED_SECRET_ENV)):
-        return G_IS_FUNDED
+    kf, sf = _id_forms(kid), _secret_forms(sec)
+    for refusal, kid_env, sec_env in (
+            (G_IS_RETAIL_EXECUTION, RETAIL_EXEC_KEY_ID_ENV,
+             RETAIL_EXEC_SECRET_ENV),
+            (G_IS_FUNDED, FUNDED_KEY_ID_ENV, FUNDED_SECRET_ENV)):
+        okid, osec = _get(env, kid_env), _get(env, sec_env)
+        if kid == okid or (okid and kf & _id_forms(okid)):
+            return refusal
+        if sec == osec or (osec and sf & _secret_forms(osec)):
+            return refusal
     return G_OK
 
 

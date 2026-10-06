@@ -1172,3 +1172,11 @@ tests/test_agent_scorecards.py
 # protection; fully sold -> closed everywhere; no duplicate resting fills; no
 # new PAPER ENTRY while protection continuity / packets have failed.
 tests/test_p0_xavier_packet_and_reconciliation.py
+# P1 PMX institutional (2026-10-06): the market-data identity guard accepts a
+# distinct orderless PMX credential and refuses one equal to the funded or
+# retail execution key (identifier, secret in any encoding, peer
+# fingerprint), naming the colliding env variables; held markets beyond the
+# focus bound are subscribed; held REST reads are same-book samples; the
+# PMUS owner refuses Kalshi tickers; no Kalshi module shares PMUS pacing /
+# gate / cache / freshness.
+tests/test_p1_pmx_institutional.py

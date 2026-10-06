@@ -53,6 +53,20 @@ VERSION = "INSTITUTIONAL_API_STREAM_V1"
 #: Symbols this process will bootstrap and subscribe (focus universe +
 #: asked); the focus universe's own bound (FU.MAX_MEMBERS) equals it.
 MAX_SYMBOLS = 32
+#: HELD PAPER MARKETS BEYOND THE FOCUS BOUND (P1 institutional primary). The
+#: held-mark refresh names every held market (FU.held_first, due first); those
+#: not already in the focus universe are bootstrapped and subscribed too, up
+#: to this many, so held positions can be marked from the stream. Bounded by
+#: the stream's own per-process limit: MAX_SYMBOLS + HELD_SYMBOL_BUDGET =
+#: institutional_stream.MAX_SYMBOLS (200), itself far inside the venue's
+#: documented 1,000 symbols per stream (/streaming-endpoints/market-data-
+#: stream; institutional_stream.MAX_SYMBOLS's own note). One subscribe is ONE
+#: client message carrying many symbols, so the documented 100 msg/s per firm
+#: is not approached. A test pins the sum.
+HELD_SYMBOL_BUDGET = 168
+#: Refdata reads per pass (paced READ_PACING_S each): a large held set is
+#: bootstrapped over consecutive LOOP_S passes instead of one long pass.
+BOOTSTRAPS_PER_PASS = 24
 SERVICE = "sportsassets-api"
 #: The workers' cadences, reused.
 LOOP_S = 2.0
@@ -75,7 +89,8 @@ _REQUESTED: dict = {}
 #: symbol -> epoch s of the last refdata attempt (bounds REST reads).
 _ATTEMPT: dict = {}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
-                "refdata_reads": 0, "refdata_failures": 0}
+                "refdata_reads": 0, "refdata_failures": 0, "backlog": 0,
+                "held_wanted": 0, "held_subscribed": 0}
 #: The last focus universe computed here (members without identity).
 _UNIVERSE: dict = {}
 
@@ -134,6 +149,10 @@ def describe() -> dict:
         asked = list(_REQUESTED)
     return {"version": VERSION, "running": running(),
             "start": _STATE.get("start"), "refdata_symbols": held,
+            "held_symbol_budget": HELD_SYMBOL_BUDGET,
+            "held_wanted": _STATE.get("held_wanted"),
+            "held_subscribed": _STATE.get("held_subscribed"),
+            "bootstrap_backlog": _STATE.get("backlog"),
             "requested": asked[:MAX_SYMBOLS],
             "refdata_reads": _STATE.get("refdata_reads"),
             "refdata_failures": _STATE.get("refdata_failures"),
@@ -197,7 +216,8 @@ def reset() -> None:
         _ATTEMPT.clear()
         _UNIVERSE.clear()
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
-                  refdata_failures=0)
+                  refdata_failures=0, backlog=0, held_wanted=0,
+                  held_subscribed=0)
 
 
 async def _focus_symbols(get_pool, focus) -> list:
@@ -309,11 +329,28 @@ def pending(now=None) -> list:
     return [s for s in asked if _due(s, at)]
 
 
+def _held_extra(already) -> list:
+    """The held markets the refresh named (due first) that the focus / asked
+    set does not already carry, bounded by HELD_SYMBOL_BUDGET."""
+    seen = set(already)
+    out = []
+    for s in FU.held_first():
+        if s and s not in seen:
+            seen.add(s)
+            out.append(s)
+            if len(out) >= HELD_SYMBOL_BUDGET:
+                break
+    return out
+
+
 async def refresh_once(get_pool=None, *, client=None, focus=None,
-                       bootstrap=None, now=None, symbols=None) -> dict:
-    """ONE pass: focus set + asked symbols -> refdata (only when due: never
-    held, older than REFDATA_REFRESH_S, or a failed / unlisted symbol after
-    RETRY_UNLISTED_S) -> set_instrument -> want."""
+                       bootstrap=None, now=None, symbols=None,
+                       held=None, max_bootstraps=None) -> dict:
+    """ONE pass: focus set + asked symbols (<= MAX_SYMBOLS), then the held
+    markets beyond them (<= HELD_SYMBOL_BUDGET) -> refdata (only when due:
+    never held, older than REFDATA_REFRESH_S, or a failed / unlisted symbol
+    after RETRY_UNLISTED_S; at most `max_bootstraps` per pass, the rest is
+    the backlog the next pass takes) -> set_instrument -> want."""
     at = float(now if now is not None else time.time())
     if symbols is None:
         try:
@@ -328,10 +365,24 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
         if s and s not in wanted:
             wanted.append(s)
     wanted = wanted[:MAX_SYMBOLS]
+    held_names = list(FU.held_first() if held is None else held)
+    extra = (_held_extra(wanted) if held is None
+             else [s for s in held_names if s and s not in wanted]
+             [:HELD_SYMBOL_BUDGET])
+    held_set = set(held_names)
+    wanted = wanted + extra
+    cap = BOOTSTRAPS_PER_PASS if max_bootstraps is None else int(
+        max_bootstraps)
     boot = 0
+    attempted = 0
+    backlog = 0
     for s in wanted:
         if not _due(s, at):
             continue
+        if attempted >= cap:
+            backlog += 1
+            continue
+        attempted += 1
         with _LOCK:
             _ATTEMPT[s] = at
         try:
@@ -354,8 +405,12 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
     # not listed, any mapping refusal) is never subscribed or priced.
     priced = [s for s in held if _exact_here(s)]
     IS.want(priced)
+    _STATE.update(backlog=backlog,
+                  held_wanted=sum(1 for s in wanted if s in held_set),
+                  held_subscribed=sum(1 for s in priced if s in held_set))
     return {"wanted": len(wanted), "bootstrapped": boot,
-            "subscribed": len(priced)}
+            "subscribed": len(priced), "held_extra": len(extra),
+            "backlog": backlog}
 
 
 async def _run(get_pool, *, client, focus, bootstrap) -> None:
@@ -371,7 +426,7 @@ async def _run(get_pool, *, client, focus, bootstrap) -> None:
                 await refresh_once(client=client, bootstrap=bootstrap,
                                    symbols=focus_cache)
                 await persist_universe(get_pool)
-            elif pending():
+            elif pending() or _STATE.get("backlog"):
                 await refresh_once(client=client, bootstrap=bootstrap,
                                    symbols=focus_cache)
             await asyncio.sleep(LOOP_S)
