@@ -412,6 +412,10 @@ READERS = {
     "intel/calibration.py": ("SHADOW_CALIBRATION_ENGINE_READS_ALL", 2),
     "intel/regime.py": ("SHADOW_REGIME_REPORTING_READS_ALL", 2),
     "intel/reads.py": ("BY_ID_FROM_A_DECISION_SHADOW_ONLY", 1),
+    # (310) the CAPITAL READINESS LAB's feeds name the table only to check it
+    # exists before the bind's own settled-outcome join (PB.outcomes) scores
+    # a RESEARCH court row; it selects no candidate, sizes and places nothing
+    "capital_readiness/feeds.py": ("RESEARCH_OUTCOME_JOIN_EXISTENCE_CHECK", 1),
     # select candidates or a decision's probability -> filter the purpose
     # (asserted constant by constant above)
     "bettor_hold_value.py": ("FILTERS_ENTRY_DECISION", 4),
