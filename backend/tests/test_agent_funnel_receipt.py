@@ -187,8 +187,11 @@ def test_every_select_refusal_is_staged_classified_and_pinned_to_its_source():
                 and node.value.startswith("PINNAPI_PRIMARY_"):
             reasons.add(node.value)
     # the reasons only validate() can raise are not select's
+    # (P1) and the supersession the paper hook names after validate()
+    # refused INPUT_CHANGED (pinnapi_primary.supersession): never select's
     validate_only = {"PINNAPI_PRIMARY_FIXTURE_CHANGED",
-                     "PINNAPI_PRIMARY_INPUT_CHANGED", "PINNAPI_PRIMARY_H2H_V1"}
+                     "PINNAPI_PRIMARY_INPUT_CHANGED", "PINNAPI_PRIMARY_H2H_V1",
+                     "PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE"}
     assert sel is not None
     feed = {v for k, v in vars(F).items()
             if k.startswith("R_") and isinstance(v, str)

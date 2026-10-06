@@ -961,6 +961,117 @@ def entry_fill_status() -> dict:
             "last": _ENTRY_FILL["last"]}
 
 
+# ── A VALUATION A NEWER PRICE HAS REPLACED IS NOT DECIDED (P1) ───────────
+#
+# `pinnapi_primary.R_SUPERSEDED` (read its note): the feed now holds a
+# strictly newer, fresh price of the SAME market of the same record of the
+# same fixture, and that newer price is itself going to be valued -- queued
+# on (or in flight at) the reactive scheduler, or a newer valuation of the
+# same contract already written. Then no strategy decides THIS valuation:
+# each would refuse PINNAPI_PRIMARY_INPUT_CHANGED (correctly) and record a
+# SOFTWARE first loss for a contract whose newer valuation decides it. It is
+# recorded instead as a hook DEFERRED row (`paper_hook_failures`, why =
+# R_SUPERSEDED, detail.superseded = true, with the evidence), which the
+# paper-pass backstop reads so it does not re-decide it either. Nothing is
+# valued on any price: no threshold, clock or the 30 s rule moves; a phase,
+# fixture, epoch or staleness failure keeps its own refusal.
+R_SUPERSEDED = "PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE"
+SUPERSEDED_COUNTS: dict = {"skipped": 0, "by_queued_change": 0,
+                           "by_newer_valuation": 0}
+
+NEWER_VALUATION_SQL = """
+    SELECT id FROM external_valuations
+     WHERE experiment_id = $1 AND us_market_slug = $2
+       AND buy_intent IS NOT DISTINCT FROM $3 AND id > $4
+     ORDER BY id DESC LIMIT 1
+"""
+
+
+def _row_reference(row: dict) -> dict:
+    import json as _json
+    scmp = row.get("settlement_comparison")
+    if isinstance(scmp, str):
+        try:
+            scmp = _json.loads(scmp)
+        except ValueError:
+            scmp = None
+    return dict((scmp or {}).get("reference_input") or {}) \
+        if isinstance(scmp, dict) else {}
+
+
+async def superseded_by(conn, ctx: dict, row: dict) -> dict | None:
+    """None, or why this valuation is SUPERSEDED (R_SUPERSEDED) at the
+    decision instant `ctx['clock']()`. Never raises: any doubt is None, and
+    the strategies then decide (and refuse) exactly as before."""
+    try:
+        from .. import pinnapi_primary as primary
+        ref = _row_reference(row)
+        if ref.get("provider") != primary.PROVIDER or \
+                ref.get("version") != primary.VERSION:
+            return None
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_reactive as reactive
+        owner = feed._STATE.get("owner")
+        cache = owner.cache if owner else None
+        if cache is None:
+            return None
+        at = float(ctx["clock"]()) if ctx.get("clock") else float(ctx["now"])
+        max_age = float(((ctx.get("config") or {}).get("entry") or {})
+                        .get("pinnacle_max_age_s", 30.0))
+        sup = primary.supersession(
+            cache, {"reference_input": ref}, at=at, max_age_s=max_age,
+            runtime_id=feed._STATE.get("runtime_id"))
+        if sup is None:
+            return None
+        sched = reactive.ACTIVE
+        if sched is not None and sched.cache is cache and \
+                sched.will_value(sup["fixture_id"], sup["version"]):
+            return dict(sup, by="QUEUED_CHANGE", at=at)
+        newer = None
+        if row.get("us_market_slug") and row.get("id") is not None:
+            newer = await conn.fetchval(
+                NEWER_VALUATION_SQL, row.get("experiment_id"),
+                row.get("us_market_slug"), row.get("buy_intent"),
+                int(row["id"]))
+        if newer is not None:
+            return dict(sup, by="NEWER_VALUATION", at=at,
+                        newer_valuation_id=int(newer))
+        return None
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def _superseded_result(sup: dict) -> dict:
+    SUPERSEDED_COUNTS["skipped"] += 1
+    SUPERSEDED_COUNTS["by_queued_change" if sup.get("by") == "QUEUED_CHANGE"
+                      else "by_newer_valuation"] += 1
+    return {"deferred": True, "superseded": True, "why": R_SUPERSEDED,
+            "superseded_by": {k: v for k, v in sup.items()
+                              if k != "version"}}
+
+
+async def _record_superseded(conn, *, ctx: dict, valuation_id: int,
+                             strategy: str, res: dict) -> None:
+    """The DEFERRED hook row naming the supersession. Never raises."""
+    try:
+        import json as _json
+        await conn.execute(
+            "INSERT INTO paper_hook_failures (session_id, account_id, "
+            " valuation_id, strategy, stage, outcome, elapsed_s, error, "
+            " detail) VALUES ($1,$2,$3,$4,'IN_CYCLE_VALUATION_HOOK',"
+            " 'DEFERRED',NULL,$5,$6::jsonb)", ctx.get("session_id"),
+            ctx.get("account_id"), int(valuation_id), str(strategy),
+            R_SUPERSEDED, _json.dumps(
+                {"why": R_SUPERSEDED, "superseded": True,
+                 "deferred": True, "decided_via": ctx.get("decided_via"),
+                 "superseded_by": res.get("superseded_by")}, default=str))
+    except Exception:                                           # noqa: BLE001
+        log.warning("paper supersession not recorded (valuation %s, %s)",
+                    valuation_id, strategy, exc_info=True)
+
+
 async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
                                    strategies, via: str, attempt_no: int,
                                    schedule_retry) -> dict:
@@ -982,6 +1093,7 @@ async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
     results: dict = {}
     retry_for: list = []
     retry_after = None
+    sup = None
     for strat, fn in plan:
         if strategies is not None and strat not in strategies:
             continue
@@ -989,6 +1101,16 @@ async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
             res = {"deferred": True, "why": "BOOK_RETRY",
                    "retry": {"with": retry_for[0]}}
             retry_for.append(strat)
+        elif sup is not None or (sup := await superseded_by(
+                conn, ctx, row)) is not None:
+            # A NEWER PRICE REPLACED THIS VALUATION'S (R_SUPERSEDED): this
+            # strategy, and every one after it, leaves it to the newer
+            # valuation -- recorded, never decided on the old price
+            res = _superseded_result(sup)
+            results[strat] = res
+            await _record_superseded(conn, ctx=ctx, valuation_id=vid,
+                                     strategy=strat, res=res)
+            continue
         else:
             res = await fn(ctx)
             if res.get("deferred") and res.get("why") == "BOOK_RETRY":
@@ -1142,18 +1264,28 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                         "deferred", "why")} for k, v in family.items()
                         if k != "retry"}}
         t_derek = time.monotonic()
+        sup = await superseded_by(conn, ctx, dict(row))
         try:
-            dctx = dict(ctx, deadline=time.monotonic()
-                        + VALUATION_HOOK_TIMEOUT_S)
-            # THE DEADLINE BOUNDS THE DECISION; a recorded ENTER's order
-            # completes (PD.bounded_decision, P0 incident 2026-10-04).
-            rec = await PD.bounded_decision(
-                lambda c: PD.decide_one(conn, c, dict(row)), dctx,
-                timeout_s=VALUATION_HOOK_TIMEOUT_S)
-            await _record_hook_failure(
-                conn, ctx=ctx, valuation_id=vid,
-                strategy="DEREK_ENTRY_POLICY_V2",
-                res=dict(rec, elapsed_s=round(time.monotonic() - t_derek, 3)))
+            if sup is not None:
+                # R_SUPERSEDED: a newer price replaced this valuation's and
+                # is itself being valued; Derek leaves it to that valuation
+                rec = _superseded_result(sup)
+                await _record_superseded(
+                    conn, ctx=ctx, valuation_id=vid,
+                    strategy="DEREK_ENTRY_POLICY_V2", res=rec)
+            else:
+                dctx = dict(ctx, deadline=time.monotonic()
+                            + VALUATION_HOOK_TIMEOUT_S)
+                # THE DEADLINE BOUNDS THE DECISION; a recorded ENTER's order
+                # completes (PD.bounded_decision, P0 incident 2026-10-04).
+                rec = await PD.bounded_decision(
+                    lambda c: PD.decide_one(conn, c, dict(row)), dctx,
+                    timeout_s=VALUATION_HOOK_TIMEOUT_S)
+                await _record_hook_failure(
+                    conn, ctx=ctx, valuation_id=vid,
+                    strategy="DEREK_ENTRY_POLICY_V2",
+                    res=dict(rec, elapsed_s=round(
+                        time.monotonic() - t_derek, 3)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:                               # noqa: BLE001
@@ -1215,6 +1347,9 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             mutation_attempts=delta)
         if rec.get("entry_fill") is not None:
             out["entry_fill"] = rec["entry_fill"]
+        if rec.get("superseded"):
+            out.update(superseded=True, why=rec.get("why"),
+                       superseded_by=rec.get("superseded_by"))
         if bench is not None:
             out["benchmark"] = bench
             if bench_cg is not None:

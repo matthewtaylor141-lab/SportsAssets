@@ -96,6 +96,8 @@ GAP_SETTLEMENT = "SETTLEMENT_INTERPRETATION"
 #: PINNACLE_ONLY_PAPER_BENCHMARK (agents/paper_benchmark.py) may decide the
 #: same valuation separately; its record never stands in for this one's.
 #: Every row this path writes takes the column default, DEREK_ENTRY_POLICY_V2.
+#: A valuation the in-cycle hook SKIPPED AS SUPERSEDED for this strategy
+#: (paper_runtime.R_SUPERSEDED) is not re-decided by the backstop either.
 CANDIDATES_SQL = """
     SELECT v.* FROM external_valuations v
      WHERE v.experiment_id = $1
@@ -104,6 +106,10 @@ CANDIDATES_SQL = """
        AND NOT EXISTS (SELECT 1 FROM paper_decisions d
                         WHERE d.session_id = $4 AND d.valuation_id = v.id
                           AND d.strategy = 'DEREK_ENTRY_POLICY_V2')
+       AND NOT EXISTS (SELECT 1 FROM paper_hook_failures h
+                        WHERE h.session_id = $4 AND h.valuation_id = v.id
+                          AND h.strategy = 'DEREK_ENTRY_POLICY_V2'
+                          AND h.error = 'PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE')
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """
