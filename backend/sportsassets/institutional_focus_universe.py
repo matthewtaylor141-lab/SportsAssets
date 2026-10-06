@@ -82,6 +82,28 @@ INVESTMENT_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V3"
 
 #: = institutional_api_stream.MAX_SYMBOLS (<= institutional_stream.MAX_SYMBOLS).
 MAX_MEMBERS = 32
+#: THE HELD-PAPER RESERVE (P0 market-data freshness, 2026-10-06). Of the
+#: bound, up to this many slots go to HELD PAPER positions (tiers 3 and 6)
+#: right after the actual / execution-intent tiers -- ahead of candidates,
+#: the mapped universe and discovery -- so the symbols whose marks must be
+#: refreshed inside the 300 s SLA are subscribed (and same-book probed, which
+#: is what accumulates their PER-SYMBOL evidence). Tier names and ranks do not
+#: change (exploration stays diagnostic_only, rank 6); a reserved member is
+#: marked `held_reserve`. `compute` applies it; `prioritize` only when asked.
+HELD_PAPER_RESERVE = 20
+
+#: The held markets the held-mark refresh named in THIS process, in its own
+#: priority order (paper_market_data.set_held fills it). A plain list of
+#: slugs: this module imports nothing from the paper path.
+_HELD_FIRST: list = []
+
+
+def note_held_first(slugs) -> None:
+    _HELD_FIRST[:] = [str(s) for s in slugs or () if s][:4 * MAX_MEMBERS]
+
+
+def held_first() -> list:
+    return list(_HELD_FIRST)
 
 T_ACTUAL = "ACTUAL_OPEN_POSITION"
 T_INTENT = "EXECUTION_INTENT"
@@ -155,10 +177,17 @@ INTENTS_SQL = """
        AND actual_state <> 'PAPER_ONLY'
      ORDER BY us_market_slug, live_eligible DESC, created_at DESC
 """
+#: EVERY CURRENTLY OPEN PAPER POSITION, whatever the age of its fills: the
+#: canonical open quantity of bettor_paper_ledger.POSITIONS_SQL (bought -
+#: sold - the latest settlement version's qty, per account / group / slug /
+#: holding side) > 1e-9. It used to read only paper_fills inside a recent
+#: window, so a position entered earlier was invisible here and its symbol
+#: was never prioritised or subscribed -- while it was still held and still
+#: needed a mark inside the SLA.
 PAPER_POSITIONS_SQL = """
     WITH f AS (
         SELECT pf.account_id, pf.group_id, pf.us_market_slug,
-               pf.holding_side, pf.strategy,
+               pf.holding_side, max(pf.strategy) AS strategy,
                (array_agg(pf.fixture ORDER BY pf.filled_at))[1] AS fixture,
                (array_agg(pf.label->>'event_key' ORDER BY pf.filled_at))[1]
                    AS event_key,
@@ -167,19 +196,20 @@ PAPER_POSITIONS_SQL = """
                    AS sold,
                max(pf.filled_at) AS at
           FROM paper_fills pf
-         WHERE pf.filled_at > now() - make_interval(secs => $1)
-         GROUP BY 1, 2, 3, 4, 5),
+         GROUP BY 1, 2, 3, 4),
     s AS (
         SELECT DISTINCT ON (position_key) position_key, qty
           FROM paper_settlements
          ORDER BY position_key, version DESC)
-    SELECT f.*, f.bought - f.sold - coalesce(s.qty, 0) AS open_qty
+    SELECT f.*, coalesce(f.bought, 0) - f.sold - coalesce(s.qty, 0)
+               AS open_qty
       FROM f LEFT JOIN s
         ON s.position_key = 'paperpos:' || f.account_id || ':' || f.group_id
                             || ':' || f.us_market_slug || ':'
                             || f.holding_side
      WHERE coalesce(f.bought, 0) - f.sold - coalesce(s.qty, 0) > 1e-9
-     ORDER BY (f.strategy = $2) DESC, f.at DESC
+       AND (coalesce(f.strategy, '') = $1) = $2
+     ORDER BY f.at DESC
      LIMIT $3
 """
 CANDIDATES_SQL = """
@@ -342,9 +372,13 @@ async def _intents(db, n):
 
 async def _positions(db, n):
     """Both paper position tiers from one read: the investment strategy's
-    (tier 3) and every other strategy's (tier 6, diagnostic only)."""
-    return await _rows(db, PAPER_POSITIONS_SQL, POSITION_WINDOW_S,
-                       INVESTMENT_STRATEGY, n * 2)
+    (tier 3) and every other strategy's (tier 6, diagnostic only) -- each
+    with its OWN limit, so a large investment book can never crowd every
+    other held position out of the read."""
+    return (await _rows(db, PAPER_POSITIONS_SQL, INVESTMENT_STRATEGY, True,
+                        n * 2)
+            + await _rows(db, PAPER_POSITIONS_SQL, INVESTMENT_STRATEGY,
+                          False, n * 2))
 
 
 def _paper_member(r, *, diagnostic):
@@ -407,16 +441,30 @@ _READERS = {T_ACTUAL: _actual, T_INTENT: _intents, T_PAPER: _paper,
 # ── ordering and the bound (pure) ────────────────────────────────────
 
 def prioritize(candidates: dict, *, discovery=(), limit: int = MAX_MEMBERS,
-               now=None) -> dict:
+               now=None, held_reserve: int = 0, held_first=()) -> dict:
     """Pure: {tier: [candidate]} (+ discovery symbols) -> the bounded,
     ordered, de-duplicated universe. A slug is a member ONCE, at its highest
     tier; every reason it qualified for is kept. Within a tier the reader's
-    order stands. Members past `limit` are counted per tier."""
+    order stands. Members past `limit` are counted per tier.
+
+    `held_reserve` (HELD_PAPER_RESERVE from `compute`): up to that many slots
+    are kept for held paper positions (tiers 3 / 6) after tiers 1-2, in the
+    order `held_first` names (the held-mark refresh's own priority: due and
+    not covered by a stream first), then the reader's order. A `held_first`
+    slug no reader returned joins tier 6 (diagnostic). Real-money tiers are
+    never displaced by it."""
     bound = max(0, min(int(limit), MAX_MEMBERS))
     cands = {t: list((candidates or {}).get(t) or ()) for t in TIERS}
     cands[T_DISCOVERY] = cands[T_DISCOVERY] + [
         {"slug": s, "why": "experimental lane focus set (discovery)"}
         for s in discovery or ()]
+    held_first = [str(s) for s in held_first or () if str(s or "").strip()]
+    if held_first:
+        known = {str(c.get("slug") or "") for t in TIERS for c in cands[t]}
+        cands[T_EXPLORATION] = cands[T_EXPLORATION] + [
+            {"slug": s, "diagnostic_only": True,
+             "why": "held paper position needing a mark (held-mark refresh)"}
+            for s in held_first if s not in known]
     by_slug: dict = {}
     order: list = []
     for tier in TIERS:
@@ -444,9 +492,27 @@ def prioritize(candidates: dict, *, discovery=(), limit: int = MAX_MEMBERS,
                  "live_eligibility_effect": "NONE"}
             by_slug[slug] = m
             order.append(slug)
-    members = [by_slug[s] for s in order[:bound]]
+    selected = order[:bound]
+    reserve = max(0, min(int(held_reserve or 0), bound))
+    if reserve:
+        pos = {s: i for i, s in enumerate(order)}
+        pref = {s: i for i, s in enumerate(held_first)}
+        protected = [s for s in order
+                     if by_slug[s]["tier"] in (T_ACTUAL, T_INTENT)][:bound]
+        held = sorted((s for s in order
+                       if by_slug[s]["tier"] in (T_PAPER, T_EXPLORATION)),
+                      key=lambda s: (pref.get(s, len(pref)), pos[s]))
+        pinned = held[:max(0, min(reserve, bound - len(protected)))]
+        chosen = set(protected) | set(pinned)
+        rest = [s for s in order if s not in chosen]
+        selected = protected + pinned + rest[:max(
+            0, bound - len(protected) - len(pinned))]
+        for s in pinned:
+            by_slug[s]["held_reserve"] = True
+    keep = set(selected)
+    members = [by_slug[s] for s in selected]
     dropped: dict = {}
-    for s in order[bound:]:
+    for s in (s for s in order if s not in keep):
         t = by_slug[s]["tier"]
         dropped[t] = dropped.get(t, 0) + 1
     for i, m in enumerate(members):
@@ -469,11 +535,14 @@ def per_tier(members) -> dict:
 
 
 async def compute(db, *, discovery=(), limit: int = MAX_MEMBERS,
-                  now=None) -> dict:
+                  now=None, held_reserve: int = HELD_PAPER_RESERVE,
+                  held_first=()) -> dict:
     """The universe from the database (read-only), identities NOT yet
-    attached (`attach`)."""
+    attached (`attach`). Held paper positions keep HELD_PAPER_RESERVE slots
+    after the real-money tiers (see `prioritize`)."""
     g = await gather(db, limit=limit)
-    u = prioritize(g["candidates"], discovery=discovery, limit=limit, now=now)
+    u = prioritize(g["candidates"], discovery=discovery, limit=limit, now=now,
+                   held_reserve=held_reserve, held_first=held_first)
     u["tier_status"] = dict(g["status"], **{T_DISCOVERY: {
         "status": "MEASURED", "why": None}})
     return u

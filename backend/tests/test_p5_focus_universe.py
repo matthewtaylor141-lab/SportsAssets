@@ -258,7 +258,13 @@ async def test_every_reader_puts_each_seeded_contract_in_its_tier():
         assert where[s["cand"]][0] == FU.T_CANDIDATE
         assert where[s["uni"]][0] == FU.T_UNIVERSE
         assert s["paperonly"] not in where          # PAPER_ONLY: not tier 2
-        u = FU.prioritize(g["candidates"])
+        # THE BOUND OVER THIS PROOF'S OWN CONTRACTS. Since every currently
+        # open paper position is read whatever its fill age (P0 market-data
+        # freshness), the shared test database's residue of other proofs'
+        # open investment positions fills tier 3 past the 32-member bound;
+        # the ordering below is asserted over the contracts seeded here.
+        u = FU.prioritize({t: [c for c in v if c["slug"] in s.values()]
+                           for t, v in g["candidates"].items()})
         mine = [m for m in u["members"] if m["retail_slug"] in s.values()]
         assert [m["tier_rank"] for m in mine] == sorted(
             m["tier_rank"] for m in mine)

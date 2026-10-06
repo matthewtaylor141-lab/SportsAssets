@@ -11846,6 +11846,18 @@ def _max_dispatches():
         return None
 
 
+def _paper_market_data_digest() -> dict:
+    try:
+        from .. import paper_market_data as PMD
+        t = PMD.telemetry()
+        return {k: t.get(k) for k in (
+            "version", "rest_requests_per_min", "responses_2xx_per_min",
+            "responses_429_per_min", "totals", "queue_depth",
+            "held_registered", "venue_hold", "streams")}
+    except Exception as exc:                                   # noqa: BLE001
+        return {"unavailable": type(exc).__name__}
+
+
 def _rate_control_digest() -> dict:
     """The prohibition and the reduced rate, SEPARATELY.
 
@@ -12617,6 +12629,10 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # bound it has spent, any venue refusal, and which M1 reasons
                 # decisions were refused under. Bounded; never raises.
                 "market_subscription": _market_subscription_digest(),
+                # THE ONE PAPER MARKET-DATA OWNER (paper_market_data): REST
+                # requests / min, 2xx, 429, cache hits, coalesced reads,
+                # queue depth per lane, stream update counts. Never raises.
+                "paper_market_data": _paper_market_data_digest(),
                 "state": out.get("state"),
                 "evaluated": out.get("evaluated"),
                 "written": out.get("written"),

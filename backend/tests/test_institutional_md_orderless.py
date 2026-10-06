@@ -541,6 +541,9 @@ def test_the_workers_universe_path_reads_refdata_only_and_subscribes():
 
 def test_the_api_stream_reaches_the_universe_for_reads_only():
     tree, _names = _imports_of(IAS)
+    # held_first (P0 market-data freshness): a read of the process-local
+    # list of held paper slugs the held-mark refresh named -- a read only
     assert _attrs_on(tree, "FU") <= {"compute", "attach", "persist",
-                                     "summary", "MAX_MEMBERS"}, \
+                                     "summary", "MAX_MEMBERS",
+                                     "held_first"}, \
         _attrs_on(tree, "FU")
