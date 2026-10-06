@@ -118,6 +118,24 @@ STALE_FACTOR = 3.0                # x the agent's recorded cadence
 RUN_WINDOW_FLOOR_S = 600.0        # a run older than this is not "in progress"
 DETAIL_WINDOW_S = 86400.0         # a workspace's timeline: the last day
 ALLOCATOR_CYCLE_S = 600.0         # intel/runner.CYCLE_S (read, not imported)
+#: evidence ids carried per collaboration edge (= merge_edges max_evidence)
+EDGE_EVIDENCE = 5
+#: = the agent_conv_agents_ck CHECK of agent_conversation_messages (224 /
+#: 266): every from_agent a message can carry
+MESSAGE_AGENTS = ["DEREK", "XAVIER", "AUDREY", "KAREN", "CHIEF_ALLOCATOR",
+                  "EDDIE", "ARCHER", "SCOUT", "ADRIANA"]
+#: THE XAVIER WORKSPACE'S POSITION BOOK (the detail route only): at most
+#: this many open PAPER positions, each with its ONE current review, packet
+#: and protection; the open count is always read in full and the list says
+#: when it was cut (`positions_truncated`)
+MAX_DETAIL_POSITIONS = 200
+#: THE DETAIL RESPONSE'S SIZE BOUND (serialized bytes). Over it, the longest
+#: lists are cut, each cut named under `truncated` -- never silently
+MAX_DETAIL_BYTES = 512 * 1024
+#: the detail route's short read cache (seconds): repeated / retried reads
+#: of one workspace inside this window share one aggregate. The payload
+#: carries `cached_at` / `cache_age_s`; no gate reads this route.
+DETAIL_CACHE_S = 10.0
 
 STATES = ("WORKING_ON", "REVIEWING", "CHALLENGING", "WAITING", "IDLE",
           "STALE", "NOT_DEPLOYED")
@@ -363,15 +381,22 @@ def merge_edges(raw: list, *, max_evidence: int = 5) -> list:
                                "kind": e["kind"], "count": 0, "at": None,
                                "first_at": None, "evidence": [],
                                "summary": None})
-        a["count"] += 1
+        # a row PRE-AGGREGATED in SQL carries its own count, first instant
+        # and newest-first evidence list; a raw row counts once
+        a["count"] += int(e.get("count") or 1)
         at = _ep(e.get("at"))
         if at is not None and (a["at"] is None or at > a["at"]):
             a["at"] = at
             a["summary"] = e.get("summary")
-        if at is not None and (a["first_at"] is None or at < a["first_at"]):
-            a["first_at"] = at
-        if e.get("evidence") and len(a["evidence"]) < max_evidence:
-            a["evidence"].append(e["evidence"])
+        first = _ep(e.get("first_at")) if e.get("first_at") is not None \
+            else at
+        if first is not None and (a["first_at"] is None
+                                  or first < a["first_at"]):
+            a["first_at"] = first
+        for ev in (e.get("evidence_list") or
+                   ([e["evidence"]] if e.get("evidence") else [])):
+            if len(a["evidence"]) < max_evidence:
+                a["evidence"].append(ev)
     return sorted(acc.values(), key=lambda a: -(a["at"] or 0))
 
 
@@ -800,14 +825,25 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
                     "   AND upper(s.actor) <> upper(f.proposer)", since)]
 
     async def handoffs(conn):
+        # ONE ROW, aggregated in SQL (count, first / last instant, the
+        # newest EDGE_EVIDENCE ids): never every hand-off of the window
+        r = await conn.fetchrow(
+            "SELECT count(*) AS n, min(created_at) AS first_at, "
+            "       max(created_at) AS last_at, "
+            "       (array_agg(handoff_id ORDER BY created_at DESC, "
+            "                  handoff_id DESC))[1:$2] AS ids, "
+            "       (array_agg(group_id ORDER BY created_at DESC, "
+            "                  handoff_id DESC))[1] AS last_group "
+            "  FROM paper_handoffs WHERE created_at >= to_timestamp($1)",
+            since, EDGE_EVIDENCE)
+        if not r or not r["n"]:
+            return []
         return [{"from": "DEREK", "to": "XAVIER", "kind": "HANDOFF",
-                 "at": r["created_at"],
-                 "evidence": _ref("paper_handoffs", r["handoff_id"]),
-                 "summary": "Handed group %s to Xavier" % r["group_id"]}
-                for r in await conn.fetch(
-                    "SELECT handoff_id, group_id, created_at "
-                    "  FROM paper_handoffs "
-                    " WHERE created_at >= to_timestamp($1)", since)]
+                 "at": r["last_at"], "first_at": r["first_at"],
+                 "count": int(r["n"]),
+                 "evidence_list": [_ref("paper_handoffs", i)
+                                   for i in r["ids"] or []],
+                 "summary": "Handed group %s to Xavier" % r["last_group"]}]
 
     async def pos_steps(conn):
         rows = await conn.fetch(
@@ -834,30 +870,61 @@ async def _edges_raw(rd: _Reads, since: float) -> list:
         return out
 
     async def archer(conn):
+        # ONE ROW, aggregated in SQL (one estimate per Derek decision: a
+        # day of them is thousands of rows the edge only counts)
+        r = await conn.fetchrow(
+            "SELECT count(*) AS n, min(estimated_at) AS first_at, "
+            "       max(estimated_at) AS last_at, "
+            "       (array_agg(estimate_id ORDER BY estimated_at DESC, "
+            "                  estimate_id DESC))[1:$2] AS ids, "
+            "       (array_agg(decision_id || ': ' || "
+            "                  coalesce(recommendation, '') "
+            "                  ORDER BY estimated_at DESC, "
+            "                  estimate_id DESC))[1] AS last "
+            "  FROM eddie_execution_estimates "
+            " WHERE estimated_at >= to_timestamp($1)", since, EDGE_EVIDENCE)
+        if not r or not r["n"]:
+            return []
         return [{"from": "DEREK", "to": "ARCHER", "kind": "EXECUTION_ESTIMATE",
-                 "at": r["estimated_at"],
-                 "evidence": _ref("eddie_execution_estimates",
-                                  r["estimate_id"]),
-                 "summary": "Estimated decision %s: %s" % (
-                     r["decision_id"], r["recommendation"])}
-                for r in await conn.fetch(
-                    "SELECT estimate_id, decision_id, recommendation, "
-                    "       estimated_at FROM eddie_execution_estimates "
-                    " WHERE estimated_at >= to_timestamp($1)", since)]
+                 "at": r["last_at"], "first_at": r["first_at"],
+                 "count": int(r["n"]),
+                 "evidence_list": [_ref("eddie_execution_estimates", i)
+                                   for i in r["ids"] or []],
+                 "summary": "Estimated decision %s" % r["last"]}]
 
     async def messages(conn):
-        # (224) durable agent-to-agent hand-offs and memory hand-offs
-        return [{"from": _seat_agent(r["from_agent"]),
-                 "to": _seat_agent(r["to_agent"]),
-                 "kind": r["message_kind"], "at": r["created_at"],
-                 "evidence": _ref("agent_conversation_messages",
-                                  r["message_id"], None, r["created_at"]),
-                 "summary": str(r["summary"])[:160]}
-                for r in await conn.fetch(
-                    "SELECT message_id, from_agent, to_agent, message_kind, "
-                    "       summary, created_at "
-                    "  FROM agent_conversation_messages "
-                    " WHERE created_at >= to_timestamp($1)", since)]
+        # (224) durable agent-to-agent hand-offs and memory hand-offs,
+        # AGGREGATED IN SQL per (from, to, kind): count, first / last
+        # instant, the newest EDGE_EVIDENCE ids and the newest summary.
+        # from_agent is CHECK-constrained to the seat ids, so the
+        # (from_agent, created_at DESC) index serves the window.
+        out = []
+        for r in await conn.fetch(
+                "SELECT from_agent, to_agent, message_kind, count(*) AS n, "
+                "       min(created_at) AS first_at, "
+                "       max(created_at) AS last_at, "
+                "       (array_agg(message_id ORDER BY created_at DESC, "
+                "                  message_id DESC))[1:$3] AS ids, "
+                "       (array_agg(created_at ORDER BY created_at DESC, "
+                "                  message_id DESC))[1:$3] AS ats, "
+                "       (array_agg(left(summary, 160) ORDER BY "
+                "                  created_at DESC, message_id DESC))[1] "
+                "         AS summary "
+                "  FROM agent_conversation_messages "
+                " WHERE from_agent = ANY($2::text[]) "
+                "   AND created_at >= to_timestamp($1) "
+                " GROUP BY from_agent, to_agent, message_kind",
+                since, MESSAGE_AGENTS, EDGE_EVIDENCE):
+            out.append({"from": _seat_agent(r["from_agent"]),
+                        "to": _seat_agent(r["to_agent"]),
+                        "kind": r["message_kind"], "at": r["last_at"],
+                        "first_at": r["first_at"], "count": int(r["n"]),
+                        "evidence_list": [
+                            _ref("agent_conversation_messages", i, None, t)
+                            for i, t in zip(r["ids"] or [],
+                                            r["ats"] or [])],
+                        "summary": str(r["summary"])[:160]})
+        return out
 
     for name, tables, fn in (
             ("edges.agent_conversation_messages",
@@ -1287,6 +1354,154 @@ async def build_floor(conn, *, now: float | None = None,
                            "no figure here is an order or an approval.")}
 
 
+#: the packet's elements as xavier_packet._KEYS names them (read, not
+#: imported: this module imports no agent module; a test pins equality)
+PACKET_ELEMENTS = (("residual", "NO_RECONCILED_POSITION_QTY"),
+                   ("probability", "NO_FRESH_PROBABILITY"),
+                   ("book", "NO_CURRENT_EXECUTABLE_BOOK"),
+                   ("exit_depth", "NO_EXECUTABLE_EXIT_DEPTH"),
+                   ("settlement", "NO_SETTLEMENT_IDENTITY"),
+                   ("protection", "NO_VALID_ACTIVE_PROTECTION"))
+
+#: one row per open PAPER position (bounded): its ONE current review
+#: (xavier_current_review, migration 226) with only the review fields the
+#: workspace shows -- the packet, the selection's valuation, the measure --
+#: never the review's alternatives or full selection. $1 = the bound + 1.
+_POSITIONS_OPEN = (
+    "WITH o AS (SELECT DISTINCT group_id FROM ("
+    + _CANONICAL_OPEN_POSITIONS_SQL + ") q), "
+    "     n AS (SELECT count(*) AS n FROM o), "
+    "     pick AS (SELECT group_id FROM o ORDER BY group_id LIMIT $1) ")
+_POSITIONS_COLS = (
+    "SELECT p.group_id, n.n AS n_open, r.review_id, r.reviewed_at, "
+    "       r.recommendation, r.refusal, r.measure, "
+    "       jsonb_build_object('valuation', r.selection -> 'valuation') "
+    "         AS selection, "
+    "       r.selection -> 'management_packet' AS packet ")
+POSITIONS_CURRENT_SQL = (
+    _POSITIONS_OPEN + _POSITIONS_COLS +
+    "  FROM pick p CROSS JOIN n "
+    "  LEFT JOIN xavier_current_review c "
+    "    ON c.position_kind = 'PAPER' AND c.group_id = p.group_id "
+    "  LEFT JOIN paper_xavier_reviews r ON r.review_id = c.paper_review_id "
+    " ORDER BY p.group_id")
+#: without migration 226: the newest review per group, one index probe each
+POSITIONS_NEWEST_SQL = (
+    _POSITIONS_OPEN + _POSITIONS_COLS +
+    "  FROM pick p CROSS JOIN n "
+    "  LEFT JOIN LATERAL (SELECT * FROM paper_xavier_reviews x "
+    "                      WHERE x.group_id = p.group_id "
+    "                      ORDER BY x.reviewed_at DESC, x.review_id DESC "
+    "                      LIMIT 1) r ON true "
+    " ORDER BY p.group_id")
+
+
+def packet_view(packet) -> dict | None:
+    """THE RECORDED MANAGEMENT PACKET AS THE WORKSPACE SHOWS IT (pure):
+    every element's presence, the gate the review recorded (complete /
+    missing / refusal; derived from the elements when the gate was not
+    recorded, by xavier_packet.gate's rule) and the protection-continuity
+    state. None when the review recorded no packet."""
+    pk = _j(packet)
+    if not isinstance(pk, dict) or not pk:
+        return None
+    elements = {k: bool((pk.get(k) or {}).get("present"))
+                for k, _code in PACKET_ELEMENTS}
+    derived = [code for k, code in PACKET_ELEMENTS if not elements[k]]
+    g = pk.get("gate") if isinstance(pk.get("gate"), dict) else None
+    missing = list(g.get("missing") or []) if g else derived
+    complete = bool(g.get("complete")) if g else not derived
+    pr = pk.get("protection") or {}
+    return {"version": pk.get("version"), "complete": complete,
+            "missing": missing,
+            "refusal": g.get("refusal") if g else (
+                None if complete else "XAVIER_MANAGEMENT_PACKET_INCOMPLETE"),
+            "gate_basis": "RECORDED_GATE" if g else "DERIVED_FROM_ELEMENTS",
+            "elements": elements,
+            "protection": {"state": pr.get("state"),
+                           "order_id": pr.get("order_id"),
+                           "present": bool(pr.get("present"))}}
+
+
+def position_view(r: dict, now: float) -> dict:
+    """One open PAPER position: its ONE current review judged at read time
+    (xavier_freshness: the action word only while CURRENT; the stored word
+    kept as recorded), its packet and its protection continuity."""
+    out = {"position_kind": "PAPER", "group_id": r["group_id"]}
+    if r.get("review_id") is None:
+        return dict(out, current_review=None, packet=None,
+                    protection=None, why="NO_REVIEW_RECORDED")
+    d = dict(r, reviewed_at=_ep(r.get("reviewed_at")))
+    lab = _labels(_xf_of_review(d, now=now))
+    pk = packet_view(r.get("packet"))
+    return dict(out, current_review=dict({
+        "table": "paper_xavier_reviews", "review_id": r["review_id"],
+        "reviewed_at": d["reviewed_at"], "refusal": r.get("refusal")},
+        **lab), packet=pk,
+        protection=(pk or {}).get("protection"),
+        why=None if pk else "NO_PACKET_RECORDED")
+
+
+async def _xavier_positions(rd, c, now: float) -> dict | None:
+    if not (await rd.exists("paper_fills")
+            and await rd.exists("paper_settlements")
+            and await rd.exists("paper_xavier_reviews")):
+        return None
+    sql = (POSITIONS_CURRENT_SQL if await rd.exists("xavier_current_review")
+           else POSITIONS_NEWEST_SQL)
+    rows = [dict(r) for r in await c.fetch(sql, MAX_DETAIL_POSITIONS + 1)]
+    n_open = int(rows[0]["n_open"]) if rows else 0
+    shown = rows[:MAX_DETAIL_POSITIONS]
+    return {"open": n_open, "shown": len(shown),
+            "positions_truncated": n_open > len(shown),
+            "bound": MAX_DETAIL_POSITIONS,
+            "positions": [position_view(r, now) for r in shown]}
+
+
+def bound_detail(out: dict, max_bytes: int = MAX_DETAIL_BYTES) -> dict:
+    """THE DETAIL RESPONSE'S SIZE BOUND (pure). Over `max_bytes` serialized,
+    the longest lists are halved in turn (timeline, outputs, queue, the
+    position book, challenges) until it fits; each cut is named under
+    `truncated` {path: {"kept", "total"}} -- never silently."""
+    size = len(json.dumps(out, default=str))
+    out["size_bytes"] = size
+    out["truncated"] = {}
+    if size <= max_bytes:
+        return out
+    cuts: dict = out["truncated"]
+
+    def lists():
+        yield "timeline", out, "timeline"
+        yield "outputs", out, "outputs"
+        yield "queue", out, "queue"
+        pb = out.get("position_book")
+        if isinstance(pb, dict):
+            yield "position_book.positions", pb, "positions"
+        ch = out.get("challenges")
+        if isinstance(ch, dict):
+            for k in ("given", "received", "evaluated"):
+                yield "challenges." + k, ch, k
+    for _ in range(64):
+        best = max(((p, o, k) for p, o, k in lists()
+                    if isinstance(o.get(k), list) and len(o[k]) > 1),
+                   key=lambda t: len(json.dumps(t[1][t[2]], default=str)),
+                   default=None)
+        if best is None:
+            break
+        path, o, k = best
+        cuts.setdefault(path, {"total": len(o[k])})
+        o[k] = o[k][:len(o[k]) // 2]
+        cuts[path]["kept"] = len(o[k])
+        if path == "position_book.positions":
+            o["positions_truncated"] = True
+            o["shown"] = len(o[k])
+        size = len(json.dumps(out, default=str))
+        if size <= max_bytes:
+            break
+    out["size_bytes"] = size
+    return out
+
+
 async def build_agent_detail(conn, slug: str, *, now: float | None = None
                              ) -> dict | None:
     """One workspace: the floor entry plus its queue, outputs, challenges
@@ -1523,9 +1738,13 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
     q = await rd.run("queue", (), queue, default=[]) or []
     o = await rd.run("outputs", (), outputs, default=[]) or []
     c = await rd.run("challenges", (), challenges)
+    book = (await rd.run("position_book", (), lambda cc: _xavier_positions(
+        rd, cc, now)) if a == "XAVIER" else None)
     timeline = [e for e in floor["edges"] if a in (e["from"], e["to"])]
-    return {"version": VERSION, "read_at": now, "read_only": True,
+    return bound_detail({
+            "version": VERSION, "read_at": now, "read_only": True,
             "agent": me, "queue": q, "outputs": o, "challenges": c,
+            "position_book": book,
             "timeline": timeline, "timeline_window_s": DETAIL_WINDOW_S,
             "peers": [{"agent": x["agent"], "slug": x["slug"],
                        "display_name": x["display_name"],
@@ -1534,7 +1753,7 @@ async def build_agent_detail(conn, slug: str, *, now: float | None = None
                       for x in floor["agents"]],
             "sections": dict(floor["sections"], **{
                 "detail." + k: v for k, v in rd.sections.items()}),
-            "disclosure": floor["disclosure"]}
+            "disclosure": floor["disclosure"]})
 
 
 async def _read_only(fn):
@@ -1558,6 +1777,10 @@ async def floor_index(response: Response) -> dict:
             "reason": "FLOOR_READ_FAILED", "detail": type(exc).__name__})
 
 
+#: {slug: (computed_at, payload)} -- the detail route's DETAIL_CACHE_S cache
+_DETAIL_CACHE: dict = {}
+
+
 @router.get("/api/command/floor/{agent}",
             dependencies=[Depends(require_read)])
 async def floor_agent(agent: str, response: Response) -> dict:
@@ -1569,14 +1792,22 @@ async def floor_agent(agent: str, response: Response) -> dict:
         got = await floor_agent(canon, response)
         return dict(got or {}, alias_of=canon,
                     historical_alias=str(agent).upper())
-    if str(agent).lower() not in SEAT_BY_SLUG:
+    key = str(agent).lower()
+    if key not in SEAT_BY_SLUG:
         raise HTTPException(status_code=404, detail={
             "reason": "NOT_A_FLOOR_AGENT", "agents": sorted(SEAT_BY_SLUG)})
+    t = time.time()
+    hit = _DETAIL_CACHE.get(key)
+    if hit and 0 <= t - hit[0] < DETAIL_CACHE_S:
+        return dict(hit[1], cache_age_s=round(t - hit[0], 3))
     try:
-        got = await _read_only(lambda conn: build_agent_detail(conn, agent))
+        got = await _read_only(lambda conn: build_agent_detail(conn, key))
     except HTTPException:
         raise
     except Exception as exc:                                    # noqa: BLE001
         raise HTTPException(status_code=503, detail={
             "reason": "FLOOR_READ_FAILED", "detail": type(exc).__name__})
+    if got is not None:
+        got = dict(got, cached_at=t, cache_age_s=0.0)
+        _DETAIL_CACHE[key] = (t, got)
     return got
