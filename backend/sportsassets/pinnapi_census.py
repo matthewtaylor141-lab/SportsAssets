@@ -313,6 +313,76 @@ def event_identity(teams, leagues, starts, event_slug, game_start,
     return match_event(sides, game_start, feed_events)
 
 
+#: ── THE NBA / NHL: THE VENUE SPLITS THE PLACE FROM THE NICKNAME ─────────
+#:
+#: P0 coverage (2026-10-06). The venue's NBA and NHL team record carries the
+#: NICKNAME in `team.name` ("Warriors", "Maple Leafs") and the place in
+#: `safeName` -- sometimes truncated ("Los Angeles C", "Los Angeles L"); see
+#: tests/fixtures/pmus_nba_nhl_winner_listings_2026_10_06.json. `match_event`
+#: compares structured full names EXACTLY, so every NBA / NHL contract was
+#: NO_FEED_EVENT here (and Xavier's held read refused every open position)
+#: although the discovery pass already matches the same events.
+#:
+#: So, ONLY for these two leagues and ONLY after the exact comparison found
+#: nothing, the event is compared with THE DISCOVERY MATCHER'S OWN RULES
+#: (pinnapi_discovery: the record's own renderings exactly, else its
+#: controlled fallback -- containment with a shared DISTINCTIVE token and
+#: equal squad qualifiers), within the same start tolerance, in the same
+#: sport id (so the NBA's Kings never meet the NHL's), one-to-one. A feed
+#: fixture whose two names fit the two records in BOTH orientations, or two
+#: feed fixtures that fit, is AMBIGUOUS_FEED_EVENT by name; nothing that
+#: fits is NO_FEED_EVENT, as before. Every other league and sport is
+#: answered by `match_event` alone, unchanged.
+SPLIT_NAME_LEAGUES = {3: frozenset(("nba",)), 4: frozenset(("nhl",))}
+MATCHED_BY_SPLIT_NAME = "DISCOVERY_RULES_ON_THE_SPLIT_NAME_TEAM_RECORD"
+
+
+def split_name_identity(event_rows, sid, game_start, feed_events) -> tuple:
+    """(state, feed_event_id) for ONE NBA / NHL venue event by the discovery
+    matcher's rules, or (NO_FEED_EVENT, None) outside SPLIT_NAME_LEAGUES.
+    Pure."""
+    allowed = SPLIT_NAME_LEAGUES.get(sid)
+    rows = [dict(r) for r in (event_rows or ())]
+    if not allowed or not rows:
+        return S_NO_FEED_EVENT, None
+    leagues = {str(r.get("team_league") or "").strip().lower() for r in rows}
+    if len(leagues) != 1 or not leagues <= allowed:
+        return S_NO_FEED_EVENT, None
+    from . import pinnapi_discovery as D
+    evs = D.venue_events(rows).get(sid) or []
+    if len(evs) != 1 or evs[0]["problems"]:
+        return S_NO_FEED_EVENT, None
+    ev = evs[0]
+    fam = D.FAMILY_OF_SPORT.get(sid)
+    r0, r1 = ev["participants"]
+    memo = D._Memo()
+
+    def fits(name, rec):
+        return bool(name) and (D._exact(name, rec, memo) or D._fallback(
+            name, rec, fam, memo) is not None)
+
+    gs = _epoch(game_start)
+    if gs is None:
+        return 'START_TIME_MISSING', None
+    hits, both = [], []
+    for e in feed_events or ():
+        start = _epoch(e.get('start'))
+        if start is None or abs(start - gs) > START_TOLERANCE_S:
+            continue
+        h, w = e.get('home'), e.get('away')
+        straight = fits(h, r0) and fits(w, r1)
+        swapped = fits(h, r1) and fits(w, r0)
+        if straight and swapped:
+            both.append(e["id"])
+        elif straight or swapped:
+            hits.append(e["id"])
+    if both or len(set(hits)) > 1:
+        return S_AMBIGUOUS, None
+    if not hits:
+        return S_NO_FEED_EVENT, None
+    return S_SUPPORTED, hits[0]
+
+
 def group_event(rows) -> tuple:
     """(teams, leagues, starts) of one event's rows, as `census` groups."""
     teams, leagues, starts = set(), set(), set()
@@ -344,6 +414,10 @@ def contract_match(row, event_rows, feed_view: dict, *, subscribed_sports,
     state, eid = event_identity(teams, leagues, starts, row.get('event_slug'),
                                 _epoch(row.get("game_start")),
                                 feed_view.get(sid, []))
+    if state == S_NO_FEED_EVENT:
+        # the NBA / NHL split-name record only (SPLIT_NAME_LEAGUES)
+        state, eid = split_name_identity(same, sid, row.get("game_start"),
+                                         feed_view.get(sid, []))
     if state == S_SUPPORTED and not family_of(
             row.get("kind"), row.get("line"), row.get('sports_type'),
             row)[1]:
@@ -415,8 +489,10 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
     teams = collections.defaultdict(set)
     starts = collections.defaultdict(set)
     leagues = collections.defaultdict(set)
+    rows_of = collections.defaultdict(list)
     for r in rows:
         ek = (sport_id_of(r.get('sports_type')), r.get('event_slug'))
+        rows_of[ek].append(r)
         if r.get('team_league'):
             leagues[ek].add(str(r['team_league']).lower())
         if str(r.get('team_name') or '').strip():
@@ -443,6 +519,10 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
                 by_event[ek] = event_identity(
                     teams[ek], leagues[ek], starts[ek], ek[1], gs,
                     feed_view.get(sid, []))
+                if by_event[ek][0] == S_NO_FEED_EVENT:
+                    # the same split-name rule as contract_match
+                    by_event[ek] = split_name_identity(
+                        rows_of[ek], sid, gs, feed_view.get(sid, []))
             state = by_event[ek][0]
             if state == S_SUPPORTED and not supported:
                 state = S_UNSUPPORTED

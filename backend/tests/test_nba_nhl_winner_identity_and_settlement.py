@@ -584,13 +584,10 @@ FULL_NAME = {"warriors": "golden state warriors",
 
 def test_a_held_nba_contract_is_read_from_the_feed_and_another_league_not(
         monkeypatch):
-    """The held read admits the NBA type for the NBA only. Its event identity
-    (pinnapi_census.match_event) compares STRUCTURED FULL NAMES exactly, and
-    the venue's NBA / NHL record splits the place from the nickname
-    (team.name 'Warriors', safeName 'Golden State', or the truncated 'Los
-    Angeles C'), so a production-shaped NBA row is refused NO_FEED_EVENT by
-    name -- never matched by containment. With the structured name equal to
-    the feed's, the type and league admission are what decide."""
+    """The held read admits the NBA type for the NBA only: with the
+    structured name equal to the feed's, the type and league admission are
+    what decide. The production-shaped row (nickname only) resolves too, by
+    the split-name rule (section 6)."""
     import types
     slug = "aec-nba-gs-lac-2026-10-04"
     prod = [dict(r, game_start=_epoch(r["game_start"]))
@@ -634,11 +631,202 @@ def test_a_held_nba_contract_is_read_from_the_feed_and_another_league_not(
                               max_age_s=30.0, sport_ids=[3], synced=True,
                               view=view)
         assert stale["ok"] is False
-        # the production-shaped row (nickname only): refused by name
+        # the production-shaped row (nickname only) reads the same number
         pg = next(r for r in prod if r["team_name"] == "warriors")
-        off = FR.held_quote(pg, event_rows=prod,
-                            payout_event="Golden State Warriors",
-                            payout_is_complement=False, at=at,
-                            max_age_s=30.0, sport_ids=[3], synced=True,
-                            view=view)
-        assert off["ok"] is False and off["reason"] == CEN.S_NO_FEED_EVENT
+        same = FR.held_quote(pg, event_rows=prod,
+                             payout_event="Golden State Warriors",
+                             payout_is_complement=False, at=at,
+                             max_age_s=30.0, sport_ids=[3], synced=True,
+                             view=view)
+        assert same["ok"] is True and same["p"] == pytest.approx(got["p"])
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · HELD POSITIONS: THE SPLIT-NAME TEAM RECORD RESOLVES, BY THE
+#     DISCOVERY MATCHER'S RULES, FOR THE NBA / NHL ONLY
+# ═════════════════════════════════════════════════════════════════════
+
+SID = {"basketball": 3, "hockey": 4}
+FEED_ID = {slug: 500 + i for i, slug in enumerate(sorted(PROVIDER))}
+AT = 1_791_000_000.0
+
+
+def _feed(at, fixtures):
+    """A PinnAPI cache holding `fixtures` [(id, sport id, start, home, away)],
+    each with a fresh period-0 two-way money line."""
+    c = F.FeedCache()
+    e = c.new_connection([("prematch", 3), ("prematch", 4)])
+    for sid in (3, 4):
+        evs = [{"id": fid, "startTime": _iso(start), "isLive": False,
+                "participants": [{"name": h, "alignment": "home"},
+                                 {"name": w, "alignment": "away"}],
+                "markets": [{"key": F.FULL_GAME_MONEYLINE_KEY,
+                             "type": "moneyline", "period": 0,
+                             "status": "open",
+                             "prices": [{"designation": "home",
+                                         "price": -150},
+                                        {"designation": "away",
+                                         "price": 130}]}]}
+               for fid, s, start, h, w in fixtures if s == sid]
+        c.apply({"type": "snapshot", "stream": "prematch", "sport_id": sid,
+                 "ts": (at - 60) * 1000, "events": evs}, epoch=e,
+                received_ms=(at - 60) * 1000 + 5)
+        # an OBSERVED price change, so the quote's age is known
+        for ev in evs:
+            moved = json.loads(json.dumps(ev["markets"][0]))
+            moved["prices"][0]["price"] += 5
+            c.apply({"type": "prematch_markets", "matchup_id": ev["id"],
+                     "data": [moved], "sport_id": sid,
+                     "ts": (at - 2) * 1000}, epoch=e,
+                    received_ms=(at - 2) * 1000 + 5)
+    return c
+
+
+def _all_fixtures():
+    return [(FEED_ID[slug], SID[_family(slug)],
+             _epoch(MARKETS[slug]["gameStartTime"]), h, w)
+            for slug, (h, w) in PROVIDER.items()]
+
+
+def _prod(slug, **over):
+    return [dict(r, **dict({"game_start": _epoch(r["game_start"])}, **over))
+            for r in _rows(MARKETS[slug])]
+
+
+def _held(row, rows, payout, view, *, sport_ids=(3, 4)):
+    return FR.held_quote(row, event_rows=rows, payout_event=payout,
+                         payout_is_complement=False, at=AT, max_age_s=30.0,
+                         sport_ids=list(sport_ids), synced=True, view=view)
+
+
+def test_every_held_nba_nhl_position_resolves_to_its_own_event_and_side(
+        monkeypatch):
+    """All ten captured listings, both sides, on the production-shaped
+    catalogue rows (team_name = the nickname): each held position finds
+    EXACTLY its own feed fixture -- among NBA and NHL games starting at the
+    same instants, both New York NHL teams, the NBA's and the NHL's Kings --
+    and its own designation."""
+    import types
+    cache = _feed(AT, _all_fixtures())
+    monkeypatch.setitem(FR._STATE, "owner", types.SimpleNamespace(
+        cache=cache, sport_ids=[3, 4]))
+    view = CEN.feed_event_view(cache)
+    for slug, (home, away) in PROVIDER.items():
+        rows = _prod(slug)
+        for side in MARKETS[slug]["marketSides"]:
+            row = next(r for r in rows
+                       if r["team_name"] == side["team"]["name"].lower())
+            payout = home if side["team"]["ordering"] == "home" else away
+            got = _held(row, rows, payout, view)
+            assert got["ok"] is True, (slug, side, got)
+            assert got["feed_event_id"] == FEED_ID[slug], (slug, got)
+            assert got["sport_id"] == SID[_family(slug)]
+            assert got["designation"] == side["team"]["ordering"]
+        state, eid, sid = CEN.contract_match(
+            rows[0], rows, view, subscribed_sports={3, 4}, synced=True)
+        assert (state, eid, sid) == (CEN.S_SUPPORTED, FEED_ID[slug],
+                                     SID[_family(slug)])
+
+
+def test_the_held_event_id_path_resolves_the_split_name_record(monkeypatch):
+    import types
+    cache = _feed(AT, _all_fixtures())
+    monkeypatch.setitem(FR._STATE, "owner", types.SimpleNamespace(
+        cache=cache, sport_ids=[3, 4]))
+
+    class _Conn:
+        def __init__(self, rows):
+            self.rows = rows
+
+        async def fetchrow(self, sql, slug):
+            return dict(self.rows[0])
+
+        async def fetch(self, sql, *args):
+            return [dict(r) for r in self.rows]
+
+    for slug in ("aec-nhl-nyi-nyr-2026-10-06", "aec-nba-lal-gs-2026-10-06",
+                 "aec-nhl-fla-la-2026-10-06", "aec-nba-lal-sac-2026-10-05"):
+        eid, why = asyncio.run(FR.held_event_id(_Conn(_prod(slug)), slug))
+        assert (eid, why) == (FEED_ID[slug], None), slug
+
+
+def test_ambiguous_and_unknown_names_refuse_by_name():
+    slug = "aec-nba-gs-lac-2026-10-04"
+    start = _epoch(MARKETS[slug]["gameStartTime"])
+    rows = _prod(slug)
+    gsw = next(r for r in rows if r["team_name"] == "warriors")
+    # the same fixture listed twice by the feed: two candidates, no choice
+    twice = CEN.feed_event_view(_feed(AT, [
+        (1, 3, start, "Los Angeles Clippers", "Golden State Warriors"),
+        (2, 3, start + 600, "Los Angeles Clippers", "Golden State Warriors")]))
+    got = _held(gsw, rows, "Golden State Warriors", twice)
+    assert got["ok"] is False and got["reason"] == CEN.S_AMBIGUOUS
+    # a feed fixture whose names fit the two records BOTH ways round
+    nyr = [dict(r, team_name=n) for r, n in zip(
+        _prod("aec-nhl-nyi-nyr-2026-10-06"), ("rangers", "new york rangers"))]
+    both = CEN.feed_event_view(_feed(AT, [
+        (3, 4, nyr[0]["game_start"], "New York Rangers", "Rangers")]))
+    assert CEN.split_name_identity(nyr, 4, nyr[0]["game_start"],
+                                   both[4]) == (CEN.S_AMBIGUOUS, None)
+    # a name the record does not carry: no alias is invented
+    uta = _prod("aec-nhl-uta-nj-2026-10-06")
+    old = CEN.feed_event_view(_feed(AT, [
+        (4, 4, uta[0]["game_start"], "New Jersey Devils",
+         "Utah Hockey Club")]))
+    got = _held(uta[0], uta, "Utah Hockey Club", old)
+    assert got["ok"] is False and got["reason"] == CEN.S_NO_FEED_EVENT
+    # the LA teams: a Lakers record never fits the Clippers, even with the
+    # venue's truncated place name on the record
+    lal = [dict(r, team_safe_name=("los angeles l" if r["team_name"] ==
+                                   "lakers" else "golden state"))
+           for r in _prod("aec-nba-lal-gs-2026-10-06")]
+    clip = CEN.feed_event_view(_feed(AT, [
+        (5, 3, lal[0]["game_start"], "Golden State Warriors",
+         "Los Angeles Clippers")]))
+    assert CEN.split_name_identity(lal, 3, lal[0]["game_start"],
+                                   clip[3]) == (CEN.S_NO_FEED_EVENT, None)
+    # the NBA's Kings are not in the NHL's sport id, and the reverse
+    la = _prod("aec-nhl-fla-la-2026-10-06")
+    nba_kings = CEN.feed_event_view(_feed(AT, [
+        (6, 3, la[0]["game_start"], "Sacramento Kings", "Florida Panthers")]))
+    got = _held(la[0], la, "Los Angeles Kings", nba_kings)
+    assert got["ok"] is False and got["reason"] == CEN.S_NO_FEED_EVENT
+    sac = _prod("aec-nba-lal-sac-2026-10-05")
+    nhl_kings = CEN.feed_event_view(_feed(AT, [
+        (7, 4, sac[0]["game_start"], "Los Angeles Kings",
+         "Los Angeles Lakers")]))
+    got = _held(sac[0], sac, "Sacramento Kings", nhl_kings)
+    assert got["ok"] is False and got["reason"] == CEN.S_NO_FEED_EVENT
+
+
+def test_other_leagues_and_sports_are_unchanged():
+    """Outside the NBA / NHL the exact structured comparison alone answers,
+    as before: a nickname-only record of another league (the same rows
+    relabelled WNBA / KHL) stays NO_FEED_EVENT -- not a containment match,
+    not a different refusal."""
+    view = CEN.feed_event_view(_feed(AT, _all_fixtures()))
+    for slug, lg in (("aec-nba-gs-lac-2026-10-04", "wnba"),
+                     ("aec-nhl-uta-nyr-2026-10-04", "khl")):
+        tok = slug.split("-")[1]
+        rows = _prod(slug, team_league=lg,
+                     identifier=slug.replace("-%s-" % tok, "-%s-" % lg),
+                     event_slug=slug[4:].replace(tok + "-", lg + "-", 1))
+        got = _held(rows[0], rows, PROVIDER[slug][0], view)
+        assert got["ok"] is False and got["reason"] == CEN.S_NO_FEED_EVENT
+        sid = SID[_family(slug)]
+        assert CEN.split_name_identity(rows, sid, rows[0]["game_start"],
+                                       view[sid]) == \
+            (CEN.S_NO_FEED_EVENT, None)
+    assert set(CEN.SPLIT_NAME_LEAGUES) == {3, 4}
+    assert CEN.split_name_identity(_prod("aec-nba-gs-lac-2026-10-04"), 5,
+                                   0.0, []) == (CEN.S_NO_FEED_EVENT, None)
+
+
+def test_the_census_counts_the_split_name_events_like_the_held_read():
+    view = CEN.feed_event_view(_feed(AT, _all_fixtures()))
+    rows = [dict(r, game_start=_epoch(r["game_start"])) for r in ROWS]
+    got = CEN.census(rows, view, subscribed_sports={3, 4}, synced=True,
+                     now=AT)
+    states = got["by_sport_family_phase_state"]
+    assert sum(n for k, n in states.items()
+               if k.endswith("|" + CEN.S_SUPPORTED)) == len(rows), states
