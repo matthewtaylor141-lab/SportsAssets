@@ -823,6 +823,11 @@ tests/test_position_rooms_authority.py
 # with a bounded statement timeout, SELECT-only SQL, and imports no order,
 # venue, ledger, paper or funded module.
 tests/test_command_floor_authority.py
+# GET /api/command/floor/xavier is bounded (production 499): a fixed number
+# of queries whatever the positions / review history, no review blobs in the
+# payload, a byte bound with named truncation, each position's ONE current
+# review with its packet and protection, CURRENT EXIT / REDUCE shown.
+tests/test_command_floor_xavier_bounded.py
 # Improvement pipeline (claude/pos-improve, migration 221): the bounded
 # self-improvement ledger. The runner has no order / deploy / merge /
 # network / process path and writes only improve_*; the database refuses

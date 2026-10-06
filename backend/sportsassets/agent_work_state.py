@@ -254,6 +254,14 @@ OPEN_ITEMS_BY_AGENT_SQL = (
     " WHERE p.rn <= $1 "
     " ORDER BY o.agent_id, coalesce(r.due_at, r.expires_at), r.request_id")
 
+#: A REVIEW'S SELECTION AS THE FRESHNESS JUDGEMENT READS IT: only its
+#: `valuation` (xavier_freshness.of_review reads nothing else of it). The
+#: full selection (management packet, policy, mechanical selection) is tens
+#: of kB per review and was carried for every open position.
+REVIEW_SELECTION_SQL = (
+    "       jsonb_build_object('valuation', r.selection -> 'valuation') "
+    "         AS selection ")
+
 # position classes (Xavier)
 P_UNREVIEWED, P_CURRENT, P_BLOCKED, P_WAITING = (
     "UNREVIEWED", "CURRENT", "BLOCKED_ON_MARKET_DATA",
@@ -1060,19 +1068,22 @@ async def _read_positions(s: _Sections, now: float) -> dict:
             if await s.exists("xavier_current_review"):
                 sql = ("SELECT 'PAPER' AS pk, r.review_id, r.group_id, "
                        "       r.reviewed_at, r.recommendation, r.measure, "
-                       "       r.selection FROM xavier_current_review c "
+                       + REVIEW_SELECTION_SQL +
+                       "  FROM xavier_current_review c "
                        "  JOIN paper_xavier_reviews r "
                        "    ON r.review_id = c.paper_review_id "
                        " WHERE c.position_kind = 'PAPER' "
                        "   AND c.group_id = ANY($1::text[])")
             else:
-                sql = ("SELECT DISTINCT ON (group_id) 'PAPER' AS pk, "
-                       "       review_id, group_id, reviewed_at, "
-                       "       recommendation, measure, selection "
-                       "  FROM paper_xavier_reviews "
-                       " WHERE group_id = ANY($1::text[]) "
-                       " ORDER BY group_id, reviewed_at DESC, "
-                       "          review_id DESC")
+                sql = ("SELECT 'PAPER' AS pk, r.review_id, r.group_id, "
+                       "       r.reviewed_at, r.recommendation, r.measure, "
+                       + REVIEW_SELECTION_SQL +
+                       "  FROM unnest($1::text[]) AS g(group_id) "
+                       "  CROSS JOIN LATERAL (SELECT * FROM "
+                       "        paper_xavier_reviews x "
+                       "        WHERE x.group_id = g.group_id "
+                       "        ORDER BY x.reviewed_at DESC, "
+                       "                 x.review_id DESC LIMIT 1) r")
             for r in await conn.fetch(sql, paper_groups):
                 d = dict(r, reviewed_at=_ep(r["reviewed_at"]))
                 blk = XF.of_review(d, now=now)
@@ -1110,13 +1121,24 @@ async def _read_positions(s: _Sections, now: float) -> dict:
         return got
 
     async def books(conn):
+        # THE LATEST BOOK PER HELD SLUG, ONE INDEX PROBE EACH (LATERAL ...
+        # LIMIT 1 on paper_book_observations_slug_idx). The earlier
+        # DISTINCT ON (us_market_slug) over `slug = ANY(...)` read and sorted
+        # EVERY observation ever recorded for every held market -- a history
+        # scan that grows with each book read and timed the floor out.
+        # Same row chosen: newest observed_at, ties to the newest obs_id.
         return {r["us_market_slug"]: {
             "obs_id": r["obs_id"], "observed_at": _ep(r["observed_at"]),
             "error": r["error"]} for r in await conn.fetch(
-                "SELECT DISTINCT ON (us_market_slug) us_market_slug, obs_id,"
-                "       observed_at, error FROM paper_book_observations "
-                " WHERE us_market_slug = ANY($1::text[]) "
-                " ORDER BY us_market_slug, observed_at DESC, obs_id DESC",
+                "SELECT s.slug AS us_market_slug, b.obs_id, b.observed_at, "
+                "       b.error "
+                "  FROM unnest($1::text[]) AS s(slug) "
+                "  CROSS JOIN LATERAL (SELECT o.obs_id, o.observed_at, "
+                "                             o.error "
+                "                        FROM paper_book_observations o "
+                "                       WHERE o.us_market_slug = s.slug "
+                "                       ORDER BY o.observed_at DESC, "
+                "                                o.obs_id DESC LIMIT 1) b",
                 sorted({p["slug"] for p in positions if p.get("slug")}))}
 
     async def requests(conn):
