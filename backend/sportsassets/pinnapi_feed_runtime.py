@@ -406,7 +406,29 @@ async def _discovery_once(pool) -> dict:
         out["line_census"] = {"error": type(exc).__name__}
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
+    # THE WATCHED LEAGUES' FULL RECEIPTS (pinnapi_discovery.watch_receipts):
+    # their own row, apart from the 64 KB heartbeat. Never raises.
+    if isinstance(out.get("watch"), dict):
+        try:
+            async with asyncio.timeout(HEARTBEAT_WRITE_TIMEOUT_S):
+                async with pool.acquire() as c:
+                    await c.execute(
+                        "INSERT INTO ingestion_state (key, value) VALUES "
+                        "($1, $2::jsonb) ON CONFLICT (key) DO UPDATE SET "
+                        "value = EXCLUDED.value", DISCOVERY_WATCH_KEY,
+                        json.dumps(dict(out["watch"], computed_at=t0,
+                                        pass_state=out.get("pass_state")),
+                                   default=str))
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                       # noqa: BLE001
+            log.warning("pinnapi discovery watch write failed",
+                        exc_info=True)
     return out
+
+
+#: the watched leagues' discovery receipts (NCAAF funnel identity stage)
+DISCOVERY_WATCH_KEY = "pinnapi_discovery_watch"
 
 
 #: a MATCHED fixture of a family no market of which can be priced is not

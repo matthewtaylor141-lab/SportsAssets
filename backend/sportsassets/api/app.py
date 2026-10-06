@@ -798,6 +798,14 @@ try:
 except ImportError:
     log.warning("market plane: api.command_market_plane not loaded",
                 exc_info=True)
+# ── THE NCAAF FUNNEL (closeout): GET /api/command/ncaaf-funnel. GET only,
+# COMMAND auth, READ ONLY.
+try:
+    from .command_ncaaf_funnel import router as _command_ncaaf_funnel_router
+    app.include_router(_command_ncaaf_funnel_router)
+except ImportError:
+    log.warning("ncaaf funnel: api.command_ncaaf_funnel not loaded",
+                exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
 # /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.

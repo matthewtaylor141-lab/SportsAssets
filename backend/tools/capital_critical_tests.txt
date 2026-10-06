@@ -1227,3 +1227,5 @@ tests/test_market_plane_dedicated_service.py
 # (closeout) Xavier held LINE read re-runs the entry's pricing; the settlement join reads once per market, held positions first
 tests/test_xavier_held_line_read.py
 tests/test_settlement_join_per_market_held_first.py
+# (closeout) the NCAAF funnel names every loss per event; the discovery watch keeps every NCAA receipt
+tests/test_ncaaf_funnel.py

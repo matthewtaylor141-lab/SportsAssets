@@ -426,6 +426,9 @@ READERS = {
     # state); its Command readback shows that one valuation by contract. Neither
     # selects a candidate, sizes or places anything.
     "market_plane/populate.py": ("COVERAGE_EVIDENCE_REPORTING_READS_ALL", 1),
+    # the NCAAF funnel (closeout): a READ ONLY report of how far each venue
+    # event got; it selects no candidate, sizes and places nothing
+    "ncaaf_funnel.py": ("COVERAGE_EVIDENCE_REPORTING_READS_ALL", 1),
     "api/command_market_plane.py": ("CANONICAL_OPPORTUNITY_READBACK_BY_CONTRACT", 1),
     # select candidates or a decision's probability -> filter the purpose
     # (asserted constant by constant above)
