@@ -118,7 +118,8 @@ R_SCOPE_NOT_AN_ID = "SPORT_ID_NOT_AN_INTEGER"
 
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None, "held": None,
-                "scope": None, "discovery": None}
+                "scope": None, "discovery": None, "restarts": 0,
+                "last_restart": None}
 CENSUS_S = 60.0
 #: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
 #: one bounded catalogue read per CENSUS_S, under its own timeout
@@ -214,6 +215,10 @@ def digest() -> dict:
     if o is None:
         return {"state": "NOT_STARTED", "enabled_env": enabled()}
     d = o.status()
+    # the task's own liveness: `state` is the owner's last word, which a
+    # task that ended can never update (P0 first-loss, 2026-10-06)
+    d["owner_task"] = owner_task_state()
+    d["last_owner_restart"] = _STATE.get("last_restart")
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
@@ -423,9 +428,102 @@ def families_with_a_priced_market() -> set:
             | {str(k[0]) for k in MF.EQUIVALENCE})
 
 
+#: ── AN OWNER TASK THAT ENDED BY ACCIDENT IS RESTARTED (P0 first-loss) ──
+#: Production 2026-10-06 01:29:56Z (research-sql run 37411912022): the owner
+#: task ended on a stray CancelledError (pinnapi_owner R_STRAY_CANCELLATION)
+#: and nothing noticed -- the heartbeat kept writing its last state
+#: (STARTING) for 2.5 h while every candidate read FEED_OWNERSHIP_NOT_HELD.
+#: A task that ends while the owner was neither stopped nor refused (a
+#: refusal -- writer lock lost, eviction loop, provider refusal -- is a
+#: deliberate, permanent stop and stays one) is restarted here, once per
+#: heartbeat pass, after its leaked lease session (if any) is discarded so
+#: the new attempt can take the lease. Authority is revoked first; the new
+#: run contends, resynchronizes and is fenced exactly like the first.
+R_OWNER_TASK_ENDED = "FEED_OWNER_TASK_ENDED_UNEXPECTEDLY"
+
+
+def owner_task_state() -> dict:
+    t, o = _STATE.get("task"), _STATE.get("owner")
+    if t is None or o is None:
+        return {"state": "NOT_STARTED"}
+    if not t.done():
+        return {"state": "RUNNING", "restarts": _STATE.get("restarts", 0)}
+    if t.cancelled():
+        why = "CANCELLED"
+    else:
+        exc = t.exception()
+        why = "RAISED:%s" % type(exc).__name__ if exc else "RETURNED"
+    return {"state": "ENDED", "how": why,
+            "deliberate": bool(o.stop_event.is_set() or o.refused),
+            "restarts": _STATE.get("restarts", 0)}
+
+
+def supervise() -> Optional[str]:
+    """Restart the owner task if it ended without being stopped or refused.
+    Returns how it had ended when it restarted it, else None. Never
+    raises; must run on the event loop."""
+    try:
+        o, t = _STATE.get("owner"), _STATE.get("task")
+        if o is None or t is None or not t.done():
+            return None
+        if o.stop_event.is_set() or o.refused:
+            return None
+        how = owner_task_state().get("how")
+        o.cache.lost(R_OWNER_TASK_ENDED)
+        lease = getattr(o, "lease", None)
+        if lease is not None:
+            try:
+                lease.discard()
+            except Exception:                                   # noqa: BLE001
+                pass
+            o.lease = None
+        _STATE["restarts"] = int(_STATE.get("restarts") or 0) + 1
+        _STATE["last_restart"] = {"at": time.time(), "ended": how}
+        o._note("OWNER_TASK_RESTARTED", ended=how)
+        log.error("pinnapi feed owner task ended (%s) without a stop or a "
+                  "refusal; restarted", how)
+        _STATE["task"] = asyncio.get_running_loop().create_task(o.run())
+        return how
+    except Exception:                                           # noqa: BLE001
+        log.warning("pinnapi feed supervision failed", exc_info=True)
+        return None
+
+
+#: how long the decider's first cycle of a hold waits for the owner to
+#: resynchronize (ext_pinnacle_loop._hold_once); bounded so a provider that
+#: never answers delays one cycle by at most this, never the lane
+FIRST_SYNC_WAIT_S = 60.0
+#: owner states in which no sync is coming soon: return at once
+_NOT_CONTENDING = ("DISARMED", "STANDBY", "WRITER_LOCK_LOST",
+                   "EVICTION_LOOP_SUSPECTED", "REFUSED_BY_PROVIDER",
+                   "STOPPED")
+
+
+async def wait_synced(timeout_s: float = FIRST_SYNC_WAIT_S,
+                      poll_s: float = 0.25) -> str:
+    """Wait until this process's owner is synced, by name: SYNCED,
+    NOT_STARTED, NOT_CONTENDING:<state>, OWNER_TASK_ENDED, or
+    TIMEOUT_AFTER_<s>S. Reads nothing but the in-process owner."""
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    while True:
+        o, t = _STATE.get("owner"), _STATE.get("task")
+        if o is None:
+            return "NOT_STARTED"
+        if o.cache.authority.synced:
+            return "SYNCED"
+        if o.refused or o.state in _NOT_CONTENDING:
+            return "NOT_CONTENDING:%s" % (o.refused or o.state)
+        if t is not None and t.done():
+            return "OWNER_TASK_ENDED"
+        if time.monotonic() >= deadline:
+            return "TIMEOUT_AFTER_%dS" % int(timeout_s)
+        await asyncio.sleep(poll_s)
+
+
 async def _beat_loop(pool):
     last_census = 0.0
     while True:
+        supervise()
         o = _STATE.get("owner")
         synced = bool(o and o.cache.authority.synced)
         if not synced:
@@ -521,13 +619,32 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
             log.warning("pinnapi heartbeat task ended with error", exc_info=True)
     verdict = "CLOSED"
     try:
-        if t is not None:
+        if t is not None and t.done():
+            # an owner task that already ended (a stray cancellation, an
+            # error): awaiting it would re-raise its CancelledError into the
+            # decider's teardown (P0 first-loss, 2026-10-06)
+            if t.cancelled() or t.exception() is not None:
+                verdict = "CLOSED_WITH_ERROR"
+        elif t is not None:
             await asyncio.wait_for(asyncio.shield(t), wait_s)
     except asyncio.TimeoutError:
         verdict = "INCOMPLETE_CLOSE_TIMEOUT"
         t.cancel()
+    except asyncio.CancelledError:
+        if O._task_is_being_cancelled():
+            raise
+        verdict = "CLOSED_WITH_ERROR"
     except Exception:                                           # noqa: BLE001
         verdict = "CLOSED_WITH_ERROR"
+    # a lease the owner never retired (its task ended holding one) is
+    # discarded so the next holder can take it
+    _leaked = getattr(o, "lease", None)
+    if _leaked is not None and (t is None or t.done()):
+        try:
+            _leaked.discard()
+        except Exception:                                       # noqa: BLE001
+            pass
+        o.lease = None
     o.cache.lost(O.R_STOPPED)
     final_status = "WRITTEN_OR_SUPERSEDED"
     try:
@@ -540,7 +657,8 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
-                  census=None, held=None, scope=None, discovery=None)
+                  census=None, held=None, scope=None, discovery=None,
+                  restarts=0, last_restart=None)
     return {"verdict": verdict, "terminal_heartbeat": final_status}
 
 

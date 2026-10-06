@@ -1473,7 +1473,44 @@ def feed_coverage() -> dict:
 #: within three runs and left later cycles fetching nothing.
 _COVERAGE: dict = {"last_served": {}, "ledger": [], "cost": {},
                    "deferred_events": {}, "demand_since": {},
-                   "demand_known": False}
+                   "demand_known": False,
+                   # sport_key -> {event id: since}: see
+                   # REQUEUE_AFTER_OUR_DELAY_RULE
+                   "requeued_after_our_delay": {}}
+
+#: ── STALE BY OUR QUEUE, FIRST IN THE NEXT ONE (P0 first-loss) ──────────
+#:
+#: MEASURED (research-sql runs 37411912022, 37412834338). In the 24 h
+#: census 45 of 61 NCAAF provider events never reached a valuation and
+#: their first loss was QUOTE_STALE_ON_ARRIVAL; 312 of the 421 NCAAF rows
+#: so refused had a provider lag INSIDE the 30 s rule. One fetch, queue
+#: order: every event carries the SAME provider last_update (lag 19.5 s in
+#: cycle 8f54ec3e..., 27.0 s in 20dcafb3..., 21.8 s in cf44844e...); the
+#: event at queue position 0 or 1 takes the paced venue read (10-15 s, often
+#: VENUE_BOOK_READ_FAILED), and every later event arrives at the check at
+#: lag + ~11-25 s and is refused -- each costs ~0.05 s, so the doom is that
+#: one read, not the queue length. And the queue order is the SAME every
+#: fetch: equal last_update, so lever B's freshest-first sort falls through
+#: to the event id, and the same one or two events took the only usable
+#: slot in all 29 fetches of the day while the rest were refused every
+#: time.
+#:
+#: THE REPAIR IS ORDER, NOT A RULE. An event refused QUOTE_STALE_ON_ARRIVAL
+#: because OUR processing took a quote the provider handed over inside the
+#: limit past it (exactly `stale_on_arrival_due_to_our_processing`) is owed
+#: the next fetch's early slot, exactly as an event the evaluation bound
+#: deferred is (collector_coverage.candidate_order_key class 0, oldest
+#: first). The scarce fresh slots then rotate across the competition
+#: instead of going to the same id every time. The 30 s rule, its clock,
+#: the instant it is applied at, the venue pacing and every bound are
+#: unchanged; a quote the provider delivered stale is NOT requeued (no
+#: order could have saved it). Bounded: an entry leaves when its event
+#: leaves the provider's listing or is judged past the arrival check.
+REQUEUE_AFTER_OUR_DELAY_RULE = (
+    "an event refused QUOTE_STALE_ON_ARRIVAL because our own processing "
+    "took a quote the provider delivered inside the limit past it is judged "
+    "first in its competition's next fetch (oldest first, beside events the "
+    "evaluation bound deferred); no limit, clock or pacing changes")
 
 #: THE ONE METERED REQUEST SHAPE (h2h x regions eu,uk,us; unchanged), named
 #: on every receipt so a measured cost is only ever reused for the same shape.
@@ -9747,6 +9784,7 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            "age_samples": [], "valid_evaluations": 0, "stale_refusals": 0,
            "self_inflicted_stale": 0, "provider_stale_on_arrival": 0,
            "stale_on_arrival_due_to_our_processing": 0,
+           "requeued_after_our_delay": 0,
            "skipped_stale_on_arrival": 0, "arrival_skip_samples": 0,
            "deduplicated_requests": 0, "venue_requests": 0,
            # every event WITH A PINNACLE PRICE, measured when it came up --
@@ -9997,15 +10035,25 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # each class, and the key reads only identities and clocks.
         _prev_deferred = _COVERAGE["deferred_events"].setdefault(sport_key,
                                                                  {})
+        # REQUEUE_AFTER_OUR_DELAY_RULE: this competition's events our own
+        # queue made stale last time (a reactive job keeps its own store
+        # out of it: it judges one event and reorders nothing)
+        _requeued = (_COVERAGE.setdefault("requeued_after_our_delay", {})
+                     .setdefault(sport_key, {})
+                     if stream_seed is None else {})
         if stream_seed is None:
             _live_ids = {str((e or {}).get("id")) for e in events}
             for _gone in [k for k in _prev_deferred if k not in _live_ids]:
                 _prev_deferred.pop(_gone, None)
+            for _gone in [k for k in _requeued if k not in _live_ids]:
+                _requeued.pop(_gone, None)
         _now_sort = time.time()
+        _owed_first = dict(_requeued)
+        _owed_first.update(_prev_deferred)
         events.sort(key=lambda e: cov.candidate_order_key(
             (e or {}).get("id"),
             commence_epoch=fmeta_mod._epoch((e or {}).get("commence_time")),
-            now=_now_sort, deferred_since=_prev_deferred,
+            now=_now_sort, deferred_since=_owed_first,
             freshness_key=()))
 
         # ── LEVER C · WITHIN-CYCLE DEDUPLICATION ────────────────────
@@ -10165,6 +10213,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             event = events[_i]
             # judged now: no longer a deferred event of this competition
             _prev_deferred.pop(str((event or {}).get("id")), None)
+            # ...nor a requeued one, unless our queue makes it stale again
+            # (then it goes back with its original instant, oldest first)
+            _requeued_since = _requeued.pop(str((event or {}).get("id")),
+                                            None)
             _open_event(sport_key, family, _i, event)
             served_by_this_fetch += 1
             # A PINNAPI-NATIVE EVENT NAMES ITS VENUE EVENT ALREADY: its line
@@ -10555,6 +10607,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     # skipped - provider_stale, which also swept in the
                     # events whose receipt stamp was missing.
                     lat["stale_on_arrival_due_to_our_processing"] += 1
+                    # REQUEUE_AFTER_OUR_DELAY_RULE: first in the next fetch
+                    if stream_seed is None and (event or {}).get("id") \
+                            is not None:
+                        _requeued[str(event["id"])] = (
+                            _requeued_since if _requeued_since is not None
+                            else _arr)
+                        lat["requeued_after_our_delay"] += 1
                 # THE SKIPPED EVENT'S CLOCKS JOIN THE CYCLE'S FIGURES. The
                 # medians sampled evaluated candidates only, so the events
                 # most likely to be stale were the ones left out of the
@@ -11603,6 +11662,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                # the limit and our own processing took the price past it.
                "stale_on_arrival_due_to_our_processing":
                    lat["stale_on_arrival_due_to_our_processing"],
+               # ...and how many of those go first in their competition's
+               # next fetch (REQUEUE_AFTER_OUR_DELAY_RULE)
+               "requeued_after_our_delay": lat["requeued_after_our_delay"],
                "skipped_stale_on_arrival": lat["skipped_stale_on_arrival"],
                # `samples` now includes the events lever A skipped (their
                # clocks at the skip instant); this many of them.
@@ -12999,6 +13061,23 @@ async def _hold_once(get_pool) -> str | None:
                      ).get("state"))
         except Exception:                                      # noqa: BLE001
             log.warning("ext_pinnacle: pinnapi feed start failed",
+                        exc_info=True)
+        # ── THE FIRST CYCLE READS A SYNCED FEED (P0 first-loss) ──────────
+        # The first cycle of every hold ran the instant the feed task was
+        # created, before it had a lease, a socket or the provider's
+        # snapshots, so every event with no other Pinnacle source was
+        # recorded FEED_OWNERSHIP_NOT_HELD in that cycle (production
+        # 2026-10-05 09:16, 18:16, 18:21Z: 5-6 events each, research-sql run
+        # 37411912022). Bounded wait for the owner to resynchronize; it
+        # returns at once when the feed is not started, disarmed, standing
+        # by, refused or ended. No freshness rule is read or moved here.
+        try:
+            log.info("ext_pinnacle: pinnapi feed before the first cycle: %s",
+                     await _feed.wait_synced())
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: pinnapi feed sync wait failed",
                         exc_info=True)
         from .. import pinnapi_reactive as _reactive
         reactive_task = _reactive.start(pool, cycle=cycle)

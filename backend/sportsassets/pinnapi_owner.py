@@ -78,11 +78,63 @@ R_STOPPED = "FEED_OWNER_STOPPED"
 R_PROVIDER_REFUSED = "FEED_PROVIDER_REFUSED"
 
 
+#: ── THE WEDGED OWNER (P0 first-loss, production 2026-10-06) ─────────────
+#:
+#: MEASURED (research-sql run 37411912022). From 01:29:56Z the deciding
+#: process had NO feed authority for 2.5 h while every other loop in it ran:
+#: the heartbeat read state STARTING, epoch 0, transitions LEASE_ACQUIRED
+#: (01:29:50) -> FEED_GUARD_CHECK_TIMED_OUT (01:29:56) and nothing after;
+#: pg_locks showed the feed lease (7723901544120036) still granted to the
+#: `pinnapi-feed-owner` session opened at 01:29:50, idle. Every candidate
+#: read FEED_OWNERSHIP_NOT_HELD (94-102 rows/h, 0 before), no reactive
+#: attempt was written after 01:59Z, and 38 provider events' first loss in
+#: the 24 h census was FEED_OWNERSHIP_NOT_HELD.
+#:
+#: THE MECHANISM (reproduced on Python 3.12.3 / asyncpg 0.31 against a real
+#: Postgres, tests/test_p0_first_loss_plumbing.py). The guard's `holds()`
+#: timed out; asyncpg answers a cancelled query by sending a CancelRequest
+#: on a NEW connection and awaiting the server's disconnect with no timeout
+#: (connect_utils._cancel). While that is unanswered, the teardown's
+#: `release()` waits on it and times out, then `close()` sets the protocol's
+#: `closing` flag and awaits the same (now cancelled) future: a
+#: CancelledError that is NOT a cancellation of the task. `close()` then
+#: calls `_abort()`, which returns at once because `closing` is already set
+#: -- the socket stays open and the lock stays held -- and the
+#: CancelledError (a BaseException) escaped `except Exception`, out of
+#: `run()`'s `finally`, ending the owner task for good. Nothing restarted
+#: it, and its leaked session kept every later contender in STANDBY.
+#:
+#: THE REPAIR: a lease session whose state is in doubt (a guard that timed
+#: out or raised, a failed unlock) is DISCARDED -- its transport aborted
+#: synchronously, which ends the server session and frees the lock -- never
+#: awaited; teardown never raises; a CancelledError that is not the task's
+#: own cancellation is an owner error that re-contends, not an exit; and the
+#: runtime restarts an owner task that ended without being stopped or
+#: refused (pinnapi_feed_runtime.supervise). The 30 s rule, the lease, the
+#: writer fence and the arm row are unchanged.
+R_STRAY_CANCELLATION = "FEED_OWNER_STRAY_CANCELLATION"
+
+
+def _task_is_being_cancelled() -> bool:
+    """True when the CURRENT task itself was asked to cancel (shutdown),
+    as opposed to a CancelledError raised from a driver future."""
+    t = asyncio.current_task()
+    try:
+        return bool(t is not None and t.cancelling())
+    except AttributeError:                       # Python < 3.11
+        return True
+
+
 class Lease:
     """The advisory lock on its own connection."""
 
     def __init__(self, conn):
         self.conn = conn
+        #: set when this session's state is no longer known (a guard check
+        #: that timed out or raised, an unlock that failed): it is then
+        #: discarded, never awaited (see R_STRAY_CANCELLATION above)
+        self.in_doubt = False
+        self.discarded = False
 
     @classmethod
     async def open(cls, dsn: str):
@@ -107,22 +159,75 @@ class Lease:
         return bool(await self.conn.fetchval(WRITER_SQL, writer_key,
                                              writer_pid))
 
+    def discard(self) -> None:
+        """END THE SESSION NOW, synchronously, awaiting nothing: the server
+        frees the session's advisory lock when its socket closes. Used for
+        a session in doubt. `terminate()` alone is a no-op once a graceful
+        close has set the protocol's `closing` flag, so the transport is
+        aborted directly as well. Never raises."""
+        self.discarded = True
+        conn = self.conn
+        try:
+            conn.terminate()
+        except Exception:                                       # noqa: BLE001
+            pass
+        tr = getattr(conn, "_transport", None)
+        try:
+            if tr is not None and not tr.is_closing():
+                tr.abort()
+        except Exception:                                       # noqa: BLE001
+            pass
+
     async def release(self):
+        """Unlock, bounded. Never raises except the task's own
+        cancellation; any failure marks the session in doubt."""
+        if self.in_doubt or self.discarded:
+            return
         try:
             await asyncio.wait_for(self.conn.execute(
                 "SELECT pg_advisory_unlock($1)", FEED_LOCK_KEY),
                 CLOSE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            self.in_doubt = True
+            if _task_is_being_cancelled():
+                self.discard()
+                raise
         except Exception:                                       # noqa: BLE001
-            pass
+            self.in_doubt = True
 
     async def close(self):
+        """Close, bounded; a session in doubt (or one whose graceful close
+        fails in any way) is discarded. Never raises except the task's own
+        cancellation, and then only after the session is discarded."""
+        if self.discarded:
+            return
+        if self.in_doubt:
+            self.discard()
+            return
         try:
             await asyncio.wait_for(self.conn.close(), CLOSE_TIMEOUT_S)
+        except asyncio.CancelledError:
+            self.discard()
+            if _task_is_being_cancelled():
+                raise
         except Exception:                                       # noqa: BLE001
-            try:
-                self.conn.terminate()
-            except Exception:                                   # noqa: BLE001
-                pass
+            self.discard()
+
+
+def _mark_in_doubt(lease) -> None:
+    try:
+        lease.in_doubt = True
+    except Exception:                                           # noqa: BLE001
+        pass
+
+
+async def retire_lease(lease) -> None:
+    """Unlock and close a lease, or discard it when its session is in doubt.
+    Never raises except the task's own cancellation."""
+    if lease is None:
+        return
+    await lease.release()
+    await lease.close()
 
 
 class FeedOwner:
@@ -145,6 +250,9 @@ class FeedOwner:
         self.writer_pid, self.writer_key = writer_pid, writer_key
         self.armed = armed              # async () -> bool, fail-closed
         self.evictions: list = []
+        #: the lease currently held (or being acquired), so a supervisor can
+        #: discard it if this owner's task ever ends without retiring it
+        self.lease = None
 
     def _note(self, what, **kw):
         self.events.append(dict(at=round(self.clock(), 3), what=what, **kw))
@@ -170,25 +278,40 @@ class FeedOwner:
                 continue
             try:
                 lease = await self.lease_factory()
+                self.lease = lease
                 if not await lease.try_acquire():
                     self.state = "STANDBY"
                     await lease.close()
-                    lease = None
+                    lease = self.lease = None
                     await self._wait(self.standby_s)
                     continue
                 self._note("LEASE_ACQUIRED")
+                self.state = "LEASE_HELD"
                 attempt = await self._own(lease, attempt)
+            except asyncio.CancelledError:
+                if _task_is_being_cancelled():
+                    raise
+                # NOT a cancellation of this task: a driver future that was
+                # cancelled under us (see R_STRAY_CANCELLATION). An owner
+                # error -- authority revoked, session discarded, contend
+                # again -- never an exit.
+                self.cache.lost(R_STRAY_CANCELLATION)
+                _mark_in_doubt(lease)
+                self._note(R_STRAY_CANCELLATION)
             except Exception as exc:                            # noqa: BLE001
                 self.cache.lost(R_LEASE_LOST)
+                _mark_in_doubt(lease)
                 self._note("OWNER_ERROR", error=type(exc).__name__)
             finally:
                 if self.cache.authority.granted:
                     self.cache.lost(R_STOPPED if self.stop_event.is_set()
                                     else R_LEASE_LOST)
                 if lease is not None:
-                    await lease.release()
-                    await lease.close()
-                    self._note("LEASE_RELEASED")
+                    doubt = bool(getattr(lease, "in_doubt", False))
+                    await retire_lease(lease)
+                    self.lease = None
+                    self._note("LEASE_DISCARDED" if doubt or getattr(
+                        lease, "in_doubt", False) else "LEASE_RELEASED")
             if self.refused:
                 self.state = ("WRITER_LOCK_LOST" if self.refused == R_WRITER_LOST
                               else "EVICTION_LOOP_SUSPECTED"
@@ -228,8 +351,12 @@ class FeedOwner:
                     self.liveness_s):
                 return False, R_WRITER_LOST
         except asyncio.TimeoutError:
+            # the check's query may still be in flight (or its cancellation
+            # unanswered): the session is in doubt and is discarded
+            _mark_in_doubt(lease)
             return False, R_GUARD_TIMEOUT
         except Exception:                                       # noqa: BLE001
+            _mark_in_doubt(lease)
             return False, R_LEASE_LOST
         why = await self._arm_state()
         if why is not None:
