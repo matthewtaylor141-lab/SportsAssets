@@ -234,6 +234,42 @@ services:
     #     because an undeclared path is the /var/tmp mistake again.
     envVars: *backend_env
 
+  # UNIVERSAL MARKET PLANE -- DEDICATED READ-ONLY MARKET-DATA RUNTIME (owner
+  # decision 2026-10-06: ~74,500 active markets are not solved by raising
+  # UMP_MAX_STREAMS inside the shared workers). Its own CPU, health and
+  # restarts. NO ORDER, CANCEL OR FUNDING AUTHORITY: it gets the database and
+  # the PMX institutional MARKET-DATA credential only -- no PMUS key, no
+  # LIVE_TRADING_ENABLED, no Kalshi key. When it is up, set
+  # UNIVERSAL_MARKET_PLANE=off on sportsassets-workers so exactly one runtime
+  # holds the shards. The PMX_* values are entered in the dashboard (they
+  # cannot be copied between services by this blueprint).
+  - type: worker
+    name: sportsassets-market-plane
+    runtime: docker
+    plan: starter
+    rootDir: .
+    dockerfilePath: ./backend/Dockerfile
+    dockerCommand: python -m sportsassets.workers.universal_market_plane
+    envVars:
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sportsassets-db
+          property: connectionString
+      - key: UMP_RUNTIME
+        value: DEDICATED_READ_ONLY
+      - key: UNIVERSAL_MARKET_PLANE
+        value: "on"
+      - key: INSTITUTIONAL_MD_STREAM
+        value: "on"
+      - key: PMX_CLIENT_ID
+        sync: false
+      - key: PMX_KEY_ID
+        sync: false
+      - key: PMX_PRIVATE_KEY_B64
+        sync: false
+
   # Edge-engine shadow runner (logs would-be fills; never places orders).
   # Requires EDGE_ODDS_API_KEY. Suspend this service to pause shadow logging.
   - type: worker
