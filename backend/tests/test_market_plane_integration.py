@@ -558,7 +558,8 @@ def test_coverage_and_assignment_over_the_registry():
             assert plan["shards_required_for_all"] == 1
             assigned = await R.assigned_contracts(c)
             assert [r["contract_id"] for r in assigned] == ["mp-1"]
-            due = await R.refdata_due(c, now=now, unlisted_retry_s=3600)
+            due = await R.refdata_due(c, now=now, unlisted_retry_s=3600,
+                                      limit=100000)
             assert "mp-3" in due and "mp-1" not in due and "mp-2" not in due
             # the snapshot + Radar with no stream armed
             snap = await W.snapshot(c, None, {"coverage": cov, "plan": plan,
@@ -577,7 +578,16 @@ def test_coverage_and_assignment_over_the_registry():
             tu = fr["total_universe"]
             assert tu["active_contracts"] == cov["active"]
             assert tu["streamed"] == 0 and tu["overflow"] == 0
-            assert tu["stale_or_unread"] == cov["active"]
+            # nothing streamed here; the shared database's REQUIRED markets
+            # (other proofs' paper positions) may be current via the REST
+            # recovery read or named external -- the identity, not a count
+            al = (cov.get("freshness_tiers") or {}).get("ALL") or {}
+            assert tu["stale_or_unread"] == cov["active"] - int(
+                al.get("PMX_GRPC") or 0) - int(
+                al.get("REST_RECOVERY") or 0) - int(
+                al.get("EXTERNAL_DATA_UNAVAILABLE") or 0)
+            # the seeded markets alone: none current, none external
+            assert {"mp-1", "mp-2", "mp-3"} <= set(states)
             assert fr["priority_universe"]["target"] == 0.95
             cap = snap["radar"]["capacity"]
             assert cap["symbol_capacity"] == 4 * 1000
