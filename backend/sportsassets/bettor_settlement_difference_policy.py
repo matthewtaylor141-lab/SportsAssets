@@ -225,7 +225,13 @@ def rate(family) -> dict:
         status = "UNMEASURED_CONSERVATIVE_PRIOR"
     return {"held": True, "family": fam, "q_hi": q_hi,
             "q_hi_is": status, "min_fixtures": SER.MIN_FIXTURES,
-            "measured": dict(iv, k_fixtures=list(m["k_fixtures"])),
+            # the exceptional fixtures are CITED BY REFERENCE, never copied
+            # into every priced decision: a fixture slug (aec-mlb-bal-nyy-...)
+            # stored on each MLB decision made every one read as a position
+            # in that fixture's teams to row searches (the persona chat)
+            "measured": dict(iv, k_fixtures_count=len(m["k_fixtures"]),
+                             k_fixtures_ref=("bettor_settlement_difference_"
+                                             "policy.MEASURED[%r]" % fam)),
             "prior_floor_upper": floor,
             "prior_floor_basis": ("settlement_exception_risk."
                                   "PRIOR_FLOOR_UPPER: the exact 95%% upper "
