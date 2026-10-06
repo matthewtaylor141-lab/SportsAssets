@@ -1217,3 +1217,9 @@ tests/test_capital_readiness_feeds.py
 tests/test_universal_market_plane.py
 tests/test_market_plane_integration.py
 tests/test_mirror_shadow_quote_client.py
+# (settlement rule registry) per-contract PMUS / Kalshi rule evidence, the
+# GET-only Kalshi sports catalogue, the market plane's settlement state and
+# the 0.50-tie payoff vector: evidence only, no order or capital authority
+tests/test_settlement_rule_registry.py
+tests/test_kalshi_public_rules.py
+tests/test_settlement_rule_registry_integration.py

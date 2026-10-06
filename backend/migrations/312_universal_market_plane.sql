@@ -32,6 +32,19 @@ CREATE TABLE IF NOT EXISTS market_plane_registry (
     coverage_why text,
     coverage_at timestamptz,
     content_sha text,
+    -- (settlement rule registry) the contract's settlement state, from
+    -- evidence only (market_plane.settlement): the latest decision attest
+    -- verdict, else the captured CURRENT rules text compared condition ->
+    -- payout against the captured bookmaker terms. Decision-time attest
+    -- remains the authority for trading; this is coverage evidence.
+    settlement_state text CHECK (settlement_state IS NULL OR settlement_state IN (
+        'SETTLEMENT_PROVEN_COMPATIBLE','SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED',
+        'MAPPED_BUT_SETTLEMENT_NOT_PROVEN','SETTLEMENT_RULE_EVIDENCE_CONFLICT',
+        'EXTERNAL_SETTLEMENT_DATA_UNAVAILABLE')),
+    settlement_why text,
+    settlement_basis text,
+    settlement_evidence jsonb,
+    settlement_at timestamptz,
     label text NOT NULL DEFAULT 'RESEARCH' CHECK(label='RESEARCH'),
     authority text NOT NULL DEFAULT 'MARKET_DATA_ONLY_NO_ORDER_AUTHORITY'
       CHECK(authority='MARKET_DATA_ONLY_NO_ORDER_AUTHORITY')
@@ -40,6 +53,8 @@ CREATE INDEX IF NOT EXISTS market_plane_registry_active_idx
   ON market_plane_registry(active,desired_subscription,contract_id);
 CREATE INDEX IF NOT EXISTS market_plane_registry_coverage_idx
   ON market_plane_registry(active,coverage_state);
+CREATE INDEX IF NOT EXISTS market_plane_registry_settlement_idx
+  ON market_plane_registry(active,settlement_state);
 CREATE INDEX IF NOT EXISTS market_plane_registry_shard_idx
   ON market_plane_registry(subscription_shard,contract_id) WHERE active AND desired_subscription;
 
@@ -57,6 +72,37 @@ CREATE TABLE IF NOT EXISTS market_plane_certification (
       CHECK(authority='MARKET_DATA_ONLY_NO_ORDER_AUTHORITY'),
     PRIMARY KEY(contract_id,fingerprint)
 );
+
+-- (settlement rule registry) THE CURRENT RULES BLOCK OF EVERY CONTRACT, as
+-- the venue published it: Polymarket US captured by the premap sweep from
+-- the event board it already reads (no extra venue request), Kalshi from the
+-- GET-only sports catalogue (rules_primary / rules_secondary). One row per
+-- contract, rewritten ONLY when the fingerprint changes (a changed rules
+-- block invalidates the prior interpretation; the change is appended to
+-- market_plane_events as RULES_CHANGED). rules_published = false with a
+-- NULL text is the venue's own listing carrying no rules field (evidence,
+-- read ok) -- never "not read".
+CREATE TABLE IF NOT EXISTS market_plane_rules (
+    contract_id text PRIMARY KEY,
+    venue text NOT NULL CHECK (venue IN ('POLYMARKET_US','KALSHI')),
+    rules_published boolean NOT NULL,
+    rules_field text,
+    rules_sha256 text,
+    rules_text text,
+    rules_secondary text,
+    parse_status text NOT NULL CHECK (parse_status IN (
+        'ESTABLISHED','PARTIAL','ABSENT','CONFLICT')),
+    evidence jsonb NOT NULL DEFAULT '{}'::jsonb,
+    parser_version text NOT NULL,
+    source text NOT NULL,
+    observed_at timestamptz NOT NULL,
+    CHECK (rules_published = (rules_sha256 IS NOT NULL)),
+    label text NOT NULL DEFAULT 'RESEARCH' CHECK(label='RESEARCH'),
+    authority text NOT NULL DEFAULT 'MARKET_DATA_ONLY_NO_ORDER_AUTHORITY'
+      CHECK(authority='MARKET_DATA_ONLY_NO_ORDER_AUTHORITY')
+);
+CREATE INDEX IF NOT EXISTS market_plane_rules_venue_idx
+  ON market_plane_rules(venue,parse_status);
 
 CREATE TABLE IF NOT EXISTS market_plane_events (
     event_key text PRIMARY KEY,

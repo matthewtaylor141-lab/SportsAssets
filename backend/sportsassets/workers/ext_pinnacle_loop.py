@@ -4335,6 +4335,20 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
     out["rules_text"] = rules.get("rules_text")
     out["rules_source"] = rules.get("source")
     out["rules_read"] = rules
+    # STRUCTURED RULE EVIDENCE for coverage / audit (settlement rule
+    # registry). `attest` still owns compatibility -- it reads none of these
+    # keys -- and this evidence layer grants no authority. Pure: no request.
+    try:
+        from .. import settlement_rule_registry as _SRR
+        ev = _SRR.polymarket_us_rule_evidence(
+            out["rules_text"], sports_market_type=out.get("sports_type"))
+        ev["rules_field"] = rules.get("rules_field")
+        out["structured_rules"] = ev
+        out["rules_sha256"] = ev.get("rules_sha256")
+    except Exception as exc:                                   # noqa: BLE001
+        out["structured_rules"] = {
+            "status": "ABSENT", "error": type(exc).__name__}
+        out["rules_sha256"] = None
     return out
 
 
@@ -9501,7 +9515,11 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
         "venue_rules_read": bool(rules_text),
         "venue_rules_source": (vevid or {}).get("rules_source"),
         "venue_rules_text": (str(rules_text)[:4000] if rules_text else None),
-        "venue_rules_sha256": MF.rules_sha256(rules_text)}
+        "venue_rules_sha256": MF.rules_sha256(rules_text),
+        # (settlement rule registry) provenance only; the verdict above is
+        # unchanged by it
+        "venue_rules_fingerprint": (vevid or {}).get("rules_sha256"),
+        "venue_rules_structured": (vevid or {}).get("structured_rules")}
     if calibration_only is not None:
         try:
             vid = await ext.persist(conn, rec)
@@ -11397,7 +11415,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 venue_rules_from_cache=((vevid or {}).get("rules_read")
                                         or {}).get("from_cache"),
                 venue_rules_error=((vevid or {}).get("rules_read")
-                                   or {}).get("error"))
+                                   or {}).get("error"),
+                # (settlement rule registry) the STRUCTURED reading of the
+                # same words and its whitespace-normalised fingerprint, for
+                # provenance and coverage only: `attest` above decided the
+                # verdict and this changes nothing in it
+                venue_rules_fingerprint=(vevid or {}).get("rules_sha256"),
+                venue_rules_structured=(vevid or {}).get("structured_rules"))
             # Persist actual source + epoch/clocks beside settlement evidence.
             # Invalid authority/input removes probability as well as admission:
             # paper policies may intentionally disregard other lane refusals.

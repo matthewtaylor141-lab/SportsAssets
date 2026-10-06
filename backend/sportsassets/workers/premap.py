@@ -181,6 +181,11 @@ FAST_PARTITION_MAX_SECONDS = float(
 #: read as OFFSET_CEILING_REACHED (truncated, partitioned), never as the end.
 MAX_OFFSET = int(os.environ.get("PREMAP_MAX_OFFSET", "0"))
 
+#: (settlement rule registry) running counts of the rules-text capture the
+#: sweep makes from payloads it already holds (market_plane.rules); read by
+#: the market plane's snapshot. Process-local evidence, no authority.
+RULES_CAPTURE: dict = {}
+
 
 def _items(resp, key: str) -> list:
     """The SDK returns either {"events": [...]} / {"markets": [...]} or a
@@ -6804,6 +6809,24 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         added = [m for m in got if m.get("slug") and m.get("slug") not in have]
         return inline + added, len(inline) + len(added)
 
+    async def capture_rules(ms):
+        """market_plane.rules.capture_pmus_markets over markets this sweep
+        already holds (no request). Off with PREMAP_RULES_CAPTURE=off.
+        Never raises."""
+        if str(os.environ.get("PREMAP_RULES_CAPTURE", "on")).strip().lower() \
+                in ("off", "0", "false", "no"):
+            return
+        try:
+            from ..market_plane import rules as _mpr
+            got = await _mpr.capture_pmus_markets(pool, ms)
+        except Exception as exc:  # noqa: BLE001 — evidence only, never a row
+            got = {"error": type(exc).__name__}
+        for k, v in (got or {}).items():
+            if isinstance(v, int):
+                RULES_CAPTURE[k] = RULES_CAPTURE.get(k, 0) + v
+            else:
+                RULES_CAPTURE["last_%s" % k] = v
+
     async def _write_event(ev, pass_name):
         """One event of any pass: dropped by name or written row by row, its
         tally finished whatever happens. Returns the rows written; raises
@@ -6956,6 +6979,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 tally.market_dropped(**cell,
                                      reason=vc.D_MARKET_ROWS_REFUSED_BY_SIDE_KEY)
         tally.sides_written += written
+        # THE RULES TEXT THIS PAYLOAD ALREADY CARRIES (settlement rule
+        # registry): each kept market's own `description` / rules field goes
+        # to market_plane_rules, rewritten only when its fingerprint changes.
+        # No venue request; never raises; a capture failure costs no row.
+        await capture_rules([m for m, _cell in markets])
         if written == 0:
             tally.event_dropped(ev, vc.D_EVENT_NO_ROW_WRITTEN)
             return 0
@@ -7270,6 +7298,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                                                     str(exc_m)[:160]))
                             continue
                         fb_failures = 0
+                        await capture_rules([m])
                         seen_rows += n_w
                         tally.sides_written += n_w
                         if rows:

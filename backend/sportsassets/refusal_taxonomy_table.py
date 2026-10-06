@@ -1431,6 +1431,30 @@ TABLE = {
     "VOICE_PROVIDER_FAILED": (S, DATA, "OUT_OF_FUNNEL"),
     "VOICE_UNAVAILABLE_SERVER_KEY_NOT_CONFIGURED": (S, DATA, "OUT_OF_FUNNEL"),
     "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (settlement rule registry) the market plane's settlement-state whys
+    # (market_plane.settlement, coverage evidence only -- decision-time
+    # attest remains the trading authority) ...
+    "NO_SETTLEMENT_COMPARISON_RECORDED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_NOT_CAPTURED": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_SILENT_ON": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "BOOKMAKER_TERMS_NOT_HELD": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "INCOMPATIBLE_NOT_PRICEABLE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULES_CHANGED_SINCE_DECISION_ATTEST": (S, SET,
+                                            "SETTLEMENT_COMPATIBILITY"),
+    "TIE_RULE_NOT_COVERED_BY_THE_TERMS_COMPARISON": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "KALSHI_CONTRACT_NOT_MAPPED_TO_A_BETTOR_FAMILY": (S, MAP,
+                                                      "VENUE_MAPPING"),
+    "RULE_EVIDENCE_CONFLICT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_SELF_CONTRADICTORY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # ... and the GET-only Kalshi sports catalogue's named truncations and
+    # its transport's non-GET refusal (kalshi_catalogue)
+    "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),
+    "KALSHI_CATALOGUE_SERIES_LIST_NOT_READ": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_CURSOR_REPEATED": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_PAGE_CAP": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
