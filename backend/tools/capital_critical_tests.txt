@@ -1172,3 +1172,7 @@ tests/test_agent_scorecards.py
 # protection; fully sold -> closed everywhere; no duplicate resting fills; no
 # new PAPER ENTRY while protection continuity / packets have failed.
 tests/test_p0_xavier_packet_and_reconciliation.py
+tests/test_p1_pinnapi_canonical_names.py
+tests/test_p1_priced_settlement_difference.py
+tests/test_p1_read_bounded_by_the_probability_deadline.py
+tests/test_p1_wnba_league_team_table.py

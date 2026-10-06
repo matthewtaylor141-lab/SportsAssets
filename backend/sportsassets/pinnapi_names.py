@@ -77,7 +77,7 @@ VERSION = "PINNAPI_CANONICAL_NAMES_V1"
 SOCCER_AFFILIATION = frozenset(("fc", "sc", "cf", "afc"))
 
 #: THE NCAAF PROVIDER'S RENDERING: (school, mascot), every name the metered
-#: provider sent in 14 days (research-sql run 37478502753 section 1a, 139
+#: provider sent in 14 days (research-sql run 37478502753 section 1a, 130
 #: names) plus the remaining FBS programmes in the same "School Mascot" form.
 #: The canonical school is the provider's own school words, folded.
 NCAAF_SCHOOL_MASCOT = (
@@ -286,9 +286,13 @@ def _tokens(value, family) -> set:
     return {t for t in raw if len(t) > 1 and t not in ABSENCE_STOP}
 
 
+#: the grammatical words an acronym skips ("Clube de Regatas Brasil" is CRB)
+_ACRONYM_SKIP = frozenset(("de", "do", "da", "the", "of", "y", "e"))
+
+
 def _acronym(value) -> str:
     toks = [t for t in _fold(value).split()
-            if len(t) > 1 and t not in ABSENCE_STOP]
+            if len(t) > 1 and t not in _ACRONYM_SKIP]
     return "".join(t[0] for t in toks) if len(toks) >= 2 else ""
 
 

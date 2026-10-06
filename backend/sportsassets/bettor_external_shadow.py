@@ -912,6 +912,8 @@ STAGES = (
         "ONE_CLOCK_IS_NOT_MEASURED",
         # Lever A: already past the 30 s rule before any venue read.
         "QUOTE_STALE_ON_ARRIVAL",
+        # (P1) the read bounded by the candidate's probability deadline
+        "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
         # THE VENUE READ'S OWN FRESHNESS REFUSALS. They used to stop the lane
         # before any row existed, so no row carried them; a calibration-only
         # record now does, and without these the census would attribute it
@@ -1187,6 +1189,9 @@ EVALUABILITY_OF = {
     # A MEASURED AGE PAST THE LIMIT, measured before the venue read instead
     # of after it. The same decision as QUOTE_STALE, taken earlier.
     "QUOTE_STALE_ON_ARRIVAL": DECIDED,
+    # (P1) the same measured age, taken at the read's own deadline: the
+    # quote's 30 s budget ran out before the venue read could finish
+    "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH": DECIDED,
     # THE GLOBAL MATCH FOUND TWO ROWS AND COULD NOT CHOOSE. Ours: the match
     # ignores dates, which is why the venue-native path exists.
     "VENUE_MAPPING_AMBIGUOUS": COULD_NOT_EVALUATE,

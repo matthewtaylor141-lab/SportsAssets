@@ -740,6 +740,11 @@ TABLE = {
     "QUOTE_HAS_NO_TIMESTAMP": (S, DATA, "PROBABILITY"),
     "QUOTE_STALE": (S, FRESH, "PROBABILITY"),
     "QUOTE_STALE_ON_ARRIVAL": (S, FRESH, "FRESHNESS"),
+    # (P1) a collector venue read bounded by its candidate's probability
+    # deadline (ext_pinnacle_loop.READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_
+    # RULE): the quote's 30 s budget ran out before the read could finish
+    "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH": (
+        S, FRESH, "FRESHNESS"),
     "RAIL_HEADROOM_NOT_MEASURED": (S, DATA, "ORDER"),
     "REAL_EVENT_NOT_ESTABLISHED": (S, MAP, "VENUE_MAPPING"),
     "REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE": (E, RAIL, "ORDER"),

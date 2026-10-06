@@ -275,6 +275,28 @@ def check_before_dispatch(*, read_id: str = None, deadline_epoch_s=None,
     return {"waited_s": wait, "gated": True, "reason": g["reason"]}
 
 
+def check_deadline_after_pacing(*, read_id: str = None, now: float = None
+                                ) -> None:
+    """Refuse a request whose read's deadline passed while it waited for the
+    pacer's gap (R_DEADLINE_PASSED, by name, as `check_before_dispatch`
+    refuses one that passed before). A read with no deadline: nothing."""
+    st = read_state(read_id) if read_id else None
+    dl = (st or {}).get("deadline_epoch_s")
+    if dl is None:
+        return
+    wall = time.time() if now is None else float(now)
+    if wall >= float(dl):
+        detail = {"refusal": R_DEADLINE_PASSED, "now_epoch_s": wall,
+                  "deadline_epoch_s": float(dl),
+                  "stage": "AFTER_THE_PACER_QUEUE",
+                  "why": ("the decision deadline passed while this request "
+                          "waited for the pacer's gap, so sending it could "
+                          "only produce evidence for a decision already "
+                          "abandoned")}
+        _note_gate_refusal(read_id, detail)
+        raise VenueGateRefusal(R_DEADLINE_PASSED, detail)
+
+
 def _note_gate_refusal(read_id, detail) -> None:
     with _LOCK:
         _totals["refused_by_gate"] += 1
@@ -393,6 +415,12 @@ if httpx is not None:
                     self._pace()
                 except Exception:                              # noqa: BLE001
                     pass
+            # 2b · THE DEADLINE, AGAIN, AFTER THE PACER'S QUEUE (P1): the
+            #      wait for the gap can outlast the caller's deadline, and a
+            #      request sent after it is the failure step 1 exists to
+            #      prevent, merely reached through the queue. Only a read
+            #      that carries a deadline is affected.
+            check_deadline_after_pacing(read_id=rid)
             # 3 · COUNTED BEFORE THE SEND.
             note_dispatch(rid)
             resp = self._inner.handle_request(request)
@@ -417,6 +445,7 @@ else:                                                          # pragma: no cove
 __all__ = ["PacedTransport", "begin_read", "end_read", "read_state",
            "attempts_for_read", "totals", "hold_until", "gate_state",
            "clear_hold", "check_before_dispatch", "check_write_lock",
+           "check_deadline_after_pacing",
            "READ_ONLY_METHODS", "note_dispatch",
            "note_response", "bind_read", "current_read",
            "VenueGateRefusal", "R_COOLDOWN_EXCEEDS_DEADLINE",
