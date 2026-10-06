@@ -712,10 +712,16 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
                      "   AND strategy = $2 GROUP BY 1",
                      acct["session_id"], DEREK)}
         assert set(derek) == set(slugs.values()), derek
-        d_why = {w for _n, w in derek.values()}
-        assert len(d_why) == 1 and "ENTER" not in d_why
+        # the stale-probability market: Derek names the stale probability
+        # itself (its own freshness gate, checked before the research model
+        # since the priced settlement-difference policy reached it); every
+        # other market refuses with one reason
+        assert derek[slugs["stale"]][1] == stale, derek
+        d_why = {w for s_, (_n, w) in derek.items() if s_ != slugs["stale"]}
+        assert len(d_why) == 1 and "ENTER" not in d_why, derek
         d_why = d_why.pop()
         n_derek = sum(n for n, _w in derek.values())
+        n_derek_why = n_derek - derek[slugs["stale"]][0]
         API._CACHE.clear()
         allg = await API.opportunity_funnel(sleeve="INVESTMENT", strategy=None,
                                             hours=1.0)
@@ -729,15 +735,19 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
         assert t["entered_unique"] == 1
         ob = {b["blocker"]: b for b in ov["blockers"]}
         # Derek's refusal binds all seven -- CG's ENTER does not hide it
-        assert ob[d_why]["unique_opportunities"] == 7
-        assert ob[d_why]["bound_by_strategy"] == {DEREK: 7}
+        assert ob[d_why]["unique_opportunities"] == 6
+        assert ob[d_why]["bound_by_strategy"] == {DEREK: 6}
         assert ob[d_why]["entered_by_another_strategy"] == 1
         # ...and Derek's later rows do not overwrite CG's own blockers
         for code, n in ((PB.R_FEES_CONSUME_EDGE, 2), (settle, 2),
-                        (stale, 1), (PB.R_EDGE, 1)):
+                        (PB.R_EDGE, 1)):
             assert ob[code]["unique_opportunities"] == n, code
             assert ob[code]["bound_by_strategy"] == {CG: n}, code
             assert ob[code]["strategies"] == [CG]
+        # the stale probability binds the one market for both strategies
+        assert ob[stale]["unique_opportunities"] == 1
+        assert ob[stale]["bound_by_strategy"] == {CG: 1, DEREK: 1}
+        assert ob[stale]["strategies"] == sorted([CG, DEREK])
         # the per-strategy views are the strategy funnels exactly
         per = allg["data"]["by_strategy"]
         assert set(per) == {CG, DEREK}
@@ -751,12 +761,12 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
         from sportsassets.agents import paper_ops_audit as POA
         monkeypatch.setattr(U, "ACCOUNT", acct["account_id"])
         act = await U.activity(conn, now - 3600.0, now + 60.0)
-        assert act["refusals"][0] == (d_why, 7)
+        assert act["refusals"][0] == (d_why, 6)
         top3 = {r for r, _n in act["refusals"]}
         assert top3 == {d_why, PB.R_FEES_CONSUME_EDGE, settle}
         # (the rows would have ranked the stale probability second)
         assert stale not in top3
-        assert act["refusal_evaluations"][d_why] == n_derek
+        assert act["refusal_evaluations"][d_why] == n_derek_why
         # Audrey's operational funnel: per strategy, reasons by unique
         # opportunity, the rows as reason_evaluations
         fun = await POA.funnel(conn, acct["account_id"], since=now - 3600.0)
@@ -769,7 +779,7 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
         assert cg["reason_evaluations"][PB.R_EDGE] == 3
         assert list(cg["reasons"])[:2] == sorted([PB.R_FEES_CONSUME_EDGE,
                                                   settle])
-        assert fun[DEREK]["reasons"] == {d_why: 7}
+        assert fun[DEREK]["reasons"] == {d_why: 6, stale: 1}
         # the TRAINING funnel holds none of it
         API._CACHE.clear()
         tr = await API.opportunity_funnel(sleeve="TRAINING", strategy=None,
