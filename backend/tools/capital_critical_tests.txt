@@ -1181,3 +1181,4 @@ tests/test_p0_xavier_packet_and_reconciliation.py
 tests/test_venue_key_seed_decoding.py
 tests/test_ops_canary.py
 tests/test_fresh_database_migrates.py
+tests/test_command_position_closed_and_ipad.py
