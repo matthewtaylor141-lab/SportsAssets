@@ -187,6 +187,25 @@ async def counterfactual(conn, acct, *, pnl, at, outcome="LOST",
     return key
 
 
+async def variant(conn, acct, eid, *, name="MAKER", at, slug,
+                  pnl=None, ev=1.0):
+    vid = await conn.fetchval(
+        "INSERT INTO paper_counterfactual_variants (account_id, strategy, "
+        " eval_id, stage, verdict, us_market_slug, holding_side, variant, "
+        " style, qty, vwap, p_used, fill_probability, cost_usd, fees_usd, "
+        " expected_ev_usd, decided_at) VALUES ($1,$2,$3,'LEDGER','ENTER',$4,"
+        " 'LONG',$5,'MAKER',10,0.38,0.6,0.3,3.8,0,$6,to_timestamp($7)) "
+        "RETURNING variant_id", acct["account_id"], DEREK, eid, slug, name,
+        ev, float(at))
+    if pnl is not None:
+        await conn.execute(
+            "INSERT INTO paper_counterfactual_variant_outcomes (variant_id, "
+            " outcome, payout_per_contract, counterfactual_pnl_usd, "
+            " settled_at) VALUES ($1,'WON',1,$2,to_timestamp($3))", vid, pnl,
+            float(at) + 4 * HOUR)
+    return vid
+
+
 async def court_rows(conn, decision_id):
     return [dict(r) for r in await conn.fetch(
         "SELECT * FROM capital_readiness_shadow_court WHERE decision_id = $1"
@@ -216,6 +235,7 @@ def test_court_rows_include_cash_and_use_decision_time_values_only():
             late = await model(conn, acct, "CALIBRATION",
                                cal_payload(n=5000, brier=0.0), at=t + 60)
             eid, slug = await evaluation(conn, acct, at=t, ev=1.5, pf=0.9)
+            await variant(conn, acct, eid, at=t, slug=slug)
             cid, _ = await evaluation(conn, acct, at=t, verdict="CASH",
                                       ev=-0.2)
             got = await O.observe(conn, now=NOW, account_id=acct["account_id"],
@@ -226,6 +246,7 @@ def test_court_rows_include_cash_and_use_decision_time_values_only():
             alts = json.loads(rows[0]["alternatives"])
             names = [a["name"] for a in alts]
             assert "CASH" in names and "ENTER" in names
+            assert "VARIANT:MAKER" in names          # 311 variant ledger
             enter = next(a for a in alts if a["name"] == "ENTER")
             fz = enter["frozen_at_decision"]
             assert fz["calibration_model_id"] == early != late
@@ -265,6 +286,7 @@ def test_outcome_scoring_appends_a_new_court_row_never_an_update():
                        qty=10, price=0.40, fee=0.1, at=t + 2)
             eid, _ = await evaluation(conn, acct, at=t, slug=slug,
                                       order_key=key)
+            await variant(conn, acct, eid, at=t, slug=slug, pnl=6.2)
             await O.observe(conn, now=NOW, account_id=acct["account_id"],
                             readers=GREEN)
             first = await court_rows(conn, "ppe:%d" % eid)
@@ -283,6 +305,7 @@ def test_outcome_scoring_appends_a_new_court_row_never_an_update():
             assert res["basis"] == "PAPER_ENTRY_FILLS_HELD_TO_SETTLEMENT"
             # 10 x 1.00 - (4.00 + 0.10)
             assert abs(res["chosen_realized_usd"] - 5.9) < 1e-6
+            assert res["realized_by_alternative"]["VARIANT:MAKER"] == 6.2
             assert rows[1]["scored_at"] is not None
             # scored once
             await O.observe(conn, now=NOW + 120,

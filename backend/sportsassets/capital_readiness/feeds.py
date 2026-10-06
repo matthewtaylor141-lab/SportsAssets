@@ -14,7 +14,10 @@ THE FOUR FEEDS (sources, all already persisted by the paper runtime):
     the bind's per-entry all-in EV, fill probability, hold, learned adverse
     selection and residual haircut AS RECORDED AT THE DECISION, plus the
     newest profitability model fitted AT OR BEFORE the decision (never a
-    later one) for the epistemic inputs. CASH is always an alternative.
+    later one) for the epistemic inputs. CASH is always an alternative; the
+    311 counterfactual entry variants recorded with the evaluation
+    (POLICY_SIZE, HALF_SIZE, MAKER) are alternatives too, scored on their
+    own settled variant outcomes.
     Outcomes: paper fills held to settlement (ENTER), the 305 shadow
     counterfactual outcome (refused trades), else the decision-time terms
     at the settled payout.
@@ -260,9 +263,45 @@ def entry_terms(e: dict) -> dict:
                          else cap_qty * per)}
 
 
-def court_alternatives(e: dict, cal: dict | None, exe: dict | None):
-    """(chosen, alternatives) for one evaluation; CASH always present."""
+ENTRY_VARIANTS = ("POLICY_SIZE", "HALF_SIZE", "MAKER")
+
+
+def variant_alternative(v: dict, e: dict, epi: dict, frozen: dict) -> dict:
+    """One 311 counterfactual entry variant as a court alternative: its own
+    decision-time quantity, style, cost, fees and expected EV."""
+    q, p = _num(v.get("qty")), _num(v.get("p_used"))
+    cost, fees = _num(v.get("cost_usd")), _num(v.get("fees_usd"))
+    capital = None if cost is None else cost + (fees or 0.0)
+    return {"name": "VARIANT:%s" % v.get("variant"),
+            "expected_net_usd": _num(v.get("expected_ev_usd")),
+            "capital_usd": capital if capital and capital > 0 else None,
+            "expected_hold_hours": _num(e.get("expected_hold_hours")),
+            "uncertainty_sigma_usd": (None if q is None or p is None else
+                                      q * math.sqrt(max(0.0, p * (1 - p)))),
+            "epistemic": {"confidence_factor": epi["confidence_factor"],
+                          "status": epi["status"]},
+            "terms": {"variant_id": v.get("variant_id"),
+                      "style": v.get("style"), "qty": q, "vwap": _num(
+                          v.get("vwap")), "fill_probability": _num(
+                          v.get("fill_probability"))},
+            "frozen_at_decision": dict(
+                frozen, source="paper_counterfactual_variants (311)")}
+
+
+def court_alternatives(e: dict, cal: dict | None, exe: dict | None,
+                       variants: list | None = None):
+    """(chosen, alternatives) for one evaluation; CASH always present. The
+    311 entry variants recorded with the evaluation (POLICY_SIZE,
+    HALF_SIZE, MAKER) join as alternatives; AS_BOUND IS the ENTER
+    alternative and only supplies its exact decision-time capital."""
     t = entry_terms(e)
+    vs = {v.get("variant"): v for v in variants or []}
+    ab = vs.get("AS_BOUND")
+    if ab is not None and e.get("verdict") == "ENTER":
+        c = _num(ab.get("cost_usd"))
+        if c is not None and c + (_num(ab.get("fees_usd")) or 0.0) > 0:
+            t["capital_usd"] = c + (_num(ab.get("fees_usd")) or 0.0)
+            t["capital_basis"] = "AS_BOUND_VARIANT_COST_PLUS_FEES"
     epi = evaluation_epistemic(e, cal, exe)
     frozen = {"eval_id": e.get("eval_id"), "stage": e.get("stage"),
               "strategy": e.get("strategy"), "verdict": e.get("verdict"),
@@ -283,9 +322,47 @@ def court_alternatives(e: dict, cal: dict | None, exe: dict | None):
                            "status": epi["status"],
                            "components": epi["components"]},
              "terms": t, "frozen_at_decision": frozen}
-    cash = {"name": "CASH", "frozen_at_decision": frozen}
+    alts = [enter]
+    for name in ENTRY_VARIANTS:
+        if name in vs:
+            alts.append(variant_alternative(vs[name], e, epi, frozen))
+    alts.append({"name": "CASH", "frozen_at_decision": frozen})
     chosen = "ENTER" if e.get("verdict") == "ENTER" else "CASH"
-    return chosen, [enter, cash]
+    return chosen, alts
+
+
+async def evaluation_variants(conn, eval_ids) -> dict:
+    """{eval_id: [variant rows]} from the 311 variant ledger (decision-time
+    rows only; empty without migration 311)."""
+    ids = sorted({int(i) for i in eval_ids if i is not None})
+    if not ids or not await _has(conn, "paper_counterfactual_variants"):
+        return {}
+    out: dict = {}
+    for r in await conn.fetch(
+            "SELECT variant_id, eval_id, variant, style, qty, vwap, p_used, "
+            "       fill_probability, cost_usd, fees_usd, expected_ev_usd "
+            "  FROM paper_counterfactual_variants "
+            " WHERE eval_id = ANY($1::bigint[]) ORDER BY variant_id", ids):
+        out.setdefault(r["eval_id"], []).append(dict(r))
+    return out
+
+
+async def variant_outcomes(conn, eval_ids) -> dict:
+    """{eval_id: {"VARIANT:<name>": counterfactual P&L}} for settled 311
+    variants."""
+    ids = sorted({int(i) for i in eval_ids if i is not None})
+    if not ids or not await _has(conn, "paper_counterfactual_variant_outcomes"):
+        return {}
+    out: dict = {}
+    for r in await conn.fetch(
+            "SELECT v.eval_id, v.variant, o.counterfactual_pnl_usd "
+            "  FROM paper_counterfactual_variants v "
+            "  JOIN paper_counterfactual_variant_outcomes o "
+            "    USING (variant_id) WHERE v.eval_id = ANY($1::bigint[])", ids):
+        if r["variant"] in ENTRY_VARIANTS:
+            out.setdefault(r["eval_id"], {})["VARIANT:%s" % r["variant"]] = \
+                float(r["counterfactual_pnl_usd"])
+    return out
 
 
 EVAL_COLUMNS = (
@@ -338,11 +415,13 @@ async def court_judgements(conn, account_id: str, *, now: float,
         " ORDER BY e.eval_id LIMIT $4", account_id, _ts(now - window_s),
         COURT_PREFIX, int(limit))]
     models = _Models(conn, account_id)
+    variants = await evaluation_variants(conn, [e["eval_id"] for e in rows])
     courts = []
     for e in rows:
         cal = await models.at("CALIBRATION", e["evaluated_at"])
         exe = await models.at("EXECUTION", e["evaluated_at"])
-        chosen, alts = court_alternatives(e, cal, exe)
+        chosen, alts = court_alternatives(e, cal, exe,
+                                          variants.get(e["eval_id"]))
         court = SC.judge(decision_id=COURT_PREFIX + str(e["eval_id"]),
                          chosen=chosen, alternatives=alts)
         courts.append({"court": court,
@@ -458,6 +537,7 @@ async def court_outcomes(conn, account_id: str, *,
             account_id, ids)}
     payouts = await settled_payouts(conn, account_id, {
         (e["us_market_slug"], e["holding_side"]) for e in evals.values()})
+    vouts = await variant_outcomes(conn, list(evals))
     scored = []
     for r in rows:
         try:
@@ -473,11 +553,15 @@ async def court_outcomes(conn, account_id: str, *,
                  "shadow_winner": r["shadow_winner"],
                  "disagreement": r["disagreement"],
                  "alternatives": _j(r["alternatives"]) or []}
-        res = SC.score_outcome(court, {"ENTER": real["ENTER"],
-                                       "CASH": real["CASH"]})
+        realized = dict(vouts.get(e["eval_id"]) or {},
+                        ENTER=real["ENTER"], CASH=real["CASH"])
+        res = SC.score_outcome(court, realized)
         res.update(basis=real["basis"], settled_at=real.get("settled_at"),
-                   realized_by_alternative={"ENTER": C.rnd(real["ENTER"]),
-                                            "CASH": 0.0})
+                   realized_by_alternative={k: C.rnd(v)
+                                            for k, v in realized.items()},
+                   variant_basis=("paper_counterfactual_variant_outcomes "
+                                  "(311)" if vouts.get(e["eval_id"])
+                                  else None))
         scored.append({"court": court, "result": res,
                        "decided_at": _epoch(r["decided_at"])})
     return {"status": "OK", "why": None, "scored": scored,

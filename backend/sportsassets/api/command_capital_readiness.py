@@ -90,10 +90,13 @@ async def _sections(conn) -> dict:
         out["shadow_court"] = {"status": "EMPTY",
                                "why": "MIGRATION_310_NOT_APPLIED"}
     if await _exists(conn, "capital_readiness_scale_trials"):
-        rows = await conn.fetch(
-            "SELECT * FROM capital_readiness_scale_trials WHERE computed_at = "
-            " (SELECT max(computed_at) FROM capital_readiness_scale_trials) "
-            " ORDER BY scope_key, capital_usd")
+        last = await conn.fetchrow(
+            "SELECT scope_key, computed_at FROM capital_readiness_scale_trials"
+            " ORDER BY computed_at DESC, trial_id DESC LIMIT 1")
+        rows = [] if last is None else await conn.fetch(
+            "SELECT * FROM capital_readiness_scale_trials WHERE scope_key = $1"
+            "   AND computed_at = $2 ORDER BY capital_usd",
+            last["scope_key"], last["computed_at"])
         out["scale_twin"] = {"status": "OK" if rows else "EMPTY",
                              "why": None if rows else "NO_SCALE_TRIALS",
                              "rows": [_row(r) for r in rows]}
