@@ -455,6 +455,36 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
                        fee_fn=None, now: float | None = None,
                        locked_check=None, exclusive_fixture: bool = False,
                        one_live_entry_per_fixture: bool = False) -> dict:
+    """`_submit_order` (below), then -- for a REFUSED ENTRY BUY -- the
+    profitability instrumentation (bettor_capital_authority, migration 305):
+    the refusal's census row (strategy, contract, side, fixture, edge,
+    fees, execution cost, executable EV, the exact refusal) and, when the
+    refusal is a missing capital authority on an otherwise eligible order,
+    its SHADOW_COUNTERFACTUAL. Both are evidence only, each under its own
+    savepoint: they never reserve cash, never write a paper order and never
+    change the result returned."""
+    got = await _submit_order(
+        conn, order, caps=caps, fee_fn=fee_fn, now=now,
+        locked_check=locked_check, exclusive_fixture=exclusive_fixture,
+        one_live_entry_per_fixture=one_live_entry_per_fixture)
+    if not got.get("ok") and order.get("role") == "ENTRY" \
+            and order.get("direction") == "BUY":
+        try:
+            from . import bettor_capital_authority as CA
+            o = dict(order, strategy=order.get("strategy")
+                     or DEFAULT_STRATEGY)
+            await CA.after_ledger_refusal(
+                conn, o, got, at=float(now if now is not None
+                                       else time.time()))
+        except Exception:                                       # noqa: BLE001
+            pass
+    return got
+
+
+async def _submit_order(conn, order: dict, *, caps: dict | None = None,
+                        fee_fn=None, now: float | None = None,
+                        locked_check=None, exclusive_fixture: bool = False,
+                        one_live_entry_per_fixture: bool = False) -> dict:
     """RECORD A PAPER ORDER AND RESERVE ITS CASH, ATOMICALLY.
 
     One transaction: the account lock, the idempotency check, the caps, the
@@ -511,6 +541,7 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
         cs = await cash_state(conn, acct)
         reserve = Decimal(0)
         lifecycle = None
+        authority = None
         if o["direction"] == "BUY" and o.get("role") == "ENTRY":
             # THE STRATEGY LIFECYCLE (migration 290), UNDER THE LOCK: an
             # ADDITIONAL gate on top of the allowlist and the entry switch.
@@ -530,6 +561,18 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
             if D(lifecycle["qty"]) < qty:
                 qty = D(lifecycle["qty"])
                 o["qty"] = f(qty)
+            # PAPER CAPITAL AUTHORITY (migration 305), UNDER THE SAME LOCK,
+            # for EVERY strategy's ENTRY: the order's own capital-eligibility
+            # evidence with executable EV after fees and execution costs
+            # > 0, no predeclared stopping rule firing NOW (re-evaluated on
+            # the positions, not the stored state), and forward economics
+            # POSITIVE. Refuse-only; unreadable = refused.
+            from . import bettor_capital_authority as CA
+            authority = await CA.ledger_entry_authority(conn, o, at=at)
+            if authority.get("refusal"):
+                return dict(authority, ok=False, under_lock=True,
+                            lifecycle=lifecycle,
+                            available_usd=f(cs["available"]))
         if o["direction"] == "BUY":
             reserve = reservation_for(qty, limit, at=at, fee_fn=fee_fn)
             chk = await _check_caps(conn, o, reserve=reserve, cs=cs,
@@ -617,7 +660,10 @@ async def submit_order(conn, order: dict, *, caps: dict | None = None,
                                 k: lifecycle.get(k) for k in (
                                     "state", "capped", "qty",
                                     "lifecycle_event_id")}}
-                               if lifecycle else {})})
+                               if lifecycle else {}),
+                            **({"capital_authority": authority.get(
+                                "capital_authority")}
+                               if authority else {})})
         if o["order_type"] == "RESTING":
             await event(conn, order_id=o["order_id"], kind="ACKNOWLEDGED",
                         at=at, simulator_version=o["simulator_version"],

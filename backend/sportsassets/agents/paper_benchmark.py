@@ -2187,6 +2187,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             levels=[{"price": t["price"], "qty": t["take"]}
                     for t in (econ or {}).get("walk") or []],
             sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn,
+            decision_id=did, threshold_edge_pp=min_edge_pp,
+            book=(None if obs is None else {
+                "book_obs_id": obs.get("obs_id"),
+                "observed_at": obs.get("observed_at")}),
             # THE POLICY'S OWN CONTRACT MATCH resolves the settlement terms:
             # the strict benchmark's needs COMPATIBLE and every rule
             # established; the completed-game policy's proves the ordinary-
@@ -2396,7 +2400,25 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         json.dumps(provenance, default=str))
     if inserted is None:
         return dict(rec, duplicate=True)
+    from .. import bettor_capital_authority as CA
+    cevidence = CA.capital_evidence(
+        capital, p=p, limit=sized.get("limit"),
+        threshold_edge_pp=min_edge_pp, basis="BENCHMARK_CAPITAL_GATE",
+        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
+        book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
+        await CA.record_refusal(
+            conn, account_id=ctx["account_id"], strategy=STRATEGY,
+            stage="DECISION", refusal=rec["refusal"], refusals=refusals,
+            decision_id=did, slug=cand.get("us_market_slug"),
+            holding_side=side, fixture=cand.get("fixture"),
+            line=cand.get("line"), scope=cand.get("scope"), p=p,
+            best_price=(levels[0]["price"] if levels else None),
+            threshold_edge_pp=min_edge_pp, evidence=cevidence,
+            expected_fees_usd=(econ or {}).get("fees_usd"),
+            executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
+            qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
     # THE ENTER IS RECORDED: from here its paper order is owed. The hook's
     # decision deadline stops applying (PD.bounded_decision); the order
@@ -2544,7 +2566,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "decided_at": at, "eligible_at": at + delay,
              "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
              "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY}
+             "strategy": STRATEGY,
+             # the decision's executable-EV evidence, re-checked by the
+             # ledger's capital authority under the account lock
+             "capital_evidence": cevidence}
     expired = None
     if canonical is not None:
         # THE PAPER ADAPTER CONSUMES THE INTENT: every order-defining field

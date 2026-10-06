@@ -1092,6 +1092,12 @@ tests/test_coverage_first_loss_census.py
 tests/test_ncaaf_native_seed_identity.py
 tests/test_capital_eligibility.py
 tests/test_strategy_lifecycle.py
+# (305) PAPER CAPITAL AUTHORITY: every paper ENTRY needs executable EV > 0,
+# no stopping rule firing at the entry and POSITIVE forward economics; a
+# strategy without capital authority learns through SHADOW_COUNTERFACTUAL
+# records (NOT_REALIZED_PNL, never a paper order); the refusal census and
+# the acceptance read.
+tests/test_capital_authority.py
 tests/test_paper_mark_freshness_classifier.py
 tests/test_paper_mark_refresh_coverage.py
 tests/test_paper_mark_refresh_cooldown.py

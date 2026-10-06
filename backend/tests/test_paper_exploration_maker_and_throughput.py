@@ -174,19 +174,40 @@ def test_sizing_keeps_entry_cost_with_fees_within_100_dollars():
 
 
 @pg
-async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
+async def test_exploration_refuses_a_losing_candidate_and_the_chain_completes(
         explore_only):
-    """0.5 pp gross at $0.50 against a 1.74 pp taker fee: the investment
-    policy would refuse; exploration ENTERS, says the EV is negative and why
-    it trades, and the whole chain runs: fill, debit, Xavier, Audrey."""
+    """0.5 pp gross at $0.50 against a 1.74 pp taker fee: since the PAPER
+    CAPITAL AUTHORITY (migration 305) exploration no longer gives paper
+    capital to a negative-EV "research cost" -- it REFUSES by the capital-
+    eligibility code and places no order. A candidate with POSITIVE
+    executable EV after fees (3 pp gross) ENTERS, and the whole chain runs:
+    fill, debit, Xavier, Audrey."""
+    from sportsassets import bettor_capital_eligibility as CE
     conn = await H.connect()
     now = time.time() + 5.0
     try:
         acct, t = await _setup(conn, "explore1", now)
-        v = await PL.valuation(conn, decided_at=now - 10, p_pin=0.505,
+        client = PL.client(t)
+        lose = await PL.valuation(conn, decided_at=now - 10, p_pin=0.505,
+                                  compatibility="INCOMPATIBLE")
+        t.set(lose["slug"], offers=[(0.50, 5000)], bids=[(0.48, 5000)])
+        p0 = await _pass(conn, acct, t, now, client)
+        assert p0["ran"] and not p0["errors"], p0["errors"]
+        d0 = await _dec(conn, acct, lose["valuation_id"], EXPLORE)
+        assert d0 is not None and d0["verdict"] == "REFUSE"
+        assert d0["refusal"] == CE.R_CE_CASH_WAIT_EV_NOT_POSITIVE
+        est0 = H.j(d0["policy_decision"])["estimate"]
+        assert est0["gross_edge_pp_at_best"] == pytest.approx(0.5)
+        assert est0["fee_per_contract_usd"] == pytest.approx(0.017375,
+                                                             abs=1e-6)
+        assert est0["expected_net_profit_usd"] < 0
+        assert est0["passes_positive_after_fees"] is False
+        assert await conn.fetchval(
+            "SELECT count(*) FROM paper_orders WHERE decision_id=$1",
+            d0["decision_id"]) == 0
+        v = await PL.valuation(conn, decided_at=now - 10, p_pin=0.53,
                                compatibility="INCOMPATIBLE")
         t.set(v["slug"], offers=[(0.50, 5000)], bids=[(0.48, 5000)])
-        client = PL.client(t)
         p1 = await _pass(conn, acct, t, now, client)
         assert p1["ran"] and not p1["errors"], p1["errors"]
         assert client.mutation_attempts == 0
@@ -200,11 +221,9 @@ async def test_exploration_enters_a_losing_candidate_and_the_chain_completes(
         assert entry_check["threshold"] is None and entry_check["target"] == 1000.0
         assert entry_check["passed"] is True
         est = pdx["estimate"]
-        assert est["gross_edge_pp_at_best"] == pytest.approx(0.5)
-        assert est["fee_per_contract_usd"] == pytest.approx(0.017375,
-                                                            abs=1e-6)
-        assert est["expected_net_profit_usd"] < 0, "a research cost"
-        assert est["passes_positive_after_fees"] is False
+        assert est["gross_edge_pp_at_best"] == pytest.approx(3.0)
+        assert est["expected_net_profit_usd"] > 0
+        assert est["passes_positive_after_fees"] is True
         assert pdx["training"] is True and pdx["training_purpose"]
         assert pdx["position_label"] == "Training / simulated execution"
         sel = pdx["selection"]
@@ -304,18 +323,23 @@ async def test_each_owner_limit_and_safeguard_refuses_by_name(explore_only,
         assert d["refusal"] == PD.DP.R_STALE
         assert d["book_obs_id"] is None
         # not sampled: refused before any book read
+        real_inclusion = PEX.inclusion_probability
         monkeypatch.setattr(PEX, "inclusion_probability", lambda n: 0.0)
         v, d = await one()
         assert d["refusal"] == PEX.R_NOT_SAMPLED and d["book_obs_id"] is None
-        monkeypatch.undo()
+        # only the sampling stub is lifted (a blanket undo() would also lift
+        # the suite's seeded capital authority, tests/conftest.py)
+        monkeypatch.setattr(PEX, "inclusion_probability", real_inclusion)
         monkeypatch.setenv(PB.ENV_FLAG, "on")
         monkeypatch.setenv(PL.S.ENV_FLAG, "on")
-        # one enters; a second valuation of the SAME fixture is refused
-        v1, d1 = await one()
+        # one enters (POSITIVE executable EV after fees: the capital
+        # authority of migration 305); a second valuation of the SAME fixture
+        # is refused
+        v1, d1 = await one(p=0.53)
         assert d1["verdict"] == "ENTER", d1["refusals"]
         t.t += 1.0
         v2 = await PL.valuation(conn, slug=v1["slug"], decided_at=now - 9,
-                                p_pin=0.505, compatibility="INCOMPATIBLE")
+                                p_pin=0.53, compatibility="INCOMPATIBLE")
         await _pass(conn, acct, t, now, client)
         d2 = await _dec(conn, acct, v2["valuation_id"], EXPLORE)
         assert d2["refusal"] == PEX.R_FIXTURE_TAKEN
