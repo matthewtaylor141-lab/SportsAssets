@@ -2983,7 +2983,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     if d is not None and d["valuation_id"] is not None:
         contract = await conn.fetchrow(
             "SELECT payout_event, payout_is_complement, observed_at, "
-            " received_at, sport_family, us_market_slug, raw_odds, "
+            " received_at, sport_family, us_market_slug, raw_odds, event_key,"
             " settlement_comparison->>'venue_rules_text' AS venue_rules_text"
             "  FROM external_valuations WHERE id=$1",
             int(d["valuation_id"]))
@@ -3079,8 +3079,13 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # THE HELD CONTRACT ON THE IN-PROCESS FEED: only an ok read under the
     # same limit becomes fresh; any refusal keeps the stale measure as is.
     try:
+        # the entry valuation's provider fixture travels with the position
+        # (pinnapi_feed_runtime.entry_fixture): identity the entry proved
         cur = await feed(
-            conn, pos=pos, at=at, max_age_s=max_age,
+            conn, pos=(pos if contract is None or not contract.get(
+                "event_key") else dict(pos,
+                                       entry_event_key=contract["event_key"])),
+            at=at, max_age_s=max_age,
             payout_event=None if contract is None
             else contract["payout_event"],
             payout_is_complement=bool(contract is not None
@@ -3092,7 +3097,8 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         return dict(stale_out, feed_refusal=cur.get("reason"),
                     feed_detail={k: cur[k] for k in (
                         "sport_id", "feed_event_id", "market_key",
-                        "designation", "provenance", "why", "error")
+                        "designation", "identity_basis", "provenance", "why",
+                        "error")
                         if cur.get(k) is not None})
     prov = cur["provenance"]
     # THE CHANGE INSTANT THE FEED'S OWN 30 s RULE WAS MEASURED FROM
@@ -3136,6 +3142,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                       "feed_event_id": cur.get("feed_event_id"),
                       "market_key": cur.get("market_key"),
                       "designation": cur.get("designation"),
+                      "identity_basis": cur.get("identity_basis"),
                       "payout_event": cur.get("payout_event"),
                       "payout_is_complement": cur.get("payout_is_complement"),
                       "p_selection": cur.get("p_selection"),

@@ -727,10 +727,38 @@ def held_event_sql() -> str:
  LIMIT 200""" % C._base_where(horizon=False))
 
 
+#: THE ENTRY'S PROVEN PROVIDER FIXTURE (closeout, production 2026-10-06):
+#: the entry valuation of a held contract was written from THIS feed under
+#: the discovery matcher's identity, keyed "pinnapi:<fixture id>"
+#: (pinnapi_discovery.seed_event). The held read re-matched the event by
+#: exact structured names only, so a fixture the entry had already proven
+#: (venue "Vila Nova" vs provider "Vila Nova FC") read NO_FEED_EVENT on every
+#: review. Only when that exact match finds nothing (or the venue's rows do
+#: not group to two teams) and the entry's key names a fixture the cache
+#: holds in the same sport, that fixture is used -- its start still checked
+#: against the venue's (START_TOLERANCE_S) and the outcome still mapped to
+#: ONE designation, or the read refuses exactly as before.
+ENTRY_FIXTURE_PREFIX = "pinnapi:"
+IDENTITY_EXACT = "EXACT_STRUCTURED_NAMES"
+IDENTITY_ENTRY_FIXTURE = "ENTRY_PROVEN_PROVIDER_FIXTURE"
+
+
+def entry_fixture(entry_event_key, view: dict, sid):
+    """The cache's fixture the entry valuation named, or None (pure)."""
+    k = str(entry_event_key or "")
+    if sid is None or not k.startswith(ENTRY_FIXTURE_PREFIX):
+        return None
+    fid = k[len(ENTRY_FIXTURE_PREFIX):]
+    if not fid:
+        return None
+    hits = [e for e in view.get(sid, []) if str(e.get("id")) == fid]
+    return hits[0] if len(hits) == 1 else None
+
+
 def held_quote(row: dict, *, event_rows=None, payout_event,
                payout_is_complement: bool,
                at: float, max_age_s: float, sport_ids, synced: bool,
-               view: dict) -> dict:
+               view: dict, entry_event_key=None) -> dict:
     """P(the held contract's payout event) from the feed, or a named
     refusal. `row` is the contract's catalogue row (HELD_CATALOGUE_SQL),
     `view` the census's feed_event_view of the owner's cache. Pure apart
@@ -757,6 +785,12 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
         sel = pay[4:-1]
     state, eid, sid = C.contract_match(row, event_rows or [row], view, subscribed_sports=set(
         sport_ids), synced=synced)
+    identity = IDENTITY_EXACT
+    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
+        fx = entry_fixture(entry_event_key, view, sid)
+        if fx is not None:
+            state, eid, identity = C.S_SUPPORTED, fx["id"], \
+                IDENTITY_ENTRY_FIXTURE
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
@@ -777,7 +811,7 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
     got = read(ev.get("quote_id", eid), key,
                evaluated_ms=float(at) * 1000.0, max_age_s=float(max_age_s))
     where = {"sport_id": sid, "feed_event_id": eid, "market_key": key,
-             "designation": des}
+             "designation": des, "identity_basis": identity}
     if not got.get("ok"):
         return dict(where, ok=False, reason=got.get("reason"),
                     provenance=got.get("provenance"))
@@ -829,7 +863,7 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
 
 async def held_moneyline(conn, *, us_market_slug, payout_event,
                          payout_is_complement: bool, at: float,
-                         max_age_s: float) -> dict:
+                         max_age_s: float, entry_event_key=None) -> dict:
     """Xavier's read for ONE held contract. No owner in this process ->
     FEED_OWNERSHIP_NOT_HELD before anything else (no catalogue read)."""
     o = _STATE.get("owner")
@@ -867,7 +901,7 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                       at=evaluated_at,
                       max_age_s=max_age_s, sport_ids=o.sport_ids,
                       synced=bool(o.cache.authority.synced),
-                      view=view)
+                      view=view, entry_event_key=entry_event_key)
 
 
 async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:

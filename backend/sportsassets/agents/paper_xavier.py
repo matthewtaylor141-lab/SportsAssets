@@ -645,7 +645,8 @@ async def _held_feed(conn, *, pos: dict, payout_event, payout_is_complement,
                 conn, us_market_slug=pos["us_market_slug"],
                 payout_event=payout_event,
                 payout_is_complement=payout_is_complement, at=at,
-                max_age_s=max_age_s)
+                max_age_s=max_age_s,
+                entry_event_key=pos.get("entry_event_key"))
     except TimeoutError:
         return {"ok": False, "reason": FR.R_ON_DEMAND_TIMEOUT}
 
