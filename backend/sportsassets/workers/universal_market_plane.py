@@ -433,21 +433,14 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
             "EXTERNAL_DATA_UNAVAILABLE") or 0)
         cur = int(t.get("PMX_GRPC") or 0) + int(t.get("REST_RECOVERY") or 0)
         return None if den <= 0 else round(cur / den, 4)
-    held = {"status": "UNREAD"}
-    try:
-        from .. import bettor_paper_freshness as PMF
-        from .. import bettor_paper_ledger as L
-        got = await PMF.read(conn, L.ACCOUNT_ID, rows_limit=0)
-        held = {"open_positions": got.get("open_positions"),
-                "markable": got.get("markable"),
-                "freshly_manageable": got.get("freshly_manageable"),
-                "external_unavailable": ((got.get("counts") or {}).get(
-                    "EXTERNAL_UNAVAILABLE") or {}).get("count"),
-                "rate": got.get("fresh_rate"),
-                "basis": "bettor_paper_freshness.read (FRESH + QUIET_VALID "
-                         "/ markable; 300 s SLA)"}
-    except Exception as exc:                                    # noqa: BLE001
-        held = {"status": "UNREAD", "why": type(exc).__name__, "rate": None}
+    # THE HELD-POSITION DENOMINATOR IS READ BY THE API, NOT HERE: this
+    # worker is a started loop and must not import the paper ledger (whose
+    # import graph reaches venue-write layers -- test_workers_hold_no_venue_
+    # write / test_paper_records_cannot_reach_the_funded_path). GET
+    # /api/command/market-plane fills it from bettor_paper_freshness.read.
+    held = {"status": "READ_BY_THE_API", "rate": None,
+            "source": "GET /api/command/market-plane (bettor_paper_freshness"
+                      ".read: FRESH + QUIET_VALID / markable; 300 s SLA)"}
     total_active = int(reg.get("active") or 0)
     streamed_fresh = int(fresh)
     via_fallback = int(al.get("REST_RECOVERY") or 0)

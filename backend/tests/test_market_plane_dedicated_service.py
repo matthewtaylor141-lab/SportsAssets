@@ -2,7 +2,9 @@
 
 Owner decision 2026-10-06: ~74,500 active markets are not solved by raising
 UMP_MAX_STREAMS inside the shared workers; the market plane runs as its own
-read-only Render service. That service receives the database and the PMX
+read-only Render service, specified in ops/render_market_plane_service.yaml
+(NOT render.yaml: a Blueprint change would redeploy the collector). That
+service receives the database and the PMX
 institutional MARKET-DATA credential only -- never a PMUS key, a Kalshi key,
 the live-trading switch or the admin token."""
 from __future__ import annotations
@@ -17,8 +19,11 @@ FORBIDDEN = ("PMUS_KEY_ID", "PMUS_SECRET_KEY", "PM_PRIVATE_KEY", "PM_FUNDER",
              "KALSHI", "FUNDED", "EXECMIRROR")
 
 
+SPEC = ROOT / "ops" / "render_market_plane_service.yaml"
+
+
 def _svc(name):
-    doc = yaml.safe_load((ROOT / "render.yaml").read_text())
+    doc = yaml.safe_load(SPEC.read_text())
     for s in doc["services"]:
         if s.get("name") == name:
             return s
@@ -39,6 +44,12 @@ def test_the_dedicated_runtime_runs_the_market_plane_read_only():
     # secrets are entered by the owner, never written in the blueprint
     for k in ("PMX_CLIENT_ID", "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64"):
         assert env[k].get("sync") is False and "value" not in env[k]
+
+
+def test_the_spec_is_not_in_the_blueprint():
+    # a render.yaml change on this branch would Blueprint-sync and redeploy
+    # the collector: the owner creates the service from the spec
+    assert "sportsassets-market-plane" not in (ROOT / "render.yaml").read_text()
 
 
 def test_the_module_it_runs_imports_no_venue_write_path():

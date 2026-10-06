@@ -49,6 +49,28 @@ def _empty(why):
             "authority": AUTHORITY, "label": "RESEARCH"}
 
 
+async def _held_freshness(pool) -> dict:
+    """bettor_paper_freshness.read over the account's open positions, or
+    UNREAD with its reason. Never raises."""
+    try:
+        from .. import bettor_paper_freshness as PMF
+        from .. import bettor_paper_ledger as L
+        async with pool.acquire() as c:
+            async with c.transaction(readonly=True):
+                await c.execute("SET LOCAL statement_timeout = 15000")
+                got = await PMF.read(c, L.ACCOUNT_ID, rows_limit=0)
+        return {"open_positions": got.get("open_positions"),
+                "markable": got.get("markable"),
+                "freshly_manageable": got.get("freshly_manageable"),
+                "external_unavailable": ((got.get("counts") or {}).get(
+                    "EXTERNAL_UNAVAILABLE") or {}).get("count"),
+                "rate": got.get("fresh_rate"),
+                "basis": "bettor_paper_freshness.read (FRESH + QUIET_VALID "
+                         "/ markable; 300 s SLA)"}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": "UNREAD", "why": type(exc).__name__, "rate": None}
+
+
 @router.get(BASE, dependencies=[Depends(require_read)])
 async def market_plane(limit: int = Query(default=200, ge=0, le=5000),
                        state: str | None = Query(default=None),
@@ -146,6 +168,11 @@ async def market_plane(limit: int = Query(default=200, ge=0, le=5000),
                     + " ORDER BY priority, contract_id LIMIT $%d" % len(args),
                     *args)]
     payload = _j(snap["payload"]) if snap else None
+    # THE HELD-POSITION DENOMINATOR, read here (the worker must not import
+    # the paper ledger): bettor_paper_freshness.read over the open positions
+    if isinstance(payload, dict) and isinstance(payload.get("freshness"),
+                                                dict):
+        payload["freshness"]["held_positions"] = await _held_freshness(pool)
     return {"status": "OK" if payload else "EMPTY",
             "why": None if payload else "NO_MARKET_PLANE_SNAPSHOT_YET",
             "version": VERSION, "authority": AUTHORITY, "label": "RESEARCH",
