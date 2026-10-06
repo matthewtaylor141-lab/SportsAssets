@@ -101,7 +101,11 @@ def test_the_import_graph_reaches_no_order_or_paper_writer_module():
         # probability in a room (the paper simulator's rate is never shown
         # as live execution quality): pure, stdlib only, imports no
         # sportsassets module (tests/test_execution_calibration.py pins it)
-        "execution_evidence.py"}, sorted(reached)
+        "execution_evidence.py",
+        # (P0 closeout) the canonical open-position rule: constants + SQL
+        # text, stdlib only (tests/test_agent_work_state_authority.py pins
+        # it import-free)
+        "open_position_canon.py"}, sorted(reached)
 
 
 def test_the_route_module_imports_only_auth_db_and_the_read_model():

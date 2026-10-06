@@ -121,6 +121,23 @@ def test_the_pins():
     assert PMF.FIRST_MANAGEMENT_GRACE_S == XM.PAPER_FIRST_REVIEW_BOUND_S
     assert XPK.VALID_PROTECTION_STATES == (PMF.PS_PROTECTED,)
     assert L.OPEN_QTY_EPS == CANON.OPEN_QTY_EPS == 1e-9
+    from sportsassets import order_state_truth as OST
+    assert OST.OPEN_QTY_EPS == CANON.OPEN_QTY_EPS
+
+
+def test_a_fully_sold_protected_position_reads_closed_not_its_history():
+    """8 bought, 8 sold by a filled protective sale: position_qty (held + sold
+    by protection) is still 8 by its documented basis, but the position is
+    CLOSED and nothing is unprotected -- never displayed as an open 8."""
+    from sportsassets import order_state_truth as OST
+    s = OST.protection_summary(held_qty=0.0, orders=[{
+        "role": "STANDING_PROTECTION", "direction": "SELL", "qty": 8,
+        "filled_qty": 8, "raw_state": "FILLED", "source": "PAPER",
+        "order_ref": "o", "limit": 0.83}])
+    assert s["position_state"] == "CLOSED"
+    assert s["held_qty_now"] == 0.0 and s["unprotected_qty"] == 0.0
+    assert OST.protection_summary(held_qty=0.39, orders=[])[
+        "position_state"] == "OPEN"
     assert L.CANONICAL_OPEN_POSITIONS_SQL is CANON.CANONICAL_OPEN_POSITIONS_SQL
     from sportsassets import refusal_taxonomy_table as T
     for code in (PMF.R_PACKETS_BLOCK_ALLOCATION,

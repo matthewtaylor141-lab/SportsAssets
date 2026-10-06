@@ -57,6 +57,7 @@ from . import bettor_book_snapshot as BS
 from . import bettor_venue_native_identity as VNI
 from . import execution_evidence as EE
 from . import order_state_truth as OST
+from .open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 from . import xavier_freshness as XF
 
 VERSION = "POSITION_ROOMS_V1"
@@ -1913,16 +1914,14 @@ async def _paper(conn, now: float, account_id: str) -> dict:
                        GROUP BY group_id),
                 h AS (SELECT f.group_id, max(f.filled_at) AS at
                         FROM paper_fills f
+                        JOIN (""" + CANONICAL_OPEN_POSITIONS_SQL + """) c
+                          ON c.account_id = f.account_id
+                         AND c.group_id = f.group_id
+                         AND c.us_market_slug = f.us_market_slug
+                         AND c.holding_side = f.holding_side
                        WHERE f.account_id = $1
-                       GROUP BY f.group_id, f.us_market_slug, f.holding_side
-                      HAVING sum(CASE WHEN f.direction = 'BUY' THEN f.qty
-                                      ELSE -f.qty END) > 0
-                         AND NOT EXISTS (
-                             SELECT 1 FROM paper_settlements s
-                              WHERE s.account_id = $1
-                                AND s.group_id = f.group_id
-                                AND s.us_market_slug = f.us_market_slug
-                                AND s.holding_side = f.holding_side))
+                       GROUP BY f.group_id, f.us_market_slug,
+                                f.holding_side)
            SELECT group_id, max(at) AS at FROM (
                SELECT * FROM o UNION ALL SELECT * FROM h) x
             GROUP BY group_id ORDER BY max(at) DESC LIMIT $3""",

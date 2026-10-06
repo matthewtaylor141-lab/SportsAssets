@@ -42,6 +42,9 @@ PURE. Imports nothing from this package; no I/O, no clock.
 from __future__ import annotations
 
 VERSION = "ORDER_STATE_TRUTH_V1"
+#: = open_position_canon.OPEN_QTY_EPS (pinned by a test; this module imports
+#: nothing from the package)
+OPEN_QTY_EPS = 1e-9
 
 PROPOSED, SUBMITTED, RESTING, PARTIAL = (
     "PROPOSED", "SUBMITTED", "RESTING", "PARTIAL")
@@ -336,6 +339,8 @@ def protection_summary(*, held_qty, orders: list,
     position = None if h is None else round(h + sold_by_protection, 6)
     unprot = None if position is None else round(max(0.0, position - filled),
                                                  6)
+    if h is not None and h <= OPEN_QTY_EPS:
+        unprot = 0.0                      # nothing is held: nothing exposed
     live_rows = [r for r in rows if r["state"] in LIVE_STATES
                  or r["filled_qty"] > 0]
     head = " + ".join(r["line"] for r in live_rows) or "NO PROTECTIVE ORDER"
@@ -350,6 +355,12 @@ def protection_summary(*, held_qty, orders: list,
         "version": VERSION,
         "position_qty": position,
         "held_qty_now": None if h is None else round(h, 6),
+        # THE CANONICAL STATE (open_position_canon): a position whose held
+        # quantity is <= the ledger epsilon is CLOSED, whatever its
+        # historical position_qty (held + sold by filled protection) says --
+        # an 8-bought / 8-sold-by-protection position is CLOSED, never "8"
+        "position_state": (None if h is None else
+                           "OPEN" if h > OPEN_QTY_EPS else "CLOSED"),
         "filled_protection_qty": round(filled, 6),
         "standing_order_qty": round(standing, 6),
         "pending_order_qty": round(pending, 6),
