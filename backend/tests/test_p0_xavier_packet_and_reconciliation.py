@@ -568,3 +568,51 @@ async def test_the_receipt_names_sub_contract_remainders_and_duplicates():
         assert rc["counts"]["phantom_opens_in_canonical_readers"] == 0
     finally:
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PM'S ACCEPTANCE MATRIX FOR THE STRICT RAIL (Astra, lane A): 10 positions
+# ═════════════════════════════════════════════════════════════════════
+
+def _ten(*, stale=0, packet_incomplete=0, protection_bad=0):
+    good = {"state": "PROTECTED_RESTING"}
+    pos = [_pos("p%d" % i, "g%d" % i, NOW - 3600) for i in range(10)]
+    packets = {"g%d" % i: i >= packet_incomplete for i in range(10)}
+    prot = {"p%d" % i: (good if i >= protection_bad else
+                        {"state": "UNPROTECTED_NO_STANDING_ORDER"})
+            for i in range(10)}
+    return pos, packets, prot
+
+
+def _mark_rows(stale):
+    import tests.test_paper_mark_freshness_classifier as C
+    fresh = dict(C.cls(last_ok=C.obs(1, 5)), strategy="A")
+    old = dict(C.cls(last_ok=C.obs(1, 900)), strategy="A")
+    return [old] * stale + [fresh] * (10 - stale)
+
+
+def test_ten_positions_nine_healthy_one_stale_refuses_entry():
+    s = PMF.summarize(_mark_rows(1))
+    assert s["by_strategy"]["A"]["allocation_blocked"] is True
+
+
+def test_ten_positions_nine_healthy_one_packet_incomplete_refuses_entry():
+    pos, packets, prot = _ten(packet_incomplete=1)
+    v = PMF.integrity_verdict(positions=pos, packets=packets,
+                              protections=prot, now=NOW)
+    assert v["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
+
+
+def test_ten_positions_nine_healthy_one_protection_incomplete_refuses():
+    pos, packets, prot = _ten(protection_bad=1)
+    v = PMF.integrity_verdict(positions=pos, packets=packets,
+                              protections=prot, now=NOW)
+    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
+
+
+def test_ten_of_ten_healthy_this_rail_alone_does_not_refuse():
+    assert PMF.summarize(_mark_rows(0))["by_strategy"]["A"][
+        "allocation_blocked"] is False
+    pos, packets, prot = _ten()
+    assert PMF.integrity_verdict(positions=pos, packets=packets,
+                                 protections=prot, now=NOW)["refusal"] is None
