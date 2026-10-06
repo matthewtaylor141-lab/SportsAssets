@@ -798,6 +798,14 @@ try:
 except ImportError:
     log.warning("market plane: api.command_market_plane not loaded",
                 exc_info=True)
+# ── THE PAPER LOSS ATTRIBUTION (closeout): GET
+# /api/command/paper/loss-attribution. GET only, COMMAND auth, READ ONLY.
+try:
+    from .command_paper_loss_attribution import (
+        router as _command_paper_loss_attribution_router)
+    app.include_router(_command_paper_loss_attribution_router)
+except ImportError:
+    log.warning("paper loss attribution: route not loaded", exc_info=True)
 # ── THE NCAAF FUNNEL (closeout): GET /api/command/ncaaf-funnel. GET only,
 # COMMAND auth, READ ONLY.
 try:

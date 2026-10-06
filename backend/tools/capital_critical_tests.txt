@@ -1235,3 +1235,5 @@ tests/test_ncaaf_funnel.py
 tests/test_settlement_rule_registry.py
 tests/test_kalshi_public_rules.py
 tests/test_settlement_rule_registry_integration.py
+# (closeout) the PAPER loss attributed by cause: reconciled identity + spread, model-vs-variance z, unmanaged positions, missed exits, correlation
+tests/test_paper_loss_attribution.py
