@@ -396,12 +396,14 @@ class ReadOnlyTransport:
             pass
 
 
-def install_read_only(client, *, inner=None):
+def install_read_only(client, *, inner=None, wrap_with=None):
     """Wrap EVERY transport the client's httpx client can route through --
     the default one and each proxy mount (an HTTPS_PROXY in the environment
     routes through a mount, not `_transport`) -- GET-only outermost, the
     process write lock + pacing gate (`venue_request_gate.PacedTransport`)
-    inside. `inner` (tests) replaces the network transport everywhere."""
+    inside. `inner` (tests) replaces the network transport everywhere.
+    `wrap_with(t)` (the paper public-gateway lane) replaces the shared
+    PacedTransport with the caller's own gate; GET-only stays outermost."""
     http = getattr(client, "_http", None)
     if http is None or getattr(http, "_transport", None) is None:
         raise RuntimeError("the retail SDK client exposes no transport")
@@ -414,7 +416,9 @@ def install_read_only(client, *, inner=None):
 
     def wrap(t):
         t = inner if inner is not None else t
-        if paced is not None and inner is None:
+        if wrap_with is not None:
+            t = wrap_with(t)
+        elif paced is not None and inner is None:
             t = paced(t, pace=_pace)
         return ReadOnlyTransport(t)
     http._transport = wrap(http._transport)
@@ -426,16 +430,18 @@ def install_read_only(client, *, inner=None):
     return client
 
 
-def _keyless_client():
+def _keyless_client(*, wrap_with=None):
     """The retail SDK client with NO key (public gateway endpoints only),
-    its own retries off, every transport wrapped read-only and gated."""
+    its own retries off, every transport wrapped read-only and gated.
+    `wrap_with` (the paper public-gateway lane) supplies that lane's own
+    book-only gate in place of the shared PacedTransport."""
     from polymarket_us import PolymarketUS
     try:
         from . import venue_sdk as _vsdk
         extra = _vsdk.client_kwargs()
     except Exception:                                         # noqa: BLE001
         extra = {}
-    return install_read_only(PolymarketUS(**extra))
+    return install_read_only(PolymarketUS(**extra), wrap_with=wrap_with)
 
 
 _CLIENT = None

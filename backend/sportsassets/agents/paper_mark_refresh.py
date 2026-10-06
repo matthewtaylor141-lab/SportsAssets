@@ -156,9 +156,13 @@ O_STREAM = "STREAM_BOOK"
 INSTITUTIONAL_BASIS = PMD.INSTITUTIONAL_BASIS
 INSTITUTIONAL_SOURCE = PMD.INSTITUTIONAL_SOURCE
 O_INSTITUTIONAL = "INSTITUTIONAL_STREAM_BOOK"
-#: the consultation order (pinned by a test)
+PUBLIC_BASIS = PMD.PUBLIC_BASIS
+PUBLIC_SOURCE = PMD.PUBLIC_SOURCE
+#: the consultation order (pinned by a test); the last step is two REST
+#: lanes in parallel -- the authenticated key and the keyless public gateway
 SOURCE_ORDER = ("INSTITUTIONAL_STREAM", "RETAIL_STREAM", "HARVEST",
                 "PACED_REST")
+REST_LANES = ("AUTHENTICATED", "PUBLIC_GATEWAY")
 
 _HOURLY: dict = {"reads": []}
 
@@ -283,7 +287,8 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                   max_reads: int = MAX_READS_PER_RUN,
                   hourly_budget: int = MAX_VENUE_READS_PER_HOUR,
                   recent=None, trigger: str = "SCHEDULED", gate=None,
-                  sleep=None, stream=None, institutional=None) -> dict:
+                  sleep=None, stream=None, institutional=None,
+                  public=None) -> dict:
     """ONE BOUNDED HELD-MARK REFRESH RUN for `account_id`. Records every due
     market's outcome. Never raises (CancelledError excepted).
 
@@ -296,6 +301,11 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
     at = float(now if now is not None else clock())
     t0 = time.monotonic()
     deadline = t0 + float(run_budget_s)
+    # THE PUBLIC-GATEWAY LANE runs only on the process's own read path: a
+    # caller that hands in its own market-data client (a test, a stand-in)
+    # gets exactly that client and no second lane unless it names one.
+    if public is None and market_data is None:
+        public = PMD.default_public_lane()
     md = market_data if market_data is not None else G.PaperMarketDataClient()
     recent = recent if recent is not None else _default_recent
     gate = gate if gate is not None else _default_gate
@@ -316,7 +326,10 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                                              else "NOT_RUNNING"),
                            "sources": {"institutional_stream": 0,
                                        "retail_stream": 0, "harvest": 0,
-                                       "rest": 0},
+                                       "rest": 0, "public_gateway": 0},
+                           "lane_reads": {},
+                           "public_lane": ("RUNNING" if public is not None
+                                           else "NOT_RUNNING"),
                            "outcomes": {},
                            "budget": budget()}
     run_id = None
@@ -361,7 +374,7 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                     conn, [s for s, _ in pl["due"]])
             except Exception as exc:                            # noqa: BLE001
                 out["institutional_evidence"] = {"error": type(exc).__name__}
-        cooldown_stop = None
+        rest_due: list = []
         for slug, evd in pl["terminal"].items():
             out["outcomes"][slug] = {"outcome": O_SKIP_TERMINAL,
                                      "why": evd["market_state"],
@@ -428,60 +441,104 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                 out["outcomes"][slug] = {"outcome": O_HARVESTED,
                                          "obs_id": rec.get("obs_id")}
                 continue
-            # 6. THE BOUNDS, checked before each venue read
-            stop, why = None, None
-            if cooldown_stop is not None:
-                stop, why = O_SKIP_COOLDOWN, cooldown_stop
-            elif out["read_attempted"] >= int(max_reads):
-                stop = O_SKIP_RUN_CAP
-            elif hourly_used(float(clock())) >= int(hourly_budget):
-                stop = O_SKIP_HOURLY
-            elif deadline - time.monotonic() <= PD.BOOK_READ_RESERVE_S:
-                stop = O_SKIP_TIME
-            if stop is None:
-                # 5a. THE VENUE'S HOLD: waited out inside this run's budget,
-                #     or the REST lane stops for the run (recorded, no request)
-                g = gate() or {}
+            # 4. NO STREAM / HARVEST: a REST read (below, in the lanes)
+            rest_due.append((slug, ok_at))
+        # ── 4. THE REST LANES ──────────────────────────────────────────
+        # AUTHENTICATED (the paced, gated key through the one owner) and,
+        # when it runs here, PUBLIC_GATEWAY (keyless, its own pace and
+        # Retry-After hold). Each lane's worker pulls the next due market
+        # from ONE shared queue, so the held markets split across the lanes
+        # by availability: a lane on a long hold stops, and the other keeps
+        # serving -- neither lane's 429 starves the other.
+        queue = list(rest_due)
+        rlock = asyncio.Lock()
+        lanes = [("AUTHENTICATED", None)]
+        if public is not None:
+            lanes.append(("PUBLIC_GATEWAY", public))
+        stopped: dict = {}
+
+        async def _record(slug, got, *, source, basis, feed):
+            async with rlock:
+                rec = await SIM.record_book(conn, slug=slug, read=got,
+                                            source=source, read_basis=basis)
+            if rec.get("error"):
+                out["read_failed"] += 1
+                out["outcomes"][slug] = {"outcome": O_READ_FAILED,
+                                         "why": str(rec["error"])[:160],
+                                         "obs_id": rec.get("obs_id"),
+                                         "lane": feed}
+            else:
+                out["read_ok"] += 1
+                out["sources"]["rest" if feed == "AUTHENTICATED"
+                               else "public_gateway"] += 1
+                out["outcomes"][slug] = {"outcome": O_READ_OK,
+                                         "obs_id": rec.get("obs_id"),
+                                         "lane": feed}
+
+        def _bound():
+            if out["read_attempted"] >= int(max_reads):
+                return O_SKIP_RUN_CAP
+            if hourly_used(float(clock())) >= int(hourly_budget):
+                return O_SKIP_HOURLY
+            if deadline - time.monotonic() <= PD.BOOK_READ_RESERVE_S:
+                return O_SKIP_TIME
+            return None
+
+        async def _worker(name, pub):
+            while queue:
+                if _bound() is not None:
+                    return
+                # THIS LANE'S HOLD: waited out inside the run's budget, or
+                # this lane stops (the other lane, if any, carries on)
+                g = (gate() if pub is None else pub.hold()) or {}
                 hold = float(g.get("seconds_left") or 0.0) \
                     if g.get("blocking") else 0.0
                 if hold > 0.0:
                     room = (deadline - time.monotonic()
                             - PD.BOOK_READ_RESERVE_S - PER_READ_TIMEOUT_S)
                     if hold > MAX_COOLDOWN_WAIT_S or hold > room:
-                        cooldown_stop = "%.1fs_left:%s" % (
+                        stopped[name] = "%.1fs_left:%s" % (
                             hold, g.get("reason") or "VENUE_HOLD")
-                        stop, why = O_SKIP_COOLDOWN, cooldown_stop
-                    else:
-                        await sleep(hold + 0.05)
-                        out["cooldown_waited_s"] = round(
-                            out["cooldown_waited_s"] + hold + 0.05, 3)
-            if stop is not None:
-                out["skipped_budget"] += 1
-                if stop == O_SKIP_COOLDOWN:
-                    out["skipped_cooldown"] += 1
-                out["outcomes"][slug] = {"outcome": stop, "why": why or stop}
-                continue
-            # 5. ONE PACED, GATED VENUE READ
-            rctx = {"market_data": md,
-                    "deadline": min(deadline, time.monotonic()
-                                    + PER_READ_TIMEOUT_S
-                                    + PD.BOOK_READ_RESERVE_S)}
-            _HOURLY["reads"].append(float(clock()))
-            out["read_attempted"] += 1
-            with PMD.lane(PMD.LANE_HELD):
-                got = await PD.read_book_within_deadline(rctx, slug)
-            rec = await SIM.record_book(conn, slug=slug, read=got,
-                                        source=SOURCE, read_basis=READ_BASIS)
-            if rec.get("error"):
-                out["read_failed"] += 1
-                out["outcomes"][slug] = {"outcome": O_READ_FAILED,
-                                         "why": str(rec["error"])[:160],
-                                         "obs_id": rec.get("obs_id")}
-            else:
-                out["read_ok"] += 1
-                out["sources"]["rest"] += 1
-                out["outcomes"][slug] = {"outcome": O_READ_OK,
-                                         "obs_id": rec.get("obs_id")}
+                        return
+                    await sleep(hold + 0.05)
+                    out["cooldown_waited_s"] = round(
+                        out["cooldown_waited_s"] + hold + 0.05, 3)
+                    continue
+                if not queue:
+                    return
+                slug, _ok_at = queue.pop(0)
+                rctx = {"market_data": md,
+                        "deadline": min(deadline, time.monotonic()
+                                        + PER_READ_TIMEOUT_S
+                                        + PD.BOOK_READ_RESERVE_S)}
+                _HOURLY["reads"].append(float(clock()))
+                out["read_attempted"] += 1
+                out["lane_reads"][name] = out["lane_reads"].get(name, 0) + 1
+                if pub is None:
+                    with PMD.lane(PMD.LANE_HELD):
+                        got = await PD.read_book_within_deadline(rctx, slug)
+                    await _record(slug, got, source=SOURCE,
+                                  basis=READ_BASIS, feed=name)
+                else:
+                    got = await pub.read(slug, deadline=rctx["deadline"])
+                    await _record(slug, got, source=PUBLIC_SOURCE,
+                                  basis=PUBLIC_BASIS, feed=name)
+
+        await asyncio.gather(*[_worker(n, p) for n, p in lanes])
+        # every due market no lane reached is recorded with the bound or
+        # the hold that stopped it -- FEED_GAP, never fresh
+        for slug, _ok_at in queue:
+            stop, why = _bound(), None
+            if stop is None:
+                stop = O_SKIP_COOLDOWN
+                why = "; ".join("%s:%s" % kv for kv in sorted(
+                    stopped.items())) or "VENUE_HOLD"
+                if len(stopped) == 1 and "AUTHENTICATED" in stopped:
+                    why = stopped["AUTHENTICATED"]
+            out["skipped_budget"] += 1
+            if stop == O_SKIP_COOLDOWN:
+                out["skipped_cooldown"] += 1
+            out["outcomes"][slug] = {"outcome": stop, "why": why or stop}
     except asyncio.CancelledError:
         raise
     except Exception as exc:                                    # noqa: BLE001
@@ -576,7 +633,7 @@ async def run_once(get_pool, *, trigger: str,
         "read_attempted", "read_ok", "read_failed", "skipped_budget",
         "harvested", "skipped_cooldown", "stream_books", "cooldown_waited_s",
         "stream", "elapsed_s", "institutional_books", "institutional",
-        "sources", "institutional_refusals")}
+        "sources", "institutional_refusals", "lane_reads", "public_lane")}
     return res
 
 

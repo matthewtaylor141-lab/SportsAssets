@@ -55,6 +55,8 @@ import contextlib
 import contextvars
 import heapq
 import itertools
+import os
+import re
 import threading
 import time
 from collections import deque
@@ -100,17 +102,271 @@ def lane(name: str):
         _lane_ctx.reset(tok)
 
 
+# ═════════════════════════════════════════════════════════════════════
+# THE KEYLESS PUBLIC-GATEWAY LANE (held marks only)
+# ═════════════════════════════════════════════════════════════════════
+#
+# WHY. In production the retail stream cannot run (no dedicated market-data
+# key, and credentials are not ours to add), so REST is the bottleneck: the
+# AUTHENTICATED book endpoint is rate-limited per key (429, Retry-After
+# 7-10 s, at ~0.23 req/s). The PUBLIC gateway serves the same documented
+# read, GET /v1/markets/{slug}/book, with NO key (institutional_same_book's
+# keyless client already reads it for the probe), and may carry a separate
+# budget. So held marks get a second REST lane through it.
+#
+# ITS OWN STATE, KEYED BY AUTH CLASS. The public lane never consults the
+# authenticated key's not-before instant or pace (venue_request_gate /
+# venue_pace), and a 429 here never arms them: a 429 on one budget is not
+# evidence about the other. Each honours ITS OWN Retry-After. The lane
+# starts conservatively (PUBLIC_MIN_GAP_S between requests); every 429 sets
+# a hard hold of max(Retry-After, PUBLIC_HOLD_FLOOR_S) and doubles the gap
+# (x2, x4, ... up to PUBLIC_MAX_MULT) for PUBLIC_PENALTY_S, like
+# venue_pace's penalty.
+#
+# NOTHING BUT THAT GET. The keyless client's every transport (default and
+# proxy mounts) is wrapped by institutional_same_book.install_read_only
+# (GET-only outermost) around PublicGatewayTransport, which refuses any
+# request that is not exactly GET /v1/markets/<slug>/book and passes the
+# process write lock. No key is ever attached.
+#
+# HELD ONLY. The owner refuses a public-lane read of a market that is not a
+# registered held market; discovery / entry readers never reach it (their
+# PaperMarketDataClient path cannot name it), and a public-gateway book is
+# not put in the shared read cache nor coalesced with a keyed read.
+
+AUTH_KEYED = "AUTHENTICATED"
+AUTH_PUBLIC = "PUBLIC_GATEWAY"
+AUTH_LANES = (AUTH_KEYED, AUTH_PUBLIC)
+PUBLIC_BASIS = "HELD_MARK_PUBLIC_GATEWAY"
+PUBLIC_SOURCE = "PAPER_PUBLIC_GATEWAY"
+PUBLIC_MIN_GAP_S = 1.0
+PUBLIC_HOLD_FLOOR_S = 5.0
+PUBLIC_PENALTY_S = 300.0
+PUBLIC_MAX_MULT = 8.0
+#: off switch for the lane alone (PAPER_PUBLIC_GATEWAY_LANE=off)
+PUBLIC_ENV_FLAG = "PAPER_PUBLIC_GATEWAY_LANE"
+R_PUBLIC_HELD_ONLY = "PUBLIC_GATEWAY_LANE_SERVES_HELD_MARKS_ONLY"
+R_PUBLIC_HOLD = "PUBLIC_GATEWAY_HOLD_EXCEEDS_THE_DEADLINE"
+R_PUBLIC_NOT_A_BOOK_READ = "PUBLIC_GATEWAY_REFUSES_ALL_BUT_GET_BOOK"
+
+_BOOK_PATH = re.compile(r"^/v1/markets/[a-z0-9][a-z0-9.\-]{2,200}/book$")
+
+
+def _retry_after_s(v):
+    """Retry-After as seconds (delta-seconds or an HTTP date), or None."""
+    if v is None:
+        return None
+    try:
+        return max(0.0, float(str(v).strip()))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, parsedate_to_datetime(str(v)).timestamp()
+                   - time.time())
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+
+
+class AuthLaneState:
+    """One auth class's pace + Retry-After hold + counters. Thread-safe."""
+
+    def __init__(self, name: str, *, min_gap_s: float = PUBLIC_MIN_GAP_S,
+                 hold_floor_s: float = PUBLIC_HOLD_FLOOR_S,
+                 penalty_s: float = PUBLIC_PENALTY_S,
+                 max_mult: float = PUBLIC_MAX_MULT, clock=time.time,
+                 sleep=time.sleep):
+        self.name = name
+        self.min_gap_s = float(min_gap_s)
+        self.hold_floor_s = float(hold_floor_s)
+        self.penalty_s = float(penalty_s)
+        self.max_mult = float(max_mult)
+        self._clock = clock
+        self._sleep = sleep
+        self._lock = threading.Lock()
+        self._pace_lock = threading.Lock()
+        self._last = 0.0
+        self._mult = 1.0
+        self._penalty_until = 0.0
+        self._not_before = 0.0
+        self._reason = None
+        self._retry_after_last = None
+        self._events: deque = deque(maxlen=5000)
+        self._totals = {k: 0 for k in (
+            "dispatched", "responses_2xx", "responses_429",
+            "responses_other", "retry_after_seen", "refused_hold",
+            "refused_queue", "refused_not_held", "refused_not_a_book_read")}
+
+    def sleep(self, s: float) -> None:
+        if s > 0:
+            self._sleep(float(s))
+
+    def note(self, kind: str) -> None:
+        with self._lock:
+            self._totals[kind] = self._totals.get(kind, 0) + 1
+            if kind in ("dispatched", "responses_2xx", "responses_429"):
+                self._events.append((self._clock(), kind))
+
+    def gap_s(self, now=None) -> float:
+        at = self._clock() if now is None else float(now)
+        with self._lock:
+            if at >= self._penalty_until:
+                self._mult = 1.0
+            return self.min_gap_s * self._mult
+
+    def pace(self) -> float:
+        """Block until this lane's gap has passed since its last request,
+        then claim. Its own gap -- never venue_pace's."""
+        with self._pace_lock:
+            wait = self._last + self.gap_s() - self._clock()
+            if wait > 0:
+                self._sleep(wait)
+            self._last = self._clock()
+            return max(0.0, wait)
+
+    def hold(self, now=None) -> dict:
+        at = self._clock() if now is None else float(now)
+        with self._lock:
+            nb, why = self._not_before, self._reason
+        return {"blocking": nb > at, "seconds_left": max(0.0, nb - at),
+                "reason": why, "auth_lane": self.name}
+
+    def on_response(self, status, retry_after=None) -> None:
+        st = int(status) if isinstance(status, int) else None
+        if st is not None and 200 <= st < 300:
+            self.note("responses_2xx")
+            return
+        if st != 429:
+            self.note("responses_other")
+            return
+        self.note("responses_429")
+        ra = _retry_after_s(retry_after)
+        now = self._clock()
+        with self._lock:
+            if ra is not None:
+                self._totals["retry_after_seen"] += 1
+                self._retry_after_last = ra
+            until = now + max(self.hold_floor_s, ra or 0.0)
+            if until > self._not_before:            # extends, never shortens
+                self._not_before = until
+                self._reason = "%s_429%s" % (
+                    self.name, "" if ra is None else "_RETRY_AFTER_%gs" % ra)
+            # x2 per 429 inside the penalty window, capped
+            self._mult = min(self.max_mult, (self._mult * 2.0)
+                             if now < self._penalty_until else 2.0)
+            self._penalty_until = now + self.penalty_s
+
+    def telemetry(self, *, now=None) -> dict:
+        at = self._clock() if now is None else float(now)
+        with self._lock:
+            tot = dict(self._totals)
+            ev = [k for t, k in self._events if at - t <= 60.0]
+            ra = self._retry_after_last
+        return {"auth_lane": self.name,
+                "requests_per_min": ev.count("dispatched"),
+                "responses_2xx_per_min": ev.count("responses_2xx"),
+                "responses_429_per_min": ev.count("responses_429"),
+                "totals": tot, "retry_after_last_s": ra,
+                "gap_s": round(self.gap_s(now=at), 3),
+                "min_gap_s": self.min_gap_s,
+                "hold": self.hold(now=at),
+                "state": "OWN pace + Retry-After hold (never the keyed "
+                         "lane's, never armed by it)"}
+
+
+class PublicGatewayTransport:
+    """The keyless lane's request gate (inside install_read_only's GET-only
+    wrapper): exactly GET /v1/markets/<slug>/book, the process write lock,
+    this lane's pace, every dispatch and response counted, a 429's
+    Retry-After armed on THIS lane only."""
+
+    def __init__(self, inner, lane: AuthLaneState):
+        self._inner = inner
+        self._lane = lane
+
+    def handle_request(self, request):
+        method = str(getattr(request, "method", "")).upper()
+        path = str(getattr(getattr(request, "url", None), "path", ""))
+        if method != "GET" or not _BOOK_PATH.match(path):
+            self._lane.note("refused_not_a_book_read")
+            from .institutional_same_book import WriteRefused
+            raise WriteRefused("%s: %s %s" % (R_PUBLIC_NOT_A_BOOK_READ,
+                                              method, path))
+        from . import venue_request_gate as _grt
+        _grt.check_write_lock(method, path)
+        self._lane.pace()
+        self._lane.note("dispatched")
+        resp = self._inner.handle_request(request)
+        hdrs = getattr(resp, "headers", None) or {}
+        self._lane.on_response(getattr(resp, "status_code", None),
+                               hdrs.get("retry-after"))
+        return resp
+
+    def close(self):
+        try:
+            self._inner.close()
+        except Exception:                                      # noqa: BLE001
+            pass
+
+
+def public_client(lane: AuthLaneState, *, inner=None):
+    """The retail SDK client with NO key, every transport wrapped GET-only
+    (install_read_only) around this lane's PublicGatewayTransport. `inner`
+    (tests) replaces the network transport. Built by the same-book probe's
+    keyless constructor (the one census-listed keyless client)."""
+    from . import institutional_same_book as SB
+
+    def wrap(t):
+        return PublicGatewayTransport(inner if inner is not None else t,
+                                      lane)
+    return SB._keyless_client(wrap_with=wrap)
+
+
+_PUBLIC_CLIENT: dict = {"client": None, "lane": None}
+
+
+def _default_public_rest(slug, *, lane: AuthLaneState) -> dict:
+    """ONE keyless public-gateway book read. Our receipt instant is
+    `observed_at`; the venue's own clock travels in marketData.transactTime.
+    Never raises."""
+    from . import institutional_same_book as SB
+    if _PUBLIC_CLIENT["client"] is None or _PUBLIC_CLIENT["lane"] is not lane:
+        _PUBLIC_CLIENT.update(client=public_client(lane), lane=lane)
+    asked = time.time()
+    r = SB.retail_book_read(slug, client=_PUBLIC_CLIENT["client"])
+    got = time.time()
+    return {"marketData": r.get("marketData") if r.get("ok") else None,
+            "error": None if r.get("ok") else (r.get("error")
+                                                or "PUBLIC_READ_FAILED"),
+            "observed_at": got, "asked_at": asked, "feed": AUTH_PUBLIC}
+
+
+def _keyed_retry_after():
+    try:
+        from . import venue_pace as VP
+        return (VP.cooldown_state() or {}).get("retry_after_s")
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
 class Owner:
     """The cache / coalescing / priority-queue owner. One per process
     (`OWNER`); tests construct their own with fakes."""
 
     def __init__(self, *, transport=None, recent=None, gate=None,
                  clock=time.time, max_in_flight: int = MAX_IN_FLIGHT,
-                 cache_max_age_s: float = CACHE_MAX_AGE_S):
+                 cache_max_age_s: float = CACHE_MAX_AGE_S,
+                 public_transport=None, public_state=None):
         self._transport = transport
         self._recent = recent
         self._gate = gate
         self._clock = clock
+        # THE PUBLIC-GATEWAY LANE: its own transport, its own pace / hold
+        # state, one request at a time, HELD reads only
+        self._public_transport = public_transport
+        self.public = public_state if public_state is not None else \
+            AuthLaneState(AUTH_PUBLIC, clock=clock)
+        self._public_slot = threading.Lock()
         self.max_in_flight = int(max_in_flight)
         self.cache_max_age_s = float(cache_max_age_s)
         self._cv = threading.Condition()
@@ -246,13 +502,21 @@ class Owner:
         return got
 
     def read(self, slug: str, *, deadline_epoch_s=None, not_before_epoch=None,
-             lane_name=None) -> dict:
+             lane_name=None, auth: str = None) -> dict:
         """ONE paper book read (blocking; run off the event loop). Never
         raises. Returns the transport's {marketData, error, observed_at, ...}
         or a cache / coalesced copy (original receipt instant) or a named
-        refusal."""
+        refusal. `auth` = AUTH_PUBLIC sends it through the keyless public
+        gateway lane -- refused unless the read is HELD."""
         slug = str(slug or "")
         ln = self.lane_for(slug, lane_name)
+        auth = AUTH_PUBLIC if auth == AUTH_PUBLIC else AUTH_KEYED
+        if auth == AUTH_PUBLIC and not self.is_held(slug):
+            self.public.note("refused_not_held")
+            return {"marketData": None, "error": R_PUBLIC_HELD_ONLY,
+                    "observed_at": self._clock(), "owner_lane": ln,
+                    "auth_lane": AUTH_PUBLIC,
+                    "refused_by": "PAPER_MARKET_DATA_OWNER"}
         self._note("reads")
         with self._cv:
             self._by_lane[ln]["reads"] += 1
@@ -264,11 +528,11 @@ class Owner:
         # 2. COALESCING
         while True:
             with self._cv:
-                fl = self._flights.get(slug)
+                fl = self._flights.get((auth, slug))
                 if fl is None:
                     fl = {"event": threading.Event(), "result": None,
                           "started_at": self._clock()}
-                    self._flights[slug] = fl
+                    self._flights[(auth, slug)] = fl
                     leader = True
                 else:
                     leader = False
@@ -302,12 +566,14 @@ class Owner:
                 return dict(hit, owner_lane=ln, served_by="CACHE")
         out = None
         try:
-            out = self._dispatch(slug, ln, deadline_epoch_s)
+            out = (self._dispatch_public(slug, ln, deadline_epoch_s)
+                   if auth == AUTH_PUBLIC
+                   else self._dispatch(slug, ln, deadline_epoch_s))
             return out
         finally:
             with self._cv:
                 fl["result"] = out
-                self._flights.pop(slug, None)
+                self._flights.pop((auth, slug), None)
             fl["event"].set()
 
     def _dispatch(self, slug, ln, deadline_epoch_s) -> dict:
@@ -345,9 +611,53 @@ class Owner:
                 self._note("read_errors")
             out["owner_lane"] = ln
             out["served_by"] = "REST"
+            out["auth_lane"] = AUTH_KEYED
             return out
         finally:
             self._release()
+
+    def _dispatch_public(self, slug, ln, deadline_epoch_s) -> dict:
+        """THE KEYLESS PUBLIC-GATEWAY LANE: its OWN Retry-After hold (never
+        the authenticated key's, and a 429 here never holds that one), its
+        own pace (inside the transport, per request), one request at a
+        time. A hold it cannot wait out inside the deadline is refused by
+        name -- nothing is sent."""
+        def refuse(name, **kw):
+            return dict({"marketData": None, "error": name,
+                         "observed_at": self._clock(), "owner_lane": ln,
+                         "auth_lane": AUTH_PUBLIC,
+                         "refused_by": "PAPER_MARKET_DATA_OWNER"}, **kw)
+        limit = (float(deadline_epoch_s) if deadline_epoch_s is not None
+                 else self._clock() + MAX_UNDEADLINED_QUEUE_S)
+        h = self.public.hold()
+        if h["blocking"]:
+            if self._clock() + h["seconds_left"] >= limit:
+                self.public.note("refused_hold")
+                return refuse(R_PUBLIC_HOLD, hold=h)
+            self.public.sleep(h["seconds_left"])
+        left = limit - self._clock()
+        if left <= 0 or not self._public_slot.acquire(timeout=left):
+            self.public.note("refused_queue")
+            return refuse(R_QUEUE_DEADLINE)
+        try:
+            tr = self._public_transport or _default_public_rest
+            try:
+                out = tr(slug, lane=self.public)
+            except TypeError:
+                out = tr(slug)
+            except Exception as exc:                           # noqa: BLE001
+                out = {"marketData": None, "error": type(exc).__name__}
+            out = dict(out or {})
+            out.setdefault("observed_at", self._clock())
+            # NOT remembered in the shared read cache: a public-gateway book
+            # serves the held mark it was read for, never a discovery /
+            # entry reader (which must not use this lane, even second-hand)
+            out["owner_lane"] = ln
+            out["served_by"] = "PUBLIC_GATEWAY"
+            out["auth_lane"] = AUTH_PUBLIC
+            return out
+        finally:
+            self._public_slot.release()
 
     # ── telemetry ────────────────────────────────────────────────────
     def telemetry(self, *, now=None) -> dict:
@@ -376,6 +686,24 @@ class Owner:
                     held_registered=held,
                     max_in_flight=self.max_in_flight,
                     cache_max_age_s=self.cache_max_age_s,
+                    auth_lanes={AUTH_KEYED: dict(
+                        auth_lane=AUTH_KEYED,
+                        requests_per_min=per_min["rest_requests_per_min"],
+                        responses_2xx_per_min=per_min[
+                            "responses_2xx_per_min"],
+                        responses_429_per_min=per_min[
+                            "responses_429_per_min"],
+                        totals={k: tot.get(k) for k in (
+                            "rest_dispatches", "responses_2xx",
+                            "responses_429", "responses_other")},
+                        retry_after_last_s=_keyed_retry_after(),
+                        hold={"blocking": bool(g.get("blocking")),
+                              "seconds_left": round(float(
+                                  g.get("seconds_left") or 0.0), 3),
+                              "reason": g.get("reason")},
+                        state="venue_request_gate + venue_pace (process-"
+                              "wide, shared with every keyed read)"),
+                        AUTH_PUBLIC: self.public.telemetry(now=at)},
                     venue_hold={"blocking": bool(g.get("blocking")),
                                 "seconds_left": round(float(
                                     g.get("seconds_left") or 0.0), 3),
@@ -670,6 +998,48 @@ def held_priority() -> list:
 
 def telemetry(*, now=None) -> dict:
     return OWNER.telemetry(now=now)
+
+
+class PublicLane:
+    """The held-mark refresh's handle on the public-gateway lane: this
+    lane's hold, and one HELD read through the owner (off the loop)."""
+
+    def __init__(self, owner=None):
+        self._owner = owner
+
+    @property
+    def owner(self):
+        return self._owner if self._owner is not None else OWNER
+
+    def hold(self) -> dict:
+        return self.owner.public.hold()
+
+    async def read(self, slug: str, *, deadline: float) -> dict:
+        """`deadline` is a time.monotonic() instant (the refresh's)."""
+        import asyncio
+        left = float(deadline) - time.monotonic()
+        return await asyncio.to_thread(
+            self.owner.read, slug, deadline_epoch_s=time.time() + left,
+            auth=AUTH_PUBLIC)
+
+
+def public_lane_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(PUBLIC_ENV_FLAG, "on")).strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+def default_public_lane():
+    """The public-gateway lane for THIS process's held-mark refresh, unless
+    switched off (PAPER_PUBLIC_GATEWAY_LANE=off) or the retail SDK is not
+    importable here."""
+    if not public_lane_enabled():
+        return None
+    try:
+        import polymarket_us  # noqa: F401
+    except Exception:                                          # noqa: BLE001
+        return None
+    return PublicLane()
 
 
 def reset() -> None:
