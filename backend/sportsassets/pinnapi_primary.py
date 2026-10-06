@@ -13,6 +13,7 @@ import re
 import unicodedata
 
 from . import pinnapi_feed as F
+from . import pinnapi_names as N
 
 PROVIDER = "pinnapi.com/raw-websocket"
 LEGACY_PROVIDER = "the-odds-api.com/v4"
@@ -46,6 +47,18 @@ R_FOOTBALL_DRAW_PRICED = "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW"
 #: settlement comparison still decide, each refusing by its own name.
 SPORTS = {"baseball": 6, "soccer": 1, "football": 5, "basketball": 3,
           "hockey": 4, "tennis": 2}
+FAMILY_OF_SPORT = {v: k for k, v in SPORTS.items()}
+R_NO_EXACT = "PINNAPI_PRIMARY_NO_EXACT_FIXTURE"
+#: the feed holds no record naming either team near the start
+#: (pinnapi_names.absence): the fixture is not in the feed
+R_NOT_IN_FEED = N.R_NOT_IN_FEED
+#: the canonical tier's index key, the index's extra entries, and the two
+#: name-match bases a selected quote's provenance records (pinnapi_names)
+CANONICAL = "CANONICAL"
+RAW = ("__raw_records__",)
+EVICTED = ("__events_evicted__",)
+MATCH_EXACT = "EXACT_FOLDED_NAMES"
+MATCH_CANONICAL = "CANONICAL_NAMES"
 
 
 def epoch(value):
@@ -81,7 +94,10 @@ def name(value):
 
 def fixture_index(cache) -> dict:
     """{(sport id, frozenset of the two folded names): [(fixture id, home,
-    away, start)]} over ONE `fixture_view` of the cache, in its order.
+    away, start)]} over ONE `fixture_view` of the cache, in its order -- and
+    the same under (sport id, CANONICAL, frozenset of the two canonical feed
+    names) for the canonical tier (`pinnapi_names`), plus the raw records
+    and the cache's eviction count for the absence check.
 
     THE REGISTRATION COST (adversarial verification, finding 1, fix stage
     2026-10-05): `match_event` rebuilt the whole fixture view for every
@@ -96,12 +112,52 @@ def fixture_index(cache) -> dict:
         h, a = name(fx.get("home")), name(fx.get("away"))
         if not h or not a or h == a:
             continue
+        start = epoch(fx.get("startTime"))
         out.setdefault((fx.get("sport_id"), frozenset((h, a))), []).append(
-            (fx["id"], h, a, epoch(fx.get("startTime"))))
+            (fx["id"], h, a, start))
+        fam = FAMILY_OF_SPORT.get(fx.get("sport_id"))
+        ch = N.canonical(fx.get("home"), fam, side="feed")["name"]
+        ca = N.canonical(fx.get("away"), fam, side="feed")["name"]
+        if ch and ca and ch != ca:
+            out.setdefault((fx.get("sport_id"), CANONICAL,
+                            frozenset((ch, ca))), []).append(
+                (fx["id"], ch, ca, start))
+    out[RAW] = [dict(v) for v in cache.events.values() if isinstance(v, dict)]
+    out[EVICTED] = _evicted(cache)
     return out
 
 
-def match_event(cache, event, family, *, index=None):
+def _evicted(cache) -> int:
+    try:
+        return int((getattr(cache, "counts", None) or {})
+                   .get("events_evicted", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return 0
+
+
+def _candidates(cache, sid, home, away, *, index, canonical_tier, family):
+    """The fixtures of sport `sid` that could carry {home, away}: from the
+    index, exactly those two (folded or canonical) names; else every
+    fixture of the sport with its names in the tier's form."""
+    if index is not None:
+        if canonical_tier:
+            return index.get((sid, CANONICAL, frozenset((home, away))), ())
+        return index.get((sid, frozenset((home, away))), ())
+    view, _skipped = F.fixture_view(cache.events)
+    out = []
+    for fx in view:
+        if fx.get("sport_id") != sid:
+            continue
+        if canonical_tier:
+            h = N.canonical(fx.get("home"), family, side="feed")["name"]
+            a = N.canonical(fx.get("away"), family, side="feed")["name"]
+        else:
+            h, a = name(fx.get("home")), name(fx.get("away"))
+        out.append((fx["id"], h, a, epoch(fx.get("startTime"))))
+    return out
+
+
+def match_event(cache, event, family, *, index=None, explain=None):
     """((fixture id, {home, away} labels), None) for the ONE fixture whose
     two participants are exactly the event's, starting within the
     tolerance; else (None, named reason). R30A RC3: a fixture is read from
@@ -109,7 +165,24 @@ def match_event(cache, event, family, *, index=None):
     is still matched (its live-phase child prices it), and a live game
     whose parent left the cache is its own fixture -- a child record is no
     longer skipped for carrying a parentId. `index` (`fixture_index` of the
-    same cache) replaces the scan with a lookup; the answer is the same."""
+    same cache) replaces the scan with a lookup; the answer is the same.
+
+    TWO TIERS, ONE IDENTITY (P1 first-loss census, `pinnapi_names`). The
+    folded names first, exactly as before; only when they find NO fixture,
+    the canonical names (one deterministic rewrite of each rendering, closed
+    tables, never a similarity) -- under every same condition: both
+    participants one-to-one, the sport, the start tolerance, exactly one
+    fixture (two are AMBIGUOUS by name). `explain` (a dict, optional)
+    receives the basis: {"name_match": EXACT_FOLDED_NAMES | CANONICAL_NAMES,
+    "rules": [...]}, or, on a miss, the absence evidence. When no fixture
+    matches either way AND the feed holds no record naming either team
+    anywhere near the start (`pinnapi_names.absence`), the reason is
+    PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM; any doubt keeps
+    PINNAPI_PRIMARY_NO_EXACT_FIXTURE.
+
+    `event["sport_key"]` (the metered provider's competition, carried on
+    its events) scopes the competition-only renderings; a validate call
+    passes the one the selection recorded."""
     sid = SPORTS.get(family)
     start = epoch(event.get("commence_time"))
     home, away = name(event.get("home_team")), name(event.get("away_team"))
@@ -117,15 +190,46 @@ def match_event(cache, event, family, *, index=None):
         return None, "PINNAPI_PRIMARY_SPORT_UNSUPPORTED"
     if start is None or not home or not away or home == away:
         return None, "PINNAPI_PRIMARY_FIXTURE_UNPROVED"
+    ex = explain if isinstance(explain, dict) else {}
+    hit, why = _match_tier(cache, event, sid, start, home, away,
+                           index=index, canonical_tier=False, family=family)
+    if why != R_NO_EXACT:
+        if why is None:
+            ex.update(name_match=MATCH_EXACT, rules=[])
+        return hit, why
+    sport_key = event.get("sport_key")
+    ch = N.canonical(event.get("home_team"), family, sport_key)
+    ca = N.canonical(event.get("away_team"), family, sport_key)
+    if ch["name"] and ca["name"] and ch["name"] != ca["name"]:
+        hit, why = _match_tier(cache, event, sid, start, ch["name"],
+                               ca["name"], index=index, canonical_tier=True,
+                               family=family)
+        if why != R_NO_EXACT:
+            if why is None:
+                ex.update(name_match=MATCH_CANONICAL,
+                          rules=sorted(set(ch["rules"] + ca["rules"])),
+                          canonical={"home": ch["name"], "away": ca["name"]},
+                          version=N.VERSION, sport_key=sport_key)
+            return hit, why
+    records = index.get(RAW) if index is not None else \
+        [v for v in cache.events.values() if isinstance(v, dict)]
+    evicted = index.get(EVICTED, 0) if index is not None else _evicted(cache)
+    ab = N.absence(records, sport_id=sid, start=start,
+                   home=event.get("home_team"), away=event.get("away_team"),
+                   family=family, evicted=evicted)
+    ex.update(absence=ab)
+    return None, (N.R_NOT_IN_FEED if ab["absent"] else R_NO_EXACT)
+
+
+def _match_tier(cache, event, sid, start, home, away, *, index,
+                canonical_tier, family):
+    """One tier's answer: the one fixture whose two names (in the tier's
+    form) are exactly {home, away}, inside the tolerance; else a named
+    reason. The labels are always the EVENT's own names."""
     hits = []
-    if index is not None:
-        candidates = index.get((sid, frozenset((home, away))), ())
-    else:
-        view, _skipped = F.fixture_view(cache.events)
-        candidates = [(fx["id"], name(fx.get("home")), name(fx.get("away")),
-                       epoch(fx.get("startTime"))) for fx in view
-                      if fx.get("sport_id") == sid]
-    for eid, h, a, other_start in candidates:
+    for eid, h, a, other_start in _candidates(
+            cache, sid, home, away, index=index,
+            canonical_tier=canonical_tier, family=family):
         if other_start is None or abs(start - other_start) > START_TOLERANCE_S:
             continue
         if h != a and {home, away} == {h, a}:
@@ -149,7 +253,7 @@ def match_event(cache, event, family, *, index=None):
             return mine[0], None
     if len(hits) != 1:
         return None, ("PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS" if hits
-                      else "PINNAPI_PRIMARY_NO_EXACT_FIXTURE")
+                      else R_NO_EXACT)
     return hits[0], None
 
 
@@ -218,9 +322,11 @@ def select(cache, event, fallback, *, family, sharp_books, at,
         return fail(F.R_NO_AUTHORITY)
     if not isinstance(runtime_id, str) or not runtime_id:
         return fail("PINNAPI_PRIMARY_RUNTIME_UNIDENTIFIED")
-    hit, reason = match_event(cache, event, family)
+    name_basis: dict = {}
+    hit, reason = match_event(cache, event, family, explain=name_basis)
     if reason:
-        return fail(reason)
+        return fail(reason, {"fixture_match": name_basis} if name_basis
+                    else None)
     eid, labels = hit
     # THE RECORD THAT PRICES THE FIXTURE NOW: its live-phase child while in
     # play, else the fixture itself (R30A RC3)
@@ -259,7 +365,9 @@ def select(cache, event, fallback, *, family, sharp_books, at,
                 outcome_labels=labels, independent_books=evidence,
                 discovery_event_id=event.get("id"), family=family,
                 discovery_home=event["home_team"], discovery_away=event["away_team"],
-                discovery_start=event["commence_time"])
+                discovery_start=event["commence_time"],
+                discovery_sport_key=event.get("sport_key"),
+                fixture_match=name_basis)
     return {"prices": prices, "depth": depth,
             # the change instant the 30 s rule measures from: the provider
             # stamp, or (only for a change in an unstamped frame) our
@@ -287,7 +395,8 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
         return {"ok": False, "reason": "PINNAPI_PRIMARY_CLOCK_INVALID"}
     hit, why = match_event(cache, {
         "home_team": p["discovery_home"], "away_team": p["discovery_away"],
-        "commence_time": p["discovery_start"]}, p["family"])
+        "commence_time": p["discovery_start"],
+        "sport_key": p.get("discovery_sport_key")}, p["family"])
     if (why or hit[0] != p["feed_event_id"] or
             any(hit[1][d] != p["outcome_labels"].get(d) for d in ("home", "away"))):
         return {"ok": False, "reason": why or "PINNAPI_PRIMARY_FIXTURE_CHANGED"}

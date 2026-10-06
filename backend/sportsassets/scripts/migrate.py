@@ -32,6 +32,28 @@ def content_sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+async def bootstrap_collector_tables(conn) -> list[str]:
+    """Tables migrations ALTER but no migration CREATES -- built here when,
+    and only when, they are absent.
+
+    `us_premap` is the collector's table: production built it with
+    workers/premap._ensure_table long before migrations 031/055/106/153/249
+    altered it, so on a brand-new database 031 failed with `relation
+    "us_premap" does not exist` and CI had to pre-create it by hand. The
+    same DDL runs here, before the first migration, so `python -m
+    sportsassets.scripts.migrate` applies every file to an empty database.
+
+    IDEMPOTENT AND INERT WHERE THE TABLE EXISTS: production already has it,
+    so the branch never runs there and premap is not even imported."""
+    built = []
+    if await conn.fetchval("SELECT to_regclass('us_premap') IS NULL"):
+        from ..workers import premap
+        await premap._ensure_table(conn)
+        built.append("us_premap")
+        log.info("bootstrap: created us_premap (collector DDL, absent)")
+    return built
+
+
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     pool = await get_pool()
@@ -45,6 +67,7 @@ async def main() -> None:
         await conn.execute(
             "ALTER TABLE schema_migrations "
             "ADD COLUMN IF NOT EXISTS content_sha TEXT")
+        await bootstrap_collector_tables(conn)
         applied = {r["version"]: r["content_sha"] for r in await conn.fetch(
             "SELECT version, content_sha FROM schema_migrations")}
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):

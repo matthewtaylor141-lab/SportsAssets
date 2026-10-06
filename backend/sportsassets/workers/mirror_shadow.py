@@ -1215,6 +1215,34 @@ async def ledger_net(pool, us_slug: str) -> int:
     return round(net, 4)               # fractional fills kept; the plan compares within a share
 
 
+#: the named precondition refusal of the positions walk, logged once per reason
+R_PMUS_SECRET_NOT_ED25519 = "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY"
+_UNUSABLE_LOGGED: dict = {}
+
+
+def _configured_secret():
+    from ..config import settings
+    return getattr(settings(), "pmus_secret_key", None)
+
+
+def pmus_secret_unusable_reason(pmus=None, *, secret_fn=None) -> str | None:
+    """None when the configured PMUS secret is (or normalises to) an Ed25519
+    key the SDK can sign with, or when it cannot be inspected (the walk then
+    behaves exactly as before); otherwise R_PMUS_SECRET_NOT_ED25519. Reads
+    the FORMAT only (venue_key.describe_secret_key), never the value."""
+    try:
+        raw = (secret_fn or _configured_secret)()
+    except Exception:                                           # noqa: BLE001
+        return None
+    if not raw:
+        return None
+    from .. import venue_key as VK
+    d = VK.describe_secret_key(raw)
+    if d.get("present") and not d.get("usable_after_normalisation"):
+        return R_PMUS_SECRET_NOT_ED25519
+    return None
+
+
 async def account_positions(pmus, basis_out: dict | None = None) -> dict[str, float] | None:
     """ONE paced walk of the venue account's positions per tick:
     {slug (lower): signed netPosition}. None when the walk failed -- a
@@ -1251,7 +1279,10 @@ async def account_positions_walk(pmus, basis_out: dict | None = None
     pages = [0]
 
     def _walk() -> dict[str, float]:
-        client = pmus._get_client()
+        # the READ client: the configured secret decoded in the form it
+        # was given (pmus._get_read_client; "The seed must be exactly 32
+        # bytes long" on every walk, 2026-10-06)
+        client = getattr(pmus, "_get_read_client", pmus._get_client)()
         out: dict[str, float] = {}
         basis: dict[str, dict] = {}
         cursor = ""
@@ -1319,6 +1350,23 @@ async def account_positions_walk(pmus, basis_out: dict | None = None
             basis_out.update(basis)
         return out
 
+    # THE PRECONDITION, CHECKED BEFORE ANY VENUE CALL (P1 closeout). The SDK
+    # signs only with an Ed25519 key; production's PMUS secret slot holds a
+    # non-Ed25519 credential (the PMX RSA key -- market_data_identity
+    # PMX_NON_PMUS_SLOT_BASIS), so every walk raised "The seed must be exactly
+    # 32 bytes long". A secret that is not an Ed25519 key in ANY encoding
+    # (venue_key) is named once and the walk is skipped: positions unknown
+    # (None), never guessed, no doomed signed request every tick. A real
+    # PMUS key in that slot restores the walk with no code change.
+    why = pmus_secret_unusable_reason(pmus)
+    if why is not None:
+        if not _UNUSABLE_LOGGED.get(why):
+            _UNUSABLE_LOGGED[why] = True
+            log.warning("mirror_shadow: positions walk skipped (%s): the PMUS "
+                        "secret slot holds no Ed25519 key in any encoding; "
+                        "positions are unknown until a PMUS API key is "
+                        "provisioned there", why)
+        return None, 0, False
     try:
         return await asyncio.to_thread(_walk), pages[0], False
     except Exception as exc:  # noqa: BLE001 — a failed walk is named, never guessed

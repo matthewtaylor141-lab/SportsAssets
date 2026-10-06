@@ -126,12 +126,13 @@ TRANSIENT_NOT_OPEN_STATES = frozenset({
 #: gate): >= 95% of MARKABLE open positions FRESH or QUIET_VALID.
 TARGET_FRESH_RATE = 0.95
 
-#: THE ALLOCATION RAIL'S PREDECLARED THRESHOLD. A strategy whose MARKABLE
-#: open positions are more than this fraction NOT freshly manageable (not
-#: FRESH / QUIET_VALID) may not open a new ENTRY: its book is not being
-#: managed on current evidence, so it is not grown. Applies from the first
-#: markable open position of the strategy. Tightening only.
-MAX_STALE_MANAGEMENT_RATE = 0.20
+#: THE ALLOCATION RAIL'S PREDECLARED THRESHOLD -- STRICT (P1 closeout, PM
+#: directive "any applicable stale position blocks NEW PAPER entry"; was
+#: 0.20). A strategy with ANY markable open position NOT freshly manageable
+#: (not FRESH / QUIET_VALID) may not open a new ENTRY: its book is not being
+#: managed on current evidence, so it is not grown. EXIT / REDUCE /
+#: protection are never blocked by this rail. Tightening only.
+MAX_STALE_MANAGEMENT_RATE = 0.0
 
 R_STALE_MANAGEMENT_BLOCKS_ALLOCATION = (
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED")
@@ -139,26 +140,25 @@ R_STALE_MANAGEMENT_UNREADABLE = (
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ")
 
 K_ENTRY = "ENTRY_ALLOCATION_STALE_MANAGEMENT"
-#: NO NEW PAPER EXPOSURE WHILE MANAGEMENT INTEGRITY HAS FAILED (P0 closeout):
-#: beside the stale-mark rate, a new ENTRY of a strategy is refused when,
-#: over its open positions, (a) the share whose latest Xavier review had an
-#: INCOMPLETE management packet (or that has no review yet) exceeds
-#: MAX_STALE_MANAGEMENT_RATE, or (b) the share whose protection continuity
-#: is not PROTECTED_RESTING exceeds it, or (c) ANY position shows a broken
-#: one-live-protection invariant / an unknown protection state. Unreadable
-#: -> refused (fail closed). Tightening only: the existing rate is reused,
-#: nothing is relaxed.
+#: NO NEW PAPER EXPOSURE WHILE MANAGEMENT INTEGRITY HAS FAILED -- STRICT
+#: (P1 closeout): beside the stale-mark rail, a new ENTRY of a strategy is
+#: refused when ANY APPLICABLE open position of it (every open position
+#: except one whose market is EXTERNAL_UNAVAILABLE -- terminal / halted at
+#: the venue, where no protection can rest) (a) has no review whose
+#: management packet was complete (an unreviewed position included), or (b)
+#: has protection continuity other than PROTECTED_RESTING, or (c) shows a
+#: broken one-live-protection invariant / unknown protection state.
+#: Unreadable -> refused (fail closed). EXIT / REDUCE / protection orders
+#: are never blocked. Tightening only.
 R_PACKETS_BLOCK_ALLOCATION = (
     "STRATEGY_OPEN_POSITIONS_MANAGEMENT_PACKETS_INCOMPLETE")
 R_PROTECTION_BLOCKS_ALLOCATION = (
     "STRATEGY_OPEN_POSITIONS_PROTECTION_CONTINUITY_FAILED")
 R_INTEGRITY_UNREADABLE = "STRATEGY_MANAGEMENT_INTEGRITY_COULD_NOT_BE_READ"
-#: A POSITION AWAITING ITS FIRST MANAGEMENT is not yet a failure: filled
-#: within the last FIRST_MANAGEMENT_GRACE_S and not reviewed since that fill
-#: (Xavier's first review places the protection on T_FIRST / T_FILL). It is
-#: left out of both shares until the grace ends; after it, an unreviewed or
-#: unprotected position counts in full. = xavier_management.
-#: PAPER_FIRST_REVIEW_BOUND_S (pinned by a test).
+#: (P1: no grace -- a position awaiting its first management is reported as
+#: such, and it BLOCKS growth like any other incomplete packet until Xavier
+#: has protected and reviewed it. = xavier_management.
+#: PAPER_FIRST_REVIEW_BOUND_S, kept for the report only.)
 FIRST_MANAGEMENT_GRACE_S = 120.0
 #: protection states that refuse growth at ANY count (the invariant broken)
 PROTECTION_INVARIANT_BROKEN = ("PROTECTION_MULTIPLE_LIVE_ORDERS",
@@ -835,13 +835,17 @@ LATEST_PACKET_SQL = """
 
 def integrity_verdict(*, positions: list, packets: dict,
                       protections: dict, reviewed_at: dict | None = None,
-                      now: float | None = None) -> dict:
-    """Pure. The strategy's management integrity over its open positions:
-    packet-incomplete and protection-failed shares against the predeclared
-    MAX_STALE_MANAGEMENT_RATE, and any broken protection invariant. A
-    position awaiting its first management (FIRST_MANAGEMENT_GRACE_S) is
-    left out of the shares, never out of the invariant check."""
+                      now: float | None = None,
+                      classes: dict | None = None) -> dict:
+    """Pure. STRICT: the strategy's management integrity over its APPLICABLE
+    open positions (all but EXTERNAL_UNAVAILABLE markets, `classes` by
+    position key): ANY incomplete packet or ANY protection other than
+    PROTECTED_RESTING refuses; any broken invariant refuses. Positions
+    awaiting their first management are named (and count)."""
     rv = reviewed_at or {}
+    cls = classes or {}
+    excluded = [p["position_key"] for p in positions
+                if cls.get(p["position_key"]) == EXTERNAL_UNAVAILABLE]
     awaiting = []
     if now is not None:
         for p in positions:
@@ -851,7 +855,7 @@ def integrity_verdict(*, positions: list, packets: dict,
                     and float(now) - float(lf) <= FIRST_MANAGEMENT_GRACE_S:
                 awaiting.append(p["position_key"])
     all_pos = positions
-    positions = [p for p in positions if p["position_key"] not in awaiting]
+    positions = [p for p in positions if p["position_key"] not in excluded]
     n = len(positions)
     incomplete = [p["position_key"] for p in positions
                   if not packets.get(p["group_id"])]
@@ -865,12 +869,13 @@ def integrity_verdict(*, positions: list, packets: dict,
     pk_rate = None if n == 0 else len(incomplete) / n
     pr_rate = None if n == 0 else len(unprotected) / n
     refusal = None
-    if broken or (pr_rate is not None
-                  and pr_rate > MAX_STALE_MANAGEMENT_RATE + 1e-12):
+    if broken or unprotected:
         refusal = R_PROTECTION_BLOCKS_ALLOCATION
-    elif pk_rate is not None and pk_rate > MAX_STALE_MANAGEMENT_RATE + 1e-12:
+    elif incomplete:
         refusal = R_PACKETS_BLOCK_ALLOCATION
     return {"open_positions": n,
+            "rule": "STRICT_ANY_APPLICABLE_POSITION",
+            "excluded_external_unavailable": excluded[:20],
             "awaiting_first_management": awaiting[:20],
             "packet_incomplete_rate": pk_rate,
             "protection_failure_rate": pr_rate,
@@ -894,9 +899,12 @@ async def strategy_management_integrity(conn, account_id: str, strategy: str,
             packets[r["group_id"]] = bool(r["complete"])
             reviewed[r["group_id"]] = r["reviewed_at"]
     prot = await protections(conn, account_id, pos, now=now)
+    rows = await classify_positions(conn, account_id, now=now, positions=pos)
+    classes = {r["position_key"]: r["class"] for r in rows}
     return dict(integrity_verdict(positions=pos, packets=packets,
                                   protections=prot, reviewed_at=reviewed,
-                                  now=now), strategy=strategy)
+                                  now=now, classes=classes),
+                strategy=strategy)
 
 
 async def allocation_refusal(conn, *, account_id: str, strategy: str,
@@ -927,11 +935,11 @@ async def allocation_refusal(conn, *, account_id: str, strategy: str,
             return None
         return dict(iv, why=(
             "management integrity of %s failed: packet-incomplete %s, "
-            "protection-failed %s of %d open positions (max %.0f%%), "
-            "invariant broken on %d: no allocation growth until repaired"
+            "protection-failed %s of %d applicable open positions (strict: "
+            "any), invariant broken on %d: no allocation growth until "
+            "repaired; EXIT / REDUCE / protection unaffected"
             % (strategy, iv["packet_incomplete_rate"],
                iv["protection_failure_rate"], iv["open_positions"],
-               100 * MAX_STALE_MANAGEMENT_RATE,
                len(iv["protection_invariant_broken"]))))
     return {"refusal": R_STALE_MANAGEMENT_BLOCKS_ALLOCATION,
             "strategy": strategy, "stale_management_rate": rate,
@@ -940,8 +948,8 @@ async def allocation_refusal(conn, *, account_id: str, strategy: str,
             "freshly_manageable": m["freshly_manageable"],
             "counts": m["counts"], "not_fresh": m["not_fresh"],
             "why": ("%d of %d markable open positions of %s cannot be "
-                    "freshly managed (%.1f%% > %.0f%%): no allocation "
-                    "growth until they are"
+                    "freshly managed (%.1f%% > %.0f%%, strict: any): no "
+                    "allocation growth until they are"
                     % (m["markable"] - m["freshly_manageable"],
                        m["markable"], strategy, 100 * rate,
                        100 * MAX_STALE_MANAGEMENT_RATE))}

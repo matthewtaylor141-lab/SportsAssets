@@ -75,7 +75,9 @@ jobs:
           get xavier "/api/command/paper/xavier?limit=200"
           jq -c '[.. | objects | select(has("management_packet")) | .management_packet | {complete, missing}] | group_by(.complete) | map({complete: .[0].complete, n: length, missing: ([.[].missing[]?] | group_by(.) | map({(.[0]): length}) | add)})' p0/xavier.json 2>&1 | cut -c1-3000
           get first_loss "/api/command/coverage/first-loss?hours=24"
-          jq -c '{status, totals: (.totals // .summary // .counts), by_class: (.by_class // .first_loss_by_class)}' p0/first_loss.json 2>&1 | cut -c1-6000
+          jq -c '.data.totals | {provider_events, entered, by_class, first_loss, software: [.by_code[]? | select(.class=="SOFTWARE") | {stage, code, events}]}' p0/first_loss.json 2>&1 | cut -c1-6000
+          get first_loss_1h "/api/command/coverage/first-loss?hours=1"
+          jq -c '.data.totals | {provider_events, entered, by_class, first_loss, software: [.by_code[]? | select(.class=="SOFTWARE") | {stage, code, events}]}' p0/first_loss_1h.json 2>&1 | cut -c1-6000
           get turnaround /api/command/paper/turnaround
           jq -c 'del(.rows) | del(.events)' p0/turnaround.json 2>&1 | cut -c1-8000
           get capital_authority /api/command/paper/capital-authority

@@ -14,6 +14,15 @@ since the cutover; the expected executable EV at the decision; and the
 distinct contract / side blocker census. Actual profitability is
 DEFERRED_FORWARD_EVIDENCE.
 
+THE PROFITABILITY BIND (migration 309): per strategy `profitability_bind`
+-- the absolute-positive champion verdict, the regime authority per regime,
+the learned execution terms and residual haircut cells, the bind's ENTER /
+CASH evaluations by refusal (churn included), entries shrunk by the bind
+and the explicit CASH decisions; top level, the fitted models and the
+calibration cells. `paper.unrealized_pnl_usd` / `paper.open_exposure_usd`
+are never null when computable (with the mark basis of every position) and
+`paper.management` reconciles the $500,000 management epoch to the cent.
+
 ANSWERS {label, authority: PAPER_ONLY_NO_CAPITAL_AUTHORITY, status, why,
 computed_at, data}. A read that fails, or a missing migration, is
 status UNAVAILABLE with data None -- never zeros.

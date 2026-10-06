@@ -209,6 +209,8 @@ def declared_conversion(pin: dict) -> dict | None:
 #: verifier finding 6): bettor_ncaaf_settlement's VERSION and LEAGUE, pinned
 #: equal by test (kept as constants so this module stays pure).
 IDENTITY_CONVERSION_VERSION = "BETTOR_NCAAF_SETTLEMENT_V1"
+#: bettor_settlement_difference_policy.VERSION (pinned equal by test)
+PRICED_DIFFERENCE_VERSION = "PRICED_SETTLEMENT_DIFFERENCE_V1"
 IDENTITY_CONVERSION_LEAGUE = "cfb"
 
 
@@ -232,6 +234,17 @@ def conversion(*, p, p_book, conv: dict, league: str | None = None) -> dict:
     own declaration (`version`) on a row of the NCAAF venue league
     (`league`, from the row's venue slug); every other declaration takes the
     worst-end path, which refuses one with no interval."""
+    if conv.get("version") == PRICED_DIFFERENCE_VERSION:
+        # THE PRICED SETTLEMENT-DIFFERENCE POLICY (P1): re-derived by the
+        # policy's own formula at its own rate -- the declaration is checked,
+        # never trusted
+        from . import bettor_settlement_difference_policy as SDP
+        v = SDP.verify(p=p, p_book=p_book, conv=conv)
+        return _check("VENUE_CONVERSION", v["ok"], R_CONVERSION,
+                      why=v["why"], expected=v.get("expected"),
+                      p_completed=v.get("p_completed"),
+                      q_hi=v.get("q_hi"), p_book=p_book, value=p,
+                      formula=conv.get("formula"))
     if conv.get("version") == IDENTITY_CONVERSION_VERSION \
             and league == IDENTITY_CONVERSION_LEAGUE \
             and conv.get("tie_rate_interval") is None \

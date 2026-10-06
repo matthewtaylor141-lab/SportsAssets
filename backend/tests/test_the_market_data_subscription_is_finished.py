@@ -983,5 +983,9 @@ def test_no_order_path_is_reachable_from_the_subscription():
         elif isinstance(node, ast.ImportFrom):
             mdi_names |= {"%s%s" % ("." * node.level, node.module or "")
                           + ":" + a.name for a in node.names}
+    # base64 / binascii / re (2026-10-06): pure stdlib codecs the guard
+    # uses to compare a secret in any encoding (raw PEM vs base64-of-PEM)
+    # and to recognise a slot's shape -- no I/O, no network, no order path
     assert mdi_names <= {"hashlib", "os", "__future__:annotations",
+                         "base64", "binascii", "re",
                          ".:pmx_institutional"}, mdi_names

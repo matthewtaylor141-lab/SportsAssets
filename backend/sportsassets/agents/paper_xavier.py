@@ -256,13 +256,25 @@ def _exit_walk(levels: list, qty: float, fee_fn, at) -> dict:
 
 
 def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
-                 at: float) -> dict:
+                 at: float, hold_haircut_per_contract: float = 0.0,
+                 economics: dict | None = None) -> dict:
     """HOLD / EXIT / REDUCE / NETTING / INDIRECT on ONE measure, in the unit
     `bettor_funded_decision.decide` ranks: expected dollars from here over
-    the whole position (the cost basis is sunk and common to all)."""
+    the whole position (the cost basis is sunk and common to all).
+
+    THE SAME ALL-IN NET ECONOMICS AS THE ENTRY (bettor_paper_profitability_bind.
+    management_economics, migration 309): `p` is the calibrated probability
+    (min(raw, calibrated) -- never inflated) and every contract held -- the
+    whole position on HOLD, the unsold remainder on EXIT / REDUCE -- is
+    valued at p minus the strategy's residual haircut per contract; every
+    sale is valued on the walked bids AFTER its fees. Holding to settlement
+    pays no trading fee."""
     q = float(pos["open_qty"])
     basis = float(pos["cost_basis_usd"])
     cands, blocked = [], []
+    hc = max(0.0, float(hold_haircut_per_contract or 0.0))
+    if p is not None:
+        p = max(0.0, float(p) - hc)
     if p is None:
         blocked.append({"action": A_HOLD, "blocker": R_NO_MEASURE,
                         "value_usd": None})
@@ -313,6 +325,11 @@ def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
                             "this alternative, never assumed empty")})
     return {"candidates": cands, "not_rankable": blocked,
             "version": "PAPER_HOLD_RANKING_V1",
+            "economics": dict(economics or {}, hold_value_per_contract=(
+                None if p is None else round(p, 9)),
+                residual_haircut_per_contract=round(hc, 9),
+                exit_fees="charged per walked level (bettor_paper_ledger."
+                          "_fee); HOLD to settlement pays none"),
             "incomplete_search": {"complete": False,
                                   "missing": [A_INDIRECT],
                                   "why": B_INDIRECT_NOT_SEARCHED}}
@@ -826,8 +843,21 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             "complete": pgate["complete"], "missing": pgate["missing"],
             "mark_class": packet["book"]["mark_class"],
             "version": packet["version"]}
-        alts = alternatives(pos=pos, levels=exit_lv, p=measure.get("p"),
-                            fee_fn=fee_fn, at=at)
+        # THE SAME ALL-IN ECONOMICS AS THE ENTRY: the calibrated HOLD
+        # probability and the residual haircut (migration 309)
+        from .. import bettor_paper_profitability_bind as PBIND
+        mecon = await PBIND.management_economics(
+            conn, account_id=acct, pos=pos, p_raw=measure.get("p"), at=at)
+        measure["management_economics"] = {
+            k: mecon.get(k) for k in ("p_raw", "p_hold",
+                                      "haircut_per_contract", "status")}
+        alts = alternatives(
+            pos=pos, levels=exit_lv,
+            p=(mecon.get("p_hold") if measure.get("p") is not None
+               else None),
+            fee_fn=fee_fn, at=at,
+            hold_haircut_per_contract=mecon.get("haircut_per_contract")
+            or 0.0, economics=measure["management_economics"])
         if not rankable or measure.get("stale") or \
                 measure.get("p") is None:
             # STALE / INCOMPLETE EVIDENCE: HOLD, EXIT AND REDUCE ALL LEAVE THE

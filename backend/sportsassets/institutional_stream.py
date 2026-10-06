@@ -554,6 +554,10 @@ class ResidentBooks:
                     "why": self.state_why, "connection_seq": self._conn_seq,
                     "connected": self._connected, "messages": self._messages,
                     "stray_updates": self._stray,
+                    # accepted full book updates (messages also counts
+                    # heartbeats and acks)
+                    "book_updates": sum(int(m.get("updates") or 0)
+                                        for m in self._markets.values()),
                     "venue_refusal": dict(self._refusal or {}) or None,
                     "subscription_errors": list(self._errors[-5:])}
         by: dict = {}
@@ -935,13 +939,20 @@ def start_default(*, env=None, transport_factory=None, token_fn=None,
             if _TRANSPORT is not None:
                 return {"started": False, "state": BOOKS.state,
                         "why": "already started"}
+        _START.pop("detail", None)
         if not enabled(env):
             _START.update(state=S_DISABLED, why="%s is not on" % ENV_FLAG)
             BOOKS.set_state(S_DISABLED, _START["why"])
             return dict(_START, started=False)
         refusal = mdi.guard(mdi.PMX, env=env)
         if refusal is not None:
-            _START.update(state=S_CREDENTIAL, why=refusal)
+            # The refusal AND which env NAMES collide (never a value), so the
+            # readback says what to re-provision; the rule is not relaxed.
+            try:
+                detail = mdi.refusal_why(mdi.PMX, env=env) or refusal
+            except Exception:                                 # noqa: BLE001
+                detail = refusal
+            _START.update(state=S_CREDENTIAL, why=refusal, detail=detail)
             BOOKS.set_state(S_CREDENTIAL, refusal)
             return dict(_START, started=False)
         ok, why = (available() if available else transport_available())

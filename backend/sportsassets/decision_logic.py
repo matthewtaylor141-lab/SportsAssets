@@ -67,6 +67,17 @@ DECISION_LOGIC_FILES = (
     # premise -- paper_benchmark's ENTER imports it, so a change to it
     # changes the decision and must restart the forward window
     "bettor_ncaaf_settlement.py",
+    # P1 first-loss census: the PRICED settlement-difference policy -- the
+    # worst-case venue value max(0, p_completed - q_hi) of a contract whose
+    # only settlement differences are exceptional-state ones, the rate table
+    # behind q_hi and the eligibility it admits through; paper_derek's ENTER,
+    # gross_edge_inputs' re-derivation and the capital gate read it, so a
+    # change to it changes which contracts can ENTER and at what value
+    "bettor_settlement_difference_policy.py",
+    # P1 first-loss census: the canonical-name tier of the PinnAPI fixture
+    # match (pinnapi_primary imports it) -- which WS fixture prices which
+    # provider event, and so which probability a decision reads
+    "pinnapi_names.py",
     # P0 incident inc-edge (pinned at integration): the gross edge's INPUT
     # validation -- paper_benchmark's and paper_derek's decisions refuse
     # (SOFTWARE) when the row's probability, the book's best level or the
@@ -100,6 +111,12 @@ DECISION_LOGIC_FILES = (
     # firing at the entry, or with forward economics UNKNOWN / NEGATIVE --
     # it changes which entries are placed (refuse-only)
     "bettor_capital_authority.py",
+    # (309) THE PROFITABILITY BIND: calibrated all-in EV, churn control,
+    # capacity / capital-hour / correlation size (refuse or shrink only),
+    # the regime authority and the absolute-positive champion rule at the
+    # decision and the ledger; Xavier's HOLD value -- it changes which
+    # entries are placed, at what size, and how a hold is valued
+    "bettor_paper_profitability_bind.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",

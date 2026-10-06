@@ -34,6 +34,9 @@ from sportsassets.agents import paper_mark_refresh as PMR
 
 from tests import paper_harness as H
 
+#: the strict management entry rail runs its production functions here
+MANAGEMENT_RAIL_ENFORCED = True
+
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 STRAT = "PINNACLE_COMPLETED_GAME_PAPER"
 OTHER = "PINNACLE_EXPLORATION_PAPER"
@@ -318,6 +321,14 @@ async def _refusals(conn, a, kind):
         "   AND kind=$2 ORDER BY refusal_id", a["account_id"], kind)
 
 
+@pytest.fixture(autouse=True)
+def _integrity_rail_isolated(monkeypatch):
+    """The refresh and the stale-MARK rail are under test in this module; the
+    management-integrity rail (packets / protection, strict) has its own
+    tests in test_p0_xavier_packet_and_reconciliation."""
+    _isolate_the_mark_rail(monkeypatch)
+
+
 def _isolate_the_mark_rail(monkeypatch):
     """These tests exercise the STALE-MARK rate rail alone. The management-
     integrity rail beside it (packets / protection continuity, P0 closeout)
@@ -386,14 +397,16 @@ async def test_the_rail_counts_only_markable_positions_at_its_threshold(
         a = await H.new_account(conn, "mrthr")
         slugs = await _seed(conn, a, 5)
         now = H.T0 + 1000
-        # 4 fresh, 1 stale -> 20% == the threshold: permitted
+        # 4 fresh, 1 stale -> STRICT: refused until the stale one is fresh
+        # or excluded (here: its market expires at the venue)
         for s in slugs[:4]:
             await H.observe(conn, s, now - 10, bids=[(0.47, 10)])
         o = H.order(a, key="g1", qty=10, limit=0.50, at=now,
                     slug="%s:n1" % a["account_id"], fixture="fx-n1")
         o["strategy"] = STRAT
-        assert (await L.submit_order(conn, o, fee_fn=H.zero_fee,
-                                     now=now))["ok"]
+        got = await L.submit_order(conn, o, fee_fn=H.zero_fee, now=now)
+        assert got["ok"] is False
+        assert got["refusal"] == PMF.R_STALE_MANAGEMENT_BLOCKS_ALLOCATION
         # the one stale market EXPIRED at the venue: excluded (with
         # evidence), never counted against the strategy
         await SIM.record_book(conn, slug=slugs[4], read={

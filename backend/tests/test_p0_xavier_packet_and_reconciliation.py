@@ -36,6 +36,9 @@ from sportsassets.agents import xavier_management as XM
 from tests import paper_harness as H
 from tests import test_xavier_review_probability_freshness as XRF
 
+#: the strict management entry rail runs its production functions here
+MANAGEMENT_RAIL_ENFORCED = True
+
 pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 AT = XRF.AT
 QTY = XRF.QTY
@@ -171,39 +174,48 @@ def _pos(k, group, last_fill_at):
 
 
 def test_the_integrity_verdict():
+    """STRICT (P1): ANY applicable position with an incomplete packet or a
+    protection other than PROTECTED_RESTING refuses growth; only a market
+    EXTERNAL_UNAVAILABLE at the venue is not applicable."""
     pos = [_pos("a", "g1", NOW - 3600), _pos("b", "g2", NOW - 3600)]
     good = {"state": "PROTECTED_RESTING"}
     v = PMF.integrity_verdict(positions=pos, packets={"g1": True, "g2": True},
                               protections={"a": good, "b": good}, now=NOW)
-    assert v["refusal"] is None
-    # one of two unprotected -> 50% > 20%
-    v = PMF.integrity_verdict(
-        positions=pos, packets={"g1": True, "g2": True},
-        protections={"a": good, "b": {"state": "UNPROTECTED_NO_STANDING_"
-                                                "ORDER"}}, now=NOW)
-    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
-    # a broken invariant refuses at ANY share
+    assert v["refusal"] is None and v["rule"] == \
+        "STRICT_ANY_APPLICABLE_POSITION"
+    # ONE of ten unprotected is enough
     many = [_pos(str(i), "g%d" % i, NOW - 3600) for i in range(10)]
+    ok_p = {"g%d" % i: True for i in range(10)}
     prot = {str(i): good for i in range(10)}
-    prot["0"] = {"state": "PROTECTION_MULTIPLE_LIVE_ORDERS"}
-    v = PMF.integrity_verdict(positions=many,
-                              packets={"g%d" % i: True for i in range(10)},
+    prot["3"] = {"state": "UNPROTECTED_NO_STANDING_ORDER"}
+    v = PMF.integrity_verdict(positions=many, packets=ok_p,
                               protections=prot, now=NOW)
     assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
-    # packets incomplete above the rate
-    v = PMF.integrity_verdict(positions=pos, packets={"g1": False},
-                              protections={"a": good, "b": good}, now=NOW)
+    for bad in ("PROTECTION_CANCEL_PENDING", "PROTECTION_EXPIRED",
+                "PROTECTION_QTY_DIFFERS_FROM_OPEN_QTY",
+                "PROTECTION_MULTIPLE_LIVE_ORDERS"):
+        prot["3"] = {"state": bad}
+        assert PMF.integrity_verdict(positions=many, packets=ok_p,
+                                     protections=prot, now=NOW)[
+            "refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION, bad
+    # ONE incomplete packet is enough
+    prot["3"] = good
+    v = PMF.integrity_verdict(positions=many, packets=dict(ok_p, g7=False),
+                              protections=prot, now=NOW)
     assert v["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
-    # a position filled 10 s ago and not yet reviewed awaits its first
-    # management: out of the shares (never out of the invariant check)
+    # an unreviewed new fill blocks too (no grace) and is named
     fresh = [_pos("n", "gn", NOW - 10)]
     v = PMF.integrity_verdict(positions=fresh, packets={}, protections={},
                               reviewed_at={}, now=NOW)
-    assert v["refusal"] is None and v["awaiting_first_management"] == ["n"]
-    late = [_pos("n", "gn", NOW - PMF.FIRST_MANAGEMENT_GRACE_S - 1)]
-    v = PMF.integrity_verdict(positions=late, packets={}, protections={},
-                              reviewed_at={}, now=NOW)
-    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
+    assert v["refusal"] is not None
+    assert v["awaiting_first_management"] == ["n"]
+    # a terminal / halted market at the venue is not applicable
+    v = PMF.integrity_verdict(
+        positions=[_pos("x", "gx", NOW - 3600)], packets={},
+        protections={"x": {"state": "UNPROTECTED_NO_STANDING_ORDER"}},
+        now=NOW, classes={"x": PMF.EXTERNAL_UNAVAILABLE})
+    assert v["refusal"] is None
+    assert v["excluded_external_unavailable"] == ["x"]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -556,3 +568,51 @@ async def test_the_receipt_names_sub_contract_remainders_and_duplicates():
         assert rc["counts"]["phantom_opens_in_canonical_readers"] == 0
     finally:
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE PM'S ACCEPTANCE MATRIX FOR THE STRICT RAIL (Astra, lane A): 10 positions
+# ═════════════════════════════════════════════════════════════════════
+
+def _ten(*, stale=0, packet_incomplete=0, protection_bad=0):
+    good = {"state": "PROTECTED_RESTING"}
+    pos = [_pos("p%d" % i, "g%d" % i, NOW - 3600) for i in range(10)]
+    packets = {"g%d" % i: i >= packet_incomplete for i in range(10)}
+    prot = {"p%d" % i: (good if i >= protection_bad else
+                        {"state": "UNPROTECTED_NO_STANDING_ORDER"})
+            for i in range(10)}
+    return pos, packets, prot
+
+
+def _mark_rows(stale):
+    import tests.test_paper_mark_freshness_classifier as C
+    fresh = dict(C.cls(last_ok=C.obs(1, 5)), strategy="A")
+    old = dict(C.cls(last_ok=C.obs(1, 900)), strategy="A")
+    return [old] * stale + [fresh] * (10 - stale)
+
+
+def test_ten_positions_nine_healthy_one_stale_refuses_entry():
+    s = PMF.summarize(_mark_rows(1))
+    assert s["by_strategy"]["A"]["allocation_blocked"] is True
+
+
+def test_ten_positions_nine_healthy_one_packet_incomplete_refuses_entry():
+    pos, packets, prot = _ten(packet_incomplete=1)
+    v = PMF.integrity_verdict(positions=pos, packets=packets,
+                              protections=prot, now=NOW)
+    assert v["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
+
+
+def test_ten_positions_nine_healthy_one_protection_incomplete_refuses():
+    pos, packets, prot = _ten(protection_bad=1)
+    v = PMF.integrity_verdict(positions=pos, packets=packets,
+                              protections=prot, now=NOW)
+    assert v["refusal"] == PMF.R_PROTECTION_BLOCKS_ALLOCATION
+
+
+def test_ten_of_ten_healthy_this_rail_alone_does_not_refuse():
+    assert PMF.summarize(_mark_rows(0))["by_strategy"]["A"][
+        "allocation_blocked"] is False
+    pos, packets, prot = _ten()
+    assert PMF.integrity_verdict(positions=pos, packets=packets,
+                                 protections=prot, now=NOW)["refusal"] is None

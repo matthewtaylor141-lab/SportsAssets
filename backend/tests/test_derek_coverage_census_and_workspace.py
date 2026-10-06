@@ -148,21 +148,23 @@ async def test_the_census_partitions_every_listed_contract_and_hides_none(
         assert cats["final_states_sum"] == cats["listed"]
         assert cats["sums_to_listed"] is True
         fs = cats["final_states"]
-        assert fs == {"OUTSIDE_MANDATE": 5, "UNSUPPORTED": 1, "BLOCKED": 2,
-                      "EVALUATED": 1, "NOT_YET_EVALUATED": 1}
+        # (P1) the injected NBA/WNBA basketball money line is now priced
+        # (league-scoped team table + the priced settlement-difference
+        # policy), so it is supported and awaiting evaluation, not UNSUPPORTED
+        assert fs == {"OUTSIDE_MANDATE": 5, "UNSUPPORTED": 0, "BLOCKED": 2,
+                      "EVALUATED": 1, "NOT_YET_EVALUATED": 2}
         # THE FUNNEL NARROWS AND NEVER GROWS.
         assert cats["listed"] >= cats["within_mandate"] >= \
             cats["supported"] >= cats["receiving_current_data"] >= \
             cats["evaluated"]
         assert (cats["within_mandate"], cats["supported"],
                 cats["receiving_current_data"], cats["evaluated"]) == \
-            (5, 4, 2, 1)
-        assert cats["blocked"] == 8
+            (5, 5, 2, 1)
+        assert cats["blocked"] == 7          # (P1) basketball no longer UNSUPPORTED
         assert cats["derek_verdicts_on_evaluated"]["ENTER"] == 1
         # UNSUPPORTED AND NON-SPORTS MARKETS STAY VISIBLE, BY NAME.
         br = got["blocked_by_reason"]
-        assert br["UNSUPPORTED:NO_PROBABILITY_SOURCE_FOR_THIS_MARKET:"
-                  "basketball"] == 1
+        assert not [k for k in br if k.startswith("UNSUPPORTED:")]
         assert br["OUTSIDE_MANDATE:NOT_A_SPORTS_FIXTURE"] == 1
         assert br["OUTSIDE_MANDATE:SIMULATED_OR_ELECTRONIC_FIXTURE"] == 1
         assert br["OUTSIDE_MANDATE:SPORT_NOT_IN_THE_ENTRY_MANDATE:soccer"] == 1
@@ -173,8 +175,8 @@ async def test_the_census_partitions_every_listed_contract_and_hides_none(
         assert br["BLOCKED:NO_PINNACLE_ON_EVENT"] == 1
         assert br["BLOCKED:VALUED_FOR_CALIBRATION_ONLY:"
                   "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED"] == 1
-        assert got["sample"]["NOT_YET_EVALUATED"][0]["us_market_slug"] == \
-            "aec-mlb-bos-nyy-2026-10-01-bos"
+        assert "aec-mlb-bos-nyy-2026-10-01-bos" in {
+            x["us_market_slug"] for x in got["sample"]["NOT_YET_EVALUATED"]}
         assert cats["lane_records_not_in_the_current_catalogue"] == 1
         assert got["polymarket_us_only"] is True
         # NO PROBABILITY IS INVENTED FOR ANY CONTRACT.

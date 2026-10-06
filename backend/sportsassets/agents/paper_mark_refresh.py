@@ -548,6 +548,16 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
     if inst is not None:
         out["institutional_refusals"] = dict(
             getattr(inst, "refusals", {}) or {})
+    # THE HELD READS' SAME-BOOK SAMPLES (paper_market_data.SameBookTap):
+    # persisted here, per symbol, so the next run's per-symbol evidence can
+    # admit the institutional book. Nothing pending (no stream here) -> no
+    # write at all.
+    try:
+        tapped = await PMD.persist_tap_samples(conn)
+        if tapped.get("rows"):
+            out["same_book_tap"] = tapped
+    except Exception as exc:                                    # noqa: BLE001
+        out["same_book_tap"] = {"error": type(exc).__name__}
     try:
         out["market_data"] = PMD.telemetry()
     except Exception as exc:                                    # noqa: BLE001

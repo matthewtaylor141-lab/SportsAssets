@@ -213,6 +213,47 @@ def _get_client():
     return _client
 
 
+_read_client = None
+
+
+def _get_read_client():
+    """THE CLIENT FOR AUTHENTICATED READS (positions, balances) -- never an
+    order.
+
+    `_get_client` hands the SDK `PMUS_SECRET_KEY` exactly as configured, and
+    the SDK decodes only standard base64 of a 32- or 64-byte key: production
+    mirror_shadow failed every positions walk with `ValueError: The seed must
+    be exactly 32 bytes long` (render-ops 37477349299). `venue_key` reads the
+    key in the form it was actually given (hex, PKCS#8, url-safe or unpadded
+    base64, quoted) and re-encodes the SAME key; the secret is not changed.
+
+    THE ORDER CLIENT IS NOT TOUCHED. When normalisation changes nothing this
+    IS `_get_client()`; when it does, this is a SEPARATE client, so the
+    shared client `orders.create` uses keeps the configured encoding and its
+    behaviour is unchanged by this fix. It shares the process-wide pacer
+    through the same transport gate."""
+    global _read_client
+    cfg = settings()
+    if not (cfg.pmus_key_id and cfg.pmus_secret_key):
+        return _get_client()
+    from .venue_key import normalize_secret_key
+    sec = normalize_secret_key(cfg.pmus_secret_key)
+    if sec == cfg.pmus_secret_key:
+        return _get_client()
+    if _read_client is not None:
+        return _read_client
+    from polymarket_us import PolymarketUS
+    try:
+        from . import venue_sdk as _vsdk
+        extra = _vsdk.client_kwargs()
+    except Exception:                                          # noqa: BLE001
+        extra = {}
+    _read_client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=sec,
+                                **extra)
+    _install_request_gate(_read_client)
+    return _read_client
+
+
 def _install_request_gate(client) -> dict:
     """Put the not-before gate and the attempt counter AT THE TRANSPORT.
 

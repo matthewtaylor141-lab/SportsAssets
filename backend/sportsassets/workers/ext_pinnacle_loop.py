@@ -2242,6 +2242,49 @@ ADAPTIVE_ODDS_REFETCH_RULE = (
 #: hold the cycle open.
 VENUE_TIMEOUT_S = 10.0
 
+#: ── ONE SLOW VENUE READ NO LONGER STALLS THE REST OF A FETCH (P1) ──────
+#:
+#: THE MEASURED SERIALISATION (production 2026-10-06, research-sql run
+#: 37477575060 section 3b). The metered provider's NCAAF quotes arrived
+#: 15.19 s old; queue position 1's paced venue read and its follow-ups took
+#: ~17 s, so positions 2..50 of the same fetch reached their turn at
+#: 32.7-39.5 s and were refused QUOTE_STALE_ON_ARRIVAL one by one (1,445
+#: rows / 52 events in 24 h). A read that cannot finish before ITS OWN
+#: candidate's probability deadline -- the provider's change instant plus
+#: the unchanged 30 s rule -- produces nothing the decision could use: the
+#: 30 s rule refuses the decision whatever the book says. Waiting for it
+#: (up to VENUE_TIMEOUT_S, or queued behind the process-wide pacer) only
+#: spends the following candidates' budget.
+#:
+#: SO THE READ IS BOUNDED BY THAT DEADLINE: it is not started past it, it
+#: is never dispatched past it (the request gate rechecks the deadline AFTER
+#: the pacer's queue, `venue_request_gate.PacedTransport`), and it is
+#: awaited no longer than it. Refused by name
+#: (PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH), never a
+#: venue failure. The 30 s rule, the pacer's gap and the venue's rate are
+#: all unchanged; the bound only ever REFUSES EARLIER.
+READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE = (
+    "a collector venue read is bounded by its own candidate's probability "
+    "deadline (the provider change instant + PINNACLE_MAX_AGE_S): not "
+    "started, dispatched or awaited past it, so a read whose answer the 30 s "
+    "rule would refuse never stalls the candidates after it; refused by name")
+R_READ_PAST_PROBABILITY_DEADLINE = \
+    "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH"
+#: the deadline the collector sets around ONE venue read (None: unbounded)
+_READ_DEADLINE: contextvars.ContextVar = contextvars.ContextVar(
+    "collector_venue_read_probability_deadline", default=None)
+
+
+def probability_deadline(observed_epoch) -> float | None:
+    """The last instant a decision on a quote observed at `observed_epoch`
+    could still pass the unchanged 30 s rule, or None when the instant is
+    unknown (no bound: the rule then refuses by its own name). Pure."""
+    try:
+        t = float(observed_epoch)
+    except (TypeError, ValueError):
+        return None
+    return t + PINNACLE_MAX_AGE_S if math.isfinite(t) else None
+
 #: The sharp books whose agreement counts toward per-outcome depth. Taken
 #: from `edge/fairvalue/feed.py`'s ANCHOR_BOOKS/SHARP_BOOKS set, which was
 #: built from observed production payloads. Pinnacle is the anchor and is
@@ -3681,6 +3724,10 @@ def _read_book_blocking(slug: str, *,
     # request's gap.
     from .. import venue_request_gate as grt
 
+    if deadline_epoch_s is None:
+        # the collector's probability deadline for THIS read, when it set
+        # one (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE)
+        deadline_epoch_s = _READ_DEADLINE.get()
     read_id = grt.begin_read(slug=slug, deadline_epoch_s=deadline_epoch_s)
     grt.bind_read(read_id)
     try:
@@ -4440,8 +4487,33 @@ def complement_record(rec: dict, *, contract: dict, ev_quote: dict,
     return out, None
 
 
+#: the request gate's two deadline refusals (venue_request_gate
+#: R_DEADLINE_PASSED / R_COOLDOWN_EXCEEDS_DEADLINE; pinned equal by a test)
+_GATE_DEADLINE_PASSED = "DECISION_DEADLINE_PASSED_BEFORE_DISPATCH"
+_GATE_COOLDOWN_PAST_DEADLINE = "VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE"
+
+
+def _past_deadline(slug, deadline_epoch_s, started_at, how) -> dict:
+    """The named refusal of a read bounded by its candidate's probability
+    deadline (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE). No book was
+    used: nothing is displayed and no price of any kind is carried."""
+    now = time.time()
+    return {"ok": False, "refusal": R_READ_PAST_PROBABILITY_DEADLINE,
+            "why": ("the read could not finish before this candidate's "
+                    "probability deadline (%s): past it the unchanged 30 s "
+                    "rule refuses the decision whatever the book says"
+                    % how),
+            "bound": how, "slug": slug,
+            "deadline_epoch_s": round(float(deadline_epoch_s), 6),
+            "read_started_at": round(float(started_at), 6),
+            "abandoned_at": round(now, 6),
+            "spent_s": round(now - float(started_at), 3),
+            "rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE}
+
+
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
-                      subscription=None, revalidation=None):
+                      subscription=None, revalidation=None,
+                      deadline_epoch_s=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
 
     `intent` IS THE SIDE, AND IT IS REQUIRED. This used to take an
@@ -4521,16 +4593,44 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     # our own latency is worth knowing -- NOT because it bounds the age of
     # the book. See the note on our own clocks below.
     request_sent_at = time.time()
+    # THE CANDIDATE'S OWN PROBABILITY DEADLINE BOUNDS THE READ
+    # (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE): the argument, else the
+    # one the collector set around this call. None: unbounded, as before
+    # (every other caller).
+    if deadline_epoch_s is None:
+        deadline_epoch_s = _READ_DEADLINE.get()
+    timeout = VENUE_TIMEOUT_S
+    if deadline_epoch_s is not None:
+        left = float(deadline_epoch_s) - request_sent_at
+        if left <= 0:
+            return _past_deadline(slug, deadline_epoch_s, request_sent_at,
+                                  "NOT_STARTED")
+        timeout = min(VENUE_TIMEOUT_S, left)
     try:
-        book = await asyncio.wait_for(
-            asyncio.to_thread(_read_book_blocking, slug),
-            timeout=VENUE_TIMEOUT_S)
+        # the reader takes the deadline from the same context variable
+        # (asyncio.to_thread copies the context into its thread)
+        _dl_token = _READ_DEADLINE.set(deadline_epoch_s)
+        try:
+            book = await asyncio.wait_for(
+                asyncio.to_thread(_read_book_blocking, slug),
+                timeout=timeout)
+        finally:
+            _READ_DEADLINE.reset(_dl_token)
     except Exception as exc:                                   # noqa: BLE001
+        if (deadline_epoch_s is not None and timeout < VENUE_TIMEOUT_S
+                and isinstance(exc, (asyncio.TimeoutError, TimeoutError))):
+            return _past_deadline(slug, deadline_epoch_s, request_sent_at,
+                                  "AWAIT_ABANDONED_AT_THE_DEADLINE")
         return {"ok": False, "refusal": R_VENUE_READ_FAILED,
                 "why": "book read failed: %s" % type(exc).__name__,
                 "exception": type(exc).__name__,
                 "diagnostic": _venue_diagnostic(slug, exc,
                                                 stage="BOOK_READ_AWAIT")}
+    if (deadline_epoch_s is not None and book.get("refused_by")
+            == "OUR_REQUEST_GATE" and book.get("error") in (
+                _GATE_DEADLINE_PASSED, _GATE_COOLDOWN_PAST_DEADLINE)):
+        return _past_deadline(slug, deadline_epoch_s, request_sent_at,
+                              "REFUSED_BY_OUR_GATE:%s" % book.get("error"))
     if book.get("error"):
         diag = book.get("diagnostic") or {}
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
@@ -9792,6 +9892,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            "requeued_after_our_delay": 0,
            "skipped_stale_on_arrival": 0, "arrival_skip_samples": 0,
            "deduplicated_requests": 0, "venue_requests": 0,
+           # reads refused or abandoned at the candidate's own probability
+           # deadline (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE)
+           "reads_bounded_by_probability_deadline": 0,
            # every event WITH A PINNACLE PRICE, measured when it came up --
            # mapped or not, evaluated or not
            "arrival_lag_every_priced": [], "arrival_ours_every_priced": []}
@@ -10745,12 +10848,35 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                              None if _pe is None else round(float(_pe), 6)),
                          "why": WHY_DUPLICATE_INSTRUMENT})
                 continue
-            vq = await venue_quote(
-                conn, us_slug=ident["us_market_slug"],
-                intent=ident["intent"], now=read_at,
-                subscription=_cev.get("subscription"),
-                revalidation=_cev.get("revalidation"))
+            # THE READ IS BOUNDED BY THIS CANDIDATE'S OWN PROBABILITY
+            # DEADLINE (P1 first-loss census, READ_BOUNDED_BY_THE_
+            # PROBABILITY_DEADLINE_RULE): past it the 30 s rule refuses the
+            # decision whatever the book says, so the read is never
+            # dispatched or awaited beyond it and the rest of the fetch is
+            # not stalled behind it. The 30 s rule is unchanged. Carried in a
+            # context variable set around THIS call only (asyncio.to_thread
+            # copies it into the reader's thread).
+            _dl_token = _READ_DEADLINE.set(probability_deadline(_pe))
+            try:
+                vq = await venue_quote(
+                    conn, us_slug=ident["us_market_slug"],
+                    intent=ident["intent"], now=read_at,
+                    subscription=_cev.get("subscription"),
+                    revalidation=_cev.get("revalidation"))
+            finally:
+                _READ_DEADLINE.reset(_dl_token)
             lat["venue_requests"] += 1
+            if vq.get("refusal") == R_READ_PAST_PROBABILITY_DEADLINE:
+                lat["reads_bounded_by_probability_deadline"] += 1
+                # OUR READ'S WAIT TOOK IT PAST THE RULE: first in its
+                # competition's next fetch, as lever A's own-delay skips
+                # (REQUEUE_AFTER_OUR_DELAY_RULE)
+                if stream_seed is None and (event or {}).get("id") \
+                        is not None:
+                    _requeued[str(event["id"])] = (
+                        _requeued_since if _requeued_since is not None
+                        else time.time())
+                    lat["requeued_after_our_delay"] += 1
             # ONLY A SUCCESSFUL READ CLAIMS THE INSTRUMENT. Recording a
             # refusal would suppress every retry on that instrument for the
             # rest of the cycle, so one transient venue error would refuse
@@ -11688,6 +11814,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        lat["arrival_ours_every_priced"])},
                "deduplicated_requests": lat["deduplicated_requests"],
                "venue_requests": lat["venue_requests"],
+               "reads_bounded_by_probability_deadline":
+                   lat["reads_bounded_by_probability_deadline"],
+               "read_bound_rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE,
                # WHAT WAS NOT EXAMINED, so throughput cannot be confused
                # with quietly dropping the difficult cases.
                "deferred_candidates": deferred_total,

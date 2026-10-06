@@ -288,6 +288,13 @@
       '</div><p class="sl-why">' + txt(x.basis) + '</p></details>';
   }
 
+  /* THE SERVER'S position_state, never derived here (header: nothing is
+     computed that the server did not send). Absent or unknown -> no state
+     is shown, and the quantities render exactly as sent. */
+  function positionState(p) {
+    return (p.position_state === 'OPEN' || p.position_state === 'CLOSED') ? p.position_state : null;
+  }
+
   function protectionCol(side, p) {
     p = p || {};
     var paper = side === 'paper';
@@ -297,9 +304,19 @@
       return '<div class="sl-col ' + (paper ? 'sl-paper' : 'sl-actual') + '">' + head +
         '<p class="muted">Protection unavailable — ' + esc(p.why_unavailable) + '</p></div>';
     }
+    /* THE CANONICAL STATE (backend position_state): held <= epsilon is
+       CLOSED, held 0 -- never the historical held + sold quantity ("8"). */
+    var pstate = positionState(p);
+    var closed = pstate === 'CLOSED';
+    var held = paper ? p.open_qty : p.held_qty;
     return '<div class="sl-col ' + (paper ? 'sl-paper' : 'sl-actual') + '">' + head + '<div class="facts">' +
-      fact(paper ? 'Open qty' : 'Held qty', qty(paper ? p.open_qty : p.held_qty)) +
-      (p.position_qty !== undefined ? fact('Position qty (held + sold by filled protection)', qty(p.position_qty)) : '') +
+      (pstate ? fact('Position state', pill(pstate, closed ? 'grey' : 'good')) : '') +
+      fact(paper ? 'Open qty' : 'Held qty', closed ? qty(0) : qty(held)) +
+      (p.position_qty !== undefined
+        ? fact('Position qty (held + sold by filled protection)',
+               closed ? pill('CLOSED', 'grey') + '<span class="sl-why">fully sold: held 0</span>'
+                      : qty(p.position_qty))
+        : '') +
       fact('Standing orders (resting, NOT protection until filled)', qty(p.standing_resting_qty) +
         (num(p.standing_resting_orders) !== null ? '<span class="sl-why">' +
           esc(p.standing_resting_orders) + ' resting order(s)</span>' : '')) +
@@ -708,5 +725,5 @@
     document.addEventListener('DOMContentLoaded', start);
   } else { start(); }
 
-  window.BettorSmallLive = {load: load, render: render, VERSION: '1.1.0'};
+  window.BettorSmallLive = {load: load, render: render, protectionCol: protectionCol, VERSION: '1.2.0'};
 }());

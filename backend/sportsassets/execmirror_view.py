@@ -984,6 +984,13 @@ def protection_quantities(*, held, resting, filled, pending=None) -> dict:
     h, r, f = _d(held), _d(resting), _d(filled)
     position = h + f if h > 0 or f > 0 else Decimal(0)
     return {"position_qty": _f(position),
+            # THE CANONICAL STATE (order_state_truth.protection_summary): held
+            # <= the ledger epsilon is CLOSED whatever position_qty (held +
+            # sold by filled protection) says -- 8 bought / 8 sold is CLOSED,
+            # held 0, never "8"
+            "position_state": ("OPEN" if float(h) > OST.OPEN_QTY_EPS
+                               else "CLOSED"),
+            "held_qty_now": _f(h),
             "standing_resting_qty": _f(r),
             "filled_protection_qty": _f(f),
             "pending_submission_qty": None if pending is None else _f(_d(pending)),
@@ -1045,6 +1052,7 @@ def _protection(g, mg) -> dict:
                                   filled=pp["filled"], pending=pp.get("pending"))
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": _f(open_q),
                  "position_qty": q["position_qty"],
+                 "position_state": q["position_state"],
                  "standing_resting_qty": q["standing_resting_qty"],
                  "standing_resting_orders": pp["resting_orders"],
                  "pending_submission_qty": q["pending_submission_qty"],
@@ -1055,7 +1063,8 @@ def _protection(g, mg) -> dict:
                  "why_unavailable": None}
     else:
         paper = {"label": "PAPER POSITION (SIMULATED)", "open_qty": None,
-                 "position_qty": None, "pending_submission_qty": None,
+                 "position_qty": None, "position_state": None,
+                 "pending_submission_qty": None,
                  "standing_resting_qty": None, "standing_resting_orders": None,
                  "filled_protection_qty": None, "unprotected_qty": None, "source": None,
                  "why_unavailable": ("no simulated fill in this group: there is no paper "
@@ -1066,6 +1075,7 @@ def _protection(g, mg) -> dict:
                                   filled=lp["filled"], pending=lp["pending"])
         actual = {"label": "ACTUAL POSITION", "held_qty": _f(held),
                   "position_qty": q["position_qty"],
+                  "position_state": q["position_state"],
                   "standing_resting_qty": q["standing_resting_qty"],
                   "standing_resting_orders": lp["resting_orders"],
                   "pending_submission_qty": q["pending_submission_qty"],
@@ -1077,7 +1087,7 @@ def _protection(g, mg) -> dict:
                   "why_unavailable": None}
     else:
         actual = {"label": "ACTUAL POSITION", "held_qty": None,
-                  "position_qty": None,
+                  "position_qty": None, "position_state": None,
                   "standing_resting_qty": None, "standing_resting_orders": None,
                   "pending_submission_qty": None, "filled_protection_qty": None,
                   "unprotected_qty": None, "source": None,

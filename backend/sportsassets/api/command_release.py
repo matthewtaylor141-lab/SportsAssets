@@ -60,9 +60,12 @@ STATEMENT_TIMEOUT_MS = 3000
 #: 216..305 since the PAPER CAPITAL AUTHORITY (305: shadow counterfactuals
 #: and the entry-refusal census); 216..306 since the P0 closeout (303
 #: Xavier probability snapshots, 306 paper market-data telemetry; 304 unused).
+#: 216..309 since the PAPER PROFITABILITY BIND (309: learned models, per-
+#: entry all-in evaluations, explicit CASH decisions; 307 / 308 reserved by
+#: parallel work, absent from this build).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 306
+TRACKED_FROM, TRACKED_TO = 216, 309
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"
