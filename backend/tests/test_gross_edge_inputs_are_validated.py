@@ -254,8 +254,24 @@ def test_the_validation_module_is_pure():
             mods |= {node.module or ""} | {a.name for a in node.names}
         elif isinstance(node, ast.Import):
             mods |= {a.name for a in node.names}
+    # (P1) the priced settlement-difference policy re-derives its own
+    # declaration; it is itself pure (standard library plus the pure
+    # bettor_settlement_terms / settlement_exception_risk), pinned below
     assert mods <= {"__future__", "annotations", "math", "json", "",
-                    "bettor_book_snapshot", "bettor_pinnacle_devig"}, mods
+                    "bettor_book_snapshot", "bettor_pinnacle_devig",
+                    "bettor_settlement_difference_policy"}, mods
+    import sportsassets.bettor_settlement_difference_policy as SDP
+    tree = ast.parse(pathlib.Path(SDP.__file__).read_text())
+    sdp_mods = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            sdp_mods |= {node.module or ""} | {a.name for a in node.names}
+        elif isinstance(node, ast.Import):
+            sdp_mods |= {a.name for a in node.names}
+    assert sdp_mods <= {"__future__", "annotations", "math", "",
+                        "bettor_settlement_terms",
+                        "settlement_exception_risk"}, sdp_mods
+    assert GEI.PRICED_DIFFERENCE_VERSION == SDP.VERSION
 
 
 # ═════════════════════════════════════════════════════════════════════

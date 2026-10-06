@@ -265,12 +265,13 @@ SUPPORTED: dict = {
 #: The book's Game-period grading is the same for every competition of each
 #: sport (only the basketball MINIMUM differs -- 43 minutes in the NBA, 35
 #: elsewhere -- an exceptional state, never the ordinary grading). The WNBA
-#: is listed and NOT admitted: its venue team record is the city alone
-#: (bettor_venue_native_identity.LEAGUES_NOT_READ). The leagues equal
+#: (P1) is admitted on its captured wording, its city-only venue team record
+#: read through the league's own team table
+#: (bettor_venue_native_identity.WNBA_TEAMS). The leagues equal
 #: bettor_venue_native_identity.ADMITTED_WINNER_LEAGUES (pinned by a test).
 _BASKETBALL_LEAGUES = ("nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl",
                        "eurocup", "eurolg", "jpbl", "kbl", "lba", "lnbp",
-                       "nbl", "slnbl", "svkbl", "vtb")
+                       "nbl", "slnbl", "svkbl", "vtb", "wnba")
 _HOCKEY_LEAGUES = ("nhl", "ahl", "cehl", "khl", "liiga", "snhl")
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,

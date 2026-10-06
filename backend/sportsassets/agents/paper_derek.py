@@ -449,6 +449,102 @@ async def _calibration(conn, dctx: dict, version) -> dict:
     return dctx["calibration"][key]
 
 
+def settlement_difference(cand: dict, row: dict, *, catalogue=None,
+                          precise=()) -> dict:
+    """THE PRICED SETTLEMENT-DIFFERENCE POLICY'S ELIGIBILITY for a candidate
+    the strict settlement check refuses (an INCOMPATIBLE comparison or a
+    cited NCAAF clause difference): bettor_settlement_difference_policy.
+    eligibility on the candidate's recorded comparison, its settlement-stage
+    lane refusals and the completed-game match (ordinary completion only).
+    The match is kept: `apply_settlement_difference` takes its conversion.
+    Pure apart from what it is handed."""
+    from .. import bettor_settlement_difference_policy as SDP
+    from . import paper_benchmark as PB
+    try:
+        match = PB.completed_game_match(cand, row, catalogue=catalogue)
+    except Exception as exc:                                    # noqa: BLE001
+        match = {"established": False,
+                 "refusals": ["COMPLETED_GAME_MATCH_RAISED:%s"
+                              % type(exc).__name__], "checks": []}
+    scmp = DP._j(row.get("settlement_comparison")) or {}
+    st = dict(cand.get("settlement") or {})
+    st["per_condition"] = scmp.get("per_condition") or {}
+    from .. import bettor_nfl_settlement as NFL
+    league = NFL.league_of_slug(cand.get("us_market_slug"))
+    el = SDP.eligibility(sport_family=cand.get("sport_family"),
+                         market=cand.get("market"), league=league,
+                         settlement=st,
+                         lane_codes=list(st.get("unmet") or []),
+                         precise_codes=list(precise or []), match=match)
+    return dict(el, match=match, league=league)
+
+
+def apply_settlement_difference(pin: dict, sd: dict, *, cand: dict) -> str | None:
+    """THE PRICE, IN PLACE: `pin["p"]` (the stored book number for the event
+    the contract pays on, already re-aged) becomes the policy's worst-case
+    venue value; the book's own number stays as `p_book_conditional_no_tie`
+    and the declaration as `venue_conversion` (version, formula, rate,
+    basis), which gross_edge_inputs re-derives. The NFL tie (and the NCAAF
+    identity) is converted first by the completed-game conversion. Never
+    touches the age, the freshness verdict or the 30 s limit. Returns the
+    refusal to append, or None."""
+    from .. import bettor_settlement_difference_policy as SDP
+    from . import paper_benchmark as PB
+    if pin.get("p") is None:
+        return None
+    p_book = float(pin["p"])
+    inner = None
+    p_completed = p_book
+    if (sd.get("match") or {}).get("venue_conversion"):
+        probe = {"p": p_book}
+        why = PB.apply_venue_conversion(probe, sd["match"])
+        if why:
+            pin["settlement_difference_policy"] = {
+                "policy_id": SDP.POLICY_ID, "version": SDP.VERSION,
+                "refusal": why, "completed_conversion":
+                    probe.get("venue_conversion")}
+            return why
+        p_completed = float(probe["p"])
+        vc = probe.get("venue_conversion") or {}
+        if vc.get("tie_rate_interval") is not None:
+            inner = {k: vc.get(k) for k in (
+                "version", "tie_rate_interval", "tie_payout_per_contract",
+                "tie_rate_used", "p", "formula")}
+    priced = SDP.price(p_completed, sport_family=cand.get("sport_family"),
+                       p_book=p_book, completed_conversion=inner)
+    pin["settlement_difference_policy"] = priced
+    if priced.get("refusal") or priced.get("p") is None:
+        return priced.get("refusal") or SDP.R_NO_P
+    if float(priced["p"]) <= 0.0:
+        # PRICED, AT ZERO: no price above zero carries an edge; the book's
+        # number stays what it was (never a probability of 0 handed on)
+        return SDP.R_PRICED_AT_ZERO
+    pin["p_book_conditional_no_tie"] = p_book
+    pin["p"] = float(priced["p"])
+    pin["p_is"] = SDP.P_IS
+    pin["venue_conversion"] = {
+        "applies": True, "version": SDP.VERSION, "policy_id": SDP.POLICY_ID,
+        "sport_family": cand.get("sport_family"), "p": pin["p"],
+        "p_book": p_book, "p_completed": p_completed,
+        "q_hi": priced["q_hi"], "formula": SDP.FORMULA,
+        "completed_conversion": inner,
+        "rate_basis": {k: priced["rate"].get(k) for k in (
+            "q_hi_is", "measured", "prior_floor_upper", "basis")}}
+    return None
+
+
+def _priced_settlement(priced: dict) -> dict:
+    """The settlement the capital gate is handed for a contract the priced
+    settlement-difference policy admitted: the policy's own marker, id and
+    version (bettor_capital_eligibility.settlement_resolved checks them)."""
+    from .. import bettor_settlement_difference_policy as SDP
+    return {"compatibility": SDP.SETTLEMENT_PRICED,
+            "policy_id": priced.get("policy_id"),
+            "version": priced.get("version"),
+            "p": priced.get("p"), "q_hi": priced.get("q_hi"),
+            "basis": "bettor_settlement_difference_policy.price"}
+
+
 async def decide_one(conn, ctx: dict, row: dict) -> dict:
     """ONE PAPER DECISION, persisted; an ENTER is then submitted."""
     cfg = ctx["config"]
@@ -476,10 +572,33 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
     # the category); a cited payout difference refuses even if a row recorded
     # COMPATIBLE. Every other contract: unchanged.
     precise = DP.strict_settlement_reasons(cand)
+    # THE PRICED SETTLEMENT-DIFFERENCE POLICY (P1 first-loss census): a
+    # difference that lies only in the EXCEPTIONAL states (postponed,
+    # abandoned, suspended ...: book void, venue last fair price) is priced
+    # -- p_venue = max(0, p_completed - q_hi) -- and admitted ONLY through
+    # that policy; anything it cannot price refuses SETTLEMENT_NOT_SUPPORTED
+    # with the policy's exact code behind it.
+    sdp = None
     if cand["settlement"].get("compatibility") == "INCOMPATIBLE" or precise:
-        refusals.append(DP.R_SETTLEMENT)
-        refusals.extend(r for r in precise if r not in refusals)
+        sdp = settlement_difference(cand, row, catalogue=cat,
+                                    precise=precise)
+        if not sdp.get("eligible"):
+            refusals.append(DP.R_SETTLEMENT)
+            refusals.extend(r for r in precise if r not in refusals)
+            refusals.extend(r for r in sdp.get("refusals") or []
+                            if r not in refusals)
     pin = _pinnacle(cand, at=at, max_age=float(ent["pinnacle_max_age_s"]))
+    if sdp is not None and sdp.get("eligible"):
+        why_sdp = apply_settlement_difference(pin, sdp, cand=cand)
+        pin["settlement_difference_eligibility"] = {
+            k: sdp.get(k) for k in ("eligible", "why", "league",
+                                    "ordinary_completion")}
+        if why_sdp:
+            from .. import bettor_settlement_difference_policy as SDP
+            if why_sdp != SDP.R_PRICED_AT_ZERO:
+                refusals.append(DP.R_SETTLEMENT)
+            if why_sdp not in refusals:
+                refusals.append(why_sdp)
     # WHERE AND WHEN THIS DECISION WAS FORMED (audits the freshness rule):
     # at the valuation instant inside the cycle, or later by the pass.
     pin["decided_via"] = ctx.get("decided_via") or DECIDED_VIA_PASS
@@ -601,10 +720,16 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         # firing now and POSITIVE forward economics; otherwise CASH/WAIT is
         # the recorded decision (and a shadow counterfactual when only the
         # capital authority was missing).
+        priced = pin.get("settlement_difference_policy") or {}
         ce = await capital_gate(
             conn, ctx, strategy=STRATEGY, p=p_blend, levels=levels,
             sized=sized, cand=cand, side=side, at=at, fee_fn=fee_fn,
             decision_id=did,
+            # A CONTRACT ADMITTED THROUGH THE PRICED SETTLEMENT-DIFFERENCE
+            # POLICY is resolved by THAT policy, named as such (never
+            # COMPATIBLE); every other contract keeps its recorded verdict
+            settlement=(_priced_settlement(priced)
+                        if priced.get("p") is not None else None),
             threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
             book=(None if obs is None else {
                 "book_obs_id": obs.get("obs_id"),

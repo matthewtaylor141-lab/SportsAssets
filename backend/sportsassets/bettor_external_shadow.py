@@ -833,7 +833,10 @@ PINNAPI_SELECT_REFUSALS = (
     # stream's draw-priced football line (pinnapi_primary) and inc-pinnapi's
     # unparsed record of a held event (pinnapi_feed, fix-stage finding 3)
     "PINNAPI_PRIMARY_FOOTBALL_LINE_PRICES_A_DRAW",
-    "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN")
+    "FEED_EVENT_LAST_RECORD_UNPARSED_MARKETS_UNKNOWN",
+    # (P1 first-loss census) the feed holds no record naming either team
+    # anywhere near the start (pinnapi_names.absence)
+    "PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM")
 
 #: ── ONE TAXONOMY: THE LANE STAGE OF THE INCIDENT'S CODES IS DERIVED ──
 #:
@@ -955,6 +958,8 @@ STAGES = (
         "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW",
         # P0 coverage: a basketball / hockey league whose winner is not read
         "VENUE_NATIVE_LEAGUE_NOT_ADMITTED",
+        # P1: a city-only league's team (the WNBA) its table does not name
+        "VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE",
         "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE",
         "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
         "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
@@ -1215,6 +1220,8 @@ EVALUABILITY_OF = {
     "VENUE_NATIVE_DISCOVERED_EVENT_NOT_IN_THE_WINDOW": COULD_NOT_EVALUATE,
     # not EXTERNAL: the venue lists the league; reading it is ours
     "VENUE_NATIVE_LEAGUE_NOT_ADMITTED": COULD_NOT_EVALUATE,
+    # a city the league's own team table does not name: ours to extend
+    "VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE": COULD_NOT_EVALUATE,
     "PRICED_OUTCOME_NOT_IN_THE_PROVIDER_QUOTE": COULD_NOT_EVALUATE,
 
     # ── EXTERNAL DEPENDENCY: the missing input is theirs ──────────────
@@ -1227,6 +1234,15 @@ EVALUABILITY_OF = {
     "THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK": EXTERNAL_DEPENDENCY,
     "THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET": EXTERNAL_DEPENDENCY,
     **{c: COULD_NOT_EVALUATE for c in PINNAPI_SELECT_REFUSALS},
+    # ...EXCEPT THE ONE THAT IS THEIRS (P1 first-loss census): no record of
+    # the sport in the feed -- prematch or live, priced or not -- within 36 h
+    # of the start shares one token or an acronym with EITHER participant,
+    # the feed holds fixtures of that sport and has evicted nothing
+    # (pinnapi_names.absence). Pinnacle has not published the fixture: the
+    # same absence as NO_PINNACLE_ON_EVENT, measured on the feed. Any token
+    # in common keeps PINNAPI_PRIMARY_NO_EXACT_FIXTURE, a naming gap, ours.
+    "PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM":
+        EXTERNAL_DEPENDENCY,
     # The catalogue lists only line markets for this fixture: no moneyline
     # exists there to price, the same kind of absence as no contract at all.
     "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": EXTERNAL_DEPENDENCY,

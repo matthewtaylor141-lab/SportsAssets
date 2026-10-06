@@ -135,7 +135,19 @@ def walk(ladder: list, qty: float) -> list:
 
 
 def settlement_resolved(settlement: dict | None) -> bool:
-    return str((settlement or {}).get("compatibility") or "") == COMPATIBLE
+    """COMPATIBLE terms -- or a contract the PRICED settlement-difference
+    policy admitted, named by its own marker, id and CURRENT version with a
+    priced probability (bettor_settlement_difference_policy): its exceptional
+    states are priced into p, never read as compatible. Anything else is
+    unresolved."""
+    s = settlement or {}
+    if str(s.get("compatibility") or "") == COMPATIBLE:
+        return True
+    from . import bettor_settlement_difference_policy as SDP
+    return (str(s.get("compatibility") or "") == SDP.SETTLEMENT_PRICED
+            and s.get("policy_id") == SDP.POLICY_ID
+            and s.get("version") == SDP.VERSION
+            and s.get("p") is not None)
 
 
 def evaluate(*, p, levels, qty, limit, fee_fn: Callable | None,

@@ -248,6 +248,13 @@ def venue_events(rows) -> dict:
         starts = {s for s in ev["starts"] if s is not None}
         if len(starts) != 1 or None in ev["starts"]:
             problems.append("VENUE_EVENT_START_NOT_ONE_INSTANT")
+        # A CITY-ONLY LEAGUE (P1, the WNBA: bettor_venue_native_identity.
+        # LEAGUE_TEAM_TABLES): its record's one rendering is the league's own
+        # (city, nickname) pair, and the controlled fallback is never asked
+        # -- a bare city is no identity (it is contained in the NBA's
+        # "Atlanta Hawks" as in the WNBA's "Atlanta Dream")
+        city_league = vnat.league_token(slug) \
+            if vnat.league_token(slug) in vnat.LEAGUE_TEAM_TABLES else None
         for rec in recs:
             rend = set()
             for nm in sorted(rec.pop("names")) or [rec["team_name"]]:
@@ -256,6 +263,14 @@ def venue_events(rows) -> dict:
                                          "team_safe_name": sf})
             rec.pop("safe_names")
             rec["exact"] = sorted(rend)
+            if city_league is not None:
+                got, why = vnat.league_participant(rec["team_name"],
+                                                   city_league)
+                rec["no_fallback"] = True
+                rec["exact"] = [_fold(got)] if got else []
+                if got is None:
+                    problems.append("%s:%s" % (vnat.R_LEAGUE_TEAM,
+                                               _fold(rec["team_name"])))
         leagues = sorted(ev["leagues"]) or [vnat.league_token(slug)]
         out[sid].append({"slug": slug,
                          "start": min(starts) if starts else None,
@@ -340,6 +355,9 @@ def _fallback(provider_name: str, rec: dict, family: str,
     qualifiers, against each of the record's renderings. `memo` (one
     pass's `_Memo`) only caches the pure fold and profile calls."""
     from . import bettor_venue_native_identity as vnat
+    if rec.get("no_fallback"):
+        # a city-only league's record: its table rendering, exactly, or none
+        return None
     memo = memo if memo is not None else _Memo()
     football = family == "football"
     for rendering in _fallback_renderings(rec, memo):

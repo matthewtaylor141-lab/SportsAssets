@@ -67,6 +67,17 @@ DECISION_LOGIC_FILES = (
     # premise -- paper_benchmark's ENTER imports it, so a change to it
     # changes the decision and must restart the forward window
     "bettor_ncaaf_settlement.py",
+    # P1 first-loss census: the PRICED settlement-difference policy -- the
+    # worst-case venue value max(0, p_completed - q_hi) of a contract whose
+    # only settlement differences are exceptional-state ones, the rate table
+    # behind q_hi and the eligibility it admits through; paper_derek's ENTER,
+    # gross_edge_inputs' re-derivation and the capital gate read it, so a
+    # change to it changes which contracts can ENTER and at what value
+    "bettor_settlement_difference_policy.py",
+    # P1 first-loss census: the canonical-name tier of the PinnAPI fixture
+    # match (pinnapi_primary imports it) -- which WS fixture prices which
+    # provider event, and so which probability a decision reads
+    "pinnapi_names.py",
     # P0 incident inc-edge (pinned at integration): the gross edge's INPUT
     # validation -- paper_benchmark's and paper_derek's decisions refuse
     # (SOFTWARE) when the row's probability, the book's best level or the

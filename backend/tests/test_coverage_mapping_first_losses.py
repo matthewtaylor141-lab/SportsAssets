@@ -71,17 +71,19 @@ def _leagues_in_capture():
     return out
 
 
-def test_the_admitted_leagues_are_every_captured_league_but_the_wnba():
+def test_the_admitted_leagues_are_every_captured_league():
+    """P1: the WNBA is admitted too -- its city-only team record read
+    through the league's own team table (test_p1_wnba_league_team_table)."""
     cap = _leagues_in_capture()
-    assert V.ADMITTED_WINNER_LEAGUES["basketball"] == cap["basketball"] - {
-        "wnba"}
+    assert V.ADMITTED_WINNER_LEAGUES["basketball"] == cap["basketball"]
     assert V.ADMITTED_WINNER_LEAGUES["hockey"] == cap["hockey"]
-    assert set(V.LEAGUES_NOT_READ) == {"wnba"}
+    assert set(V.LEAGUES_NOT_READ) == set()
+    assert set(V.LEAGUE_TEAM_TABLES) == {"wnba"}
     # one list, read three ways: identity, de-vig, census admission
     for fam, leagues in V.ADMITTED_WINNER_LEAGUES.items():
         dv = {k[2] for k in devig.SUPPORTED_BY_LEAGUE if k[:2] == (fam, "h2h")}
         assert dv == set(leagues), fam
-    assert devig.expected_outcomes("basketball", "h2h", league="wnba") is None
+    assert devig.expected_outcomes("basketball", "h2h", league="wnba") == 2
 
 
 def test_every_captured_league_states_one_full_game_overtime_wording():
@@ -243,16 +245,21 @@ def test_every_production_refusal_now_maps_to_its_own_contract():
         assert h["priced_participant"] != w["priced_participant"]
 
 
-def test_the_wnba_city_only_record_refuses_by_name():
+def test_the_wnba_city_only_record_maps_only_through_its_league_table():
     """Golden State Valkyries / Las Vegas Aces against the venue's WNBA
-    'golden state' / 'las vegas' -- and the NBA's Golden State Warriors
-    would contain the same city: no identity, by name."""
+    'golden state' / 'las vegas' (+ its own nicknames): mapped through the
+    league table; the NBA's Golden State Warriors, which would contain the
+    bare city, no longer does."""
     rows = _event("wnba-lv-gsv-2026-10-07", "golden state", "las vegas", T0)
-    for home, away in (("Golden State Valkyries", "Las Vegas Aces"),
-                       ("Golden State Warriors", "Las Vegas Aces")):
-        m = _match("wnba-lv-gsv-2026-10-07", rows, home, away)
-        assert m["ok"] is False and m["refusal"] == V.R_LEAGUE_NOT_ADMITTED
-        assert "city" in m["why"]
+    for r in rows:
+        r["side_norm"] = V.WNBA_TEAMS[r["team_name"]]
+    m = _match("wnba-lv-gsv-2026-10-07", rows, "Golden State Valkyries",
+               "Las Vegas Aces")
+    assert m["ok"] is True, (m.get("refusal"), m.get("why"))
+    assert m["venue_league"] == "wnba"
+    m = _match("wnba-lv-gsv-2026-10-07", rows, "Golden State Warriors",
+               "Las Vegas Aces")
+    assert m["ok"] is False and m["refusal"] == V.R_ONE_TEAM_ONLY
     # an uncaptured league of the family refuses by the same name
     rows = _event("xbl-aaa-bbb-2026-10-07", "alpha club", "beta club", T0)
     m = _match("xbl-aaa-bbb-2026-10-07", rows, "Alpha Club", "Beta Club")
@@ -284,7 +291,8 @@ def test_the_census_and_de_vig_admit_each_captured_league():
                    "question": "Who will win?"}
             assert CEN.family_of("side", None, TYPE[fam], row) == \
                 ("MONEYLINE", True, None), (fam, lg)
-    row = {"identifier": "aec-wnba-ny-atl-2026-10-06", "team_league": "wnba"}
+    # an uncaptured league is still not admitted
+    row = {"identifier": "aec-xbl-ny-atl-2026-10-06", "team_league": "xbl"}
     assert CEN.family_of("side", None, TYPE["basketball"], row) == \
         ("MONEYLINE", False, CEN.R_WINNER_LEAGUE_NOT_ADMITTED)
 
