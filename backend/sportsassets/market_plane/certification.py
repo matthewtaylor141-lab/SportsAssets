@@ -30,3 +30,28 @@ def verdict(*, comparable:int, agreeing:int, identity:dict) -> dict:
 def can_reuse(existing:dict|None, identity:dict)->bool:
     return bool(existing and existing.get("status")=="SUPPORTED" and
                 existing.get("fingerprint")==fingerprint(identity))
+
+
+#: the book schema the certified comparison was made against
+BOOK_SCHEMA_VERSION = "INSTITUTIONAL_STREAM_V1/RETAIL_BOOK_V1"
+ONTOLOGY_VERSION = "CONTRACT_ONTOLOGY_V1"
+
+
+def identity_for(symbol: str, *, price_scale, qty_scale,
+                 price_transform="IDENTITY", venue="POLYMARKET_US") -> dict:
+    """(integration) THE ONE IDENTITY BOTH SIDES FINGERPRINT: the workers'
+    certifier and the API's held-mark lane build it from the same fields, so
+    a certificate is reused only for the same contract, scales, transform,
+    ontology and book schema. Scales are normalised to int (refdata carries
+    strings, the identity mapper ints)."""
+    def _i(v):
+        try:
+            return int(str(v))
+        except (TypeError, ValueError):
+            return None
+    return {"venue": venue, "contract_id": str(symbol),
+            "institutional_symbol": str(symbol),
+            "price_transform": price_transform or "IDENTITY",
+            "price_scale": _i(price_scale), "qty_scale": _i(qty_scale),
+            "ontology_version": ONTOLOGY_VERSION,
+            "book_schema_version": BOOK_SCHEMA_VERSION}

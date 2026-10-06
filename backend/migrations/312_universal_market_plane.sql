@@ -16,12 +16,30 @@ CREATE TABLE IF NOT EXISTS market_plane_registry (
     refdata jsonb,
     refdata_at timestamptz,
     updated_at timestamptz NOT NULL,
+    -- integration (closeout): why the contract is required, its subscription
+    -- priority (lower = first), the catalogue's own family / period / start,
+    -- when the catalogue last listed it, and its terminal coverage state
+    priority integer NOT NULL DEFAULT 100,
+    required_reason text,
+    family text,
+    period text,
+    event_start timestamptz,
+    last_seen_at timestamptz,
+    coverage_state text CHECK (coverage_state IS NULL OR coverage_state IN (
+        'PRICEABLE','MAPPED_BUT_NO_FAIR_VALUE_SOURCE',
+        'MAPPED_BUT_SETTLEMENT_NOT_PROVEN','EXTERNAL_DATA_UNAVAILABLE',
+        'CODE_CONTROLLED_GAP')),
+    coverage_why text,
+    coverage_at timestamptz,
+    content_sha text,
     label text NOT NULL DEFAULT 'RESEARCH' CHECK(label='RESEARCH'),
     authority text NOT NULL DEFAULT 'MARKET_DATA_ONLY_NO_ORDER_AUTHORITY'
       CHECK(authority='MARKET_DATA_ONLY_NO_ORDER_AUTHORITY')
 );
 CREATE INDEX IF NOT EXISTS market_plane_registry_active_idx
   ON market_plane_registry(active,desired_subscription,contract_id);
+CREATE INDEX IF NOT EXISTS market_plane_registry_coverage_idx
+  ON market_plane_registry(active,coverage_state);
 CREATE INDEX IF NOT EXISTS market_plane_registry_shard_idx
   ON market_plane_registry(subscription_shard,contract_id) WHERE active AND desired_subscription;
 

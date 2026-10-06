@@ -30,7 +30,7 @@ from . import (analytics, bettor_live_loop, bettor_state,
                mirror_shadow, poller, premap, price_path, reconciler,
                retention, rn1_observability, roster, roster_auto,
                shadow_bettor, shadow_experimental, shadow_rn1,
-               underdog, whale_exits)
+               underdog, universal_market_plane, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -393,6 +393,13 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # deployment that has no institutional credential costs a heartbeat
     # and no venue traffic. INSTITUTIONAL_MD=off stops it outright.
     ("institutional_md", institutional_md.run),
+    # THE UNIVERSAL MARKET PLANE (migration 312), PARALLEL / SHADOW: the
+    # durable registry of every listed sports contract, priority-ordered
+    # stable PMX shards (armed under the same identity guard and switch as
+    # the stream above), coverage / certification / latency / Radar evidence.
+    # It serves no decision and no mark yet (parallel first); no order path.
+    # UNIVERSAL_MARKET_PLANE=off stops it outright.
+    ("universal_market_plane", universal_market_plane.run),
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
     # BETTOR LIVE OBSERVATION -- DECISION ONLY.

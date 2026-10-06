@@ -416,6 +416,13 @@ READERS = {
     # exists before the bind's own settled-outcome join (PB.outcomes) scores
     # a RESEARCH court row; it selects no candidate, sizes and places nothing
     "capital_readiness/feeds.py": ("RESEARCH_OUTCOME_JOIN_EXISTENCE_CHECK", 1),
+    # (312) the UNIVERSAL MARKET PLANE's coverage evidence reads the newest
+    # valuation per contract (both purposes) only to state whether a fair-value
+    # source and a settlement comparison exist for it (a terminal coverage
+    # state); its Command readback shows that one valuation by contract. Neither
+    # selects a candidate, sizes or places anything.
+    "market_plane/populate.py": ("COVERAGE_EVIDENCE_REPORTING_READS_ALL", 1),
+    "api/command_market_plane.py": ("CANONICAL_OPPORTUNITY_READBACK_BY_CONTRACT", 1),
     # select candidates or a decision's probability -> filter the purpose
     # (asserted constant by constant above)
     "bettor_hold_value.py": ("FILTERS_ENTRY_DECISION", 4),

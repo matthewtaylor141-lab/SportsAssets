@@ -7,7 +7,7 @@ DEFAULT_MAX_STREAMS=20
 
 
 def assign_stable(symbols, existing=None, *, max_per_stream=DEFAULT_MAX_PER_STREAM,
-                  max_streams=DEFAULT_MAX_STREAMS) -> dict:
+                  max_streams=DEFAULT_MAX_STREAMS, order=None) -> dict:
     """Preserve valid existing assignments; place only new symbols.
 
     No reshuffle on membership additions. That prevents healthy streams from
@@ -22,7 +22,13 @@ def assign_stable(symbols, existing=None, *, max_per_stream=DEFAULT_MAX_PER_STRE
         if s in existing and loads[existing[s]] < max_per_stream:
             assigned[s]=existing[s]; loads[existing[s]]+=1
     overflow=[]
-    for s in syms:
+    # (integration) NEW symbols are placed in the caller's priority order
+    # (held positions, candidates, core families first), so when capacity
+    # runs out the overflow is the LOWEST-priority tail -- named, never the
+    # alphabetical tail. Existing assignments are never moved.
+    rank={str(x):i for i,x in enumerate(order or ())}
+    placing=sorted(syms,key=lambda x:(rank.get(x,len(rank)),x)) if order else syms
+    for s in placing:
         if s in assigned: continue
         candidates=[i for i in range(int(max_streams)) if loads[i] < max_per_stream]
         if not candidates:

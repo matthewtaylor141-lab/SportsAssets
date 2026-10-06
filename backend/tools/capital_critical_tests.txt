@@ -1214,3 +1214,4 @@ tests/test_profitability_stack_binding.py
 # (capital readiness feeds) Shadow Court / agent economics / scale twin / readiness observer: RESEARCH, writes only the 310 tables
 tests/test_capital_readiness_feeds.py
 tests/test_universal_market_plane.py
+tests/test_market_plane_integration.py

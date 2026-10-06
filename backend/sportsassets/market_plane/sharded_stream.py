@@ -15,6 +15,32 @@ class SizedBooks:
         class _Books(base_cls):
             def __init__(self):
                 super().__init__(clock=clock); self.max_symbols=max_symbols
+                # (integration) a fresh ResidentBooks is not RUNNING: every
+                # current() would refuse NOT_RUNNING. A shard's books are
+                # armed IDLE exactly like start_default arms the singleton.
+                try:
+                    from sportsassets import institutional_stream as IS
+                    self.set_state(IS.S_IDLE, "market-plane shard armed")
+                except Exception:
+                    pass
+                import collections
+                self.latency=collections.deque(maxlen=4000)
+            def on_update(self, u, *, received_at=None):
+                recv=float(received_at if received_at is not None else self._clock())
+                super().on_update(u, received_at=recv)
+                # the instant the canonical book for this symbol was
+                # replaced (normalised and readable in this process)
+                try:
+                    norm=float(self._clock()); vt=(u or {}).get("transact_time")
+                    vts=vt.timestamp() if hasattr(vt,"timestamp") else (
+                        float(vt) if isinstance(vt,(int,float)) else None)
+                    self.latency.append((vts,recv,norm))
+                    sym=str((u or {}).get("symbol") or "")
+                    with self._lock:
+                        m=self._markets.get(sym)
+                        if m is not None: m["normalized_at"]=norm
+                except Exception:
+                    pass
             def want(self, symbols):
                 at=self._clock(); fresh=[]
                 with self._lock:
@@ -31,9 +57,10 @@ class SizedBooks:
 
 class Manager:
     def __init__(self, *, token_fn, max_per_stream=1000, max_streams=20,
-                 transport_factory=None, clock=None):
+                 transport_factory=None, clock=None, invalidate_token=None):
         from sportsassets import institutional_stream as IS
         self.IS=IS; self.token_fn=token_fn; self.max_per_stream=int(max_per_stream)
+        self.invalidate_token=invalidate_token
         self.max_streams=int(max_streams); self.transport_factory=transport_factory
         self.clock=clock or time.time; self._lock=threading.RLock(); self.shards={}
         self.symbol_to_shard={}
@@ -42,7 +69,8 @@ class Manager:
         if len(self.shards)>=self.max_streams: raise RuntimeError("STREAM_LIMIT_REACHED")
         books=SizedBooks.create(self.IS.ResidentBooks,self.max_per_stream,self.clock)
         t=(self.transport_factory(books,self.token_fn) if self.transport_factory
-           else self.IS.GrpcBidiTransport(books,self.token_fn))
+           else self.IS.GrpcBidiTransport(books,self.token_fn,
+                                          invalidate_token=self.invalidate_token))
         t.start(); rec={"books":books,"transport":t,"symbols":set()}
         self.shards[int(shard_id)]=rec; return rec
 
@@ -79,6 +107,30 @@ class Manager:
             if sid is None:return {"ok":False,"symbol":symbol,"refusal":"SYMBOL_NOT_SUBSCRIBED_TO_ANY_SHARD"}
             b=self.shards[sid]["books"]
         return b.current(symbol,now=now,max_snapshot_age_s=max_snapshot_age_s)
+
+    def shard_digest(self)->list:
+        out=[]
+        with self._lock:
+            for sid,rec in sorted(self.shards.items()):
+                b=rec["books"]; t=rec["transport"]
+                out.append({"shard":sid,"symbols":len(rec["symbols"]),
+                            "state":getattr(b,"state",None),
+                            "connected":getattr(t,"_connected",None),
+                            "attempts":getattr(t,"attempts",None),
+                            "consecutive_failures":getattr(t,"consecutive_failures",None)})
+        return out
+
+    def latency_samples(self, limit_per_shard=2000)->list:
+        out=[]
+        with self._lock:
+            for rec in self.shards.values():
+                lat=getattr(rec["books"],"latency",None)
+                if lat: out.extend(list(lat)[-int(limit_per_shard):])
+        return out
+
+    def subscribed(self)->list:
+        with self._lock:
+            return sorted(self.symbol_to_shard)
 
     def stop(self):
         with self._lock:

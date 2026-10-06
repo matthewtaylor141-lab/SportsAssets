@@ -422,6 +422,8 @@ WORKERS_LOOPS = (
     _w("bettor_state", 60.0, _hb("bettor_state", "ok")),
     _w("institutional_md", 60.0,
        _hb("institutional_md", "ok", "no_focus_set")),
+    _w("universal_market_plane", 60.0,
+       _hb("universal_market_plane", "ok", "degraded")),
     _w("shadow_experimental", 60.0,
        _hb("shadow_experimental", "ok", "no_eligible_population",
            "no_focus_set", "already_sealed")),
