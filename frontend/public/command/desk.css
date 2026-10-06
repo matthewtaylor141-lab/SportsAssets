@@ -337,3 +337,25 @@ details.sl-more > summary:focus-visible { outline: 1px solid var(--dk-accent); }
 .sl-branch { border-top: 2px solid var(--dk-line, #242e3b); padding-top: 8px; min-width: 0; }
 .sl-branch h4 { margin: 0 0 6px; font-size: 13px; }
 @media (max-width: 640px) { .sl-decbranches { grid-template-columns: 1fr; } }
+
+/* ── iPad widths (768–1024px): no sideways page scroll, readable tables ──
+ * Grid tracks are minmax(0, 1fr) so a long mono id or a nowrap pill can
+ * never widen a column past the viewport; inside a PAPER / ACTUAL column
+ * the facts stack one per row (two ~160px tracks were unreadable); wide
+ * tables keep scrolling inside .tablewrap, with tighter cells and headers
+ * that may wrap. */
+@media (min-width: 641px) {
+  .sl-decbranches { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.deskmain > *, .sl-trade, .sl-dec, .sl-ops, .sl-branch { min-width: 0; max-width: 100%; }
+.fact .v .pill { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+.sl-col .mono, .sl-ops .mono, .sl-dec .mono { overflow-wrap: anywhere; }
+@media (min-width: 760px) and (max-width: 1024px) {
+  .deskmain { padding: 16px 14px; }
+  .sl-col .facts { grid-template-columns: minmax(0, 1fr); }
+  .facts.three { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sl-lat { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+  table.dt { font-size: 12.5px; }
+  table.dt th, table.dt td { padding: 6px 8px; }
+  table.dt th { white-space: normal; }
+}
