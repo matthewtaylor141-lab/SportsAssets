@@ -95,6 +95,11 @@ DECISION_LOGIC_FILES = (
     # placed and at what size
     "bettor_capital_eligibility.py", "bettor_strategy_lifecycle.py",
     "bettor_stale_management.py",
+    # (305) PAPER CAPITAL AUTHORITY: the decision's capital gate and the
+    # ledger's ENTRY refuse without executable EV > 0, with a stopping rule
+    # firing at the entry, or with forward economics UNKNOWN / NEGATIVE --
+    # it changes which entries are placed (refuse-only)
+    "bettor_capital_authority.py",
     # the probability: its 30 s rule, qualification, de-vig and feed reads
     "workers/ext_pinnacle_loop.py", "pinnapi_primary.py",
     "pinnapi_feed_runtime.py", "pinnapi_held.py", "bettor_pinnacle_devig.py",

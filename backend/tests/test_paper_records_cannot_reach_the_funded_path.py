@@ -194,6 +194,16 @@ def test_no_funded_module_imports_the_paper_modules():
                "bettor_strategy_lifecycle.py",
                "bettor_stale_management.py",
                "api/command_turnaround.py",
+               # (305) PAPER CAPITAL AUTHORITY: reads the paper ledger's
+               # positions / balances and the simulator's pure window and
+               # walk rules, writes ONLY its own append-only shadow
+               # counterfactual / outcome / refusal-census rows; the ledger
+               # calls its entry check, which can only refuse a paper ENTRY.
+               # The GET-only acceptance route reads it in a READ ONLY
+               # transaction. Neither imports an order, venue, execution or
+               # funded module (tests/test_capital_authority.py)
+               "bettor_capital_authority.py",
+               "api/command_capital_authority.py",
                # (R30C, 300) the live execution calibration read model
                # (/api/command/execution-calibration): GET-only, reads the
                # PAPER adapter's paper orders / fills / books and walks the

@@ -52,6 +52,7 @@ import math
 import time
 from typing import Any
 
+from .. import bettor_capital_authority as CA
 from .. import bettor_paper_ledger as L
 from .. import decision_hooks as DH
 from .. import bettor_paper_simulator as SIM
@@ -313,6 +314,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     obs, md, levels = None, None, []
     sized: dict = {"qty": 0, "limit": None, "wire": None}
     econ: dict | None = None
+    capital: dict | None = None
     book_age = None
     if not refusals:
         bk = await PB.book_for(conn, ctx, cand["us_market_slug"],
@@ -357,6 +359,32 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     cand=cand, row=row, qty=econ["qty"], vwap=econ["vwap"])
                 if not econ["fees_ok"]:
                     refusals.append(PB.R_FEES)
+                else:
+                    # PAPER CAPITAL AUTHORITY (migration 305): an exploration
+                    # ENTRY also needs POSITIVE executable EV after the
+                    # depth walk, per-level fees and the adverse-selection
+                    # estimate (bettor_capital_eligibility, the same gate as
+                    # every policy); a negative-EV "research cost" entry is
+                    # no longer given paper capital.
+                    capital = CA.evaluate_executable(
+                        p=p, levels=[{"price": t["price"], "qty": t["take"]}
+                                     for t in walk["takes"]],
+                        qty=sized["qty"], limit=sized["limit"],
+                        fee_fn=fee_fn, at=at,
+                        settlement={"compatibility": (
+                            "COMPATIBLE" if match.get("established") is True
+                            else "NOT_ESTABLISHED_BY_THE_MATCH")},
+                        identity={"us_market_slug": cand.get(
+                            "us_market_slug"),
+                            "payout_event": cand.get("payout_event"),
+                            "fixture": cand.get("fixture"),
+                            "holding_side": side})
+                    econ["capital_eligibility"] = {k: capital.get(k) for k in (
+                        "capital_eligible", "qty", "total_executable_ev_usd",
+                        "fees_usd", "adverse_selection_usd", "refusals")}
+                    if not capital.get("capital_eligible"):
+                        refusals.extend(r for r in capital["refusals"]
+                                        if r not in refusals)
     PD.recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_px = levels[0]["price"] if levels else None
@@ -491,7 +519,24 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         json.dumps(provenance, default=str))
     if inserted is None:
         return dict(rec, duplicate=True)
+    cevidence = CA.capital_evidence(
+        capital, p=p, limit=sized.get("limit"),
+        threshold_edge_pp=PB.CG_MIN_EDGE_PP_V2, basis="EXPLORATION_ENTRY",
+        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
+        book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
+        await CA.record_refusal(
+            conn, account_id=ctx["account_id"], strategy=STRATEGY,
+            stage="DECISION", refusal=rec["refusal"], refusals=refusals,
+            decision_id=did, slug=cand.get("us_market_slug"),
+            holding_side=side, fixture=cand.get("fixture"),
+            line=cand.get("line"), scope=cand.get("scope"), p=p,
+            best_price=best_px, threshold_edge_pp=PB.CG_MIN_EDGE_PP_V2,
+            evidence=cevidence, expected_fees_usd=(econ or {}).get(
+                "fees_usd"),
+            executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
+            qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
     # THE ENTER IS RECORDED: its paper order is owed (PD.bounded_decision).
     PD.enter_recorded(ctx, did)
@@ -538,7 +583,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "eligible_at": at + delay,
              "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
              "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY}
+             "strategy": STRATEGY, "capital_evidence": cevidence}
     got = await L.submit_order(
         conn, order, caps=cfg["risk"], fee_fn=fee_fn, now=at,
         exclusive_fixture=True,

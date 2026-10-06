@@ -241,6 +241,15 @@ def default_steps() -> list:
     except ImportError:
         pass
     try:
+        # ZERO-CAPITAL SHADOW LEARNING (migration 305): the counterfactual
+        # outcome of every shadow decision whose contract has settled, at
+        # most every RUN_EVERY_S. Evidence only (never an order, never
+        # cash); labelled SHADOW_COUNTERFACTUAL / NOT_REALIZED_PNL.
+        from .. import bettor_capital_authority as CA
+        steps.append(("shadow_settlement", CA.step))
+    except ImportError:
+        pass
+    try:
         from . import paper_derek as PD
         steps.append(("derek", PD.step))
         # THE EXPERIMENTAL PINNACLE_ONLY_PAPER_BENCHMARK, a separate strategy

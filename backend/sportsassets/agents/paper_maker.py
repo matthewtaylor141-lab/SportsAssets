@@ -58,6 +58,7 @@ import json
 import math
 from typing import Any
 
+from .. import bettor_capital_authority as CA
 from .. import bettor_paper_ledger as L
 from .. import bettor_paper_simulator as SIM
 from .. import gross_edge_inputs as GEI
@@ -202,6 +203,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     p = pin.get("p")
     obs, md, levels, price = None, None, [], {}
     qty, econ, book_age, queue = 0, None, None, None
+    capital: dict | None = None
     gross_inputs: dict | None = None
     if not refusals:
         bk = await PB.book_for(conn, ctx, cand["us_market_slug"],
@@ -288,6 +290,39 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                             "label": PB.ECONOMICS_LABEL}
                     if not net > 0:
                         refusals.append(PB.R_NET)
+                    else:
+                        # PAPER CAPITAL AUTHORITY (migration 305): the
+                        # maker ENTRY also needs POSITIVE executable EV from
+                        # bettor_capital_eligibility, evaluated as the fill
+                        # the resting order would get -- its own limit, its
+                        # own quantity, fees charged; identity and the
+                        # policy's settlement match resolved. The adverse
+                        # selection of a resting bid is UNMEASURED; the
+                        # gate's IOC limit bound is 0 at one level (disclosed
+                        # on the evidence).
+                        capital = CA.evaluate_executable(
+                            p=p, levels=[{"price": lim, "qty": qty}],
+                            qty=qty, limit=lim, fee_fn=fee_fn, at=at,
+                            settlement={"compatibility": (
+                                "COMPATIBLE" if match.get("established")
+                                is True else "NOT_ESTABLISHED_BY_THE_MATCH")},
+                            identity={"us_market_slug": cand.get(
+                                "us_market_slug"),
+                                "payout_event": cand.get("payout_event"),
+                                "fixture": cand.get("fixture"),
+                                "holding_side": side})
+                        econ["capital_eligibility"] = {
+                            k: capital.get(k) for k in (
+                                "capital_eligible", "qty",
+                                "total_executable_ev_usd", "fees_usd",
+                                "adverse_selection_usd", "refusals")}
+                        econ["capital_eligibility"][
+                            "adverse_selection_is"] = (
+                            "UNMEASURED for a resting bid: the IOC limit "
+                            "bound is 0 at one level")
+                        if not capital.get("capital_eligible"):
+                            refusals.extend(r for r in capital["refusals"]
+                                            if r not in refusals)
                     queue = await SIM.queue_ahead_at_placement(
                         conn, slug=cand["us_market_slug"], direction="BUY",
                         holding_side=side, limit=lim, market_data=md,
@@ -426,7 +461,26 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         json.dumps(provenance, default=str))
     if inserted is None:
         return dict(rec, duplicate=True)
+    cevidence = CA.capital_evidence(
+        capital, p=p, limit=price.get("limit"), threshold_edge_pp=min_edge_pp,
+        basis="MAKER_RESTING_FILL_AT_OWN_LIMIT",
+        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
+        book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
+        await CA.record_refusal(
+            conn, account_id=ctx["account_id"], strategy=STRATEGY,
+            stage="DECISION", refusal=rec["refusal"], refusals=refusals,
+            decision_id=did, slug=cand.get("us_market_slug"),
+            holding_side=side, fixture=cand.get("fixture"),
+            line=cand.get("line"), scope=cand.get("scope"), p=p,
+            best_price=(price.get("limit") or (levels[0]["price"]
+                                               if levels else None)),
+            threshold_edge_pp=min_edge_pp, evidence=cevidence,
+            expected_fees_usd=(econ or {}).get("fees_if_filled_usd"),
+            executable_ev_usd=(econ or {}).get(
+                "expected_net_profit_if_filled_usd"),
+            qty=qty or None, limit_price=price.get("limit"), at=at)
         return rec
     # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision).
     PD.enter_recorded(ctx, did)
@@ -454,7 +508,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "queue_basis": dict(queue or {},
                                  placement_obs_id=obs["obs_id"]),
              "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY}
+             "strategy": STRATEGY, "capital_evidence": cevidence}
     got = await L.submit_order(conn, order, caps=cfg["risk"], fee_fn=fee_fn,
                                now=at, exclusive_fixture=True,
                                one_live_entry_per_fixture=True)

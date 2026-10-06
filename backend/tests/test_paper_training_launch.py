@@ -131,15 +131,21 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
                             lambda **kw: {"scheduled": False})
         monkeypatch.setenv(S.ENV_FLAG, "on")
         monkeypatch.setenv(PB.ENV_FLAG, "on")
-        # THE LAUNCH SWITCHES: the investment policy on, the strict
-        # benchmark off, and maker/exploration exactly as migrated
-        sw = dict(_migrated_switches(), **{CG: True, PB.CONTROL_KEY: False})
+        # THE LAUNCH SWITCHES: the strict benchmark off and maker /
+        # exploration exactly as migrated. PAPER CAPITAL AUTHORITY (migration
+        # 305): exploration no longer enters the negative-EV candidate the
+        # investment policy refuses after fees (0.505 at $0.50 -- pinned in
+        # test_exploration_refuses_a_losing_candidate_and_the_chain_
+        # completes), so this proof of the TRAINING CHAIN runs exploration on
+        # a candidate with POSITIVE executable EV after fees, with the
+        # investment policy switched off (it would own that fixture first)
+        sw = dict(_migrated_switches(), **{CG: False, PB.CONTROL_KEY: False})
         for key, on in sw.items():
             await conn.execute("UPDATE paper_control SET enabled=$2 WHERE "
                                " control_key=$1", key, on)
         _restart()
-        # 0.505 against $0.50: 0.5 pp gross, the 1.74 pp taker fee eats it
-        DT._stub(monkeypatch, p_home=0.505, stamp_age_s=2.0)
+        # 0.53 against $0.50: 3 pp gross, positive after the 1.74 pp fee
+        DT._stub(monkeypatch, p_home=0.53, stamp_age_s=2.0)
         # the REAL venue rules reader, on the venue's listing payload (as in
         # test_completed_game_collector_path): the grading period is read
         # from the venue's own words, not injected
@@ -158,22 +164,18 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
                 "SELECT * FROM paper_decisions WHERE session_id=$1 AND "
                 " valuation_id=$2 AND strategy=$3", acct["session_id"],
                 v["id"], strategy)
-        # THE INVESTMENT POLICY REFUSES AFTER FEES, unchanged
-        cg = await dec(CG)
-        assert cg is not None and cg["verdict"] == "REFUSE"
-        assert cg["refusal"] in (PB.R_FEES, PB.R_FEES_CONSUME_EDGE), (
-            cg["refusal"], cg["refusals"])
-        assert H.j(cg["pinnacle"])["decided_via"] == PD.DECIDED_VIA_CYCLE
+        # THE INVESTMENT POLICY IS OFF in this proof: no decision
+        assert await dec(CG) is None
         # MAKER IS OFF: no decision, no order
         assert await dec(MAKER) is None
-        # EXPLORATION ENTERS, in the same hook, on the same book
+        # EXPLORATION ENTERS in the in-cycle hook, with POSITIVE EV
         ex = await dec(EXPLORE)
         assert ex is not None and ex["verdict"] == "ENTER", ex["refusals"]
+        assert H.j(ex["pinnacle"])["decided_via"] == PD.DECIDED_VIA_CYCLE
         pdx = H.j(ex["policy_decision"])
-        assert pdx["estimate"]["expected_net_profit_usd"] < 0
+        assert pdx["estimate"]["expected_net_profit_usd"] > 0
         assert pdx["training"] is True and pdx["training_purpose"]
         assert pdx["selection"]["selected"] is True
-        assert ex["book_obs_id"] == cg["book_obs_id"], "one shared read"
         o = await conn.fetchrow("SELECT * FROM paper_orders WHERE "
                                 " decision_id=$1", ex["decision_id"])
         assert o["strategy"] == EXPLORE and o["state"] == \
@@ -185,8 +187,8 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
         att = await conn.fetch(
             "SELECT strategy, outcome FROM paper_evaluation_attempts WHERE "
             " valuation_id=$1 ORDER BY attempt_id", v["id"])
-        assert [(a["strategy"], a["outcome"]) for a in att] == [
-            (CG, "DECIDED"), (EXPLORE, "DECIDED")]
+        assert [(a["strategy"], a["outcome"]) for a in att
+                if a["strategy"] != CG] == [(EXPLORE, "DECIDED")]
 
         # THE SIMULATOR: a book observed AFTER the order became eligible
         eligible = L._epoch(o["eligible_at"])

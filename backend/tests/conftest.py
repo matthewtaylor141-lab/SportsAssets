@@ -458,3 +458,35 @@ def new_strategies_off():
     yield
     for k, on in migrated.items():
         PL.set_policy_control(k, on)
+
+
+@pytest.fixture(autouse=True)
+def _capital_authority_seeded(request, monkeypatch):
+    """PAPER CAPITAL AUTHORITY (migration 305): the forward-economics verdict
+    seeded POSITIVE, and the absent-evidence check lifted, for every proof
+    written before the gate existed.
+
+    Same stance as the edge gate above. The gate fails CLOSED -- forward
+    economics are UNKNOWN until a strategy has 20 settled forward
+    observations, and an ENTRY that carries no capital-eligibility evidence
+    is refused -- which is right for the paper book and useless here: no
+    older proof settles 20 forward positions before it submits, and the
+    ledger proofs submit bare orders, so every one of them would refuse at
+    this gate and pass while proving nothing about the cash, cap, lifecycle
+    and simulator logic they exist to check.
+
+    Seeded, not bypassed: an order that DOES carry evidence is still held to
+    executable EV > 0, and the stopping rules are evaluated at the entry in
+    every test. A module that declares `CAPITAL_AUTHORITY_ENFORCED = True`
+    (tests/test_capital_authority.py) runs the production functions."""
+    if getattr(request.module, "CAPITAL_AUTHORITY_ENFORCED", False):
+        return
+    from sportsassets import bettor_capital_authority as CA
+
+    async def _seeded(conn, account_id, strategy, *, now, positions=None):
+        return dict(CA.forward_verdict([1.0] * CA.MIN_FORWARD_OBSERVATIONS,
+                                       []), ok=True, as_of=float(now),
+                    seeded="TEST_SUITE_SEEDED_POSITIVE")
+
+    monkeypatch.setattr(CA, "forward_economics", _seeded)
+    monkeypatch.setattr(CA, "missing_ev_evidence_refusal", lambda o: None)
