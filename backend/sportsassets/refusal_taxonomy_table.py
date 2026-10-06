@@ -28,6 +28,16 @@ TABLE = {
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
+    # (P0 closeout) no ENTRY growth while the strategy's open positions'
+    # management packets are incomplete or their protection continuity has
+    # failed (fail-closed when it cannot be read); a fresh exit walk is
+    # required before any management action is rankable
+    "STRATEGY_OPEN_POSITIONS_MANAGEMENT_PACKETS_INCOMPLETE": (
+        S, FRESH, "ORDER"),
+    "STRATEGY_OPEN_POSITIONS_PROTECTION_CONTINUITY_FAILED": (
+        S, INT, "ORDER"),
+    "STRATEGY_MANAGEMENT_INTEGRITY_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
+    "NO_FRESH_EXECUTABLE_EXIT_WALK": (S, FRESH, "MANAGEMENT"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),

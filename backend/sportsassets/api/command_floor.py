@@ -61,6 +61,8 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 
+from ..agent_work_state import CANONICAL_OPEN_POSITIONS_SQL as \
+    _CANONICAL_OPEN_POSITIONS_SQL
 from ..agent_work_state import WORK_STATES as _WORK_STATES
 from ..agent_work_state import read_work_states as _read_work_states
 from ..xavier_freshness import of_assessment as _xf_of_assessment
@@ -470,18 +472,12 @@ async def _derek(rd: _Reads, now: float) -> dict:
 
 async def _xavier(rd: _Reads, now: float) -> dict:
     async def paper(conn):
+        # CANONICALLY OPEN (bettor_paper_ledger.CANONICAL_OPEN_POSITIONS_SQL)
         r = await conn.fetchrow(
-            "SELECT count(*) FILTER (WHERE open_qty > 1e-9 AND NOT settled) "
-            "       AS open, count(*) AS handed "
-            "  FROM (SELECT h.group_id, "
-            "         coalesce((SELECT sum(qty) FILTER (WHERE direction='BUY')"
-            "                   - coalesce(sum(qty) FILTER ("
-            "                       WHERE direction='SELL'), 0) "
-            "                     FROM paper_fills f "
-            "                    WHERE f.group_id = h.group_id), 0) AS open_qty,"
-            "         EXISTS (SELECT 1 FROM paper_settlements s "
-            "                  WHERE s.group_id = h.group_id) AS settled "
-            "    FROM paper_handoffs h) q")
+            "SELECT count(*) FILTER (WHERE EXISTS (SELECT 1 FROM ("
+            + _CANONICAL_OPEN_POSITIONS_SQL + ") c "
+            "         WHERE c.group_id = h.group_id)) AS open, "
+            "       count(*) AS handed FROM paper_handoffs h")
         return {"open": int(r["open"]), "handed": int(r["handed"])}
 
     async def actual(conn):

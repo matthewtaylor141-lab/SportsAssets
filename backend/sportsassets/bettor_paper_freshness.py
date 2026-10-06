@@ -139,6 +139,30 @@ R_STALE_MANAGEMENT_UNREADABLE = (
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ")
 
 K_ENTRY = "ENTRY_ALLOCATION_STALE_MANAGEMENT"
+#: NO NEW PAPER EXPOSURE WHILE MANAGEMENT INTEGRITY HAS FAILED (P0 closeout):
+#: beside the stale-mark rate, a new ENTRY of a strategy is refused when,
+#: over its open positions, (a) the share whose latest Xavier review had an
+#: INCOMPLETE management packet (or that has no review yet) exceeds
+#: MAX_STALE_MANAGEMENT_RATE, or (b) the share whose protection continuity
+#: is not PROTECTED_RESTING exceeds it, or (c) ANY position shows a broken
+#: one-live-protection invariant / an unknown protection state. Unreadable
+#: -> refused (fail closed). Tightening only: the existing rate is reused,
+#: nothing is relaxed.
+R_PACKETS_BLOCK_ALLOCATION = (
+    "STRATEGY_OPEN_POSITIONS_MANAGEMENT_PACKETS_INCOMPLETE")
+R_PROTECTION_BLOCKS_ALLOCATION = (
+    "STRATEGY_OPEN_POSITIONS_PROTECTION_CONTINUITY_FAILED")
+R_INTEGRITY_UNREADABLE = "STRATEGY_MANAGEMENT_INTEGRITY_COULD_NOT_BE_READ"
+#: A POSITION AWAITING ITS FIRST MANAGEMENT is not yet a failure: filled
+#: within the last FIRST_MANAGEMENT_GRACE_S and not reviewed since that fill
+#: (Xavier's first review places the protection on T_FIRST / T_FILL). It is
+#: left out of both shares until the grace ends; after it, an unreviewed or
+#: unprotected position counts in full. = xavier_management.
+#: PAPER_FIRST_REVIEW_BOUND_S (pinned by a test).
+FIRST_MANAGEMENT_GRACE_S = 120.0
+#: protection states that refuse growth at ANY count (the invariant broken)
+PROTECTION_INVARIANT_BROKEN = ("PROTECTION_MULTIPLE_LIVE_ORDERS",
+                               "PROTECTION_STATE_UNKNOWN")
 K_PACKET = "XAVIER_PACKET_INCOMPLETE"
 
 HELD_INTENT = {"LONG": "ORDER_INTENT_BUY_LONG",
@@ -308,24 +332,98 @@ def settlement_fingerprint(identity: dict) -> str | None:
     return "settle:" + hashlib.sha256(body.encode()).hexdigest()[:20]
 
 
-def protection_state(standing: list, open_qty: float) -> dict:
-    """THE STANDING PROTECTIVE ORDER'S STATE (pure) from the open
-    STANDING_PROTECTION orders of one position."""
-    live = [s for s in standing if s.get("state") != "CANCEL_PENDING"]
-    pend = [s for s in standing if s.get("state") == "CANCEL_PENDING"]
-    if live:
-        s = live[0]
+#: THE PROTECTION-CONTINUITY STATES (pure, protection_state). Only
+#: PS_PROTECTED is explicitly valid, active and quantity-matched; every
+#: other state is packet-INCOMPLETE (xavier_packet.VALID_PROTECTION_STATES).
+PS_PROTECTED = "PROTECTED_RESTING"
+PS_QTY_MISMATCH = "PROTECTION_QTY_DIFFERS_FROM_OPEN_QTY"
+PS_CANCEL_PENDING = "PROTECTION_CANCEL_PENDING"
+PS_UNPROTECTED = "UNPROTECTED_NO_STANDING_ORDER"
+PS_EXPIRED = "PROTECTION_EXPIRED"
+PS_CANCELLED = "PROTECTION_CANCELLED"
+PS_PENDING_SIM = "PROTECTION_PENDING_SIMULATION"
+PS_MULTIPLE = "PROTECTION_MULTIPLE_LIVE_ORDERS"
+PS_UNKNOWN = "PROTECTION_STATE_UNKNOWN"
+PROTECTION_STATES = (PS_PROTECTED, PS_QTY_MISMATCH, PS_CANCEL_PENDING,
+                     PS_UNPROTECTED, PS_EXPIRED, PS_CANCELLED,
+                     PS_PENDING_SIM, PS_MULTIPLE, PS_UNKNOWN)
+#: the order states that are ACTIVELY resting on the simulated book
+_ACTIVE_ORDER_STATES = ("RESTING", "PARTIALLY_FILLED")
+#: quantity agreement tolerance (the ledger's numeric(18,6) grain)
+PROTECTION_QTY_EPS = 1e-6
+
+
+def _order_epoch(v):
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return L._epoch(v)
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def protection_state(standing: list, open_qty: float, *,
+                     now: float | None = None) -> dict:
+    """THE STANDING PROTECTIVE ORDER'S CONTINUITY STATE (pure) from the
+    STANDING_PROTECTION orders of one position.
+
+    PROTECTED_RESTING (the only valid state) needs exactly ONE order, in
+    RESTING or PARTIALLY_FILLED, not past its GTD expiry at `now`, whose
+    remaining qty equals the open qty. Everything else is named and
+    INCOMPLETE: no order (UNPROTECTED), a cancel in flight (CANCEL_PENDING),
+    an order past expiry the simulator has not yet terminated (EXPIRED), a
+    terminal CANCELED / EXPIRED / REJECTED row handed in (CANCELLED /
+    EXPIRED), an order not yet simulated (PENDING_SIMULATION), more than one
+    live-or-potentially-live order (MULTIPLE -- the one-order invariant is
+    broken), a quantity mismatch, or any state not recognised (UNKNOWN)."""
+    rows = [dict(s) for s in (standing or [])]
+    base = {"known": True, "active": False, "qty_matched": False,
+            "orders": len(rows)}
+
+    def out(state, s=None, **kw):
+        d = dict(base, state=state,
+                 order_id=None if s is None else s.get("order_id"),
+                 order_state=None if s is None else s.get("state"))
+        d.update(kw)
+        return d
+
+    open_states = set(L.OPEN_STATES)
+    live = [s for s in rows if s.get("state") in open_states]
+    unknown = [s for s in rows if s.get("state") not in open_states
+               and s.get("state") not in L.TERMINAL_STATES]
+    if unknown:
+        return out(PS_UNKNOWN, unknown[0])
+    if len(live) > 1:
+        return out(PS_MULTIPLE, live[0],
+                   order_ids=[s.get("order_id") for s in live])
+    if not live:
+        term = [s for s in rows if s.get("state") in L.TERMINAL_STATES]
+        if term:
+            st = term[0].get("state")
+            if st == "EXPIRED":
+                return out(PS_EXPIRED, term[0])
+            if st in ("CANCELED", "REJECTED"):
+                return out(PS_CANCELLED, term[0])
+        return out(PS_UNPROTECTED)
+    s = live[0]
+    if s.get("state") == "CANCEL_PENDING":
+        return out(PS_CANCEL_PENDING, s)
+    try:
         rem = float(s["qty"]) - float(s["filled_qty"])
-        st = ("PROTECTED_RESTING" if abs(rem - float(open_qty)) < 1e-6
-              else "PROTECTION_QTY_DIFFERS_FROM_OPEN_QTY")
-        return {"state": st, "order_id": s.get("order_id"),
-                "order_state": s.get("state"), "remaining_qty": rem,
-                "limit_price": L.f(s.get("limit_price")), "known": True}
-    if pend:
-        return {"state": "PROTECTION_CANCEL_PENDING",
-                "order_id": pend[0].get("order_id"), "known": True}
-    return {"state": "UNPROTECTED_NO_STANDING_ORDER", "order_id": None,
-            "known": True}
+    except Exception:                                           # noqa: BLE001
+        return out(PS_UNKNOWN, s)
+    exp = _order_epoch(s.get("expires_at"))
+    detail = {"remaining_qty": rem, "limit_price": L.f(s.get("limit_price")),
+              "expires_at": exp}
+    if now is not None and exp is not None and float(now) >= exp:
+        return out(PS_EXPIRED, s, **detail)
+    if s.get("state") not in _ACTIVE_ORDER_STATES:
+        return out(PS_PENDING_SIM, s, **detail)
+    if abs(rem - float(open_qty)) > PROTECTION_QTY_EPS:
+        return out(PS_QTY_MISMATCH, s, active=True, **detail)
+    return out(PS_PROTECTED, s, active=True, qty_matched=True, **detail)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -462,7 +560,7 @@ IDENTITY_SQL = """
 
 STANDING_SQL = """
     SELECT order_id, group_id, us_market_slug, holding_side, state, qty,
-           filled_qty, limit_price
+           filled_qty, limit_price, expires_at
       FROM paper_orders
      WHERE account_id = $1 AND group_id = ANY($2::text[])
        AND role = 'STANDING_PROTECTION' AND state = ANY($3::text[])
@@ -513,7 +611,8 @@ async def identities(conn, account_id: str, positions: list) -> dict:
     return out
 
 
-async def protections(conn, account_id: str, positions: list) -> dict:
+async def protections(conn, account_id: str, positions: list, *,
+                      now: float | None = None) -> dict:
     groups = sorted({p["group_id"] for p in positions})
     rows = await conn.fetch(STANDING_SQL, account_id, groups,
                             list(L.OPEN_STATES)) if groups else []
@@ -522,7 +621,8 @@ async def protections(conn, account_id: str, positions: list) -> dict:
         st = [dict(r) for r in rows if r["group_id"] == p["group_id"]
               and r["us_market_slug"] == p["us_market_slug"]
               and r["holding_side"] == p["holding_side"]]
-        out[p["position_key"]] = protection_state(st, p["open_qty"])
+        out[p["position_key"]] = protection_state(st, p["open_qty"],
+                                                  now=now)
     return out
 
 
@@ -585,7 +685,7 @@ async def position_rows(conn, account_id: str, *, now: float,
     rows = await classify_positions(conn, account_id, now=now, positions=pos)
     res = await residuals(conn, account_id, pos)
     ids = await identities(conn, account_id, pos)
-    prot = await protections(conn, account_id, pos)
+    prot = await protections(conn, account_id, pos, now=now)
     vals = await valuations(conn, account_id, pos, now=now,
                             limit_s=await pinnacle_limit_s(conn, account_id))
     for r in rows:
@@ -654,6 +754,86 @@ async def strategy_stale_management(conn, account_id: str, strategy: str,
                           FRESHLY_MANAGEABLE][:20]}
 
 
+LATEST_PACKET_SQL = """
+    SELECT group_id, extract(epoch FROM max(reviewed_at))::float8
+               AS reviewed_at,
+           bool_and(coalesce((selection->'management_packet'->'gate'
+                              ->>'complete')::boolean, false)) AS complete
+      FROM (SELECT r.*, max(r.reviewed_at) OVER (PARTITION BY r.group_id)
+                       AS newest
+              FROM paper_xavier_reviews r
+             WHERE r.account_id = $1 AND r.group_id = ANY($2::text[])) q
+     WHERE reviewed_at = newest
+     GROUP BY group_id
+"""
+
+
+def integrity_verdict(*, positions: list, packets: dict,
+                      protections: dict, reviewed_at: dict | None = None,
+                      now: float | None = None) -> dict:
+    """Pure. The strategy's management integrity over its open positions:
+    packet-incomplete and protection-failed shares against the predeclared
+    MAX_STALE_MANAGEMENT_RATE, and any broken protection invariant. A
+    position awaiting its first management (FIRST_MANAGEMENT_GRACE_S) is
+    left out of the shares, never out of the invariant check."""
+    rv = reviewed_at or {}
+    awaiting = []
+    if now is not None:
+        for p in positions:
+            lf = p.get("last_fill_at")
+            last = rv.get(p["group_id"])
+            if lf is not None and (last is None or float(last) < float(lf)) \
+                    and float(now) - float(lf) <= FIRST_MANAGEMENT_GRACE_S:
+                awaiting.append(p["position_key"])
+    all_pos = positions
+    positions = [p for p in positions if p["position_key"] not in awaiting]
+    n = len(positions)
+    incomplete = [p["position_key"] for p in positions
+                  if not packets.get(p["group_id"])]
+    pstate = {p["position_key"]: (protections.get(p["position_key"]) or {})
+              .get("state") for p in positions}
+    unprotected = [k for k, st in pstate.items()
+                   if st != PS_PROTECTED]
+    broken = [p["position_key"] for p in all_pos
+              if (protections.get(p["position_key"]) or {}).get("state")
+              in PROTECTION_INVARIANT_BROKEN]
+    pk_rate = None if n == 0 else len(incomplete) / n
+    pr_rate = None if n == 0 else len(unprotected) / n
+    refusal = None
+    if broken or (pr_rate is not None
+                  and pr_rate > MAX_STALE_MANAGEMENT_RATE + 1e-12):
+        refusal = R_PROTECTION_BLOCKS_ALLOCATION
+    elif pk_rate is not None and pk_rate > MAX_STALE_MANAGEMENT_RATE + 1e-12:
+        refusal = R_PACKETS_BLOCK_ALLOCATION
+    return {"open_positions": n,
+            "awaiting_first_management": awaiting[:20],
+            "packet_incomplete_rate": pk_rate,
+            "protection_failure_rate": pr_rate,
+            "max_rate": MAX_STALE_MANAGEMENT_RATE,
+            "packet_incomplete": incomplete[:20],
+            "protection_not_valid": [{"position_key": k,
+                                      "state": pstate[k]}
+                                     for k in unprotected][:20],
+            "protection_invariant_broken": broken,
+            "refusal": refusal}
+
+
+async def strategy_management_integrity(conn, account_id: str, strategy: str,
+                                        *, now: float) -> dict:
+    pos = [p for p in await L.positions(conn, account_id)
+           if (p.get("strategy") or L.DEFAULT_STRATEGY) == strategy]
+    groups = sorted({p["group_id"] for p in pos})
+    packets, reviewed = {}, {}
+    if groups:
+        for r in await conn.fetch(LATEST_PACKET_SQL, account_id, groups):
+            packets[r["group_id"]] = bool(r["complete"])
+            reviewed[r["group_id"]] = r["reviewed_at"]
+    prot = await protections(conn, account_id, pos, now=now)
+    return dict(integrity_verdict(positions=pos, packets=packets,
+                                  protections=prot, reviewed_at=reviewed,
+                                  now=now), strategy=strategy)
+
+
 async def allocation_refusal(conn, *, account_id: str, strategy: str,
                              now: float) -> dict | None:
     """None when the strategy may grow; otherwise the refusal. FAIL CLOSED:
@@ -669,7 +849,25 @@ async def allocation_refusal(conn, *, account_id: str, strategy: str,
                 "strategy": strategy}
     rate = m["stale_management_rate"]
     if rate is None or rate <= MAX_STALE_MANAGEMENT_RATE + 1e-12:
-        return None
+        # THE MARKS ARE FRESH ENOUGH; NOW THE PACKETS AND THE PROTECTION
+        try:
+            async with conn.transaction():
+                iv = await strategy_management_integrity(
+                    conn, account_id, strategy, now=now)
+        except Exception as exc:                                # noqa: BLE001
+            return {"refusal": R_INTEGRITY_UNREADABLE,
+                    "why": "%s: %s" % (type(exc).__name__, str(exc)[:160]),
+                    "strategy": strategy}
+        if iv["refusal"] is None:
+            return None
+        return dict(iv, why=(
+            "management integrity of %s failed: packet-incomplete %s, "
+            "protection-failed %s of %d open positions (max %.0f%%), "
+            "invariant broken on %d: no allocation growth until repaired"
+            % (strategy, iv["packet_incomplete_rate"],
+               iv["protection_failure_rate"], iv["open_positions"],
+               100 * MAX_STALE_MANAGEMENT_RATE,
+               len(iv["protection_invariant_broken"]))))
     return {"refusal": R_STALE_MANAGEMENT_BLOCKS_ALLOCATION,
             "strategy": strategy, "stale_management_rate": rate,
             "max_stale_management_rate": MAX_STALE_MANAGEMENT_RATE,

@@ -71,6 +71,7 @@ import time
 from decimal import Decimal
 from typing import Any
 
+from .. import bettor_paper_ledger as L
 from .. import xavier_freshness as XF
 
 VERSION = "XAVIER_MANAGEMENT_V1"
@@ -961,12 +962,9 @@ async def paper_reallocation(conn, ctx: dict, *, group_id: str, pos: dict,
         if fresh:
             # the markets this account HOLDS now (net open, not settled)
             held = {r["us_market_slug"] for r in await conn.fetch(
-                "SELECT f.us_market_slug FROM paper_fills f WHERE "
-                " f.account_id=$1 AND NOT EXISTS (SELECT 1 FROM "
-                " paper_settlements s WHERE s.account_id=f.account_id AND "
-                " s.us_market_slug=f.us_market_slug) GROUP BY "
-                " f.us_market_slug HAVING sum(CASE WHEN f.direction='BUY' "
-                " THEN f.qty ELSE -f.qty END) > 0", ctx["account_id"])}
+                "SELECT DISTINCT us_market_slug FROM ("
+                + L.CANONICAL_OPEN_POSITIONS_SQL + ") c "
+                " WHERE c.account_id = $1", ctx["account_id"])}
             best = await best_opportunity(conn, at=at, exclude_slugs=held)
         re = reallocation(evidence_state=measure.get("evidence_state"), qty=q,
                           p=measure.get("p") if fresh else None,
@@ -1054,12 +1052,9 @@ async def _paper_review_hook(conn, ctx, *, group_id, pos, review_id, trigger,
         if fresh:
             # the markets this account HOLDS now (net open, not settled)
             held = {r["us_market_slug"] for r in await conn.fetch(
-                "SELECT f.us_market_slug FROM paper_fills f WHERE "
-                " f.account_id=$1 AND NOT EXISTS (SELECT 1 FROM "
-                " paper_settlements s WHERE s.account_id=f.account_id AND "
-                " s.us_market_slug=f.us_market_slug) GROUP BY "
-                " f.us_market_slug HAVING sum(CASE WHEN f.direction='BUY' "
-                " THEN f.qty ELSE -f.qty END) > 0", ctx["account_id"])}
+                "SELECT DISTINCT us_market_slug FROM ("
+                + L.CANONICAL_OPEN_POSITIONS_SQL + ") c "
+                " WHERE c.account_id = $1", ctx["account_id"])}
             best = await best_opportunity(conn, at=at, exclude_slugs=held)
         re = reallocation(evidence_state=measure.get("evidence_state"),
                           qty=q, p=measure.get("p") if fresh else None,
@@ -1942,17 +1937,19 @@ async def management_view(conn, *, limit: int = 100,
     for r in await conn.fetch(
             "SELECT h.handoff_id, h.group_id, h.first_fill_at, h.strategy, "
             "       h.account_id, o.us_market_slug, o.holding_side, "
-            "       coalesce((SELECT sum(qty) FILTER (WHERE direction='BUY')"
-            "                       - coalesce(sum(qty) FILTER ("
-            "                         WHERE direction='SELL'), 0) "
-            "                   FROM paper_fills f "
-            "                  WHERE f.group_id = h.group_id), 0) AS open_qty,"
+            "       coalesce(c.open_qty, 0) AS open_qty, "
             "       EXISTS (SELECT 1 FROM paper_settlements s "
             "                WHERE s.group_id = h.group_id) AS settled "
             "  FROM paper_handoffs h JOIN paper_orders o "
             "    ON o.order_id = h.entry_order_id "
+            "  LEFT JOIN (" + L.CANONICAL_OPEN_POSITIONS_SQL + ") c "
+            "    ON c.group_id = h.group_id "
+            "   AND c.us_market_slug = o.us_market_slug "
+            "   AND c.holding_side = o.holding_side "
             " ORDER BY h.first_fill_at DESC LIMIT $1", limit):
-        open_ = float(r["open_qty"] or 0) > 1e-9 and not r["settled"]
+        # canonical: the position's own open qty (latest settlement already
+        # subtracted), never "any settlement in the group"
+        open_ = L.is_open(r["open_qty"])
         refs.append((K_PAPER, r["group_id"], {
             "handoff_id": r["handoff_id"], "market": r["us_market_slug"],
             "holding_side": r["holding_side"], "strategy": r["strategy"],

@@ -72,7 +72,7 @@ import hashlib
 import json
 import math
 import time
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 
 from .. import bettor_paper_ledger as L
@@ -98,6 +98,12 @@ T_GAME = "GAME_STATE_CHANGE"
 T_EXPIRY = "FRESHNESS_EXPIRY"
 
 A_HOLD, A_EXIT, A_REDUCE = "HOLD", "EXIT", "REDUCE"
+#: WHERE A PERSISTED valuation_id LIVES (xavier_packet: a FRESH probability
+#: is management evidence only with a persisted valuation id).
+VALUATION_STORE_EXTERNAL = "external_valuations"
+VALUATION_STORE_SNAPSHOT = "xavier_probability_snapshots"
+#: the standing protection's quantity grain: the ledger's numeric(18,6)
+PROTECTION_QTY_GRAIN = Decimal("0.000001")
 A_NETTING, A_INDIRECT = "NETTING", "ACQUIRE_INDIRECT_HEDGE"
 B_NETTING_IS_EXIT = "IDENTICAL_TO_EXIT_ON_A_ONE_NET_POSITION_VENUE"
 B_INDIRECT_NOT_SEARCHED = "INDIRECT_HEDGE_SEARCH_NOT_RUN_ON_THE_PAPER_BOOK"
@@ -114,6 +120,14 @@ B_STALE_MEASURE = "MEASURE_STALE_OR_ABSENT_NO_DISCRETIONARY_SALE"
 #: reconcile, the book must be current with exit depth, the settlement
 #: identity and the protection state known.
 B_PACKET_INCOMPLETE = "MANAGEMENT_PACKET_INCOMPLETE_NO_DISCRETIONARY_SALE"
+#: NO RANKABLE MANAGEMENT ACTION WITHOUT A FRESH EXECUTABLE EXIT WALK: the
+#: book the alternatives are walked on must be readable, inside the 300 s
+#: executable-mark SLA and show exit depth.
+B_NO_FRESH_EXIT_WALK = "NO_FRESH_EXECUTABLE_EXIT_WALK"
+#: (= xavier_packet.P_PROTECTION; the packet module is imported lazily)
+XPK_P_PROTECTION = "NO_VALID_ACTIVE_PROTECTION"
+#: a book stamped this far AFTER the review instant is still clock skew
+WALK_MAX_FUTURE_SKEW_S = 5.0
 #: THE EVIDENCE STATE OF THE PROBABILITY EVERY REVIEW STANDS ON, exactly
 #: one, on `measure.evidence_state`. FRESH only when the measure is current
 #: AND its own source stamp is within the Pinnacle freshness limit
@@ -466,7 +480,7 @@ async def management_packet(conn, ctx: dict, *, pos: dict, measure: dict,
         ident = None
     try:
         prot = PMF.protection_state([dict(s) for s in standing],
-                                    pos["open_qty"])
+                                    pos["open_qty"], now=at)
     except Exception:                                           # noqa: BLE001
         prot = None
     packet = XPK.build(
@@ -477,6 +491,106 @@ async def management_packet(conn, ctx: dict, *, pos: dict, measure: dict,
         mark_class=mk.get("class"), settlement=ident, protection=prot)
     packet["book"]["reason"] = mk.get("reason")
     return packet, XPK.gate(packet)
+
+
+async def persist_probability_snapshot(conn, *, account_id: str, pos: dict,
+                                       measure: dict, at: float):
+    """A FRESH probability that carries no persisted valuation (the
+    in-process PinnAPI feed reading) is written to
+    xavier_probability_snapshots (migration 303) and the measure then
+    carries that row's id. Only a FRESH reading with a probability is
+    written; anything else, or a failed write, leaves valuation_id None --
+    and the packet's probability element MISSING (never assumed present).
+    Returns the snapshot id or None."""
+    if measure.get("evidence_state") != E_FRESH or \
+            measure.get("valuation_id") is not None or \
+            measure.get("p") is None:
+        return None
+    feed = measure.get("feed") if isinstance(measure.get("feed"), dict) \
+        else {}
+    src_at = measure.get("probability_source_at") or measure.get(
+        "pinnacle_at")
+    rcv_at = measure.get("probability_received_at") or measure.get(
+        "pinnacle_received_at")
+    try:
+        async with conn.transaction():
+            sid = await conn.fetchval(
+                "INSERT INTO xavier_probability_snapshots (account_id, "
+                " group_id, us_market_slug, holding_side, source, "
+                " probability, source_at, received_at, limit_s, "
+                " payout_event, payout_is_complement, evidence) VALUES "
+                " ($1,$2,$3,$4,$5,$6, CASE WHEN $7::float8 IS NULL THEN NULL"
+                " ELSE to_timestamp($7) END, CASE WHEN $8::float8 IS NULL "
+                " THEN NULL ELSE to_timestamp($8) END, $9,$10,$11,"
+                " $12::jsonb) RETURNING snapshot_id",
+                account_id, pos["group_id"], pos["us_market_slug"],
+                pos["holding_side"],
+                str(measure.get("probability_source")
+                    or measure.get("source") or "UNKNOWN"),
+                float(measure["p"]),
+                None if src_at is None else float(src_at),
+                None if rcv_at is None else float(rcv_at),
+                measure.get("probability_limit_s")
+                or measure.get("pinnacle_limit_s"),
+                feed.get("payout_event"), feed.get("payout_is_complement"),
+                json.dumps({"feed": feed, "recorded_for_review_at": at,
+                            "age_s": measure.get("probability_age_s")},
+                           default=str))
+    except Exception:                                           # noqa: BLE001
+        return None
+    measure["valuation_id"] = sid
+    measure["valuation_store"] = VALUATION_STORE_SNAPSHOT
+    return sid
+
+
+async def exit_continuation(conn, *, group_id: str, standing, at: float,
+                            window_s: float) -> dict | None:
+    """THE EXIT THAT CANCELLED ITS OWN PROTECTION, CONTINUED.
+
+    An EXIT / REDUCE ranked on a COMPLETE packet first cancels the resting
+    protection (its inventory is committed; never two potentially live
+    sells). Once that cancel is terminal the position has no standing order
+    -- UNPROTECTED, which is never packet-present -- so without this the next
+    review would re-protect and the exit could never complete.
+
+    Returns the prior review only when ALL hold: no live-or-potentially-live
+    standing order now; the group's latest review selected EXIT / REDUCE on
+    a complete packet and took CANCEL_STANDING_BEFORE_EXIT; every order it
+    cancelled is terminal CANCELED (not filled, not pending); and it is no
+    older than `window_s` (the 30 s probability limit). The caller still
+    requires a FRESH probability with a persisted valuation, a fresh exit
+    walk and every OTHER packet element present."""
+    if standing:
+        return None
+    r = await conn.fetchrow(
+        "SELECT review_id, reviewed_at, action, selection "
+        "  FROM paper_xavier_reviews WHERE group_id=$1 "
+        " ORDER BY reviewed_at DESC, review_id DESC LIMIT 1", group_id)
+    if r is None:
+        return None
+    act = L._j(r["action"]) or {}
+    sel = L._j(r["selection"]) or {}
+    gate_ = ((sel.get("management_packet") or {}).get("gate") or {})
+    if act.get("taken") != "CANCEL_STANDING_BEFORE_EXIT" or \
+            sel.get("mechanical_selection") not in (A_EXIT, A_REDUCE) or \
+            not gate_.get("complete"):
+        return None
+    if at - L._epoch(r["reviewed_at"]) > float(window_s) + 1e-9:
+        return None
+    oids = [o for o in (act.get("orders") or []) if o]
+    if not oids:
+        return None
+    states = {x["order_id"]: x["state"] for x in await conn.fetch(
+        "SELECT order_id, state FROM paper_orders WHERE order_id = "
+        " ANY($1::text[])", oids)}
+    if len(states) != len(oids) or \
+            any(s != "CANCELED" for s in states.values()):
+        return None
+    return {"prior_review_id": r["review_id"],
+            "prior_selection": sel.get("mechanical_selection"),
+            "cancelled_orders": oids,
+            "prior_reviewed_at": L._epoch(r["reviewed_at"]),
+            "window_s": float(window_s)}
 
 
 async def _latest_book(conn, slug: str):
@@ -520,7 +634,7 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
     v = await conn.fetchrow(
-        "SELECT probability, observed_at, received_at, "
+        "SELECT id, probability, observed_at, received_at, "
         "       payout_is_complement, version "
         "  FROM external_valuations WHERE us_market_slug=$1 "
         "   AND buy_intent=$2 AND probability IS NOT NULL "
@@ -542,6 +656,8 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
                     "p_pinnacle": float(v["probability"]),
                     "pinnacle_at": L._epoch(v["observed_at"]),
                     "pinnacle_received_at": L._epoch(v["received_at"]),
+                    "valuation_id": v["id"],
+                    "valuation_store": VALUATION_STORE_EXTERNAL,
                     "stale": False, "void_applied": False}
     d = await conn.fetchrow(
         "SELECT d.p_blended, d.decided_at FROM paper_decisions d "
@@ -650,7 +766,31 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         measure.update(probability_evidence(
             measure, at=at, qty=pos["open_qty"],
             limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"])))
+        # a fresh reading with no persisted valuation (the in-process feed)
+        # is persisted first; if that fails it stays without an id and the
+        # packet's probability element is MISSING
+        await persist_probability_snapshot(conn, account_id=acct, pos=pos,
+                                           measure=measure, at=at)
         fresh = measure["evidence_state"] == E_FRESH
+        # THE EXIT WALK MUST BE FRESH: the book the alternatives are walked
+        # on is current within the 300 s executable-mark SLA, readable, and
+        # shows exit depth -- never the newest row of any age
+        # (a receipt stamp a moment after the review instant is clock
+        # skew, clamped to 0 as the mark classifier does; one more than
+        # WALK_MAX_FUTURE_SKEW_S ahead is a clock disagreement: not fresh)
+        walk_age = (None if obs is None or obs["error"]
+                    else at - L._epoch(obs["observed_at"]))
+        walk_fresh = (walk_age is not None
+                      and -WALK_MAX_FUTURE_SKEW_S <= walk_age
+                      <= L.MARK_STALE_AFTER_S
+                      and bool(exit_lv))
+        if walk_age is not None and walk_age < 0:
+            walk_age = 0.0 if walk_fresh else walk_age
+        measure["exit_walk"] = {"book_obs_id": measure["book_obs_id"],
+                                "age_s": None if walk_age is None
+                                else round(walk_age, 3),
+                                "sla_s": L.MARK_STALE_AFTER_S,
+                                "levels": len(exit_lv), "fresh": walk_fresh}
         # ── THE MANAGEMENT PACKET (xavier_packet) ───────────────────────
         # A management action (HOLD / EXIT / REDUCE / a hedge) needs the
         # reconciled qty, a FRESH probability, a current executable book
@@ -666,25 +806,58 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         packet, pgate = await management_packet(
             conn, ctx, pos=pos, measure=measure, standing=standing, at=at)
         manageable = fresh and pgate["complete"]
+        # THE EXIT CONTINUATION: the only packet gap is the protection this
+        # position's own just-ranked EXIT cancelled (terminal), and every
+        # other element -- fresh probability with a persisted valuation, the
+        # book, depth, qty, identity -- is present now
+        cont = None
+        if fresh and walk_fresh and not pgate["complete"] and \
+                pgate["missing"] == [XPK_P_PROTECTION]:
+            cont = await exit_continuation(
+                conn, group_id=group_id, standing=standing, at=at,
+                window_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
+        if cont is not None:
+            measure["exit_continuation"] = cont
+            manageable = True
+        # RANKABLE only on a fresh probability with a persisted valuation, a
+        # complete packet AND a fresh executable exit walk
+        rankable = manageable and walk_fresh
         measure["management_packet"] = {
             "complete": pgate["complete"], "missing": pgate["missing"],
             "mark_class": packet["book"]["mark_class"],
             "version": packet["version"]}
         alts = alternatives(pos=pos, levels=exit_lv, p=measure.get("p"),
                             fee_fn=fee_fn, at=at)
-        if not manageable or measure.get("stale") or \
+        if not rankable or measure.get("stale") or \
                 measure.get("p") is None:
+            # STALE / INCOMPLETE EVIDENCE: HOLD, EXIT AND REDUCE ALL LEAVE THE
+            # RANKABLE SET BEFORE THE SELECTOR RUNS -- XP.run ranks none of
+            # them (a HOLD priced on a stale p is not a decision either). The
+            # cost-recovery protection is still maintained (management_action
+            # on non-fresh evidence -> PROTECT).
             blocker = (B_STALE_MEASURE if (not fresh or measure.get("stale")
                                            or measure.get("p") is None)
-                       else B_PACKET_INCOMPLETE)
+                       else B_PACKET_INCOMPLETE if not pgate["complete"]
+                       else B_NO_FRESH_EXIT_WALK)
+            extra = ({} if blocker == B_STALE_MEASURE else
+                     {"packet_missing": pgate["missing"]}
+                     if blocker == B_PACKET_INCOMPLETE else
+                     {"exit_walk": measure["exit_walk"]})
+            gated = (A_HOLD, A_EXIT, A_REDUCE)
             keep = [c for c in alts["candidates"]
-                    if c["action"] not in (A_EXIT, A_REDUCE)]
+                    if c["action"] not in gated]
+            def _label(c):
+                # a HOLD valued on non-current evidence keeps its value only
+                # as the labelled entry-time figure, never as current EV
+                if c["action"] != A_HOLD or fresh:
+                    return c
+                return dict(c, ev_basis=measure["evidence_state"],
+                            ev_is_current=False, expected_net_usd=None,
+                            entry_time_expected_net_usd=c.get(
+                                "expected_net_usd"))
             alts["not_rankable"] = alts["not_rankable"] + [
-                dict(c, blocker=blocker,
-                     **({} if blocker == B_STALE_MEASURE else
-                        {"packet_missing": pgate["missing"]}))
-                for c in alts["candidates"]
-                if c["action"] in (A_EXIT, A_REDUCE)]
+                dict(_label(c), blocker=blocker, **extra)
+                for c in alts["candidates"] if c["action"] in gated]
             alts["candidates"] = keep
         policy = await XP.load(conn)
         sel = XP.run(policy, hold_ranking=alts, limits=None)
@@ -711,9 +884,11 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                                                or "ABSENT"))
         if not fresh:
             exceptional.append(measure["evidence_state"])
-        if not pgate["complete"]:
+        if not pgate["complete"] and cont is None:
             exceptional.append(pgate["refusal"])
             exceptional.extend(pgate["missing"])
+        if cont is not None:
+            exceptional.append("EXIT_CONTINUATION_AFTER_TERMINAL_CANCEL")
         # ── STANDING PROTECTION AND THE ACTION ──────────────────────
         action: dict[str, Any] = {"taken": "NONE"}
         chosen = sel.get("selected")
@@ -726,7 +901,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         # it is recorded immutably and BOTH adapters consume it: the paper
         # book below and the SMALL LIVE adapter (SHADOW) after it.
         decided = CI.management_action(
-            chosen=chosen, fresh=manageable,
+            chosen=chosen, fresh=rankable,
             stale=bool(measure.get("stale")),
             p_missing=measure.get("p") is None,
             protection_ok=bool(prot.get("ok")), standing_live=bool(standing),
@@ -778,7 +953,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         # -- the protection is still maintained, no discretionary sale.
         recorded = XF.recorded_recommendation(
             evidence_state=measure["evidence_state"], selected=chosen)
-        if fresh and not pgate["complete"]:
+        if fresh and not rankable:
             recorded = XF.REC_UNAVAILABLE
         mintent = None
         try:
@@ -861,7 +1036,7 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
             rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
             recorded, (pgate["refusal"] if not pgate["complete"]
-                       else sel.get("refusal")),
+                       and cont is None else sel.get("refusal")),
             json.dumps(alts, default=str),
             json.dumps(dict({k: sel.get(k) for k in (
                 "selected", "refusal", "selection_reason",
@@ -893,10 +1068,10 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         mg = await XM.paper_review_hook(
             conn, ctx, group_id=group_id, pos=pos, review_id=rid,
             trigger=trigger, at=at, measure=measure, alts=alts,
-            recommendation=(chosen if pgate["complete"] else recorded),
+            recommendation=(chosen if rankable else recorded),
             exit_levels=exit_lv, policy=mpol,
             due_at=due_at, precomputed=realloc)
-        if not pgate["complete"]:
+        if not pgate["complete"] and cont is None:
             # THE REFUSAL, RECORDED (migration 270) with every missing
             # element -- never a silent HOLD on stale data.
             from .. import bettor_paper_freshness as PMF
@@ -1009,6 +1184,19 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
     pending = [s for s in standing if s["state"] == "CANCEL_PENDING"]
     if live:
         s = live[0]
+        # THE DETERMINISTIC LIFECYCLE: GTD expiry -> terminal confirmation
+        # (the simulator's next step marks it EXPIRED and releases it) ->
+        # replacement on the next feasible pass. An order past its expiry
+        # is neither kept as protection nor replaced alongside -- it is
+        # still potentially live until terminal.
+        exp = s.get("expires_at")
+        exp = None if exp is None else (float(exp) if isinstance(
+            exp, (int, float)) else L._epoch(exp))
+        if exp is not None and float(at) >= exp:
+            return {"taken": "WAIT_FOR_TERMINAL_EXPIRY",
+                    "order_id": s["order_id"], "expired_at": exp,
+                    "why": ("GTD expiry -> terminal confirmation -> "
+                            "replacement on the next feasible pass")}
         remaining = float(s["qty"]) - float(s["filled_qty"])
         if abs(remaining - want_qty) < 1e-9 and \
                 abs(float(s["limit_price"]) - prot["price"]) < 1e-9:
@@ -1027,8 +1215,14 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
                                     group_id=pos["group_id"],
                                     slug=pos["us_market_slug"],
                                     holding_side=pos["holding_side"])
-    qty = math.floor(float(held))
-    if qty < 1:
+    # THE WHOLE HELD QUANTITY, at the ledger's own grain (numeric(18,6),
+    # rounded DOWN so it never exceeds what is held). Entries fill
+    # fractional book sizes (1454.12, 0.39); a whole-contract floor left a
+    # sub-contract remainder that could never be protected, kept the
+    # position open forever and churned cancel/replace (remaining 1454 vs
+    # open 1454.12 never matched).
+    qty = float(L.D(held).quantize(PROTECTION_QTY_GRAIN, rounding=ROUND_DOWN))
+    if not L.is_open(qty):
         return {"taken": "NONE", "why": "NO_UNCOMMITTED_INVENTORY"}
     q = await SIM.queue_ahead_at_placement(
         conn, slug=pos["us_market_slug"], direction="SELL",

@@ -2913,6 +2913,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                                None if v.get("received_at") is None
                                else L._epoch(v["received_at"])),
                            pinnacle_limit_s=max_age, valuation_id=v["id"],
+                           valuation_store="external_valuations",
                            stale=not fresh)
             reading = _venue_scale(reading)
             if fresh and reading.get("p") is not None:

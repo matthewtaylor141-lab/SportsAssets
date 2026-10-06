@@ -1145,3 +1145,11 @@ tests/test_agent_work_state.py
 tests/test_improvement_clusters.py
 tests/test_lesson_usage.py
 tests/test_agent_scorecards.py
+# P0 CLOSEOUT (Xavier packet / protection continuity / canonical paper
+# position reconciliation): probability present only FRESH + a persisted
+# valuation_id; protection present only PROTECTED_RESTING; HOLD/EXIT/REDUCE
+# not rankable before the selector on stale/incomplete evidence or without a
+# fresh exit walk; GTD expiry -> terminal -> replacement; one live
+# protection; fully sold -> closed everywhere; no duplicate resting fills; no
+# new PAPER ENTRY while protection continuity / packets have failed.
+tests/test_p0_xavier_packet_and_reconciliation.py

@@ -318,8 +318,19 @@ async def _refusals(conn, a, kind):
         "   AND kind=$2 ORDER BY refusal_id", a["account_id"], kind)
 
 
+def _isolate_the_mark_rail(monkeypatch):
+    """These tests exercise the STALE-MARK rate rail alone. The management-
+    integrity rail beside it (packets / protection continuity, P0 closeout)
+    has its own tests (test_p0_xavier_packet_and_reconciliation); here its
+    verdict is held at "no refusal" so only the mark rate decides."""
+    async def ok(conn, account_id, strategy, *, now):
+        return {"refusal": None, "strategy": strategy}
+    monkeypatch.setattr(PMF, "strategy_management_integrity", ok)
+
+
 @pg
-async def test_no_allocation_growth_where_management_is_stale():
+async def test_no_allocation_growth_where_management_is_stale(monkeypatch):
+    _isolate_the_mark_rail(monkeypatch)
     conn = await H.connect()
     try:
         a = await H.new_account(conn, "mrrail")
@@ -367,7 +378,9 @@ async def test_no_allocation_growth_where_management_is_stale():
 
 
 @pg
-async def test_the_rail_counts_only_markable_positions_at_its_threshold():
+async def test_the_rail_counts_only_markable_positions_at_its_threshold(
+        monkeypatch):
+    _isolate_the_mark_rail(monkeypatch)
     conn = await H.connect()
     try:
         a = await H.new_account(conn, "mrthr")

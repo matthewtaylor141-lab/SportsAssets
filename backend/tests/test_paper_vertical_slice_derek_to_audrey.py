@@ -164,7 +164,15 @@ async def test_the_vertical_slice_decides_fills_hands_off_protects_settles_and_r
         r = await conn.fetchrow("SELECT * FROM paper_xavier_reviews WHERE "
                                 " group_id=$1 ORDER BY reviewed_at",
                                 o["group_id"])
-        assert r["trigger"] == "FIRST_FILL" and r["recommendation"] == "HOLD"
+        # THE FIRST REVIEW FINDS NO STANDING PROTECTION YET: its packet is
+        # incomplete (UNPROTECTED_NO_STANDING_ORDER is never protection), so
+        # nothing is ranked -- the review places the cost-recovery
+        # protection and records MANAGEMENT_UNAVAILABLE (P0 closeout)
+        assert r["trigger"] == "FIRST_FILL"
+        assert r["recommendation"] == "MANAGEMENT_UNAVAILABLE_STALE_INPUT"
+        assert "NO_VALID_ACTIVE_PROTECTION" in H.j(r["measure"])[
+            "management_packet"]["missing"]
+        assert H.j(r["action"])["taken"] == "PLACE_STANDING"
         alts = H.j(r["alternatives"])
         acts = {c["action"] for c in alts["candidates"]} | {
             c["action"] for c in alts["not_rankable"]}

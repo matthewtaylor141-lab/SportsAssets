@@ -141,6 +141,8 @@ async def _held(conn, tag, *, bid_at_entry=0.38, p_entry=0.62,
     await SIM.simulate_order(conn, got["order"]["order_id"], now=AT - 56,
                              fee_fn=H.zero_fee)
     out = await PX.step_handoff(conn, XF._ctx(a, AT - 55))
+    # the valid standing protection a complete management packet needs
+    await H.protect(conn, XF._ctx(a, AT - 54), g, at=AT - 54)
     if fresh_p is not None:
         await XF._reading(conn, slug, decided_at=AT - 3, pin_age_s=5.0,
                           p=fresh_p)

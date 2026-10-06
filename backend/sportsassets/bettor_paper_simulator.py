@@ -324,6 +324,50 @@ def resting_cross(levels: list, *, consumed: dict, limit: float,
             "crossing_qty": round(total, 6), "touch_seen": touch}
 
 
+#: A CROSSING LEVEL IS THE SAME LIQUIDITY UNTIL IT SHRINKS (the economic-
+#: duplicate rule). A resting order's step reads every new observation of its
+#: book; liquidity consumption is per observation, so a crossing level that
+#: is simply still displayed on the next snapshot used to fill the SAME
+#: order AGAIN at the same price and instant (production 2026-10-05: one
+#: order filled 105.81 @ 0.52 twice at one instant; another 5 x 142). A level
+#: that crossed us (or our queue ahead) would have traded and vanished; its
+#: re-appearance at the same size is not new liquidity. So, per order: the
+#: displayed size of every level that has already crossed is remembered;
+#: on a later book only displayed size ABOVE the remembered size is
+#: available; a level that shrinks (or disappears) lowers the memory to what
+#: is still shown. Conservative: it can only remove fills, never add one.
+SEEN_CROSSING_KEY = "seen_crossing"
+
+
+def carry_seen(levels: list, *, consumed: dict, seen: dict) -> dict:
+    """Pure. The consumption map for one later book with the order's own
+    remembered crossing liquidity applied: consumed[wire] = max(the book's
+    own consumption, what this order already saw cross at that wire, capped
+    by what is displayed now)."""
+    shown = {_wk(lv["wire"]): float(lv["qty"]) for lv in levels}
+    out = dict(consumed)
+    for wk, mem in (seen or {}).items():
+        mem = min(float(mem), shown.get(wk, 0.0))
+        if mem > 0:
+            out[wk] = max(float(out.get(wk, 0.0)), mem)
+    return out
+
+
+def update_seen(levels: list, *, limit: float, direction: str,
+                seen: dict) -> dict:
+    """Pure. The memory after one book: every level shown lowers its memory
+    to what it shows (a level gone is forgotten); every level that CROSSES
+    the limit raises its memory to its displayed size."""
+    shown = {_wk(lv["wire"]): float(lv["qty"]) for lv in levels}
+    out = {wk: min(float(m), shown[wk]) for wk, m in (seen or {}).items()
+           if shown.get(wk, 0.0) > 1e-9}
+    for lv in levels:
+        if within(lv["price"], limit, direction, strict=True):
+            wk = _wk(lv["wire"])
+            out[wk] = max(out.get(wk, 0.0), float(lv["qty"]))
+    return {k: round(v, 6) for k, v in out.items()}
+
+
 def optimistic_fill(market_data: dict | None, *, direction: str,
                     holding_side: str, qty: float, limit: float) -> dict:
     """THE OPTIMISTIC SENSITIVITY: the decision-time book, no delay, no
@@ -646,6 +690,7 @@ async def _resting(conn, o, *, now: float, fee_fn) -> dict:
     qb = dict(L._j(o["queue_basis"]) or {})
     last_obs = int(qb.get("last_obs_id") or qb.get("placement_obs_id") or 0)
     q_ahead = float(o["queue_ahead_qty"] or 0.0)
+    seen = dict(qb.get(SEEN_CROSSING_KEY) or {})
     rows = await conn.fetch(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
         "   AND obs_id > $2 AND observed_at >= $3 AND observed_at <= $4 "
@@ -664,10 +709,13 @@ async def _resting(conn, o, *, now: float, fee_fn) -> dict:
                         holding_side=o["holding_side"])
         consumed = await _consumed(conn, o["us_market_slug"], lv["side"],
                                    obs["obs_id"])
+        consumed = carry_seen(lv["levels"], consumed=consumed, seen=seen)
         got = resting_cross(lv["levels"], consumed=consumed,
                             limit=float(o["limit_price"]),
                             direction=o["direction"], queue_ahead=q_ahead,
                             remaining=remaining)
+        seen = update_seen(lv["levels"], limit=float(o["limit_price"]),
+                           direction=o["direction"], seen=seen)
         q_before, q_ahead = q_ahead, got["queue_ahead_after"]
         if not got["takes"]:
             reasons.append({"book_obs_id": obs["obs_id"],
@@ -691,7 +739,8 @@ async def _resting(conn, o, *, now: float, fee_fn) -> dict:
         remaining -= got["filled"]
         if remaining <= 1e-9:
             break
-    qb.update(last_obs_id=last_obs, queue_ahead_remaining=q_ahead)
+    qb.update(last_obs_id=last_obs, queue_ahead_remaining=q_ahead,
+              **{SEEN_CROSSING_KEY: seen})
     cur = await conn.fetchrow("SELECT state FROM paper_orders WHERE "
                               "order_id=$1", oid)
     if cur["state"] in L.OPEN_STATES:

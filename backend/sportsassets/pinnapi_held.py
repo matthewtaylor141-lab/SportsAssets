@@ -46,26 +46,25 @@ import logging
 import time
 from collections import Counter
 
+from . import bettor_paper_ledger as L
+
 log = logging.getLogger(__name__)
 
 HELD_REFRESH_S = 10.0
 HELD_REFRESH_TIMEOUT_S = 8.0
 MAX_HELD = 400
 
-#: open paper positions (handed to Xavier, net long, not settled) and open
+#: open paper positions (handed to Xavier; CANONICALLY open: bought - sold -
+#: the latest settlement qty > the ledger epsilon, per group / market /
+#: holding side -- bettor_paper_ledger.CANONICAL_OPEN_POSITIONS_SQL) and open
 #: actual positions: the contracts Xavier holds now
 HELD_SLUGS_SQL = """
-    SELECT f.us_market_slug AS slug, 'PAPER' AS kind
-      FROM paper_fills f JOIN paper_handoffs h ON h.group_id = f.group_id
-     WHERE NOT EXISTS (SELECT 1 FROM paper_settlements s
-                        WHERE s.group_id = f.group_id
-                          AND s.us_market_slug = f.us_market_slug)
-     GROUP BY f.group_id, f.us_market_slug
-    HAVING sum(CASE WHEN f.direction = 'BUY' THEN f.qty ELSE -f.qty END) > 0
+    SELECT DISTINCT c.us_market_slug AS slug, 'PAPER' AS kind
+      FROM (%s) c JOIN paper_handoffs h ON h.group_id = c.group_id
     UNION
     SELECT us_market_slug AS slug, 'ACTUAL' AS kind
       FROM smalllive_handoffs WHERE state = 'OPEN'
-     LIMIT %d""" % MAX_HELD
+     LIMIT %d""" % (L.CANONICAL_OPEN_POSITIONS_SQL, MAX_HELD)
 
 
 class HeldWatch:

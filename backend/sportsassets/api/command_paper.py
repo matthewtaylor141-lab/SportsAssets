@@ -290,6 +290,28 @@ async def paper_session() -> dict:
         return await _readmodel("session_payload", conn)
 
 
+@router.get("/api/command/paper/reconciliation",
+            dependencies=[Depends(require_read)])
+async def paper_reconciliation() -> dict:
+    """THE CANONICAL POSITION RECONCILIATION RECEIPT
+    (bettor_paper_reconciliation): true opens by the one rule (bought - sold
+    - latest settlement > the ledger epsilon), what the legacy readers would
+    have called open that is not (phantom opens), sub-contract remainders,
+    economic-duplicate fill suspects (listed, never rewritten) and any live
+    protection on a closed position. Read only; a failed read is
+    UNAVAILABLE, never zero."""
+    from .. import bettor_paper_ledger as L
+    from .. import bettor_paper_reconciliation as REC
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        if not await _schema(conn):
+            return dict(_labels(), reconciliation=_unavailable_schema())
+        async with conn.transaction(readonly=True):
+            await conn.execute("SET LOCAL statement_timeout = 12000")
+            got = await REC.receipt(conn, L.ACCOUNT_ID)
+        return dict(_labels(), reconciliation=got)
+
+
 @router.get("/api/command/paper/derek", dependencies=[Depends(require_read)])
 async def paper_derek(limit: int = Query(100, ge=1, le=1000)) -> dict:
     pool = await _pool()

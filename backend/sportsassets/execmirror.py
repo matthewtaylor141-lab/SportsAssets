@@ -1042,11 +1042,24 @@ async def live_entry_qty(conn, group_id) -> Decimal:
 
 
 async def paper_open_qty(conn, group_id) -> Decimal:
+    """The group's canonical paper open quantity: bought - sold - the latest
+    settlement version's qty, per market / holding side, summed (the
+    arithmetic of bettor_paper_ledger.POSITIONS_SQL, inlined: this module
+    imports no paper module). A settled position is never still open."""
     r = await conn.fetchrow(
-        """SELECT coalesce(sum(qty) FILTER (WHERE direction = 'BUY'), 0) AS b,
-                  coalesce(sum(qty) FILTER (WHERE direction = 'SELL'), 0) AS s
-             FROM paper_fills WHERE group_id = $1""", group_id)
-    return Decimal(str(r["b"])) - Decimal(str(r["s"]))
+        """SELECT coalesce(sum(f.b - f.s - coalesce(st.qty, 0)), 0) AS open
+             FROM (SELECT account_id, us_market_slug, holding_side,
+                          coalesce(sum(qty) FILTER (WHERE direction = 'BUY'), 0) AS b,
+                          coalesce(sum(qty) FILTER (WHERE direction = 'SELL'), 0) AS s
+                     FROM paper_fills WHERE group_id = $1
+                    GROUP BY 1, 2, 3) f
+             LEFT JOIN (SELECT DISTINCT ON (position_key) position_key, qty
+                          FROM paper_settlements WHERE group_id = $1
+                         ORDER BY position_key, version DESC) st
+               ON st.position_key = 'paperpos:' || f.account_id || ':' || $1
+                                    || ':' || f.us_market_slug || ':'
+                                    || f.holding_side""", group_id)
+    return Decimal(str(r["open"]))
 
 
 #: THE ACTUAL POSITION'S PROBABILITY EVIDENCE WHEN NONE COULD BE READ. The

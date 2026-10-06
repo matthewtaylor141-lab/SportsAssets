@@ -872,6 +872,13 @@ async def release_remainder(conn, *, order_id: str, reason: str, at: float,
 # POSITIONS, DERIVED FROM FILLS AND SETTLEMENTS
 # ═════════════════════════════════════════════════════════════════════
 
+#: THE ONE OPEN-QUANTITY EPSILON AND THE CANONICAL OPEN-POSITION SQL live in
+#: the neutral `open_position_canon` (no paper import, so read-only surfaces
+#: that may not import the paper ledger share the same rule); re-exported.
+from .open_position_canon import (  # noqa: E402
+    CANONICAL_OPEN_POSITIONS_SQL, OPEN_QTY_EPS, is_open)
+
+
 POSITIONS_SQL = """
     WITH f AS (
         SELECT group_id, us_market_slug, holding_side,
@@ -942,7 +949,7 @@ async def positions(conn, account_id: str, *,
     rows = [_position_from(account_id, r)
             for r in await conn.fetch(POSITIONS_SQL, account_id)]
     return rows if include_closed else [p for p in rows
-                                        if p["open_qty"] > 1e-9]
+                                        if is_open(p["open_qty"])]
 
 
 async def held_uncommitted(conn, account_id: str, *, group_id: str,

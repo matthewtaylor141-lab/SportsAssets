@@ -59,9 +59,18 @@ def test_the_work_state_module_imports_nothing_with_authority():
     for imp in _imports(AWS, "sportsassets"):
         top = imp.split(".")[0]
         if top == "sportsassets":
-            assert imp.startswith("sportsassets.xavier_freshness"), imp
+            # xavier_freshness (pure reads) and open_position_canon (the
+            # canonical open-position rule: constants + SQL text, stdlib only)
+            assert imp.startswith(("sportsassets.xavier_freshness",
+                                   "sportsassets.open_position_canon")), imp
         else:
             assert top in STDLIB, imp
+
+
+def test_the_canonical_open_rule_module_imports_only_the_stdlib():
+    canon = AWS.parent / "open_position_canon.py"
+    for imp in _imports(canon, "sportsassets"):
+        assert imp.split(".")[0] in STDLIB | {"__future__"}, imp
 
 
 def test_the_work_state_sql_is_select_only():

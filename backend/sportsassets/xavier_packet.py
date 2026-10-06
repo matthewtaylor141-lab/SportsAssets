@@ -12,7 +12,10 @@ missing element, never a silent HOLD on stale data:
                               by its own freshness rule (the Pinnacle /
                               PinnAPI 30 s rule, paper_xavier.
                               probability_evidence) -- an entry-time or older
-                              probability is never management evidence
+                              probability is never management evidence -- OR
+                              it is fresh but carries no PERSISTED
+                              valuation_id (a reading nobody can audit back
+                              to a stored row is not management evidence)
   NO_CURRENT_EXECUTABLE_BOOK  the held market's mark is not FRESH or
                               QUIET_VALID (bettor_paper_freshness, the 300 s
                               SLA): no current executable bid / ask
@@ -21,8 +24,16 @@ missing element, never a silent HOLD on stale data:
   NO_SETTLEMENT_IDENTITY      the contract's settlement identity (payout
                               event + complement flag of the entry valuation)
                               is not established
-  NO_PROTECTION_STATE         the standing protective order's state could not
-                              be read
+  NO_VALID_ACTIVE_PROTECTION  the standing protective order is not an
+                              explicitly valid, active, quantity-matched
+                              continuity state: only PROTECTED_RESTING (one
+                              RESTING / PARTIALLY_FILLED order, unexpired,
+                              remaining qty == open qty) is present.
+                              UNPROTECTED_NO_STANDING_ORDER,
+                              PROTECTION_CANCEL_PENDING, an expired /
+                              cancelled / pending-simulation / unknown order,
+                              more than one live order and a quantity
+                              mismatch are all INCOMPLETE
 
 The probability and book rules are the existing ones; nothing here defines a
 threshold. What a refusal still permits is unchanged: the cost-recovery
@@ -31,7 +42,7 @@ discretionary sale is possible. Pure: stdlib only.
 """
 from __future__ import annotations
 
-VERSION = "XAVIER_MANAGEMENT_PACKET_V1"
+VERSION = "XAVIER_MANAGEMENT_PACKET_V2"
 
 R_XAVIER_PACKET_INCOMPLETE = "XAVIER_MANAGEMENT_PACKET_INCOMPLETE"
 
@@ -40,7 +51,7 @@ P_PROBABILITY = "NO_FRESH_PROBABILITY"
 P_BOOK = "NO_CURRENT_EXECUTABLE_BOOK"
 P_DEPTH = "NO_EXECUTABLE_EXIT_DEPTH"
 P_SETTLEMENT = "NO_SETTLEMENT_IDENTITY"
-P_PROTECTION = "NO_PROTECTION_STATE"
+P_PROTECTION = "NO_VALID_ACTIVE_PROTECTION"
 ELEMENTS = (P_QTY, P_PROBABILITY, P_BOOK, P_DEPTH, P_SETTLEMENT,
             P_PROTECTION)
 
@@ -50,6 +61,13 @@ E_FRESH = "FRESH_CURRENT_PROBABILITY"
 #: the mark classes that are a current executable book
 #: (= bettor_paper_freshness.FRESHLY_MANAGEABLE, pinned by a test)
 CURRENT_BOOK_CLASSES = ("FRESH", "QUIET_VALID")
+#: THE ONLY PROTECTION-CONTINUITY STATE THAT IS PACKET-PRESENT
+#: (bettor_paper_freshness.protection_state): explicitly valid, active and
+#: quantity-matched. Every other state -- UNPROTECTED_NO_STANDING_ORDER,
+#: PROTECTION_CANCEL_PENDING, PROTECTION_EXPIRED, PROTECTION_CANCELLED,
+#: PROTECTION_PENDING_SIMULATION, PROTECTION_MULTIPLE_LIVE_ORDERS,
+#: PROTECTION_QTY_DIFFERS_FROM_OPEN_QTY, PROTECTION_STATE_UNKNOWN -- is not.
+VALID_PROTECTION_STATES = ("PROTECTED_RESTING",)
 #: the management actions the packet gates
 MANAGEMENT_ACTIONS = ("HOLD", "EXIT", "REDUCE", "NETTING",
                       "ACQUIRE_INDIRECT_HEDGE", "HEDGE", "DIRECT_HEDGE",
@@ -74,7 +92,14 @@ def build(*, residual: dict | None, evidence_state, probability_source=None,
         "probability": {"evidence_state": evidence_state,
                         "source": probability_source,
                         "valuation_id": valuation_id,
-                        "present": evidence_state == E_FRESH},
+                        "absent_because": (
+                            None if evidence_state == E_FRESH
+                            and valuation_id is not None else
+                            "FRESH_BUT_NO_PERSISTED_VALUATION_ID"
+                            if evidence_state == E_FRESH else
+                            "NOT_FRESH_CURRENT_PROBABILITY"),
+                        "present": (evidence_state == E_FRESH
+                                    and valuation_id is not None)},
         "book": {"mark_class": mark_class,
                  "obs_id": mk.get("obs_id"),
                  "observed_at": mk.get("observed_at"),
@@ -93,9 +118,19 @@ def build(*, residual: dict | None, evidence_state, probability_source=None,
                        "present": bool(st.get("fingerprint"))},
         "protection": {"state": pr.get("state"),
                        "order_id": pr.get("order_id"),
-                       "present": bool(pr.get("known"))
-                       and pr.get("state") is not None},
+                       "present": protection_present(pr)},
     }
+
+
+def protection_present(pr: dict | None) -> bool:
+    """Pure. True ONLY for an explicitly valid, active, quantity-matched
+    protection-continuity state; anything absent, unknown or ambiguous is
+    False (never assumed present)."""
+    pr = pr or {}
+    return bool(pr.get("known")) \
+        and pr.get("state") in VALID_PROTECTION_STATES \
+        and pr.get("active") is True \
+        and pr.get("qty_matched") is True
 
 
 _KEYS = (("residual", P_QTY), ("probability", P_PROBABILITY),
