@@ -160,7 +160,8 @@ REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED, R_NICKNAME,
             R_PRICED_DESIGNATION, R_NO_DRAW_IN_FAMILY, R_NO_DRAW_CONTRACT,
             R_DRAW_CONTRACT_AMBIGUOUS, R_DRAW_CONTRACT_NOT_ESTABLISHED,
-            R_DISCOVERED_EVENT_ABSENT, "VENUE_NATIVE_LEAGUE_NOT_ADMITTED")
+            R_DISCOVERED_EVENT_ABSENT, "VENUE_NATIVE_LEAGUE_NOT_ADMITTED",
+            "VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE")
 
 #: ── WHICH REFUSALS ARE ABOUT THE EVENT, NOT ONE OF ITS OUTCOMES ──────
 #:
@@ -177,7 +178,8 @@ EVENT_LEVEL_REFUSALS = frozenset((
     R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
     R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED, R_READ_TRUNCATED,
     R_COMPETITION, R_MATCH_RAISED, R_NICKNAME, R_DISCOVERED_EVENT_ABSENT,
-    "VENUE_NATIVE_LEAGUE_NOT_ADMITTED"))
+    "VENUE_NATIVE_LEAGUE_NOT_ADMITTED",
+    "VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE"))
 
 #: The designations an outcome can carry: the provider's home team, its away
 #: team, and the draw of a three-way (soccer) book.
@@ -231,22 +233,72 @@ ADMITTED_WINNER_LEAGUES = {
     "basketball": frozenset((
         "nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl", "eurocup",
         "eurolg", "jpbl", "kbl", "lba", "lnbp", "nbl", "slnbl", "svkbl",
-        "vtb")),
+        "vtb", "wnba")),
     "hockey": frozenset(("nhl", "ahl", "cehl", "khl", "liiga", "snhl")),
 }
-#: LISTED, CAPTURED, AND STILL NOT READ -- each with the reason. The WNBA
-#: wording grades the same game, but its team record is the CITY alone
-#: ("atlanta", "new york", "golden state", "las vegas") -- places the NBA's
-#: own fixtures carry in the same sport and the same weeks -- so a provider
-#: "Atlanta Hawks" contains the WNBA's "atlanta" exactly as "Atlanta Dream"
-#: does. A record that cannot tell two leagues' teams apart establishes no
-#: identity; refused by name.
-LEAGUES_NOT_READ = {
-    "wnba": ("the venue's WNBA team record is the city alone, which the NBA's "
-             "fixtures share: containment cannot tell the two leagues' teams "
-             "apart"),
-}
+#: LISTED, CAPTURED, AND STILL NOT READ -- each with the reason. Empty since
+#: P1: the WNBA (below) is read through its own league-scoped team table.
+LEAGUES_NOT_READ: dict = {}
 R_LEAGUE_NOT_ADMITTED = "VENUE_NATIVE_LEAGUE_NOT_ADMITTED"
+
+#: ── A LEAGUE WHOSE VENUE TEAM RECORD IS THE CITY ALONE (P1: the WNBA) ──
+#:
+#: THE COLLISION. The venue's WNBA team record is the CITY ("atlanta", "new
+#: york", "golden state", "las vegas": tests/fixtures/
+#: pmus_basketball_hockey_winner_listings_2026_10_06.json, aec-wnba-lv-gsv /
+#: aec-wnba-ny-atl, `marketSides[].team.name`) -- places the NBA's own
+#: fixtures carry in the same sport -- so a provider "Atlanta Hawks"
+#: CONTAINED the WNBA's "atlanta" exactly as "Atlanta Dream" does, and the
+#: league was refused VENUE_NATIVE_LEAGUE_NOT_ADMITTED.
+#:
+#: THE TABLE. Inside the league the city IS one team: every WNBA franchise
+#: has its own city ("Las Vegas" is only the Aces; "New York" only the
+#: Liberty), and the venue states the nickname beside it on the same side
+#: (`marketSides[].description`: "Aces", "Valkyries", "Liberty", "Dream" --
+#: `side_norm` on the winner row). So a WNBA venue participant is the
+#: league's own (city, nickname) pair -- "las vegas aces" -- read ONLY for
+#: an event of the league's own token (`league_token(event_slug) ==
+#: "wnba"`), never for another league's "atlanta". A city not in the table,
+#: or a winner row whose own nickname disagrees with it, establishes no
+#: participant and refuses VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE.
+#: The provider's "Atlanta Hawks" then contains nothing of "atlanta dream"
+#: (hawks against dream), and the NBA's "Atlanta Hawks" event is the NBA's.
+#:
+#: THE TEAMS: the 2025 league's thirteen (the four 2026 playoff teams seen in
+#: production, research-sql run 37478502753 section 1b -- Atlanta Dream,
+#: Golden State Valkyries, Las Vegas Aces, New York Liberty -- and the nine
+#: others), plus the two 2026 expansion franchises (Portland Fire, Toronto
+#: Tempo). Each entry is ONE team's city and nickname.
+WNBA_TEAMS = {
+    "atlanta": "dream", "chicago": "sky", "connecticut": "sun",
+    "dallas": "wings", "golden state": "valkyries", "indiana": "fever",
+    "las vegas": "aces", "los angeles": "sparks", "minnesota": "lynx",
+    "new york": "liberty", "phoenix": "mercury", "seattle": "storm",
+    "washington": "mystics", "portland": "fire", "toronto": "tempo",
+}
+#: league token -> its (city -> nickname) table
+LEAGUE_TEAM_TABLES = {"wnba": WNBA_TEAMS}
+R_LEAGUE_TEAM = "VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_TABLE"
+
+
+def league_participant(team_name, league, side_norm=None):
+    """("<city> <nickname>", None) for a team of a league whose venue record
+    is the city alone (LEAGUE_TEAM_TABLES), else (None, why). A winner row's
+    own nickname (`side_norm`), when it names one, must be the table's.
+    Pure."""
+    table = LEAGUE_TEAM_TABLES.get(str(league or "").strip().lower())
+    if table is None:
+        return None, "league %r carries no team table" % (league,)
+    city = fold(team_name)
+    nick = table.get(city)
+    if nick is None:
+        return None, ("%r is not a %s city in the league's table"
+                      % (city, league))
+    sn = fold(side_norm)
+    if sn and sn not in ("yes", "no") and sn != nick:
+        return None, ("the row's own nickname %r is not the %s table's %r "
+                      "for %r" % (sn, league, nick, city))
+    return "%s %s" % (city, nick), None
 
 #: ── FOOTBALL PARTICIPANTS CARRY THE VENUE'S OWN NICKNAME ───────────────
 #:
@@ -275,6 +327,14 @@ def participant_name(row, family) -> str:
     Pure."""
     r = _row(row)
     team = " ".join(str(r.get("team_name") or "").split())
+    lg = league_token(r.get("event_slug"))
+    if lg in LEAGUE_TEAM_TABLES and team:
+        # A CITY-ONLY LEAGUE (P1, the WNBA): the league's own (city,
+        # nickname) pair, or "" -- no participant -- when the table does not
+        # establish one (refused VENUE_NATIVE_LEAGUE_TEAM_NOT_IN_THE_LEAGUE_
+        # TABLE by `match_event`)
+        got, _why = league_participant(team, lg, r.get("side_norm"))
+        return got or ""
     if family in NICKNAME_QUALIFIED_FAMILIES and team:
         nick = " ".join(str(r.get("side_norm") or "").split())
         if nick and nick not in ("yes", "no"):
@@ -767,7 +827,8 @@ def _events_in_window(rows, *, family, commence_epoch, league_tokens=None):
         by_event.setdefault(ev, []).append(r)
     inside, set_aside = [], {"not_two_participants": [],
                              "start_not_one_instant": [],
-                             "other_competition": []}
+                             "other_competition": [],
+                             "league_team_not_in_table": []}
     for ev, rs in sorted(by_event.items()):
         starts = {_epoch(r.get("game_start")) for r in rs}
         if len(starts) != 1 or None in starts:
@@ -782,8 +843,12 @@ def _events_in_window(rows, *, family, commence_epoch, league_tokens=None):
         if leagues is not None and league_token(ev) not in leagues:
             set_aside["other_competition"].append(ev)
             continue
-        names = sorted({participant_name(r, family) for r in rs
-                        if str(r.get("team_name") or "").strip()})
+        named = [participant_name(r, family) for r in rs
+                 if str(r.get("team_name") or "").strip()]
+        if league_token(ev) in LEAGUE_TEAM_TABLES and "" in named:
+            set_aside["league_team_not_in_table"].append(ev)
+            continue
+        names = sorted(set(named))
         if len(names) != 2:
             set_aside["not_two_participants"].append(ev)
             continue
@@ -876,6 +941,14 @@ def match_event(*, home, away, commence_epoch, family, rows,
         # on it; an event the discovery did not name is simply not asked.
         named = [e for e in events if e["event_slug"] == str(event_slug)]
         out["events_in_window_before_discovery_restriction"] = len(events)
+        if not named and str(event_slug) in \
+                set_aside["league_team_not_in_table"]:
+            out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
+            return _refuse(out, R_LEAGUE_TEAM, (
+                "the discovered venue event %s is in league %r, whose venue "
+                "team record is the city alone, and its team table does not "
+                "establish both participants" % (
+                    event_slug, league_token(event_slug))))
         if not named:
             out["events_in_window"] = len(events)
             out["set_aside"] = {k: v[:6] for k, v in set_aside.items() if v}
@@ -945,6 +1018,14 @@ def match_event(*, home, away, commence_epoch, family, rows,
                 "be different schools (Ohio / Ohio State, Miami FL / Miami "
                 "OH). Refused rather than cross-mapped"
                 % (home, away, ", ".join(nickname_blocked[:6]))))
+        if not out["partial_matches"] and \
+                set_aside["league_team_not_in_table"]:
+            return _refuse(out, R_LEAGUE_TEAM, (
+                "venue event(s) %s inside the window are in a league whose "
+                "venue team record is the city alone, and its team table "
+                "does not establish both participants: no identity is read "
+                "from a city" % ", ".join(
+                    set_aside["league_team_not_in_table"][:6])))
         if out["partial_matches"]:
             return _refuse(out, R_ONE_TEAM_ONLY, (
                 "%d venue event(s) within %.0f min name one of %r / %r and "

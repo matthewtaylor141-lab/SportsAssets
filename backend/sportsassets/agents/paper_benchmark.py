@@ -735,9 +735,12 @@ R_PERIOD = "GRADING_PERIOD_NOT_FULL_GAME"
 R_FAMILY = "NO_COMPLETED_GAME_TERMS_FOR_THIS_SPORT"
 
 #: the venue's "winner of the <A> vs <B> <league> game [originally]
-#: scheduled for" sentence; a team name's "St." does not end it
+#: scheduled for" sentence; a team name's "St." does not end it. A playoff
+#: series names its game's number ("... WNBA Semifinals Game 2 scheduled
+#: for Oct 7, 2026.", tests/fixtures/pmus_basketball_hockey_winner_listings_
+#: 2026_10_06.json aec-wnba-lv-gsv / aec-wnba-ny-atl): the same one game.
 _WINNER_OF_THE_GAME = (r"\bwill settle to the winner of the\b(?:[^.]|\bst\.)*"
-                       r"\bgame (?:originally )?scheduled for\b")
+                       r"\bgame (?:\d{1,2} )?(?:originally )?scheduled for\b")
 
 VENUE_GRADING_TEMPLATES = {
     "baseball": {

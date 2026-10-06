@@ -636,6 +636,10 @@ READERS = {
     # valuation's STORE label "external_valuations" beside the new
     # xavier_probability_snapshots store, so an id is compared only within
     # its own table; labels, no read.)
+    # (P1) the priced settlement-difference policy names the table once in
+    # the provenance of its measured exception rates (a label; no read)
+    "bettor_settlement_difference_policy.py": (
+        "LABEL_ONLY_PROVENANCE_OF_THE_MEASURED_RATES", 1),
     "xavier_freshness.py": (
         "HELD_POSITION_NEWER_VALUATION_FOR_RECOMMENDATION_VALIDITY_ONLY", 6),
     # (220) THE LOST OPPORTUNITY LEDGER (RESEARCH): reads the valuation row

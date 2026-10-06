@@ -337,7 +337,10 @@ def _val(slug, outcomes, selection, *, league=None, family=None):
 def test_the_nba_and_nhl_money_lines_are_admitted_by_league_only():
     assert devig.expected_outcomes("basketball", "h2h", league="nba") == 2
     assert devig.expected_outcomes("hockey", "h2h", league="nhl") == 2
-    for fam, lg in (("basketball", "wnba"), ("basketball", "xbl"),
+    # (P1: the WNBA is admitted through its league team table --
+    # test_p1_wnba_league_team_table; only uncaptured leagues refuse)
+    assert devig.expected_outcomes("basketball", "h2h", league="wnba") == 2
+    for fam, lg in (("basketball", "xbl"),
                     ("basketball", None), ("hockey", "xhl"),
                     ("hockey", "wnba"), ("hockey", None)):
         assert devig.expected_outcomes(fam, "h2h", league=lg) is None
@@ -371,7 +374,7 @@ def test_another_league_a_disagreeing_league_or_a_draw_priced_set_refuses():
     assert devig.R_UNSUPPORTED_MARKET in _val(
         "aec-xhl-cska-ska-2026-10-06", odds, "A", family="hockey")["refusals"]
     assert devig.R_UNSUPPORTED_MARKET in _val(
-        "aec-wnba-ny-atl-2026-10-06", odds, "A",
+        "aec-xbl-ny-atl-2026-10-06", odds, "A",
         family="basketball")["refusals"]
     # the structured league and the slug disagree: no league at all
     assert devig.R_UNSUPPORTED_MARKET in _val(
@@ -441,7 +444,7 @@ NHL_TEXT = MARKETS["aec-nhl-uta-nyr-2026-10-04"]["description"]
 
 def test_any_other_wording_league_or_family_establishes_nothing():
     # another league of the family has no book grading here
-    for fam, lg in (("basketball", "wnba"), ("basketball", "xbl"),
+    for fam, lg in (("basketball", "xbl"),
                     ("hockey", "xhl"), ("basketball", None)):
         assert PB.book_grading_period(fam, lg) is None
     # an NHL text silent on the shootout is not the NHL wording
@@ -592,7 +595,7 @@ def test_a_held_nba_contract_is_read_from_the_feed_and_another_league_not(
     slug = "aec-nba-gs-lac-2026-10-04"
     prod = [dict(r, game_start=_epoch(r["game_start"]))
             for r in _rows(MARKETS[slug])]
-    for league, admitted in (("nba", True), ("wnba", False)):
+    for league, admitted in (("nba", True), ("xbl", False)):
         rows = [dict(r, team_league=league,
                      team_name=FULL_NAME[r["team_name"]],
                      identifier=slug.replace("-nba-", "-%s-" % league),

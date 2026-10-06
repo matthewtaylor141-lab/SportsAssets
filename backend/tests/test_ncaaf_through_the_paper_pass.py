@@ -295,9 +295,17 @@ async def test_ncaaf_enters_orders_and_fills_on_paper(cg_on_with_parity):
         if dk is not None:
             assert dk["verdict"] == "REFUSE"
             refs = list(dk["refusals"] or [])
-            i = refs.index("SETTLEMENT_NOT_SUPPORTED")
-            assert refs[i + 1:i + 1 + len(NC.STRICT_CODES)] == \
-                list(NC.STRICT_CODES), refs
+            # P1: the strict policy no longer stops at the settlement
+            # difference -- the PRICED settlement-difference policy
+            # (bettor_settlement_difference_policy) values it or refuses it
+            # by its own named code; where the strict codes are still the
+            # refusal they come in order, by name
+            if "SETTLEMENT_NOT_SUPPORTED" in refs:
+                i = refs.index("SETTLEMENT_NOT_SUPPORTED")
+                assert refs[i + 1:i + 1 + len(NC.STRICT_CODES)] == \
+                    list(NC.STRICT_CODES), refs
+            else:
+                assert refs, "a REFUSE decision names its refusal"
     finally:
         try:
             await forget_settled_entry(conn, acct and acct["account_id"])

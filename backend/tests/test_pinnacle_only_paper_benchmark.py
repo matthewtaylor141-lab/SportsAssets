@@ -264,7 +264,10 @@ def test_no_funded_module_reaches_the_benchmark():
     # agents/paper_maker.py, agents/paper_explore.py: the maker-entry policy
     # and the bounded exploration strategy (migration 189), paper modules
     # whose decisions reuse the benchmark's match, book and attempt helpers
+    # agents/paper_derek.py (P1): the priced settlement-difference policy
+    # reuses the benchmark's completed-game match and venue conversion
     assert users <= {"agents/paper_runtime.py", "agents/paper_xavier.py",
+                     "agents/paper_derek.py",
                      "agents/paper_audrey.py", "bettor_paper_readmodel.py",
                      "bettor_paper_ops.py", "agents/persona_facts.py",
                      "agents/paper_maker.py", "agents/paper_explore.py"}, \
