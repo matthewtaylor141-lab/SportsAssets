@@ -38,6 +38,17 @@ TABLE = {
         S, INT, "ORDER"),
     "STRATEGY_MANAGEMENT_INTEGRITY_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "NO_FRESH_EXECUTABLE_EXIT_WALK": (S, FRESH, "MANAGEMENT"),
+    # (P0 closeout) the paper market-data owner and its keyless public-
+    # gateway held-mark lane: a read refused by the shared queue / venue hold
+    # / deadline, or by the lane's own scope (held marks only, GET book only)
+    "PAPER_MARKET_DATA_QUEUE_WAIT_EXCEEDED_THE_DEADLINE": (
+        S, FRESH, "VENUE_BOOK"),
+    "PAPER_DISCOVERY_READ_DEFERRED_DURING_VENUE_HOLD": (
+        S, FRESH, "VENUE_BOOK"),
+    "PAPER_COALESCED_READ_DEADLINE_EXCEEDED": (S, FRESH, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_HOLD_EXCEEDS_THE_DEADLINE": (S, FRESH, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_LANE_SERVES_HELD_MARKS_ONLY": (S, CAP, "VENUE_BOOK"),
+    "PUBLIC_GATEWAY_REFUSES_ALL_BUT_GET_BOOK": (S, CAP, "VENUE_BOOK"),
     "ABOVE_THE_MAXIMUM_CONCURRENT_GROUPS": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_FIXTURE_CONCENTRATION_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_PER_MARKET_CONCENTRATION_CAP": (E, RAIL, "ORDER"),

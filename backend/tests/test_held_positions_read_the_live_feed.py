@@ -307,6 +307,8 @@ async def test_a_feed_refused_stale_measure_still_blocks_a_discretionary_exit(
         await SIM.simulate_order(conn, ge["order"]["order_id"], now=H.T0 + 4,
                                  fee_fn=H.zero_fee)
         await PX.step_handoff(conn, _ctx(a, H.T0 + 5))
+        # the valid standing protection a complete management packet needs
+        await H.protect(conn, _ctx(a, H.T0 + 5.2), g, at=H.T0 + 5.2)
         # a book whose bid makes selling worth more than holding at p ~ 0.2
         await H.observe(conn, s, H.T0 + 6, offers=[(0.82, 100)],
                         bids=[(0.80, 100)])
@@ -334,12 +336,18 @@ async def test_a_feed_refused_stale_measure_still_blocks_a_discretionary_exit(
                    if x.get("blocker") == PX.B_STALE_MEASURE]
         if expect == "EXIT":
             assert seen["m"]["source"] == PB.SOURCE_FEED_CURRENT
-            assert sales == 1 and not blocked
+            # the fresh feed reading was persisted (a valuation id) and the
+            # EXIT first cancels the valid protection (terminal before sale)
+            assert H.j(rv["measure"])["valuation_store"] == \
+                PX.VALUATION_STORE_SNAPSHOT
+            assert H.j(rv["action"])["taken"] == \
+                "CANCEL_STANDING_BEFORE_EXIT"
+            assert sales == 0 and not blocked
         else:
             assert seen["m"]["stale"] is True
             assert seen["m"]["feed_refusal"] == F.R_STALE
             assert sales == 0, "no sale on a stale measure"
             assert blocked and {x["action"] for x in blocked} <= {
-                "EXIT", "REDUCE"}
+                "HOLD", "EXIT", "REDUCE"}
     finally:
         await conn.close()

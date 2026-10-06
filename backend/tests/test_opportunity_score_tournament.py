@@ -745,7 +745,8 @@ async def test_a_bounded_tournament_read_never_scores_a_reevaluation_as_first(
 
 
 @pg
-async def test_the_production_path_records_a_measured_v2_beside_the_intent():
+async def test_the_production_path_records_a_measured_v2_beside_the_intent(
+        monkeypatch):
     """live_parity.canonical_decision -- the decision hook itself, with
     canonical_components.at_decision reading the database -- over a
     recorded history seeded through the real writers (Archer's paper orders,
@@ -755,6 +756,14 @@ async def test_the_production_path_records_a_measured_v2_beside_the_intent():
     estimates carry their LIVE intervals."""
     from sportsassets import canonical_components as CC
     from sportsassets import live_parity as LP
+    # seeded HISTORY through the real writers: the management-integrity rail
+    # (P0 closeout; its own tests are test_p0_xavier_packet_and_
+    # reconciliation) is held at "no refusal" so the seed is not refused
+    from sportsassets import bettor_paper_freshness as _PMF
+
+    async def _ok(conn_, account_id, strategy, *, now):
+        return {"refusal": None, "strategy": strategy}
+    monkeypatch.setattr(_PMF, "strategy_management_integrity", _ok)
     conn = await asyncpg.connect(H.DSN)
     tx = conn.transaction()
     await tx.start()
