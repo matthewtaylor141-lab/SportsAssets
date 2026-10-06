@@ -283,7 +283,10 @@ async def probe_same_book(pool, store, symbols, *, process_id,
         retail = await xstore.retail_rows(pool, syms) if syms else {}
     except Exception:                                          # noqa: BLE001
         retail = {}
-    cur = current or istream.current
+    # SAME-BOOK EVIDENCE CERTIFIES ONE USE: the held-mark book
+    # (paper_market_data.institutional_held_book is its only consumer), so
+    # the probe reads the stream exactly as that use does
+    cur = current or istream.current_for_held_mark
     read = retail_read or samebook.retail_book_read
 
     def run_all():

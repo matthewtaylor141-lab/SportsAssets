@@ -1054,8 +1054,10 @@ def default_institutional():
         from . import institutional_stream as IS
         if not IAS.running():
             return None
+        # the held-mark read: the mark SLA's snapshot bound, every other
+        # currency check of current() unchanged
         return InstitutionalBooks(identity_fn=IAS.identity_mapper,
-                                  current_fn=IS.current)
+                                  current_fn=IS.current_for_held_mark)
     except Exception:                                          # noqa: BLE001
         return None
 
@@ -1203,8 +1205,9 @@ def default_same_book_tap():
             return (IAS.REFDATA.get(slug) or {}).get("record")
 
     def current(slug, now=None):
+        # the evidence certifies the held-mark use, so it reads as that use
         from . import institutional_stream as IS
-        return IS.current(slug, now=now)
+        return IS.current_for_held_mark(slug, now=now)
 
     _TAP["tap"] = SameBookTap(eligible=eligible, current=current,
                               record_for=record_for)
