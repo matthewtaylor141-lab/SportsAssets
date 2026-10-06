@@ -54,6 +54,12 @@ BOOK_SETTLEMENT = {
     # CAPTURE_RUN_FOOTBALL ("Bets on the Game and 2nd Half-periods include
     # points scored in overtime.").
     "football": "FULL_GAME_INCLUDING_OVERTIME",
+    # P0 coverage, captured with its page hash: bettor_settlement_terms.
+    # CAPTURE_RUN_LINE_RULES ("Bets on the Game and 2 nd -Half periods include
+    # all overtimes played in their result." / "Unless otherwise specified,
+    # Game-period bets include overtime and penalty shootouts.").
+    "basketball": "FULL_GAME_INCLUDING_ALL_OVERTIMES",
+    "hockey": "FULL_GAME_INCLUDING_OVERTIME_AND_SHOOTOUT",
 }
 
 # ── the four rules, separately, because only one is even answerable ──
@@ -106,6 +112,39 @@ OVERTIME_PROSE = {
                      r"(?:does|will)\s+not\s+includ\w*\s+overtime",
                      r"regulation\s+(?:time\s+)?only",
                      r"overtime\s+(?:is|will\s+be)\s+not\s+(?:included|counted)"),
+    },
+    # P0 coverage. The venue's NBA listing (tests/fixtures/
+    # pmus_nba_nhl_winner_listings_2026_10_06.json, 63 of 63 open listings):
+    # "Overtime is included if played." The book: "Bets on the Game and 2 nd
+    # -Half periods include all overtimes played in their result."
+    "basketball": {
+        "book_rule_includes_overtime": True,
+        "includes": (r"overtime\s+(?:is|are|will\s+be)\s+included",
+                     r"includ\w*\s+(?:all\s+|any\s+)?overtimes?"),
+        "excludes": (r"exclud\w*\s+(?:any\s+)?overtime",
+                     r"(?:does|will)\s+not\s+includ\w*\s+overtime",
+                     r"regulation\s+(?:time\s+)?only",
+                     r"overtime\s+(?:is|will\s+be)\s+not\s+(?:included|counted)"),
+    },
+    # The venue's NHL listing (same fixture, 26 of 26): "Overtime and any
+    # shootout are included if played." The book: "Unless otherwise
+    # specified, Game-period bets include overtime and penalty shootouts."
+    # THE SHOOTOUT MUST BE STATED TOO: a text including overtime and silent
+    # on the shootout does not say how a game level after overtime is
+    # graded, so it matches nothing here and stays NOT ESTABLISHED.
+    "hockey": {
+        "book_rule_includes_overtime": True,
+        "includes": (r"overtime\s+and\s+(?:any\s+)?(?:penalty\s+)?shootouts?"
+                     r"\s+(?:is|are|will\s+be)\s+included",
+                     r"includ\w*\s+(?:any\s+)?overtime\s+and\s+(?:any\s+)?"
+                     r"(?:penalty\s+)?shootouts?"),
+        "excludes": (r"exclud\w*\s+(?:any\s+|the\s+)?(?:overtime|shootouts?)",
+                     r"(?:does|will)\s+not\s+includ\w*\s+(?:overtime|"
+                     r"(?:the\s+|any\s+)?shootouts?)",
+                     r"regulation\s+(?:time\s+)?only",
+                     r"(?:overtime|shootouts?)\s+(?:is|are|will\s+be)\s+not"
+                     r"\s+(?:included|counted)",
+                     r"shootouts?\s+(?:does|will)\s+not\s+count"),
     },
     "soccer": {
         "book_rule_includes_overtime": False,
@@ -395,7 +434,11 @@ VOID_BOOK_NOTE = (
 BOOK_OUTCOMES = {"soccer": 3, "baseball": 2,
                  # a college game cannot end level (overtime to a result) and
                  # the book's money line prices two outcomes
-                 "football": 2}
+                 "football": 2,
+                 # P0 coverage: graded through every overtime (hockey: and
+                 # the shootout), so a winner always exists (TIE_REACHABLE)
+                 # and the Game-period money line prices two outcomes
+                 "basketball": 2, "hockey": 2}
 
 #: THE DRAW ASYMMETRY, which is the one that would quietly cost money.
 #:

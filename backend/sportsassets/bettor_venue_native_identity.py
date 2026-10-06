@@ -160,7 +160,7 @@ REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
             R_READ_TRUNCATED, R_COMPETITION, R_MATCH_RAISED, R_NICKNAME,
             R_PRICED_DESIGNATION, R_NO_DRAW_IN_FAMILY, R_NO_DRAW_CONTRACT,
             R_DRAW_CONTRACT_AMBIGUOUS, R_DRAW_CONTRACT_NOT_ESTABLISHED,
-            R_DISCOVERED_EVENT_ABSENT)
+            R_DISCOVERED_EVENT_ABSENT, "VENUE_NATIVE_LEAGUE_NOT_ADMITTED")
 
 #: ── WHICH REFUSALS ARE ABOUT THE EVENT, NOT ONE OF ITS OUTCOMES ──────
 #:
@@ -176,7 +176,8 @@ REFUSALS = (R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
 EVENT_LEVEL_REFUSALS = frozenset((
     R_NO_EVENT, R_AMBIGUOUS, R_ONE_TEAM_ONLY, R_ASSIGNMENT_AMBIGUOUS,
     R_FAMILY, R_PROVIDER_EVENT, R_READ_FAILED, R_READ_TRUNCATED,
-    R_COMPETITION, R_MATCH_RAISED, R_NICKNAME, R_DISCOVERED_EVENT_ABSENT))
+    R_COMPETITION, R_MATCH_RAISED, R_NICKNAME, R_DISCOVERED_EVENT_ABSENT,
+    "VENUE_NATIVE_LEAGUE_NOT_ADMITTED"))
 
 #: The designations an outcome can carry: the provider's home team, its away
 #: team, and the draw of a three-way (soccer) book.
@@ -203,7 +204,49 @@ FAMILY_WINNER_TYPES = {
     # token is `full_game`; segment winners (`_first_half_winner`,
     # `_first_quarter_winner` ...) are different values and stay absent.
     "football": ("football_team_full_game_winner",),
+    # P0 coverage (2026-10-06): the venue's NBA and NHL full-game winners,
+    # read on its own listings (tests/fixtures/
+    # pmus_nba_nhl_winner_listings_2026_10_06.json: 63 nba + 26 nhl open
+    # listings, every one ONE contract carrying one LONG and one SHORT side,
+    # one per team -- the baseball/football two-way shape). Scope token
+    # `full_game`. NOT the 3-way `hockey_team_regulation_winner` (a regulation
+    # draw is its own outcome there), nor any `_first_period_` /
+    # `_first_half_` / `_first_quarter_` segment: different values, absent.
+    "basketball": ("basketball_team_full_game_winner",),
+    "hockey": ("hockey_team_full_game_winner",),
 }
+
+#: ── WHICH BASKETBALL / HOCKEY LEAGUES ARE READ (P0 coverage) ───────────
+#:
+#: The venue spells EVERY basketball league's winner the same way, so the
+#: type alone admits no league. A league is read here only where its OWN
+#: winner wording is captured (tests/fixtures/
+#: pmus_basketball_hockey_winner_listings_2026_10_06.json: every open listing
+#: of the league at the read, plus the closed ones research-sql run
+#: 37411602665 named) and states the full game, overtime included (hockey:
+#: overtime AND the shootout) -- the grading the book's Basketball / Hockey
+#: section states for every competition. The same set is the de-vig's
+#: (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE, pinned equal by a test).
+ADMITTED_WINNER_LEAGUES = {
+    "basketball": frozenset((
+        "nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl", "eurocup",
+        "eurolg", "jpbl", "kbl", "lba", "lnbp", "nbl", "slnbl", "svkbl",
+        "vtb")),
+    "hockey": frozenset(("nhl", "ahl", "cehl", "khl", "liiga", "snhl")),
+}
+#: LISTED, CAPTURED, AND STILL NOT READ -- each with the reason. The WNBA
+#: wording grades the same game, but its team record is the CITY alone
+#: ("atlanta", "new york", "golden state", "las vegas") -- places the NBA's
+#: own fixtures carry in the same sport and the same weeks -- so a provider
+#: "Atlanta Hawks" contains the WNBA's "atlanta" exactly as "Atlanta Dream"
+#: does. A record that cannot tell two leagues' teams apart establishes no
+#: identity; refused by name.
+LEAGUES_NOT_READ = {
+    "wnba": ("the venue's WNBA team record is the city alone, which the NBA's "
+             "fixtures share: containment cannot tell the two leagues' teams "
+             "apart"),
+}
+R_LEAGUE_NOT_ADMITTED = "VENUE_NATIVE_LEAGUE_NOT_ADMITTED"
 
 #: ── FOOTBALL PARTICIPANTS CARRY THE VENUE'S OWN NICKNAME ───────────────
 #:
@@ -644,6 +687,21 @@ def same_team(provider: dict, venue: dict, *, womens_competition=False) -> dict:
                       "that distinguishes one club from another differs")
         return out
     shared = sorted(provider["distinctive"] & venue["distinctive"])
+    if (not shared and p_t == v_t and provider.get("folded")
+            and provider.get("folded") == venue.get("folded")):
+        # THE SAME NAME, TOKEN FOR TOKEN (P0 coverage, 2026-10-06: the
+        # provider's "Athletic Club" and the venue's Serie B "athletic club",
+        # refused for sharing only generic tokens). Generic tokens never
+        # count ALONE as evidence of containment; two renderings that are
+        # IDENTICAL after folding -- the WHOLE folded name, the affiliation
+        # words this module otherwise drops included ("athletic club" is not
+        # "athletic fc") -- with the same squad qualifiers, are the strongest
+        # identity there is; "Athletic Club (MG)" against "Athletic Club" is
+        # still not identical and still refuses.
+        out.update(same=True, shared_distinctive=[], identical=True,
+                   why=("identical names after folding (%s), the same squad "
+                        "qualifiers" % sorted(p_t)))
+        return out
     if not shared:
         out["why"] = ("the names share only generic tokens (%s), which two "
                       "different clubs can share"
@@ -910,6 +968,15 @@ def match_event(*, home, away, commence_epoch, family, rows,
     out["participants"] = ev["participants"]
     out["offset_s"] = ev["offset_s"]
     out["name_evidence"] = ev["evidence"]
+    if family in ADMITTED_WINNER_LEAGUES:
+        lg = league_token(ev["event_slug"])
+        out["venue_league"] = lg
+        if lg not in ADMITTED_WINNER_LEAGUES[family]:
+            return _refuse(out, R_LEAGUE_NOT_ADMITTED, (
+                "venue event %s is in league %r, whose %s winner is not read: "
+                "%s" % (ev["event_slug"], lg, family, LEAGUES_NOT_READ.get(
+                    lg, "its own winner wording is not captured (read: %s)"
+                    % sorted(ADMITTED_WINNER_LEAGUES[family])))))
     if ev["straight"] and ev["swapped"]:
         return _refuse(out, R_ASSIGNMENT_AMBIGUOUS, (
             "each provider team matches both participants of %s (%s), so "

@@ -1090,6 +1090,19 @@ tests/test_paper_management_epoch.py
 # discovered venue event (containment still refused).
 tests/test_coverage_first_loss_census.py
 tests/test_ncaaf_native_seed_identity.py
+# P0 coverage (2026-10-06): the NBA / NHL full-game winners are venue family
+# winner types -- exact identity for both outcomes with two-way LONG/SHORT
+# semantics, segments / the 3-way regulation winner refused; de-vig, census
+# and held reads admit the NBA / NHL only; both sides grade through every
+# overtime (and the shootout); strict settlement INCOMPATIBLE by name
+# (postponement: book voids, venue pays the last fair market price).
+tests/test_nba_nhl_winner_identity_and_settlement.py
+# P0 coverage, the remaining mapping first losses (2026-10-06): every
+# basketball / hockey league the venue lists admitted by its own captured
+# wording (WNBA refused by name: city-only team record); identical names are
+# an identity (Goias / Athletic Club); a native seed's own fixture id breaks
+# a same-names tie; "&" / "and" one spelling; the NCAAF school-only seeds.
+tests/test_coverage_mapping_first_losses.py
 tests/test_capital_eligibility.py
 tests/test_strategy_lifecycle.py
 # (305) PAPER CAPITAL AUTHORITY: every paper ENTRY needs executable EV > 0,

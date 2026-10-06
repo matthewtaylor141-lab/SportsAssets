@@ -66,9 +66,17 @@ def epoch(value):
 
 def name(value):
     # Full structured names only. No substring/abbreviation/geographic guess.
+    # ONE ORTHOGRAPHIC EQUIVALENCE (P0 coverage, 2026-10-06): the conjunction
+    # is spelled "&", "and" or not at all ("Bosnia & Herzegovina", "Bosnia
+    # and Herzegovina", "Bosnia-Herzegovina") by different sources for the
+    # same name; the metered provider's "&" form found no feed fixture
+    # (PINNAPI_PRIMARY_NO_EXACT_FIXTURE, UEFA Nations League 2026-10-05). The
+    # conjunction is dropped from every name; every other token must still be
+    # identical, in order.
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     text = "".join(c for c in text if not unicodedata.combining(c))
-    return " ".join(re.findall(r"[^\W_]+", text))
+    return " ".join(t for t in re.findall(r"[^\W_]+", text.replace("&", " "))
+                    if t != "and")
 
 
 def fixture_index(cache) -> dict:
@@ -125,6 +133,20 @@ def match_event(cache, event, family, *, index=None):
                                else event["away_team"],
                                "away": event["away_team"] if away == a
                                else event["home_team"]}))
+    if len(hits) > 1:
+        # THE SEED'S OWN FIXTURE (P0 coverage, 2026-10-06: Deportivo Riestra
+        # vs Central Cordoba, two feed fixtures of the same two names within
+        # the tolerance). A PinnAPI-native seed IS one feed fixture: the
+        # discovery matched exactly that fixture id one-to-one to its venue
+        # event (and seeds nothing when two fixtures claim one venue event).
+        # So when that id is among the name matches it is the fixture, by
+        # identity, not by preference; a metered event, or a seed whose id is
+        # not among them, stays AMBIGUOUS by name.
+        own = (event.get("pinnapi_native") or {}).get("fixture_id") \
+            if isinstance(event.get("pinnapi_native"), dict) else None
+        mine = [h for h in hits if own is not None and str(h[0]) == str(own)]
+        if len(mine) == 1:
+            return mine[0], None
     if len(hits) != 1:
         return None, ("PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS" if hits
                       else "PINNAPI_PRIMARY_NO_EXACT_FIXTURE")

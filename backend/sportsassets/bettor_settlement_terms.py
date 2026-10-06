@@ -155,6 +155,15 @@ APPLICABLE_CONDITIONS = {
     # before it -- those two conditions ARE football's suspended-beyond case.
     ("football", "h2h"): (C_FULL, C_OVERTIME, C_CALLED_FINAL,
                           C_STOPPED_EARLY, C_SUSPENDED_RESUMED, C_NOT_PLAYED),
+    # BASKETBALL / HOCKEY (P0 coverage): the book conditions the Game period
+    # on a minimum of play (NBA 43 minutes; hockey 55 minutes), so a game
+    # stopped before it and one stopped after it are different conditions,
+    # exactly as football's.
+    ("basketball", "h2h"): (C_FULL, C_OVERTIME, C_CALLED_FINAL,
+                            C_STOPPED_EARLY, C_SUSPENDED_RESUMED,
+                            C_NOT_PLAYED),
+    ("hockey", "h2h"): (C_FULL, C_OVERTIME, C_CALLED_FINAL,
+                        C_STOPPED_EARLY, C_SUSPENDED_RESUMED, C_NOT_PLAYED),
 }
 
 R_NO_APPLICABLE_SET = "NO_APPLICABLE_CONDITION_SET_DECLARED"
@@ -698,6 +707,30 @@ CAPTURED_SCOPE = {
                               "is mentioned within the rule."),
                           "leagues_covered": ("NCAA", "NFL"),
                           "not_covered": ("NFL Pro Bowl",)},
+    # BASKETBALL / HOCKEY (P0 coverage, capture CAPTURE_RUN_LINE_RULES): each
+    # sport section states one Game-period rule set for every competition,
+    # with no phase or format carve-out; the basketball minimum is stated per
+    # competition (NBA 43, others 35 -- both void), and the hockey section
+    # names one exception, the NHL All-Star Game, and a sub-sport (3-on-3
+    # basketball) with its own rules. Which LEAGUES are read is decided
+    # upstream, by the venue's own captured wording (bettor_pinnacle_devig.
+    # SUPPORTED_BY_LEAGUE).
+    ("basketball", "h2h"): {"phases": (), "formats": (),
+                            "phase_independent": True,
+                            "phase_independent_because": (
+                                "Bets on the Game and 2 nd -Half periods "
+                                "include all overtimes played in their "
+                                "result."),
+                            "leagues_covered": ("NBA", "every other "
+                                                "competition"),
+                            "not_covered": ("3 on 3 Basketball",)},
+    ("hockey", "h2h"): {"phases": (), "formats": (),
+                        "phase_independent": True,
+                        "phase_independent_because": (
+                            "Unless otherwise specified, Game-period bets "
+                            "include overtime and penalty shootouts."),
+                        "leagues_covered": ("every competition",),
+                        "not_covered": ("NHL All-Star Game",)},
 }
 
 R_PHASE_UNKNOWN = "COMPETITION_PHASE_NOT_ESTABLISHED"
@@ -1341,10 +1374,97 @@ _FOOTBALL_H2H_TERMS = {
 BOOK_TERMS[("football", "h2h", CTX_PRE_GAME)] = dict(_FOOTBALL_H2H_TERMS)
 BOOK_TERMS[("football", "h2h", CTX_LIVE)] = dict(_FOOTBALL_H2H_TERMS)
 
+# ── BASKETBALL AND HOCKEY: THE 2026-10-04 RE-READ OF THE SAME PAGE ───────
+#
+# RETRIEVED, NOT RECALLED, by the GitHub Actions runner (fetch-docs run
+# 37234815185, job 111531701564) at 2026-10-04T21:07:42Z: 119,592 bytes,
+# sha256 63d64321...3d8303fd -- byte-identical to CAPTURE_RUN_FOOTBALL and
+# CAPTURE_RUN_PLAYOFF. The publisher's Basketball and Hockey sections,
+# verbatim: tests/fixtures/pinnacle_line_rules_2026_10_04.json
+# (`sections.basketball`, `sections.hockey`), the capture
+# bettor_market_family.BOOK_CAPTURE already cites for the line families.
+#
+# ONLY WHAT A SENTENCE STATES IS DECLARED. Neither section states what a Game
+# period stopped AFTER its minimum and not completed pays, nor what a game
+# suspended and resumed pays (the General Rules' 30-hour rule speaks to a
+# fixture NOT completed in time); those conditions are left book-silent, so
+# the strict comparison names them (SETTLEMENT_BOOK_RULE_NOT_STATED) rather
+# than reading an answer into silence.
+_AT_LINE_RULES = "2026-10-04T21:07:42Z"
+
+CAPTURE_RUN_LINE_RULES = {
+    "reader": "github-actions runner, ubuntu-latest (fetch-docs)",
+    "job": ("https://github.com/matthewtaylor141-lab/SportsAssets/actions/"
+            "runs/37234815185/job/111531701564"),
+    "url": _URL,
+    "retrieved_at": _AT_LINE_RULES,
+    "http": 200,
+    "bytes": 119592,
+    "sha256": ("63d6432114be131dfbab98baf91f8777a98549221a59c288fa76916c"
+               "3d8303fd"),
+    "section": "Basketball and Hockey (sport rules)",
+    "fixture": "tests/fixtures/pinnacle_line_rules_2026_10_04.json",
+}
+
+_Q_BK_OVERTIME = ("Bets on the Game and 2 nd -Half periods include all "
+                  "overtimes played in their result.")
+#: BOTH minimums, one sentence pair: the NBA's 43 minutes and every other
+#: competition's 35. The trigger differs by league; the payout (void) does
+#: not, so one cited term serves every admitted league.
+_Q_BK_MINIMUM = ("In the NBA, all bets on the Game-period will be voided if "
+                 "fewer than 43 minutes are completed. In all other "
+                 "competitions, bets on the Game-period will be voided if "
+                 "fewer than 35 minutes are completed.")
+_Q_HK_OVERTIME = ("Unless otherwise specified, Game-period bets include "
+                  "overtime and penalty shootouts.")
+_Q_HK_MINIMUM = ("Bets on Match markets require a minimum of 55 minutes to "
+                 "be played for action. If a game is suspended before 55 "
+                 "minutes are played, bets on periods that have been played "
+                 "to completion will have action and all others will be "
+                 "voided.")
+
+
+def _cite_line_rules(sport, quote, rule):
+    return {"source": "%s -- %s, %s" % (_SRC, sport, rule),
+            "source_url": _URL, "retrieved_at": _AT_LINE_RULES,
+            "quote": quote, "page_sha256": CAPTURE_RUN_LINE_RULES["sha256"]}
+
+
+_BASKETBALL_H2H_TERMS = {
+    C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite_line_rules(
+        "Basketball", _Q_BK_OVERTIME, "overtime sentence")},
+    C_OVERTIME: {"payout": PAY_ON_FINAL, "cite": _cite_line_rules(
+        "Basketball", _Q_BK_OVERTIME, "overtime sentence"),
+        "note": "every overtime INCLUDED"},
+    # fewer than 43 minutes (the NBA's own minimum): void
+    C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
+        "Basketball", _Q_BK_MINIMUM, "minimum sentences (NBA 43, others 35)")},
+    C_NOT_PLAYED: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
+        "General Rules", _Q_GENERAL_NOT_STARTED, "not-started rule")},
+}
+_HOCKEY_H2H_TERMS = {
+    C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite_line_rules(
+        "Hockey", _Q_HK_OVERTIME, "overtime sentence")},
+    C_OVERTIME: {"payout": PAY_ON_FINAL, "cite": _cite_line_rules(
+        "Hockey", _Q_HK_OVERTIME, "overtime sentence"),
+        "note": "overtime AND the penalty shootout INCLUDED"},
+    # suspended before 55 minutes: the Game period is voided
+    C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
+        "Hockey", _Q_HK_MINIMUM, "minimum sentence")},
+    C_NOT_PLAYED: {"payout": PAY_STAKE_BACK, "cite": _cite_line_rules(
+        "General Rules", _Q_GENERAL_NOT_STARTED, "not-started rule")},
+}
+for _ctx in (CTX_PRE_GAME, CTX_LIVE):
+    BOOK_TERMS[("basketball", "h2h", _ctx)] = dict(_BASKETBALL_H2H_TERMS)
+    BOOK_TERMS[("hockey", "h2h", _ctx)] = dict(_HOCKEY_H2H_TERMS)
+del _ctx
+
 #: Captures whose terms are the SAME in every context, so an unproven quote
 #: context does not withhold them (the pre-game / in-play split that makes
 #: context matter for baseball does not exist in the section).
-CONTEXT_INVARIANT_CAPTURES = {("football", "h2h"): CAPTURE_RUN_FOOTBALL}
+CONTEXT_INVARIANT_CAPTURES = {("football", "h2h"): CAPTURE_RUN_FOOTBALL,
+                              ("basketball", "h2h"): CAPTURE_RUN_LINE_RULES,
+                              ("hockey", "h2h"): CAPTURE_RUN_LINE_RULES}
 
 #: The phases the general (non-phase-keyed) BOOK_TERMS describe. Anything
 #: else is answered from PHASE_BOOK_TERMS or not at all.
