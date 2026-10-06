@@ -4,6 +4,18 @@ As of 2026-10-05 23:47Z. Production: API = workers = `e54ee95` (ALIGNED, migrati
 Evidence: hqprod readback run 37389929039 (`claude/site-verify-evidence:evidence/hqprod/20261005T234733Z_run37389929039/`), research-sql runs 37384642567 / 37384839810 / 37385477712 / 37389862924.
 Rule: GREEN = exact SHA + named passing tests + migration applied + deployed + production readback + no safety gate weakened. Anything short of that is RED or BLOCKED with the reason. DEFERRED_FORWARD_EVIDENCE only where the remaining proof is elapsed market time.
 
+## P0 closeout update — 2026-10-06 06:32Z (release `221ce6b`, receipt `docs/receipts/P0_CLOSEOUT_2026-10-06.md`)
+
+| Row | Status | Evidence |
+|---|---|---|
+| Mark freshness ≥95% | RED / BLOCKED (credential) | 79/131 = 0.603 (from 0.537), 100% classified; both REST lanes 429-limited; retail stream needs a dedicated market-data key; institutional stream refused by the market-data identity guard |
+| Phantom open reconciliation | GREEN | canonical rule in every reader; 0 phantom opens; 0 live protection on closed; 17 duplicate-fill groups listed; simulator fix live |
+| Xavier packet / protection | GREEN (code + CI + deployed) | packet V2, valuation_id + PROTECTED_RESTING only; HOLD/EXIT/REDUCE not rankable on stale/incomplete; GTD lifecycle; integrity entry rail |
+| SOFTWARE first loss = 0 | RED | basketball/hockey and feed-owner losses gone (1 h); remaining QUOTE_STALE_ON_ARRIVAL, PINNAPI_PRIMARY_NO_EXACT_FIXTURE, SETTLEMENT_NOT_SUPPORTED |
+| Profitability containment | GREEN (engineering) | 0 new PAPER entries since cutover; 0 in no-entry states; 0 without positive forward economics; shadow counterfactuals recording |
+| Realized profitability | DEFERRED_FORWARD_EVIDENCE | realized PAPER −$23,942.82 |
+| Canary | RED (incomplete) | no-order structural tests ✓, new boot id, SMALL LIVE 0 orders; production checkpoint/cursor/retention not run |
+
 | # | Category | Status | Evidence | What is missing |
 |---|---|---|---|---|
 | 1 | Management epoch ($500,000 @ 2026-10-05 00:00 ET) | GREEN | `tests/test_paper_management_epoch.py` 16 ✓ (capital-critical); `equity/live paper.management` status OK, opening identity holds, ledger reconciles; equity $479,006.66, total P&L −$20,993.34 (realized −$11,642.28, unrealized −$9,351.06) | — |
