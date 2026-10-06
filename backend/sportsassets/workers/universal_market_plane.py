@@ -20,6 +20,16 @@ INTEGRATION FIXES OVER THE DELIVERED SUPERVISOR (each pinned by a test):
     in priority order (open positions, candidates, core families soonest);
     an unlisted contract is recorded and re-asked after UNLISTED_RETRY_S, not
     every pass;
+  * DEDICATED READ-ONLY RUNTIME (owner decision, 2026-10-06): ~74,500 active
+    markets are NOT to be solved by raising UMP_MAX_STREAMS inside the shared
+    workers process. The same supervisor runs standalone as its own
+    read-only service: `python -m sportsassets.workers.universal_market_plane`
+    with UMP_RUNTIME=DEDICATED_READ_ONLY (and UNIVERSAL_MARKET_PLANE=off on the
+    shared workers so exactly one runtime holds the shards). Until the venue
+    grants more institutional capacity the priority order binds: held
+    positions / working management, imminent decisions, near-term core
+    sports, the remaining active sports, futures / the long tail; overflow is
+    always named with the streams full coverage would need;
   * capacity is configured, never assumed: UMP_MAX_STREAMS x UMP_MAX_PER_STREAM
     (PMX documents 1,000 symbols per stream; the account's concurrent-stream
     allowance is not documented here). Overflow is named with the exact
@@ -339,6 +349,77 @@ async def run() -> None:
             await asyncio.sleep(10)
 
 
+async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
+                                 subscribed: int, fresh: int,
+                                 now: float) -> dict:
+    """THE TWO DENOMINATORS, never blended (owner, 2026-10-06).
+
+      priority_universe   open PAPER positions + evaluated candidates (the
+                          capital-required markets): current via the PMX
+                          stream or the REST recovery read inside the 300 s
+                          SLA, over all of them (external named apart)
+      held_positions      the management truth: bettor_paper_freshness over
+                          the account's open positions (markable = all but
+                          EXTERNAL_UNAVAILABLE with venue evidence)
+      total_universe      every active sports contract: subscription
+                          eligible, streamed, current via fallback, stale,
+                          overflow, external -- nothing excluded to raise it
+    """
+    tiers = (cov or {}).get("freshness_tiers") or {}
+    pr = tiers.get("PRIORITY") or {}
+    al = tiers.get("ALL") or {}
+
+    def rate(t):
+        den = int(t.get("total") or 0) - int(t.get(
+            "EXTERNAL_DATA_UNAVAILABLE") or 0)
+        cur = int(t.get("PMX_GRPC") or 0) + int(t.get("REST_RECOVERY") or 0)
+        return None if den <= 0 else round(cur / den, 4)
+    held = {"status": "UNREAD"}
+    try:
+        from .. import bettor_paper_freshness as PMF
+        from .. import bettor_paper_ledger as L
+        got = await PMF.read(conn, L.ACCOUNT_ID, rows_limit=0)
+        held = {"open_positions": got.get("open_positions"),
+                "markable": got.get("markable"),
+                "freshly_manageable": got.get("freshly_manageable"),
+                "external_unavailable": ((got.get("counts") or {}).get(
+                    "EXTERNAL_UNAVAILABLE") or {}).get("count"),
+                "rate": got.get("fresh_rate"),
+                "basis": "bettor_paper_freshness.read (FRESH + QUIET_VALID "
+                         "/ markable; 300 s SLA)"}
+    except Exception as exc:                                    # noqa: BLE001
+        held = {"status": "UNREAD", "why": type(exc).__name__, "rate": None}
+    total_active = int(reg.get("active") or 0)
+    streamed_fresh = int(fresh)
+    via_fallback = int(al.get("REST_RECOVERY") or 0)
+    ext = int(al.get("EXTERNAL_DATA_UNAVAILABLE") or 0)
+    current = int(al.get("PMX_GRPC") or 0) + via_fallback
+    return {
+        "priority_universe": {
+            "denominator": int(pr.get("total") or 0),
+            "current_pmx_stream": int(pr.get("PMX_GRPC") or 0),
+            "current_rest_fallback": int(pr.get("REST_RECOVERY") or 0),
+            "not_current": int(pr.get("NONE") or 0),
+            "external_unavailable": int(pr.get(
+                "EXTERNAL_DATA_UNAVAILABLE") or 0),
+            "rate": rate(pr), "target": 0.95,
+            "members": "OPEN_PAPER_POSITION + EVALUATED_CANDIDATE (6 h)"},
+        "held_positions": held,
+        "total_universe": {
+            "active_contracts": total_active,
+            "subscription_eligible": int(reg.get("pmx_listed") or 0),
+            "pmx_unlisted": int(reg.get("pmx_unlisted") or 0),
+            "refdata_pending": int(reg.get("refdata_pending") or 0),
+            "streamed": int(subscribed),
+            "streamed_current": streamed_fresh,
+            "current_via_fallback": via_fallback,
+            "stale_or_unread": max(0, total_active - current - ext),
+            "overflow": plan.get("overflow_count"),
+            "external_unavailable": ext,
+            "rate": (round(current / max(1, total_active - ext), 4)
+                     if total_active > ext else None)}}
+
+
 async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                    fresh: set, caps: tuple) -> dict:
     """ONE append-only market-plane snapshot: universe, registry, coverage,
@@ -401,6 +482,23 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                      % (max(0, venue_active) - reg_active))
     rad["extra_findings"] = extra
     max_streams, max_per = caps
+    # CAPACITY, explicit (owner): streams, symbol capacity, subscribed,
+    # overflow and the streams the whole subscribable universe would need
+    rad["capacity"] = {
+        "streams_open": len(mgr.shard_digest()) if mgr is not None else 0,
+        "max_streams": max_streams, "max_per_stream": max_per,
+        "symbol_capacity": max_streams * max_per,
+        "subscribed": subscribed,
+        "subscribable": plan.get("subscribable"),
+        "overflow": plan.get("overflow_count"),
+        "streams_required_for_full_coverage": plan.get(
+            "shards_required_for_all"),
+        "runtime": os.environ.get("UMP_RUNTIME", "SHARED_WORKERS")}
+    freshness = await freshness_denominators(conn, cov, reg, plan,
+                                             subscribed=subscribed,
+                                             fresh=len(fresh), now=now)
+    rad["freshness"] = {k: (v.get("rate") if isinstance(v, dict) else None)
+                        for k, v in freshness.items()}
     return {
         "computed_at": now, "version": "UNIVERSAL_MARKET_PLANE_SNAPSHOT_V1",
         "authority": R.AUTHORITY,
@@ -423,6 +521,7 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                          "subscribed": subscribed, "fresh": len(fresh),
                          "stale_subscribed": stale},
         "sources": cov.get("source_counts"),
+        "freshness": freshness,
         "latency": lat, "certification": dict(
             cert, last_pass=state.get("certification")),
         "catalogue": state.get("catalogue"),

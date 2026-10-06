@@ -500,6 +500,13 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     results, changed = [], []
     src_counts = {"PMX_GRPC": 0, "RETAIL_PUSH": 0, "REST_RECOVERY": 0,
                   "NONE": 0}
+    # THE TWO DENOMINATORS (owner, 2026-10-06): the PRIORITY universe (open
+    # positions + evaluated candidates: the capital-required markets) and
+    # the ENTIRE active universe are reported apart, never blended
+    tiers = {"PRIORITY": {"PMX_GRPC": 0, "REST_RECOVERY": 0, "NONE": 0,
+                          "EXTERNAL_DATA_UNAVAILABLE": 0, "total": 0},
+             "ALL": {"PMX_GRPC": 0, "REST_RECOVERY": 0, "NONE": 0,
+                     "EXTERNAL_DATA_UNAVAILABLE": 0, "total": 0}}
     for r in rows:
         s = r["contract_id"]
         if s in fresh_symbols:
@@ -512,6 +519,13 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         t = classify(r, valuation=vals.get(s), candidate=cands.get(s),
                      fresh_book=fresh, book_source=src, external_codes=ext)
         results.append(t)
+        for tier in (("PRIORITY", "ALL") if (r.get("priority") is not None
+                                            and int(r["priority"])
+                                            <= P_CANDIDATE) else ("ALL",)):
+            tiers[tier]["total"] += 1
+            if t["state"] == "EXTERNAL_DATA_UNAVAILABLE":
+                tiers[tier]["EXTERNAL_DATA_UNAVAILABLE"] += 1
+            tiers[tier][src or "NONE"] += 1
         if (t["state"], t["why"]) != (r.get("coverage_state"),
                                      r.get("coverage_why")):
             changed.append((s, t["state"], t["why"], at))
@@ -535,5 +549,6 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     return dict(m, by_sport=by_sport,
                 top_reasons=dict(sorted(by_why.items(),
                                         key=lambda kv: -kv[1])[:40]),
-                source_counts=src_counts, changed=len(changed),
+                source_counts=src_counts, freshness_tiers=tiers,
+                changed=len(changed),
                 active=len(rows), computed_at=at)

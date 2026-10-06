@@ -417,6 +417,27 @@ def test_the_routes_are_get_only_and_registered():
     assert "from .command_market_plane import router" in src
 
 
+def test_priority_and_total_denominators_are_counted_apart():
+    import asyncio as _a
+
+    class _C:
+        async def fetch(self, *a):
+            return []
+    tiers = {"PRIORITY": {"PMX_GRPC": 3, "REST_RECOVERY": 5, "NONE": 1,
+                          "EXTERNAL_DATA_UNAVAILABLE": 1, "total": 10},
+             "ALL": {"PMX_GRPC": 30, "REST_RECOVERY": 50, "NONE": 900,
+                     "EXTERNAL_DATA_UNAVAILABLE": 20, "total": 1000}}
+    got = _a.run(W.freshness_denominators(
+        _C(), {"freshness_tiers": tiers},
+        {"active": 1000, "pmx_listed": 400}, {"overflow_count": 7},
+        subscribed=380, fresh=30, now=NOW))
+    pr, tu = got["priority_universe"], got["total_universe"]
+    assert pr["rate"] == round(8 / 9, 4)          # external named apart
+    assert tu["rate"] == round(80 / 980, 4)       # nothing excluded
+    assert tu["overflow"] == 7 and tu["stale_or_unread"] == 900
+    assert got["held_positions"]["rate"] is None  # unread here: never 0
+
+
 def test_the_worker_is_supervised():
     src = (ROOT / "workers" / "all.py").read_text()
     assert '("universal_market_plane", universal_market_plane.run)' in src
@@ -549,6 +570,19 @@ def test_coverage_and_assignment_over_the_registry():
                        for f in snap["radar"]["extra_findings"])
             assert "CATALOGUE_NOT_PROVEN_COMPLETE" in snap["radar"]["failures"]
             assert snap["universe"]["represented"] == cov["active"]
+            # the two denominators, never blended
+            fr = snap["freshness"]
+            assert set(fr) == {"priority_universe", "held_positions",
+                               "total_universe"}
+            tu = fr["total_universe"]
+            assert tu["active_contracts"] == cov["active"]
+            assert tu["streamed"] == 0 and tu["overflow"] == 0
+            assert tu["stale_or_unread"] == cov["active"]
+            assert fr["priority_universe"]["target"] == 0.95
+            cap = snap["radar"]["capacity"]
+            assert cap["symbol_capacity"] == 4 * 1000
+            assert cap["streams_required_for_full_coverage"] == 1
+            assert cap["streams_open"] == 0
         finally:
             await tr.rollback()
             await c.close()
