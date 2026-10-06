@@ -216,8 +216,13 @@ MIN_MANAGEMENT_IMPROVEMENT_USD = 0.01
 
 # ── 15 scenario concentration (shrink only) ──────────────────────────
 #: aggregate PAPER exposure (open cost basis + open BUY reservations) of the
-#: ACCOUNT -- every strategy, every contract -- on one event / fixture
-SCENARIO_MAX_EXPOSURE_USD = 3000.0
+#: ACCOUNT -- every strategy, every contract -- on one event / fixture.
+#: NO INVENTED NUMBER (owner, 2026-10-06): the cap is the account's OWN
+#: owner/risk rail (bettor_paper_limits.effective_caps per_fixture_cap_usd)
+#: when that policy sets one; where the owner policy sets none (the main
+#: account), the exposure is MEASURED AND RECORDED on every decision and no
+#: cap is applied from here. Only ever a cap, never a raise.
+SCENARIO_MAX_EXPOSURE_USD = None
 
 # ── 17 reprice deadband ──────────────────────────────────────────────
 REPRICE_DEADBAND_S = 900.0
@@ -1151,9 +1156,14 @@ def scenario_cap(scenario: dict | None, *, capital_per_contract) -> dict:
     s = scenario or {}
     x = _num(s.get("exposure_usd"))
     pc = _num(capital_per_contract)
-    cap_usd = _num(s.get("cap_usd"))
-    cap_usd = SCENARIO_MAX_EXPOSURE_USD if cap_usd is None else min(
-        cap_usd, SCENARIO_MAX_EXPOSURE_USD)
+    caps = [c for c in (_num(s.get("cap_usd")),
+                        _num(SCENARIO_MAX_EXPOSURE_USD)) if c is not None]
+    cap_usd = min(caps) if caps else None
+    if cap_usd is None:
+        # the owner policy sets no event cap: measured, recorded, not capped
+        return {"qty_cap": None, "exposure_usd": None if x is None
+                else _r(x, 6), "cap_usd": None, "key": s.get("key"),
+                "basis": "MEASURED_NO_OWNER_EVENT_CAP"}
     if x is None or not pc or pc <= 0:
         return {"qty_cap": None, "exposure_usd": x, "cap_usd": cap_usd,
                 "key": s.get("key")}
@@ -1395,9 +1405,16 @@ async def scenario_exposure(conn, *, account_id: str, fixture) -> dict:
     from . import bettor_paper_ledger as L
     if not fixture:
         return {"exposure_usd": None, "key": None}
+    from . import bettor_paper_limits as LIMITS
     x = await L._exposure(conn, account_id, fixture=fixture)
+    # the owner's own per-fixture rail for this account (None = none set)
+    try:
+        owner = LIMITS.effective_caps({}, account_id, "ENTRY").get(
+            "per_fixture_cap_usd")
+    except Exception:                                           # noqa: BLE001
+        owner = None
     return {"exposure_usd": float(x), "key": "fixture:%s" % fixture,
-            "cap_usd": SCENARIO_MAX_EXPOSURE_USD}
+            "cap_usd": _num(owner), "cap_basis": "OWNER_POLICY_PER_FIXTURE"}
 
 
 async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
