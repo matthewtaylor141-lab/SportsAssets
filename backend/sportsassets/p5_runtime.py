@@ -87,9 +87,8 @@ EVIDENCE_LIVE_S = 180.0
 #: Stream evidence window read for aggregates.
 STREAM_WINDOW_S = 900.0
 #: Same-book window and the evidence it needs to be SUPPORTED.
-SAME_BOOK_WINDOW_S = 86400.0
-SAME_BOOK_MIN_COMPARABLE = 30
-SAME_BOOK_MIN_AGREE_RATE = 0.95
+from .same_book_rule import (  # noqa: E402,F401  (one definition)
+    SAME_BOOK_MIN_AGREE_RATE, SAME_BOOK_MIN_COMPARABLE, SAME_BOOK_WINDOW_S)
 
 API_SERVICE = "sportsassets-api"
 WORKERS_SERVICE = "sportsassets-workers"
@@ -224,9 +223,7 @@ STREAM_AGG_SQL = """
 #: (identity ok, institutional symbol = retail slug = the probed symbol); a
 #: row carrying a comparable verdict without that is counted NOT_COMPARABLE
 #: (the probe never writes one -- this makes the count not depend on it).
-EXACT_SAMPLE_SQL = (
-    "coalesce(identity_ok IS TRUE AND identity->>'institutional_symbol' = "
-    "symbol AND retail_slug = symbol, false)")
+from .same_book_rule import EXACT_SAMPLE_SQL  # noqa: E402
 NC_NOT_EXACT = "COMPARABLE_VERDICT_WITHOUT_EXACT_IDENTITY"
 PROBE_AGG_SQL = """
     SELECT symbol,
@@ -320,30 +317,7 @@ async def stream_evidence(conn, *, now: float,
             "symbols": out_syms, "aggregates": aggs}
 
 
-def same_book_status(counts: dict) -> tuple:
-    """Pure: (status, detail) from {verdict: (n, n_stable)} totals."""
-    agree = counts.get("AGREE_TOP_N", (0, 0))[0]
-    touch = counts.get("AGREE_TOUCH_ONLY", (0, 0))[0]
-    dis, dis_stable = counts.get("DISAGREE", (0, 0))
-    nc = counts.get("NOT_COMPARABLE", (0, 0))[0]
-    comparable = agree + touch + dis
-    rate = None if not comparable else (agree + touch) / comparable
-    detail = {"comparable": comparable, "agree_top_n": agree,
-              "agree_touch_only": touch, "disagree": dis,
-              "disagree_with_stream_stable_in_window": dis_stable,
-              "not_comparable": nc, "agree_rate": None if rate is None
-              else round(rate, 4),
-              "supported_needs": {"min_comparable": SAME_BOOK_MIN_COMPARABLE,
-                                  "min_agree_rate": SAME_BOOK_MIN_AGREE_RATE,
-                                  "stable_disagreements": 0}}
-    if dis_stable > 0:
-        return "CONTRADICTED", detail
-    if comparable == 0:
-        return "UNTESTED", detail
-    if comparable >= SAME_BOOK_MIN_COMPARABLE and \
-            rate >= SAME_BOOK_MIN_AGREE_RATE:
-        return "SUPPORTED", detail
-    return "INCONCLUSIVE", detail
+from .same_book_rule import same_book_status  # noqa: E402,F401
 
 
 async def same_book_evidence(conn, *,

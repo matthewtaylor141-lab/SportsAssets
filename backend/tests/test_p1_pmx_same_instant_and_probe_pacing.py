@@ -325,7 +325,7 @@ def test_the_probe_spends_reads_on_unsupported_symbols_fewest_first():
 def test_the_worker_orders_its_probe_by_the_evidence_reader():
     import inspect
     src = inspect.getsource(WMD.run)
-    assert "pmd.same_book_by_symbol(pool, probe_syms)" in src
+    assert "samebook.same_book_by_symbol(" in src
     assert "evidence=evidence" in src
 
 

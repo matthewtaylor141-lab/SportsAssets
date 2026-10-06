@@ -621,3 +621,63 @@ async def persist(pool, rows, *, process_id: str, service: str) -> int:
             except Exception:                                 # noqa: BLE001
                 continue
     return n
+
+
+# ── the per-symbol evidence reader (held-mark use) ───────────────────
+
+#: THE SAME VENUE INSTANT, applied to persisted samples too
+#: (institutional_same_book.NC_RETAIL_OLDER): a sample whose retail
+#: transactTime and stream venue clock are both known and differ by more than
+#: SAME_INSTANT_TOLERANCE_S compared two different book states -- it counts
+#: as NOT_COMPARABLE, whatever verdict it was recorded with (the rows written
+#: before the rule included 19 DISAGREE and 39 AGREE_TOUCH_ONLY of exactly
+#: that kind). A CASE, so the cast runs only on a well-formed clock.
+SAME_INSTANT_SQL = r"""
+    (CASE WHEN stream_venue_ts IS NOT NULL
+               AND retail_book->>'transact_time' ~
+                   '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})$'
+          THEN abs(extract(epoch FROM ((retail_book->>'transact_time')
+                                       ::timestamptz - stream_venue_ts)))
+               <= 0.001
+          ELSE TRUE END)"""
+
+SAME_BOOK_SYMBOL_SQL = """
+    SELECT symbol,
+           CASE WHEN verdict <> 'NOT_COMPARABLE' AND NOT (%s AND """ \
+    + SAME_INSTANT_SQL.replace("%", "%%") + """)
+                THEN 'NOT_COMPARABLE' ELSE verdict END       AS verdict,
+           count(*)                                          AS n,
+           count(*) FILTER (WHERE NOT stream_changed_in_window) AS n_stable
+      FROM institutional_same_book_probe
+     WHERE probed_at > now() - make_interval(secs => $1)
+       AND symbol = ANY($2::text[])
+     GROUP BY 1, 2
+"""
+
+
+async def same_book_by_symbol(conn, symbols) -> dict:
+    """{symbol: {"status", "detail"}} under p5_runtime.same_book_status, for
+    THESE symbols only (exact-identity samples, the P5 window). Never
+    raises; an absent table or a failed read is {} (nothing proven)."""
+    from . import same_book_rule as P5R
+    syms = sorted({str(s) for s in symbols or () if s})
+    if not syms:
+        return {}
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('institutional_same_book_probe') "
+                "IS NOT NULL"):
+            return {}
+        rows = await conn.fetch(SAME_BOOK_SYMBOL_SQL % P5R.EXACT_SAMPLE_SQL,
+                                float(P5R.SAME_BOOK_WINDOW_S), syms)
+    except Exception:                                          # noqa: BLE001
+        return {}
+    by: dict = {}
+    for r in rows:
+        by.setdefault(r["symbol"], {})[r["verdict"]] = (int(r["n"]),
+                                                        int(r["n_stable"]))
+    out = {}
+    for s, counts in by.items():
+        st, det = P5R.same_book_status(counts)
+        out[s] = {"status": st, "detail": det}
+    return out

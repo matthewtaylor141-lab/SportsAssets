@@ -675,9 +675,9 @@ async def run() -> None:
                 m, universe_id=universe.get("universe_id"))
                 for m in probe_members} if probe_members else None)
             try:
-                from .. import paper_market_data as pmd
                 try:
-                    evidence = await pmd.same_book_by_symbol(pool, probe_syms)
+                    evidence = await samebook.same_book_by_symbol(
+                        pool, probe_syms)
                 except Exception:                              # noqa: BLE001
                     evidence = None
                 stats["sameBook"] = await probe_same_book(
