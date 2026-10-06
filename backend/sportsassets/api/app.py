@@ -983,6 +983,16 @@ try:
 except ImportError:
     log.warning("loop health: api.command_loop_health not loaded",
                 exc_info=True)
+# ── PRODUCTION CANARY (P1): /api/command/canary. GET only, COMMAND auth, one
+# READ ONLY transaction with a statement timeout: boot identity history, the
+# latest checkpoint, cursor non-regression across the last restart, retention
+# status and no-order structural evidence (sportsassets.ops_canary, shared
+# with scripts/bettor_canary.py). No write path.
+try:
+    from .command_canary import router as _command_canary_router
+    app.include_router(_command_canary_router)
+except ImportError:
+    log.warning("canary: api.command_canary not loaded", exc_info=True)
 # ── RUNTIME SLOs (R30A): /api/command/slo. GET only, COMMAND auth, one READ
 # ONLY transaction with a statement timeout: eight SLOs, each target /
 # measured / window / OK | BREACH | UNAVAILABLE(reason). No write path.

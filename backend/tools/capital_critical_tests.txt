@@ -1172,3 +1172,12 @@ tests/test_agent_scorecards.py
 # protection; fully sold -> closed everywhere; no duplicate resting fills; no
 # new PAPER ENTRY while protection continuity / packets have failed.
 tests/test_p0_xavier_packet_and_reconciliation.py
+# P1 ops canary: the venue Ed25519 secret is read in the form it was given
+# (mirror_shadow "The seed must be exactly 32 bytes long") while the order
+# client keeps the configured encoding; GET /api/command/canary (boot
+# identity, checkpoint, cursor non-regression, retention, no-order) is
+# read-only and fails on each defect it exists to catch; a brand-new
+# database migrates with production's runner alone.
+tests/test_venue_key_seed_decoding.py
+tests/test_ops_canary.py
+tests/test_fresh_database_migrates.py

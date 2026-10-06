@@ -60,8 +60,12 @@ from datetime import datetime, timezone
 sys.path.insert(0, "backend")
 
 from sportsassets import bettor_live_store as st        # noqa: E402
+# THE CHECK LOGIC IS SHARED with GET /api/command/canary (no DSN needed
+# there): the restart rule, the checkpoint snapshot, the journal no-order
+# read, the verdict states and the thresholds live in one module.
+from sportsassets import ops_canary as OC               # noqa: E402
 
-PASS, FAIL, UNKNOWN = "PASS", "FAIL", "NOT_ESTABLISHED"
+PASS, FAIL, UNKNOWN = OC.PASS, OC.FAIL, OC.UNKNOWN
 EXIT_OK, EXIT_FAILED, EXIT_INCOMPLETE = 0, 1, 3
 
 RESULTS: list = []
@@ -83,8 +87,7 @@ def verdict(name, state, detail, *, required=True):
         print("        %s" % line)
 
 
-def state_of(ok):
-    return PASS if ok is True else (FAIL if ok is False else UNKNOWN)
+state_of = OC.state_of
 
 
 # ── 1. live socket, FRESH books ──────────────────────────────────────
@@ -255,12 +258,8 @@ async def check_settlement(con, store, lane, minutes):
 
 async def check_no_order(con, lane):
     rule("4. NO EXECUTION IN OUR OWN JOURNAL")
-    ex = await con.fetchval(
-        "SELECT count(*) FROM bettor_live_journal "
-        " WHERE lane = $1 AND (record->>'executed') = 'true'", lane)
-    sized = await con.fetchval(
-        "SELECT count(*) FROM bettor_live_journal WHERE lane = $1 "
-        "   AND COALESCE((record->>'size_contracts')::float, 0) <> 0", lane)
+    jr = await OC.journal_no_order(con, lane)
+    ex, sized = jr["executed"], jr["sized"]
     verdict("no execution recorded in our own journal",
             state_of(ex == 0 and sized == 0),
             "records claiming an execution %s (over ALL time)\n"
@@ -324,31 +323,8 @@ def check_ops(evidence):
 # ── 6. a REAL restart, compared against a checkpoint ─────────────────
 
 async def snapshot(con, store, lane):
-    """What a restart has to preserve."""
-    rows = await con.fetch(
-        "SELECT record_key FROM bettor_live_journal WHERE lane = $1 "
-        " ORDER BY id DESC LIMIT $2", lane, CHECKPOINT_KEYS)
-    boots = await con.fetch(
-        "SELECT DISTINCT boot_id FROM bettor_live_journal WHERE lane = $1 "
-        "   AND boot_id IS NOT NULL", lane)
-    cur = await con.fetchrow(
-        "SELECT count(*) AS n, "
-        "       count(*) FILTER (WHERE settle_status IS DISTINCT FROM $2) "
-        "         AS outstanding FROM bettor_live_cursor WHERE lane = $1",
-        lane, st.SETTLE_RESOLVED)
-    led = await con.fetchrow(
-        "SELECT boot_id, saved_at FROM bettor_live_ledger WHERE lane = $1",
-        lane)
-    return {
-        "at": datetime.now(timezone.utc).isoformat(),
-        "journal_rows": await con.fetchval(
-            "SELECT count(*) FROM bettor_live_journal WHERE lane = $1", lane),
-        "record_keys": [r["record_key"] for r in rows],
-        "boot_ids": sorted(b["boot_id"] for b in boots),
-        "cursors": cur["n"], "outstanding": cur["outstanding"],
-        "ledger_boot_id": led["boot_id"] if led else None,
-        "ledger_saved_at": str(led["saved_at"]) if led else None,
-    }
+    """What a restart has to preserve (ops_canary.snapshot)."""
+    return await OC.snapshot(con, lane)
 
 
 async def check_restart(con, store, lane, before):
@@ -382,7 +358,9 @@ async def check_restart(con, store, lane, before):
     else:
         still = len(before["record_keys"])
 
-    new_boots = sorted(set(after["boot_ids"]) - set(before["boot_ids"]))
+    state, why, new_boots = OC.restart_verdict(
+        before, after, still_present=still,
+        expected_present=len(before["record_keys"]))
     detail = (
         "checkpoint  %s: %s rows, %s cursors (%s outstanding), boots %s\n"
         "now         %s: %s rows, %s cursors (%s outstanding), boots %s\n"
@@ -396,29 +374,18 @@ async def check_restart(con, store, lane, before):
            new_boots or "NONE",
            still, len(before["record_keys"]),
            after["ledger_boot_id"], after["ledger_saved_at"]))
-
-    if not new_boots:
-        return verdict("a restart happened and records were retained",
-                       FAIL, detail + "\nNO NEW PROCESS BOOT: the worker "
-                       "did not restart, so this window cannot establish "
-                       "recovery")
-    ok = (still == len(before["record_keys"])
-          and after["journal_rows"] >= before["journal_rows"]
-          and after["cursors"] >= before["cursors"])
-    verdict("a restart happened and records were retained", state_of(ok),
-            detail + "\nrequired: a NEW boot_id, every checkpointed record "
-            "key still present, and neither the row count nor the cursor "
-            "count going backwards")
+    verdict("a restart happened and records were retained", state,
+            detail + "\n" + why)
 
 
 # ── wiring ───────────────────────────────────────────────────────────
 
-MAX_SOURCE_AGE_S = 10.0
-MAX_RECEIPT_AGE_S = 5.0
-SETTLEMENT_EVERY_S = 600.0
-MIN_FRESH_DECISIONS = 10
-RSS_GROWTH_PCT = 15.0
-CHECKPOINT_KEYS = 200
+MAX_SOURCE_AGE_S = OC.MAX_SOURCE_AGE_S
+MAX_RECEIPT_AGE_S = OC.MAX_RECEIPT_AGE_S
+SETTLEMENT_EVERY_S = OC.SETTLEMENT_EVERY_S
+MIN_FRESH_DECISIONS = OC.MIN_FRESH_DECISIONS
+RSS_GROWTH_PCT = OC.RSS_GROWTH_PCT
+CHECKPOINT_KEYS = OC.CHECKPOINT_KEYS
 
 
 async def run(dsn, minutes, checkpoint, checkpoint_write, evidence,
