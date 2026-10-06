@@ -897,6 +897,12 @@ STAGES = (
         # R30A: a draw-priced football line is the regulation market, never
         # de-vigged as the two-way game line (bettor_pinnacle_devig).
         "FOOTBALL_LINE_PRICES_A_DRAW_NOT_THE_TWO_WAY_GAME_LINE",
+        # (software census closure) Pinnacle has not posted the fixture:
+        # the feed holds no candidate at its start AND the metered payload
+        # carries no Pinnacle book (ext_pinnacle_loop.no_pinnacle_codes),
+        # and the evidence code that rides beside it
+        "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED",
+        "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES",
         # ...NOW RECORDED BY CAUSE (P0 incident, ext_pinnacle_loop.
         # no_pinnacle_codes): what the discovery payload lacked, and the
         # PinnAPI refusal that left no WS price (2,534 rows/day had been
@@ -912,6 +918,10 @@ STAGES = (
         "ONE_CLOCK_IS_NOT_MEASURED",
         # Lever A: already past the 30 s rule before any venue read.
         "QUOTE_STALE_ON_ARRIVAL",
+        # ...split by the row's own measurement (software census closure,
+        # ext_pinnacle_loop.QUOTE_STALE_AS_DELIVERED_RULE): delivered past
+        # the limit by the metered provider, no PinnAPI price ours to use
+        "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER",
         # (P1) the read bounded by the candidate's probability deadline
         "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
         # THE VENUE READ'S OWN FRESHNESS REFUSALS. They used to stop the lane
@@ -1189,6 +1199,12 @@ EVALUABILITY_OF = {
     # A MEASURED AGE PAST THE LIMIT, measured before the venue read instead
     # of after it. The same decision as QUOTE_STALE, taken earlier.
     "QUOTE_STALE_ON_ARRIVAL": DECIDED,
+    # (software census closure) THE PROVIDER'S CADENCE, MEASURED ON THE ROW:
+    # its lag at our receipt (provider_lag_s) already past the 30 s rule, and
+    # the PinnAPI read that could have replaced it refused for an EXTERNAL
+    # reason (ext_pinnacle_loop.QUOTE_STALE_AS_DELIVERED_RULE). No cadence,
+    # order or pacing of ours could have delivered it younger.
+    "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER": EXTERNAL_DEPENDENCY,
     # (P1) the same measured age, taken at the read's own deadline: the
     # quote's 30 s budget ran out before the venue read could finish
     "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH": DECIDED,
@@ -1247,6 +1263,14 @@ EVALUABILITY_OF = {
     # same absence as NO_PINNACLE_ON_EVENT, measured on the feed. Any token
     # in common keeps PINNAPI_PRIMARY_NO_EXACT_FIXTURE, a naming gap, ours.
     "PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM":
+        EXTERNAL_DEPENDENCY,
+    # (software census closure) TWO SOURCES AGREE PINNACLE HAS NOT POSTED
+    # IT: no feed record at the start shares a token with either team AND
+    # the metered payload carries no Pinnacle book
+    # (ext_pinnacle_loop.R_FIXTURE_NOT_YET_POSTED); the feed naming the
+    # teams only at OTHER starts is that evidence, recorded beside it.
+    "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": EXTERNAL_DEPENDENCY,
+    "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES":
         EXTERNAL_DEPENDENCY,
     # The catalogue lists only line markets for this fixture: no moneyline
     # exists there to price, the same kind of absence as no contract at all.

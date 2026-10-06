@@ -9,6 +9,8 @@ LIMIT = 500
 # These paths continue before ext.persist/_paper_valuation in the collector.
 # Generic REFUSED is NOT enough: calibration-only rows can still reach Derek.
 PRE_VALUATION_CODES = {'NO_PINNACLE_ON_EVENT','QUOTE_STALE_ON_ARRIVAL',
+                       'QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER',
+                       'PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED',
                        'NO_VENUE_NATIVE_CONTRACT_IN_PREMAP','WS_REFERENCE_NOT_USABLE',
                        'WS_TRIGGER_SUPERSEDED',
                        # NO_PINNACLE_ON_EVENT by cause (P0 incident): the WS

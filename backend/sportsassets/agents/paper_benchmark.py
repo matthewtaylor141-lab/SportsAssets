@@ -660,6 +660,17 @@ def contract_match(cand: dict, row: dict, *, not_applied=()) -> dict:
          else "the lane refused the probability: %s" % lane["probability"]),
         lane_refusals=lane["probability"],
         not_applied_by_policy=lane["not_applied_by_policy"])
+    # THE LANE'S OWN CODES RIDE BEHIND THE CATEGORY (software census
+    # closure), as the settlement blockers do: the category says only that
+    # the lane refused the probability, so the first-loss census classed
+    # every such decision by the wrapper (SOFTWARE) whatever the lane's
+    # cause -- a payload with no Pinnacle book, thin outcomes, a stale
+    # quote. The census now reads the carried code
+    # (coverage_first_loss.LANE_WRAPPERS); the decision is unchanged.
+    if lane["probability"]:
+        for c in lane["probability"]:
+            if c not in refusals:
+                refusals.append(c)
     # 5 · VENUE
     put("polymarket_us_contract", cand.get("venue") in (None, "PMUS"),
         R_NOT_PMUS, "venue %s" % cand.get("venue"))
@@ -2204,7 +2215,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         "retry_after_s": retry["after_s"], "retry": retry}
             refusals.append(PD.R_BOOK_DEADLINE)
         elif obs.get("error") or not levels:
-            refusals.append(R_NO_BOOK)
+            refusals.append(PD.no_book_refusal(obs, lv))
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
         else:

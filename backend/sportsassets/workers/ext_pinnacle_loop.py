@@ -2400,6 +2400,77 @@ def _maxof(xs):
 #: by moving cases from one bucket into an indistinguishable one.
 R_QUOTE_STALE_ON_ARRIVAL = "QUOTE_STALE_ON_ARRIVAL"
 
+#: ── WHOSE AGE: THE PROVIDER'S CADENCE, BY THE ROW'S OWN MEASUREMENT ──────
+#:
+#: MEASURED (live release 55eb7c82, 1 h census): QUOTE_STALE_ON_ARRIVAL was
+#: the largest SOFTWARE first loss (46 events; 198 rows / 51 NCAAF events in
+#: 90 min) -- the metered provider's quotes for games days ahead. One code
+#: covered two different facts, both already measured on the row
+#: (`arrival_split`, migration 143 columns):
+#:
+#:   provider_lag_s   our receipt - the provider's own last_update. Past the
+#:                    30 s rule, the quote was ALREADY too old when it
+#:                    reached us: no fetch cadence, queue order or venue
+#:                    pacing of ours could have saved it (the lag at receipt
+#:                    does not depend on when we poll -- the provider's
+#:                    snapshot is as old as its own refresh made it).
+#:   our_processing_s our arrival - our receipt: OURS.
+#:
+#: The provider's cadence is EXTERNAL only where we had NO better source:
+#: the metered quote is the fallback the PinnAPI read left, and that read's
+#: own refusal is itself EXTERNAL (bettor_external_shadow.EVALUABILITY_OF,
+#: e.g. PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM). Then the
+#: refusal is QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER, with that WS refusal
+#: beside it on the row. Where the PinnAPI read was refused for OUR reason
+#: (a naming gap, no feed ownership, the sport unsupported) the stale metered
+#: quote is our loss and stays QUOTE_STALE_ON_ARRIVAL, the WS reason beside
+#: it; and a quote the provider delivered INSIDE the limit that our own
+#: processing took past it stays QUOTE_STALE_ON_ARRIVAL (and is requeued,
+#: REQUEUE_AFTER_OUR_DELAY_RULE). The 30 s rule, its clock and the instant it
+#: is applied at are unchanged: this only names whose time it was.
+R_QUOTE_STALE_AS_DELIVERED = "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER"
+QUOTE_STALE_AS_DELIVERED_RULE = (
+    "a quote refused on arrival is QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER "
+    "only when its measured provider lag at our receipt already exceeded "
+    "PINNACLE_MAX_AGE_S and it is the metered fallback of a PinnAPI read "
+    "refused for an EXTERNAL reason; otherwise QUOTE_STALE_ON_ARRIVAL")
+
+
+def stale_on_arrival_attribution(quote, *, provider_epoch,
+                                 received_at) -> dict:
+    """{"code", "ws_refusal", "provider_lag_s", "basis"} for a quote refused
+    on arrival (QUOTE_STALE_AS_DELIVERED_RULE). Pure."""
+    q = quote if isinstance(quote, dict) else {}
+    ri = q.get("reference_input") if isinstance(q.get("reference_input"),
+                                                 dict) else {}
+    ws = ri.get("fallback_reason")
+    ws = str(ws) if ws else None
+    metered = ri.get("provider") != "pinnapi.com/raw-websocket"
+    try:
+        lag = (None if provider_epoch is None or received_at is None
+               else float(received_at) - float(provider_epoch))
+    except (TypeError, ValueError):
+        lag = None
+    delivered_stale = lag is not None and lag > PINNACLE_MAX_AGE_S
+    ws_external = (ws is not None
+                   and ext.EVALUABILITY_OF.get(ws) == ext.EXTERNAL_DEPENDENCY)
+    if delivered_stale and metered and ws_external:
+        code, basis = (R_QUOTE_STALE_AS_DELIVERED,
+                       "PROVIDER_LAG_AT_RECEIPT_PAST_THE_LIMIT_"
+                       "PINNAPI_REFUSAL_EXTERNAL")
+    elif delivered_stale:
+        code, basis = (R_QUOTE_STALE_ON_ARRIVAL,
+                       "PROVIDER_LAG_AT_RECEIPT_PAST_THE_LIMIT_"
+                       "BUT_THE_PINNAPI_REFUSAL_IS_OURS")
+    elif lag is not None:
+        code, basis = (R_QUOTE_STALE_ON_ARRIVAL,
+                       "DELIVERED_INSIDE_THE_LIMIT_OUR_PROCESSING_TOOK_IT_PAST")
+    else:
+        code, basis = (R_QUOTE_STALE_ON_ARRIVAL, "PROVIDER_LAG_UNMEASURED")
+    return {"code": code, "ws_refusal": ws if metered else None,
+            "provider_lag_s": None if lag is None else round(lag, 3),
+            "basis": basis}
+
 #: How many deferred candidates are named on the cycle. Bounded because a
 #: heartbeat is overwritten every cycle and must not grow without bound;
 #: `deferred_total` carries the full count beside the sample so the bound
@@ -3319,11 +3390,82 @@ def pinnacle_absence_in_payload(event) -> str | None:
     return None
 
 
+#: ── PINNACLE HAS NOT POSTED THIS GAME: TWO SOURCES AGREE (software census) ──
+#:
+#: MEASURED (live release 55eb7c82, 1 h census): 16 events refused
+#: PINNAPI_PRIMARY_NO_EXACT_FIXTURE, every row ALSO carrying
+#: THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK -- MLS and Brazil Serie B games
+#: 4-8 days out (LAFC v Vancouver 2026-10-11, D.C. United v NY Red Bulls
+#: 2026-10-14, Botafogo-SP v Ceara 2026-10-13). NO_EXACT stayed ours because
+#: `pinnapi_names.absence` found a participant token somewhere in the 36 h
+#: window (the team's other game, another club's "City" / "United"), which
+#: proves nothing about THIS start: no record at another start can ever be
+#: matched, whatever the names.
+#:
+#: SO THE ABSENCE IS NAMED BY ITS EVIDENCE, NOT ASSUMED. It is EXTERNAL
+#: (PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED) only when ALL hold:
+#:   1 the WS read refused PINNAPI_PRIMARY_NO_EXACT_FIXTURE (both name tiers
+#:     found no fixture);
+#:   2 the feed holds records of the sport and evicted nothing, and NO
+#:     record starting inside the match tolerance (or with no readable
+#:     start) shares a token or an acronym with either participant
+#:     (`absence(...)["no_candidate_near_start"]`): no fixture the names
+#:     could be hiding exists at that start;
+#:   3 the event is the METERED provider's own (not a PinnAPI-native seed)
+#:     and its payload carries NO Pinnacle book
+#:     (THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK): the second, independent
+#:     source of Pinnacle's prices has no price for it either.
+#: Any doubt -- a token near the start, a Pinnacle book in the payload, an
+#: eviction, a seed -- keeps PINNAPI_PRIMARY_NO_EXACT_FIXTURE (SOFTWARE,
+#: a naming question). When the feed names a participant only at OTHER
+#: start times, that fact rides on the row as its own code
+#: (PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES), and the
+#: payload's absence stays beside it, so the row carries the evidence.
+#: No tolerance, name table or identity rule changes.
+R_FIXTURE_NOT_YET_POSTED = "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED"
+R_TEAMS_ONLY_AT_OTHER_STARTS = \
+    "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES"
+
+
+def fixture_not_yet_posted(explain, event) -> dict | None:
+    """The evidence that Pinnacle has not posted this fixture (see
+    R_FIXTURE_NOT_YET_POSTED), or None when any condition fails. Pure."""
+    from .. import pinnapi_primary as primary
+    ex = explain if isinstance(explain, dict) else {}
+    if ex.get("reason") != primary.R_NO_EXACT:
+        return None
+    ev = event if isinstance(event, dict) else {}
+    if ev.get("pinnapi_native") is not None or \
+            not isinstance(ev.get("bookmakers"), list):
+        return None
+    if pinnacle_absence_in_payload(ev) != R_PAYLOAD_HAS_NO_PINNACLE:
+        return None
+    ab = (((ex.get("provenance") or {}).get("fixture_match") or {})
+          .get("absence"))
+    if not isinstance(ab, dict) or ab.get("no_candidate_near_start") \
+            is not True:
+        return None
+    return {"ws_refusal": primary.R_NO_EXACT,
+            "payload_absence": R_PAYLOAD_HAS_NO_PINNACLE,
+            "feed_sport_records": ab.get("sport_records"),
+            "feed_evicted": ab.get("evicted"),
+            "near_start_window_s": ab.get("near_start_window_s"),
+            "named_near_start": list(ab.get("named_near_start") or []),
+            "named_elsewhere": list(ab.get("named_elsewhere") or [])}
+
+
 def no_pinnacle_codes(explain, event) -> list:
     """The codes recorded for an event with no usable Pinnacle price, in
-    order: the WS refusal reason, then the discovery payload's absence."""
+    order: the WS refusal reason, then the discovery payload's absence. A
+    WS NO_EXACT_FIXTURE whose fixture both sources show unposted is
+    recorded PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED (fixture_not_yet_posted)."""
     ws = (explain or {}).get("reason")
     legacy = pinnacle_absence_in_payload(event)
+    posted = fixture_not_yet_posted(explain, event)
+    if posted is not None:
+        return ([R_FIXTURE_NOT_YET_POSTED, legacy]
+                + ([R_TEAMS_ONLY_AT_OTHER_STARTS]
+                   if posted["named_elsewhere"] else []))
     codes = [c for c in (ws, legacy) if c]
     return codes or [R_NO_PINNACLE_ON_EVENT]
 
@@ -9889,6 +10031,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            "age_samples": [], "valid_evaluations": 0, "stale_refusals": 0,
            "self_inflicted_stale": 0, "provider_stale_on_arrival": 0,
            "stale_on_arrival_due_to_our_processing": 0,
+           # every arrival refusal by the code it was written under
+           # (QUOTE_STALE_AS_DELIVERED_RULE)
+           "stale_on_arrival_by_attribution": {},
            "requeued_after_our_delay": 0,
            "skipped_stale_on_arrival": 0, "arrival_skip_samples": 0,
            "deduplicated_requests": 0, "venue_requests": 0,
@@ -10386,6 +10531,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                "ws_refusal": _ws_why.get("reason"),
                                "payload_absence":
                                    pinnacle_absence_in_payload(event),
+                               # the two sources' agreement, when it is
+                               # what named the code (R_FIXTURE_NOT_YET_
+                               # POSTED); None otherwise
+                               "not_yet_posted_evidence":
+                                   fixture_not_yet_posted(_ws_why, event),
                                "formerly_recorded_as":
                                    R_NO_PINNACLE_ON_EVENT})
                 continue
@@ -10732,9 +10882,24 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     lat["our_delay_samples"].append(_arr - float(reference_received_at))
                 lat["age_samples"].append(_arr - _pe)
                 lat["arrival_skip_samples"] += 1
-                code = R_QUOTE_STALE_ON_ARRIVAL
+                # WHOSE AGE, BY THE ROW'S OWN MEASUREMENT
+                # (QUOTE_STALE_AS_DELIVERED_RULE): delivered past the limit
+                # by the metered provider while the PinnAPI read was refused
+                # for an EXTERNAL reason -> the provider's cadence, by name;
+                # anything else stays QUOTE_STALE_ON_ARRIVAL, ours.
+                _split = stale_on_arrival_attribution(
+                    quote, provider_epoch=_pe,
+                    received_at=reference_received_at)
+                code = _split["code"]
                 tally[code] = tally.get(code, 0) + 1
                 _step_refuse(code)
+                if _split["ws_refusal"]:
+                    # THE PINNAPI REFUSAL THAT LEFT THE METERED QUOTE AS
+                    # THE ONLY PRICE rides on the row as evidence
+                    tally[_split["ws_refusal"]] = \
+                        tally.get(_split["ws_refusal"], 0) + 1
+                lat["stale_on_arrival_by_attribution"][code] = \
+                    lat["stale_on_arrival_by_attribution"].get(code, 0) + 1
                 _ledger({"global_slug": mapped.get("global_slug")
                          or (mapped.get("market_row") or {}).get("slug"),
                          "us_market_slug": ident.get("us_market_slug"),
@@ -10752,6 +10917,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                              None if reference_received_at is None
                              else round(_arr - float(reference_received_at), 3)),
                          "age_basis": "PROVIDER_LAST_UPDATE_AT_ARRIVAL",
+                         # whose time it was, and the PinnAPI refusal that
+                         # left this quote as the only price
+                         "attribution": _split["basis"],
+                         "ws_refusal": _split["ws_refusal"],
                          "why": WHY_SKIPPED_ON_ARRIVAL})
                 continue
 
@@ -11793,6 +11962,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                # the limit and our own processing took the price past it.
                "stale_on_arrival_due_to_our_processing":
                    lat["stale_on_arrival_due_to_our_processing"],
+               # ...and every arrival refusal by the code it carries
+               "stale_on_arrival_by_attribution":
+                   dict(lat["stale_on_arrival_by_attribution"]),
                # ...and how many of those go first in their competition's
                # next fetch (REQUEUE_AFTER_OUR_DELAY_RULE)
                "requeued_after_our_delay": lat["requeued_after_our_delay"],
