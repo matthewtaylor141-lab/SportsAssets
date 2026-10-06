@@ -65,10 +65,12 @@ STATEMENT_TIMEOUT_MS = 3000
 #: parallel work, absent from this build); 216..310 since the CAPITAL
 #: READINESS LAB (310: append-only RESEARCH / SHADOW_NO_AUTHORITY evidence);
 #: 216..311 since the PAPER PROFITABILITY STACK (311: learned management /
-#: exit cost and the counterfactual variant ledger).
+#: exit cost and the counterfactual variant ledger); 216..312 since the
+#: UNIVERSAL MARKET PLANE (312: durable market registry, same-book
+#: certification and append-only market-plane evidence; no order authority).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 311
+TRACKED_FROM, TRACKED_TO = 216, 312
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

@@ -790,6 +790,14 @@ try:
 except ImportError:
     log.warning("capital readiness: api.command_capital_readiness not loaded",
                 exc_info=True)
+# ── THE UNIVERSAL MARKET PLANE (migration 312): GET /api/command/market-plane.
+# GET only, COMMAND auth. MARKET_DATA_ONLY_NO_ORDER_AUTHORITY.
+try:
+    from .command_market_plane import router as _command_market_plane_router
+    app.include_router(_command_market_plane_router)
+except ImportError:
+    log.warning("market plane: api.command_market_plane not loaded",
+                exc_info=True)
 # ── THE LEARNING-LAYER READS (migration 218): /api/command/tournament/*,
 # /api/command/profitability/{edge-confidence,avoidance},
 # /api/command/experiments. GET only, COMMAND auth, SHADOW / RESEARCH.
