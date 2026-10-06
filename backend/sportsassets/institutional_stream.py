@@ -92,6 +92,14 @@ MAX_SYMBOLS = 200
 #: No new numbers: the lane's own liveness and snapshot bounds.
 MAX_SILENCE_S = sc.MAX_SILENCE_S
 MAX_SNAPSHOT_AGE_S = sc.MAX_SNAPSHOT_AGE_S
+#: THE HELD-MARK BOUND. A held-position MARK is judged under the mark SLA
+#: (bettor_paper_freshness.SLA_S = bettor_paper_ledger.MARK_STALE_AFTER_S,
+#: 300 s; a test pins the equality), not under the decision path's 30 s
+#: snapshot bound: the retail stream's held marks already use `book_at` at
+#: the SLA bounds. Only `current_for_held_mark` reads with it -- the held-mark
+#: refresh and the same-book evidence that certifies exactly that use. The
+#: decision path's `current()` keeps MAX_SNAPSHOT_AGE_S; nothing widens it.
+HELD_MARK_MAX_SNAPSHOT_AGE_S = 300.0
 
 #: A stream silent this long (no update, heartbeat or ack) is cancelled and
 #: reconnected. Updates are documented to arrive "at regular intervals (even if
@@ -411,8 +419,15 @@ class ResidentBooks:
 
     # ── the read the decision path makes ──────────────────────────────
 
-    def current(self, symbol, *, now=None) -> dict:
+    def current(self, symbol, *, now=None, max_snapshot_age_s=None) -> dict:
         at = float(now if now is not None else self._clock())
+        # the decision bound unless the held-mark reader asks for the mark
+        # SLA; never above it, never below the decision bound
+        bound = MAX_SNAPSHOT_AGE_S if max_snapshot_age_s is None else \
+            max(MAX_SNAPSHOT_AGE_S, min(float(max_snapshot_age_s),
+                                        HELD_MARK_MAX_SNAPSHOT_AGE_S))
+        bound_use = "DECISION" if bound == MAX_SNAPSHOT_AGE_S and \
+            max_snapshot_age_s is None else "HELD_MARK"
         sym = str(symbol or "")
         with self._lock:
             st, why_st = self.state, self.state_why
@@ -457,7 +472,8 @@ class ResidentBooks:
                       "requested": DEPTH},
             "venue_sequence": VENUE_SEQUENCE,
             "bounds": {"max_silence_s": MAX_SILENCE_S,
-                       "max_snapshot_age_s": MAX_SNAPSHOT_AGE_S},
+                       "max_snapshot_age_s": bound,
+                       "bound_use": bound_use},
         }
 
         def refuse(name, why):
@@ -504,9 +520,10 @@ class ResidentBooks:
         if silence is None or silence > MAX_SILENCE_S:
             return refuse(R_SILENT, "the stream has not proven itself alive "
                           "within %.0f s" % MAX_SILENCE_S)
-        if age is None or age > MAX_SNAPSHOT_AGE_S:
+        if age is None or age > bound:
             return refuse(R_SNAPSHOT_OLD, "the last full update for this "
-                          "symbol is older than %.0f s" % MAX_SNAPSHOT_AGE_S)
+                          "symbol is older than %.0f s (%s bound)"
+                          % (bound, bound_use))
         if m.get("book_hidden"):
             return refuse(R_BOOK_HIDDEN, "the venue marks this book hidden")
         if not state:
@@ -1014,6 +1031,24 @@ def current(symbol, *, now=None) -> dict:
         return {"ok": False, "symbol": str(symbol or ""),
                 "refusal": R_NOT_RUNNING, "book": None, "evidence": None,
                 "why": "current() raised %s" % type(exc).__name__}
+
+
+def current_for_held_mark(symbol, *, now=None) -> dict:
+    """THE HELD-MARK LANE'S READ: `current()` with every check unchanged
+    (running, requested, scaled, connected, same connection, no gap, venue
+    clock present, stream alive within MAX_SILENCE_S, open, not hidden) but
+    the snapshot bound at the mark SLA (HELD_MARK_MAX_SNAPSHOT_AGE_S) instead
+    of the decision bound. The caller still applies its own receipt and
+    venue-clock ages against the SLA (paper_market_data.
+    institutional_held_book). Never used to decide an entry. NEVER RAISES."""
+    try:
+        return BOOKS.current(symbol, now=now,
+                             max_snapshot_age_s=HELD_MARK_MAX_SNAPSHOT_AGE_S)
+    except Exception as exc:                                  # noqa: BLE001
+        return {"ok": False, "symbol": str(symbol or ""),
+                "refusal": R_NOT_RUNNING, "book": None, "evidence": None,
+                "why": "current_for_held_mark() raised %s"
+                       % type(exc).__name__}
 
 
 def digest() -> dict:
