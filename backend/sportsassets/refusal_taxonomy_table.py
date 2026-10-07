@@ -1503,6 +1503,14 @@ TABLE = {
     # (315) a canonical alias whose settlement-rules fingerprint differs
     # from the one it was certified against (red team settlement guard)
     "RULES_CHANGED_SINCE_CERTIFICATION": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # Kalshi game contract terms (the venue's rulebook): a rulebook that is
+    # not recorded, not verified live, changed, or a non-entire-game
+    # contract applies no term -- the alias stays UNKNOWN_STATES
+    "RULEBOOK_NOT_RECORDED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULEBOOK_CHANGED_SINCE_RECORDING": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULEBOOK_NOT_VERIFIED_LIVE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SERIES_RULEBOOK_UNKNOWN": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NOT_AN_ENTIRE_GAME_CONTRACT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
