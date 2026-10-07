@@ -105,3 +105,47 @@ def capacity_view(*, active: int, pending: int, subscribable: int,
         "capacity_is_not_an_explanation_for":
             "unresolved reference data or unused configured slots",
     }
+
+
+def _pct(xs: list, q: float):
+    if not xs:
+        return None
+    ys = sorted(xs)
+    return round(ys[min(len(ys) - 1, int(q * (len(ys) - 1) + 0.5))], 1)
+
+
+def refdata_metrics(totals: dict, boot: Mapping, *, lat_ms: list, n429: int,
+                    budget: int, now: float) -> dict:
+    """THE REFDATA THROUGHPUT, MEASURED (owner closeout item 4). `totals` is
+    the worker's running record since its boot (mutated); returns this
+    pass's latency and the running rates: requests/min, success rate, 429
+    rate, median / p95 latency, listed / unlisted / retryable counts and the
+    burn-down per hour. Transient failures are RETRY, never UNLISTED."""
+    t = totals
+    t.setdefault("since", float(now))
+    for k in ("requests", "listed", "unlisted", "retryable", "http_429"):
+        t.setdefault(k, 0)
+    t["requests"] += int(boot.get("attempted") or 0)
+    t["listed"] += int(boot.get("stored") or 0)
+    t["unlisted"] += int(boot.get("unlisted") or 0)
+    t["retryable"] += int(boot.get("failed") or 0)
+    t["http_429"] += int(n429)
+    ring = t.setdefault("lat_ms", [])
+    ring.extend(round(x, 1) for x in lat_ms)
+    del ring[:-2000]
+    mins = max((float(now) - t["since"]) / 60.0, 1e-9)
+    req = t["requests"]
+    return {"budget": budget,
+            "latency_ms": {"p50": _pct(lat_ms, 0.5), "p95": _pct(lat_ms, 0.95)},
+            "totals_since_boot": {
+                "since": t["since"], "requests": req,
+                "listed": t["listed"], "unlisted": t["unlisted"],
+                "retryable": t["retryable"], "http_429": t["http_429"],
+                "requests_per_min": round(req / mins, 2),
+                "success_rate": (round((t["listed"] + t["unlisted"]) / req, 4)
+                                 if req else None),
+                "rate_429": round(t["http_429"] / req, 4) if req else None,
+                "latency_ms_p50": _pct(ring, 0.5),
+                "latency_ms_p95": _pct(ring, 0.95),
+                "burn_down_per_hour": round(
+                    (t["listed"] + t["unlisted"]) / (mins / 60.0), 1)}}
