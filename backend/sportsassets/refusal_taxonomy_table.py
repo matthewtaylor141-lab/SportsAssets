@@ -1476,6 +1476,15 @@ TABLE = {
     "KALSHI_CATALOGUE_TRUNCATED_PAGE_CAP": (S, DATA, "INGESTION"),
     "KALSHI_CATALOGUE_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
     "KALSHI_CATALOGUE_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
+    # (314) Kalshi canonical venue: the market-data walk's own TRUNCATED
+    # reasons (never COMPLETE), its 429 backoff, and Adriana's claim-first
+    # scan naming a claim pair that does not pay $1 in every state
+    "KALSHI_MD_RATE_LIMITED_429": (S, FRESH, "INGESTION"),
+    "KALSHI_MD_SERIES_LIST_NOT_READ": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_CURSOR_REPEATED": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
+    "CLAIMS_NOT_COMPLEMENTARY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
