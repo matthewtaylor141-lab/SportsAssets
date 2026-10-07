@@ -1,0 +1,244 @@
+                                   BASEBALLGAMEWIN
+
+Scope: These rules shall apply to this contract.
+
+Underlying: The Underlying for this Contract is the official final result of <baseball game>.
+Revisions to the Underlying made after Expiration will not be accounted for in determining the
+Expiration Value.
+
+Instructions: The Underlying can be found at: https://www.mlb.com/scores. These
+instructions on how to access the Underlying are provided for convenience only and are not
+part of the binding Terms and Conditions of the Contract. They may be clarified at any time.
+
+Source Agency: The Source Agencies are, in hierarchical order, the governing league or
+association of <baseball game> (e.g., Major League Baseball, NCAA, Nippon Professional
+Baseball, or the World Baseball Classic organizing body), ESPN, CBS Sports, Fox Sports, the
+Associated Press, The Wall Street Journal, and the official broadcaster of <baseball game>.
+
+Type: The type of Contract is an Event Contract.
+
+Issuance: The Contract is based on the outcome of a recurrent event. Thus, Contract
+iterations will be issued on a recurring basis, and future Contract iterations will generally
+correspond to the next scheduled occurrence of <baseball game> or similar games within the
+same league or season.
+
+<team>: <team> refers to an entity participating in baseball, specified by the Exchange.
+This includes, but is not limited to, professional teams (e.g., MLB), collegiate teams (e.g.,
+NCAA Division I, II, III), international teams, or other organized baseball teams at any level of
+competition. <team> may refer to a singular team, multiple teams using AND/OR logic, a
+team within a set of teams, or teams defined by distinguishing characteristics (e.g., "any AL
+team," "the home team," "teams with winning records"). <team> may also take the values
+"Any" or "None." The Exchange may list iterations of the Contract corresponding to variations
+of <team>. If a team name changes, relocates, or undergoes organizational restructuring
+while maintaining substantial continuity, <team> shall track the successor entity. This will be
+announced by the Exchange in the event it is relevant.
+
+<baseball game>: <baseball game> refers to a specific baseball contest or set of contests
+specified by the Exchange. This may be defined by exact matchup (e.g., "New York Yankees
+vs. Boston Red Sox"), date and time, location or venue, playoff round or tournament stage
+(e.g., "2025 World Series Game 4," "ALCS Game 7"), game number within a doubleheader
+(e.g., "Game 1" or "Game 2"), or other distinguishing information. <baseball game> may refer
+to games sanctioned by Major League Baseball (MLB), the National Collegiate Athletic
+Association (NCAA), international baseball federations (e.g., the World Baseball Classic), or any
+other organized baseball competition as specified by the Exchange. <baseball game> may
+refer to a singular game, multiple games (even if non-consecutive), an element in a set of
+games, or games defined by distinguishing characteristics (e.g., "any playoff game," "all
+games on July 4, 2025," "home games"). <baseball game> may also be used to refer to the
+overarching tournament as a whole (e.g. “The World Series”). <baseball game> may also take
+the values "Any" or "None." The Exchange may list iterations of the Contract corresponding to
+variations of <baseball game>. The Contract has not been endorsed by any league or
+association as of self-certification. The use of any names of leagues or associations does not
+indicate an endorsement of this product.
+<time period>: <time period> refers to a specific duration or discrete segment of <baseball
+game> specified by the Exchange. <time period> may be expressed as, but is not limited to
+expression as, a specific inning (e.g., "the 1st inning," "the top of the 5th inning"), a range of
+innings (e.g., "the first 5 innings," "innings 1 through 3"), a half of the game (e.g., "the first
+half," meaning innings 1 through the midpoint as defined by the Exchange), a particular time
+period (e.g. “the first hour”) or other segments as appropriate to the contract subject matter.
+All times are interpreted in Eastern Time (ET) unless otherwise specified. The Exchange may
+list iterations of the Contract corresponding to variations of <time period>. Unless otherwise
+specified, <time period> shall be understood to be the full duration of <baseball game>,
+including all regulation innings and any extra innings or tie-breaking procedures employed by
+the governing body.
+
+Payout Criterion: The Payout Criterion for the Contract encompasses the Expiration Values
+that <team> is the winner of <time period> of <baseball game>.
+
+     In order to be considered the "winner" of <time period> of <baseball game>, <team>
+     must have scored more runs (a strictly greater number) than their opponent in <time
+     period>. Unless otherwise explicitly specified, only the runs scored in <time period> are
+     considered.
+     The market resolves based on the first official final result reported unless the Exchange,
+     in its sole discretion, has reason to believe that the first official final result is clearly
+     erroneous, in which case it may defer to a corrected official final result if such a
+     correction is made prior to Contract Expiration. Subsequent corrections or revisions after
+     Expiration will not be considered.
+     Unless otherwise specified, all extra innings (or any equivalent tie-breaking procedure
+     used by the governing body, such as the international tiebreaker rule) are included in
+     determining the winner. If <baseball game> extends into extra innings, the market will
+     resolve based on the final result after all extra innings have concluded.
+     If a "Tie" strike is listed for a given <time period> (e.g., the first 5 innings, a single
+     inning, or any other sub-game segment), and <time period> ends with both teams
+     having an equal number of runs, the "Tie" strike will resolve to "Yes" and all team-specific
+     strikes for that <time period> will resolve to "No." If a “Tie” strike is not listed for a given
+     <time period> and <time period> of <baseball game> ends in a tie after all regulation
+     and extra innings (unless specifically excluded), the market will resolve to $1/(the
+     number of tied teams), rounded down. For example, if two teams tie, then each team
+     strike will resolve to $0.50.
+     If <baseball game> is shortened, called, or otherwise ended before the regulation
+     number of innings (e.g., due to weather, curfew, or mercy rule), and the governing body
+     declares the game official and records a winner, the market for the full game will resolve
+     based on that official result. Markets for sub-game <time period> segments that were
+     completed before the game was called will resolve based on the score at the end of those
+     completed segments. Markets for sub-game <time period> segments that were not
+     completed before the game was called will resolve at the last fair market price as
+     determined by the Exchange.
+     If <baseball game> is abandoned, cancelled, or suspended and is not resumed within 48
+     hours of its originally scheduled start time, the market will resolve based on the last fair
+     market price as determined by the Exchange. If <baseball game> is suspended during
+     play and resumed within 48 hours of the originally scheduled start time, the market will
+     remain open and will resolve based on the official final result of the completed game.
+    If <baseball game> refers to a specific game number in a playoff or championship series
+    (e.g., 'Game 6 of the World Series'), and the series concludes before that game number is
+    reached (e.g., the series ends 4-1, so Game 6 is unnecessary), the market will resolve
+    based on the last fair market price as determined by the Exchange.
+    If <baseball game> is postponed from its originally scheduled date but is rescheduled
+    and started within 48 hours of its originally scheduled start time, the market will remain
+    open and will resolve based on the official final result of the rescheduled game. If
+    <baseball game> is not started within that 48-hour period, the market will resolve based
+    on the last fair market price as determined by the Exchange.
+    If a team forfeits <baseball game> before the game has started (i.e., before the first
+    pitch), the team markets will resolve based on the last fair market price as determined by
+    the Exchange. If <team> forfeits <baseball game> after the game has started, the
+    market for the forfeiting <team> will resolve to "No”, and the market for the opposing
+    team (if declared the winner) will resolve to “Yes”, for all not-yet completed time periods
+    (including full game, where applicable). Markets for sub-game <time period> segments
+    that were completed before the forfeit will resolve based on the score at the end of those
+    completed segments.
+    If the venue of <baseball game> is changed but the designated home and away teams
+    remain the same and the game is started within 48 hours of the originally scheduled start
+    time, the market will remain open and will resolve based on the official final result. If the
+    home/away designation is reversed or if the game is not started within 48 hours of the
+    originally scheduled start time, the market will resolve based on the last fair market price
+    as determined by the Exchange.
+    If <team> is disqualified, deemed ineligible, or has the result of <baseball game>
+    vacated before the game has started, the market will resolve based on the last fair
+    market price as determined by the Exchange. If <team> is disqualified, deemed
+    ineligible, or has the result of <baseball game> vacated after the game has started but
+    before the Contract expires, the market will resolve to "No" for the disqualified <team>. If
+    such disqualification causes the opposing team to be declared the winner, the market for
+    that team will resolve to "Yes."
+    If multiple games within the same series between the same teams are each listed as
+    separate <baseball game> iterations (e.g., 'Yankees vs Red Sox, Friday July 4' and
+    'Yankees vs Red Sox, Saturday July 5'), and multiple such games are postponed, the
+    following applies:
+          If the governing body of <baseball game> explicitly designates which original game
+          a makeup game represents (e.g., through official announcements or game records),
+          that designation shall control regardless of chronological order.
+          If makeup game(s) occur within the 48-hour window but the governing body does
+          not clearly designate which postponed game is being made up (e.g., does not
+          specify 'this is the Friday makeup' vs 'this is the Saturday makeup'), then the first
+          makeup game played shall resolve the Contract for the first postponed game
+          chronologically (by originally scheduled date/time) and the second makeup game
+          played shall resolve the contract for the second postponed game chronologically,
+          and so forth in sequential order. If fewer makeup games occur within the 48-hour
+          window than the total number of postponed games, the Contracts for games
+          considered postponed without a corresponding makeup game shall resolve to the
+          last fair market price as determined in the sole discretion of the Exchange.
+
+Examples that would resolve the market to "Yes":
+    If <time period> is set to “full game”, and <team> wins <baseball game> 5-3 in nine
+    innings. <team> wins <baseball game> 2-1 in 11 extra innings.
+    <baseball game> is postponed from Saturday to Sunday due to weather (within 48
+    hours), and <team> wins the rescheduled game (<time period> is “full game”).
+    <baseball game> is suspended in the 7th inning due to a power outage, resumes the
+    next day (within 48 hours), and <team> wins the completed game (<time period> is “full
+    game”).
+    <baseball game> is called after 6 complete innings due to rain; the governing body
+    declares the game official with <team> winning 4-2 (<time period> is “full game”).
+    The opposing team forfeits <baseball game> after the first pitch; the market for <team>
+    resolves to "Yes." (<time period> is “full game”)
+    For a "first 5 innings" <time period>: <team> leads 3-1 after the completion of the top
+    and bottom of the 5th inning. The market for <team> resolves to "Yes."
+
+Examples that would NOT resolve the market to "Yes" for <team>:
+
+    <team> loses <baseball game> 4- 7 (<time period> is “full game”).
+    <baseball game> ends in a tie after regulation in an All-Star Game format and there is
+    no “Tie” strike listed (<team> resolves to $0.50).
+    <baseball game> is cancelled due to a natural disaster and not started within 48 hours
+    (resolves at last fair market price).
+    <team> wins <baseball game> but is disqualified before Expiration for using ineligible
+    players (resolves to "No").
+    <team> forfeits <baseball game> after the game begins (resolves to "No" for the
+    forfeiting team).
+    The opposing team forfeits <baseball game> before the first pitch (resolves at last fair
+    market price, not "Yes" for <team>).
+    <baseball game> is suspended in the 2nd inning due to severe weather and not resumed
+    within 48 hours (resolves at last fair market price).
+    For a "first 5 innings" <time period>: The score is tied 2-2 after 5 complete innings, and a
+    "Tie" strike is listed (the "Tie" strike resolves to "Yes"; <team> resolves to "No").
+    For a "1st inning" <time period>: <baseball game> is suspended during the 1st inning
+    before it is completed, and is not resumed within 48 hours (resolves at last fair market
+    price).
+
+Minimum Tick: The Minimum Tick size for the Contract shall be $0.01.
+
+Position Accountability Level: The Position Accountability Level for the Contract shall be
+$25,000 per strike, per Member.
+
+Last Trading Date: The Last Trading Date of the Contract will be the same as the Expiration
+Date. The Last Trading Time will be the same as the Expiration time.
+
+Settlement Date: The Settlement Date of the Contract shall be no later than the day after
+the Expiration Date, unless the Market Outcome is under review pursuant to Rule 7.1.
+
+Expiration Date: The latest Expiration Date of the Contract shall be three days after the
+originally scheduled date of <baseball game>. If an event described in the Payout Criterion
+occurs (e.g.., a winner is reported for <time period> or the game concludes with a tie),
+expiration will be moved to an earlier date and time in accordance with Rule 7.2.
+Expiration time: The Expiration time of the Contract shall be 10:00 AM ET.
+
+Settlement Value: The Settlement Value for this Contract is $1.00.
+
+Expiration Value: The Expiration Value is the value of the Underlying as documented by the
+Source Agency on the Expiration Date at the Expiration time.
+
+Contingencies: Before Settlement, Kalshi may, at its sole discretion, initiate the Market
+Outcome Review Process pursuant to Rule 7.1 of the Rulebook. If an Expiration Value cannot
+be determined on the Expiration Date, Kalshi has the right to determine payouts pursuant to
+Rule 7.1 in the Rulebook.
+
+
+
+
+                          APPENDIX B – TRADING PROHIBITIONS
+
+
+In addition to the general prohibition against trading on material nonpublic information, the
+Exchange will institute additional prohibitions for trading the contract. Persons under 18 years
+of age are not permitted to create Kalshi accounts. The following individuals will be prohibited
+from trading:
+
+
+     Current and former players, coaches, and staff of the league, association, or
+     organization(s) governing <baseball game>.
+
+          For college leagues/associations specifically, or where otherwise appropriate (as
+          identified by the Exchange), this applies to current and former players/coaches/staff
+          of the specific teams in <event> rather than the league/association as a whole,
+          (e.g., if the Division I LSU Baseball Team is playing in <baseball game>, this
+          prohibition will restrict trades by current/former players of that team, rather than all
+          current/former players/coaches/staff in any NCAA sport);
+
+     Paid employees of the league and league participants;
+
+     Ultimate beneficial owners of teams and the league; and
+
+     Household members and immediate family of all above.
+
+These prohibitions apply to the appropriate values of <baseball game>. For example, former
+players of Major League Baseball are not necessarily prohibited from trading on iterations of
+the Contract related to the National Football League, unless they are part of any other group
+listed for that league.
+

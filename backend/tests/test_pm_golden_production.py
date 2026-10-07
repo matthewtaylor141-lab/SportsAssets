@@ -24,7 +24,7 @@ def test_every_frozen_case_passes_on_the_production_path():
     r = G.receipt()
     assert r["green"] is True
     assert (r["passed"], r["total"]) == (18, 18)
-    assert (r["appended_passed"], r["appended_total"]) == (3, 3)
+    assert (r["appended_passed"], r["appended_total"]) == (6, 6)
     assert {c["result"] for c in r["cases"]} == {"PASS"}
     assert {c["result"] for c in r["appended_source_records"]} == {"PASS"}
     assert r["path"].startswith("PRODUCTION")

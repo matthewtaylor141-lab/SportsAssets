@@ -1,0 +1,207 @@
+                              APPENDIX A – CONTRACT TERMS AND CONDITIONS
+
+               Official Product Name: Will <team> win <time period> of <basketball game>? Rulebook:
+                                             BASKETBALLGAMEWIN
+
+
+
+
+KalshiEX LLC
+                                                                                                             KalshiEX LLC
+
+
+
+                                             BASKETBALLGAMEWIN
+Scope: These rules shall apply to this contract.
+
+Underlying: The Underlying for this Contract is the official outcome of <time period> of <basketball game>, specifically
+whether <team> records a greater number of points than the opposing team during <time period> of <basketball game>, as
+reflected in the first official final result and/or official box score and/or play-by-play published by the league or association
+governing <basketball game> (e.g., NBA, WNBA, FIBA, NCAA). Revisions to the official record made after Expiration
+will not be considered when determining the Expiration Value.
+
+Source Agency: The Source Agencies are, in hierarchical order, the league or association governing <basketball game>,
+ESPN, The Associated Press, Reuters, Fox Sports, and the official broadcast partner of <basketball game>.
+
+Type: The type of Contract is an Event Contract.
+
+Issuance: After the initial Contract, Contract iterations will be listed on an as-needed basis at the discretion of the Exchange
+and corresponding to the risk management needs of Members.
+
+<team>: <team> refers to a basketball team officially entered in <basketball game> as recognized by the governing body of
+the competition (e.g., NBA, WNBA, NCAA, FIBA) and specified by the Exchange. <team> is defined by the franchise,
+school, or national side name as listed on the official schedule of the relevant governing body and shall be tracked through
+official name changes, relocations, mergers, rebranding, and successor or expansion designations as recognized by the
+official governing body. <team> must be one of the two teams officially entered in <basketball game>.
+
+<basketball game>: <basketball game> refers to a single officially scheduled contest between two teams as recognized by
+the National Basketball Association (NBA) or the governing body of the relevant competition (e.g., FIBA, NCAA, WNBA)
+specified by the Exchange. <basketball game> shall be defined by the names of the two teams involved, the date of the
+game, and where applicable the stage of the season (e.g., regular season, playoffs, finals, exhibition). The "opposing team"
+for <team> is the other team scheduled to participate in <basketball game> as listed on the official schedule of the relevant
+governing body.
+
+<time period>: <time period> refers to a segment of <basketball game> or the tournament at which <basketball game> is
+played specified by the Exchange. <time period> may take, but is not limited to, the following forms: (i) the entire game,
+which refers to the time period encapsulating regulation time and any officially designated overtime periods; (ii) the entire
+game excluding overtime (i.e., regulation time only); (iii) overtime only (which may include one or more overtime periods,
+as specified); (iv) a quarter, half, or subsegment of the game specified in
+
+
+KalshiEX LLC
+                                                                                                                     KalshiEX LLC
+
+
+the singular or in the plural when used with AND/OR operators (e.g., Q1, or Q1 and Q2); (v) any quarter, half, or
+subsegment across the entire game or a subset of the game, which may be satisfied if at least one of the aforementioned
+segments meets the stated Payout Criterion; (vi) each quarter, half, or subsegment across the entire game, or each
+subsegment, which may be satisfied if ALL of the aforementioned segments meet the stated Payout Criterion; (vii) a given
+duration denoted in hours and/or minutes and/or seconds of matchplay, or constrained by a given clock time in a stated
+timezone. <time period> may also take the forms of any segment in a set range, refer in the singular or the plural, by
+distinguishing characteristics, "Any", or "None". Where not specified otherwise, <time period> shall be understood to refer
+to the sum of regulation time and any officially designated overtime periods. For the avoidance of doubt, a quarter or half
+(including the fourth quarter and the second half) does not include any officially designated overtime period unless overtime
+is expressly specified. All times are interpreted in Eastern Time (ET) unless otherwise specified.
+
+Payout Criterion: The Payout Criterion for the Contract encompasses the Expiration Values that <team> records a strictly
+greater number of points than the opposing team during <time period> of <basketball game>, as reflected in the first official
+final result of <basketball game>.
+
+Additional clarification(s):
+
+    ● For purposes of this Contract, only points credited in the official record during <time period> of <basketball game>
+       shall count. Points scored during pre-game warm-ups, exhibitions, halftime entertainment, post-game ceremonies, or
+       any periods outside of <time period> shall not count. Points awarded by reason of technical fouls, flagrant fouls,
+       free throws, or any other officially credited scoring during <time period> are included to the extent reflected in the
+       official record.
+    ● Points are considered final at the conclusion of <basketball game>. Revisions, statistical corrections, replays,
+       protests, or other modifications made to the official record after Expiration will not affect the Expiration Value.
+    ● If, at the conclusion of <time period>, the number of points credited to <team> is equal to the number of points
+       credited to the opposing team (i.e., a tie for <time period>), the following shall apply:
+                ○ If a “Tie” strike is listed for <time period>, the "Tie" strike will resolve to "Yes" and all team-specific
+                                             strikes for that <time period> will resolve to "No";
+            ○ If no “Tie” strike is listed, the Contract shall resolve such that "Yes" holders are paid $0.50, and "No"
+                holders are paid $0.50.
+    ● If <time period> is specified in the Contract title (e.g., "win Q1"), then only points credited to <team> and the
+       opposing team within that segment count toward the comparison; points credited outside of <time period> do
+       not count.
+    ● If <basketball game> is cancelled prior to its scheduled commencement and is not rescheduled to commence
+                                   within forty-eight (48) hours of its original scheduled
+
+
+KalshiEX LLC
+                                                                                                                  KalshiEX LLC
+
+
+       commencement, all markets on <basketball game> will resolve to the last fair price as determined by the
+       Exchange in its sole discretion.
+    ● If <basketball game> is cancelled, abandoned, or suspended after the start of the game and is not scheduled to
+       resume within forty-eight (48) hours of the original scheduled commencement, then: (i) for any <time period> that
+       was fully completed prior to the cancellation, abandonment, or suspension and whose result is unequivocally
+       determined by the official record at that point, the Contract shall resolve based on the official record at the
+       conclusion of <time period>; (ii) for any <time period> that was not fully completed at the time of the cancellation,
+       abandonment, or suspension, the Contract shall resolve to the last fair price as determined by the Exchange in its
+       sole discretion. For purposes of subclause (i), a <time period> is considered "fully completed" if and only if the
+       game clock reached the official end of <time period> with officials having confirmed the conclusion of that
+       segment.
+    ● For Contracts where <time period> covers the entire game (regulation plus overtime), and the game is cancelled,
+       abandoned, or suspended after the start but is not scheduled to resume within forty-eight (48) hours, the markets
+       shall resolve based on the official record only if the game has reached forty-eight (48) minutes of gameplay for an
+       NBA game, or forty (40) minutes of gameplay for a WNBA, NCAA, or other collegiate or international game
+       governed by FIBA rules, OR the league has declared the game's outcome as official; otherwise, the markets shall
+       resolve to the last fair price as determined by the Exchange in its sole discretion.
+    ● If <basketball game> is delayed and re-commences within forty-eight (48) hours of its original scheduled
+       commencement, all markets on <basketball game> will remain open until resolution based on the official record.
+    ● If <basketball game> is delayed for more than forty-eight (48) hours, all markets on <basketball game> for which
+           the relevant <time period> has not been fully completed will resolve to the last fair price as determined by the
+                                                                                             Exchange in its sole discretion.
+    ● If the league or association governing <basketball game> officially declares <basketball game> a forfeit prior to the
+       start of the game (i.e., before any officially recorded gameplay has occurred), all markets on <basketball game> will
+       resolve to the last fair price as determined by the Exchange in its sole discretion. If the league or association
+       governing <basketball game> officially declares <basketball game> a forfeit after the start of the game, the Contract
+       shall resolve in accordance with the league's official determination of the winning team. Specifically, if <team> is
+       officially recorded as the winner of <basketball game> by reason of forfeit, the Contract resolves "Yes" for
+       Contracts where <time period> encompasses the entire game; if the opposing team is officially recorded as the
+       winner of <basketball game> by reason of forfeit, the Contract resolves "No" for Contracts where <time period>
+       encompasses the entire game. For Contracts where <time period> covers only a segment of the game that was fully
+       completed prior to the event triggering the forfeit, the Contract shall resolve based on the
+KalshiEX LLC
+                                                                                                                  KalshiEX LLC
+
+
+        official record at the conclusion of <time period>; otherwise, the Contract shall resolve to the last fair price as
+        determined by the Exchange in its sole discretion.
+    ● If <team> does not enter <basketball game> (i.e., does not participate in any officially recorded gameplay during
+        <basketball game>), all markets on <basketball game> will resolve to the last fair price as determined by the
+        Exchange in its sole discretion.
+    ● If data for the results of <basketball game> is delayed or unavailable, the Exchange may wait forty-eight (48) hours
+     from the conclusion of <basketball game> for it to become available. If, after forty-eight (48) hours, the data remains
+                                                   unavailable, all markets on
+        <basketball game> that cannot be settled due to missing data will resolve to the last fair price as determined by the
+        Exchange in its sole discretion.
+
+Examples that would resolve the market to Yes:
+
+    ● "Will Los Angeles Lakers win the full game of Los Angeles Lakers vs. Golden State Warriors on May 25,
+       2026?" — The Lakers defeat the Warriors 110–100 at the conclusion of regulation time. → Resolves "Yes".
+    ● "Will Boston Celtics win Q1 of Boston Celtics vs. Miami Heat on May 25, 2026?" — At the end of Q1, the official
+    box score shows Celtics 30, Heat 25. → Resolves "Yes". ● "Will Oklahoma City Thunder win the first half of
+    Oklahoma City Thunder vs. Indiana Pacers on June 5, 2026?" — At halftime, the official record shows Thunder 58,
+    Pacers 52. → Resolves "Yes".
+    ● "Will Los Angeles Lakers win each quarter of Los Angeles Lakers vs. Phoenix Suns on May 25, 2026?" — Lakers
+       outscore the Suns in Q1, Q2, Q3, and Q4 individually. → Resolves "Yes".
+    ● "Will Golden State Warriors win the full game of Golden State Warriors vs. Sacramento Kings on May 25, 2026?"
+       — The Warriors win 105–104 in overtime (regulation tied 95–95). → Resolves "Yes".
+    ● "Will Atlanta Hawks win the full game of Atlanta Hawks vs. Miami Heat on May 25, 2026?" — Hawks lead 60–
+       50 at halftime; due to arena power failure, the game is officially declared completed by the league with the
+       Hawks recorded as winners by forfeit. → Resolves "Yes".
+
+Examples that would NOT resolve the market to Yes:
+
+    ● "Will Los Angeles Lakers win the full game of Los Angeles Lakers vs. Golden State Warriors on May 25,
+       2026?" — The Warriors defeat the Lakers 110–100 at the conclusion of regulation time. → Resolves "No".
+    ● "Will Boston Celtics win Q1 of Boston Celtics vs. Miami Heat on May 25, 2026?" — At the end of Q1, the official
+                                 box score shows Celtics 25, Heat 30. → Resolves "No".
+
+
+
+
+KalshiEX LLC
+                                                                                                                  KalshiEX LLC
+
+
+    ● "Will Oklahoma City Thunder win the full game of Oklahoma City Thunder vs. Indiana Pacers on June 5, 2026?" —
+       The Thunder lead by 5 at halftime, but the Pacers come back and win 120–115 in regulation. → Resolves "No".
+    ● "Will Los Angeles Lakers win each quarter of Los Angeles Lakers vs. Phoenix Suns on May 25, 2026?" — Lakers
+       win Q1, Q2, and Q4 but lose Q3 by one point. → Resolves "No".
+    ● "Will Boston Celtics win Q1 of Boston Celtics vs. Miami Heat on May 25, 2026?" — At the end of Q1, the official
+       box score shows Celtics 25, Heat 25 (a tie within Q1), and no “Tie” strike is listed. → Resolves such that "Yes"
+       holders are paid $0.50 and "No" holders are paid $0.50 (this is not a "Yes" resolution).
+    ● "Will Atlanta Hawks win the full game of Atlanta Hawks vs. Miami Heat on May 25, 2026?" — Game is
+       cancelled prior to tipoff due to arena conditions and is not rescheduled within 48 hours. → Resolves to the last
+       fair price.
+Minimum Tick: The Minimum Tick size for the Contract shall be $0.01.
+
+Position Accountability Level: The Position Accountability Level for the Contract shall be $25,000 per strike, per
+Member.
+
+Last Trading Date: The Last Trading Date of the Contract will be the same as the Expiration Date. The Last Trading Time
+will be the same as the Expiration time.
+
+Settlement Date: The Settlement Date of the Contract shall be no later than the day after the Expiration Date, unless the
+Market Outcome is under review pursuant to Rule 7.1.
+
+Expiration Date: The latest Expiration Date of the Contract shall be one week after the conclusion of <basketball game>. If
+an event described in the Payout Criterion occurs, expiration will be moved to an earlier date and time in accordance with
+Rule 7.2.
+
+Expiration time: The Expiration time of the Contract shall be 10:00 AM ET. Settlement Value: The
+
+Settlement Value for this Contract is $1.00.
+Expiration Value: The Expiration Value is the value of the Underlying as documented by the Source Agency on the
+Expiration Date at the Expiration time.
+
+Contingencies: Before Settlement, Kalshi may, at its sole discretion, initiate the Market Outcome Review Process pursuant
+to Rule 7.1 of the Rulebook. If an Expiration Value cannot be determined on the Expiration Date, Kalshi has the right to
+determine payouts pursuant to Rule 7.1 in the Rulebook.
+

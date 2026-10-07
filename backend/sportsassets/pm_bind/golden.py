@@ -43,12 +43,63 @@ TERMS = {"overtime_included": True, "draw_rule": "SCALAR_0_50",
          "postponement_payout": "SCALAR_0_50", "verification_sources": ["X"]}
 
 
+#: appended source-record files, in order (each preserved as appended)
+APPENDED = ("golden_cases_kalshi_rep_v1.json",
+            "golden_cases_kalshi_contract_terms_v1.json")
+
+
 def load_cases() -> dict:
     base = json.loads((DATA / "golden_cases.json").read_text())
-    extra = DATA / "golden_cases_kalshi_rep_v1.json"
-    appended = json.loads(extra.read_text()) if extra.exists() else {
-        "source_manifest": [], "cases": []}
+    appended = {"source_manifest": [], "cases": [], "files": []}
+    for name in APPENDED:
+        f = DATA / name
+        if f.exists():
+            d = json.loads(f.read_text())
+            appended["source_manifest"] += d.get("source_manifest") or []
+            appended["cases"] += d.get("cases") or []
+            appended["files"].append(name)
     return {"base": base, "appended": appended}
+
+
+#: the recorded market rule samples, shipped with the package (byte-identical
+#: to research/kalshi_canonical_venue/CONTRACT_TERMS_2026-10-07, which the
+#: image does not carry)
+KT_SAMPLES = "kalshi_market_rules_samples_2026-10-07.jsonl"
+
+
+def _kt_sample(ticker: str) -> dict:
+    for line in (DATA / KT_SAMPLES).read_text().splitlines():
+        m = json.loads(line)
+        if m["ticker"] == ticker:
+            return m
+    raise KeyError(ticker)
+
+
+def _kt_bound(ticker: str, rulebook: str, *, sha=None):
+    from .. import kalshi_contract_terms as KCT
+    from .. import settlement_rule_registry as SR
+    m = _kt_sample(ticker)
+    return KCT.bind(SR.kalshi_rule_evidence(m),
+                    rules_primary=m["rules_primary"],
+                    rules_secondary=m["rules_secondary"], rulebook=rulebook,
+                    observed_sha256=sha or KCT.RULEBOOKS[rulebook][
+                        "pdf_sha256"], has_tie_strike=False)
+
+
+def _kt_pair(ev, *, sport, league):
+    fx = CC.Fixture(event_key="KT:%s" % league, sport=sport, league=league,
+                    start_epoch=NOW, outcome_kind="TWO_WAY", home="H",
+                    away="A")
+
+    def inst(mid, side, subj):
+        return CC.Instrument(venue="KALSHI", market_id=mid, side=side,
+                             subject=subj, settlement=dict(ev["settlement"]),
+                             settlement_status="PROVEN",
+                             mapping_status="ESTABLISHED", asks=(),
+                             observed_at=None, book_basis=None, sport=sport)
+    a, b = inst("K-A", "YES", "AWAY"), inst("K-H", "NO", "HOME")
+    built = CC.build_claims(fx, [a, b])
+    return fx, a, b, built
 
 
 def _epoch(iso: str) -> float:
@@ -309,6 +360,33 @@ def run_appended(c: dict) -> dict:
                                now=NOW + 1, fee_by_venue=fees, max_age_s=30)
             got = {"best": (r["best_single"] or {}).get("market_id")}
             ok = y.fingerprint == n.fingerprint and got["best"] == "K-TB"
+        elif cid == "KT01_MLB_RULEBOOK_PRICES_EVERY_RESULT_STATE":
+            ev = _kt_bound("KXMLBGAME-26OCT071600CLECWS-CLE",
+                           "BASEBALLGAMEWIN")
+            fx, a, b, built = _kt_pair(ev, sport="BASEBALL", league="MLB")
+            rec = CC.equivalence_receipt(fx, a, b, built["states"])
+            fp_only = all("FP[" in str(st["a"]) and "FP[" in str(st["b"])
+                          for st in rec["states"]
+                          if st["state"] in rec["states_differing"])
+            got = {"fingerprinted": bool(a.fingerprint and b.fingerprint),
+                   "differing_states_are_fair_price_only": fp_only}
+            ok = got == c["expected"]
+        elif cid == "KT02_HOCKEY_TIE_IS_NOT_A_FIXED_PAYOUT":
+            ev = _kt_bound("KXNHLGAME-26OCT13BOSSJ-SJ",
+                           "HOCKEYWINNINGINPERIOD")
+            _fx, a, _b, _ = _kt_pair(ev, sport="HOCKEY", league="NHL")
+            got = {"fingerprinted": a.fingerprint is not None,
+                   "refusals": a.refusals}
+            ok = a.fingerprint is None and any(
+                r.startswith("UNKNOWN_STATES:DRAW") for r in a.refusals)
+        elif cid == "KT03_CHANGED_RULEBOOK_APPLIES_NOTHING":
+            from .. import kalshi_contract_terms as KCT
+            ev = _kt_bound("KXMLBGAME-26OCT071600CLECWS-CLE",
+                           "BASEBALLGAMEWIN", sha="0" * 64)
+            _fx, a, _b, _ = _kt_pair(ev, sport="BASEBALL", league="MLB")
+            got = {"fingerprinted": a.fingerprint is not None,
+                   "refused": ev["contract_terms"]["refused"]}
+            ok = a.fingerprint is None and KCT.R_CHANGED in got["refused"]
         else:
             return {"id": cid, "result": "NOT_BOUND", "pass": False}
     except Exception as exc:                                    # noqa: BLE001

@@ -22,6 +22,7 @@ from decimal import Decimal
 
 from . import canonical_claims as CC
 from . import kalshi_claims as KCL
+from . import kalshi_contract_terms as KCT
 from . import kalshi_market_data as KMD
 
 VERSION = "CANONICAL_CLAIMS_DB_V1"
@@ -113,14 +114,59 @@ async def rules_evidence(conn, contract_ids: list) -> dict:
         return {}
     out = {}
     for r in await conn.fetch(
-            "SELECT contract_id, evidence, rules_sha256 FROM "
-            " market_plane_rules WHERE contract_id = ANY($1::text[])",
-            list(contract_ids)):
+            "SELECT contract_id, evidence, rules_sha256, rules_text, "
+            "       rules_secondary FROM market_plane_rules "
+            " WHERE contract_id = ANY($1::text[])", list(contract_ids)):
         ev = dict(_j(r["evidence"]) or {})
         # the rules fingerprint the claim is built (and certified) from
         ev["rules_sha256"] = r["rules_sha256"]
+        ev["_rules_primary"] = r["rules_text"]
+        ev["_rules_secondary"] = r["rules_secondary"]
         out[r["contract_id"]] = ev
     return out
+
+
+#: a rulebook hash older than this is not a live verification
+CONTRACT_TERMS_MAX_AGE_S = 48 * 3600.0
+
+
+async def contract_terms_state(conn, *, now: float) -> dict:
+    """The Kalshi worker's record of each game series' rulebook and the live
+    hash of its PDF (ingestion_state 'kalshi_contract_terms')."""
+    if not await _has(conn, "ingestion_state"):
+        return {}
+    st = _j(await conn.fetchval("SELECT value FROM ingestion_state WHERE "
+                                " key = $1", KCT.STATE_KEY)) or {}
+    books = {}
+    for name, r in (st.get("rulebooks") or {}).items():
+        fresh = (r.get("status") == "OK" and r.get("fetched_at") is not None
+                 and now - float(r["fetched_at"]) <= CONTRACT_TERMS_MAX_AGE_S)
+        books[name] = r.get("sha256") if fresh else None
+    return {"series": dict(st.get("series") or {}), "observed": books}
+
+
+def bind_contract_terms(k, evidence: dict, state: dict) -> dict:
+    """{ticker: evidence} with the venue's explicit clauses bound
+    (kalshi_contract_terms): market text first, then the verified rulebook."""
+    rb = (state.get("series") or {}).get(k.series_ticker)
+    obs = (state.get("observed") or {}).get(rb) if rb else None
+    out = {}
+    for t, ev in evidence.items():
+        if ev is None:
+            out[t] = None
+            continue
+        out[t] = _strip(KCT.bind(
+            ev, rules_primary=ev.get("_rules_primary"),
+            rules_secondary=ev.get("_rules_secondary"), rulebook=rb,
+            observed_sha256=obs, has_tie_strike=bool(k.tie_ticker)))
+    return out
+
+
+def _strip(ev):
+    """Evidence without the raw rules text read beside it."""
+    if ev is None:
+        return None
+    return {k: v for k, v in ev.items() if not k.startswith("_rules_")}
 
 
 async def pmus_identity(conn, slug: str) -> dict | None:
@@ -190,6 +236,7 @@ async def assemble(conn, *, now: float | None = None) -> list:
     in the window that has at least one readable Kalshi book."""
     now = float(now if now is not None else time.time())
     out = []
+    cterms = await contract_terms_state(conn, now=now)
     for k, slug in await fixtures(conn, now=now):
         tickers = list(k.team_tickers) + ([k.tie_ticker] if k.tie_ticker
                                           else [])
@@ -201,13 +248,14 @@ async def assemble(conn, *, now: float | None = None) -> list:
         terms = await kalshi_fee_terms(conn, k.series_ticker,
                                        k.event_ticker, now=now)
         insts = KCL.kalshi_instruments(
-            k, {}, books, {t: ev.get("kalshi:%s" % t) for t in tickers},
+            k, {}, books, bind_contract_terms(
+                k, {t: ev.get("kalshi:%s" % t) for t in tickers}, cterms),
             fee_terms=terms)
         if slug:
             ident = await pmus_identity(conn, slug)
             if ident is not None:
                 insts += KCL.pmus_instruments(
-                    k, ident, evidence=ev.get(slug),
+                    k, ident, evidence=_strip(ev.get(slug)),
                     book=await pmus_book(conn, slug, now=now))
         fx = KCL.fixture_of(k)
         if fx is None:

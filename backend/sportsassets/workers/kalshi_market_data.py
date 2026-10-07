@@ -224,6 +224,51 @@ async def persist_claims(conn, fx: CC.Fixture, built: dict, routes: list,
             % fe, *args)
 
 
+#: the rulebook PDFs are re-hashed this often (public, a handful of files)
+CONTRACT_TERMS_EVERY_S = 6 * 3600.0
+
+
+def contract_terms_refresh(series: dict, game_series: list, prior: dict, *,
+                           now: float, fetch=None) -> dict:
+    """{series: {ticker: rulebook}, rulebooks: {name: fetch receipt}}: each
+    game series' rulebook (GET /series contract_terms_url) and the live
+    hash of each distinct rulebook PDF, re-fetched at most every
+    CONTRACT_TERMS_EVERY_S. kalshi_contract_terms applies a rulebook only
+    while its live hash equals the recorded one."""
+    from .. import kalshi_contract_terms as KCT
+    fetch = fetch or KCT.fetch_rulebook
+    prior = prior or {}
+    out_series = dict(prior.get("series") or {})
+    urls = {}
+    for t in game_series:
+        url = (series.get(t) or {}).get("contract_terms_url")
+        name = KCT.rulebook_of(url)
+        if name:
+            out_series[t] = name
+            urls[name] = url
+    books = dict(prior.get("rulebooks") or {})
+    for name, url in sorted(urls.items()):
+        old = books.get(name) or {}
+        if old.get("status") == "OK" and now - float(
+                old.get("fetched_at") or 0) < CONTRACT_TERMS_EVERY_S:
+            continue
+        r = fetch(url)
+        r["fetched_at"] = now
+        rec = (KCT.RULEBOOKS.get(name) or {}).get("pdf_sha256")
+        r["matches_recorded"] = bool(rec) and r.get("sha256") == rec
+        books[name] = r
+    return {"version": KCT.VERSION, "series": out_series,
+            "rulebooks": books, "updated_at": now}
+
+
+async def persist_contract_terms(conn, state: dict) -> None:
+    from .. import kalshi_contract_terms as KCT
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        KCT.STATE_KEY, json.dumps(state, default=str))
+
+
 async def persist_fee_terms(conn, rows: list, *, kind: str) -> int:
     """APPEND the venue's published fee terms (migration 315, kalshi_fee_
     terms): the change id is the key, so a re-read inserts nothing."""
@@ -394,6 +439,7 @@ async def run() -> None:
     markets, fixtures, books, milestones_tried = {}, {}, {}, {}
     claims, last_record = {}, 0.0
     fee_new, fee_events_at, rest = {}, {}, {"pass": 0}
+    cterms: dict = {}
     while True:
         try:
             now = time.time()
@@ -427,6 +473,17 @@ async def run() -> None:
                         c, obs, kind="SERIES_OBSERVED")
                     fee_new["series_changes"] = await persist_fee_terms(
                         c, fee_rows, kind="SERIES_CHANGE")
+                # THE CONTRACT TERMS each game series is listed under (its
+                # rulebook) and the live hash of each rulebook PDF
+                try:
+                    cterms = await asyncio.to_thread(
+                        contract_terms_refresh, res.get("series") or {},
+                        gser, cterms, now=now)
+                    async with pool.acquire() as c:
+                        await persist_contract_terms(c, cterms)
+                except Exception as exc:                        # noqa: BLE001
+                    log.warning("kalshi contract terms: %s",
+                                type(exc).__name__)
                 markets = {m["ticker"]: m for ms in games.values()
                            for m in ms}
                 last_cat = now
