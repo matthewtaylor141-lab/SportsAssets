@@ -144,6 +144,23 @@ def ui_truth(metrics: dict, *, now: float) -> dict:
                     {"metrics": out, "max_age_s": METRIC_MAX_AGE_S})
 
 
+#: each sectioned read and the controls it feeds
+SECTION_CONTROLS = {
+    "venue_health": ("VENUE_HEALTH",),
+    "truth_quorum": ("TRUTH_QUORUM",),
+    "attribution": ("PROFIT_BREAKERS", "ATTRIBUTION"),
+    "holdout_registry": ("SAMPLE_INTEGRITY", "MULTIPLE_TESTING"),
+    "capacity": ("CAPACITY",),
+    "karen": ("KAREN_VALUE",),
+    "credential_classes": ("CREDENTIAL_CLASSES",),
+    "release_receipt": ("RELEASE", "MIGRATION_INTEGRITY"),
+    "migrations": ("MIGRATION_INTEGRITY",),
+    "fee_evidence": ("FEE_EVIDENCE",),
+    "certificates": ("SETTLEMENT_CERTIFICATES",),
+    "canonical_exposure": ("CANONICAL_EXPOSURE",),
+}
+
+
 async def evaluate(conn, *, now: float | None = None,
                    completion: dict | None = None) -> dict:
     from ..completion import read as CR
@@ -163,48 +180,66 @@ async def evaluate(conn, *, now: float | None = None,
                                    + int(mgmt.get("quiet_valid") or 0)),
             "as_of": now}
     pri = md.get("priority_freshness") or {}
-    vh = await VH.read(conn, held=held, priority=pri, total=None, now=now)
+    sec = CR._Sections(conn)
+    unk = {"rate": None, "green": False, "status": "UNAVAILABLE",
+           "source": "UNAVAILABLE", "numerator": None, "denominator": None}
+    vh = await sec.run("venue_health", lambda: VH.read(
+        conn, held=held, priority=pri, total=None, now=now), {
+            "venues": {}, "isolated": None, "cross_venue_pair": None,
+            "freshness": {"held": dict(unk), "priority": dict(unk)}})
     venues = vh["venues"]
     pm_green = bool((venues.get(VH.POLYMARKET_US) or {}).get("green"))
     controls = {}
     controls["VENUE_HEALTH"] = C.result(
         "VENUE_HEALTH",
-        C.GREEN if all(v.get("green") for v in venues.values()) else C.RED,
+        C.GREEN if venues and all(v.get("green") for v in venues.values())
+        else C.RED,
         ["%s:%s" % (k, b) for k, v in venues.items()
          for b in v.get("blockers") or ()],
         {"venues": venues, "isolated": vh["isolated"],
          "cross_venue_pair": vh["cross_venue_pair"],
          "freshness": vh["freshness"]})
-    rows, open_disc = await C.quorum_rows(
+    rows, open_disc = await sec.run("truth_quorum", lambda: C.quorum_rows(
         conn, now=now, venue_confirmed=bool(venue.get("venue_confirmed")),
-        market_data_green=pm_green)
+        market_data_green=pm_green), ([], None))
     controls["TRUTH_QUORUM"] = C.quorum(rows, now=now,
                                         audrey_open_discrepancies=open_disc)
-    attributed, fixtures = await C.attributed_positions(conn, now=now)
+    attributed, fixtures = await sec.run(
+        "attribution", lambda: C.attributed_positions(conn, now=now),
+        ([], {}))
     mech = C.mechanism_rows(attributed, fixtures)
     controls["PROFIT_BREAKERS"] = C.profit_breakers(mech)
     controls["ATTRIBUTION"] = C.attribution(attributed)
     controls["DIGITAL_TWIN"] = C.twin(comp.get("digital_twin") or {})
-    reg = await C.holdout_registry(conn)
+    reg = await sec.run("holdout_registry",
+                        lambda: C.holdout_registry(conn), {})
     controls["SAMPLE_INTEGRITY"] = C.samples(comp.get("probability") or {},
                                              reg)
     controls["MULTIPLE_TESTING"] = C.multiple_testing(reg)
     from .. import allie_capital as ALLIE
-    controls["CAPACITY"] = C.capacity(await capacity_points(conn),
-                                      requested_usd=ALLIE.BOOK_CAP_USD)
-    saved, false_cost, ksrc = await karen_counterfactuals(conn)
+    controls["CAPACITY"] = C.capacity(
+        await sec.run("capacity", lambda: capacity_points(conn), []),
+        requested_usd=ALLIE.BOOK_CAP_USD)
+    saved, false_cost, ksrc = await sec.run(
+        "karen", lambda: karen_counterfactuals(conn), (None, None, None))
     controls["KAREN_VALUE"] = C.karen(saved, false_cost, source=ksrc)
     controls["CREDENTIAL_CLASSES"] = C.credentials({
         "api": C.credential_classes(),
-        "workers": await workers_credential_classes(conn)})
-    rel = await release_receipt(conn, sha)
+        "workers": await sec.run("credential_classes",
+                                 lambda: workers_credential_classes(conn),
+                                 None)})
+    rel = await sec.run("release_receipt", lambda: release_receipt(conn, sha),
+                        None)
     controls["MIGRATION_INTEGRITY"] = C.migrations(
-        await C.applied_migrations(conn), C.repo_migrations(),
+        await sec.run("migrations", lambda: C.applied_migrations(conn), {}),
+        C.repo_migrations(),
         fresh_db_passed=(bool(rel["capital_critical_green"]) if rel
                          else None))
-    controls["FEE_EVIDENCE"] = C.fee_control(await F.census(conn, now=now),
-                                             now=now)
-    certs = await certificate_census(conn)
+    controls["FEE_EVIDENCE"] = C.fee_control(
+        await sec.run("fee_evidence", lambda: F.census(conn, now=now), {}),
+        now=now)
+    certs = await sec.run("certificates", lambda: certificate_census(conn),
+                          {})
     controls["SETTLEMENT_CERTIFICATES"] = C.result(
         "SETTLEMENT_CERTIFICATES",
         C.GREEN if certs.get("CERTIFIED") and not certs.get("INVALIDATED")
@@ -213,7 +248,10 @@ async def evaluate(conn, *, now: float | None = None,
          if certs.get("INVALIDATED") else [])
         + ([] if certs.get("CERTIFIED") else ["NO_CERTIFIED_ALIAS"]),
         {"latest_by_status": certs})
-    ex = await X.census(conn, ACCOUNT_ID, sha=sha, at=now)
+    ex = await sec.run("canonical_exposure", lambda: X.census(
+        conn, ACCOUNT_ID, sha=sha, at=now), {
+            "eligible": False, "blockers": ["READ_UNAVAILABLE"],
+            "receipts": []})
     controls["CANONICAL_EXPOSURE"] = C.result(
         "CANONICAL_EXPOSURE", C.GREEN if ex["eligible"] else C.RED,
         ex["blockers"], {k: v for k, v in ex.items() if k != "receipts"})
@@ -226,6 +264,18 @@ async def evaluate(conn, *, now: float | None = None,
         {"running_sha": sha, "receipt": {k: (str(v) if not isinstance(
             v, (bool, int, float, type(None), str)) else v)
             for k, v in (rel or {}).items()}})
+    # a read that failed is never a vacuous pass: every control it feeds is
+    # RED and names it
+    for name, t in sec.timings.items():
+        if t["ok"]:
+            continue
+        for ctl in SECTION_CONTROLS.get(name, ()):
+            c = controls.get(ctl)
+            if c is not None:
+                controls[ctl] = C.result(
+                    ctl, C.RED, list(c.get("blockers") or []) + [
+                        "READ_UNAVAILABLE:%s" % name],
+                    dict(c.get("evidence") or {}, read_failure=t))
     fr = vh["freshness"]
     # each metric's as_of is its SOURCE read's, never this render's clock
     src_at = comp.get("as_of") if isinstance(comp.get("as_of"),
@@ -291,6 +341,7 @@ async def evaluate(conn, *, now: float | None = None,
             "historical_paper_immutable_basis": (
                 "this read writes nothing; PAPER history is append-only by "
                 "the ledger's own guards"),
+            "read_timings": sec.timings,
             "completion": comp}
 
 

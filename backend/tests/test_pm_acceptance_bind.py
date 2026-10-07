@@ -197,3 +197,18 @@ def test_release_endpoint_refuses_a_sha_the_api_is_not_serving():
     bad = dict(body, tested_sha="abc")
     assert "NOT_A_FULL_SHA:tested_sha" in CR.validate_release(
         bad, running_sha=SHA)
+
+
+def test_red_team_reuses_only_a_fresh_ok_completion_read():
+    from sportsassets.api import command_completion_readiness as CCR
+    from sportsassets.api import command_red_team as CR
+    CCR._CACHE.clear()
+    assert CR.cached_completion(NOW) is None
+    CCR._CACHE["main"] = (NOW - 10, {"status": "OK", "data": {"as_of": 1}})
+    assert CR.cached_completion(NOW) == {"as_of": 1}
+    CCR._CACHE["main"] = (NOW - CCR.CACHE_S - 1, {"status": "OK",
+                                                  "data": {"as_of": 1}})
+    assert CR.cached_completion(NOW) is None
+    CCR._CACHE["main"] = (NOW - 10, {"status": "UNAVAILABLE", "data": None})
+    assert CR.cached_completion(NOW) is None
+    CCR._CACHE.clear()

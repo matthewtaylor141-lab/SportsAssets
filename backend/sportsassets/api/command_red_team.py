@@ -99,9 +99,22 @@ def _strip(res: dict) -> dict:
     return out
 
 
+def cached_completion(now: float) -> dict | None:
+    """The completion readback this API process computed within its own
+    cache window (GET /api/command/completion-readiness), reused so one
+    request never pays for the whole completion read twice; older or absent
+    -> None (evaluate reads it afresh)."""
+    from . import command_completion_readiness as CCR
+    hit = CCR._CACHE.get("main")
+    if not hit or now - hit[0] >= CCR.CACHE_S:
+        return None
+    env = hit[1] or {}
+    return env.get("data") if env.get("status") == "OK" else None
+
+
 async def build(conn, *, now: float) -> dict:
     from ..redteam import readiness as R
-    res = await R.evaluate(conn, now=now)
+    res = await R.evaluate(conn, now=now, completion=cached_completion(now))
     return {"readiness": _strip(res),
             "receipts": await latest_receipts(conn)}, res
 
@@ -132,11 +145,20 @@ async def pm_read(conn, *, now: float) -> dict:
     from ..pm_bind import scoreboard as SB
     from ..redteam import controls as C
     from ..redteam import readiness as R
+    from ..completion import read as CMP
     data, res = await build(conn, now=now)
-    attributed, fixtures = await C.attributed_positions(conn, now=now)
-    sb = await SB.read(conn, now=now, attributed=attributed,
-                       fixtures=fixtures)
-    rel = await R.release_receipt(conn, res["implementation_sha"])
+    sec = CMP._Sections(conn)
+    attributed, fixtures = await sec.run(
+        "attribution", lambda: C.attributed_positions(conn, now=now),
+        ([], {}))
+    sb = await sec.run("scoreboard", lambda: SB.read(
+        conn, now=now, attributed=attributed, fixtures=fixtures),
+        {"status": "UNAVAILABLE"})
+    if not sec.timings.get("attribution", {}).get("ok", True):
+        # a scoreboard over no positions is not a scoreboard
+        sb = {"status": "UNAVAILABLE", "why": "ATTRIBUTION_READ_FAILED"}
+    rel = await sec.run("release_receipt", lambda: R.release_receipt(
+        conn, res["implementation_sha"]), None)
     acc = PA.evaluate(red=res, scoreboard=sb, release=rel, now=now)
     return {"golden": G.receipt(), "scoreboard": sb, "pm_acceptance": acc,
             "release_receipt": None if rel is None else {
@@ -144,6 +166,7 @@ async def pm_read(conn, *, now: float) -> dict:
                     (C._j(v) if k == "blockers" else v))
                 for k, v in rel.items()},
             "red_team_status": res["status"],
+            "read_timings": sec.timings,
             "authority": {"small_live": "SHADOW",
                           "kalshi_live_money": "NOT_ACTIVATED",
                           "adriana": "SHADOW_ONLY",
