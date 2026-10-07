@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#eef3f1">
+  <meta name="description" content="BETTOR Trader Mode: watch recorded PAPER positions, management decisions and standing orders. Read only.">
+  <title>BETTOR · Trader Mode</title>
+  <link rel="stylesheet" href="trader.css">
+  <script defer src="trader-core.js"></script><script defer src="trader.js"></script>
+</head>
+<body>
+<a class="skip" href="#positions">Skip to positions</a>
+<div class="preview-notice" id="preview-notice" hidden>DESIGN PREVIEW · ILLUSTRATIVE REPLAY · NOT PRODUCTION DATA</div>
+<header class="topbar">
+  <a class="wordmark" href="index.html" aria-label="Back to BETTOR Command"><span class="brand-mark">B<span></span></span>BETTOR<span class="brand-divider"></span><small>COMMAND</small></a>
+  <nav aria-label="Workspace"><a href="index.html">Command</a><a href="index.html#floor">Floor</a><a href="trader.html" aria-current="page">Trader mode <span class="new-dot"></span></a></nav>
+  <div class="top-right"><span class="safe-badge">PAPER / SHADOW</span><span class="clock" id="wall-clock">--:--:--</span><button class="icon-button" id="fullscreen" aria-label="Toggle full screen" title="Full screen">⛶</button></div>
+</header>
+<main>
+  <section class="page-heading" aria-label="Trader mode status">
+    <div><div class="eyebrow">PORTFOLIO MANAGEMENT · OBSERVATION DECK</div><h1>Inside Xavier’s desk<span class="heading-dot">.</span></h1><p>Every position. Every recorded decision. Nothing behind the curtain.</p></div>
+    <div class="heading-controls"><span class="connection" id="connection"><i></i>Connecting</span><button id="follow" class="button" aria-pressed="false">◎ Follow Xavier</button><button id="motion" class="button subtle" aria-pressed="false">Reduce motion</button><button id="sound" class="icon-button" aria-label="Enable notification sound" aria-pressed="false">♪</button></div>
+  </section>
+  <div id="error" class="error" role="alert" hidden></div>
+  <section class="metrics" id="metrics" aria-label="Current portfolio metrics"></section>
+  <section class="cockpit" aria-label="Xavier desk view">
+    <div class="architecture" aria-hidden="true"><div class="window-frame"></div><div class="window-frame two"></div><div class="skyline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="ceiling-light"></div></div>
+    <div class="cockpit-topline"><span><i class="on-air-dot"></i> XAVIER’S PERSPECTIVE</span><span id="cockpit-context">Waiting for authenticated position data</span><span class="readonly">READ ONLY</span></div>
+    <div class="monitors">
+      <div class="monitor monitor-left"><div class="monitor-inner" id="focus-game"></div><div class="monitor-neck"></div><div class="monitor-base"></div></div>
+      <div class="monitor monitor-main"><div class="monitor-inner" id="focus-market"><div class="empty-screen"><span class="screen-logo">X</span><h2>Waiting for position evidence</h2><p>There is no automatic demo fallback.</p></div></div><div class="monitor-neck"></div><div class="monitor-base"></div></div>
+      <div class="monitor monitor-right"><div class="monitor-inner" id="focus-decision"></div><div class="monitor-neck"></div><div class="monitor-base"></div></div>
+    </div>
+    <div class="desk-surface" aria-hidden="true"><div class="desk-edge"></div><div class="desk-pad"></div><div class="keyboard"></div><div class="mouse"></div><div class="coffee"><i></i></div><div class="desk-plant"><i></i><i></i><i></i><span></span></div></div>
+    <div class="desk-caption"><span class="avatar">X</span><span><b>Xavier</b><small>Portfolio management</small></span><div class="ownership-path"><span>Derek selected</span><i>→</i><strong>Xavier manages</strong><i>→</i><span>Audrey reconciles</span></div><span class="desk-source" id="desk-source">Evidence not connected</span></div>
+  </section>
+  <section class="workspace-toolbar" aria-label="Position controls">
+    <div class="view-tabs" role="group" aria-label="View"><button class="active" data-view="positions" aria-pressed="true">Position wall <span id="wall-count">0</span></button><button data-view="orders" aria-pressed="false">Standing orders <span id="order-count">0</span></button></div>
+    <div class="filters" role="group" aria-label="Filter positions"><button data-filter="all" class="active" aria-pressed="true">All</button><button data-filter="near" aria-pressed="false">Near target</button><button data-filter="blocked" aria-pressed="false">Needs evidence</button><button data-filter="settlement" aria-pressed="false">Settlement</button></div>
+    <label class="search"><span>⌕</span><input id="search" type="search" placeholder="Find a game, position or market" aria-label="Search games and positions"></label>
+    <button id="wall" class="button subtle" aria-pressed="false">▦ Wall mode</button>
+  </section>
+  <div class="workspace">
+    <section id="positions" class="position-wall" aria-label="All owned positions" tabindex="-1"><div class="empty-state">Connecting to the existing Command session…</div></section>
+    <aside class="activity-panel"><div class="section-title"><div><span class="eyebrow">RECORDED EVIDENCE</span><h2>Decision tape</h2></div><span class="tape-dot"></span></div><p class="section-note">Actual review and quote records. A price touch is not a fill.</p><div id="activity" class="activity"><div class="empty-note">No recorded events loaded.</div></div><div class="learning-box"><span class="mini-avatar">X</span><div><b>Observe → decide → measure</b><p>Completed records enable learning. They do not prove a model update or positive performance.</p></div></div></aside>
+  </div>
+  <footer><span><i class="lock-dot"></i> No submit, cancel, funding or strategy-promotion controls.</span><span id="footer-proof">Native ledger readback · not connected</span></footer>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<dialog id="evidence-dialog"><div class="dialog-top"><h2>Position evidence</h2><button id="close-evidence" class="icon-button" aria-label="Close evidence">×</button></div><pre id="evidence-text"></pre></dialog>
+</body>
+</html>

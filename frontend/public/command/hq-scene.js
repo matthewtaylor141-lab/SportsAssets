@@ -39,6 +39,7 @@
  * prefers-reduced-motion: no drift, no scrolling, no flowing light, instant
  * camera cuts; the scene renders only when data or the camera changes. */
 import * as THREE from './team-demo/assets/three.module.min.js';
+import {makeDeskFinish} from './desk-materials.js';
 import {mergeGeometries} from './team-demo/assets/BufferGeometryUtils.js';
 import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes, buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
 import * as S from './hq-screens.js';
@@ -138,7 +139,7 @@ export async function createHQ(host, opts) {
     darkMetal: std({color: '#1b222b', roughness: 0.35, metalness: 0.9}),
     brass: std({color: '#c7a467', roughness: 0.26, metalness: 1}),
     bezel: std({color: '#07090c', roughness: 0.22, metalness: 0.4}),
-    deskTop: std({color: '#14181d', roughness: 0.38, metalness: 0.08}),
+    deskTop: makeDeskFinish(THREE, {phone}),
     walnut: std({color: '#2b1d14', roughness: 0.42, metalness: 0.05}),
     leather: std({color: '#101215', roughness: 0.5, metalness: 0.05}),
     mesh: std({color: '#16191e', roughness: 0.85, metalness: 0.1}),
@@ -1188,7 +1189,7 @@ export async function createHQ(host, opts) {
     setInsets(v) { Object.assign(insets, v || {}); panelOffsets(); requestRender(); },
     setPaused(v) { paused = !!v; if (!paused) { forceDirty = true; resize(); requestRender(); } },
     stats() { return Object.assign({avatars: avatars.length, edges: edgeMats.length}, perf); },
-    dispose() { cancelAnimationFrame(raf); renderer.dispose(); }
+    dispose() { cancelAnimationFrame(raf); if (MAT.deskTop.map) MAT.deskTop.map.dispose(); MAT.deskTop.dispose(); renderer.dispose(); }
   };
   // inspection hooks (software-GL renders): complete running transitions now / place the camera
   const settle = () => { panelOffsets(); camState.offX = camState.offXT; camState.offY = camState.offYT; camState.t = 1; for (const av of avatars) { av.t = 1; applyPosture(av, 1); } forceDirty = true; requestRender(); };

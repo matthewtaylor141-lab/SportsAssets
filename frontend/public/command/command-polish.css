@@ -1,0 +1,10 @@
+/* Additive shell polish. Never hides alerts, changes a state color, or overrides
+   portfolio content. Existing Floor and agent portraits remain intact. */
+.bt-trader-launch{position:fixed;right:20px;bottom:18px;z-index:45;display:inline-flex;align-items:center;gap:10px;padding:13px 18px;border:1px solid #9fd3be;border-radius:15px;background:linear-gradient(140deg,#183f34,#102e28);color:#ecfff7;font:600 13px/1.3 system-ui,sans-serif;box-shadow:0 8px 30px #0004;text-decoration:none;min-height:44px;box-sizing:border-box}
+.bt-trader-launch span{color:#9fd3be;font-size:11px}.bt-trader-launch:focus-visible{outline:3px solid #d5b367;outline-offset:4px}.bt-trader-launch:hover{background:#205344}
+.hq .ins{border-radius:14px;box-shadow:0 9px 28px #0002, inset 0 1px 0 #ffffff0b}
+.hq #hq-top{box-shadow:0 8px 30px #0002}.fl .fl-panel{box-shadow:-10px 8px 36px #0003}
+@media(max-width:760px){.bt-trader-launch{bottom:max(16px,env(safe-area-inset-bottom));right:12px;padding:11px 14px}.bt-trader-launch span{display:none}}
+@media(prefers-reduced-motion:reduce){.bt-trader-launch{transition:none}}
+
+.bt-trader-launch--nav{position:static;margin-left:6px;padding:8px 12px;border-radius:7px;font-size:11px;box-shadow:none;white-space:nowrap}.bt-trader-launch--nav span{display:none}

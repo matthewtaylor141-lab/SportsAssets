@@ -19,6 +19,7 @@
  * CAST and CREDITS). Archer's headset is a desk prop. Nothing is downloaded
  * from anywhere else. */
 import * as THREE from './team-demo/assets/three.module.min.js';
+import {makeDeskFinish} from './desk-materials.js';
 import {clone as cloneSkinned} from './team-demo/assets/SkeletonUtils.js';
 import {AvatarController, resolveBones, resolveBlendshapes, resolveVisemes,
         buildJoints, armsDown} from './team-demo/assets/cc_avatar.js';
@@ -281,7 +282,7 @@ export async function createFloor(host, opts) {
   const N = seats.length;
   const center = new THREE.Vector3(0, 0, ARC_Z);
   const deskMetal = new THREE.MeshStandardMaterial({color: '#1a2633', metalness: .75, roughness: .3});
-  const deskTop = new THREE.MeshStandardMaterial({color: '#162230', metalness: .3, roughness: .22});
+  const deskTop = makeDeskFinish(THREE, {phone});
   const screenBack = new THREE.MeshStandardMaterial({color: '#0c131b', metalness: .6, roughness: .4});
 
   function makeCanvasPlane(w, h, pxW, pxH) {
@@ -841,6 +842,6 @@ export async function createFloor(host, opts) {
     setInsetRight(px) { insetRight = px || 0; applyInset(); requestRender(); },
     setPaused(v) { paused = !!v; if (!paused) requestRender(); },
     stats() { return {fps: fps.slice(), dpr, shadows: renderer.shadowMap.enabled, avatars: avatars.length, trails: trails.length, walking: avatars.filter((a) => a.walk).map((a) => a.slug)}; },
-    dispose() { cancelAnimationFrame(raf); if (ro) ro.disconnect(); renderer.dispose(); }
+    dispose() { cancelAnimationFrame(raf); if (ro) ro.disconnect(); if (deskTop.map) deskTop.map.dispose(); deskTop.dispose(); renderer.dispose(); }
   };
 }

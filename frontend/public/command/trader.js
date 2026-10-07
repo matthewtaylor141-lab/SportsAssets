@@ -1,0 +1,105 @@
+/* Live management presentation. GET only; no automatic illustrative fallback. */
+(function(){'use strict';
+const C=window.TraderCore,$=id=>document.getElementById(id),E=C.esc;
+const preview=window.__TRADER_PREVIEW__===true;
+let state=null,selected=null,filter='all',view='positions',query='',follow=false,muted=true,pollTimer=null,controller=null,stopped=false,backoff=2000;
+let eventIds=new Set(),events=[],previousQuotes=new Map(),lastSnapshotAt=-Infinity,connected=false;
+let generation=0;
+if(preview)$('preview-notice').hidden=false;
+function toast(s){$('toast').textContent=s;$('toast').classList.add('show');setTimeout(()=>$('toast').classList.remove('show'),2600);}
+function beep(){if(muted)return;try{const Audio=window.AudioContext||window.webkitAudioContext;if(!Audio)return;const a=new Audio(),o=a.createOscillator(),g=a.createGain();o.connect(g);g.connect(a.destination);o.frequency.value=610;g.gain.setValueAtTime(.025,a.currentTime);g.gain.exponentialRampToValueAtTime(.001,a.currentTime+.12);o.start();o.stop(a.currentTime+.13);o.onended=()=>a.close();}catch(_){}}
+function abbr(s){return String(s||'?').replace(/[^A-Za-z0-9 ]/g,'').split(/\s+/).map(x=>x[0]||'').join('').slice(0,3).toUpperCase()||'?';}
+function sport(p){const s=String(p.sport||'').toUpperCase();if(s&&s!=='UNCLASSIFIED')return s;
+ const id=String(p.event_id||'').toLowerCase();return id.startsWith('mlb-')?'MLB':id.startsWith('nfl-')?'NFL':id.startsWith('cfb-')?'NCAAF':id.startsWith('nba-')?'NBA':id.startsWith('nhl-')?'NHL':'SPORT';}
+function gameHTML(p,screen=false){const g=p.game||{},now=Date.now()/1000;
+ if(!['CURRENT','STALE'].includes(g.status))return`<div class="score-unavailable"><span>${E(sport(p))} · GAME STATE</span><b>${E(p.title||'Game identity unavailable')}</b><span>${p.state==='SETTLEMENT_PENDING'?'Awaiting venue settlement':E(g.why==='SCORE_EVENT_IDENTITY_UNPROVEN'?'Score identity not verified':'Live score feed unavailable')}</span></div>`;
+ const fresh=g.status==='CURRENT'&&C.fresh(g.source_at,now,15),clk=C.clock(g,now);
+ const inning=C.finite(g.inning)?`${g.inning_half==='TOP'?'▲':g.inning_half==='BOTTOM'?'▼':''} ${g.inning}`:g.period||g.game_status||'Game state';
+ let bases='';if(Array.isArray(g.bases)&&g.bases.length===3)bases=`<span class="bases" aria-label="Bases ${g.bases.map((b,i)=>b?i+1:'').filter(Boolean).join(', ')||'empty'}">${['first','second','third'].map((b,i)=>`<i class="base ${b}${g.bases[i]?' occupied':''}"></i>`).join('')}</span>`;
+ let count='';if(C.finite(g.outs)||C.finite(g.balls)||C.finite(g.strikes))count=`<div class="count-strip">${bases}<span>B <strong>${C.fmt(g.balls)}</strong></span><span>S <strong>${C.fmt(g.strikes)}</strong></span><span>O <strong>${C.fmt(g.outs)}</strong></span></div>`;
+ else if(C.finite(g.down))count=`<div class="count-strip"><span>${C.fmt(g.down)} &amp; ${C.fmt(g.distance)}</span><span>${E(g.possession||'')} possession</span></div>`;
+ return`<div class="scoreboard"><div class="team-row away"><span class="team-abbr">${E(abbr(g.away))}</span><span class="team-name">${E(g.away)}</span><span class="team-score">${C.fmt(g.away_score)}</span></div><div class="team-row"><span class="team-abbr">${E(abbr(g.home))}</span><span class="team-name">${E(g.home)}</span><span class="team-score">${C.fmt(g.home_score)}</span></div><div class="screen-game-meta"><span>${E(inning)}</span>${clk.value!==null?`<span class="game-clock" data-game-clock="${E(p.position_id)}" title="${clk.estimated?'Interpolated display, not official live clock':'Last source-confirmed clock'}">${E(clk.text)}</span>`:''}<span class="game-status-pill">${fresh?E(g.game_status||'LIVE'):'STALE SCORE'}</span></div>${count}<div class="score-note">${E(g.last_play||'No play description supplied')}${screen?' · '+E(g.source||''):''}</div></div>`;
+}
+function metrics(){if(!state)return;const now=Date.now()/1000,all=state.positions,active=all.filter(p=>p.state==='ACTIVE'),mark=active.filter(p=>p.quote?.current&&C.fresh(p.quote.at,now,300)).length,pack=active.filter(p=>C.packet(p,now).complete).length;
+ const marked=all.filter(p=>C.finite(p.unrealized_usd)),pnl=marked.reduce((s,p)=>s+p.unrealized_usd,0),os=all.reduce((s,p)=>s+C.standing(p).length,0),unknown=all.length-marked.length;
+ const data=[['Owned positions',C.fmt(state.total_position_count),`${all.length-active.length} settlement pending`,''],['Current venue marks',`${mark}<span class="metric-unit"> / ${active.length}</span>`,active.length?`${C.fmt(mark/active.length*100,1)}% · ${state.truncated?'returned active only':'full active denominator'}`:'No active positions',!active.length?'':!state.truncated&&mark===active.length?'positive':'warning'],['Complete packets',`${pack}<span class="metric-unit"> / ${active.length}</span>`,`${active.length-pack} waiting for evidence`,!active.length?'':!state.truncated&&pack===active.length?'positive':'warning'],['Standing orders',C.fmt(os),'PAPER simulated · not guaranteed fills',''],['Marked P/L',marked.length?C.money(pnl,true):'—',`Before exit fees${unknown?' · '+unknown+' unmarked':''}`,pnl<0?'negative':'positive']];
+ $('metrics').innerHTML=data.map(([l,v,d,cls])=>`<div class="metric"><div class="metric-label">${l}</div><div class="metric-main"><strong class="metric-value ${cls}">${v}</strong></div><div class="metric-detail">${E(d)}</div></div>`).join('');$('wall-count').textContent=state.total_position_count;$('order-count').textContent=os;
+}
+function focus(p){if(!p)return;selected=p.position_id;const now=Date.now()/1000,q=p.quote||{},t=C.target(p),g=C.gap(t,q,now),pk=C.packet(p,now),rev=p.review||{};
+ $('cockpit-context').textContent=p.title||p.market_id;$('desk-source').textContent=`${preview?'ILLUSTRATIVE REPLAY':'NATIVE PAPER RECORD'} · ${C.duration(C.age(q.at,now))}`;
+ $('focus-game').innerHTML=`<div class="screen-eyebrow"><span>${E(sport(p))} GAME CENTER</span><span class="screen-live">${preview?'REPLAY':'SOURCE'}</span></div>${gameHTML(p,true)}`;
+ const current=q.current&&C.fresh(q.at,now,300),status=current?'CURRENT EXIT BID':'LAST OBSERVED BID';
+ $('focus-market').innerHTML=`<div class="screen-eyebrow"><span>${E(status)} · ${E(p.venue)}</span><span>${E(p.holding_side)} · ${C.fmt(p.qty)} CONTRACTS</span></div><div class="screen-title">${E(p.market_title)}</div><div class="screen-value">${C.cents(q.bid)}<small>${g.distance!==null?`${C.fmt(g.distance,1)}¢ to ${t?.order_id?'standing limit':'recorded target'}`:'No target recorded'}</small></div><svg class="screen-chart" viewBox="0 0 420 88" role="img" aria-label="Observed held-side bid history and recorded order target">${C.chart(p,t?.limit_price)}</svg><div class="screen-bottom"><span>${C.fmt(C.series(p).length)} OBSERVATIONS · ${C.duration(C.age(q.at,now))} OLD</span><span>${t?`TARGET ${C.cents(t.limit_price)} · ${g.met===true?'TOUCH ≠ FILL':g.met===null?'EVIDENCE REQUIRED':'WAITING'}`:'NO STANDING TARGET'}</span></div>`;
+ let action=pk.complete?(p.packet.current_recommendation||rev.recommendation||'REVIEW RECORDED'):'Waiting for evidence';
+ let note='No order or price target has been recorded for this position.';
+ if(t){
+  if(t.order_id){const watch=g.met===true?'Price condition reached; execution is not confirmed.':g.met===null?'The quote is not current.':`Watching the ${g.side} ${t.direction==='SELL'?'rise':'fall'} ${C.fmt(g.distance,1)}¢.`;note=`${E(t.direction)} limit recorded at ${C.cents(t.limit_price)}. ${watch}`;}
+  else note=`Protective target ${C.cents(t.limit_price)} is a proposal, not a placed order.`;
+ }
+ if(!pk.complete)note+=` Missing: ${E(pk.missing.map(x=>x.replace(/^NO_/,'').replaceAll('_',' ').toLowerCase()).join(', '))}.`;
+ const alts=(rev.alternatives?.candidates||[]).filter(a=>C.finite(a.value_usd)).slice(0,3);
+ $('focus-decision').innerHTML=`<div class="screen-eyebrow"><span>RECORDED MANAGEMENT</span><span>${pk.complete?'CURRENT':'BLOCKED'}</span></div><div class="screen-decision">${E(action)}</div><div class="screen-decision-note">${note}</div><div class="alternatives">${alts.map(a=>`<div class="alternative"><span>${E(a.action)}</span><span class="alt-line"></span><em>${C.money(a.value_usd)}</em></div>`).join('')}</div><div class="screen-packet">${['QTY','PROBABILITY','BOOK','DEPTH','SETTLEMENT','PROTECTION'].map(k=>`<i class="${pk.missing.some(x=>x.includes(k))?'bad':'ok'}"></i>`).join('')}</div><div class="screen-footnote">Recorded alternatives · not newly computed advice</div>`;
+ document.querySelectorAll('.position-card').forEach(el=>el.classList.toggle('focused',el.dataset.id===selected));
+}
+function cards(){if(!state)return;const now=Date.now()/1000,ps=state.positions.filter(p=>C.matches(p,filter,query,now));let html='';
+ if(state.truncated)html+=`<div class="truncate-banner">This response contains ${state.positions.length} of ${state.total_position_count} positions. Coverage is incomplete; missing positions are not counted as healthy.</div>`;
+ if(!ps.length)html+='<div class="empty-state"><h2>No positions in this view</h2>Nothing has been hidden from the total. Change the filter or wait for authenticated records.</div>';
+ if(view==='orders'){const os=ps.flatMap(p=>C.standing(p).map(o=>({p,o})));html+=`<div class="orders-view"><table><thead><tr><th>POSITION / GAME</th><th>ORDER</th><th>REMAINING</th><th>CURRENT ${'BID / ASK'}</th><th>LIMIT</th><th>PRICE CONDITION</th><th>STATE</th></tr></thead><tbody>${os.map(({p,o})=>{const g=C.gap(o,p.quote,now);return`<tr><td><button class="table-focus" data-focus="${E(p.position_id)}">${E(p.title)}</button><small>${E(p.market_title)}</small></td><td>${E(o.direction)}<small>${E(o.role)}</small></td><td>${C.fmt(o.remaining_qty,2)}</td><td>${C.cents(g.reference)}</td><td>${C.cents(o.limit_price)}</td><td>${g.met===null?'Needs current book':g.met?'Reached · not a fill':`${C.fmt(g.distance,1)}¢ away`}</td><td><span class="order-state">${E(o.state)}</span><small>PAPER SIMULATED</small></td></tr>`;}).join('')||'<tr><td colspan="7">No standing orders recorded for these positions.</td></tr>'}</tbody></table></div>`;}
+ else html+=ps.map(p=>{const q=p.quote||{},t=C.target(p),g=C.gap(t,q,now),pk=C.packet(p,now),os=C.standing(p);const pct=g.distance!==null?Math.max(4,Math.min(100,100-g.distance*7)):0;
+ const status=p.state==='SETTLEMENT_PENDING'?'Settlement pending':pk.complete?'Packet complete':`${pk.missing.length} evidence gap${pk.missing.length===1?'':'s'}`;
+ return`<article class="position-card${selected===p.position_id?' focused':''}${g.met===true?' target-touch':''}" data-id="${E(p.position_id)}"><div class="card-head"><span class="sport-tag">${E(sport(p))} <span style="opacity:.4">/</span> ${E(p.family||'CONTRACT')}</span><div class="card-actions"><span class="position-id">${E(p.venue==='POLYMARKET_US'?'PMUS':p.venue)}</span><button class="tiny-button" data-evidence="${E(p.position_id)}" aria-label="Inspect position evidence" title="Inspect evidence">↗</button></div></div><button class="card-focus" data-focus="${E(p.position_id)}" aria-label="Focus Xavier desk on ${E(p.title)}"><div class="card-score">${gameHTML(p)}</div><div class="market-title">${E(p.market_title)}</div><div class="holding-line">DEREK → XAVIER · ${C.fmt(p.qty,2)} ${E(p.holding_side)} · ENTRY ${C.cents(p.entry_price)}</div><div class="card-prices"><div class="price-block"><small>${q.current&&C.fresh(q.at,now,300)?'Current bid':'Last bid'}</small><strong>${C.cents(q.bid)}</strong></div><div class="price-block target"><small>${t?.order_id?'Standing limit':'Recorded target'}</small><strong>${C.cents(t?.limit_price)}</strong></div><div class="price-block pnl"><small>Marked P/L</small><strong class="${p.unrealized_usd<0?'negative':'positive'}">${C.money(p.unrealized_usd,true)}</strong></div></div><div class="target-track${g.met===null?' stale':''}"><span style="width:${pct}%"></span></div><div class="gap-caption${g.met===null?' stale':''}"><b>${g.distance===null?'No recorded target':g.met===null?'Needs current evidence':g.met?'Price condition reached':`${C.fmt(g.distance,1)}¢ ${t.direction==='SELL'?'up':'down'} to target`}</b><span>${g.met?'Not a fill':os.length?`${os.length} standing`:'No standing order'}</span></div></button><div class="order-strip"><i class="order-status"></i>${t?`<span>${t.order_id?'Recorded':'Proposed'} <strong>${E(t.direction)} ${C.cents(t.limit_price)}</strong></span><span class="order-qty">${t.order_id?`${C.fmt(t.remaining_qty,2)} remain`:'NOT PLACED'}</span>`:'<span>No standing order or proposed target recorded</span>'}</div><div class="card-footer"><span class="packet-pill${!pk.complete?' blocked':''}"><i></i>${E(status)}</span><span class="age-label">BOOK ${C.duration(C.age(q.at,now))} · P ${C.duration(C.age(p.packet?.probability_at,now))}</span></div></article>`;}).join('');
+ const af=document.activeElement,restore=af?.dataset?.focus||af?.dataset?.evidence;const evidence=!!af?.dataset?.evidence;
+ $('positions').innerHTML=html;
+ if(restore){const el=[...$('positions').querySelectorAll(evidence?'[data-evidence]':'[data-focus]')].find(e=>(evidence?e.dataset.evidence:e.dataset.focus)===restore);el?.focus({preventScroll:true});}
+}
+function renderTape(){const es=events.slice().sort((a,b)=>b.at-a.at).slice(0,30);$('activity').innerHTML=es.map(e=>`<div class="tape-event"><span class="event-dot">${e.kind==='quote'?'↗':'X'}</span><div class="event-main"><b>${E(e.head)}</b><p>${E(e.detail)}</p><time>${new Date(e.at*1000).toLocaleTimeString('en-US',{hour12:false})} · ${E(e.ref)}</time></div></div>`).join('')||'<div class="empty-note">No recorded management events.</div>';}
+function receive(s){const check=C.validate(s,{remote:!preview});if(!check.ok)throw Error(check.errors.join(' '));
+ if(s.snapshot_at<lastSnapshotAt)throw Error('Out-of-order snapshot refused.');lastSnapshotAt=s.snapshot_at;
+ const first=!state;state=s;connected=true;document.body.classList.remove('disconnected');$('error').hidden=true;$('connection').className='connection connected';$('connection').innerHTML=`<i></i>${preview?'Preview replay':'Readback connected'}`;
+ for(const p of s.positions){const r=p.review||{},id=r.review_id,at=r.reviewed_at;
+ if(id&&!eventIds.has(id)&&C.finite(at)){eventIds.add(id);events.push({kind:'review',head:`Xavier · ${r.recommendation||'review recorded'}`,detail:p.title||p.market_id,at,ref:id.slice(-10)});if(!first){beep();if(follow)selected=p.position_id;}}
+ const q=p.quote||{},prior=previousQuotes.get(p.position_id);if(prior&&q.observation_id!==prior.id&&C.finite(q.bid)&&q.bid!==prior.bid){events.push({kind:'quote',head:`Bid ${C.cents(prior.bid)} → ${C.cents(q.bid)}`,detail:p.title||p.market_id,at:q.at,ref:String(q.observation_id||'quote')});}
+ previousQuotes.set(p.position_id,{bid:q.bid,id:q.observation_id});}
+ if(events.length>100)events=events.sort((a,b)=>b.at-a.at).slice(0,100);
+ if(eventIds.size>5000)eventIds=new Set(s.positions.map(p=>p.review?.review_id).filter(Boolean));
+ if(!s.positions.some(p=>p.position_id===selected))selected=s.positions[0]?.position_id||null;
+ metrics();cards();focus(s.positions.find(p=>p.position_id===selected));renderTape();
+ if(!s.positions.length){$('focus-game').innerHTML='';$('focus-decision').innerHTML='';$('focus-market').innerHTML='<div class="empty-screen"><span class="screen-logo">X</span><h2>No open positions</h2><p>No activity or orders are invented to fill the desk.</p></div>';}
+ $('footer-proof').textContent=`${preview?'ILLUSTRATIVE':'READ ONLY'} · ${s.source_sha?.slice(0,8)||'SHA not supplied'} · ${s.snapshot_id||'snapshot'} · source ${new Date(s.snapshot_at*1000).toLocaleTimeString()}`;
+}
+function fail(message){connected=false;
+ if(state){state={...state,positions:state.positions.map(p=>({...p,
+ quote:{...p.quote,current:false},unrealized_usd:null,
+ packet:{...p.packet,complete:false,current_recommendation:null,missing:[...new Set([...(p.packet?.missing||[]),'DASHBOARD_DISCONNECTED'])]},
+ game:{...p.game,status:p.game?.status==='UNAVAILABLE'?'UNAVAILABLE':'STALE',clock_running:false}}))};
+ metrics();cards();focus(state.positions.find(p=>p.position_id===selected));}
+document.body.classList.add('disconnected');$('connection').className='connection error-state';$('connection').innerHTML='<i></i>Disconnected';$('error').hidden=false;$('error').textContent=message+' Last received data is retained for inspection; no automatic demo fallback.';}
+async function poll(){if(stopped||preview||document.hidden)return;const ticket=generation,aborter=new AbortController();controller=aborter;const timeout=setTimeout(()=>aborter.abort(),12000);
+ try{const response=await fetch('/api/command/paper/trader-mode',{method:'GET',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'},signal:aborter.signal});
+ if(stopped||ticket!==generation)return;
+ if(response.status===401||response.status===403)throw Error('Command session required. Sign in through Command, then return to Trader Mode.');
+ if(!response.ok)throw Error(`Readback returned HTTP ${response.status}.`);
+ if(!(response.headers.get('content-type')||'').includes('application/json'))throw Error('Readback returned a non-JSON response.');
+ const s=await response.json();if(stopped||ticket!==generation)return;receive(s);backoff=2000;
+ }catch(e){if(!stopped&&ticket===generation){fail(e.name==='AbortError'?'Readback timeout.':e.message||'Readback unavailable.');backoff=Math.min(30000,backoff*2);}}
+ finally{clearTimeout(timeout);if(controller===aborter)controller=null;if(!stopped&&!document.hidden&&ticket===generation)pollTimer=setTimeout(poll,backoff);}}
+$('positions').addEventListener('click',e=>{const b=e.target.closest('[data-focus],[data-evidence]');if(!b||!state)return;const id=b.dataset.focus||b.dataset.evidence,p=state.positions.find(x=>x.position_id===id);if(!p)return;if(b.dataset.evidence){$('evidence-text').textContent=JSON.stringify(p,null,2);$('evidence-dialog').showModal();}else{follow=false;$('follow').setAttribute('aria-pressed','false');focus(p);if(view==='orders')toast('Desk focused on '+p.title);}});
+$('close-evidence').onclick=()=>$('evidence-dialog').close();$('evidence-dialog').addEventListener('click',e=>{if(e.target===$('evidence-dialog'))$('evidence-dialog').close();});
+document.querySelectorAll('[data-filter]').forEach(b=>b.onclick=()=>{filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>{x.classList.toggle('active',x===b);x.setAttribute('aria-pressed',String(x===b));});cards();});
+document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;document.querySelectorAll('[data-view]').forEach(x=>{x.classList.toggle('active',x===b);x.setAttribute('aria-pressed',String(x===b));});cards();});
+$('search').addEventListener('input',e=>{query=e.target.value;cards();});
+$('follow').onclick=()=>{follow=!follow;$('follow').setAttribute('aria-pressed',String(follow));toast(follow?'Following new recorded Xavier reviews.':'Desk focus pinned.');};
+$('wall').onclick=()=>{document.body.classList.toggle('wall-mode');$('wall').setAttribute('aria-pressed',String(document.body.classList.contains('wall-mode')));};
+$('motion').onclick=()=>{document.body.classList.toggle('reduced-motion');$('motion').setAttribute('aria-pressed',String(document.body.classList.contains('reduced-motion')));};
+$('sound').onclick=()=>{muted=!muted;$('sound').setAttribute('aria-pressed',String(!muted));$('sound').setAttribute('aria-label',muted?'Enable notification sound':'Mute notification sound');if(!muted)beep();};
+$('fullscreen').onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen();}catch(_){toast('Full screen is unavailable in this browser.');}};
+document.addEventListener('visibilitychange',()=>{generation++;clearTimeout(pollTimer);controller?.abort();controller=null;if(!document.hidden&&!preview)poll();});
+window.addEventListener('pagehide',()=>{stopped=true;generation++;clearTimeout(pollTimer);controller?.abort();controller=null;});
+window.addEventListener('pageshow',e=>{if(e.persisted){stopped=false;generation++;clearTimeout(pollTimer);if(!preview&&!document.hidden)poll();}});
+setInterval(()=>{const now=Date.now()/1000;$('wall-clock').textContent=new Date().toLocaleTimeString('en-GB',{hour12:false});if(!state)return;
+ document.querySelectorAll('[data-game-clock]').forEach(el=>{const p=state.positions.find(x=>x.position_id===el.dataset.gameClock);if(p)el.textContent=C.clock(p.game,now).text;});
+ if(connected&&!preview&&now-state.snapshot_at>15)fail('No recent dashboard snapshot.');
+},500);
+window.TraderMode={receive,inspect:()=>state};
+if(!preview)poll();else if(window.__TRADER_DEMO_INITIAL__)receive(window.__TRADER_DEMO_INITIAL__);
+})();
