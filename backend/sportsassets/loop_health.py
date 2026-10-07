@@ -416,6 +416,8 @@ WORKERS_LOOPS = (
        note="passes every EVERY_S (20 s); health recorded at most every "
             "30 s"),
     _w("mirror_shadow", 30.0, _hb("mirror_shadow", "ok")),
+    _w("kalshi_market_data", 30.0, _hb("kalshi_market_data", "ok",
+                                       "degraded")),
     _w("retention", 3600.0, _hb("retention", "ok", "off")),
     _w("rn1_obs", None, note="inert unless RN1_OBSERVABILITY_SHADOW is set"),
     _w("shadow_bettor", 60.0, _hb("shadow_bettor", "ok", "no_universe")),

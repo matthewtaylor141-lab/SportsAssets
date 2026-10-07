@@ -1,0 +1,186 @@
+"""THE PERSISTED VENUE EVIDENCE (KALSHI x PMUS) -> CANONICAL CLAIMS (Kalshi Canonical
+Venue V1). One assembler, two readers:
+
+  * the shared-workers loop (workers/kalshi_market_data) after it persists
+    books and fixtures: aliases + best-route receipts (314 tables);
+  * Adriana's own runner (agents/adriana_runner, the API process): her
+    claim-first scan, recorded into her migration-265 tables -- she remains
+    the only writer of arbitrage records, and the shared workers never
+    import her (agents.adriana reaches the funded layers through the agent
+    registry; tests/test_workers_hold_no_venue_write.py).
+
+READ ONLY: every statement here is a SELECT. Kalshi rules evidence is the
+registry's own parse (market_plane_rules, contract_id 'kalshi:'+ticker);
+PMUS evidence the same table's POLYMARKET_US row; PMUS books the paper
+path's recorded observations (paper_book_observations).
+"""
+from __future__ import annotations
+
+import json
+import time
+from decimal import Decimal
+
+from . import canonical_claims as CC
+from . import kalshi_claims as KCL
+from . import kalshi_market_data as KMD
+
+VERSION = "CANONICAL_CLAIMS_DB_V1"
+WINDOW_BEHIND_S = 4 * 3600.0
+WINDOW_AHEAD_S = 36 * 3600.0
+PMUS_BOOK_WINDOW_S = 900.0
+MAX_FIXTURES = 80
+
+
+def _j(v):
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return None
+    return v
+
+
+def _lv(raw) -> tuple:
+    out = []
+    for x in _j(raw) or []:
+        try:
+            out.append((Decimal(str(x[0])), int(x[1])))
+        except Exception:                                     # noqa: BLE001
+            continue
+    return tuple(out)
+
+
+def _pmus_levels(raw) -> list:
+    out = []
+    for x in _j(raw) or []:
+        try:
+            px = x["px"]["value"] if isinstance(x.get("px"), dict) \
+                else x.get("px")
+            out.append((Decimal(str(px)), int(Decimal(str(x["qty"])))))
+        except Exception:                                     # noqa: BLE001
+            continue
+    return out
+
+
+async def _has(conn, t: str) -> bool:
+    return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", t))
+
+
+async def fixtures(conn, *, now: float) -> list:
+    if not await _has(conn, "kalshi_fixtures_current"):
+        return []
+    rows = await conn.fetch(
+        "SELECT * FROM kalshi_fixtures_current "
+        " WHERE mapping_status = 'ESTABLISHED' AND start_at BETWEEN "
+        "       to_timestamp($1) AND to_timestamp($2) "
+        " ORDER BY start_at LIMIT $3",
+        now - WINDOW_BEHIND_S, now + WINDOW_AHEAD_S, MAX_FIXTURES)
+    out = []
+    for r in rows:
+        k = KMD.KalshiFixture(
+            event_ticker=r["event_ticker"], series_ticker=r["series_ticker"],
+            sport=r["sport"], league=r["league"],
+            start_epoch=r["start_at"].timestamp() if r["start_at"] else None,
+            home_id=r["home_id"], away_id=r["away_id"],
+            home_code=r["home_code"], away_code=r["away_code"],
+            tie_ticker=r["tie_ticker"],
+            team_tickers=tuple(r["team_tickers"] or ()),
+            outcome_kind=r["outcome_kind"], status=r["mapping_status"],
+            reasons=tuple(_j(r["mapping_reasons"]) or ()),
+            milestone_id=r["milestone_id"])
+        out.append((k, r["pmus_slug"] if r["pmus_mapping_status"]
+                    == "ESTABLISHED" else None))
+    return out
+
+
+async def kalshi_books(conn, tickers: list) -> dict:
+    if not tickers or not await _has(conn, "kalshi_books_current"):
+        return {}
+    out = {}
+    for r in await conn.fetch(
+            "SELECT ticker, yes_asks, no_asks, readable, observed_at "
+            "  FROM kalshi_books_current WHERE ticker = ANY($1::text[])",
+            list(tickers)):
+        out[r["ticker"]] = {"yes_asks": _lv(r["yes_asks"]),
+                            "no_asks": _lv(r["no_asks"]),
+                            "readable": bool(r["readable"]),
+                            "observed_at": r["observed_at"].timestamp()}
+    return out
+
+
+async def rules_evidence(conn, contract_ids: list) -> dict:
+    if not contract_ids:
+        return {}
+    return {r["contract_id"]: _j(r["evidence"]) for r in await conn.fetch(
+        "SELECT contract_id, evidence FROM market_plane_rules "
+        " WHERE contract_id = ANY($1::text[])", list(contract_ids))}
+
+
+async def pmus_identity(conn, slug: str) -> dict | None:
+    r = await conn.fetchrow(
+        "SELECT market_slug, team_league, "
+        "  max(team_abbr) FILTER (WHERE intent = 'ORDER_INTENT_BUY_LONG') a, "
+        "  max(team_abbr) FILTER (WHERE intent = 'ORDER_INTENT_BUY_SHORT') b,"
+        "  extract(epoch FROM min(game_start)) s "
+        "  FROM us_premap WHERE market_slug = $1 GROUP BY 1, 2", slug)
+    if r is None:
+        return None
+    return {"slug": r["market_slug"], "league": r["team_league"],
+            "team_a": r["a"], "team_b": r["b"],
+            "start_epoch": float(r["s"]) if r["s"] is not None else None}
+
+
+async def pmus_book(conn, slug: str, *, now: float) -> dict | None:
+    r = await conn.fetchrow(
+        "SELECT bids, offers, extract(epoch FROM observed_at) AS at "
+        "  FROM paper_book_observations WHERE us_market_slug = $1 "
+        "   AND error IS NULL AND observed_at > to_timestamp($2) "
+        " ORDER BY observed_at DESC LIMIT 1", slug, now - PMUS_BOOK_WINDOW_S)
+    if r is None:
+        return None
+    return {"bids": _pmus_levels(r["bids"]),
+            "offers": _pmus_levels(r["offers"]),
+            "observed_at": float(r["at"])}
+
+
+async def assemble(conn, *, now: float | None = None) -> list:
+    """[(Fixture, built, instruments)] for every ESTABLISHED Kalshi fixture
+    in the window that has at least one readable Kalshi book."""
+    now = float(now if now is not None else time.time())
+    out = []
+    for k, slug in await fixtures(conn, now=now):
+        tickers = list(k.team_tickers) + ([k.tie_ticker] if k.tie_ticker
+                                          else [])
+        books = await kalshi_books(conn, tickers)
+        if not any(b.get("readable") for b in books.values()):
+            continue
+        ev = await rules_evidence(conn, ["kalshi:%s" % t for t in tickers]
+                                  + ([slug] if slug else []))
+        insts = KCL.kalshi_instruments(
+            k, {}, books, {t: ev.get("kalshi:%s" % t) for t in tickers})
+        if slug:
+            ident = await pmus_identity(conn, slug)
+            if ident is not None:
+                insts += KCL.pmus_instruments(
+                    k, ident, evidence=ev.get(slug),
+                    book=await pmus_book(conn, slug, now=now))
+        fx = KCL.fixture_of(k)
+        if fx is None:
+            continue
+        out.append((fx, CC.build_claims(fx, insts), insts))
+    return out
+
+
+async def claims_census(conn, *, now: float | None = None) -> dict:
+    """Adriana's claim-first census over the persisted evidence, shaped for
+    adriana.record (pure engine + pure claim layer; no write here)."""
+    from .agents import adriana_claims as AC
+    now = float(now if now is not None else time.time())
+    scans, aliases, fresh = [], 0, 0
+    for fx, built, insts in await assemble(conn, now=now):
+        aliases += len(insts)
+        fresh += sum(1 for i in insts if i.observed_at is not None
+                     and now - float(i.observed_at) <= KMD.BOOK_SLA_S)
+        scans.append(AC.scan_fixture(fx, built, now=now))
+    return AC.census_result(scans, markets_read=aliases, books_fresh=fresh,
+                            skipped={})

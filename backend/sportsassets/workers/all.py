@@ -26,7 +26,8 @@ from .. import loop_health as _LH
 from ..db import heartbeat
 from . import (analytics, bettor_live_loop, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
-               institutional_md, metadata_refresher, mirror_live,
+               institutional_md, kalshi_market_data, metadata_refresher,
+               mirror_live,
                mirror_shadow, poller, premap, price_path, reconciler,
                retention, rn1_observability, roster, roster_auto,
                shadow_bettor, shadow_experimental, shadow_rn1,
@@ -394,6 +395,13 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # deployment that has no institutional credential costs a heartbeat
     # and no venue traffic. INSTITUTIONAL_MD=off stops it outright.
     ("institutional_md", institutional_md.run),
+    # KALSHI AS A CANONICAL VENUE (Kalshi Canonical Venue V1): the complete
+    # open sports catalogue, structured fixtures, books for the fixtures
+    # starting inside 36 h, canonical claims, best all-in routes and
+    # Adriana's claim-first SHADOW scan. GET-only Kalshi reads, its own
+    # KALSHI_HEALTH domain, bounded (books <= 120 / pass). No order, cancel
+    # or capital path. KALSHI_MARKET_DATA=off stops it outright.
+    ("kalshi_market_data", kalshi_market_data.run),
     # THE UNIVERSAL MARKET PLANE IS NOT A SHARED-WORKER LOOP (completion
     # readiness, 2026-10-07). Production OOM-killed this 2 GiB process
     # repeatedly while the market plane's full-universe registry and shards

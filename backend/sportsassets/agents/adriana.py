@@ -430,9 +430,13 @@ async def record(conn, result: dict, *, started: float, finished: float,
                 int(eco["qty"]), Decimal(str(eco["floor_payout_per_set"])),
                 Decimal(str(eco["total_cost"])),
                 Decimal(str(eco["worst_case_net_profit"])),
-                Decimal(str(eco["edge_per_set"])),
+                # the engine names the per-set edge `edge_per_contract`
+                # (one contract per leg per matched set): the same number
+                Decimal(str(eco.get("edge_per_set",
+                                    eco.get("edge_per_contract")))),
                 json.dumps((rec.get("inputs") or {}).get("books") or []),
-                json.dumps(eco, default=str),
+                json.dumps(dict(eco, claim_pair=rec.get("claim_pair"))
+                           if rec.get("claim_pair") else eco, default=str),
                 json.dumps(None if plan is None else {
                     "state": plan.state, "target_qty": plan.target_qty,
                     "leg_a": {"venue": plan.leg_a.venue,
@@ -463,7 +467,10 @@ async def record(conn, result: dict, *, started: float, finished: float,
                     "conditional_on": rec.get("conditional_on"),
                     "books": (rec.get("inputs") or {}).get("books"),
                     "skew_s": (rec.get("inputs") or {}).get("skew_s"),
-                    "payoff_table": rec.get("payoff_table")}, default=str),
+                    "payoff_table": rec.get("payoff_table"),
+                    # (claim-first scans) the canonical claims, the basis
+                    # and the topology read off the routes actually used
+                    "claim_pair": rec.get("claim_pair")}, default=str),
                 finished)
     return {"ok": True, "created": True, "scan_id": scan_id,
             "opportunity_ids": opp_ids, "refusals_recorded": len(refs)}

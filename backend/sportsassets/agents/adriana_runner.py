@@ -58,6 +58,11 @@ async def _phase(summary: dict, name: str, coro):
         return None
 
 
+async def _claims_census(conn, at: float) -> dict:
+    from .. import canonical_claims_db as KCDB
+    return await KCDB.claims_census(conn, now=at)
+
+
 async def pass_once(conn, *, now: float | None = None) -> dict:
     at = float(now if now is not None else time.time())
     t0 = time.monotonic()
@@ -109,6 +114,27 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
                        opportunities=len(result["opportunities"]),
                        refusals=len(result["refusals"]),
                        conditional=c.get("conditional_candidates"))
+    # THE CLAIM-FIRST SCAN (Kalshi Canonical Venue V1): canonical claim
+    # classes over the persisted Kalshi / PMUS evidence, every complementary
+    # pair -- same venue or cross venue -- through the same engine, recorded
+    # as her own second scan (SHADOW, 265). A failure here is a named phase
+    # error; the recorded-books census above is unaffected.
+    claims = await _phase(summary, "claims", _claims_census(conn, at))
+    cn = (len(claims["opportunities"]) + len(claims["refusals"])
+          if claims is not None else 0)
+    if cn:
+        # recorded only when a complementary claim pair was evaluated: an
+        # empty claim pass is in the summary, never an empty scan row
+        crec = await _phase(summary, "claims_record", AD.record(
+            conn, claims, started=at, finished=at + (time.monotonic() - t0),
+            scan_id="adr-claims-%d" % int(at * 1000), status="OK", why=None))
+        cc = claims["census"]
+        summary["claims"] = {
+            "scan": (crec or {}).get("scan_id"),
+            "structures": cn, "opportunities": len(claims["opportunities"]),
+            "refusals": len(claims["refusals"]),
+            "by_topology": cc.get("by_topology"),
+            "pairs_not_complementary": cc.get("pairs_not_complementary")}
     elapsed = round(time.monotonic() - t0, 3)
     if result is None or (rec is None and "record" in summary["phase_errors"]):
         state, outcome = R.S_FAILED, "FAILED"

@@ -809,6 +809,15 @@ try:
 except ImportError:
     log.warning("revenue reliability: api.command_revenue_reliability not "
                 "loaded", exc_info=True)
+# ── VENUES (Kalshi Canonical Venue V1): GET /api/command/venues. GET only,
+# COMMAND auth, READ ONLY: KALSHI_HEALTH and POLYMARKET_HEALTH apart, the
+# Kalshi catalogue / coverage / freshness, canonical claims with every
+# alias and the best all-in route, Adriana's claim-first scans.
+try:
+    from .command_venues import router as _command_venues_router
+    app.include_router(_command_venues_router)
+except ImportError:
+    log.warning("venues: api.command_venues not loaded", exc_info=True)
 # ── COMPLETION READINESS (Completion Readiness Patch V1): GET
 # /api/command/completion-readiness. GET only, COMMAND auth, READ ONLY:
 # runtime, market data, freshness, hard gates, probability / EV authority,
