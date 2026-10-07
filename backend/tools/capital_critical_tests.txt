@@ -1266,6 +1266,7 @@ tests/test_red_team_exposure_lock.py
 tests/test_red_team_chaos.py
 tests/test_red_team_readiness_db.py
 tests/test_red_team_env_cannot_grant_authority.py
+tests/test_adriana_scan_clock.py
 # (PM evidence & acceptance pack V1) package 45/45, golden validation over production mapping / claims / routing / arb as a release gate, forward scoreboard reconciled to the PAPER ledger, PM harness from machine evidence
 tests/test_pm_evidence_package_parity.py
 tests/test_pm_golden_production.py

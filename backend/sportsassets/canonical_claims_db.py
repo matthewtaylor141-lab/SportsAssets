@@ -220,10 +220,18 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
     """Adriana's claim-first census over the persisted evidence, shaped for
     adriana.record (pure engine + pure claim layer; no write here)."""
     from .agents import adriana_claims as AC
+    live = now is None
     now = float(now if now is not None else time.time())
     scans, aliases, fresh = [], 0, 0
     from .redteam import settlement as RTS
-    for fx, built, insts in await assemble(conn, now=now):
+    assembled = await assemble(conn, now=now)
+    if live:
+        # evaluate as of the moment the books were READ: a book the workers
+        # persisted while this pass was reading is not "in the future"
+        # (production 088af82: 21 BOOK_TIME_IN_FUTURE of 139). A venue clock
+        # ahead of ours still is; staleness only gets stricter.
+        now = max(now, time.time())
+    for fx, built, insts in assembled:
         # the settlement certificates, read only: an alias whose rules
         # fingerprint is not the certified one is no leg (red team)
         built, _cert = await RTS.apply(conn, built)

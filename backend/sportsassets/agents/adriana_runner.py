@@ -59,7 +59,7 @@ async def _phase(summary: dict, name: str, coro):
         return None
 
 
-async def _claims_census(conn, at: float) -> dict:
+async def _claims_census(conn, at: float | None) -> dict:
     from .. import canonical_claims_db as KCDB
     return await KCDB.claims_census(conn, now=at)
 
@@ -76,6 +76,7 @@ async def _sentinel(conn, result: dict, scan_id: str, at: float) -> dict:
 
 
 async def pass_once(conn, *, now: float | None = None) -> dict:
+    fixed = now is not None
     at = float(now if now is not None else time.time())
     t0 = time.monotonic()
     run_id = "adriana-run:%s" % uuid.uuid4().hex
@@ -94,10 +95,14 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
     await R.start_run(conn, R.ADRIANA, run_id, now=at,
                       summary={"window_s": AD.BOOK_WINDOW_S})
     rows = await _phase(summary, "read", AD.read_rows(conn, now=at))
+    # evaluated as of the moment the rows were READ (a book persisted while
+    # the read ran is not "in the future"; venue clock skew still is)
+    ev_at = at if fixed else max(at, time.time())
     result = None
     if rows is not None:
         try:
-            result = AD.census(rows, datetime.fromtimestamp(at, timezone.utc))
+            result = AD.census(rows, datetime.fromtimestamp(ev_at,
+                                                            timezone.utc))
         except Exception as exc:                                # noqa: BLE001
             summary["phase_errors"]["census"] = type(exc).__name__
     scan_id = "adr-scan-%d" % int(at * 1000)
@@ -119,7 +124,8 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
             scan_id=scan_id, status=status, why=why))
         if rec and rec.get("created") and result.get("opportunities"):
             summary["sentinel"] = await _phase(
-                summary, "sentinel", _sentinel(conn, result, scan_id, at))
+                summary, "sentinel", _sentinel(
+                    conn, result, scan_id, at if fixed else time.time()))
         if rec and rec.get("created"):
             summary["collaboration"] = await _phase(
                 summary, "collaborate", AD.collaborate(
@@ -138,7 +144,8 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
     # pair -- same venue or cross venue -- through the same engine, recorded
     # as her own second scan (SHADOW, 265). A failure here is a named phase
     # error; the recorded-books census above is unaffected.
-    claims = await _phase(summary, "claims", _claims_census(conn, at))
+    claims = await _phase(summary, "claims", _claims_census(
+        conn, at if fixed else None))
     cn = (len(claims["opportunities"]) + len(claims["refusals"])
           if claims is not None else 0)
     if cn:
@@ -150,8 +157,8 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
             scan_id=cscan, status="OK", why=None))
         if crec and crec.get("created") and claims.get("opportunities"):
             summary["claims_sentinel"] = await _phase(
-                summary, "claims_sentinel", _sentinel(conn, claims, cscan,
-                                                      at))
+                summary, "claims_sentinel", _sentinel(
+                    conn, claims, cscan, at if fixed else time.time()))
         cc = claims["census"]
         summary["claims"] = {
             "scan": (crec or {}).get("scan_id"),

@@ -219,6 +219,41 @@ def test_the_whole_read_runs_read_only_and_returns_every_section():
     assert before == after
 
 
+@pg
+def test_a_failing_section_is_unavailable_evidence_never_a_failed_read(
+        monkeypatch):
+    """Production 088af82: one slow statement cancelled the WHOLE readback
+    (QueryCanceledError). Each section now runs in its own savepoint with
+    its own budget; a failing section is named, timed, and fails the
+    readiness closed while every other section still reads."""
+    import asyncpg
+    from sportsassets.completion import evidence as EVM
+
+    async def boom(conn, **_k):
+        await conn.execute("SELECT pg_sleep(2)")
+    monkeypatch.setattr(EVM, "read_twin", boom)
+    monkeypatch.setattr(CR, "SECTION_TIMEOUT_MS", 500)
+
+    async def go():
+        c = await asyncpg.connect(DSN)
+        try:
+            async with c.transaction(readonly=True):
+                return await CR.read(c)
+        finally:
+            await c.close()
+    got = asyncio.run(go())
+    t = got["section_timings"]
+    assert t["digital_twin"]["ok"] is False
+    assert "QueryCanceled" in t["digital_twin"]["why"]
+    assert got["sections_unavailable"] == ["digital_twin"]
+    assert "SECTION_UNAVAILABLE:digital_twin" in got["readiness"]["blockers"]
+    assert got["readiness"]["status"] == "PAPER_SHADOW_ONLY"
+    assert got["digital_twin"]["status"] == "SECTION_UNAVAILABLE"
+    # every later section still read (the transaction was not aborted)
+    for k in ("revenue", "venue_positions", "arbitrage", "settlement"):
+        assert t[k]["ok"] is True, (k, t[k])
+
+
 # ── §5 the route and its reach ───────────────────────────────────────
 
 def test_the_route_is_get_only_command_auth_no_store_and_registered():

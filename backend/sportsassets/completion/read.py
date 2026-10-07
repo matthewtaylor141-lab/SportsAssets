@@ -398,40 +398,124 @@ def owner_blockers(runtime, venue, refdata_universe) -> list:
     return out
 
 
+#: each section of the readback gets its own savepoint and time budget, so
+#: one slow or failing read is reported as UNAVAILABLE evidence (which fails
+#: the readiness closed) instead of failing the whole readback
+SECTION_TIMEOUT_MS = 30000
+#: the whole readback's budget: a section that would start after it is
+#: reported SKIPPED (never silently dropped)
+TOTAL_BUDGET_S = 80.0
+
+
+class _Sections:
+    """Each section in its own savepoint, with min(section, remaining
+    total) as its statement timeout, timed; a failure returns the section's
+    default and is recorded (never raised)."""
+
+    def __init__(self, conn):
+        self.conn, self.t0, self.timings = conn, time.monotonic(), {}
+
+    async def run(self, name: str, fn, default):
+        start = time.monotonic()
+        left_ms = int((TOTAL_BUDGET_S - (start - self.t0)) * 1000.0)
+        if left_ms <= 1000:
+            self.timings[name] = {"ms": 0.0, "ok": False, "why":
+                                  "SKIPPED_TOTAL_BUDGET_%ds" % TOTAL_BUDGET_S}
+            return default
+        try:
+            async with self.conn.transaction():
+                await self.conn.execute("SET LOCAL statement_timeout = %d"
+                                        % min(SECTION_TIMEOUT_MS, left_ms))
+                out = await fn()
+            self.timings[name] = {"ms": round((time.monotonic() - start)
+                                              * 1000.0, 1), "ok": True}
+            return out
+        except Exception as exc:                                # noqa: BLE001
+            self.timings[name] = {
+                "ms": round((time.monotonic() - start) * 1000.0, 1),
+                "ok": False, "why": "%s: %s" % (type(exc).__name__,
+                                                str(exc)[:160])}
+            return default
+
+
 async def read(conn, *, account_id: str = ACCOUNT_ID,
                now: float | None = None) -> dict:
-    """The whole readback, inside the caller's READ ONLY transaction."""
+    """The whole readback, inside the caller's READ ONLY transaction; every
+    section in its own savepoint with its own budget and timing."""
     from ..capital_readiness import feeds as F
     from ..revenue_reliability import read as RR
     from .. import bettor_paper_freshness as FR
     now = float(now if now is not None else time.time())
-    boot = await _state(conn, "workers_boot")
-    mem = await _heartbeat(conn, "workers_memory")
-    ump = await _heartbeat(conn, UMP_SERVICE)
+    sec = _Sections(conn)
+    down_ = {"status": "SECTION_UNAVAILABLE"}
+
+    async def _runtime():
+        return (await _state(conn, "workers_boot"),
+                await _heartbeat(conn, "workers_memory"),
+                await _heartbeat(conn, UMP_SERVICE))
+    boot, mem, ump = await sec.run("runtime", _runtime, (None, None, None))
     runtime = runtime_block(boot, mem, ump, now=now)
-    snap, why = await latest_snapshot(conn, now=now)
+
+    async def _snap():
+        return await latest_snapshot(conn, now=now)
+    snap, why = await sec.run("market_data", _snap,
+                              (None, "SECTION_UNAVAILABLE"))
     market = market_data_block(snap, why, (ump or {}).get("detail"))
-    fr = await FR.read(conn, account_id, now=now, rows_limit=0)
+
+    async def _fr():
+        return await FR.read(conn, account_id, now=now, rows_limit=0)
+    fr = await sec.run("management_freshness", _fr, {}) or {}
     management = {"status": fr.get("status"), "fresh_rate": fr.get(
         "fresh_rate"), "markable": fr.get("markable"),
         "open_positions": fr.get("open_positions"),
         "fresh": ((fr.get("counts") or {}).get("FRESH") or {}).get("count"),
         "quiet_valid": ((fr.get("counts") or {}).get("QUIET_VALID") or {})
         .get("count"), "target": fr.get("target_fresh_rate")}
-    gates = await F.gates(conn, account_id=account_id, now=now,
-                          source_sha=F.source_sha_from_env())
-    probability = await EV.read_probability(conn)
-    ev = await EV.read_ev(conn, authority=probability["authority"])
-    twin = await EV.read_twin(conn)
-    revenue = await RR.read(conn, account_id=account_id, now=now)
-    venue = venue_positions_block(await _heartbeat(conn, "mirror_shadow"),
-                                  now=now)
-    arb = await arbitrage_block(conn)
-    settle = await settlement_block(conn, account_id)
+
+    async def _gates():
+        return await F.gates(conn, account_id=account_id, now=now,
+                             source_sha=F.source_sha_from_env())
+    gates = await sec.run("gates", _gates, {}) or {}
+
+    async def _prob():
+        return await EV.read_probability(conn)
+    probability = await sec.run("probability", _prob,
+                                dict(down_, authority=None))
+
+    async def _ev():
+        return await EV.read_ev(conn, authority=probability.get("authority"))
+    ev = await sec.run("executable_ev", _ev, dict(down_))
+
+    async def _twin():
+        return await EV.read_twin(conn)
+    twin = await sec.run("digital_twin", _twin, dict(down_))
+
+    async def _rev():
+        return await RR.read(conn, account_id=account_id, now=now)
+    revenue = await sec.run("revenue", _rev, dict(down_))
+
+    async def _venue():
+        return venue_positions_block(await _heartbeat(conn, "mirror_shadow"),
+                                     now=now)
+    venue = await sec.run("venue_positions", _venue, dict(down_))
+
+    async def _arb():
+        return await arbitrage_block(conn)
+    arb = await sec.run("arbitrage", _arb, dict(down_))
+
+    async def _settle():
+        return await settlement_block(conn, account_id)
+    settle = await sec.run("settlement", _settle, dict(down_))
     ready = readiness_block(runtime=runtime, market_data=market,
                             management=management, gates=gates,
                             probability=probability, ev=ev, twin=twin,
                             revenue=revenue, settlement=settle, venue=venue)
+    t = sec.timings
+    down = sorted(k for k, v in t.items() if not v["ok"])
+    if down:
+        ready["blockers"] = list(ready["blockers"]) + [
+            "SECTION_UNAVAILABLE:%s" % k for k in down]
+        ready["status"] = "PAPER_SHADOW_ONLY"
     rv = (revenue or {}).get("data") or {}
     return {
         "version": VERSION, "mode": MODE, "as_of": now,
@@ -456,6 +540,8 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
         "arbitrage": arb,
         "venue_positions": venue,
         "settlement": settle,
+        "section_timings": t,
+        "sections_unavailable": down,
         "owner_blockers": owner_blockers(runtime, venue,
                                          market.get("refdata", {}).get(
                                              "universe_pull")),
