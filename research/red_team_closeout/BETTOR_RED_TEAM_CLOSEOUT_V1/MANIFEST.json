@@ -1,0 +1,24 @@
+{
+  "package": "BETTOR_RED_TEAM_CLOSEOUT_V1",
+  "version": "1.0.0",
+  "built_against_context": {
+    "accepted_tested_closeout_sha": "659edaf21c2deb1dcc032932f38a7ff1ec8456c2",
+    "accepted_release_commit": "a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd",
+    "observed_completion_branch_sha": "2bcdf10c8396a6ffa354c74b6a6ee7c574cb931d",
+    "ev_probability_receipt_sha": "037bdc0b9e056a997eb8c00cbd7a3be246549e70",
+    "profitability_stack_sha": "bfe01a2705291fd3aa7ac3684d44ee9a99473d2d"
+  },
+  "package_tests": 51,
+  "red_team_issues": 50,
+  "authority": {
+    "submit": false,
+    "cancel": false,
+    "capital": false,
+    "live_activation": false
+  },
+  "dependencies": [
+    "BETTOR_COMPLETION_READINESS_PATCH_V1.zip",
+    "BETTOR_KALSHI_CANONICAL_VENUE_V1.zip"
+  ],
+  "final_rule": "CASH/PAPER_SHADOW remains mandatory until every readiness interlock is green and positive independent forward economics are proven."
+}

@@ -1,0 +1,405 @@
+{
+  "package": "BETTOR_RED_TEAM_CLOSEOUT_V1",
+  "issues": [
+    {
+      "id": 1,
+      "failure": "Upgrade exists only in research",
+      "control": "Release gate: exact tested/release/deployed SHA + production readback",
+      "artifact": "release_guard.py",
+      "test": "T21-T25",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 2,
+      "failure": "Branch/release contamination",
+      "control": "Descendant-of-accepted-base check; exact-SHA gates",
+      "artifact": "release_guard.py",
+      "test": "T21-T25",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 3,
+      "failure": "Worker OOM returns",
+      "control": "Source-level UMP isolation dependency + runtime soak requirement + RSS gate in prior Completion package",
+      "artifact": "vendor/BETTOR_COMPLETION_READINESS_PATCH_V1.zip",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 4,
+      "failure": "Process alive but market data dead",
+      "control": "Stream currency gate requires complete authoritative snapshot, no gap, current book",
+      "artifact": "stream_guard.py",
+      "test": "T47-T48",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 5,
+      "failure": "PMX silently falls back to REST",
+      "control": "Source-specific health/readback; do not blend source names",
+      "artifact": "freshness_guard.py",
+      "test": "T19-T20",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 6,
+      "failure": "Kalshi/Polymarket health contamination",
+      "control": "Per-venue health domains; pair requires both healthy",
+      "artifact": "freshness_guard.py",
+      "test": "T19-T20",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 7,
+      "failure": "Wrong fixture mapped",
+      "control": "Dependency on Kalshi canonical package structured mapping",
+      "artifact": "vendor/BETTOR_KALSHI_CANONICAL_VENUE_V1.zip",
+      "test": "dependency",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 8,
+      "failure": "False YES/NO equivalence",
+      "control": "Dependency on exhaustive payoff-vector claim fingerprints",
+      "artifact": "vendor/BETTOR_KALSHI_CANONICAL_VENUE_V1.zip",
+      "test": "dependency",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 9,
+      "failure": "Wrong Kalshi wire semantics",
+      "control": "Explicit-book requirement + canonical package adapter contract",
+      "artifact": "vendor/BETTOR_KALSHI_CANONICAL_VENUE_V1.zip",
+      "test": "dependency",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 10,
+      "failure": "Same-market YES/NO mistaken for arb",
+      "control": "Adriana existing same-market exclusion + canonical claim requirement",
+      "artifact": "integration/CURRENT_SYSTEM_BINDING.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 11,
+      "failure": "Screen price beats all-in cost",
+      "control": "Fee guard + canonical best-all-in router dependency",
+      "artifact": "fee_guard.py",
+      "test": "T26-T27",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 12,
+      "failure": "Stale/wrong fee schedule",
+      "control": "Versioned fee evidence; unknown fee ineligible",
+      "artifact": "fee_guard.py",
+      "test": "T26-T27",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 13,
+      "failure": "Top-of-book depth illusion",
+      "control": "Capacity frontier + full depth/VWAP in Kalshi package",
+      "artifact": "capacity_guard.py",
+      "test": "T39-T40",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 14,
+      "failure": "Equivalent aliases hide duplicate exposure",
+      "control": "Canonical exposure lock",
+      "artifact": "claim_exposure.py",
+      "test": "T01-T03",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 15,
+      "failure": "Asynchronous arb books",
+      "control": "Venue health/stream gates + execution revalidation",
+      "artifact": "freshness_guard.py/two_leg_sentinel.py",
+      "test": "T05,T19-T20",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 16,
+      "failure": "Guaranteed economics confused with guaranteed execution",
+      "control": "Two-leg sentinel; only LOCKED after matched fills",
+      "artifact": "two_leg_sentinel.py",
+      "test": "T04-T11",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 17,
+      "failure": "Cross-venue cash unavailable",
+      "control": "Truth quorum requires venue balances; readiness stays fail-closed",
+      "artifact": "truth_quorum.py",
+      "test": "T12-T15",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 18,
+      "failure": "Order retry duplicates exposure",
+      "control": "Chaos acceptance requires reconcile-before-retry; integrate existing Kalshi ambiguity logic",
+      "artifact": "CHAOS_ACCEPTANCE_MATRIX.md",
+      "test": "C10",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 19,
+      "failure": "Partial fills mis-accounted",
+      "control": "Two-leg sentinel tracks matched/unmatched qty and repair state",
+      "artifact": "two_leg_sentinel.py",
+      "test": "T08-T11",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 20,
+      "failure": "Reconnect creates phantom freshness",
+      "control": "Complete snapshot required after connect",
+      "artifact": "stream_guard.py",
+      "test": "T47",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 21,
+      "failure": "Clock skew",
+      "control": "Future/stale book semantics required in venue adapters; chaos case",
+      "artifact": "CHAOS_ACCEPTANCE_MATRIX.md",
+      "test": "C14",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 22,
+      "failure": "429 retry storm",
+      "control": "Independent venue health + rate-limit RED; no SLA widening",
+      "artifact": "freshness_guard.py",
+      "test": "T19",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 23,
+      "failure": "New listings missed",
+      "control": "Dependency on completion/Kalshi packages: cached catalogue + state-change path",
+      "artifact": "vendor packages",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 24,
+      "failure": "Settlement rules change after mapping",
+      "control": "Rules fingerprint invalidates certificate",
+      "artifact": "settlement_guard.py",
+      "test": "T28",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 25,
+      "failure": "Directional model remains wrong",
+      "control": "Final readiness requires positive edge; prior negative receipts immutable",
+      "artifact": "readiness.py",
+      "test": "T50-T51",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 26,
+      "failure": "Repeated rows inflate sample",
+      "control": "Independent-event gate",
+      "artifact": "sample_integrity.py",
+      "test": "T34-T36",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 27,
+      "failure": "Strategy mining finds fake winners",
+      "control": "Preregistered candidate / holdout / PBO / DSR gate",
+      "artifact": "sample_integrity.py",
+      "test": "T37-T38",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 28,
+      "failure": "Bad subgroup hidden by global results",
+      "control": "Integrate regime-specific authority; readiness accepts only proven sleeves",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 29,
+      "failure": "Digital Twin lies about fills",
+      "control": "Twin certification gate",
+      "artifact": "digital_twin_gate.py",
+      "test": "T31-T33",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 30,
+      "failure": "Maker selection bias",
+      "control": "Directive requires conditional-on-fill + opportunity-cost evidence",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 31,
+      "failure": "Execution costs measured at wrong horizon",
+      "control": "Directive requires only observed horizons; unknown remains UNMEASURED",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 32,
+      "failure": "Xavier hindsight",
+      "control": "Directive preserves frozen entry counterfactuals",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 33,
+      "failure": "Allie double-counts diversification",
+      "control": "Canonical exposure lock + event concentration",
+      "artifact": "claim_exposure.py",
+      "test": "T01-T03",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 34,
+      "failure": "Karen over-blocks",
+      "control": "Correct economic value = saved loss - false-block cost",
+      "artifact": "karen_value.py",
+      "test": "T43",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 35,
+      "failure": "Agent feedback self-reinforcement",
+      "control": "Independent sample/holdout + Audrey governance directive",
+      "artifact": "sample_integrity.py",
+      "test": "T34-T38",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 36,
+      "failure": "Management failure while entries continue",
+      "control": "Directive preserves strict management rail; no new entry on stale/unprotected held positions",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 37,
+      "failure": "Settlement losses disappear",
+      "control": "Truth quorum + attribution/reconciliation mandate",
+      "artifact": "truth_quorum.py/attribution.py",
+      "test": "T12-T15,T44-T45",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 38,
+      "failure": "Agent P&L double-counted",
+      "control": "Attribution must reconcile exactly to realized P&L",
+      "artifact": "attribution.py",
+      "test": "T44-T45",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 39,
+      "failure": "Ledger and venue disagree",
+      "control": "Truth quorum freezes readiness on mismatch",
+      "artifact": "truth_quorum.py",
+      "test": "T12-T15",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 40,
+      "failure": "Wrong credential in slot",
+      "control": "Credential-class gate",
+      "artifact": "credential_guard.py",
+      "test": "T46",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 41,
+      "failure": "Execution authority leaks",
+      "control": "Directive preserves AST/import/process locks and SHADOW authority",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 42,
+      "failure": "Env toggle activates live money",
+      "control": "Directive requires code/release approval; env alone cannot grant authority",
+      "artifact": "CLAUDE_DIRECTIVE.md",
+      "test": "integration",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 43,
+      "failure": "UI reports stale green",
+      "control": "Metric truth gate",
+      "artifact": "ui_truth.py",
+      "test": "T41-T42",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 44,
+      "failure": "Global freshness hides held stale position",
+      "control": "Separate held/priority/venue health requirements",
+      "artifact": "freshness_guard.py/readiness.py",
+      "test": "T19-T20,T50-T51",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 45,
+      "failure": "Capacity extrapolated from tiny trades",
+      "control": "Positive capacity frontier only",
+      "artifact": "capacity_guard.py",
+      "test": "T39-T40",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 46,
+      "failure": "Positive PAPER is luck",
+      "control": "Independent-event + lower-bound / forward evidence mandate",
+      "artifact": "sample_integrity.py/readiness.py",
+      "test": "T34-T38,T51",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 47,
+      "failure": "Revenue target forces trades",
+      "control": "Deployment capped at proven positive capacity",
+      "artifact": "capacity_guard.py",
+      "test": "T40",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 48,
+      "failure": "Arb too rare for revenue reliability",
+      "control": "Mechanism-specific capacity and profit breaker; combine only proven sleeves",
+      "artifact": "profit_breaker.py/capacity_guard.py",
+      "test": "T16-T18,T39",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 49,
+      "failure": "Migration drift",
+      "control": "Applied fingerprint + fresh DB + forward-only gate",
+      "artifact": "migration_guard.py",
+      "test": "T49",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    },
+    {
+      "id": 50,
+      "failure": "Tested code differs from deployed code",
+      "control": "Exact tested/release/deployed SHA equality",
+      "artifact": "release_guard.py",
+      "test": "T22-T23",
+      "closure": "CLOSED_IN_PACKAGE_REQUIRES_INTEGRATION_PROOF"
+    }
+  ]
+}
