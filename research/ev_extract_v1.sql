@@ -37,7 +37,7 @@ dec AS (
       FROM d0 JOIN bk USING (strategy, us_market_slug, holding_side, bkt)
      WHERE NOT bk.has_enter
      ORDER BY d0.strategy, d0.us_market_slug, d0.holding_side, d0.bkt, d0.decided_at) r)
-SELECT json_build_object(
+SELECT (jsonb_build_object(
   'id', dec.decision_id, 'at', extract(epoch FROM dec.decided_at),
   'strategy', dec.strategy, 'policy_version', dec.policy_version, 'slug', dec.us_market_slug,
   'side', dec.holding_side, 'verdict', dec.verdict, 'refusal', dec.refusal,
@@ -51,7 +51,7 @@ SELECT json_build_object(
                      THEN (dec.economics->>'executable_price')::float8 END,
   'fees_usd', CASE WHEN jsonb_typeof(dec.economics->'fees_usd') = 'number'
                    THEN (dec.economics->>'fees_usd')::float8 END,
-  'limit', dec.limit_price, 'qty', dec.proposed_qty,
+  'limit', dec.limit_price, 'qty', dec.proposed_qty) || jsonb_build_object(
   'v_provider', v.provider, 'v_book', v.book, 'v_devig', v.devig_method,
   'v_age_s', v.age_s, 'v_observed', extract(epoch FROM v.observed_at), 'v_prob', v.probability,
   'v_settlement_rule', v.settlement_rule, 'v_payout_event', v.payout_event,
@@ -63,7 +63,7 @@ SELECT json_build_object(
   'start', extract(epoch FROM pm.game_start),
   'registry_settlement', reg.settlement_state,
   'bid', b.bid, 'ask', b.ask, 'bid_q', b.bid_q, 'ask_q', b.ask_q, 'book_at', extract(epoch FROM b.at),
-  'close_bid', cl.bid, 'close_ask', cl.ask, 'close_at', extract(epoch FROM cl.at))
+  'close_bid', cl.bid, 'close_ask', cl.ask, 'close_at', extract(epoch FROM cl.at)))::text
   FROM dec
   JOIN lab2 ON lab2.slug = dec.us_market_slug
   JOIN bk ON bk.strategy = dec.strategy AND bk.us_market_slug = dec.us_market_slug
