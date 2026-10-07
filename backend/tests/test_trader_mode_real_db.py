@@ -352,3 +352,25 @@ def test_the_read_model_holds_no_order_or_venue_authority():
         for bad in ("pmus", "execmirror", "live_executor", "kalshi_orders",
                     "bettor_funded_execution", "pmx"):
             assert not any(m.split(".")[-1] == bad for m in mods), (rel, m)
+
+
+@pg
+async def test_a_fresh_read_with_an_empty_exit_side_is_named_not_absent():
+    conn = await H.connect()
+    try:
+        a = await H.new_account(conn, "trdr5")
+        g = "paper_g_%s_ex" % a["account_id"][-10:]
+        s = "%s:ex" % a["account_id"]
+        await _fill(conn, a, slug=s, group=g)
+        # a successful read of the market with NO bid: the LONG's exit side
+        # (the bids) is empty
+        await H.observe(conn, s, T + 20, offers=[(0.45, 50)])
+        [p] = (await _read(a, T + 21))["positions"]
+        assert p["quote"]["current"] is False
+        assert p["quote"]["why"] != "NO_SUCCESSFUL_BOOK_READ"
+        assert p["quote"]["why"] != "BOOK_READ_OLDER_THAN_300S"
+        # 400 s later the same read is expired, named as such
+        [q] = (await _read(a, T + 420))["positions"]
+        assert q["quote"]["why"] == "BOOK_READ_OLDER_THAN_300S"
+    finally:
+        await conn.close()

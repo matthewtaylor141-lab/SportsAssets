@@ -95,14 +95,28 @@ def _mark(obs, side, now):
     acq = BS.acquisition_ladder(md, intent=intent)
     bid = T.price(ex.get("best_exit_price")) if ex.get("ok") else None
     ask = T.price(acq["levels"][0].get("acquisition_price")) if acq.get("ok") and acq.get("levels") else None
-    current = bid is not None and T.fresh_at(o.get("observed_at"), now, T.BOOK_LIMIT_S)
+    read_fresh = T.fresh_at(o.get("observed_at"), now, T.BOOK_LIMIT_S)
+    current = bid is not None and read_fresh
+    # THE REASON IS THE READ'S OWN (production 2026-10-07: seven fresh reads
+    # of OPEN markets whose exit side was empty were labelled
+    # BOOK_ABSENT_OR_EXPIRED). No row -> absent; a row past the 300 s limit
+    # -> expired; a fresh read with no executable level on the side a close
+    # consumes -> that, by name (bettor_paper_freshness calls it UNMARKED).
+    if current:
+        why = None
+    elif not o:
+        why = "NO_SUCCESSFUL_BOOK_READ"
+    elif not read_fresh:
+        why = "BOOK_READ_OLDER_THAN_300S"
+    else:
+        why = ex.get("refusal") or "EXIT_SIDE_HAS_NO_EXECUTABLE_LEVEL"
     return {"bid": bid, "ask": ask, "at": T.epoch(o.get("observed_at")),
             "source": o.get("source"), "read_basis": o.get("read_basis"),
             "observation_id": o.get("obs_id"), "current": current,
             "depth_at_bid": T.num(ex.get("size_at_best")),
             "total_exit_depth": T.num(ex.get("displayed_depth")),
             "market_state": o.get("market_state"),
-            "why": None if current else ex.get("refusal") or "BOOK_ABSENT_OR_EXPIRED"}
+            "why": why}
 
 
 def project_rows(raw, *, now, games=None):
