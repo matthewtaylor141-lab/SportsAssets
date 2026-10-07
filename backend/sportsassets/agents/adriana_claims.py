@@ -215,6 +215,13 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                     continue
                 if a.key in conts and b.key in conts:
                     combos.append((conts[a.key], conts[b.key]))
+        if not combos and same and not dropped:
+            # every combination of the two classes is one market's YES and
+            # NO: one pool that nets (Kalshi rep 2026-10-07), never a
+            # structure -- counted, never recorded as a refusal
+            out["same_market_only_pairs"] = out.get(
+                "same_market_only_pairs", 0) + 1
+            continue
         recs = []
         for (ia, ca, na), (ib, cb, nb) in combos:
             books = [A.Book(i.venue, i.market_id, c.side, tuple(i.asks),
@@ -289,7 +296,9 @@ def census_result(scans: list, *, markets_read: int, books_fresh: int,
                        s["pairs_not_complementary"] for s in scans),
                    same_market_pairs_excluded=sum(
                        s.get("same_market_pairs_excluded", 0)
-                       for s in scans))
+                       for s in scans),
+                   same_market_only_pairs=sum(
+                       s.get("same_market_only_pairs", 0) for s in scans))
     return {"opportunities": opps, "refusals": refs, "census": summary,
             "books_fresh": books_fresh}
 

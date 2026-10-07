@@ -214,3 +214,29 @@ def test_the_packaged_samples_are_the_recorded_source_records():
     pkg = (pathlib.Path(G.__file__).resolve().parents[1] / "pm_evidence" /
            "data" / G.KT_SAMPLES).read_bytes()
     assert pkg == (SRC / "market_rules_samples_2026-10-07.jsonl").read_bytes()
+
+
+def test_a_pair_of_one_markets_yes_and_no_is_never_recorded_as_a_structure():
+    """Production 08828d04 (rulebook bound): the only complementary claim
+    pairs were one market's YES and NO; they were excluded yet recorded as
+    32 CLAIM_LEG_HAS_NO_EVALUABLE_ALIAS refusals. They are counted, never a
+    structure."""
+    from sportsassets.agents import adriana_claims as AC
+    from sportsassets.pm_bind import golden as G
+    ev = _bound(MLB)
+    fx = CC.Fixture(event_key="T:MLB2", sport="BASEBALL", league="MLB",
+                    start_epoch=G.NOW + 3600, outcome_kind="TWO_WAY",
+                    home="H", away="A")
+
+    def inst(mid, side, subj):
+        return CC.Instrument(
+            venue="KALSHI", market_id=mid, side=side, subject=subj,
+            settlement=dict(ev["settlement"]), settlement_status="PROVEN",
+            mapping_status="ESTABLISHED", asks=((CC.Decimal("0.40"), 100),),
+            observed_at=G.NOW, book_basis="T", sport="BASEBALL",
+            fee_terms=G._kterms())
+    insts = [inst("K-A", "YES", "AWAY"), inst("K-A", "NO", "AWAY"),
+             inst("K-H", "YES", "HOME"), inst("K-H", "NO", "HOME")]
+    res = AC.scan_fixture(fx, CC.build_claims(fx, insts), now=G.NOW)
+    assert res["records"] == []
+    assert res["same_market_only_pairs"] >= 1
