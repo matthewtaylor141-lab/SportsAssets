@@ -1,0 +1,20 @@
+{
+  "verified_against_sha": "659edaf21c2deb1dcc032932f38a7ff1ec8456c2",
+  "current_logic_sources": {
+    "strategy_lifecycle": "backend/migrations/290_paper_strategy_lifecycle.sql",
+    "score_tournament": "backend/migrations/300_execution_calibration_and_score_tournament.sql",
+    "shadow_counterfactuals": "backend/migrations/305_paper_capital_authority_shadow.sql",
+    "profitability_bind": "backend/migrations/309_paper_profitability_bind.sql",
+    "counterfactual_variants": "backend/migrations/311_paper_profitability_stack.sql",
+    "derek": "backend/migrations/153_derek.sql",
+    "karen": "backend/migrations/207_karen_red_team.sql",
+    "xavier": "backend/migrations/206_xavier_management_thesis.sql",
+    "audrey": "backend/migrations/155_audrey_audit.sql",
+    "agent_authorities": "backend/migrations/266_archer_execution_agent_rename.sql"
+  },
+  "mode": "RESEARCH_PAPER_SHADOW_ONLY",
+  "authority_changes": "NONE",
+  "writes_to_production": "NONE",
+  "historical_paper_mutation": "FORBIDDEN",
+  "small_live": "SHADOW"
+}
