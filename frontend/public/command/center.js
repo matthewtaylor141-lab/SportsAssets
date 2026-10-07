@@ -786,6 +786,8 @@
       /* Legacy Mirror Validation · Paper vs Actual is its own static page (live.html),
        * not a view of this evidence read, so it is a plain link. */
       + '<a class="cc-tab" href="live.html">Legacy mirror</a>'
+      /* Revenue readiness reads its own endpoint, so it is its own page. */
+      + '<a class="cc-tab" href="revenue.html">Revenue readiness</a>'
       + '</nav></header>';
   }
 

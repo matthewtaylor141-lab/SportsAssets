@@ -159,6 +159,14 @@
   status = 200
   force = true
 
+# Read-only revenue readiness (agent certification, CASH-incumbent tournament,
+# regime matrix, daily plan). Stable management URL.
+[[redirects]]
+  from = "https://command.bettortoken.com/revenue"
+  to = "/command/revenue.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/allocator"
   to = "/command/agent.html"

@@ -1,0 +1,54 @@
+/* Revenue Readiness -- layered on trader.css tokens; read-only management surface. */
+.rv-section{background:#fff;border:1px solid var(--line);border-radius:13px;box-shadow:var(--shadow);padding:18px 20px;margin-bottom:18px;min-width:0}
+.rv-section h2{font-size:17px;letter-spacing:-.3px;margin-bottom:4px}
+.rv-section .rv-note{font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.55}
+.rv-status{font:11px var(--mono);padding:7px 10px;border-radius:8px;border:1px solid var(--line);background:#f6faf7;white-space:nowrap}
+.rv-status.cash{color:var(--amber);border-color:#e4c99f;background:#fff8ec}
+.rv-status.ready{color:var(--green);border-color:#9bcbb6;background:var(--green-light)}
+.rv-status.bad{color:var(--red);border-color:#eac3b1;background:#fff6f1}
+.rv-metrics{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:0}
+.rv-metric{padding:4px 16px;border-right:1px solid #e1e8e2;min-width:0}
+.rv-metric:last-child{border:0}
+.rv-metric small{display:block;font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.rv-metric b{display:block;font-size:22px;font-weight:650;letter-spacing:-.6px;margin-top:4px;overflow-wrap:anywhere}
+.rv-metric span{display:block;font-size:10px;color:var(--muted);margin-top:2px}
+.rv-reasons{margin:0;padding-left:18px;font-size:12px;line-height:1.7}
+.rv-reasons code{font:11px var(--mono);overflow-wrap:anywhere}
+.rv-table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+.rv-table{border-collapse:collapse;width:100%;font-size:12px;min-width:720px}
+.rv-table th{text-align:left;font-size:9px;letter-spacing:.08em;color:#77856f;padding:10px;background:#f7faf4;border-bottom:1px solid var(--line);white-space:nowrap}
+.rv-table td{padding:10px;border-bottom:1px solid #edf1e9;vertical-align:top;font-variant-numeric:tabular-nums}
+.rv-table td.rv-why{font:10px var(--mono);color:#5f7064;max-width:360px;overflow-wrap:anywhere}
+.rv-badge{display:inline-block;font-size:9px;font-weight:750;letter-spacing:.06em;padding:4px 7px;border-radius:5px;white-space:nowrap}
+.rv-LICENSED,.rv-GREEN{background:var(--green-light);color:var(--green)}
+.rv-PROBATION,.rv-AMBER{background:#fff3df;color:var(--amber)}
+.rv-SHADOW_ONLY{background:#eef2f0;color:#5d6f67}
+.rv-SUSPENDED,.rv-RED{background:#fdebe8;color:var(--red)}
+.rv-CASH-champ{background:#163c2f;color:#f3fbef}
+.rv-regimes{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
+.rv-cell{border:1px solid var(--line);border-left-width:5px;border-radius:8px;padding:9px 10px;font-size:11px;min-width:0}
+.rv-cell.rv-c-GREEN{border-left-color:var(--green)}
+.rv-cell.rv-c-AMBER{border-left-color:var(--amber)}
+.rv-cell.rv-c-RED{border-left-color:var(--red)}
+.rv-cell b{display:block;font-size:12px;overflow-wrap:anywhere}
+.rv-cell small{display:block;font:9px var(--mono);color:#6f8076;margin-top:3px;overflow-wrap:anywhere}
+.rv-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:10px;margin-bottom:10px}
+.rv-wf{display:grid;gap:7px}
+.rv-wf-row{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr) 110px;gap:10px;align-items:center;font-size:12px}
+.rv-wf-row .bar{height:14px;border-radius:4px;background:#e6ede8;position:relative;overflow:hidden}
+.rv-wf-row .bar i{position:absolute;top:0;bottom:0;border-radius:4px}
+.rv-wf-row .bar i.neg{background:var(--red)}
+.rv-wf-row .bar i.pos{background:var(--green)}
+.rv-wf-row .v{font:11px var(--mono);text-align:right}
+.rv-wf-row .na{font:10px var(--mono);color:var(--muted)}
+#rv-foot{font-size:10px;color:#7b8b7f;line-height:1.7}
+@media(max-width:900px){.rv-metrics{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px 0}.rv-metric:nth-child(3){border:0}}
+@media(max-width:600px){.rv-section{padding:14px 13px;border-radius:11px}.rv-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.rv-metric{padding:4px 10px}.rv-metric:nth-child(2n){border:0}.rv-metric b{font-size:18px}.rv-wf-row{grid-template-columns:minmax(0,1fr) 90px}.rv-wf-row .bar{display:none}}
+.topbar{min-width:0}.topbar nav{min-width:0;overflow:hidden;gap:20px}.topbar nav a{white-space:nowrap}.top-right{flex-shrink:0}
+/* dark command header, as on the other Command pages: the approved white logo needs it */
+.topbar{background:#03080d;border-bottom-color:#13232a}
+.topbar .real-brand-logo{height:26px;width:auto;max-width:190px;display:block}
+.topbar .wordmark small,.topbar nav a{color:#9fb2ad}
+.topbar nav [aria-current]{color:#f2f7f4;border-color:#3fbf93}
+.topbar .brand-divider{background:#2b3d42}
+@media(max-width:600px){.topbar .real-brand-logo{height:20px}}
