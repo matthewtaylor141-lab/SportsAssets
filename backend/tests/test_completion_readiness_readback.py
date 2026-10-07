@@ -286,3 +286,16 @@ def test_the_completion_modules_reach_no_order_or_venue_write_path():
         text = f.read_text()
         for w in ("INSERT INTO", "UPDATE market", "DELETE FROM"):
             assert w not in text, (f.name, w)
+
+
+def test_probability_and_ev_reads_join_premap_once_not_per_row():
+    """Production 088af82/08828d04: the probability read took 43 s (a nested
+    loop over paper_decisions and one sequential us_premap probe per row)
+    and timed out its section. The rewrites returned the SAME rows on
+    production data (479 / 3,094, zero difference either way:
+    research/rt_prob_sql_equivalence.sql) in 251 ms / 211 ms."""
+    from sportsassets.completion import evidence as EVM
+    for q in (EVM.PROB_SQL, EVM.EV_SQL):
+        assert "LATERAL" not in q.upper()
+        assert "DISTINCT ON (market_slug)" in q
+    assert "IN (SELECT slug FROM slugs)" in EVM.PROB_SQL

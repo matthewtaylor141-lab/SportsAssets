@@ -152,7 +152,14 @@ jobs:
         run: |
           set +e
           echo "::add-mask::$ADMIN_TOKEN"
-          mig=$(jq '.data.readiness.controls.MIGRATION_INTEGRITY.status == "GREEN"' acc/red_team.json 2>/dev/null || echo false)
+          # the FINGERPRINT half of migration integrity (applied history ==
+          # this build's files); the fresh-database half is the
+          # capital-critical conclusion this same receipt carries
+          mig=$(jq '.data.readiness.controls.MIGRATION_INTEGRITY.evidence as $e
+                    | ($e.applied_fingerprint != null)
+                      and ($e.applied_fingerprint == $e.repo_fingerprint)
+                      and (($e.edited_in_place // []) | length == 0)
+                      and (($e.applied_not_in_build // []) | length == 0)' acc/red_team.json 2>/dev/null || echo false)
           jq -n --slurpfile l acc/lineage.json --slurpfile g acc/gates.json --slurpfile p acc/pm_before.json \
                 --slurpfile r acc/render.json \
                 --arg s "$SHA" --argjson m "${mig:-false}" '

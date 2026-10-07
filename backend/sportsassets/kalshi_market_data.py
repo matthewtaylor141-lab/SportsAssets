@@ -178,6 +178,28 @@ def _get(tx, pacer, health, path, params, timeout_s=KC.TIMEOUT_S):
     return body, err
 
 
+#: a catalogue page refused 429 is retried after the health backoff, at most
+#: this many times, before the walk stops (Kalshi: no penalty, the bucket
+#: refills, "apply exponential backoff on 429"); every 429 is still counted
+PAGE_429_RETRIES = 3
+PAGE_429_MAX_WAIT_S = 16.0
+
+
+def _get_patient(tx, pacer, health, path, params, spend):
+    """_get, retrying the SAME request after the 429 backoff (each retry is
+    a budgeted request). Returns (body, err, retries)."""
+    tries = 0
+    while True:
+        body, err = _get(tx, pacer, health, path, params)
+        if err not in ("HTTP_429", "BACKOFF") or tries >= PAGE_429_RETRIES \
+                or health is None or not spend():
+            return body, err, tries
+        tries += 1
+        wait = min(PAGE_429_MAX_WAIT_S,
+                   max(1.0, health.backoff_until - health.clock()))
+        pacer.sleep(wait)
+
+
 # ── the complete catalogue ─────────────────────────────────────────────
 
 COMPACT_KEYS = ("ticker", "event_ticker", "status", "market_type",
@@ -260,9 +282,12 @@ def walk_open_sports(transport=None, *, health: KalshiHealth | None = None,
         p = {"status": "open", "limit": PAGE_LIMIT, "mve_filter": "exclude"}
         if cursor:
             p["cursor"] = cursor
-        body, err = _get(tx, pacer, health, "/markets", p)
+        body, err, tries = _get_patient(tx, pacer, health, "/markets", p,
+                                        spend)
+        out["page_429_retries"] = out.get("page_429_retries", 0) + tries
         if err:
-            out["stopped"] = (R_RATE_LIMITED if err == "HTTP_429"
+            out["stopped"] = (R_RATE_LIMITED if err in ("HTTP_429",
+                                                        "BACKOFF")
                               else "%s:%s" % (R_TRUNCATED_HTTP, err))
             break
         out["pages"] += 1

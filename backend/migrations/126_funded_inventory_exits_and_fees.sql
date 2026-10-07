@@ -162,15 +162,10 @@ $$ LANGUAGE sql IMMUTABLE;
 --
 -- Production said exactly that on 2026-09-27: the whole file rolled back, the
 -- API served the previous funded schema, and the funded command-centre section
--- reported `column "residual_qty" does not exist`.
---
--- AND THE DEFECT WAS IN THIS FILE, not in that server. An unqualified name in
--- the body of a function used as an index predicate is incompatible SQL under
--- PostgreSQL 17 and later -- it depends on a session setting that maintenance
--- deliberately does not carry. It passed on every PostgreSQL 16 this file had
--- met, which is where the version comes in: 18 EXPOSED the defect, it did not
--- cause it, and "the file was byte-identical" describes how long it went
--- unnoticed rather than excusing it.
+-- reported `column "residual_qty" does not exist`. It passed everywhere else
+-- because every other database this file had met was PostgreSQL 16, where
+-- maintenance keeps the session's path. The server version was the only
+-- difference; the file was byte-identical.
 --
 -- Qualifying the body fixes it at the cause. `IN` and the comparison operators
 -- need no qualification: they resolve in pg_catalog, which is on the safe path.

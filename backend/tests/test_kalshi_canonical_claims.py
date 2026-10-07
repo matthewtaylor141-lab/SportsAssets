@@ -462,6 +462,52 @@ def test_the_backoff_is_bounded_and_the_walk_stops_named_on_429():
     assert h.http_429 == 1 and h.blocked()
 
 
+def test_a_429_on_a_catalogue_page_is_retried_after_backoff_not_a_stop():
+    """Production 08828d04: one 429 stopped every catalogue walk at page
+    77, so the catalogue never completed. Kalshi: no penalty, the bucket
+    refills, back off exponentially. The SAME page is retried after the
+    backoff; the 429 is still counted in KALSHI_HEALTH."""
+    t = {"now": 1000.0}
+
+    def sleep(s):
+        t["now"] += s
+    calls = {"markets": 0}
+
+    class TX:
+        def get(self, url, params=None, timeout=None):
+            class R:
+                status_code = 200
+                body = {}
+
+                def json(self):
+                    return self.body
+            r = R()
+            if url.endswith("/series"):
+                r.body = {"series": [{"ticker": "KXMLBGAME",
+                                      "category": "Sports"}]}
+            elif url.endswith("/markets"):
+                calls["markets"] += 1
+                if calls["markets"] == 2:
+                    r.status_code = 429
+                    r.body = {"error": "too many requests"}
+                elif calls["markets"] == 1:
+                    r.body = {"markets": [{"ticker": "KXMLBGAME-A-X",
+                                           "event_ticker": "KXMLBGAME-A"}],
+                              "cursor": "c2"}
+                else:
+                    r.body = {"markets": [{"ticker": "KXMLBGAME-B-Y",
+                                           "event_ticker": "KXMLBGAME-B"}]}
+            return r
+    h = KMD.KalshiHealth(clock=lambda: t["now"])
+    got = KMD.walk_open_sports(TX(), health=h, sleep=sleep,
+                               clock=lambda: t["now"])
+    assert got["complete"] is True and got["stopped"] is None
+    assert got["page_429_retries"] == 1
+    assert h.http_429 == 1                      # still counted, never hidden
+    assert [m["ticker"] for m in got["markets"]] == ["KXMLBGAME-A-X",
+                                                     "KXMLBGAME-B-Y"]
+
+
 # ── 24 Adriana's authority ───────────────────────────────────────────
 
 def test_24_adriana_holds_zero_submit_cancel_capital_authority():
