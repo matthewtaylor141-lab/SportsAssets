@@ -1249,13 +1249,12 @@ tests/test_pinnapi_held_confirmation.py
 tests/test_premap_ddl_never_queues.py
 tests/test_market_plane_required_sets.py
 tests/test_revenue_reliability_readback.py
-# (completion readiness V1) shared-worker market-plane isolation (P0 OOM), subscribe-all, bounded refdata / catalogue, readiness logic + readback, probability / EV / revenue reliability authority
+# (completion readiness V1) shared-worker market-plane isolation (P0 OOM), subscribe-all, bounded refdata / catalogue, readiness logic + readback (the revenue-reliability package parity oracle needs numpy and stays in backend-tests)
 tests/test_shared_worker_isolation.py
 tests/test_ump_subscribe_all.py
 tests/test_catalogue_memory_and_time_budgets.py
 tests/test_completion_readiness_logic.py
 tests/test_completion_readiness_readback.py
-tests/test_revenue_reliability_parity.py
 # (Kalshi canonical venue V1 + Kalshi rep production contract) claims by payoff vector, fee-aware routing, fail-closed mapping, same-market netting, cross-market routes, WS snapshot / seq / gap / resubscribe, account limits
 tests/test_kalshi_canonical_claims.py
 tests/test_kalshi_canonical_db.py
