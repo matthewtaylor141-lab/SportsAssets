@@ -63,7 +63,9 @@ def test_the_boot_marker_names_the_dedicated_only_loops(monkeypatch):
     from sportsassets.workers import all as workers_all
 
     m = workers_all._boot_marker("2026-10-07T00:00:00+00:00")
-    assert m["dedicated_only"] == ["universal_market_plane"]
+    assert m["dedicated_only"] == ["kalshi_ws_market_data",
+                                   "universal_market_plane"]
+    assert "kalshi_ws_market_data" not in m["started"]
     assert "universal_market_plane" not in m["started"]
     assert "sportsassets-market-plane" in m["dedicated_only_runtime"]["universal_market_plane"]
 

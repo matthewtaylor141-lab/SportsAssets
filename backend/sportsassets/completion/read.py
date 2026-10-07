@@ -373,8 +373,12 @@ def owner_blockers(runtime, venue, refdata_universe) -> list:
                        "standard) and enter exactly PMX_CLIENT_ID, PMX_KEY_ID "
                        "and PMX_PRIVATE_KEY_B64 (the values already on "
                        "sportsassets-workers) in its dashboard; DATABASE_URL "
-                       "from sportsassets-db. Nothing else: no PMUS key, no "
-                       "LIVE_TRADING_ENABLED, no admin token" % DEDICATED_SPEC),
+                       "from sportsassets-db; and, for the Kalshi WebSocket "
+                       "book runtime beside it, KALSHI_API_KEY_ID + "
+                       "KALSHI_PRIVATE_KEY_PEM (a Kalshi API key, read-only "
+                       "use -- Kalshi rep 2026-10-07). Nothing else: no PMUS "
+                       "key, no LIVE_TRADING_ENABLED, no Kalshi trading "
+                       "switch, no admin token" % DEDICATED_SPEC),
             "why_owner": ("render-ops has no service-create action and the "
                           "PMX secret values are entered by the owner, never "
                           "copied by automation")})

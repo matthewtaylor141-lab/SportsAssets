@@ -65,7 +65,8 @@ def _settlement(evidence: dict | None) -> tuple:
 
 
 def kalshi_instruments(k: KMD.KalshiFixture, markets: dict, books: dict,
-                       evidence: dict, *, sport: str | None = None) -> list:
+                       evidence: dict, *, sport: str | None = None,
+                       fee_terms: dict | None = None) -> list:
     """`markets` {ticker: market}, `books` {ticker: book_from_orderbook},
     `evidence` {ticker: settlement_rule_registry.kalshi_rule_evidence}."""
     out = []
@@ -103,7 +104,8 @@ def kalshi_instruments(k: KMD.KalshiFixture, markets: dict, books: dict,
                 book_basis=KMD.ORDERBOOK_PROTOCOL["basis"]
                 if b.get("readable") else None,
                 sport=sport or k.sport, team_code=code,
-                rules_sha256=(evidence.get(t) or {}).get("rules_sha256")))
+                rules_sha256=(evidence.get(t) or {}).get("rules_sha256"),
+                fee_terms=fee_terms))
     return out
 
 

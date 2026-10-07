@@ -5,7 +5,8 @@ ALTER TABLE IF EXISTS canonical_route_receipts DROP COLUMN IF EXISTS fee_evidenc
 ALTER TABLE IF EXISTS canonical_claim_aliases DROP COLUMN IF EXISTS certificate_status;
 ALTER TABLE IF EXISTS canonical_claim_aliases DROP COLUMN IF EXISTS rules_sha256;
 DROP TABLE IF EXISTS red_team_holdout_registry;
-DROP TABLE IF EXISTS red_team_kalshi_series_fees;
+DROP TABLE IF EXISTS kalshi_account_limits_receipts;
+DROP TABLE IF EXISTS kalshi_fee_terms;
 DROP TABLE IF EXISTS red_team_settlement_certificates;
 DROP TABLE IF EXISTS red_team_control_receipts;
 DROP TABLE IF EXISTS red_team_release_receipts;

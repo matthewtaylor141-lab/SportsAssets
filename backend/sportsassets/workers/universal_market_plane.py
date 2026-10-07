@@ -875,7 +875,13 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
 
 
 async def main():
-    await run()
+    """THE DEDICATED MARKET-DATA SERVICE'S ENTRY POINT: the universal market
+    plane and, beside it, the authenticated Kalshi WebSocket book runtime
+    (Kalshi rep production contract 2026-10-07: WebSocket primary, never on
+    sportsassets-api; it reports OWNER_ACTION_REQUIRED and stays idle until
+    its key is provisioned on this service)."""
+    from . import kalshi_ws_market_data as KWSMD
+    await asyncio.gather(run(), KWSMD.run())
 
 
 if __name__ == "__main__":

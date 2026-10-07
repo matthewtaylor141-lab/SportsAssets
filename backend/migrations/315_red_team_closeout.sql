@@ -1,4 +1,5 @@
--- 315 · RED TEAM CLOSEOUT V1: APPEND-ONLY SAFETY / READINESS RECEIPTS.
+-- 315 · RED TEAM CLOSEOUT V1: APPEND-ONLY SAFETY / READINESS RECEIPTS,
+-- KALSHI PUBLISHED FEE TERMS AND ACCOUNT-LIMIT READBACKS.
 -- The package's sql/314_red_team_closeout.sql, renumbered (314 is the Kalshi
 -- canonical venue), with the receipts the bindings need beside it. These
 -- are readiness and safety receipts only: no order, cancel, funding, sizing
@@ -139,19 +140,45 @@ CREATE TABLE IF NOT EXISTS red_team_settlement_certificates (
 CREATE INDEX IF NOT EXISTS red_team_settlement_certificates_alias
     ON red_team_settlement_certificates (alias_key, at DESC);
 
--- Kalshi's own per-series fee terms (GET /series fee_type,
--- fee_multiplier) as first observed: the fee evidence a Kalshi route needs
--- (schedule id, version, effective-since); a series whose terms change
--- gets a new row, never an edit
-CREATE TABLE IF NOT EXISTS red_team_kalshi_series_fees (
-    fee_id text PRIMARY KEY,
+-- Kalshi's PUBLISHED fee terms, versioned (Kalshi rep 2026-10-07: the
+-- published schedule with series-specific multipliers, no individual
+-- arrangements, no account-specific discounts): every series fee change and
+-- event override the venue publishes (its own change id), and the series'
+-- current terms as first observed when it publishes no dated change. A
+-- route binds to the terms in force at its time; none = ineligible.
+CREATE TABLE IF NOT EXISTS kalshi_fee_terms (
+    term_id text PRIMARY KEY,
+    kind text NOT NULL CHECK (kind IN ('SERIES_CHANGE', 'EVENT_OVERRIDE',
+                                       'SERIES_OBSERVED')),
     series_ticker text NOT NULL,
+    event_ticker text,
     fee_type text,
     fee_multiplier numeric,
-    first_observed_at timestamptz NOT NULL DEFAULT now()
+    scheduled_ts timestamptz,
+    first_observed_at timestamptz NOT NULL DEFAULT now(),
+    source text NOT NULL
 );
-CREATE INDEX IF NOT EXISTS red_team_kalshi_series_fees_series
-    ON red_team_kalshi_series_fees (series_ticker, first_observed_at DESC);
+CREATE INDEX IF NOT EXISTS kalshi_fee_terms_series
+    ON kalshi_fee_terms (series_ticker, scheduled_ts DESC);
+CREATE INDEX IF NOT EXISTS kalshi_fee_terms_event
+    ON kalshi_fee_terms (event_ticker) WHERE event_ticker IS NOT NULL;
+
+-- GET /trade-api/v2/account/limits, each read (the authoritative usage
+-- tier and token buckets; a field the venue does not return is recorded as
+-- NOT_RETURNED_BY_VENUE, never assumed)
+CREATE TABLE IF NOT EXISTS kalshi_account_limits_receipts (
+    receipt_id text PRIMARY KEY,
+    as_of timestamptz NOT NULL,
+    status text NOT NULL,
+    usage_tier text,
+    read_refill_rate numeric,
+    read_bucket_capacity numeric,
+    write_refill_rate numeric,
+    write_bucket_capacity numeric,
+    grants jsonb NOT NULL DEFAULT '[]'::jsonb,
+    websocket_connection_limit text,
+    source text NOT NULL
+);
 
 -- preregistration and holdout use: a candidate set registered BEFORE any
 -- result is read, and every opening of a holdout, appended
@@ -220,9 +247,14 @@ CREATE TRIGGER red_team_certificate_append_only
 BEFORE UPDATE OR DELETE ON red_team_settlement_certificates
 FOR EACH ROW EXECUTE FUNCTION red_team_append_only();
 
-DROP TRIGGER IF EXISTS red_team_series_fee_append_only ON red_team_kalshi_series_fees;
-CREATE TRIGGER red_team_series_fee_append_only
-BEFORE UPDATE OR DELETE ON red_team_kalshi_series_fees
+DROP TRIGGER IF EXISTS kalshi_fee_terms_append_only ON kalshi_fee_terms;
+CREATE TRIGGER kalshi_fee_terms_append_only
+BEFORE UPDATE OR DELETE ON kalshi_fee_terms
+FOR EACH ROW EXECUTE FUNCTION red_team_append_only();
+
+DROP TRIGGER IF EXISTS kalshi_account_limits_append_only ON kalshi_account_limits_receipts;
+CREATE TRIGGER kalshi_account_limits_append_only
+BEFORE UPDATE OR DELETE ON kalshi_account_limits_receipts
 FOR EACH ROW EXECUTE FUNCTION red_team_append_only();
 
 DROP TRIGGER IF EXISTS red_team_holdout_append_only ON red_team_holdout_registry;

@@ -436,7 +436,7 @@ WORKERS_NOT_STARTED = ("copy_sweep", "underdog", "whale_exits", "mirror_live")
 #: never a workers loop at all: each runs in its own dedicated service
 #: (workers/all.py DEDICATED_ONLY_LOOPS); its health is its own heartbeat,
 #: read by its own readback (/api/command/market-plane)
-WORKERS_DEDICATED_ONLY = ("universal_market_plane",)
+WORKERS_DEDICATED_ONLY = ("universal_market_plane", "kalshi_ws_market_data")
 
 INVENTORY = API_LOOPS + WORKERS_LOOPS
 BY_NAME = {(s["name"], s["process"]): s for s in INVENTORY}

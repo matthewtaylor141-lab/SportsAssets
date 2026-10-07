@@ -447,7 +447,12 @@ def test_the_worker_runs_only_in_its_dedicated_service():
     # read-only service (ops/render_market_plane_service.yaml)
     src = (ROOT / "workers" / "all.py").read_text()
     assert '("universal_market_plane", universal_market_plane.run)' not in src
-    assert 'DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane"})' in src
+    assert 'DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane",' \
+        in src
+    # (Kalshi rep 2026-10-07) the Kalshi WebSocket book runtime is
+    # dedicated-only too, never registered in the shared workers
+    assert '"kalshi_ws_market_data"})' in src
+    assert "kalshi_ws_market_data.run" not in src
 
 
 # ── pg: populate, coverage, assignment, certification, snapshot ─────

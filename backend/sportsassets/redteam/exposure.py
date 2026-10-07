@@ -123,8 +123,49 @@ async def book_rows(conn, account_id: str, *, extra_slugs=()) -> tuple:
     return out, aliases
 
 
+#: venues whose YES and NO in ONE market are one pool and net (Kalshi rep
+#: 2026-10-07: "YES and NO positions in the same market net; the exchange
+#: will not hold both sides independently in one market")
+NETTING_VENUES = frozenset({"KALSHI"})
+
+
+def net_same_market(rows: list) -> list:
+    """Net each netting venue's YES and NO of ONE market into one row: the
+    excess quantity on its side, at that side's average notional per
+    contract. Cross-market aliases are untouched (separate books)."""
+    out, groups = [], {}
+    for r in rows:
+        mkt, _sep, side = str(r.instrument_id).rpartition(":")
+        if r.venue in NETTING_VENUES and side in ("YES", "NO") and mkt:
+            groups.setdefault((r.venue, mkt), []).append((side, r))
+        else:
+            out.append(r)
+    for (venue, mkt), items in sorted(groups.items()):
+        q = {"YES": Decimal(0), "NO": Decimal(0)}
+        n = {"YES": Decimal(0), "NO": Decimal(0)}
+        keep = {}
+        for side, r in items:
+            q[side] += D(r.qty)
+            n[side] += D(r.signed_notional)
+            keep[side] = r
+        net = q["YES"] - q["NO"]
+        if net == 0:
+            continue
+        side = "YES" if net > 0 else "NO"
+        per = n[side] / q[side] if q[side] else Decimal(0)
+        r = keep[side]
+        out.append(ClaimExposure(
+            claim_key=r.claim_key, event_key=r.event_key,
+            payoff_fingerprint=r.payoff_fingerprint, venue=venue,
+            instrument_id="%s:%s" % (mkt, side), qty=abs(net),
+            signed_notional=abs(net) * per, alias_group=r.alias_group))
+    return out
+
+
 def gate(rows: list, *, claim_cap: Decimal, event_cap: Decimal) -> dict:
-    """The package's exposure gate over the claim rows."""
+    """The package's exposure gate over the claim rows (same-market
+    YES / NO netted first on netting venues)."""
+    rows = net_same_market(rows)
     return RTX.exposure_gate(rows, max_abs_notional_by_claim=claim_cap,
                              max_abs_notional_by_event=event_cap)
 

@@ -41,6 +41,9 @@ from ..db import get_pool, heartbeat
 from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
+KF_SOURCE_SERIES = "GET /series/fee_changes"
+KF_SOURCE_EVENT = "GET /events/fee_changes"
+KF_SOURCE_OBSERVED = "GET /series (fee_type, fee_multiplier)"
 SERVICE = "kalshi_market_data"
 ENV_FLAG = "KALSHI_MARKET_DATA"
 INTERVAL_S = 30.0
@@ -156,16 +159,41 @@ async def persist_book(conn, ticker: str, event: str, b: dict, market: dict):
 
 
 async def persist_claims(conn, fx: CC.Fixture, built: dict, routes: list,
-                         *, now: float, record: bool = True):
+                         *, now: float, record: bool = True,
+                         certificates: dict | None = None,
+                         fee_evidence: dict | None = None):
+    cert = certificates or {}
+    rt = await conn.fetchval(
+        "SELECT count(*) FROM information_schema.columns WHERE table_name ="
+        " 'canonical_claim_aliases' AND column_name = 'certificate_status'")
     for i in [x for c in built["classes"].values() for x in c] + \
             built["refused"]:
+        ak = "%s|%s|%s" % (i.venue, i.market_id, i.side)
+        args = [ak, fx.event_key,
+                i.fingerprint, i.venue, i.market_id, i.side, i.subject,
+                i.mapping_status, i.settlement_status, _j(i.refusals),
+                _j(i.vector), (min(Decimal(str(p)) for p, _q in i.asks)
+                               if i.asks else None),
+                sum(int(q) for _p, q in i.asks) if i.asks else 0,
+                i.book_basis, i.observed_at]
+        extra_cols, extra_vals, extra_set = "", "", ""
+        if rt:
+            d = cert.get(ak) or {}
+            status = ("CERTIFIED" if d.get("eligible") and i.fingerprint
+                      else "INVALIDATED" if d.get("action") == "INVALIDATE"
+                      else "NOT_CERTIFIED")
+            args += [i.rules_sha256, status]
+            extra_cols = ", rules_sha256, certificate_status"
+            extra_vals = ", $16, $17"
+            extra_set = (", rules_sha256=excluded.rules_sha256, "
+                         "certificate_status=excluded.certificate_status")
         await conn.execute(
             "INSERT INTO canonical_claim_aliases (alias_key, event_key, "
             " claim_fingerprint, venue, market_id, side, subject, "
             " mapping_status, settlement_status, refusals, payoff, best_ask, "
-            " depth, book_basis, observed_at, updated_at) VALUES ($1,$2,$3,"
+            " depth, book_basis, observed_at, updated_at%s) VALUES ($1,$2,$3,"
             " $4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12,$13,$14,"
-            " to_timestamp($15), now()) ON CONFLICT (alias_key) DO UPDATE "
+            " to_timestamp($15), now()%s) ON CONFLICT (alias_key) DO UPDATE "
             " SET claim_fingerprint=excluded.claim_fingerprint, "
             " event_key=excluded.event_key, subject=excluded.subject, "
             " mapping_status=excluded.mapping_status, "
@@ -173,29 +201,106 @@ async def persist_claims(conn, fx: CC.Fixture, built: dict, routes: list,
             " refusals=excluded.refusals, payoff=excluded.payoff, "
             " best_ask=excluded.best_ask, depth=excluded.depth, "
             " book_basis=excluded.book_basis, "
-            " observed_at=excluded.observed_at, updated_at=now()",
-            "%s|%s|%s" % (i.venue, i.market_id, i.side), fx.event_key,
-            i.fingerprint, i.venue, i.market_id, i.side, i.subject,
-            i.mapping_status, i.settlement_status, _j(i.refusals),
-            _j(i.vector), (min(Decimal(str(p)) for p, _q in i.asks)
-                           if i.asks else None),
-            sum(int(q) for _p, q in i.asks) if i.asks else 0, i.book_basis,
-            i.observed_at)
+            " observed_at=excluded.observed_at, updated_at=now()%s"
+            % (extra_cols, extra_vals, extra_set), *args)
     if not record:
         return
     bucket = int(now // RECORD_EVERY_S)
     for r in routes:
+        fe = (", fee_evidence", ", $13::jsonb") if rt else ("", "")
+        args = ["route-%s-%d-%d" % (r["claim_fingerprint"][:24], r["qty"],
+                                    bucket), now, r["event_key"],
+                r["claim_fingerprint"], r["qty"], r["aliases"],
+                _j(r["chosen"]), _j(r["best_single"]), _j(r["runner_up"]),
+                _j(r["lost"]), _j(r["candidates"]), r["refusal"]]
+        if rt:
+            args.append(_j(fee_evidence or {}))
         await conn.execute(
             "INSERT INTO canonical_route_receipts (receipt_id, computed_at, "
             " event_key, claim_fingerprint, qty, aliases, chosen, "
-            " best_single, runner_up, lost, candidates, refusal) VALUES ($1,"
+            " best_single, runner_up, lost, candidates, refusal%s) VALUES ($1,"
             " to_timestamp($2),$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,"
-            " $10::jsonb,$11::jsonb,$12) ON CONFLICT (receipt_id) DO NOTHING",
-            "route-%s-%d-%d" % (r["claim_fingerprint"][:24], r["qty"],
-                                bucket), now, r["event_key"],
-            r["claim_fingerprint"], r["qty"], r["aliases"],
-            _j(r["chosen"]), _j(r["best_single"]), _j(r["runner_up"]),
-            _j(r["lost"]), _j(r["candidates"]), r["refusal"])
+            " $10::jsonb,$11::jsonb,$12%s) ON CONFLICT (receipt_id) DO NOTHING"
+            % fe, *args)
+
+
+async def persist_fee_terms(conn, rows: list, *, kind: str) -> int:
+    """APPEND the venue's published fee terms (migration 315, kalshi_fee_
+    terms): the change id is the key, so a re-read inserts nothing."""
+    if not rows or not await conn.fetchval(
+            "SELECT to_regclass('kalshi_fee_terms') IS NOT NULL"):
+        return 0
+    n = 0
+    for r in rows:
+        if kind == "SERIES_OBSERVED":
+            tid = "observed:%s:%s:%s" % (r["series_ticker"], r.get("fee_type"),
+                                         r.get("fee_multiplier"))
+            ft, fm, sts, ev = r.get("fee_type"), r.get("fee_multiplier"), \
+                None, None
+            src = KF_SOURCE_OBSERVED
+        elif kind == "EVENT_OVERRIDE":
+            tid = str(r.get("id"))
+            ft, fm = r.get("fee_type_override"), r.get(
+                "fee_multiplier_override")
+            sts, ev = r.get("scheduled_ts"), r.get("event_ticker")
+            src = KF_SOURCE_EVENT
+        else:
+            tid = str(r.get("id"))
+            ft, fm, sts, ev = r.get("fee_type"), r.get("fee_multiplier"), \
+                r.get("scheduled_ts"), None
+            src = KF_SOURCE_SERIES
+        if not tid or tid == "None":
+            continue
+        from .. import kalshi_fees as KF
+        try:
+            fmd = None if fm is None else Decimal(str(fm))
+        except Exception:                                       # noqa: BLE001
+            fmd = None
+        st = await conn.execute(
+            "INSERT INTO kalshi_fee_terms (term_id, kind, series_ticker, "
+            " event_ticker, fee_type, fee_multiplier, scheduled_ts, source) "
+            "VALUES ($1,$2,$3,$4,$5,$6, CASE WHEN $7::float8 IS NULL "
+            " THEN NULL ELSE to_timestamp($7::float8) END, $8) "
+            "ON CONFLICT (term_id) DO NOTHING",
+            tid, kind, r.get("series_ticker"), ev, ft, fmd, KF._ts(sts), src)
+        n += st.endswith(" 1")
+    return n
+
+
+async def ws_current(conn, tickers: list) -> set:
+    """The tickers whose book the authenticated WebSocket runtime holds
+    CURRENT now (readable, its basis, re-asserted inside the SLA): REST
+    never re-polls them -- REST is bootstrap / recovery / fallback."""
+    from .. import kalshi_ws as KWS
+    if not tickers:
+        return set()
+    return {r["ticker"] for r in await conn.fetch(
+        "SELECT ticker FROM kalshi_books_current WHERE ticker = "
+        "ANY($1::text[]) AND book_basis = $2 AND readable AND observed_at "
+        "> now() - make_interval(secs => $3)", list(tickers), KWS.BOOK_BASIS,
+        float(KMD.BOOK_SLA_S))}
+
+
+async def db_freshness(conn, tickers: list, *, now: float) -> dict:
+    """KALSHI freshness over the tracked books as persisted (WebSocket or
+    REST), numerator / denominator, by source."""
+    from .. import kalshi_ws as KWS
+    tick = sorted(set(tickers))
+    by = {"WS": 0, "REST": 0}
+    cur = 0
+    if tick:
+        for r in await conn.fetch(
+                "SELECT book_basis, readable, extract(epoch FROM "
+                "observed_at) at FROM kalshi_books_current WHERE ticker = "
+                "ANY($1::text[])", tick):
+            if r["readable"] and now - float(r["at"]) <= KMD.BOOK_SLA_S:
+                cur += 1
+                by["WS" if r["book_basis"] == KWS.BOOK_BASIS else "REST"] \
+                    += 1
+    return {"domain": KMD.HEALTH_DOMAIN, "numerator": cur,
+            "denominator": len(tick),
+            "rate": round(cur / len(tick), 4) if tick else None,
+            "sla_s": KMD.BOOK_SLA_S, "current_by_source": by}
 
 
 def coverage(fixtures: dict) -> dict:
@@ -230,12 +335,27 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
     from .. import canonical_claims_db as KCDB
     from ..agents import adriana_claims as AC
     routes_n, aliases_n, equivalences, best_routes = 0, 0, [], []
+    certs: dict = {}
     scans = []
     async with pool.acquire() as c:
+        from .. import kalshi_fees as KF
+        from ..redteam import fees as RTF
+        from ..redteam import settlement as RTS
         assembled = await KCDB.assemble(c, now=now)
         for fx, built, insts in assembled:
             aliases_n += len(insts)
-            fees = CC.fee_functions(at=now, sport=fx.sport)
+            # settlement certificates: decide, append, strip (red team)
+            built, cert_counts = await RTS.certify(c, built, now=now)
+            cert = (await RTS.apply(c, built))[1]
+            for k, v in cert_counts.items():
+                certs[k] = certs.get(k, 0) + v
+            terms = next((i.fee_terms for i in insts
+                          if i.venue == KCL.KALSHI and i.fee_terms), None)
+            fees = CC.fee_functions(at=now, sport=fx.sport,
+                                    kalshi_terms=terms)
+            fee_ev = RTF.route_fee_evidence(
+                kalshi_terms=terms, pmus_sport=fx.sport, at=now,
+                market_key=fx.event_key)
             routes = [CC.route_claim(fx, fp, members, qty=RECEIPT_QTY,
                                      now=now, fee_by_venue=fees,
                                      max_age_s=ROUTE_MAX_AGE_S)
@@ -249,13 +369,15 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
                         fx, y, o, built["states"]))
             best_routes += [r for r in routes if r["chosen"]][:2]
             await persist_claims(c, fx, built, routes, now=now,
-                                 record=record)
+                                 record=record, certificates=cert,
+                                 fee_evidence=fee_ev)
             routes_n += len(routes)
             scans.append(AC.scan_fixture(fx, built, now=now))
     census = AC.census_result(scans, markets_read=aliases_n, books_fresh=0,
                               skipped={})["census"]
     return {"fixtures_priced": len(scans), "aliases": aliases_n,
             "routes": routes_n, "structures": census,
+            "settlement_certificates": certs,
             "equivalence_receipts": equivalences[:6],
             "best_route_receipts": best_routes[:4]}
 
@@ -271,6 +393,7 @@ async def run() -> None:
     last_cat, census, games = 0.0, {}, {}
     markets, fixtures, books, milestones_tried = {}, {}, {}, {}
     claims, last_record = {}, 0.0
+    fee_new, fee_events_at, rest = {}, {}, {"pass": 0}
     while True:
         try:
             now = time.time()
@@ -285,6 +408,25 @@ async def run() -> None:
                             c, res, now=now)
                 gm = KMD.game_candidates(res.get("markets") or [])
                 games = {e: ms for e, ms in gm.items()}
+                # THE PUBLISHED FEE TERMS (Kalshi rep 2026-10-07): each game
+                # series' current terms as observed, its dated changes, and
+                # (below, per tracked event) the event overrides
+                gser = sorted({e.split("-")[0] for e in games})
+                obs = [dict(series_ticker=t, **{
+                    k: (res.get("series") or {}).get(t, {}).get(k)
+                    for k in ("fee_type", "fee_multiplier")})
+                    for t in gser if (res.get("series") or {}).get(t)]
+                fee_rows = []
+                for t in gser[:40]:
+                    ch, err = await asyncio.to_thread(
+                        KMD.read_series_fee_changes, t, tx, health=health,
+                        pacer=pacer)
+                    fee_rows += ch or []
+                async with pool.acquire() as c:
+                    fee_new["series_observed"] = await persist_fee_terms(
+                        c, obs, kind="SERIES_OBSERVED")
+                    fee_new["series_changes"] = await persist_fee_terms(
+                        c, fee_rows, kind="SERIES_CHANGE")
                 markets = {m["ticker"]: m for ms in games.values()
                            for m in ms}
                 last_cat = now
@@ -317,7 +459,29 @@ async def run() -> None:
             tracked = [(k.event_ticker, t) for k, _pm in live
                        for t in list(k.team_tickers) +
                        ([k.tie_ticker] if k.tie_ticker else [])]
-            for ev, t in tracked[:MAX_BOOKS_PER_PASS]:
+            # event fee overrides for the tracked events, every 15 minutes
+            ev_todo = [k.event_ticker for k, _pm in live
+                       if now - fee_events_at.get(k.event_ticker, 0)
+                       > CATALOGUE_EVERY_S][:20]
+            ev_rows = []
+            for e in ev_todo:
+                fee_events_at[e] = now
+                ch, err = await asyncio.to_thread(
+                    KMD.read_event_fee_changes, e, tx, health=health,
+                    pacer=pacer)
+                ev_rows += [dict(x, series_ticker=x.get("series_ticker")
+                                 or e.split("-")[0]) for x in (ch or [])]
+            if ev_rows:
+                async with pool.acquire() as c:
+                    fee_new["event_overrides"] = await persist_fee_terms(
+                        c, ev_rows, kind="EVENT_OVERRIDE")
+            # REST = bootstrap / recovery / fallback (Kalshi rep 2026-10-07):
+            # a book the WebSocket runtime holds CURRENT is never re-polled
+            async with pool.acquire() as c:
+                ws_cur = await ws_current(c, [t for _e, t in tracked])
+            req0 = int(health.digest().get("requests") or 0)
+            todo_books = [(ev, t) for ev, t in tracked if t not in ws_cur]
+            for ev, t in todo_books[:MAX_BOOKS_PER_PASS]:
                 if health.blocked():
                     break
                 b = await asyncio.to_thread(KMD.read_orderbook, t, tx,
@@ -325,7 +489,10 @@ async def run() -> None:
                 books[t] = b
                 async with pool.acquire() as c:
                     await persist_book(c, t, ev, b, markets.get(t) or {})
-            fresh = KMD.freshness(books, [t for _e, t in tracked], now=now)
+            rest["pass"] = int(health.digest().get("requests") or 0) - req0
+            async with pool.acquire() as c:
+                fresh = await db_freshness(c, [t for _e, t in tracked],
+                                           now=time.time())
             rec_now = now - last_record >= RECORD_EVERY_S
             claims = await claims_pass(pool, now=time.time(), record=rec_now)
             if rec_now:
@@ -347,6 +514,14 @@ async def run() -> None:
                                        == "ESTABLISHED")},
                 "coverage": coverage(fixtures), "freshness": fresh,
                 "tracked_markets": len(tracked), "claims": claims,
+                "book_sources": {
+                    "ws_current_not_polled": len(ws_cur),
+                    "rest_polled_this_pass": min(len(todo_books),
+                                                 MAX_BOOKS_PER_PASS),
+                    "rest_requests_this_pass": rest["pass"],
+                    "rest_role": "BOOTSTRAP_RECOVERY_FALLBACK (the "
+                                 "WebSocket runtime is primary)"},
+                "fee_terms_appended": fee_new,
                 "authority": "MARKET_DATA_SHADOW_NO_ORDER_AUTHORITY"})
             await asyncio.sleep(INTERVAL_S)
         except asyncio.CancelledError:

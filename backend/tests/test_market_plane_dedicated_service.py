@@ -16,7 +16,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 FORBIDDEN = ("PMUS_KEY_ID", "PMUS_SECRET_KEY", "PM_PRIVATE_KEY", "PM_FUNDER",
              "LIVE_TRADING_ENABLED", "ADMIN_TOKEN", "ENGINE_INGEST_TOKEN",
-             "KALSHI", "FUNDED", "EXECMIRROR")
+             "FUNDED", "EXECMIRROR",
+             # Kalshi: every trading switch stays forbidden; only the two
+             # key variables the read-only WebSocket handshake needs are
+             # allowed (Kalshi rep production contract 2026-10-07)
+             "KALSHI_SMALLLIVE", "KALSHI_LIVE", "KALSHI_ENV",
+             "KALSHI_PRIVATE_KEY_PATH", "KALSHI_ORDER", "KALSHI_SUBMIT")
+KALSHI_READ_ONLY_KEYS = {"KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PEM"}
 
 
 SPEC = ROOT / "ops" / "render_market_plane_service.yaml"
@@ -41,8 +47,10 @@ def test_the_dedicated_runtime_runs_the_market_plane_read_only():
                         "PMX_PRIVATE_KEY_B64"}
     for k in env:
         assert not any(f in k for f in FORBIDDEN), k
+        assert not k.startswith("KALSHI") or k in KALSHI_READ_ONLY_KEYS, k
     # secrets are entered by the owner, never written in the blueprint
-    for k in ("PMX_CLIENT_ID", "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64"):
+    for k in ("PMX_CLIENT_ID", "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64",
+              "KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PEM"):
         assert env[k].get("sync") is False and "value" not in env[k]
 
 
@@ -68,8 +76,11 @@ def test_its_only_secrets_are_the_database_and_three_pmx_market_data_values():
     env = {e["key"]: e for e in s["envVars"]}
     secret = {k for k, e in env.items()
               if e.get("sync") is False or "fromDatabase" in e}
+    # (Kalshi rep 2026-10-07) + the Kalshi key the authenticated WebSocket
+    # handshake requires -- read-only use, on this service only
     assert secret == {"DATABASE_URL", "PMX_CLIENT_ID", "PMX_KEY_ID",
-                      "PMX_PRIVATE_KEY_B64"}
+                      "PMX_PRIVATE_KEY_B64", "KALSHI_API_KEY_ID",
+                      "KALSHI_PRIVATE_KEY_PEM"}
     assert "PMX_PARTICIPANT_ID" not in env
     plain = {k: e.get("value") for k, e in env.items() if k not in secret}
     assert plain == {"MALLOC_ARENA_MAX": "2",

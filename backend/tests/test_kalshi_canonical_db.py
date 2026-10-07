@@ -62,6 +62,14 @@ def test_persist_assemble_record_and_read_back():
             for t in ("canonical_route_receipts", "canonical_claim_aliases",
                       "kalshi_books_current", "kalshi_fixtures_current"):
                 await c.execute("DELETE FROM %s" % t)
+            # the PUBLISHED fee terms (Kalshi rep 2026-10-07): without them
+            # every Kalshi alias is ineligible (no route, no arb leg)
+            n = await W.persist_fee_terms(c, [{
+                "id": "test-x1-%d" % int(time.time() * 1e6),
+                "fee_type": "quadratic_with_maker_fees", "fee_multiplier": 1,
+                "scheduled_ts": "2025-10-04T07:00:00Z",
+                "series_ticker": "KXMLBGAME"}], kind="SERIES_CHANGE")
+            assert n == 1
             now = time.time()
             start = now + 3 * 3600
             k = KMD.KalshiFixture(
@@ -127,7 +135,7 @@ def test_persist_assemble_record_and_read_back():
                     "KALSHI_HEALTH"
                 assert data["claims"] and data["claims"][0]["claims"]
                 route = data["claims"][0]["claims"][0]["route"]
-                assert route and route["chosen"], route["candidates"]
+                assert route and route["chosen"], json.dumps(route["candidates"])
                 assert data["arbitrage"]["status"] == "OK"
         finally:
             await tr.rollback()

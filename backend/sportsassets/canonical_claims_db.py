@@ -111,9 +111,16 @@ async def kalshi_books(conn, tickers: list) -> dict:
 async def rules_evidence(conn, contract_ids: list) -> dict:
     if not contract_ids:
         return {}
-    return {r["contract_id"]: _j(r["evidence"]) for r in await conn.fetch(
-        "SELECT contract_id, evidence FROM market_plane_rules "
-        " WHERE contract_id = ANY($1::text[])", list(contract_ids))}
+    out = {}
+    for r in await conn.fetch(
+            "SELECT contract_id, evidence, rules_sha256 FROM "
+            " market_plane_rules WHERE contract_id = ANY($1::text[])",
+            list(contract_ids)):
+        ev = dict(_j(r["evidence"]) or {})
+        # the rules fingerprint the claim is built (and certified) from
+        ev["rules_sha256"] = r["rules_sha256"]
+        out[r["contract_id"]] = ev
+    return out
 
 
 async def pmus_identity(conn, slug: str) -> dict | None:
@@ -143,6 +150,41 @@ async def pmus_book(conn, slug: str, *, now: float) -> dict | None:
             "observed_at": float(r["at"])}
 
 
+async def kalshi_fee_terms(conn, series_ticker: str, event_ticker: str, *,
+                           now: float) -> dict | None:
+    """The published Kalshi fee terms in force for this event at `now`
+    (kalshi_fees.effective_terms over migration-315 kalshi_fee_terms), or
+    None (the Kalshi aliases are then ineligible)."""
+    from . import kalshi_fees as KF
+    if not await _has(conn, "kalshi_fee_terms"):
+        return None
+    rows = [dict(r) for r in await conn.fetch(
+        "SELECT term_id, kind, series_ticker, event_ticker, fee_type, "
+        "       fee_multiplier, extract(epoch FROM scheduled_ts) sts, "
+        "       extract(epoch FROM first_observed_at) seen "
+        "  FROM kalshi_fee_terms WHERE series_ticker = $1 "
+        "   AND (event_ticker IS NULL OR event_ticker = $2)",
+        series_ticker, event_ticker)]
+    series = [{"id": r["term_id"], "fee_type": r["fee_type"],
+               "fee_multiplier": r["fee_multiplier"],
+               "scheduled_ts": r["sts"], "series_ticker": series_ticker}
+              for r in rows if r["kind"] == "SERIES_CHANGE"]
+    events = [{"id": r["term_id"], "fee_type_override": r["fee_type"],
+               "fee_multiplier_override": r["fee_multiplier"],
+               "scheduled_ts": r["sts"], "event_ticker": r["event_ticker"],
+               "series_ticker": series_ticker}
+              for r in rows if r["kind"] == "EVENT_OVERRIDE"]
+    obs = [r for r in rows if r["kind"] == "SERIES_OBSERVED"]
+    seen = max(obs, key=lambda r: r["seen"]) if obs else None
+    return KF.effective_terms(
+        series_ticker=series_ticker, event_ticker=event_ticker, at=now,
+        series_changes=series, event_changes=events,
+        observed=None if seen is None else {
+            "fee_type": seen["fee_type"],
+            "fee_multiplier": seen["fee_multiplier"],
+            "first_observed_at": seen["seen"]})
+
+
 async def assemble(conn, *, now: float | None = None) -> list:
     """[(Fixture, built, instruments)] for every ESTABLISHED Kalshi fixture
     in the window that has at least one readable Kalshi book."""
@@ -156,8 +198,11 @@ async def assemble(conn, *, now: float | None = None) -> list:
             continue
         ev = await rules_evidence(conn, ["kalshi:%s" % t for t in tickers]
                                   + ([slug] if slug else []))
+        terms = await kalshi_fee_terms(conn, k.series_ticker,
+                                       k.event_ticker, now=now)
         insts = KCL.kalshi_instruments(
-            k, {}, books, {t: ev.get("kalshi:%s" % t) for t in tickers})
+            k, {}, books, {t: ev.get("kalshi:%s" % t) for t in tickers},
+            fee_terms=terms)
         if slug:
             ident = await pmus_identity(conn, slug)
             if ident is not None:
@@ -177,7 +222,11 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
     from .agents import adriana_claims as AC
     now = float(now if now is not None else time.time())
     scans, aliases, fresh = [], 0, 0
+    from .redteam import settlement as RTS
     for fx, built, insts in await assemble(conn, now=now):
+        # the settlement certificates, read only: an alias whose rules
+        # fingerprint is not the certified one is no leg (red team)
+        built, _cert = await RTS.apply(conn, built)
         aliases += len(insts)
         fresh += sum(1 for i in insts if i.observed_at is not None
                      and now - float(i.observed_at) <= KMD.BOOK_SLA_S)

@@ -498,6 +498,34 @@ def read_orderbook(ticker: str, transport=None, *, health=None, pacer=None,
     return b
 
 
+def read_series_fee_changes(series_ticker: str, transport=None, *,
+                            health=None, pacer=None) -> tuple:
+    """GET /series/fee_changes (public, effective-dated, the venue's own
+    change ids): the published fee terms of one series, history included."""
+    tx = transport or KC.GetOnlyTransport()
+    pacer = pacer or KC._Pacer(DEFAULT_PACING_S, time.sleep, time.monotonic)
+    body, err = _get(tx, pacer, health, "/series/fee_changes",
+                     {"series_ticker": series_ticker,
+                      "show_historical": "true"})
+    if err:
+        return None, err
+    return list((body or {}).get("series_fee_change_arr") or []), None
+
+
+def read_event_fee_changes(event_ticker: str, transport=None, *,
+                           health=None, pacer=None) -> tuple:
+    """GET /events/fee_changes: event-level overrides layered on the series
+    terms (a null fee_type_override / fee_multiplier_override = cleared)."""
+    tx = transport or KC.GetOnlyTransport()
+    pacer = pacer or KC._Pacer(DEFAULT_PACING_S, time.sleep, time.monotonic)
+    body, err = _get(tx, pacer, health, "/events/fee_changes",
+                     {"event_ticker": event_ticker,
+                      "show_historical": "true"})
+    if err:
+        return None, err
+    return list((body or {}).get("event_fee_changes") or []), None
+
+
 def read_milestone(event_ticker: str, transport=None, *, health=None,
                    pacer=None) -> tuple:
     tx = transport or KC.GetOnlyTransport()

@@ -495,7 +495,8 @@ PROCESS_LOCK_REASON = ("sportsassets-workers holds no venue write (cand21): "
 #: source-level rule, not an environment switch: even if a name below is
 #: registered in LOOPS again (or UNIVERSAL_MARKET_PLANE=on is set on this
 #: service), startable_loops() refuses it and the boot marker names it.
-DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane"})
+DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane",
+                                  "kalshi_ws_market_data"})
 
 
 def startable_loops(loops=None) -> list:
@@ -577,7 +578,10 @@ def _boot_marker(at: str) -> dict:
             "dedicated_only": sorted(DEDICATED_ONLY_LOOPS),
             "dedicated_only_runtime": {
                 "universal_market_plane": "sportsassets-market-plane "
-                                          "(ops/render_market_plane_service.yaml)"},
+                                          "(ops/render_market_plane_service.yaml)",
+                "kalshi_ws_market_data": "sportsassets-market-plane (beside "
+                                         "the market plane, same entry "
+                                         "point)"},
             "started": [n for n, _fn in startable_loops()]}
 
 

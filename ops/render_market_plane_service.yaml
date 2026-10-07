@@ -52,4 +52,11 @@ services:
         sync: false
       - key: PMX_PRIVATE_KEY_B64
         sync: false
+      # (Kalshi rep 2026-10-07) the authenticated Kalshi WebSocket book
+      # runtime runs beside the market plane: its handshake needs a Kalshi
+      # API key. Read-only use; the runtime imports no order / cancel path.
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      - key: KALSHI_PRIVATE_KEY_PEM
+        sync: false
 

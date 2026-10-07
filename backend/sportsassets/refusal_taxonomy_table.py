@@ -1493,6 +1493,16 @@ TABLE = {
     "ABOVE_THE_CANONICAL_CLAIM_EXPOSURE_CAP": (E, RAIL, "ORDER"),
     "ABOVE_THE_CANONICAL_EVENT_EXPOSURE_CAP": (E, RAIL, "ORDER"),
     "CANONICAL_EXPOSURE_UNREADABLE": (S, DATA, "ORDER"),
+    # (Kalshi rep 2026-10-07) the authenticated WebSocket book runtime:
+    # a sequence gap / disconnect / subscription error makes the book GAP
+    # until a fresh snapshot; no credential provisioned = owner action
+    "KALSHI_WS_SEQUENCE_GAP": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_DISCONNECTED": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_SUBSCRIPTION_ERROR": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
+    # (315) a canonical alias whose settlement-rules fingerprint differs
+    # from the one it was certified against (red team settlement guard)
+    "RULES_CHANGED_SINCE_CERTIFICATION": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one

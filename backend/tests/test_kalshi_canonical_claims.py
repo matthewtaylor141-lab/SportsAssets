@@ -18,6 +18,7 @@ from decimal import Decimal
 import pytest
 
 from sportsassets import canonical_claims as CC
+from sportsassets import kalshi_fees as KF
 from sportsassets import kalshi_claims as KCL
 from sportsassets import kalshi_market_data as KMD
 from sportsassets.agents import adriana_arb as A
@@ -45,14 +46,29 @@ FX = CC.Fixture(event_key="MLB:2026-10-08T00:00Z:TB@NYY", sport="BASEBALL",
                 home="NYY", away="TB")
 
 
+#: the published Kalshi fee terms in force (kalshi_fees.effective_terms over
+#: the venue's own change-record shape), multiplier 1: a Kalshi alias is a
+#: route / arbitrage leg only with known terms (Kalshi rep 2026-10-07)
+KTERMS = KF.effective_terms(
+    series_ticker="KXMLBGAME", event_ticker="KXMLBGAME-26OCT072000TBNYY",
+    at=NOW, event_changes=[], series_changes=[{
+        "id": "test-change-x1", "fee_type": "quadratic_with_maker_fees",
+        "fee_multiplier": 1, "scheduled_ts": "2025-10-04T07:00:00Z",
+        "series_ticker": "KXMLBGAME"}])
+_DEFAULT = object()
+
+
 def inst(venue, market, side, subject, asks=((D("0.50"), 100),), *,
          terms=PROVEN_TERMS, at=NOW, status="PROVEN", mapping="ESTABLISHED",
-         sport="BASEBALL"):
+         sport="BASEBALL", fee_terms=_DEFAULT):
+    if fee_terms is _DEFAULT:
+        fee_terms = KTERMS if venue == "KALSHI" else None
     return CC.Instrument(venue=venue, market_id=market, side=side,
                          subject=subject, settlement=dict(terms),
                          settlement_status=status, mapping_status=mapping,
                          asks=tuple(asks), observed_at=at,
-                         book_basis="TEST_BOOK", sport=sport)
+                         book_basis="TEST_BOOK", sport=sport,
+                         fee_terms=fee_terms)
 
 
 def flat(_count, _price):
@@ -298,7 +314,12 @@ def test_a_stale_book_cannot_make_an_arb():
     assert A.STALE_BOOK in A.reason_codes(rec)
 
 
-def test_fair_price_terms_same_market_complements_cross_market_does_not():
+def test_fair_price_terms_same_market_never_arb_cross_market_no_complement():
+    """KALSHI REP 2026-10-07: one market's YES and NO are ONE pool (NO ask =
+    1 - best YES bid) and positions in them NET -- a market's YES + its own
+    NO is never structural arbitrage (excluded and counted, never
+    evaluated). A per-market fair-price symbol complements only its own
+    market's NO, so cross-market FP legs are no complement either."""
     y = inst("KALSHI", "K-NYY", "YES", "HOME", [(D("0.44"), 100)],
              terms=FAIR_PRICE_TERMS)
     n = inst("KALSHI", "K-NYY", "NO", "HOME", [(D("0.57"), 100)],
@@ -308,26 +329,15 @@ def test_fair_price_terms_same_market_complements_cross_market_does_not():
     b = build(y, n, t)
     assert "FP[K-NYY]" in y.vector.values() and "1-FP[K-NYY]" in \
         n.vector.values()
-    # the draw is not stated in these (production-shaped) rules: no claim
-    # identity is fingerprinted, every alias refused by state ...
     assert y.fingerprint is None and not b["classes"]
-    assert CC.complement_states(y.vector, n.vector, b["states"],
-                                same_market=True)[0]
+    assert CC.same_market(y, n) and not CC.same_market(y, t)
     ok, bad = CC.complement_states(y.vector, t.vector, b["states"])
     assert not ok and any("FP" in why or "UNKNOWN" in why for _s, why in bad)
-    # ... yet a market's YES and its own NO pay $1 in every state whatever
-    # the rules say: that structure is evaluated (and is never profitable
-    # on a reciprocal book)
     assert [(p[0].market_id, p[1].market_id) for p in b["reciprocal"]] == [
         ("K-NYY", "K-NYY")]
     res = AC.scan_fixture(FX, b, now=NOW)
-    assert res["pairs_considered"] == 1
-    rec = res["records"][0]
-    assert rec["claim_pair"]["basis"] == "SAME_MARKET_RECIPROCAL"
-    assert rec["claim_pair"]["topology"] == "SAME_VENUE"
-    assert rec["verdict"] == A.REFUSED           # 0.44 + 0.57 >= 1
-    assert set(A.reason_codes(rec)) & {A.PAYOFF_FLOOR_BELOW_COST,
-                                       A.NOT_PROFITABLE_AFTER_COSTS}
+    assert res["pairs_considered"] == 0 and res["records"] == []
+    assert res["same_market_pairs_excluded"] == 1
 
 
 # ── 13-18 settlement and mapping fail closed ──────────────────────────

@@ -266,6 +266,8 @@ class Instrument:
     sport: str | None = None
     team_code: str | None = None
     rules_sha256: str | None = None
+    #: KALSHI: the published fee terms in force (kalshi_fees.effective_terms)
+    fee_terms: dict | None = None
     vector: dict = field(default_factory=dict)
     fingerprint: str | None = None
     refusals: list = field(default_factory=list)
@@ -458,15 +460,29 @@ def route_claim(fx: Fixture, fp: str, members: list, *, qty: int,
                     "depth); unknown fee / stale / no book are ineligible"}
 
 
-def fee_functions(*, at, sport: str | None) -> dict:
+def same_market(a: Instrument, b: Instrument) -> bool:
+    """ONE market's YES and NO (Kalshi rep 2026-10-07): one book, one
+    liquidity pool (NO ask = 1 - best YES bid), positions that NET. Never
+    two routes of one pool, never a structural-arbitrage pair."""
+    return a.venue == b.venue and a.market_id == b.market_id
+
+
+def fee_functions(*, at, sport: str | None, kalshi_terms=None) -> dict:
     """{venue: fee_fn(count, price)} for the venues whose fee is KNOWN for
-    this sport and date; a venue absent here is FEE_UNKNOWN (ineligible)."""
+    this sport and date; a venue absent here is FEE_UNKNOWN (ineligible).
+    KALSHI is present only when `kalshi_terms` (kalshi_fees.effective_terms:
+    the published schedule x the series / event multiplier in force) price
+    -- an unknown multiplier is an ineligible route, never a default."""
     from datetime import datetime, timezone
 
+    from . import kalshi_fees as KF
     from .agents import adriana_arb as A
     when = at if isinstance(at, datetime) else datetime.fromtimestamp(
         float(at), timezone.utc)
-    out = {A.KALSHI: Q.kalshi_taker_fee}
+    out = {}
+    kf = KF.fee_fn(kalshi_terms) if kalshi_terms else None
+    if kf is not None:
+        out[A.KALSHI] = kf
     probe = A.order_fee(A.POLYMARKET_US, [(Decimal("0.5"), 1)], at=when,
                         sport=sport)
     if probe.known:
