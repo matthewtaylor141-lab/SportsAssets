@@ -36,7 +36,7 @@ SELECT count(*) unjoined, count(*) FILTER (WHERE settlement_read_at IS NULL) nev
   FROM external_valuations WHERE experiment_id='EXT_PINNACLE_DEVIG_V1_SHADOW' AND NOT outcome_known
    AND outcome_basis IS NULL AND us_market_slug IS NOT NULL AND decided_at < now()-interval '2 hours';
 SELECT status, count(*), max(computed_at) FROM xavier_value_add GROUP BY 1;
-SELECT count(*) theses, max(created_at) FROM xavier_entry_theses;
+SELECT count(*) theses FROM xavier_entry_theses;
 SELECT count(*) FILTER (WHERE refdata IS NULL) pending,
        count(*) FILTER (WHERE refdata->>'unlisted'='true') unlisted,
        count(*) FILTER (WHERE refdata IS NOT NULL AND coalesce(refdata->>'unlisted','false')<>'true') listed,
