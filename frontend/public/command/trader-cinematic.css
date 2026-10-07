@@ -148,7 +148,7 @@ footer{border-color:rgba(114,202,179,.12);color:#607d75}dialog{background:#06151
 @keyframes microUp{0%{box-shadow:inset 0 -18px rgba(70,220,166,.10)}100%{box-shadow:inset 0 -18px transparent}}
 @keyframes microDown{0%{box-shadow:inset 0 -18px rgba(255,114,129,.08)}100%{box-shadow:inset 0 -18px transparent}}
 
-.wall-mode .position-wall{grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.wall-mode .position-card{border-radius:9px}.wall-mode .micro-chart{display:block}.wall-mode .card-score{padding:7px 9px}.wall-mode .market-title{font-size:10px}
+.wall-mode .position-wall{grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px}.wall-mode .position-card{border-radius:9px}.wall-mode .micro-chart{display:block}.wall-mode .card-score{padding:7px 9px}.wall-mode .market-title{font-size:10px}
 
 @media(max-width:1250px){.brain-rail{grid-template-columns:repeat(5,1fr)}.cockpit{height:400px}.monitors{left:3%;right:3%}}
 @media(max-width:900px){h1{font-size:31px}.brain-rail{grid-template-columns:repeat(3,1fr)}.brain-node:nth-child(4),.brain-node:nth-child(5){border-top:1px solid rgba(105,211,179,.09)}.cockpit{height:365px}}
