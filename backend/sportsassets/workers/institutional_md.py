@@ -53,6 +53,7 @@ from .. import pmx_institutional as pmx
 from .. import shadow_experimental_store as xstore
 from .. import shadow_identity_resolver as resolver
 from ..db import get_pool, heartbeat
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -495,7 +496,7 @@ def subscribe_universe(store, universe) -> list:
 async def run() -> None:
     if _off("INSTITUTIONAL_MD"):
         log.info("institutional_md: off by switch")
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
 
     seen = pmx.presence()
     boot = {"service": SERVICE,

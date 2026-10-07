@@ -51,6 +51,9 @@ def test_every_workers_loop_is_inventoried():
     assert not missing, "workers loops with no inventory entry: %s" % missing
     stale = inventoried - set(names)
     assert not stale, "inventory entries no loop has: %s" % stale
+    # a dedicated-service loop is neither registered nor inventoried here
+    assert set(LH.WORKERS_DEDICATED_ONLY) == set(W.DEDICATED_ONLY_LOOPS)
+    assert not set(LH.WORKERS_DEDICATED_ONLY) & (inventoried | set(names))
 
 
 def _lifespan_task_callees(lifespan: str) -> list:

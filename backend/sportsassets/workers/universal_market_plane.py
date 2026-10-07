@@ -61,6 +61,7 @@ from ..market_plane import registry as R
 from ..market_plane import refdata_progress as RP
 from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 SERVICE = "universal_market_plane"
@@ -274,7 +275,7 @@ async def certify(conn, mgr) -> dict:
 async def run() -> None:
     if not enabled():
         log.info("universal_market_plane: off by switch (%s)", ENV_FLAG)
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
     max_streams, max_per = caps()
     arming = stream_arming()
     mgr, client = None, None

@@ -422,8 +422,6 @@ WORKERS_LOOPS = (
     _w("bettor_state", 60.0, _hb("bettor_state", "ok")),
     _w("institutional_md", 60.0,
        _hb("institutional_md", "ok", "no_focus_set")),
-    _w("universal_market_plane", 60.0,
-       _hb("universal_market_plane", "ok", "degraded")),
     _w("shadow_experimental", 60.0,
        _hb("shadow_experimental", "ok", "no_eligible_population",
            "no_focus_set", "already_sealed")),
@@ -433,6 +431,10 @@ WORKERS_LOOPS = (
 )
 #: registered in workers/all.py LOOPS and deliberately NOT started (cand21)
 WORKERS_NOT_STARTED = ("copy_sweep", "underdog", "whale_exits", "mirror_live")
+#: never a workers loop at all: each runs in its own dedicated service
+#: (workers/all.py DEDICATED_ONLY_LOOPS); its health is its own heartbeat,
+#: read by its own readback (/api/command/market-plane)
+WORKERS_DEDICATED_ONLY = ("universal_market_plane",)
 
 INVENTORY = API_LOOPS + WORKERS_LOOPS
 BY_NAME = {(s["name"], s["process"]): s for s in INVENTORY}
@@ -968,4 +970,5 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
             "loops": loops, "summary": summary,
             "capital_critical_not_healthy": critical_bad,
             "workers_not_started_by_design": list(WORKERS_NOT_STARTED),
+            "dedicated_service_only_by_design": list(WORKERS_DEDICATED_ONLY),
             "sources_missing": missing}

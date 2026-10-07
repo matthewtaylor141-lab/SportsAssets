@@ -30,7 +30,8 @@ from . import (analytics, bettor_live_loop, bettor_state,
                mirror_shadow, poller, premap, price_path, reconciler,
                retention, rn1_observability, roster, roster_auto,
                shadow_bettor, shadow_experimental, shadow_rn1,
-               underdog, universal_market_plane, whale_exits)
+               underdog, whale_exits)
+from .loop_contract import is_disabled as _loop_disabled
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -393,13 +394,15 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # deployment that has no institutional credential costs a heartbeat
     # and no venue traffic. INSTITUTIONAL_MD=off stops it outright.
     ("institutional_md", institutional_md.run),
-    # THE UNIVERSAL MARKET PLANE (migration 312), PARALLEL / SHADOW: the
-    # durable registry of every listed sports contract, priority-ordered
-    # stable PMX shards (armed under the same identity guard and switch as
-    # the stream above), coverage / certification / latency / Radar evidence.
-    # It serves no decision and no mark yet (parallel first); no order path.
-    # UNIVERSAL_MARKET_PLANE=off stops it outright.
-    ("universal_market_plane", universal_market_plane.run),
+    # THE UNIVERSAL MARKET PLANE IS NOT A SHARED-WORKER LOOP (completion
+    # readiness, 2026-10-07). Production OOM-killed this 2 GiB process
+    # repeatedly while the market plane's full-universe registry and shards
+    # ran here beside the capital-critical loops; UNIVERSAL_MARKET_PLANE=off
+    # only made it return and be restarted every five seconds. It runs in
+    # its own read-only service (ops/render_market_plane_service.yaml:
+    # `python -m sportsassets.workers.universal_market_plane`), and this
+    # module does not even import it. See DEDICATED_ONLY_LOOPS below; a test
+    # fails the build if it is registered here again.
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
     # BETTOR LIVE OBSERVATION -- DECISION ONLY.
@@ -480,10 +483,18 @@ PROCESS_LOCK_REASON = ("sportsassets-workers holds no venue write (cand21): "
                        "ingestion and measurement only")
 
 
+#: LOOPS THAT RUN ONLY IN THEIR OWN DEDICATED SERVICE, NEVER HERE. A
+#: source-level rule, not an environment switch: even if a name below is
+#: registered in LOOPS again (or UNIVERSAL_MARKET_PLANE=on is set on this
+#: service), startable_loops() refuses it and the boot marker names it.
+DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane"})
+
+
 def startable_loops(loops=None) -> list:
-    """The loops main() starts: LOOPS minus VENUE_WRITE_LOOPS, order kept."""
+    """The loops main() starts: LOOPS minus VENUE_WRITE_LOOPS minus
+    DEDICATED_ONLY_LOOPS, order kept."""
     return [(n, fn) for n, fn in (LOOPS if loops is None else loops)
-            if n not in VENUE_WRITE_LOOPS]
+            if n not in VENUE_WRITE_LOOPS and n not in DEDICATED_ONLY_LOOPS]
 
 
 def _lock_venue_writes() -> str:
@@ -493,6 +504,11 @@ def _lock_venue_writes() -> str:
 
     gate.lock_process(PROCESS_LOCK_REASON)
     return gate.process_lock()
+
+
+#: loops that returned LOOP_DISABLED this process (read back by tests and
+#: the inventory log); never restarted until the next deploy
+_DISABLED: set = set()
 
 
 async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
@@ -512,7 +528,14 @@ async def supervise(name: str, factory: Callable[[], Awaitable[None]], *,
             # process already has (none yet: nothing, never a wait). The
             # loops' own heartbeats remain their success record.
             _LH.spawn_record(name, process="workers", phase=_LH.START)
-            await factory()
+            result = await factory()
+            if _loop_disabled(result):
+                # OFF BY CONFIGURATION (loop_contract): this service re-reads
+                # its environment only on a deploy, so a restart would only
+                # repeat the same answer every five seconds. Stop here.
+                log.info("loop %s disabled by configuration; not restarting", name)
+                _DISABLED.add(name)
+                return
             log.warning("loop %s exited cleanly; restarting in %ss", name, RESTART_DELAY_SECONDS)
         except Exception as exc:  # noqa: BLE001
             log.exception("loop %s crashed; restarting in %ss", name, RESTART_DELAY_SECONDS)
@@ -537,6 +560,10 @@ def _boot_marker(at: str) -> dict:
             "venue_writes": "LOCKED" if lock else "NOT_LOCKED",
             "lock_reason": lock,
             "not_started": sorted(VENUE_WRITE_LOOPS),
+            "dedicated_only": sorted(DEDICATED_ONLY_LOOPS),
+            "dedicated_only_runtime": {
+                "universal_market_plane": "sportsassets-market-plane "
+                                          "(ops/render_market_plane_service.yaml)"},
             "started": [n for n, _fn in startable_loops()]}
 
 
@@ -602,6 +629,9 @@ async def main() -> None:
     # listener itself for a status row. The marker is not staggered
     # either: it is the one write the probe waits on to learn which
     # commit is booting.
+    log.info("workers loop inventory: starting=%s not_started=%s dedicated_only=%s",
+             [n for n, _ in startable_loops()], sorted(VENUE_WRITE_LOOPS),
+             sorted(DEDICATED_ONLY_LOOPS))
     await asyncio.gather(_record_boot(),
                          *(supervise(name, fn, boot_delay=i * BOOT_STAGGER_S)
                            for i, (name, fn) in enumerate(startable_loops())))

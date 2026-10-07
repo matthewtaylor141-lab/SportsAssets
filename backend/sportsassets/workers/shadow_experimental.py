@@ -72,6 +72,7 @@ from .. import shadow_identity_resolver as xident
 from .. import shadow_l2 as l2
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -886,7 +887,7 @@ async def tick(pool, *, now=None) -> dict:
 async def run() -> None:
     if _off("SHADOW_EXPERIMENTAL"):
         log.info("shadow_experimental: collection off by switch")
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
     pool = await get_pool()
 
     # THE REGISTRY IS WRITTEN DOWN BEFORE THE FIRST SEAL, and a rule

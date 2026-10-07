@@ -438,9 +438,13 @@ def test_priority_and_total_denominators_are_counted_apart():
     assert got["held_positions"]["rate"] is None  # unread here: never 0
 
 
-def test_the_worker_is_supervised():
+def test_the_worker_runs_only_in_its_dedicated_service():
+    # completion readiness 2026-10-07: the shared workers OOM-killed with
+    # the market plane in-process; it is supervised ONLY by its dedicated
+    # read-only service (ops/render_market_plane_service.yaml)
     src = (ROOT / "workers" / "all.py").read_text()
-    assert '("universal_market_plane", universal_market_plane.run)' in src
+    assert '("universal_market_plane", universal_market_plane.run)' not in src
+    assert 'DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane"})' in src
 
 
 # ── pg: populate, coverage, assignment, certification, snapshot ─────
