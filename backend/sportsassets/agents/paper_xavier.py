@@ -521,7 +521,70 @@ async def management_packet(conn, ctx: dict, *, pos: dict, measure: dict,
         valuation_id=measure.get("valuation_id"), mark=mk.get("mark"),
         mark_class=mk.get("class"), settlement=ident, protection=prot)
     packet["book"]["reason"] = mk.get("reason")
+    packet["probability"].update({
+        k: measure.get(k) for k in ("probability_age_s",
+                                    "probability_source_at",
+                                    "probability_received_at",
+                                    "probability_limit_s", "feed_refusal")
+        if measure.get(k) is not None})
+    packet["position"] = await packet_position(
+        conn, acct, pos=pos, mark=mk.get("mark") or {}, standing=standing,
+        at=at)
     return packet, XPK.gate(packet)
+
+
+async def packet_position(conn, acct: str, *, pos: dict, mark: dict,
+                          standing, at: float) -> dict:
+    """THE POSITION BLOCK OF THE PACKET (closeout): the canonical identity,
+    entry, cost, P&L at the current executable bid, horizon, correlated
+    exposure and standing orders. INFORMATIONAL: it gates nothing (the six
+    elements of xavier_packet do). Each read in its own savepoint; a failed
+    read is null with its reason, never assumed."""
+    q = float(pos.get("open_qty") or 0.0)
+    bid = mark.get("bid")
+    out = {"position_key": pos.get("position_key"),
+           "group_id": pos.get("group_id"), "venue": "PMUS",
+           "strategy": pos.get("strategy"),
+           "us_market_slug": pos.get("us_market_slug"),
+           "holding_side": pos.get("holding_side"),
+           "fixture": pos.get("fixture"), "label": pos.get("label"),
+           "open_qty": q,
+           "entry_price_incl_fees": pos.get("avg_cost_per_contract_incl_fees"),
+           "entry_at": pos.get("first_fill_at"),
+           "cost_basis_usd": pos.get("cost_basis_usd"),
+           "realized_pnl_usd": pos.get("realized_pnl_usd"),
+           "unrealized_at_bid_usd": (
+               None if bid is None or pos.get("cost_basis_usd") is None
+               else round(q * float(bid) - float(pos["cost_basis_usd"]), 6)),
+           "unrealized_basis": "OPEN_QTY_AT_THE_CURRENT_BID_BEFORE_EXIT_FEES",
+           "standing_orders": len(list(standing or ()))}
+    try:
+        async with conn.transaction():
+            gs = await conn.fetchval(
+                "SELECT extract(epoch FROM game_start)::float8 FROM "
+                " us_premap WHERE market_slug = $1 LIMIT 1",
+                pos.get("us_market_slug"))
+        out["event_start"] = gs
+        out["seconds_to_start"] = (None if gs is None
+                                   else round(float(gs) - float(at), 1))
+    except Exception as exc:                                    # noqa: BLE001
+        out["event_start"] = None
+        out["event_start_unread"] = type(exc).__name__
+    try:
+        async with conn.transaction():
+            out["correlated_groups_in_fixture"] = int(await conn.fetchval(
+                "SELECT count(DISTINCT o.group_id) FROM paper_orders o "
+                " WHERE o.account_id = $1 AND o.fixture = $2 "
+                "   AND o.group_id <> $3 AND o.role = 'ENTRY' "
+                "   AND EXISTS (SELECT 1 FROM paper_fills f "
+                "                WHERE f.group_id = o.group_id) "
+                "   AND NOT EXISTS (SELECT 1 FROM paper_settlements s "
+                "                    WHERE s.group_id = o.group_id)",
+                acct, pos.get("fixture"), pos.get("group_id")) or 0)
+    except Exception as exc:                                    # noqa: BLE001
+        out["correlated_groups_in_fixture"] = None
+        out["correlated_unread"] = type(exc).__name__
+    return out
 
 
 async def persist_probability_snapshot(conn, *, account_id: str, pos: dict,
@@ -645,7 +708,9 @@ async def _held_feed(conn, *, pos: dict, payout_event, payout_is_complement,
                 conn, us_market_slug=pos["us_market_slug"],
                 payout_event=payout_event,
                 payout_is_complement=payout_is_complement, at=at,
-                max_age_s=max_age_s)
+                max_age_s=max_age_s,
+                entry_event_key=pos.get("entry_event_key"),
+                entry_line=pos.get("entry_line"))
     except TimeoutError:
         return {"ok": False, "reason": FR.R_ON_DEMAND_TIMEOUT}
 
@@ -1463,7 +1528,21 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
                  "waiting_s": None if da is None else round(at - da, 3)}
                 for (_, _, dg, dt_, da) in due[i:]]
             break
-        got = await review_group(conn, ctx, g, trigger=trig, due_at=d_at)
+        # ONE GROUP'S FAILED REVIEW NEVER STARVES THE REST: before this a
+        # review that raised (e.g. the feed-provenance TypeError fixed in
+        # paper_benchmark.xavier_measure) aborted the whole step, so every
+        # group due after it -- held markets that had just moved first of
+        # all (FEED_CHANGE_PRIORITY) -- went unreviewed in that pass. The
+        # failure is named per group; nothing is assumed reviewed.
+        try:
+            got = await review_group(conn, ctx, g, trigger=trig, due_at=d_at)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                                # noqa: BLE001
+            out.setdefault("review_errors", []).append(
+                {"group_id": g, "trigger": trig,
+                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])})
+            continue
         out["reviews"] += len(got["reviews"])
         out["by_trigger"][trig] = out["by_trigger"].get(trig, 0) + 1
         if trig == T_FIRST and d_at is not None:

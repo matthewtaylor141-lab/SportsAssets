@@ -662,7 +662,49 @@ def discover(events, venue_rows, *, sport_ids, deadline=None) -> dict:
                                 if s in sports),
             "venue_events_without_a_fixture": venue_unmatched,
             "receipt_sample": dict(samples),
+            "watch": watch_receipts(receipts, venue, matched_venue,
+                                    sports=sports),
             "receipts": receipts, "seeds": seeds}
+
+
+#: THE NCAAF FUNNEL'S IDENTITY STAGE (closeout, production 2026-10-06: 108
+#: venue cfb events in seven days, 37 matched to a PinnAPI fixture, and the
+#: rest unattributed per event because the heartbeat carried only 8 samples
+#: per state for ALL sports). For these provider leagues / venue event
+#: prefixes the digest carries EVERY receipt and every unmatched venue event
+#: (bounded), so the funnel names each venue event's identity loss: matched;
+#: a provider fixture that names it but mismatches a participant or the start
+#: (ours to map); or no provider fixture names it at all.
+WATCH_PROVIDER_LEAGUES = ("NCAA",)
+WATCH_VENUE_PREFIXES = ("cfb-",)
+WATCH_MAX = 300
+
+
+def watch_receipts(receipts, venue, matched_venue, *, sports) -> dict:
+    """Pure. {provider: [receipt...], venue_unmatched: [slug...]} for the
+    watched leagues (bounded by WATCH_MAX each)."""
+    prov = []
+    for r in receipts or ():
+        if str(r.get("league") or "") in WATCH_PROVIDER_LEAGUES and \
+                len(prov) < WATCH_MAX:
+            prov.append({k: r.get(k) for k in (
+                "fixture_id", "league", "home", "away", "start", "state",
+                "venue_event_slug", "matched_by", "candidates",
+                "start_offset_s", "reason")})
+    unmatched = []
+    for sid, evs in (venue or {}).items():
+        if sid not in sports:
+            continue
+        for e in evs:
+            slug = str(e.get("slug") or "")
+            if slug.startswith(WATCH_VENUE_PREFIXES) and \
+                    (sid, slug) not in matched_venue and \
+                    len(unmatched) < WATCH_MAX:
+                unmatched.append(slug)
+    return {"provider_leagues": list(WATCH_PROVIDER_LEAGUES),
+            "venue_prefixes": list(WATCH_VENUE_PREFIXES),
+            "provider": prov, "venue_unmatched": sorted(unmatched),
+            "bounded_at": WATCH_MAX}
 
 
 def seed_event(receipt: dict) -> dict:

@@ -86,6 +86,12 @@ jobs:
           jq -c '.' p0/profitability_scoreboard.json 2>&1 | cut -c1-12000
           get capital_readiness /api/command/capital-readiness
           jq -c '{status, why, label, authority, readiness: (.readiness | {readiness_status, recommended_capital_usd, blocking_gates, computed_at, source_sha}), agent_championship: .agent_championship.agents, shadow_court, scale_twin: {status: .scale_twin.status, rows: (.scale_twin.rows | length)}}' p0/capital_readiness.json 2>&1 | cut -c1-8000
+          get loss_attribution /api/command/paper/loss-attribution
+          jq -c 'del(.missed_exits.sample)' p0/loss_attribution.json 2>&1 | cut -c1-12000
+          get ncaaf_funnel /api/command/ncaaf-funnel
+          jq -c '{status, why, watch, stages, refused, unexplained_losses, venue_side: (.venue_side | {venue_events, contracts, matched, unmatched, unmatched_by_reason, sample: .unmatched_events[:20]}), events: .events[:40]}' p0/ncaaf_funnel.json 2>&1 | cut -c1-12000
+          get market_plane "/api/command/market-plane?limit=50"
+          jq -c '{status, why, snapshot_at, counts, coverage_by_state, certification, universe: .snapshot.universe, subscription: (.snapshot.subscription | {armed, arming_why, configured_capacity, subscribed, fresh, stale_subscribed, plan: (.plan | {complete, symbols, capacity, overflow_count, subscribable, shards_required_for_all}), shards}), sources: .snapshot.sources, latency: .snapshot.latency, catalogue: .snapshot.catalogue, radar: .snapshot.radar}' p0/market_plane.json 2>&1 | cut -c1-12000
           get small_live "/api/command/small-live?limit=1"
           jq -c 'del(.rows) | del(.basis)' p0/small_live.json 2>&1 | cut -c1-3000
           exit 0

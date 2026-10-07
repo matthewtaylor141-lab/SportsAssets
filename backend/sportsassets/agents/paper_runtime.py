@@ -1397,8 +1397,22 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
 HELD_REVIEW_MIN_GAP_S = 5.0
 HELD_REVIEW_BUDGET_S = 10.0
 HELD_REVIEW_TIMEOUT_S = 20.0
+#: A HELD REVIEW REFUSED BECAUSE A PAPER PASS HOLDS THE LOCK IS RETRIED, not
+#: dropped. Before this the batch was cleared from `pending` before the run,
+#: so a held market's change that arrived while a pass ran (the pass holds
+#: the lock up to its budget / hard timeout, and its Xavier step built its
+#: due list before the change) was never reviewed while its probability was
+#: fresh: the next pass saw it >= 60 s later, stale by construction. A slug
+#: is retried every HELD_REVIEW_MIN_GAP_S for at most this long after it was
+#: first queued -- the odds source's 30 s rule (ext_pinnacle_loop.
+#: PINNACLE_MAX_AGE_S, pinned by a test): after that no review of that
+#: change could be fresh, so the slug is dropped (counted). The review
+#: itself still judges freshness by the unchanged rule; this only stops the
+#: chance from being thrown away.
+HELD_REVIEW_RETRY_WINDOW_S = 30.0
 _HELD: dict = {"task": None, "pending": set(), "runs": 0, "coalesced": 0,
-               "last": None}
+               "last": None, "queued_at": {}, "busy_retries": 0,
+               "busy_dropped": 0}
 
 
 async def held_review(conn, *, slugs, now: float | None = None,
@@ -1457,13 +1471,39 @@ async def held_review(conn, *, slugs, now: float | None = None,
                 pass
 
 
-def schedule_held_review(slugs, *, get_pool=None) -> dict:
+def requeue_busy(batch, *, now: float) -> dict:
+    """A batch refused R_BUSY: every slug still inside its retry window
+    (first queued <= HELD_REVIEW_RETRY_WINDOW_S ago) goes back to `pending`;
+    the rest are dropped and counted. Pure apart from _HELD."""
+    qa = _HELD.setdefault("queued_at", {})
+    kept, dropped = [], []
+    for s in sorted(batch or []):
+        first = qa.get(s, now)
+        if now - first <= HELD_REVIEW_RETRY_WINDOW_S:
+            kept.append(s)
+            qa.setdefault(s, first)
+        else:
+            dropped.append(s)
+            qa.pop(s, None)
+    _HELD["pending"].update(kept)
+    _HELD["busy_retries"] = _HELD.get("busy_retries", 0) + len(kept)
+    _HELD["busy_dropped"] = _HELD.get("busy_dropped", 0) + len(dropped)
+    return {"requeued": kept, "dropped": dropped}
+
+
+def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:
     """Synchronous (the feed's change notification): schedule a bounded
     background held review on its own connection. Returns at once."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
+    qa = _HELD.setdefault("queued_at", {})
+    t_now = float(clock())
+    for s in (slugs or []):
+        # the window runs from the LATEST request for the slug: a newer
+        # change has a fresh probability of its own
+        qa[s] = t_now
     _HELD["pending"].update(slugs or [])
     t = _HELD.get("task")
     if t is not None and not t.done():
@@ -1476,16 +1516,25 @@ def schedule_held_review(slugs, *, get_pool=None) -> dict:
         while _HELD["pending"]:
             batch = set(_HELD["pending"])
             _HELD["pending"].clear()
+            res = None
             try:
                 pool = await get_pool()
                 async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as c:
-                    _HELD["last"] = await asyncio.wait_for(
+                    res = await asyncio.wait_for(
                         held_review(c, slugs=batch), HELD_REVIEW_TIMEOUT_S)
+                    _HELD["last"] = res
                 _HELD["runs"] += 1
             except asyncio.CancelledError:
                 raise
             except Exception:                                  # noqa: BLE001
                 log.warning("xavier held review failed", exc_info=True)
+            if isinstance(res, dict) and res.get("refusal") == R_BUSY:
+                # a paper pass holds the lock: retry inside the window
+                requeue_busy(batch, now=float(clock()))
+            else:
+                for s in batch:
+                    if s not in _HELD["pending"]:
+                        qa.pop(s, None)
             await asyncio.sleep(HELD_REVIEW_MIN_GAP_S)
 
     _HELD["task"] = loop.create_task(run())

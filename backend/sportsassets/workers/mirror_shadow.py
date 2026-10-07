@@ -1495,7 +1495,37 @@ def _paced_bbo(pmus, slug: str) -> dict:
     state beside the quotes (2026-09-05: five hours of
     MARKET_STATE_HALTED read as `no_quote`)."""
     pace(READ_PACING_S)
-    return pmus.bbo_read(pmus._get_client(), slug)
+    return pmus.bbo_read(_quote_client(pmus), slug)
+
+
+#: (closeout) THE QUOTE READ NEEDS NO KEY. Production 2026-10-06 21:21Z:
+#: positions read from the funded ledger, yet the tick was still abandoned --
+#: every bbo/book read went through the AUTHENTICATED retail client, whose
+#: secret slot holds the PMX RSA credential (no Ed25519 key), so each read
+#: raised before it was sent, named no state, and three of them abandoned
+#: the tick (MISS_STREAK_ABANDON). The venue's bbo / book endpoints are public:
+#: when the PMUS secret cannot sign, the quote read goes through the KEYLESS,
+#: GET-only, paced client the same-book probe already uses
+#: (institutional_same_book: ReadOnlyTransport refuses every non-GET before it
+#: is sent). A real Ed25519 key keeps the authenticated client as before. No
+#: order path either way.
+_KEYLESS = {"client": None}
+QUOTE_CLIENT_KEYLESS = "KEYLESS_PUBLIC_GATEWAY_GET_ONLY"
+QUOTE_CLIENT_AUTH = "AUTHENTICATED_RETAIL_CLIENT"
+
+
+def quote_client_kind(*, secret_fn=None) -> str:
+    return QUOTE_CLIENT_KEYLESS if pmus_secret_unusable_reason(
+        secret_fn=secret_fn) is not None else QUOTE_CLIENT_AUTH
+
+
+def _quote_client(pmus, *, secret_fn=None):
+    if quote_client_kind(secret_fn=secret_fn) == QUOTE_CLIENT_KEYLESS:
+        if _KEYLESS["client"] is None:
+            from .. import institutional_same_book as _SB
+            _KEYLESS["client"] = _SB._keyless_client()
+        return _KEYLESS["client"]
+    return pmus._get_client()
 
 
 def _px(f: dict) -> float | None:

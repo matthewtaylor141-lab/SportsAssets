@@ -155,6 +155,17 @@ def test_no_funded_module_imports_the_paper_modules():
                # imports no order, venue, execution or funded module
                # (tests/test_equity_wall_authority.py)
                "api/command_equity.py",
+               # (closeout) the market plane's held-position denominator
+               # (/api/command/market-plane): GET-only, reads
+               # bettor_paper_freshness.read inside a READ ONLY transaction so
+               # the started market-plane worker never imports the paper
+               # ledger; writes nothing, imports no order or funded module
+               "api/command_market_plane.py",
+               # (closeout) the PAPER loss attribution (/api/command/paper/
+               # loss-attribution): GET-only, reads paper_loss_attribution
+               # (intel.attribution over the immutable paper history) inside
+               # a READ ONLY transaction; writes nothing, no order authority
+               "api/command_paper_loss_attribution.py",
                # (223) the paper sleeve economics (/api/command/profitability/
                # sleeves): GET-only, reads bettor_paper_sleeves.sleeve_book
                # (paper ledger + paper_sleeve_classifications) inside a READ

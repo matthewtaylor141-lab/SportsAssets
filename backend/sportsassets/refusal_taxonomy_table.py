@@ -370,6 +370,15 @@ TABLE = {
     "HELD_PAYOUT_COMPLEMENT_NOT_NOT_OF_A_SELECTION": (S, SET, "INGESTION"),
     "HELD_PAYOUT_EVENT_NOT_RECORDED": (S, SET, "INGESTION"),
     "HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE": (S, MAP, "INGESTION"),
+    # closeout: the held LINE read (pinnapi_feed_runtime.held_line_quote)
+    "HELD_LINE_ENTRY_VALUATION_STATES_NO_LINE": (S, MAP, "INGESTION"),
+    "HELD_LINE_OUTCOME_NOT_ONE_PINNACLE_OUTCOME": (S, MAP, "INGESTION"),
+    # closeout: the NCAAF funnel's per-event loss reasons (ncaaf_funnel).
+    # SOFTWARE until evidence says otherwise -- none is called external here
+    "PROVIDER_HOLDS_NO_FIXTURE_FOR_THE_VENUE_EVENT": (S, DATA, "EVENT_IDENTITY"),
+    "PROVIDER_FIXTURE_NAMES_IT_BUT_IDENTITY_MISMATCHES": (S, MAP, "EVENT_IDENTITY"),
+    "PROVIDER_DISCOVERY_WATCH_NOT_RECORDED": (S, DATA, "INGESTION"),
+    "COLLECTOR_RECORDED_NO_VALUATION_OR_DECISION_IN_24H": (S, CAP, "INGESTION"),
     "HOLDOUT_BUDGET_EXHAUSTED": (S, CAP, "OUT_OF_FUNNEL"),
     "HOLDS_PROBABILITY_DISAGREES_WITH_THE_RECORD_MANAGEMENT_KEPT": (S, DATA, "PROBABILITY"),
     "HOLD_IS_NOT_PRICED_SO_NOTHING_IS_SELECTED": (S, DATA, "RISK_ADMISSION"),
@@ -1431,6 +1440,30 @@ TABLE = {
     "VOICE_PROVIDER_FAILED": (S, DATA, "OUT_OF_FUNNEL"),
     "VOICE_UNAVAILABLE_SERVER_KEY_NOT_CONFIGURED": (S, DATA, "OUT_OF_FUNNEL"),
     "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (settlement rule registry) the market plane's settlement-state whys
+    # (market_plane.settlement, coverage evidence only -- decision-time
+    # attest remains the trading authority) ...
+    "NO_SETTLEMENT_COMPARISON_RECORDED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_NOT_CAPTURED": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_SILENT_ON": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "BOOKMAKER_TERMS_NOT_HELD": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "INCOMPATIBLE_NOT_PRICEABLE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULES_CHANGED_SINCE_DECISION_ATTEST": (S, SET,
+                                            "SETTLEMENT_COMPATIBILITY"),
+    "TIE_RULE_NOT_COVERED_BY_THE_TERMS_COMPARISON": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "KALSHI_CONTRACT_NOT_MAPPED_TO_A_BETTOR_FAMILY": (S, MAP,
+                                                      "VENUE_MAPPING"),
+    "RULE_EVIDENCE_CONFLICT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VENUE_RULES_SELF_CONTRADICTORY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # ... and the GET-only Kalshi sports catalogue's named truncations and
+    # its transport's non-GET refusal (kalshi_catalogue)
+    "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),
+    "KALSHI_CATALOGUE_SERIES_LIST_NOT_READ": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_CURSOR_REPEATED": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_PAGE_CAP": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
+    "KALSHI_CATALOGUE_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
@@ -1488,6 +1521,9 @@ INLINE = {
     "NO_VENUE_CONTRACT_SO_NO_LADDER": (S, MAP, "VENUE_MAPPING"),
     "PAPER_PASS_HAD_NO_CONNECTION": (S, DATA, "AGENT_EVALUATION"),
     "PAPER_PASS_RAISED_OR_TIMED_OUT": (S, INT, "AGENT_EVALUATION"),
+    # Xavier's held measure: an ok feed read naming no change instant is
+    # not evidence of currency (paper_benchmark.xavier_measure)
+    "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT": (S, FRESH, "FRESHNESS"),
     "PINNAPI_PRIMARY_CLOCK_INVALID": (S, FRESH, "FRESHNESS"),
     "PINNAPI_PRIMARY_FIXTURE_AMBIGUOUS": (S, MAP, "EVENT_IDENTITY"),
     "PINNAPI_PRIMARY_FIXTURE_CHANGED": (S, FRESH, "FRESHNESS"),
@@ -1909,12 +1945,42 @@ POS_OS_STREAM = {
     "POS_OS_NO_RECORDED_MID_AT_FILL": (S, DATA, "FILL"),
 }
 
+#: THE SOFTWARE CENSUS CLOSURE (live release 55eb7c82 first-loss census).
+#: Each is SOFTWARE by this table's two-class vocabulary (the data is not
+#: ours to have); the first-loss census classes each EXTERNAL by
+#: bettor_external_shadow.EVALUABILITY_OF, on the evidence its emitter
+#: records:
+#:   QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER  the metered quote's lag at our
+#:       receipt (provider_lag_s, on the row) already past the 30 s rule, and
+#:       the PinnAPI read refused for an EXTERNAL reason (that reason rides
+#:       beside it) -- ext_pinnacle_loop.QUOTE_STALE_AS_DELIVERED_RULE
+#:   PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED    no feed record at the start
+#:       shares a token with either team AND the metered payload carries no
+#:       Pinnacle book (THEODDSAPI_PAYLOAD_HAS_NO_PINNACLE_BOOK beside it) --
+#:       ext_pinnacle_loop.R_FIXTURE_NOT_YET_POSTED
+#:   PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES  the evidence
+#:       code beside it: the feed lists a participant only at other starts
+SOFTWARE_CENSUS_CLOSURE = {
+    "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER": (S, FRESH, "FRESHNESS"),
+    "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": (S, DATA, "PROBABILITY"),
+    "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES": (
+        S, DATA, "PROBABILITY"),
+    # ECONOMIC by its evidence: the paper decision's book read SUCCEEDED and
+    # the side it would buy from is published, well formed and empty (no
+    # executable depth: the market's state, recorded on the observation) --
+    # paper_derek.no_book_refusal; a failed / malformed read keeps
+    # THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY (SOFTWARE)
+    "THE_OBSERVED_BOOK_HAS_NO_LEVEL_ON_THE_SIDE_BOUGHT": (
+        E, DEPTH, "VENUE_BOOK"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())
                + list(INTEGRATION_STREAMS.items())
                + list(COVERAGE_CENSUS.items())
                + list(EXEC_GATING_STREAM.items())
-               + list(POS_OS_STREAM.items())):
+               + list(POS_OS_STREAM.items())
+               + list(SOFTWARE_CENSUS_CLOSURE.items())):
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
@@ -1943,6 +2009,9 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    "NO_RECORD_AT_THIS_STAGE":
+        "ncaaf_funnel: the event recorded no code at all (a marker beside a "
+        "named stage loss, never a refusal)",
     "COMPLETE_PAIR":
         "bettor_policy: a policy route name",
     "EPOCH":

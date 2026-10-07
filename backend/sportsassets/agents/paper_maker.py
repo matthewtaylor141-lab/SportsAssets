@@ -226,7 +226,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         "retry_after_s": retry["after_s"], "retry": retry}
             refusals.append(PD.R_BOOK_DEADLINE)
         elif obs.get("error") or not levels:
-            refusals.append(PB.R_NO_BOOK)
+            refusals.append(PD.no_book_refusal(obs, lv))
         elif book_age > PB.BOOK_MAX_AGE_S:
             refusals.append(PB.R_BOOK_NOT_CURRENT)
         else:

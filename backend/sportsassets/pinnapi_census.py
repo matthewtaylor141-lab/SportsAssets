@@ -90,7 +90,10 @@ def _norm_sql() -> str:
             "'-', '')")
 
 
-def _base_where() -> str:
+def _base_where(horizon: bool = True) -> str:
+    """The census's base filter. `horizon=False` keeps every realism filter
+    and drops ONLY the census's start window: a HELD contract's own event
+    is grouped whatever its start (pinnapi_feed_runtime.held_event_sql)."""
     from . import bettor_venue_realism as vreal
     for m in vreal.SIMULATED_MARKERS:
         assert m.replace("-", "").isalpha() and m.islower(), m
@@ -111,6 +114,10 @@ def _base_where() -> str:
     # -- would read as NO_FEED_EVENT and push the subscribed rows past
     # MAX_CONTRACTS. The census keeps measuring the population it always
     # measured; the catalogue itself is no longer cut to it.
+    if not horizon:
+        return ("""game_start IS NOT NULL
+   %s
+   %s""" % (prose, types))
     return ("""game_start > now() - interval '6 hours'
    AND game_start <= now() + interval '%d hours'
    %s

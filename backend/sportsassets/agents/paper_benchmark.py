@@ -660,6 +660,17 @@ def contract_match(cand: dict, row: dict, *, not_applied=()) -> dict:
          else "the lane refused the probability: %s" % lane["probability"]),
         lane_refusals=lane["probability"],
         not_applied_by_policy=lane["not_applied_by_policy"])
+    # THE LANE'S OWN CODES RIDE BEHIND THE CATEGORY (software census
+    # closure), as the settlement blockers do: the category says only that
+    # the lane refused the probability, so the first-loss census classed
+    # every such decision by the wrapper (SOFTWARE) whatever the lane's
+    # cause -- a payload with no Pinnacle book, thin outcomes, a stale
+    # quote. The census now reads the carried code
+    # (coverage_first_loss.LANE_WRAPPERS); the decision is unchanged.
+    if lane["probability"]:
+        for c in lane["probability"]:
+            if c not in refusals:
+                refusals.append(c)
     # 5 · VENUE
     put("polymarket_us_contract", cand.get("venue") in (None, "PMUS"),
         R_NOT_PMUS, "venue %s" % cand.get("venue"))
@@ -2204,7 +2215,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         "retry_after_s": retry["after_s"], "retry": retry}
             refusals.append(PD.R_BOOK_DEADLINE)
         elif obs.get("error") or not levels:
-            refusals.append(R_NO_BOOK)
+            refusals.append(PD.no_book_refusal(obs, lv))
         elif book_age > BOOK_MAX_AGE_S:
             refusals.append(R_BOOK_NOT_CURRENT)
         else:
@@ -2923,6 +2934,10 @@ async def group_strategy(conn, group_id: str) -> str:
 
 
 SOURCE_FEED_CURRENT = "PINNAPI_FEED_CURRENT"
+#: an ok feed read whose provenance names no change instant at all (never
+#: expected: pinnapi_feed.read refuses a quote without one) is not evidence
+#: of currency; the stale measure stands with this named reason
+R_FEED_NO_CHANGE_INSTANT = "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT"
 
 
 async def xavier_measure(conn, ctx: dict, *, pos: dict,
@@ -2979,7 +2994,8 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     if d is not None and d["valuation_id"] is not None:
         contract = await conn.fetchrow(
             "SELECT payout_event, payout_is_complement, observed_at, "
-            " received_at, sport_family, us_market_slug, raw_odds, "
+            " received_at, sport_family, us_market_slug, raw_odds, event_key,"
+            " market, line,"
             " settlement_comparison->>'venue_rules_text' AS venue_rules_text"
             "  FROM external_valuations WHERE id=$1",
             int(d["valuation_id"]))
@@ -2992,8 +3008,12 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # twice. A HELD NCAAF POSITION (P0 incident) takes its own conversion --
     # the identity, re-checked against the contract's cited clauses -- so a
     # reading the entry could not have used is never used to manage it.
+    # A LINE CONTRACT TAKES NO TIE CONVERSION: a half-point line cannot
+    # push, and the line lane priced it unconverted at entry (closeout).
+    is_line = contract is not None and str(
+        contract.get("market") or "") in MF.LINE_FAMILIES
     nfl_conv = (held_venue_conversion(contract)
-                if contract is not None
+                if contract is not None and not is_line
                 and pol["kind"] in COMPLETED_GAME_KINDS else None)
 
     def _venue_scale(reading: dict) -> dict:
@@ -3075,8 +3095,13 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     # THE HELD CONTRACT ON THE IN-PROCESS FEED: only an ok read under the
     # same limit becomes fresh; any refusal keeps the stale measure as is.
     try:
+        # the entry valuation's provider fixture travels with the position
+        # (pinnapi_feed_runtime.entry_fixture): identity the entry proved
         cur = await feed(
-            conn, pos=pos, at=at, max_age_s=max_age,
+            conn, pos=(pos if contract is None else dict(
+                pos, entry_event_key=contract.get("event_key"),
+                entry_line=(contract.get("line") if is_line else None))),
+            at=at, max_age_s=max_age,
             payout_event=None if contract is None
             else contract["payout_event"],
             payout_is_complement=bool(contract is not None
@@ -3088,12 +3113,31 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         return dict(stale_out, feed_refusal=cur.get("reason"),
                     feed_detail={k: cur[k] for k in (
                         "sport_id", "feed_event_id", "market_key",
-                        "designation", "provenance", "why", "error")
+                        "designation", "identity_basis", "provenance", "why",
+                        "error")
                         if cur.get(k) is not None})
     prov = cur["provenance"]
+    # THE CHANGE INSTANT THE FEED'S OWN 30 s RULE WAS MEASURED FROM
+    # (pinnapi_feed.Quote.change_ms, carried on the read's provenance as
+    # `change_ms`): the provider stamp of the changing frame, or -- ONLY when
+    # that frame carried no stamp -- our labelled observation of the change
+    # (change_clock LOCAL_OBSERVATION_OF_THE_CHANGE, source_change_ms None).
+    # The held read's de-vig ages the quote on exactly this instant
+    # (pinnapi_feed_runtime.held_quote). Reading `source_change_ms` alone
+    # raised TypeError (None / 1000.0) on every unstamped change, which
+    # aborted the review -- and every review queued after it -- exactly
+    # when the held market had just moved. Not a wider rule: the same
+    # instant, the same limit.
+    change_ms = prov.get("change_ms")
+    if change_ms is None:
+        change_ms = prov.get("source_change_ms")
+    if change_ms is None:
+        # an ok read always has a change instant; anything else is not
+        # evidence of currency -- the stale measure stands, named
+        return dict(stale_out, feed_refusal=R_FEED_NO_CHANGE_INSTANT)
     return _venue_scale(dict(base, p=float(cur["p"]), source=SOURCE_FEED_CURRENT,
                 p_pinnacle=float(cur["p"]),
-                pinnacle_at=prov["source_change_ms"] / 1000.0,
+                pinnacle_at=float(change_ms) / 1000.0,
                 pinnacle_age_s=prov.get("quote_age_s"),
                 pinnacle_received_at=(
                     None if prov.get("received_ms") is None
@@ -3102,6 +3146,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                 feed={"epoch": prov.get("epoch"),
                       "quote_age_s": prov.get("quote_age_s"),
                       "source_change_ms": prov.get("source_change_ms"),
+                      "change_ms": change_ms,
+                      "change_clock": prov.get("change_clock"),
+                      "observed_change_ms": prov.get("observed_change_ms"),
                       "frame_ts_ms": prov.get("frame_ts_ms"),
                       "received_ms": prov.get("received_ms"),
                       "evaluated_ms": prov.get("evaluated_ms"),
@@ -3111,6 +3158,7 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                       "feed_event_id": cur.get("feed_event_id"),
                       "market_key": cur.get("market_key"),
                       "designation": cur.get("designation"),
+                      "identity_basis": cur.get("identity_basis"),
                       "payout_event": cur.get("payout_event"),
                       "payout_is_complement": cur.get("payout_is_complement"),
                       "p_selection": cur.get("p_selection"),

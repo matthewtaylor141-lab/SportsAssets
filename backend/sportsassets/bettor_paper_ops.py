@@ -298,6 +298,7 @@ REFUSAL_WORDS = {
     "PROBABILITY_EVIDENCE_FRESHNESS_UNKNOWN": "the Pinnacle price's age is unknown",
     "THE_PAPER_BOOK_OBSERVATION_IS_NOT_CURRENT": "the venue order book reading was too old",
     "THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY": "the venue order book was empty or unreadable",
+    "THE_OBSERVED_BOOK_HAS_NO_LEVEL_ON_THE_SIDE_BOUGHT": "the venue order book was read and has nobody on the side bought",
     "NO_ESTABLISHED_EXECUTABLE_DEPTH": "not enough contracts available at the price",
     "NO_SIZED_QUANTITY": "no quantity could be sized",
     "LIMIT_PRICE_NOT_SUPPORTED": "the limit price is outside what the venue supports",

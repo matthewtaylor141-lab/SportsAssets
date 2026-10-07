@@ -41,6 +41,8 @@ def measure_function():
         "DP": SimpleNamespace(LONG="LONG", SHORT="SHORT"),
         "L": SimpleNamespace(_epoch=lambda value: value.timestamp()),
         "COMPLETED_GAME_KINDS": (),
+        "MF": SimpleNamespace(LINE_FAMILIES=("spread", "total",
+                                             "team_total")),
     }
     exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), env)
     return env["xavier_measure"]

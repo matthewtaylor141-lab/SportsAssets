@@ -216,7 +216,8 @@ def match_event(cache, event, family, *, index=None, explain=None):
     evicted = index.get(EVICTED, 0) if index is not None else _evicted(cache)
     ab = N.absence(records, sport_id=sid, start=start,
                    home=event.get("home_team"), away=event.get("away_team"),
-                   family=family, evicted=evicted)
+                   family=family, evicted=evicted,
+                   tolerance_s=START_TOLERANCE_S)
     ex.update(absence=ab)
     return None, (N.R_NOT_IN_FEED if ab["absent"] else R_NO_EXACT)
 

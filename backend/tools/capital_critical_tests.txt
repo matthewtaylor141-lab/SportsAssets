@@ -1033,6 +1033,7 @@ tests/test_contract_writers_round_trip_to_their_readers.py
 # PageWalk-paged, paced and backs off after a 429 or a refused partial.
 tests/test_venue_catalogue_is_complete.py
 tests/test_venue_catalogue_readers_and_receipts.py
+tests/test_catalogue_recursive_partition.py
 # (248) THE COLLECTOR'S COVERAGE SCHEDULER AND RECEIPTS (P0 incident
 # 2026-10-04): the four metered calls a cycle are scheduled earliest deadline
 # first instead of truncated (NCAAF served every cycle of a Saturday slate
@@ -1184,6 +1185,7 @@ tests/test_p0_xavier_packet_and_reconciliation.py
 # database migrates with production's runner alone.
 tests/test_venue_key_seed_decoding.py
 tests/test_ops_canary.py
+tests/test_ops_canary_established.py
 tests/test_fresh_database_migrates.py
 tests/test_command_position_closed_and_ipad.py
 # P1 PMX institutional (2026-10-06): the market-data identity guard accepts a
@@ -1213,3 +1215,26 @@ tests/test_p1_pinnapi_input_changed.py
 tests/test_profitability_stack_binding.py
 # (capital readiness feeds) Shadow Court / agent economics / scale twin / readiness observer: RESEARCH, writes only the 310 tables
 tests/test_capital_readiness_feeds.py
+tests/test_universal_market_plane.py
+tests/test_market_plane_integration.py
+tests/test_mirror_shadow_quote_client.py
+tests/test_xavier_packet_fresh_inputs.py
+# (software census closure) QUOTE_STALE split by the row's measured provider lag; NO_EXACT_FIXTURE -> NOT_YET_POSTED only when two sources agree; the lane wrapper classed by its carried code; a read book's valid empty side is ECONOMIC
+tests/test_software_census_closure.py
+# (closeout) Xavier held read: the held event grouped beyond the census window; the entry's proven PinnAPI fixture
+tests/test_held_event_beyond_census_horizon.py
+tests/test_market_plane_dedicated_service.py
+# (closeout) Xavier held LINE read re-runs the entry's pricing; the settlement join reads once per market, held positions first
+tests/test_xavier_held_line_read.py
+tests/test_settlement_join_per_market_held_first.py
+# (closeout) the NCAAF funnel names every loss per event; the discovery watch keeps every NCAA receipt
+tests/test_ncaaf_funnel.py
+# (settlement rule registry) per-contract PMUS / Kalshi rule evidence, the
+# GET-only Kalshi sports catalogue, the market plane's settlement state and
+# the 0.50-tie payoff vector: evidence only, no order or capital authority
+tests/test_settlement_rule_registry.py
+tests/test_kalshi_public_rules.py
+tests/test_settlement_rule_registry_integration.py
+# (closeout) the PAPER loss attributed by cause: reconciled identity + spread, model-vs-variance z, unmanaged positions, missed exits, correlation
+tests/test_paper_loss_attribution.py
+tests/test_xavier_packet_position_block.py

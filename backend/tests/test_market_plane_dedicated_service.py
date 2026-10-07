@@ -1,0 +1,60 @@
+"""THE DEDICATED MARKET-PLANE RUNTIME HOLDS NO ORDER AUTHORITY (closeout).
+
+Owner decision 2026-10-06: ~74,500 active markets are not solved by raising
+UMP_MAX_STREAMS inside the shared workers; the market plane runs as its own
+read-only Render service, specified in ops/render_market_plane_service.yaml
+(NOT render.yaml: a Blueprint change would redeploy the collector). That
+service receives the database and the PMX
+institutional MARKET-DATA credential only -- never a PMUS key, a Kalshi key,
+the live-trading switch or the admin token."""
+from __future__ import annotations
+
+from pathlib import Path
+
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+FORBIDDEN = ("PMUS_KEY_ID", "PMUS_SECRET_KEY", "PM_PRIVATE_KEY", "PM_FUNDER",
+             "LIVE_TRADING_ENABLED", "ADMIN_TOKEN", "ENGINE_INGEST_TOKEN",
+             "KALSHI", "FUNDED", "EXECMIRROR")
+
+
+SPEC = ROOT / "ops" / "render_market_plane_service.yaml"
+
+
+def _svc(name):
+    doc = yaml.safe_load(SPEC.read_text())
+    for s in doc["services"]:
+        if s.get("name") == name:
+            return s
+    raise AssertionError("service %s not in render.yaml" % name)
+
+
+def test_the_dedicated_runtime_runs_the_market_plane_read_only():
+    s = _svc("sportsassets-market-plane")
+    assert s["type"] == "worker"
+    assert s["dockerCommand"] == (
+        "python -m sportsassets.workers.universal_market_plane")
+    env = {e["key"]: e for e in s["envVars"]}
+    assert env["UMP_RUNTIME"]["value"] == "DEDICATED_READ_ONLY"
+    assert set(env) >= {"DATABASE_URL", "PMX_CLIENT_ID", "PMX_KEY_ID",
+                        "PMX_PRIVATE_KEY_B64"}
+    for k in env:
+        assert not any(f in k for f in FORBIDDEN), k
+    # secrets are entered by the owner, never written in the blueprint
+    for k in ("PMX_CLIENT_ID", "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64"):
+        assert env[k].get("sync") is False and "value" not in env[k]
+
+
+def test_the_spec_is_not_in_the_blueprint():
+    # a render.yaml change on this branch would Blueprint-sync and redeploy
+    # the collector: the owner creates the service from the spec
+    assert "sportsassets-market-plane" not in (ROOT / "render.yaml").read_text()
+
+
+def test_the_module_it_runs_imports_no_venue_write_path():
+    src = (ROOT / "backend/sportsassets/workers/universal_market_plane.py"
+           ).read_text()
+    for w in ("place_order", "cancel_order", "submit_order", "create_order",
+              "funded_submit"):
+        assert w not in src, w

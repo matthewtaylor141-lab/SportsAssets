@@ -186,6 +186,40 @@ def _earliest(codes, *, mapped, default) -> tuple:
     return best or (None, None)
 
 
+#: A DECISION CODE THAT ONLY SAYS "THE LANE REFUSED THE PROBABILITY"
+#: (paper_benchmark.R_PROBABILITY_UNQUALIFIED). Its cause is the lane's own
+#: probability-stage code, which the decision now carries right behind it
+#: (paper_benchmark.contract_match); the census attributes the loss to that
+#: carried code, by its own class -- never to the wrapper, and never by
+#: guessing: a decision written before the codes were carried keeps the
+#: wrapper (SOFTWARE), named.
+LANE_WRAPPERS = frozenset(("PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",))
+
+
+def _unwrap(codes, best, *, mapped) -> tuple:
+    """(chain stage, code, wrapper or None): a LANE_WRAPPERS code replaced by
+    the first lane probability-stage code recorded after it. Pure."""
+    st, c = best
+    if c is None or _code(c) not in LANE_WRAPPERS:
+        return st, c, None
+    seq = [str(x) for x in (codes or ())]
+    try:
+        i = seq.index(str(c))
+    except ValueError:
+        return st, c, None
+    for x in seq[i + 1:]:
+        k = _code(x)
+        if k is None or k in LANE_WRAPPERS:
+            continue
+        # only a code one of the two tables knows: an unclassified carried
+        # code would replace a named wrapper with an unknown
+        if (ext.STAGE_OF.get(k) == "1_PROBABILITY"
+                and (RT.lookup(k) is not None
+                     or ext.EVALUABILITY_OF.get(k) is not None)):
+            return chain_stage(x, mapped=mapped), x, c
+    return st, c, None
+
+
 def _jsonish(v):
     if isinstance(v, str):
         try:
@@ -232,12 +266,17 @@ def first_loss_of_event(ev: dict, valuations: list, decisions: list, *,
             st, c = _earliest(codes, mapped=True, default="ENTER_PASS")
             if st is None:
                 st, c = "ENTER_PASS", R_DECISION_NAMES_NO_CODE
+            st, c, wrapped = _unwrap(codes, (st, c), mapped=True)
             if best is None or CHAIN.index(st) < CHAIN.index(best[0]):
-                best = (st, c, codes)
+                best = (st, c, codes, wrapped)
         k = classify(best[1])
-        return dict(out, stage=best[0], code=k["code"], **{"class": k["class"]},
-                    family=k["family"], evidence=k["evidence"],
-                    source="paper_decisions", codes=list(best[2])[:8])
+        res = dict(out, stage=best[0], code=k["code"],
+                   **{"class": k["class"]}, family=k["family"],
+                   evidence=k["evidence"], source="paper_decisions",
+                   codes=list(best[2])[:8])
+        if best[3]:
+            res["carried_by"] = _code(best[3])
+        return res
     reach = int(ev.get("reach") or 0)
     if valuations:
         if not decisions_read:

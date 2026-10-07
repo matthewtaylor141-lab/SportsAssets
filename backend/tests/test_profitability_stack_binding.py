@@ -420,19 +420,34 @@ def test_item14_correlated_exposure_halves_then_refuses():
 # ── 15 scenario concentration ────────────────────────────────────────
 
 def test_item15_scenario_concentration_only_lowers_size():
-    free = bind(qty_in=100, scenario={"exposure_usd": 0.0})
-    near = bind(qty_in=100, scenario={"exposure_usd":
-                                      B.SCENARIO_MAX_EXPOSURE_USD - 10.0})
-    full = bind(qty_in=100, scenario={"exposure_usd":
-                                      B.SCENARIO_MAX_EXPOSURE_USD})
+    # the cap is the OWNER's own per-fixture rail, passed on the scenario
+    CAP = 3000.0
+    free = bind(qty_in=100, scenario={"exposure_usd": 0.0, "cap_usd": CAP})
+    near = bind(qty_in=100, scenario={"exposure_usd": CAP - 10.0,
+                                      "cap_usd": CAP})
+    full = bind(qty_in=100, scenario={"exposure_usd": CAP, "cap_usd": CAP})
     assert free["qty"] >= near["qty"] >= 1
     assert near["qty"] < free["qty"]
     assert near["scenario"]["qty_cap"] == near["qty"]
     assert full["refusal"] == B.R_SCENARIO_CONCENTRATION
-    # a larger cap than the declared one is never honoured
-    big = B.scenario_cap({"exposure_usd": 0.0, "cap_usd": 1e9},
-                         capital_per_contract=1.0)
-    assert big["cap_usd"] == B.SCENARIO_MAX_EXPOSURE_USD
+
+
+def test_item15_no_invented_event_cap_when_the_owner_sets_none():
+    # owner, 2026-10-06: no arbitrary event cap; existing rails authoritative
+    assert B.SCENARIO_MAX_EXPOSURE_USD is None
+    free = bind(qty_in=100, scenario={"exposure_usd": 0.0})
+    huge = bind(qty_in=100, scenario={"exposure_usd": 1e7})
+    assert huge["qty"] == free["qty"] and huge.get("refusal") is None
+    got = B.scenario_cap({"exposure_usd": 1e7}, capital_per_contract=1.0)
+    assert got["qty_cap"] is None and got["cap_usd"] is None
+    assert got["basis"] == "MEASURED_NO_OWNER_EVENT_CAP"
+    assert got["exposure_usd"] == 1e7                 # measured, recorded
+
+
+def test_item15_the_owner_rail_is_the_main_accounts_policy():
+    from sportsassets import bettor_paper_limits as LIMITS
+    assert LIMITS.effective_caps({}, LIMITS.ACCOUNT_ID, "ENTRY").get(
+        "per_fixture_cap_usd") is None
 
 
 @pg
@@ -931,7 +946,7 @@ def test_new_refusals_are_classified_and_nothing_raises_authority():
     assert not set(B.REFUSALS) & set(CA.NO_CAPITAL_AUTHORITY)
     # only shrinks / refuses: every constant the stack adds lowers size
     assert 0 < B.FRESHNESS_MAX_HAIRCUT and 0 <= B.EXIT_RATE_PRIOR <= 1
-    assert B.SCENARIO_MAX_EXPOSURE_USD > 0
+    assert B.SCENARIO_MAX_EXPOSURE_USD is None      # no invented cap
     src = (PKG / "bettor_paper_profitability_stack.py").read_text()
     for word in ("per_order_cap_usd", "per_market_cap_usd",
                  "INSERT INTO paper_orders", "INSERT INTO paper_ledger",
@@ -959,7 +974,8 @@ def test_migration_311_has_its_rollback_and_is_tracked():
     assert mig.is_file()
     assert (ROOT / "migrations" / "rollback" /
             "311_paper_profitability_stack.down.sql").is_file()
-    assert R.TRACKED_TO == 311
+    # tracked: inside the release range (311 and every later migration)
+    assert R.TRACKED_FROM <= 311 <= R.TRACKED_TO
     assert "MANAGEMENT" in mig.read_text()
 
 

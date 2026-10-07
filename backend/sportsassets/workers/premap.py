@@ -144,6 +144,47 @@ DETAIL_READS_PER_REFRESH = int(os.environ.get("PREMAP_DETAIL_READS", "25"))
 #: every short event (`detail_reads_skipped_budget`).
 FAST_DETAIL_READS_PER_REFRESH = int(
     os.environ.get("PREMAP_FAST_DETAIL_READS", "0"))
+# ── A TRUNCATED WINDOW IS PARTITIONED, NEVER ACCEPTED (2026-10-06) ───────
+#
+# The owner: "A result marked truncated=true may NEVER be treated as a
+# complete venue universe. No active market may disappear because it fell
+# past an offset ceiling." What truncates a pass here is the request budget
+# (venue_catalogue.PageWalk.next_offset -> REQUEST_BUDGET_EXHAUSTED once
+# `max_requests` -- MAX_EVENT_PAGES / FAST_MAX_PAGES / the calendar pass
+# budget -- is spent while pages are still full), the wall time, or an offset
+# the venue refuses. Such a window is now recursively halved by start time
+# (venue_catalogue.WindowPartition) and each half walked through the same
+# PageWalk / writer / tally until every bucket ends naturally; a bucket still
+# truncated at PARTITION_MAX_DEPTH or PARTITION_MIN_WINDOW_S is named
+# PROVIDER_BUCKET_REMAINS_TRUNCATED and the refresh stays TRUNCATED. Every
+# bucket request claims venue_pace like every other request. THE COST,
+# STATED: at most PARTITION_MAX_PAGES more requests per full sweep (0.35 s
+# apart: ~42 s), FAST_PARTITION_MAX_PAGES per fast refresh, and
+# CALENDAR_PARTITION_PAGES per calendar pass -- spent only when a pass was
+# truncated, and recorded on the receipt (`partition_requests`).
+PARTITION_MAX_PAGES = int(os.environ.get("PREMAP_PARTITION_PAGES", "120"))
+FAST_PARTITION_MAX_PAGES = int(
+    os.environ.get("PREMAP_FAST_PARTITION_PAGES", "25"))
+CALENDAR_PARTITION_PAGES = int(
+    os.environ.get("PREMAP_CALENDAR_PARTITION_PAGES", "40"))
+#: the window lanes' partition wall-time bound (the calendar lane's is
+#: CALENDAR_MAX_SECONDS, shared with its passes)
+PARTITION_MAX_SECONDS = float(os.environ.get("PREMAP_PARTITION_MAX_S", "600"))
+FAST_PARTITION_MAX_SECONDS = float(
+    os.environ.get("PREMAP_FAST_PARTITION_MAX_S", "60"))
+#: The largest offset this venue serves on events.list, when known. NONE IS
+#: KNOWN: the public gateway answered `GET /v1/events?limit=100&offset=1000`
+#: with 100 events and HTTP 200 (research/beta48/shadow/
+#: fixtures_events_block3.json) and `/v1/markets ... offset=1500`
+#: (tests/fixtures/pmus_nba_nhl_winner_listings_2026_10_06.json). 0 = no
+#: configured ceiling; a refusal of an offset by the venue itself is still
+#: read as OFFSET_CEILING_REACHED (truncated, partitioned), never as the end.
+MAX_OFFSET = int(os.environ.get("PREMAP_MAX_OFFSET", "0"))
+
+#: (settlement rule registry) running counts of the rules-text capture the
+#: sweep makes from payloads it already holds (market_plane.rules); read by
+#: the market plane's snapshot. Process-local evidence, no authority.
+RULES_CAPTURE: dict = {}
 
 
 def _items(resp, key: str) -> list:
@@ -6612,6 +6653,44 @@ def _rate_limited(exc) -> dict | None:
     return d
 
 
+def _offset_refused(exc) -> bool:
+    """The venue refused the OFFSET itself (an offset ceiling), not the
+    request: its error names the offset and either says it is too large /
+    past a maximum or answers 400 / 422. Read as OFFSET_CEILING_REACHED --
+    truncated, and the window is partitioned -- never as the board's end."""
+    text = str(exc).lower()
+    if "offset" not in text:
+        return False
+    if any(w in text for w in ("too large", "exceed", "maximum", "max ")):
+        return True
+    try:
+        from .. import venue_http_error as _vhe
+
+        return _vhe.describe(exc, endpoint="events.list").get(
+            "http_status") in (400, 422)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+async def _latest_calendar_complete(pool):
+    """The latest calendar-lane receipt's `catalogue_complete`: True, False,
+    or None when there is no such receipt (or the table is absent)."""
+    try:
+        if not await _receipts_table_present(pool):
+            return None
+        rows = await pool.fetch(
+            "SELECT receipt->>'catalogue_complete' AS cc FROM "
+            "venue_catalogue_receipts WHERE lane = 'calendar' "
+            "ORDER BY recorded_at DESC, id DESC LIMIT 1 "
+            "/* premap-calendar-completeness */")
+    except Exception:  # noqa: BLE001 — unknown is not complete
+        return False
+    if not rows:
+        return None
+    # a receipt written before the field existed proves nothing: not complete
+    return str(rows[0]["cc"] or "").lower() == "true"
+
+
 async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                   max_pages: int = MAX_EVENT_PAGES,
                   prune: bool = True,
@@ -6729,6 +6808,24 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         have = {m.get("slug") for m in inline if m.get("slug")}
         added = [m for m in got if m.get("slug") and m.get("slug") not in have]
         return inline + added, len(inline) + len(added)
+
+    async def capture_rules(ms):
+        """market_plane.rules.capture_pmus_markets over markets this sweep
+        already holds (no request). Off with PREMAP_RULES_CAPTURE=off.
+        Never raises."""
+        if str(os.environ.get("PREMAP_RULES_CAPTURE", "on")).strip().lower() \
+                in ("off", "0", "false", "no"):
+            return
+        try:
+            from ..market_plane import rules as _mpr
+            got = await _mpr.capture_pmus_markets(pool, ms)
+        except Exception as exc:  # noqa: BLE001 — evidence only, never a row
+            got = {"error": type(exc).__name__}
+        for k, v in (got or {}).items():
+            if isinstance(v, int):
+                RULES_CAPTURE[k] = RULES_CAPTURE.get(k, 0) + v
+            else:
+                RULES_CAPTURE["last_%s" % k] = v
 
     async def _write_event(ev, pass_name):
         """One event of any pass: dropped by name or written row by row, its
@@ -6882,6 +6979,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 tally.market_dropped(**cell,
                                      reason=vc.D_MARKET_ROWS_REFUSED_BY_SIDE_KEY)
         tally.sides_written += written
+        # THE RULES TEXT THIS PAYLOAD ALREADY CARRIES (settlement rule
+        # registry): each kept market's own `description` / rules field goes
+        # to market_plane_rules, rewritten only when its fingerprint changes.
+        # No venue request; never raises; a capture failure costs no row.
+        await capture_rules([m for m, _cell in markets])
         if written == 0:
             tally.event_dropped(ev, vc.D_EVENT_NO_ROW_WRITTEN)
             return 0
@@ -6941,16 +7043,47 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             except Exception as exc:  # noqa: BLE001 — named on the walk
                 rl = _rate_limited(exc)
                 walk.requests += 1        # it was sent (and paced): counted
-                walk.fail(vc.STOP_RATE_LIMITED if rl else vc.STOP_ERROR,
+                walk.fail(vc.STOP_RATE_LIMITED if rl else
+                          vc.STOP_OFFSET_CEILING if _offset_refused(exc)
+                          else vc.STOP_ERROR,
                           "%s: %s" % (type(exc).__name__, str(exc)[:160]))
                 break
             fresh = walk.accept(_items(resp, "events"))
         return walk
 
+    def _epoch_iso(t):
+        return _iso(_dt.fromtimestamp(float(t), _tz.utc))
+
+    async def _partition(pass_name, part, shared, base, deadline=None):
+        """Walk every bucket the partition hands out: the same `_walk` (so
+        the same writer, the same tally, every request behind venue_pace),
+        over `base` narrowed to the bucket's start-time window, events read
+        by another bucket (or the window's first read) skipped through
+        `shared`. Never raises."""
+        while (b := part.next_bucket()) is not None:
+            lo, hi, depth, max_req = b
+            var = dict(base, startTimeMin=_epoch_iso(lo),
+                       startTimeMax=_epoch_iso(hi))
+            bw = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_req,
+                             deadline=deadline,
+                             max_offset=MAX_OFFSET or None,
+                             already_read=shared)
+            await _walk(pass_name, var, bw)
+            r = bw.receipt()
+            part.record(lo, hi, depth, r, new_events=max(
+                0, int(r["events_unique"]) - int(r["already_read_elsewhere"])))
+        return part
+
     window_pass = vc.PASS_FAST if windowed_only else vc.PASS_WINDOW
     wwalk = None
+    wpart = vc.WindowPartition(
+        pass_name=window_pass,
+        budget=(FAST_PARTITION_MAX_PAGES if windowed_only
+                else PARTITION_MAX_PAGES),
+        bucket_max_requests=max_pages)
     if not calendar:
-        wwalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_pages)
+        wwalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_pages,
+                            max_offset=MAX_OFFSET or None)
         try:
             # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
             # IGNORES the eventSlug filter on markets.list (every queried
@@ -7015,6 +7148,20 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                     "no events.list variant returned live inline markets")
             window_variant_bounded = variant is _window
             await _walk(window_pass, variant, wwalk, first_events=first)
+            # A TRUNCATED WINDOW IS PARTITIONED (see PARTITION_MAX_PAGES): the
+            # first read is the partition's root bucket; an unbounded variant
+            # rung has no window to cut, and is named so when truncated
+            if window_variant_bounded:
+                w_lo = int((_now - _td(hours=back_h)).timestamp())
+                w_hi = int((_now + _td(hours=fwd_h)).timestamp())
+            else:
+                w_lo = w_hi = None
+            wpart.record(w_lo, w_hi, 0, wwalk.receipt(), root=True)
+            wpart.deadline = time.monotonic() + max(1.0, (
+                FAST_PARTITION_MAX_SECONDS if windowed_only
+                else PARTITION_MAX_SECONDS))
+            await _partition(window_pass, wpart, wwalk.seen_keys(), _window,
+                             deadline=wpart.deadline)
             if wwalk.stopped in (vc.STOP_ERROR, vc.STOP_RATE_LIMITED,
                                  vc.STOP_WRITE_FAILURES):
                 raise RuntimeError(wwalk.error or wwalk.stopped)
@@ -7151,6 +7298,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                                                     str(exc_m)[:160]))
                             continue
                         fb_failures = 0
+                        await capture_rules([m])
                         seen_rows += n_w
                         tally.sides_written += n_w
                         if rows:
@@ -7183,7 +7331,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             finally:
                 if fb is not None:
                     tally.set_pass(vc.PASS_MARKETS_FALLBACK, fb.receipt())
-        tally.set_pass(window_pass, wwalk.receipt())
+        tally.set_pass(window_pass, vc.apply_partition(wwalk.receipt(), wpart))
     else:
         # THE CALENDAR LANE: AHEAD then STARTED_EARLIER, each in start-time
         # slices nearest-first under one request budget per pass, the whole
@@ -7207,44 +7355,83 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                     "complete": False, "budget": budget})
                 continue
             slice_receipts, not_read = [], []
+            # the pass's partition: every slice walked is a root bucket; a
+            # truncated slice is halved, and a slice the pass budget never
+            # reached is walked as a bucket under the partition's own budget
+            # (nearest-first: AHEAD from its low edge, STARTED_EARLIER from
+            # its high one)
+            part = vc.WindowPartition(
+                pass_name=pname, budget=CALENDAR_PARTITION_PAGES,
+                bucket_max_requests=budget, nearest_high=not ahead,
+                deadline=deadline)
+            shared: set = set()
+            roots, unread_roots = [], []
             left = max(0, int(budget))
             for lo_h, hi_h in vc.calendar_slices(edge_h, reach_h, bounds):
-                if left <= 0 or stop_lane is not None \
-                        or time.monotonic() >= deadline:
-                    not_read.append({
-                        "hours_from_now": ([lo_h, hi_h] if ahead
-                                           else [-hi_h, -lo_h]),
-                        "why": (vc.STOP_BUDGET if left <= 0 else
-                                vc.STOP_NOT_RUN if stop_lane is not None
-                                else vc.STOP_WALL_TIME)})
-                    continue
                 if ahead:
                     lo, hi = _now + _td(hours=lo_h), _now + _td(hours=hi_h)
                 else:
                     lo, hi = _now - _td(hours=hi_h), _now - _td(hours=lo_h)
+                if left <= 0 or stop_lane is not None \
+                        or time.monotonic() >= deadline:
+                    why = (vc.STOP_BUDGET if left <= 0 else
+                           vc.STOP_NOT_RUN if stop_lane is not None
+                           else vc.STOP_WALL_TIME)
+                    not_read.append({
+                        "hours_from_now": ([lo_h, hi_h] if ahead
+                                           else [-hi_h, -lo_h]),
+                        "window": [_iso(lo), _iso(hi)],
+                        "why": why})
+                    if why in vc.TRUNCATING_STOPS:
+                        unread_roots.append((int(lo.timestamp()),
+                                             int(hi.timestamp())))
+                    continue
                 pvar = {"active": True, "closed": False,
                         "startTimeMin": _iso(lo), "startTimeMax": _iso(hi)}
                 swalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=left,
-                                    deadline=deadline)
+                                    deadline=deadline,
+                                    max_offset=MAX_OFFSET or None)
                 await _walk(pname, pvar, swalk)
                 left -= swalk.requests
+                shared |= swalk.seen_keys()
                 srec = swalk.receipt()
                 srec["window"] = [pvar["startTimeMin"], pvar["startTimeMax"]]
                 srec["hours_from_now"] = ([lo_h, hi_h] if ahead
                                           else [-hi_h, -lo_h])
                 slice_receipts.append(srec)
+                roots.append((int(lo.timestamp()), int(hi.timestamp()), srec))
                 if swalk.stopped == vc.STOP_RATE_LIMITED:
                     stop_lane = "the venue rate-limited the %s pass" % pname
                 elif swalk.stopped == vc.STOP_WRITE_FAILURES:
                     stop_lane = "catalogue writes failing in the %s pass" % pname
+            for r_lo, r_hi, srec in roots:
+                part.record(r_lo, r_hi, 0, srec, root=True)
+            if stop_lane is None:
+                for u_lo, u_hi in unread_roots:
+                    part.add_unread(u_lo, u_hi)
+                await _partition(pname, part, shared,
+                                 {"active": True, "closed": False},
+                                 deadline=deadline)
+                if part.aborted == vc.STOP_RATE_LIMITED:
+                    stop_lane = "the venue rate-limited the %s partition" % pname
+                elif part.aborted == vc.STOP_WRITE_FAILURES:
+                    stop_lane = ("catalogue writes failing in the %s "
+                                 "partition" % pname)
+            else:
+                part.abort(vc.STOP_NOT_RUN)
             prec = vc.rollup_slices(slice_receipts, not_read=not_read,
                                     duration_s=time.monotonic() - p_t0)
             prec["budget"] = budget
+            prec = vc.apply_partition(prec, part)
             tally.set_pass(pname, prec)
             if prec["stopped"] in (vc.STOP_ERROR, vc.STOP_RATE_LIMITED,
                                    vc.STOP_WRITE_FAILURES):
                 mode = "calendar/partial"
                 err = err or prec.get("error") or prec["stopped"]
+            elif part.aborted in (vc.STOP_ERROR, vc.STOP_RATE_LIMITED,
+                                  vc.STOP_WRITE_FAILURES):
+                mode = "calendar/partial"
+                err = err or prec.get("error") or part.aborted
     # NEVER prune on an empty sweep (leak-hunt 2026-08-24): a sweep
     # that wrote zero rows proves nothing about staleness — repeated
     # empty sweeps would otherwise age the whole table out and take
@@ -7259,13 +7446,50 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     # deleting the table.) The calendar lane never prunes either: its
     # rows age out through the full sweep's prune if it stops refreshing
     # them, which is the correct direction.
+    #
+    # AND NEVER ON A WINDOW THAT WAS NOT READ TO ITS END (2026-10-06). The
+    # prune deletes rows unseen for PRUNE_HOURS. A listing the sweep never
+    # reached -- past a truncation, in a partition bucket left unresolved,
+    # past an offset ceiling -- is unseen because it was not READ, not
+    # because the venue stopped listing it; a board truncated sweep after
+    # sweep would age every such active market out. So the full lane prunes
+    # only when the pass that wrote the catalogue reached a natural end of
+    # the venue's board (the window pass, partitioned or not, with no bucket
+    # unresolved -- or the degraded markets fallback read to its end), and
+    # it leaves the calendar lane's rows (listing_pass AHEAD /
+    # STARTED_EARLIER) alone while that lane's latest receipt does not say
+    # `catalogue_complete`. A truncated refresh therefore deletes nothing it
+    # did not re-see.
     pruned = None
     prune_err = None
+    prune_skipped = None
+    prune_protected = []
     if seen_rows > 0 and prune:
+        wp = tally.passes.get(window_pass) or {}
+        fbp = tally.passes.get(vc.PASS_MARKETS_FALLBACK) or {}
+        if (wp.get("stopped") in vc.NATURAL_ENDS and not wp.get("truncated")
+                and not (wp.get("partition") or {}).get("unresolved")):
+            read_whole = True
+        else:
+            read_whole = bool(mode == "markets"
+                              and fbp.get("stopped") in vc.NATURAL_ENDS)
+        if not read_whole:
+            prune_skipped = (
+                "the %s pass did not read its window to a natural end (%s): "
+                "rows it did not re-see are kept" % (
+                    window_pass, wp.get("stopped") or "not run"))
+    if seen_rows > 0 and prune and prune_skipped is None:
+        guard_sql = ""
+        if (await _latest_calendar_complete(pool)) is False:
+            guard_sql = (" AND COALESCE(listing_pass, '') NOT IN "
+                         "('AHEAD', 'STARTED_EARLIER')")
+            prune_protected.append(
+                "calendar rows: the latest calendar receipt is not "
+                "catalogue_complete")
         try:
             pruned = await pool.execute(
                 "DELETE FROM us_premap WHERE updated_at < now() - "
-                "interval '%s hours'" % int(PRUNE_HOURS))
+                "interval '%s hours'%s" % (int(PRUNE_HOURS), guard_sql))
         except Exception as exc:  # noqa: BLE001 — the summary and receipt still land
             prune_err = "%s: %s" % (type(exc).__name__, str(exc)[:160])
             log.warning("premap prune failed: %s", prune_err)
@@ -7294,7 +7518,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         _pruned_n = 0
     calendar_eligible = bool(
         lane == "full" and wwalk is not None and window_variant_bounded
-        and wwalk.stopped in (vc.NATURAL_ENDS | {vc.STOP_BUDGET}))
+        and wwalk.stopped in (vc.NATURAL_ENDS | {vc.STOP_BUDGET,
+                                                 vc.STOP_OFFSET_CEILING}))
     summary = {"mode": mode, "events": events, "rows": seen_rows,
                "err": err, "events_err": events_err,
                "lane": lane,
@@ -7309,6 +7534,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                    if _truncated else None),
                "pruned": _pruned_n,
                "prune_err": prune_err,
+               "prune_skipped": prune_skipped,
+               "prune_protected": prune_protected,
+               "catalogue_complete": rec["catalogue_complete"],
+               "partition_unresolved": rec["partition"]["unresolved"],
                "calendar_eligible": calendar_eligible,
                "duration_s": round(time.monotonic() - t0, 3),
                "side_keys": guard.receipt(),

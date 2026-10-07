@@ -233,7 +233,10 @@ def levels_for(market_data: dict | None, *, direction: str,
     return {"ok": bool(lad.get("ok")), "levels": lv,
             "side": side_consumed(direction, holding_side),
             "excluded_off_cent_grid": len(excluded),
-            "refusal": lad.get("refusal")}
+            "refusal": lad.get("refusal"),
+            # a valid empty side vs a malformed / absent one
+            # (paper_derek.no_book_refusal)
+            "book_was": lad.get("book_was")}
 
 
 def within(price: float, limit: float, direction: str, *,

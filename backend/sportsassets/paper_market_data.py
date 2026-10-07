@@ -987,9 +987,11 @@ class InstitutionalBooks:
 
     async def load(self, conn, slugs) -> dict:
         self.same_book = await same_book_by_symbol(conn, slugs)
+        self.durable = await durable_certifications(conn, slugs)
         return {"symbols_with_evidence": len(self.same_book),
                 "supported": sum(1 for v in self.same_book.values()
-                                 if v.get("status") == "SUPPORTED")}
+                                 if v.get("status") == "SUPPORTED"),
+                "durable_certificates": len(self.durable)}
 
     def book(self, slug: str, *, now: float, sla_s: float):
         try:
@@ -1002,14 +1004,82 @@ class InstitutionalBooks:
                 cur = self._current(slug, now=now)
             except Exception:                                  # noqa: BLE001
                 cur = None
-        got = institutional_held_book(slug, identity=ident,
-                                      same_book=self.same_book.get(slug),
-                                      current=cur, now=now, sla_s=sla_s)
+        got = institutional_held_book(
+            slug, identity=ident,
+            same_book=effective_same_book(self.same_book.get(slug),
+                                          getattr(self, "durable", {}).get(
+                                              slug), ident),
+            current=cur, now=now, sla_s=sla_s)
         if not got["ok"]:
             self.refusals[got["refusal"]] = \
                 self.refusals.get(got["refusal"], 0) + 1
             return None
         return got["read"]
+
+
+# ── DURABLE SAME-BOOK CERTIFICATION (Universal Market Plane, 312) ──────
+#
+# The window evidence above (30 comparable same-instant samples at >= 95%,
+# exact identity, 24 h) stays the primary rule and is unchanged. A certificate
+# the market plane persisted (market_plane_certification) answers SUPPORTED
+# for a symbol ONLY when (a) the window holds no contradiction for it (a
+# CONTRADICTED window always wins), and (b) the certificate's fingerprint
+# equals the fingerprint of the identity in force now (same contract,
+# scales, transform, ontology and book schema). So a restart, or a quiet day
+# that ages samples out of the window, no longer erases a proven
+# equivalence; any relevant change invalidates it.
+
+DURABLE_SQL = """
+    SELECT contract_id, fingerprint, comparable, agreeing, agreement,
+           certified_at
+      FROM market_plane_certification
+     WHERE status = 'SUPPORTED' AND contract_id = ANY($1::text[])
+"""
+
+
+async def durable_certifications(conn, slugs) -> dict:
+    syms = sorted({str(s) for s in slugs or () if s})
+    if not syms:
+        return {}
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('market_plane_certification') "
+                "IS NOT NULL"):
+            return {}
+        rows = await conn.fetch(DURABLE_SQL, syms)
+    except Exception:                                          # noqa: BLE001
+        return {}
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["contract_id"], []).append(dict(r))
+    return out
+
+
+def effective_same_book(window, durable, ident) -> dict | None:
+    """PURE. The window evidence, or -- when it is not SUPPORTED and not
+    CONTRADICTED -- a durable certificate whose fingerprint matches the
+    identity in force now. Never SUPPORTED without one or the other."""
+    w = window if isinstance(window, dict) else None
+    if w and w.get("status") in ("SUPPORTED", "CONTRADICTED"):
+        return w
+    if not durable or not isinstance(ident, dict) or \
+            ident.get("status") != "EXACT":
+        return w
+    from .market_plane import certification as CERT
+    fp = CERT.fingerprint(CERT.identity_for(
+        ident.get("symbol"), price_scale=ident.get("price_scale"),
+        qty_scale=ident.get("qty_scale"),
+        price_transform=ident.get("price_transform")))
+    for c in durable:
+        if c.get("fingerprint") == fp:
+            return {"status": "SUPPORTED",
+                    "detail": {"basis": "DURABLE_CERTIFICATION",
+                               "fingerprint": fp,
+                               "comparable": c.get("comparable"),
+                               "agreeing": c.get("agreeing"),
+                               "certified_at": str(c.get("certified_at")),
+                               "window": (w or {}).get("detail")}}
+    return w
 
 
 def default_institutional():

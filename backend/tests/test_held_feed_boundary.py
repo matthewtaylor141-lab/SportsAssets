@@ -213,5 +213,77 @@ class HeldBoundary(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out['error'], 'RuntimeError')
 
 
+class EntryProvenFixture(unittest.TestCase):
+    """THE ENTRY'S PROVEN PROVIDER FIXTURE (closeout, production 2026-10-06):
+    the venue spells a team differently from the provider ("Flamengo RJ" vs
+    "Flamengo"), so the exact structured-name match finds nothing -- yet the
+    entry valuation was written from this feed keyed pinnapi:<fixture id>.
+    That fixture is used only when the exact match fails, only in the same
+    sport, and its start and outcome designation are still proved."""
+
+    def setUp(self):
+        self.cache, row, _ = fixture()
+        self.row = dict(row, event_title='Flamengo RJ vs Palmeiras',
+                        team_name='Flamengo RJ')
+        self.view = C.feed_event_view(self.cache)
+        self.old_owner = R._STATE.get('owner')
+        R._STATE['owner'] = types.SimpleNamespace(cache=self.cache,
+                                                  sport_ids=[1, 6])
+
+    def tearDown(self):
+        R._STATE['owner'] = self.old_owner
+
+    def q(self, row=None, **kw):
+        r = self.row if row is None else row
+        args = dict(payout_event='Flamengo', payout_is_complement=False,
+                    at=AT, max_age_s=30, sport_ids=[1, 6], synced=True,
+                    event_rows=event_rows(r), view=self.view)
+        args.update(kw)
+        return R.held_quote(r, **args)
+
+    def test_the_exact_match_alone_still_refuses(self):
+        out = self.q()
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['reason'], C.S_NO_FEED_EVENT)
+
+    def test_the_entry_fixture_prices_the_held_contract(self):
+        out = self.q(entry_event_key='pinnapi:%s' % EID)
+        self.assertTrue(out['ok'], out)
+        self.assertEqual(out['identity_basis'], R.IDENTITY_ENTRY_FIXTURE)
+        self.assertEqual(out['designation'], 'home')
+        self.assertEqual(out['devig']['outcomes'], 3)
+
+    def test_an_exact_match_keeps_its_own_basis(self):
+        row = dict(self.row, event_title='Flamengo vs Palmeiras',
+                   team_name='Flamengo')
+        out = self.q(row, entry_event_key='pinnapi:%s' % EID)
+        self.assertTrue(out['ok'])
+        self.assertEqual(out['identity_basis'], R.IDENTITY_EXACT)
+
+    def test_a_key_the_cache_does_not_hold_or_another_provider_refuses(self):
+        for key in ('pinnapi:999', '62d8e1c18355ab6b3913d7a28fa677c2',
+                    'pinnapi:', None):
+            with self.subTest(key=key):
+                out = self.q(entry_event_key=key)
+                self.assertFalse(out['ok'])
+                self.assertEqual(out['reason'], C.S_NO_FEED_EVENT)
+
+    def test_the_start_is_still_proved(self):
+        row = dict(self.row, game_start=START + 6 * 3600)
+        out = self.q(row, entry_event_key='pinnapi:%s' % EID)
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['reason'], R.R_HELD_TIME_UNPROVED)
+
+    def test_the_outcome_is_still_one_designation(self):
+        out = self.q(payout_event='Santos', entry_event_key='pinnapi:%s' % EID)
+        self.assertFalse(out['ok'])
+        self.assertEqual(out['reason'], R.R_OUTCOME_UNMAPPED)
+
+    def test_the_sport_must_agree(self):
+        row = dict(self.row, sports_type='baseball_team_full_game_winner')
+        out = self.q(row, entry_event_key='pinnapi:%s' % EID)
+        self.assertFalse(out['ok'])
+
+
 if __name__ == '__main__':
     unittest.main()

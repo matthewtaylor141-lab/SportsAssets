@@ -635,7 +635,7 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         if book_deadline_refusal(got):
             refusals.append(R_BOOK_DEADLINE)
         elif obs.get("error") or not levels:
-            refusals.append(R_NO_BOOK)
+            refusals.append(no_book_refusal(obs, lv))
         else:
             # THE GROSS EDGE'S INPUTS, VALIDATED BEFORE V2 JUDGES THE EDGE
             # (P0 incident; review of 7bd084b: only the completed-game
@@ -1319,6 +1319,36 @@ async def read_book_within_deadline(ctx: dict, slug: str, *,
     except TypeError:
         # a market-data client without deadline support (a test stand-in)
         return await md.read_book(slug)
+
+
+#: ── A READ BOOK WITH NOBODY ON THE SIDE BOUGHT (software census closure) ──
+#:
+#: THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY joined two facts: a read that
+#: FAILED (an error on the observation -- not a book at all) and a read that
+#: SUCCEEDED and returned a valid book whose side we would buy from carries
+#: no level (`bettor_book_snapshot.acquisition_ladder` book_was
+#: VALID_BUT_EMPTY: the side is published, well formed, and empty). The
+#: second is the market's own state -- no executable depth -- so it is its
+#: own code, ECONOMIC / DEPTH, on the evidence recorded with the decision
+#: (the paper_book_observations row: no error, the published empty side).
+#: A failed read, a malformed side, a side absent from the payload, or
+#: levels our cent grid excluded keep THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_
+#: EMPTY (ours). No threshold or gate changes.
+R_SIDE_EMPTY_ON_A_READ_BOOK = "THE_OBSERVED_BOOK_HAS_NO_LEVEL_ON_THE_SIDE_BOUGHT"
+
+
+def no_book_refusal(obs: dict | None, lv: dict | None) -> str:
+    """The refusal for an observation that gave no usable level: the
+    ECONOMIC empty-side code only for a read that succeeded on a valid,
+    empty side; else THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY. Pure."""
+    o = obs if isinstance(obs, dict) else {}
+    v = lv if isinstance(lv, dict) else {}
+    if (not o.get("error") and isinstance(o.get("market_data"), dict)
+            and v.get("book_was") == "VALID_BUT_EMPTY"
+            and not v.get("excluded_off_cent_grid")
+            and not (v.get("levels") or [])):
+        return R_SIDE_EMPTY_ON_A_READ_BOOK
+    return R_NO_BOOK
 
 
 def book_deadline_refusal(got: dict) -> bool:
