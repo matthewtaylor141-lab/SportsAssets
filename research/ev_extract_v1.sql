@@ -29,6 +29,21 @@ bk AS (
   SELECT strategy, us_market_slug, holding_side, bkt, count(*) n,
          bool_or(verdict = 'ENTER') has_enter
     FROM d0 GROUP BY 1,2,3,4),
+pm1 AS (
+  SELECT DISTINCT ON (market_slug) market_slug, sports_type, team_league, game_start, event_slug
+    FROM us_premap WHERE market_slug IN (SELECT slug FROM lab2) ORDER BY market_slug),
+cl1 AS (
+  SELECT pm1.market_slug, c.at, c.bid, c.ask FROM pm1
+  CROSS JOIN LATERAL (
+    SELECT o.observed_at at,
+           (SELECT max((l->'px'->>'value')::float8) FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(o.bids)='array' THEN o.bids ELSE '[]' END) l) bid,
+           (SELECT min((l->'px'->>'value')::float8) FROM jsonb_array_elements(
+               CASE WHEN jsonb_typeof(o.offers)='array' THEN o.offers ELSE '[]' END) l) ask
+      FROM paper_book_observations o
+     WHERE o.us_market_slug = pm1.market_slug AND o.error IS NULL
+       AND pm1.game_start IS NOT NULL AND o.observed_at <= pm1.game_start
+     ORDER BY o.observed_at DESC LIMIT 1) c),
 dec AS (
   SELECT d0.* FROM d0 WHERE d0.verdict = 'ENTER'
   UNION ALL
@@ -70,8 +85,8 @@ SELECT (jsonb_build_object(
          AND bk.holding_side = dec.holding_side AND bk.bkt = dec.bkt
   LEFT JOIN external_valuations v ON v.id = dec.valuation_id
   LEFT JOIN market_plane_registry reg ON reg.contract_id = dec.us_market_slug
-  LEFT JOIN LATERAL (SELECT sports_type, team_league, game_start, event_slug FROM us_premap
-                      WHERE market_slug = dec.us_market_slug LIMIT 1) pm ON true
+  LEFT JOIN pm1 pm ON pm.market_slug = dec.us_market_slug
+  LEFT JOIN cl1 cl ON cl.market_slug = dec.us_market_slug
   LEFT JOIN LATERAL (
     SELECT o.observed_at at,
            (SELECT max((l->'px'->>'value')::float8) FROM jsonb_array_elements(
@@ -85,14 +100,4 @@ SELECT (jsonb_build_object(
                CASE WHEN jsonb_typeof(o.offers)='array' THEN o.offers ELSE '[]' END) l
              ORDER BY (l->'px'->>'value')::float8 LIMIT 1) ask_q
       FROM paper_book_observations o WHERE o.obs_id = dec.book_obs_id AND o.error IS NULL) b ON true
-  LEFT JOIN LATERAL (
-    SELECT o.observed_at at,
-           (SELECT max((l->'px'->>'value')::float8) FROM jsonb_array_elements(
-               CASE WHEN jsonb_typeof(o.bids)='array' THEN o.bids ELSE '[]' END) l) bid,
-           (SELECT min((l->'px'->>'value')::float8) FROM jsonb_array_elements(
-               CASE WHEN jsonb_typeof(o.offers)='array' THEN o.offers ELSE '[]' END) l) ask
-      FROM paper_book_observations o
-     WHERE o.us_market_slug = dec.us_market_slug AND o.error IS NULL
-       AND pm.game_start IS NOT NULL AND o.observed_at <= pm.game_start
-     ORDER BY o.observed_at DESC LIMIT 1) cl ON true
  ORDER BY dec.decided_at;
