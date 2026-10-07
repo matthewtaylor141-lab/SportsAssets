@@ -42,7 +42,7 @@ async def upsert_contract(conn, row:dict):
 SUBSCRIBABLE_SQL = """
     SELECT contract_id, subscription_shard
       FROM market_plane_registry
-     WHERE active AND desired_subscription AND refdata IS NOT NULL
+     WHERE venue='POLYMARKET_US' AND active AND desired_subscription AND refdata IS NOT NULL
        AND coalesce(refdata->>'unlisted', 'false') <> 'true'
      ORDER BY priority, event_start NULLS LAST, contract_id"""
 
@@ -60,7 +60,7 @@ async def assign_missing_shards(conn, *, max_per_stream=1000,max_streams=20)->di
     # gives up its slot -- by name in the plan, never silently
     await conn.execute(
         "UPDATE market_plane_registry SET subscription_shard=NULL "
-        " WHERE subscription_shard IS NOT NULL AND NOT (contract_id = ANY($1::text[]))",
+        " WHERE venue='POLYMARKET_US' AND subscription_shard IS NOT NULL AND NOT (contract_id = ANY($1::text[]))",
         sorted(plan["assignments"]))
     plan=dict(plan)
     plan["overflow_count"]=len(plan.get("overflow") or ())
@@ -71,7 +71,7 @@ async def assign_missing_shards(conn, *, max_per_stream=1000,max_streams=20)->di
     return plan
 
 async def desired_contracts(conn)->list[dict]:
-    rows=await conn.fetch("SELECT contract_id,subscription_shard,refdata,extract(epoch FROM refdata_at)::float8 refdata_at,priority FROM market_plane_registry WHERE active AND desired_subscription ORDER BY priority,subscription_shard,contract_id")
+    rows=await conn.fetch("SELECT contract_id,subscription_shard,refdata,extract(epoch FROM refdata_at)::float8 refdata_at,priority FROM market_plane_registry WHERE venue='POLYMARKET_US' AND active AND desired_subscription ORDER BY priority,subscription_shard,contract_id")
     out=[]
     for r in rows:
         d=dict(r)
@@ -119,20 +119,20 @@ async def assigned_contracts(conn) -> list:
     return [dict(r) for r in await conn.fetch(
         "SELECT contract_id, subscription_shard, refdata "
         "  FROM market_plane_registry "
-        " WHERE active AND subscription_shard IS NOT NULL "
+        " WHERE venue='POLYMARKET_US' AND active AND subscription_shard IS NOT NULL "
         "   AND refdata IS NOT NULL "
         " ORDER BY subscription_shard, contract_id")]
 
 
 async def refdata_due(conn, *, now: float, unlisted_retry_s: float,
-                      limit: int = 64) -> list:
-    """(integration) active contracts still without institutional refdata
-    (or unlisted longer than the retry), highest priority first, bounded."""
+                      limit: int = 64, excluded=()) -> list:
+    """PMUS only; exclude retry cooldowns BEFORE LIMIT to prevent starvation."""
     rows = await conn.fetch(
         "SELECT contract_id FROM market_plane_registry "
-        " WHERE active AND desired_subscription AND ("
-        "       refdata IS NULL OR (refdata->>'unlisted' = 'true' AND "
-        "       refdata_at < to_timestamp($1))) "
-        " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2",
-        float(now) - float(unlisted_retry_s), int(limit))
+        " WHERE venue='POLYMARKET_US' AND active AND desired_subscription "
+        " AND NOT (contract_id=ANY($3::text[])) AND ("
+        "       refdata IS NULL OR (refdata->>'unlisted'='true' AND "
+        "       refdata_at<to_timestamp($1))) "
+        " ORDER BY priority,event_start NULLS LAST,contract_id LIMIT $2",
+        float(now)-float(unlisted_retry_s),int(limit),sorted(set(excluded)))
     return [r["contract_id"] for r in rows]

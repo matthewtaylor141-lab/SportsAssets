@@ -148,21 +148,13 @@ def _now():
 
 
 def bootstrap_instrument(client, symbol) -> dict:
-    """Refdata for one symbol: identity and ITS OWN scales.
-
-    Returns a named result either way. A symbol the institutional venue
-    does not list is a real answer about coverage, not an error.
-    """
-    row = client.read("instruments", symbol)
-    body = row.get("body") or {}
-    rows = body.get("instruments") or []
-    rec = rows[0] if rows and isinstance(rows[0], dict) else None
-    ps, qs = pmx.scales_of(rec)
-    return {"symbol": symbol, "status": row.get("status"),
-            "record": rec, "priceScale": ps, "qtyScale": qs,
-            "listed": rec is not None, "priceable": bool(ps and qs),
-            "ms": row.get("ms"),
-            "transportError": row.get("transportError")}
+    """Exact refdata, with transport failure distinct from proven unlisted."""
+    from ..market_plane.refdata_progress import instrument_response
+    parsed = instrument_response(symbol, client.read("instruments",symbol))
+    rec = parsed["record"]
+    ps,qs = pmx.scales_of(rec)
+    return dict(parsed,priceScale=ps,qtyScale=qs,listed=rec is not None,
+                priceable=bool(ps and qs))
 
 
 def sweep_once(client, store, symbols) -> dict:

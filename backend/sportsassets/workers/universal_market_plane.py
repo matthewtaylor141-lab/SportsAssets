@@ -58,6 +58,7 @@ from ..market_plane import freshness as FR
 from ..market_plane import populate as POP
 from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
+from ..market_plane import refdata_progress as RP
 from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
 
@@ -227,7 +228,7 @@ async def certify(conn, mgr) -> dict:
            "contradicted": 0}
     rows = await conn.fetch(
         "SELECT contract_id, refdata FROM market_plane_registry "
-        " WHERE active AND refdata IS NOT NULL "
+        " WHERE venue='POLYMARKET_US' AND active AND refdata IS NOT NULL "
         "   AND coalesce(refdata->>'unlisted','false') <> 'true' "
         "   AND subscription_shard IS NOT NULL")
     recs = {}
@@ -322,9 +323,11 @@ async def run() -> None:
                     assigned_rows = await R.assigned_contracts(c)
                 due_rows = (await R.refdata_due(
                     c, now=now, unlisted_retry_s=UNLISTED_RETRY_S,
-                    limit=REFDATA_PER_PASS * 8)) if mgr is not None else []
+                    limit=REFDATA_PER_PASS * 8,
+                    excluded=RP.cooling_ids(attempted, now=now,
+                                             retry_s=REFDATA_RETRY_S))) if mgr is not None else []
             sync = state.get("sync") or {}
-            boot = {"attempted": 0, "stored": 0, "unlisted": 0, "failed": 0}
+            boot = {"attempted": 0, "stored": 0, "unlisted": 0, "failed": 0, "failures_by_reason": {}}
             if mgr is not None:
                 if assigned_rows is not None:
                     assignments = {r["contract_id"]: r["subscription_shard"]
@@ -351,17 +354,23 @@ async def run() -> None:
                         continue
                     finally:
                         await asyncio.sleep(REFDATA_PACING_S)
-                    rec = (got or {}).get("record")
+                    checked = RP.classify_bootstrap(s_, got)
+                    if checked["state"] == "RETRY":
+                        boot["failed"] += 1
+                        why = checked["why"]
+                        boot["failures_by_reason"][why] = boot["failures_by_reason"].get(why, 0) + 1
+                        continue
                     async with pool.acquire() as c:
-                        if rec is None:
-                            await R.save_unlisted(c, s_, at=now)
+                        if checked["state"] == "UNLISTED":
+                            await R.save_unlisted(c, s_, at=time.time())
                             boot["unlisted"] += 1
                             continue
-                        await R.save_refdata(c, s_, rec, at=now)
+                        await R.save_refdata(c, s_, checked["record"], at=time.time())
                     boot["stored"] += 1
                 if len(attempted) > 200000:
                     attempted.clear()
                 state["refdata"] = boot
+            now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
@@ -566,6 +575,11 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
     freshness = await freshness_denominators(conn, cov, reg, plan,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now)
+    rad["capacity"].update(RP.capacity_view(
+        active=reg_active, subscribable=int(reg.get("pmx_listed") or 0),
+        pending=int(reg.get("refdata_pending") or 0),
+        subscribed=subscribed, max_streams=max_streams,
+        max_per_stream=max_per))
     rad["freshness"] = {k: (v.get("rate") if isinstance(v, dict) else None)
                         for k, v in freshness.items()}
     return {

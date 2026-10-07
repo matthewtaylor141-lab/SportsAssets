@@ -351,65 +351,9 @@ def alternatives(*, pos: dict, levels: list, p: float | None, fee_fn,
 
 def probability_evidence(measure: dict, *, at: float, limit_s: float,
                          qty=None) -> dict:
-    """THE EVIDENCE STATE of a measure at `at` (pure). A measure that says
-    it is current but whose own source stamp is outside [0, limit] is NOT
-    fresh (a future stamp is a clock disagreement); a current measure that
-    carries no stamp is taken as its provider stated it, `age_s` null. The
-    hold value q x p is split by state: `current_hold_value_usd` only on
-    fresh evidence, `entry_time_hold_value_usd` (labelled stale) otherwise,
-    null when there is no probability -- never a placeholder 0."""
-    m = measure or {}
-    p = m.get("p")
-    src_at = m.get("pinnacle_at")
-    rcv = m.get("pinnacle_received_at")
-    if src_at is None:
-        src_at = m.get("entry_pinnacle_at")
-        rcv = m.get("entry_pinnacle_received_at")
-    limit = float(m.get("pinnacle_limit_s") or limit_s)
-    # the feed's own age (evaluated after its read) when it gave one
-    age = m.get("pinnacle_age_s")
-    if age is None and src_at is not None:
-        age = round(float(at) - float(src_at), 3)
-    if p is None:
-        state = E_NONE
-    elif m.get("stale"):
-        state = E_STALE
-    elif age is not None and not (0 <= float(age) <= limit):
-        state = E_STALE
-    else:
-        state = E_FRESH
-    limitation = None
-    if state == E_STALE:
-        limitation = (
-            "no fresh PinnAPI/Pinnacle probability for this contract within "
-            "the %.0fs freshness limit at review time; the probability used "
-            "is %s (source %s, age %s s), so the hold value derived from it "
-            "is entry-time/stale and NOT a current expected value. No "
-            "discretionary sale is ranked on it; the position is held with "
-            "this limitation stated and its cost-recovery protection is "
-            "unaffected" % (limit, "the entry decision's" if
-                            m.get("source") == "ENTRY_TIME_MEASURE"
-                            else "an older reading", m.get("source"), age))
-    elif state == E_NONE:
-        limitation = (
-            "no probability for this contract (neither a current reading "
-            "nor the entry decision's); none is invented, nothing is ranked "
-            "on one, and its absence alone never liquidates the position; "
-            "its cost-recovery protection is unaffected")
-    if limitation and m.get("feed_refusal"):
-        limitation += "; PinnAPI feed: %s" % m["feed_refusal"]
-    hv = (None if p is None or qty is None
-          else round(float(qty) * float(p), 6))
-    return {"evidence_state": state,
-            "probability": None if p is None else float(p),
-            "probability_source": m.get("source"),
-            "probability_source_at": src_at,
-            "probability_received_at": rcv,
-            "probability_age_s": age,
-            "probability_limit_s": limit,
-            "probability_limitation": limitation,
-            "current_hold_value_usd": hv if state == E_FRESH else None,
-            "entry_time_hold_value_usd": hv if state == E_STALE else None}
+    """Currency is recomputed from the source timestamp at use, not cached age."""
+    from ..xavier_measure_refresh import evidence
+    return evidence(measure, at=at, limit_s=limit_s, qty=qty)
 
 
 async def actual_position_evidence(conn, *, group_id: str,
@@ -716,59 +660,68 @@ async def _held_feed(conn, *, pos: dict, payout_event, payout_is_complement,
 
 
 async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
-    """P(the held side pays), on the paper session's measure -- the measure
-    of the group's OWN strategy: a PINNACLE_ONLY_PAPER_BENCHMARK group is
-    measured on the de-vigged Pinnacle probability alone
-    (`paper_benchmark.xavier_measure`), never the two-model blend; a position
-    never switches policy."""
+    """Preserve each strategy's measure; refresh Derek's held blend as well.
+
+    Benchmarks still use their own probability policy. The original two-model
+    policy uses its existing scorer and blend, but can now obtain a current
+    probability for its ENTRY-PROVEN contract through the exact held reader.
+    No stale entry probability is ever relabelled current.
+    """
     from . import paper_benchmark as PB
+    from . import paper_derek as PD
+    from .. import xavier_measure_refresh as MR
     strat = await PB.group_strategy(conn, pos["group_id"])
     if strat in PB.BENCHMARK_STRATEGIES:
         return await PB.xavier_measure(conn, ctx, pos=pos, strategy=strat,
                                        feed=_held_feed)
     at = _clock(ctx)
-    lookback = float(ctx["config"]["entry"]["valuation_lookback_s"])
+    ent = ctx["config"]["entry"]
+    lookback = float(ent["valuation_lookback_s"])
+    max_age = float(ent["pinnacle_max_age_s"])
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
-    v = await conn.fetchrow(
-        "SELECT id, probability, observed_at, received_at, "
-        "       payout_is_complement, version "
-        "  FROM external_valuations WHERE us_market_slug=$1 "
-        "   AND buy_intent=$2 AND probability IS NOT NULL "
-        "   AND decided_at > to_timestamp($3) "
-        " ORDER BY decided_at DESC LIMIT 1", pos["us_market_slug"], intent,
-        at - lookback)
-    from . import paper_derek as PD
+    contract = await conn.fetchrow(
+        "SELECT v.id,v.us_market_slug,v.payout_event,v.payout_is_complement,"
+        "       v.event_key,v.market,v.line "
+        "FROM external_valuations v JOIN paper_decisions d ON d.valuation_id=v.id "
+        "JOIN paper_orders o ON o.decision_id=d.decision_id "
+        "WHERE o.group_id=$1 AND o.us_market_slug=$2 AND o.holding_side=$3 AND o.account_id=$4 "
+        "AND o.role='ENTRY' ORDER BY o.created_at,o.order_id LIMIT 1",
+        pos["group_id"],pos["us_market_slug"],pos["holding_side"],ctx["account_id"])
+    v = None
+    if contract is not None:
+        v = await conn.fetchrow(
+            "SELECT id,probability,observed_at,received_at FROM external_valuations "
+            "WHERE us_market_slug=$1 AND buy_intent=$2 AND probability IS NOT NULL "
+            "AND payout_event=$3 AND payout_is_complement=$4 "
+            "AND market IS NOT DISTINCT FROM $5 AND line IS NOT DISTINCT FROM $6 "
+            "AND event_key IS NOT DISTINCT FROM $7 "
+            "AND decided_at>to_timestamp($8) ORDER BY decided_at DESC,id DESC LIMIT 1",
+            pos["us_market_slug"],intent,contract["payout_event"],
+            contract["payout_is_complement"],contract["market"],contract["line"],
+            contract["event_key"],at-lookback)
     model = (ctx.get("derek") or {}).get("model")
     if model is None:
         model = await PD.research_model(conn, at=at, verify=False)
-    if v is not None and model.get("ok") and levels_buy:
-        sc = PD.score(model, price=levels_buy[0]["price"],
-                      payout_is_complement=bool(v["payout_is_complement"]))
-        if sc.get("ok"):
-            return {"p": DP.blend(sc["p"], float(v["probability"])),
-                    "source": "CURRENT_BLEND",
-                    "p_internal": sc["p"], "model_id": model.get("model_id"),
-                    "model_label": PD.MODEL_LABEL,
-                    "p_pinnacle": float(v["probability"]),
-                    "pinnacle_at": L._epoch(v["observed_at"]),
-                    "pinnacle_received_at": L._epoch(v["received_at"]),
-                    "valuation_id": v["id"],
-                    "valuation_store": VALUATION_STORE_EXTERNAL,
-                    "stale": False, "void_applied": False}
+    got = await MR.refresh(
+        conn,pos=pos,contract=dict(contract) if contract is not None else None,
+        stored=dict(v) if v is not None else None,model=model,levels_buy=levels_buy,
+        at=at,max_age_s=max_age,score=PD.score,blend=DP.blend,held_feed=_held_feed,
+        clock=lambda: _clock(ctx))
+    if got.get("ok"):
+        return dict(got,model_label=PD.MODEL_LABEL)
     d = await conn.fetchrow(
-        "SELECT d.p_blended, d.decided_at FROM paper_decisions d "
-        "  JOIN paper_orders o ON o.decision_id = d.decision_id "
-        " WHERE o.group_id=$1 AND o.us_market_slug=$2 "
-        "   AND d.p_blended IS NOT NULL LIMIT 1", pos["group_id"],
-        pos["us_market_slug"])
+        "SELECT d.p_blended,d.decided_at FROM paper_decisions d "
+        "JOIN paper_orders o ON o.decision_id=d.decision_id "
+        "WHERE o.group_id=$1 AND o.us_market_slug=$2 AND o.holding_side=$3 AND o.account_id=$4 "
+        "AND o.role='ENTRY' AND d.p_blended IS NOT NULL "
+        "ORDER BY o.created_at,o.order_id LIMIT 1",
+        pos["group_id"],pos["us_market_slug"],pos["holding_side"],ctx["account_id"])
     if d is not None:
-        return {"p": float(d["p_blended"]), "source": "ENTRY_TIME_MEASURE",
-                "at": L._epoch(d["decided_at"]), "stale": True,
-                "void_applied": False,
-                "why": ("no current Pinnacle reading for this contract "
-                        "within the lookback; the entry decision's blended "
-                        "probability is used and labelled stale")}
-    return {"p": None, "source": None, "stale": True, "why": R_NO_MEASURE}
+        return {"p":float(d["p_blended"]),"source":"ENTRY_TIME_MEASURE",
+                "at":L._epoch(d["decided_at"]),"stale":True,"void_applied":False,
+                "why":got.get("why"),"feed_refusal":got.get("feed_refusal")}
+    return {"p":None,"source":None,"stale":True,"why":R_NO_MEASURE,
+            "feed_refusal":got.get("feed_refusal"),"refresh_detail":got.get("why")}
 
 
 def last_evidence_expiry(last: dict | None) -> float | None:

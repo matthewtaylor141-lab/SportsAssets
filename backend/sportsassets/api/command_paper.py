@@ -469,3 +469,17 @@ async def paper_overview() -> dict:
         if not await _schema(conn):
             return dict(_labels(), overview=_unavailable_schema())
         return await OPS.overview(conn, account_id=L.ACCOUNT_ID)
+
+
+@router.get("/api/command/paper/trader-mode", dependencies=[Depends(require_read)])
+async def paper_trader_mode() -> dict:
+    """Read-only management wall; same-origin command authentication."""
+    from . import trader_readmodel as TR
+    from fastapi.responses import JSONResponse
+    pool = await _pool()
+    try:
+        payload = await TR.cached(pool)
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail={
+            "reason":"TRADER_READBACK_UNAVAILABLE","detail":type(exc).__name__})
+    return JSONResponse(payload,headers={"Cache-Control":"private, no-store"})

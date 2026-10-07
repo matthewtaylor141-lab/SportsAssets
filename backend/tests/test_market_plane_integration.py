@@ -591,7 +591,16 @@ def test_coverage_and_assignment_over_the_registry():
             assert fr["priority_universe"]["target"] == 0.95
             cap = snap["radar"]["capacity"]
             assert cap["symbol_capacity"] == 4 * 1000
-            assert cap["streams_required_for_full_coverage"] == 1
+            # (developer pass) capacity is not backlog: the known subscribable
+            # set needs one stream, but mp-3 still awaits reference data, so
+            # the full-universe requirement is NOT proven (null, with why)
+            assert cap["streams_for_known_subscribable"] == 1
+            assert cap["refdata_pending"] >= 1
+            assert cap["streams_required_for_full_coverage"] is None
+            assert cap["full_coverage_requirement_why"] == (
+                "REFERENCE_DATA_OR_FULL_UNIVERSE_STREAM_AVAILABILITY_NOT_PROVEN")
+            assert cap["unused_configured_slots"] == 4 * 1000 - cap[
+                "subscribed"]
             assert cap["streams_open"] == 0
         finally:
             await tr.rollback()
