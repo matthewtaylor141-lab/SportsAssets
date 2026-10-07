@@ -1,0 +1,1128 @@
+{
+ "mode": "prod",
+ "base": "https://command.bettortoken.com",
+ "other_api_reads": "503 (signed-in shell; only the Trader Mode payload is from the signed readback)",
+ "payload": "authenticated production Trader Mode payload (signed p0 readback)",
+ "browser": "Chromium (Playwright) device emulation, SwiftShader WebGL",
+ "webkit_tested": false,
+ "physical_devices_tested": false,
+ "passed": 97,
+ "total": 97,
+ "checks": [
+  {
+   "name": "iphone-portrait: root Command shows a visible, unobscured Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--mobile-docked",
+    "r": [
+     254.28125,
+     724,
+     123.71875,
+     44
+    ]
+   }
+  },
+  {
+   "name": "iphone-portrait: root Command launcher targets /trader",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: root Command no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: a visible Floor action exists on root Command",
+   "passed": true,
+   "detail": "#hq-tabbar button[data-go=floor]"
+  },
+  {
+   "name": "iphone-portrait: Floor action shows a visible WebGL canvas (DEDICATED_FLOOR)",
+   "passed": true,
+   "detail": {
+    "url": "https://command.bettortoken.com/floor",
+    "canvases": [
+     {
+      "w": 390,
+      "h": 754,
+      "top": 84,
+      "vis": true,
+      "gl": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "iphone-portrait: /floor renders the 3D WebGL floor (not the 2D map)",
+   "passed": true,
+   "detail": {
+    "view": "3d",
+    "stats": {
+     "fps": [
+      1
+     ],
+     "dpr": 1.25,
+     "shadows": false,
+     "avatars": 7,
+     "trails": 0,
+     "walking": []
+    },
+    "canvas": [
+     0,
+     84,
+     390,
+     754
+    ],
+    "ih": 844,
+    "iw": 390,
+    "slugs": [
+     "derek",
+     "karen",
+     "scout",
+     "archer",
+     "allocator",
+     "audrey",
+     "xavier"
+    ],
+    "anchors": [
+     {
+      "slug": "derek",
+      "x": -62.21048145807925,
+      "y": 304.78822376564995,
+      "behind": false
+     },
+     {
+      "slug": "karen",
+      "x": 18.728813379495115,
+      "y": 255.47525259099177,
+      "behind": false
+     },
+     {
+      "slug": "scout",
+      "x": 105.6781186652333,
+      "y": 227.17271639734776,
+      "behind": false
+     },
+     {
+      "slug": "archer",
+      "x": 195,
+      "y": 217.96422749124395,
+      "behind": false
+     },
+     {
+      "slug": "allocator",
+      "x": 284.32188133476666,
+      "y": 227.17271639734767,
+      "behind": false
+     },
+     {
+      "slug": "audrey",
+      "x": 371.2711866205049,
+      "y": 255.47525259099177,
+      "behind": false
+     },
+     {
+      "slug": "xavier",
+      "x": 452.2104814580793,
+      "y": 304.78822376564995,
+      "behind": false
+     }
+    ],
+    "gl": true,
+    "fallbackLabel": false
+   }
+  },
+  {
+   "name": "iphone-portrait: /floor canvas is on screen and large",
+   "passed": true,
+   "detail": [
+    0,
+    84,
+    390,
+    754
+   ]
+  },
+  {
+   "name": "iphone-portrait: /floor avatars rendered",
+   "passed": true,
+   "detail": {
+    "fps": [
+     1
+    ],
+    "dpr": 1.25,
+    "shadows": false,
+    "avatars": 7,
+    "trails": 0,
+    "walking": []
+   }
+  },
+  {
+   "name": "iphone-portrait: /floor desks rendered (7 desk anchors)",
+   "passed": true,
+   "detail": [
+    {
+     "slug": "derek",
+     "x": -62.21048145807925,
+     "y": 304.78822376564995,
+     "behind": false
+    },
+    {
+     "slug": "karen",
+     "x": 18.728813379495115,
+     "y": 255.47525259099177,
+     "behind": false
+    },
+    {
+     "slug": "scout",
+     "x": 105.6781186652333,
+     "y": 227.17271639734776,
+     "behind": false
+    }
+   ]
+  },
+  {
+   "name": "iphone-portrait: /floor canvas has drawn content (not blank)",
+   "passed": true,
+   "detail": 28.20626128364279
+  },
+  {
+   "name": "iphone-portrait: touch drag moves the 3D camera (desk anchors moved 171 px vs 0.0 px untouched)",
+   "passed": true,
+   "detail": {
+    "drag_px": 171.12051055642533,
+    "untouched_px": 0.0,
+    "pixels_changed": 0.07848889493451827
+   }
+  },
+  {
+   "name": "iphone-portrait: tapping a desk selects it and opens its recorded desk panel",
+   "passed": true,
+   "detail": {
+    "tapped": "derek",
+    "selected": "derek",
+    "panel_visible": true,
+    "panel_text": "D\nCIO \u00b7 ALPHA\nDerek\n\nChief Investment Officer \u00b7 entry decisions\n\n\u00d7\n\nThe API answered HTTP 503.\n\nOpen Derek\u2019s workspace \u2192\nBack to the floor"
+   }
+  },
+  {
+   "name": "iphone-portrait: open desk panel's actions are not covered by the launcher or team dock",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-portrait: /floor shows a visible Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--mobile bt-trader-launch--mobile-docked",
+    "r": [
+     254.28125,
+     654,
+     123.71875,
+     44
+    ]
+   }
+  },
+  {
+   "name": "iphone-portrait: /floor launcher does not obscure floor controls",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-portrait: /floor no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: the launcher lands on /trader",
+   "passed": true,
+   "detail": "https://command.bettortoken.com/trader"
+  },
+  {
+   "name": "iphone-portrait: /trader renders the authenticated readback (30 positions)",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "iphone-portrait: /trader cockpit renders",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: /trader keeps polling (>= 3 GET reads in ~6 s)",
+   "passed": true,
+   "detail": 3
+  },
+  {
+   "name": "iphone-portrait: /trader reads are same-origin /api/command/paper/trader-mode",
+   "passed": true,
+   "detail": [
+    {
+     "url": "https://command.bettortoken.com/api/command/paper/trader-mode",
+     "method": "GET",
+     "t": 1791387584.8714952,
+     "same_origin": true,
+     "credentials_header": "application/json"
+    }
+   ]
+  },
+  {
+   "name": "iphone-portrait: /trader no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: a refused read shows the session requirement, no demo fallback",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: no uncaught JS errors on Command, Floor or Trader",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-landscape: root Command shows a visible, unobscured Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--nav",
+    "r": [
+     701.53125,
+     8,
+     105.296875,
+     44
+    ]
+   }
+  },
+  {
+   "name": "iphone-landscape: root Command launcher targets /trader",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: root Command no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: a visible Floor action exists on root Command",
+   "passed": true,
+   "detail": "#hq-nav button[data-go=floor]"
+  },
+  {
+   "name": "iphone-landscape: Floor action shows a visible WebGL canvas (HQ_INLINE_FLOOR)",
+   "passed": true,
+   "detail": {
+    "url": "https://command.bettortoken.com/#floor",
+    "canvases": [
+     {
+      "w": 844,
+      "h": 390,
+      "top": 0,
+      "vis": true,
+      "gl": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "iphone-landscape: /floor renders the 3D WebGL floor (not the 2D map)",
+   "passed": true,
+   "detail": {
+    "view": "3d",
+    "stats": {
+     "fps": [
+      0,
+      2
+     ],
+     "dpr": 1.25,
+     "shadows": false,
+     "avatars": 3,
+     "trails": 0,
+     "walking": []
+    },
+    "canvas": [
+     92,
+     90,
+     752,
+     556
+    ],
+    "ih": 390,
+    "iw": 844,
+    "slugs": [
+     "derek",
+     "karen",
+     "scout",
+     "archer",
+     "allocator",
+     "audrey",
+     "xavier"
+    ],
+    "anchors": [
+     {
+      "slug": "derek",
+      "x": 51.78626502961171,
+      "y": 250.8683146382472,
+      "behind": false
+     },
+     {
+      "slug": "karen",
+      "x": 152.23808219526924,
+      "y": 170.06805568989842,
+      "behind": false
+     },
+     {
+      "slug": "scout",
+      "x": 262.64684004223875,
+      "y": 125.75530623581474,
+      "behind": false
+     },
+     {
+      "slug": "archer",
+      "x": 376,
+      "y": 111.697226245816,
+      "behind": false
+     },
+     {
+      "slug": "allocator",
+      "x": 489.3531599577612,
+      "y": 125.75530623581474,
+      "behind": false
+     },
+     {
+      "slug": "audrey",
+      "x": 599.7619178047307,
+      "y": 170.06805568989842,
+      "behind": false
+     },
+     {
+      "slug": "xavier",
+      "x": 700.2137349703883,
+      "y": 250.8683146382472,
+      "behind": false
+     }
+    ],
+    "gl": true,
+    "fallbackLabel": false
+   }
+  },
+  {
+   "name": "iphone-landscape: /floor canvas is on screen and large",
+   "passed": true,
+   "detail": [
+    92,
+    90,
+    752,
+    556
+   ]
+  },
+  {
+   "name": "iphone-landscape: /floor avatars rendered",
+   "passed": true,
+   "detail": {
+    "fps": [
+     0,
+     2
+    ],
+    "dpr": 1.25,
+    "shadows": false,
+    "avatars": 3,
+    "trails": 0,
+    "walking": []
+   }
+  },
+  {
+   "name": "iphone-landscape: /floor desks rendered (7 desk anchors)",
+   "passed": true,
+   "detail": [
+    {
+     "slug": "derek",
+     "x": 51.78626502961171,
+     "y": 250.8683146382472,
+     "behind": false
+    },
+    {
+     "slug": "karen",
+     "x": 152.23808219526924,
+     "y": 170.06805568989842,
+     "behind": false
+    },
+    {
+     "slug": "scout",
+     "x": 262.64684004223875,
+     "y": 125.75530623581474,
+     "behind": false
+    }
+   ]
+  },
+  {
+   "name": "iphone-landscape: /floor canvas has drawn content (not blank)",
+   "passed": true,
+   "detail": 29.05561720232323
+  },
+  {
+   "name": "iphone-landscape: touch drag moves the 3D camera (desk anchors moved 213 px vs 0.0 px untouched)",
+   "passed": true,
+   "detail": {
+    "drag_px": 213.0200675605126,
+    "untouched_px": 0.0,
+    "pixels_changed": 0.09576168852152321
+   }
+  },
+  {
+   "name": "iphone-landscape: tapping a desk selects it and opens its recorded desk panel",
+   "passed": true,
+   "detail": {
+    "tapped": "derek",
+    "selected": "derek",
+    "panel_visible": true,
+    "panel_text": "D\nCIO \u00b7 ALPHA\nDerek\n\nChief Investment Officer \u00b7 entry decisions\n\n\u00d7\n\nThe API answered HTTP 503.\n\nOpen Derek\u2019s workspace \u2192\nBack to the floor"
+   }
+  },
+  {
+   "name": "iphone-landscape: open desk panel's actions are not covered by the launcher or team dock",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-landscape: /floor shows a visible Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--mobile bt-trader-launch--mobile-docked",
+    "r": [
+     582.6875,
+     140.109375,
+     241.3125,
+     44.890625
+    ]
+   }
+  },
+  {
+   "name": "iphone-landscape: /floor launcher does not obscure floor controls",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-landscape: /floor no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: the launcher lands on /trader",
+   "passed": true,
+   "detail": "https://command.bettortoken.com/trader"
+  },
+  {
+   "name": "iphone-landscape: /trader renders the authenticated readback (30 positions)",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "iphone-landscape: /trader cockpit renders",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: /trader keeps polling (>= 3 GET reads in ~6 s)",
+   "passed": true,
+   "detail": 3
+  },
+  {
+   "name": "iphone-landscape: /trader reads are same-origin /api/command/paper/trader-mode",
+   "passed": true,
+   "detail": [
+    {
+     "url": "https://command.bettortoken.com/api/command/paper/trader-mode",
+     "method": "GET",
+     "t": 1791387745.407546,
+     "same_origin": true,
+     "credentials_header": "application/json"
+    }
+   ]
+  },
+  {
+   "name": "iphone-landscape: /trader no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: a refused read shows the session requirement, no demo fallback",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: no uncaught JS errors on Command, Floor or Trader",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-portrait: root Command shows a visible, unobscured Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--nav",
+    "r": [
+     701.53125,
+     8,
+     105.296875,
+     44
+    ]
+   }
+  },
+  {
+   "name": "ipad-portrait: root Command launcher targets /trader",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: root Command no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: a visible Floor action exists on root Command",
+   "passed": true,
+   "detail": "#hq-nav button[data-go=floor]"
+  },
+  {
+   "name": "ipad-portrait: Floor action shows a visible WebGL canvas (HQ_INLINE_FLOOR)",
+   "passed": true,
+   "detail": {
+    "url": "https://command.bettortoken.com/#floor",
+    "canvases": [
+     {
+      "w": 820,
+      "h": 1180,
+      "top": 0,
+      "vis": true,
+      "gl": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "ipad-portrait: /floor renders the 3D WebGL floor (not the 2D map)",
+   "passed": true,
+   "detail": {
+    "view": "3d",
+    "stats": {
+     "fps": [
+      0
+     ],
+     "dpr": 1.25,
+     "shadows": false,
+     "avatars": 1,
+     "trails": 0,
+     "walking": []
+    },
+    "canvas": [
+     92,
+     90,
+     728,
+     1090
+    ],
+    "ih": 1180,
+    "iw": 820,
+    "slugs": [
+     "derek",
+     "karen",
+     "scout",
+     "archer",
+     "allocator",
+     "audrey",
+     "xavier"
+    ],
+    "anchors": [
+     {
+      "slug": "derek",
+      "x": -7.829475847886382,
+      "y": 440.60897069570086,
+      "behind": false
+     },
+     {
+      "slug": "karen",
+      "x": 109.17825806850092,
+      "y": 369.3209884936088,
+      "behind": false
+     },
+     {
+      "slug": "scout",
+      "x": 234.87420337546988,
+      "y": 328.40618152932234,
+      "behind": false
+     },
+     {
+      "slug": "archer",
+      "x": 364,
+      "y": 315.09417502049854,
+      "behind": false
+     },
+     {
+      "slug": "allocator",
+      "x": 493.12579662453004,
+      "y": 328.4061815293222,
+      "behind": false
+     },
+     {
+      "slug": "audrey",
+      "x": 618.8217419314991,
+      "y": 369.3209884936088,
+      "behind": false
+     },
+     {
+      "slug": "xavier",
+      "x": 735.8294758478863,
+      "y": 440.60897069570086,
+      "behind": false
+     }
+    ],
+    "gl": true,
+    "fallbackLabel": false
+   }
+  },
+  {
+   "name": "ipad-portrait: /floor canvas is on screen and large",
+   "passed": true,
+   "detail": [
+    92,
+    90,
+    728,
+    1090
+   ]
+  },
+  {
+   "name": "ipad-portrait: /floor avatars rendered",
+   "passed": true,
+   "detail": {
+    "fps": [
+     0
+    ],
+    "dpr": 1.25,
+    "shadows": false,
+    "avatars": 1,
+    "trails": 0,
+    "walking": []
+   }
+  },
+  {
+   "name": "ipad-portrait: /floor desks rendered (7 desk anchors)",
+   "passed": true,
+   "detail": [
+    {
+     "slug": "derek",
+     "x": -7.829475847886382,
+     "y": 440.60897069570086,
+     "behind": false
+    },
+    {
+     "slug": "karen",
+     "x": 109.17825806850092,
+     "y": 369.3209884936088,
+     "behind": false
+    },
+    {
+     "slug": "scout",
+     "x": 234.87420337546988,
+     "y": 328.40618152932234,
+     "behind": false
+    }
+   ]
+  },
+  {
+   "name": "ipad-portrait: /floor canvas has drawn content (not blank)",
+   "passed": true,
+   "detail": 22.911121574223944
+  },
+  {
+   "name": "ipad-portrait: touch drag moves the 3D camera (desk anchors moved 247 px vs 0.0 px untouched)",
+   "passed": true,
+   "detail": {
+    "drag_px": 247.37580438528323,
+    "untouched_px": 0.0,
+    "pixels_changed": 0.07373191601976006
+   }
+  },
+  {
+   "name": "ipad-portrait: tapping a desk selects it and opens its recorded desk panel",
+   "passed": true,
+   "detail": {
+    "tapped": "derek",
+    "selected": "derek",
+    "panel_visible": true,
+    "panel_text": "D\nCIO \u00b7 ALPHA\nDerek\n\nChief Investment Officer \u00b7 entry decisions\n\n\u00d7\n\nThe API answered HTTP 503.\n\nOpen Derek\u2019s workspace \u2192\nBack to the floor"
+   }
+  },
+  {
+   "name": "ipad-portrait: open desk panel's actions are not covered by the launcher or team dock",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-portrait: /floor shows a visible Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--mobile bt-trader-launch--mobile-docked",
+    "r": [
+     558.6875,
+     996.109375,
+     241.3125,
+     44.890625
+    ]
+   }
+  },
+  {
+   "name": "ipad-portrait: /floor launcher does not obscure floor controls",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-portrait: /floor no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: the launcher lands on /trader",
+   "passed": true,
+   "detail": "https://command.bettortoken.com/trader"
+  },
+  {
+   "name": "ipad-portrait: /trader renders the authenticated readback (30 positions)",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "ipad-portrait: /trader cockpit renders",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: /trader keeps polling (>= 3 GET reads in ~6 s)",
+   "passed": true,
+   "detail": 3
+  },
+  {
+   "name": "ipad-portrait: /trader reads are same-origin /api/command/paper/trader-mode",
+   "passed": true,
+   "detail": [
+    {
+     "url": "https://command.bettortoken.com/api/command/paper/trader-mode",
+     "method": "GET",
+     "t": 1791387974.5378845,
+     "same_origin": true,
+     "credentials_header": "application/json"
+    }
+   ]
+  },
+  {
+   "name": "ipad-portrait: /trader no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: a refused read shows the session requirement, no demo fallback",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: no uncaught JS errors on Command, Floor or Trader",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-landscape: root Command shows a visible, unobscured Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--nav",
+    "r": [
+     701.53125,
+     8,
+     105.296875,
+     44
+    ]
+   }
+  },
+  {
+   "name": "ipad-landscape: root Command launcher targets /trader",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: root Command no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: a visible Floor action exists on root Command",
+   "passed": true,
+   "detail": "#hq-nav button[data-go=floor]"
+  },
+  {
+   "name": "ipad-landscape: Floor action shows a visible WebGL canvas (HQ_INLINE_FLOOR)",
+   "passed": true,
+   "detail": {
+    "url": "https://command.bettortoken.com/#floor",
+    "canvases": [
+     {
+      "w": 1180,
+      "h": 820,
+      "top": 0,
+      "vis": true,
+      "gl": true
+     }
+    ]
+   }
+  },
+  {
+   "name": "ipad-landscape: /floor renders the 3D WebGL floor (not the 2D map)",
+   "passed": true,
+   "detail": {
+    "view": "3d",
+    "stats": {
+     "fps": [
+      0,
+      0
+     ],
+     "dpr": 1.75,
+     "shadows": true,
+     "avatars": 2,
+     "trails": 0,
+     "walking": []
+    },
+    "canvas": [
+     92,
+     114,
+     1088,
+     706
+    ],
+    "ih": 820,
+    "iw": 1180,
+    "slugs": [
+     "derek",
+     "karen",
+     "scout",
+     "archer",
+     "allocator",
+     "audrey",
+     "xavier"
+    ],
+    "anchors": [
+     {
+      "slug": "derek",
+      "x": -131.33321482815276,
+      "y": 255.5616046322363,
+      "behind": false
+     },
+     {
+      "slug": "karen",
+      "x": 112.586504285241,
+      "y": 168.79984118275382,
+      "behind": false
+     },
+     {
+      "slug": "scout",
+      "x": 334.0230823122495,
+      "y": 126.48472483567645,
+      "behind": false
+     },
+     {
+      "slug": "archer",
+      "x": 544,
+      "y": 113.74515321966844,
+      "behind": false
+     },
+     {
+      "slug": "allocator",
+      "x": 753.9769176877503,
+      "y": 126.48472483567645,
+      "behind": false
+     },
+     {
+      "slug": "audrey",
+      "x": 975.413495714759,
+      "y": 168.79984118275382,
+      "behind": false
+     },
+     {
+      "slug": "xavier",
+      "x": 1219.3332148281527,
+      "y": 255.5616046322363,
+      "behind": false
+     }
+    ],
+    "gl": true,
+    "fallbackLabel": false
+   }
+  },
+  {
+   "name": "ipad-landscape: /floor canvas is on screen and large",
+   "passed": true,
+   "detail": [
+    92,
+    114,
+    1088,
+    706
+   ]
+  },
+  {
+   "name": "ipad-landscape: /floor avatars rendered",
+   "passed": true,
+   "detail": {
+    "fps": [
+     0,
+     0
+    ],
+    "dpr": 1.75,
+    "shadows": true,
+    "avatars": 2,
+    "trails": 0,
+    "walking": []
+   }
+  },
+  {
+   "name": "ipad-landscape: /floor desks rendered (7 desk anchors)",
+   "passed": true,
+   "detail": [
+    {
+     "slug": "derek",
+     "x": -131.33321482815276,
+     "y": 255.5616046322363,
+     "behind": false
+    },
+    {
+     "slug": "karen",
+     "x": 112.586504285241,
+     "y": 168.79984118275382,
+     "behind": false
+    },
+    {
+     "slug": "scout",
+     "x": 334.0230823122495,
+     "y": 126.48472483567645,
+     "behind": false
+    }
+   ]
+  },
+  {
+   "name": "ipad-landscape: /floor canvas has drawn content (not blank)",
+   "passed": true,
+   "detail": 25.935611512144007
+  },
+  {
+   "name": "ipad-landscape: touch drag moves the 3D camera (desk anchors moved 367 px vs 0.0 px untouched)",
+   "passed": true,
+   "detail": {
+    "drag_px": 366.7564519843633,
+    "untouched_px": 0.0,
+    "pixels_changed": 0.09050672544159306
+   }
+  },
+  {
+   "name": "ipad-landscape: tapping a desk selects it and opens its recorded desk panel",
+   "passed": true,
+   "detail": {
+    "tapped": "derek",
+    "selected": "derek",
+    "panel_visible": true,
+    "panel_text": "D\nCIO \u00b7 ALPHA\nDerek\n\nChief Investment Officer \u00b7 entry decisions\n\n\u00d7\n\nThe API answered HTTP 503.\n\nOpen Derek\u2019s workspace \u2192\nBack to the floor"
+   }
+  },
+  {
+   "name": "ipad-landscape: open desk panel's actions are not covered by the launcher or team dock",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-landscape: /floor shows a visible Trader Mode launcher",
+   "passed": true,
+   "detail": {
+    "ok": true,
+    "inside": true,
+    "top": "bt-trader-launch bt-trader-launch--mobile bt-trader-launch--mobile-docked",
+    "r": [
+     918.6875,
+     636.109375,
+     241.3125,
+     44.890625
+    ]
+   }
+  },
+  {
+   "name": "ipad-landscape: /floor launcher does not obscure floor controls",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-landscape: /floor no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: the launcher lands on /trader",
+   "passed": true,
+   "detail": "https://command.bettortoken.com/trader"
+  },
+  {
+   "name": "ipad-landscape: /trader renders the authenticated readback (30 positions)",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "ipad-landscape: /trader cockpit renders",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: /trader keeps polling (>= 3 GET reads in ~6 s)",
+   "passed": true,
+   "detail": 3
+  },
+  {
+   "name": "ipad-landscape: /trader reads are same-origin /api/command/paper/trader-mode",
+   "passed": true,
+   "detail": [
+    {
+     "url": "https://command.bettortoken.com/api/command/paper/trader-mode",
+     "method": "GET",
+     "t": 1791388383.9234717,
+     "same_origin": true,
+     "credentials_header": "application/json"
+    }
+   ]
+  },
+  {
+   "name": "ipad-landscape: /trader no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: a refused read shows the session requirement, no demo fallback",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: no uncaught JS errors on Command, Floor or Trader",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "every network request was a GET",
+   "passed": true,
+   "detail": [
+    "GET"
+   ]
+  }
+ ]
+}

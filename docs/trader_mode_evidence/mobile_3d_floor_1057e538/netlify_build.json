@@ -1,0 +1,12 @@
+{
+  "schema": "bt.frontend.build.v1",
+  "sha": "1057e5383c54a6bdd80dd1f54345fb0f32277696",
+  "sha_why": null,
+  "branch": "claude/session-njaewf",
+  "context": "production",
+  "deploy_id": "6ac6674bfcaca10008a91985",
+  "build_id": "6ac6674bfcaca10008a91983",
+  "site": "polymarkettracker1",
+  "source": "NETLIFY",
+  "built_at": "2026-10-07T15:38:05.297Z"
+}
