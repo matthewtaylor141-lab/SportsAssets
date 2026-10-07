@@ -86,6 +86,8 @@ jobs:
           jq -c '.' p0/profitability_scoreboard.json 2>&1 | cut -c1-12000
           get capital_readiness /api/command/capital-readiness
           jq -c '{status, why, label, authority, readiness: (.readiness | {readiness_status, recommended_capital_usd, blocking_gates, computed_at, source_sha}), agent_championship: .agent_championship.agents, shadow_court, scale_twin: {status: .scale_twin.status, rows: (.scale_twin.rows | length)}}' p0/capital_readiness.json 2>&1 | cut -c1-8000
+          get trader_mode /api/command/paper/trader-mode
+          jq -c '{schema, source, mode, authority, execution_authority, source_sha, snapshot_at, total_position_count, returned_position_count, truncated, counts, score_feed, missing: ([.positions[]? | select(.state=="ACTIVE") | .packet.missing[]] | group_by(.) | map({(.[0]): length}) | add), orders: [.positions[]? | .orders[]? | {position_id, role, state, direction, limit_price, remaining_qty, met: .gap.condition_met, is_fill: .gap.is_fill}]}' p0/trader_mode.json 2>&1 | cut -c1-12000
           get loss_attribution /api/command/paper/loss-attribution
           jq -c 'del(.missed_exits.sample)' p0/loss_attribution.json 2>&1 | cut -c1-12000
           get ncaaf_funnel /api/command/ncaaf-funnel
