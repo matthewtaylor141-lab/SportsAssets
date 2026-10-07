@@ -1,0 +1,8 @@
+/* Venues & Claims -- layered on trader / revenue / readiness css; read only. */
+.vn-claim{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:12px;min-width:0}
+.vn-claim h3{font-size:13px;margin-bottom:6px;overflow-wrap:anywhere}
+.vn-claim code{font:10px var(--mono);color:#5f7064;overflow-wrap:anywhere}
+.vn-best{background:var(--green-light)}
+.vn-best td:first-child::before{content:"BEST ALL-IN ROUTE · ";font-size:9px;font-weight:750;color:var(--green);letter-spacing:.06em}
+.vn-event{font:11px var(--mono);color:#40524a;margin:14px 0 6px}
+.vn-tag{display:inline-block;font:9px var(--mono);padding:3px 6px;border-radius:5px;background:#eef2f0;color:#5d6f67;margin-right:4px}
