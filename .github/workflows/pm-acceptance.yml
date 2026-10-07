@@ -1,0 +1,241 @@
+# PM EVIDENCE & ACCEPTANCE PACK V1 -- THE INDEPENDENT RELEASE / ACCEPTANCE
+# RECEIPT, RUN FROM OUTSIDE (2026-10-07).
+#
+# For one 40-hex SHA this job establishes, from MACHINE sources only:
+#   lineage     git merge-base --is-ancestor <accepted production base> SHA
+#   gates       the GitHub conclusions of backend-tests, capital-critical,
+#               commit-guard and engine-diagnostic ON THAT EXACT SHA (the
+#               newest run of each; anything but success is not green)
+#   deployed    Render's LIVE deploy commit of sportsassets-api and of
+#               sportsassets-workers (tested = release = deployed) and the
+#               OOM / server_failed events since each went live
+#   production  GET /api/command/{release,red-team,pm-acceptance,venues,
+#               completion-readiness} (ADMIN_TOKEN, read role)
+# then POSTs the release receipt to the serving API, which accepts it ONLY
+# when deployed_sha is its own RENDER_GIT_COMMIT, appends it (migration 315)
+# and never edits it. A receipt is EVIDENCE, never authority: nothing here
+# can place, cancel, size, fund or authorize anything, and no setting,
+# credential or limit is read or changed.
+#
+# Finally the byte-identical package harness is re-run HERE over the API's
+# machine evidence with the gate / lineage fields replaced by what this job
+# read from GitHub itself, and must reach the same RED / YELLOW / GREEN. A
+# RED or YELLOW state is the truthful output, not a job failure; the job
+# fails only when the evidence cannot be read or the two harness runs
+# disagree.
+name: pm-acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "40-hex release SHA (tested = release = deployed)"
+        required: true
+      post_receipt:
+        description: "on = POST the release receipt to the serving API (evidence only); blank = read only"
+        required: false
+        default: "on"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  accept:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE: https://sportsassets-api.onrender.com
+      ACCEPTED_BASE: a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd
+      SHA: ${{ inputs.sha }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Validate the SHA
+        shell: bash
+        run: |
+          echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "not a full 40-hex sha: $SHA"; exit 1; }
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Lineage (accepted production base is an ancestor)
+        shell: bash
+        run: |
+          mkdir -p acc
+          if git merge-base --is-ancestor "$ACCEPTED_BASE" "$SHA"; then d=true; else d=false; fi
+          echo "descendant_of_base=$d ($ACCEPTED_BASE -> $SHA)"
+          jq -n --arg b "$ACCEPTED_BASE" --arg s "$SHA" --argjson d $d \
+            '{accepted_base_sha:$b, sha:$s, descendant_of_base:$d}' > acc/lineage.json
+
+      - name: Exact-SHA gate conclusions (GitHub)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" > acc/runs_raw.json
+          jq '[.workflow_runs[] | {name, id, event, status, conclusion, created_at, head_sha, html_url}]' acc/runs_raw.json > acc/runs.json
+          jq -n --slurpfile r acc/runs.json '
+            def latest(n): ([$r[0][] | select(.name == n)] | sort_by(.created_at) | last);
+            def green(n): (latest(n) // {} | (.status == "completed" and .conclusion == "success"));
+            {backend_tests_green: green("backend-tests"),
+             capital_critical_green: green("capital-critical"),
+             commit_guard_green: green("commit-guard"),
+             engine_diagnostic_green: green("engine-diagnostic"),
+             runs: {backend_tests: latest("backend-tests"),
+                    capital_critical: latest("capital-critical"),
+                    commit_guard: latest("commit-guard"),
+                    engine_diagnostic: latest("engine-diagnostic")}}' > acc/gates.json
+          jq -c '{backend_tests_green, capital_critical_green, commit_guard_green, engine_diagnostic_green}' acc/gates.json
+          jq -r '.runs | to_entries[] | "  \(.key): \(.value.id // "-") \(.value.status // "absent")/\(.value.conclusion // "-") \(.value.html_url // "")"' acc/gates.json
+
+      - name: Render deploys and OOM events (read only)
+        shell: bash
+        env:
+          KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set +e
+          [ -z "${KEY:-}" ] && { echo "no RENDER_API_KEY: deployed commits NOT_ESTABLISHED"; echo '{}' > acc/render.json; exit 0; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          out='{}'
+          for svc in sportsassets-api sportsassets-workers sportsassets-market-plane; do
+            id=$(get "/services?name=$svc&limit=20" | jq -r --arg n "$svc" '.[]? | select(.service.name==$n) | .service.id' | head -1)
+            if [ -z "$id" ]; then
+              out=$(jq --arg s "$svc" '.[$s] = {present:false}' <<<"$out"); echo "$svc: ABSENT"; continue
+            fi
+            get "/services/$id/deploys?limit=20" > "acc/deploys_$svc.json"
+            live=$(jq -c '[.[]? | .deploy | select(.status=="live")] | first // {}' "acc/deploys_$svc.json")
+            commit=$(jq -r '.commit.id // empty' <<<"$live"); fin=$(jq -r '.finishedAt // empty' <<<"$live")
+            get "/services/$id/events?limit=100" > "acc/events_$svc.json"
+            ooms=$(jq --arg f "$fin" '[.[]? | .event | select($f == "" or .timestamp >= $f)
+                     | select((.details|tostring|test("oom|out of memory";"i")))] | length' "acc/events_$svc.json")
+            fails=$(jq --arg f "$fin" '[.[]? | .event | select($f == "" or .timestamp >= $f)
+                     | select(.type=="server_failed")] | length' "acc/events_$svc.json")
+            out=$(jq --arg s "$svc" --arg c "$commit" --arg f "$fin" --argjson o "${ooms:-null}" --argjson x "${fails:-null}" \
+                  '.[$s] = {present:true, live_commit:$c, live_since:$f, oom_events_since_live:$o, server_failed_since_live:$x}' <<<"$out")
+            echo "$svc: live=$commit since=$fin oom_since_live=$ooms server_failed_since_live=$fails"
+          done
+          echo "$out" > acc/render.json
+
+      - name: Production readbacks (ADMIN_TOKEN, read role)
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          [ -z "${ADMIN_TOKEN:-}" ] && { echo "no ADMIN_TOKEN: production readbacks NOT_ESTABLISHED"; exit 1; }
+          echo "::add-mask::$ADMIN_TOKEN"
+          get() {
+            code=$(curl -s -o "acc/$1.json" -w '%{http_code}' --max-time 150 \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$2" || echo 000)
+            echo "== $1 GET $2 -> HTTP $code ($(wc -c < "acc/$1.json") bytes) at $(date -u +%FT%TZ)"
+          }
+          get release /api/command/release
+          get red_team /api/command/red-team
+          get venues /api/command/venues
+          get completion /api/command/completion-readiness
+          get pm_before /api/command/pm-acceptance
+          jq -c '{api: .api.sha, workers: .workers.sha, alignment, schema: {status: .schema.status, max_version: .schema.max_version}}' acc/release.json | cut -c1-1500
+          jq -c '{status, why, red_team: .data.readiness.status, blockers: .data.readiness.blockers}' acc/red_team.json | cut -c1-3000
+          jq -c '{status, pm_state: .data.pm_acceptance.pm_state, golden: {passed: .data.golden.passed, total: .data.golden.total, appended: .data.golden.appended_passed, green: .data.golden.green}}' acc/pm_before.json | cut -c1-2000
+
+      - name: POST the release receipt (evidence only)
+        if: ${{ inputs.post_receipt == 'on' }}
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          echo "::add-mask::$ADMIN_TOKEN"
+          mig=$(jq '.data.readiness.controls.MIGRATION_INTEGRITY.status == "GREEN"' acc/red_team.json 2>/dev/null || echo false)
+          jq -n --slurpfile l acc/lineage.json --slurpfile g acc/gates.json --slurpfile p acc/pm_before.json \
+                --slurpfile r acc/render.json \
+                --arg s "$SHA" --argjson m "${mig:-false}" '
+            {accepted_base_sha: $l[0].accepted_base_sha, tested_sha: $s, release_sha: $s,
+             deployed_sha: $s, descendant_of_base: $l[0].descendant_of_base,
+             backend_tests_green: $g[0].backend_tests_green,
+             capital_critical_green: $g[0].capital_critical_green,
+             commit_guard_green: $g[0].commit_guard_green,
+             engine_diagnostic_green: $g[0].engine_diagnostic_green,
+             migration_fingerprint_match: $m,
+             workers_deployed_sha: ($r[0]["sportsassets-workers"].live_commit // null),
+             pm_acceptance: ($p[0].data.pm_acceptance // null)}' > acc/receipt_body.json
+          code=$(curl -s -o acc/receipt_resp.json -w '%{http_code}' --max-time 60 -X POST \
+                 -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+                 --data @acc/receipt_body.json "$BASE/api/admin/red-team/release-receipt" || echo 000)
+          echo "release receipt POST -> HTTP $code: $(head -c 1500 acc/receipt_resp.json)"
+          case "$code" in 200) ;; *) echo "receipt not accepted (the API refuses a SHA it is not serving)";; esac
+
+      - name: Re-read PM acceptance and re-run the package harness here
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -o pipefail
+          echo "::add-mask::$ADMIN_TOKEN"
+          curl -s -o acc/pm_after.json --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/command/pm-acceptance"
+          PYTHONPATH=backend python3 -I - <<'PY'
+          import json, os, sys
+          sys.path.insert(0, "backend")
+          from sportsassets.pm_evidence.pm_acceptance import harness as H
+          spec = json.load(open("backend/sportsassets/pm_evidence/data/acceptance_spec.json"))
+          pm = json.load(open("acc/pm_after.json"))
+          if pm.get("status") != "OK":
+              print("pm-acceptance readback unavailable:", pm.get("why")); sys.exit(1)
+          api = pm["data"]["pm_acceptance"]
+          lin = json.load(open("acc/lineage.json")); g = json.load(open("acc/gates.json"))
+          ren = json.load(open("acc/render.json"))
+          sha = os.environ["SHA"]
+          ev = dict(api["evidence_input"])
+          # the CI fields, as THIS job read them from GitHub / git
+          ev.update(accepted_base_sha=lin["accepted_base_sha"], tested_sha=sha,
+                    release_sha=sha,
+                    is_descendant_of_accepted_base=lin["descendant_of_base"],
+                    backend_tests=g["backend_tests_green"],
+                    capital_critical=g["capital_critical_green"],
+                    commit_guard=g["commit_guard_green"],
+                    engine_diagnostic=g["engine_diagnostic_green"])
+          wk = (ren.get("sportsassets-workers") or {}).get("live_commit")
+          ap = (ren.get("sportsassets-api") or {}).get("live_commit")
+          mine = H.evaluate(ev, spec)
+          out = {"sha": sha, "api_live_commit": ap, "workers_live_commit": wk,
+                 "api_serving_sha": ev.get("deployed_sha"),
+                 "render": ren, "api_pm_state": api["pm_state"],
+                 "independent_pm_state": mine["pm_state"],
+                 "critical_failures": mine["critical_failures"],
+                 "economic_or_evidence_gaps": mine["economic_or_evidence_gaps"],
+                 "fields_without_machine_evidence": api["fields_without_machine_evidence"],
+                 "release_receipt": pm["data"].get("release_receipt"),
+                 "golden": {k: pm["data"]["golden"].get(k) for k in ("passed", "total", "appended_passed", "appended_total", "green")},
+                 "scoreboard_reconciliation": pm["data"]["scoreboard"].get("reconciliation"),
+                 "ledger_reconciliation": pm["data"]["scoreboard"].get("ledger_reconciliation"),
+                 "authority": pm["data"].get("authority")}
+          json.dump(out, open("acc/acceptance.json", "w"), indent=1, default=str)
+          print(json.dumps(out, default=str)[:6000])
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("## PM acceptance for `%s`\n\n" % sha)
+              f.write("* PM state (API): **%s**; independent re-run: **%s**\n" % (api["pm_state"], mine["pm_state"]))
+              f.write("* API live `%s`, workers live `%s`, serving `%s`\n" % (ap, wk, ev.get("deployed_sha")))
+              f.write("* critical failures: %s\n" % (", ".join(mine["critical_failures"]) or "none"))
+              f.write("* economic / evidence gaps: %s\n" % (", ".join(mine["economic_or_evidence_gaps"]) or "none"))
+          bad = []
+          # the receipt the API holds was built from the same GitHub reads, so
+          # after it is accepted both runs must agree; before (read only) the
+          # API cannot know the gates and is RED by construction
+          if pm["data"].get("release_receipt") and mine["pm_state"] != api["pm_state"]:
+              bad.append("HARNESS_DISAGREES:%s!=%s" % (mine["pm_state"], api["pm_state"]))
+          if bad:
+              print("FAIL", bad); sys.exit(1)
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pm-acceptance-${{ inputs.sha }}
+          path: acc/
+          retention-days: 90

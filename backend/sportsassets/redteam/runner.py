@@ -60,8 +60,8 @@ async def write_receipts(conn, res: dict, *, now: float) -> dict:
         json.dumps(res["blockers"]), json.dumps(res["checks"]), h)
     n["readiness"] = 1
     for name, c in res["controls"].items():
-        ch = C.evidence_hash({k: c[k] for k in ("status", "blockers",
-                                                "evidence")})
+        ch = C.evidence_hash(_stable({k: c[k] for k in (
+            "status", "blockers", "evidence")}))
         last, at = await _latest_hash(conn, "red_team_control_receipts",
                                       "control", name, "computed_at")
         # VENUE_HEALTH is the sentinel's live input: always appended
@@ -125,6 +125,19 @@ async def write_receipts(conn, res: dict, *, now: float) -> dict:
             bool(r["eligible"]), json.dumps(r["blockers"]))
         n["exposure"] += 1
     return dict(n, status="OK")
+
+
+VOLATILE = frozenset({"as_of", "computed_at"})
+
+
+def _stable(x):
+    """The evidence a receipt is deduplicated on: everything but the read's
+    own clock (the receipt row keeps its computed_at)."""
+    if isinstance(x, dict):
+        return {k: _stable(v) for k, v in x.items() if k not in VOLATILE}
+    if isinstance(x, (list, tuple)):
+        return [_stable(v) for v in x]
+    return x
 
 
 def _num(v):

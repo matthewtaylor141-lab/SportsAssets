@@ -216,6 +216,14 @@ async def release_receipt(body: dict = Body(...)) -> dict:
         migration_fingerprint_match=bool(body.get(
             "migration_fingerprint_match", False)))
     g = RG.release_gate(ev)
+    blockers = list(g["blockers"])
+    # the workers run the same release: a different live workers commit is
+    # a release blocker (absent = not established, also a blocker)
+    wk = str(body.get("workers_deployed_sha") or "").lower()
+    if wk != running:
+        blockers.append("WORKERS_NOT_ON_RELEASE_SHA:%s" % (wk[:12] or
+                                                           "UNKNOWN"))
+    green = bool(g["green"]) and not blockers
     rid = "rel:%s:%d" % (running[:12], int(time.time()))
     pool = await _pool()
     async with pool.acquire(timeout=5.0) as conn:
@@ -234,7 +242,7 @@ async def release_receipt(body: dict = Body(...)) -> dict:
             ev.deployed_sha, ev.is_descendant_of_base,
             ev.backend_tests_green, ev.capital_critical_green,
             ev.commit_guard_green, ev.engine_diagnostic_green,
-            ev.migration_fingerprint_match, json.dumps(list(g["blockers"])))
+            ev.migration_fingerprint_match, json.dumps(blockers))
         if body.get("pm_acceptance"):
             pa = body["pm_acceptance"]
             h = hashlib.sha256(json.dumps(pa, sort_keys=True, default=str)
@@ -252,5 +260,5 @@ async def release_receipt(body: dict = Body(...)) -> dict:
                 json.dumps(pa, default=str), h)
     _CACHE.clear()
     return {"receipt_id": rid, "release_gate": {
-        "green": g["green"], "blockers": list(g["blockers"])},
+        "green": green, "blockers": blockers},
         "authority": "EVIDENCE_ONLY_NO_AUTHORITY"}

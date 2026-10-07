@@ -153,10 +153,60 @@ async def arb_rows(conn, *, since: float) -> list:
     return out
 
 
-async def ledger_total(conn, account_id: str) -> D:
+async def ledger_positions(conn, account_id: str) -> list:
     from .. import bettor_paper_ledger as L
-    pos = await L.positions(conn, account_id, include_closed=True)
-    return sum((D(str(p["realized_pnl_usd"])) for p in pos), D(0))
+    return await L.positions(conn, account_id, include_closed=True)
+
+
+async def ledger_total(conn, account_id: str) -> D:
+    return sum((D(str(p["realized_pnl_usd"])) for p in
+                await ledger_positions(conn, account_id)), D(0))
+
+
+def ledger_reconciliation(claimed: list, positions: list, *,
+                          tolerance: D) -> dict:
+    """The scoreboard's realized P&L against the PAPER LEDGER'S OWN realized
+    P&L, group by group: for every entry group the scoreboard counts, the
+    sum of its attributed cash P&L must equal the ledger's realized P&L over
+    every position of that group (hedge legs included) once the group holds
+    nothing open. A group still open in the ledger is reported, never
+    counted as reconciled."""
+    by_led: dict = {}
+    for p in positions:
+        g = by_led.setdefault(p["group_id"], {"realized": D(0), "open": D(0)})
+        g["realized"] += D(str(p["realized_pnl_usd"]))
+        g["open"] += D(str(p["open_qty"]))
+    by_sb: dict = {}
+    for r in claimed:
+        gid = r.get("group_id")
+        by_sb[gid] = by_sb.get(gid, D(0)) + D(str(r.get("cash_pnl_usd") or 0))
+    matched, mismatched, still_open, absent = 0, [], [], []
+    sb_total = led_total = D(0)
+    for gid, v in sorted(by_sb.items(), key=lambda t: str(t[0])):
+        led = by_led.get(gid)
+        if led is None:
+            absent.append(gid)
+            continue
+        if led["open"] > 0:
+            still_open.append(gid)
+            continue
+        sb_total += v
+        led_total += led["realized"]
+        if abs(v - led["realized"]) <= tolerance:
+            matched += 1
+        else:
+            mismatched.append({"group_id": gid, "scoreboard": str(v),
+                               "ledger": str(led["realized"])})
+    return {"green": not mismatched and not absent,
+            "groups_counted": len(by_sb), "groups_reconciled": matched,
+            "groups_mismatched": mismatched[:50],
+            "groups_absent_from_ledger": absent[:50],
+            "groups_still_open_in_ledger": len(still_open),
+            "scoreboard_realized_usd": str(sb_total),
+            "ledger_realized_usd": str(led_total),
+            "residual_usd": str(sb_total - led_total),
+            "tolerance_per_group_usd": str(tolerance),
+            "basis": "PAPER ledger positions (bettor_paper_ledger.positions)"}
 
 
 async def read(conn, *, now: float, account_id: str = "paper_acct_main",
@@ -187,24 +237,67 @@ async def read(conn, *, now: float, account_id: str = "paper_acct_main",
         outcome_variance=s("outcome_variance_usd"),
         reported_total=s("cash_pnl_usd"),
         tolerance=D(str(th["global"]["pnl_reconciliation_tolerance_usd"])))
-    total = await ledger_total(conn, account_id)
+    led = await ledger_positions(conn, account_id)
+    total = sum((D(str(p["realized_pnl_usd"])) for p in led), D(0))
+    ledrec = ledger_reconciliation(claim, led, tolerance=D(str(
+        th["global"]["pnl_reconciliation_tolerance_usd"])))
     decision_rows = len([r for r in attributed
                          if float(r.get("decided_at") or 0) >= since])
-    mechs = head["mechanisms"]
+    mechs, states = all_mechanisms(head, th)
     return {"version": VERSION, "thresholds_version": th["version"],
             "forward_cohort_start": since, "as_of": now,
             "decision_rows": decision_rows,
             "independent_events": {k: v.get("independent_events")
                                    for k, v in mechs.items()},
             "mechanisms": _s(mechs),
-            "mechanism_states": _s(head["mechanism_states"]),
+            "mechanism_states": _s(states),
             "routing": _s(head["routing"]),
             "routing_counts": routing_counts(pairs),
             "arbitrage": _s(head["arbitrage"]),
             "reconciliation": _s(rec),
+            "ledger_reconciliation": ledrec,
             "paper_ledger_realized_total_usd": str(total),
             "theoretical_arb_is_not_realized": True,
             "authority": "READ_ONLY_EVIDENCE_NO_LEDGER"}
+
+
+MECHANISMS = ("DIRECTIONAL", "SAME_VENUE_ARB", "CROSS_VENUE_ARB",
+              "ROUTING_SAVINGS", "EXECUTION_ALPHA", "ALLOCATION_ALPHA",
+              "XAVIER_MANAGEMENT")
+
+
+def all_mechanisms(head: dict, th: dict) -> tuple:
+    """Every one of the seven mechanisms, ALWAYS reported and never blended:
+    the attribution mechanisms from their event rows (zero events = shadow
+    only, never omitted), the arbitrage mechanisms from Adriana's claim-first
+    records (theoretical, never realized), routing savings from the route
+    receipts, allocation alpha zero (Allie resizes nothing)."""
+    m = dict(head["mechanisms"])
+    st = dict(head["mechanism_states"])
+    for k in ("DIRECTIONAL", "EXECUTION_ALPHA", "XAVIER_MANAGEMENT"):
+        if k not in m:
+            m[k] = {"independent_events": 0, "realized_pnl": D(0),
+                    "expected_pnl": D(0), "forward_pnl_lcb_per_event": None}
+            st[k] = SB.classify_mechanism(k, m[k], th)
+    for k, topo in (("SAME_VENUE_ARB", "SAME_VENUE"),
+                    ("CROSS_VENUE_ARB", "CROSS_VENUE")):
+        a = head["arbitrage"].get(topo) or {"opportunities": 0}
+        m[k] = dict(a, independent_events=a.get("independent_events", 0),
+                    realized_pnl=D(0),
+                    basis="THEORETICAL_ONLY_SHADOW_NEVER_EXECUTION_LOCKED")
+        st[k] = {"status": "SHADOW_ONLY",
+                 "blockers": ("ADRIANA_SHADOW_ONLY_NO_SUBMIT_AUTHORITY",)}
+    r = head["routing"]
+    m["ROUTING_SAVINGS"] = dict(r, independent_events=None,
+                                realized_pnl=D(0),
+                                basis="SAVINGS_VS_NEXT_BEST_ROUTE_NOT_PNL")
+    st["ROUTING_SAVINGS"] = {"status": "SHADOW_ONLY", "blockers": (
+        "ROUTE_SAVINGS_ARE_COUNTERFACTUAL_NOT_REALIZED",)}
+    m["ALLOCATION_ALPHA"] = {"independent_events": 0, "realized_pnl": D(0),
+                             "basis": "ALLIE_SHADOW_WEIGHTS_RESIZE_NOTHING"}
+    st["ALLOCATION_ALPHA"] = {"status": "SHADOW_ONLY", "blockers": (
+        "NO_ALLOCATION_AUTHORITY",)}
+    return {k: m[k] for k in MECHANISMS}, {k: st[k] for k in MECHANISMS}
 
 
 def _s(x):

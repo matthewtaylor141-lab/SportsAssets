@@ -227,18 +227,21 @@ async def evaluate(conn, *, now: float | None = None,
             v, (bool, int, float, type(None), str)) else v)
             for k, v in (rel or {}).items()}})
     fr = vh["freshness"]
+    # each metric's as_of is its SOURCE read's, never this render's clock
+    src_at = comp.get("as_of") if isinstance(comp.get("as_of"),
+                                              (int, float)) else None
     metrics = {
-        "held_freshness": _metric(fr["held"]["rate"], as_of=now,
+        "held_freshness": _metric(fr["held"]["rate"], as_of=src_at,
                                   source=fr["held"]["source"],
                                   status=fr["held"]["status"],
                                   num=fr["held"]["numerator"],
                                   den=fr["held"]["denominator"]),
-        "priority_freshness": _metric(fr["priority"]["rate"], as_of=now,
+        "priority_freshness": _metric(fr["priority"]["rate"], as_of=src_at,
                                       source=fr["priority"]["source"],
                                       status=fr["priority"]["status"],
                                       num=fr["priority"]["numerator"],
                                       den=fr["priority"]["denominator"]),
-        "readiness_status": _metric(ready.get("status"), as_of=now,
+        "readiness_status": _metric(ready.get("status"), as_of=src_at,
                                     source="completion readiness",
                                     status=ready.get("status")),
     }

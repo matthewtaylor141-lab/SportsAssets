@@ -1249,3 +1249,24 @@ tests/test_pinnapi_held_confirmation.py
 tests/test_premap_ddl_never_queues.py
 tests/test_market_plane_required_sets.py
 tests/test_revenue_reliability_readback.py
+# (completion readiness V1) shared-worker market-plane isolation (P0 OOM), subscribe-all, bounded refdata / catalogue, readiness logic + readback, probability / EV / revenue reliability authority
+tests/test_shared_worker_isolation.py
+tests/test_ump_subscribe_all.py
+tests/test_catalogue_memory_and_time_budgets.py
+tests/test_completion_readiness_logic.py
+tests/test_completion_readiness_readback.py
+tests/test_revenue_reliability_parity.py
+# (Kalshi canonical venue V1 + Kalshi rep production contract) claims by payoff vector, fee-aware routing, fail-closed mapping, same-market netting, cross-market routes, WS snapshot / seq / gap / resubscribe, account limits
+tests/test_kalshi_canonical_claims.py
+tests/test_kalshi_canonical_db.py
+tests/test_kalshi_ws_market_data.py
+# (red team closeout V1) package 51/51 byte-identical, canonical exposure lock on the PAPER entry path, chaos matrix C01-C30, readiness interlock + append-only receipts on a migrated database
+tests/test_red_team_package_parity.py
+tests/test_red_team_exposure_lock.py
+tests/test_red_team_chaos.py
+tests/test_red_team_readiness_db.py
+# (PM evidence & acceptance pack V1) package 45/45, golden validation over production mapping / claims / routing / arb as a release gate, forward scoreboard reconciled to the PAPER ledger, PM harness from machine evidence
+tests/test_pm_evidence_package_parity.py
+tests/test_pm_golden_production.py
+tests/test_pm_scoreboard_bind.py
+tests/test_pm_acceptance_bind.py

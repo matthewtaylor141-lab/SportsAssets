@@ -62,8 +62,18 @@ def collect(*, red: dict, scoreboard: dict, release: dict | None,
                        ("commit_guard", "commit_guard_green"),
                        ("engine_diagnostic", "engine_diagnostic_green")):
             put(k, rel.get(col), src)
-    put("deployed_sha", sha if sha and sha != "UNKNOWN" else None,
-        "RENDER_GIT_COMMIT of the serving API")
+    blk = rel.get("blockers") or []
+    if isinstance(blk, str):
+        blk = json.loads(blk or "[]")
+    wk_bad = [b for b in blk if str(b).startswith(
+        "WORKERS_NOT_ON_RELEASE_SHA")]
+    # deployed = BOTH services: a workers live commit that differs from the
+    # API's (recorded by the release receipt from Render) is not deployed
+    put("deployed_sha", (wk_bad[0] if wk_bad else sha)
+        if sha and sha != "UNKNOWN" else None,
+        "RENDER_GIT_COMMIT of the serving API" + (
+            "; the workers' live commit differs (release receipt, Render)"
+            if wk_bad else ""))
     mig = ctr.get("MIGRATION_INTEGRITY") or {}
     put("migration_integrity", mig.get("status") == "GREEN" if mig else None,
         "red team MIGRATION_INTEGRITY (schema_migrations vs this build)")
