@@ -1,0 +1,5 @@
+BETTOR_REVENUE_RELIABILITY_STACK_V1 -- imported UNCHANGED (byte-identical to the zip contents)
+zip sha256: 04d1da83ced971487a8bf4516176ab061c03a44076701aa6e786d4126f5068f6
+package tests: tests/test_revenue_reliability_stack.py 28/28 passed (Python 3.13.16)
+dependencies: numpy, pandas, scipy (package only; already in the research venv). The production backend has none of them, so the live binding is a stdlib port held to the package by a parity test -- no production dependency change
+authority: RESEARCH / PAPER-SHADOW; no network, credential, order, cancel or capital code (every file inspected)
