@@ -136,6 +136,11 @@ def test_no_funded_module_imports_the_paper_modules():
                # a funded module; neither has an order or authority effect
                "redteam/exposure.py",
                "redteam/readiness.py",
+               # PM EVIDENCE PACK: the forward scoreboard reconciles to the
+               # paper ledger's own positions (bettor_paper_ledger.positions)
+               # inside the readback's READ ONLY transaction; a read layer,
+               # never a second ledger, no order or authority effect
+               "pm_bind/scoreboard.py",
                # COMPLETION READINESS: the readback reads the paper ledger's
                # cash / positions and the paper freshness summary inside a
                # READ ONLY transaction (GET /api/command/completion-readiness);

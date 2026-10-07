@@ -116,7 +116,7 @@ def _fixture_identity(e: dict) -> MC.FixtureIdentity:
 
 def _venue_fixture(e: dict) -> MC.VenueFixture:
     lg = e["league"]
-    return MC.VenueFixture(venue="CANDIDATE", sport=e.get("sport") or
+    return MC.VenueFixture(venue="PMUS", sport=e.get("sport") or
                            SPORT_OF.get(lg), league=lg,
                            home_key="%s:%s" % (lg, e["home"]),
                            away_key="%s:%s" % (lg, e["away"]),

@@ -273,11 +273,11 @@ class WsBooks:
             b["sid"] is not None and self.sid_seq.get(b["sid"]) is not None
         return {"ok": ok, "state": b["state"] if ok or b["state"] != CURRENT
                 else GAP, "why": b["why"],
-                "book": self.orderbook(t) if ok else None,
+                "book": self.book_of(t) if ok else None,
                 "snapshot_at": b["snapshot_at"],
                 "updated_at": b["updated_at"]}
 
-    def orderbook(self, t: str) -> dict:
+    def book_of(self, t: str) -> dict:
         """The REST orderbook_fp shape (bids ascending), so the one reader
         (kalshi_market_data.book_from_orderbook) derives the asks."""
         b = self.books[t]

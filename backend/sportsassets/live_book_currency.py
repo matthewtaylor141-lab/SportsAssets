@@ -117,6 +117,9 @@ STREAM_REFUSAL_CLASS = {
     "MARKET_NOT_OPEN": REFUSED,
     "MARKET_STATE_UNKNOWN": NOT_ESTABLISHED,
     "BOOK_CROSSED": REFUSED,
+    # red team stream guard: connected is not current (complete snapshot,
+    # no gap, current book) -- the book is not established
+    "STREAM_CURRENCY_GATE_REFUSED": NOT_ESTABLISHED,
 }
 _GAP_CONNECTION = "GAP_CONNECTION_LOST_AWAITING_FRESH_SNAPSHOT"
 _GAP_CLOCK = "GAP_VENUE_CLOCK_WENT_BACKWARDS_AWAITING_FRESH_SNAPSHOT"

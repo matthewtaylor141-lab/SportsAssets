@@ -145,6 +145,11 @@ DECISION_LOGIC_FILES = (
     # the agent components inside the intent
     "agents/archer.py", "lost_opportunity/score.py",
     "lost_opportunity/reads.py", "profitability/economics.py",
+    # RED TEAM CLOSEOUT V1: the canonical exposure lock refuses ENTRY
+    # orders under the ledger's account lock (bettor_paper_ledger ->
+    # redteam.exposure -> the package's claim_exposure)
+    "redteam/exposure.py", "red_team/claim_exposure.py",
+    "red_team/models.py",
     # (R30 tails, pinned at integration) the R30C shadow components the
     # canonical-components path computes at the decision instant: the
     # execution-evidence labels and widened LIVE intervals on Archer's
@@ -154,12 +159,7 @@ DECISION_LOGIC_FILES = (
     # lost_opportunity/score.py do -- pinned, so a change restarts the
     # forward window rather than slipping under it
     "execution_evidence.py", "settlement_exception_risk.py",
-    "opportunity_score_v2.py",
-    # RED TEAM CLOSEOUT V1: the canonical exposure lock refuses ENTRY
-    # orders under the ledger's account lock (bettor_paper_ledger ->
-    # redteam.exposure -> the package's claim_exposure)
-    "redteam/exposure.py", "red_team/claim_exposure.py",
-    "red_team/models.py")
+    "opportunity_score_v2.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
 #: modules that make the ENTER decision, size it, review a position, and
