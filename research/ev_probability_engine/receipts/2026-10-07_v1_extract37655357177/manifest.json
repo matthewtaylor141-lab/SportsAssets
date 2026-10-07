@@ -1,0 +1,25 @@
+{
+ "authority": "RESEARCH_PAPER_SHADOW_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY",
+ "code_sha256": "21bfa7a5360f6d813fa464c3084d6eae6411236c7b3f9e5049b86d56f06a51e0",
+ "dataset_sha256": "b23a0a3b4107a5bb665a1aa8857ecd46864208bed05aad7d045b5666ea976e87",
+ "extract": {
+  "query": "ev_extract_v1.sql",
+  "query_sha256": "dda5e99a99b43d29a9f700b9c9fedfeb6d203435853b57c40d08f28e7906f15e",
+  "raw_sha256": "fb3fbf14ab26f71d7236271ef2c1c4219316b1dee568e54fb25968a246eef7ac",
+  "research_sql_run_id": "37655357177",
+  "rows_dropped": {
+   "NO_TWO_SIDED_VENUE_BOOK": 520
+  },
+  "rows_extracted": 13832
+ },
+ "feedback_sha256": "0b175473144bb503ecf2b6b987d1d4aa27136928f3a41cae4f7d2dc5a00e8907",
+ "generated_at": "2026-10-07T17:45:00Z",
+ "orders": {
+  "file_sha256": "c9713874c8f386d62158f05cea6b0586a380ce35466f9868a6f2f4dee05fcf85",
+  "rows": 11445,
+  "source": "claude/profitability-stack@bfe01a27:research/profitability_stack/receipts/2026-10-07_orders37638168119_arb37638235741_twin37643890985/orders.jsonl.gz"
+ },
+ "receipt_sha256": "4b63b55f60c005ff3f328811bc4ae9317adf8c6d809bdd7bf4501b1d8fedd92c",
+ "verdict": "CASH",
+ "version": "BETTOR_EV_PROBABILITY_RECEIPT_V1"
+}
