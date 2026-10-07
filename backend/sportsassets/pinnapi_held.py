@@ -78,6 +78,11 @@ class HeldWatch:
         self.slug_event: dict = {}     # held slug -> feed event id
         self.unmatched: dict = {}      # held slug -> named reason
         self.changes: dict = {}        # held slug -> provider change (s)
+        # held slug -> the latest PROVIDER-STAMPED confirmation of its
+        # unchanged price (s); the held read admits it within the same 30 s
+        # (pinnapi_feed.read_held), so it is a review trigger too
+        self.confirms: dict = {}
+        self._notified: dict = {}      # held slug -> last confirmation notice
         self.listeners: list = []
         self.counts = Counter()
         self.refreshed_at = None
@@ -97,6 +102,8 @@ class HeldWatch:
         # forget changes of slugs no longer held
         self.changes = {s: t for s, t in self.changes.items()
                         if s in slug_event}
+        self.confirms = {s: t for s, t in self.confirms.items()
+                         if s in slug_event}
         self.refreshed_at = self.clock()
 
     def is_held(self, event_id) -> bool:
@@ -114,14 +121,38 @@ class HeldWatch:
         # the targets are fixture ids (held_event_id, census identity)
         fid = getattr(quote, "fixture_id", None) or quote.event_id
         slugs = self.targets.get(fid)
-        change = getattr(quote, "change_ms", quote.source_change_ms)
-        if not slugs or change is None:
+        if not slugs:
             return
-        at = float(change) / 1000.0
-        for s in slugs:
-            if at > self.changes.get(s, 0.0):
-                self.changes[s] = at
-        self.counts["HELD_CHANGES"] += 1
+        change = getattr(quote, "change_ms", quote.source_change_ms)
+        moved = False
+        if change is not None:
+            at = float(change) / 1000.0
+            for s in slugs:
+                if at > self.changes.get(s, 0.0):
+                    self.changes[s] = at
+                    moved = True
+            self.counts["HELD_CHANGES"] += 1
+        conf = None
+        if getattr(quote, "confirmed_ms", None) is not None and \
+                getattr(quote, "confirmed_clock", None) == F.CLOCK_PROVIDER \
+                and getattr(quote, "confirmed_by", None) in \
+                F.PROVIDER_CONFIRMATIONS:
+            conf = float(quote.confirmed_ms) / 1000.0
+            for s in slugs:
+                if conf > self.confirms.get(s, 0.0):
+                    self.confirms[s] = conf
+        if conf is not None and not moved:
+            # a confirmation notifies at most once per CONFIRM_NOTICE_S per
+            # slug: Xavier reviews right after a provider frame, bounded
+            due = [s for s in slugs if conf - self._notified.get(s, 0.0)
+                   >= CONFIRM_NOTICE_S]
+            if not due:
+                return
+            for s in due:
+                self._notified[s] = conf
+            self.counts["HELD_CONFIRMATIONS_NOTIFIED"] += 1
+        elif change is None:
+            return
         for fn in list(self.listeners):
             try:
                 fn(fid, sorted(slugs))
@@ -132,6 +163,14 @@ class HeldWatch:
         """The provider time of the held slug's last observed price change
         (None when none was observed while held)."""
         return self.changes.get(slug)
+
+    def fresh_at(self, slug) -> float | None:
+        """The provider time from which the held slug's price is current:
+        its last observed change or its latest provider-stamped confirmation
+        of the unchanged price, whichever is later (the review trigger)."""
+        xs = [x for x in (self.changes.get(slug), self.confirms.get(slug))
+              if x is not None]
+        return max(xs) if xs else None
 
     def status(self) -> dict:
         return {"held_events": len(self.targets),
@@ -150,6 +189,15 @@ WATCH = HeldWatch()
 
 def changed_at(slug) -> float | None:
     return WATCH.changed_at(slug)
+
+
+def fresh_at(slug) -> float | None:
+    return WATCH.fresh_at(slug)
+
+
+#: at most one confirmation-driven review notice per held slug per this many
+#: seconds (a provider list re-sent every ~60 s gives one fresh review each)
+CONFIRM_NOTICE_S = 20.0
 
 
 async def held_slugs(conn) -> list:
@@ -226,7 +274,9 @@ def install(cache, *, watch: HeldWatch | None = None) -> None:
 
     def chained(quote):
         w.changed(quote)
-        if prev is not None:
+        # the next consumer (the reactive entry scheduler) sees CHANGES
+        # only, exactly as before; confirmations are the held watch's
+        if prev is not None and getattr(quote, "change_ms", None) is not None:
             prev(quote)
     chained._held_chain = True
     cache.on_change = chained

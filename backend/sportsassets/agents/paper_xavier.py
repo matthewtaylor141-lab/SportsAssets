@@ -1523,7 +1523,10 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
                                 direction="SELL", holding_side=side)
             best_exit = lv["levels"][0]["price"] if lv["levels"] else None
         book_at = None if book is None else L._epoch(book["observed_at"])
-        fc = None if slug is None else PH.changed_at(slug)
+        # the held market's provider time: its last change or its latest
+        # provider-stamped confirmation (the held read admits either within
+        # the same 30 s) -- a fresh frame triggers the review at once
+        fc = None if slug is None else PH.fresh_at(slug)
         gev = ev.get(g) or {}
         trig = _trigger(group=g, new_handoffs=ctx.get("new_handoffs") or [],
                         last=lastd, last_fill_at=lf, book_at=book_at,

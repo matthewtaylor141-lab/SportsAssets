@@ -129,3 +129,27 @@ def test_the_entry_path_keeps_the_change_rule():
     assert "read_held" in src and "if held" in src
     assert inspect.signature(MF.pinnacle_pair).parameters["held"].default \
         is False
+
+
+def test_a_provider_confirmation_of_a_held_market_triggers_xavier_bounded():
+    """The held watch hears provider-stamped confirmations (not only
+    changes): fresh_at advances, the review listener is notified at most
+    once per CONFIRM_NOTICE_S per slug, and the reactive ENTRY scheduler
+    chained after it still hears changes only."""
+    from sportsassets import pinnapi_held as PH
+    c, ep = _cache()
+    w = PH.HeldWatch()
+    w.set_targets({"held-slug": (9, None)})
+    heard, entry = [], []
+    w.listeners.append(lambda fid, slugs: heard.append((fid, slugs)))
+    c.on_change = lambda q: entry.append(q.key)
+    PH.install(c, watch=w)
+    for ts in (1_005_000, 1_010_000, 1_030_000):
+        c.apply({"type": "prematch_markets", "sport_id": 5, "matchup_id": 9,
+                 "ts": ts, "data": [dict(ML, version=7)]}, epoch=ep,
+                received_ms=ts + 20)
+    assert w.changed_at("held-slug") is None          # no change observed
+    assert w.fresh_at("held-slug") == 1_030.0         # latest confirmation
+    # 1_005 notified, 1_010 inside 20 s suppressed, 1_030 notified
+    assert len(heard) == 2
+    assert entry == [], "the entry scheduler hears changes only"

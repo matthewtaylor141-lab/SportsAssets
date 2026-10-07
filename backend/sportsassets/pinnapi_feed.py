@@ -756,9 +756,16 @@ class FeedCache:
         # Notify after the entire frame (including closed periods and bounds)
         # has applied. Consumers re-read authority; no callback can trade here.
         if self.on_change is not None:
+            # a held watch in the chain also hears PROVIDER-STAMPED
+            # confirmations of unchanged prices (pinnapi_held); every other
+            # consumer hears changes only, as before
+            held = getattr(self.on_change, "_held_chain", False)
             for key in self._touched:
                 quote = self.quotes.get(key)
-                if quote is not None and quote.change_ms is not None:
+                if quote is not None and (
+                        quote.change_ms is not None or (
+                            held and quote.confirmed_ms is not None
+                            and quote.confirmed_clock == CLOCK_PROVIDER)):
                     try:
                         quote.fixture_id = self.canonical_id(quote.event_id)
                         self.on_change(quote)
