@@ -36,7 +36,11 @@ def test_command_and_floor_carry_the_launcher_without_losing_anything():
         assert 'href="command-polish.css"' in s
         assert 'src="command-polish.js"' in s
     js = (CMD / "command-polish.js").read_text()
-    assert "trader.html" in js and "fetch(" not in js
+    # the launcher targets the /trader route, which Netlify serves from trader.html
+    assert "href='/trader'" in js and "fetch(" not in js
+    toml = (ROOT / "netlify.toml").read_text()
+    assert 'from = "https://command.bettortoken.com/trader"' in toml
+    assert 'to = "/command/trader.html"' in toml
 
 
 def test_only_the_desk_top_material_changes_and_it_is_disposed():

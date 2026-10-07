@@ -787,6 +787,16 @@ function insets() {
 }
 function go(view, opts) {
   if (VIEWS.indexOf(view) < 0) view = 'command';
+
+  // The phone Command shell intentionally collapses the HQ stage into a
+  // one-column executive HUD. FLOOR is different: it is an interactive room,
+  // and the existing /floor page already has a phone-tuned WebGL renderer.
+  // Never substitute the flat desk-card summary for the user's Floor action.
+  if (PHONE && view === 'floor' && !(opts && opts.inlineMobileFloor)) {
+    location.assign('/floor');
+    return;
+  }
+
   if (S.watch && !(opts && opts.fromWatch)) watch(false);
   S.view = view;
   doc.body.setAttribute('data-view', view);
@@ -872,6 +882,15 @@ async function mountScene() {
 function boot() {
   const want = (location.hash || '').replace(/^#/, '');
   S.view = VIEWS.indexOf(want) >= 0 ? want : (doc.body.getAttribute('data-start') || 'command');
+
+  // A bookmarked /#floor must have the same mobile semantics as tapping Floor:
+  // use the dedicated mobile-capable 3D room rather than the list-only pocket
+  // summary. replace() avoids leaving a dead summary view in browser history.
+  if (PHONE && S.view === 'floor') {
+    location.replace('/floor');
+    return;
+  }
+
   doc.body.setAttribute('data-view', S.view);
   $$('#hq-nav button, #hq-tabbar button').forEach((b) => { if (b.dataset.go === S.view) b.setAttribute('aria-current', 'page'); });
   wire();

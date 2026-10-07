@@ -4,7 +4,25 @@
 .bt-trader-launch span{color:#9fd3be;font-size:11px}.bt-trader-launch:focus-visible{outline:3px solid #d5b367;outline-offset:4px}.bt-trader-launch:hover{background:#205344}
 .hq .ins{border-radius:14px;box-shadow:0 9px 28px #0002, inset 0 1px 0 #ffffff0b}
 .hq #hq-top{box-shadow:0 8px 30px #0002}.fl .fl-panel{box-shadow:-10px 8px 36px #0003}
-@media(max-width:760px){.bt-trader-launch{bottom:max(16px,env(safe-area-inset-bottom));right:12px;padding:11px 14px}.bt-trader-launch span{display:none}}
+@media(max-width:760px){
+  .bt-trader-launch{right:12px;padding:11px 14px;z-index:45}
+  .bt-trader-launch span{display:none}
+  .bt-trader-launch--mobile{bottom:max(16px,env(safe-area-inset-bottom))}
+  /* Root Command has a 64px + safe-area bottom tab bar. Keep Trader Mode
+     visibly above it instead of underneath it. */
+  .bt-trader-launch--mobile-docked{bottom:calc(76px + env(safe-area-inset-bottom))}
+}
 @media(prefers-reduced-motion:reduce){.bt-trader-launch{transition:none}}
 
 .bt-trader-launch--nav{position:static;margin-left:6px;padding:8px 12px;border-radius:7px;font-size:11px;box-shadow:none;white-space:nowrap}.bt-trader-launch--nav span{display:none}
+/* Landscape phones (<= 500 px tall and <= 1024 px wide: e.g. iPhone 844x390)
+   get the same compact one-row team dock as portrait phones; the 4-column
+   card grid covered most of the 3D floor at that height. Keyed on size, not
+   pointer type, which emulators and some browsers report inconsistently. */
+@media (max-height:500px) and (max-width:1024px){
+  body.meeting-real-floor .fl-roster{display:flex!important;overflow-x:auto!important;scroll-snap-type:x mandatory!important;min-height:56px!important;padding:5px!important}
+  body.meeting-real-floor .fl-agent{flex:0 0 132px!important;scroll-snap-align:start!important;min-height:44px!important}
+  /* a desk panel fills the short screen: the dock and the launcher would sit
+     on its actions; both return when the panel closes */
+  body.meeting-real-floor.focused .fl-roster,body.meeting-real-floor.focused .bt-trader-launch{display:none!important}
+}

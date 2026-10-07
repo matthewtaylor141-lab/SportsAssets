@@ -151,6 +151,14 @@
   status = 200
   force = true
 
+# Read-only Xavier management cockpit. Stable management URL so the mobile
+# launcher never depends on the source file's physical /command path.
+[[redirects]]
+  from = "https://command.bettortoken.com/trader"
+  to = "/command/trader.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/allocator"
   to = "/command/agent.html"
