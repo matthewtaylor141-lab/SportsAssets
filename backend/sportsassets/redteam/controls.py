@@ -445,8 +445,12 @@ def credential_classes(env=None) -> dict:
 
     def cls(kid, sec):
         shape = MDI.slot_shape(env.get(kid, ""), env.get(sec, ""))
+        if shape == MDI.SHAPE_ABSENT:
+            return None
+        # something present that is neither shape is a MISMATCH, never
+        # "not provisioned"
         return {MDI.SHAPE_PMUS_RETAIL: "POLYMARKET_US_ED25519",
-                MDI.SHAPE_RSA_PEM: "RSA_PEM"}.get(shape)
+                MDI.SHAPE_RSA_PEM: "RSA_PEM"}.get(shape, "UNRECOGNISED_SHAPE")
 
     pmx = cls("PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
     pmus = cls("PMUS_EXECMIRROR_KEY_ID", "PMUS_EXECMIRROR_SECRET_KEY") or \

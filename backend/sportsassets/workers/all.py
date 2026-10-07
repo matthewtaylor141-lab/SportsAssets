@@ -582,7 +582,19 @@ def _boot_marker(at: str) -> dict:
                 "kalshi_ws_market_data": "sportsassets-market-plane (beside "
                                          "the market plane, same entry "
                                          "point)"},
-            "started": [n for n, _fn in startable_loops()]}
+            "started": [n for n, _fn in startable_loops()],
+            # RED TEAM credential-class guard: each logical slot's CLASS by
+            # shape only (never a value, length or prefix), so a key in the
+            # wrong slot blocks that path and names the owner action
+            "credential_classes": _credential_classes()}
+
+
+def _credential_classes() -> dict:
+    try:
+        from ..redteam import controls as RTC
+        return RTC.credential_classes()
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": type(exc).__name__}
 
 
 async def _record_boot() -> None:
