@@ -809,6 +809,17 @@ try:
 except ImportError:
     log.warning("revenue reliability: api.command_revenue_reliability not "
                 "loaded", exc_info=True)
+# ── COMPLETION READINESS (Completion Readiness Patch V1): GET
+# /api/command/completion-readiness. GET only, COMMAND auth, READ ONLY:
+# runtime, market data, freshness, hard gates, probability / EV authority,
+# repaired twin, agents, readiness verdict. Changes nothing.
+try:
+    from .command_completion_readiness import (
+        router as _command_completion_readiness_router)
+    app.include_router(_command_completion_readiness_router)
+except ImportError:
+    log.warning("completion readiness: api.command_completion_readiness not "
+                "loaded", exc_info=True)
 # ── THE PAPER LOSS ATTRIBUTION (closeout): GET
 # /api/command/paper/loss-attribution. GET only, COMMAND auth, READ ONLY.
 try:
