@@ -317,6 +317,11 @@ API_LOOPS = (
                  "scan id"},
           armed=("env_not_off", "ADRIANA_RUNNER_ENABLED", "1"),
           sources=(_hb("agent_adriana", *OK_ERROR),)),
+    _spec("redteam.runner", "api", 300.0, critical=False,
+          lease={"kind": "NONE", "why": "append-only receipts keyed per "
+                 "pass and evidence hash"},
+          armed=("env_not_off", "RED_TEAM_RUNNER_ENABLED", "1"),
+          sources=(_hb("red_team_readiness", *OK_ERROR),)),
     _spec("agents.improvement_pipeline", "api", 600.0, critical=False,
           lease={"kind": "NONE", "why": "items seeded from source keys "
                  "(UNIQUE); stages mirrored, never decided"},

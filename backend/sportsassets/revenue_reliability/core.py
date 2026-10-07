@@ -336,7 +336,15 @@ def derek_entry_alpha(realized, baseline):
 
 
 def karen_challenge_value(saved_loss_usd, false_block_cost_usd):
-    return score_increment("KAREN", "NO_CHALLENGE", saved_loss_usd, -abs(false_block_cost_usd))
+    """Karen's economic value = saved loss - |false-block opportunity cost|
+    (Red Team Closeout V1, red_team.karen_value; $100 saved, $30 false-block
+    cost = $70). SUPERSEDES the vendored revenue package's form, which used
+    -|false-block cost| as the BASELINE and so ADDED the cost to her value
+    (saved + |fb| = $130 in the same case). Never scored by block count."""
+    from ..red_team.karen_value import karen_incremental_value
+    v = karen_incremental_value(saved_loss_usd, false_block_cost_usd)
+    return score_increment("KAREN", "NO_CHALLENGE_NET_OF_FALSE_BLOCK_COST",
+                           float(v), 0.0)
 
 
 def audrey_reconciliation_score(unexplained_residual_usd, tolerance_usd=1e-6) -> dict:

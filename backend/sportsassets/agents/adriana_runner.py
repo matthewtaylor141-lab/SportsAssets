@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 
 from . import adriana as AD
 from . import registry as R
+from ..redteam import sentinel as SENT
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,17 @@ async def _phase(summary: dict, name: str, coro):
 async def _claims_census(conn, at: float) -> dict:
     from .. import canonical_claims_db as KCDB
     return await KCDB.claims_census(conn, now=at)
+
+
+async def _sentinel(conn, result: dict, scan_id: str, at: float) -> dict:
+    """THE TWO-LEG SENTINEL (red team), SHADOW: every opportunity
+    revalidated immediately -- books, rules fingerprint, economics, venue
+    capital, both venues' health -- and its pair receipt appended. Adriana
+    has no submit authority: a pair is never ARMED, never execution-locked."""
+    vh = await SENT.latest_venue_health(conn, now=at)
+    return await SENT.shadow_pass(conn, result, scan_id=scan_id, now=at,
+                                  venue_health=vh,
+                                  sha=SENT.running_sha())
 
 
 async def pass_once(conn, *, now: float | None = None) -> dict:
@@ -98,9 +110,16 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
                    % AD.BOOK_WINDOW_S)
         elif summary["phase_errors"]:
             status, why = "PARTIAL", ",".join(summary["phase_errors"])
+        # the rules fingerprint each opportunity was decided against
+        # (red team settlement guard), stamped BEFORE it is recorded
+        await _phase(summary, "certify_rules", SENT.certify_rules(conn,
+                                                                  result))
         rec = await _phase(summary, "record", AD.record(
             conn, result, started=at, finished=at + (time.monotonic() - t0),
             scan_id=scan_id, status=status, why=why))
+        if rec and rec.get("created") and result.get("opportunities"):
+            summary["sentinel"] = await _phase(
+                summary, "sentinel", _sentinel(conn, result, scan_id, at))
         if rec and rec.get("created"):
             summary["collaboration"] = await _phase(
                 summary, "collaborate", AD.collaborate(
@@ -125,9 +144,14 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
     if cn:
         # recorded only when a complementary claim pair was evaluated: an
         # empty claim pass is in the summary, never an empty scan row
+        cscan = "adr-claims-%d" % int(at * 1000)
         crec = await _phase(summary, "claims_record", AD.record(
             conn, claims, started=at, finished=at + (time.monotonic() - t0),
-            scan_id="adr-claims-%d" % int(at * 1000), status="OK", why=None))
+            scan_id=cscan, status="OK", why=None))
+        if crec and crec.get("created") and claims.get("opportunities"):
+            summary["claims_sentinel"] = await _phase(
+                summary, "claims_sentinel", _sentinel(conn, claims, cscan,
+                                                      at))
         cc = claims["census"]
         summary["claims"] = {
             "scan": (crec or {}).get("scan_id"),

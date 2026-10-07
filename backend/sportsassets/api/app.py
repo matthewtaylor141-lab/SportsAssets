@@ -486,6 +486,16 @@ async def lifespan(_: FastAPI):
         adriana_task = asyncio.create_task(_ADRIANA.run(_cap_pool))
     except Exception:                                           # noqa: BLE001
         log.warning("adriana: runner not armed", exc_info=True)
+    # RED TEAM CLOSEOUT V1 (migration 315): the final readiness interlock,
+    # evaluated read only, its append-only receipts written every 5 min.
+    # No order, authority or PAPER effect. Kill switch
+    # RED_TEAM_RUNNER_ENABLED=0.
+    redteam_task = None
+    try:
+        from ..redteam import runner as _REDTEAM
+        redteam_task = asyncio.create_task(_REDTEAM.run(_cap_pool))
+    except Exception:                                           # noqa: BLE001
+        log.warning("red team: runner not armed", exc_info=True)
     # 1:1,000 execution mirror: its own durable control (off by default) and
     # its own credential; idle until the control row is enabled.
     from .. import execmirror as _EXM
@@ -624,7 +634,7 @@ async def lifespan(_: FastAPI):
                              ext_task, rn1x_model_task, trim_task,
                              poller_task, capability_task, slack_task,
                              karen_task, peer_task, execmirror_task,
-                             archer_task, scout_task, adriana_task, intel_task, pos_task, poslearn_task, twin_task,
+                             archer_task, scout_task, adriana_task, redteam_task, intel_task, pos_task, poslearn_task, twin_task,
                              improve_task, readiness_task,
                              *watchdog_tasks)
                  if t is not None]
@@ -818,6 +828,15 @@ try:
     app.include_router(_command_venues_router)
 except ImportError:
     log.warning("venues: api.command_venues not loaded", exc_info=True)
+# ── RED TEAM CLOSEOUT + PM EVIDENCE PACK: GET /api/command/red-team, GET
+# /api/command/pm-acceptance (COMMAND auth, READ ONLY) and the ADMIN release
+# receipt the pm-acceptance workflow appends (accepted only for this API's
+# own RENDER_GIT_COMMIT; evidence, never authority).
+try:
+    from .command_red_team import router as _command_red_team_router
+    app.include_router(_command_red_team_router)
+except ImportError:
+    log.warning("red team: api.command_red_team not loaded", exc_info=True)
 # ── COMPLETION READINESS (Completion Readiness Patch V1): GET
 # /api/command/completion-readiness. GET only, COMMAND auth, READ ONLY:
 # runtime, market data, freshness, hard gates, probability / EV authority,

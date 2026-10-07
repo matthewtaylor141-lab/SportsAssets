@@ -126,9 +126,12 @@ def test_counterfactual_parity():
         assert a["conservative_incremental_value_usd"] == b["conservative_incremental_value_usd"]
         for fa, fb in ((C.archer_execution_alpha, cf.archer_execution_alpha),
                        (C.allie_allocation_alpha, cf.allie_allocation_alpha),
-                       (C.derek_entry_alpha, cf.derek_entry_alpha),
-                       (C.karen_challenge_value, cf.karen_challenge_value)):
+                       (C.derek_entry_alpha, cf.derek_entry_alpha)):
             assert asdict(fa(x[0], x[1])) == asdict(fb(x[0], x[1]))
+        # KAREN: the red team's formula SUPERSEDES the package's (which
+        # added the false-block cost); production = saved - |false cost|
+        k = C.karen_challenge_value(x[0], x[1])
+        assert k.incremental_value_usd == pytest.approx(x[0] - abs(x[1]))
         assert C.audrey_reconciliation_score(x[2]) == cf.audrey_reconciliation_score(x[2])
 
 
@@ -138,3 +141,14 @@ def test_core_never_promotes_least_negative_and_keeps_cash():
     p = C.optimize_reliable_portfolio([C.StrategyEvidence("a", 500, 10, -1, 5, 10, 1, 1e5, "ACTIVE_CHAMPION")],
                                       bankroll=500000.0)
     assert p.allocations == {"CASH": 500000.0}
+
+
+
+def test_karen_value_is_saved_loss_minus_false_block_cost():
+    """RED TEAM CLOSEOUT V1 item 17: $100 saved, $30 false-block cost =
+    $70 value added (the vendored package's baseline form gave $130)."""
+    from sportsassets.red_team.karen_value import karen_incremental_value
+    assert C.karen_challenge_value(100, 30).incremental_value_usd == 70.0
+    assert float(karen_incremental_value(100, 30)) == 70.0
+    assert C.karen_challenge_value(100, -30).incremental_value_usd == 70.0
+    assert C.karen_challenge_value(0, 0).incremental_value_usd == 0.0

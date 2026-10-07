@@ -1,0 +1,33 @@
+{
+  "version": "GOLDEN_APPENDED_KALSHI_REP_V1",
+  "appended_at": "2026-10-07",
+  "policy": "APPENDED source records: the frozen golden_cases.json is unchanged; these cases run beside it and are preserved likewise.",
+  "source_manifest": [
+    {
+      "id": "KALSHI_REP_CONFIRMATION_2026_10_07",
+      "kind": "KALSHI_REP_CONFIRMATION",
+      "repo_path": "research/kalshi_canonical_venue/REP_PRODUCTION_CONTRACT_2026-10-07/KALSHI_REP_PRODUCTION_CONTRACT.md",
+      "notes": "The Kalshi representative's production-semantics confirmation forwarded by the owner, with the public documentation pages it cites. Not a captured wire payload; exact production wire-shape cases are appended when real payload examples are supplied."
+    }
+  ],
+  "cases": [
+    {
+      "id": "KR01_SAME_MARKET_YES_NO_NEVER_ARB",
+      "source": "KALSHI_REP_CONFIRMATION_2026_10_07",
+      "statement": "Within one market buying NO is selling YES; YES and NO positions net; same-market YES + NO is never structural arbitrage.",
+      "expected": {"same_market_pairs_excluded": 1, "guaranteed": 0}
+    },
+    {
+      "id": "KR02_SAME_MARKET_NO_ASK_FROM_YES_BID",
+      "source": "KALSHI_REP_CONFIRMATION_2026_10_07",
+      "statement": "NO ask = 100c - best YES bid (and YES ask = 100c - best NO bid): one book, one liquidity pool.",
+      "expected": {"no_ask": "0.57", "yes_ask": "0.46"}
+    },
+    {
+      "id": "KR03_CROSS_MARKET_ALIASES_PRICE_APART",
+      "source": "KALSHI_REP_CONFIRMATION_2026_10_07",
+      "statement": "Yankees YES and Rays NO are different markets with separate books, independently executable, prices may differ; the route may choose Rays NO when it is cheaper all-in.",
+      "expected": {"same_claim": true, "best": "K-TB"}
+    }
+  ]
+}

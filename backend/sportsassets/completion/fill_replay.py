@@ -214,13 +214,25 @@ def agreement(orders: list) -> dict:
         "created") or 0))
     agree, residual, optimistic = 0, Counter(), Counter()
     events = set()
-    replayed = 0
+    replayed = false_fills = lookahead = 0
     for o in marketable:
         r = replay_marketable(o, ledger)
         if r["state"] == "NOT_REPLAYABLE":
             continue
         replayed += 1
         events.add(str(o.get("slug") or ""))
+        # the red team's certification counters (digital_twin_gate): the
+        # twin FILLED where PAPER expired, and any book used from before
+        # the order was eligible or after it expired (lookahead / stale)
+        tq = float(r.get("qty") or 0)
+        if tq > QTY_TOL and _paper_qty(o) <= QTY_TOL:
+            false_fills += 1
+        el = o.get("eligible") or o.get("decided") or o.get("created")
+        ex = o.get("expires")
+        bat = r.get("book_at")
+        if bat is not None and ((el is not None and bat < float(el)) or (
+                ex is not None and bat > float(ex))):
+            lookahead += 1
         c = classify(o, r)
         if c is None:
             agree += 1
@@ -234,6 +246,11 @@ def agreement(orders: list) -> dict:
             "marketable_orders": len(marketable), "replayed": replayed,
             "agree": agree, "fill_agreement_rate": rate, "target": TARGET,
             "certified": bool(rate is not None and rate >= TARGET),
+            "compared": replayed,
+            "optimistic_false_fills": false_fills,
+            "optimistic_false_fill_rate": (round(false_fills / replayed, 6)
+                                           if replayed else None),
+            "lookahead_violations": lookahead,
             "residual_mismatch_taxonomy": dict(residual),
             "optimistic_twin_mismatch_taxonomy": dict(optimistic),
             "markets": len(events),
