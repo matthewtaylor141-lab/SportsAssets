@@ -1,0 +1,234 @@
+{
+  "browser": "Chromium (Playwright), emulated viewports",
+  "physical_safari_ipad_tested": false,
+  "passed": 44,
+  "total": 44,
+  "checks": [
+    {
+      "name": "desktop: two real positions rendered",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "desktop: no preview banner",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "desktop: no horizontal overflow",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "desktop: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "reached SELL limit says 'Not a fill'",
+      "passed": true,
+      "detail": "SPORT / MONEYLINE\nPMUS\n\u2197\nSPORT \u00b7 GAME STATE\naec-mlb-nyy-bos-2026-10-07\nLive score feed unavailable\naec-mlb-nyy-bos-2026-10-07\nDEREK \u2192 XAVIER \u00b7 100.00 LONG \u00b7 ENTRY 40.0\u00a2\nCURRENT BID\n46.0\u00a2\nSTANDING LIMIT\n41.0\u00a2\nMARKED P/L\n+$6.00\nPrice condition reached\nNot a fill\nRecorded SELL 41.0\u00a2\n100.00 remain\nPacke"
+    },
+    {
+      "name": "no card claims a fill",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "SHORT card shows the held side's bid 43.0\u00a2",
+      "passed": true,
+      "detail": "SPORT / MONEYLINE\nPMUS\n\u2197\nSPORT \u00b7 GAME STATE\naec-nfl-tb-dal-2026-10-11\nLive score feed unavailable\naec-nfl-tb-dal-2026-10-11\nDEREK \u2192 XAVIER \u00b7 100.00 SHORT \u00b7 ENTRY 40.0\u00a2\nCURRENT BID\n43.0\u00a2\nRECORDED TARGET\n\u2014\nMARKED P/L\n+$3.00\nNo recorded target\nNo standing order\nNo standing order or proposed target recorded\n2 evidence gaps\nBOOK 9s \u00b7 P 4m"
+    },
+    {
+      "name": "SHORT card: no standing order, no invented target",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "SHORT card: needs evidence, not current",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "focus syncs cockpit to the SHORT position",
+      "passed": true,
+      "detail": "aec-nfl-tb-dal-2026-10-11"
+    },
+    {
+      "name": "stale recommendation is not shown as current",
+      "passed": true,
+      "detail": "RECORDED MANAGEMENT\nBLOCKED\nWaiting for evidence\nNo order or price target has been recorded for this position. Missing: fresh probability, valid active protection.\nRecorded alternatives \u00b7 not newly computed advice"
+    },
+    {
+      "name": "orders view: exactly the one standing order",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "orders view: reached condition is not a fill",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "search narrows cards without changing the total",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "evidence dialog opens",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Escape closes evidence",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "reduced motion applied",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "refresh reloads real records",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "Floor link lands on index.html#floor",
+      "passed": true,
+      "detail": "http://127.0.0.1:43341/index.html#floor"
+    },
+    {
+      "name": "Command HQ shows the Trader Mode launcher",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "browser back returns to Trader Mode",
+      "passed": true,
+      "detail": "http://127.0.0.1:43341/trader.html"
+    },
+    {
+      "name": "401 shows sign-in requirement",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "disconnect removes target-touch styling",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "disconnect invalidates current marks",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-landscape: two real positions rendered",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-landscape: no preview banner",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-landscape: no horizontal overflow",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-landscape: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "ipad-portrait: two real positions rendered",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-portrait: no preview banner",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-portrait: no horizontal overflow",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "ipad-portrait: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "mobile: two real positions rendered",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "mobile: no preview banner",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "mobile: no horizontal overflow",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "mobile: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "signed out: zero position cards",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "/floor.html: Trader Mode launcher present",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "/floor.html: a WebGL canvas exists",
+      "passed": true,
+      "detail": [
+        true
+      ]
+    },
+    {
+      "name": "/floor.html: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "/index.html: Trader Mode launcher present",
+      "passed": true,
+      "detail": null
+    },
+    {
+      "name": "/index.html: a WebGL canvas exists",
+      "passed": true,
+      "detail": [
+        true
+      ]
+    },
+    {
+      "name": "/index.html: no JS errors",
+      "passed": true,
+      "detail": []
+    },
+    {
+      "name": "all transport requests are GET",
+      "passed": true,
+      "detail": [
+        "GET"
+      ]
+    }
+  ]
+}

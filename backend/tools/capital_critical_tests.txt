@@ -1120,6 +1120,7 @@ tests/test_paper_mark_freshness_classifier.py
 tests/test_paper_mark_refresh_coverage.py
 tests/test_paper_mark_refresh_cooldown.py
 tests/test_xavier_management_packet.py
+tests/test_xavier_exit_continuation.py
 tests/test_pos_os_authority.py
 tests/test_pos_os_components.py
 tests/test_pos_os_db.py
@@ -1244,3 +1245,6 @@ tests/test_xavier_measure_refresh.py
 tests/test_trader_mode_projection.py
 tests/test_trader_score_evidence.py
 tests/test_trader_mode_real_db.py
+tests/test_pinnapi_held_confirmation.py
+tests/test_premap_ddl_never_queues.py
+tests/test_market_plane_required_sets.py

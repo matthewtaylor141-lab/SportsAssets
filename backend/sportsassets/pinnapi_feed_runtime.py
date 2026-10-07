@@ -692,6 +692,17 @@ def read(event_id, key, **kw) -> dict:
     return o.cache.read(event_id, key, **kw)
 
 
+def read_held(event_id, key, **kw) -> dict:
+    """The HELD-position accessor: the change rule, else a provider-stamped
+    confirmation of the unchanged price within the same limit
+    (pinnapi_feed.FeedCache.read_held)."""
+    o = _STATE.get("owner")
+    if o is None:
+        return {"ok": False, "reason": F.R_NO_AUTHORITY}
+    rh = getattr(o.cache, "read_held", None)
+    return (rh or o.cache.read)(event_id, key, **kw)
+
+
 # ── XAVIER'S HELD POSITION: ONE CONTRACT, READ FROM THIS PROCESS'S CACHE ──
 R_NO_PAYOUT_EVENT = "HELD_PAYOUT_EVENT_NOT_RECORDED"
 R_BAD_COMPLEMENT = "HELD_PAYOUT_COMPLEMENT_NOT_NOT_OF_A_SELECTION"
@@ -830,8 +841,9 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
                 "feed_event_id": eid}
     key = F.FULL_GAME_MONEYLINE_KEY
     # the record that prices the fixture now (its live-phase child in play)
-    got = read(ev.get("quote_id", eid), key,
-               evaluated_ms=float(at) * 1000.0, max_age_s=float(max_age_s))
+    got = read_held(ev.get("quote_id", eid), key,
+                    evaluated_ms=float(at) * 1000.0,
+                    max_age_s=float(max_age_s))
     where = {"sport_id": sid, "feed_event_id": eid, "market_key": key,
              "designation": des, "identity_basis": identity}
     if not got.get("ok"):
@@ -854,8 +866,9 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
                   "line": None, "league": row.get("team_league"),
                   "us_market_slug": row.get("identifier")},
         quote={"book": devig.BOOK, "outcomes": q.decimal_prices(),
-               "observed_at": prov.get("change_ms",
-                                       prov.get("source_change_ms")) / 1000.0,
+               "observed_at": (prov.get("freshness_at_ms")
+                               or prov.get("change_ms")
+                               or prov.get("source_change_ms")) / 1000.0,
                "received_at": prov["received_ms"] / 1000.0,
                "event_key": eid, "period": period, "line": None},
         now=float(at), max_age_s=float(max_age_s))
@@ -993,7 +1006,7 @@ def held_line_quote(row: dict, *, event_rows=None, payout_event,
     cand, outcome = hits[0]
     pair = MF.pinnacle_pair(cache, fixture_id=eid, contract=cand,
                             evaluated_ms=float(at) * 1000.0,
-                            max_age_s=float(max_age_s))
+                            max_age_s=float(max_age_s), held=True)
     where.update(market_key=pair.get("key"),
                  designation=(pair.get("designations") or {}).get(outcome))
     if not pair.get("ok"):

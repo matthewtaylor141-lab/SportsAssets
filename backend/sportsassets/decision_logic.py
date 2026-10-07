@@ -130,6 +130,11 @@ DECISION_LOGIC_FILES = (
     # whether a review's probability is current, so a change restarts the
     # forward window
     "xavier_measure_refresh.py",
+    # (closeout) the persisted EXIT intent: whether an EXIT that cancelled
+    # its protection is executed, waits its bounded window or is abandoned
+    # with the protection restored -- it changes which management actions
+    # happen, so a change restarts the forward window
+    "agents/paper_exit_intents.py",
     # (270) paper mark freshness: Xavier's management packet (no HOLD /
     # EXIT / REDUCE / hedge without reconciled qty, a fresh probability, a
     # current book with exit depth, settlement identity and protection

@@ -83,3 +83,22 @@ def test_unknown_full_universe_requirement_is_not_reported_as_one_stream():
     r=R.capacity_view(active=73072,pending=72936,subscribable=125,subscribed=117,max_per_stream=1000,max_streams=4)
     assert r['streams_for_known_subscribable']==1
     assert r['streams_required_for_full_coverage'] is None
+
+
+def test_refdata_metrics_measure_throughput_and_never_count_retry_as_unlisted():
+    t = {}
+    a = R.refdata_metrics(t, {"attempted": 10, "stored": 7, "unlisted": 1,
+                               "failed": 2}, lat_ms=[100, 200, 300, 400],
+                           n429=1, budget=8, now=1000.0)
+    b = R.refdata_metrics(t, {"attempted": 10, "stored": 10, "unlisted": 0,
+                               "failed": 0}, lat_ms=[150] * 10, n429=0,
+                           budget=12, now=1060.0)
+    assert a["latency_ms"]["p50"] in (200, 300)
+    tot = b["totals_since_boot"]
+    assert tot["requests"] == 20 and tot["listed"] == 17
+    assert tot["unlisted"] == 1 and tot["retryable"] == 2
+    assert tot["http_429"] == 1 and tot["rate_429"] == 0.05
+    assert tot["success_rate"] == 0.9
+    assert tot["requests_per_min"] == 20.0
+    assert tot["burn_down_per_hour"] == 1080.0
+    assert b["budget"] == 12

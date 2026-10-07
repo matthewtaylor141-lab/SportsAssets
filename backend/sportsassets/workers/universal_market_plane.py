@@ -74,6 +74,13 @@ COVERAGE_EVERY_S = 120.0
 CERTIFY_EVERY_S = 300.0
 SNAPSHOT_EVERY_S = 60.0
 REFDATA_PER_PASS = 8
+#: ADAPTIVE, BOUNDED REFDATA BUDGET (owner closeout item 4): the per-pass
+#: count grows by REFDATA_BUDGET_STEP while every request succeeds, up to
+#: REFDATA_BUDGET_MAX, and HALVES on any HTTP 429 (never below
+#: REFDATA_BUDGET_MIN). Requests stay sequential and paced (the venue
+#: client's thread safety under concurrent calls is not proven); priority
+#: order is refdata_due's (held, candidates, core soon, other soon, rest).
+REFDATA_BUDGET_MIN, REFDATA_BUDGET_MAX, REFDATA_BUDGET_STEP = 4, 32, 4
 REFDATA_PACING_S = 0.15
 REFDATA_RETRY_S = 300.0
 UNLISTED_RETRY_S = 6 * 3600.0
@@ -323,7 +330,7 @@ async def run() -> None:
                     assigned_rows = await R.assigned_contracts(c)
                 due_rows = (await R.refdata_due(
                     c, now=now, unlisted_retry_s=UNLISTED_RETRY_S,
-                    limit=REFDATA_PER_PASS * 8,
+                    limit=REFDATA_BUDGET_MAX * 4,
                     excluded=RP.cooling_ids(attempted, now=now,
                                              retry_s=REFDATA_RETRY_S))) if mgr is not None else []
             sync = state.get("sync") or {}
@@ -339,13 +346,16 @@ async def run() -> None:
                 # bounded refdata catch-up, priority order; a failed read is
                 # retried after REFDATA_RETRY_S, an unlisted one after
                 # UNLISTED_RETRY_S (refdata_due filters by refdata_at)
+                budget = int(state.get("refdata_budget") or REFDATA_PER_PASS)
                 due = [s_ for s_ in due_rows
                        if now - attempted.get(s_, 0.0) >= REFDATA_RETRY_S
-                       ][:REFDATA_PER_PASS]
+                       ][:budget]
                 from .institutional_md import bootstrap_instrument
+                lat_ms, n429 = [], 0
                 for s_ in due:
                     attempted[s_] = now
                     boot["attempted"] += 1
+                    t_req = time.monotonic()
                     try:
                         got = await asyncio.to_thread(bootstrap_instrument,
                                                       client, s_)
@@ -353,12 +363,18 @@ async def run() -> None:
                         boot["failed"] += 1
                         continue
                     finally:
+                        lat_ms.append((time.monotonic() - t_req) * 1000.0)
                         await asyncio.sleep(REFDATA_PACING_S)
                     checked = RP.classify_bootstrap(s_, got)
                     if checked["state"] == "RETRY":
                         boot["failed"] += 1
                         why = checked["why"]
+                        if checked.get("http_status") == 429:
+                            n429 += 1
+                            why = "HTTP_429"
                         boot["failures_by_reason"][why] = boot["failures_by_reason"].get(why, 0) + 1
+                        if n429:
+                            break               # back off for this pass
                         continue
                     async with pool.acquire() as c:
                         if checked["state"] == "UNLISTED":
@@ -369,6 +385,16 @@ async def run() -> None:
                     boot["stored"] += 1
                 if len(attempted) > 200000:
                     attempted.clear()
+                # the budget adapts: halve on a 429, grow on a clean pass
+                if n429:
+                    budget = max(REFDATA_BUDGET_MIN, budget // 2)
+                elif due and not boot["failed"] and len(due) >= budget:
+                    budget = min(REFDATA_BUDGET_MAX,
+                                 budget + REFDATA_BUDGET_STEP)
+                state["refdata_budget"] = budget
+                boot.update(RP.refdata_metrics(
+                    state.setdefault("refdata_totals", {}), boot,
+                    lat_ms=lat_ms, n429=n429, budget=budget, now=now))
                 state["refdata"] = boot
             now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
@@ -385,6 +411,19 @@ async def run() -> None:
                     snap = await snapshot(c, mgr, state, now=now,
                                           arming=arming, fresh=fresh,
                                           caps=(max_streams, max_per))
+                    # THE CONSUMER PARITY BRIDGE (SHADOW): the priority
+                    # members' PMX tops, one append-only event per pass;
+                    # the API compares them with the REST books the paper
+                    # runtime used. Never read by a decision.
+                    cen = ((snap.get("freshness") or {}).get(
+                        "priority_universe") or {}).get("census") or {}
+                    books = cen.pop("pmx_books", None)
+                    if books:
+                        await R.record_event(
+                            c, PRIORITY_BOOKS_KIND,
+                            "pbooks:%d" % int(now // 60),
+                            {"at": now, "books": books,
+                             "mode": "SHADOW_PARITY_NO_DECISION_EFFECT"})
                     await R.record_event(
                         c, "SNAPSHOT", "snapshot:%d" % int(now // 60), snap)
                     state["last_snapshot"] = snap
@@ -415,6 +454,93 @@ async def run() -> None:
             except Exception:                                   # noqa: BLE001
                 pass
             await asyncio.sleep(10)
+
+
+PRIORITY_CENSUS_SAMPLE = 40
+#: the market_plane_events kind carrying the priority members' PMX tops
+PRIORITY_BOOKS_KIND = "PRIORITY_PMX_BOOKS"
+
+
+async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
+    """EVERY PRIORITY MEMBER THAT IS NOT CURRENT, CLASSIFIED (owner closeout
+    item 3): by tier (held / candidate), refdata state, shard assignment,
+    the stream's own refusal for the symbol, and the age of its latest
+    REST / public book. Read only; nothing is excluded from the denominator
+    here -- this names why each member is not current."""
+    rows = await conn.fetch(
+        "SELECT contract_id, priority, required_reason, event_start, "
+        "       CASE WHEN refdata IS NULL THEN 'REFDATA_PENDING' "
+        "            WHEN refdata->>'unlisted' = 'true' THEN 'PMX_UNLISTED' "
+        "            ELSE 'PMX_LISTED' END AS refdata_state "
+        "  FROM market_plane_registry WHERE active AND priority <= $1",
+        POP.P_CANDIDATE)
+    slugs = [r["contract_id"] for r in rows]
+    rest = {r["slug"]: float(r["age"]) for r in await conn.fetch(
+        "SELECT us_market_slug AS slug, "
+        "       extract(epoch FROM now() - max(observed_at)) AS age "
+        "  FROM paper_book_observations WHERE us_market_slug = "
+        "   ANY($1::text[]) AND observed_at > now() - interval '6 hours' "
+        " GROUP BY 1", slugs)} if slugs else {}
+    shard_of = dict(getattr(mgr, "symbol_to_shard", {}) or {}) \
+        if mgr is not None else {}
+    connected = {}
+    if mgr is not None:
+        try:
+            connected = {d["shard"]: d.get("connected")
+                         for d in mgr.shard_digest()}
+        except Exception:                                       # noqa: BLE001
+            connected = {}
+    by, sample, pmx = {}, [], {}
+    for r in rows:
+        s = r["contract_id"]
+        age = rest.get(s)
+        if s in fresh and mgr is not None:
+            # THE PMX BOOK OF A PRIORITY MEMBER, for the consumer parity
+            # bridge (SHADOW: published, compared, never a decision input)
+            try:
+                cur = mgr.current(s, now=now, max_snapshot_age_s=FRESH_SLA_S)
+            except Exception:                                   # noqa: BLE001
+                cur = None
+            if (cur or {}).get("ok"):
+                bk = cur.get("book") or {}
+                sn = (cur.get("evidence") or {}).get("snapshot") or {}
+                pmx[s] = {"best_bid": bk.get("best_bid"),
+                          "best_offer": bk.get("best_offer"),
+                          "venue_ts": sn.get("venue_ts"),
+                          "received_at": sn.get("received_at")}
+        if s in fresh or (age is not None and age <= FRESH_SLA_S):
+            continue
+        tier = "HELD" if int(r["priority"]) <= POP.P_HELD else "CANDIDATE"
+        if r["refdata_state"] != "PMX_LISTED":
+            why = r["refdata_state"]
+        elif s not in shard_of:
+            why = "LISTED_NOT_ASSIGNED_TO_A_SHARD"
+        elif connected.get(shard_of[s]) is False:
+            why = "SHARD_NOT_CONNECTED"
+        else:
+            try:
+                cur = mgr.current(s, now=now, max_snapshot_age_s=FRESH_SLA_S)
+            except Exception as exc:                            # noqa: BLE001
+                cur = {"refusal": "READ_RAISED:%s" % type(exc).__name__}
+            why = "STREAM:%s" % str((cur or {}).get("refusal") or (
+                cur or {}).get("reason") or (cur or {}).get(
+                "FRESHNESS_STATUS") or "NOT_CURRENT")[:60]
+        start = r["event_start"]
+        phase = ("NO_START" if start is None else
+                 "STARTED_GT_4H" if (now - start.timestamp()) > 4 * 3600 else
+                 "IN_PLAY_OR_RECENT" if start.timestamp() <= now else
+                 "PREGAME")
+        rest_k = ("NO_REST_BOOK_6H" if age is None else "REST_OLDER_THAN_300S")
+        k = "%s|%s|%s|%s" % (tier, why, rest_k, phase)
+        by[k] = by.get(k, 0) + 1
+        if len(sample) < PRIORITY_CENSUS_SAMPLE:
+            sample.append({"contract_id": s, "tier": tier, "why": why,
+                           "rest_age_s": None if age is None
+                           else round(age, 1), "phase": phase})
+    return {"members": len(rows), "not_current": sum(by.values()),
+            "by_tier_reason_rest_phase": dict(sorted(
+                by.items(), key=lambda kv: -kv[1])), "sample": sample,
+            "pmx_books": pmx}
 
 
 async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
@@ -575,6 +701,12 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
     freshness = await freshness_denominators(conn, cov, reg, plan,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now)
+    try:
+        freshness["priority_universe"]["census"] = await priority_census(
+            conn, mgr, fresh=fresh, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        freshness["priority_universe"]["census"] = {
+            "error": type(exc).__name__}
     rad["capacity"].update(RP.capacity_view(
         active=reg_active, subscribable=int(reg.get("pmx_listed") or 0),
         pending=int(reg.get("refdata_pending") or 0),

@@ -3131,13 +3131,16 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
     change_ms = prov.get("change_ms")
     if change_ms is None:
         change_ms = prov.get("source_change_ms")
-    if change_ms is None:
+    # the instant the read's 30 s rule was measured from (the change, or a
+    # held read's provider-stamped confirmation of the unchanged price)
+    fresh_ms = prov.get("freshness_at_ms") or change_ms
+    if fresh_ms is None:
         # an ok read always has a change instant; anything else is not
         # evidence of currency -- the stale measure stands, named
         return dict(stale_out, feed_refusal=R_FEED_NO_CHANGE_INSTANT)
     return _venue_scale(dict(base, p=float(cur["p"]), source=SOURCE_FEED_CURRENT,
                 p_pinnacle=float(cur["p"]),
-                pinnacle_at=float(change_ms) / 1000.0,
+                pinnacle_at=float(fresh_ms) / 1000.0,
                 pinnacle_age_s=prov.get("quote_age_s"),
                 pinnacle_received_at=(
                     None if prov.get("received_ms") is None
@@ -3147,6 +3150,11 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                       "quote_age_s": prov.get("quote_age_s"),
                       "source_change_ms": prov.get("source_change_ms"),
                       "change_ms": change_ms,
+                      "freshness_basis": prov.get("freshness_basis"),
+                      "freshness_at_ms": fresh_ms,
+                      "confirmed_ms": prov.get("confirmed_ms"),
+                      "confirmed_by": prov.get("confirmed_by"),
+                      "confirmed_clock": prov.get("confirmed_clock"),
                       "change_clock": prov.get("change_clock"),
                       "observed_change_ms": prov.get("observed_change_ms"),
                       "frame_ts_ms": prov.get("frame_ts_ms"),

@@ -53,6 +53,7 @@ import json
 import time
 
 from . import ontology as O
+from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 
 VERSION = "MARKET_PLANE_POPULATOR_V1"
 VENUE = "POLYMARKET_US"
@@ -99,14 +100,14 @@ CATALOGUE_SQL = """
      GROUP BY market_slug
 """
 
+#: OPEN means bought - sold - SETTLED (open_position_canon's own rule).
+#: Before, settlements were ignored: every settled position stayed "held"
+#: for good (production 2026-10-07: 123 held contracts for 30 open
+#: positions, 101 of them without a book for 6 h -- games long over), and the
+#: priority-universe rate counted them as capital-required markets.
 HELD_SQL = """
-    SELECT DISTINCT us_market_slug AS slug FROM (
-        SELECT us_market_slug,
-               coalesce(sum(qty) FILTER (WHERE direction = 'BUY'), 0)
-             - coalesce(sum(qty) FILTER (WHERE direction = 'SELL'), 0) AS net
-          FROM paper_fills GROUP BY account_id, group_id, us_market_slug,
-                                    holding_side) p
-     WHERE net > 1e-9 AND us_market_slug IS NOT NULL
+    SELECT DISTINCT p.us_market_slug AS slug FROM (""" + \
+    CANONICAL_OPEN_POSITIONS_SQL + """) p WHERE p.us_market_slug IS NOT NULL
 """
 
 CANDIDATE_SQL = """
@@ -315,17 +316,80 @@ EVENT_SQL = """
 
 
 async def required_sets(conn) -> tuple:
-    held, cands = set(), set()
+    held, cands, _ = await required_sets_read(conn)
+    return held, cands
+
+
+async def required_sets_read(conn) -> tuple:
+    """(held, candidates, both_read): `both_read` False when either read
+    failed -- then nothing is DEMOTED on the strength of an empty set."""
+    held, cands, ok = set(), set(), True
     try:
         held = {r["slug"] for r in await conn.fetch(HELD_SQL)}
     except Exception:                                           # noqa: BLE001
-        held = set()
+        held, ok = set(), False
     try:
         cands = {r["slug"] for r in await conn.fetch(
             CANDIDATE_SQL, float(CANDIDATE_WINDOW_S))}
     except Exception:                                           # noqa: BLE001
-        cands = set()
-    return held, cands
+        cands, ok = set(), False
+    return held, cands, ok
+
+
+#: THE REQUIRED SETS ARE RE-APPLIED EVERY PASS, not only to the catalogue
+#: rows that changed: a market that became held / a candidate is promoted
+#: now, and one no longer held nor evaluated leaves the priority tier now
+#: (its venue-activity priority, as contract_row would compute it) -- before,
+#: both waited for a full pass, and a settled position never left.
+PROMOTE_SQL = """
+    UPDATE market_plane_registry r SET
+           priority = CASE WHEN r.contract_id = ANY($1::text[]) THEN %(held)d
+                           ELSE %(cand)d END,
+           required_reason = CASE WHEN r.contract_id = ANY($1::text[])
+                                  THEN 'OPEN_PAPER_POSITION'
+                                  ELSE 'EVALUATED_CANDIDATE' END,
+           active = true, updated_at = to_timestamp($3)
+     WHERE r.contract_id = ANY($2::text[])
+       AND (r.priority IS DISTINCT FROM (CASE WHEN r.contract_id =
+                ANY($1::text[]) THEN %(held)d ELSE %(cand)d END)
+            OR NOT r.active)
+""" % {"held": P_HELD, "cand": P_CANDIDATE}
+DEMOTE_SQL = """
+    UPDATE market_plane_registry r SET
+           priority = CASE
+               WHEN r.event_start IS NOT NULL
+                AND (r.event_start BETWEEN to_timestamp($2)
+                                       AND to_timestamp($2 + %(soon)f)
+                     OR r.event_start BETWEEN to_timestamp($2 - 21600)
+                                          AND to_timestamp($2))
+               THEN CASE WHEN r.family = ANY($3::text[])
+                          AND r.period = 'FULL_EVENT' THEN %(core)d
+                         ELSE %(other)d END
+               ELSE %(rest)d END,
+           required_reason = 'VENUE_ACTIVE', updated_at = to_timestamp($2)
+     WHERE r.priority <= %(cand)d AND NOT (r.contract_id = ANY($1::text[]))
+""" % {"soon": SOON_S, "core": P_CORE_SOON, "other": P_OTHER_SOON,
+       "rest": P_REST, "cand": P_CANDIDATE}
+
+
+def _count(tag) -> int:
+    try:
+        return int(str(tag).split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+async def apply_required(conn, held: set, cands: set, *, at: float,
+                         both_read: bool = True) -> dict:
+    req = sorted(held | cands)
+    out = {"promoted": _count(await conn.execute(
+        PROMOTE_SQL, sorted(held), req, float(at))), "demoted": 0}
+    if both_read:
+        out["demoted"] = _count(await conn.execute(
+            DEMOTE_SQL, req, float(at), sorted(CORE_METRICS)))
+    else:
+        out["demotion_skipped"] = "A_REQUIRED_SET_READ_FAILED"
+    return out
 
 
 async def populate(conn, *, since: float, now: float | None = None,
@@ -335,7 +399,7 @@ async def populate(conn, *, since: float, now: float | None = None,
     registry rows the catalogue no longer lists and nothing requires. Returns
     counts and the new watermark."""
     at = float(now if now is not None else time.time())
-    held, cands = await required_sets(conn)
+    held, cands, both_read = await required_sets_read(conn)
     rows = [dict(r) for r in await conn.fetch(
         CATALOGUE_SQL, 0.0 if full else float(since))]
     have = {r["contract_id"]: r["content_sha"] for r in await conn.fetch(
@@ -391,6 +455,8 @@ async def populate(conn, *, since: float, now: float | None = None,
             await conn.executemany(UPSERT_SQL, batch[i:i + 1000])
         for i in range(0, len(events), 1000):
             await conn.executemany(EVENT_SQL, events[i:i + 1000])
+        out["required_applied"] = await apply_required(
+            conn, held, cands, at=at, both_read=both_read)
         if full:
             # retire: not listed within the horizon and not required
             tag = await conn.execute(

@@ -28,6 +28,18 @@ TABLE = {
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
+    # (313) the persisted EXIT intent's explicit abandonments: what stopped
+    # an EXIT that had already cancelled its protection (the protection is
+    # restored by the same review whenever inventory remains)
+    "ABANDONED_NO_FRESH_PROBABILITY_WITHIN_WINDOW": (S, FRESH, "MANAGEMENT"),
+    "ABANDONED_PACKET_INCOMPLETE_AT_REVALIDATION": (S, FRESH, "MANAGEMENT"),
+    "ABANDONED_REFRESHED_SELECTION_NOT_EXIT": (E, EV, "MANAGEMENT"),
+    "ABANDONED_NO_EXECUTABLE_EXIT_DEPTH": (E, DEPTH, "MANAGEMENT"),
+    "ABANDONED_PROTECTION_FILLED_BEFORE_CANCEL": (E, PRICE, "MANAGEMENT"),
+    "ABANDONED_EXIT_ORDER_REFUSED": (S, INT, "MANAGEMENT"),
+    "ABANDONED_CANCEL_NOT_CONFIRMED_BY_DEADLINE": (S, INT, "MANAGEMENT"),
+    "ABANDONED_CANCEL_REQUEST_REFUSED": (S, INT, "MANAGEMENT"),
+    "ABANDONED_PROTECTION_ALREADY_PRESENT": (S, INT, "MANAGEMENT"),
     # (P0 closeout) no ENTRY growth while the strategy's open positions'
     # management packets are incomplete or their protection continuity has
     # failed (fail-closed when it cannot be read); a fresh exit walk is
@@ -2009,6 +2021,12 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    "EXIT_ORDER_CREATED":
+        "paper_exit_intents: the intent's SUCCESS resolution (the exit order "
+        "was created on fresh evidence)",
+    "ABANDONED_POSITION_CLOSED":
+        "paper_exit_intents: the position closed (filled / settled) before "
+        "the intent resolved -- a state, nothing was refused",
     "NO_RECORD_AT_THIS_STAGE":
         "ncaaf_funnel: the event recorded no code at all (a marker beside a "
         "named stage loss, never a refusal)",

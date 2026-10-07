@@ -67,10 +67,12 @@ STATEMENT_TIMEOUT_MS = 3000
 #: 216..311 since the PAPER PROFITABILITY STACK (311: learned management /
 #: exit cost and the counterfactual variant ledger); 216..312 since the
 #: UNIVERSAL MARKET PLANE (312: durable market registry, same-book
-#: certification and append-only market-plane evidence; no order authority).
+#: certification and append-only market-plane evidence; no order authority);
+#: 216..313 since the PERSISTED EXIT INTENT (313: paper_exit_intents and the
+#: EXIT_INTENT_DEADLINE review trigger; paper ledger only).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 312
+TRACKED_FROM, TRACKED_TO = 216, 313
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

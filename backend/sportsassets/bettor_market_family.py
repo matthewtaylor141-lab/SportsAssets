@@ -849,7 +849,7 @@ def _close(a, b) -> bool:
 
 
 def pinnacle_pair(cache, *, fixture_id, contract, evaluated_ms,
-                  max_age_s=30.0, children=None) -> dict:
+                  max_age_s=30.0, children=None, held=False) -> dict:
     """Pinnacle's two-way market for THIS contract: same family, full game
     (period 0), the contract's team where it names one, and the IDENTICAL
     line on the IDENTICAL side -- read through the cache's one read path, so
@@ -868,7 +868,7 @@ def pinnacle_pair(cache, *, fixture_id, contract, evaluated_ms,
         return _pinnacle_pair(cache, out, fixture_id=fixture_id,
                               contract=dict(contract or {}),
                               evaluated_ms=evaluated_ms, max_age_s=max_age_s,
-                              children=children)
+                              children=children, held=held)
     except Exception as exc:                                   # noqa: BLE001
         out.update(refusal="PINNACLE_LINE_READ_RAISED:%s"
                    % type(exc).__name__)
@@ -887,7 +887,7 @@ def _quote_record(cache, fixture_id, children=None) -> tuple:
 
 
 def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
-                   max_age_s, children=None) -> dict:
+                   max_age_s, children=None, held=False) -> dict:
     if cache is None:
         out["refusal"] = F.R_NO_AUTHORITY
         return out
@@ -960,8 +960,11 @@ def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
         out.update(refusal=R_PAIR_INCOMPLETE, key=q.key,
                    designations=sorted(dec))
         return out
-    got = cache.read(qid, q.key, evaluated_ms=evaluated_ms,
-                     max_age_s=max_age_s)
+    # a HELD position's read admits a provider-stamped confirmation of the
+    # unchanged price within the same limit (pinnapi_feed.read_held)
+    reader = (getattr(cache, "read_held", None) if held else None) \
+        or cache.read
+    got = reader(qid, q.key, evaluated_ms=evaluated_ms, max_age_s=max_age_s)
     out.update(key=q.key, quote_event_id=qid, alternate=bool(q.alternate),
                stream=q.stream, provenance=got.get("provenance"))
     if not got.get("ok"):
@@ -981,7 +984,10 @@ def _pinnacle_pair(cache, out, *, fixture_id, contract, evaluated_ms,
                line=line, epoch=q.epoch,
                change_ms=q.change_ms,
                source_change_ms=q.source_change_ms,
-               observed_at=q.change_ms / 1000.0,
+               freshness_basis=(got.get("provenance") or {}).get(
+                   "freshness_basis"),
+               observed_at=(((got.get("provenance") or {}).get(
+                   "freshness_at_ms") or q.change_ms) / 1000.0),
                received_at=q.received_ms / 1000.0)
     return out
 

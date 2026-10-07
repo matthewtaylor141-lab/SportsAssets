@@ -71,6 +71,91 @@ async def _held_freshness(pool) -> dict:
         return {"status": "UNREAD", "why": type(exc).__name__, "rate": None}
 
 
+PARITY_WINDOW_S = 60.0
+PARITY_SAMPLE = 20
+
+
+def _top(levels, best) -> float | None:
+    out = None
+    for lv in levels or ():
+        try:
+            px = lv.get("px")
+            v = float(px.get("value") if isinstance(px, dict) else px)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        out = v if out is None else (max(out, v) if best == "max"
+                                     else min(out, v))
+    return out
+
+
+async def consumer_parity(pool) -> dict:
+    """THE MARKET-PLANE CONSUMER BRIDGE, SHADOW (owner closeout item 7): the
+    worker's latest PMX tops for the priority members against the REST /
+    public book the paper runtime recorded for the SAME contract (exact
+    identity: the venue slug) within PARITY_WINDOW_S of the PMX receipt.
+    Same 300 s freshness rule on both sides; the REST read stays the
+    consumer; no funded authority; read only -- nothing here reaches a
+    decision."""
+    try:
+        async with pool.acquire() as c:
+            return await parity_read(c)
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(_parity_head(), status="UNREADABLE",
+                    error=type(exc).__name__)
+
+
+def _parity_head() -> dict:
+    return {"mode": "SHADOW_PARITY_NO_DECISION_EFFECT",
+            "consumer_of_record": "paper_book_observations (REST/public)",
+            "identity": "EXACT_VENUE_SLUG", "window_s": PARITY_WINDOW_S}
+
+
+async def parity_read(c) -> dict:
+    out = _parity_head()
+    ev = await c.fetchrow(
+        "SELECT payload, at FROM market_plane_events WHERE kind = "
+        " 'PRIORITY_PMX_BOOKS' ORDER BY at DESC LIMIT 1")
+    if ev is None:
+        return dict(out, status="NO_PMX_BOOKS_PUBLISHED_YET")
+    books = (_j(ev["payload"]) or {}).get("books") or {}
+    rest = {r["us_market_slug"]: r for r in await c.fetch(
+        "SELECT DISTINCT ON (us_market_slug) us_market_slug, bids, "
+        "       offers, observed_at, error FROM "
+        " paper_book_observations WHERE us_market_slug = "
+        " ANY($1::text[]) AND observed_at > now() - interval "
+        " '15 minutes' ORDER BY us_market_slug, observed_at DESC",
+        sorted(books))}
+    n = {"pmx_books": len(books), "rest_in_window": 0, "rest_absent": 0,
+         "top_equal": 0, "top_different": 0}
+    diffs = []
+    for slug, b in sorted(books.items()):
+        r = rest.get(slug)
+        rcv = b.get("received_at")
+        if r is None or r["error"] or rcv is None or abs(
+                r["observed_at"].timestamp() - float(rcv)) > PARITY_WINDOW_S:
+            n["rest_absent"] += 1
+            continue
+        n["rest_in_window"] += 1
+        rb = _top(_j(r["bids"]), "max")
+        ro = _top(_j(r["offers"]), "min")
+        same = all((x is None and y is None) or (
+            x is not None and y is not None and abs(float(x) - float(y))
+            < 1e-9) for x, y in ((rb, b.get("best_bid")),
+                                 (ro, b.get("best_offer"))))
+        n["top_equal" if same else "top_different"] += 1
+        if not same and len(diffs) < PARITY_SAMPLE:
+            diffs.append({"contract_id": slug, "pmx_bid": b.get("best_bid"),
+                          "rest_bid": rb, "pmx_offer": b.get("best_offer"),
+                          "rest_offer": ro,
+                          "skew_s": round(r["observed_at"].timestamp()
+                                          - float(rcv), 1)})
+    cmp_ = n["rest_in_window"]
+    return dict(out, status="OK", published_at=ev["at"].timestamp(),
+                counts=n, parity_rate=(round(n["top_equal"] / cmp_, 4)
+                                       if cmp_ else None),
+                differences=diffs)
+
+
 @router.get(BASE, dependencies=[Depends(require_read)])
 async def market_plane(limit: int = Query(default=200, ge=0, le=5000),
                        state: str | None = Query(default=None),
@@ -173,7 +258,9 @@ async def market_plane(limit: int = Query(default=200, ge=0, le=5000),
     if isinstance(payload, dict) and isinstance(payload.get("freshness"),
                                                 dict):
         payload["freshness"]["held_positions"] = await _held_freshness(pool)
+    parity = await consumer_parity(pool)
     return {"status": "OK" if payload else "EMPTY",
+            "consumer_parity": parity,
             "why": None if payload else "NO_MARKET_PLANE_SNAPSHOT_YET",
             "version": VERSION, "authority": AUTHORITY, "label": "RESEARCH",
             "computed_at": time.time(),
