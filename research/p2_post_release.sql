@@ -25,7 +25,7 @@ SELECT status, count(*), max(computed_at) FROM xavier_value_add GROUP BY 1;
 SELECT value->'steps'->'xavier_value_add' value_add, value->'steps'->'xavier'->>'reviews' reviews,
        value->>'written_at' written_at FROM ingestion_state WHERE key='paper_session_last_pass';
 SELECT count(*) FILTER (WHERE state='idle in transaction' AND now()-xact_start > interval '60 seconds') idle_tx_gt_60s,
-       count(*) FILTER (WHERE wait_event_type='Lock') lock_waiters,
+       count(*) FILTER (WHERE starts_with(wait_event_type, 'Loc')) heavyweight_waiters,
        max(now()-xact_start) FILTER (WHERE state='idle in transaction') longest_idle_tx
   FROM pg_stat_activity WHERE datname=current_database();
 SELECT application_name, now()-xact_start xact_age, now()-query_start q_age, left(query,120) q
