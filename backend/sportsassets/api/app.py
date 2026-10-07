@@ -798,6 +798,17 @@ try:
 except ImportError:
     log.warning("market plane: api.command_market_plane not loaded",
                 exc_info=True)
+# ── REVENUE RELIABILITY V1: GET /api/command/revenue-readiness. GET only,
+# COMMAND auth. READBACK_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY: agent
+# certification, CASH-incumbent tournament, regime matrix, reliability plan,
+# counterfactual value-add, daily revenue readiness. Changes nothing.
+try:
+    from .command_revenue_reliability import (
+        router as _command_revenue_reliability_router)
+    app.include_router(_command_revenue_reliability_router)
+except ImportError:
+    log.warning("revenue reliability: api.command_revenue_reliability not "
+                "loaded", exc_info=True)
 # ── THE PAPER LOSS ATTRIBUTION (closeout): GET
 # /api/command/paper/loss-attribution. GET only, COMMAND auth, READ ONLY.
 try:

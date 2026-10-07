@@ -446,7 +446,13 @@ async def slow_half(conn, *, now: float | None = None) -> dict:
     directives = await call_hook(conn, R.AUDREY, "directives", "monitor",
                                  now=at, timeout_s=SLOW_HOOK_TIMEOUT_S,
                                  record_failure=False)
-    hooks = (audit, improve, directives)
+    # Revenue Reliability V1: governed improvement PROPOSALS (never releases)
+    # for verified economic weaknesses; throttled inside the hook.
+    revenue = await call_hook(conn, R.AUDREY, "revenue_improvements",
+                              "propose_due", now=at,
+                              timeout_s=SLOW_HOOK_TIMEOUT_S,
+                              record_failure=False)
+    hooks = (audit, improve, directives, revenue)
     raised = [h for h in hooks if not h.get("ok") and h.get("installed")]
     missing = [h for h in hooks if not h.get("ok") and not h.get("installed")]
     deps = {h["hook"]: {"ok": h.get("ok"), "installed": h.get("installed"),
@@ -487,4 +493,5 @@ async def slow_half(conn, *, now: float | None = None) -> dict:
                       run={"finished_at": at + elapsed, "elapsed_s": elapsed})
     return {"at": at, "state": state, "audrey_audit": _digest(audit),
             "improvement": _digest(improve),
-            "directives": _digest(directives)}
+            "directives": _digest(directives),
+            "revenue_improvements": _digest(revenue)}

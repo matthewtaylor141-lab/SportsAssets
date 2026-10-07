@@ -96,6 +96,8 @@ jobs:
           jq -c '{status, why, snapshot_at, counts, coverage_by_state, certification, universe: .snapshot.universe, subscription: (.snapshot.subscription | {armed, arming_why, configured_capacity, subscribed, fresh, stale_subscribed, plan: (.plan | {complete, symbols, capacity, overflow_count, subscribable, shards_required_for_all}), shards}), sources: .snapshot.sources, latency: .snapshot.latency, catalogue: .snapshot.catalogue, radar: .snapshot.radar}' p0/market_plane.json 2>&1 | cut -c1-12000
           get small_live "/api/command/small-live?limit=1"
           jq -c 'del(.rows) | del(.basis)' p0/small_live.json 2>&1 | cut -c1-3000
+          get revenue_readiness /api/command/revenue-readiness
+          jq -c '{status, why, label, authority, daily: (.data.daily_revenue_readiness | {overall_status, management_bankroll_usd, proven_positive_capacity_usd, planned_capital_usd, cash_usd, expected_daily_profit_usd, what_has_earned_capital_today, agent_certification, regime_status_counts, reasons_unused_capital_is_cash}), tournament: (.data.strategy_tournament | {selected, status, reason}), authority_changed: .data.authority_changed, small_live: .data.small_live}' p0/revenue_readiness.json 2>&1 | cut -c1-8000
           exit 0
 
       - name: Keep the P0 readback as evidence
