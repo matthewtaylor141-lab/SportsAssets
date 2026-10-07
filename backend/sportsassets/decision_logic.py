@@ -125,6 +125,11 @@ DECISION_LOGIC_FILES = (
     "agents/xavier_management.py", "agents/xavier_small_live_policy.py",
     "bettor_xavier_standing_orders.py", "xavier_freshness.py",
     "bettor_funded_decision.py",
+    # (developer pass) the two-model held probability refresh and the
+    # source-clock probability evidence paper_xavier reads: they change
+    # whether a review's probability is current, so a change restarts the
+    # forward window
+    "xavier_measure_refresh.py",
     # (270) paper mark freshness: Xavier's management packet (no HOLD /
     # EXIT / REDUCE / hedge without reconciled qty, a fresh probability, a
     # current book with exit depth, settlement identity and protection

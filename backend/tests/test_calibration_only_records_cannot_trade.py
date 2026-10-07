@@ -429,6 +429,10 @@ READERS = {
     # the NCAAF funnel (closeout): a READ ONLY report of how far each venue
     # event got; it selects no candidate, sizes and places nothing
     "ncaaf_funnel.py": ("COVERAGE_EVIDENCE_REPORTING_READS_ALL", 1),
+    # (developer pass) names the table only as the valuation_store label of
+    # a reading paper_xavier's _measure (decision logic) already selected by
+    # the entry's exact contract; it issues no query of its own
+    "xavier_measure_refresh.py": ("LABEL_ONLY_VALUATION_STORE_NO_READ", 1),
     "api/command_market_plane.py": ("CANONICAL_OPPORTUNITY_READBACK_BY_CONTRACT", 1),
     # select candidates or a decision's probability -> filter the purpose
     # (asserted constant by constant above)
@@ -515,8 +519,13 @@ READERS = {
     # (184) plus the venue's published settlement PRICE for a contract it
     # settled at a price (VENUE_PRICE_SQL): a settlement-evidence read by
     # slug for an already-held paper position, never a candidate selection.
+    # (developer pass, +1) the two-model measure reads the ENTRY's own
+    # valuation (joined through its paper decision and order) and then the
+    # newest reading of that exact contract (slug, intent, payout,
+    # complement, market, line, event key): a held-position measure, never a
+    # candidate selection
     "agents/paper_xavier.py": (
-        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 9),
+        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 10),
     # (206) XAVIER'S MANAGEMENT RECORD: the entry thesis reads the held
     # position's own decision valuation BY ID (its source stamp, its
     # condition's event start) and the value-add reads venue settlement

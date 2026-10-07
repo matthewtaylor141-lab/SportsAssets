@@ -307,9 +307,12 @@ async def test_a_stale_or_absent_measure_never_drives_a_discretionary_sale(
 
         async def measure(conn_, ctx_, *, pos, levels_buy):
             # a fresh reading carries its persisted valuation id (packet)
+            # (source-clock rule) a fresh reading carries its SOURCE
+            # timestamp inside the 30 s limit; a stamp-less one is never fresh
             return {"p": p, "source": "PINNACLE_ONLY_LATEST" if stale
                     else "PINNACLE_ONLY_CURRENT", "stale": stale,
-                    "valuation_id": None if stale else 1}
+                    "valuation_id": None if stale else 1,
+                    "pinnacle_at": H.T0 + 7 - 2.0}
         monkeypatch.setattr(PX, "_measure", measure)
         out = await PX.review_group(conn, _ctx(a, H.T0 + 7), g,
                                     trigger="SCHEDULED_BACKSTOP")

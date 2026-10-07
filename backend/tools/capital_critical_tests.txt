@@ -1238,3 +1238,9 @@ tests/test_settlement_rule_registry_integration.py
 # (closeout) the PAPER loss attributed by cause: reconciled identity + spread, model-vs-variance z, unmanaged positions, missed exits, correlation
 tests/test_paper_loss_attribution.py
 tests/test_xavier_packet_position_block.py
+# (developer pass + trader mode) refdata recovery / exact symbol / cooldown before LIMIT / PMUS isolation / capacity vs backlog; two-model held refresh and source-clock probability evidence; Trader Mode projection, real-database read model, route authority, display-only score adapter
+tests/test_refdata_progress.py
+tests/test_xavier_measure_refresh.py
+tests/test_trader_mode_projection.py
+tests/test_trader_score_evidence.py
+tests/test_trader_mode_real_db.py

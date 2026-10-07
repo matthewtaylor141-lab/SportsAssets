@@ -386,7 +386,10 @@ class FakeClient:
     def read(self, name, symbol=""):
         self.calls.append((name, symbol))
         if name == "instruments":
-            rows = [] if self.instruments is None else [self.instruments]
+            # the venue answers the REQUESTED symbol (exact-symbol refdata,
+            # closeout: a record for another symbol is never accepted)
+            rows = [] if self.instruments is None else [
+                dict(self.instruments, symbol=symbol)]
             return {"read": name, "status": 200,
                     "body": {"instruments": rows}, "ms": 12.0}
         return {"read": name, "status": self.book_status,
@@ -468,3 +471,15 @@ def test_the_market_data_loop_runs_before_the_lane_that_reads_it():
 def test_the_two_regimes_are_different_words_and_stay_apart():
     assert xstore.REGIME_DIRECT != xstore.REGIME_BRIDGE
     assert worker.DIRECT == xstore.REGIME_DIRECT == ib.EVIDENCE_ENVIRONMENT
+
+
+def test_a_record_for_another_symbol_is_never_the_requested_one():
+    class Wrong(FakeClient):
+        def read(self, name, symbol=""):
+            got = FakeClient.read(self, name, symbol)
+            if name == "instruments":
+                got["body"] = {"instruments": [INSTRUMENT]}   # symbol X
+            return got
+    boot = md.bootstrap_instrument(Wrong(instruments=INSTRUMENT), "Y")
+    assert boot["record"] is None and boot["listed"] is False
+    assert boot["authoritative_empty"] is False      # not proof of absence
