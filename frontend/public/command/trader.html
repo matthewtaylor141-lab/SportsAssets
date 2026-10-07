@@ -2,17 +2,19 @@
 <html lang="en">
 <head>
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#eef3f1">
+  <meta name="theme-color" content="#03080d">
   <meta name="description" content="BETTOR Trader Mode: watch recorded PAPER positions, management decisions and standing orders. Read only.">
   <title>BETTOR · Trader Mode</title>
   <link rel="stylesheet" href="trader.css">
-  <script defer src="trader-core.js"></script><script defer src="trader.js"></script>
+  <link rel="stylesheet" href="brand/brand.css">
+  <link rel="stylesheet" href="trader-cinematic.css">
+  <script defer src="trader-core.js"></script><script defer src="trader.js"></script><script defer src="trader-cinematic.js"></script>
 </head>
 <body>
 <a class="skip" href="#positions">Skip to positions</a>
 <div class="preview-notice" id="preview-notice" hidden>DESIGN PREVIEW · ILLUSTRATIVE REPLAY · NOT PRODUCTION DATA</div>
 <header class="topbar">
-  <a class="wordmark" href="index.html" aria-label="Back to BETTOR Command"><span class="brand-mark">B<span></span></span>BETTOR<span class="brand-divider"></span><small>COMMAND</small></a>
+  <a class="wordmark" href="index.html" aria-label="Back to BETTOR Command"><img class="real-brand-logo" src="brand/bettortoken-logo-white.png" alt="BettorToken"><span class="brand-divider"></span><small>COMMAND</small></a>
   <nav aria-label="Workspace"><a href="index.html">Command</a><a href="index.html#floor">Floor</a><a href="trader.html" aria-current="page">Trader mode <span class="new-dot"></span></a></nav>
   <div class="top-right"><span class="safe-badge">PAPER / SHADOW</span><span class="clock" id="wall-clock">--:--:--</span><button class="icon-button" id="fullscreen" aria-label="Toggle full screen" title="Full screen">⛶</button></div>
 </header>
@@ -23,6 +25,7 @@
   </section>
   <div id="error" class="error" role="alert" hidden></div>
   <section class="metrics" id="metrics" aria-label="Current portfolio metrics"></section>
+  <section class="brain-rail" id="brain-rail" aria-label="Live position management chain"><div class="brain-node brain-pulse" data-state="stale"><small>SYSTEM</small><b>Waiting for native ledger</b><i></i></div><div class="brain-node" data-state="stale"><small>VENUE BOOK</small><b>—</b><i></i></div><div class="brain-node" data-state="stale"><small>XAVIER</small><b>—</b><i></i></div><div class="brain-node" data-state="stale"><small>PROTECTION</small><b>—</b><i></i></div><div class="brain-node" data-state="stale"><small>TARGET</small><b>—</b><i></i></div></section>
   <section class="cockpit" aria-label="Xavier desk view">
     <div class="architecture" aria-hidden="true"><div class="window-frame"></div><div class="window-frame two"></div><div class="skyline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="ceiling-light"></div></div>
     <div class="cockpit-topline"><span><i class="on-air-dot"></i> XAVIER’S PERSPECTIVE</span><span id="cockpit-context">Waiting for authenticated position data</span><span class="readonly">READ ONLY</span></div>
