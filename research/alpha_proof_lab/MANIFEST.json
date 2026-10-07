@@ -1,0 +1,23 @@
+{
+  "package": "BETTOR_ALPHA_PROOF_LAB_V1",
+  "purpose": "research-only profitability falsification and verification",
+  "production_authority": "NONE",
+  "order_authority": "NONE",
+  "small_live": "SHADOW",
+  "historical_paper_mutation": "FORBIDDEN",
+  "components": [
+    "dynamic Elo",
+    "market residual logistic model",
+    "beta + isotonic calibration",
+    "executable EV",
+    "maker fill economics",
+    "structural arbitrage checks",
+    "fractional Kelly",
+    "correlation/capacity haircuts",
+    "walk-forward validation",
+    "CLV",
+    "PBO approximation",
+    "Deflated Sharpe approximation",
+    "model cards and hashes"
+  ]
+}

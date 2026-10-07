@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Alpha Decision Record",
+  "type": "object",
+  "required": [
+    "decision_id",
+    "observed_at",
+    "sport",
+    "family",
+    "regime",
+    "venue",
+    "market_id",
+    "market_prior_p",
+    "model_p_raw",
+    "model_p_calibrated",
+    "expected_fill_price",
+    "costs",
+    "net_ev_per_contract",
+    "capital_status"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string"
+    },
+    "observed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "sport": {
+      "type": "string"
+    },
+    "family": {
+      "type": "string"
+    },
+    "regime": {
+      "type": "string"
+    },
+    "venue": {
+      "type": "string"
+    },
+    "market_id": {
+      "type": "string"
+    },
+    "market_prior_p": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "model_p_raw": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "model_p_calibrated": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "expected_fill_price": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "costs": {
+      "type": "object"
+    },
+    "net_ev_per_contract": {
+      "type": "number"
+    },
+    "capital_status": {
+      "enum": [
+        "RESEARCH_ONLY",
+        "SHADOW_ONLY",
+        "ACTIVE_CHALLENGER",
+        "ACTIVE_CHAMPION",
+        "CASH"
+      ]
+    },
+    "source_sha": {
+      "type": "string"
+    },
+    "dataset_sha": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

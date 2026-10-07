@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Alpha Settled Result",
+  "type": "object",
+  "required": [
+    "decision_id",
+    "settled_at",
+    "outcome",
+    "realized_profit",
+    "expected_net_profit"
+  ],
+  "properties": {
+    "decision_id": {
+      "type": "string"
+    },
+    "settled_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "outcome": {
+      "type": "number"
+    },
+    "realized_profit": {
+      "type": "number"
+    },
+    "expected_net_profit": {
+      "type": "number"
+    },
+    "residual": {
+      "type": "number"
+    },
+    "execution_error": {
+      "type": "number"
+    },
+    "management_error": {
+      "type": "number"
+    },
+    "settlement_variance": {
+      "type": "number"
+    }
+  }
+}

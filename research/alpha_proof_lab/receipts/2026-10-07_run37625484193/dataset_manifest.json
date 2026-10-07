@@ -1,0 +1,18 @@
+{
+ "dataset_sha256": "a381f64e475bdf99689027405713bff70d4aea38b79fa5813447cb780b7c9afd",
+ "receipt_sha256": "2a82af2f9f39b94d566cdbebc0c93b108913aefec0353a77f98a59652f969684",
+ "rows": 12020,
+ "source": {
+  "access": "SELECT_ONLY_VIA_RESEARCH_SQL_WORKFLOW",
+  "extract_sql": "research/apl_extract_v1.sql",
+  "extract_sql_sha256": "3ce7da0cd15d9f70b42e6936fb6ba4bfbc77f55f0ad73a19ccacdd9c09db5efd",
+  "research_sql_run_id": "37625484193",
+  "tables": [
+   "paper_decisions",
+   "paper_book_observations",
+   "paper_settlements",
+   "external_valuations",
+   "us_premap"
+  ]
+ }
+}

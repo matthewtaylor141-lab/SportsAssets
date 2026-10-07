@@ -1,0 +1,34 @@
+name: alpha-proof-lab
+# RESEARCH / SHADOW ONLY. Runs the BETTOR Alpha Proof Lab's tests (the
+# vendored package's own and the BETTOR integration's) and re-derives the
+# committed real-data receipt from its committed dataset, checking the
+# hashes. No secret, no database, no network beyond pip, no order or capital
+# authority.
+on:
+  push:
+    paths:
+      - "research/alpha_proof_lab/**"
+      - ".github/workflows/alpha-proof-lab.yml"
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: alpha-proof-lab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the lab's declared dependencies
+        run: pip install "numpy>=1.26" "pandas>=2.1" "scipy>=1.11" "scikit-learn>=1.4" pytest
+      - name: Run the lab tests
+        working-directory: research/alpha_proof_lab
+        run: python -m pytest -p no:cacheprovider -W ignore::FutureWarning -rA tests
+      - name: Re-derive every committed receipt from its committed dataset
+        working-directory: research/alpha_proof_lab
+        run: python bettor_integration/verify_receipts.py receipts
