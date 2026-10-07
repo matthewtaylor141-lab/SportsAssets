@@ -412,7 +412,7 @@ class TestTheStore:
         for c in cols:
             assert c in src.split("VALUES")[-1].split("ON CONFLICT")[0] or c in src, c
             assert f"{c}=$" in src and f'r.get("{c}")' in src, c
-        table = inspect.getsource(premap._ensure_table)
+        table = inspect.getsource(premap._ensure_table_ddl)
         for c in cols:
             assert f'("{c}", ' in table, c
         # one SELECT: C6's fragment carries the four names C7 reads, and

@@ -491,10 +491,14 @@ class TestTheSignedColumnIsActuallyPersisted:
     def test_the_column_exists_in_the_table_definition(self):
         import inspect
 
-        src = inspect.getsource(premap._ensure_table)
+        # the DDL body (run only when the catalogue shows the schema is
+        # incomplete -- test_premap_ddl_never_queues), and the completeness
+        # check requires the column, so a deployment without it gets the ALTER
+        src = inspect.getsource(premap._ensure_table_ddl)
         assert "signed text" in src
         assert "ADD COLUMN IF NOT EXISTS signed text" in src, \
             "an existing deployment needs the ALTER, not just the CREATE"
+        assert "signed" in premap._PREMAP_BASE_COLUMNS
 
     def test_there_is_a_migration_for_it(self):
         from pathlib import Path

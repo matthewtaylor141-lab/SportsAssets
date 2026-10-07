@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import asyncpg
 import os
 import re
 import time
@@ -5963,7 +5964,78 @@ def match_side(rows: list[dict], outcome: str | None,
     return None
 
 
+#: THE SWEEP'S DDL NEVER QUEUES AHEAD OF READERS (production 2026-10-07
+#: 10:56Z-11:53Z): `ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS ...` takes
+#: ACCESS EXCLUSIVE even when the column exists. A long transaction holding
+#: an ACCESS SHARE on us_premap made the ALTER wait; every later reader of
+#: us_premap (the paper pass, Xavier, the shadow) queued behind the ALTER --
+#: one of them inside that same long transaction's loop, so it never ended:
+#: 57 minutes with no paper pass and no Xavier review. Now the catalogue is
+#: read first (no lock) and nothing runs when the schema is already complete;
+#: when DDL is needed it runs in ONE transaction under a short lock_timeout,
+#: and a lock it cannot get is a logged skip (the next sweep retries), never
+#: an indefinite queue.
+PREMAP_DDL_LOCK_TIMEOUT_MS = 2000
+_PREMAP_BASE_COLUMNS = ("identifier", "event_slug", "event_title",
+                        "market_slug", "question", "kind", "line",
+                        "side_norm", "event_keys", "intent", "signed",
+                        "updated_at", "team_abbr", "team_name",
+                        "team_safe_name", "team_id", "team_league",
+                        "game_start", "sports_type")
+
+
+async def _premap_schema_complete(conn) -> bool:
+    cols = {r["column_name"] for r in await conn.fetch(
+        "SELECT column_name FROM information_schema.columns "
+        " WHERE table_schema = current_schema() AND table_name = 'us_premap'")}
+    if not cols or not set(_PREMAP_BASE_COLUMNS + tuple(_LISTING_COLUMNS)) \
+            <= cols:
+        return False
+    idx = {r["indexname"] for r in await conn.fetch(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = current_schema()"
+        "   AND tablename = 'us_premap'")}
+    if not {"us_premap_ident_side", "us_premap_keys"} <= idx:
+        return False
+    return not await conn.fetchval(
+        "SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = "
+        " 'us_premap_pkey')")
+
+
 async def _ensure_table(pool) -> None:
+    async def run(conn):
+        if await _premap_schema_complete(conn):
+            # the columns are present: the readers' probes re-read them, as
+            # after the DDL path (no ALTER needed for that)
+            _TEAM_COLS_STATE["present"] = None
+            _LISTING_COLS_STATE["present"] = None
+            return
+        # inside a caller's transaction this block is a SAVEPOINT, and SET
+        # LOCAL would outlive it (to the caller's commit): the previous value
+        # is restored before the block ends; a failure rolls the savepoint
+        # back, which reverts it as well
+        prev = await conn.fetchval("SHOW lock_timeout")
+        try:
+            async with conn.transaction():
+                await conn.execute("SET LOCAL lock_timeout = '%dms'"
+                                   % PREMAP_DDL_LOCK_TIMEOUT_MS)
+                await _ensure_table_ddl(conn)
+                await conn.execute(
+                    "SELECT set_config('lock_timeout', $1, true)", prev)
+        except asyncpg.exceptions.LockNotAvailableError:
+            log.warning("us_premap DDL skipped: lock not available within "
+                        "%d ms (the next sweep retries)",
+                        PREMAP_DDL_LOCK_TIMEOUT_MS)
+    if hasattr(pool, "acquire"):
+        async with pool.acquire() as conn:
+            await run(conn)
+    elif hasattr(pool, "fetch") and hasattr(pool, "transaction"):
+        await run(pool)
+    else:
+        # a bare executor (no catalogue read, no transaction): the DDL as is
+        await _ensure_table_ddl(pool)
+
+
+async def _ensure_table_ddl(pool) -> None:
     await pool.execute(
         """
         CREATE TABLE IF NOT EXISTS us_premap (

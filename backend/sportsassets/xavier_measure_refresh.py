@@ -93,11 +93,24 @@ async def refresh(conn, *, pos: dict, contract: dict | None,
         except Exception as exc:
             return dict(failed, why="HELD_CACHE_READ_FAILED", error=type(exc).__name__)
         if not isinstance(cur, Mapping) or not cur.get("ok"):
+            # the refused read's clocks are KEPT (measured only): the census
+            # must be able to see whether the provider produced a newer
+            # frame than the one the refusal was measured on
             return dict(failed, why="CURRENT_HELD_PROBABILITY_UNAVAILABLE",
-                        feed_refusal=cur.get("reason") if isinstance(cur, Mapping) else "INVALID_HELD_READ")
+                        feed_refusal=cur.get("reason") if isinstance(cur, Mapping) else "INVALID_HELD_READ",
+                        feed_detail=({k: cur[k] for k in (
+                            "sport_id", "feed_event_id", "market_key",
+                            "designation", "identity_basis", "provenance")
+                            if cur.get(k) is not None}
+                            if isinstance(cur, Mapping) else None))
         prov = dict(cur.get("provenance") or {})
         # change_ms is BETTOR's existing accepted change clock; never receipt.
-        ms = prov.get("change_ms")
+        # the instant the read's own 30 s rule was measured from: the last
+        # observed change, or (held reads) the provider-stamped
+        # confirmation of the unchanged price -- never receipt
+        ms = prov.get("freshness_at_ms")
+        if ms is None:
+            ms = prov.get("change_ms")
         if ms is None:
             ms = prov.get("source_change_ms")
         nms = number(ms)

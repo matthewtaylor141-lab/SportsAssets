@@ -81,6 +81,7 @@ from .. import canonical_intent as CI
 from .. import decision_hooks as DH
 from .. import xavier_freshness as XF
 from . import derek_policy as DP
+from . import paper_exit_intents as XI
 
 VERSION = "PAPER_XAVIER_V1"
 T_FIRST = "FIRST_FILL"
@@ -96,6 +97,10 @@ T_ORDER = "ORDER_EVENT"
 T_VALUATION = "VALUATION_CHANGE"
 T_GAME = "GAME_STATE_CHANGE"
 T_EXPIRY = "FRESHNESS_EXPIRY"
+#: an open EXIT intent's own deadline (cancel confirmation, or the bounded
+#: revalidation window after a terminal cancel) passed: re-review at once
+#: so the intent is continued or explicitly abandoned (migration 313)
+T_EXIT_INTENT = "EXIT_INTENT_DEADLINE"
 
 A_HOLD, A_EXIT, A_REDUCE = "HOLD", "EXIT", "REDUCE"
 #: WHERE A PERSISTED valuation_id LIVES (xavier_packet: a FRESH probability
@@ -581,56 +586,6 @@ async def persist_probability_snapshot(conn, *, account_id: str, pos: dict,
     return sid
 
 
-async def exit_continuation(conn, *, group_id: str, standing, at: float,
-                            window_s: float) -> dict | None:
-    """THE EXIT THAT CANCELLED ITS OWN PROTECTION, CONTINUED.
-
-    An EXIT / REDUCE ranked on a COMPLETE packet first cancels the resting
-    protection (its inventory is committed; never two potentially live
-    sells). Once that cancel is terminal the position has no standing order
-    -- UNPROTECTED, which is never packet-present -- so without this the next
-    review would re-protect and the exit could never complete.
-
-    Returns the prior review only when ALL hold: no live-or-potentially-live
-    standing order now; the group's latest review selected EXIT / REDUCE on
-    a complete packet and took CANCEL_STANDING_BEFORE_EXIT; every order it
-    cancelled is terminal CANCELED (not filled, not pending); and it is no
-    older than `window_s` (the 30 s probability limit). The caller still
-    requires a FRESH probability with a persisted valuation, a fresh exit
-    walk and every OTHER packet element present."""
-    if standing:
-        return None
-    r = await conn.fetchrow(
-        "SELECT review_id, reviewed_at, action, selection "
-        "  FROM paper_xavier_reviews WHERE group_id=$1 "
-        " ORDER BY reviewed_at DESC, review_id DESC LIMIT 1", group_id)
-    if r is None:
-        return None
-    act = L._j(r["action"]) or {}
-    sel = L._j(r["selection"]) or {}
-    gate_ = ((sel.get("management_packet") or {}).get("gate") or {})
-    if act.get("taken") != "CANCEL_STANDING_BEFORE_EXIT" or \
-            sel.get("mechanical_selection") not in (A_EXIT, A_REDUCE) or \
-            not gate_.get("complete"):
-        return None
-    if at - L._epoch(r["reviewed_at"]) > float(window_s) + 1e-9:
-        return None
-    oids = [o for o in (act.get("orders") or []) if o]
-    if not oids:
-        return None
-    states = {x["order_id"]: x["state"] for x in await conn.fetch(
-        "SELECT order_id, state FROM paper_orders WHERE order_id = "
-        " ANY($1::text[])", oids)}
-    if len(states) != len(oids) or \
-            any(s != "CANCELED" for s in states.values()):
-        return None
-    return {"prior_review_id": r["review_id"],
-            "prior_selection": sel.get("mechanical_selection"),
-            "cancelled_orders": oids,
-            "prior_reviewed_at": L._epoch(r["reviewed_at"]),
-            "window_s": float(window_s)}
-
-
 async def _latest_book(conn, slug: str):
     return await conn.fetchrow(
         "SELECT * FROM paper_book_observations WHERE us_market_slug=$1 "
@@ -739,7 +694,8 @@ def last_evidence_expiry(last: dict | None) -> float | None:
 def _trigger(*, group: str, new_handoffs: list, last: dict | None,
              last_fill_at, book_at, best_exit, at: float,
              backstop_s: float, feed_change_at=None, order_event_at=None,
-             valuation_at=None, event_start_at=None) -> str | None:
+             valuation_at=None, event_start_at=None,
+             exit_intent_due_at=None) -> str | None:
     """WHICH REVIEW A HELD GROUP IS DUE. Every requeue is bounded: each
     trigger fires once per change (it compares with the last review's
     instant), so nothing loops."""
@@ -747,6 +703,11 @@ def _trigger(*, group: str, new_handoffs: list, last: dict | None,
         return T_FIRST
     if last_fill_at is not None and last_fill_at > last["reviewed_at"]:
         return T_FILL
+    # AN OPEN EXIT INTENT'S DEADLINE PASSED since the last review: the
+    # position may be unprotected -- continue or abandon it now
+    if exit_intent_due_at is not None and exit_intent_due_at <= at and \
+            exit_intent_due_at > last["reviewed_at"]:
+        return T_EXIT_INTENT
     # THE HELD MARKET MOVED ON THE PINNAPI FEED since the last review
     # (pinnapi_held): a fresh probability exists for ~30 s from now on
     if feed_change_at is not None and feed_change_at > last["reviewed_at"]:
@@ -855,16 +816,34 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         packet, pgate = await management_packet(
             conn, ctx, pos=pos, measure=measure, standing=standing, at=at)
         manageable = fresh and pgate["complete"]
-        # THE EXIT CONTINUATION: the only packet gap is the protection this
-        # position's own just-ranked EXIT cancelled (terminal), and every
-        # other element -- fresh probability with a persisted valuation, the
-        # book, depth, qty, identity -- is present now
+        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
+        # THE PERSISTED EXIT INTENT (migration 313): an EXIT that cancelled
+        # this position's protection is continued from its own row, never
+        # inferred from "the latest review" and never from the deciding
+        # review's (now expired) probability
+        xi = await XI.load_open(conn, acct, group_id, pos["position_key"])
+        xphase = None if xi is None else await XI.advance(
+            conn, xi, standing=standing, at=at, review_id=rid,
+            window_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
+        revalidating = (xphase or {}).get("phase") == XI.PH_REVALIDATE
+        if xphase is not None:
+            measure["exit_intent"] = dict(xphase, intent_id=xi["intent_id"],
+                                          state=xi["state"])
+        # THE EXIT CONTINUATION: the cancel is terminal and the only packet
+        # gap is the protection that EXIT cancelled; every other element --
+        # a fresh probability with a persisted valuation, the book, depth,
+        # qty, identity -- is present NOW, at this review
         cont = None
-        if fresh and walk_fresh and not pgate["complete"] and \
+        if revalidating and fresh and walk_fresh and \
+                not pgate["complete"] and \
                 pgate["missing"] == [XPK_P_PROTECTION]:
-            cont = await exit_continuation(
-                conn, group_id=group_id, standing=standing, at=at,
-                window_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
+            cont = {"intent_id": xi["intent_id"],
+                    "decided_review_id": xi["decided_review_id"],
+                    "cancelled_orders": xi["cancel_orders"],
+                    "cancel_terminal_at": xi.get("cancel_terminal_at"),
+                    "revalidate_by": xi.get("revalidate_by"),
+                    "probability_source_at": measure.get(
+                        "probability_source_at")}
         if cont is not None:
             measure["exit_continuation"] = cont
             manageable = True
@@ -958,7 +937,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         prot = protective_price(qty=pos["open_qty"],
                                 cost_basis=pos["cost_basis_usd"],
                                 fee_fn=fee_fn, at=at)
-        rid = "paperrev:" + _h(group_id, pos["position_key"], at, trigger)
         # ── R30 · THE ONE CANONICAL MANAGEMENT INTENT ───────────────────
         # Xavier's review decides ONE action (live_parity.management_action);
         # it is recorded immutably and BOTH adapters consume it: the paper
@@ -1046,28 +1024,120 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             mintent = None
         act = decided["action"]
         tl = decided.get("target_limit") or {}
+        sched = ctx.get("schedule_review_at")
         if act == CI.ACT_CANCEL_FIRST:
             # THE EXIT WAITS FOR THE PROTECTION TO BE TERMINAL: its
             # inventory is committed to the resting sale.
+            res = {}
             for s in standing:
                 if s["state"] != "CANCEL_PENDING":
-                    await SIM.request_cancel(
+                    res[s["order_id"]] = await SIM.request_cancel(
                         conn, s["order_id"], now=at,
                         reason="EXIT_WAITS_FOR_STANDING_TERMINAL")
             action = {"taken": "CANCEL_STANDING_BEFORE_EXIT",
                       "orders": [s["order_id"] for s in standing]}
+            if xi is None:
+                xi = await XI.record(
+                    conn, account_id=acct, pos=pos, review_id=rid,
+                    selection=chosen, at=at,
+                    probability_source_at=measure.get(
+                        "probability_source_at"),
+                    orders=action["orders"], cancel_results=res)
+                if res and not any(r.get("ok") for r in res.values()) and \
+                        not any(s["state"] == "CANCEL_PENDING"
+                                for s in standing):
+                    # no cancel was accepted: the protection stands (or
+                    # is already terminal); the intent cannot proceed
+                    await XI.resolve(conn, xi, state=XI.S_ABANDONED,
+                                     resolution=XI.R_CANCEL_REFUSED, at=at,
+                                     review_id=rid, detail={"results": res})
+            action["exit_intent_id"] = None if xi is None else \
+                xi["intent_id"]
+            if sched is not None and xi is not None and \
+                    xi["state"] == XI.S_CANCEL_REQUESTED:
+                try:
+                    sched(pos["us_market_slug"], xi["cancel_deadline_at"])
+                except Exception:                               # noqa: BLE001
+                    pass
         elif act in (CI.ACT_EXIT, CI.ACT_REDUCE):
             action = await _submit_sale(
                 conn, ctx, pos=pos, role=chosen, qty=decided["target_qty"],
                 limit=tl.get("limit_price"), wire=tl.get("wire_price"),
                 review_key="%s:%s:%s" % (group_id, pos["position_key"], at))
+            if revalidating:
+                if action.get("ok") and action.get("order_id"):
+                    await XI.resolve(conn, xi, state=XI.S_EXIT_SUBMITTED,
+                                     resolution=XI.R_EXIT_ORDER_CREATED,
+                                     at=at, review_id=rid,
+                                     exit_order_id=action["order_id"])
+                else:
+                    # THE EXIT NO LONGER QUALIFIES (refused): abandon it
+                    # explicitly and restore the protection now
+                    prot_act = await _maintain_standing(
+                        conn, ctx, pos=pos, standing=[], prot=prot, md=md,
+                        at=at, SPO=SPO)
+                    await XI.resolve(
+                        conn, xi, state=XI.S_ABANDONED,
+                        resolution=XI.R_EXIT_REFUSED, at=at, review_id=rid,
+                        protection_order_id=prot_act.get("order_id"),
+                        detail={"refusal": action.get("refusal")})
+                    action["protection_restored"] = prot_act
+        elif act == CI.ACT_PROTECT and revalidating and not rankable and \
+                at < float(xi["revalidate_by"]):
+            # THE CANCEL IS TERMINAL, THE FRESH PROBABILITY / BOOK IS NOT
+            # HERE YET: the intent waits -- bounded by revalidate_by (the
+            # terminal instant + the 30 s probability limit) -- for its own
+            # fresh evidence; a review is scheduled for that instant
+            action = {"taken": "EXIT_REVALIDATION_PENDING",
+                      "exit_intent_id": xi["intent_id"],
+                      "revalidate_by": xi["revalidate_by"],
+                      "missing": pgate["missing"],
+                      "evidence_state": measure["evidence_state"],
+                      "walk_fresh": walk_fresh}
+            if sched is not None:
+                try:
+                    sched(pos["us_market_slug"], float(xi["revalidate_by"]))
+                except Exception:                               # noqa: BLE001
+                    pass
         elif act == CI.ACT_PROTECT:
             action = await _maintain_standing(
                 conn, ctx, pos=pos, standing=[dict(s) for s in standing],
                 prot=prot, md=md, at=at, SPO=SPO)
+            if revalidating:
+                why = (XI.R_NOT_EXIT if rankable else
+                       XI.R_NO_FRESH if not fresh else
+                       XI.R_NO_DEPTH if not walk_fresh else XI.R_PACKET)
+                await XI.resolve(
+                    conn, xi, state=XI.S_ABANDONED, resolution=why, at=at,
+                    review_id=rid, protection_order_id=action.get("order_id"),
+                    detail={"selected": chosen, "missing": pgate["missing"],
+                            "evidence_state": measure["evidence_state"],
+                            "walk": measure["exit_walk"]})
         elif chosen in (A_EXIT, A_REDUCE):
             action = {"taken": "NONE", "why": tl.get("why")
                       or "NO_WALKABLE_SALE"}
+            if revalidating:
+                prot_act = await _maintain_standing(
+                    conn, ctx, pos=pos, standing=[dict(s) for s in standing],
+                    prot=prot, md=md, at=at, SPO=SPO)
+                await XI.resolve(
+                    conn, xi, state=XI.S_ABANDONED, resolution=XI.R_NO_DEPTH,
+                    at=at, review_id=rid,
+                    protection_order_id=prot_act.get("order_id"),
+                    detail={"why": action["why"]})
+                action["protection_restored"] = prot_act
+        elif revalidating:
+            # nothing selectable and no protective price: abandoned and
+            # recorded -- never left open
+            await XI.resolve(conn, xi, state=XI.S_ABANDONED,
+                             resolution=XI.R_PACKET, at=at, review_id=rid,
+                             detail={"decided": decided.get("action"),
+                                     "protection_ok": bool(prot.get("ok"))})
+        if xi is not None:
+            action.setdefault("exit_intent_id", xi["intent_id"])
+            action["exit_intent_state"] = xi["state"]
+            if xi.get("resolution"):
+                action["exit_intent_resolution"] = xi["resolution"]
         if mintent is not None:
             action["canonical_intent_id"] = mintent["intent_id"]
             ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
@@ -1150,7 +1220,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         # that instant (paper_runtime.schedule_expiry_review via the
         # runtime's ctx hook: one timer per market, bounded) and the pass's
         # own _trigger also fires FRESHNESS_EXPIRY on the next pass.
-        sched = ctx.get("schedule_review_at")
         if sched is not None and measure["evidence_state"] == E_FRESH \
                 and valuation.get("expires_at") is not None:
             try:
@@ -1329,8 +1398,8 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
 
 #: THE TRIGGERS' PRIORITY: a position never reviewed goes first, then one
 #: with a new fill, a market event, the scheduled backstop.
-TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_ORDER: 1.2, T_VALUATION: 1.4,
-                    T_GAME: 1.6, T_EXPIRY: 1.8, T_MARKET: 2, T_BACKSTOP: 3}
+TRIGGER_PRIORITY = {T_FIRST: 0, T_FILL: 1, T_EXIT_INTENT: 1.1, T_ORDER: 1.2,
+                    T_VALUATION: 1.4, T_GAME: 1.6, T_EXPIRY: 1.8, T_MARKET: 2, T_BACKSTOP: 3}
 #: a held market that just moved on the feed is reviewed right after the
 #: first reviews: its fresh probability lasts only the 30 s limit
 FEED_CHANGE_PRIORITY = 0.5
@@ -1421,6 +1490,13 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
            "due": 0, "deferred": [], "first_review_latency_s": []}
     ev = await _requeue_evidence(conn, ctx, [g for g in groups
                                              if g in handed], at=at)
+    # EXIT INTENTS: one whose position closed is resolved; the rest give
+    # their deadline to the trigger
+    held_keys = [(p["group_id"], p["position_key"])
+                 for p in await L.positions(conn, acct)]
+    out["exit_intents_closed"] = await XI.close_orphans(
+        conn, acct, held_keys, at=at)
+    xdue = await XI.due_at_by_group(conn, acct, groups)
     due = []
     for g in groups:
         if g not in handed:
@@ -1455,13 +1531,15 @@ async def step(conn, ctx: dict, *, only_groups=None) -> dict:
                         feed_change_at=fc,
                         order_event_at=gev.get("order_event_at"),
                         valuation_at=gev.get("valuation_at"),
-                        event_start_at=gev.get("event_start_at"))
+                        event_start_at=gev.get("event_start_at"),
+                        exit_intent_due_at=xdue.get(g))
         if trig is None:
             continue
         by_feed = (trig == T_MARKET and fc is not None and lastd is not None
                    and fc > lastd["reviewed_at"])
         d_at = (fc if by_feed else
                 gev.get("order_event_at") if trig == T_ORDER else
+                xdue.get(g) if trig == T_EXIT_INTENT else
                 gev.get("valuation_at") if trig == T_VALUATION else
                 gev.get("event_start_at") if trig == T_GAME else
                 last_evidence_expiry(lastd) if trig == T_EXPIRY else

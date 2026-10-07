@@ -304,7 +304,7 @@ class TestTheSweepStoresTheTeamField:
             assert "await team_select_cols(pool)" in src
             assert "intent, signed, event_slug, market_slug FROM us_premap" in src
         # the sweep ensures the columns itself (the `signed` precedent), then re-probes
-        src = inspect.getsource(premap._ensure_table)
+        src = inspect.getsource(premap._ensure_table_ddl)
         for col, typ in (("team_abbr", "text"), ("team_safe_name", "text"), ("team_id", "bigint"),
                          ("game_start", "timestamptz"), ("sports_type", "text")):
             assert f'("{col}", "{typ}")' in src, col

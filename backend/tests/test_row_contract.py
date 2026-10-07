@@ -56,7 +56,7 @@ def _inserted_columns():
 
 
 def _table_columns():
-    src = inspect.getsource(premap._ensure_table)
+    src = inspect.getsource(premap._ensure_table_ddl)
     cols = set(re.findall(r"([a-z_]+)\s+text", src))
     cols |= set(re.findall(r"ADD COLUMN IF NOT EXISTS ([a-z_]+)", src))
     return cols

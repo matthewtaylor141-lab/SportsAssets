@@ -144,6 +144,19 @@ C_MATCHUP_VERSION = "PREMATCH_MATCHUPS_VERSION_UNCHANGED"
 C_SNAPSHOT_RECONFIRM = "SNAPSHOT_RECONFIRMED_THE_SAME_PRICE"
 CLOCK_PROVIDER = "PROVIDER_FRAME_TS"
 CLOCK_LOCAL = "LOCAL_RECEIPT_NO_PROVIDER_TS"
+#: HELD-POSITION READS ONLY (owner closeout 2026-10-07: "if PinnAPI is
+#: producing genuinely current frames or authoritative provider timestamps
+#: and Xavier is failing to consume them, that is a software defect"): a
+#: price that has not changed is current when a PROVIDER-STAMPED frame that
+#: asserts the market's current state re-carried it within the SAME 30 s
+#: limit. Admitted kinds: a live record carrying the market, the
+#: authoritative prematch_markets list, and a prematch_matchups version equal
+#: to the markets' version (PinnAPI: markets are re-sent whenever the matchup
+#: version is bumped). NOT admitted: the subscribe snapshot (the provider's
+#: stored mirror) and any confirmation dated by OUR receipt -- a new poll /
+#: receipt time is never freshness.
+PROVIDER_CONFIRMATIONS = (C_LIVE_REC, C_PREMATCH_MARKETS, C_MATCHUP_VERSION)
+FRESHNESS_BASIS_CONFIRMED = "PROVIDER_STAMPED_CONFIRMATION_OF_UNCHANGED_PRICE"
 
 # ── IN-PLAY: Pinnacle's live game is a CHILD matchup (R30A RC3) ──────
 #: A child record is the LIVE PHASE of its parent only when every one of
@@ -1128,6 +1141,7 @@ class FeedCache:
                     "provenance": prov}
         age = (ev_ms - at) / 1000.0
         prov["quote_age_s"] = round(age, 3)
+        prov["freshness_at_ms"] = at
         self.receipt_to_eval.add(ev_ms - q.received_ms)
         if age < 0:
             return {"ok": False, "reason": R_FUTURE, "quote": q,
@@ -1135,6 +1149,38 @@ class FeedCache:
         if age > max_age_s:
             return {"ok": False, "reason": R_STALE, "quote": q,
                     "provenance": prov}
+        return {"ok": True, "quote": q, "provenance": prov}
+
+    def read_held(self, event_id, key, *,
+                  evaluated_ms: Optional[float] = None,
+                  max_age_s: float = 30.0) -> dict:
+        """THE HELD-POSITION READ: `read` (the change rule) first; when it
+        refuses only because no change was observed / the change is older
+        than the limit, the price is admitted on its latest PROVIDER-STAMPED
+        confirmation (PROVIDER_CONFIRMATIONS) within the SAME limit. The
+        provenance names the basis and the instant the age is measured from
+        (`freshness_at_ms`); the change clocks stay as observed."""
+        got = self.read(event_id, key, evaluated_ms=evaluated_ms,
+                        max_age_s=max_age_s)
+        if got.get("ok") or got.get("reason") not in (R_NO_CHANGE_TIME,
+                                                      R_STALE):
+            return got
+        q = got.get("quote")
+        ev_ms = evaluated_ms if evaluated_ms is not None else _now_ms()
+        if q is None or q.confirmed_ms is None or \
+                q.confirmed_clock != CLOCK_PROVIDER or \
+                q.confirmed_by not in PROVIDER_CONFIRMATIONS:
+            return got
+        age = (ev_ms - q.confirmed_ms) / 1000.0
+        if age < 0 or age > max_age_s:
+            return got
+        self.counts["held_reads_admitted_on_provider_confirmation"] += 1
+        prov = dict(got.get("provenance") or {},
+                    freshness_basis=FRESHNESS_BASIS_CONFIRMED,
+                    freshness_at_ms=q.confirmed_ms,
+                    quote_age_s=round(age, 3),
+                    change_rule_refusal=got.get("reason"),
+                    confirmation_is_a_decision_input=True)
         return {"ok": True, "quote": q, "provenance": prov}
 
     # ── census / health (bounded, for the heartbeat) ────────────────
