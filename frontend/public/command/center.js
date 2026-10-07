@@ -790,6 +790,7 @@
       + '<a class="cc-tab" href="revenue.html">Revenue readiness</a>'
       + '<a class="cc-tab" href="readiness.html">Readiness</a>'
       + '<a class="cc-tab" href="venues.html">Venues</a>'
+      + '<a class="cc-tab" href="redteam.html">Red team</a>'
       + '</nav></header>';
   }
 

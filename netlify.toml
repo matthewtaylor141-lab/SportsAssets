@@ -183,6 +183,14 @@
   status = 200
   force = true
 
+# Read-only red-team readiness interlock + PM acceptance (RED / YELLOW /
+# GREEN from machine evidence), golden validation, forward scoreboard.
+[[redirects]]
+  from = "https://command.bettortoken.com/red-team"
+  to = "/command/redteam.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/allocator"
   to = "/command/agent.html"

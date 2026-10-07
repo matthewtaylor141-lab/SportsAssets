@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#03080d">
+  <meta name="description" content="BETTOR Red Team and PM Acceptance: the final readiness interlock, the PM acceptance harness (RED / YELLOW / GREEN from machine evidence), golden validation over production code and the forward scoreboard. Read only, SHADOW.">
+  <title>BETTOR · Red Team &amp; PM Acceptance</title>
+  <link rel="stylesheet" href="trader.css">
+  <link rel="stylesheet" href="revenue.css">
+  <link rel="stylesheet" href="readiness.css">
+  <link rel="stylesheet" href="venues.css">
+  <link rel="stylesheet" href="redteam.css">
+  <link rel="stylesheet" href="brand/brand.css">
+  <script defer src="redteam.js"></script>
+</head>
+<body>
+<a class="skip" href="#rt-gates">Skip to the gates</a>
+<header class="topbar">
+  <a class="wordmark" href="index.html" aria-label="Back to BETTOR Command"><img class="real-brand-logo" src="brand/bettortoken-logo-white.png" alt="BettorToken"><span class="brand-divider"></span><small>COMMAND</small></a>
+  <nav aria-label="Workspace"><a href="index.html">Command</a><a href="trader.html">Trader mode</a><a href="readiness.html">Readiness</a><a href="venues.html">Venues</a><a href="redteam.html" aria-current="page">Red team</a></nav>
+  <div class="top-right"><span class="safe-badge">SHADOW · NO LIVE MONEY</span></div>
+</header>
+<main id="rt-root" data-state="loading">
+  <section class="page-heading">
+    <div><div class="eyebrow">BETTOR RED TEAM · PM ACCEPTANCE</div><h1>Machine evidence, or it is not done<span class="heading-dot">.</span></h1>
+      <p>Every gate is read from production, GitHub or the PAPER ledger with its source. Missing evidence is a failure, never a pass. Nothing on this page can grant authority.</p></div>
+    <div class="heading-controls"><span class="rv-status" id="rt-status">Reading…</span><button class="button" id="rt-refresh">Re-read</button></div>
+  </section>
+  <div id="rt-error" class="error" role="alert" hidden></div>
+  <section id="rt-verdict" class="rv-section" aria-label="Verdict and authority"></section>
+  <section id="rt-gates" class="rv-section" aria-label="PM acceptance gates"></section>
+  <section id="rt-controls" class="rv-section" aria-label="Red-team controls"></section>
+  <section id="rt-golden" class="rv-section" aria-label="Golden validation"></section>
+  <section id="rt-board" class="rv-section" aria-label="Forward scoreboard"></section>
+  <section id="rt-release" class="rv-section" aria-label="Release receipt"></section>
+  <footer id="rt-foot"></footer>
+</main>
+</body>
+</html>

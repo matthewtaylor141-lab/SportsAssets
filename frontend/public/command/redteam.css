@@ -1,0 +1,8 @@
+/* Red Team & PM Acceptance -- layered on trader / revenue / readiness / venues css; read only. */
+.rt-state{font:700 28px var(--mono);letter-spacing:.04em}
+.rt-RED{color:var(--red)}.rt-YELLOW{color:var(--amber)}.rt-GREEN{color:var(--green)}
+.rt-auth{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.rt-auth span{font:10px var(--mono);padding:4px 8px;border-radius:5px;background:#eef2f0;color:#40524a}
+.rt-prov{font:10px var(--mono);color:#5f7064;overflow-wrap:anywhere}
+.rt-pass td:nth-child(2){color:var(--green)}.rt-fail td:nth-child(2){color:var(--red)}
+#rt-root h2,#rt-root h3,#rt-root .rv-note{overflow-wrap:anywhere}
