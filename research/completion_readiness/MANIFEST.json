@@ -1,0 +1,23 @@
+{
+  "package": "BETTOR_COMPLETION_READINESS_PATCH_V1",
+  "purpose": "close code-controlled runtime and readiness blockers; preserve CASH until positive evidence",
+  "created_for": "SportsAssets tested closeout tree 659edaf2 / release a91be09f",
+  "included": [
+    "runtime patch: shared worker UMP isolation",
+    "runtime patch: PMX subscribe-all architecture",
+    "completion logic: probability authority",
+    "completion logic: all-in EV authority",
+    "completion logic: capital readiness gate",
+    "vendor: EV probability engine upgrade",
+    "vendor: profitability stack",
+    "vendor: revenue reliability stack",
+    "Claude directive"
+  ],
+  "hard_limits": {
+    "live_capital_activation": "FORBIDDEN",
+    "small_live": "SHADOW",
+    "historical_paper_mutation": "FORBIDDEN",
+    "risk_gate_weakening": "FORBIDDEN",
+    "profitability_claim": "EVIDENCE_ONLY"
+  }
+}

@@ -1,0 +1,57 @@
+*** Begin Patch
+*** Update File: backend/sportsassets/workers/all.py
+@@
+-from . import (analytics, bettor_live_loop, bettor_state,
++from . import (analytics, bettor_live_loop, bettor_state,
+                chain_listener, copy_sweep, dispatcher, edge_marks,
+                institutional_md, metadata_refresher, mirror_live,
+                mirror_shadow, poller, premap, price_path, reconciler,
+                retention, rn1_observability, roster, roster_auto,
+                shadow_bettor, shadow_experimental, shadow_rn1,
+                underdog, universal_market_plane, whale_exits)
+@@
+ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
+@@
+-    ("universal_market_plane", universal_market_plane.run),
++    # UNIVERSAL MARKET PLANE IS NOT A SHARED-WORKER LOOP.
++    #
++    # Production incident 2026-10-07: the shared workers repeatedly OOM-killed
++    # while this loop and broad catalogue work ran in the same 2 GiB process.
++    # Setting UNIVERSAL_MARKET_PLANE=off is not enough: the supervisor still
++    # starts the loop, it returns cleanly, and all.py restarts it every 5s.
++    #
++    # The UMP belongs to its own dedicated read-only service:
++    #   python -m sportsassets.workers.universal_market_plane
++    # and shared workers must never supervise it.
++    #
++    # DO NOT add ("universal_market_plane", ...) back to LOOPS.
+@@
+ ]
++
++DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane"})
++
++
++def _loop_allowed_in_shared_worker(name: str) -> bool:
++    return name not in DEDICATED_ONLY_LOOPS
++
++
++def startable_loops() -> list[tuple[str, Callable[[], Awaitable[None]]]]:
++    """Loops the shared sportsassets-workers process may supervise.
++
++    The rule is code-bound, not environment-bound. A disabled loop returning
++    normally must not be restarted every five seconds, and a dedicated
++    market-data universe supervisor must not share memory with capital-critical
++    workers.
++    """
++    return [(n, fn) for n, fn in LOOPS if _loop_allowed_in_shared_worker(n)]
+@@
+-    await asyncio.gather(*(
+-        supervised(name, fn, first_delay=i * BOOT_STAGGER_S)
+-        for i, (name, fn) in enumerate(LOOPS)))
++    loops = startable_loops()
++    log.info("workers loop inventory: starting=%s dedicated_only=%s",
++             [n for n, _ in loops], sorted(DEDICATED_ONLY_LOOPS))
++    await asyncio.gather(*(
++        supervised(name, fn, first_delay=i * BOOT_STAGGER_S)
++        for i, (name, fn) in enumerate(loops)))
+*** End Patch

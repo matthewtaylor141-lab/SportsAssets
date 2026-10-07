@@ -1,0 +1,19 @@
+{
+  "package": "BETTOR_PROFITABILITY_STACK_V1",
+  "version": "0.1.0",
+  "authority": "RESEARCH_PAPER_SHADOW_ONLY",
+  "network_clients": [],
+  "credential_access": "NONE",
+  "order_authority": "NONE",
+  "cancel_authority": "NONE",
+  "capital_limit_mutation": "NONE",
+  "historical_paper_mutation": "FORBIDDEN",
+  "small_live": "SHADOW",
+  "modules": {
+    "execution_truth": "bettor_profit_stack/execution_truth.py",
+    "structural_arb": "bettor_profit_stack/structural_arb.py",
+    "digital_twin": "bettor_profit_stack/digital_twin.py",
+    "profitability_governor": "bettor_profit_stack/profitability_governor.py",
+    "pnl_attribution": "bettor_profit_stack/pnl_attribution.py"
+  }
+}
