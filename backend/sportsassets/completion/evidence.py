@@ -20,7 +20,7 @@
                 ev_authority.evaluate_all_in_ev per decision; the portfolio
                 verdict is ELIGIBLE only when the event-clustered lower bound
                 of the per-decision lower bounds is positive. Otherwise CASH.
-  twin          the repaired IOC twin (completion.twin) over marketable PAPER
+  twin          the repaired IOC fill replay (completion.fill_replay) over marketable PAPER
                 orders that reached a terminal state AFTER the diagnosis
                 window (fresh: the semantics were derived before these
                 orders existed), against their recorded PAPER outcomes.
@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 
 from . import ev_authority as EVA
 from . import probability_authority as PA
-from . import twin as TW
+from . import fill_replay as TW
 
 #: the Profitability Stack V1 twin receipt's window end (run 37643890985):
 #: orders after it are FRESH for the repaired twin's agreement

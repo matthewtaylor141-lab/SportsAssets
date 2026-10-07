@@ -129,6 +129,11 @@ def test_no_funded_module_imports_the_paper_modules():
                # governed improvement candidates / holdouts (migration 155,
                # REQUIRES_APPROVAL). No order, size, limit or authority effect.
                "revenue_reliability/read.py",
+               # COMPLETION READINESS: the readback reads the paper ledger's
+               # cash / positions and the paper freshness summary inside a
+               # READ ONLY transaction (GET /api/command/completion-readiness);
+               # no order, size, limit or authority effect
+               "completion/read.py",
                "api/command_revenue_reliability.py",
                "agents/revenue_improvements.py",
                # (209) Audrey's coverage integrity, postmortems and the

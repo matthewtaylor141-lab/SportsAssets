@@ -28,7 +28,7 @@ from sportsassets.completion import ev_authority as EVA
 from sportsassets.completion import evidence as EV
 from sportsassets.completion import probability_authority as PA
 from sportsassets.completion import readiness_gate as RG
-from sportsassets.completion import twin as TW
+from sportsassets.completion import fill_replay as TW
 
 ROOT = Path(__file__).resolve().parents[2]
 PKG = ROOT / "research" / "completion_readiness" / "completion_logic"
