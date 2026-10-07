@@ -167,6 +167,14 @@
   status = 200
   force = true
 
+# Read-only completion readiness (the readiness gate, runtime, market data,
+# probability / profitability, agents). Stable management URL.
+[[redirects]]
+  from = "https://command.bettortoken.com/readiness"
+  to = "/command/readiness.html"
+  status = 200
+  force = true
+
 [[redirects]]
   from = "https://command.bettortoken.com/allocator"
   to = "/command/agent.html"

@@ -1,0 +1,13 @@
+/* Completion Readiness -- layered on trader.css + revenue.css; read only. */
+.cr-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.cr-card{border:1px solid var(--line);border-radius:10px;padding:12px 14px;min-width:0}
+.cr-card h3{font-size:13px;margin-bottom:8px;letter-spacing:-.2px}
+.cr-kv{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;font-size:12px}
+.cr-kv dt{color:var(--muted);overflow-wrap:anywhere}
+.cr-kv dd{margin:0;font:11px var(--mono);text-align:right;overflow-wrap:anywhere}
+.cr-ok{color:var(--green)}.cr-bad{color:var(--red)}.cr-unk{color:var(--amber)}
+.cr-blockers{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
+.cr-blockers code{font:10px var(--mono);background:#fdebe8;color:var(--red);padding:4px 7px;border-radius:5px;overflow-wrap:anywhere}
+.cr-owner li{margin-bottom:10px;font-size:12px;line-height:1.55}
+.cr-owner code{font:10px var(--mono);overflow-wrap:anywhere}
+@media(max-width:900px){.cr-grid{grid-template-columns:minmax(0,1fr)}}

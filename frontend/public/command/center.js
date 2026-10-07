@@ -788,6 +788,7 @@
       + '<a class="cc-tab" href="live.html">Legacy mirror</a>'
       /* Revenue readiness reads its own endpoint, so it is its own page. */
       + '<a class="cc-tab" href="revenue.html">Revenue readiness</a>'
+      + '<a class="cc-tab" href="readiness.html">Readiness</a>'
       + '</nav></header>';
   }
 

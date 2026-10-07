@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#03080d">
+  <meta name="description" content="BETTOR Completion Readiness: the readiness gate, runtime, market data, probability, profitability, agents and daily revenue readiness. Read only.">
+  <title>BETTOR · Readiness</title>
+  <link rel="stylesheet" href="trader.css">
+  <link rel="stylesheet" href="revenue.css">
+  <link rel="stylesheet" href="readiness.css">
+  <link rel="stylesheet" href="brand/brand.css">
+  <script defer src="readiness.js"></script>
+</head>
+<body>
+<a class="skip" href="#cr-verdict">Skip to the readiness verdict</a>
+<header class="topbar">
+  <a class="wordmark" href="index.html" aria-label="Back to BETTOR Command"><img class="real-brand-logo" src="brand/bettortoken-logo-white.png" alt="BettorToken"><span class="brand-divider"></span><small>COMMAND</small></a>
+  <nav aria-label="Workspace"><a href="index.html">Command</a><a href="trader.html">Trader mode</a><a href="revenue.html">Revenue</a><a href="readiness.html" aria-current="page">Readiness</a></nav>
+  <div class="top-right"><span class="safe-badge">PAPER / SHADOW</span></div>
+</header>
+<main id="cr-root" data-state="loading">
+  <section class="page-heading">
+    <div><div class="eyebrow">BETTOR COMPLETION READINESS</div><h1>Is BETTOR ready for capital<span class="heading-dot">?</span></h1>
+      <p>PAPER / SHADOW until every input is measured green. Never automatic, and never while a governor says CASH.</p></div>
+    <div class="heading-controls"><span class="rv-status" id="cr-status">Reading…</span><button class="button" id="cr-refresh">Re-read</button></div>
+  </section>
+  <div id="cr-error" class="error" role="alert" hidden></div>
+  <section id="cr-verdict" class="rv-section" aria-label="Readiness verdict"></section>
+  <section id="cr-runtime" class="rv-section" aria-label="Runtime"></section>
+  <section id="cr-market" class="rv-section" aria-label="Market data"></section>
+  <section id="cr-prob" class="rv-section" aria-label="Probability and profitability"></section>
+  <section id="cr-agents" class="rv-section" aria-label="Agents and daily revenue readiness"></section>
+  <section id="cr-gates" class="rv-section" aria-label="Hard gates"></section>
+  <section id="cr-owner" class="rv-section" aria-label="Owner-controlled blockers"></section>
+  <footer id="cr-foot"></footer>
+</main>
+</body>
+</html>
