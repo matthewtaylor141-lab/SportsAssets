@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Forward Profitability Scoreboard Receipt",
+  "type": "object",
+  "required": [
+    "as_of",
+    "implementation_sha",
+    "mechanisms",
+    "routing",
+    "arbitrage",
+    "overall_governor"
+  ],
+  "properties": {
+    "as_of": {
+      "type": "string"
+    },
+    "implementation_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "mechanisms": {
+      "type": "object"
+    },
+    "routing": {
+      "type": "object"
+    },
+    "arbitrage": {
+      "type": "object"
+    },
+    "overall_governor": {
+      "enum": [
+        "CASH",
+        "PAPER_SHADOW_ONLY",
+        "CAPITAL_CANDIDATE"
+      ]
+    }
+  }
+}

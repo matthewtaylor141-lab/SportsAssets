@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Final PM Evidence Input",
+  "type": "object",
+  "required": [
+    "accepted_base_sha",
+    "tested_sha",
+    "release_sha",
+    "deployed_sha"
+  ],
+  "properties": {
+    "accepted_base_sha": {
+      "type": "string"
+    },
+    "tested_sha": {
+      "type": "string"
+    },
+    "release_sha": {
+      "type": "string"
+    },
+    "deployed_sha": {
+      "type": "string"
+    },
+    "paper_pnl": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "profitability_governor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "proven_positive_capacity": {
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

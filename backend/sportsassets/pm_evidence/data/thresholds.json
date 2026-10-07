@@ -1,0 +1,54 @@
+{
+  "version": "FORWARD_PROFITABILITY_SCOREBOARD_THRESHOLDS_V1",
+  "frozen_at": "2026-10-07",
+  "change_policy": "Any threshold change after forward results begin requires a new version and cannot retroactively promote the old cohort.",
+  "global": {
+    "min_priority_freshness_rate": 0.95,
+    "min_held_freshness_rate": 0.95,
+    "min_twin_fill_agreement": 0.95,
+    "max_twin_optimistic_false_fill_rate": 0.01,
+    "max_lookahead_violations": 0,
+    "pnl_reconciliation_tolerance_usd": 0.01,
+    "unknown_fee_allowed": false,
+    "unknown_settlement_allowed": false,
+    "cash_is_valid_champion": true,
+    "turnover_target_may_force_trades": false
+  },
+  "directional": {
+    "min_independent_events": 100,
+    "require_positive_executable_ev_lower_bound": true,
+    "require_market_prior_outperformance_oos": true,
+    "require_event_clustered_validation": true,
+    "require_untouched_holdout": true,
+    "require_positive_forward_pnl_lower_bound": true
+  },
+  "structural_arb": {
+    "min_independent_executed_or_twin_matched_opportunities_for_early_certification": 30,
+    "require_payoff_floor_proven_every_state": true,
+    "require_settlement_identity": true,
+    "require_all_fees_known": true,
+    "require_book_sync": true,
+    "require_positive_profit_after_costs": true,
+    "execution_locked_only_after_both_legs_filled": true
+  },
+  "routing": {
+    "require_all_in_cost_comparison": true,
+    "require_fresh_quotes": true,
+    "allow_equivalent_yes_no_aliases_only_with_payoff_equality": true,
+    "measure_savings_vs_next_best_route": true
+  },
+  "execution": {
+    "require_twin_certified_before_capital_evidence": true,
+    "require_conditional_on_fill_economics": true,
+    "unmeasured_latency_cost_treated_as_zero": false
+  },
+  "management": {
+    "require_frozen_hold_to_settlement_counterfactual": true,
+    "require_frozen_immediate_exit_counterfactual": true,
+    "require_positive_value_add_lower_bound_for_promotion": true
+  },
+  "capacity": {
+    "require_positive_marginal_ev_at_deployed_size": true,
+    "deployment_capped_at_proven_positive_capacity": true
+  }
+}
