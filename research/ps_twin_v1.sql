@@ -5,7 +5,7 @@
 -- order's terminal time (or expiry), each with its observed_at and the top 5
 -- price levels per side. The twin replays these strictly in event-time order.
 WITH o AS (
-  SELECT o.*, d.decided_at, d.p_pinnacle
+  SELECT o.*, d.decided_at AS dec_at, d.p_pinnacle AS dec_p
     FROM paper_orders o
     LEFT JOIN paper_decisions d ON d.decision_id = o.decision_id
    WHERE o.role IN ('ENTRY', 'EXIT', 'REDUCE'))
@@ -14,7 +14,7 @@ SELECT json_build_object(
   'tif', o.time_in_force, 'direction', o.direction, 'side', o.holding_side,
   'slug', o.us_market_slug, 'strategy', o.strategy, 'state', o.state, 'qty', o.qty,
   'limit', o.limit_price, 'queue_ahead', o.queue_ahead_qty,
-  'decided', extract(epoch FROM o.decided_at), 'p_pin', o.p_pinnacle,
+  'decided', extract(epoch FROM o.dec_at), 'p_pin', o.dec_p,
   'created', extract(epoch FROM o.created_at), 'eligible', extract(epoch FROM o.eligible_at),
   'expires', extract(epoch FROM o.expires_at), 'terminal', extract(epoch FROM o.terminal_at),
   'fills', (SELECT json_agg(json_build_object('at', extract(epoch FROM pf.filled_at), 'qty', pf.qty,
@@ -34,7 +34,7 @@ SELECT json_build_object(
                    ORDER BY b.observed_at)
               FROM paper_book_observations b
              WHERE b.error IS NULL AND b.us_market_slug = o.us_market_slug
-               AND b.observed_at >= coalesce(o.decided_at, o.created_at) - interval '180 seconds'
+               AND b.observed_at >= coalesce(o.dec_at, o.created_at) - interval '180 seconds'
                AND b.observed_at <= coalesce(o.terminal_at, o.expires_at) + interval '60 seconds'))
   FROM o
  ORDER BY o.created_at;
