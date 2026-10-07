@@ -554,9 +554,15 @@ def _boot_marker(at: str) -> dict:
 
     from .. import execution_gate as gate
 
+    from .. import procmem
+
     sha = os.environ.get("RENDER_GIT_COMMIT") or "?"
     lock = gate.process_lock()
     return {"commit": sha[:7], "commit_sha": sha, "at": at,
+            # the RSS high-water denominator (cgroup), read, never assumed;
+            # `at` is this process's start, so time-since-restart is
+            # observable beside Render's own OOM events
+            "memory_limit_mb": procmem.limit_mb(), "pid": os.getpid(),
             "venue_writes": "LOCKED" if lock else "NOT_LOCKED",
             "lock_reason": lock,
             "not_started": sorted(VENUE_WRITE_LOOPS),

@@ -268,14 +268,19 @@ STOP_PARTITION_COMPLETE = "PARTITIONED_TO_A_NATURAL_END"
 #: a truncated time window whose partition left buckets unresolved (each
 #: named with its window and why in `partition.unresolved`): TRUNCATED
 STOP_PARTITION_UNRESOLVED = "PARTITION_LEFT_BUCKETS_UNRESOLVED"
+#: (completion readiness) the process crossed its memory budget while pages
+#: were still full (the shared workers were OOM-killed at 2 GiB while broad
+#: catalogue work ran beside the capital-critical loops): TRUNCATED, never
+#: complete -- the next cycle resumes on a lighter process
+STOP_MEMORY_BUDGET = "MEMORY_BUDGET_EXHAUSTED"
 STOPS = (STOP_SHORT_PAGE, STOP_EMPTY_PAGE, STOP_BUDGET, STOP_WALL_TIME,
          STOP_RATE_LIMITED, STOP_ERROR, STOP_NO_VARIANT, STOP_WRITE_FAILURES,
          STOP_NOT_RUN, STOP_OFFSET_CEILING, STOP_PARTITION_COMPLETE,
-         STOP_PARTITION_UNRESOLVED)
+         STOP_PARTITION_UNRESOLVED, STOP_MEMORY_BUDGET)
 NATURAL_ENDS = frozenset({STOP_SHORT_PAGE, STOP_EMPTY_PAGE,
                           STOP_PARTITION_COMPLETE})
 TRUNCATING_STOPS = frozenset({STOP_BUDGET, STOP_WALL_TIME, STOP_OFFSET_CEILING,
-                              STOP_PARTITION_UNRESOLVED})
+                              STOP_PARTITION_UNRESOLVED, STOP_MEMORY_BUDGET})
 
 #: How many events of the previous page each next request reads again. Offset
 #: pagination over a board that changes while it is walked (games closing,
@@ -732,9 +737,14 @@ class PageWalk:
                  overlap: int = PAGE_OVERLAP, start_offset: int = 0,
                  deadline: float | None = None, clock=None,
                  max_offset: int | None = None,
-                 already_read: set | None = None):
+                 already_read: set | None = None,
+                 memory_guard=None):
         import time as _time
 
+        #: (completion readiness) a callable answering True when the process
+        #: is over its memory budget: the walk then stops TRUNCATED
+        #: (MEMORY_BUDGET_EXHAUSTED) before asking for another page
+        self.memory_guard = memory_guard
         self.limit = max(1, int(limit))
         self.max_requests = max(1, int(max_requests))
         self.overlap = max(0, int(overlap))
@@ -811,6 +821,14 @@ class PageWalk:
         if self.deadline is not None and self._clock() >= self.deadline:
             self.stopped = STOP_WALL_TIME
             return None
+        if self.memory_guard is not None:
+            try:
+                over = bool(self.memory_guard())
+            except Exception:                                 # noqa: BLE001
+                over = False
+            if over:
+                self.stopped = STOP_MEMORY_BUDGET
+                return None
         if self.max_offset is not None and self._next > self.max_offset:
             self.stopped = STOP_OFFSET_CEILING
             return None
@@ -1197,6 +1215,13 @@ class WindowPartition:
         if stopped == STOP_WALL_TIME:
             self._unresolved(start, end, depth, STOP_WALL_TIME)
             return
+        if stopped == STOP_MEMORY_BUDGET:
+            # (completion readiness) over the memory budget: this window is
+            # unresolved and no further bucket is walked in this process --
+            # never split (more walks) and never PARTITIONED_TO_A_NATURAL_END
+            self._unresolved(start, end, depth, STOP_MEMORY_BUDGET)
+            self.aborted = STOP_MEMORY_BUDGET
+            return
         if stopped in (STOP_BUDGET, STOP_OFFSET_CEILING):
             if start is None or end is None:
                 self._unresolved(start, end, depth, P_UNBOUNDED)
@@ -1302,6 +1327,8 @@ def apply_partition(pass_receipt: dict, part: WindowPartition) -> dict:
         whys = {u.get("why") for u in pr["unresolved"]} or {None}
         if whys == {STOP_WALL_TIME}:
             out["stopped"] = STOP_WALL_TIME
+        elif whys == {STOP_MEMORY_BUDGET}:
+            out["stopped"] = STOP_MEMORY_BUDGET
         elif whys <= {P_BUDGET, STOP_BUDGET}:
             out["stopped"] = STOP_BUDGET
         else:

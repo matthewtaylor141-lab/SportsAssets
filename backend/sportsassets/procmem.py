@@ -30,6 +30,40 @@ def rss_mb() -> float | None:
     return None
 
 
+def limit_mb() -> float | None:
+    """The container's memory limit in MB (cgroup v2 memory.max, else v1
+    memory.limit_in_bytes), or None when unlimited or unreadable -- the
+    denominator of an RSS high-water fraction, never assumed from a plan."""
+    for path in ("/sys/fs/cgroup/memory.max",
+                 "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                raw = f.read().strip()
+        except OSError:
+            continue
+        if not raw or raw == "max":
+            return None
+        try:
+            v = int(raw)
+        except ValueError:
+            return None
+        # v1 reports "unlimited" as a huge page-aligned number
+        return None if v >= 1 << 60 else round(v / (1024 * 1024), 1)
+    return None
+
+
+def peak_mb() -> float | None:
+    """The process's own RSS high-water (VmHWM) in MB, or None."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmHWM:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def rss_label() -> str:
     """rss_mb() for a log line: the figure, or '?' when there is none,
     so 'rss a->b MB' keeps one grammar wherever it is written."""

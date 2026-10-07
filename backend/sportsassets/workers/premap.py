@@ -126,6 +126,32 @@ EARLIER_MAX_PAGES = int(os.environ.get("PREMAP_EARLIER_PAGES", "40"))
 #: WALL_TIME_BUDGET_EXHAUSTED (truncated, named) -- the lane never runs into
 #: the next 30-minute cycle.
 CALENDAR_MAX_SECONDS = float(os.environ.get("PREMAP_CALENDAR_MAX_S", "900"))
+#: (completion readiness) THE WINDOW WALK'S WALL-TIME BOUND: production
+#: measured the full sweep at ~856 s (~2,086 events, ~64k rows) beside the
+#: capital-critical loops. Past this the window walk stops as
+#: WALL_TIME_BUDGET_EXHAUSTED -- TRUNCATED and partitioned, never complete.
+WINDOW_MAX_SECONDS = float(os.environ.get("PREMAP_WINDOW_MAX_S", "900"))
+#: (completion readiness) THE MEMORY BUDGET: every catalogue walk stops as
+#: MEMORY_BUDGET_EXHAUSTED (TRUNCATED, named) before another page once this
+#: process's RSS crosses this fraction of its own container limit (read from
+#: the cgroup, never assumed). sportsassets-workers was OOM-killed at its
+#: 2 GiB limit; a truncated catalogue is named, an OOM kills held-position
+#: management with it.
+MEMORY_BUDGET_FRACTION = float(os.environ.get("PREMAP_MEMORY_BUDGET_FRACTION",
+                                              "0.80"))
+
+
+def memory_over_budget(rss=None, limit=None) -> bool:
+    """True when RSS >= MEMORY_BUDGET_FRACTION of the container limit. An
+    unreadable figure is not a breach (never a manufactured stop)."""
+    from .. import procmem
+    rss = procmem.rss_mb() if rss is None else rss
+    limit = procmem.limit_mb() if limit is None else limit
+    if not rss or not limit:
+        return False
+    return float(rss) >= MEMORY_BUDGET_FRACTION * float(limit)
+
+
 #: 0 turns the calendar lane off (the window lanes are unaffected).
 CALENDAR_ENABLED = os.environ.get("PREMAP_CALENDAR", "1") not in ("0", "false")
 #: THE PER-EVENT MARKET CAP, REPAIRED WHERE THE BUDGET ALLOWS. When an event's
@@ -7139,7 +7165,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             bw = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_req,
                              deadline=deadline,
                              max_offset=MAX_OFFSET or None,
-                             already_read=shared)
+                             already_read=shared,
+                             memory_guard=memory_over_budget)
             await _walk(pass_name, var, bw)
             r = bw.receipt()
             part.record(lo, hi, depth, r, new_events=max(
@@ -7155,7 +7182,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         bucket_max_requests=max_pages)
     if not calendar:
         wwalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_pages,
-                            max_offset=MAX_OFFSET or None)
+                            max_offset=MAX_OFFSET or None,
+                            deadline=time.monotonic() + max(
+                                1.0, WINDOW_MAX_SECONDS),
+                            memory_guard=memory_over_budget)
         try:
             # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
             # IGNORES the eventSlug filter on markets.list (every queried
@@ -7462,7 +7492,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                         "startTimeMin": _iso(lo), "startTimeMax": _iso(hi)}
                 swalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=left,
                                     deadline=deadline,
-                                    max_offset=MAX_OFFSET or None)
+                                    max_offset=MAX_OFFSET or None,
+                                    memory_guard=memory_over_budget)
                 await _walk(pname, pvar, swalk)
                 left -= swalk.requests
                 shared |= swalk.seen_keys()

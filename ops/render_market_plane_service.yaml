@@ -14,10 +14,20 @@ services:
   # UNIVERSAL_MARKET_PLANE=off on sportsassets-workers so exactly one runtime
   # holds the shards. The PMX_* values are entered in the dashboard (they
   # cannot be copied between services by this blueprint).
+  #
+  # COMPLETION READINESS (venue guidance 2026-10-07): ONE subscribe-all
+  # market-data stream (symbols=[], every instrument; the 20 gRPC streams are
+  # a FIRM-WIDE pool shared with orders, drop copy, positions, balances and
+  # RFQ), sports filtered locally. The books hold the registry's refdata-
+  # listed contracts (bounded by UMP_SUBSCRIBE_ALL_MAX_BOOKS, default
+  # 100,000; ~3.5 KB each at depth 10) -- hence `standard` (2 GB), not
+  # `starter` (512 MB). Secrets: DATABASE_URL and the three PMX_* market-data
+  # values ONLY. No PMX_PARTICIPANT_ID (an account-path identifier): refdata
+  # reads send it only when present.
   - type: worker
     name: sportsassets-market-plane
     runtime: docker
-    plan: starter
+    plan: standard
     rootDir: .
     dockerfilePath: ./backend/Dockerfile
     dockerCommand: python -m sportsassets.workers.universal_market_plane
@@ -33,6 +43,8 @@ services:
       - key: UNIVERSAL_MARKET_PLANE
         value: "on"
       - key: INSTITUTIONAL_MD_STREAM
+        value: "on"
+      - key: UMP_SUBSCRIBE_ALL
         value: "on"
       - key: PMX_CLIENT_ID
         sync: false

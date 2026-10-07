@@ -58,3 +58,24 @@ def test_the_module_it_runs_imports_no_venue_write_path():
     for w in ("place_order", "cancel_order", "submit_order", "create_order",
               "funded_submit"):
         assert w not in src, w
+
+
+def test_its_only_secrets_are_the_database_and_three_pmx_market_data_values():
+    """(completion readiness) the dedicated runtime may receive only
+    DATABASE_URL, PMX_CLIENT_ID, PMX_KEY_ID and PMX_PRIVATE_KEY_B64; every
+    other variable is a plain, non-secret switch written in the spec."""
+    s = _svc("sportsassets-market-plane")
+    env = {e["key"]: e for e in s["envVars"]}
+    secret = {k for k, e in env.items()
+              if e.get("sync") is False or "fromDatabase" in e}
+    assert secret == {"DATABASE_URL", "PMX_CLIENT_ID", "PMX_KEY_ID",
+                      "PMX_PRIVATE_KEY_B64"}
+    assert "PMX_PARTICIPANT_ID" not in env
+    plain = {k: e.get("value") for k, e in env.items() if k not in secret}
+    assert plain == {"MALLOC_ARENA_MAX": "2",
+                     "UMP_RUNTIME": "DEDICATED_READ_ONLY",
+                     "UNIVERSAL_MARKET_PLANE": "on",
+                     "INSTITUTIONAL_MD_STREAM": "on",
+                     "UMP_SUBSCRIBE_ALL": "on"}
+    # the books for the subscribe-all universe do not fit in 512 MB
+    assert s["plan"] in ("standard", "pro")

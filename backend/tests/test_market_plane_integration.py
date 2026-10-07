@@ -302,8 +302,11 @@ def test_the_worker_is_on_by_switch_and_caps_are_configured():
     assert W.enabled({}) is True
     assert W.enabled({"UNIVERSAL_MARKET_PLANE": "off"}) is False
     assert W.caps({}) == (W.DEFAULT_MAX_STREAMS, W.DEFAULT_MAX_PER_STREAM)
+    # (completion readiness) the explicit fallback never takes the firm's
+    # whole pooled 20-stream budget, and never above the documented 1,000
     assert W.caps({"UMP_MAX_STREAMS": "20", "UMP_MAX_PER_STREAM": "5000"}) \
-        == (20, 1000)                     # never above the documented 1,000
+        == (W.EXPLICIT_MAX_STREAMS_CEILING, 1000)
+    assert W.EXPLICIT_MAX_STREAMS_CEILING < W.FIRM_STREAM_BUDGET
 
 
 def test_shard_books_are_running_and_record_the_replacement_instant():

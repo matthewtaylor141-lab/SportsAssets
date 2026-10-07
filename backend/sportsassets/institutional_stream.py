@@ -123,6 +123,24 @@ CHANNEL_OPTIONS = (
 #: The ONLY commands this client ever puts on the wire.
 OUTBOUND_COMMANDS = ("subscribe", "keepalive")
 
+#: SUBSCRIPTION MODES (completion readiness, venue guidance 2026-10-07).
+#: EXPLICIT is this lane's mode: a non-empty symbol list, never the empty
+#: one. SUBSCRIBE_ALL is the dedicated market plane's: ONE stream whose ONE
+#: subscribe carries `symbols=[]` -- the venue's documented "every
+#: instrument" request, recommended for a universe this size -- with the
+#: books filtering locally. Only a transport CONSTRUCTED in subscribe-all
+#: mode may send the empty list, and only as the first request of a
+#: connection; every other request passes the non-empty rule unchanged.
+MODE_EXPLICIT = "EXPLICIT_SYMBOL_LIST"
+MODE_SUBSCRIBE_ALL = "SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST"
+
+#: CLIENT-TO-SERVER PACING. The venue caps client messages at 100/s PER FIRM
+#: (averaged over a minute, short bursts allowed), shared by every stream and
+#: service. One stream here never exceeds OUTBOUND_RATE_PER_S sustained with
+#: a burst of OUTBOUND_BURST: a tenth of the firm cap per stream.
+OUTBOUND_RATE_PER_S = 10.0
+OUTBOUND_BURST = 10
+
 RECONNECT_BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_CONSECUTIVE_FAILURES = 8
 RESTART_AFTER_GAVE_UP_S = 900.0
@@ -203,6 +221,7 @@ class ResidentBooks:
         self._last_life_at = None
         self._messages = 0
         self._stray = 0
+        self._filtered = 0
         self._refusal = None
         self._markets: dict = {}
         self._instruments: dict = {}
@@ -262,6 +281,20 @@ class ResidentBooks:
     def wanted(self) -> list:
         with self._lock:
             return sorted(self._markets)
+
+    def accepts(self, symbol) -> bool:
+        """The local filter of a subscribe-all stream: a symbol this process
+        asked for. Everything else is counted (on_filtered), never held."""
+        with self._lock:
+            return str(symbol or "") in self._markets
+
+    def on_filtered(self, symbol, update=None) -> None:
+        """An update for a symbol nobody here asked for (subscribe-all):
+        proof the stream is alive, nothing more."""
+        with self._lock:
+            self._last_life_at = self._clock()
+            self._messages += 1
+            self._filtered += 1
 
     # ── transport events ──────────────────────────────────────────────
 
@@ -571,6 +604,7 @@ class ResidentBooks:
                     "why": self.state_why, "connection_seq": self._conn_seq,
                     "connected": self._connected, "messages": self._messages,
                     "stray_updates": self._stray,
+                    "filtered_updates": self._filtered,
                     # accepted full book updates (messages also counts
                     # heartbeats and acks)
                     "book_updates": sum(int(m.get("updates") or 0)
@@ -656,9 +690,13 @@ class OutboundRefused(RuntimeError):
     """A client-to-server message this lane does not send."""
 
 
-def _outbound(req):
+def _outbound(req, *, allow_subscribe_all: bool = False):
     """THE ONE GATE every client-to-server message passes. Refuses any
     command but `subscribe` (explicit, non-empty symbols) and `keepalive`.
+    `allow_subscribe_all` admits the EMPTY subscribe (the venue's every-
+    instrument request) and is passed only for the first request of a
+    transport constructed in MODE_SUBSCRIBE_ALL; a subscribe naming symbols
+    must still name only non-empty ones.
     Real protobuf messages are checked by their oneof; a test double without
     WhichOneof is passed through (the builders below are the only callers)."""
     which = getattr(req, "WhichOneof", None)
@@ -668,9 +706,14 @@ def _outbound(req):
     if cmd not in OUTBOUND_COMMANDS:
         raise OutboundRefused("refused: %r is not a command this lane sends"
                               % cmd)
-    if cmd == "subscribe" and not [s for s in req.subscribe.symbols if s]:
-        raise OutboundRefused("refused: an empty subscribe is ALL "
-                              "instruments to the venue")
+    if cmd == "subscribe":
+        syms = list(req.subscribe.symbols)
+        if not syms and not allow_subscribe_all:
+            raise OutboundRefused("refused: an empty subscribe is ALL "
+                                  "instruments to the venue")
+        if syms and not all(syms):
+            raise OutboundRefused("refused: a subscribe naming an empty "
+                                  "symbol")
     return req
 
 
@@ -695,8 +738,20 @@ class GrpcBidiTransport:
 
     def __init__(self, books: ResidentBooks, token_fn, *, target=GRPC_TARGET,
                  depth=DEPTH, modules=None, clock=time.time,
-                 sleep=None, channel_factory=None, invalidate_token=None):
+                 sleep=None, channel_factory=None, invalidate_token=None,
+                 subscribe_all: bool = False):
         self.books = books
+        # MODE_SUBSCRIBE_ALL: one empty-list subscribe per connection, the
+        # books filter locally; subscribe() sends nothing (every instrument
+        # is already on the stream). Fixed at construction.
+        self.subscribe_all = bool(subscribe_all)
+        self.subscription_mode = (MODE_SUBSCRIBE_ALL if self.subscribe_all
+                                  else MODE_EXPLICIT)
+        self._out_tokens = float(OUTBOUND_BURST)
+        self._out_at = time.monotonic()
+        self.outbound = {"sent": 0, "paced": 0, "subscribe": 0,
+                         "keepalive": 0}
+        self.filtered_updates = 0
         self._token_fn = token_fn
         # Drops a cached bearer token so the next token_fn() mints a fresh
         # one. Called once on UNAUTHENTICATED, per the venue's own guidance.
@@ -730,16 +785,26 @@ class GrpcBidiTransport:
         first request of a connection also carries the options the venue
         reads from it (depth; aggregated book; continuous, not snapshot-only;
         slow_consumer_skip_to_head left false, so a slow consumer is
-        DISCONNECTED -- a gap we see -- rather than silently skipped)."""
-        syms = [str(s) for s in symbols or () if str(s or "").strip()]
-        if not syms:
-            raise OutboundRefused("refused: an empty subscribe is ALL "
-                                  "instruments to the venue")
+        DISCONNECTED -- a gap we see -- rather than silently skipped).
+
+        MODE_SUBSCRIBE_ALL: the first request is `symbols=[]` (every
+        instrument) with the same options, and there is no other subscribe."""
+        if self.subscribe_all:
+            if not first:
+                raise OutboundRefused("refused: subscribe-all mode sends one "
+                                      "subscribe per connection")
+            syms = []
+        else:
+            syms = [str(s) for s in symbols or () if str(s or "").strip()]
+            if not syms:
+                raise OutboundRefused("refused: an empty subscribe is ALL "
+                                      "instruments to the venue")
         _g, pb2, _pg, _r = self.mods()
         kw = {"subscribe": pb2.SubscribeCommand(symbols=syms)}
         if first:
             kw["depth"] = self.depth
-        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(**kw))
+        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(**kw),
+                         allow_subscribe_all=self.subscribe_all and first)
 
     def _keepalive_request(self):
         _g, pb2, _pg, _r = self.mods()
@@ -747,7 +812,10 @@ class GrpcBidiTransport:
             keepalive=pb2.KeepAliveCommand()))
 
     def subscribe(self, symbols) -> None:
-        """Queue a subscribe for symbols not already on the stream."""
+        """Queue a subscribe for symbols not already on the stream. In
+        MODE_SUBSCRIBE_ALL nothing is sent: every instrument is on it."""
+        if self.subscribe_all:
+            return
         new = [s for s in symbols or () if s and s not in self._subscribed]
         if not new:
             return
@@ -761,19 +829,44 @@ class GrpcBidiTransport:
         not linger until the next keepalive."""
         last = self._clock()
         q = self._q
-        yield _outbound(first)
+        yield self._count(_outbound(first,
+                                    allow_subscribe_all=self.subscribe_all))
         while not self._stop.is_set() and not (done and done.is_set()):
             try:
                 req = q.get(timeout=0.5)
             except queue.Empty:
                 if self._clock() - last >= KEEPALIVE_S:
                     last = self._clock()
-                    yield self._keepalive_request()
+                    self._pace()
+                    yield self._count(self._keepalive_request())
                 continue
             if req is None:
                 return
             last = self._clock()
-            yield _outbound(req)
+            self._pace()
+            yield self._count(_outbound(req))
+
+    def _pace(self) -> None:
+        """A token bucket under the venue's per-firm client-message cap:
+        OUTBOUND_RATE_PER_S sustained, OUTBOUND_BURST at once. Waits (stop()
+        interrupts) rather than sending early."""
+        now = time.monotonic()
+        self._out_tokens = min(float(OUTBOUND_BURST), self._out_tokens + (
+            now - self._out_at) * OUTBOUND_RATE_PER_S)
+        self._out_at = now
+        if self._out_tokens < 1.0:
+            self.outbound["paced"] += 1
+            self._stop.wait((1.0 - self._out_tokens) / OUTBOUND_RATE_PER_S)
+            self._out_tokens, self._out_at = 1.0, time.monotonic()
+        self._out_tokens -= 1.0
+
+    def _count(self, req):
+        self.outbound["sent"] += 1
+        which = getattr(req, "WhichOneof", None)
+        cmd = which("command") if which else None
+        if cmd in ("subscribe", "keepalive"):
+            self.outbound[cmd] += 1
+        return req
 
     def _channel(self, grpc):
         if self._channel_factory is not None:
@@ -794,8 +887,9 @@ class GrpcBidiTransport:
         self._q = queue.Queue()
         self._subscribed = set()
         symbols = self.books.wanted()
-        if not symbols:
-            # NEVER an empty subscribe: the venue reads it as ALL instruments.
+        if not symbols and not self.subscribe_all:
+            # NEVER an empty subscribe in this mode: the venue reads it as ALL
+            # instruments (only MODE_SUBSCRIBE_ALL asks for that, on purpose).
             self.books.set_state(S_IDLE, "no symbols requested")
             return "idle"
         try:
@@ -882,6 +976,16 @@ class GrpcBidiTransport:
 
     def _dispatch(self, resp, refdata) -> None:
         if _has(resp, "update"):
+            if self.subscribe_all:
+                # LOCAL FILTERING: every instrument arrives; only the books'
+                # own symbols are decoded and held. The rest still prove the
+                # stream alive and are counted, never stored.
+                sym = str(getattr(resp.update, "symbol", "") or "")
+                accepts = getattr(self.books, "accepts", None)
+                if accepts is not None and not accepts(sym):
+                    self.filtered_updates += 1
+                    self.books.on_filtered(sym, resp.update)
+                    return
             self.books.on_update(decode_update(resp.update, refdata),
                                  received_at=self._clock())
         elif _has(resp, "heartbeat"):
