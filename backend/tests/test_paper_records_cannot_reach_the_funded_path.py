@@ -129,6 +129,13 @@ def test_no_funded_module_imports_the_paper_modules():
                # governed improvement candidates / holdouts (migration 155,
                # REQUIRES_APPROVAL). No order, size, limit or authority effect.
                "revenue_reliability/read.py",
+               # RED TEAM CLOSEOUT V1: the canonical exposure lock is CALLED
+               # BY the paper ledger (its ENTRY path, under the account lock)
+               # and reads the ledger's open positions / reservations; the
+               # readiness binding reads the paper book read-only. Neither is
+               # a funded module; neither has an order or authority effect
+               "redteam/exposure.py",
+               "redteam/readiness.py",
                # COMPLETION READINESS: the readback reads the paper ledger's
                # cash / positions and the paper freshness summary inside a
                # READ ONLY transaction (GET /api/command/completion-readiness);

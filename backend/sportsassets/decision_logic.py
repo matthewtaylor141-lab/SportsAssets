@@ -154,7 +154,12 @@ DECISION_LOGIC_FILES = (
     # lost_opportunity/score.py do -- pinned, so a change restarts the
     # forward window rather than slipping under it
     "execution_evidence.py", "settlement_exception_risk.py",
-    "opportunity_score_v2.py")
+    "opportunity_score_v2.py",
+    # RED TEAM CLOSEOUT V1: the canonical exposure lock refuses ENTRY
+    # orders under the ledger's account lock (bettor_paper_ledger ->
+    # redteam.exposure -> the package's claim_exposure)
+    "redteam/exposure.py", "red_team/claim_exposure.py",
+    "red_team/models.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
 #: modules that make the ENTER decision, size it, review a position, and

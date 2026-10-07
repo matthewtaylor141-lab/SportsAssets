@@ -75,6 +75,7 @@ from datetime import datetime, timezone
 from . import bettor_stream_currency as sc
 from . import market_data_identity as mdi
 from . import shadow_l2 as l2
+from .red_team import stream_guard as _RT_STREAM
 
 log = logging.getLogger(__name__)
 
@@ -183,6 +184,8 @@ R_NOT_OPEN = "MARKET_NOT_OPEN"
 R_STATE_UNKNOWN = "MARKET_STATE_UNKNOWN"
 R_CROSSED = "BOOK_CROSSED"
 R_CURRENT = None
+#: the package stream-currency gate refused (Red Team Closeout V1)
+R_STREAM_CURRENCY = "STREAM_CURRENCY_GATE_REFUSED"
 
 _BENIGN_SUBSCRIPTION_ERRORS = ("ALREADY_SUBSCRIBED", "NOT_SUBSCRIBED")
 
@@ -572,6 +575,23 @@ class ResidentBooks:
         if bids and offers and max(b["px"] for b in bids) >= \
                 min(o["px"] for o in offers):
             return refuse(R_CROSSED, "best bid is at or through best offer")
+        # CONNECTED != CURRENT (Red Team Closeout V1): the package's stream
+        # currency gate is the last word -- connected, a complete
+        # authoritative update on THIS connection, no gap, a book inside the
+        # bound. Every check above already implies it; this binds the
+        # contract so a future change cannot quietly drop one of them.
+        sc = _RT_STREAM.stream_currency_gate(
+            connected=bool(connected),
+            complete_snapshot_received=bool(
+                evidence["snapshot"]["on_current_connection"]),
+            gap=bool(gap), book_age_s=age, max_book_age_s=bound,
+            source="PMX_GRPC")
+        evidence["stream_currency"] = {"green": sc["green"],
+                                       "blockers": list(sc["blockers"]),
+                                       "source": sc["source"]}
+        if not sc["green"]:
+            return refuse(R_STREAM_CURRENCY, "stream currency gate: %s"
+                          % ",".join(sc["blockers"]))
         return {"ok": True, "symbol": sym, "refusal": R_CURRENT,
                 "why": "full update %.1f s old on connection %s, alive %.1f s "
                        "ago" % (age, seq, silence),

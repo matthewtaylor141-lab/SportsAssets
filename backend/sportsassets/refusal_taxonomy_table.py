@@ -1485,6 +1485,14 @@ TABLE = {
     "KALSHI_MD_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
     "KALSHI_MD_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
     "CLAIMS_NOT_COMPLEMENTARY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (315) Red Team Closeout V1: the package's stream-currency gate as the
+    # institutional stream's last word; the canonical exposure lock's
+    # refusals (an ENTRY carrying its canonical claim / event past the
+    # existing fixture cap; an unreadable exposure refuses)
+    "STREAM_CURRENCY_GATE_REFUSED": (S, FRESH, "VENUE_BOOK"),
+    "ABOVE_THE_CANONICAL_CLAIM_EXPOSURE_CAP": (E, RAIL, "ORDER"),
+    "ABOVE_THE_CANONICAL_EVENT_EXPOSURE_CAP": (E, RAIL, "ORDER"),
+    "CANONICAL_EXPOSURE_UNREADABLE": (S, DATA, "ORDER"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
