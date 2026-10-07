@@ -1,0 +1,66 @@
+{
+ "kind": "BETTOR_STRUCTURAL_ARB",
+ "payload": {
+  "complement": {
+   "best_guaranteed_profit": -0.014900000000000135,
+   "checked": 257,
+   "locked_after_fees": 0,
+   "measured": 257,
+   "median_cost": 1.0397
+  },
+  "cross_venue": {
+   "kalshi_registry": 5969,
+   "pmus_registry": 66511,
+   "reason": "KALSHI_CONTRACTS_IN_REGISTRY_HAVE_NO_RECORDED_BOOKS",
+   "status": "UNMEASURED"
+  },
+  "decision_rows": {
+   "event_buckets_scanned": 112,
+   "legs_scanned": 257
+  },
+  "eligible_locked_baskets": 0,
+  "exhaustive_baskets": {
+   "checked": 0,
+   "rows": []
+  },
+  "implication_bounds": {
+   "eligible_violations": 0,
+   "pairs": 0,
+   "rows": [],
+   "violations_after_costs": 0
+  },
+  "module": "STRUCTURAL_ARB",
+  "provenance": {
+   "authority": "RESEARCH_PAPER_SHADOW_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY",
+   "code_sha256": "c57d9a1d3d92e1d16e60c8eea2869052bb8f1625a3ff637e10e57d7b2ac84a27",
+   "datasets": {
+    "arb": {
+     "query": "ps_arb_v1.sql",
+     "query_sha256": "83da7d4518f80bba5d86115699db057db75f0441dbe1bac2475c6715921dacb7",
+     "research_sql_run_id": "37638235741",
+     "rows": 112,
+     "sha256_of_jsonl": "5b2fa17c1a704459fdbc4a23d5e45c0cf1f6bddfc7541fb67c41ee214bcf9a14"
+    }
+   },
+   "generated_at": "2026-10-07T15:40:00Z"
+  },
+  "reasons": {
+   "NO_COMPLEMENT_LOCK_AFTER_FEES": 1,
+   "NO_LEG_HAS_PROVEN_SETTLEMENT_IDENTITY": 1,
+   "NO_ONTOLOGY_STATED_EXHAUSTIVE_PARTITION_WITH_BOOKS": 1,
+   "NO_SAME_TOTAL_MULTI_LINE_PAIRS_IN_WINDOW": 1
+  },
+  "registry_settlement_states_of_scanned_legs": {
+   "MAPPED_BUT_SETTLEMENT_NOT_PROVEN": 163,
+   "SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED": 94
+  },
+  "result": "NO_ELIGIBLE_STRUCTURAL_ARB",
+  "unique_independent_events": 22,
+  "window": {
+   "from": "2026-10-05T23:00:00Z",
+   "to": "2026-10-07T14:35:00Z"
+  }
+ },
+ "sha256": "d158e35d7488fdb441acad973ddb3fc8da380896c6910078dc57f07e4ef5ff49",
+ "version": "bettor-adapter-v1"
+}

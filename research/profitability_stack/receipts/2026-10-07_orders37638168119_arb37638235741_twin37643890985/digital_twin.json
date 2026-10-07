@@ -1,0 +1,579 @@
+{
+ "kind": "BETTOR_DIGITAL_TWIN",
+ "payload": {
+  "book_events_replayed": 6466,
+  "by_role": {
+   "ENTRY": {
+    "False/False": 4,
+    "False/True": 26,
+    "True/False": 160,
+    "True/True": 491
+   },
+   "EXIT": {
+    "False/False": 15,
+    "False/True": 9,
+    "True/False": 34,
+    "True/True": 33
+   },
+   "REDUCE": {
+    "False/True": 1,
+    "True/False": 6,
+    "True/True": 9
+   }
+  },
+  "decision_logic_mode": "RECORDED_PRODUCTION_DECISIONS",
+  "decision_rows": {
+   "not_replayable": {},
+   "orders_input": 788,
+   "replayed": 788
+  },
+  "decisions_with_no_book_before_decision": 23,
+  "fill_agreement": {
+   "TWIN_FILL_PAPER_FILL": 533,
+   "TWIN_FILL_PAPER_NOFILL": 200,
+   "TWIN_NOFILL_PAPER_FILL": 36,
+   "TWIN_NOFILL_PAPER_NOFILL": 19
+  },
+  "fill_agreement_rate": 0.700507614213198,
+  "latency_basis": {
+   "cancel_basis": "PAPER_SIMULATOR median",
+   "cancel_s": 51.06414604187012,
+   "submit": "PAPER_SIMULATOR eligible_at - decided_at, per order"
+  },
+  "module": "DIGITAL_TWIN",
+  "no_lookahead_violations": 0,
+  "provenance": {
+   "authority": "RESEARCH_PAPER_SHADOW_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY",
+   "code_sha256": "c57d9a1d3d92e1d16e60c8eea2869052bb8f1625a3ff637e10e57d7b2ac84a27",
+   "datasets": {
+    "orders": {
+     "query": "ps_orders_v1.sql",
+     "query_sha256": "ee3e2047961454262fe466f99c86f0ac237a6e941c0dbc8bc5593fbb4fff10a8",
+     "research_sql_run_id": "37638168119",
+     "rows": 11445,
+     "sha256_of_jsonl": "dccccefd0a04b69bc114880ee906f0d3f69ef6818908baf311136bfe28f27dd6"
+    },
+    "twin": {
+     "query": "ps_twin_v1.sql",
+     "query_sha256": "c617f407b06d2814fb71fde875ab95331eee9b79367a1917d0087f585045da93",
+     "research_sql_run_id": "37643890985",
+     "rows": 788,
+     "sha256_of_jsonl": "67d788f8f8aefa7877b5fed92d36dd2522aed60ab5855eacafdd0d5e54ff5ac2"
+    }
+   },
+   "generated_at": "2026-10-07T15:40:00Z"
+  },
+  "sample": [
+   {
+    "book_events": 4,
+    "books_before_decision": 3,
+    "event": "mlb-sd-mil-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:9e13a780ab5ee23eb85c2c95",
+    "paper_first_fill": 1790887348.821021,
+    "paper_qty": 144.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.67,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790887345.661511,
+    "twin_qty": 144.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.665
+   },
+   {
+    "book_events": 5,
+    "books_before_decision": 3,
+    "event": "mlb-phi-atl-2026-10-01",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:8a1e6a2f7a5eca891c152f1c",
+    "paper_first_fill": 1790887413.350124,
+    "paper_qty": 188.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.51,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790887348.471409,
+    "twin_qty": 188.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.505
+   },
+   {
+    "book_events": 3,
+    "books_before_decision": 1,
+    "event": "mlb-cws-cle-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:bf7a77cfb226769092d3d9ac",
+    "paper_first_fill": 1790887413.350124,
+    "paper_qty": 163.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.59,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [],
+    "twin_first_fill": null,
+    "twin_qty": 0,
+    "twin_state": "CANCELLED",
+    "twin_vwap": null
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 2,
+    "event": "mlb-nyy-tb-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:5893921e98fea2c6ec7e17dd",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790888266.239366,
+    "twin_qty": 172.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.5549999999999999
+   },
+   {
+    "book_events": 4,
+    "books_before_decision": 2,
+    "event": "mlb-nyy-tb-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:a759c827c6cc23e90ec9206e",
+    "paper_first_fill": 1790889171.091161,
+    "paper_qty": 172.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.56,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790889156.25459,
+    "twin_qty": 172.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.5549999999999999
+   },
+   {
+    "book_events": 4,
+    "books_before_decision": 2,
+    "event": "unl-wal-den-2026-10-04",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:efdc3e515e7b2c1151ffcc9f",
+    "paper_first_fill": 1790890083.000812,
+    "paper_qty": 380.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.25,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790890069.070441,
+    "twin_qty": 380.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.25
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 2,
+    "event": "brb-acg-afc-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:1f2d4e013972c01b195223c3",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790890989.729569,
+    "twin_qty": 136.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.71
+   },
+   {
+    "book_events": 5,
+    "books_before_decision": 2,
+    "event": "brb-bot-vln-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:d4e49bb367fcb13deafd8a6e",
+    "paper_first_fill": 1790891140.273697,
+    "paper_qty": 238.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.4,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790891003.783966,
+    "twin_qty": 238.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.4
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 1,
+    "event": "brb-acg-afc-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:ccd1b1899117533e4d4f341f",
+    "paper_first_fill": 1790894575.518858,
+    "paper_qty": 136.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.71,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790894496.908333,
+    "twin_qty": 136.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.71
+   },
+   {
+    "book_events": 4,
+    "books_before_decision": 0,
+    "event": "mlb-phi-atl-2026-10-01",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:aea43d7f15656fa7f2f58e43",
+    "paper_first_fill": 1790905661.489681,
+    "paper_qty": 5102.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.96,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790905598.806799,
+    "twin_qty": 5102.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.96
+   },
+   {
+    "book_events": 5,
+    "books_before_decision": 1,
+    "event": "mlb-phi-atl-2026-10-01",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:71230622b93634eea672c860",
+    "paper_first_fill": 1790906448.571459,
+    "paper_qty": 5102.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.9594620932967465,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": true,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790906376.780852,
+    "twin_qty": 5102.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.92
+   },
+   {
+    "book_events": 3,
+    "books_before_decision": 2,
+    "event": "unl-gre-ger-2026-10-04",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:a8c16a255bb5eba66fd3b58a",
+    "paper_first_fill": 1790911075.715609,
+    "paper_qty": 2957.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.26,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790911061.212119,
+    "twin_qty": 2957.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.26
+   },
+   {
+    "book_events": 3,
+    "books_before_decision": 2,
+    "event": "unl-por-nor-2026-10-04",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:4e19a5d339fe14c05cc27187",
+    "paper_first_fill": 1790912874.251481,
+    "paper_qty": 416.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.59,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790912859.445657,
+    "twin_qty": 416.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.59
+   },
+   {
+    "book_events": 1,
+    "books_before_decision": 1,
+    "event": "unl-fra-ita-2026-10-02",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:e014ccf0e5c0848c331d723f",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790914654.60856,
+    "twin_qty": 1408.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.69
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 2,
+    "event": "brb-cui-pop-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:63c9d4610633e4ae530d5728",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790915578.820556,
+    "twin_qty": 1149.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.85
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 1,
+    "event": "brb-ava-csc-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:28d311b8ce62346d27e0828a",
+    "paper_first_fill": 1790915595.444789,
+    "paper_qty": 2370.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.39,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790915583.055786,
+    "twin_qty": 2370.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.39
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 2,
+    "event": "brb-lon-cri-2026-10-02",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:2528be4249f15aa722dbafe1",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790916435.91138,
+    "twin_qty": 286.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.32
+   },
+   {
+    "book_events": 1,
+    "books_before_decision": 1,
+    "event": "brb-cui-pop-2026-10-03",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:a2c3f97758f70ba605a98314",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790916437.161344,
+    "twin_qty": 1149.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.85
+   },
+   {
+    "book_events": 2,
+    "books_before_decision": 2,
+    "event": "brb-lon-cri-2026-10-02",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:71d854ec277d1060b68cb9db",
+    "paper_first_fill": null,
+    "paper_qty": 0,
+    "paper_state": "EXPIRED",
+    "paper_vwap": null,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790917336.190589,
+    "twin_qty": 286.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.32
+   },
+   {
+    "book_events": 5,
+    "books_before_decision": 2,
+    "event": "brb-ber-crb-2026-10-02",
+    "no_lookahead_violations": 0,
+    "order_id": "paperord:05fc0f47612f9033ca2e7304",
+    "paper_first_fill": 1790917483.762876,
+    "paper_qty": 2564.0,
+    "paper_state": "FILLED",
+    "paper_vwap": 0.37,
+    "role": "ENTRY",
+    "status": "REPLAYED",
+    "strategy": "PINNACLE_EXPLORATION_PAPER",
+    "submit_latency_s": 2.0,
+    "tif": "IOC",
+    "touch_smaller_than_order": false,
+    "twin_fill_reasons": [
+     "CROSSED_AT_ACK"
+    ],
+    "twin_first_fill": 1790917349.774659,
+    "twin_qty": 2564.0,
+    "twin_state": "FILLED",
+    "twin_vwap": 0.37
+   }
+  ],
+  "touch_smaller_than_order_on_twin_fill": 94,
+  "twin_fill_paper_nofill_by_paper_state": {
+   "EXPIRED/IOC": 200
+  },
+  "twin_minus_paper_first_fill_s": {
+   "mean": -21.50182597319583,
+   "median": -10.741037130355835,
+   "n": 533,
+   "p10": -55.007316207885744,
+   "p90": -0.740183210372924
+  },
+  "twin_minus_paper_vwap": {
+   "mean": -8.403543806791405e-07,
+   "median": 0.0,
+   "n": 533,
+   "p10": -0.0050000000000001155,
+   "p90": 0.0
+  },
+  "twin_nofill_paper_fill_by_twin_state": {
+   "CANCELLED/IOC": 36
+  },
+  "unique_independent_events": 139,
+  "unmeasured": {
+   "depth_partial_fill_at_cross": "PACKAGE_FILLS_FULL_REMAINDER_AT_TOUCH; flagged above",
+   "trade_tape": "NO_TRADE_RECORDS: resting queue consumption and resting partial fills"
+  },
+  "window": {
+   "from": "2026-10-01T20:42:23Z",
+   "to": "2026-10-07T14:56:26Z"
+  }
+ },
+ "sha256": "5700f08597fa94a0f009a09cd9719d427bf40d4267867f48ea18f8fca637c8f2",
+ "version": "bettor-adapter-v1"
+}

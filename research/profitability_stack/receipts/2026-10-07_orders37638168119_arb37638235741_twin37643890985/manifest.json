@@ -1,0 +1,57 @@
+{
+ "authority": "RESEARCH_PAPER_SHADOW_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY",
+ "code_sha256": "c57d9a1d3d92e1d16e60c8eea2869052bb8f1625a3ff637e10e57d7b2ac84a27",
+ "datasets": {
+  "arb": {
+   "query": "ps_arb_v1.sql",
+   "query_sha256": "83da7d4518f80bba5d86115699db057db75f0441dbe1bac2475c6715921dacb7",
+   "research_sql_run_id": "37638235741",
+   "rows": 112,
+   "sha256_of_jsonl": "5b2fa17c1a704459fdbc4a23d5e45c0cf1f6bddfc7541fb67c41ee214bcf9a14"
+  },
+  "decisions": {
+   "path": "research/alpha_proof_lab/receipts/2026-10-07_run37625484193/dataset.jsonl.gz",
+   "query": "apl_extract_v1.sql",
+   "query_sha256": "3ce7da0cd15d9f70b42e6936fb6ba4bfbc77f55f0ad73a19ccacdd9c09db5efd",
+   "rows": 12020,
+   "sha256_of_dataset_file": "b1ed2e432c897b5b0f009fb53acb74f02814f31e6d4dd11361fdaee2b6ade76b"
+  },
+  "orders": {
+   "query": "ps_orders_v1.sql",
+   "query_sha256": "ee3e2047961454262fe466f99c86f0ac237a6e941c0dbc8bc5593fbb4fff10a8",
+   "research_sql_run_id": "37638168119",
+   "rows": 11445,
+   "sha256_of_jsonl": "dccccefd0a04b69bc114880ee906f0d3f69ef6818908baf311136bfe28f27dd6"
+  },
+  "twin": {
+   "query": "ps_twin_v1.sql",
+   "query_sha256": "c617f407b06d2814fb71fde875ab95331eee9b79367a1917d0087f585045da93",
+   "research_sql_run_id": "37643890985",
+   "rows": 788,
+   "sha256_of_jsonl": "67d788f8f8aefa7877b5fed92d36dd2522aed60ab5855eacafdd0d5e54ff5ac2"
+  }
+ },
+ "generated_at": "2026-10-07T15:40:00Z",
+ "receipts": {
+  "digital_twin": {
+   "file_sha256": "2af2d48e220e969e8659ac78191280754f8b6361e2bc4b19bb999faff60e01b0",
+   "receipt_sha256": "5700f08597fa94a0f009a09cd9719d427bf40d4267867f48ea18f8fca637c8f2"
+  },
+  "execution_truth": {
+   "file_sha256": "45c43c31e34bbfb10ad9bb0c6e2485f1b5a0ce351e14164b24f6a9ce56203560",
+   "receipt_sha256": "bd66d0d0b22f386c8195567c829138df4c643299352cfc9a70b6734ae1425094"
+  },
+  "pnl_attribution": {
+   "file_sha256": "b21a9048b124417b1e6ed74094b43d7f27dd00c853011e9b829abfad4b8dbc7b",
+   "receipt_sha256": "56c31c84d6ac8ce86dac9737ce2d834f6a0a309a1db471f811d848ef650326a9"
+  },
+  "profitability_governor": {
+   "file_sha256": "e1c72a099b95d8ba5a7bb9b1eb4d1eb3c24cb1e6acb1726e0df8184ca928df51",
+   "receipt_sha256": "58643a388cd1458c14ad1359908a087948913fe7b4f1b7cd262749e17892b451"
+  },
+  "structural_arb": {
+   "file_sha256": "6a545356dc7c2712d86cff16e981442378baebd3ae28f58bcefd4cfcedc28210",
+   "receipt_sha256": "d158e35d7488fdb441acad973ddb3fc8da380896c6910078dc57f07e4ef5ff49"
+  }
+ }
+}

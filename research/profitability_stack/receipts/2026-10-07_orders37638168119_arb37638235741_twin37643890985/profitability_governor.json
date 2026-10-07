@@ -1,0 +1,365 @@
+{
+ "kind": "BETTOR_PROFITABILITY_GOVERNOR",
+ "payload": {
+  "allocation_fraction": {
+   "CASH": 1.0
+  },
+  "capital_reason": "NO_STRATEGY_GRADUATED: CASH is the required result while positive executable expectancy is not proven",
+  "capital_status": "CASH",
+  "decision_rows": {
+   "open_positions_excluded": 12,
+   "paper_decisions_by_strategy": {
+    "DEREK_ENTRY_POLICY_V2": 3905,
+    "PINNACLE_COMPLETED_GAME_PAPER": 6451,
+    "PINNACLE_EXPLORATION_PAPER": 1664
+   },
+   "settled_positions": 505
+  },
+  "event_identity_sources": {
+   "PREMAP_EVENT_SLUG": 122,
+   "SLUG_DERIVED": 383
+  },
+  "module": "PROFITABILITY_GOVERNOR",
+  "observation_bounds_per_contract": [
+   -1.1,
+   1.0
+  ],
+  "provenance": {
+   "authority": "RESEARCH_PAPER_SHADOW_ONLY_NO_ORDER_NO_CAPITAL_AUTHORITY",
+   "code_sha256": "c57d9a1d3d92e1d16e60c8eea2869052bb8f1625a3ff637e10e57d7b2ac84a27",
+   "datasets": {
+    "decisions": {
+     "path": "research/alpha_proof_lab/receipts/2026-10-07_run37625484193/dataset.jsonl.gz",
+     "query": "apl_extract_v1.sql",
+     "query_sha256": "3ce7da0cd15d9f70b42e6936fb6ba4bfbc77f55f0ad73a19ccacdd9c09db5efd",
+     "rows": 12020,
+     "sha256_of_dataset_file": "b1ed2e432c897b5b0f009fb53acb74f02814f31e6d4dd11361fdaee2b6ade76b"
+    },
+    "orders": {
+     "query": "ps_orders_v1.sql",
+     "query_sha256": "ee3e2047961454262fe466f99c86f0ac237a6e941c0dbc8bc5593fbb4fff10a8",
+     "research_sql_run_id": "37638168119",
+     "rows": 11445,
+     "sha256_of_jsonl": "dccccefd0a04b69bc114880ee906f0d3f69ef6818908baf311136bfe28f27dd6"
+    }
+   },
+   "generated_at": "2026-10-07T15:40:00Z"
+  },
+  "settlement_evidence": {
+   "all_traded_contracts_proven_compatible": false,
+   "reason": "NO_SCANNED_REGISTRY_CONTRACT_IS_SETTLEMENT_PROVEN_COMPATIBLE",
+   "registry_states_seen_in_arb_scan": {
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN": 163,
+    "SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED": 94
+   }
+  },
+  "strategies": {
+   "DEREK_ENTRY_POLICY_V2": {
+    "all_blockers": [
+     "INSUFFICIENT_INDEPENDENT_FORWARD_EVENTS",
+     "SETTLEMENT_IDENTITY_NOT_PROVEN",
+     "CALIBRATION_NOT_PROVEN",
+     "EXECUTION_ECONOMICS_NOT_PROVEN",
+     "POSITIVE_FORWARD_LOWER_BOUND_NOT_PROVEN",
+     "NO_EXECUTABLE_POSITIVE_CAPACITY"
+    ],
+    "by_family_regime": {
+     "BASEBALL_TEAM_FULL_GAME_WINNER|PREGAME": {
+      "events": 3,
+      "positions": 5,
+      "realized_pnl_usd": 95.69199999999948
+     },
+     "HOCKEY_TEAM_FULL_GAME_SPREAD|PREGAME": {
+      "events": 1,
+      "positions": 1,
+      "realized_pnl_usd": 16.109999999999985
+     },
+     "MONEYLINE|REGIME_UNKNOWN": {
+      "events": 6,
+      "positions": 46,
+      "realized_pnl_usd": -4353.3799
+     },
+     "SOCCER_TEAM_FULL_TIME_WINNER|PREGAME": {
+      "events": 3,
+      "positions": 4,
+      "realized_pnl_usd": -1254.08
+     },
+     "SPREAD|REGIME_UNKNOWN": {
+      "events": 9,
+      "positions": 10,
+      "realized_pnl_usd": -3796.5002
+     },
+     "TEAM_TO_WIN_3WAY|REGIME_UNKNOWN": {
+      "events": 30,
+      "positions": 75,
+      "realized_pnl_usd": -4584.3839
+     },
+     "TOTAL|REGIME_UNKNOWN": {
+      "events": 3,
+      "positions": 3,
+      "realized_pnl_usd": 15.963199999999938
+     }
+    },
+    "calibration": {
+     "event_ece": 0.2864778750737417,
+     "events": 29,
+     "interval_90": [
+      -0.5229783587684106,
+      -0.18757984969629882
+     ],
+     "mean_outcome_minus_p": -0.3552791042323547,
+     "ok": false,
+     "reasons": [
+      "FEWER_THAN_100_SETTLED_EVENTS",
+      "OUTCOME_MINUS_P_INTERVAL_EXCLUDES_ZERO",
+      "EVENT_LEVEL_ECE_ABOVE_0.05"
+     ],
+     "rows": 65
+    },
+    "capacity_usd": {
+     "status": "UNMEASURED_TREATED_AS_ZERO",
+     "value": 0.0
+    },
+    "capital_reason": "INSUFFICIENT_INDEPENDENT_FORWARD_EVENTS",
+    "capital_status": "SHADOW_ONLY",
+    "cost_usd": 66525.27189999999,
+    "decision_rows_total": 3905,
+    "evidence_state": {
+     "alpha_spent": 1.885369532428356e-05,
+     "lower_bound": -0.802001738958288,
+     "mean": -0.09467111604091787,
+     "n": 51,
+     "reason": "CONFIDENCE_SEQUENCE_CROSSES_ZERO",
+     "status": "UNRESOLVED",
+     "upper_bound": 0.6126595068764523
+    },
+    "execution": {
+     "evaluation_actions": {
+      "MAKE": 49,
+      "REFUSE": 1027,
+      "WAIT": 59
+     },
+     "ok": false,
+     "reason": "NON_REFUSED_PATHS_REALIZED_LOWER_BOUND_NOT_POSITIVE"
+    },
+    "realized_pnl_usd": -13860.578800000001,
+    "settled_positions": 144,
+    "settlement_ok": false,
+    "unique_independent_events": 51
+   },
+   "PINNACLE_COMPLETED_GAME_PAPER": {
+    "all_blockers": [
+     "INSUFFICIENT_INDEPENDENT_FORWARD_EVENTS",
+     "SETTLEMENT_IDENTITY_NOT_PROVEN",
+     "CALIBRATION_NOT_PROVEN",
+     "EXECUTION_ECONOMICS_NOT_PROVEN",
+     "POSITIVE_FORWARD_LOWER_BOUND_NOT_PROVEN",
+     "NO_EXECUTABLE_POSITIVE_CAPACITY"
+    ],
+    "by_family_regime": {
+     "MONEYLINE|REGIME_UNKNOWN": {
+      "events": 8,
+      "positions": 21,
+      "realized_pnl_usd": -1681.960199999999
+     },
+     "SOCCER_TEAM_FULL_TIME_WINNER|PREGAME": {
+      "events": 6,
+      "positions": 8,
+      "realized_pnl_usd": -639.5500000000001
+     },
+     "SPREAD|REGIME_UNKNOWN": {
+      "events": 1,
+      "positions": 1,
+      "realized_pnl_usd": 0.8899999999999959
+     },
+     "TEAM_TO_WIN_3WAY|REGIME_UNKNOWN": {
+      "events": 23,
+      "positions": 32,
+      "realized_pnl_usd": -468.9399999999999
+     },
+     "TOTAL|REGIME_UNKNOWN": {
+      "events": 1,
+      "positions": 1,
+      "realized_pnl_usd": 0.020000000000000046
+     }
+    },
+    "calibration": {
+     "event_ece": 0.22716073154553532,
+     "events": 15,
+     "interval_90": [
+      -0.3438147144756264,
+      -0.05957760766654324
+     ],
+     "mean_outcome_minus_p": -0.20169616107108482,
+     "ok": false,
+     "reasons": [
+      "FEWER_THAN_100_SETTLED_EVENTS",
+      "OUTCOME_MINUS_P_INTERVAL_EXCLUDES_ZERO",
+      "EVENT_LEVEL_ECE_ABOVE_0.05"
+     ],
+     "rows": 16
+    },
+    "capacity_usd": {
+     "status": "UNMEASURED_TREATED_AS_ZERO",
+     "value": 0.0
+    },
+    "capital_reason": "INSUFFICIENT_INDEPENDENT_FORWARD_EVENTS",
+    "capital_status": "SHADOW_ONLY",
+    "cost_usd": 33646.016299999996,
+    "decision_rows_total": 6451,
+    "evidence_state": {
+     "alpha_spent": 3.556187766714083e-05,
+     "lower_bound": -0.8647906885565902,
+     "mean": -0.057443837948721634,
+     "n": 37,
+     "reason": "CONFIDENCE_SEQUENCE_CROSSES_ZERO",
+     "status": "UNRESOLVED",
+     "upper_bound": 0.7499030126591469
+    },
+    "execution": {
+     "evaluation_actions": {
+      "MAKE": 57,
+      "REFUSE": 1250,
+      "WAIT": 92
+     },
+     "ok": false,
+     "reason": "NON_REFUSED_PATHS_REALIZED_LOWER_BOUND_NOT_POSITIVE"
+    },
+    "realized_pnl_usd": -2789.540199999999,
+    "settled_positions": 63,
+    "settlement_ok": false,
+    "unique_independent_events": 37
+   },
+   "PINNACLE_EXPLORATION_PAPER": {
+    "all_blockers": [
+     "SETTLEMENT_IDENTITY_NOT_PROVEN",
+     "CALIBRATION_NOT_PROVEN",
+     "EXECUTION_ECONOMICS_NOT_PROVEN",
+     "POSITIVE_FORWARD_LOWER_BOUND_NOT_PROVEN",
+     "NO_EXECUTABLE_POSITIVE_CAPACITY"
+    ],
+    "by_family_regime": {
+     "BASEBALL_TEAM_FULL_GAME_WINNER|PREGAME": {
+      "events": 4,
+      "positions": 9,
+      "realized_pnl_usd": -167.0876000000003
+     },
+     "BASEBALL_TEAM_TOTAL_RUNS|PREGAME": {
+      "events": 1,
+      "positions": 1,
+      "realized_pnl_usd": 1.14
+     },
+     "BASKETBALL_TEAM_FULL_GAME_SPREAD|PREGAME": {
+      "events": 2,
+      "positions": 4,
+      "realized_pnl_usd": -117.26999999999998
+     },
+     "FOOTBALL_TEAM_FULL_GAME_SPREAD|PREGAME": {
+      "events": 1,
+      "positions": 2,
+      "realized_pnl_usd": -119.86999999999992
+     },
+     "FOOTBALL_TEAM_FULL_GAME_TOTAL|PREGAME": {
+      "events": 1,
+      "positions": 2,
+      "realized_pnl_usd": -195.41999999999996
+     },
+     "FOOTBALL_TEAM_FULL_GAME_WINNER|PREGAME": {
+      "events": 9,
+      "positions": 9,
+      "realized_pnl_usd": -438.52080000000024
+     },
+     "FOOTBALL_TEAM_POINTS_FULL_GAME_TOTAL|PREGAME": {
+      "events": 2,
+      "positions": 3,
+      "realized_pnl_usd": -287.7099000000001
+     },
+     "HOCKEY_TEAM_FULL_GAME_SPREAD|PREGAME": {
+      "events": 1,
+      "positions": 1,
+      "realized_pnl_usd": 2.719999999999999
+     },
+     "MONEYLINE|REGIME_UNKNOWN": {
+      "events": 14,
+      "positions": 30,
+      "realized_pnl_usd": -2962.4999000000003
+     },
+     "SOCCER_TEAM_FULL_TIME_WINNER|PREGAME": {
+      "events": 37,
+      "positions": 73,
+      "realized_pnl_usd": -6427.15
+     },
+     "SPREAD|REGIME_UNKNOWN": {
+      "events": 11,
+      "positions": 22,
+      "realized_pnl_usd": -4617.2104
+     },
+     "TEAM_TO_WIN_3WAY|REGIME_UNKNOWN": {
+      "events": 54,
+      "positions": 128,
+      "realized_pnl_usd": -9177.9789
+     },
+     "TOTAL|REGIME_UNKNOWN": {
+      "events": 5,
+      "positions": 14,
+      "realized_pnl_usd": -2983.6
+     }
+    },
+    "calibration": {
+     "event_ece": 0.24149608356021185,
+     "events": 82,
+     "interval_90": [
+      -0.2611876624929242,
+      -0.16697628040346674
+     ],
+     "mean_outcome_minus_p": -0.21408197144819546,
+     "ok": false,
+     "reasons": [
+      "FEWER_THAN_100_SETTLED_EVENTS",
+      "OUTCOME_MINUS_P_INTERVAL_EXCLUDES_ZERO",
+      "EVENT_LEVEL_ECE_ABOVE_0.05"
+     ],
+     "rows": 113
+    },
+    "capacity_usd": {
+     "status": "UNMEASURED_TREATED_AS_ZERO",
+     "value": 0.0
+    },
+    "capital_reason": "SETTLEMENT_IDENTITY_NOT_PROVEN",
+    "capital_status": "SHADOW_ONLY",
+    "cost_usd": 127357.4762,
+    "decision_rows_total": 1664,
+    "evidence_state": {
+     "alpha_spent": 2.8480291638186375e-06,
+     "lower_bound": -0.6162038054767346,
+     "mean": -0.14199172161557017,
+     "n": 132,
+     "reason": "CONFIDENCE_SEQUENCE_CROSSES_ZERO",
+     "status": "UNRESOLVED",
+     "upper_bound": 0.33222036224559426
+    },
+    "execution": {
+     "evaluation_actions": {
+      "MAKE": 36,
+      "REFUSE": 864,
+      "WAIT": 91
+     },
+     "ok": false,
+     "reason": "NON_REFUSED_PATHS_REALIZED_LOWER_BOUND_NOT_POSITIVE"
+    },
+    "realized_pnl_usd": -27490.4575,
+    "settled_positions": 298,
+    "settlement_ok": false,
+    "unique_independent_events": 132
+   }
+  },
+  "unique_independent_events": 132,
+  "unit_of_analysis": "CANONICAL_EVENT (positions on one game are one observation)",
+  "window": {
+   "from": "2026-10-01T20:42:28Z",
+   "to": "2026-10-07T02:57:14Z"
+  }
+ },
+ "sha256": "58643a388cd1458c14ad1359908a087948913fe7b4f1b7cd262749e17892b451",
+ "version": "bettor-adapter-v1"
+}
