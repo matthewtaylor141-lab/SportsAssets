@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Profitability Stack Research Receipt",
+  "type": "object",
+  "required": [
+    "kind",
+    "version",
+    "payload",
+    "sha256"
+  ],
+  "properties": {
+    "kind": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    }
+  }
+}

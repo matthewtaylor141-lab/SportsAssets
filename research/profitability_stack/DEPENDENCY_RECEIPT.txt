@@ -1,0 +1,2 @@
+python 3.13.16 numpy 2.5.3 pandas 3.0.6 scipy 1.18.1
+package zip sha256 b974875f6fb2ecb19488685861917f07129bcaa0f00dece5c2a39ba06b8f925a; tests: 39 passed unchanged
