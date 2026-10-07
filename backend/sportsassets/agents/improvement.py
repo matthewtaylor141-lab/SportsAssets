@@ -308,6 +308,46 @@ CHANGE_CLASSES: dict[str, ChangeClass] = {c.name: c for c in (
         description=("a registry model; promoted only by "
                      "bettor_funded_model.promote with a named approver"),
         rollback="bettor_funded_model.rollback to the prior approved model"),
+    # REVENUE RELIABILITY V1 -- proposals Audrey raises from the economic
+    # readback (/api/command/revenue-readiness) for a VERIFIED weakness. Never
+    # pre-authorized, no in-process evaluator: each needs a separate
+    # evaluator and a named human approver, and its criteria are fixed HERE,
+    # before any evidence is evaluated (no retrospective tuning).
+    ChangeClass(
+        name="REVENUE_DEREK_SEGMENT_CALIBRATION", kind=K_MODEL, agent=DEREK,
+        description=("repair Derek's entry probability calibration per sport x "
+                     "family x regime, falling back to the market prior where "
+                     "a segment is unsupported"),
+        pre_authorized=False, evaluator=None,
+        success_metrics={"min_independent_events": 100,
+                         "holdout_log_loss_beats_market_prior": {"==": True},
+                         "entry_value_lower_bound_per_event_usd": {">": 0}},
+        harm_metrics={"holdout_realized_pnl_vs_cash_usd": {">=": 0},
+                      "authority_changed": {"==": False}},
+        rollback=("keep the current entry policy and probability source; the "
+                  "candidate model is never released")),
+    ChangeClass(
+        name="REVENUE_XAVIER_MANAGEMENT_POLICY", kind=K_CODE, agent=XAVIER,
+        description=("a management-policy change that must beat BOTH frozen "
+                     "migration-206 counterfactuals (hold to settlement and "
+                     "immediate exit) on independent events"),
+        pre_authorized=False, evaluator=None,
+        success_metrics={"min_independent_events": 100,
+                         "lower_bound_vs_hold_and_exit_per_event_usd": {">": 0}},
+        harm_metrics={"max_drawdown_increase_usd": {"<=": 0},
+                      "authority_changed": {"==": False}},
+        rollback="revert the improve/<task_id> branch commit"),
+    ChangeClass(
+        name="REVENUE_KAREN_CHALLENGE_DETECTOR", kind=K_CODE, agent="KAREN",
+        description=("make Karen's challenges economically measurable: record "
+                     "the downstream impact so saved loss and false-block cost "
+                     "can be assessed (Karen keeps zero authority)"),
+        pre_authorized=False, evaluator=None,
+        success_metrics={"assessed_blocking_challenges": {">=": 30},
+                         "saved_loss_minus_false_block_cost_lower_bound_usd": {">": 0}},
+        harm_metrics={"false_block_rate": {"<=": 0.2},
+                      "karen_authority": {"==": "CHALLENGE_ONLY_ZERO_AUTHORITY"}},
+        rollback="revert the improve/<task_id> branch commit"),
 )}
 
 

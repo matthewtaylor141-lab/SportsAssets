@@ -123,6 +123,14 @@ def test_no_funded_module_imports_the_paper_modules():
                # authority audit forbids the order modules)
                "capital_readiness/feeds.py",
                "capital_readiness/observer.py",
+               # REVENUE RELIABILITY V1: the readback reads the paper ledger's
+               # cash_state inside a READ ONLY transaction it rolls back (the
+               # route and the read); Audrey's proposal hook writes only
+               # governed improvement candidates / holdouts (migration 155,
+               # REQUIRES_APPROVAL). No order, size, limit or authority effect.
+               "revenue_reliability/read.py",
+               "api/command_revenue_reliability.py",
+               "agents/revenue_improvements.py",
                # (209) Audrey's coverage integrity, postmortems and the
                # improvement driver: they read the paper ledger, write their
                # own migration-209 tables, Audrey findings and the
