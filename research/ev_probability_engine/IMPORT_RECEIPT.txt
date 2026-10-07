@@ -1,0 +1,5 @@
+BETTOR_EV_PROBABILITY_ENGINE_UPGRADE_V1 -- imported UNCHANGED (byte-identical to the zip contents)
+zip sha256: 1f1d6d35e3253afc99f7f8ebab6c42e1579692a98f0b0967c7deea030410db15
+package tests: tests/test_probability_engine.py 14/14 passed
+runtime: Python 3.13.16; numpy 2.5.3, pandas 3.0.6, scipy 1.18.1, scikit-learn 1.9.1
+authority: RESEARCH / PAPER-SHADOW only; no network, credential, order, cancel or capital code (inspected every file)

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR EV Probability Engine Input",
+  "type": "object",
+  "required": [
+    "event_id",
+    "event_time",
+    "sport",
+    "family",
+    "regime",
+    "market_prior_p",
+    "bettor_raw_p",
+    "outcome",
+    "entry_price"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string"
+    },
+    "event_time": {
+      "type": "string"
+    },
+    "sport": {
+      "type": "string"
+    },
+    "family": {
+      "type": "string"
+    },
+    "regime": {
+      "type": "string"
+    },
+    "market_prior_p": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "bettor_raw_p": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "outcome": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "entry_price": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}
