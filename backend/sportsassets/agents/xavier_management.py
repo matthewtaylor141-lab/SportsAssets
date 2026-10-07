@@ -1550,25 +1550,51 @@ CANDIDATES_SQL = """
 """
 
 
+#: THE STEP IS NEVER STARVED (production 2026-10-07): it runs after
+#: Xavier's reviews, which exhaust the pass budget every pass, so it checked
+#: 0 theses per pass and 57 settled positions with a thesis had no value-add
+#: row (xavier_value_add stuck at 7). Each pass now computes at least
+#: VALUE_ADD_MIN_PER_PASS theses whatever the budget (a handful of small
+#: reads each), and a thesis whose outcome is not known yet is not retried
+#: for VALUE_ADD_RETRY_S, so pending ones never hold the head of the queue.
+VALUE_ADD_MIN_PER_PASS = 8
+VALUE_ADD_RETRY_S = 600.0
+_VA_ATTEMPTED: dict = {}
+
+
 async def step_value_add(conn, ctx: dict) -> dict:
     """THE PAPER PASS STEP: every thesis without a FINAL value-add is
-    (re)computed when its outcome is known, within the pass budget."""
+    (re)computed when its outcome is known -- at least
+    VALUE_ADD_MIN_PER_PASS per pass, more within the pass budget."""
     if not await has_schema(conn):
         return {"refusal": "MIGRATION_206_NOT_APPLIED"}
     # only positions whose outcome can be known: closed / settled paper
     # positions; actual positions closed or with venue outcome evidence
     rows = await conn.fetch(CANDIDATES_SQL)
-    out = {"checked": 0, "written": 0, "pending": 0}
+    now = time.monotonic()
+    out = {"candidates": len(rows), "checked": 0, "written": 0,
+           "pending": 0, "skipped_recently_pending": 0, "why_pending": {}}
     for r in rows:
-        if time.monotonic() > float(ctx.get("deadline") or 1e18):
+        tid = r["thesis_id"]
+        if now - _VA_ATTEMPTED.get(tid, -1e18) < VALUE_ADD_RETRY_S:
+            out["skipped_recently_pending"] += 1
+            continue
+        if out["checked"] >= VALUE_ADD_MIN_PER_PASS and \
+                time.monotonic() > float(ctx.get("deadline") or 1e18):
             out["budget_exhausted"] = True
             break
         out["checked"] += 1
         got = await compute_value_add(conn, _thesis_row(r))
         if got.get("ok"):
             out["written"] += 1
+            _VA_ATTEMPTED.pop(tid, None)
         else:
             out["pending"] += 1
+            _VA_ATTEMPTED[tid] = now
+            w = str(got.get("why") or "UNKNOWN")[:60]
+            out["why_pending"][w] = out["why_pending"].get(w, 0) + 1
+    if len(_VA_ATTEMPTED) > 20000:
+        _VA_ATTEMPTED.clear()
     return out
 
 

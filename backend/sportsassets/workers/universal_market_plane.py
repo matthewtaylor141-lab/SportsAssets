@@ -417,6 +417,76 @@ async def run() -> None:
             await asyncio.sleep(10)
 
 
+PRIORITY_CENSUS_SAMPLE = 40
+
+
+async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
+    """EVERY PRIORITY MEMBER THAT IS NOT CURRENT, CLASSIFIED (owner closeout
+    item 3): by tier (held / candidate), refdata state, shard assignment,
+    the stream's own refusal for the symbol, and the age of its latest
+    REST / public book. Read only; nothing is excluded from the denominator
+    here -- this names why each member is not current."""
+    rows = await conn.fetch(
+        "SELECT contract_id, priority, required_reason, event_start, "
+        "       CASE WHEN refdata IS NULL THEN 'REFDATA_PENDING' "
+        "            WHEN refdata->>'unlisted' = 'true' THEN 'PMX_UNLISTED' "
+        "            ELSE 'PMX_LISTED' END AS refdata_state "
+        "  FROM market_plane_registry WHERE active AND priority <= $1",
+        POP.P_CANDIDATE)
+    slugs = [r["contract_id"] for r in rows]
+    rest = {r["slug"]: float(r["age"]) for r in await conn.fetch(
+        "SELECT us_market_slug AS slug, "
+        "       extract(epoch FROM now() - max(observed_at)) AS age "
+        "  FROM paper_book_observations WHERE us_market_slug = "
+        "   ANY($1::text[]) AND observed_at > now() - interval '6 hours' "
+        " GROUP BY 1", slugs)} if slugs else {}
+    shard_of = dict(getattr(mgr, "symbol_to_shard", {}) or {}) \
+        if mgr is not None else {}
+    connected = {}
+    if mgr is not None:
+        try:
+            connected = {d["shard"]: d.get("connected")
+                         for d in mgr.shard_digest()}
+        except Exception:                                       # noqa: BLE001
+            connected = {}
+    by, sample = {}, []
+    for r in rows:
+        s = r["contract_id"]
+        age = rest.get(s)
+        if s in fresh or (age is not None and age <= FRESH_SLA_S):
+            continue
+        tier = "HELD" if int(r["priority"]) <= POP.P_HELD else "CANDIDATE"
+        if r["refdata_state"] != "PMX_LISTED":
+            why = r["refdata_state"]
+        elif s not in shard_of:
+            why = "LISTED_NOT_ASSIGNED_TO_A_SHARD"
+        elif connected.get(shard_of[s]) is False:
+            why = "SHARD_NOT_CONNECTED"
+        else:
+            try:
+                cur = mgr.current(s, now=now, max_snapshot_age_s=FRESH_SLA_S)
+            except Exception as exc:                            # noqa: BLE001
+                cur = {"refusal": "READ_RAISED:%s" % type(exc).__name__}
+            why = "STREAM:%s" % str((cur or {}).get("refusal") or (
+                cur or {}).get("reason") or (cur or {}).get(
+                "FRESHNESS_STATUS") or "NOT_CURRENT")[:60]
+        start = r["event_start"]
+        phase = ("NO_START" if start is None else
+                 "STARTED_GT_4H" if (now - start.timestamp()) > 4 * 3600 else
+                 "IN_PLAY_OR_RECENT" if start.timestamp() <= now else
+                 "PREGAME")
+        rest_k = ("NO_REST_BOOK_6H" if age is None else "REST_OLDER_THAN_300S")
+        k = "%s|%s|%s|%s" % (tier, why, rest_k, phase)
+        by[k] = by.get(k, 0) + 1
+        if len(sample) < PRIORITY_CENSUS_SAMPLE:
+            sample.append({"contract_id": s, "tier": tier, "why": why,
+                           "rest_age_s": None if age is None
+                           else round(age, 1), "phase": phase})
+    return {"members": len(rows), "not_current": sum(by.values()),
+            "by_tier_reason_rest_phase": dict(sorted(
+                by.items(), key=lambda kv: -kv[1])), "sample": sample}
+
+
 async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
                                  subscribed: int, fresh: int,
                                  now: float) -> dict:
@@ -575,6 +645,12 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
     freshness = await freshness_denominators(conn, cov, reg, plan,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now)
+    try:
+        freshness["priority_universe"]["census"] = await priority_census(
+            conn, mgr, fresh=fresh, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        freshness["priority_universe"]["census"] = {
+            "error": type(exc).__name__}
     rad["capacity"].update(RP.capacity_view(
         active=reg_active, subscribable=int(reg.get("pmx_listed") or 0),
         pending=int(reg.get("refdata_pending") or 0),

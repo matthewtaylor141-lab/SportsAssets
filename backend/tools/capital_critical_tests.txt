@@ -1247,3 +1247,4 @@ tests/test_trader_score_evidence.py
 tests/test_trader_mode_real_db.py
 tests/test_pinnapi_held_confirmation.py
 tests/test_premap_ddl_never_queues.py
+tests/test_market_plane_required_sets.py

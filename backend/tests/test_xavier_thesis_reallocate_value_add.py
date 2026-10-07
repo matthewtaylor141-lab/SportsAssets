@@ -472,6 +472,39 @@ async def test_value_add_is_persisted_when_the_position_settles():
         await conn.close()
 
 
+@pg
+async def test_value_add_is_not_starved_by_an_exhausted_pass_budget():
+    """Production 2026-10-07: Xavier's reviews exhausted every pass budget,
+    the value-add step checked 0 theses per pass, and 57 settled positions
+    with a thesis had no row. With the budget ALREADY exhausted the step
+    still computes VALUE_ADD_MIN_PER_PASS per pass, and pending theses rotate
+    out of the head of the queue -- the settled position's row is written
+    within a bounded number of passes."""
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug, vid, _ = await _held(conn, "xtvastarve")
+        slugs.append(slug)
+        ctx = XF._ctx(a, AT)
+        await PX.review_group(conn, ctx, g, trigger=PX.T_BACKSTOP)
+        await PL.settle_valuation(conn, vid, outcome=1,
+                                  basis="VENUE_REPORTED_OUTCOME")
+        assert (await PX.step_settle(conn, ctx))["settled"] >= 1
+        spent = dict(ctx, deadline=0.0)          # the budget is gone
+        first = await XM.step_value_add(conn, spent)
+        assert first["checked"] >= min(XM.VALUE_ADD_MIN_PER_PASS,
+                                       first["candidates"])
+        for _ in range(60):
+            if await XM.value_add(conn, group_id=g):
+                break
+            await XM.step_value_add(conn, spent)
+        (v,) = await XM.value_add(conn, group_id=g)
+        assert v["status"] == "FINAL"
+    finally:
+        await XF._purge(conn, slugs)
+        await conn.close()
+
+
 def test_live_cash_is_collateral_space():
     fills = [{"intent": "ORDER_INTENT_BUY_SHORT", "qty": 3, "price": 0.70,
               "fee_usd": 0.03},
