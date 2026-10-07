@@ -1,0 +1,657 @@
+{
+ "payload": "authenticated production Trader Mode payload (signed p0 readback)",
+ "positions": 30,
+ "browser": "Chromium (Playwright) device emulation",
+ "webkit_tested": false,
+ "physical_devices_tested": false,
+ "video": [
+  "a9dd9780bb1d8989b78c00ed6b044386.webm"
+ ],
+ "passed": 74,
+ "total": 74,
+ "checks": [
+  {
+   "name": "desktop-1440: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "desktop-1440: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "desktop-1440: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-1440: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "desktop-1440: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "desktop-1440: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    1440,
+    1440
+   ]
+  },
+  {
+   "name": "desktop-1440: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "desktop-1440: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-1440: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-1440: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "no quote pulse while native observations are unchanged (8 s, 4 polls)",
+   "passed": true,
+   "detail": 0
+  },
+  {
+   "name": "a new observation at the SAME bid produces no pulse",
+   "passed": true,
+   "detail": 0
+  },
+  {
+   "name": "a changed native observation with bid +1c pulses UP with +1.0\u00a2",
+   "passed": true,
+   "detail": {
+    "cls": "cockpit cinematic-tick cinematic-tick-up",
+    "flare": "\u25b2 +1.0\u00a2 \u00b7 58.3\u00a2"
+   }
+  },
+  {
+   "name": "a changed native observation with bid -2c pulses DOWN with -2.0\u00a2",
+   "passed": true,
+   "detail": {
+    "flare": "\u25bc -2.0\u00a2 \u00b7 56.3\u00a2"
+   }
+  },
+  {
+   "name": "desktop-1440: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "desktop-4k: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "desktop-4k: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "desktop-4k: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-4k: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "desktop-4k: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "desktop-4k: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    3840,
+    3840
+   ]
+  },
+  {
+   "name": "desktop-4k: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "desktop-4k: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-4k: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "desktop-4k: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "desktop-4k: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-landscape: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "ipad-landscape: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "ipad-landscape: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "ipad-landscape: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "ipad-landscape: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    1180,
+    1180
+   ]
+  },
+  {
+   "name": "ipad-landscape: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "ipad-landscape: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-landscape: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-landscape: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-portrait: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "ipad-portrait: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "ipad-portrait: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "ipad-portrait: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "ipad-portrait: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    820,
+    820
+   ]
+  },
+  {
+   "name": "ipad-portrait: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "ipad-portrait: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "ipad-portrait: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "ipad-portrait: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-portrait: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "iphone-portrait: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "iphone-portrait: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "iphone-portrait: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "iphone-portrait: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    390,
+    390
+   ]
+  },
+  {
+   "name": "iphone-portrait: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "iphone-portrait: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-portrait: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-portrait: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-landscape: all 30 production positions rendered",
+   "passed": true,
+   "detail": 30
+  },
+  {
+   "name": "iphone-landscape: header uses the approved repo logo asset, loaded",
+   "passed": true,
+   "detail": {
+    "src": "brand/bettortoken-logo-white.png",
+    "w": 994,
+    "h": 159
+   }
+  },
+  {
+   "name": "iphone-landscape: no CSS-drawn B mark",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: brain rail shows the five native-field nodes",
+   "passed": true,
+   "detail": [
+    "DEREK / ENTRY\nENTRY 58.0\u00a2",
+    "VENUE BOOK\n59.3\u00a2 \u00b7 2m",
+    "XAVIER / MANAGEMENT\nWAITING \u00b7 fresh probability",
+    "PROTECTION\n1 STANDING",
+    "NEXT PRICE CONDITION\n63.0\u00a2 SELL"
+   ]
+  },
+  {
+   "name": "iphone-landscape: every card has a real micro-chart or 'No observed price history'",
+   "passed": true,
+   "detail": [
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart",
+    "chart"
+   ]
+  },
+  {
+   "name": "iphone-landscape: no horizontal overflow",
+   "passed": true,
+   "detail": [
+    844,
+    844
+   ]
+  },
+  {
+   "name": "iphone-landscape: selecting a position moves focus to it",
+   "passed": true,
+   "detail": "paperpos:paper_acct_main:paperexpgrp:20f235d59072851fdc3c5180:aec-nfl-ind-pit-2026-10-11:SHORT"
+  },
+  {
+   "name": "iphone-landscape: Wall Mode engaged",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: Wall Mode no horizontal overflow",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "iphone-landscape: Wall Mode values are not clipped by their cards",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "iphone-landscape: no uncaught JS errors",
+   "passed": true,
+   "detail": []
+  },
+  {
+   "name": "prefers-reduced-motion: no infinite decorative animation runs",
+   "passed": true,
+   "detail": 0
+  },
+  {
+   "name": "signed out: zero position cards, rail waits for the native ledger",
+   "passed": true,
+   "detail": null
+  },
+  {
+   "name": "every network request was a GET",
+   "passed": true,
+   "detail": [
+    "GET"
+   ]
+  },
+  {
+   "name": "the only API read is the authenticated Trader Mode GET",
+   "passed": true,
+   "detail": [
+    "/api/command/paper/trader-mode"
+   ]
+  }
+ ]
+}
