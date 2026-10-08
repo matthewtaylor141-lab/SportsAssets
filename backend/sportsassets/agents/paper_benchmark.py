@@ -1747,11 +1747,20 @@ async def book_for(conn, ctx: dict, slug: str, *, basis: str) -> dict:
     return {"got": got, "obs": obs, "reused": False}
 
 
+#: (RC5) the book the paper market-data owner served from the deciding
+#: process's own PMX institutional stream (paper_pmx_books) instead of a
+#: venue read. A label only: the admission facts keep this module's
+#: BOOK_CURRENCY (NOT_ESTABLISHED) for it exactly as for a REST read.
+PMX_STREAM_BOOK_SOURCE = "PMX_GRPC_STREAM_BOOK"
+
+
 def book_source(bk: dict) -> str:
     """Where a decision's book came from, for the attempt record."""
     if bk.get("reused"):
         return "REUSED_IN_THIS_EVALUATION"
     got = bk.get("got") or {}
+    if got.get("book_source") == "PMX_GRPC":
+        return PMX_STREAM_BOOK_SOURCE
     if got.get("shared_read"):
         return "SHARED_RECENT_PROCESS_READ"
     if PD.book_deadline_refusal(got):
