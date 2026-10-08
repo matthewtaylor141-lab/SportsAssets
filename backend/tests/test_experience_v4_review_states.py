@@ -51,3 +51,10 @@ def test_a_disconnected_page_marks_the_broadcast():
 
 def test_live_scores_survive_a_back_forward_cache_return():
     assert "pagehide',e=>{if(e&&e.persisted)return;" in LGS
+
+
+def test_phone_workspace_links_override_the_base_minimum_width():
+    """SF7 (re-review): the phone rule must use the base rule's own selector or
+    it loses on specificity and the badge runs past a 320 px screen."""
+    phone = CSS[CSS.index("@media"):]
+    assert ".bt-v4-workspaces a:not(.bt-trader-launch){min-width:0;padding:0 8px" in phone

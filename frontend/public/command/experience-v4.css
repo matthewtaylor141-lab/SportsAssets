@@ -177,6 +177,9 @@ body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-
   #bt-v4-pulse b{font-size:9px;}
   .bt-v4-palette-list{grid-template-columns:1fr;}
   .bt-v4-workspaces a,.bt-v4-workspaces button{min-width:0;flex:1;height:38px;padding:0 8px;font-size:10px;}
+  /* the base rule's :not(.bt-trader-launch) selector is more specific than the line above, so on phones the
+     workspace links kept their 72 px minimum and 11 px padding and pushed the PAPER / SHADOW badge past 320 px */
+  .bt-v4-workspaces a:not(.bt-trader-launch){min-width:0;padding:0 8px;letter-spacing:.04em;}
   #bt-v4-evidence{top:auto;right:8px;left:8px;bottom:calc(8px + var(--v3-safe-bottom));width:auto;max-height:78vh;}
   .bt-v4-evidence-grid{grid-template-columns:90px minmax(0,1fr);}
 
@@ -381,4 +384,4 @@ body.bt-v4-broadcast-open #bt-v4-broadcast{display:block}
    badge fits a 320 px screen */
 .bt-v4-broadcast-top{flex-wrap:wrap}
 .bt-v4-broadcast-shell>*{min-width:0}
-@media (max-width:339px){.topbar .safe-badge,.top-right .safe-badge{letter-spacing:.02em;padding-left:6px;padding-right:6px}}
+@media (max-width:339px){.topbar .safe-badge,.top-right .safe-badge{letter-spacing:.02em;padding-left:6px;padding-right:6px}.bt-v4-workspaces a:not(.bt-trader-launch){padding:0 6px;letter-spacing:.02em}}
