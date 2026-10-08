@@ -276,6 +276,19 @@ TABLE = {
     "ARCHER_AND_SCOUT_NEVER_MARK_RELEASE_ELIGIBILITY": (S, CAP, "OUT_OF_FUNNEL"),
     # management epoch (bettor_paper_epoch): no defensible epoch mark
     "EPOCH_OPEN_MARK_UNVERIFIED": (S, FRESH, "ACCOUNTING"),
+    # ...and its precise reason, read from the recorded observations: our
+    # read path held no current book at the epoch instant (never read, read
+    # too long before, every read failed, or the book had no exit side), or
+    # the market had ended and is not re-read by design. A data gap of ours
+    # for the mark either way: no venue fault is claimed.
+    "EPOCH_MARK_NO_BOOK_OF_THIS_MARKET_OBSERVED_BY_THE_EPOCH": (
+        S, FRESH, "ACCOUNTING"),
+    "EPOCH_MARK_LAST_ERROR_FREE_BOOK_OLDER_THAN_THE_BOUND": (
+        S, FRESH, "ACCOUNTING"),
+    "EPOCH_MARK_MARKET_IN_A_TERMINAL_STATE_BEFORE_THE_EPOCH": (
+        S, DATA, "ACCOUNTING"),
+    "EPOCH_MARK_EVERY_READ_IN_THE_WINDOW_FAILED": (S, FRESH, "ACCOUNTING"),
+    "EPOCH_BOOK_HAS_NO_EXIT_SIDE": (S, DATA, "ACCOUNTING"),
     "ARCHER_HAS_NO_AUTHORITY": (E, RAIL, "OUT_OF_FUNNEL"),
     "ARCHER_NOT_DEPLOYED": (S, CAP, "ACCOUNTING"),
     # (266) the execution agent's HISTORICAL ALIAS: records written before
@@ -1495,6 +1508,27 @@ TABLE = {
     "KALSHI_MD_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
     "KALSHI_MD_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
     "CLAIMS_NOT_COMPLEMENTARY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC5) the pair settlement-difference policy (settlement_pair_policy):
+    # a pair whose payout rule is unknown in some outcome class, whose
+    # classes are not all enumerated, that is no complement in ordinary
+    # completion, or whose priced floor (separate markets' fair prices at
+    # their worst case, never summed to $1) is below the complement payout
+    "SETTLEMENT_PAIR_PAYOUT_RULE_UNKNOWN": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PAYOUT_TOKEN_UNREADABLE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_STATE_IMPOSSIBLE_ON_ONE_LEG_ONLY": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_STAKE_BACK_WITHOUT_AN_ENTRY_PRICE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_NOT_COMPLEMENTARY_IN_ORDINARY_COMPLETION": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_OUTCOME_CLASS_NOT_ENUMERATED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PARTIAL_PLAY_GRADING_NOT_ESTABLISHED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PRICED_FLOOR_BELOW_THE_COMPLEMENT_PAYOUT": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (315) Red Team Closeout V1: the package's stream-currency gate as the
     # institutional stream's last word; the canonical exposure lock's
     # refusals (an ENTRY carrying its canonical claim / event past the

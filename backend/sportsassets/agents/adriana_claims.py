@@ -32,6 +32,24 @@ is a per-MARKET symbol FP[x]: it complements only its own market's NO,
 which is never paired (above), so a pair carrying FP symbols of two markets
 is not a complement and never reaches the engine.
 
+THE PAIR SETTLEMENT-DIFFERENCE POLICY (settlement_pair_policy, owner
+directive RC5: "do not assume cancelled-game fair prices across separate
+markets sum to $1; unknown payout compatibility stays refused"). Every claim
+pair is priced explicitly, per outcome class (normal / postponed /
+cancelled-or-void / partial):
+  * a pair that is NOT a complement is no longer only counted: its policy
+    verdict is tallied (`settlement_pair_policy`) -- a separate-market
+    fair-price state is PRICED at its worst case (each fair price in [0, 1],
+    never summed to $1), so the pair's guaranteed floor is stated, and an
+    unknown rule is REFUSED by name;
+  * every alias combination of a complementary pair is priced BEFORE the
+    engine: only an EXACT_COMPLEMENT payout table may reach it, so the
+    engine's 0.5 fair-price substitution can never stand in for two
+    markets' fair prices; anything else is a REFUSED record carrying the
+    policy's codes and its priced floor. (Partial play is the engine's own
+    source rule there: two legs grading by different official sources are
+    refused SETTLEMENT_SOURCE_DIFFERS before any price is read.)
+
 FEES: a Kalshi alias is a leg only with the published fee terms in force
 (kalshi_fees: the series / event multiplier); unknown terms drop it.
 
@@ -45,6 +63,7 @@ from decimal import Decimal
 from itertools import combinations
 
 from .. import canonical_claims as CC
+from .. import settlement_pair_policy as SPP
 from . import adriana_arb as A
 
 VERSION = "ADRIANA_CLAIMS_V1"
@@ -157,6 +176,56 @@ def _source(i: CC.Instrument) -> str:
     return str(src) if src else "UNSTATED:%s:%s" % (i.venue, i.market_id)
 
 
+def policy_leg(i: CC.Instrument) -> SPP.Leg:
+    """An instrument as the pair policy reads it: its tokens and the
+    official source its rules grade by (UNSTATED = not stated)."""
+    return SPP.Leg(venue=i.venue, market_id=str(i.market_id), side=i.side,
+                   vector=dict(i.vector or {}), resolution_source=_source(i))
+
+
+def _tally(out: dict, pol: dict, fa: str, fb: str, *,
+           complementary: bool) -> None:
+    """One class pair's policy verdict into the scan's tally (examples of
+    priced differences bounded, never every pair)."""
+    t = out.setdefault("settlement_pair_policy", {
+        "policy": SPP.VERSION, "by_verdict": {}, "by_refusal": {},
+        "priced_floors": {}, "priced_examples": []})
+    v = pol["verdict"]
+    t["by_verdict"][v] = t["by_verdict"].get(v, 0) + 1
+    if pol.get("refusal"):
+        t["by_refusal"][pol["refusal"]] = t["by_refusal"].get(
+            pol["refusal"], 0) + 1
+    if v == SPP.PRICED:
+        f = str(pol.get("guaranteed_floor"))
+        t["priced_floors"][f] = t["priced_floors"].get(f, 0) + 1
+        if len(t["priced_examples"]) < 5:
+            t["priced_examples"].append({
+                "claim_a": fa, "claim_b": fb, "complementary": complementary,
+                "guaranteed_floor": pol.get("guaranteed_floor"),
+                "differences": pol.get("differences")[:4]})
+
+
+def _policy_refusal(fx: CC.Fixture, ia: CC.Instrument, ib: CC.Instrument,
+                    pol: dict, now_dt) -> dict:
+    """A combination the policy did not price as an exact complement: a
+    REFUSED record with the policy's codes and floor; the engine is never
+    run on substituted fair prices."""
+    codes = [r.get("code") for r in pol.get("refusals") or []] or [
+        SPP.R_PRICED_NOT_A_COMPLEMENT]
+    reasons = [{"code": c, "detail": (
+        "pair settlement policy %s: guaranteed floor %s per set, target %s"
+        % (pol.get("payout_verdict"), pol.get("guaranteed_floor"),
+           pol.get("target")))} for c in dict.fromkeys(codes)]
+    rec = A._record("STRUCTURE", A.COMPLEMENT, reasons, {
+        "event_key": fx.event_key, "legs": [
+            [{"venue": i.venue, "market_id": i.market_id, "side": i.side}]
+            for i in (ia, ib)],
+        "books": [], "skew_s": None, "now": now_dt.isoformat()},
+        None, None)
+    rec["settlement_pair_policy"] = SPP.slim(pol)
+    return rec
+
+
 def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                  max_age_s: float = A.DEFAULT_MAX_AGE_S,
                  max_skew_s: float = A.DEFAULT_MAX_SKEW_S,
@@ -186,11 +255,19 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
            "by_topology": {}}
     keys = sorted(classes)
     pairs = []
+    family = str(fx.sport or "").lower() or None
     for fa, fb in combinations(keys, 2):
         ma, mb = classes[fa], classes[fb]
         ok, _bad = CC.complement_states(ma[0].vector, mb[0].vector, states)
         if not ok:
             out["pairs_not_complementary"] += 1
+            # PRICED EXPLICITLY, NOT ONLY COUNTED: what the pair pays in
+            # each outcome class, a separate-market fair price at its worst
+            # case, an unknown rule refused by name
+            _tally(out, SPP.evaluate_pair(policy_leg(ma[0]),
+                                          policy_leg(mb[0]), states,
+                                          sport_family=family), fa, fb,
+                   complementary=False)
             continue
         pairs.append((fa, fb, ma, mb))
     # ONE market's YES and NO net on the exchange (Kalshi rep 2026-10-07):
@@ -223,7 +300,16 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                 "same_market_only_pairs", 0) + 1
             continue
         recs = []
+        pols = []
         for (ia, ca, na), (ib, cb, nb) in combos:
+            pol = SPP.evaluate_pair(policy_leg(ia), policy_leg(ib), states,
+                                    sport_family=family)
+            pols.append(pol)
+            if pol["payout_verdict"] != SPP.EXACT:
+                # never the engine on a substituted fair price: only an
+                # exact complement payout table may be evaluated
+                recs.append((_policy_refusal(fx, ia, ib, pol, now_dt), []))
+                continue
             books = [A.Book(i.venue, i.market_id, c.side, tuple(i.asks),
                             _aware(i.observed_at))
                      for i, c in ((ia, ca), (ib, cb))
@@ -233,6 +319,10 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                 max_age_s=max_age_s, max_skew_s=max_skew_s,
                 max_scan_qty=max_scan_qty)
             recs.append((r, sorted(set(na + nb))))
+        if pols:
+            _tally(out, min(pols, key=lambda p: (
+                p["payout_verdict"] != SPP.EXACT, p["verdict"])), fa, fb,
+                complementary=True)
         if not recs:
             rec = A._record("STRUCTURE", A.COMPLEMENT, [{
                 "code": "CLAIM_LEG_HAS_NO_EVALUABLE_ALIAS",
@@ -265,6 +355,7 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                              "alias_combinations_evaluated": len(recs),
                              "same_market_combinations_excluded": same,
                              "fair_price_substitution": notes or None,
+                             "settlement_pair_policy": SPP.VERSION,
                              "aliases_dropped": dropped,
                              # the settlement-rule fingerprint of every
                              # alias as this decision read it: the sentinel
@@ -298,9 +389,26 @@ def census_result(scans: list, *, markets_read: int, books_fresh: int,
                        s.get("same_market_pairs_excluded", 0)
                        for s in scans),
                    same_market_only_pairs=sum(
-                       s.get("same_market_only_pairs", 0) for s in scans))
+                       s.get("same_market_only_pairs", 0) for s in scans),
+                   settlement_pair_policy=_sum_policy(scans))
     return {"opportunities": opps, "refusals": refs, "census": summary,
             "books_fresh": books_fresh}
+
+
+def _sum_policy(scans) -> dict:
+    """The pair settlement policy's verdicts over every scanned fixture."""
+    out = {"policy": SPP.VERSION, "by_verdict": {}, "by_refusal": {},
+           "priced_floors": {}, "priced_examples": [],
+           "assumes_separate_market_fair_prices_sum_to_one": False}
+    for s in scans:
+        t = s.get("settlement_pair_policy") or {}
+        for k in ("by_verdict", "by_refusal", "priced_floors"):
+            for c, n in (t.get(k) or {}).items():
+                out[k][c] = out[k].get(c, 0) + n
+        room = 5 - len(out["priced_examples"])
+        if room > 0:
+            out["priced_examples"] += (t.get("priced_examples") or [])[:room]
+    return out
 
 
 def _sum_topology(scans) -> dict:

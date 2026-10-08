@@ -165,7 +165,17 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
             "structures": cn, "opportunities": len(claims["opportunities"]),
             "refusals": len(claims["refusals"]),
             "by_topology": cc.get("by_topology"),
-            "pairs_not_complementary": cc.get("pairs_not_complementary")}
+            "pairs_not_complementary": cc.get("pairs_not_complementary"),
+            "settlement_pair_policy": cc.get("settlement_pair_policy")}
+    elif claims is not None:
+        # no complementary pair to record, yet every claim pair WAS priced
+        # by the pair settlement policy (separate-market fair prices at
+        # their worst case, never $1): its verdicts ride the run summary
+        cc = claims.get("census") or {}
+        summary["claims"] = {
+            "scan": None, "structures": 0,
+            "pairs_not_complementary": cc.get("pairs_not_complementary"),
+            "settlement_pair_policy": cc.get("settlement_pair_policy")}
     elapsed = round(time.monotonic() - t0, 3)
     if result is None or (rec is None and "record" in summary["phase_errors"]):
         state, outcome = R.S_FAILED, "FAILED"
