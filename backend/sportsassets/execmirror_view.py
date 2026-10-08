@@ -1680,9 +1680,14 @@ async def launch_state(conn, ctl: dict | None = None) -> dict:
     try:
         from . import institutional_stream as IS
         d = IS.digest()
+        # THE LIVE STATE. `start` is what start_default answered once at
+        # boot (IDLE_NO_SYMBOLS_REQUESTED for any stream that started), so
+        # reading it here showed IDLE forever, whatever the stream did.
         out["market_data"]["institutional_stream"] = {
-            "state": (d.get("start") or {}).get("state"),
-            "why": (d.get("start") or {}).get("why")}
+            "state": d.get("state"), "why": d.get("why"),
+            "connected": d.get("connected"), "symbols": d.get("symbols"),
+            "current_books": d.get("current_books"),
+            "start_state": (d.get("start") or {}).get("state")}
     except Exception as exc:                                    # noqa: BLE001
         out["market_data"]["institutional_stream"] = {
             "state": None, "why": "unreadable: %s" % type(exc).__name__}

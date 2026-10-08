@@ -66,13 +66,22 @@ MODEL_VERSION = "bettor_ev_v0_collecting"
 #   V5  APPLICABILITY GATES ECONOMICS. The portfolio state is derived
 #       first and an action that cannot exist in it is never priced and
 #       never risk-evaluated.
+#   V6  THE REFUSAL IS A VERDICT (70ca3a4, 2026-09-23). `decide` evaluates
+#       bettor_entry_gate.admit and has a branch that returns an admitted
+#       entry; V5 had none. That change was made UNDER V5, so production
+#       froze V5 at 92a190a0 and has run 98aaa204 since -- POLICY_CODE_DRIFT,
+#       decision writing blocked, correctly. V6 is the version that branch
+#       always needed. With production's inputs (no entryInputs) the gate
+#       still refuses on every requirement and the answer is NO_TRADE.
+#       Also frozen for the first time: the sixteenth considered action
+#       (FORM_INDIRECT_HEDGE, fe69419) and the V2 code boundary.
 #
 # WHY V4 COULD NOT SIMPLY BE AMENDED. A zero on an impossible action is
 # not a harmless placeholder: zero beats every negative number, so a
 # nonexistent HOLD would outrank a real take in any ranking. V4's rows
 # say something different about the world than V5's do, and the
 # version is what keeps them distinguishable.
-POLICY_VERSION = "BETTOR_EV_SHADOW_V5"
+POLICY_VERSION = "BETTOR_EV_SHADOW_V6"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it
@@ -384,13 +393,14 @@ def decide(opportunity: dict, market_state: dict | None, *,
            decision_ts=None, inventory=None) -> dict:
     """BETTOR's own prospective decision.
 
-    NO_TRADE TODAY, ALWAYS, AND HONESTLY. This function has no path that
-    produces a BUY or a SELL, and that is correct rather than
-    unfinished: there is no validated independent EV to act on, and a
-    lane that traded anyway would be manufacturing the very claim the
-    dataset exists to test. When Action EV is registered the gate opens
-    here, in one place, and every row written before it is still
-    readable as what BETTOR believed at the time.
+    NO_TRADE ON THE PRODUCTION PATH. Since 70ca3a4 (BETTOR_EV_SHADOW_V6)
+    this function has ONE path that returns an admitted entry -- the
+    entry gate's verdict, below -- and it is reachable only when the
+    caller supplies `entryInputs`, which the production worker never
+    does. Everything else is NO_TRADE: there is no validated independent
+    EV to act on, and a lane that traded anyway would be manufacturing
+    the very claim the dataset exists to test. Every row written before
+    the gate opens is still readable as what BETTOR believed at the time.
     """
     decision_ts = decision_ts or _now()
     blocks = blockers_for(opportunity, market_state)
@@ -402,9 +412,9 @@ def decide(opportunity: dict, market_state: dict | None, *,
     # written down and auditable, not an assertion that no comparison
     # was possible.
     #
-    # THE GATE DOES NOT MOVE. Nothing here can produce a BUY or a SELL.
-    # The table is evidence, and a positive EV in it is a research
-    # finding, never an instruction.
+    # THE TABLE IS NOT THE GATE. A positive EV in it is a research
+    # finding, never an instruction; only bettor_entry_gate.admit, below,
+    # can return an entry, and only on inputs production never supplies.
     # NO SIZE IS PASSED, DELIBERATELY. BETTOR has no sizing policy --
     # SIZING_POLICY_VERSION is NOT_APPLICABLE -- so the order size is
     # genuinely not identified. Handing the book's availableDepth in as

@@ -1,0 +1,6 @@
+{"series_fee_change_arr":[{"fee_multiplier":0.5,"fee_type":"quadratic_with_maker_fees","id":"38032af2-e3fa-4659-9280-da64300b544c","scheduled_ts":"2026-08-07T04:59:45.131Z","series_ticker":"KXMLBGAME"},{"fee_multiplier":1,"fee_type":"quadratic_with_maker_fees","id":"16ab5717-ef1d-4323-9926-d23e3147a4f7","scheduled_ts":"2025-10-04T07:00:00Z","series_ticker":"KXMLBGAME"}]}
+{"series_fee_change_arr":[]}
+{"series_fee_change_arr":[]}
+{"series_fee_change_arr":[{"fee_multiplier":1,"fee_type":"quadratic_with_maker_fees","id":"babedc22-e303-4aaf-8e0b-5016f1239786","scheduled_ts":"2026-01-01T08:00:00Z","series_ticker":"KXNFLGAME"}]}
+{"series_fee_change_arr":[{"fee_multiplier":1,"fee_type":"quadratic_with_maker_fees","id":"dd3797e1-91ea-4768-a34d-2d0418ce977c","scheduled_ts":"2025-10-04T07:00:00Z","series_ticker":"KXWNBAGAME"}]}
+{"series_fee_change_arr":[]}

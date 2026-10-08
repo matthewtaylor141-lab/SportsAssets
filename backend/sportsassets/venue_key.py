@@ -126,6 +126,29 @@ def normalize_secret_key(raw: str | None) -> str:
     return base64.b64encode(got[0]).decode("ascii")
 
 
+#: the named refusal when a PMUS secret slot holds no Ed25519 key in any
+#: encoding (identical to workers.mirror_shadow.R_PMUS_SECRET_NOT_ED25519)
+R_NOT_ED25519 = "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY"
+
+
+class SecretNotEd25519(RuntimeError):
+    """The slot holds a credential no PMUS signer can use. Deterministic: a
+    caller must not retry it; the message is the refusal name, never a
+    value."""
+
+
+def signing_secret(raw: str | None) -> str:
+    """The secret a PMUS signer is handed: `normalize_secret_key(raw)` when
+    `raw` is an Ed25519 key in any encoding (the same key), else
+    SecretNotEd25519(R_NOT_ED25519) BEFORE any client, signature or socket.
+    Empty stays empty (the callers' own "not configured" answer)."""
+    if not raw:
+        return raw or ""
+    if _decode(raw) is None:
+        raise SecretNotEd25519(R_NOT_ED25519)
+    return normalize_secret_key(raw)
+
+
 def describe_secret_key(raw: str | None) -> dict:
     """The secret's FORMAT, never its value: present, the detected encoding,
     whether the SDK would have read it unchanged, and whether it now will."""

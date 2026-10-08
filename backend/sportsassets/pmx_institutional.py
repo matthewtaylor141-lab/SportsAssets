@@ -74,6 +74,41 @@ TIMEOUT = (5.0, 30.0)
 # subscription nobody has verified.
 MARKET_DATA_MECHANISM = "REST_POLL_MAINTAINED_IN_MEMORY"
 STREAM_TARGET = "NOT_IDENTIFIED"
+#: SINCE 2026-10-03 THERE IS A STREAM (institutional_stream: the vendored
+#: official proto, BiDirectionalStreamMarketData on the documented
+#: production target). The two constants above still describe the REST
+#: sweep and nothing else; a process's label is `market_data_mechanisms`.
+STREAM_MECHANISM = "PMX_GRPC_BIDI_MARKET_DATA_STREAM"
+MECH_STREAM_PRIMARY = "PMX_GRPC_STREAM_PRIMARY_REST_FALLBACK"
+MECH_STREAM_NOT_CURRENT = "PMX_GRPC_STREAM_ARMED_NOT_CURRENT_REST_FALLBACK"
+
+
+def market_data_mechanisms(*, stream_enabled: bool,
+                           stream_digest: dict | None = None) -> dict:
+    """PURE. The mechanisms this process runs, by evidence: the REST
+    sweep (always MARKET_DATA_MECHANISM), and the gRPC stream when it is
+    armed here -- PRIMARY only while its live digest shows a connection
+    with at least one current resident book; otherwise ARMED_NOT_CURRENT.
+    Never claims a stream that is off, and never the boot record."""
+    from .institutional_stream import GRPC_TARGET
+    d = stream_digest if isinstance(stream_digest, dict) else {}
+    current = int(d.get("held_mark_current_books")
+                  or d.get("current_books") or 0)
+    if not stream_enabled:
+        mech, target = MARKET_DATA_MECHANISM, STREAM_TARGET
+    elif d.get("connected") and current > 0:
+        mech, target = MECH_STREAM_PRIMARY, GRPC_TARGET
+    else:
+        mech, target = MECH_STREAM_NOT_CURRENT, GRPC_TARGET
+    return {"mechanism": mech, "rest_sweep": MARKET_DATA_MECHANISM,
+            "stream": {"mechanism": STREAM_MECHANISM if stream_enabled
+                       else None, "enabled": bool(stream_enabled),
+                       "target": target, "state": d.get("state"),
+                       "connected": d.get("connected"),
+                       "requested": d.get("symbols"),
+                       "current_l2_books": d.get("current_books"),
+                       "held_mark_current_l2_books":
+                           d.get("held_mark_current_books")}}
 
 # §3: the evidence environment for anything this module returns.
 EVIDENCE_ENVIRONMENT = "DIRECT_INSTITUTIONAL_WORKER"
@@ -150,6 +185,29 @@ def request_for(name: str, symbol: str = "") -> tuple:
             raise NotAReadPath("refused: %r needs a symbol" % name)
         path = path.replace("{symbol}", symbol)
     return method, assert_production(REST_BASE + path), body
+
+
+#: ListInstruments pages to at most 1,000 (venue guidance 2026-10-07)
+INSTRUMENTS_PAGE_MAX = 1000
+
+
+def instruments_body(symbols=(), page_token: str | None = None,
+                     page_size: int = INSTRUMENTS_PAGE_MAX) -> dict:
+    """The body of the ONE `instruments` read for a batch: up to 1,000 named
+    symbols (refdata by symbols answers only the ones that exist), or one
+    page of the full list continued by the venue's own `pageToken`. Same
+    path, same allow-list entry as request_for('instruments')."""
+    syms = sorted({str(s).strip() for s in symbols or () if str(s or "").strip()})
+    if len(syms) > INSTRUMENTS_PAGE_MAX:
+        raise NotAReadPath("refused: more than %d symbols in one instruments "
+                           "read" % INSTRUMENTS_PAGE_MAX)
+    size = max(1, min(INSTRUMENTS_PAGE_MAX, int(page_size)))
+    body = {"pageSize": max(size, len(syms))}
+    if syms:
+        body["symbols"] = syms
+    if page_token:
+        body["pageToken"] = str(page_token)
+    return body
 
 
 def presence(env=None) -> dict:
@@ -295,11 +353,45 @@ class Institutional:
         self._token_expires_at = 0.0
 
     def _headers(self, token, rid) -> dict:
-        return {"Authorization": "Bearer %s" % token,
-                "X-Client-Id": self._env["PMX_CLIENT_ID"],
-                "x-participant-id": self._env["PMX_PARTICIPANT_ID"],
-                "X-Request-Id": rid,
-                "Content-Type": "application/json"}
+        h = {"Authorization": "Bearer %s" % token,
+             "X-Client-Id": self._env["PMX_CLIENT_ID"],
+             "X-Request-Id": rid,
+             "Content-Type": "application/json"}
+        # The participant id is an ACCOUNT-path identifier; the dedicated
+        # read-only market plane is deliberately not given it
+        # (ops/render_market_plane_service.yaml), so it is sent only when
+        # present. A venue refusal without it is a named read failure.
+        part = self._env.get("PMX_PARTICIPANT_ID")
+        if part:
+            h["x-participant-id"] = part
+        return h
+
+    def read_instruments(self, body: dict) -> dict:
+        """The `instruments` read with a batch body (instruments_body): the
+        same allow-listed POST, the same never-raise contract as read()."""
+        method, path, _shape = READ_ONLY_PATHS["instruments"]
+        url = assert_production(REST_BASE + path)
+        token = self.token()
+        if not token:
+            return {"read": "instruments", "status": None,
+                    "verdict": A_REJECTED, "ms": None}
+        rid = request_id()
+        t0 = time.time()
+        try:
+            r = self.session.request(method, url,
+                                     headers=self._headers(token, rid),
+                                     json=dict(body or {}), timeout=TIMEOUT)
+            try:
+                parsed = r.json()
+            except Exception:                                  # noqa: BLE001
+                parsed = None
+            return {"read": "instruments", "status": r.status_code,
+                    "body": parsed, "requestId": rid,
+                    "ms": round((time.time() - t0) * 1000, 1)}
+        except Exception as exc:                               # noqa: BLE001
+            return {"read": "instruments", "status": None,
+                    "transportError": type(exc).__name__, "requestId": rid,
+                    "ms": round((time.time() - t0) * 1000, 1)}
 
     def read(self, name: str, symbol: str = "") -> dict:
         """One named read. Returns status, body and the REAL timings.

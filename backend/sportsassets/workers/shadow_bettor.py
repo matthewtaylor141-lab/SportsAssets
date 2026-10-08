@@ -57,6 +57,7 @@ from .. import shadow_l2 as l2
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -346,7 +347,7 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
 async def run() -> None:
     if _off("SHADOW_BETTOR"):
         log.info("shadow_bettor: collection off by switch")
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
     pool = await get_pool()
 
     ready = await store.store_ready(pool)
@@ -435,6 +436,14 @@ async def run() -> None:
             "standardNotionalUsd": szpol.STANDARD_BETTOR_SHADOW_NOTIONAL_USD,
             "policySha": bpol.POLICY_SHA[:16],
             "policyCodeSha": bpol.POLICY_CODE_SHA[:16],
+            # THE STORED SIDE OF THE COMPARISON, so a readback shows both
+            # numbers without parsing policyIntegrityWhy.
+            # REFUSED compares no code sha, so it says NOT_COMPARED rather
+            # than NOT_ATTEMPTED (the freeze WAS attempted).
+            "frozenPolicyCodeSha": (
+                str(frozen["policyCodeSha"])[:16]
+                if (frozen or {}).get("policyCodeSha")
+                else "NOT_COMPARED" if frozen else "NOT_ATTEMPTED"),
             "codeShaMatches": (frozen or {}).get("codeShaMatches"),
             "universe": bettor.UNIVERSE_VERSION,
             "pBettor": "NOT_ESTABLISHED",

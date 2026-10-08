@@ -1,0 +1,33 @@
+{
+  "version": "GOLDEN_APPENDED_KALSHI_CONTRACT_TERMS_V1",
+  "appended_at": "2026-10-07",
+  "policy": "APPENDED source records: the frozen golden_cases.json is unchanged; these cases run beside it and are preserved likewise.",
+  "source_manifest": [
+    {
+      "id": "KALSHI_CONTRACT_TERMS_2026_10_07",
+      "kind": "VENUE_RULEBOOK",
+      "repo_path": "research/kalshi_canonical_venue/CONTRACT_TERMS_2026-10-07",
+      "notes": "Kalshi's own rulebooks (series contract_terms_url: BASKETBALLGAMEWIN, FOOTBALLGAMEWIN, BASEBALLGAMEWIN, HOCKEYWINNINGINPERIOD) recorded byte for byte with sha256, plus the market rule text of six live game markets. Production 088af82 refused every Kalshi game alias UNKNOWN_STATES because the market text alone never states overtime or the tie payout."
+    }
+  ],
+  "cases": [
+    {
+      "id": "KT01_MLB_RULEBOOK_PRICES_EVERY_RESULT_STATE",
+      "source": "KALSHI_CONTRACT_TERMS_2026_10_07",
+      "statement": "An entire-game KXMLBGAME market with the live-verified BASEBALLGAMEWIN rulebook: extra innings included, a tie without a Tie strike pays $0.50; every result state is priced, so the aliases fingerprint; away YES and home NO differ only where each market settles at its own fair price.",
+      "expected": {"fingerprinted": true, "differing_states_are_fair_price_only": true}
+    },
+    {
+      "id": "KT02_HOCKEY_TIE_IS_NOT_A_FIXED_PAYOUT",
+      "source": "KALSHI_CONTRACT_TERMS_2026_10_07",
+      "statement": "HOCKEYWINNINGINPERIOD includes overtime and the shootout but says a drawn team 'may resolve to No': not a fixed payout, so the tie state stays unknown and the alias is refused.",
+      "expected": {"fingerprinted": false, "refusal": "UNKNOWN_STATES:DRAW"}
+    },
+    {
+      "id": "KT03_CHANGED_RULEBOOK_APPLIES_NOTHING",
+      "source": "KALSHI_CONTRACT_TERMS_2026_10_07",
+      "statement": "A rulebook whose live hash differs from the recorded bytes applies nothing: RULEBOOK_CHANGED_SINCE_RECORDING, the alias stays UNKNOWN_STATES.",
+      "expected": {"fingerprinted": false, "refused": "RULEBOOK_CHANGED_SINCE_RECORDING"}
+    }
+  ]
+}

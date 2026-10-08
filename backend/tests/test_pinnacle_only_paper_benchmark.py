@@ -843,8 +843,12 @@ async def test_both_strategies_reserving_concurrently_never_overcommit():
     c0, c1, c2 = await H.connect(), await H.connect(), await H.connect()
     try:
         a = await H.new_account(c0, "benchconc")
+        # the filler sits on its OWN fixture: $499k on the entries' fixture
+        # would (rightly) trip the canonical event-exposure lock (Red Team
+        # Closeout V1, 125k) before the cash serialization under test
         filler = H.order(a, key="fill", qty=998000, limit=0.50,
-                         role="HEDGE", slug=a["account_id"] + ":filler")
+                         role="HEDGE", slug=a["account_id"] + ":filler",
+                         fixture="fx-conc-filler")
         got = await L.submit_order(c0, filler, fee_fn=H.zero_fee, now=H.T0)
         assert got["ok"], got
         cs = await L.cash_state(c0, a["account_id"])

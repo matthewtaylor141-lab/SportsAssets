@@ -1,0 +1,24 @@
+{
+  "package": "BETTOR_PM_EVIDENCE_ACCEPTANCE_PACK_V1",
+  "version": "1.0.0",
+  "created": "2026-10-07",
+  "components": {
+    "golden_market_validation": {
+      "tests": 18
+    },
+    "forward_profitability_scoreboard": {
+      "tests": 11
+    },
+    "final_pm_acceptance_harness": {
+      "tests": 16
+    }
+  },
+  "total_tests": 45,
+  "authority": {
+    "live_activation": false,
+    "submit": false,
+    "cancel": false,
+    "capital": false
+  },
+  "evidence_note": "PMUS golden cases include captured venue fixtures; Kalshi semantic cases remain explicitly frozen integration cases until real production payloads are supplied."
+}

@@ -76,6 +76,13 @@ READ_PACING_S = 0.15
 BOOTSTRAP_BACKOFF_S = 30.0
 #: A symbol whose refdata read failed or was unlisted is retried no sooner.
 RETRY_UNLISTED_S = 300.0
+#: One INFO line with the live stream digest this often (the stream's steady
+#: state was never in the log: only the boot line, by construction IDLE).
+DIGEST_LOG_EVERY_S = 60.0
+#: The SUBSCRIPTION MODE of this process's stream: an explicit, bounded
+#: held + priority symbol list. Subscribe-all (symbols=[]) is the dedicated
+#: market plane's alone (institutional_stream.MODE_SUBSCRIBE_ALL).
+SUBSCRIPTION_MODE = "EXPLICIT_SYMBOL_LIST"   # = IS.MODE_EXPLICIT (pinned)
 
 LONG_INTENTS = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG", "YES",
                 "LONG", "BUY_YES", "BUY_LONG")
@@ -90,7 +97,8 @@ _REQUESTED: dict = {}
 _ATTEMPT: dict = {}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
                 "refdata_reads": 0, "refdata_failures": 0, "backlog": 0,
-                "held_wanted": 0, "held_subscribed": 0}
+                "held_wanted": 0, "held_subscribed": 0,
+                "held_preempted": 0}
 #: The last focus universe computed here (members without identity).
 _UNIVERSE: dict = {}
 
@@ -143,11 +151,64 @@ def identity_mapper(slug, order_intent=None) -> dict | None:
             "evidence": list(m.get("basis") or [])}
 
 
+def primary_report(*, now=None) -> dict:
+    """PMX gRPC PRIMARY, AS THIS PROCESS HOLDS IT (the deciding process: the
+    decision path and the held-mark refresh read these books). Plain data
+    for readbacks; never raises. `requested` symbols, venue `acked` on the
+    current connection, RESIDENT L2 BOOKS current under the decision and the
+    held-mark bounds, their ages, and the held-market coverage."""
+    try:
+        d = IS.BOOKS.digest(now=now)
+        t = IS._TRANSPORT
+    except Exception as exc:                                  # noqa: BLE001
+        return {"version": VERSION, "error": type(exc).__name__}
+    return {
+        "version": VERSION, "process": SERVICE,
+        "subscription_mode": getattr(t, "subscription_mode", None)
+        or SUBSCRIPTION_MODE,
+        "target": d.get("target"),
+        "state": d.get("state"), "why": d.get("why"),
+        "connected": d.get("connected"),
+        "connection_seq": d.get("connection_seq"),
+        "requested": d.get("symbols"), "acked": d.get("acked"),
+        "refused_symbols": d.get("refused_symbols"),
+        "current_l2_books": d.get("current_books"),
+        "held_mark_current_l2_books": d.get("held_mark_current_books"),
+        "book_age_s": d.get("book_age_s"),
+        "venue_receipt_lag_s": d.get("venue_receipt_lag_s"),
+        "dropped_at_cap": d.get("dropped_at_cap"),
+        "evicted": d.get("evicted"),
+        "held_preempted": _STATE.get("held_preempted"),
+        "by_refusal": d.get("by_refusal"),
+        "held_wanted": _STATE.get("held_wanted"),
+        "held_subscribed": _STATE.get("held_subscribed"),
+        "refdata_reads": _STATE.get("refdata_reads"),
+        "refdata_failures": _STATE.get("refdata_failures"),
+        "bootstrap_backlog": _STATE.get("backlog"),
+        "last_error": _STATE.get("last_error"),
+        "at": d.get("at")}
+
+
+def log_digest() -> None:
+    """One INFO line: the live stream state (never the boot record)."""
+    r = primary_report()
+    log.info("institutional_api_stream: state=%s connected=%s requested=%s "
+             "acked=%s current_l2=%s held_mark_current_l2=%s held_wanted=%s "
+             "held_subscribed=%s refdata_reads=%s refdata_failures=%s "
+             "dropped_at_cap=%s last_error=%s", r.get("state"),
+             r.get("connected"), r.get("requested"), r.get("acked"),
+             r.get("current_l2_books"), r.get("held_mark_current_l2_books"),
+             r.get("held_wanted"), r.get("held_subscribed"),
+             r.get("refdata_reads"), r.get("refdata_failures"),
+             r.get("dropped_at_cap"), r.get("last_error"))
+
+
 def describe() -> dict:
     with _LOCK:
         held = sorted(REFDATA)
         asked = list(_REQUESTED)
     return {"version": VERSION, "running": running(),
+            "stream_state": IS.BOOKS.state,
             "start": _STATE.get("start"), "refdata_symbols": held,
             "held_symbol_budget": HELD_SYMBOL_BUDGET,
             "held_wanted": _STATE.get("held_wanted"),
@@ -217,7 +278,7 @@ def reset() -> None:
         _UNIVERSE.clear()
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
                   refdata_failures=0, backlog=0, held_wanted=0,
-                  held_subscribed=0)
+                  held_subscribed=0, held_preempted=0)
 
 
 async def _focus_symbols(get_pool, focus) -> list:
@@ -404,7 +465,24 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
     # SUBSCRIBE ONLY WHAT MAPS EXACTLY: an UNAVAILABLE member (no record,
     # not listed, any mapping refusal) is never subscribed or priced.
     priced = [s for s in held if _exact_here(s)]
+    # HELD MARKETS FIRST: the stream's per-process bound is spent on held
+    # positions before candidates / discovery, and entries nobody has named
+    # for RETAIN_IDLE_S are evicted first, so a newly held market is never
+    # the one the bound refuses.
+    priced = ([s for s in priced if s in held_set]
+              + [s for s in priced if s not in held_set])
+    IS.BOOKS.retain(wanted)
     IS.want(priced)
+    # THE GUARANTEE, not a likelihood: `retain` frees only entries idle for
+    # RETAIN_IDLE_S, so focus churn or the decision path's own wants inside
+    # that window can still fill the bound. A held market the bound refused
+    # takes the slot of an entry THIS pass does not want. `wanted` is at
+    # most MAX_SYMBOLS + HELD_SYMBOL_BUDGET = IS.MAX_SYMBOLS, so it fits.
+    have = set(IS.BOOKS.wanted())
+    if any(s in held_set and s not in have for s in priced):
+        _STATE["held_preempted"] = int(_STATE.get("held_preempted") or 0) \
+            + len(IS.BOOKS.retain(wanted, idle_s=0.0))
+        IS.want(priced)
     _STATE.update(backlog=backlog,
                   held_wanted=sum(1 for s in wanted if s in held_set),
                   held_subscribed=sum(1 for s in priced if s in held_set))
@@ -415,9 +493,18 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
 
 async def _run(get_pool, *, client, focus, bootstrap) -> None:
     last_focus, focus_cache = 0.0, []
+    last_log = None
     while True:
         try:
-            if time.monotonic() - last_focus >= FOCUS_EVERY_S:
+            if last_log is None or \
+                    time.monotonic() - last_log >= DIGEST_LOG_EVERY_S:
+                last_log = time.monotonic()
+                try:
+                    log_digest()
+                except Exception:                             # noqa: BLE001
+                    pass
+            if not last_focus or \
+                    time.monotonic() - last_focus >= FOCUS_EVERY_S:
                 last_focus = time.monotonic()
                 try:
                     focus_cache = await _focus_symbols(get_pool, focus)

@@ -1,0 +1,465 @@
+{
+  "version": "GOLDEN_MARKET_VALIDATION_V1",
+  "frozen_at": "2026-10-07",
+  "policy": {
+    "titles_are_evidence": false,
+    "structured_identity_required": true,
+    "settlement_payoff_vector_required_for_equivalence": true,
+    "unknown_state": "REFUSE",
+    "ambiguous_mapping": "REFUSE"
+  },
+  "source_manifest": [
+    {
+      "id": "PMUS_NFL_2026_10_04",
+      "kind": "CAPTURED_VENUE_FIXTURE",
+      "repo_path": "backend/tests/fixtures/pmus_nfl_listing_2026_10_04.json",
+      "captured_at": "2026-10-04T04:29:04Z",
+      "notes": "Venue-owned NFL moneyline listings with structured team orientation and settlement prose."
+    },
+    {
+      "id": "PMUS_LINES_2026_10_04",
+      "kind": "CAPTURED_VENUE_FIXTURE",
+      "repo_path": "backend/tests/fixtures/pmus_line_listings_2026_10_04.json",
+      "captured_at": "2026-10-04T21:16:00Z/2026-10-04T21:16:07Z",
+      "notes": "Venue-owned spread/total/team-total listings across sports."
+    },
+    {
+      "id": "PMUS_SOCCER_SAMPLE_2026_09_25",
+      "kind": "CAPTURED_VENUE_FIXTURE",
+      "repo_path": "backend/tests/fixtures/pmus_soccer_board_2026_09_25.json",
+      "captured_at": "2026-09-25T22:39:29Z",
+      "notes": "Captured sample proving eBattles binaries must not map to real EPL simply by team names."
+    },
+    {
+      "id": "KALSHI_ADAPTER_SEMANTICS",
+      "kind": "FROZEN_INTEGRATION_CASE",
+      "repo_path": "backend/tests/kalshi_fixtures.py + current kalshi_mapping.py/kalshi_orders.py semantics",
+      "notes": "Not a captured production venue payload. Frozen semantic cases pending rep-supplied production examples."
+    }
+  ],
+  "cases": [
+    {
+      "id": "G01_NFL_STRUCTURED_MONEYLINE",
+      "source": "PMUS_NFL_2026_10_04",
+      "event": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "WAS",
+        "away": "IND",
+        "start": "2026-10-04T13:30:00Z"
+      },
+      "market": {
+        "family": "MONEYLINE",
+        "period": "FULL_GAME",
+        "line": null,
+        "subject": "IND"
+      },
+      "expected": {
+        "mapping": "ESTABLISHED",
+        "reason": "STRUCTURED_EVENT_AND_MARKET_MATCH"
+      }
+    },
+    {
+      "id": "G02_NFL_WRONG_START",
+      "source": "PMUS_NFL_2026_10_04",
+      "event": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "WAS",
+        "away": "IND",
+        "start": "2026-10-04T17:00:00Z"
+      },
+      "candidate": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "WAS",
+        "away": "IND",
+        "start": "2026-10-04T13:30:00Z"
+      },
+      "expected": {
+        "mapping": "NOT_ESTABLISHED",
+        "reason": "START_TIME_MISMATCH"
+      }
+    },
+    {
+      "id": "G03_NFL_WRONG_TEAM",
+      "source": "PMUS_NFL_2026_10_04",
+      "event": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "CHI",
+        "away": "NYJ",
+        "start": "2026-10-04T17:00:00Z"
+      },
+      "candidate": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "PHI",
+        "away": "LAR",
+        "start": "2026-10-04T17:00:00Z"
+      },
+      "expected": {
+        "mapping": "NOT_ESTABLISHED",
+        "reason": "TEAM_MISMATCH"
+      }
+    },
+    {
+      "id": "G04_SPREAD_LINE_MATCH",
+      "source": "PMUS_LINES_2026_10_04",
+      "event": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "home": "CAR",
+        "away": "DET",
+        "start": "2026-10-05T00:20:00Z"
+      },
+      "market": {
+        "family": "SPREAD",
+        "period": "FULL_GAME",
+        "line": "-10.5",
+        "subject": "DET"
+      },
+      "candidate": {
+        "family": "SPREAD",
+        "period": "FULL_GAME",
+        "line": "-10.5",
+        "subject": "DET"
+      },
+      "expected": {
+        "mapping": "ESTABLISHED",
+        "reason": "EXACT_LINE_MATCH"
+      }
+    },
+    {
+      "id": "G05_SPREAD_LINE_DRIFT",
+      "source": "PMUS_LINES_2026_10_04",
+      "market": {
+        "family": "SPREAD",
+        "period": "FULL_GAME",
+        "line": "-10.5",
+        "subject": "DET"
+      },
+      "candidate": {
+        "family": "SPREAD",
+        "period": "FULL_GAME",
+        "line": "-9.5",
+        "subject": "DET"
+      },
+      "expected": {
+        "mapping": "NOT_ESTABLISHED",
+        "reason": "LINE_MISMATCH"
+      }
+    },
+    {
+      "id": "G06_TOTAL_VS_TEAM_TOTAL",
+      "source": "PMUS_LINES_2026_10_04",
+      "market": {
+        "family": "TOTAL",
+        "period": "FULL_GAME",
+        "line": "22.5",
+        "subject": "GAME_TOTAL"
+      },
+      "candidate": {
+        "family": "TEAM_TOTAL",
+        "period": "FULL_GAME",
+        "line": "10.5",
+        "subject": "CAR"
+      },
+      "expected": {
+        "mapping": "NOT_ESTABLISHED",
+        "reason": "FAMILY_OR_SUBJECT_MISMATCH"
+      }
+    },
+    {
+      "id": "G07_NHL_SETTLEMENT_WINDOW_DIFFERS",
+      "source": "PMUS_LINES_2026_10_04",
+      "left": {
+        "sport": "HOCKEY",
+        "league": "NHL",
+        "postponement_window_hours": 48
+      },
+      "right": {
+        "sport": "FOOTBALL",
+        "league": "NFL",
+        "postponement_window_hours": 336
+      },
+      "expected": {
+        "equivalence": "NOT_ESTABLISHED",
+        "reason": "SETTLEMENT_WINDOW_MISMATCH"
+      }
+    },
+    {
+      "id": "G08_SOCCER_CROSS_COMPETITION_REFUSAL",
+      "source": "PMUS_SOCCER_SAMPLE_2026_09_25",
+      "source_market": {
+        "competition": "EBFPL",
+        "label": "eBattles",
+        "teams": [
+          "ARS",
+          "LIV"
+        ]
+      },
+      "probability_source": {
+        "competition": "EPL",
+        "label": "English Premier League",
+        "teams": [
+          "ARS",
+          "LIV"
+        ]
+      },
+      "expected": {
+        "mapping": "NOT_ESTABLISHED",
+        "reason": "COMPETITION_MISMATCH"
+      }
+    },
+    {
+      "id": "G09_SOCCER_BINARY_CONTRACT_NOT_3WAY_LINE",
+      "source": "PMUS_SOCCER_SAMPLE_2026_09_25",
+      "contracts": [
+        "ARS_YES_NO_BINARY",
+        "DRAW_YES_NO_BINARY",
+        "LIV_YES_NO_BINARY"
+      ],
+      "expected": {
+        "three_way_single_market": false,
+        "reason": "THREE_SEPARATE_BINARY_EVENTS"
+      }
+    },
+    {
+      "id": "G10_KALSHI_TWO_WAY_YES_NO_ALIAS",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "event": {
+        "outcomes": [
+          "NYY",
+          "TB",
+          "VOID",
+          "POSTPONED"
+        ],
+        "exhaustive": true
+      },
+      "claims": {
+        "NYY_YES": {
+          "NYY": "1",
+          "TB": "0",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        },
+        "TB_NO": {
+          "NYY": "1",
+          "TB": "0",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        }
+      },
+      "expected": {
+        "equivalent": true,
+        "canonical_claim": "NYY_WIN"
+      }
+    },
+    {
+      "id": "G11_KALSHI_TWO_WAY_OPPOSITE_YES",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "event": {
+        "outcomes": [
+          "NYY",
+          "TB",
+          "VOID",
+          "POSTPONED"
+        ],
+        "exhaustive": true
+      },
+      "claims": {
+        "NYY_YES": {
+          "NYY": "1",
+          "TB": "0",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        },
+        "TB_YES": {
+          "NYY": "0",
+          "TB": "1",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        }
+      },
+      "expected": {
+        "equivalent": false,
+        "complements": true
+      }
+    },
+    {
+      "id": "G12_THREE_WAY_FALSE_NO_ALIAS",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "event": {
+        "outcomes": [
+          "ARS",
+          "DRAW",
+          "CHE",
+          "VOID",
+          "POSTPONED"
+        ],
+        "exhaustive": true
+      },
+      "claims": {
+        "ARS_YES": {
+          "ARS": "1",
+          "DRAW": "0",
+          "CHE": "0",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        },
+        "CHE_NO": {
+          "ARS": "1",
+          "DRAW": "1",
+          "CHE": "0",
+          "VOID": "0.5",
+          "POSTPONED": "0.5"
+        }
+      },
+      "expected": {
+        "equivalent": false,
+        "reason": "DRAW_STATE_DIFFERS"
+      }
+    },
+    {
+      "id": "G13_UNKNOWN_SETTLEMENT_REFUSES",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "event": {
+        "outcomes": [
+          "A",
+          "B",
+          "VOID"
+        ],
+        "exhaustive": true
+      },
+      "left": {
+        "A": "1",
+        "B": "0",
+        "VOID": null
+      },
+      "right": {
+        "A": "1",
+        "B": "0",
+        "VOID": "0.5"
+      },
+      "expected": {
+        "equivalence": "NOT_ESTABLISHED",
+        "reason": "UNKNOWN_SETTLEMENT_STATE"
+      }
+    },
+    {
+      "id": "G14_BEST_PRICE_USES_OPPONENT_NO",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "routes": [
+        {
+          "name": "KALSHI_NYY_YES",
+          "display_price": "0.49",
+          "fee": "0.02",
+          "slippage": "0.00"
+        },
+        {
+          "name": "KALSHI_TB_NO",
+          "display_price": "0.45",
+          "fee": "0.018",
+          "slippage": "0.00"
+        },
+        {
+          "name": "PMUS_NYY_YES",
+          "display_price": "0.47",
+          "fee": "0.00",
+          "slippage": "0.00"
+        }
+      ],
+      "expected": {
+        "best_route": "KALSHI_TB_NO",
+        "basis": "MIN_ALL_IN_COST"
+      }
+    },
+    {
+      "id": "G15_FEE_REVERSES_SCREEN_PRICE",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "routes": [
+        {
+          "name": "KALSHI",
+          "display_price": "0.45",
+          "fee": "0.03",
+          "slippage": "0.00"
+        },
+        {
+          "name": "PMUS",
+          "display_price": "0.46",
+          "fee": "0.00",
+          "slippage": "0.00"
+        }
+      ],
+      "expected": {
+        "best_route": "PMUS",
+        "basis": "MIN_ALL_IN_COST"
+      }
+    },
+    {
+      "id": "G16_STALE_CHEAP_ROUTE_LOSES",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "routes": [
+        {
+          "name": "STALE_KALSHI",
+          "display_price": "0.40",
+          "fee": "0.01",
+          "fresh": false
+        },
+        {
+          "name": "CURRENT_PMUS",
+          "display_price": "0.47",
+          "fee": "0.00",
+          "fresh": true
+        }
+      ],
+      "expected": {
+        "best_route": "CURRENT_PMUS",
+        "basis": "FRESH_ELIGIBLE_ONLY"
+      }
+    },
+    {
+      "id": "G17_SAME_VENUE_ARB",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "legs": [
+        {
+          "claim": "A_WIN",
+          "all_in": "0.45"
+        },
+        {
+          "claim": "B_WIN",
+          "all_in": "0.45"
+        }
+      ],
+      "guaranteed_payout": "1.00",
+      "expected": {
+        "arb": true,
+        "topology": "SAME_VENUE",
+        "gross_floor": "0.10"
+      }
+    },
+    {
+      "id": "G18_CROSS_VENUE_ARB",
+      "source": "KALSHI_ADAPTER_SEMANTICS",
+      "legs": [
+        {
+          "venue": "KALSHI",
+          "claim": "A_WIN",
+          "all_in": "0.44"
+        },
+        {
+          "venue": "PMUS",
+          "claim": "B_WIN",
+          "all_in": "0.45"
+        }
+      ],
+      "guaranteed_payout": "1.00",
+      "expected": {
+        "arb": true,
+        "topology": "CROSS_VENUE",
+        "gross_floor": "0.11"
+      }
+    }
+  ]
+}

@@ -268,14 +268,19 @@ STOP_PARTITION_COMPLETE = "PARTITIONED_TO_A_NATURAL_END"
 #: a truncated time window whose partition left buckets unresolved (each
 #: named with its window and why in `partition.unresolved`): TRUNCATED
 STOP_PARTITION_UNRESOLVED = "PARTITION_LEFT_BUCKETS_UNRESOLVED"
+#: (completion readiness) the process crossed its memory budget while pages
+#: were still full (the shared workers were OOM-killed at 2 GiB while broad
+#: catalogue work ran beside the capital-critical loops): TRUNCATED, never
+#: complete -- the next cycle resumes on a lighter process
+STOP_MEMORY_BUDGET = "MEMORY_BUDGET_EXHAUSTED"
 STOPS = (STOP_SHORT_PAGE, STOP_EMPTY_PAGE, STOP_BUDGET, STOP_WALL_TIME,
          STOP_RATE_LIMITED, STOP_ERROR, STOP_NO_VARIANT, STOP_WRITE_FAILURES,
          STOP_NOT_RUN, STOP_OFFSET_CEILING, STOP_PARTITION_COMPLETE,
-         STOP_PARTITION_UNRESOLVED)
+         STOP_PARTITION_UNRESOLVED, STOP_MEMORY_BUDGET)
 NATURAL_ENDS = frozenset({STOP_SHORT_PAGE, STOP_EMPTY_PAGE,
                           STOP_PARTITION_COMPLETE})
 TRUNCATING_STOPS = frozenset({STOP_BUDGET, STOP_WALL_TIME, STOP_OFFSET_CEILING,
-                              STOP_PARTITION_UNRESOLVED})
+                              STOP_PARTITION_UNRESOLVED, STOP_MEMORY_BUDGET})
 
 #: How many events of the previous page each next request reads again. Offset
 #: pagination over a board that changes while it is walked (games closing,
@@ -732,9 +737,14 @@ class PageWalk:
                  overlap: int = PAGE_OVERLAP, start_offset: int = 0,
                  deadline: float | None = None, clock=None,
                  max_offset: int | None = None,
-                 already_read: set | None = None):
+                 already_read: set | None = None,
+                 memory_guard=None):
         import time as _time
 
+        #: (completion readiness) a callable answering True when the process
+        #: is over its memory budget: the walk then stops TRUNCATED
+        #: (MEMORY_BUDGET_EXHAUSTED) before asking for another page
+        self.memory_guard = memory_guard
         self.limit = max(1, int(limit))
         self.max_requests = max(1, int(max_requests))
         self.overlap = max(0, int(overlap))
@@ -811,6 +821,14 @@ class PageWalk:
         if self.deadline is not None and self._clock() >= self.deadline:
             self.stopped = STOP_WALL_TIME
             return None
+        if self.memory_guard is not None:
+            try:
+                over = bool(self.memory_guard())
+            except Exception:                                 # noqa: BLE001
+                over = False
+            if over:
+                self.stopped = STOP_MEMORY_BUDGET
+                return None
         if self.max_offset is not None and self._next > self.max_offset:
             self.stopped = STOP_OFFSET_CEILING
             return None
@@ -1197,6 +1215,13 @@ class WindowPartition:
         if stopped == STOP_WALL_TIME:
             self._unresolved(start, end, depth, STOP_WALL_TIME)
             return
+        if stopped == STOP_MEMORY_BUDGET:
+            # (completion readiness) over the memory budget: this window is
+            # unresolved and no further bucket is walked in this process --
+            # never split (more walks) and never PARTITIONED_TO_A_NATURAL_END
+            self._unresolved(start, end, depth, STOP_MEMORY_BUDGET)
+            self.aborted = STOP_MEMORY_BUDGET
+            return
         if stopped in (STOP_BUDGET, STOP_OFFSET_CEILING):
             if start is None or end is None:
                 self._unresolved(start, end, depth, P_UNBOUNDED)
@@ -1302,6 +1327,8 @@ def apply_partition(pass_receipt: dict, part: WindowPartition) -> dict:
         whys = {u.get("why") for u in pr["unresolved"]} or {None}
         if whys == {STOP_WALL_TIME}:
             out["stopped"] = STOP_WALL_TIME
+        elif whys == {STOP_MEMORY_BUDGET}:
+            out["stopped"] = STOP_MEMORY_BUDGET
         elif whys <= {P_BUDGET, STOP_BUDGET}:
             out["stopped"] = STOP_BUDGET
         else:
@@ -1340,10 +1367,29 @@ class SideKeyGuard:
 
     The first writer of a qualified pair has already been written unqualified
     when the second arrives; `requalify` names it so the caller rewrites it
-    (and deletes the unqualified row the earlier write left)."""
+    (and deletes the unqualified row the earlier write left).
+
+    WHAT IT HOLDS IS BOUNDED BY THE EVENT, NOT THE REFRESH (2026-10-08, the
+    workers OOM). It kept every admitted row dict for the whole refresh --
+    measured ~105 MB for the 86,088-row full sweep and ~55 MB for the
+    44,496-row calendar lane -- although a row body is only ever read back by
+    the caller while the event that admitted it is being written: the
+    rewrite of a qualified pair replaces the first row in that event's own
+    write list, and a first row admitted by an EARLIER event cannot be in it
+    (its key was held before this event began, so no row of this event
+    carrying that unqualified key was admitted). So the refresh-long record
+    per key is (market_slug, intent) -- all the refusal / duplicate /
+    qualification decisions read -- and the bodies are kept only until the
+    caller says the event is done (`end_event`). Decisions, counters,
+    examples and the rewrite of a same-event pair are unchanged; for a first
+    row from an earlier event the rewrite names the same identifier, side
+    and market (what the caller's DELETE and its write-list match read)."""
 
     def __init__(self):
+        #: (identifier, side_norm) -> (market_slug, intent), whole refresh
         self._held: dict = {}
+        #: (identifier, side_norm) -> the row admitted under it, current event
+        self._rows: dict = {}
         self.qualified = 0
         self.refused = 0
         self.examples: list = []
@@ -1361,21 +1407,29 @@ class SideKeyGuard:
         key = (row.get("identifier"), row.get("side_norm"))
         prior = self._held.get(key)
         if prior is None:
-            self._held[key] = {"market_slug": row.get("market_slug"),
-                               "intent": row.get("intent"), "row": row}
+            self._held[key] = (row.get("market_slug"), row.get("intent"))
+            self._rows[key] = row
             return row, None
-        if prior["market_slug"] != row.get("market_slug"):
+        prior_slug, prior_intent = prior
+        if prior_slug != row.get("market_slug"):
             self.refused += 1
             if len(self.examples) < MAX_EXAMPLES:
                 self.examples.append({"case": D_SIDE_KEY_HELD_BY_ANOTHER_MARKET,
                                       "identifier": key[0], "side_norm": key[1],
-                                      "held_by": prior["market_slug"],
+                                      "held_by": prior_slug,
                                       "refused": row.get("market_slug")})
             return None, None
-        if prior["intent"] == row.get("intent"):
+        if prior_intent == row.get("intent"):
             # the venue listed the same side twice: one row, nothing lost
             return None, None
-        first = dict(prior["row"])
+        prior_row = self._rows.get(key)
+        if prior_row is None:
+            # admitted by an earlier event of this refresh, whose body is no
+            # longer held (see the class docstring): the same key, market and
+            # intent the decision above read
+            prior_row = {"identifier": key[0], "side_norm": key[1],
+                         "market_slug": prior_slug, "intent": prior_intent}
+        first = dict(prior_row)
         first["side_norm"] = "%s [%s]" % (key[1], self._marker(first.get("intent")))
         second = dict(row)
         second["side_norm"] = "%s [%s]" % (key[1], self._marker(row.get("intent")))
@@ -1383,12 +1437,10 @@ class SideKeyGuard:
             self.refused += 1
             return None, None
         self.qualified += 1
-        self._held[(key[0], first["side_norm"])] = {
-            "market_slug": first.get("market_slug"),
-            "intent": first.get("intent"), "row": first}
-        self._held[(key[0], second["side_norm"])] = {
-            "market_slug": second.get("market_slug"),
-            "intent": second.get("intent"), "row": second}
+        for q in (first, second):
+            self._held[(key[0], q["side_norm"])] = (q.get("market_slug"),
+                                                    q.get("intent"))
+            self._rows[(key[0], q["side_norm"])] = q
         if len(self.examples) < MAX_EXAMPLES:
             self.examples.append({"case": K_SIDE_KEY_QUALIFIED,
                                   "identifier": key[0], "side_norm": key[1],
@@ -1396,6 +1448,11 @@ class SideKeyGuard:
         # the caller rewrites `first` under its qualified key and deletes the
         # unqualified row its earlier write left behind
         return second, {"rewrite": first, "delete_side_norm": key[1]}
+
+    def end_event(self) -> None:
+        """The caller finished writing one event: its row bodies are never
+        read back again, only the per-key (market_slug, intent) record."""
+        self._rows.clear()
 
     def receipt(self) -> dict:
         return {"qualified_pairs": self.qualified,

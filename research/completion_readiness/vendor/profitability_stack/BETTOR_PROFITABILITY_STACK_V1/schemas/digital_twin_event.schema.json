@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Digital Twin Event",
+  "type": "object",
+  "required": [
+    "ts",
+    "seq",
+    "kind",
+    "market_id",
+    "payload"
+  ],
+  "properties": {
+    "ts": {
+      "type": "number"
+    },
+    "seq": {
+      "type": "integer"
+    },
+    "kind": {
+      "enum": [
+        "BOOK",
+        "TRADE",
+        "DECISION",
+        "ORDER_ACK",
+        "CANCEL_ACK",
+        "SETTLEMENT"
+      ]
+    },
+    "market_id": {
+      "type": "string"
+    },
+    "payload": {
+      "type": "object"
+    }
+  }
+}

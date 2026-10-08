@@ -1,0 +1,1127 @@
+{
+ "_what": "THE VENUE'S OWN BASKETBALL AND HOCKEY FULL-GAME WINNER LISTINGS OF EVERY LEAGUE IT LISTED at the read THAT THE 2026-10-06 CAPTURE (pmus_basketball_hockey_winner_listings_2026_10_06.json) DID NOT CARRY: the wording census per league (every sentence after the first, the result-source sentence excluded) and up to two listings per league. Read because production refused PinnAPI-native seeds of three of these leagues VENUE_NATIVE_LEAGUE_NOT_ADMITTED (first-loss census 2026-10-08 01:40Z: Lahti Basketball v Kataja Basket Joensuu = koris, Antibes v Orleans Loiret Basket = fra2, Manchester Basketball v Cheshire Phoenix = slb).",
+ "_source": "C<offset>: GET https://gateway.polymarket.us/v1/markets?categories=sports&closed=false&limit=500&marketTypes=moneyline&offset=<offset> (read 2026-10-08T02:22:31Z..2026-10-08T02:22:35Z; C2000 returned no markets: the listing is complete)",
+ "_reader": "Claude Code session container, outbound HTTPS through its agent proxy (read-only public GET, no credential)",
+ "_reads": {
+  "C0": {
+   "response_bytes": 2284830,
+   "response_sha256": "a59be08717b0d76c93159149ad0fc894cf92b788d12385910ebc7b86ae947e90"
+  },
+  "C500": {
+   "response_bytes": 2040490,
+   "response_sha256": "56e7de58094c7bd7d19fce5f7c512bd5e1702a5c8971554ca64401b023049f70"
+  },
+  "C1000": {
+   "response_bytes": 1988582,
+   "response_sha256": "98a15cddb692e173266ae34fcce1ac7916a09d6c2a30e18f38986af543325a17"
+  },
+  "C1500": {
+   "response_bytes": 1063276,
+   "response_sha256": "42b8b784d4f6285139ae73a726e0eeca3410ea327b8ba97907979bd0eb89c2a5"
+  },
+  "C2000": {
+   "response_bytes": 14,
+   "response_sha256": "f36daaa1fcd896f9fdfd2a991f06ef808c56d5acaceca4e6f89329e7794608d1"
+  }
+ },
+ "_subset": "the fields this repository reads; the sha256 is of each WHOLE response, so this subset is attributable but not byte-reproducible",
+ "wording_census": {
+  "autbl/basketball_team_full_game_winner": [
+   {
+    "listings": 2,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "bsktcin/basketball_team_full_game_winner": [
+   {
+    "listings": 2,
+    "after_the_first_sentence": "Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50."
+   }
+  ],
+  "bsktcua/basketball_team_full_game_winner": [
+   {
+    "listings": 7,
+    "after_the_first_sentence": "Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50."
+   }
+  ],
+  "cznbl/basketball_team_full_game_winner": [
+   {
+    "listings": 3,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "fra2/basketball_team_full_game_winner": [
+   {
+    "listings": 10,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "gbl/basketball_team_full_game_winner": [
+   {
+    "listings": 6,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "hunbl/basketball_team_full_game_winner": [
+   {
+    "listings": 5,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "ita2/basketball_team_full_game_winner": [
+   {
+    "listings": 2,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "koris/basketball_team_full_game_winner": [
+   {
+    "listings": 7,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "lkl/basketball_team_full_game_winner": [
+   {
+    "listings": 2,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "lnb/basketball_team_full_game_winner": [
+   {
+    "listings": 5,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "slb/basketball_team_full_game_winner": [
+   {
+    "listings": 3,
+    "after_the_first_sentence": "Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price."
+   }
+  ],
+  "del/hockey_team_full_game_winner": [
+   {
+    "listings": 7,
+    "after_the_first_sentence": "Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price."
+   }
+  ],
+  "shl/hockey_team_full_game_winner": [
+   {
+    "listings": 7,
+    "after_the_first_sentence": "Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price."
+   }
+  ]
+ },
+ "markets": [
+  {
+   "id": "1276620",
+   "slug": "aec-autbl-obe-kap-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Oberwart Gunners vs Kapfenberg Bulls scheduled for October 10, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the Oberwart Gunners vs Kapfenberg Bulls Austrian Superliga game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Austrian Superliga.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T17:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Oberwart Gunners",
+     "long": true,
+     "team": {
+      "name": "Oberwart Gunners",
+      "safeName": "Oberwart Gunners",
+      "abbreviation": "obe",
+      "league": "autbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Kapfenberg Bulls",
+     "long": false,
+     "team": {
+      "name": "Kapfenberg Bulls",
+      "safeName": "Kapfenberg Bulls",
+      "abbreviation": "kap",
+      "league": "autbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1252052",
+   "slug": "aec-autbl-pol-tra-2026-10-09",
+   "question": "Who will win in the upcoming basketball event SKN St. Polten Basketball vs Traiskirchen Lions scheduled for October 9, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the SKN St. Polten Basketball vs Traiskirchen Lions Austrian Superliga game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Austrian Superliga.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T17:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "SKN St. Polten Basketball",
+     "long": true,
+     "team": {
+      "name": "SKN St. Polten Basketball",
+      "safeName": "SKN St. Polten Basketball",
+      "abbreviation": "pol",
+      "league": "autbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Traiskirchen Lions",
+     "long": false,
+     "team": {
+      "name": "Traiskirchen Lions",
+      "safeName": "Traiskirchen Lions",
+      "abbreviation": "tra",
+      "league": "autbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1276189",
+   "slug": "aec-cznbl-hra-dec-2026-10-10",
+   "question": "Who will win in the upcoming basketball event BK Gapa Hradec Kralove vs BK Decin scheduled for October 10, 2026 at 4:00 PM UTC?",
+   "description": "This market will settle to the winner of the BK Gapa Hradec Kralove vs BK Decin Czech NBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Czech NBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T16:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "BK Gapa Hradec Kralove",
+     "long": true,
+     "team": {
+      "name": "BK Gapa Hradec Kralove",
+      "safeName": "BK Gapa Hradec Kralove",
+      "abbreviation": "hra",
+      "league": "cznbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "BK Decin",
+     "long": false,
+     "team": {
+      "name": "BK Decin",
+      "safeName": "BK Decin",
+      "abbreviation": "dec",
+      "league": "cznbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1272175",
+   "slug": "aec-cznbl-sla-par-2026-10-10",
+   "question": "Who will win in the upcoming basketball event SK Slavia Prague vs BK Pardubice scheduled for October 10, 2026 at 10:00 AM UTC?",
+   "description": "This market will settle to the winner of the SK Slavia Prague vs BK Pardubice Czech NBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Czech NBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T10:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "SK Slavia Prague",
+     "long": true,
+     "team": {
+      "name": "SK Slavia Prague",
+      "safeName": "SK Slavia Prague",
+      "abbreviation": "sla",
+      "league": "cznbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "BK Pardubice",
+     "long": false,
+     "team": {
+      "name": "BK Pardubice",
+      "safeName": "BK Pardubice",
+      "abbreviation": "par",
+      "league": "cznbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1253179",
+   "slug": "aec-fra2-ant-orl-2026-10-09",
+   "question": "Who will win in the upcoming basketball event Antibes vs Orleans Loiret Basket scheduled for October 9, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Antibes vs Orleans Loiret Basket FRA2 game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from FRA2.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Antibes",
+     "long": true,
+     "team": {
+      "name": "Antibes",
+      "safeName": "Antibes",
+      "abbreviation": "ant",
+      "league": "fra2",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Orleans Loiret Basket",
+     "long": false,
+     "team": {
+      "name": "Orleans Loiret Basket",
+      "safeName": "Orleans Loiret Basket",
+      "abbreviation": "orl",
+      "league": "fra2",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1253181",
+   "slug": "aec-fra2-cae-htv-2026-10-09",
+   "question": "Who will win in the upcoming basketball event Caen vs Hyeres-Toulon scheduled for October 9, 2026 at 6:00 PM UTC?",
+   "description": "This market will settle to the winner of the Caen vs Hyeres-Toulon FRA2 game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from FRA2.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T18:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Caen",
+     "long": true,
+     "team": {
+      "name": "Caen",
+      "safeName": "Caen",
+      "abbreviation": "cae",
+      "league": "fra2",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Hyeres-Toulon",
+     "long": false,
+     "team": {
+      "name": "Hyeres-Toulon",
+      "safeName": "Hyeres-Toulon",
+      "abbreviation": "htv",
+      "league": "fra2",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1274732",
+   "slug": "aec-gbl-ari-aek-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Aris BSA vs AEK scheduled for October 10, 2026 at 2:30 PM UTC?",
+   "description": "This market will settle to the winner of the Aris BSA vs AEK GBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from GBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T14:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Aris BSA",
+     "long": true,
+     "team": {
+      "name": "Aris BSA",
+      "safeName": "Aris BSA",
+      "abbreviation": "ari",
+      "league": "gbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "AEK",
+     "long": false,
+     "team": {
+      "name": "AEK",
+      "safeName": "AEK",
+      "abbreviation": "aek",
+      "league": "gbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1274731",
+   "slug": "aec-gbl-kar-vik-2026-10-10",
+   "question": "Who will win in the upcoming basketball event AS Karditsas vs Vikos scheduled for October 10, 2026 at 2:00 PM UTC?",
+   "description": "This market will settle to the winner of the AS Karditsas vs Vikos GBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from GBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T14:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "AS Karditsas",
+     "long": true,
+     "team": {
+      "name": "AS Karditsas",
+      "safeName": "AS Karditsas",
+      "abbreviation": "kar",
+      "league": "gbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Vikos",
+     "long": false,
+     "team": {
+      "name": "Vikos",
+      "safeName": "Vikos",
+      "abbreviation": "vik",
+      "league": "gbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276211",
+   "slug": "aec-hunbl-ato-sop-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Atomeromu SE vs Soproni KC scheduled for October 10, 2026 at 4:00 PM UTC?",
+   "description": "This market will settle to the winner of the Atomeromu SE vs Soproni KC HUNBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from HUNBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T16:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Atomeromu SE",
+     "long": true,
+     "team": {
+      "name": "Atomeromu SE",
+      "safeName": "Atomeromu SE",
+      "abbreviation": "ato",
+      "league": "hunbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Soproni KC",
+     "long": false,
+     "team": {
+      "name": "Soproni KC",
+      "safeName": "Soproni KC",
+      "abbreviation": "sop",
+      "league": "hunbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276214",
+   "slug": "aec-hunbl-fal-sze-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Falco KC Szombathely vs Szedeak scheduled for October 10, 2026 at 4:00 PM UTC?",
+   "description": "This market will settle to the winner of the Falco KC Szombathely vs Szedeak HUNBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from HUNBL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T16:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Falco KC Szombathely",
+     "long": true,
+     "team": {
+      "name": "Falco KC Szombathely",
+      "safeName": "Falco KC Szombathely",
+      "abbreviation": "fal",
+      "league": "hunbl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Szedeak",
+     "long": false,
+     "team": {
+      "name": "Szedeak",
+      "safeName": "Szedeak",
+      "abbreviation": "sze",
+      "league": "hunbl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276782",
+   "slug": "aec-ita2-mes-sas-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Basket Mestre 1958 vs Dinamo Sassari scheduled for October 10, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Basket Mestre 1958 vs Dinamo Sassari Italian Serie A2 game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Italian Serie A2.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Basket Mestre 1958",
+     "long": true,
+     "team": {
+      "name": "Basket Mestre 1958",
+      "safeName": "Basket Mestre 1958",
+      "abbreviation": "mes",
+      "league": "ita2",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Dinamo Sassari",
+     "long": false,
+     "team": {
+      "name": "Dinamo Sassari",
+      "safeName": "Dinamo Sassari",
+      "abbreviation": "sas",
+      "league": "ita2",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276783",
+   "slug": "aec-ita2-ura-ruv-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Urania Milano vs Pallacanestro Ruvo di Puglia scheduled for October 10, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Urania Milano vs Pallacanestro Ruvo di Puglia Italian Serie A2 game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Italian Serie A2.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Urania Milano",
+     "long": true,
+     "team": {
+      "name": "Urania Milano",
+      "safeName": "Urania Milano",
+      "abbreviation": "ura",
+      "league": "ita2",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Pallacanestro Ruvo di Puglia",
+     "long": false,
+     "team": {
+      "name": "Pallacanestro Ruvo di Puglia",
+      "safeName": "Pallacanestro Ruvo di Puglia",
+      "abbreviation": "ruv",
+      "league": "ita2",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1249582",
+   "slug": "aec-koris-hse-bis-2026-10-09",
+   "question": "Who will win in the upcoming basketball event Helsinki Seagulls vs Bisons Loimaa scheduled for October 9, 2026 at 3:30 PM UTC?",
+   "description": "This market will settle to the winner of the Helsinki Seagulls vs Bisons Loimaa Korisliiga game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Korisliiga.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T15:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Helsinki Seagulls",
+     "long": true,
+     "team": {
+      "name": "Helsinki Seagulls",
+      "safeName": "Helsinki Seagulls",
+      "abbreviation": "hse",
+      "league": "koris",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Bisons Loimaa",
+     "long": false,
+     "team": {
+      "name": "Bisons Loimaa",
+      "safeName": "Bisons Loimaa",
+      "abbreviation": "bis",
+      "league": "koris",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1249585",
+   "slug": "aec-koris-kat-hon-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Kataja Basket Joensuu vs Honka Espoo scheduled for October 10, 2026 at 12:00 PM UTC?",
+   "description": "This market will settle to the winner of the Kataja Basket Joensuu vs Honka Espoo Korisliiga game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Korisliiga.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T12:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Kataja Basket Joensuu",
+     "long": true,
+     "team": {
+      "name": "Kataja Basket Joensuu",
+      "safeName": "Kataja Basket Joensuu",
+      "abbreviation": "kat",
+      "league": "koris",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Honka Espoo",
+     "long": false,
+     "team": {
+      "name": "Honka Espoo",
+      "safeName": "Honka Espoo",
+      "abbreviation": "hon",
+      "league": "koris",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1276209",
+   "slug": "aec-lkl-lie-jon-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Lietkabelis vs BC Jonava scheduled for October 10, 2026 at 4:10 PM UTC?",
+   "description": "This market will settle to the winner of the Lietkabelis vs BC Jonava LKL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from LKL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T16:10:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Lietkabelis",
+     "long": true,
+     "team": {
+      "name": "Lietkabelis",
+      "safeName": "Lietkabelis",
+      "abbreviation": "lie",
+      "league": "lkl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "BC Jonava",
+     "long": false,
+     "team": {
+      "name": "BC Jonava",
+      "safeName": "BC Jonava",
+      "abbreviation": "jon",
+      "league": "lkl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1274730",
+   "slug": "aec-lkl-ryt-nep-2026-10-10",
+   "question": "Who will win in the upcoming basketball event BC Rytas vs BC Neptunas scheduled for October 10, 2026 at 1:50 PM UTC?",
+   "description": "This market will settle to the winner of the BC Rytas vs BC Neptunas LKL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from LKL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T13:50:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "BC Rytas",
+     "long": true,
+     "team": {
+      "name": "BC Rytas",
+      "safeName": "BC Rytas",
+      "abbreviation": "ryt",
+      "league": "lkl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "BC Neptunas",
+     "long": false,
+     "team": {
+      "name": "BC Neptunas",
+      "safeName": "BC Neptunas",
+      "abbreviation": "nep",
+      "league": "lkl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276794",
+   "slug": "aec-lnb-blz-bou-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Boulazac vs Bourg-en-Bresse scheduled for October 10, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Boulazac vs Bourg-en-Bresse LNB game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from LNB.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Boulazac",
+     "long": true,
+     "team": {
+      "name": "Boulazac",
+      "safeName": "Boulazac",
+      "abbreviation": "blz",
+      "league": "lnb",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Bourg-en-Bresse",
+     "long": false,
+     "team": {
+      "name": "Bourg-en-Bresse",
+      "safeName": "Bourg-en-Bresse",
+      "abbreviation": "bou",
+      "league": "lnb",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276208",
+   "slug": "aec-lnb-cha-nan-2026-10-10",
+   "question": "Who will win in the upcoming basketball event Chalon/Saone vs Nancy scheduled for October 10, 2026 at 4:30 PM UTC?",
+   "description": "This market will settle to the winner of the Chalon/Saone vs Nancy LNB game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from LNB.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-10T16:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Chalon/Saone",
+     "long": true,
+     "team": {
+      "name": "Chalon/Saone",
+      "safeName": "Chalon/Saone",
+      "abbreviation": "cha",
+      "league": "lnb",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Nancy",
+     "long": false,
+     "team": {
+      "name": "Nancy",
+      "safeName": "Nancy",
+      "abbreviation": "nan",
+      "league": "lnb",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1253171",
+   "slug": "aec-slb-lei-bri-2026-10-09",
+   "question": "Who will win in the upcoming basketball event Leicester Riders vs Bristol Flyers scheduled for October 9, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Leicester Riders vs Bristol Flyers SLB game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SLB.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Leicester Riders",
+     "long": true,
+     "team": {
+      "name": "Leicester Riders",
+      "safeName": "Leicester Riders",
+      "abbreviation": "lei",
+      "league": "slb",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Bristol Flyers",
+     "long": false,
+     "team": {
+      "name": "Bristol Flyers",
+      "safeName": "Bristol Flyers",
+      "abbreviation": "bri",
+      "league": "slb",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1253173",
+   "slug": "aec-slb-man-che-2026-10-09",
+   "question": "Who will win in the upcoming basketball event Manchester Basketball vs Cheshire Phoenix scheduled for October 9, 2026 at 6:30 PM UTC?",
+   "description": "This market will settle to the winner of the Manchester Basketball vs Cheshire Phoenix SLB game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SLB.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T18:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Manchester Basketball",
+     "long": true,
+     "team": {
+      "name": "Manchester Basketball",
+      "safeName": "Manchester Basketball",
+      "abbreviation": "man",
+      "league": "slb",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Cheshire Phoenix",
+     "long": false,
+     "team": {
+      "name": "Cheshire Phoenix",
+      "safeName": "Cheshire Phoenix",
+      "abbreviation": "che",
+      "league": "slb",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1276624",
+   "slug": "aec-del-aev-bhv-2026-10-09",
+   "question": "Who will win in the upcoming hockey event Augsburger Panther vs Bremerhaven scheduled for October 9, 2026 at 5:30 PM UTC?",
+   "description": "This market will settle to the winner of the Augsburger Panther vs Bremerhaven DEL game scheduled for Oct 9, 2026 at 1:30PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from DEL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T17:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Augsburger Panther",
+     "long": true,
+     "team": {
+      "name": "Augsburger Panther",
+      "safeName": "Augsburger Panther",
+      "abbreviation": "aev",
+      "league": "del",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Bremerhaven",
+     "long": false,
+     "team": {
+      "name": "Bremerhaven",
+      "safeName": "Bremerhaven",
+      "abbreviation": "bhv",
+      "league": "del",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1276625",
+   "slug": "aec-del-ebb-wob-2026-10-09",
+   "question": "Who will win in the upcoming hockey event Eisbaeren Berlin vs Grizzlys Wolfsburg scheduled for October 9, 2026 at 5:30 PM UTC?",
+   "description": "This market will settle to the winner of the Eisbaeren Berlin vs Grizzlys Wolfsburg DEL game scheduled for Oct 9, 2026 at 1:30PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from DEL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-09T17:30:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Eisbaeren Berlin",
+     "long": true,
+     "team": {
+      "name": "Eisbaeren Berlin",
+      "safeName": "Eisbaeren Berlin",
+      "abbreviation": "ebb",
+      "league": "del",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Grizzlys Wolfsburg",
+     "long": false,
+     "team": {
+      "name": "Grizzlys Wolfsburg",
+      "safeName": "Grizzlys Wolfsburg",
+      "abbreviation": "wob",
+      "league": "del",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1252053",
+   "slug": "aec-shl-bif-ifb-2026-10-08",
+   "question": "Who will win in the upcoming hockey event Brynaes vs Bjoerkloeven scheduled for October 8, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the Brynaes vs Bjoerkloeven SHL game scheduled for Oct 8, 2026 at 1:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from SHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T17:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Brynaes",
+     "long": true,
+     "team": {
+      "name": "Brynaes",
+      "safeName": "Brynaes",
+      "abbreviation": "bif",
+      "league": "shl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Bjoerkloeven",
+     "long": false,
+     "team": {
+      "name": "Bjoerkloeven",
+      "safeName": "Bjoerkloeven",
+      "abbreviation": "ifb",
+      "league": "shl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  },
+  {
+   "id": "1252054",
+   "slug": "aec-shl-dif-ohk-2026-10-08",
+   "question": "Who will win in the upcoming hockey event Djurgaarden vs Oerebro HK scheduled for October 8, 2026 at 5:00 PM UTC?",
+   "description": "This market will settle to the winner of the Djurgaarden vs Oerebro HK SHL game scheduled for Oct 8, 2026 at 1:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from SHL.",
+   "marketType": "moneyline",
+   "sportsMarketType": "hockey_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T17:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Djurgaarden",
+     "long": true,
+     "team": {
+      "name": "Djurgaarden",
+      "safeName": "Djurgaarden",
+      "abbreviation": "dif",
+      "league": "shl",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Oerebro HK",
+     "long": false,
+     "team": {
+      "name": "Oerebro HK",
+      "safeName": "Oerebro HK",
+      "abbreviation": "ohk",
+      "league": "shl",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C500"
+  }
+ ],
+ "_listings_not_read": "the BSKT Cup boards (bsktcin, bsktcua) state a wording no admitted league carries; their listings are kept here, apart from `markets`, and the leagues are named in bettor_venue_native_identity.LEAGUES_NOT_READ",
+ "listings_not_read": [
+  {
+   "id": "1281609",
+   "slug": "aec-bsktcin-din-for-2026-10-08-48c1796d",
+   "question": "Who will win in the upcoming basketball event Dinamo NS vs Fortuna Basket scheduled for October 8, 2026 at 8:00 PM UTC?",
+   "description": "This market will settle to the winner of the Dinamo NS vs Fortuna Basket BSKT Cup International game scheduled for Oct 8, 2026. Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. Outcome sourced from BSKT Cup International.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T20:00:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Dinamo NS",
+     "long": true,
+     "team": {
+      "name": "Dinamo NS",
+      "safeName": "Dinamo NS",
+      "abbreviation": "din",
+      "league": "bsktcin",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Fortuna Basket",
+     "long": false,
+     "team": {
+      "name": "Fortuna Basket",
+      "safeName": "Fortuna Basket",
+      "abbreviation": "for",
+      "league": "bsktcin",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1500"
+  },
+  {
+   "id": "1281610",
+   "slug": "aec-bsktcin-for-din-2026-10-08-4d8d7e25",
+   "question": "Who will win in the upcoming basketball event Fortuna Basket vs Dinamo NS scheduled for October 8, 2026 at 9:20 PM UTC?",
+   "description": "This market will settle to the winner of the Fortuna Basket vs Dinamo NS BSKT Cup International game scheduled for Oct 8, 2026. Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. Outcome sourced from BSKT Cup International.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T21:20:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Fortuna Basket",
+     "long": true,
+     "team": {
+      "name": "Fortuna Basket",
+      "safeName": "Fortuna Basket",
+      "abbreviation": "for",
+      "league": "bsktcin",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Dinamo NS",
+     "long": false,
+     "team": {
+      "name": "Dinamo NS",
+      "safeName": "Dinamo NS",
+      "abbreviation": "din",
+      "league": "bsktcin",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1500"
+  },
+  {
+   "id": "1278061",
+   "slug": "aec-bsktcua-ath-doc-2026-10-08-ba387647",
+   "question": "Who will win in the upcoming basketball event Athletic Basket vs Dockers United scheduled for October 8, 2026 at 7:15 AM UTC?",
+   "description": "This market will settle to the winner of the Athletic Basket vs Dockers United BSKT Cup game scheduled for Oct 8, 2026. Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. Outcome sourced from BSKT Cup.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T07:15:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Athletic Basket",
+     "long": true,
+     "team": {
+      "name": "Athletic Basket",
+      "safeName": "Athletic Basket",
+      "abbreviation": "ath",
+      "league": "bsktcua",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Dockers United",
+     "long": false,
+     "team": {
+      "name": "Dockers United",
+      "safeName": "Dockers United",
+      "abbreviation": "doc",
+      "league": "bsktcua",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  },
+  {
+   "id": "1278064",
+   "slug": "aec-bsktcua-ath-uni-2026-10-08-b97d7a5e",
+   "question": "Who will win in the upcoming basketball event Athletic Basket vs Union Kremin scheduled for October 8, 2026 at 4:45 AM UTC?",
+   "description": "This market will settle to the winner of the Athletic Basket vs Union Kremin BSKT Cup game scheduled for Oct 8, 2026. Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. Outcome sourced from BSKT Cup.",
+   "marketType": "moneyline",
+   "sportsMarketType": "basketball_team_full_game_winner",
+   "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-10-08T04:45:00Z",
+   "status": "MARKET_STATUS_OPEN",
+   "marketSides": [
+    {
+     "description": "Athletic Basket",
+     "long": true,
+     "team": {
+      "name": "Athletic Basket",
+      "safeName": "Athletic Basket",
+      "abbreviation": "ath",
+      "league": "bsktcua",
+      "ordering": "home"
+     }
+    },
+    {
+     "description": "Union Kremin",
+     "long": false,
+     "team": {
+      "name": "Union Kremin",
+      "safeName": "Union Kremin",
+      "abbreviation": "uni",
+      "league": "bsktcua",
+      "ordering": "away"
+     }
+    }
+   ],
+   "read": "C1000"
+  }
+ ]
+}

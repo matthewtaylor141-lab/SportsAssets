@@ -269,10 +269,16 @@ SUPPORTED: dict = {
 #: read through the league's own team table
 #: (bettor_venue_native_identity.WNBA_TEAMS). The leagues equal
 #: bettor_venue_native_identity.ADMITTED_WINNER_LEAGUES (pinned by a test).
+#: (2026-10-08) the twelve leagues the venue listed after that read, each
+#: stating a captured wording byte-identical to an admitted one
+#: (tests/fixtures/pmus_basketball_hockey_winner_listings_2026_10_08.json).
 _BASKETBALL_LEAGUES = ("nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl",
                        "eurocup", "eurolg", "jpbl", "kbl", "lba", "lnbp",
-                       "nbl", "slnbl", "svkbl", "vtb", "wnba")
-_HOCKEY_LEAGUES = ("nhl", "ahl", "cehl", "khl", "liiga", "snhl")
+                       "nbl", "slnbl", "svkbl", "vtb", "wnba",
+                       "autbl", "cznbl", "fra2", "gbl", "hunbl", "ita2",
+                       "koris", "lkl", "lnb", "slb")
+_HOCKEY_LEAGUES = ("nhl", "ahl", "cehl", "khl", "liiga", "snhl",
+                   "del", "shl")
 SUPPORTED_BY_LEAGUE: dict = {
     ("football", "h2h", "nfl"): 2,
     ("football", "h2h", "cfb"): 2,

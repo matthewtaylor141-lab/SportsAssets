@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Canonical Venue Claim",
+  "type": "object",
+  "required": [
+    "event_key",
+    "family",
+    "period",
+    "outcomes",
+    "payoff",
+    "aliases"
+  ],
+  "properties": {
+    "event_key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "family": {
+      "type": "string",
+      "minLength": 1
+    },
+    "period": {
+      "type": "string",
+      "minLength": 1
+    },
+    "outcomes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "uniqueItems": true
+    },
+    "payoff": {
+      "type": "object",
+      "additionalProperties": {
+        "type": [
+          "string",
+          "number"
+        ]
+      }
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "venue",
+          "instrument_id",
+          "side",
+          "mapping_status",
+          "settlement_status"
+        ],
+        "properties": {
+          "venue": {
+            "type": "string"
+          },
+          "instrument_id": {
+            "type": "string"
+          },
+          "market_id": {
+            "type": "string"
+          },
+          "side": {
+            "enum": [
+              "YES",
+              "NO"
+            ]
+          },
+          "mapping_status": {
+            "enum": [
+              "PROVEN",
+              "NOT_PROVEN"
+            ]
+          },
+          "settlement_status": {
+            "enum": [
+              "PROVEN",
+              "NOT_PROVEN"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

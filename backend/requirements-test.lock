@@ -11,7 +11,22 @@
 # lock, read with `pip freeze`. CI installs `-r requirements.lock -r
 # requirements-test.lock` together and runs `pip check`, so nothing here may
 # move a locked runtime version.
+#
+# + numpy==2.5.3 (red-team closeout, DEFECT 4). The revenue-reliability parity
+# proof (tests/test_revenue_reliability_parity.py) holds the production
+# standard-library port (sportsassets/revenue_reliability/core.py) to the
+# vendored package (research/revenue_reliability_stack), whose reliability and
+# tournament modules import numpy. Without it the oracle half SKIPPED in CI and
+# the parity proof never ran. TEST-ONLY: numpy is not in requirements.lock, the
+# image never installs it, and no module under sportsassets/ imports it
+# (tests/test_numpy_is_test_only.py). numpy 2.5.3 has no dependencies
+# (requires_dist empty) and requires Python >=3.12; cp312 manylinux x86_64
+# wheel sha256 b7e18c623bb5c95acb3b3328861272816ba199fb531921c5d6d0b675f1fde9e3
+# (https://pypi.org/pypi/numpy/2.5.3/json). No --hash line: one hash anywhere in
+# `-r requirements.lock -r requirements-test.lock` puts pip in hash-checking
+# mode for BOTH files, and requirements.lock carries none.
 grpcio-tools==1.84.0
+numpy==2.5.3
 pglast==8.4
 pytest-asyncio==1.4.0
 pytest-timeout==2.4.0

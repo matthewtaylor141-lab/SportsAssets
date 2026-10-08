@@ -228,10 +228,10 @@ def test_wiring_the_mapping_did_not_move_the_policy_code_sha():
     The PROPERTY this test exists for is that wiring `universe()` cannot move
     the hash. That is now asserted directly, on any interpreter, by
     mutating `universe` / `UNIVERSE_SQL` through `overrides` (unchanged) and
-    `decide` (moved). The literal is kept for the gated interpreter only.
+    `decide` (moved). The literal was kept for the gated interpreter only
+    while the boundary was ast.dump; V6's boundary (BETTOR_DECISION_PATH_V2)
+    is interpreter-independent, so V6's literal is asserted everywhere.
     """
-    import platform
-    from sportsassets import runtime_manifest as RM
     from sportsassets import shadow_bettor_codesha as cs
     import pathlib
     src = (pathlib.Path(cs.__file__).parent / "shadow_bettor.py").read_text()
@@ -253,9 +253,10 @@ def test_wiring_the_mapping_did_not_move_the_policy_code_sha():
     assert moved != src
     assert cs.semantic_code_sha(
         overrides={"shadow_bettor.py": moved}) != base
-    if platform.python_version() == RM.EXPECTED_PYTHON:
-        assert base == (
-            "98aaa204379a812b90a5154c1bd70f80418a6ffb85f4571b45554199aaff2172")
+    # V6 (BETTOR_DECISION_PATH_V2) is interpreter-independent, so the
+    # literal holds on every interpreter, not only the gated one.
+    assert base == (
+        "9c66940429caf9b79ff87a71272edd974e97de131f4dcc91e5622d22e5a9815c")
 
 
 # ── a venue-stated non-sport is not an unknown ───────────────────────

@@ -1,0 +1,113 @@
+                                          HOCKEYWINNINGINPERIOD
+
+Scope: These rules shall apply to this contract.
+
+Underlying: The Underlying for this Contract is the number of goals recorded during <time period> of <hockey game>. For
+team-specific markets, only statistics accumulated by the specified team count. For game totals, statistics from both teams
+are combined. Statistics recorded during regulation time, overtime periods, and the shootout shall count toward the
+Underlying, unless <time period> specifies otherwise. Revisions to the Underlying made after Expiration will not be
+accounted for in determining the Expiration Value.
+
+Source Agency: The Source Agencies are, in hierarchical order, the league governing <hockey game>, ESPN, Fox Sports,
+and the official broadcaster of <hockey game>.
+
+Type: The type of Contract is an Event Contract.
+
+Issuance: After the initial Contract, Contract iterations will be listed on an as-needed basis at the discretion of the Exchange
+and corresponding to the risk management needs of Members.
+
+<team>: <team> refers to a hockey team officially entered in a <hockey game> as recognized by the governing body of the
+competition (e.g., NHL, NCAA) and specified by the Exchange. A <team> is defined by the name of the franchise, school,
+or national side as listed on the official schedule. <team> may also be referred to in the singular or multiple, as any team
+within a set of hockey teams (including within or representative of the whole season or tournament participants), or by
+distinguishing characteristics. <team> may also take the forms “Any” or “None”. A <team> shall be tracked through name
+changes.
+
+<time period>: <time period> refers to a segment of <hockey game> or the tournament at which <hockey game> is played
+specified by the Exchange. <time period> may take, but is not limited to the following forms:
+      Entire game, which refers to the time period encapsulating regulation time, overtime, and the shootout, unless
+      otherwise specified by the Exchange
+      Entire game excluding overtime (i.e. regulation time only game), which refers to regulation time with neither overtime
+      nor the shootout
+      Overtime or penalties only
+      A period or subsegment of the game specified in the singular or in the plural when used with AND/OR operators (e.g.
+      first period and second period, first period or third period)
+      Any period cross the entire game or a subset of the game, which may be satisfied if at least one of the aforementioned
+      segments of the game meets the stated Payout Criterion
+      Each period across the entire game, or each subset of the game, which may be satisfied if ALL of the aforementioned
+      segments of the game meets the stated Payout Criterion
+      A given segment or subsection of a competition, or the competition in its entirety
+<time period> may also take the forms of any segment in a set range, refer in the singular or the multiple, by distinguishing
+characteristics (e.g. any hockey game involving a team from New York), “Any” or “None”. Where not specified otherwise,
+<time period> shall be understood to refer to the sum of regulation time, overtime, and the shootout.
+
+<hockey game>: <hockey game> refers to an officially scheduled contest between two teams as recognized by the National
+Hockey League (NHL) or the governing body of the relevant competition (e.g., IIHF, NCAA) specified by the Exchange.
+<hockey game> may be defined by the names of the teams involved, by the date of the game, by the stage of the season (e.g.,
+regular season, playoffs, finals), as any hockey game within a set of hockey games (including within or representative of the
+whole season or tournament), or by distinguishing characteristics. <hockey game> may also take the forms “Any” or “None”.
+
+<date>: <date> refers to a calendar date specified by the Exchange. The Exchange may list iterations of the Contract
+corresponding to variations of <date>.
+Payout Criterion: The Payout Criterion for the Contract encompasses the Expiration Values that <team> has won <time
+period> of <hockey game>.
+
+Additional clarification(s):
+      To be considered to have won <time period> of <hockey game>, <team> must have scored a strictly greater number
+      of goals within <time period> than their opponent(s). If <team> are drawn with their opponent (i.e. the goal
+      differential is zero), the Contract for <team> may resolve to “No”, and a “Tie” strike, if present, may resolve “Yes”.
+      Statistics are considered final at the conclusion of <hockey game>. Corrections made afterwards will not affect the
+      value of the Contract.
+
+Additional clarification(s):
+      If <hockey game> is cancelled prior to scheduled commencement, all markets on <hockey game> will resolve to the
+      last fair price as determined by the Exchange in its sole discretion.
+      If <hockey game> is cancelled or abandoned after the start of the game and before 55 minutes of play have elapsed,
+      and does not re-commence within forty-eight (48) hours, all markets except for final game score (which will resolve if
+      the game reaches 55 minutes of gameplay, or the league has declared the game’s outcome as official, regardless of
+      minutes played) and markets for which the full encapsulating <time period>s have already elapsed or those for which
+      certain strikes have been unconditionally satisfied, will resolve to the last fair price as determined by the Exchange in
+      its sole discretion.
+      If <hockey game> is delayed for forty-eight (48) hours or less, all markets on <hockey game> will remain open.
+      If <hockey game> is delayed for more than forty-eight (48) hours, all markets on <hockey game> will resolve to the
+      last fair price as determined by the Exchange in its sole discretion.
+      If a given <team> withdraws prior to the commencement of <hockey game>, the markets on <team> performance in
+      <hockey game> will resolve to the last fair price as determined by the Exchange in its sole discretion.
+      If a given <team> is disqualified following <hockey game>, the markets on <team> will settle based on the end-of-
+      game statistics if <team> have played for at least one (1) second.
+      If data for the results of <hockey game> is delayed or unavailable, the Exchange may wait 24-hours for it to become
+      available. If, after 24 hours, the data remains unavailable, all markets on <hockey game> that cannot be settled due to
+      missing data will resolve to the last fair price as determined by the Exchange in its sole discretion.
+      If there is a change to the format of <hockey game> that materially affects markets on <hockey game>, the affected
+      markets may be resolved to the last fair price as determined by the Exchange in its sole discretion.
+      If a season is truncated mid-season, all markets deemed to be affected (e.g. total goals over a season) by the Exchange
+      may resolve to the last fair price as determined by the Exchange in its sole discretion.
+      If there is a dead-heat or multiple winners, the tiebreak or title-sharing provisions imposed by the League will govern
+      resolution, with otherwise mutually-exclusive markets involving co-winners resolving “Yes” for each <team> at a
+      Payout of ($1/(number of tied winners)), rounded down, and “No” at ($1- “Yes” Payout).
+
+Minimum Tick: The Minimum Tick size for the Contract shall be $0.01.
+
+Position Accountability Level: The Position Accountability Level for the Contract shall be $25,000 per strike, per
+Member.
+
+
+Last Trading Date: The Last Trading Date of the Contract will be the same as the Expiration Date. The Last Trading Time
+will be the same as the Expiration time.
+
+Settlement Date: The Settlement Date of the Contract shall be no later than the day after the Expiration Date, unless the
+Market Outcome is under review pursuant to Rule 7.1.
+
+Expiration Date: The latest Expiration Date of the Contract shall be the third day following <hockey game>. If an event
+described in the Payout Criterion occurs, expiration will be moved to an earlier date and time in accordance with Rule 7.2.
+Expiration time: The Expiration time of the Contract shall be 10:00 AM ET.
+
+Settlement Value: The Settlement Value for this Contract is $1.00.
+
+Expiration Value: The Expiration Value is the value of the Underlying as documented by the Source Agency on the
+Expiration Date at the Expiration time.
+
+Contingencies: Before Settlement, Kalshi may, at its sole discretion, initiate the Market Outcome Review Process pursuant
+to Rule 7.1 of the Rulebook. If an Expiration Value cannot be determined on the Expiration Date, Kalshi has the right to
+determine payouts pursuant to Rule 7.1 in the Rulebook.
+

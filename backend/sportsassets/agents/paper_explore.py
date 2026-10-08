@@ -98,6 +98,119 @@ R_NOT_SAMPLED = "FIXTURE_NOT_SELECTED_BY_THE_EXPLORATION_SAMPLE"
 R_TOO_DEAR = "ONE_CONTRACT_EXCEEDS_THE_EXPLORATION_ENTRY_BUDGET"
 R_LIMITS_UNREADABLE = "EXPLORATION_LIMITS_UNREADABLE"
 
+# ── NO ENTRY XAVIER CANNOT MANAGE (capital-readiness xavier_complete RED,
+# production 2026-10-08 02:10Z, release 08828d04) ─────────────────────────
+#
+# Exploration admitted positions Xavier's management path could never make
+# complete, and every one of them then held the strategy's management
+# integrity -- and the xavier_complete gate -- RED until it settled:
+#   * atc-brb-csc-cri-2026-10-08-csc LONG: every held read NO_FEED_EVENT.
+#     The entry's probability came from the metered provider (fixture key
+#     event:87416e0f..., whole-second stamps) and Xavier's held read
+#     (pinnapi_feed_runtime.held_moneyline -> pinnapi_census.contract_match,
+#     exact structured venue names; the entry-proven fixture only for a
+#     pinnapi:<id> key) resolves no Brazil Serie B fixture at all: no change
+#     ever triggers a review and no held read is ever fresh.
+#   * atc-idnsl-pke-mau-2026-10-09-pke SHORT: bought at 0.99 for 346.74 /
+#     350 contracts. paper_xavier.protective_price has no cent <= 0.99 that
+#     recovers cost + sale fees + the buffer, so the standing protection can
+#     never be placed: NO_VALID_ACTIVE_PROTECTION for the life of the
+#     position, whatever the evidence.
+# Both are decidable AT ENTRY with the very code management runs, so the
+# entry now asks it: the SAME held reader Xavier's review calls
+# (paper_xavier._held_feed, with the identity the entry valuation proves)
+# and the SAME protective price. Nothing here reads or moves a freshness,
+# risk, settlement or profitability threshold; it only refuses.
+R_XAVIER_CANNOT_PRICE = "XAVIER_HELD_READ_CANNOT_PRICE_THIS_CONTRACT"
+R_XAVIER_CANNOT_PROTECT = "XAVIER_CANNOT_PROTECT_THIS_ENTRY_NO_PROTECTIVE_PRICE"
+#: the held read raised (a DB error inside the read): nothing was proven
+R_HELD_READ_FAILED = "XAVIER_HELD_READ_RAISED_AT_ENTRY"
+
+
+def _held_reasons_that_do_not_refuse() -> frozenset:
+    """The held read's refusals that do NOT say the contract is beyond
+    Xavier: (a) CURRENCY ONLY -- the read resolved the provider fixture, the
+    market and the payout outcome and stopped at the unchanged 30 s rule
+    (no observed change / older than the limit / a clock disagreement / a
+    previous connection's quote): the same read is fresh the moment the
+    provider moves or confirms the price, so Xavier can manage it; (b) NOT
+    EVALUATED -- no feed owner / no synced epoch in this process, or the
+    bounded read did not complete: nothing about the contract was learned.
+    Every other refusal (no feed event, ambiguous, participants not two,
+    sport out of scope, venue type not a held family, outcome unmapped,
+    the de-vig's own refusal, ...) is the management path saying it cannot
+    price this contract."""
+    from .. import pinnapi_census as C
+    from .. import pinnapi_feed as F
+    from .. import pinnapi_feed_runtime as FR
+    return frozenset((
+        F.R_NO_CHANGE_TIME, F.R_STALE, F.R_FUTURE, F.R_OLD_EPOCH,
+        F.R_NO_AUTHORITY, F.R_NOT_SYNCED, C.S_FEED_NOT_SYNCED,
+        F.R_LAST_RECORD_UNPARSED, FR.R_HELD_LOOKUP_TIMEOUT,
+        FR.R_ON_DEMAND_TIMEOUT, FR.R_CATALOGUE_UNREADABLE,
+        R_HELD_READ_FAILED))
+
+
+async def xavier_can_price(conn, *, cand: dict, at: float,
+                           max_age_s: float) -> dict:
+    """WOULD XAVIER'S HELD READ PRICE THIS CONTRACT? The review's own reader
+    (paper_xavier._held_feed, read only, bounded to 1 s) with exactly the
+    identity paper_benchmark.xavier_measure hands it for a held position:
+    the entry valuation's payout outcome and complement, its provider event
+    key (the entry-proven fixture) and, for a line, its line. The read runs
+    in its own savepoint that is ALWAYS rolled back (it writes nothing), so
+    a read the 1 s budget cancelled mid-statement can never leave the
+    caller's transaction aborted."""
+    from .. import bettor_market_family as MF
+    from . import paper_xavier as PX
+    is_line = str(cand.get("market") or "") in MF.LINE_FAMILIES
+    pos = {"us_market_slug": cand.get("us_market_slug"),
+           "entry_event_key": cand.get("event_key"),
+           "entry_line": cand.get("line") if is_line else None}
+    try:
+        sp = conn.transaction()
+        await sp.start()
+        try:
+            got = await PX._held_feed(
+                conn, pos=pos, payout_event=cand.get("payout_event"),
+                payout_is_complement=bool(cand.get("payout_is_complement")),
+                at=float(at), max_age_s=float(max_age_s))
+        finally:
+            await sp.rollback()
+    except Exception as exc:                                    # noqa: BLE001
+        got = {"ok": False, "reason": R_HELD_READ_FAILED,
+               "error": type(exc).__name__}
+    got = got or {}
+    reason = None if got.get("ok") else str(got.get("reason")
+                                            or R_HELD_READ_FAILED)
+    can = reason is None or reason in _held_reasons_that_do_not_refuse()
+    return {"manageable": can, "held_read_reason": reason,
+            "basis": ("HELD_READ_OK" if reason is None else
+                      "HELD_READ_REFUSED_ONLY_FOR_CURRENCY_OR_NOT_EVALUATED"
+                      if can else "HELD_READ_CANNOT_PRICE_THIS_CONTRACT"),
+            "reader": "paper_xavier._held_feed",
+            "held_read": {k: got.get(k) for k in (
+                "sport_id", "feed_event_id", "market_key", "designation",
+                "identity_basis", "error") if got.get(k) is not None}}
+
+
+def xavier_can_protect(*, econ: dict, fee_fn, at) -> dict:
+    """COULD XAVIER PLACE THE STANDING PROTECTION? paper_xavier.
+    protective_price -- the price the review places -- for the quantity this
+    entry would acquire at the cost basis it would carry (the walked
+    acquisition plus its buy fees, as the ledger books a fill). Pure but for
+    the fee function."""
+    from . import paper_xavier as PX
+    qty = float(econ.get("qty") or 0.0)
+    cost = float(econ.get("acquisition_cost_usd") or 0.0) + float(
+        econ.get("fees_usd") or 0.0)
+    got = PX.protective_price(qty=qty, cost_basis=cost, fee_fn=fee_fn, at=at)
+    return {"protectable": bool(got.get("ok")), "qty": qty,
+            "cost_basis_usd": round(cost, 6),
+            "protective_price": got.get("price"),
+            "refusal": got.get("refusal"),
+            "rule": "paper_xavier.protective_price (unchanged)"}
+
 
 # ═════════════════════════════════════════════════════════════════════
 # THE LIMITS (read on the caller's connection; re-checked under the lock)
@@ -310,6 +423,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             refusals.append(L.R_SAME_CONTRACT_HELD)
         elif not sel["selected"]:
             refusals.append(R_NOT_SAMPLED)
+    # ── XAVIER MUST BE ABLE TO PRICE WHAT IS ENTERED (before any book read)
+    mgmt_price = None
+    if not refusals:
+        mgmt_price = await xavier_can_price(
+            conn, cand=cand, at=at, max_age_s=float(ent["pinnacle_max_age_s"]))
+        if not mgmt_price["manageable"]:
+            refusals.append(R_XAVIER_CANNOT_PRICE)
+    mgmt_protect = None
     p = pin.get("p")
     obs, md, levels = None, None, []
     sized: dict = {"qty": 0, "limit": None, "wire": None}
@@ -385,6 +506,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     if not capital.get("capital_eligible"):
                         refusals.extend(r for r in capital["refusals"]
                                         if r not in refusals)
+                    # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED
+                    mgmt_protect = xavier_can_protect(econ=econ,
+                                                      fee_fn=fee_fn, at=at)
+                    econ["xavier_protection"] = mgmt_protect
+                    if not mgmt_protect["protectable"]:
+                        refusals.append(R_XAVIER_CANNOT_PROTECT)
     PD.recheck_primary_reference(cand, pin, ctx, refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_px = levels[0]["price"] if levels else None
@@ -420,6 +547,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "book_age_s": book_age, "book_max_age_s": PB.BOOK_MAX_AGE_S,
         "book_currency": PB.BOOK_CURRENCY, "acquisition": econ,
         "exceptional_terms": match.get("exceptional_terms"),
+        "xavier_management": {"price": mgmt_price,
+                              "protection": mgmt_protect},
         "refusals": refusals,
         # the keys the readbacks and the investment-policy views read
         "best_level_edge_pp": gross, "threshold_edge_pp": None}
@@ -436,6 +565,19 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
          "value": {"exposure_usd": lim.get("exposure_usd"),
                    "realized_losses_usd": lim.get("realized_losses_usd"),
                    "selected": sel["selected"]}},
+        {"condition": "xavier_held_read_can_price_this_contract",
+         "passed": None if mgmt_price is None else mgmt_price["manageable"],
+         "value": None if mgmt_price is None
+         else mgmt_price["held_read_reason"],
+         "refusal": (R_XAVIER_CANNOT_PRICE if mgmt_price is not None
+                     and not mgmt_price["manageable"] else None)},
+        {"condition": "xavier_can_place_the_standing_protection",
+         "passed": None if mgmt_protect is None
+         else mgmt_protect["protectable"],
+         "value": None if mgmt_protect is None
+         else mgmt_protect["protective_price"],
+         "refusal": (R_XAVIER_CANNOT_PROTECT if mgmt_protect is not None
+                     and not mgmt_protect["protectable"] else None)},
         {"condition": "current_paper_book_with_depth",
          "passed": (None if obs is None else bool(levels) and
                     book_age is not None and book_age <= PB.BOOK_MAX_AGE_S),

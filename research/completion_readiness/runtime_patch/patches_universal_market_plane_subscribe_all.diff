@@ -1,0 +1,58 @@
+*** Begin Patch
+*** Update File: backend/sportsassets/workers/universal_market_plane.py
+@@
+-DEDICATED READ-ONLY RUNTIME (owner decision, 2026-10-06): ~74,500 active
+-markets are NOT to be solved by raising UMP_MAX_STREAMS inside the shared
+-workers process. The same supervisor runs standalone as its own
+-read-only service: `python -m sportsassets.workers.universal_market_plane`
+-with UMP_RUNTIME=DEDICATED_READ_ONLY (and UNIVERSAL_MARKET_PLANE=off on the
+-shared workers so exactly one runtime holds the shards).
++DEDICATED READ-ONLY RUNTIME (owner decision, updated by Polymarket rep
++2026-10-07): ~74,500 active instruments are NOT to be solved by sharding
++1,000 symbols across many market-data streams inside the shared workers.
++The same supervisor runs standalone as its own read-only service:
++`python -m sportsassets.workers.universal_market_plane`.
++
++The venue clarified that a single market-data stream with symbols=[] subscribes
++to every instrument and is recommended for a universe this size. The 20 stream
++budget is firm-wide and shared across orders, drop copy, positions, balance
++ledger, RFQ and market data. Therefore the dedicated UMP should use one
++subscribe-to-all stream where transport support exists, then filter sports and
++priority books locally. Splitting into dozens of 1,000-symbol streams is
++incorrect and risks RESOURCE_EXHAUSTED.
+@@
+-DEFAULT_MAX_STREAMS = 4
++DEFAULT_MAX_STREAMS = 1
+ DEFAULT_MAX_PER_STREAM = 1000
++SUBSCRIBE_ALL_ENV = "UMP_SUBSCRIBE_ALL"
++
++
++def subscribe_all_enabled(env=None) -> bool:
++    env = os.environ if env is None else env
++    return str(env.get(SUBSCRIBE_ALL_ENV, "on")).strip().lower() not in (
++        "off", "0", "false", "no")
+@@
+-    max_streams, max_per = caps()
++    max_streams, max_per = caps()
++    subscribe_all = subscribe_all_enabled()
+@@
+-        mgr = Manager(token_fn=client.token, max_per_stream=max_per,
+-                      max_streams=max_streams,
++        mgr = Manager(token_fn=client.token, max_per_stream=max_per,
++                      max_streams=(1 if subscribe_all else max_streams),
++                      subscribe_all=subscribe_all,
+                       invalidate_token=client.invalidate_token)
+-    log.info("universal_market_plane: streams %s (%s) caps=%dx%d",
+-             "ARMED" if mgr else "NOT_ARMED", arming["why"], max_streams,
+-             max_per)
++    log.info("universal_market_plane: streams %s (%s) subscribe_all=%s caps=%dx%d",
++             "ARMED" if mgr else "NOT_ARMED", arming["why"], subscribe_all,
++             (1 if subscribe_all else max_streams), max_per)
+@@
+-        "streams_open": len(mgr.shard_digest()) if mgr is not None else 0,
++        "streams_open": len(mgr.shard_digest()) if mgr is not None else 0,
+         "max_streams": max_streams, "max_per_stream": max_per,
++        "subscription_mode": ("SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST"
++                              if subscribe_all_enabled() else
++                              "EXPLICIT_SYMBOL_SHARDS"),
+*** End Patch

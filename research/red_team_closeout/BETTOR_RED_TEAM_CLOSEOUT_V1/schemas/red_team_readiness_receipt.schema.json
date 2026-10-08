@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "BETTOR Red Team Readiness Receipt",
+  "type": "object",
+  "required": [
+    "status",
+    "implementation_sha",
+    "checks",
+    "blockers",
+    "computed_at"
+  ],
+  "properties": {
+    "status": {
+      "enum": [
+        "PAPER_SHADOW_ONLY",
+        "CAPITAL_CANDIDATE"
+      ]
+    },
+    "implementation_sha": {
+      "type": "string",
+      "minLength": 7
+    },
+    "computed_at": {
+      "type": "string"
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "authority": {
+      "const": "NO_LIVE_ACTIVATION_AUTHORITY"
+    }
+  }
+}

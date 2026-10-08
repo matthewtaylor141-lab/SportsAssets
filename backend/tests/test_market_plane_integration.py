@@ -302,8 +302,11 @@ def test_the_worker_is_on_by_switch_and_caps_are_configured():
     assert W.enabled({}) is True
     assert W.enabled({"UNIVERSAL_MARKET_PLANE": "off"}) is False
     assert W.caps({}) == (W.DEFAULT_MAX_STREAMS, W.DEFAULT_MAX_PER_STREAM)
+    # (completion readiness) the explicit fallback never takes the firm's
+    # whole pooled 20-stream budget, and never above the documented 1,000
     assert W.caps({"UMP_MAX_STREAMS": "20", "UMP_MAX_PER_STREAM": "5000"}) \
-        == (20, 1000)                     # never above the documented 1,000
+        == (W.EXPLICIT_MAX_STREAMS_CEILING, 1000)
+    assert W.EXPLICIT_MAX_STREAMS_CEILING < W.FIRM_STREAM_BUDGET
 
 
 def test_shard_books_are_running_and_record_the_replacement_instant():
@@ -438,9 +441,18 @@ def test_priority_and_total_denominators_are_counted_apart():
     assert got["held_positions"]["rate"] is None  # unread here: never 0
 
 
-def test_the_worker_is_supervised():
+def test_the_worker_runs_only_in_its_dedicated_service():
+    # completion readiness 2026-10-07: the shared workers OOM-killed with
+    # the market plane in-process; it is supervised ONLY by its dedicated
+    # read-only service (ops/render_market_plane_service.yaml)
     src = (ROOT / "workers" / "all.py").read_text()
-    assert '("universal_market_plane", universal_market_plane.run)' in src
+    assert '("universal_market_plane", universal_market_plane.run)' not in src
+    assert 'DEDICATED_ONLY_LOOPS = frozenset({"universal_market_plane",' \
+        in src
+    # (Kalshi rep 2026-10-07) the Kalshi WebSocket book runtime is
+    # dedicated-only too, never registered in the shared workers
+    assert '"kalshi_ws_market_data"})' in src
+    assert "kalshi_ws_market_data.run" not in src
 
 
 # ── pg: populate, coverage, assignment, certification, snapshot ─────

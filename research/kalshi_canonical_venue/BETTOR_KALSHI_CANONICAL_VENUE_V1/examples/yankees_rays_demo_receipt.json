@@ -1,0 +1,81 @@
+{
+  "best_nyy_claim_route": {
+    "all_in": "4.68",
+    "effective_per_contract": "0.468",
+    "allocations": [
+      {
+        "venue": "KALSHI",
+        "instrument_id": "K-RAYS-NO",
+        "market_id": "K-RAYS",
+        "side": "NO",
+        "qty": 10,
+        "all_in": "4.68",
+        "effective_per_contract": "0.468",
+        "levels": [
+          [
+            "0.45",
+            10
+          ]
+        ]
+      }
+    ]
+  },
+  "arb": [
+    {
+      "topology": "CROSS_VENUE",
+      "qty": 10,
+      "all_in_cost": "9.08",
+      "guaranteed_profit": "0.92",
+      "leg_a_route": {
+        "topology": "SINGLE_INSTRUMENT",
+        "allocations": [
+          {
+            "venue": "POLYMARKET_US",
+            "instrument_id": "P-RAYS",
+            "market_id": "P-RAYS",
+            "side": "YES",
+            "qty": 10,
+            "all_in": "4.40",
+            "effective_per_contract": "0.44",
+            "levels": [
+              [
+                "0.44",
+                10
+              ]
+            ]
+          }
+        ],
+        "all_in": "4.40"
+      },
+      "leg_b_route": {
+        "topology": "SINGLE_INSTRUMENT",
+        "allocations": [
+          {
+            "venue": "KALSHI",
+            "instrument_id": "K-RAYS-NO",
+            "market_id": "K-RAYS",
+            "side": "NO",
+            "qty": 10,
+            "all_in": "4.68",
+            "effective_per_contract": "0.468",
+            "levels": [
+              [
+                "0.45",
+                10
+              ]
+            ]
+          }
+        ],
+        "all_in": "4.68"
+      }
+    }
+  ],
+  "census": {
+    "event_key": "MLB:2026-10-07:NYY@TB",
+    "claim_classes": 2,
+    "complement_pairs_considered": 1,
+    "opportunities": 1,
+    "mapping_refusals": {},
+    "authority": "SHADOW_ONLY_NO_ORDER_AUTHORITY"
+  }
+}

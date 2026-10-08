@@ -3,11 +3,25 @@
 New symbols are subscribed without reconnecting healthy shards. A shard is
 rebuilt only when explicitly requested (e.g. compaction / credential reset).
 No order path exists here.
+
+SUBSCRIBE-ALL (completion readiness, venue guidance 2026-10-07): the venue's
+20 concurrent gRPC streams are a FIRM-WIDE budget shared with orders, drop
+copy, positions, balances and RFQ, and an empty symbol list subscribes one
+market-data stream to every instrument. In that mode this manager holds
+EXACTLY ONE stream (`symbols=[]`), whatever the assignments say; the books
+hold only the assigned (registry) symbols and count the rest; a symbol the
+registry no longer assigns is dropped locally (nothing is sent). The
+explicit-shard mode is kept as a fallback / debug mode only.
 """
 from __future__ import annotations
 import threading,time
 
-VERSION="SHARDED_PMX_STREAM_V2_INCREMENTAL"
+VERSION="SHARDED_PMX_STREAM_V3_SUBSCRIBE_ALL"
+MODE_SUBSCRIBE_ALL="SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST"
+MODE_EXPLICIT="EXPLICIT_SYMBOL_SHARDS"
+#: symbols seen on a subscribe-all stream outside the books, remembered for
+#: discovery (new listings / non-registry instruments); bounded
+SEEN_MAX=250000
 
 class SizedBooks:
     @staticmethod
@@ -25,6 +39,7 @@ class SizedBooks:
                     pass
                 import collections
                 self.latency=collections.deque(maxlen=4000)
+                self.seen={}
             def on_update(self, u, *, received_at=None):
                 recv=float(received_at if received_at is not None else self._clock())
                 super().on_update(u, received_at=recv)
@@ -41,6 +56,23 @@ class SizedBooks:
                         if m is not None: m["normalized_at"]=norm
                 except Exception:
                     pass
+            def on_filtered(self, symbol, update=None):
+                super().on_filtered(symbol, update)
+                # discovery evidence: the instrument universe the stream
+                # actually carries, and the scales each wildcard update
+                # states (evidence beside refdata; never used to price)
+                try:
+                    sym=str(symbol or "")
+                    if sym and sym not in self.seen and len(self.seen)<SEEN_MAX:
+                        ps=getattr(update,"price_scale",None) if update is not None else None
+                        qs=getattr(update,"quantity_scale",None) if update is not None else None
+                        self.seen[sym]=(self._clock(),int(ps) if ps else None,int(qs) if qs else None)
+                except Exception:
+                    pass
+            def unwant(self, symbols):
+                with self._lock:
+                    for s in symbols or ():
+                        self._markets.pop(str(s),None)
             def want(self, symbols):
                 at=self._clock(); fresh=[]
                 with self._lock:
@@ -57,26 +89,50 @@ class SizedBooks:
 
 class Manager:
     def __init__(self, *, token_fn, max_per_stream=1000, max_streams=20,
-                 transport_factory=None, clock=None, invalidate_token=None):
+                 transport_factory=None, clock=None, invalidate_token=None,
+                 subscribe_all=False):
         from sportsassets import institutional_stream as IS
         self.IS=IS; self.token_fn=token_fn; self.max_per_stream=int(max_per_stream)
         self.invalidate_token=invalidate_token
-        self.max_streams=int(max_streams); self.transport_factory=transport_factory
+        self.subscribe_all=bool(subscribe_all)
+        # ONE stream in subscribe-all mode, whatever the caller configured
+        self.max_streams=1 if self.subscribe_all else int(max_streams)
+        self.subscription_mode=MODE_SUBSCRIBE_ALL if self.subscribe_all else MODE_EXPLICIT
+        self.transport_factory=transport_factory
         self.clock=clock or time.time; self._lock=threading.RLock(); self.shards={}
         self.symbol_to_shard={}
 
     def _new_shard(self, shard_id:int):
         if len(self.shards)>=self.max_streams: raise RuntimeError("STREAM_LIMIT_REACHED")
         books=SizedBooks.create(self.IS.ResidentBooks,self.max_per_stream,self.clock)
-        t=(self.transport_factory(books,self.token_fn) if self.transport_factory
+        kw={"subscribe_all":True} if self.subscribe_all else {}
+        t=(self.transport_factory(books,self.token_fn,**kw) if self.transport_factory
            else self.IS.GrpcBidiTransport(books,self.token_fn,
-                                          invalidate_token=self.invalidate_token))
+                                          invalidate_token=self.invalidate_token,**kw))
         t.start(); rec={"books":books,"transport":t,"symbols":set()}
         self.shards[int(shard_id)]=rec; return rec
 
+    def stream_count(self)->int:
+        """Market-data streams this manager holds open (1 in subscribe-all)."""
+        with self._lock:
+            return len(self.shards)
+
     def sync(self, assignments:dict[str,int], instruments:dict[str,dict]|None=None)->dict:
         instruments=instruments or {}; added=0; instrument_updates=0; failures=[]
+        removed=0
         with self._lock:
+            if self.subscribe_all:
+                # every assignment lives on the one stream; a symbol no
+                # longer assigned is dropped from the books (local only)
+                assignments={k:0 for k in assignments}
+                rec=self.shards.get(0)
+                if rec is not None:
+                    gone=[s for s in rec["symbols"] if s not in assignments]
+                    if gone:
+                        rec["books"].unwant(gone)
+                        for s in gone:
+                            rec["symbols"].discard(s); self.symbol_to_shard.pop(s,None)
+                        removed=len(gone)
             for symbol,shard_id in sorted(assignments.items()):
                 shard_id=int(shard_id)
                 if shard_id<0 or shard_id>=self.max_streams:
@@ -92,8 +148,20 @@ class Manager:
                 if inst is not None:
                     rec["books"].set_instrument(symbol,inst); instrument_updates+=1
         return {"ok":not failures,"added":added,"instrument_updates":instrument_updates,
-                "shards":len(self.shards),"symbols":len(self.symbol_to_shard),
-                "failures":failures,"version":VERSION}
+                "removed":removed,"shards":len(self.shards),"symbols":len(self.symbol_to_shard),
+                "failures":failures[:50],"failure_count":len(failures),
+                "subscription_mode":self.subscription_mode,"version":VERSION}
+
+    def discovery(self, *, limit=0)->dict:
+        """Subscribe-all evidence: instruments the stream carried that the
+        books do not hold (counted; the first `limit` named)."""
+        with self._lock:
+            rec=self.shards.get(0) if self.subscribe_all else None
+            seen=dict(getattr(rec["books"],"seen",{}) or {}) if rec else {}
+            filtered=getattr(rec["transport"],"filtered_updates",0) if rec else 0
+        return {"mode":self.subscription_mode,"instruments_seen_outside_books":len(seen),
+                "filtered_updates":filtered,"seen_cap":SEEN_MAX,
+                "sample":sorted(seen)[:int(limit)] if limit else []}
 
     def set_instrument(self,symbol,record)->bool:
         with self._lock:
@@ -117,7 +185,10 @@ class Manager:
                             "state":getattr(b,"state",None),
                             "connected":getattr(t,"_connected",None),
                             "attempts":getattr(t,"attempts",None),
-                            "consecutive_failures":getattr(t,"consecutive_failures",None)})
+                            "consecutive_failures":getattr(t,"consecutive_failures",None),
+                            "subscription_mode":getattr(t,"subscription_mode",self.subscription_mode),
+                            "outbound":dict(getattr(t,"outbound",{}) or {}),
+                            "filtered_updates":getattr(t,"filtered_updates",None)})
         return out
 
     def latency_samples(self, limit_per_shard=2000)->list:

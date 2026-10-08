@@ -598,6 +598,20 @@ async def _submit_order(conn, order: dict, *, caps: dict | None = None,
                             "under_lock": True, "by": held,
                             "reservation_usd": f(reserve),
                             "available_usd": f(cs["available"])}
+            if o.get("role") == "ENTRY":
+                # THE CANONICAL EXPOSURE LOCK (Red Team Closeout V1,
+                # redteam.exposure), UNDER THE SAME LOCK: an ENTRY that passes
+                # every venue-level cap above but carries its canonical claim
+                # (aliases proven equal count as one, correlation 1, whatever
+                # the strategy / venue / side label) or its event past the
+                # limit is refused. Refuse-only; exits never reach it;
+                # unreadable = refused (its own savepoint).
+                chk = await _canonical_exposure_refusal(
+                    conn, o, reserve=reserve, caps=_LIMITS.effective_caps(
+                        caps, acct, o.get("role")))
+                if chk:
+                    return dict(chk, ok=False, reservation_usd=f(reserve),
+                                available_usd=f(cs["available"]))
             if exclusive_fixture and o.get("role") == "ENTRY":
                 chk = await fixture_owner_refusal(
                     conn, o, same_strategy_live=one_live_entry_per_fixture)
@@ -693,6 +707,24 @@ async def _submit_order(conn, order: dict, *, caps: dict | None = None,
                                           "purchase"})
     return {"ok": True, "duplicate": False, "order": order_view(row),
             "ledger_entry": entry}
+
+
+R_CANONICAL_EXPOSURE_UNREADABLE = "CANONICAL_EXPOSURE_UNREADABLE"
+
+
+async def _canonical_exposure_refusal(conn, o: dict, *, reserve: Decimal,
+                                      caps: dict) -> dict | None:
+    """redteam.exposure.entry_refusal under its own savepoint: a read that
+    fails refuses the ENTRY (never aborts the order transaction, never
+    admits it)."""
+    try:
+        async with conn.transaction():
+            from .redteam import exposure as RTX
+            return await RTX.entry_refusal(conn, o, reserve=reserve,
+                                           caps=caps)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"refusal": R_CANONICAL_EXPOSURE_UNREADABLE,
+                "under_lock": True, "why": type(exc).__name__}
 
 
 async def _check_caps(conn, o: dict, *, reserve: Decimal, cs: dict,

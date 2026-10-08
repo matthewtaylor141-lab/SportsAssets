@@ -136,3 +136,86 @@ async def refdata_due(conn, *, now: float, unlisted_retry_s: float,
         " ORDER BY priority,event_start NULLS LAST,contract_id LIMIT $2",
         float(now)-float(unlisted_retry_s),int(limit),sorted(set(excluded)))
     return [r["contract_id"] for r in rows]
+
+
+# ── (completion readiness) batched reference data for the market plane ──
+# refdata_universe.Planner decides; these persist. Every write is a registry
+# row's refdata/refdata_at for PMUS contracts the registry already holds:
+# instruments outside the registry are counted by the caller, never stored.
+
+REFDATA_FULL_PULL_KIND = "REFDATA_FULL_PULL"
+
+
+async def save_refdata_many(conn, records: dict, *, at: float) -> int:
+    """{contract_id: instrument record} -> rows updated (registry members)."""
+    if not records:
+        return 0
+    ids = sorted(records)
+    rows = await conn.fetch(
+        "UPDATE market_plane_registry r SET refdata = v.rec::jsonb, "
+        "       refdata_at = to_timestamp($3) "
+        "  FROM (SELECT unnest($1::text[]) AS id, unnest($2::text[]) AS rec) v "
+        " WHERE r.contract_id = v.id AND r.venue = 'POLYMARKET_US' "
+        "RETURNING r.contract_id",
+        ids, [json.dumps(records[i], default=str) for i in ids], float(at))
+    return len(rows)
+
+
+async def save_unlisted_many(conn, contract_ids, *, at: float,
+                             basis: str) -> int:
+    """Proven absent (a 200 by-symbol read that omitted them, or a COMPLETE
+    full pull that never listed them): recorded so they are re-asked only
+    after the worker's UNLISTED_RETRY_S."""
+    ids = sorted({str(x) for x in contract_ids or () if x})
+    if not ids:
+        return 0
+    rows = await conn.fetch(
+        "UPDATE market_plane_registry SET refdata = $2::jsonb, "
+        "       refdata_at = to_timestamp($3) "
+        " WHERE contract_id = ANY($1::text[]) AND venue = 'POLYMARKET_US' "
+        "   AND (refdata IS NULL OR refdata->>'unlisted' = 'true') "
+        "RETURNING contract_id",
+        ids, json.dumps({"unlisted": True, "basis": basis}), float(at))
+    return len(rows)
+
+
+async def refdata_pending_split(conn, *, now: float, unlisted_retry_s: float,
+                                priority_max: int, imminent_s: float,
+                                limit: int = 1000, excluded=()) -> dict:
+    """The contracts without usable refdata, split into PRIORITY (held,
+    candidates, or starting within `imminent_s`) and OTHER, each in
+    priority order, cooling ids excluded BEFORE the limit."""
+    rows = await conn.fetch(
+        "SELECT contract_id, (priority <= $4 OR (event_start IS NOT NULL AND "
+        "        event_start BETWEEN to_timestamp($5) - interval '4 hours' "
+        "                        AND to_timestamp($5 + $6))) AS pri "
+        "  FROM market_plane_registry "
+        " WHERE venue='POLYMARKET_US' AND active AND desired_subscription "
+        "   AND NOT (contract_id = ANY($3::text[])) AND ("
+        "       refdata IS NULL OR (refdata->>'unlisted'='true' AND "
+        "       refdata_at < to_timestamp($1))) "
+        " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2",
+        float(now) - float(unlisted_retry_s), int(limit) * 2,
+        sorted(set(excluded)), int(priority_max), float(now),
+        float(imminent_s))
+    pri = [r["contract_id"] for r in rows if r["pri"]][:int(limit)]
+    oth = [r["contract_id"] for r in rows if not r["pri"]][:int(limit)]
+    return {"priority": pri, "other": oth}
+
+
+async def refdata_pending_ids(conn) -> set:
+    """Contracts with no refdata at all: the set a full pull starting now
+    can later prove unlisted (contracts added after it began cannot be)."""
+    return {r["contract_id"] for r in await conn.fetch(
+        "SELECT contract_id FROM market_plane_registry "
+        " WHERE venue='POLYMARKET_US' AND active AND refdata IS NULL")}
+
+
+async def last_complete_full_pull(conn) -> float | None:
+    """The finish time of the newest COMPLETE full pull (durable: a restart
+    does not repoll the universe inside the refresh window)."""
+    v = await conn.fetchval(
+        "SELECT max((payload->>'finished_at')::float8) "
+        "  FROM market_plane_events WHERE kind = $1 "
+        "   AND payload->>'status' = 'COMPLETE'", REFDATA_FULL_PULL_KIND)
+    return float(v) if v is not None else None

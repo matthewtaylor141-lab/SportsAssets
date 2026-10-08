@@ -75,6 +75,7 @@ from datetime import datetime, timezone
 from . import bettor_stream_currency as sc
 from . import market_data_identity as mdi
 from . import shadow_l2 as l2
+from .red_team import stream_guard as _RT_STREAM
 
 log = logging.getLogger(__name__)
 
@@ -123,10 +124,41 @@ CHANNEL_OPTIONS = (
 #: The ONLY commands this client ever puts on the wire.
 OUTBOUND_COMMANDS = ("subscribe", "keepalive")
 
+#: SUBSCRIPTION MODES (completion readiness, venue guidance 2026-10-07).
+#: EXPLICIT is this lane's mode: a non-empty symbol list, never the empty
+#: one. SUBSCRIBE_ALL is the dedicated market plane's: ONE stream whose ONE
+#: subscribe carries `symbols=[]` -- the venue's documented "every
+#: instrument" request, recommended for a universe this size -- with the
+#: books filtering locally. Only a transport CONSTRUCTED in subscribe-all
+#: mode may send the empty list, and only as the first request of a
+#: connection; every other request passes the non-empty rule unchanged.
+MODE_EXPLICIT = "EXPLICIT_SYMBOL_LIST"
+MODE_SUBSCRIBE_ALL = "SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST"
+
+#: CLIENT-TO-SERVER PACING. The venue caps client messages at 100/s PER FIRM
+#: (averaged over a minute, short bursts allowed), shared by every stream and
+#: service. One stream here never exceeds OUTBOUND_RATE_PER_S sustained with
+#: a burst of OUTBOUND_BURST: a tenth of the firm cap per stream.
+OUTBOUND_RATE_PER_S = 10.0
+OUTBOUND_BURST = 10
+
 RECONNECT_BACKOFF_S = (1.0, 2.0, 5.0, 10.0, 30.0, 60.0)
 MAX_CONSECUTIVE_FAILURES = 8
 RESTART_AFTER_GAVE_UP_S = 900.0
 RESTART_AFTER_REFUSAL_S = 1800.0
+
+#: A local entry not wanted for this long is evictable by `retain` (the
+#: focus universe is recomputed every 60 s and the held-mark refresh names
+#: held markets every run; 30 min is many passes of neither naming it).
+RETAIN_IDLE_S = 1800.0
+#: NOTHING IS EVER UNSUBSCRIBED (OUTBOUND_COMMANDS), so an entry `retain`
+#: evicts stays subscribed AT THE VENUE for the connection's life. Before
+#: `retain` existed the local bound (MAX_SYMBOLS) also bounded the venue-side
+#: set; now a long-lived connection would keep growing past the documented
+#: 1,000 symbols per stream. Past this many symbols subscribed on one
+#: connection the transport recycles it (a local cancel, no new command):
+#: the next connection subscribes only what the books want (<= MAX_SYMBOLS).
+SUBSCRIBED_RECYCLE_AT = 2 * MAX_SYMBOLS
 
 VENUE_SEQUENCE = "NOT_PROVIDED_BY_VENUE"
 OPEN_STATES = ("INSTRUMENT_STATE_OPEN",)
@@ -165,8 +197,30 @@ R_NOT_OPEN = "MARKET_NOT_OPEN"
 R_STATE_UNKNOWN = "MARKET_STATE_UNKNOWN"
 R_CROSSED = "BOOK_CROSSED"
 R_CURRENT = None
+#: the package stream-currency gate refused (Red Team Closeout V1)
+R_STREAM_CURRENCY = "STREAM_CURRENCY_GATE_REFUSED"
 
 _BENIGN_SUBSCRIPTION_ERRORS = ("ALREADY_SUBSCRIBED", "NOT_SUBSCRIBED")
+
+
+def _log_transition(prev, new, why, symbols) -> None:
+    """ONE INFO line per state CHANGE (never per message): the stream's
+    lifecycle used to be invisible -- the only line was the boot state."""
+    if prev == new:
+        return
+    try:
+        log.info("institutional_stream: %s -> %s (%s) symbols=%d",
+                 prev, new, str(why or "")[:160], int(symbols))
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def _dist(xs) -> dict | None:
+    if not xs:
+        return None
+    ys = sorted(xs)
+    return {"n": len(ys), "p50": round(ys[len(ys) // 2], 3),
+            "max": round(ys[-1], 3)}
 
 
 def _utc(ts) -> datetime | None:
@@ -203,6 +257,18 @@ class ResidentBooks:
         self._last_life_at = None
         self._messages = 0
         self._stray = 0
+        self._filtered = 0
+        #: subscription_ack messages, and symbols a `want` could not hold
+        #: because the per-process bound was full -- never silent
+        self._acks = 0
+        self._dropped_at_cap = 0
+        self._dropped_recent: list = []
+        #: entries `retain` evicted (not wanted for RETAIN_IDLE_S), and the
+        #: venue ack each carried on THIS connection: the venue still holds
+        #: the subscription, so a re-want on the same connection is acked
+        #: (cleared on every new connection)
+        self._evicted = 0
+        self._evicted_acked: dict = {}
         self._refusal = None
         self._markets: dict = {}
         self._instruments: dict = {}
@@ -226,7 +292,10 @@ class ResidentBooks:
 
     def set_state(self, state: str, why: str) -> None:
         with self._lock:
+            prev = self.state
             self.state, self.state_why = state, why
+            n = len(self._markets)
+        _log_transition(prev, state, why, n)
 
     def set_instrument(self, symbol: str, record) -> None:
         """The venue's refdata record for this symbol: ITS OWN scales (never a
@@ -243,7 +312,10 @@ class ResidentBooks:
                 "at": self._clock()}
 
     def want(self, symbols) -> list:
-        """Symbols the decision path needs. Returns the ones that are new."""
+        """Symbols the decision path needs. Returns the ones that are new.
+        A symbol the bound (MAX_SYMBOLS) cannot hold is COUNTED
+        (dropped_at_cap, the last few named), never silently lost: callers
+        pass held markets first, and `retain` frees entries nobody wants."""
         at = self._clock()
         fresh = []
         with self._lock:
@@ -253,15 +325,59 @@ class ResidentBooks:
                     continue
                 if s not in self._markets:
                     if len(self._markets) >= MAX_SYMBOLS:
+                        self._dropped_at_cap += 1
+                        self._dropped_recent = (self._dropped_recent
+                                                + [s])[-10:]
                         continue
                     self._markets[s] = _new_market(at)
+                    if self._connected and self._evicted_acked.pop(
+                            s, None) == self._conn_seq:
+                        self._markets[s]["acked_seq"] = self._conn_seq
                     fresh.append(s)
                 self._markets[s]["wanted_at"] = at
         return fresh
 
+    def retain(self, keep, *, idle_s: float = None, now=None) -> list:
+        """THE BOUND STAYS USABLE. Drop the local entries of symbols that
+        are not in `keep` and were last wanted more than `idle_s` ago (a
+        finished game, an expired candidate). Nothing is sent: an evicted
+        symbol's updates still arriving on this connection are STRAY
+        (counted, never stored); the next connection subscribes only what is
+        wanted. Returns the evicted symbols."""
+        at = float(now if now is not None else self._clock())
+        idle = float(RETAIN_IDLE_S if idle_s is None else idle_s)
+        keep = {str(k) for k in keep or ()}
+        out = []
+        with self._lock:
+            for s, m in list(self._markets.items()):
+                if s in keep:
+                    continue
+                if at - float(m.get("wanted_at") or 0.0) > idle:
+                    if self._connected and m.get("acked_seq") == \
+                            self._conn_seq:
+                        self._evicted_acked[s] = self._conn_seq
+                    del self._markets[s]
+                    out.append(s)
+            self._evicted += len(out)
+        return out
+
     def wanted(self) -> list:
         with self._lock:
             return sorted(self._markets)
+
+    def accepts(self, symbol) -> bool:
+        """The local filter of a subscribe-all stream: a symbol this process
+        asked for. Everything else is counted (on_filtered), never held."""
+        with self._lock:
+            return str(symbol or "") in self._markets
+
+    def on_filtered(self, symbol, update=None) -> None:
+        """An update for a symbol nobody here asked for (subscribe-all):
+        proof the stream is alive, nothing more."""
+        with self._lock:
+            self._last_life_at = self._clock()
+            self._messages += 1
+            self._filtered += 1
 
     # ── transport events ──────────────────────────────────────────────
 
@@ -274,13 +390,17 @@ class ResidentBooks:
             self._connected_at = now
             self._last_life_at = now
             self._refusal = None
+            self._evicted_acked.clear()
             for m in self._markets.values():
                 m["hw"] = None          # a venue clock is per connection
                 m["acked_seq"] = None
+            prev = self.state
             self.state, self.state_why = S_CONNECTED, "stream open"
             self._emit("connected", seq=self._conn_seq, conn_id=self._conn_id,
                        at=now)
-            return self._conn_seq
+            seq, n = self._conn_seq, len(self._markets)
+        _log_transition(prev, S_CONNECTED, "connection %d" % seq, n)
+        return seq
 
     def silence_s(self) -> float | None:
         with self._lock:
@@ -297,6 +417,7 @@ class ResidentBooks:
         with self._lock:
             self._last_life_at = self._clock()
             self._messages += 1
+            self._acks += 1
             self._emit("ack", at=self._last_life_at,
                        added=len(added or ()))
             for s in added or ():
@@ -388,10 +509,13 @@ class ResidentBooks:
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
                     gapped.append(s)
+            prev = self.state
             self.state, self.state_why = S_RECONNECTING, \
                 "stream ended: %s" % str(why)[:160]
             self._emit("disconnected", seq=self._conn_seq, at=now,
                        why=str(why)[:160], gapped=gapped)
+            n = len(self._markets)
+        _log_transition(prev, S_RECONNECTING, self.state_why, n)
 
     def on_refused(self, code: str) -> None:
         now = self._clock()
@@ -404,18 +528,24 @@ class ResidentBooks:
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
                     gapped.append(s)
+            prev = self.state
             self.state, self.state_why = S_REFUSED, \
                 "venue refused the stream: %s" % code
             self._emit("refused", seq=self._conn_seq, at=now, code=str(code),
                        gapped=gapped)
+            n = len(self._markets)
+        _log_transition(prev, S_REFUSED, self.state_why, n)
 
     def on_gave_up(self, failures: int) -> None:
         with self._lock:
             self._connected = False
+            prev = self.state
             self.state, self.state_why = S_GAVE_UP, \
                 "%d consecutive attempts delivered nothing" % failures
             self._emit("gave_up", seq=self._conn_seq, at=self._clock(),
                        failures=int(failures))
+            n = len(self._markets)
+        _log_transition(prev, S_GAVE_UP, self.state_why, n)
 
     # ── the read the decision path makes ──────────────────────────────
 
@@ -539,6 +669,23 @@ class ResidentBooks:
         if bids and offers and max(b["px"] for b in bids) >= \
                 min(o["px"] for o in offers):
             return refuse(R_CROSSED, "best bid is at or through best offer")
+        # CONNECTED != CURRENT (Red Team Closeout V1): the package's stream
+        # currency gate is the last word -- connected, a complete
+        # authoritative update on THIS connection, no gap, a book inside the
+        # bound. Every check above already implies it; this binds the
+        # contract so a future change cannot quietly drop one of them.
+        sc = _RT_STREAM.stream_currency_gate(
+            connected=bool(connected),
+            complete_snapshot_received=bool(
+                evidence["snapshot"]["on_current_connection"]),
+            gap=bool(gap), book_age_s=age, max_book_age_s=bound,
+            source="PMX_GRPC")
+        evidence["stream_currency"] = {"green": sc["green"],
+                                       "blockers": list(sc["blockers"]),
+                                       "source": sc["source"]}
+        if not sc["green"]:
+            return refuse(R_STREAM_CURRENCY, "stream currency gate: %s"
+                          % ",".join(sc["blockers"]))
         return {"ok": True, "symbol": sym, "refusal": R_CURRENT,
                 "why": "full update %.1f s old on connection %s, alive %.1f s "
                        "ago" % (age, seq, silence),
@@ -567,10 +714,24 @@ class ResidentBooks:
         at = float(now if now is not None else self._clock())
         with self._lock:
             syms = list(self._markets)
+            seq = self._conn_seq
+            acked = sum(1 for m in self._markets.values()
+                        if self._connected and m.get("acked_seq") == seq)
+            refused_syms = sum(1 for m in self._markets.values()
+                               if m.get("refused"))
             base = {"version": VERSION, "state": self.state,
+                    "at": at, "target": GRPC_TARGET,
+                    "max_symbols": MAX_SYMBOLS,
+                    # symbols the venue acknowledged on THIS connection
+                    "acked": acked, "acks_total": self._acks,
+                    "refused_symbols": refused_syms,
+                    "dropped_at_cap": self._dropped_at_cap,
+                    "dropped_recent": list(self._dropped_recent),
+                    "evicted": self._evicted,
                     "why": self.state_why, "connection_seq": self._conn_seq,
                     "connected": self._connected, "messages": self._messages,
                     "stray_updates": self._stray,
+                    "filtered_updates": self._filtered,
                     # accepted full book updates (messages also counts
                     # heartbeats and acks)
                     "book_updates": sum(int(m.get("updates") or 0)
@@ -578,11 +739,27 @@ class ResidentBooks:
                     "venue_refusal": dict(self._refusal or {}) or None,
                     "subscription_errors": list(self._errors[-5:])}
         by: dict = {}
+        ages, skews, held_ok = [], [], 0
         for s in syms:
             r = self.current(s, now=at)
             k = "OK" if r["ok"] else r["refusal"]
             by[k] = by.get(k, 0) + 1
-        return dict(base, symbols=len(syms), by_refusal=by)
+            h = r if r["ok"] else self.current(
+                s, now=at, max_snapshot_age_s=HELD_MARK_MAX_SNAPSHOT_AGE_S)
+            if h["ok"]:
+                held_ok += 1
+                snap = (h.get("evidence") or {}).get("snapshot") or {}
+                if snap.get("age_s") is not None:
+                    ages.append(float(snap["age_s"]))
+                if snap.get("lag_ms") is not None:
+                    skews.append(float(snap["lag_ms"]) / 1000.0)
+        return dict(base, symbols=len(syms), by_refusal=by,
+                    # RESIDENT L2 BOOKS current in THIS process: under the
+                    # decision bound (MAX_SNAPSHOT_AGE_S) and under the held-
+                    # mark bound (HELD_MARK_MAX_SNAPSHOT_AGE_S)
+                    current_books=by.get("OK", 0),
+                    held_mark_current_books=held_ok,
+                    book_age_s=_dist(ages), venue_receipt_lag_s=_dist(skews))
 
 
 def _new_market(at: float) -> dict:
@@ -656,9 +833,13 @@ class OutboundRefused(RuntimeError):
     """A client-to-server message this lane does not send."""
 
 
-def _outbound(req):
+def _outbound(req, *, allow_subscribe_all: bool = False):
     """THE ONE GATE every client-to-server message passes. Refuses any
     command but `subscribe` (explicit, non-empty symbols) and `keepalive`.
+    `allow_subscribe_all` admits the EMPTY subscribe (the venue's every-
+    instrument request) and is passed only for the first request of a
+    transport constructed in MODE_SUBSCRIBE_ALL; a subscribe naming symbols
+    must still name only non-empty ones.
     Real protobuf messages are checked by their oneof; a test double without
     WhichOneof is passed through (the builders below are the only callers)."""
     which = getattr(req, "WhichOneof", None)
@@ -668,9 +849,14 @@ def _outbound(req):
     if cmd not in OUTBOUND_COMMANDS:
         raise OutboundRefused("refused: %r is not a command this lane sends"
                               % cmd)
-    if cmd == "subscribe" and not [s for s in req.subscribe.symbols if s]:
-        raise OutboundRefused("refused: an empty subscribe is ALL "
-                              "instruments to the venue")
+    if cmd == "subscribe":
+        syms = list(req.subscribe.symbols)
+        if not syms and not allow_subscribe_all:
+            raise OutboundRefused("refused: an empty subscribe is ALL "
+                                  "instruments to the venue")
+        if syms and not all(syms):
+            raise OutboundRefused("refused: a subscribe naming an empty "
+                                  "symbol")
     return req
 
 
@@ -695,8 +881,20 @@ class GrpcBidiTransport:
 
     def __init__(self, books: ResidentBooks, token_fn, *, target=GRPC_TARGET,
                  depth=DEPTH, modules=None, clock=time.time,
-                 sleep=None, channel_factory=None, invalidate_token=None):
+                 sleep=None, channel_factory=None, invalidate_token=None,
+                 subscribe_all: bool = False):
         self.books = books
+        # MODE_SUBSCRIBE_ALL: one empty-list subscribe per connection, the
+        # books filter locally; subscribe() sends nothing (every instrument
+        # is already on the stream). Fixed at construction.
+        self.subscribe_all = bool(subscribe_all)
+        self.subscription_mode = (MODE_SUBSCRIBE_ALL if self.subscribe_all
+                                  else MODE_EXPLICIT)
+        self._out_tokens = float(OUTBOUND_BURST)
+        self._out_at = time.monotonic()
+        self.outbound = {"sent": 0, "paced": 0, "subscribe": 0,
+                         "keepalive": 0}
+        self.filtered_updates = 0
         self._token_fn = token_fn
         # Drops a cached bearer token so the next token_fn() mints a fresh
         # one. Called once on UNAUTHENTICATED, per the venue's own guidance.
@@ -712,6 +910,10 @@ class GrpcBidiTransport:
         # Interruptible by stop() unless a test injects its own sleep.
         self._sleep = sleep or self._stop.wait
         self._subscribed: set = set()
+        #: set when the venue-side set outgrew SUBSCRIBED_RECYCLE_AT: the
+        #: watchdog (the one place that ends a call) recycles the connection
+        self._recycle = threading.Event()
+        self.recycles = 0
         self._connected = False
         self._reauth_used = False
         self.consecutive_failures = 0
@@ -730,26 +932,59 @@ class GrpcBidiTransport:
         first request of a connection also carries the options the venue
         reads from it (depth; aggregated book; continuous, not snapshot-only;
         slow_consumer_skip_to_head left false, so a slow consumer is
-        DISCONNECTED -- a gap we see -- rather than silently skipped)."""
-        syms = [str(s) for s in symbols or () if str(s or "").strip()]
-        if not syms:
-            raise OutboundRefused("refused: an empty subscribe is ALL "
-                                  "instruments to the venue")
+        DISCONNECTED -- a gap we see -- rather than silently skipped).
+
+        MODE_SUBSCRIBE_ALL: the first request is `symbols=[]` (every
+        instrument) with the same options, and there is no other subscribe."""
+        if self.subscribe_all:
+            if not first:
+                raise OutboundRefused("refused: subscribe-all mode sends one "
+                                      "subscribe per connection")
+            syms = []
+        else:
+            syms = [str(s) for s in symbols or () if str(s or "").strip()]
+            if not syms:
+                raise OutboundRefused("refused: an empty subscribe is ALL "
+                                      "instruments to the venue")
         _g, pb2, _pg, _r = self.mods()
         kw = {"subscribe": pb2.SubscribeCommand(symbols=syms)}
         if first:
             kw["depth"] = self.depth
-        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(**kw))
+        return _outbound(pb2.BiDirectionalStreamMarketDataRequest(**kw),
+                         allow_subscribe_all=self.subscribe_all and first)
 
     def _keepalive_request(self):
         _g, pb2, _pg, _r = self.mods()
         return _outbound(pb2.BiDirectionalStreamMarketDataRequest(
             keepalive=pb2.KeepAliveCommand()))
 
+    def _recycle_at(self) -> int:
+        """The venue-side bound for THIS connection: SUBSCRIBED_RECYCLE_AT,
+        or the books' own capacity when larger -- a market-plane shard
+        (SizedBooks, up to 1,000 symbols in explicit mode) must not recycle
+        at the deciding stream's 400 on every connection. A shard therefore
+        recycles only past the documented 1,000 symbols per stream."""
+        cap = getattr(self.books, "max_symbols", None)
+        try:
+            return max(SUBSCRIBED_RECYCLE_AT, int(cap)) if cap else \
+                SUBSCRIBED_RECYCLE_AT
+        except (TypeError, ValueError):
+            return SUBSCRIBED_RECYCLE_AT
+
     def subscribe(self, symbols) -> None:
-        """Queue a subscribe for symbols not already on the stream."""
+        """Queue a subscribe for symbols not already on the stream. In
+        MODE_SUBSCRIBE_ALL nothing is sent: every instrument is on it."""
+        if self.subscribe_all:
+            return
         new = [s for s in symbols or () if s and s not in self._subscribed]
         if not new:
+            return
+        if len(self._subscribed) + len(new) > self._recycle_at():
+            # the venue-side set outgrew the bound (evicted entries are never
+            # unsubscribed): recycle; the next connection subscribes
+            # books.wanted(), which already holds `new`
+            self.recycles += 1
+            self._recycle.set()
             return
         self._q.put(self._subscribe_request(new))
         self._subscribed.update(new)
@@ -761,19 +996,44 @@ class GrpcBidiTransport:
         not linger until the next keepalive."""
         last = self._clock()
         q = self._q
-        yield _outbound(first)
+        yield self._count(_outbound(first,
+                                    allow_subscribe_all=self.subscribe_all))
         while not self._stop.is_set() and not (done and done.is_set()):
             try:
                 req = q.get(timeout=0.5)
             except queue.Empty:
                 if self._clock() - last >= KEEPALIVE_S:
                     last = self._clock()
-                    yield self._keepalive_request()
+                    self._pace()
+                    yield self._count(self._keepalive_request())
                 continue
             if req is None:
                 return
             last = self._clock()
-            yield _outbound(req)
+            self._pace()
+            yield self._count(_outbound(req))
+
+    def _pace(self) -> None:
+        """A token bucket under the venue's per-firm client-message cap:
+        OUTBOUND_RATE_PER_S sustained, OUTBOUND_BURST at once. Waits (stop()
+        interrupts) rather than sending early."""
+        now = time.monotonic()
+        self._out_tokens = min(float(OUTBOUND_BURST), self._out_tokens + (
+            now - self._out_at) * OUTBOUND_RATE_PER_S)
+        self._out_at = now
+        if self._out_tokens < 1.0:
+            self.outbound["paced"] += 1
+            self._stop.wait((1.0 - self._out_tokens) / OUTBOUND_RATE_PER_S)
+            self._out_tokens, self._out_at = 1.0, time.monotonic()
+        self._out_tokens -= 1.0
+
+    def _count(self, req):
+        self.outbound["sent"] += 1
+        which = getattr(req, "WhichOneof", None)
+        cmd = which("command") if which else None
+        if cmd in ("subscribe", "keepalive"):
+            self.outbound[cmd] += 1
+        return req
 
     def _channel(self, grpc):
         if self._channel_factory is not None:
@@ -793,9 +1053,11 @@ class GrpcBidiTransport:
         # ALREADY_SUBSCRIBED, which is benign) instead of being lost.
         self._q = queue.Queue()
         self._subscribed = set()
+        self._recycle.clear()         # this connection asks for wanted() only
         symbols = self.books.wanted()
-        if not symbols:
-            # NEVER an empty subscribe: the venue reads it as ALL instruments.
+        if not symbols and not self.subscribe_all:
+            # NEVER an empty subscribe in this mode: the venue reads it as ALL
+            # instruments (only MODE_SUBSCRIBE_ALL asks for that, on purpose).
             self.books.set_state(S_IDLE, "no symbols requested")
             return "idle"
         try:
@@ -870,7 +1132,11 @@ class GrpcBidiTransport:
         def watch():
             while not done.wait(1.0) and not self._stop.is_set():
                 silence = self.books.silence_s()
-                if silence is not None and silence > WATCHDOG_S:
+                # ...and a connection whose venue-side subscription set
+                # outgrew SUBSCRIBED_RECYCLE_AT is ended the same way, so
+                # the next one subscribes only what the books want
+                if self._recycle.is_set() or (
+                        silence is not None and silence > WATCHDOG_S):
                     try:
                         call.cancel()
                     except Exception:                         # noqa: BLE001
@@ -882,6 +1148,16 @@ class GrpcBidiTransport:
 
     def _dispatch(self, resp, refdata) -> None:
         if _has(resp, "update"):
+            if self.subscribe_all:
+                # LOCAL FILTERING: every instrument arrives; only the books'
+                # own symbols are decoded and held. The rest still prove the
+                # stream alive and are counted, never stored.
+                sym = str(getattr(resp.update, "symbol", "") or "")
+                accepts = getattr(self.books, "accepts", None)
+                if accepts is not None and not accepts(sym):
+                    self.filtered_updates += 1
+                    self.books.on_filtered(sym, resp.update)
+                    return
             self.books.on_update(decode_update(resp.update, refdata),
                                  received_at=self._clock())
         elif _has(resp, "heartbeat"):
@@ -1015,6 +1291,15 @@ def want(symbols) -> dict:
         return {"queued": 0, "why": type(exc).__name__}
 
 
+def retain(keep, *, idle_s=None) -> list:
+    """Evict local entries nobody wants (see ResidentBooks.retain). NEVER
+    RAISES."""
+    try:
+        return BOOKS.retain(keep, idle_s=idle_s)
+    except Exception:                                         # noqa: BLE001
+        return []
+
+
 def set_instrument(symbol, record) -> None:
     try:
         BOOKS.set_instrument(symbol, record)
@@ -1052,8 +1337,21 @@ def current_for_held_mark(symbol, *, now=None) -> dict:
 
 
 def digest() -> dict:
+    """THE LIVE state (`state`, `connected`, ...) plus the START record
+    (`start`: what start_default answered once, at boot -- by construction
+    IDLE_NO_SYMBOLS_REQUESTED for a stream that started). A reader that
+    wants to know what the stream is doing reads `state`, never
+    `start.state`."""
     try:
-        return dict(BOOKS.digest(), start=dict(_START))
+        t = _TRANSPORT
+        mode = getattr(t, "subscription_mode", None)
+        out = getattr(t, "outbound", None)
+        return dict(BOOKS.digest(), start=dict(_START),
+                    subscription_mode=mode,
+                    outbound=dict(out) if isinstance(out, dict) else None,
+                    venue_subscribed=(len(getattr(t, "_subscribed", ()) or ())
+                                      if t is not None else None),
+                    recycles=getattr(t, "recycles", None))
     except Exception as exc:                                  # noqa: BLE001
         return {"version": VERSION, "digest_failed": type(exc).__name__}
 

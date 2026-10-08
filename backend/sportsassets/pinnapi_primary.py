@@ -337,7 +337,16 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     got = cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
                      evaluated_ms=at * 1000, max_age_s=max_age_s)
     if not got.get("ok"):
-        return fail(got.get("reason"), got.get("provenance"))
+        prov = got.get("provenance")
+        if got.get("reason") == F.R_UNKNOWN_MARKET and \
+                callable(getattr(cache, "market_list", None)):
+            # WHAT THE FIXTURE'S PRICING RECORD DOES HOLD (red-team
+            # closeout): the evidence ext_pinnacle_loop.
+            # fixture_lists_no_moneyline names Pinnacle's own absence by
+            prov = {"fixture_id": eid, "quote_event_id": qid,
+                    "fixture_match": name_basis,
+                    "market_list": cache.market_list(qid)}
+        return fail(got.get("reason"), prov)
     q = got["quote"]
     if (epoch(q.change_ms) is None or epoch(q.received_ms) is None
             or q.received_ms > at * 1000):
@@ -380,6 +389,45 @@ def select(cache, event, fallback, *, family, sharp_books, at,
             "commence_time": event["commence_time"], "reference_input": prov}
 
 
+#: ── THE RECHECK'S CLOCK GUARD: THE PRICE, NOT ITS LATEST RE-ASSERTION ──
+#:
+#: PRODUCTION (2026-10-08 01:40Z readback, release 08828d04): 319 refused
+#: paper decisions over 151 contract sides (capital-authority blocker census
+#: since 2026-10-06T05:53Z, stage DECISION only) and 2 events in the 24 h
+#: first-loss census carried PINNAPI_PRIMARY_CLOCK_INVALID from this recheck
+#: -- never from `select`, which always runs at time.time(); and after a
+#: read that is ok, `received_ms > at` is the only branch here that can
+#: fire (an unknown change time is refused by the read itself). The guard
+#: compared the cache quote's `received_ms` with the decision instant `at`.
+#: But `received_ms` is the arrival of the LATEST frame that carried the
+#: market (pinnapi_feed: "provenance only"), and the cache re-puts every
+#: market of a record on every frame: a live push that moves ANY market of
+#: the event, or a prematch list re-asserting its prices, re-stamps the
+#: money line's `received_ms` with its price, change instant and epoch
+#: untouched. Every paper policy reads `at` BEFORE its awaited catalogue /
+#: fixture / parameter reads and rechecks after them, so a re-assertion
+#: landing inside those awaits refused an UNCHANGED price as a clock fault --
+#: our own ordering, not the provider's clock. (The line-market recheck,
+#: bettor_market_family.validate_pair, has no such guard at all.)
+#:
+#: CLOCK_INVALID_RULE. The substance is compared first, so a price that DID
+#: change is PINNAPI_PRIMARY_INPUT_CHANGED by its real name (and so reaches
+#: the supersession check). The clock guard then asks the question it exists
+#: for: did WE HOLD this price at the instant it is evaluated at? Its
+#: instant is the quote's `first_observed_ms` -- our receipt of the frame
+#: that first carried this exact price on this epoch, carried unchanged by
+#: every re-assertion -- or, where a quote carries none, `received_ms` as
+#: before. An evaluation instant before we held the price is still refused
+#: CLOCK_INVALID. The 30 s rule, its change instant and the instant it is
+#: measured at are unchanged: `cache.read` still ages the price from its
+#: change at `at`, and the recheck after the book read still runs.
+def _held_since_ms(q) -> float:
+    """Our receipt instant of the frame that first carried this exact price
+    (`first_observed_ms`), else of the latest frame (`received_ms`)."""
+    held = getattr(q, "first_observed_ms", None)
+    return float(held) if epoch(held) is not None else float(q.received_ms)
+
+
 def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
     """Recheck after awaited venue/rules reads, before any valuation can act.
 
@@ -413,8 +461,7 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
         return {"ok": False, "reason": got.get("reason"),
                 "provenance": got.get("provenance")}
     q = got["quote"]
-    if (epoch(q.change_ms) is None or epoch(q.received_ms) is None
-            or q.received_ms > at * 1000):
+    if epoch(q.change_ms) is None or epoch(q.received_ms) is None:
         return {"ok": False, "reason": "PINNAPI_PRIMARY_CLOCK_INVALID"}
     live = cache.events[qid].get("isLive")
     if (q.epoch != p["epoch"] or q.source_change_ms != p["source_change_ms"]
@@ -425,6 +472,9 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
             or q.market_type != "moneyline" or q.period != 0 or q.alternate
             or q.line is not None or q.sport_id != SPORTS[p["family"]]):
         return {"ok": False, "reason": "PINNAPI_PRIMARY_INPUT_CHANGED"}
+    # THE PRICE WAS HELD AT THE EVALUATION INSTANT (CLOCK_INVALID_RULE).
+    if _held_since_ms(q) > at * 1000:
+        return {"ok": False, "reason": "PINNAPI_PRIMARY_CLOCK_INVALID"}
     return {"ok": True, "provider": PROVIDER,
             "provenance": got["provenance"],
             "receipt_to_evaluation_ms": at * 1000 - p["received_ms"]}

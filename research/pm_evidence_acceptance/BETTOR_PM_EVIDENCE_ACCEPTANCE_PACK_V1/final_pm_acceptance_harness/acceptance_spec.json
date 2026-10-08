@@ -1,0 +1,55 @@
+{
+  "version": "FINAL_PM_ACCEPTANCE_V1",
+  "frozen_at": "2026-10-07",
+  "states": [
+    "RED",
+    "YELLOW",
+    "GREEN"
+  ],
+  "meaning": {
+    "RED": "Critical software, integrity, runtime, freshness, reconciliation, release-lineage or safety failure. Do not advance.",
+    "YELLOW": "Software/operations are substantially acceptable but economic proof, twin certification, capacity, or another non-integrity evidence gate remains unproven. Remain PAPER/SHADOW.",
+    "GREEN": "All critical software/operations gates and forward economic gates pass. Eligible to be called CAPITAL_CANDIDATE; live activation still requires separate explicit approval."
+  },
+  "critical_red_gates": [
+    "release_lineage",
+    "exact_sha",
+    "backend_tests",
+    "capital_critical",
+    "commit_guard",
+    "engine_diagnostic",
+    "migration_integrity",
+    "no_oom",
+    "shared_worker_ump_isolated",
+    "held_freshness",
+    "priority_freshness",
+    "truth_quorum",
+    "software_red_zero",
+    "canary",
+    "credential_classes",
+    "historical_paper_immutable",
+    "live_authority_shadow"
+  ],
+  "yellow_to_green_gates": [
+    "pmx_grpc_primary",
+    "kalshi_market_data_live",
+    "venue_health_isolated",
+    "settlement_proven",
+    "digital_twin_certified",
+    "xavier_complete",
+    "positive_forward_edge",
+    "positive_capacity",
+    "profitability_governor_positive",
+    "mechanism_breakers_green"
+  ],
+  "thresholds": {
+    "min_no_oom_minutes": 60,
+    "max_worker_rss_fraction": 0.85,
+    "min_held_freshness": 0.95,
+    "min_priority_freshness": 0.95,
+    "min_xavier_complete": 0.95,
+    "min_twin_agreement": 0.95,
+    "max_twin_optimistic_false_fill_rate": 0.01,
+    "max_software_red_count": 0
+  }
+}

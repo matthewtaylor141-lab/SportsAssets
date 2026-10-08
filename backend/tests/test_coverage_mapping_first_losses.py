@@ -63,9 +63,15 @@ def _fam(slug):
 # 1 · EVERY LEAGUE THE VENUE LISTS: ADMITTED BY ITS OWN WORDING, OR NAMED
 # ═════════════════════════════════════════════════════════════════════
 
-def _leagues_in_capture():
+#: the leagues the venue listed AFTER the first read (2026-10-08), captured
+#: the same way (tests/test_ident_league_capture_2026_10_08.py reads it)
+LATER = json.loads((FIX / "pmus_basketball_hockey_winner_listings_2026_10_08"
+                    ".json").read_text())
+
+
+def _leagues_in_capture(capture=None):
     out = {"basketball": set(), "hockey": set()}
-    for k in ALL["wording_census"]:
+    for k in (capture or ALL)["wording_census"]:
         lg, st = k.split("/")
         out["hockey" if st.startswith("hockey") else "basketball"].add(lg)
     return out
@@ -73,11 +79,19 @@ def _leagues_in_capture():
 
 def test_the_admitted_leagues_are_every_captured_league():
     """P1: the WNBA is admitted too -- its city-only team record read
-    through the league's own team table (test_p1_wnba_league_team_table)."""
+    through the league's own team table (test_p1_wnba_league_team_table).
+    2026-10-08: every league of the second capture is admitted EXCEPT the
+    two BSKT Cup boards, whose different wording is named, not read."""
     cap = _leagues_in_capture()
-    assert V.ADMITTED_WINNER_LEAGUES["basketball"] == cap["basketball"]
+    for fam, leagues in _leagues_in_capture(LATER).items():
+        assert not leagues & cap[fam], fam       # a capture adds, never redoes
+        cap[fam] |= leagues
+    not_read = set(V.LEAGUES_NOT_READ)
+    assert not_read == {"bsktcin", "bsktcua"}
+    assert not_read <= _leagues_in_capture(LATER)["basketball"]
+    assert V.ADMITTED_WINNER_LEAGUES["basketball"] == \
+        cap["basketball"] - not_read
     assert V.ADMITTED_WINNER_LEAGUES["hockey"] == cap["hockey"]
-    assert set(V.LEAGUES_NOT_READ) == set()
     assert set(V.LEAGUE_TEAM_TABLES) == {"wnba"}
     # one list, read three ways: identity, de-vig, census admission
     for fam, leagues in V.ADMITTED_WINNER_LEAGUES.items():

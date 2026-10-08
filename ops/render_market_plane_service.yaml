@@ -9,15 +9,29 @@ services:
   # decision 2026-10-06: ~74,500 active markets are not solved by raising
   # UMP_MAX_STREAMS inside the shared workers). Its own CPU, health and
   # restarts. NO ORDER, CANCEL OR FUNDING AUTHORITY: it gets the database and
-  # the PMX institutional MARKET-DATA credential only -- no PMUS key, no
-  # LIVE_TRADING_ENABLED, no Kalshi key. When it is up, set
+  # the PMX institutional MARKET-DATA credential and the Kalshi WebSocket
+  # key only -- no PMUS key, no LIVE_TRADING_ENABLED, no Kalshi trading
+  # switch; market_plane_guard locks the process against venue writes and
+  # blocks every order-client module (provisioned from the same names by
+  # .github/workflows/market-plane.yml, ops/render_market_plane_provision.json,
+  # copying the existing values from sportsassets-workers). When it is up, set
   # UNIVERSAL_MARKET_PLANE=off on sportsassets-workers so exactly one runtime
   # holds the shards. The PMX_* values are entered in the dashboard (they
   # cannot be copied between services by this blueprint).
+  #
+  # COMPLETION READINESS (venue guidance 2026-10-07): ONE subscribe-all
+  # market-data stream (symbols=[], every instrument; the 20 gRPC streams are
+  # a FIRM-WIDE pool shared with orders, drop copy, positions, balances and
+  # RFQ), sports filtered locally. The books hold the registry's refdata-
+  # listed contracts (bounded by UMP_SUBSCRIBE_ALL_MAX_BOOKS, default
+  # 100,000; ~3.5 KB each at depth 10) -- hence `standard` (2 GB), not
+  # `starter` (512 MB). Secrets: DATABASE_URL and the three PMX_* market-data
+  # values ONLY. No PMX_PARTICIPANT_ID (an account-path identifier): refdata
+  # reads send it only when present.
   - type: worker
     name: sportsassets-market-plane
     runtime: docker
-    plan: starter
+    plan: standard
     rootDir: .
     dockerfilePath: ./backend/Dockerfile
     dockerCommand: python -m sportsassets.workers.universal_market_plane
@@ -34,10 +48,19 @@ services:
         value: "on"
       - key: INSTITUTIONAL_MD_STREAM
         value: "on"
+      - key: UMP_SUBSCRIBE_ALL
+        value: "on"
       - key: PMX_CLIENT_ID
         sync: false
       - key: PMX_KEY_ID
         sync: false
       - key: PMX_PRIVATE_KEY_B64
+        sync: false
+      # (Kalshi rep 2026-10-07) the authenticated Kalshi WebSocket book
+      # runtime runs beside the market plane: its handshake needs a Kalshi
+      # API key. Read-only use; the runtime imports no order / cancel path.
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      - key: KALSHI_PRIVATE_KEY_PEM
         sync: false
 

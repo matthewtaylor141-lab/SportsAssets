@@ -1,0 +1,12 @@
+[build-system]
+requires=["setuptools>=68","wheel"]
+build-backend="setuptools.build_meta"
+[project]
+name="bettor-ev-probability-engine-upgrade"
+version="0.1.0"
+description="Event-clustered market-prior/residual/calibration EV probability engine for BETTOR"
+requires-python=">=3.11"
+dependencies=["numpy>=1.26","pandas>=2.1","scipy>=1.11","scikit-learn>=1.4"]
+[tool.pytest.ini_options]
+testpaths=["tests"]
+addopts="-q"

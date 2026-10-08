@@ -158,7 +158,7 @@ def test_lineage_change_moves_the_hash():
 def test_policy_version_change_moves_the_hash():
     """A decision claiming a different version is a different decision."""
     mutated = mutate("shadow_bettor.py",
-                     'POLICY_VERSION = "BETTOR_EV_SHADOW_V5"',
+                     'POLICY_VERSION = "BETTOR_EV_SHADOW_V6"',
                      'POLICY_VERSION = "BETTOR_EV_SHADOW_V9"')
     assert sha(**{"shadow_bettor.py": mutated}) != BASE
 
@@ -247,34 +247,263 @@ def test_the_worker_and_the_api_are_outside_the_boundary():
     moved the running sha away from the frozen one and fail-closed the
     decision writer -- correctly, but for a change that decides
     nothing."""
-    for name in cs.DECISION_PATH:
+    for name in list(cs.DECISION_PATH) + list(cs.DECISION_PATH_V1):
         assert not name.startswith("workers/")
         assert not name.startswith("api/")
+    # V1 (V2..V5's boundary) is exactly as it was frozen; V2 (V6) adds the
+    # entry gate `decide` has called since 70ca3a4 -- and nothing else.
+    assert set(cs.DECISION_PATH_V1) == {"shadow.py", "shadow_lanes.py",
+                                        "shadow_bettor.py"}
     assert set(cs.DECISION_PATH) == {"shadow.py", "shadow_lanes.py",
-                                     "shadow_bettor.py"}
+                                     "shadow_bettor.py",
+                                     "bettor_entry_gate.py"}
 
 
-def test_the_digest_is_environment_dependent_and_that_is_recorded():
-    """A FINDING, NOT A FEATURE. ast.dump() emits version-specific
-    fields -- Python 3.12 added type_params to FunctionDef -- so the
-    same source yields a different digest on 3.11 and 3.12. Production
-    runs 3.12 and recorded 2934de9a...; this box runs 3.11 and computes
-    5220d2e7...
+def test_v1s_digest_is_environment_dependent_and_that_is_recorded():
+    """A FINDING, NOT A FEATURE -- and the reason V2 exists. ast.dump()
+    emits version-specific text: 3.12 added type_params to FunctionDef and
+    prints it empty; 3.13 omits every empty field by default. The same
+    source hashed 84c80e7c (3.11), 92a190a0 (3.12.3) and 2532d20b (3.13)
+    under V1. Production froze V2..V5 on 3.12.3, so V1 is kept exactly for
+    those numbers; on 3.13 show_empty=True restores the 3.12 text.
 
-    That is STABLE WITHIN an environment, which is why the gate works
-    today, and it fails CLOSED on a runtime upgrade rather than open.
-    But it cannot be checked from a differently-versioned box, and it
-    is not fixable under V2: changing the digest function now would
-    move the running sha away from the frozen 2934de9a and block
-    decisions. It belongs to a future version.
-
-    This test records the property so nobody rediscovers it by
-    watching production fail closed after a base-image bump.
-    """
+    The old form of this test read the DUMP for "type_params" and failed on
+    3.13 for exactly the reason it documents. The FIELD is the property."""
     import ast
     import sys
-    dumped = ast.dump(ast.parse("def f(): pass").body[0])
-    has_type_params = "type_params" in dumped
-    assert has_type_params == (sys.version_info >= (3, 12)), (
-        "ast.dump's field set changed with the Python version, which is "
-        "exactly the dependency this test documents")
+    assert ("type_params" in ast.FunctionDef._fields) == (
+        sys.version_info >= (3, 12))
+    if sys.version_info >= (3, 13):
+        assert "type_params" not in ast.dump(
+            ast.parse("def f(): pass").body[0])
+    node = ast.parse("def f(): pass").body[0]
+    assert ("type_params=[]" in cs._dump_v1(node)) == (
+        sys.version_info >= (3, 12))
+
+
+# ── V2 (BETTOR_EV_SHADOW_V6): what the drift of V5 taught ────────────
+
+# V6's digest. Interpreter-independent by construction and pinned on EVERY
+# interpreter (measured identical on 3.11.17, 3.12.3 and 3.13.16). Once
+# production freezes V6 this is ITS number: a decision change makes this
+# test fail and the remedy is BETTOR_EV_SHADOW_V7 -- never a new literal.
+V6_CODE_SHA = (
+    "9c66940429caf9b79ff87a71272edd974e97de131f4dcc91e5622d22e5a9815c")
+
+
+def test_v6s_digest_is_the_same_on_every_interpreter():
+    from sportsassets import shadow_bettor as sb
+    assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V6"
+    assert BASE == V6_CODE_SHA, (
+        "the decision path moved under BETTOR_EV_SHADOW_V6; declare V7")
+
+
+def test_v2s_serialisation_carries_no_interpreter_defaults():
+    import ast
+    node = ast.parse("def f(x=None): return 1").body[0]
+    text = cs._canon(node)
+    assert "type_params" not in text            # empty on 3.12+, absent on 3.11
+    assert "decorator_list" not in text         # empty
+    assert "NoneType:None" in text              # None is never dropped
+    assert "int:1" in text
+    # type travels with the value: 1, 1.0 and True are different programs
+    one = cs._canon(ast.parse("x = 1").body[0])
+    assert one != cs._canon(ast.parse("x = 1.0").body[0])
+    assert one != cs._canon(ast.parse("x = True").body[0])
+
+
+def test_the_entry_gate_is_inside_the_v2_boundary():
+    """70ca3a4 gave decide() a branch whose verdict is admit(); 9e236bf and
+    a0c9220 then changed admit() without moving V5's hash. Not any more."""
+    mutated = mutate("bettor_entry_gate.py",
+                     'ADMISSIBLE_MODEL_STATUS = ("FROZEN", "PROMOTED", "CHAMPION")',
+                     'ADMISSIBLE_MODEL_STATUS = ("FROZEN", "PROMOTED", "CHAMPION", "CANDIDATE")')
+    assert sha(**{"bettor_entry_gate.py": mutated}) != BASE
+
+
+def test_relaxing_the_venue_circularity_guard_moves_the_hash():
+    """The guard that stops a venue-derived fair value licensing an entry
+    -- switched off, and separately renamed. Both must move the hash."""
+    off = mutate("bettor_entry_gate.py",
+                 'elif "VENUE" in fv_kind or "MIDPOINT" in fv_kind',
+                 'elif False and "MIDPOINT" in fv_kind')
+    assert sha(**{"bettor_entry_gate.py": off}) != BASE
+    renamed = mutate("bettor_entry_gate.py",
+                     'R_FV_IS_VENUE_PRICE = "FAIR_VALUE_IS_THE_VENUE_BENCHMARK"',
+                     'R_FV_IS_VENUE_PRICE = "FAIR_VALUE_IS_FINE"')
+    assert sha(**{"bettor_entry_gate.py": renamed}) != BASE
+
+
+def test_the_admitted_record_is_inside_the_v2_boundary():
+    mutated = mutate("shadow_bettor.py",
+                     'record["orderSubmitted"] = False',
+                     'record["orderSubmitted"] = True')
+    assert sha(**{"shadow_bettor.py": mutated}) != BASE
+
+
+def test_removing_the_entry_gate_branch_moves_the_hash():
+    mutated = mutate("shadow_bettor.py",
+                     'if gate["admissible"]:',
+                     'if False:')
+    assert sha(**{"shadow_bettor.py": mutated}) != BASE
+
+
+def test_a_comment_or_docstring_in_the_entry_gate_keeps_the_hash():
+    src = source("bettor_entry_gate.py")
+    mutated = src.replace("def admit(",
+                          "# prose that changes nothing\n\n\ndef admit(", 1)
+    assert mutated != src
+    assert sha(**{"bettor_entry_gate.py": mutated}) == BASE
+    marker = '"""Return an admissible entry, or every reason there is not one.'
+    assert marker in src
+    rewritten = src.replace(marker, '"""Rewritten prose.', 1)
+    assert sha(**{"bettor_entry_gate.py": rewritten}) == BASE
+
+
+def test_reformatting_keeps_the_hash():
+    """Format-only: quote style, line wrapping, trailing comma, redundant
+    parentheses. None reaches the parsed tree."""
+    src = source("shadow_bettor.py")
+    reformatted = src.replace('B_RISK_GATE = "RISK_GATE"',
+                              "B_RISK_GATE = ('RISK_GATE')", 1)
+    assert reformatted != src
+    assert sha(**{"shadow_bettor.py": reformatted}) == BASE
+    gate = source("bettor_entry_gate.py")
+    wrapped = gate.replace(
+        'SETTLEMENT_TARGETS = ("SETTLEMENT_OUTCOME", "SETTLES_YES", "PAYOUT")',
+        'SETTLEMENT_TARGETS = (\n    "SETTLEMENT_OUTCOME",\n    "SETTLES_YES",\n'
+        '    "PAYOUT",\n)', 1)
+    assert wrapped != gate
+    assert sha(**{"bettor_entry_gate.py": wrapped}) == BASE
+
+
+def _unhashed_reads(manifest: dict) -> set:
+    """Every module-level name a hashed symbol READS that is not itself
+    hashed, as "module.py:name". Names in a module the boundary covers are
+    checked against the manifest; an attribute of any other package module
+    (`evb.evaluate`) is reported as that module's. Stdlib is not reported."""
+    import ast
+    out = set()
+    for module, wanted in manifest.items():
+        tree = ast.parse(source(module))
+        names, aliases = {}, {}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+                names[n.name] = n
+            elif isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        names[t.id] = n
+            elif isinstance(n, ast.AnnAssign) \
+                    and isinstance(n.target, ast.Name):
+                names[n.target.id] = n
+            elif isinstance(n, ast.ImportFrom) and (
+                    (n.level == 1 and n.module is None)
+                    or (n.level == 0 and n.module == "sportsassets")):
+                for a in n.names:
+                    aliases[a.asname or a.name] = a.name + ".py"
+            elif isinstance(n, ast.ImportFrom) and n.level >= 1:
+                # `from .x import y` would hide a dependency from the scan
+                raise AssertionError("%s: from-import of names from a "
+                                     "package module; import the module"
+                                     % module)
+        for sym in wanted:
+            for x in ast.walk(names[sym]):
+                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) \
+                        and x.id in names and x.id not in wanted:
+                    out.add("%s:%s" % (module, x.id))
+                if isinstance(x, ast.Attribute) \
+                        and isinstance(x.value, ast.Name) \
+                        and x.value.id in aliases:
+                    target = aliases[x.value.id]
+                    if target not in manifest \
+                            or x.attr not in manifest[target]:
+                        out.add("%s:%s" % (target, x.attr))
+    return out
+
+
+def test_the_v2_boundary_is_closed_under_reference():
+    """A hashed symbol that reads an unhashed name is hashed by NAME only:
+    the value can change behaviour without moving the digest. V1 had such
+    holes in BETTOR's own modules (LANES, PROV_*, NO_EXECUTION_ACTIONS, the
+    entry gate). V2 has none except the declared ones -- and a NEW one, e.g. decide
+    calling into another package module, fails here rather than in
+    production."""
+    assert _unhashed_reads(cs.DECISION_PATH) == set(cs.DECLARED_UNHASHED)
+
+
+def test_v1_was_not_closed_and_that_is_recorded():
+    holes = _unhashed_reads(cs.DECISION_PATH_V1)
+    assert "shadow_lanes.py:LANES" in holes
+    assert "shadow.py:NO_EXECUTION_ACTIONS" in holes
+    assert "bettor_entry_gate.py:admit" in holes
+
+
+def test_the_declared_rn1_exclusions_are_exactly_the_owner_directive():
+    rn1 = {k for k, why in cs.DECLARED_UNHASHED.items()
+           if why == "owner directive 2026-09-19"}
+    assert rn1 == {"shadow_lanes.py:RN1_PROVENANCES"}
+    # the directive's own guard still holds
+    for name in cs.DECISION_PATH["shadow_lanes.py"]:
+        assert not name.startswith("PROV_RN1") and name != "RN1_PROVENANCES"
+
+
+@pytest.mark.parametrize("module,old,new", [
+    # every BETTOR decision would raise LaneViolation
+    ("shadow_lanes.py", "LANES = (RN1_SHADOW, BETTOR_EV_SHADOW)",
+     "LANES = (RN1_SHADOW,)"),
+    # every BETTOR decision would raise LineageAmbiguous
+    ("shadow_lanes.py",
+     'PROV_MARKET_MICROSTRUCTURE = "MARKET_MICROSTRUCTURE"',
+     'PROV_MARKET_MICROSTRUCTURE = "MICROSTRUCTURE"'),
+    # a whale provenance relabelled as an independent one
+    ("shadow_lanes.py", 'PROV_WHALE_ACTION = "WHALE_ACTION"',
+     'PROV_WHALE_ACTION = "SPREAD"'),
+    # a BUY would no longer have to state why it dominated
+    ("shadow.py",
+     "NO_EXECUTION_ACTIONS = frozenset({NO_TRADE, HOLD, HOLD_TO_SETTLEMENT,",
+     "NO_EXECUTION_ACTIONS = frozenset({NO_TRADE, HOLD, HOLD_TO_SETTLEMENT, "
+     "BUY,"),
+])
+def test_a_value_read_by_the_decision_path_moves_the_v2_hash(module, old,
+                                                             new):
+    assert sha(**{module: mutate(module, old, new)}) != BASE
+    # ... and none of these moved V1's, which is why V2 needed closing.
+    assert cs.semantic_code_sha_v1(
+        overrides={module: mutate(module, old, new)}) \
+        == cs.semantic_code_sha_v1()
+
+
+def test_v1_still_reproduces_v5s_frozen_number_from_the_frozen_commit():
+    """V5 was frozen at e8ab303 on 3.12.3 as 92a190a0 and production has
+    run 98aaa204 (70ca3a4) since. Both are reproduced here from git history
+    through V1, unchanged -- so V5's row stays checkable after V6 runs."""
+    import subprocess
+    import sys
+    from sportsassets import shadow_bettor_policy as bpol
+    repo = SRC.parents[1]
+
+    def at(rev):
+        return {m: subprocess.run(
+            ["git", "-C", str(repo), "show",
+             "%s:backend/sportsassets/%s" % (rev, m)],
+            capture_output=True, text=True, check=True).stdout
+            for m in cs.DECISION_PATH_V1}
+
+    if sys.version_info >= (3, 12):
+        assert cs.semantic_code_sha_v1(
+            source_dir="/nonexistent", overrides=at("e8ab3038")) == \
+            bpol.V5_FROZEN_POLICY_CODE_SHA
+        assert cs.semantic_code_sha_v1(
+            source_dir="/nonexistent", overrides=at("70ca3a4e")) == \
+            bpol.V5_DRIFTED_POLICY_CODE_SHA
+    # on every interpreter: the drift is 70ca3a4 and nothing else
+    assert cs.semantic_code_sha_v1(
+        source_dir="/nonexistent", overrides=at("70ca3a4e^")) == \
+        cs.semantic_code_sha_v1(
+            source_dir="/nonexistent", overrides=at("e8ab3038"))
+    assert cs.semantic_code_sha_v1(
+        source_dir="/nonexistent", overrides=at("70ca3a4e")) != \
+        cs.semantic_code_sha_v1(
+            source_dir="/nonexistent", overrides=at("70ca3a4e^"))

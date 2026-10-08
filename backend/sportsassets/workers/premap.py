@@ -18,10 +18,13 @@ stream proves side fidelity on real signals before any dollar rides.
 from __future__ import annotations
 
 import asyncio
+import collections
+import contextvars
 import logging
 import asyncpg
 import os
 import re
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -126,6 +129,32 @@ EARLIER_MAX_PAGES = int(os.environ.get("PREMAP_EARLIER_PAGES", "40"))
 #: WALL_TIME_BUDGET_EXHAUSTED (truncated, named) -- the lane never runs into
 #: the next 30-minute cycle.
 CALENDAR_MAX_SECONDS = float(os.environ.get("PREMAP_CALENDAR_MAX_S", "900"))
+#: (completion readiness) THE WINDOW WALK'S WALL-TIME BOUND: production
+#: measured the full sweep at ~856 s (~2,086 events, ~64k rows) beside the
+#: capital-critical loops. Past this the window walk stops as
+#: WALL_TIME_BUDGET_EXHAUSTED -- TRUNCATED and partitioned, never complete.
+WINDOW_MAX_SECONDS = float(os.environ.get("PREMAP_WINDOW_MAX_S", "900"))
+#: (completion readiness) THE MEMORY BUDGET: every catalogue walk stops as
+#: MEMORY_BUDGET_EXHAUSTED (TRUNCATED, named) before another page once this
+#: process's RSS crosses this fraction of its own container limit (read from
+#: the cgroup, never assumed). sportsassets-workers was OOM-killed at its
+#: 2 GiB limit; a truncated catalogue is named, an OOM kills held-position
+#: management with it.
+MEMORY_BUDGET_FRACTION = float(os.environ.get("PREMAP_MEMORY_BUDGET_FRACTION",
+                                              "0.80"))
+
+
+def memory_over_budget(rss=None, limit=None) -> bool:
+    """True when RSS >= MEMORY_BUDGET_FRACTION of the container limit. An
+    unreadable figure is not a breach (never a manufactured stop)."""
+    from .. import procmem
+    rss = procmem.rss_mb() if rss is None else rss
+    limit = procmem.limit_mb() if limit is None else limit
+    if not rss or not limit:
+        return False
+    return float(rss) >= MEMORY_BUDGET_FRACTION * float(limit)
+
+
 #: 0 turns the calendar lane off (the window lanes are unaffected).
 CALENDAR_ENABLED = os.environ.get("PREMAP_CALENDAR", "1") not in ("0", "false")
 #: THE PER-EVENT MARKET CAP, REPAIRED WHERE THE BUDGET ALLOWS. When an event's
@@ -6666,6 +6695,80 @@ async def _append_receipt(pool, *, lane: str, started_at: float,
     return out
 
 
+#: (2026-10-08, the workers OOM) True only inside premap's own catalogue reads
+#: -- the worker thread's copied context, see _released_body -- so the hook
+#: below never acts on any other caller of the shared venue client.
+_RELEASE_BODY = contextvars.ContextVar("premap_release_body", default=False)
+_BODY_HOOK: dict = {}
+_BODY_HOOK_LOCK = threading.Lock()
+
+
+def _body_release_hook():
+    """THE PAGE BODY IS DROPPED ONCE IT IS PARSED. httpx's client wraps every
+    response stream in a BoundSyncStream that points back at the response,
+    so a read response -- the raw page and the SDK's decoded `.text`, ~2x the
+    page's JSON -- is cyclic garbage that only a GC pass frees: measured,
+    1 to 12 events.list bodies alive at once depending on what else the
+    process allocates. This response hook (built once) drops that
+    back-reference as soon as httpx has read and closed the body, so the
+    response is freed the moment the SDK returns the parsed page. The bytes,
+    the parse and every error path are untouched."""
+    hook = _BODY_HOOK.get("hook")
+    if hook is not None:
+        return hook
+    import httpx
+
+    class _ReleasedOnClose(httpx.SyncByteStream):
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __iter__(self):
+            yield from self._inner
+
+        def close(self):
+            inner, self._inner = self._inner, None
+            if inner is not None:
+                inner.close()
+
+    def hook(response):
+        if not _RELEASE_BODY.get():
+            return
+        if getattr(response, "_content", None) is not None:
+            # a body read before the hook (an in-memory transport): httpx
+            # will not close it again, so close it now and keep only the bytes
+            response.stream.close()
+            response.stream = httpx.ByteStream(response._content)
+        else:
+            response.stream = _ReleasedOnClose(response.stream)
+
+    _BODY_HOOK["hook"] = hook
+    return hook
+
+
+def _released_body(client, call, *args):
+    """`call(*args)` (one SDK read on `client`) with the body-release hook in
+    force for this read only. A client without an httpx `_http` (a test
+    double) is called as is."""
+    http = getattr(client, "_http", None)
+    hooks = getattr(http, "event_hooks", None)
+    if isinstance(hooks, dict):
+        hook = _body_release_hook()
+        with _BODY_HOOK_LOCK:
+            resp_hooks = hooks.get("response")
+            if isinstance(resp_hooks, list):
+                if hook not in resp_hooks:
+                    # in place: another installer's hooks are never rebuilt
+                    resp_hooks.append(hook)
+            else:
+                hooks["response"] = [hook]
+                http.event_hooks = hooks
+    token = _RELEASE_BODY.set(True)
+    try:
+        return call(*args)
+    finally:
+        _RELEASE_BODY.reset(token)
+
+
 def _paced_events_list(client, q: dict):
     """ONE events.list request, behind the process-wide venue gate.
 
@@ -6683,7 +6786,7 @@ def _paced_events_list(client, q: dict):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return client.events.list(q)
+    return _released_body(client, client.events.list, q)
 
 
 def _paced_event_by_slug(client, slug: str):
@@ -6693,7 +6796,7 @@ def _paced_event_by_slug(client, slug: str):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return client.events.retrieve_by_slug(slug)
+    return _released_body(client, client.events.retrieve_by_slug, slug)
 
 
 def _paced_markets_list(client, q: dict):
@@ -6701,7 +6804,7 @@ def _paced_markets_list(client, q: dict):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return client.markets.list(q)
+    return _released_body(client, client.markets.list, q)
 
 
 def _rate_limited(exc) -> dict | None:
@@ -7039,6 +7142,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             log.warning("premap: event %s failed to write (%s); isolated",
                         ev_slug, why)
             raise _EventFailed(why) from exc
+        finally:
+            # this event's row bodies are never read back (SideKeyGuard
+            # docstring): only their keys outlive it, not 86k row dicts
+            guard.end_event()
         for i, (m, cell) in enumerate(markets):
             if i in resolved:
                 continue
@@ -7066,19 +7173,35 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             tally.note(vc.K_KEPT_WITHOUT_EVENT_KEY)
         return written
 
-    async def _walk(pass_name, variant, walk, first_events=None):
+    async def _walk(pass_name, variant, walk, first_page=None):
         """Drive one PageWalk over `variant`: write every fresh event of
         every page (each inside its own guard), then ask for the next offset
         until the walk says the pass is over. A failed request is counted on
-        the walk and ends the pass, named. Never raises."""
+        the walk and ends the pass, named. Never raises.
+
+        ONE PAGE AT A TIME, RELEASED AS IT IS WRITTEN (2026-10-08, the
+        workers OOM). A parsed events.list page is ~4.7x its JSON (8 MB of
+        JSON -> 38 MB of dicts, measured through the SDK's own
+        response.json()). The probe page stayed referenced by refresh() for
+        the whole sweep, and each page's response and event list stayed
+        referenced while the NEXT page was fetched and parsed: three pages
+        alive at once. Now `first_page` is a one-element holder this walk
+        empties (the caller keeps no reference), the SDK response is dropped
+        the moment the walk has taken its fresh events, and each event leaves
+        the page queue before it is written, so it is freed as soon as its
+        rows are. The order, the writer, the tally and every stop are the
+        same."""
         nonlocal seen_rows
         walks[pass_name] = walk
-        fresh = walk.first(first_events) if first_events is not None else None
+        fresh = walk.first(first_page.pop()) if first_page else None
         page_no = 0
         consecutive_failures = 0
         while True:
             if fresh is not None:
-                for k, ev in enumerate(fresh):
+                queue = collections.deque(fresh)
+                fresh = None
+                while queue:
+                    ev = queue.popleft()
                     before = tally.snapshot()
                     try:
                         seen_rows += await _write_event(ev, pass_name)
@@ -7095,9 +7218,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                         consecutive_failures += 1
                         if consecutive_failures >= vc.MAX_CONSECUTIVE_EVENT_FAILURES:
                             walk.fail(vc.STOP_WRITE_FAILURES, str(exc))
-                            for ev2 in fresh[k + 1:]:
+                            for ev2 in queue:
                                 tally.event_dropped(ev2, vc.D_EVENT_NOT_REACHED)
+                            queue.clear()
                             break
+                ev = None
                 await _record_last(pool, {"mode": "events/%s/page%d"
                                           % (pass_name.lower(), page_no),
                                           "events": events, "rows": seen_rows,
@@ -7121,6 +7246,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                           "%s: %s" % (type(exc).__name__, str(exc)[:160]))
                 break
             fresh = walk.accept(_items(resp, "events"))
+            resp = None           # only the fresh events are read from here on
         return walk
 
     def _epoch_iso(t):
@@ -7139,7 +7265,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             bw = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_req,
                              deadline=deadline,
                              max_offset=MAX_OFFSET or None,
-                             already_read=shared)
+                             already_read=shared,
+                             memory_guard=memory_over_budget)
             await _walk(pass_name, var, bw)
             r = bw.receipt()
             part.record(lo, hi, depth, r, new_events=max(
@@ -7155,7 +7282,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         bucket_max_requests=max_pages)
     if not calendar:
         wwalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=max_pages,
-                            max_offset=MAX_OFFSET or None)
+                            max_offset=MAX_OFFSET or None,
+                            deadline=time.monotonic() + max(
+                                1.0, WINDOW_MAX_SECONDS),
+                            memory_guard=memory_over_budget)
         try:
             # PREMAP-GT ground truth (probe #1030, 2026-08-24): the venue
             # IGNORES the eventSlug filter on markets.list (every queried
@@ -7201,6 +7331,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                         break
                     continue
                 evs = _items(probe, "events")
+                probe = None
                 # the winning variant is the one whose events carry live
                 # inline markets — a page of bare historical rows is the
                 # junk catalog, not a win
@@ -7208,7 +7339,9 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                        if isinstance(m, dict) and not m.get("closed")):
                     variant, first = v, evs
                     break
+                evs = None        # a rejected rung's page is not kept
                 wwalk.probe_rejected()
+            evs = None
             if variant is None:
                 if wwalk.stopped is None:
                     wwalk.fail(vc.STOP_NO_VARIANT,
@@ -7219,7 +7352,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                     if probe_rate_limited else
                     "no events.list variant returned live inline markets")
             window_variant_bounded = variant is _window
-            await _walk(window_pass, variant, wwalk, first_events=first)
+            # the probe page goes to the walk in a holder it empties: nothing
+            # in this frame keeps it alive for the rest of the sweep
+            first_page, first = [first], None
+            await _walk(window_pass, variant, wwalk, first_page=first_page)
             # A TRUNCATED WINDOW IS PARTITIONED (see PARTITION_MAX_PAGES): the
             # first read is the partition's root bucket; an unbounded variant
             # rung has no window to cut, and is named so when truncated
@@ -7462,7 +7598,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                         "startTimeMin": _iso(lo), "startTimeMax": _iso(hi)}
                 swalk = vc.PageWalk(limit=PAGE_LIMIT, max_requests=left,
                                     deadline=deadline,
-                                    max_offset=MAX_OFFSET or None)
+                                    max_offset=MAX_OFFSET or None,
+                                    memory_guard=memory_over_budget)
                 await _walk(pname, pvar, swalk)
                 left -= swalk.requests
                 shared |= swalk.seen_keys()

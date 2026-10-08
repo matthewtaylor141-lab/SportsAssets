@@ -46,6 +46,7 @@ from .. import shadow_rn1
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -188,7 +189,7 @@ async def tick(pool) -> dict:
 async def run() -> None:
     if _off("SHADOW_RN1_DECIDE"):
         log.info("shadow_rn1: decision loop off by switch")
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
     pool = await get_pool()
 
     ready = await store.store_ready(pool)

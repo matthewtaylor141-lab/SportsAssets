@@ -1,0 +1,20 @@
+{
+  "package": "BETTOR_REVENUE_RELIABILITY_STACK_V1",
+  "version": "0.1.0",
+  "verified_against_sha": "659edaf21c2deb1dcc032932f38a7ff1ec8456c2",
+  "modules": [
+    "Agent Certification Engine",
+    "Champion-Challenger Tournament",
+    "Regime / Abstention Authority",
+    "Revenue Reliability Optimizer",
+    "Agent Counterfactual Scoring",
+    "Daily Revenue Readiness Contract"
+  ],
+  "authority": "RESEARCH_PAPER_SHADOW_ONLY",
+  "network_clients": [],
+  "credential_access": "NONE",
+  "order_authority": "NONE",
+  "cancel_authority": "NONE",
+  "capital_authority": "NONE",
+  "production_migrations": "NONE"
+}

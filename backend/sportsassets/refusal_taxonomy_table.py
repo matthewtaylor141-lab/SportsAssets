@@ -28,6 +28,16 @@ TABLE = {
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
+    # (xavier_complete closeout) exploration refuses an entry its manager
+    # could not manage: Xavier's own held read cannot price the contract
+    # (a management-capability gap: no feed fixture, an unheld family...),
+    # or the entry price leaves no cent <= 0.99 for the cost-recovery
+    # protection (the price itself); its held read raising is a DB error
+    "XAVIER_HELD_READ_CANNOT_PRICE_THIS_CONTRACT": (
+        S, CAP, "RISK_ADMISSION"),
+    "XAVIER_CANNOT_PROTECT_THIS_ENTRY_NO_PROTECTIVE_PRICE": (
+        E, PRICE, "RISK_ADMISSION"),
+    "XAVIER_HELD_READ_RAISED_AT_ENTRY": (S, DATA, "RISK_ADMISSION"),
     # (313) the persisted EXIT intent's explicit abandonments: what stopped
     # an EXIT that had already cancelled its protection (the protection is
     # restored by the same review whenever inventory remains)
@@ -1476,6 +1486,44 @@ TABLE = {
     "KALSHI_CATALOGUE_TRUNCATED_PAGE_CAP": (S, DATA, "INGESTION"),
     "KALSHI_CATALOGUE_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
     "KALSHI_CATALOGUE_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
+    # (314) Kalshi canonical venue: the market-data walk's own TRUNCATED
+    # reasons (never COMPLETE), its 429 backoff, and Adriana's claim-first
+    # scan naming a claim pair that does not pay $1 in every state
+    "KALSHI_MD_RATE_LIMITED_429": (S, FRESH, "INGESTION"),
+    "KALSHI_MD_SERIES_LIST_NOT_READ": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_CURSOR_REPEATED": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
+    "KALSHI_MD_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
+    "CLAIMS_NOT_COMPLEMENTARY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (315) Red Team Closeout V1: the package's stream-currency gate as the
+    # institutional stream's last word; the canonical exposure lock's
+    # refusals (an ENTRY carrying its canonical claim / event past the
+    # existing fixture cap; an unreadable exposure refuses)
+    "STREAM_CURRENCY_GATE_REFUSED": (S, FRESH, "VENUE_BOOK"),
+    "ABOVE_THE_CANONICAL_CLAIM_EXPOSURE_CAP": (E, RAIL, "ORDER"),
+    "ABOVE_THE_CANONICAL_EVENT_EXPOSURE_CAP": (E, RAIL, "ORDER"),
+    "CANONICAL_EXPOSURE_UNREADABLE": (S, DATA, "ORDER"),
+    # (Kalshi rep 2026-10-07) the authenticated WebSocket book runtime:
+    # a sequence gap / disconnect / subscription error makes the book GAP
+    # until a fresh snapshot; no credential provisioned = owner action
+    "KALSHI_WS_SEQUENCE_GAP": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_DISCONNECTED": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_SUBSCRIPTION_ERROR": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
+    # the dedicated market plane refuses to run beside an order-capable
+    # credential (market_plane_guard): a provisioning defect, ours to fix
+    "ORDER_CAPABLE_CREDENTIAL_PRESENT_ON_MARKET_PLANE": (S, CAP, "INGESTION"),
+    # (315) a canonical alias whose settlement-rules fingerprint differs
+    # from the one it was certified against (red team settlement guard)
+    "RULES_CHANGED_SINCE_CERTIFICATION": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # Kalshi game contract terms (the venue's rulebook): a rulebook that is
+    # not recorded, not verified live, changed, or a non-entire-game
+    # contract applies no term -- the alias stays UNKNOWN_STATES
+    "RULEBOOK_NOT_RECORDED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULEBOOK_CHANGED_SINCE_RECORDING": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "RULEBOOK_NOT_VERIFIED_LIVE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SERIES_RULEBOOK_UNKNOWN": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NOT_AN_ENTIRE_GAME_CONTRACT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (P1) the priced settlement-difference policy's exact refusals: a
     # difference its exceptional-state bound cannot price; and its one
@@ -1977,6 +2025,21 @@ SOFTWARE_CENSUS_CLOSURE = {
     "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": (S, DATA, "PROBABILITY"),
     "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES": (
         S, DATA, "PROBABILITY"),
+    # (red-team closeout) the matched fixture's record lists other
+    # full-game markets but no money line (or its full game is closed) AND
+    # the metered payload carries no Pinnacle h2h --
+    # ext_pinnacle_loop.R_FIXTURE_LISTS_NO_MONEYLINE; EXTERNAL by
+    # bettor_external_shadow.EVALUABILITY_OF on that evidence. Any doubt
+    # keeps FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE).
+    "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE": (
+        S, DATA, "PROBABILITY"),
+    # (red-team closeout) a PinnAPI-priced valuation whose feed runtime is
+    # not the deciding process's current one: left undecided by the paper
+    # pass (a DEFERRED hook row, never a paper decision; its recheck could
+    # only refuse FEED_OWNERSHIP_NOT_HELD) -- paper_derek.
+    # R_PREVIOUS_RUNTIME; ours (a restart), never EXTERNAL
+    "PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME": (
+        S, CAP, "PROBABILITY"),
     # ECONOMIC by its evidence: the paper decision's book read SUCCEEDED and
     # the side it would buy from is published, well formed and empty (no
     # executable depth: the market's state, recorded on the observation) --

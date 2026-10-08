@@ -749,6 +749,13 @@ READERS = {
     # no candidate is selected from the table, nothing is sized from a row.
     "bettor_paper_profitability_bind.py": (
         "SETTLED_OUTCOMES_FOR_CALIBRATION_NEVER_CANDIDATES", 1),
+    # COMPLETION READINESS: the probability evidence's settled-outcome
+    # LABELS (outcome_known, outcome 0/1, by slug) score decisions the paper
+    # path already took; a settled outcome is a fact of the market whatever
+    # the row's purpose. No candidate is selected, nothing is sized or
+    # placed; the read runs in a READ ONLY transaction.
+    "completion/evidence.py": (
+        "SETTLED_OUTCOME_LABELS_FOR_SCORING_NEVER_CANDIDATES", 1),
 }
 
 

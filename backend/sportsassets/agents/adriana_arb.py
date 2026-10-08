@@ -335,6 +335,11 @@ class Contract:
     spec: SettlementSpec
     payoff: Mapping[str, Any]
     sport: str | None = None
+    #: KALSHI: the published fee terms in force (kalshi_fees.effective_terms
+    #: -- series / event multiplier, versioned). When set, the leg is priced
+    #: on them; the production claim path never builds a Kalshi leg without
+    #: them (Kalshi rep 2026-10-07: unknown multiplier = ineligible).
+    fee_terms: Any = None
 
     @property
     def key(self) -> tuple[str, str, str]:
@@ -485,12 +490,44 @@ def _pmus_candidate_schedules(at: datetime) -> list:
     return out
 
 
+#: the published Kalshi General Trading Fees Table coefficient (equal to
+#: kalshi_fees.TAKER_COEFFICIENT; tests/test_kalshi_ws_market_data pins it)
+KALSHI_PUBLISHED_TAKER_COEFFICIENT = Decimal("0.07")
+
+
 def order_fee(venue: str, fills: Sequence[tuple[Decimal, int]], *,
-              at: datetime, sport: str | None = None) -> FeeQuote:
+              at: datetime, sport: str | None = None,
+              terms: Any = None) -> FeeQuote:
     """Taker fee for ONE order at `venue` that fills `fills` [(price, n)],
-    one fill per price level. Unknown -> FeeQuote(known=False, ...)."""
+    one fill per price level. Unknown -> FeeQuote(known=False, ...).
+    KALSHI with `terms` (kalshi_fees): the published schedule x the series /
+    event multiplier, trade fee per fill ceil to $0.000001, the order's cash
+    debit aligned up to the cent; terms that do not price -> unknown."""
     if not fills:
         return FeeQuote(True, ZERO, None, "EMPTY_ORDER")
+    if venue == KALSHI and terms is not None:
+        if not terms.get("priced") or terms.get("effective_at") is None:
+            return FeeQuote(False, None, FEE_SCHEDULE_UNKNOWN,
+                            "KALSHI fee terms do not price: %s"
+                            % terms.get("version"))
+        try:
+            mult = Decimal(str(terms["multiplier"]))
+        except (InvalidOperation, KeyError, TypeError):
+            return FeeQuote(False, None, FEE_SCHEDULE_UNKNOWN,
+                            "KALSHI fee multiplier unreadable")
+        # the published General Trading Fees Table, quadratic, x the bound
+        # multiplier (kalshi_fees.model_fee; pinned equal by a test)
+        trade = sum(((mult * KALSHI_PUBLISHED_TAKER_COEFFICIENT * n * p
+                      * (Decimal(1) - p)).quantize(
+                          Decimal("0.000001"), rounding=ROUND_CEILING)
+                     for p, n in fills), ZERO)
+        principal = sum((p * n for p, n in fills), ZERO)
+        debit = ((principal + trade) / Decimal("0.01")).to_integral_value(
+            rounding=ROUND_CEILING) * Decimal("0.01")
+        return FeeQuote(True, debit - principal, None,
+                        "KALSHI published %s (%s, effective %s)" % (
+                            terms.get("version"), terms.get("schedule_id"),
+                            terms.get("effective_at")))
     if venue == KALSHI:
         fee = sum((kalshi_taker_fee(n, p) for p, n in fills), ZERO)
         return FeeQuote(True, fee, None,
@@ -933,7 +970,8 @@ def leg_cost(c: Contract, levels, qty: int, *, at: datetime,
     fills = walk_asks(levels, qty)
     if fills is None:
         return None
-    fq = order_fee(c.venue, fills, at=at, sport=c.sport)
+    fq = order_fee(c.venue, fills, at=at, sport=c.sport,
+                   terms=getattr(c, "fee_terms", None))
     if not fq.known:
         return None
     notional = sum((p * n for p, n in fills), ZERO)
@@ -1171,6 +1209,7 @@ def evaluate_structure(legs: Sequence, books, outcome_space: OutcomeSpace,
             rs = book_reasons(c, b, now, max_age_s=float(max_age_s))
             if not rs:
                 probe = order_fee(c.venue, [(Decimal("0.5"), 1)], at=now,
+                                  terms=getattr(c, "fee_terms", None),
                                   sport=c.sport)
                 if not probe.known:
                     rs = [_reason(FEE_SCHEDULE_UNKNOWN, "%s:%s:%s: %s"

@@ -1,0 +1,18 @@
+{
+  "package": "BETTOR_KALSHI_CANONICAL_VENUE_V1",
+  "verified_against_sha": "659edaf21c2deb1dcc032932f38a7ff1ec8456c2",
+  "mode": "MARKET_DATA_MAPPING_ROUTING_ARB_SHADOW",
+  "authority": {
+    "submit": false,
+    "cancel": false,
+    "capital": false
+  },
+  "principles": [
+    "economic claims equal only by exhaustive payoff vector",
+    "explicit YES/NO quotes remain separate executable paths",
+    "best route minimizes all-in cost including fees",
+    "same-venue and cross-venue arbitrage are equally eligible",
+    "unknown mapping/settlement/fees/freshness fail closed"
+  ],
+  "baseline_tests": 17
+}

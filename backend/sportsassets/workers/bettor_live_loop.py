@@ -120,6 +120,7 @@ from .. import bettor_settlement_ingest as si
 from .. import bettor_shadow_loop as sl
 from .. import bettor_universe as uni
 from .. import bettor_universe_probe as probe_mod
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -293,6 +294,136 @@ async def _backoff(why: str, *, sleep=None, at_least: float = 0.0) -> float:
              why, delay, kind)
     await (sleep or asyncio.sleep)(delay)
     return delay
+
+
+# ── A STOPPED DELEGATED LANE PARKS IN PLACE ──────────────────────────
+#
+# THE DEFECT (production 08828d04, 2026-10-07, all day). With
+# BETTOR_INCENTIVE_MANIFEST set, `main()` delegates to
+# `bettor_incentive_observe.run()` ABOVE every `_backoff` the general path
+# serves, and that runner returns its refusal in ~3 ms. With
+# `bettor_live_observation` = false the supervisor restarted this loop
+# every RESTART_DELAY_SECONDS: four log lines and one runtime_loop_health
+# START write every five seconds, 17,280 restarts a day. The 2026-09-21
+# cycle again, through the door the incentive release (2b0fa0fb) opened
+# above the hold fd39a0a9 had added the same morning.
+#
+# WHY NOT LOOP_DISABLED. The row is an OPERATOR control: `render-ops sql
+# obs-run` / `obs-stop` / `obs-arm-incentive` write it with no deploy and no
+# restart, and the running process has to notice. LOOP_DISABLED retires a
+# loop until the next deploy, so `obs-run` would silently do nothing -- the
+# 2026-09-22 failure ("a stop you have to restart to undo is not a
+# control"). LOOP_DISABLED stays reserved for what only a deploy can
+# change: the environment kill switch.
+#
+# WHY NOT ONE HOLD AND RETURN. That still costs a supervisor restart, four
+# log lines and a loop-health write every IDLE_POLL_S + 5 s. Parked, the
+# lane costs one primary-key read per IDLE_POLL_S and logs when it parks
+# and when it is released -- and it is released exactly as promptly:
+# within IDLE_POLL_S of the row opening, plus the supervisor's 5 s.
+#
+# BOUNDED. After PARK_MAX_S the park returns anyway, so the delegate runs
+# from the top and re-logs its effective configuration once an hour -- 24
+# restarts a day, not 17,280.
+PARK_MAX_S = 3600.0
+
+# A DATABASE READ THAT FAILED AFTER THE CONTROL AND THE ALLOWANCE WERE OPEN.
+# The delegate refuses these before any socket exists, exactly like
+# CONTROL_UNREADABLE / BUDGET_UNREADABLE, so they POLL (one IDLE_POLL_S hold,
+# the rung untouched) instead of climbing the acquisition ladder: the run is
+# already AUTHORISED and its ET window is running, so a database blip must
+# not cost it 300-3600 s of observation (the 2026-09-22 arithmetic). Named
+# from bettor_incentive_state.S_UNREADABLE and bettor_incentive_journal.open;
+# a test pins them to those sources.
+_DELEGATE_DB_TRANSIENT = frozenset({
+    "RUN_ROW_UNREADABLE", "JOURNAL_NO_POOL", "JOURNAL_SCHEMA_UNAVAILABLE",
+})
+
+
+async def _delegated_gate(control_pool=None) -> tuple:
+    """(open, why) for the delegated lane, read in the delegate's own
+    order: the control row first, the incentive allowance only once the
+    control is open. Neither read raises and both fail closed."""
+    c = await ctl.read_control(control_pool)
+    if ctl.is_closed(c):
+        return False, c.get("why") or ctl.W_UNREADABLE
+    a = await ctl.read_incentive_allowance(control_pool)
+    if not a.get("open"):
+        return False, a.get("state") or ctl.B_UNREADABLE
+    return True, ctl.W_RUN
+
+
+async def _park(why: str, *, control_pool=None, sleep=None) -> dict:
+    """Hold a lane a CONTROL closed until that control opens, or until
+    PARK_MAX_S. Never returns early on a still-closed read: an unreadable
+    or absent row keeps it parked, exactly as it keeps the lane stopped."""
+    _sleep = sleep or asyncio.sleep
+    log.info("bettor_live_loop: delegated lane parked (%s); re-reading %s "
+             "every %.0fs for at most %.0fs -- no supervisor restart while "
+             "parked", why, ctl.CONTROL_KEY, IDLE_POLL_S, PARK_MAX_S)
+    parked_s, polls, last = 0.0, 0, why
+    while parked_s < PARK_MAX_S:
+        await _sleep(IDLE_POLL_S)
+        parked_s += IDLE_POLL_S
+        polls += 1
+        is_open, last = await _delegated_gate(control_pool)
+        if is_open:
+            log.info("bettor_live_loop: delegated lane released after %.0fs "
+                     "(%d reads); returning so the supervisor starts it",
+                     parked_s, polls)
+            return {"released": True, "parked_s": parked_s, "polls": polls,
+                    "last_why": last}
+    return {"released": False, "parked_s": parked_s, "polls": polls,
+            "last_why": last}
+
+
+async def _after_delegate(out, *, control_pool=None, sleep=None,
+                          bounded: bool = False):
+    """THE SUPERVISOR CONTRACT FOR THE DELEGATED LANE (loop_contract).
+
+    started          -> returned unchanged, and the acquisition rung is
+                        RESET (as the general path resets it after a
+                        start); the supervisor restarts it
+    KILL_SWITCH      -> LOOP_DISABLED: the environment is re-read only by
+                        a deploy, so a restart could only repeat it
+    control reason   -> parked in place until the row (or allowance) opens
+    database blip    -> one IDLE_POLL_S poll, rung untouched (run row /
+                        journal unreadable: authorised, never at the venue)
+    anything else    -> the general path's escalating acquisition backoff
+                        (manifest, coverage, closed run, credentials)
+
+    A bounded run (`run_for_s`) is a harness asking what was DECIDED and
+    serves neither a park nor a backoff -- the same rule as the general
+    path. A crash is not handled here: it propagates to the supervisor,
+    which restarts it on its own unchanged policy.
+    """
+    if bounded or not isinstance(out, dict):
+        return out
+    if out.get("started"):
+        # PROGRESS RESETS THE LADDER. The general path calls
+        # `_reset_backoff()` once a start succeeds; without the same here
+        # the rung only ever climbs for the life of the process, and a
+        # refusal hours later -- after a full day of observation -- waits
+        # out a rung earned by unrelated episodes.
+        _reset_backoff()
+        return out
+    why = str(out.get("why") or "")
+    if why == "KILL_SWITCH":
+        log.info("bettor_live_loop: delegated lane off by %s; not restarted "
+                 "until the next deploy (loop_contract)", KILL_ENV)
+        return LOOP_DISABLED
+    if is_control_reason(why):
+        out["parked"] = await _park(why, control_pool=control_pool,
+                                    sleep=sleep)
+        return out
+    if why in _DELEGATE_DB_TRANSIENT:
+        log.info("bettor_live_loop: delegated lane not starting (%s); "
+                 "polling again in %.0fs (database read, no venue request; "
+                 "the acquisition rung is untouched)", why, IDLE_POLL_S)
+        await (sleep or asyncio.sleep)(IDLE_POLL_S)
+        return out
+    await _backoff(why, sleep=sleep)
+    return out
 
 
 def effective_config() -> dict:
@@ -1777,7 +1908,7 @@ async def _final_flush(loop) -> None:
 
 async def main(*, client=None, stream_factory=None, store=None,
                run_for_s: float | None = None, control_pool=None,
-               sleep=None) -> dict | None:
+               sleep=None) -> dict | str | None:
     """The supervised loop `workers/all.py` runs.
 
     Every keyword is None in production: `workers/all.py` calls
@@ -1824,9 +1955,15 @@ async def main(*, client=None, stream_factory=None, store=None,
         from . import bettor_incentive_observe as inc_obs
         log.info("bettor_live_loop: delegating to %s (%s is set)",
                  inc_obs.OBSERVE_VERSION, _INCENTIVE_ENV)
-        return await inc_obs.run(stream_factory=stream_factory,
-                                 control_pool=control_pool,
-                                 run_for_s=run_for_s, sleep=sleep)
+        out = await inc_obs.run(stream_factory=stream_factory,
+                                control_pool=control_pool,
+                                run_for_s=run_for_s, sleep=sleep)
+        # THE DELEGATE'S REFUSAL GETS THE SAME CONTRACT AS OURS. It used
+        # to be returned straight to the supervisor, above every hold
+        # this function serves -- a five-second restart cycle.
+        return await _after_delegate(out, control_pool=control_pool,
+                                     sleep=sleep,
+                                     bounded=run_for_s is not None)
 
     if not enabled():
         log.info("bettor_live_loop: disabled by %s=off", KILL_ENV)

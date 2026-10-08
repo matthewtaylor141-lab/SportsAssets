@@ -924,8 +924,8 @@ def test_a_zero_fee_mutant_engine_is_caught(monkeypatch):
     check_positive_case()
     monkeypatch.setattr(
         A, "order_fee",
-        lambda venue, fills, *, at, sport=None: A.FeeQuote(True, D(0), None,
-                                                           "MUTANT_ZERO"))
+        lambda venue, fills, *, at, sport=None, terms=None: A.FeeQuote(
+            True, D(0), None, "MUTANT_ZERO"))
     with pytest.raises(AssertionError):
         check_positive_case()
     with pytest.raises(AssertionError):

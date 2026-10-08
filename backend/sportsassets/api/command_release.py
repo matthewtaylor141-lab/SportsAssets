@@ -69,10 +69,15 @@ STATEMENT_TIMEOUT_MS = 3000
 #: UNIVERSAL MARKET PLANE (312: durable market registry, same-book
 #: certification and append-only market-plane evidence; no order authority);
 #: 216..313 since the PERSISTED EXIT INTENT (313: paper_exit_intents and the
-#: EXIT_INTENT_DEADLINE review trigger; paper ledger only).
+#: EXIT_INTENT_DEADLINE review trigger; paper ledger only); 216..314 since
+#: the KALSHI CANONICAL VENUE (314: Kalshi current books, structured
+#: fixtures, canonical claim aliases and SHADOW route receipts; no order
+#: authority, no ledger); 216..315 since the RED TEAM CLOSEOUT (315:
+#: append-only safety / readiness receipts, settlement certificates, Kalshi
+#: series fee terms, the holdout registry; no order authority, no ledger).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 313
+TRACKED_FROM, TRACKED_TO = 216, 315
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

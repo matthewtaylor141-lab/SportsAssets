@@ -20,20 +20,31 @@ INTEGRATION FIXES OVER THE DELIVERED SUPERVISOR (each pinned by a test):
     in priority order (open positions, candidates, core families soonest);
     an unlisted contract is recorded and re-asked after UNLISTED_RETRY_S, not
     every pass;
-  * DEDICATED READ-ONLY RUNTIME (owner decision, 2026-10-06): ~74,500 active
-    markets are NOT to be solved by raising UMP_MAX_STREAMS inside the shared
-    workers process. The same supervisor runs standalone as its own
-    read-only service: `python -m sportsassets.workers.universal_market_plane`
-    with UMP_RUNTIME=DEDICATED_READ_ONLY (and UNIVERSAL_MARKET_PLANE=off on the
-    shared workers so exactly one runtime holds the shards). Until the venue
-    grants more institutional capacity the priority order binds: held
-    positions / working management, imminent decisions, near-term core
-    sports, the remaining active sports, futures / the long tail; overflow is
-    always named with the streams full coverage would need;
-  * capacity is configured, never assumed: UMP_MAX_STREAMS x UMP_MAX_PER_STREAM
-    (PMX documents 1,000 symbols per stream; the account's concurrent-stream
-    allowance is not documented here). Overflow is named with the exact
-    shards required for the whole subscribable universe.
+  * DEDICATED READ-ONLY RUNTIME ONLY (owner decision 2026-10-06; completion
+    readiness 2026-10-07): this supervisor runs ONLY as its own read-only
+    service, `python -m sportsassets.workers.universal_market_plane`
+    (sportsassets-market-plane, ops/render_market_plane_service.yaml). The
+    shared workers never start it, by source rule (workers/all.py
+    DEDICATED_ONLY_LOOPS), whatever UNIVERSAL_MARKET_PLANE says there;
+  * ONE SUBSCRIBE-ALL STREAM (venue guidance 2026-10-07, Polymarket
+    representative): an empty symbol list subscribes one market-data stream
+    to EVERY instrument and is the recommended architecture for a universe
+    this size; the 20 concurrent gRPC streams are a FIRM-WIDE budget shared
+    with orders, drop copy, positions, balances and RFQ. So the default is
+    subscription_mode SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST, exactly one market-data
+    stream, sports filtered locally (the books hold the registry's
+    refdata-listed contracts, bounded by UMP_SUBSCRIBE_ALL_MAX_BOOKS; every
+    other instrument is counted, never held). UMP_SUBSCRIBE_ALL=off falls
+    back to explicit 1,000-symbol shards -- a fallback / debug mode, never
+    more than EXPLICIT_MAX_STREAMS_CEILING streams;
+  * the bearer token (180 s) is refreshed in the background
+    (market_plane.token_keeper) and read only on the next connect: a healthy
+    stream is never cycled to re-authenticate;
+  * reference data is ONE bounded, cached full ListInstruments pull plus
+    batched by-symbol reads for priority contracts and new listings
+    (market_plane.refdata_universe): at most 6 calls a minute, priority
+    first, COMPLETE only on the venue's own end of pagination, never
+    repolled inside FULL_REFRESH_S (the receipt is durable).
 
 SETTLEMENT RULE REGISTRY (integration): the coverage pass also computes each
 contract's settlement state from evidence (market_plane.settlement); the
@@ -59,8 +70,11 @@ from ..market_plane import populate as POP
 from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
 from ..market_plane import refdata_progress as RP
+from ..market_plane import refdata_universe as RU
 from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
+from ..market_plane.token_keeper import TokenKeeper
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 SERVICE = "universal_market_plane"
@@ -73,22 +87,30 @@ ASSIGN_EVERY_S = 30.0
 COVERAGE_EVERY_S = 120.0
 CERTIFY_EVERY_S = 300.0
 SNAPSHOT_EVERY_S = 60.0
-REFDATA_PER_PASS = 8
-#: ADAPTIVE, BOUNDED REFDATA BUDGET (owner closeout item 4): the per-pass
-#: count grows by REFDATA_BUDGET_STEP while every request succeeds, up to
-#: REFDATA_BUDGET_MAX, and HALVES on any HTTP 429 (never below
-#: REFDATA_BUDGET_MIN). Requests stay sequential and paced (the venue
-#: client's thread safety under concurrent calls is not proven); priority
-#: order is refdata_due's (held, candidates, core soon, other soon, rest).
-REFDATA_BUDGET_MIN, REFDATA_BUDGET_MAX, REFDATA_BUDGET_STEP = 4, 32, 4
-REFDATA_PACING_S = 0.15
+#: a by-symbol refdata read that failed (not a proven absence) is not
+#: re-asked for this long; a proven-unlisted contract after UNLISTED_RETRY_S
 REFDATA_RETRY_S = 300.0
 UNLISTED_RETRY_S = 6 * 3600.0
+#: "imminent" for refdata priority: starting within this many seconds
+IMMINENT_S = 2 * 3600.0
 #: the held-mark SLA: a canonical book is "fresh" for coverage under the same
 #: 300 s rule the held marks use (never wider)
 FRESH_SLA_S = 300.0
-DEFAULT_MAX_STREAMS = 4
+#: (completion readiness) ONE market-data stream by default: subscribe-all.
+DEFAULT_MAX_STREAMS = 1
 DEFAULT_MAX_PER_STREAM = 1000
+#: the venue's concurrent gRPC streams PER FIRM, pooled across orders, drop
+#: copy, positions, balance ledger, RFQ and market data (rep, 2026-10-07)
+FIRM_STREAM_BUDGET = 20
+#: the explicit-symbol fallback never takes more than this share of it
+EXPLICIT_MAX_STREAMS_CEILING = 4
+SUBSCRIBE_ALL_ENV = "UMP_SUBSCRIBE_ALL"
+MODE_SUBSCRIBE_ALL = "SUBSCRIBE_ALL_EMPTY_SYMBOL_LIST"
+MODE_EXPLICIT = "EXPLICIT_SYMBOL_SHARDS"
+#: the subscribe-all books' local bound (memory): registry contracts held;
+#: every other instrument on the stream is counted, never stored
+SUBSCRIBE_ALL_MAX_BOOKS_DEFAULT = 100_000
+SUBSCRIBE_ALL_MAX_BOOKS_CEILING = 150_000
 #: (settlement rule registry) the Kalshi SPORTS catalogue step: a
 #: credential-free, GET-only, cursor-complete walk (kalshi_catalogue) every
 #: KALSHI_EVERY_S, run in a background thread so the plane's pass never waits
@@ -134,17 +156,65 @@ async def kalshi_step(pool, task, *, now: float, last: float, env=None,
     return task, last, report
 
 
-def caps(env=None) -> tuple:
-    env = os.environ if env is None else env
+def _env_int(env, k, d):
+    try:
+        v = int(str(env.get(k, d)))
+        return v if v > 0 else d
+    except (TypeError, ValueError):
+        return d
 
-    def _i(k, d):
-        try:
-            v = int(str(env.get(k, d)))
-            return v if v > 0 else d
-        except (TypeError, ValueError):
-            return d
-    return (_i("UMP_MAX_STREAMS", DEFAULT_MAX_STREAMS),
-            min(1000, _i("UMP_MAX_PER_STREAM", DEFAULT_MAX_PER_STREAM)))
+
+def caps(env=None) -> tuple:
+    """(streams, symbols per stream) for the EXPLICIT fallback: never above
+    the documented 1,000 per stream, never more than
+    EXPLICIT_MAX_STREAMS_CEILING of the firm's 20 pooled streams."""
+    env = os.environ if env is None else env
+    return (min(EXPLICIT_MAX_STREAMS_CEILING,
+                _env_int(env, "UMP_MAX_STREAMS", DEFAULT_MAX_STREAMS)),
+            min(1000, _env_int(env, "UMP_MAX_PER_STREAM",
+                               DEFAULT_MAX_PER_STREAM)))
+
+
+def subscribe_all_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(SUBSCRIBE_ALL_ENV, "on")).strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+def subscription_plan(env=None) -> dict:
+    """The market-data subscription this runtime holds: mode, the streams
+    it opens, the symbols its books may hold, the firm budget beside it."""
+    env = os.environ if env is None else env
+    max_streams, max_per = caps(env)
+    if subscribe_all_enabled(env):
+        books = min(SUBSCRIBE_ALL_MAX_BOOKS_CEILING,
+                    _env_int(env, "UMP_SUBSCRIBE_ALL_MAX_BOOKS",
+                             SUBSCRIBE_ALL_MAX_BOOKS_DEFAULT))
+        return {"mode": MODE_SUBSCRIBE_ALL, "subscribe_all": True,
+                "streams": 1, "books_capacity": books,
+                "assign_max_streams": 1, "assign_max_per_stream": books,
+                "firm_stream_budget": FIRM_STREAM_BUDGET,
+                "symbols_on_the_wire": [],
+                "local_filter": "registry refdata-listed PMUS contracts"}
+    return {"mode": MODE_EXPLICIT, "subscribe_all": False,
+            "streams": max_streams, "books_capacity": max_streams * max_per,
+            "assign_max_streams": max_streams,
+            "assign_max_per_stream": max_per,
+            "firm_stream_budget": FIRM_STREAM_BUDGET,
+            "explicit_max_streams_ceiling": EXPLICIT_MAX_STREAMS_CEILING,
+            "local_filter": None}
+
+
+def runtime_resources() -> dict:
+    """This process's memory against its own container limit (read, never
+    assumed) -- the dedicated runtime's half of the RSS high-water proof."""
+    from .. import procmem
+    rss, peak, lim = procmem.rss_mb(), procmem.peak_mb(), procmem.limit_mb()
+    return {"rss_mb": rss, "peak_mb": peak, "limit_mb": lim,
+            "rss_fraction": (round(rss / lim, 4) if rss and lim else None),
+            "highwater_fraction": (round(peak / lim, 4) if peak and lim
+                                   else None),
+            "pid": os.getpid()}
 
 
 def stream_arming(env=None, *, available=None) -> dict:
@@ -271,30 +341,101 @@ async def certify(conn, mgr) -> dict:
     return out
 
 
+async def refdata_step(pool, client, planner, attempted: dict, *,
+                       now: float) -> dict:
+    """ONE refdata call slot (refdata_universe.Planner decides which): a
+    batched by-symbol read for priority contracts, the next full-pull page,
+    or a batched read for contracts added since the last complete pull.
+    Persists only registry members; a COMPLETE pull proves absent exactly
+    the contracts that were pending when it started and never appeared.
+    Returns this slot's digest. Raises nothing it can name."""
+    out = {"action": None}
+    async with pool.acquire() as c:
+        pend = await R.refdata_pending_split(
+            c, now=now, unlisted_retry_s=UNLISTED_RETRY_S,
+            priority_max=POP.P_CANDIDATE, imminent_s=IMMINENT_S,
+            limit=RU.BATCH_MAX,
+            excluded=RP.cooling_ids(attempted, now=now,
+                                    retry_s=REFDATA_RETRY_S))
+        action = planner.next_action(now=now,
+                                     priority_pending=pend["priority"],
+                                     other_pending=pend["other"])
+        if action is None:
+            return dict(out, pending_priority=len(pend["priority"]),
+                        pending_other=len(pend["other"]))
+        if action.get("start"):
+            planner.pull["pending_at_start"] = await R.refdata_pending_ids(c)
+    body = planner.body_for(action)
+    res = await asyncio.to_thread(client.read_instruments, body)
+    done_at = time.time()
+    # paced from the slot's start: call STARTS stay >= interval apart
+    got = planner.record(action, res, now=now)
+    parsed = got["parsed"]
+    out.update(action=action["kind"], status=parsed["status"],
+               records=len(parsed["records"]), ms=parsed.get("ms"),
+               pending_priority=len(pend["priority"]),
+               pending_other=len(pend["other"]))
+    async with pool.acquire() as c:
+        if action["kind"] == RU.A_PAGE:
+            out["stored"] = await R.save_refdata_many(
+                c, parsed["records"], at=done_at)
+        else:
+            asked = set(action["symbols"])
+            out["stored"] = await R.save_refdata_many(
+                c, {k: v for k, v in parsed["records"].items() if k in asked},
+                at=done_at)
+            out["unlisted"] = await R.save_unlisted_many(
+                c, got["unlisted"], at=done_at,
+                basis="BY_SYMBOL_READ_200_OMITTED")
+            if not parsed["ok"]:
+                for s_ in action["symbols"]:
+                    attempted[s_] = done_at
+        fin = got.get("finished")
+        if fin is not None:
+            seen = fin.pop("_seen", set()) or set()
+            pending0 = fin.pop("_pending_at_start", None)
+            if fin["status"] == RU.COMPLETE and pending0:
+                fin["proven_unlisted"] = await R.save_unlisted_many(
+                    c, set(pending0) - seen, at=done_at,
+                    basis="COMPLETE_FULL_PULL_OMITTED")
+            await R.record_event(c, R.REFDATA_FULL_PULL_KIND, fin["id"], fin)
+            out["finished"] = fin
+    if len(attempted) > 200000:
+        attempted.clear()
+    return out
+
+
 async def run() -> None:
     if not enabled():
         log.info("universal_market_plane: off by switch (%s)", ENV_FLAG)
-        return
-    max_streams, max_per = caps()
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
+    plan_cfg = subscription_plan()
+    max_streams = plan_cfg["assign_max_streams"]
+    max_per = plan_cfg["assign_max_per_stream"]
     arming = stream_arming()
-    mgr, client = None, None
+    mgr, client, keeper = None, None, None
     if arming["armed"]:
         from .. import pmx_institutional as PMX
         client = PMX.Institutional(env=os.environ)
-        mgr = Manager(token_fn=client.token, max_per_stream=max_per,
+        keeper = TokenKeeper(client)
+        keeper.start()
+        mgr = Manager(token_fn=keeper.token, max_per_stream=max_per,
                       max_streams=max_streams,
-                      invalidate_token=client.invalidate_token)
-    log.info("universal_market_plane: streams %s (%s) caps=%dx%d",
-             "ARMED" if mgr else "NOT_ARMED", arming["why"], max_streams,
-             max_per)
+                      subscribe_all=plan_cfg["subscribe_all"],
+                      invalidate_token=keeper.invalidate)
+    log.info("universal_market_plane: streams %s (%s) mode=%s streams=%d "
+             "books=%d", "ARMED" if mgr else "NOT_ARMED", arming["why"],
+             plan_cfg["mode"], plan_cfg["streams"], plan_cfg["books_capacity"])
     watermark = 0.0
     last = {"populate": 0.0, "full": 0.0, "assign": 0.0, "coverage": 0.0,
             "certify": 0.0, "snapshot": 0.0}
     seen_receipts: dict = {}
     attempted: dict = {}
+    planner = None
     state: dict = {"plan": {}, "coverage": {}, "certification": {},
                    "populate": {}, "catalogue": {}, "refdata": {},
-                   "kalshi": {"enabled": kalshi_enabled()}}
+                   "kalshi": {"enabled": kalshi_enabled()},
+                   "subscription_plan": plan_cfg}
     kalshi_task, kalshi_last = None, 0.0
     while True:
         try:
@@ -305,6 +446,10 @@ async def run() -> None:
             if krep is not None:
                 state["kalshi"] = dict(krep, enabled=kalshi_enabled())
             async with pool.acquire() as c:
+                if mgr is not None and planner is None:
+                    planner = RU.Planner(
+                        calls_per_minute=RU.calls_per_min(os.environ),
+                        last_complete_at=await R.last_complete_full_pull(c))
                 cat = await POP.catalogue_completeness(c)
                 state["catalogue"] = cat
                 ids = {k: v.get("receipt_id")
@@ -326,15 +471,10 @@ async def run() -> None:
                 if mgr is not None and now - last["assign"] >= ASSIGN_EVERY_S:
                     state["plan"] = await R.assign_missing_shards(
                         c, max_per_stream=max_per, max_streams=max_streams)
+                    state["plan"]["subscription_mode"] = plan_cfg["mode"]
                     last["assign"] = now
                     assigned_rows = await R.assigned_contracts(c)
-                due_rows = (await R.refdata_due(
-                    c, now=now, unlisted_retry_s=UNLISTED_RETRY_S,
-                    limit=REFDATA_BUDGET_MAX * 4,
-                    excluded=RP.cooling_ids(attempted, now=now,
-                                             retry_s=REFDATA_RETRY_S))) if mgr is not None else []
             sync = state.get("sync") or {}
-            boot = {"attempted": 0, "stored": 0, "unlisted": 0, "failed": 0, "failures_by_reason": {}}
             if mgr is not None:
                 if assigned_rows is not None:
                     assignments = {r["contract_id"]: r["subscription_shard"]
@@ -343,59 +483,10 @@ async def run() -> None:
                         r["refdata"]) for r in assigned_rows}
                     sync = mgr.sync(assignments, instruments)
                     state["sync"] = sync
-                # bounded refdata catch-up, priority order; a failed read is
-                # retried after REFDATA_RETRY_S, an unlisted one after
-                # UNLISTED_RETRY_S (refdata_due filters by refdata_at)
-                budget = int(state.get("refdata_budget") or REFDATA_PER_PASS)
-                due = [s_ for s_ in due_rows
-                       if now - attempted.get(s_, 0.0) >= REFDATA_RETRY_S
-                       ][:budget]
-                from .institutional_md import bootstrap_instrument
-                lat_ms, n429 = [], 0
-                for s_ in due:
-                    attempted[s_] = now
-                    boot["attempted"] += 1
-                    t_req = time.monotonic()
-                    try:
-                        got = await asyncio.to_thread(bootstrap_instrument,
-                                                      client, s_)
-                    except Exception:                           # noqa: BLE001
-                        boot["failed"] += 1
-                        continue
-                    finally:
-                        lat_ms.append((time.monotonic() - t_req) * 1000.0)
-                        await asyncio.sleep(REFDATA_PACING_S)
-                    checked = RP.classify_bootstrap(s_, got)
-                    if checked["state"] == "RETRY":
-                        boot["failed"] += 1
-                        why = checked["why"]
-                        if checked.get("http_status") == 429:
-                            n429 += 1
-                            why = "HTTP_429"
-                        boot["failures_by_reason"][why] = boot["failures_by_reason"].get(why, 0) + 1
-                        if n429:
-                            break               # back off for this pass
-                        continue
-                    async with pool.acquire() as c:
-                        if checked["state"] == "UNLISTED":
-                            await R.save_unlisted(c, s_, at=time.time())
-                            boot["unlisted"] += 1
-                            continue
-                        await R.save_refdata(c, s_, checked["record"], at=time.time())
-                    boot["stored"] += 1
-                if len(attempted) > 200000:
-                    attempted.clear()
-                # the budget adapts: halve on a 429, grow on a clean pass
-                if n429:
-                    budget = max(REFDATA_BUDGET_MIN, budget // 2)
-                elif due and not boot["failed"] and len(due) >= budget:
-                    budget = min(REFDATA_BUDGET_MAX,
-                                 budget + REFDATA_BUDGET_STEP)
-                state["refdata_budget"] = budget
-                boot.update(RP.refdata_metrics(
-                    state.setdefault("refdata_totals", {}), boot,
-                    lat_ms=lat_ms, n429=n429, budget=budget, now=now))
-                state["refdata"] = boot
+                # ONE refdata call slot per pass at most (the planner paces
+                # it to the venue's 6/min); priority contracts first
+                state["refdata"] = await refdata_step(
+                    pool, client, planner, attempted, now=now)
             now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
@@ -408,6 +499,9 @@ async def run() -> None:
                     state["certification"] = await certify(c, mgr)
                     last["certify"] = now
                 if now - last["snapshot"] >= SNAPSHOT_EVERY_S:
+                    state["token"] = keeper.digest() if keeper else None
+                    state["refdata_universe"] = (planner.digest(now)
+                                                 if planner else None)
                     snap = await snapshot(c, mgr, state, now=now,
                                           arming=arming, fresh=fresh,
                                           caps=(max_streams, max_per))
@@ -432,7 +526,12 @@ async def run() -> None:
                 "radar", {}).get("green") else "degraded"
             await heartbeat(SERVICE, status, {
                 "arming": arming, "plan": state.get("plan"),
-                "sync": sync, "refdata": boot,
+                "subscription_mode": plan_cfg["mode"],
+                "market_data_streams": mgr.stream_count() if mgr else 0,
+                "sync": sync, "refdata": state.get("refdata"),
+                "runtime": os.environ.get("UMP_RUNTIME",
+                                          "STANDALONE_UNLABELLED"),
+                "resources": runtime_resources(),
                 "populate": {k: v for k, v in (state.get("populate") or {})
                              .items() if k != "excluded"},
                 "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
@@ -443,6 +542,8 @@ async def run() -> None:
         except asyncio.CancelledError:
             if mgr is not None:
                 mgr.stop()
+            if keeper is not None:
+                keeper.stop()
             if kalshi_task is not None:
                 kalshi_task.cancel()
             raise
@@ -697,7 +798,14 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         "overflow": plan.get("overflow_count"),
         "streams_required_for_full_coverage": plan.get(
             "shards_required_for_all"),
-        "runtime": os.environ.get("UMP_RUNTIME", "SHARED_WORKERS")}
+        "runtime": os.environ.get("UMP_RUNTIME", "STANDALONE_UNLABELLED")}
+    sub_plan = state.get("subscription_plan") or subscription_plan()
+    rad["capacity"].update({
+        "subscription_mode": sub_plan["mode"],
+        "market_data_streams": (mgr.stream_count() if mgr is not None
+                                and hasattr(mgr, "stream_count") else 0),
+        "market_data_streams_expected": sub_plan["streams"],
+        "firm_stream_budget": FIRM_STREAM_BUDGET})
     freshness = await freshness_denominators(conn, cov, reg, plan,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now)
@@ -734,6 +842,16 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         "kalshi": dict(state.get("kalshi") or {}, registry=kalshi_reg),
         "subscription": {"armed": mgr is not None,
                          "arming_why": arming.get("why"),
+                         "subscription_mode": sub_plan["mode"],
+                         "market_data_streams": rad["capacity"][
+                             "market_data_streams"],
+                         "market_data_streams_expected": sub_plan["streams"],
+                         "firm_stream_budget": FIRM_STREAM_BUDGET,
+                         "books_capacity": sub_plan["books_capacity"],
+                         "discovery": (mgr.discovery(limit=10)
+                                       if mgr is not None and
+                                       hasattr(mgr, "discovery") else None),
+                         "token": state.get("token"),
                          "configured_capacity": {"max_streams": max_streams,
                                                  "max_per_stream": max_per,
                                                  "symbols": max_streams
@@ -749,11 +867,60 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         "catalogue": state.get("catalogue"),
         "populate": {k: v for k, v in (state.get("populate") or {}).items()},
         "refdata": state.get("refdata"),
+        "refdata_universe": state.get("refdata_universe"),
+        "runtime": {"label": os.environ.get("UMP_RUNTIME",
+                                            "STANDALONE_UNLABELLED"),
+                    "resources": runtime_resources()},
         "radar": rad}
 
 
 async def main():
-    await run()
+    """THE DEDICATED MARKET-DATA SERVICE'S ENTRY POINT: the universal market
+    plane and, beside it, the authenticated Kalshi WebSocket book runtime
+    (Kalshi rep production contract 2026-10-07: WebSocket primary, never on
+    sportsassets-api; it reports OWNER_ACTION_REQUIRED and stays idle until
+    its key is provisioned on this service).
+
+    ORDERLESS BY STRUCTURE (market_plane_guard, closeout 2026-10-08): the
+    guard locks this process against every venue write and blocks the
+    order-client modules from import BEFORE any runtime starts; an
+    order-capable credential on this service makes it refuse to run (it
+    idles and says why -- never restart-churned). Its boot record
+    (`market_plane` heartbeat) carries the running commit and the guard
+    report, so the plane's SHA is read back like the other services'."""
+    from .. import market_plane_guard as GUARD
+    guard = GUARD.install()
+    from . import kalshi_ws_market_data as KWSMD
+    if guard["refused"]:
+        await plane_beat(guard, status="blocked")
+        return
+    await asyncio.gather(run(), KWSMD.run(), plane_beat(guard))
+
+
+PLANE_SERVICE = "market_plane"
+PLANE_BEAT_EVERY_S = 60.0
+
+
+async def plane_beat(guard: dict, *, status: str = "ok",
+                     forever: bool = True) -> None:
+    """The dedicated plane's own boot / liveness record: commit, mode,
+    guard report (names only). Never raises; a refused plane keeps beating
+    `blocked` so the reason is readable without a restart loop."""
+    started = time.time()
+    while True:
+        try:
+            await heartbeat(PLANE_SERVICE, status, {
+                "commit": os.environ.get("RENDER_GIT_COMMIT"),
+                "service": os.environ.get("RENDER_SERVICE_NAME"),
+                "runtime": os.environ.get("UMP_RUNTIME",
+                                          "STANDALONE_UNLABELLED"),
+                "started_at": started, "guard": guard})
+        except Exception:                                       # noqa: BLE001
+            log.warning("market plane boot record not written",
+                        exc_info=True)
+        if not forever:
+            return
+        await asyncio.sleep(PLANE_BEAT_EVERY_S)
 
 
 if __name__ == "__main__":

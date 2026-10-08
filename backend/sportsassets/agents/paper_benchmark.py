@@ -454,7 +454,8 @@ CANDIDATES_SQL = """
        AND NOT EXISTS (SELECT 1 FROM paper_hook_failures h
                         WHERE h.session_id = $4 AND h.valuation_id = v.id
                           AND h.strategy = $6
-                          AND h.error = 'PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE')
+                          AND h.error IN ('PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE',
+                                          'PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME'))
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """
@@ -1044,7 +1045,28 @@ def completed_game_match(cand: dict, row: dict, *,
     keep = {DP.C_IDENTITY, "payout_outcome_match",
             "probability_qualified_by_the_lane", "polymarket_us_contract"}
     checks = [c for c in base["checks"] if c["check"] in keep]
-    refusals = [c["refusal"] for c in checks if not c["passed"]]
+    # THE LANE'S OWN CODES RIDE BEHIND THE WRAPPER HERE TOO. `contract_match`
+    # appends them to ITS refusals (software census closure, d075e12f), but
+    # this match rebuilt its refusals from the checks alone, so they were
+    # dropped: every completed-game-kind decision (completed-game, maker,
+    # exploration) recorded PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE
+    # with nothing behind it, and the first-loss census -- which reads the
+    # code carried right after the wrapper (coverage_first_loss.LANE_
+    # WRAPPERS) -- could only class the loss by the wrapper (production
+    # 2026-10-08 01:40Z: 4 events in 1 h, 23 in 24 h, all decided by
+    # PINNACLE_COMPLETED_GAME_PAPER / PINNACLE_EXPLORATION_PAPER). They are
+    # carried from the check's own `lane_refusals` (the lane's probability-
+    # stage codes this policy applies), in the lane's order, right behind
+    # the wrapper. The checks, the verdict and `established` are unchanged:
+    # a lane code is present only when the wrapper already refuses.
+    refusals = []
+    for c in checks:
+        if c["passed"]:
+            continue
+        refusals.append(c["refusal"])
+        if c["check"] == "probability_qualified_by_the_lane":
+            refusals.extend(x for x in (c.get("lane_refusals") or [])
+                            if x not in refusals)
 
     def put(name, ok, refusal, detail, **ev):
         checks.append(dict({"check": name, "passed": bool(ok),
@@ -1752,7 +1774,9 @@ def book_retry_plan(ctx: dict, got: dict, pin: dict) -> dict:
     retry. `ctx['book_retry_ok']` is set only by the in-cycle hook's first
     attempt."""
     g = got or {}
-    detail = g.get("gate_detail") or {}
+    # the request gate names its cooldown in `gate_detail`; the paper
+    # market-data owner's hold deferral in `gate` (PD.OWNER_CUT_REFUSALS)
+    detail = g.get("gate_detail") or g.get("gate") or {}
     cool = detail.get("seconds_left")
     try:
         cool = None if cool is None else max(0.0, float(cool))
@@ -2790,6 +2814,19 @@ async def step(conn, ctx: dict, pol=None, decide=None) -> dict:
             out["budget_exhausted"] = True
             break
         t0 = time.monotonic()
+        # PRICED BY A FEED RUNTIME THAT NO LONGER EXISTS (red-team closeout,
+        # PD.R_PREVIOUS_RUNTIME): its recheck could only refuse
+        # FEED_OWNERSHIP_NOT_HELD; left undecided, recorded
+        prev = PD.previous_feed_runtime(row)
+        if prev is not None:
+            # recorded as its own DEFERRED row (paper_hook_failures), not as
+            # an evaluation attempt: nothing was evaluated
+            await PD.record_previous_runtime(
+                conn, ctx=ctx, valuation_id=row.get("id"),
+                strategy=pol["strategy"], prev=prev)
+            out["deferred"] += 1
+            out["previous_runtime"] = out.get("previous_runtime", 0) + 1
+            continue
         try:
             rec = await fn(conn, ctx, row, pol)
         except Exception as exc:                                # noqa: BLE001

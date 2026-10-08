@@ -562,6 +562,12 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
         out["market_data"] = PMD.telemetry()
     except Exception as exc:                                    # noqa: BLE001
         out["market_data"] = {"error": type(exc).__name__}
+    # REST WAS THE FALLBACK FOR A REASON: the institutional source's refusal
+    # counts (identity not exact, same-book not proven, book not current,
+    # outside the SLA) ride the persisted record, not only process memory
+    if isinstance(out.get("market_data"), dict):
+        out["market_data"]["institutional_refusals"] = dict(
+            out.get("institutional_refusals") or {})
     if run_id is not None:
         try:
             sql = ("UPDATE paper_mark_refresh_runs SET finished_at = "

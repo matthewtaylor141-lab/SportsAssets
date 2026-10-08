@@ -229,16 +229,39 @@ FAMILY_WINNER_TYPES = {
 #: overtime AND the shootout) -- the grading the book's Basketball / Hockey
 #: section states for every competition. The same set is the de-vig's
 #: (bettor_pinnacle_devig.SUPPORTED_BY_LEAGUE, pinned equal by a test).
+#:
+#: THE LEAGUES THE VENUE LISTED AFTER THAT READ (production first-loss
+#: census 2026-10-08 01:40Z: PinnAPI-native seeds of the Finnish Korisliiga,
+#: France's FRA2 and the British SLB refused VENUE_NATIVE_LEAGUE_NOT_ADMITTED
+#: -- the venue listed them, the list above was a snapshot). Every
+#: basketball / hockey winner league the venue listed at 2026-10-08T02:22Z
+#: that the first capture did not carry is captured in tests/fixtures/
+#: pmus_basketball_hockey_winner_listings_2026_10_08.json; the twelve below
+#: state a wording BYTE-IDENTICAL to one the first capture admitted
+#: (overtime included; hockey: overtime and the shootout), so each is read
+#: by the same evidence, nothing weaker. The BSKT Cup boards are not: see
+#: LEAGUES_NOT_READ.
 ADMITTED_WINNER_LEAGUES = {
     "basketball": frozenset((
         "nba", "aba", "acb", "bbl", "bcl", "bsl", "denbl", "eurocup",
         "eurolg", "jpbl", "kbl", "lba", "lnbp", "nbl", "slnbl", "svkbl",
-        "vtb", "wnba")),
-    "hockey": frozenset(("nhl", "ahl", "cehl", "khl", "liiga", "snhl")),
+        "vtb", "wnba",
+        # captured 2026-10-08
+        "autbl", "cznbl", "fra2", "gbl", "hunbl", "ita2", "koris", "lkl",
+        "lnb", "slb")),
+    "hockey": frozenset(("nhl", "ahl", "cehl", "khl", "liiga", "snhl",
+                         # captured 2026-10-08
+                         "del", "shl")),
 }
-#: LISTED, CAPTURED, AND STILL NOT READ -- each with the reason. Empty since
-#: P1: the WNBA (below) is read through its own league-scoped team table.
-LEAGUES_NOT_READ: dict = {}
+#: LISTED, CAPTURED, AND STILL NOT READ -- each with the reason. (The WNBA,
+#: P1, is read through its own league-scoped team table, below.)
+_BSKT_CUP_WHY = (
+    "captured 2026-10-08: its wording settles a walkover, withdrawal or "
+    "cancellation, and a postponement not rescheduled within two DAYS, at "
+    "$0.50 -- a wording no admitted league carries (they settle a game not "
+    "rescheduled within two weeks to the last fair market price). Not read "
+    "until that wording is reviewed against the book's terms")
+LEAGUES_NOT_READ: dict = {"bsktcin": _BSKT_CUP_WHY, "bsktcua": _BSKT_CUP_WHY}
 R_LEAGUE_NOT_ADMITTED = "VENUE_NATIVE_LEAGUE_NOT_ADMITTED"
 
 #: ── A LEAGUE WHOSE VENUE TEAM RECORD IS THE CITY ALONE (P1: the WNBA) ──

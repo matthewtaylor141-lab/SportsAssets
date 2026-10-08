@@ -53,6 +53,7 @@ from .. import pmx_institutional as pmx
 from .. import shadow_experimental_store as xstore
 from .. import shadow_identity_resolver as resolver
 from ..db import get_pool, heartbeat
+from .loop_contract import LOOP_DISABLED
 
 log = logging.getLogger(__name__)
 
@@ -136,6 +137,18 @@ FOCUS_UNIVERSE_EVERY_S = 60.0
 UNIVERSE_BOOTSTRAPS_PER_SWEEP = 2
 UNIVERSE_RETRY_UNLISTED_S = 300.0
 UNIVERSE_REFDATA_REFRESH_S = float(REFDATA_REFRESH_S)
+
+#: THE HEARTBEAT IS TIME-BOUNDED. It was every 15th loop pass; with nothing
+#: to sweep the pass sleeps BOOTSTRAP_BACKOFF_S (30 s), so a beat landed
+#: every ~450 s -- past the red team's 300 s HEARTBEAT_MAX_AGE_S, which then
+#: read the stream state as absent. At most this long between beats.
+HEARTBEAT_EVERY_S = 30.0
+
+
+def beat_due(last_beat, now) -> bool:
+    """PURE: the first pass beats; then at most HEARTBEAT_EVERY_S apart."""
+    return last_beat is None or float(now) - float(last_beat) >= \
+        HEARTBEAT_EVERY_S
 
 
 def _off(name: str, default: str = "on") -> bool:
@@ -495,12 +508,19 @@ def subscribe_universe(store, universe) -> list:
 async def run() -> None:
     if _off("INSTITUTIONAL_MD"):
         log.info("institutional_md: off by switch")
-        return
+        return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
 
     seen = pmx.presence()
+    mech = pmx.market_data_mechanisms(stream_enabled=istream.enabled())
     boot = {"service": SERVICE,
-            "marketDataMechanism": pmx.MARKET_DATA_MECHANISM,
-            "streamTarget": pmx.STREAM_TARGET,
+            # THE MECHANISMS, NAMED APART: the REST sweep that keeps the
+            # experimental lane's books, and the gRPC stream (its target and
+            # whether this process arms it). The legacy constants
+            # (REST_POLL_MAINTAINED_IN_MEMORY / NOT_IDENTIFIED) describe the
+            # REST sweep alone and are no longer the process's label.
+            "marketDataMechanism": mech["mechanism"],
+            "streamTarget": mech["stream"]["target"],
+            "marketDataMechanisms": mech,
             "evidenceEnvironment": pmx.EVIDENCE_ENVIRONMENT,
             "orderSubmissionImplementation":
                 pmx.ORDER_SUBMISSION_IMPLEMENTATION,
@@ -541,8 +561,11 @@ async def run() -> None:
     recorder = (sevid.install(istream.BOOKS, service=SERVICE)
                 if istream.enabled() else None)
     stream_start = istream.start_default()
-    log.info("institutional_md: stream %s (%s)", stream_start.get("state"),
-             stream_start.get("why"))
+    # the START record (IDLE_NO_SYMBOLS_REQUESTED for a started stream, by
+    # construction); the live state is logged on every transition and is
+    # `stats["stream"]["state"]` on the heartbeat
+    log.info("institutional_md: stream start %s (%s)",
+             stream_start.get("state"), stream_start.get("why"))
 
     last_evidence = 0.0
     # 0.0 rather than time.monotonic(): the FIRST pass through the loop
@@ -555,7 +578,7 @@ async def run() -> None:
     last_universe = 0.0
     universe: dict = {}
     u_attempts: dict = {}
-    beats = 0
+    last_beat = None
     while True:
         started = time.monotonic()
         stats = {"service": SERVICE}
@@ -631,8 +654,12 @@ async def run() -> None:
                     universe = await identify_universe(pool, store, universe,
                                                        u_attempts)
                 stats["universeBootstrap"] = boot
-                stats["universeSubscribed"] = len(
-                    subscribe_universe(store, universe))
+                exact_now = subscribe_universe(store, universe)
+                stats["universeSubscribed"] = len(exact_now)
+                # entries neither the focus set nor the universe has named
+                # for RETAIN_IDLE_S free the stream's per-process bound
+                stats["streamEvicted"] = len(istream.retain(
+                    list(symbols[:MAX_INSTRUMENTS]) + list(exact_now)))
                 # members whose refdata is not held yet (still to bootstrap)
                 stats["universePending"] = sum(
                     1 for s_ in slugs if (store.instrument(s_) or {}).get(
@@ -687,16 +714,19 @@ async def run() -> None:
         stats["symbols"] = len(symbols)
         stats["sweepS"] = round(time.monotonic() - started, 3)
         stats["authStatus"] = verdict.get("AUTH_STATUS")
-        stats["marketDataMechanism"] = pmx.MARKET_DATA_MECHANISM
         stats["orderSubmissionImplementation"] = \
             pmx.ORDER_SUBMISSION_IMPLEMENTATION
         stats["stream"] = istream.digest()
+        live = pmx.market_data_mechanisms(
+            stream_enabled=istream.enabled(), stream_digest=stats["stream"])
+        stats["marketDataMechanism"] = live["mechanism"]
+        stats["marketDataMechanisms"] = live
 
         # THE HEARTBEAT IS NOT ON THE HOT PATH, so it is throttled:
         # §7 keeps reporting out of the decision path, and a beat every
         # sweep would be thirty writes a minute saying the same thing.
-        beats += 1
-        if beats % 15 == 1:
+        if beat_due(last_beat, time.monotonic()):
+            last_beat = time.monotonic()
             try:
                 await heartbeat(SERVICE, str(stats.get("status") or "ok"),
                                 stats)

@@ -2285,6 +2285,59 @@ def probability_deadline(observed_epoch) -> float | None:
         return None
     return t + PINNACLE_MAX_AGE_S if math.isfinite(t) else None
 
+
+#: ── AN ABANDONED READ IS NEVER SENT (first-loss census, 2026-10-08) ──────
+#:
+#: THE DEFECT. `venue_quote` awaits a read for min(VENUE_TIMEOUT_S, the time
+#: to the candidate's probability deadline), but the request gate was told
+#: only the PROBABILITY deadline (or nothing). When that deadline lay beyond
+#: VENUE_TIMEOUT_S -- the FIRST candidate of every metered fetch: NCAAF quotes
+#: reach us ~15 s old, so its deadline is ~15 s out (research-sql
+#: 37412834338: queue position 0 VENUE_BOOK_READ_FAILED, position 1 at
+#: 15.6 s) -- the await was abandoned at 10 s (VENUE_TIMEOUT) while the
+#: reader's thread, still sleeping out the venue's 429 hold (Retry-After
+#: 7-10 s) or queued in the pacer, went on to DISPATCH the request seconds
+#: later, unawaited. The authenticated book endpoint answers 429 at ~0.23
+#: req/s (paper_market_data, READINESS_95_MATRIX row 2), so every such
+#: orphan spends that scarce budget for nobody and invites the next 429 --
+#: whose hold every later candidate of the fetch then waits on. And a hold
+#: that outlasted the await but not the deadline was SLEPT for the full
+#: VENUE_TIMEOUT_S instead of refused at once, spending the following
+#: candidates' 30 s window on a read that could not be used.
+#:
+#: THE REPAIR IS THE GATE'S OWN CONTRACT ("never blocks past the caller's
+#: deadline"): the read's dispatch deadline is the instant its caller STOPS
+#: AWAITING it -- the probability deadline when that comes first (exactly as
+#: before), else request instant + VENUE_TIMEOUT_S. No limit, clock, pacing
+#: gap, hold or timeout changes; the bound only ever refuses a request
+#: nobody is waiting for.
+READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE = (
+    "a venue book read is never dispatched after its caller stopped "
+    "awaiting it: its request-gate deadline is the earlier of the "
+    "candidate's probability deadline and request instant + VENUE_TIMEOUT_S, "
+    "so a 429 hold that outlasts the await is refused at once and an "
+    "abandoned read never reaches the venue; no limit, clock or pacing "
+    "changes")
+
+
+def read_dispatch_bound(request_sent_at: float, probability_deadline_s=None,
+                        timeout_s: float | None = None) -> dict:
+    """{"timeout_s", "gate_deadline_epoch_s", "probability_binds"} for one
+    read sent at `request_sent_at` (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE).
+    `probability_binds` is True when the candidate's probability deadline
+    is the earlier bound -- then the gate's deadline IS that deadline,
+    exactly as before this rule. Pure."""
+    cap = float(VENUE_TIMEOUT_S if timeout_s is None else timeout_s)
+    sent = float(request_sent_at)
+    if probability_deadline_s is not None:
+        left = float(probability_deadline_s) - sent
+        if left < cap:
+            return {"timeout_s": left,
+                    "gate_deadline_epoch_s": float(probability_deadline_s),
+                    "probability_binds": True}
+    return {"timeout_s": cap, "gate_deadline_epoch_s": sent + cap,
+            "probability_binds": False}
+
 #: The sharp books whose agreement counts toward per-outcome depth. Taken
 #: from `edge/fairvalue/feed.py`'s ANCHOR_BOOKS/SHARP_BOOKS set, which was
 #: built from observed production payloads. Pinnacle is the anchor and is
@@ -3454,11 +3507,96 @@ def fixture_not_yet_posted(explain, event) -> dict | None:
             "named_elsewhere": list(ab.get("named_elsewhere") or [])}
 
 
+#: ── THE FIXTURE IS PRICED, ITS MONEY LINE IS NOT: TWO SOURCES AGREE ──
+#:
+#: MEASURED (live release 08828d04, coverage first-loss census): every 1 h
+#: census from 2026-10-07 00:33Z to 2026-10-08 02:29Z (ping readbacks
+#: 37552591368 .. 37718053655) carried the SAME three NCAAF games as
+#: NORMALIZED / FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE): Ohio State v
+#: Maryland, Notre Dame v Stanford, Northwestern v Ball State, all
+#: 2026-10-10. A ledger row's first refusal is FEED_MARKET_NOT_IN_CURRENT_
+#: STATE only when (pinnapi_primary.select) the feed matched exactly one
+#: fixture by both names and the start, its pricing record is held, and
+#: that record holds no full-game money line (s;0;m) -- AND the metered
+#: payload carried no Pinnacle h2h, else that is the fallback and no such
+#: row exists. The census row does not say what ELSE the record held, so
+#: the remaining question -- did we fail to hold the money line, or did
+#: Pinnacle not list one -- was not answerable from the row.
+#:
+#: SO THE ABSENCE IS NAMED BY ITS EVIDENCE, NOT ASSUMED. It is EXTERNAL
+#: (PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE) only when ALL
+#: hold:
+#:   1 the WS read refused FEED_MARKET_NOT_IN_CURRENT_STATE on the record
+#:     that prices the matched fixture, on a granted, synced epoch;
+#:   2 that record parsed (no unparsed last record) and holds at least one
+#:     OTHER open full-game market on the current epoch -- a spread, a
+#:     total -- so Pinnacle's current list for THIS game reached us, parsed,
+#:     and does not carry a money line (PinnAPI: a market not in the
+#:     authoritative list "has been closed by Pinnacle"); or the record's
+#:     own periods mark the full game closed;
+#:   3 the event is the METERED provider's own (not a PinnAPI-native seed)
+#:     and its payload carries no Pinnacle h2h (THEODDSAPI_PAYLOAD_HAS_NO_
+#:     PINNACLE_BOOK or THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET): the second,
+#:     independent source of Pinnacle's prices has none either.
+#: Any doubt -- a record holding NO other market (we may have missed its
+#: list), a full-game money line held under another key (a key-mapping
+#: question of ours), an unparsed record, a Pinnacle h2h in the payload, a
+#: seed -- keeps FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE). The evidence rides on
+#: the ledger row (`no_moneyline_evidence`). No freshness rule, tolerance,
+#: name table or identity rule changes.
+R_FIXTURE_LISTS_NO_MONEYLINE = \
+    "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE"
+
+
+def fixture_lists_no_moneyline(explain, event) -> dict | None:
+    """The evidence that Pinnacle lists no full-game money line for the
+    matched fixture (see R_FIXTURE_LISTS_NO_MONEYLINE), or None when any
+    condition fails. Pure."""
+    from .. import pinnapi_feed as F
+    ex = explain if isinstance(explain, dict) else {}
+    if ex.get("reason") != F.R_UNKNOWN_MARKET:
+        return None
+    ev = event if isinstance(event, dict) else {}
+    if ev.get("pinnapi_native") is not None or \
+            not isinstance(ev.get("bookmakers"), list):
+        return None
+    absent = pinnacle_absence_in_payload(ev)
+    if absent not in (R_PAYLOAD_HAS_NO_PINNACLE, R_PINNACLE_HAS_NO_H2H):
+        return None
+    prov = ex.get("provenance") if isinstance(ex.get("provenance"),
+                                              dict) else {}
+    ml = prov.get("market_list") if isinstance(prov.get("market_list"),
+                                               dict) else {}
+    if (ml.get("record_held") is not True
+            or ml.get("authority_synced") is not True
+            or ml.get("record_unparsed") is not False
+            or ml.get("money_line_held") is not False
+            or ml.get("full_game_moneyline_under_other_keys") != 0):
+        return None
+    try:
+        others = int(ml.get("other_full_game_open_markets") or 0)
+    except (TypeError, ValueError):
+        return None
+    closed = ml.get("full_game_period_closed") is True
+    if others < 1 and not closed:
+        return None
+    return {"ws_refusal": F.R_UNKNOWN_MARKET, "payload_absence": absent,
+            "basis": ("OTHER_FULL_GAME_MARKETS_LISTED_WITHOUT_A_MONEY_LINE"
+                      if others >= 1 else "FULL_GAME_PERIOD_CLOSED"),
+            "fixture_id": prov.get("fixture_id"),
+            "quote_event_id": prov.get("quote_event_id"),
+            "market_list": dict(ml)}
+
+
 def no_pinnacle_codes(explain, event) -> list:
     """The codes recorded for an event with no usable Pinnacle price, in
     order: the WS refusal reason, then the discovery payload's absence. A
     WS NO_EXACT_FIXTURE whose fixture both sources show unposted is
-    recorded PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED (fixture_not_yet_posted)."""
+    recorded PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED (fixture_not_yet_posted);
+    a FEED_MARKET_NOT_IN_CURRENT_STATE on a fixture whose record lists
+    other full-game markets but no money line, with no Pinnacle h2h in the
+    payload either, PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE
+    (fixture_lists_no_moneyline)."""
     ws = (explain or {}).get("reason")
     legacy = pinnacle_absence_in_payload(event)
     posted = fixture_not_yet_posted(explain, event)
@@ -3466,6 +3604,8 @@ def no_pinnacle_codes(explain, event) -> list:
         return ([R_FIXTURE_NOT_YET_POSTED, legacy]
                 + ([R_TEAMS_ONLY_AT_OTHER_STARTS]
                    if posted["named_elsewhere"] else []))
+    if fixture_lists_no_moneyline(explain, event) is not None:
+        return [R_FIXTURE_LISTS_NO_MONEYLINE, legacy]
     codes = [c for c in (ws, legacy) if c]
     return codes or [R_NO_PINNACLE_ON_EVENT]
 
@@ -4667,6 +4807,32 @@ def _past_deadline(slug, deadline_epoch_s, started_at, how) -> dict:
             "rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE}
 
 
+def _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
+                                              bound) -> bool:
+    """Whether OUR gate's deadline refusal of this read is the candidate's
+    PROBABILITY deadline (-> PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_
+    COULD_FINISH) rather than the await bound alone. When the probability
+    deadline was the gate's deadline: exactly as before. When the gate was
+    handed the await bound (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE), only a
+    hold that ALSO outlasts the probability deadline is named so; a hold
+    that merely outlasts the await stays the gate's own refusal (the
+    calibration-only VENUE_GATE_COOLDOWN), never relabelled. Pure."""
+    if deadline_epoch_s is None or not isinstance(book, dict):
+        return False
+    if book.get("refused_by") != "OUR_REQUEST_GATE" or book.get("error") \
+            not in (_GATE_DEADLINE_PASSED, _GATE_COOLDOWN_PAST_DEADLINE):
+        return False
+    if (bound or {}).get("probability_binds", True):
+        return True
+    if book.get("error") != _GATE_COOLDOWN_PAST_DEADLINE:
+        return False
+    try:
+        nb = float((book.get("gate_detail") or {}).get("not_before_epoch_s"))
+    except (TypeError, ValueError):
+        return False
+    return nb > float(deadline_epoch_s)
+
+
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                       subscription=None, revalidation=None,
                       deadline_epoch_s=None):
@@ -4751,21 +4917,25 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     request_sent_at = time.time()
     # THE CANDIDATE'S OWN PROBABILITY DEADLINE BOUNDS THE READ
     # (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE): the argument, else the
-    # one the collector set around this call. None: unbounded, as before
-    # (every other caller).
+    # one the collector set around this call. None: no probability bound
+    # (every other caller) -- the await bound below still applies.
     if deadline_epoch_s is None:
         deadline_epoch_s = _READ_DEADLINE.get()
-    timeout = VENUE_TIMEOUT_S
-    if deadline_epoch_s is not None:
-        left = float(deadline_epoch_s) - request_sent_at
-        if left <= 0:
-            return _past_deadline(slug, deadline_epoch_s, request_sent_at,
-                                  "NOT_STARTED")
-        timeout = min(VENUE_TIMEOUT_S, left)
+    if deadline_epoch_s is not None \
+            and float(deadline_epoch_s) - request_sent_at <= 0:
+        return _past_deadline(slug, deadline_epoch_s, request_sent_at,
+                              "NOT_STARTED")
+    # AWAITED NO LONGER THAN min(VENUE_TIMEOUT_S, the probability deadline),
+    # and NEVER DISPATCHED AFTER THAT INSTANT
+    # (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE): the gate is handed the
+    # instant this await gives up, so a read abandoned at VENUE_TIMEOUT_S is
+    # not sent seconds later to a venue that rate-limits us.
+    bound = read_dispatch_bound(request_sent_at, deadline_epoch_s)
+    timeout = bound["timeout_s"]
     try:
         # the reader takes the deadline from the same context variable
         # (asyncio.to_thread copies the context into its thread)
-        _dl_token = _READ_DEADLINE.set(deadline_epoch_s)
+        _dl_token = _READ_DEADLINE.set(bound["gate_deadline_epoch_s"])
         try:
             book = await asyncio.wait_for(
                 asyncio.to_thread(_read_book_blocking, slug),
@@ -4773,7 +4943,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         finally:
             _READ_DEADLINE.reset(_dl_token)
     except Exception as exc:                                   # noqa: BLE001
-        if (deadline_epoch_s is not None and timeout < VENUE_TIMEOUT_S
+        if (bound["probability_binds"]
                 and isinstance(exc, (asyncio.TimeoutError, TimeoutError))):
             return _past_deadline(slug, deadline_epoch_s, request_sent_at,
                                   "AWAIT_ABANDONED_AT_THE_DEADLINE")
@@ -4782,9 +4952,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "exception": type(exc).__name__,
                 "diagnostic": _venue_diagnostic(slug, exc,
                                                 stage="BOOK_READ_AWAIT")}
-    if (deadline_epoch_s is not None and book.get("refused_by")
-            == "OUR_REQUEST_GATE" and book.get("error") in (
-                _GATE_DEADLINE_PASSED, _GATE_COOLDOWN_PAST_DEADLINE)):
+    if _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
+                                                 bound):
         return _past_deadline(slug, deadline_epoch_s, request_sent_at,
                               "REFUSED_BY_OUR_GATE:%s" % book.get("error"))
     if book.get("error"):
@@ -7431,13 +7600,20 @@ async def observation_quote(slug, side, *, now=None) -> dict:
     if hit is not None:
         book, read_at, sent, reused = hit["book"], hit["read_at"], 0, True
     else:
+        # NEVER SENT AFTER THIS AWAIT GIVES UP
+        # (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE): the observation's read
+        # spends the same scarce venue budget as a candidate's.
+        _ob = read_dispatch_bound(time.time(), None)
+        _ob_token = _READ_DEADLINE.set(_ob["gate_deadline_epoch_s"])
         try:
             book = await asyncio.wait_for(
                 asyncio.to_thread(_read_book_blocking, str(slug)),
-                timeout=VENUE_TIMEOUT_S)
+                timeout=_ob["timeout_s"])
         except Exception as exc:                                # noqa: BLE001
             return {"ok": False, "refusal": R_VENUE_READ_FAILED,
                     "error": type(exc).__name__, "dispatches": None}
+        finally:
+            _READ_DEADLINE.reset(_ob_token)
         sent, reused = book.get("attempts"), False
         if book.get("error"):
             return {"ok": False, "refusal": R_VENUE_READ_ERROR,
@@ -10635,6 +10811,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                # POSTED); None otherwise
                                "not_yet_posted_evidence":
                                    fixture_not_yet_posted(_ws_why, event),
+                               # what the fixture's record does list, when
+                               # the two sources' agreement named the code
+                               # (R_FIXTURE_LISTS_NO_MONEYLINE); else None
+                               "no_moneyline_evidence":
+                                   fixture_lists_no_moneyline(_ws_why,
+                                                              event),
                                "formerly_recorded_as":
                                    R_NO_PINNACLE_ON_EVENT})
                 continue

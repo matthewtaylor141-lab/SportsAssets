@@ -379,17 +379,31 @@ def test_the_supervisor_really_does_restart_a_loop_that_returns():
     assert forever, "supervise's `while True` is gone; the restart contract changed"
 
     body = forever[0]
+    # THE ONE SANCTIONED EXIT (completion readiness 2026-10-07): a factory
+    # that returns the explicit LOOP_DISABLED sentinel (workers/loop_contract:
+    # off by ENVIRONMENT, which this service re-reads only on a deploy) is not
+    # restarted. Every other return -- None included -- still falls through
+    # to the warning, the sleep and another round, so rn1_observability's
+    # parking reason and bettor_live's control-row polling are unchanged.
+    guarded = set()
+    for node in ast.walk(body):
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Call) \
+                and isinstance(node.test.func, ast.Name) \
+                and node.test.func.id == "_loop_disabled":
+            for sub in ast.walk(node):
+                guarded.add(id(sub))
     escapes = [s for s in ast.walk(body)
-               if isinstance(s, (ast.Break, ast.Return))]
+               if isinstance(s, (ast.Break, ast.Return)) and id(s) not in guarded]
     assert not escapes, (
         "supervise can now leave its restart loop, so a worker that returns may "
         "no longer respawn -- re-check why rn1_observability.main() parks."
     )
 
+    def _awaits_factory(v):
+        return (isinstance(v, ast.Await) and isinstance(v.value, ast.Call)
+                and isinstance(v.value.func, ast.Name) and v.value.func.id == "factory")
     awaits_factory = any(
-        isinstance(s, ast.Expr) and isinstance(s.value, ast.Await)
-        and isinstance(s.value.value, ast.Call)
-        and isinstance(s.value.value.func, ast.Name)
-        and s.value.value.func.id == "factory"
+        (isinstance(s, ast.Expr) and _awaits_factory(s.value))
+        or (isinstance(s, ast.Assign) and _awaits_factory(s.value))
         for s in ast.walk(body))
     assert awaits_factory, "supervise no longer awaits factory() inside its loop"

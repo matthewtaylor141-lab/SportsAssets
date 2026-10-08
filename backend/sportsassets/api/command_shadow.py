@@ -979,6 +979,7 @@ async def _bettor_planes(pool) -> dict:
         "policyVersion": b.get("policy"),
         "policySha": b.get("policySha"),
         "policyCodeSha": b.get("policyCodeSha"),
+        "frozenPolicyCodeSha": b.get("frozenPolicyCodeSha"),
         "codeShaMatches": b.get("codeShaMatches"),
         "codeBoundary": b.get("codeBoundary"),
         "decisionWritingAllowed": b.get("decisionWritingAllowed"),
