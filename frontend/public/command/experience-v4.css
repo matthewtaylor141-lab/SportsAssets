@@ -211,7 +211,13 @@ body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-
 
   body.bt-page-trader.bt-exp-v4 main{padding:16px 12px 20px;}
   body.bt-page-trader.bt-exp-v4 .topbar{height:58px;padding:0 12px;}
-  body.bt-page-trader.bt-exp-v4 .metrics{top:58px;grid-template-columns:repeat(3,1fr);margin-bottom:12px;}
+  /* phones: one column -- the desktop rule above (minmax(0,1fr) 290px) has no phone override, so on a
+     390 px screen the position wall was 60 px wide beside a 290 px decision tape (CI run 37783164445 shows
+     the same crushed cards with production data) */
+  body.bt-page-trader.bt-exp-v4 .workspace{grid-template-columns:1fr;}
+  body.bt-page-trader.bt-exp-v4 .activity-panel{position:static;}
+  /* not sticky on phones: two rows of metrics are ~40% of the screen; the compact ribbon stays sticky */
+  body.bt-page-trader.bt-exp-v4 .metrics{position:static;grid-template-columns:repeat(3,1fr);margin-bottom:12px;}
   body.bt-page-trader.bt-exp-v4 .metric-value{font-size:22px;}
   body.bt-page-trader.bt-exp-v4 .brain-rail{overflow-x:auto;display:flex;scroll-snap-type:x mandatory;scrollbar-width:none;}
   body.bt-page-trader.bt-exp-v4 .brain-node{flex:0 0 44vw;scroll-snap-align:start;}
@@ -326,6 +332,15 @@ body.bt-page-trader.bt-exp-v4 .tiny-button.bt-v4-broadcast-button{width:auto;pad
 #bt-v4-trader-rail{position:fixed;right:18px;bottom:20px;z-index:50;display:flex;gap:5px;padding:6px;border:1px solid rgba(114,231,255,.18);border-radius:12px;background:rgba(4,14,22,.88);backdrop-filter:blur(14px);box-shadow:0 14px 45px rgba(0,0,0,.32)}
 #bt-v4-trader-rail button{height:34px;border:0;border-radius:8px;background:transparent;color:#95b1a8;padding:0 10px;font:700 9px/1 var(--mono,ui-monospace);cursor:pointer}
 #bt-v4-trader-rail button:hover,#bt-v4-trader-rail button:focus-visible{background:rgba(75,226,170,.10);color:#e8fbf4}
+#bt-v4-trader-rail button[aria-pressed="true"]{background:rgba(75,226,170,.14);color:#e8fbf4}
+/* docked in the toolbar on wider screens: its filters are the same lanes, so only Broadcast shows there */
+#bt-v4-trader-rail.bt-v4-rail-docked{position:static;right:auto;bottom:auto;z-index:auto;padding:0;border:0;background:transparent;box-shadow:none;backdrop-filter:none}
+#bt-v4-trader-rail.bt-v4-rail-docked [data-v4-filter]{display:none}
+#bt-v4-trader-rail.bt-v4-rail-docked button{border:1px solid rgba(114,231,255,.18)}
+.bt-v4-ribbon-count{flex:0 0 auto;align-self:center;scroll-snap-align:start;padding:0 10px 0 4px;font:700 9px/1.3 var(--mono,ui-monospace);letter-spacing:.06em;text-transform:uppercase;color:#89d7bd;white-space:nowrap}
+.bt-v4-ribbon-count.narrowed{color:#e7b66c}
+.bt-v4-broadcast-asof{font:600 9px/1.3 var(--mono,ui-monospace);color:#89d7bd;max-width:42ch}
+#bt-v4-broadcast.bt-v4-broadcast-stale .bt-v4-broadcast-asof{color:#e7b66c}
 
 /* Full-screen position broadcast: cloned from already-rendered evidence. */
 #bt-v4-broadcast{position:fixed;inset:0;z-index:100;display:none;background:radial-gradient(100% 70% at 50% 0,#102d36 0,#051116 60%,#02080c 100%);color:#edf9f5;overflow:auto}
@@ -355,6 +370,8 @@ body.bt-v4-broadcast-open #bt-v4-broadcast{display:block}
   body.bt-page-trader.bt-exp-v4 .cockpit{height:285px}
   #bt-v4-game-ribbon{top:120px;margin-left:-2px;margin-right:-2px}.bt-v4-ribbon-item{flex-basis:178px}
   #bt-v4-trader-rail{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));justify-content:space-between;overflow:auto}
+  /* room under the page for the fixed phone rail (>= 44 px buttons + padding): the last card scrolls clear */
+  body.bt-page-trader.bt-exp-v4 main{padding-bottom:calc(84px + env(safe-area-inset-bottom))}
   #bt-v4-trader-rail button{flex:0 0 auto}
   .bt-v4-broadcast-shell{padding-left:10px;padding-right:10px}.bt-v4-broadcast-score{grid-template-columns:1fr;}.bt-v4-broadcast-score .bt-v4-broadcast-pane:last-child{grid-column:auto}.bt-v4-broadcast-pane{min-height:190px;padding:11px}.bt-v4-broadcast-card{display:block}.bt-v4-broadcast-tape{margin-top:10px}
 }

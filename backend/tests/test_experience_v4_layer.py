@@ -307,3 +307,76 @@ def test_floor_defers_to_existing_hq5_controls():
     # hq5 runs as a classic script at the end of <body>, before the deferred V4 layer
     assert '<script src="hq5-workspace.js" data-hq5="js"></script>' in floor
     assert '<script defer src="experience-v4.js" data-experience-v4="js"></script>' in floor
+
+
+# --- Trader: stacked bars, the position denominator, Broadcast clones -------
+#
+# Measured locally (desktop 1440x900, synthetic 7-position PAPER snapshot) on
+# the commit before this repair:
+#  * scrolled, the sticky metrics bar (68-176 px) covered the ribbon
+#    (135-199 px) and the toolbar's filters (142-203 px); V4's offsets assumed
+#    a sticky 68 px top bar Trader does not have;
+#  * the fixed quick-lane rail covered the toolbar's search / Wall mode
+#    controls and the position wall's bottom-right;
+#  * with a lane on, the ribbon listed only the matching cards under the
+#    label 'Open position ribbon' (no denominator), and after Broadcast opened
+#    it listed 8 items for 7 positions (the clone is a .position-card too);
+#  * Broadcast kept showing a 46.0c bid after the page had re-rendered the
+#    position at 51.0c, with no stale label, and duplicated #focus-game,
+#    #focus-market, #focus-decision, #activity and #chart-shade.
+
+
+def test_sticky_bars_stack_under_one_another():
+    src = js()
+    assert "function stackSticky(){if(page!=='trader')return;var top=0;['.metrics','#bt-v4-game-ribbon','.workspace-toolbar'].forEach(" in src
+    assert "var v=top+'px';if(el.style.top!==v)el.style.top=v;top+=el.offsetHeight" in src
+    assert "addEventListener('resize',stackSticky,{passive:true})" in src
+
+
+def test_quick_lanes_dock_in_the_toolbar_and_show_the_active_lane():
+    src = js()
+    assert "target=(!phone&&tb)?tb:b;if(rail.parentNode!==target)target.appendChild(rail);rail.classList.toggle('bt-v4-rail-docked',target===tb)" in src
+    assert "function syncRail(){" in src and "if(x.getAttribute('aria-pressed')!==on)x.setAttribute('aria-pressed',on)" in src
+    sheet = css()
+    assert "#bt-v4-trader-rail.bt-v4-rail-docked{position:static;" in sheet
+    assert "#bt-v4-trader-rail.bt-v4-rail-docked [data-v4-filter]{display:none}" in sheet
+    # phones keep the fixed rail, with room reserved under the page
+    assert "body.bt-page-trader.bt-exp-v4 main{padding-bottom:calc(84px + env(safe-area-inset-bottom))}" in sheet
+
+
+def test_ribbon_states_the_denominator_and_never_counts_the_broadcast_clone():
+    src = js()
+    assert "function cards(){return qa('#positions .position-card')}" in src
+    assert "function cards(){return qa('.position-card')}" not in src
+    assert "total=T(q('#wall-count'))" in src
+    assert "(narrowed?cs.length+' of '+total" in src
+    assert "||(/^\\d+$/.test(total)&&Number(total)!==cs.length)" in src
+    # aria-current only on the card that is actually focused (no aria-current="false" noise)
+    assert "(card===focused?' aria-current=\"true\"':'')" in src
+    assert "aria-current=\"'+String(card===focused)+'\"" not in src
+
+
+def test_broadcast_recopies_rendered_state_or_says_it_is_stale():
+    src = js()
+    assert "function refreshBroadcast(force){" in src
+    assert "STALE · this position is no longer on the wall" in src
+    assert "STALE desk panes · the desk now shows another position" in src
+    assert "refreshBroadcast(false)" in src  # every decorate() while open
+    assert "function cardById(id){return cards().filter(function(c){return c.dataset.id===id})[0]||null}" in src
+    # clones carry no ids
+    assert "c.removeAttribute&&c.removeAttribute('id');qa('[id]',c).forEach(function(x){x.removeAttribute('id')})" in src
+    assert '<span class="bt-v4-broadcast-asof" data-v4-b-asof role="status"></span>' in src
+    assert "#bt-v4-broadcast.bt-v4-broadcast-stale .bt-v4-broadcast-asof{color:#e7b66c}" in css()
+
+
+def test_phone_position_wall_is_one_full_width_column():
+    # V4's desktop .workspace grid (minmax(0,1fr) 290px) had no phone override: on a 390 px screen the
+    # position wall computed 60 px beside a 290 px decision tape (measured; CI run 37783164445 shows the
+    # same crushed cards with production data). Without the layer the wall is 364 px.
+    sheet = css()
+    phone = sheet[sheet.index("@media (max-width:760px){\n  #bt-v4-pulse"):]
+    phone = phone[:phone.index("\n}\n")]
+    assert "body.bt-page-trader.bt-exp-v4 .workspace{grid-template-columns:1fr;}" in phone
+    assert "body.bt-page-trader.bt-exp-v4 .activity-panel{position:static;}" in phone
+    # two rows of metrics are not pinned over ~40% of a phone screen; the compact ribbon stays sticky
+    assert "body.bt-page-trader.bt-exp-v4 .metrics{position:static;" in phone
