@@ -64,6 +64,18 @@ the RC5 repair), each step's own VmHWM rise and what it held:
   SNAPSHOT event         1,546,980 -> 35,389 characters (every minute)
   highest step peak       1,956.5 -> 448.9 MB; RSS after five passes
                           1,669.3 -> 431.7 MB
+
+Steady state after the repair (ten passes, a full repopulate every four, the
+Kalshi walk every 150 s -- eight walks, 2.5 M stream updates): RSS 471-477 MB
+from pass 2 to pass 10, no growth; highest step peak 492.1 MB.
+
+tracemalloc at --scale 0.25 (traced peak rise per step, RC4 -> repair):
+coverage_pass 344.2 -> 51.2 MB, populate(full) 110.2 -> 5.5, Kalshi walk
+104.6 -> 38.7 (RC4: json decoder strings 60.2 + kalshi_catalogue.py:199
+whole-object copies 28.4), Kalshi persist 95.5 -> 18.5, certify 52.4 ->
+3.5 (full refdata parsed), assignment read + parse + sync 71.9 -> 18.3; the
+books (institutional_stream.py:480/481 level lists, 800/801 decoded ints,
+766/768 market entries) 32.1 -> 27.2, unchanged by design.
 """
 from __future__ import annotations
 
@@ -657,9 +669,11 @@ class Probe:
                 or (peak or 0) - self._end_rss >= 2.0):
             self._row("inline:before:%s" % name, self._end_rss,
                       time.monotonic(), kind="inline")
-            before = rss_mb()
-        reset_hwm()
+        # a --top snapshot is taken BEFORE the step's RSS baseline and peak
+        # reset: its own memory is never billed to the step
         self._trace_start(name)
+        before = rss_mb()
+        reset_hwm()
         return before, time.monotonic()
 
     def _exit(self, name, st):
@@ -672,9 +686,10 @@ class Probe:
         reset_hwm()
 
     def segment_start(self, name):
-        reset_hwm()
         self._trace_start(name)
-        return rss_mb()
+        before = rss_mb()
+        reset_hwm()
+        return before
 
     def segment(self, name, before):
         """An externally timed segment (the stream fill, the walk)."""
@@ -830,7 +845,7 @@ async def measure(dsn: str, *, passes: int = 5, trace: bool = False,
     if with_kalshi_ws:
         tasks.append(asyncio.ensure_future(KWSMD.run()))
 
-    async def until(pred, timeout=600.0):
+    async def until(pred, timeout=3600.0 if trace else 600.0):
         end = time.time() + timeout
         while time.time() < end:
             if pred():
