@@ -773,7 +773,8 @@ function step() {
 
 /* ═══════════════════════════ NAVIGATION ═════════════════════════════ */
 function insets() {
-  if (!S.scene || PHONE) return;
+  if (!S.scene) return;
+  if (PHONE) { S.scene.setInsets({left: 0, right: 0, top: 0, bottom: 0}); return; }
   const w = innerWidth, top = 60;
   let v = {left: 0, right: 0, top: 0, bottom: 0};
   if (S.desk) v = {left: S.view === 'command' ? 330 : 0, right: 400, top: 0, bottom: 0};
@@ -857,7 +858,7 @@ function fromHash() {
 
 async function mountScene() {
   const stage = $('#hq-stage');
-  if (PHONE || !stage) return;
+  if (!stage) return;
   let mod;
   // the first floor read decides which planned seats are served (built as
   // desks with their people) -- bounded, so a slow API never holds the room
@@ -865,7 +866,7 @@ async function mountScene() {
   try { mod = await import('./hq-scene.js'); } catch (e) { stage.innerHTML = '<div id="hq-nogl">The 3D headquarters could not load (' + esc(e && e.message || e) + '). Every figure is in the HUD.</div>'; return; }
   if (!mod.webglAvailable() || window.__hqForceNoWebGL) { stage.innerHTML = '<div id="hq-nogl">This browser has no WebGL: the 3D headquarters is off. Every figure is in the HUD.</div>'; return; }
   try {
-    S.scene = await mod.createHQ(stage, {phone: false, reducedMotion: REDUCED, model: HQ, view: S.view === 'markets' ? 'command' : S.view,
+    S.scene = await mod.createHQ(stage, {phone: PHONE, reducedMotion: REDUCED, model: HQ, view: S.view === 'markets' ? 'command' : S.view,
       onPick: (slug) => { if (S.watch) watch(false); if (slug) { if (S.view !== 'floor' && S.view !== 'command') go('floor'); openDesk(slug); } else if (S.desk) closeDesk(); },
       onFrame: (f) => { if (f.cameraDirty) placeTags(); },
       onStatus: (kind, n) => { if (kind === 'characters-ready') doc.body.setAttribute('data-characters', String(n)); }});
