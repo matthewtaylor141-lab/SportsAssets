@@ -326,7 +326,7 @@ body.bt-page-trader.bt-exp-v4 .tiny-button.bt-v4-broadcast-button{width:auto;pad
 .bt-v4-ribbon-main{min-width:0}
 .bt-v4-ribbon-main b{display:block;font:650 10px/1.2 var(--cond,system-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bt-v4-ribbon-main small{display:block;margin-top:3px;color:#7fa29a;font:500 8px/1.2 var(--mono,ui-monospace);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.bt-v4-ribbon-state{font:700 8px/1 var(--mono,ui-monospace);color:#89d7bd;text-transform:uppercase;text-align:right}
+.bt-v4-ribbon-state{font:700 8px/1 var(--mono,ui-monospace);color:#c4d0dc;text-transform:uppercase;text-align:right}
 .bt-v4-ribbon-state.warn{color:#e7b66c}.bt-v4-ribbon-state.bad{color:#ff8492}
 
 #bt-v4-trader-rail{position:fixed;right:18px;bottom:20px;z-index:50;display:flex;gap:5px;padding:6px;border:1px solid rgba(114,231,255,.18);border-radius:12px;background:rgba(4,14,22,.88);backdrop-filter:blur(14px);box-shadow:0 14px 45px rgba(0,0,0,.32)}
@@ -376,3 +376,9 @@ body.bt-v4-broadcast-open #bt-v4-broadcast{display:block}
   .bt-v4-broadcast-shell{padding-left:10px;padding-right:10px}.bt-v4-broadcast-score{grid-template-columns:1fr;}.bt-v4-broadcast-score .bt-v4-broadcast-pane:last-child{grid-column:auto}.bt-v4-broadcast-pane{min-height:190px;padding:11px}.bt-v4-broadcast-card{display:block}.bt-v4-broadcast-tape{margin-top:10px}
 }
 @media(prefers-reduced-motion:reduce){.bt-v4-live-change{animation:none!important}.bt-v4-live-dot{box-shadow:none!important}}
+
+/* review 2026-10-08: the phone Broadcast header wraps instead of pushing Close off-screen; the PAPER / SHADOW
+   badge fits a 320 px screen */
+.bt-v4-broadcast-top{flex-wrap:wrap}
+.bt-v4-broadcast-shell>*{min-width:0}
+@media (max-width:339px){.topbar .safe-badge,.top-right .safe-badge{letter-spacing:.02em;padding-left:6px;padding-right:6px}}

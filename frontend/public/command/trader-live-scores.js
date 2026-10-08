@@ -113,7 +113,7 @@
     function animationEnd(e){if(e.animationName==='score-confirmed')e.target.classList.remove('score-confirmed-update');}
     doc.addEventListener('visibilitychange',visibility);doc.addEventListener('error',imageError,true);
     doc.addEventListener('animationend',animationEnd);
-    root.addEventListener('pagehide',()=>{disposed=true;clearInterval(timer);observer.disconnect();
+    root.addEventListener('pagehide',e=>{if(e&&e.persisted)return;disposed=true;clearInterval(timer);observer.disconnect();
       doc.removeEventListener('visibilitychange',visibility);doc.removeEventListener('error',imageError,true);
       doc.removeEventListener('animationend',animationEnd);},{once:true});
     refresh();
