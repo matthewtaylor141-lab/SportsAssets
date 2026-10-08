@@ -229,8 +229,11 @@ async function record(browser, plan) {
         const p = s.click.at ? { x: s.click.at[0], y: s.click.at[1] } : await locate(page, s.click);
         await glide(p.x, p.y, s.ms || 900); await hold(250);
         mark(i, 'click', { target: s.click, resolved: sub(s.click.text || s.click.sel || s.click.name || '') });
+        const before = page.url();
         await page.mouse.down(); await sleep(90); await page.mouse.up();
-        if (s.click.navigates) { vt = false; await page.waitForLoadState('load', { timeout: 90000 }).catch(() => {}); await page.mouse.move(mouse.x, mouse.y); }
+        if (s.click.navigates) { vt = false;
+          await page.waitForURL(u => u.href !== before, { timeout: 20000 }).catch(() => mark(i, 'navigation_not_observed'));
+          await page.waitForLoadState('load', { timeout: 90000 }).catch(() => {}); await page.mouse.move(mouse.x, mouse.y); }
         if (s.after) await hold(s.after);
       }
       else if (s.scroll) await wheel(s.scroll.dy, s.scroll.ms || 2000);

@@ -81,12 +81,21 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
       - name: Playwright (Chromium), ffmpeg, age
+        timeout-minutes: 15
         run: |
-          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          mkdir -p "$RUNNER_TEMP/pw" "$RUNNER_TEMP/bin" && cd "$RUNNER_TEMP/pw"
           npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
-          npx playwright install --with-deps chromium >/dev/null 2>&1
-          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq ffmpeg age >/dev/null
-          ffmpeg -hide_banner -version | head -1; age --version
+          timeout 600 npx playwright install --with-deps chromium > pw-install.log 2>&1 || { tail -20 pw-install.log; exit 1; }
+          if ! command -v ffmpeg >/dev/null; then
+            sudo timeout 420 apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends ffmpeg >/dev/null 2>&1 \
+              || { sudo timeout 240 apt-get -o DPkg::Lock::Timeout=120 update -qq >/dev/null 2>&1; sudo timeout 420 apt-get -o DPkg::Lock::Timeout=120 install -y -qq --no-install-recommends ffmpeg >/dev/null; }
+          fi
+          # age: the official v1.2.1 release binary, pinned by SHA-256
+          curl -sSL --max-time 120 -o "$RUNNER_TEMP/age.tgz" https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz
+          echo "7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50  $RUNNER_TEMP/age.tgz" | sha256sum -c -
+          tar -C "$RUNNER_TEMP/bin" --strip-components=1 -xzf "$RUNNER_TEMP/age.tgz" age/age
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          ffmpeg -hide_banner -version | head -1; "$RUNNER_TEMP/bin/age" --version
       - name: Capture (read only)
         env:
           READ_TOKEN: ${{ secrets.ADMIN_TOKEN }}
