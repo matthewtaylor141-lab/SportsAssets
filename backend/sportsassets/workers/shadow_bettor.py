@@ -436,6 +436,10 @@ async def run() -> None:
             "standardNotionalUsd": szpol.STANDARD_BETTOR_SHADOW_NOTIONAL_USD,
             "policySha": bpol.POLICY_SHA[:16],
             "policyCodeSha": bpol.POLICY_CODE_SHA[:16],
+            # THE STORED SIDE OF THE COMPARISON, so a readback shows both
+            # numbers without parsing policyIntegrityWhy.
+            "frozenPolicyCodeSha": str(
+                (frozen or {}).get("policyCodeSha") or "NOT_ATTEMPTED")[:16],
             "codeShaMatches": (frozen or {}).get("codeShaMatches"),
             "universe": bettor.UNIVERSE_VERSION,
             "pBettor": "NOT_ESTABLISHED",

@@ -50,12 +50,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import os
+import sys
 
 # ── the manifest ─────────────────────────────────────────────────────
 #
 # module -> the top-level names BETTOR's DECISION depends on.
 
-DECISION_PATH = {
+DECISION_PATH_V1 = {
     # BETTOR's own decision module. The version strings are in the
     # boundary on purpose: a decision that claims a different policy
     # version is a different decision.
@@ -94,7 +95,48 @@ DECISION_PATH = {
     ),
 }
 
-BOUNDARY_VERSION = "BETTOR_DECISION_PATH_V1"
+BOUNDARY_VERSION_V1 = "BETTOR_DECISION_PATH_V1"
+
+# ── the V2 boundary: BETTOR_EV_SHADOW_V6 and later ───────────────────
+#
+# TWO DEFECTS OF V1's BOUNDARY, found by the V5 drift (2026-10-07) and
+# fixed here for V6 -- NEITHER applied retroactively, so V2..V5's recorded
+# numbers stay reproducible through `semantic_code_sha_v1`.
+#
+#   TOO NARROW IN SCOPE. 70ca3a4 gave `decide` a branch that can return
+#       an admitted entry. The branch's verdict is `bettor_entry_gate.admit`
+#       and its record is `_admissible_entry_record`; NEITHER was in the
+#       boundary, so 9e236bf/a0c9220 changed what the gate admits without
+#       moving BETTOR's hash. Both are reachable from `decide` and both
+#       change what a decision SAYS, so both are inside now.
+#
+#   INTERPRETER-DEPENDENT. V1 digests `ast.dump`, whose text is per Python
+#       minor version (3.12 prints type_params=[]; 3.13 omits every empty
+#       field). The same tree hashed 84c80e7c on 3.11, 92a190a0 on 3.12.3
+#       and 2532d20b on 3.13. V2 serialises the tree itself (`_canon`), so
+#       the number is a property of the source, checkable from any box.
+#
+# OUT, AS BEFORE: `bettor_ev_bridge.evaluate` -- the action table is
+# evidence the gate reads, priced by the research engine outside this
+# package (declaration: actionEvEngineIsImportedNotCopied).
+DECISION_PATH = dict(DECISION_PATH_V1)
+DECISION_PATH["shadow_bettor.py"] = DECISION_PATH_V1["shadow_bettor.py"] + (
+    "_admissible_entry_record",
+)
+DECISION_PATH["bettor_entry_gate.py"] = (
+    "NOT_IDENTIFIED", "REQUIREMENTS",
+    "R_NO_QUALIFIED_MODEL", "R_MODEL_TARGET_MISMATCH", "R_MODEL_NOT_FROZEN",
+    "R_PREDICTIONS_INVALID_AS_ENTRY", "R_NO_INDEPENDENT_FV",
+    "R_FV_IS_VENUE_PRICE", "R_NO_EXECUTION_ESTIMATE", "R_NO_SIZING",
+    "R_RISK_BLOCKED", "R_BOOK_UNREADABLE", "R_NO_DEPTH",
+    "R_NO_POSITIVE_EDGE", "R_NO_ASK", "R_NO_FEE_FUNCTION",
+    "R_EXTERNAL_NOT_ENABLED", "R_EXTERNAL_NO_PROBABILITY",
+    "SETTLEMENT_TARGETS", "ENTRY_ACTION", "ADMISSIBLE_MODEL_STATUS",
+    "EXTERNAL_SOURCE_CLASSES",
+    "qualify_model", "_num", "admit",
+)
+
+BOUNDARY_VERSION = "BETTOR_DECISION_PATH_V2"
 
 
 class BoundaryIncomplete(Exception):
@@ -136,22 +178,52 @@ def _named(tree: ast.Module, wanted: tuple) -> dict:
     return found
 
 
-def semantic_code_sha(source_dir: str | None = None,
-                      overrides: dict | None = None) -> str:
-    """The digest over BETTOR's parsed decision path.
+def _dump_v1(node) -> str:
+    """V1's serialisation: `ast.dump` exactly as Python 3.12 prints it.
 
-    `overrides` replaces a module's SOURCE TEXT, which is how the
-    mutation tests prove what moves the hash and what does not without
-    editing files on disk.
+    3.13 changed ast.dump's default to omit empty fields (show_empty=False);
+    show_empty=True restores the 3.12 text, so the numbers production
+    recorded on 3.12.3 (92a190a0 for V5) are checkable from a 3.13 box.
+    3.11 has no type_params field at all and cannot reproduce them.
     """
+    if sys.version_info >= (3, 13):
+        return ast.dump(node, show_empty=True)
+    return ast.dump(node)
+
+
+def _canon(value) -> str:
+    """V2's serialisation: the parsed tree, by the tree's own fields.
+
+    Node type, then every field in the class's declared order. An EMPTY
+    LIST is omitted -- a field that is [] carries nothing, and omitting it
+    is what makes 3.11 (no type_params), 3.12 (type_params=[]) and 3.13
+    agree. None is NEVER omitted, and a constant carries its TYPE as well
+    as its repr, so 1, 1.0 and True stay three different programs.
+    Positions (lineno/col_offset) are attributes, not fields: never read.
+    """
+    if isinstance(value, ast.AST):
+        parts = []
+        for name in value._fields:
+            field = getattr(value, name, None)
+            if isinstance(field, list) and not field:
+                continue
+            parts.append("%s=%s" % (name, _canon(field)))
+        return "%s(%s)" % (type(value).__name__, ",".join(parts))
+    if isinstance(value, list):
+        return "[%s]" % ",".join(_canon(v) for v in value)
+    return "%s:%r" % (type(value).__name__, value)
+
+
+def _digest(manifest: dict, boundary: str, serialise,
+            source_dir: str | None, overrides: dict | None) -> str:
     here = source_dir or os.path.dirname(os.path.abspath(__file__))
     digest = hashlib.sha256()
     # The boundary's own name is in the digest: two different boundary
     # definitions must never produce the same number.
-    digest.update(BOUNDARY_VERSION.encode())
+    digest.update(boundary.encode())
 
-    for module in sorted(DECISION_PATH):
-        wanted = DECISION_PATH[module]
+    for module in sorted(manifest):
+        wanted = manifest[module]
         if overrides and module in overrides:
             src = overrides[module]
         else:
@@ -170,5 +242,26 @@ def semantic_code_sha(source_dir: str | None = None,
         # changes nothing about behaviour -- does not move the hash.
         for name in sorted(wanted):
             digest.update(name.encode())
-            digest.update(ast.dump(found[name]).encode())
+            digest.update(serialise(found[name]).encode())
     return digest.hexdigest()
+
+
+def semantic_code_sha(source_dir: str | None = None,
+                      overrides: dict | None = None) -> str:
+    """The digest over BETTOR's parsed decision path: BETTOR_DECISION_PATH_V2.
+
+    `overrides` replaces a module's SOURCE TEXT, which is how the
+    mutation tests prove what moves the hash and what does not without
+    editing files on disk.
+    """
+    return _digest(DECISION_PATH, BOUNDARY_VERSION, _canon,
+                   source_dir, overrides)
+
+
+def semantic_code_sha_v1(source_dir: str | None = None,
+                         overrides: dict | None = None) -> str:
+    """BETTOR_DECISION_PATH_V1, kept EXACTLY: the boundary V2..V5 were
+    frozen on. Nothing freezes with it any more; it exists so the numbers
+    production recorded (V5: 92a190a0 on 3.12.3) stay checkable."""
+    return _digest(DECISION_PATH_V1, BOUNDARY_VERSION_V1, _dump_v1,
+                   source_dir, overrides)

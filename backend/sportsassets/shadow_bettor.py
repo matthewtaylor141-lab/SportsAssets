@@ -66,13 +66,22 @@ MODEL_VERSION = "bettor_ev_v0_collecting"
 #   V5  APPLICABILITY GATES ECONOMICS. The portfolio state is derived
 #       first and an action that cannot exist in it is never priced and
 #       never risk-evaluated.
+#   V6  THE REFUSAL IS A VERDICT (70ca3a4, 2026-09-23). `decide` evaluates
+#       bettor_entry_gate.admit and has a branch that returns an admitted
+#       entry; V5 had none. That change was made UNDER V5, so production
+#       froze V5 at 92a190a0 and has run 98aaa204 since -- POLICY_CODE_DRIFT,
+#       decision writing blocked, correctly. V6 is the version that branch
+#       always needed. With production's inputs (no entryInputs) the gate
+#       still refuses on every requirement and the answer is NO_TRADE.
+#       Also frozen for the first time: the sixteenth considered action
+#       (FORM_INDIRECT_HEDGE, fe69419) and the V2 code boundary.
 #
 # WHY V4 COULD NOT SIMPLY BE AMENDED. A zero on an impossible action is
 # not a harmless placeholder: zero beats every negative number, so a
 # nonexistent HOLD would outrank a real take in any ranking. V4's rows
 # say something different about the world than V5's do, and the
 # version is what keeps them distinguishable.
-POLICY_VERSION = "BETTOR_EV_SHADOW_V5"
+POLICY_VERSION = "BETTOR_EV_SHADOW_V6"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it

@@ -565,7 +565,7 @@ BPOL_SRC = (BACKEND / "sportsassets" / "shadow_bettor_policy.py").read_text()
 
 def test_the_bettor_policy_is_its_own_and_not_rn1s():
     p = bpol.frozen_policy()
-    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V5"
+    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V6"
     assert p["policyVersion"] != rn1pol.RN1_SHADOW_POLICY_VERSION
     assert p["lane"] == lanes.BETTOR_EV_SHADOW
     assert p["policySha"] != rn1pol.POLICY_SHA
@@ -740,7 +740,7 @@ import sportsassets.workers.shadow_bettor as W
 from sportsassets import shadow_bettor_codesha as codesha
 
 
-def test_v5_is_the_running_policy_version():
+def test_v6_is_the_running_policy_version():
     """V3 computes the action table; V2 stubbed it.
 
     THE BUMP IS WHAT KEEPS DECISIONS WRITING. `decide` is inside the
@@ -753,31 +753,37 @@ def test_v5_is_the_running_policy_version():
     with the 4,503 rows that mean what V2's rules said -- is left
     exactly as it was.
     """
-    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
-    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
-    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V4"
+    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V6"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V6"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V5"
 
 
-def test_v5_considers_more_than_it_can_produce():
-    """The lane still emits only NO_TRADE -- now after weighing 15."""
+def test_v6_considers_more_than_it_can_produce():
+    """The lane still emits only NO_TRADE -- now after weighing 16.
+    V5's fifteen stay on the record, unedited."""
     assert bpol.ACTION_SET == [sh.NO_TRADE]
-    assert len(bpol.CONSIDERED_ACTION_SET) == 15
+    assert len(bpol.CONSIDERED_ACTION_SET) == 16
+    assert len(bpol.CONSIDERED_ACTION_SET_V5) == 15
     assert "MAKE_YES" in bpol.DECLARATION["consideredActionSet"]
     assert bpol.DECLARATION["actionEvEngineIsImportedNotCopied"] is True
 
 
-def test_v5s_declaration_does_not_follow_the_live_action_catalogue(monkeypatch):
+def test_v6s_declaration_does_not_follow_the_live_action_catalogue(monkeypatch):
     """R30A ci (2026-10-04). fe69419 added FORM_INDIRECT_HEDGE to the shared
     action catalogue and, because V5's considered set was DERIVED from it,
     rewrote V5's frozen declaration (POLICY_SHA 1887fe6e -> 6129637a), which
-    `freeze_policy` refuses at boot. The set is frozen now: V5 hashes to the
-    sha it was frozen with at e8ab303, and a further catalogue addition
-    cannot move it."""
+    `freeze_policy` refuses at boot. The set is a literal: V5's fifteen stay
+    on the record, V6 freezes the sixteen the bridge weighs, and a further
+    catalogue addition cannot move V6's hash."""
     from sportsassets import bettor_ev_actions as evacts
-    assert bpol.POLICY_SHA.startswith("1887fe6ee4624e31")
     assert "FORM_INDIRECT_HEDGE" in evacts.ACTIONS
-    assert "FORM_INDIRECT_HEDGE" not in bpol.CONSIDERED_ACTION_SET
-    assert set(bpol.CONSIDERED_ACTION_SET) < set(evacts.ACTIONS)
+    assert "FORM_INDIRECT_HEDGE" not in bpol.CONSIDERED_ACTION_SET_V5
+    assert "FORM_INDIRECT_HEDGE" in bpol.CONSIDERED_ACTION_SET
+    # THE DECLARATION SAYS WHAT THE BRIDGE WEIGHS. A catalogue that grows
+    # makes V6's consideredActionSet false: that is V7, never an edit.
+    assert bpol.CONSIDERED_ACTION_SET == list(evacts.ACTIONS), (
+        "bettor_ev_actions.ACTIONS no longer matches V6's frozen considered "
+        "set; declare BETTOR_EV_SHADOW_V7")
     before = bpol.policy_sha()
     monkeypatch.setattr(evacts, "ACTIONS",
                         tuple(evacts.ACTIONS) + ("A_LATER_ACTION",))

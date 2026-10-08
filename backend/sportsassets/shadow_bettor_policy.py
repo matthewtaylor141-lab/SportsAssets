@@ -51,7 +51,7 @@ NOT_IDENTIFIED = "NOT_IDENTIFIED"
 NOT_ESTABLISHED = lanes.NOT_ESTABLISHED
 NOT_APPLICABLE = "NOT_APPLICABLE"
 
-BETTOR_POLICY_VERSION = bettor.POLICY_VERSION          # BETTOR_EV_SHADOW_V1
+BETTOR_POLICY_VERSION = bettor.POLICY_VERSION          # BETTOR_EV_SHADOW_V6
 
 # ── the component rule versions ──────────────────────────────────────
 #
@@ -71,40 +71,67 @@ EXECUTION_RECONSTRUCTION_VERSION = NOT_APPLICABLE
 # anything on the basis of them.
 LATENCY_POLICY_VERSION = NOT_ESTABLISHED
 
-# The only action this policy can PRODUCE today. Unchanged by V3: the
-# lane still cannot emit a BUY or a SELL.
+# The only action this policy can PRODUCE ON THE PRODUCTION PATH. Unchanged
+# by V6: the worker supplies no entryInputs, so the entry gate refuses on
+# every requirement and the lane emits NO_TRADE. The admitted-entry branch
+# that exists in `decide` is DECLARED below (entryGate), not added here --
+# V6 expands no authority.
 ACTION_SET = [sh.NO_TRADE]
 
-# What V3 EVALUATES before producing it, which is the part that
-# changed. The two lists are deliberately separate: an engine that
-# considered one action and an engine that considered fifteen both
-# produce NO_TRADE, and only this distinction tells them apart in the
-# ledger.
+# What the policy EVALUATES before producing it. The two lists are
+# deliberately separate: an engine that considered one action and an engine
+# that considered fifteen both produce NO_TRADE, and only this distinction
+# tells them apart in the ledger.
 #
 # FROZEN AS A LITERAL, NOT DERIVED FROM THE LIVE CATALOGUE (R30A ci,
-# 2026-10-04). This was `list(evacts.ACTIONS)`. The declaration below says
-# the breadth is "frozen in the declaration ... rather than a property of
-# whatever the code happened to loop over that day" -- and deriving it made
-# it exactly that property. On 2026-09-27 fe69419 added FORM_INDIRECT_HEDGE to
-# `bettor_ev_actions.ACTIONS` (correctly, for the funded management path) and
-# thereby rewrote BETTOR_EV_SHADOW_V5's declaration under a version already
-# carrying rows: POLICY_SHA moved 1887fe6ee4624e31 -> 6129637ab533a879, so
-# `shadow_store.freeze_policy` answers REFUSED ("Bump the version") at every
-# boot of a build containing fe69419. Measured by importing this module from
-# `git archive` of e8ab303 (V5's declaration), fe69419^, fe69419 and 0ebdd33.
+# 2026-10-04). Deriving it from `bettor_ev_actions.ACTIONS` let fe69419
+# (FORM_INDIRECT_HEDGE, 2026-09-27) rewrite V5's declaration under a version
+# already carrying rows (POLICY_SHA 1887fe6e -> 6129637a, REFUSED at boot).
 #
-# These are the fifteen V5 declared at e8ab303, in that order; with them the
-# declaration hashes to V5's frozen 1887fe6e again. Nothing more is unlocked
-# by this: the decision code moved under V5 on 2026-09-23 (70ca3a4), so the
-# freeze now reports ALREADY_FROZEN with codeShaMatches=False and the worker
-# stays in POLICY_CODE_DRIFT -- decision writing blocked, the true state,
-# reported by its true reason. A lane that should weigh sixteen is V6, which
-# is a new declaration, never an edit of this one.
-CONSIDERED_ACTION_SET = [
+# V5's fifteen, as frozen at e8ab303 -- the record, never edited.
+CONSIDERED_ACTION_SET_V5 = [
     "MAKE_YES", "MAKE_NO", "MAKE_BOTH", "TAKE_YES", "TAKE_NO",
     "POST_COMPLEMENT", "TAKE_COMPLEMENT", "COMPLETE_PAIR", "MERGE", "HOLD",
     "WAIT_REQUOTE", "DIRECT_EXIT", "HEDGE", "HOLD_TO_SETTLEMENT", "NO_TRADE",
 ]
+# V6's sixteen: what `bettor_ev_bridge.evaluate` actually weighs since
+# fe69419, in the catalogue's order. Still a literal: a seventeenth is V7.
+CONSIDERED_ACTION_SET = [
+    "MAKE_YES", "MAKE_NO", "MAKE_BOTH", "TAKE_YES", "TAKE_NO",
+    "POST_COMPLEMENT", "TAKE_COMPLEMENT", "COMPLETE_PAIR", "MERGE", "HOLD",
+    "WAIT_REQUOTE", "DIRECT_EXIT", "HEDGE", "HOLD_TO_SETTLEMENT",
+    "FORM_INDIRECT_HEDGE", "NO_TRADE",
+]
+
+# THE ENTRY GATE, DECLARED (70ca3a4). What `decide` now does before it
+# refuses, frozen as data so the rows say which regime wrote them.
+ENTRY_GATE = {
+    "module": "bettor_entry_gate.admit",
+    "requirements": ["QUALIFIED_MODEL", "INDEPENDENT_FAIR_VALUE",
+                     "EXECUTION_ESTIMATE", "SIZING_POLICY", "RISK_PERMITTED",
+                     "READABLE_BOOK"],
+    "allRequired": True,
+    "missingInputIsARefusal": True,
+    "admittedAction": "BUY",
+    "admittedRecordIsShadowOnly": True,
+    "productionInputsSupplied": False,
+    "productionOutcome": sh.NO_TRADE,
+    "venueDerivedFairValueCanLicenseEntry": False,
+}
+
+# THE FROZEN LEDGER, read back from production -- immutable rows in
+# shadow_policy_versions (append-only trigger, migration 070). Recorded so
+# the evidence that code moved under a version survives in the source.
+V5_POLICY_VERSION = "BETTOR_EV_SHADOW_V5"
+V5_FROZEN_POLICY_SHA = (
+    "1887fe6ee4624e31aaf2ccbd286f619e2717f78a4927b34faf131205dc684b47")
+V5_FROZEN_POLICY_CODE_SHA = (
+    "92a190a086aeafc8b611a7cd856576f83435d4f27e030e92fc16b5f2281a2228")
+V5_FROZEN_CODE_BOUNDARY = "BETTOR_DECISION_PATH_V1"
+V5_FROZEN_AT_COMMIT = "e8ab3038"
+# What a V5-labelled build has run since 70ca3a4, on 3.12.3 -- the drift.
+V5_DRIFTED_POLICY_CODE_SHA = (
+    "98aaa204379a812b90a5154c1bd70f80418a6ffb85f4571b45554199aaff2172")
 
 # ── the declaration ──────────────────────────────────────────────────
 
@@ -196,13 +223,17 @@ DECLARATION = {
     # written is itself frozen rather than merely current practice.
     "codeBoundary": codesha.BOUNDARY_VERSION,
     "codeShaEnforced": True,
-    # WHAT V5 WEIGHS BEFORE REFUSING. Frozen in the declaration so the
+    # WHAT V6 WEIGHS BEFORE REFUSING. Frozen in the declaration so the
     # breadth of the comparison is part of the policy rather than a
     # property of whatever the code happened to loop over that day.
     "consideredActionSet": CONSIDERED_ACTION_SET,
     "actionEvEngine": "research/beta48/shadow/action_ev.py",
     "actionEvEngineIsImportedNotCopied": True,
-    "supersedes": "BETTOR_EV_SHADOW_V4",
+    # WHAT V6 EVALUATES BEFORE REFUSING, and why it is not V5.
+    "entryGate": ENTRY_GATE,
+    "supersedes": V5_POLICY_VERSION,
+    "supersedesBecause": ("decide gained the entry-gate branch (70ca3a4) "
+                          "after V5 was frozen; V5's rows are unchanged"),
     "latencyPolicy": NOT_ESTABLISHED,
     "latencyPolicyVersion": LATENCY_POLICY_VERSION,
     # Scoring belongs to outcomes, and this lane has produced no action
@@ -264,12 +295,15 @@ def policy_code_sha_v1() -> str:
     return digest.hexdigest()
 
 
-# ── V2's boundary: the parsed decision path ──────────────────────────
+# ── the parsed decision path ─────────────────────────────────────────
 #
 # Owner directive 2026-09-19 20:2xZ. Defined in shadow_bettor_codesha
 # and pinned there by mutation tests: a comment or whitespace edit
 # leaves it unchanged, while a change to the action, a blocker,
-# pBettorStatus, pFillStatus or the lineage moves it.
+# pBettorStatus, pFillStatus, the lineage or the entry gate moves it.
+# V2..V5 were frozen on BETTOR_DECISION_PATH_V1 (semantic_code_sha_v1);
+# V6 is the first on BETTOR_DECISION_PATH_V2, which is interpreter-
+# independent and covers the entry-gate branch.
 #
 # shadow_bettor_policy.py is deliberately NOT in that boundary. This
 # file IS the declaration, and the declaration is already covered by
