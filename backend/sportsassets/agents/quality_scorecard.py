@@ -84,7 +84,8 @@ DISCRETIONARY = ("EXIT", "REDUCE", "REALLOCATE")
 MARKET_CHANGE_REVIEW_SLA_S = 30.0
 #: the PinnAPI feed runtime's persisted heartbeat (held watch telemetry)
 FEED_HEARTBEAT_KEY = "pinnapi_feed_last"
-#: management_view's own cap on positions read per book
+#: management_view's cap on the CLOSED history it reads per book (the held
+#: positions this census counts are read in full, whatever the cap)
 MONITORED_VIEW_LIMIT = 500
 #: Where a gate artifact may be read (file or glob of run_gate.sh's
 #: `<prefix>_report.json`). Read only when the host sets it.
@@ -744,8 +745,13 @@ async def positions_monitored_metric(conn, now: float) -> dict:
     for p in view.get("positions") or []:
         per_kind[p.get("position_kind")] = per_kind.get(
             p.get("position_kind"), 0) + 1
-    truncated = sorted(kd for kd, c in per_kind.items()
-                       if c >= MONITORED_VIEW_LIMIT)
+    # THE CENSUS IS WHOLE ONLY WHERE THE VIEW SAYS ITS OPEN SET IS: it now
+    # reads every held position and bounds only the closed history
+    # (xavier_management.POPULATION_RULE). A view that does not say so is
+    # treated as possibly truncated wherever it reached the cap.
+    whole = (summ.get("population") or {}).get("open_complete") is True
+    truncated = [] if whole else sorted(
+        kd for kd, c in per_kind.items() if c >= MONITORED_VIEW_LIMIT)
     return metric(
         mid, name, value=_share(k, n), numerator=k, denominator=n, sample=n,
         unit="share", last_measured_at=now,

@@ -1288,3 +1288,9 @@ tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
+# RC5 Xavier no-growth: the management read model holds EVERY canonical held
+# position (production 2026-10-08 06:39Z: 100 newest handoffs, 0 open, while
+# 4 were held), a held position without a handoff is named, and a historical
+# complete review never keeps a stale packet green in the strict entry rail
+# or the xavier_complete gate (probability expiry, book SLA, later fill).
+tests/test_xavier_management_held_population_and_current_packets.py

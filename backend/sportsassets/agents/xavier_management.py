@@ -1903,10 +1903,80 @@ def position_view(*, kind: str, group_id: str, ref: dict, thesis: dict |
         "counterfactuals_at_entry": (thesis or {}).get("counterfactuals")}
 
 
+#: WHY A CANONICALLY HELD PAPER POSITION HAS NO REVIEW: no paper_handoffs
+#: row names its group, so paper_xavier.step never reviews or protects it
+#: (its `not_handed_off`). Named on the position, never shown as awaiting.
+R_NOT_HANDED_OFF = "HELD_BUT_NOT_HANDED_OFF_TO_XAVIER"
+
+#: THE POPULATION RULE OF THE READ MODEL. Production 2026-10-08 06:39:48Z
+#: (pm-acceptance 37738089957, xavier_management.json): the readback held
+#: 100 positions and open_positions 0 -- the newest 100 handoffs (first
+#: fills 2026-10-05 16:24Z .. 2026-10-06 00:47Z), every one closed -- while
+#: the canonical reconciliation and the freshness read of the same minute
+#: held 4 true open positions, all older than that window: they were simply
+#: outside `ORDER BY first_fill_at DESC LIMIT`. The quality scorecard's
+#: monitored census reads this view too. So the HELD population is read in
+#: full and never limited; `limit` bounds only the closed history.
+POPULATION_RULE = (
+    "OPEN: every canonical open paper position (open_position_canon."
+    "CANONICAL_OPEN_POSITIONS_SQL) with or without a handoff, and every OPEN "
+    "smalllive_handoffs row -- never limited; CLOSED: the newest `limit` "
+    "handoffs of each book whose position is no longer held")
+#: groups named in the summary when held without a handoff (the count is
+#: always complete; only the listing is bounded)
+NOT_HANDED_OFF_LISTED = 50
+
+#: every canonical open paper position, with its handoff when one exists
+OPEN_PAPER_REFS_SQL = (
+    "SELECT c.account_id, c.group_id, c.us_market_slug, c.holding_side, "
+    "       c.open_qty, h.handoff_id, "
+    "       h.first_fill_at AS handoff_first_fill_at, "
+    "       h.strategy AS handoff_strategy, f.first_fill_at, f.strategy "
+    "  FROM (" + L.CANONICAL_OPEN_POSITIONS_SQL + ") c "
+    "  LEFT JOIN paper_handoffs h "
+    "    ON h.group_id = c.group_id AND h.account_id = c.account_id "
+    "  LEFT JOIN LATERAL (SELECT min(x.filled_at) AS first_fill_at, "
+    "                            max(x.strategy) AS strategy "
+    "                       FROM paper_fills x "
+    "                      WHERE x.account_id = c.account_id "
+    "                        AND x.group_id = c.group_id "
+    "                        AND x.us_market_slug = c.us_market_slug "
+    "                        AND x.holding_side = c.holding_side) f ON true "
+    " ORDER BY coalesce(h.first_fill_at, f.first_fill_at) DESC, c.group_id,"
+    "          c.us_market_slug, c.holding_side")
+
+#: the closed history: the newest `$1` handoffs whose group holds nothing
+CLOSED_PAPER_REFS_SQL = (
+    "SELECT h.handoff_id, h.group_id, h.first_fill_at, h.strategy, "
+    "       h.account_id, o.us_market_slug, o.holding_side "
+    "  FROM paper_handoffs h JOIN paper_orders o "
+    "    ON o.order_id = h.entry_order_id "
+    " WHERE NOT EXISTS (SELECT 1 FROM (" + L.CANONICAL_OPEN_POSITIONS_SQL
+    + ") c WHERE c.group_id = h.group_id AND c.account_id = h.account_id)"
+    " ORDER BY h.first_fill_at DESC LIMIT $1")
+
+#: every OPEN actual handoff, then the newest `$1` closed ones
+ACTUAL_REFS_SQL = (
+    "SELECT * FROM (SELECT handoff_id, group_id, us_market_slug, "
+    "       opened_intent, live_held, first_live_fill_at, state "
+    "  FROM smalllive_handoffs WHERE state = 'OPEN') o "
+    "UNION ALL "
+    "SELECT * FROM (SELECT handoff_id, group_id, us_market_slug, "
+    "       opened_intent, live_held, first_live_fill_at, state "
+    "  FROM smalllive_handoffs WHERE state <> 'OPEN' "
+    " ORDER BY first_live_fill_at DESC LIMIT $1) c "
+    "ORDER BY first_live_fill_at DESC")
+
+
 async def management_view(conn, *, limit: int = 100,
                           now: float | None = None) -> dict:
     """EVERY MANAGED POSITION (paper and actual): evidence state, thesis
-    state, alternatives, policy state and value-add. Read only."""
+    state, alternatives, policy state and value-add. Read only.
+
+    EVERY HELD POSITION IS IN IT (POPULATION_RULE): the open population is
+    the canonical one, read in full; `limit` bounds only the closed history.
+    A held paper position with no handoff is OPEN with `why_no_review` =
+    R_NOT_HANDED_OFF (it is counted, never hidden)."""
     from . import xavier_small_live_policy as XSP
     at = float(now if now is not None else time.time())
     limit = max(1, min(int(limit), 500))
@@ -1960,36 +2030,34 @@ async def management_view(conn, *, limit: int = 100,
     except Exception:                                           # noqa: BLE001
         pass
     refs: list = []
-    for r in await conn.fetch(
-            "SELECT h.handoff_id, h.group_id, h.first_fill_at, h.strategy, "
-            "       h.account_id, o.us_market_slug, o.holding_side, "
-            "       coalesce(c.open_qty, 0) AS open_qty, "
-            "       EXISTS (SELECT 1 FROM paper_settlements s "
-            "                WHERE s.group_id = h.group_id) AS settled "
-            "  FROM paper_handoffs h JOIN paper_orders o "
-            "    ON o.order_id = h.entry_order_id "
-            "  LEFT JOIN (" + L.CANONICAL_OPEN_POSITIONS_SQL + ") c "
-            "    ON c.group_id = h.group_id "
-            "   AND c.us_market_slug = o.us_market_slug "
-            "   AND c.holding_side = o.holding_side "
-            " ORDER BY h.first_fill_at DESC LIMIT $1", limit):
-        # canonical: the position's own open qty (latest settlement already
-        # subtracted), never "any settlement in the group"
-        open_ = L.is_open(r["open_qty"])
+    # THE HELD BOOK, IN FULL (POPULATION_RULE): every canonical open
+    # position -- its own open qty, the latest settlement subtracted, never
+    # "any settlement in the group" -- whatever its age, handed off or not
+    not_handed: list = []
+    for r in await conn.fetch(OPEN_PAPER_REFS_SQL):
+        handed = r["handoff_id"] is not None
+        if not handed:
+            not_handed.append(r["group_id"])
+        refs.append((K_PAPER, r["group_id"], {
+            "handoff_id": r["handoff_id"], "market": r["us_market_slug"],
+            "holding_side": r["holding_side"],
+            "strategy": r["handoff_strategy"] or r["strategy"],
+            "first_fill_at": _epoch(r["handoff_first_fill_at"]
+                                    or r["first_fill_at"]),
+            "open_qty": _f(r["open_qty"]), "state": "OPEN",
+            "handed_off": handed,
+            "label": "PAPER POSITION (SIMULATED)"}, backstop))
+    # THE CLOSED HISTORY beside it: what `limit` bounds, and only that
+    for r in await conn.fetch(CLOSED_PAPER_REFS_SQL, limit):
         refs.append((K_PAPER, r["group_id"], {
             "handoff_id": r["handoff_id"], "market": r["us_market_slug"],
             "holding_side": r["holding_side"], "strategy": r["strategy"],
             "first_fill_at": _epoch(r["first_fill_at"]),
-            "open_qty": _f(r["open_qty"]),
-            "state": "OPEN" if open_ else "CLOSED",
+            "open_qty": 0.0, "state": "CLOSED", "handed_off": True,
             "label": "PAPER POSITION (SIMULATED)"}, backstop))
     if await conn.fetchval("SELECT to_regclass('smalllive_handoffs') "
                            "IS NOT NULL"):
-        for r in await conn.fetch(
-                "SELECT handoff_id, group_id, us_market_slug, opened_intent,"
-                "       live_held, first_live_fill_at, state "
-                "  FROM smalllive_handoffs "
-                " ORDER BY first_live_fill_at DESC LIMIT $1", limit):
+        for r in await conn.fetch(ACTUAL_REFS_SQL, limit):
             refs.append((K_ACTUAL, r["group_id"], {
                 "handoff_id": r["handoff_id"], "market": r["us_market_slug"],
                 "holding_side": side_of_intent(r["opened_intent"]),
@@ -2025,6 +2093,9 @@ async def management_view(conn, *, limit: int = 100,
                            va=vas.get((g, kind)), cadence_s=cad, now=at,
                            ctx=(vctx["by_group"].get(g)
                                 if kind == K_PAPER else None))
+        if ref.get("handed_off") is False and a is None:
+            # held, but Xavier was never handed it: the reason, not "yet"
+            pv["why_no_review"] = R_NOT_HANDED_OFF
         if ref["state"] == "OPEN":
             st = (pv["evidence"] or {}).get("state") or "NO_REVIEW"
             by_ev[st] = by_ev.get(st, 0) + 1
@@ -2045,6 +2116,13 @@ async def management_view(conn, *, limit: int = 100,
         "by_recommendation_state": by_rs,
         "validity_context_unchecked": vctx["unchecked"],
         "reviews_overdue": overdue, "open_without_review": missing,
+        "open_not_handed_off": len(not_handed),
+        "open_not_handed_off_groups": not_handed[:NOT_HANDED_OFF_LISTED],
+        "population": {"open": POPULATION_RULE,
+                       # the open set is read whole by construction; a
+                       # reader (the monitored census) may rely on it
+                       "open_complete": True,
+                       "closed_history_limit": limit},
         "reallocate_shadow_recommended": shadow,
         "value_add_rows": len(vas),
         "policy_status": policy["status"],
