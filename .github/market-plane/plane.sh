@@ -6,7 +6,7 @@ KEY="${KEY_SECRET:-}"
 [ -z "$KEY" ] && { echo "no RENDER_API_KEY secret"; exit 1; }
 echo "::add-mask::$KEY"
 API=https://api.render.com/v1
-SPEC=ops/render_market_plane_kalshi_ws_only.json
+SPEC=ops/render_market_plane_provision.json
 NAME=$(jq -r .name "$SPEC")
 TMP="${RUNNER_TEMP:-/tmp}/plane.$$"
 mkdir -p "$TMP"; chmod 700 "$TMP"
@@ -36,10 +36,9 @@ spec = json.load(open(sys.argv[1]))
 names = set(spec["env"]) | set(spec["copy_secrets"])
 bad = sorted(n for n in names if n in G.FORBIDDEN_ENV)
 extra = sorted(set(spec["copy_secrets"]) - set(G.ALLOWED_SECRET_ENV))
-mode = "KALSHI_WS_ONLY" if spec["env"].get("UNIVERSAL_MARKET_PLANE") == "off" else "?"
-print("guard check: forbidden=%s secrets_outside_allowed=%s mode=%s"
-      % (bad, extra, mode))
-sys.exit(1 if bad or extra or mode != "KALSHI_WS_ONLY" else 0)
+print("guard check: forbidden=%s secrets_outside_allowed=%s"
+      % (bad, extra))
+sys.exit(1 if bad or extra else 0)
 PY
 }
 
@@ -75,7 +74,7 @@ build_body() {  # -> $TMP/body.json (secret values from the environment)
   chmod 600 "$TMP/body.json"
 }
 
-redacted() { jq '.envVars |= map(if (.key | test("^(DATABASE_URL|KALSHI_API_KEY_ID|KALSHI_PRIVATE_KEY_PEM)$")) then .value = "<\(.value | length) chars>" else . end)' "$TMP/body.json"; }
+redacted() { jq --slurpfile s "$SPEC" '($s[0].copy_secrets | keys) as $sec | .envVars |= map(if (.key | IN($sec[])) then .value = "<\(.value | length) chars>" else . end)' "$TMP/body.json"; }
 
 case "${ACTION:-}" in
   plan)

@@ -25,7 +25,8 @@ from sportsassets import market_plane_guard as G
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
 ROOT = BACKEND.parent
-SPEC = ROOT / "ops" / "render_market_plane_kalshi_ws_only.json"
+SPEC = ROOT / "ops" / "render_market_plane_provision.json"
+YAML = ROOT / "ops" / "render_market_plane_service.yaml"
 
 
 def _py(code: str, env_extra: dict | None = None) -> subprocess.CompletedProcess:
@@ -293,19 +294,27 @@ def test_the_red_team_venue_read_carries_the_mechanism_without_a_new_gate():
 
 # ── the provisioning spec and workflow ─────────────────────────────────
 
-def test_the_kalshi_ws_only_spec_holds_no_order_capability():
+def test_the_provision_spec_is_the_owner_spec_and_holds_no_order_capability():
+    import yaml
     s = json.loads(SPEC.read_text())
     names = set(s["env"]) | set(s["copy_secrets"])
     assert not names & set(G.FORBIDDEN_ENV)
-    assert set(s["copy_secrets"]) == {"DATABASE_URL", "KALSHI_API_KEY_ID",
-                                      "KALSHI_PRIVATE_KEY_PEM"}
     assert set(s["copy_secrets"]) <= set(G.ALLOWED_SECRET_ENV)
-    assert s["env"] == {"MALLOC_ARENA_MAX": "2",
-                        "UMP_RUNTIME": "DEDICATED_READ_ONLY",
-                        "UNIVERSAL_MARKET_PLANE": "off"}
-    assert not any(n.startswith(("PMX", "PMUS", "EDGE")) for n in names)
-    assert s["dockerCommand"] == (
-        "python -m sportsassets.workers.universal_market_plane")
+    assert not any(n.startswith(("PMUS", "EDGE")) for n in names)
+    # exactly the owner's dedicated-service spec: same command, same plain
+    # switches, same secret NAMES (values copied, never written anywhere)
+    svc = next(x for x in yaml.safe_load(YAML.read_text())["services"]
+               if x["name"] == s["name"])
+    env = {e["key"]: e for e in svc["envVars"]}
+    secret = {k for k, e in env.items()
+              if e.get("sync") is False or "fromDatabase" in e}
+    assert set(s["copy_secrets"]) == secret
+    assert s["env"] == {k: e["value"] for k, e in env.items()
+                        if k not in secret}
+    assert s["dockerCommand"] == svc["dockerCommand"]
+    assert s["plan"] == svc["plan"] == "standard"
+    # every value comes from the service that already holds it
+    assert set(s["copy_secrets"].values()) == {"sportsassets-workers"}
     assert s["branch"] == "claude/release-api" and s["autoDeploy"] == "no"
     assert "sportsassets-market-plane" not in (ROOT / "render.yaml"
                                                ).read_text()
@@ -340,3 +349,67 @@ def test_the_workflow_mutates_only_behind_confirm_and_never_prints_a_secret():
     wf = (ROOT / ".github" / "workflows" / "market-plane.yml").read_text()
     assert "run: bash .github/market-plane/plane.sh" in wf
     assert "${{" not in body
+
+
+def _closure(starts, stop=frozenset()):
+    """Every sportsassets module reachable from `starts` by ANY import
+    statement (top level or inside a function), with the importing edge;
+    modules in `stop` are reached but never expanded (under the guard they
+    cannot load, so nothing behind them can be reached through them)."""
+    def modfile(m):
+        p = BACKEND.joinpath(*m.split("."))
+        for c in (p.with_suffix(".py"), p / "__init__.py"):
+            if c.exists():
+                return c
+        return None
+
+    def targets(cur, node):
+        if isinstance(node, ast.Import):
+            return [a.name for a in node.names
+                    if a.name.startswith("sportsassets")]
+        if node.level:
+            base = cur.split(".")
+            pkg = base if modfile(cur).name == "__init__.py" else base[:-1]
+            pkg = pkg[:len(pkg) - (node.level - 1)]
+            mod = ".".join(pkg + ([node.module] if node.module else []))
+        else:
+            mod = node.module or ""
+        if not mod.startswith("sportsassets"):
+            return []
+        return [mod] + [mod + "." + a.name for a in node.names
+                        if modfile(mod + "." + a.name)]
+    edges, seen, todo = set(), set(starts), list(starts)
+    while todo:
+        m = todo.pop()
+        f = modfile(m)
+        if f is None:
+            continue
+        for n in ast.walk(ast.parse(f.read_text())):
+            if isinstance(n, (ast.Import, ast.ImportFrom)):
+                for t in targets(m, n):
+                    edges.add((m, t))
+                    if t not in seen:
+                        seen.add(t)
+                        if t not in stop:
+                            todo.append(t)
+    return seen, edges
+
+
+def test_the_only_road_to_an_order_module_is_a_lazy_import_the_guard_blocks():
+    """The plane's whole import closure (lazy imports included) reaches an
+    order client by exactly one edge: execution_gate.read_state's in-function
+    `from . import live_executor` (the submit-time kill-switch read, never
+    called by the plane). Under the guard that import raises; any NEW edge
+    into an order module fails this test."""
+    seen, edges = _closure(["sportsassets.workers.universal_market_plane",
+                            "sportsassets.workers.kalshi_ws_market_data",
+                            "sportsassets.market_plane_guard"],
+                           stop=G.ORDER_MODULES)
+    into = {(a, b) for a, b in edges if b in G.ORDER_MODULES}
+    assert into == {("sportsassets.execution_gate",
+                     "sportsassets.live_executor")}, into
+    src = (BACKEND / "sportsassets" / "execution_gate.py").read_text()
+    top = [n for n in ast.parse(src).body
+           if isinstance(n, (ast.Import, ast.ImportFrom))]
+    assert not any("live_executor" in ast.unparse(n) for n in top)
+    assert len(seen) > 50

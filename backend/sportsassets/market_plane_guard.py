@@ -19,10 +19,10 @@ before anything else runs:
      makes the plane refuse to start its runtimes (it idles and says why,
      and is not restart-churned).
 
-KALSHI_WS_ONLY mode is the plane with UNIVERSAL_MARKET_PLANE=off: the PMX
-universal plane stays in its current home, and this service runs only the
-authenticated Kalshi WebSocket book runtime -- DATABASE_URL and the two
-Kalshi values, nothing else.
+The provisioned plane (ops/render_market_plane_provision.json, mirroring the
+owner's ops/render_market_plane_service.yaml) holds DATABASE_URL, the three
+PMX market-data values and the two Kalshi values -- nothing else. With
+UNIVERSAL_MARKET_PLANE=off it is KALSHI_WS_ONLY (the Kalshi runtime alone).
 """
 from __future__ import annotations
 

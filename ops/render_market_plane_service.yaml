@@ -12,9 +12,9 @@ services:
   # the PMX institutional MARKET-DATA credential and the Kalshi WebSocket
   # key only -- no PMUS key, no LIVE_TRADING_ENABLED, no Kalshi trading
   # switch; market_plane_guard locks the process against venue writes and
-  # blocks every order-client module (the Kalshi-WebSocket-only variant,
-  # UNIVERSAL_MARKET_PLANE=off, is ops/render_market_plane_kalshi_ws_only.json,
-  # provisioned by .github/workflows/market-plane.yml). When it is up, set
+  # blocks every order-client module (provisioned from the same names by
+  # .github/workflows/market-plane.yml, ops/render_market_plane_provision.json,
+  # copying the existing values from sportsassets-workers). When it is up, set
   # UNIVERSAL_MARKET_PLANE=off on sportsassets-workers so exactly one runtime
   # holds the shards. The PMX_* values are entered in the dashboard (they
   # cannot be copied between services by this blueprint).

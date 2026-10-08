@@ -1,0 +1,26 @@
+{
+  "version": "MARKET_PLANE_PROVISION_V1",
+  "why": "The dedicated read-only market plane the owner specified (ops/render_market_plane_service.yaml, owner decision 2026-10-06; Kalshi rep production contract 2026-10-07): the universal market plane on ONE PMX subscribe-all market-data stream plus the authenticated Kalshi WebSocket order-book runtime, on its own service. Kalshi documents no read-only API key class (docs.kalshi.com/getting_started/api_keys, 2026-10-08: Ed25519 or RSA keys, no scopes), so the boundary is the process: market_plane_guard locks it against venue writes, blocks every order-client module from import and refuses to run beside any order-capable credential. Every value is the existing one, copied unchanged from sportsassets-workers (which already holds all six); none is created or edited.",
+  "name": "sportsassets-market-plane",
+  "type": "background_worker",
+  "branch": "claude/release-api",
+  "autoDeploy": "no",
+  "plan": "standard",
+  "dockerCommand": "python -m sportsassets.workers.universal_market_plane",
+  "shape_from": "sportsassets-workers",
+  "env": {
+    "MALLOC_ARENA_MAX": "2",
+    "UMP_RUNTIME": "DEDICATED_READ_ONLY",
+    "UNIVERSAL_MARKET_PLANE": "on",
+    "INSTITUTIONAL_MD_STREAM": "on",
+    "UMP_SUBSCRIBE_ALL": "on"
+  },
+  "copy_secrets": {
+    "DATABASE_URL": "sportsassets-workers",
+    "PMX_CLIENT_ID": "sportsassets-workers",
+    "PMX_KEY_ID": "sportsassets-workers",
+    "PMX_PRIVATE_KEY_B64": "sportsassets-workers",
+    "KALSHI_API_KEY_ID": "sportsassets-workers",
+    "KALSHI_PRIVATE_KEY_PEM": "sportsassets-workers"
+  }
+}
