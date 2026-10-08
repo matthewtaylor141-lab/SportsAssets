@@ -879,9 +879,48 @@ async def main():
     plane and, beside it, the authenticated Kalshi WebSocket book runtime
     (Kalshi rep production contract 2026-10-07: WebSocket primary, never on
     sportsassets-api; it reports OWNER_ACTION_REQUIRED and stays idle until
-    its key is provisioned on this service)."""
+    its key is provisioned on this service).
+
+    ORDERLESS BY STRUCTURE (market_plane_guard, closeout 2026-10-08): the
+    guard locks this process against every venue write and blocks the
+    order-client modules from import BEFORE any runtime starts; an
+    order-capable credential on this service makes it refuse to run (it
+    idles and says why -- never restart-churned). Its boot record
+    (`market_plane` heartbeat) carries the running commit and the guard
+    report, so the plane's SHA is read back like the other services'."""
+    from .. import market_plane_guard as GUARD
+    guard = GUARD.install()
     from . import kalshi_ws_market_data as KWSMD
-    await asyncio.gather(run(), KWSMD.run())
+    if guard["refused"]:
+        await plane_beat(guard, status="blocked")
+        return
+    await asyncio.gather(run(), KWSMD.run(), plane_beat(guard))
+
+
+PLANE_SERVICE = "market_plane"
+PLANE_BEAT_EVERY_S = 60.0
+
+
+async def plane_beat(guard: dict, *, status: str = "ok",
+                     forever: bool = True) -> None:
+    """The dedicated plane's own boot / liveness record: commit, mode,
+    guard report (names only). Never raises; a refused plane keeps beating
+    `blocked` so the reason is readable without a restart loop."""
+    started = time.time()
+    while True:
+        try:
+            await heartbeat(PLANE_SERVICE, status, {
+                "commit": os.environ.get("RENDER_GIT_COMMIT"),
+                "service": os.environ.get("RENDER_SERVICE_NAME"),
+                "runtime": os.environ.get("UMP_RUNTIME",
+                                          "STANDALONE_UNLABELLED"),
+                "started_at": started, "guard": guard})
+        except Exception:                                       # noqa: BLE001
+            log.warning("market plane boot record not written",
+                        exc_info=True)
+        if not forever:
+            return
+        await asyncio.sleep(PLANE_BEAT_EVERY_S)
 
 
 if __name__ == "__main__":

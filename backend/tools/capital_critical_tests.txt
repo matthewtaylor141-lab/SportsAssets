@@ -1283,3 +1283,7 @@ tests/test_pm_scoreboard_bind.py
 tests/test_pm_acceptance_bind.py
 tests/test_pmus_credential_census.py
 tests/test_p1_pmx_grpc_primary_accounting.py
+tests/test_bettor_policy_v6_integrity.py
+tests/test_bettor_live_delegated_lane_parks.py
+tests/test_log_redaction.py
+tests/test_market_plane_orderless_guard.py

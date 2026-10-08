@@ -1,0 +1,58 @@
+# THE DEDICATED, STRUCTURALLY ORDERLESS MARKET PLANE -- KALSHI_WS_ONLY
+# (closeout 2026-10-08). Creates / deploys / suspends sportsassets-market-
+# plane from ops/render_market_plane_kalshi_ws_only.json: the Kalshi
+# authenticated WebSocket order-book runtime, alone, on its own Render
+# service. The service gets DATABASE_URL and the EXISTING Kalshi key (copied
+# value for value from the services that already hold them -- never printed,
+# never changed) and nothing else; market_plane_guard locks the process
+# against every venue write, blocks the order-client modules from import and
+# refuses to run beside an order-capable credential. render.yaml is not
+# touched (a Blueprint sync would redeploy the collector).
+#
+#   plan            READ ONLY: whether the service exists, the exact create
+#                   body with every secret replaced by its length, and the
+#                   guard check of the names it would hold
+#   status          READ ONLY: the service, its live deploy commit, env NAMES
+#   create          confirm=DO: create it (branch claude/release-api,
+#                   autoDeploy no) -- its first deploy is the branch head
+#   deploy-commit   confirm=DO: deploy it at arg (a full 40-hex sha)
+#   suspend         confirm=DO: suspend it (the REST fallback in the shared
+#                   workers remains the Kalshi book source)
+name: market-plane
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "plan | status (read only) | create | deploy-commit | suspend (confirm=DO)"
+        required: true
+        type: choice
+        options: [plan, status, create, deploy-commit, suspend]
+      arg:
+        description: "deploy-commit: the full 40-hex release sha"
+        required: false
+        default: ""
+      confirm:
+        description: "DO for create / deploy-commit / suspend"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Run
+        shell: bash
+        env:
+          ACTION: ${{ inputs.action }}
+          ARG: ${{ inputs.arg }}
+          CONFIRM: ${{ inputs.confirm }}
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+        run: bash .github/market-plane/plane.sh

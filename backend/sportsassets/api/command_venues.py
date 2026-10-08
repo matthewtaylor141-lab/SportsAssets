@@ -55,21 +55,38 @@ async def _has(c, t):
     return bool(await c.fetchval("SELECT to_regclass($1) IS NOT NULL", t))
 
 
-async def kalshi_health(c, *, now: float) -> dict:
-    r = await c.fetchrow("SELECT status, detail, beat_at FROM "
-                         "service_heartbeats WHERE service = "
-                         "'kalshi_market_data'")
+async def _beat(c, service: str):
+    r = await c.fetchrow("SELECT status, detail, extract(epoch FROM beat_at) "
+                         "AS at FROM service_heartbeats WHERE service = $1",
+                         service)
     if r is None:
-        return {"domain": "KALSHI_HEALTH", "state": "NOT_RUNNING"}
-    d = _j(r["detail"]) or {}
-    age = now - r["beat_at"].timestamp()
+        return None
+    return {"status": r["status"], "detail": _j(r["detail"]) or {},
+            "at": float(r["at"])}
+
+
+async def kalshi_health(c, *, now: float) -> dict:
+    """KALSHI_HEALTH: the REST worker's record, plus WHICH MECHANISM serves
+    the books (kalshi_ws.mechanism over the REST freshness, the WebSocket
+    runtime's heartbeat and the dedicated plane's boot record)."""
+    from .. import kalshi_ws as KWS
+    rest = await _beat(c, "kalshi_market_data")
+    ws = await _beat(c, "kalshi_ws_market_data")
+    plane = await _beat(c, "market_plane")
+    mech = KWS.mechanism((rest or {}).get("detail"), ws, plane, now=now)
+    if rest is None:
+        return {"domain": "KALSHI_HEALTH", "state": "NOT_RUNNING",
+                "mechanism": mech}
+    d = rest["detail"]
+    age = now - rest["at"]
     return {"domain": "KALSHI_HEALTH",
-            "state": "STALE" if age > 300 else r["status"].upper(),
+            "state": "STALE" if age > 300 else rest["status"].upper(),
             "heartbeat_age_s": round(age, 1), "health": d.get("health"),
             "catalogue": d.get("catalogue"), "coverage": d.get("coverage"),
             "fixtures": d.get("fixtures"), "freshness": d.get("freshness"),
+            "book_sources": d.get("book_sources"),
             "tracked_markets": d.get("tracked_markets"),
-            "claims": d.get("claims")}
+            "claims": d.get("claims"), "mechanism": mech}
 
 
 async def polymarket_health(c, *, now: float) -> dict:

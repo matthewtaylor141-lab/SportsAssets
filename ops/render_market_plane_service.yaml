@@ -9,8 +9,12 @@ services:
   # decision 2026-10-06: ~74,500 active markets are not solved by raising
   # UMP_MAX_STREAMS inside the shared workers). Its own CPU, health and
   # restarts. NO ORDER, CANCEL OR FUNDING AUTHORITY: it gets the database and
-  # the PMX institutional MARKET-DATA credential only -- no PMUS key, no
-  # LIVE_TRADING_ENABLED, no Kalshi key. When it is up, set
+  # the PMX institutional MARKET-DATA credential and the Kalshi WebSocket
+  # key only -- no PMUS key, no LIVE_TRADING_ENABLED, no Kalshi trading
+  # switch; market_plane_guard locks the process against venue writes and
+  # blocks every order-client module (the Kalshi-WebSocket-only variant,
+  # UNIVERSAL_MARKET_PLANE=off, is ops/render_market_plane_kalshi_ws_only.json,
+  # provisioned by .github/workflows/market-plane.yml). When it is up, set
   # UNIVERSAL_MARKET_PLANE=off on sportsassets-workers so exactly one runtime
   # holds the shards. The PMX_* values are entered in the dashboard (they
   # cannot be copied between services by this blueprint).

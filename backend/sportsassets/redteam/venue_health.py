@@ -160,11 +160,21 @@ def denominators(*, held: dict | None, priority: dict | None,
 
 async def read(conn, *, held: dict | None, priority: dict | None,
                total: dict | None, now: float) -> dict:
-    k = kalshi_health(await _beat(conn, "kalshi_market_data"), now=now)
+    from .. import kalshi_ws as KWS
+    kb = await _beat(conn, "kalshi_market_data")
+    k = kalshi_health(kb, now=now)
     sb = await _beat(conn, "institutional_md")
     p = polymarket_health(held, sb, now=now)
     rep = report([p, k])
+    # WHICH mechanism serves the Kalshi books (WebSocket primary on the
+    # dedicated plane, or REST fallback, every reason named). Reported, not
+    # a second gate: KALSHI freshness above already counts current books of
+    # ANY basis over the tracked denominator.
+    mech = KWS.mechanism((kb or {}).get("detail"),
+                         await _beat(conn, "kalshi_ws_market_data"),
+                         await _beat(conn, "market_plane"), now=now)
     return {"venues": rep, "isolated": set(rep) == {KALSHI, POLYMARKET_US},
+            "kalshi_mechanism": mech,
             "polymarket_stream_gap": stream_gap(sb, now=now),
             "blended_status": None,
             "cross_venue_pair": pair_gate(rep, POLYMARKET_US, KALSHI),

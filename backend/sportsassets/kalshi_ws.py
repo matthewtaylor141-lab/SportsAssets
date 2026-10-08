@@ -416,3 +416,81 @@ def websockets_connect(key_id: str, private_key, *, url: str = WS_URL):
                                         ping_interval=10, ping_timeout=10,
                                         max_size=2 ** 22)
     return connect
+
+
+# ── which mechanism serves Kalshi books (closeout 2026-10-08) ───────────
+
+KALSHI_WS = "KALSHI_WS"
+KALSHI_REST_FALLBACK = "KALSHI_REST_FALLBACK"
+BEAT_MAX_AGE_S = 120.0
+
+
+def mechanism(rest_detail: dict | None, ws_beat: dict | None,
+              plane_beat: dict | None, *, now: float) -> dict:
+    """PURE. Kalshi's market-data mechanism, from the three records that
+    exist (never assumed): the REST worker's freshness (current books by
+    persisted basis over the tracked denominator), the WebSocket runtime's
+    heartbeat and the dedicated plane's boot record. KALSHI_WS is primary
+    only when the plane is up and unrefused, the WebSocket runtime beats
+    connected with >= 1 current book, and >= 1 tracked book is current on
+    the WebSocket basis; otherwise KALSHI_REST_FALLBACK with every reason
+    named. Beats are {"status", "detail", "at"}."""
+    f = (rest_detail or {}).get("freshness") or {}
+    by = f.get("current_by_source") or {}
+    ws_cur, rest_cur = int(by.get("WS") or 0), int(by.get("REST") or 0)
+    den = f.get("denominator")
+    why = []
+    pd = (plane_beat or {}).get("detail") or {}
+    if plane_beat is None:
+        why.append("MARKET_PLANE_ABSENT")
+    elif now - float(plane_beat.get("at") or 0.0) > BEAT_MAX_AGE_S:
+        why.append("MARKET_PLANE_HEARTBEAT_STALE")
+    elif (pd.get("guard") or {}).get("refused"):
+        why.append("MARKET_PLANE_REFUSED:%s" % pd["guard"]["refused"])
+    wd = (ws_beat or {}).get("detail") or {}
+    ws = wd.get("ws") or {}
+    if ws_beat is None:
+        why.append("KALSHI_WS_HEARTBEAT_ABSENT")
+    elif now - float(ws_beat.get("at") or 0.0) > BEAT_MAX_AGE_S:
+        why.append("KALSHI_WS_HEARTBEAT_STALE")
+    elif wd.get("state") == "OWNER_ACTION_REQUIRED":
+        why.append("KALSHI_WS_%s" % (wd.get("why") or "OWNER_ACTION"))
+    else:
+        if ws.get("connected") is not True:
+            why.append("KALSHI_WS_NOT_CONNECTED")
+        if int(ws.get("current") or 0) <= 0:
+            why.append("KALSHI_WS_NO_CURRENT_BOOK")
+    if ws_cur <= 0:
+        why.append("NO_TRACKED_BOOK_CURRENT_ON_WS_BASIS")
+    wsf = wd.get("freshness") or {}
+    return {
+        "mechanism": KALSHI_REST_FALLBACK if why else KALSHI_WS,
+        "why": why,
+        "plane": {"present": plane_beat is not None,
+                  "commit": pd.get("commit"), "mode": (pd.get("guard") or {})
+                  .get("mode"), "process_locked": (pd.get("guard") or {})
+                  .get("process_locked"),
+                  "age_s": (None if plane_beat is None else
+                            round(now - float(plane_beat.get("at") or 0), 1))},
+        "ws": {"state": wd.get("state") or (ws_beat or {}).get("status"),
+               "connected": ws.get("connected"),
+               "current_books": ws.get("current"),
+               "subscribed_markets": wd.get("subscribed_markets"),
+               "resubscribes": wd.get("resubscribes"),
+               "connections": wd.get("connections"),
+               "by_state": ws.get("by_state"),
+               "current_book_update_age_s": wd.get(
+                   "current_book_update_age_s"),
+               "numerator": wsf.get("numerator"),
+               "denominator": wsf.get("denominator"),
+               "account_limits_status": (wd.get("account_limits") or {})
+               .get("status")},
+        "tracked": {"denominator": den, "current_ws": ws_cur,
+                    "current_rest": rest_cur,
+                    "numerator": f.get("numerator"), "rate": f.get("rate"),
+                    "ws_share": (round(ws_cur / den, 4) if den else None),
+                    "sla_s": f.get("sla_s")},
+        "accounting_rule": ("Kalshi freshness = current tracked books from "
+                            "ANY basis / tracked books; WS share = those on "
+                            "the snapshot-then-sequence WebSocket basis; "
+                            "REST counted apart, never merged into WS")}
