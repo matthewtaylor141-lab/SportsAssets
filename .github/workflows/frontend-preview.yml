@@ -8,7 +8,10 @@ name: frontend-preview
 # (npm ci + npm run build in frontend/), served on the runner with the target
 # ref's own netlify.toml redirects (.github/frontend-preview/serve.js), and
 # loaded in Chromium at the agreed desktop / iPhone / iPad views plus
-# landscape and reduced-motion runs (.github/frontend-preview/shots.js).
+# landscape and reduced-motion runs (.github/frontend-preview/shots.js),
+# then the Trader device acceptance (.github/frontend-preview/trader_accept.js:
+# every position, order, quote and recorded Xavier action on the page equals
+# the API snapshot; nothing moves while the data is held still).
 #
 # READ ONLY: /api/command/* is proxied to the production API like the Netlify
 # rule, but only GET/HEAD are forwarded (anything else is refused by the
@@ -73,6 +76,11 @@ jobs:
           SERVER=$!
           for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
           NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/shots.js http://127.0.0.1:8787 out
+          # Trader device acceptance: the rendered page against the API's own
+          # snapshot on every device, then a frozen phase in which nothing may
+          # move (out/trader_accept.json + out/trader/*.png)
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/trader_accept.js http://127.0.0.1:8787 out \
+            || echo "trader acceptance exited non-zero (recorded; the scorecard reads its JSON)"
           curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
           kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
           echo "== proxy =="; cat out/proxy.json
