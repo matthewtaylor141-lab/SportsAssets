@@ -375,3 +375,38 @@ async def test_a_fill_after_the_complete_review_makes_it_history():
     finally:
         await XRF._purge(conn, slugs)
         await conn.close()
+
+
+@pg
+async def test_a_protection_lost_since_the_complete_review_is_not_complete_now():
+    """The packet's protection element is judged LIVE: a complete review
+    followed by a cancelled protection (an EXIT's cancel-first, an expiry)
+    is not a complete packet now -- and the xavier_complete gate, which
+    reads only the packet list, sees it."""
+    from sportsassets.capital_readiness import feeds as CRF
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await _held_hold(conn, "xhpprot")
+        slugs.append(slug)
+        acct = a["account_id"]
+        pk = next(p["position_key"] for p in await L.positions(conn, acct)
+                  if p["group_id"] == g)
+        oid = await conn.fetchval(
+            "SELECT order_id FROM paper_orders WHERE group_id=$1 AND role="
+            "'STANDING_PROTECTION' AND state='RESTING'", g)
+        got = await SIM.request_cancel(conn, oid, now=AT + 1,
+                                       reason="TEST_CANCEL_AFTER_REVIEW")
+        assert got["ok"], got
+        # AT+5: the probability is still inside its life (expires AT+22)
+        iv = await PMF.strategy_management_integrity(conn, acct, XRF.CG,
+                                                     now=AT + 5)
+        assert pk in iv["packet_incomplete"], iv
+        assert {"position_key": pk, "why": PMF.PK_PROTECTION_NOT_VALID_NOW} \
+            in iv["packet_not_current"]
+        gate = await CRF.gate_xavier_complete(
+            conn, {"account_id": acct, "now": AT + 5})
+        assert gate["value"] is False, gate
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()

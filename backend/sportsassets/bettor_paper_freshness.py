@@ -872,8 +872,13 @@ LATEST_PACKET_SQL = """
 #:                MARK_STALE_AFTER_S)
 #:   qty          no fill of the position after the review (it reviewed
 #:                another quantity)
-#: The protection element is not re-judged here: it is read LIVE beside it
-#: (protections(), protection_state at `now`).
+#:   protection   the protection-continuity state read LIVE now
+#:                (protections() -> protection_state at `now`) is
+#:                PROTECTED_RESTING: a protection cancelled (an EXIT's
+#:                cancel-first), expired or mismatched since the review makes
+#:                the packet incomplete now, whatever the review recorded.
+#:                Before this the gate `xavier_complete` read only the packet
+#:                list and never saw it.
 PK_NO_REVIEW = "NO_REVIEW_RECORDED"
 PK_RECORDED_INCOMPLETE = "LATEST_REVIEW_PACKET_INCOMPLETE"
 PK_NO_READ_INSTANT = "NO_READ_INSTANT_TO_JUDGE_CURRENCY"
@@ -881,12 +886,14 @@ PK_POSITION_CHANGED = "POSITION_FILLED_SINCE_THE_COMPLETE_REVIEW"
 PK_NO_RECORDED_EXPIRY = "COMPLETE_REVIEW_RECORDED_NO_PROBABILITY_EXPIRY"
 PK_PROBABILITY_EXPIRED = "COMPLETE_REVIEW_PROBABILITY_EXPIRED"
 PK_BOOK_PAST_SLA = "COMPLETE_REVIEW_BOOK_PAST_THE_MARK_SLA"
+PK_PROTECTION_NOT_VALID_NOW = "COMPLETE_REVIEW_PROTECTION_NOT_VALID_NOW"
 PACKET_CURRENCY_RULE = (
     "a packet is complete NOW only if the newest review recorded it complete"
     " AND no fill of the position followed that review AND now <= its "
     "probability's expires_at (source stamp + the recorded freshness limit)"
-    " AND its book is within the %.0f s mark SLA; otherwise it is "
-    "incomplete, the reason named" % SLA_S)
+    " AND its book is within the %.0f s mark SLA AND its protection is "
+    "PROTECTED_RESTING now; otherwise it is incomplete, the reason named"
+    % SLA_S)
 #: fills and reviews are stamped on the same paper clock; a fill this close
 #: to the review instant is the same instant, not a later change
 _SAME_INSTANT_S = 1e-6
@@ -904,9 +911,12 @@ def packet_record(r) -> dict:
                                  else d.get("book_observed_at"))}
 
 
-def packet_currency(rec: dict | None, *, now, last_fill_at) -> dict:
+def packet_currency(rec: dict | None, *, now, last_fill_at,
+                    protection_state=PS_PROTECTED) -> dict:
     """{current, why} (pure): whether the newest review's packet is
-    complete NOW (PACKET_CURRENCY_RULE). Anything unknown is not current."""
+    complete NOW (PACKET_CURRENCY_RULE). Anything unknown is not current.
+    `protection_state` is the position's continuity state read live at
+    `now` (protection_state()); callers judging the stamps alone omit it."""
     def out(ok, why=None):
         return {"current": ok, "why": why}
     if not rec:
@@ -928,6 +938,8 @@ def packet_currency(rec: dict | None, *, now, last_fill_at) -> dict:
     book = rec.get("book_observed_at")
     if book is None or now - float(book) > SLA_S:
         return out(False, PK_BOOK_PAST_SLA)
+    if protection_state != PS_PROTECTED:
+        return out(False, PK_PROTECTION_NOT_VALID_NOW)
     return out(True)
 
 
@@ -943,9 +955,10 @@ def integrity_verdict(*, positions: list, packets: dict,
 
     `packets` by group: a packet_record (the newest review's gate with its
     stamps), judged CURRENT at `now` for each position (packet_currency:
-    a recorded-complete gate whose evidence expired, or that predates the
-    position's last fill, is incomplete and named in packet_not_current);
-    a bare bool is taken as already judged."""
+    a recorded-complete gate whose evidence expired, that predates the
+    position's last fill, or whose protection is not PROTECTED_RESTING now,
+    is incomplete and named in packet_not_current); a bare bool is taken as
+    already judged."""
     rv = reviewed_at or {}
     cls = classes or {}
     excluded = [p["position_key"] for p in positions
@@ -967,7 +980,10 @@ def integrity_verdict(*, positions: list, packets: dict,
         v = packets.get(p["group_id"])
         if not isinstance(v, dict):
             return bool(v)
-        cur = packet_currency(v, now=now, last_fill_at=p.get("last_fill_at"))
+        cur = packet_currency(
+            v, now=now, last_fill_at=p.get("last_fill_at"),
+            protection_state=(protections.get(p["position_key"]) or {}).get(
+                "state"))
         if v.get("complete") and not cur["current"]:
             # complete when reviewed, history now: never green
             not_current.append({"position_key": p["position_key"],
