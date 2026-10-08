@@ -17,6 +17,8 @@ import importlib.util
 import json
 import pathlib
 
+import yaml
+
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
     "evidence_packet", ROOT / "tools" / "evidence_packet.py")
@@ -171,7 +173,12 @@ def test_pm_acceptance_builds_and_attests_the_packet():
     wf = (ROOT.parent / ".github" / "workflows" /
           "pm-acceptance.yml").read_text()
     assert "python3 -I backend/tools/evidence_packet.py acc" in wf
-    assert "subject-path: acc/evidence_packet.json" in wf
+    steps = yaml.safe_load(wf)["jobs"]["accept"]["steps"]
+    att = [s for s in steps if "attest-build-provenance" in str(s.get(
+        "uses"))]
+    assert len(att) == 1
+    assert att[0]["with"]["subject-path"].split() == [
+        "acc/evidence_packet.json", "acc/SHA256SUMS"]
     assert "implementation_sha:" in wf
     for f in ("exited cleanly; restarting", "WAS ALREADY APPLIED",
               "POLICY_CODE_DRIFT", "/metrics/memory?resource="):
@@ -410,6 +417,23 @@ def test_another_services_memory_or_logs_are_a_mismatch(tmp_path):
     assert lc["sportsassets-market-plane_memory_error"]["reason"] == \
         "READ_UNAVAILABLE:logs_sportsassets-market-plane_memory_error:" \
         "HTTP_401"
+
+
+def test_the_workflow_reads_memory_and_logs_for_all_three_services():
+    wf = (ROOT.parent / ".github" / "workflows" /
+          "pm-acceptance.yml").read_text()
+    loop = ("for svc in sportsassets-api sportsassets-workers "
+            "sportsassets-market-plane; do")
+    steps = {s.get("name", ""): s for s in yaml.safe_load(wf)["jobs"][
+        "accept"]["steps"]}
+    render = [s for n, s in steps.items() if n.startswith("Render ")][0]
+    packet = [s for n, s in steps.items() if n.startswith(
+        "Production evidence packet")][0]
+    assert loop in render["run"] and "/metrics/memory?resource=" in \
+        render["run"]
+    assert loop in packet["run"] and "/logs?ownerId=" in packet["run"]
+    for _, text in EP.LOG_FILTERS:
+        assert text in packet["run"], text
 
 
 def test_the_runtime_and_paper_receipts_are_in_the_packet(tmp_path):

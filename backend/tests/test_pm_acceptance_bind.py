@@ -11,6 +11,7 @@ a hard-coded True and the workers' process age."""
 from __future__ import annotations
 
 import copy
+import json
 
 from sportsassets.pm_bind import acceptance as PA
 
@@ -289,3 +290,100 @@ def test_an_oom_in_the_window_is_red_through_the_binder():
     assert r["evidence_input"]["no_oom_minutes"] == 0.0
     assert r["pm_state"] == "RED" and "no_oom" in r["critical_failures"]
 
+
+# ── a new receipt supersedes an earlier false one BY REFERENCE ───────────
+
+D088 = "08828d04766017e520ffd4a34740162a2c792d36"
+A91 = "a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd"
+
+
+def test_supersedes_must_name_receipt_ids():
+    from sportsassets.api import command_red_team as CR
+    assert CR.validate_supersedes(None) == ([], [])
+    assert CR.validate_supersedes(["rel:08828d047660:2", "rel:08828d047660:1",
+                                   "rel:08828d047660:2"]) == (
+        ["rel:08828d047660:1", "rel:08828d047660:2"], [])
+    for bad in ("rel:08828d047660:1", ["08828d04"], ["rel:XYZ:1"],
+                [1], ["rel:08828d047660:1"] * 21 + ["rel:08828d047661:1"]):
+        assert CR.validate_supersedes(bad)[1] == [
+            "NOT_A_RECEIPT_ID:supersedes"], bad
+
+
+async def test_a_new_receipt_supersedes_the_false_one_and_never_touches_it(
+        monkeypatch):
+    import os
+
+    import asyncpg
+    import pytest
+    from fastapi import HTTPException
+
+    from sportsassets.api import command_red_team as CR
+    dsn = os.environ.get("RN1X_TEST_DSN", "")
+    if not dsn:
+        pytest.skip("needs RN1X_TEST_DSN")
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2)
+
+    async def _p():
+        return pool
+    monkeypatch.setattr(CR, "_pool", _p)
+    count = ("SELECT (SELECT count(*) FROM red_team_release_receipts) + "
+             " (SELECT count(*) FROM red_team_control_receipts)")
+    try:
+        # the earlier FALSE receipt: 08828d04 deployed while
+        # claude/release-api was at a91be09f -> green=false
+        monkeypatch.setenv("RENDER_GIT_COMMIT", D088)
+        old = await CR.release_receipt(dict(
+            green_release(), tested_sha=D088, release_sha=A91,
+            deployed_sha=D088, workers_deployed_sha=D088))
+        assert old["release_gate"]["green"] is False
+        async with pool.acquire() as conn:
+            before = dict(await conn.fetchrow(
+                "SELECT * FROM red_team_release_receipts WHERE "
+                " receipt_id = $1", old["receipt_id"]))
+            n0 = await conn.fetchval(count)
+        monkeypatch.setenv("RENDER_GIT_COMMIT", SHA)
+        body = dict(green_release(), deployed_sha=SHA,
+                    workers_deployed_sha=SHA,
+                    migration_fingerprint_match=True)
+        # an unknown or malformed reference appends NOTHING
+        for sup, why in ((["rel:ffffffffffff:1"],
+                          "SUPERSEDED_RECEIPT_NOT_FOUND:rel:ffffffffffff:1"),
+                         ("rel:08828d047660:1",
+                          "NOT_A_RECEIPT_ID:supersedes")):
+            with pytest.raises(HTTPException) as e:
+                await CR.release_receipt(dict(body, supersedes=sup))
+            assert e.value.status_code == 422
+            assert why in e.value.detail["refused"]
+        async with pool.acquire() as conn:
+            assert await conn.fetchval(count) == n0
+        new = await CR.release_receipt(dict(body,
+                                            supersedes=[old["receipt_id"]]))
+        assert new["release_gate"]["green"] is True
+        assert new["supersedes"] == [old["receipt_id"]]
+        async with pool.acquire() as conn:
+            after = dict(await conn.fetchrow(
+                "SELECT * FROM red_team_release_receipts WHERE "
+                " receipt_id = $1", old["receipt_id"]))
+            assert after == before                  # untouched, still there
+            ref = await conn.fetchrow(
+                "SELECT control, status, evidence FROM "
+                " red_team_control_receipts WHERE receipt_id = $1",
+                "sup:%s" % new["receipt_id"])
+            assert ref["control"] == "RELEASE_RECEIPT_SUPERSEDES"
+            assert json.loads(ref["evidence"]) == {
+                "receipt_id": new["receipt_id"],
+                "supersedes": [old["receipt_id"]], "deployed_sha": SHA,
+                "by_reference_only": True,
+                "earlier_receipts_unchanged": True}
+            # and neither the false receipt nor the reference can be erased
+            for q, k in (("DELETE FROM red_team_release_receipts WHERE "
+                          " receipt_id = $1", old["receipt_id"]),
+                         ("UPDATE red_team_release_receipts SET blockers = "
+                          " '[]'::jsonb WHERE receipt_id = $1",
+                          old["receipt_id"]),
+                         ("DELETE FROM red_team_control_receipts WHERE "
+                          " receipt_id = $1", "sup:%s" % new["receipt_id"])):
+                with pytest.raises(asyncpg.PostgresError):
+                    await conn.execute(q, k)
+    finally:
+        await pool.close()

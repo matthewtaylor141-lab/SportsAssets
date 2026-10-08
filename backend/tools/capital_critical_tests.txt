@@ -1281,9 +1281,10 @@ tests/test_pm_evidence_package_parity.py
 tests/test_pm_golden_production.py
 tests/test_pm_scoreboard_bind.py
 tests/test_pm_acceptance_bind.py
-# (PM review of RC4, 2026-10-08) no_oom only from the complete Render runtime window, historical PAPER immutability only from pre / post fingerprints at one fixed cutoff
+# (PM review of RC4, 2026-10-08) no_oom only from the complete Render runtime window, historical PAPER immutability only from pre / post fingerprints at one fixed cutoff, receipts posted only on an explicit on, attestation verified
 tests/test_pm_acceptance_receipts.py
 tests/test_pm_acceptance_paper_fingerprint_db.py
+tests/test_pm_acceptance_workflow.py
 tests/test_pmus_credential_census.py
 tests/test_p1_pmx_grpc_primary_accounting.py
 tests/test_bettor_policy_v6_integrity.py
