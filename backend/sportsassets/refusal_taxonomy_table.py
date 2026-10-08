@@ -1500,6 +1500,9 @@ TABLE = {
     "KALSHI_WS_DISCONNECTED": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_SUBSCRIPTION_ERROR": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
+    # the dedicated market plane refuses to run beside an order-capable
+    # credential (market_plane_guard): a provisioning defect, ours to fix
+    "ORDER_CAPABLE_CREDENTIAL_PRESENT_ON_MARKET_PLANE": (S, CAP, "INGESTION"),
     # (315) a canonical alias whose settlement-rules fingerprint differs
     # from the one it was certified against (red team settlement guard)
     "RULES_CHANGED_SINCE_CERTIFICATION": (S, SET, "SETTLEMENT_COMPATIBILITY"),
