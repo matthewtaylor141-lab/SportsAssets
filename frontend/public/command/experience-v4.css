@@ -235,7 +235,9 @@ body.bt-exp-v4{--v4-safe-bottom:env(safe-area-inset-bottom,0px)}
 /* Team + venue identity */
 .bt-v4-team-logo{width:28px;height:28px;object-fit:contain;flex:0 0 28px;filter:drop-shadow(0 3px 8px rgba(0,0,0,.22));}
 .monitor-inner .bt-v4-team-logo{width:24px;height:24px;flex-basis:24px}
-.card-score .team-row{grid-template-columns:auto auto minmax(0,1fr) auto!important}
+/* not on the Live Game State scoreboard: its rows are a 3-column grid (provider logo, name, score); this
+   !important 4-column template pushed the score into the third column and left the fourth empty */
+.card-score .scoreboard:not(.live-scoreboard) .team-row{grid-template-columns:auto auto minmax(0,1fr) auto!important}
 .card-score .team-row .bt-v4-team-logo+.team-abbr{margin-left:2px}
 .bt-v4-venue-wrap{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
 .bt-v4-venue-logo{width:17px;height:17px;object-fit:contain;border-radius:4px;background:#2e5cff}
