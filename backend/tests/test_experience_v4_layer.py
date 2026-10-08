@@ -281,3 +281,29 @@ def test_phone_command_keeps_the_real_webgl_hq():
     hq = (COMMAND / "hq.js").read_text(encoding="utf-8")
     assert "mod.createHQ(stage, {phone: PHONE," in hq
     assert "if (PHONE || !stage) return;" not in hq
+
+
+# --- Floor: current workspace, and no duplicate controls --------------------
+#
+# Integrator finding (6): Floor pages had no element with aria-current (the
+# left rail highlights FLOOR with a class only). Locally the Floor also
+# showed V4's camera rail + shift board stacked over hq5's existing view bar
+# and desk-count strip (iPhone: V4's board covered hq5's counts; 'attention 1'
+# beside hq5's 'blocked 2'), and Cmd/Ctrl+K opened V4's palette and hq5's.
+
+
+def test_rail_marks_the_current_workspace_programmatically():
+    src = js()
+    assert "qa('.bt-hq2-nav a.active').forEach(function(a){a.setAttribute('aria-current','page');});" in src
+
+
+def test_floor_defers_to_existing_hq5_controls():
+    src = js()
+    assert "function floorControls(){if(page!=='floor'||q('#bt-v4-floor-command')||q('#hq5-floorbar'))return;" in src
+    assert "if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==='k'){if(q('.hq5-palette-backdrop'))return;" in src
+    hq5 = (COMMAND / "hq5-workspace.js").read_text(encoding="utf-8")
+    assert "bar.id='hq5-floorbar'" in hq5 and "backdrop.className='hq5-palette-backdrop'" in hq5
+    floor = (COMMAND / "floor.html").read_text(encoding="utf-8")
+    # hq5 runs as a classic script at the end of <body>, before the deferred V4 layer
+    assert '<script src="hq5-workspace.js" data-hq5="js"></script>' in floor
+    assert '<script defer src="experience-v4.js" data-experience-v4="js"></script>' in floor

@@ -29,6 +29,9 @@
   };
 
   function workspaceNav(){
+    // the Command Center rail (hq2-shell / hq6) marks the current workspace with a class only: make it
+    // programmatically current too (the Floor had no element with aria-current at all)
+    qa('.bt-hq2-nav a.active').forEach(function(a){a.setAttribute('aria-current','page');});
     if(page==='trader'){
       var existing=q('.topbar nav[aria-label="Workspace"]');
       if(existing){
@@ -187,7 +190,8 @@
       var t=e.target.closest('[data-v4-tape-toggle]');if(t){var show=body.classList.contains('bt-v4-tape-collapsed');body.classList.toggle('bt-v4-tape-collapsed',!show);t.setAttribute('aria-pressed',String(show));return;}
     });
     doc.addEventListener('keydown',function(e){
-      if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==='k'){e.preventDefault();openPalette();return;}
+      // where hq5-workspace.js already binds Cmd/Ctrl+K to its palette (the Floor), one palette opens, not two
+      if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==='k'){if(q('.hq5-palette-backdrop'))return;e.preventDefault();openPalette();return;}
       if(e.key==='Escape'){closePalette();body.classList.remove('bt-v4-evidence-open');}
     });
     // ignore V4's own Pulse / evidence writes: reacting to them re-triggers this observer forever
@@ -236,7 +240,11 @@
   var lastText=new WeakMap(),primed=new WeakSet();
   function markRealChanges(root){qa('.team-score,.price-block strong,.metric-value,.screen-value',root||d).forEach(function(el){var v=T(el);if(!primed.has(el)){primed.add(el);lastText.set(el,v);return}if(lastText.get(el)!==v){lastText.set(el,v);el.classList.remove('bt-v4-live-change');void el.offsetWidth;el.classList.add('bt-v4-live-change');setTimeout(function(){el.classList.remove('bt-v4-live-change')},900)}})}
 
-  function floorControls(){if(page!=='floor'||q('#bt-v4-floor-command'))return;var stage=q('#fl-stage');if(!stage)return;var wrap=d.createElement('div');wrap.id='bt-v4-floor-command';wrap.innerHTML='<section class="bt-v4-shift"><div class="bt-v4-shift-head"><span><i class="bt-v4-live-dot"></i>Live floor</span><span data-v4-shift-state>READING</span></div><div class="bt-v4-shift-kpis"><span><b data-v4-active>—</b><small>active</small></span><span><b data-v4-attn>—</b><small>attention</small></span><span><b data-v4-desks>—</b><small>desks</small></span></div></section><nav class="bt-v4-camera-bar" aria-label="Floor camera"><button data-v4-cam="overview">Overview</button><button data-v4-cam="equity">Equity wall</button><button data-v4-cam="feed">Opportunity wall</button><button data-v4-cam="health">Health wall</button><button data-v4-cam="active">Active desk</button></nav>';stage.appendChild(wrap);wrap.addEventListener('click',function(e){var btn=e.target.closest('[data-v4-cam]');if(!btn)return;var f=window.__floor,cam=btn.dataset.v4Cam;if(!f||!f.scene)return;if(cam==='overview'){f.scene.resetView();return}if(cam==='equity'||cam==='feed'||cam==='health'){f.scene.focusWall(cam);return}if(cam==='active'){var a=qa('.fl-agent').find(function(x){return /Working|Reviewing|Challenging/i.test(T(x))})||q('.fl-agent');if(a)a.click()}});updateFloorShift()}
+  // The production Floor already has hq5's view bar (Overview / Capital Wall / Opportunities / Risk & Health /
+  // Active Desk / Map) and its desk-count strip. V4's camera rail and shift board duplicated both, stacked
+  // over the same corner (on iPhone over hq5's counts) and showed a second, different 'attention' count.
+  // V4 defers to them where they exist and keeps its own on a floor without them.
+  function floorControls(){if(page!=='floor'||q('#bt-v4-floor-command')||q('#hq5-floorbar'))return;var stage=q('#fl-stage');if(!stage)return;var wrap=d.createElement('div');wrap.id='bt-v4-floor-command';wrap.innerHTML='<section class="bt-v4-shift"><div class="bt-v4-shift-head"><span><i class="bt-v4-live-dot"></i>Live floor</span><span data-v4-shift-state>READING</span></div><div class="bt-v4-shift-kpis"><span><b data-v4-active>—</b><small>active</small></span><span><b data-v4-attn>—</b><small>attention</small></span><span><b data-v4-desks>—</b><small>desks</small></span></div></section><nav class="bt-v4-camera-bar" aria-label="Floor camera"><button data-v4-cam="overview">Overview</button><button data-v4-cam="equity">Equity wall</button><button data-v4-cam="feed">Opportunity wall</button><button data-v4-cam="health">Health wall</button><button data-v4-cam="active">Active desk</button></nav>';stage.appendChild(wrap);wrap.addEventListener('click',function(e){var btn=e.target.closest('[data-v4-cam]');if(!btn)return;var f=window.__floor,cam=btn.dataset.v4Cam;if(!f||!f.scene)return;if(cam==='overview'){f.scene.resetView();return}if(cam==='equity'||cam==='feed'||cam==='health'){f.scene.focusWall(cam);return}if(cam==='active'){var a=qa('.fl-agent').find(function(x){return /Working|Reviewing|Challenging/i.test(T(x))})||q('.fl-agent');if(a)a.click()}});updateFloorShift()}
   // write only real changes: decorate() runs on every DOM mutation, so an unconditional write here re-triggered it every frame
   function setT(el,v){v=String(v);if(el&&el.textContent!==v)el.textContent=v}
   function setD(el,k,v){if(el&&el.dataset[k]!==v)el.dataset[k]=v}
