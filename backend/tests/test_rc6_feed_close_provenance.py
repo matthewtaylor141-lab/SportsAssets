@@ -289,3 +289,24 @@ async def test_the_real_keepalive_close_is_named_ours_and_the_owner_reconnects(
         await asyncio.wait_for(t, 10)
         server.close()
         await server.wait_closed()
+
+
+# ── the connector's keepalive is the provider's own liveness rule ──────
+async def test_the_production_connector_waits_for_a_pong_as_long_as_the_provider_does():
+    """BASE: the connector passed no keepalive settings, so websockets'
+    20 s pong deadline applied -- a stall of our own event loop longer than
+    that failed a healthy socket from our side (1011). The deadline is now
+    the provider's documented silence window, the same SILENCE_S after which
+    the owner already reconnects; nothing about price freshness moves."""
+    from sportsassets import pinnapi_probe as PP
+    c = PP._ws_connect(PP.WS_URL, "k-test")
+    conn = c.factory(c.ws_uri)          # the ClientConnection it would open
+    # BASE: 20 (the library default) -- our own stall failed the socket
+    assert conn.ping_timeout == O.SILENCE_S == 75.0
+    assert conn.ping_interval == 20.0
+    assert (PP.WS_PING_INTERVAL_S, PP.WS_PING_TIMEOUT_S) == (20.0, 75.0)
+    # a dead socket is still found by the owner's own silence rule first:
+    # the provider pings every 30 s, so 75 s without ANY frame is silence
+    assert O.SILENCE_S <= PP.WS_PING_TIMEOUT_S
+    # the frame cap and the no-redirect connector are unchanged
+    assert c.process_redirect(ValueError("x")).args == ("x",)
