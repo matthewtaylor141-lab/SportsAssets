@@ -288,7 +288,7 @@ def test_v1s_digest_is_environment_dependent_and_that_is_recorded():
 # production freezes V6 this is ITS number: a decision change makes this
 # test fail and the remedy is BETTOR_EV_SHADOW_V7 -- never a new literal.
 V6_CODE_SHA = (
-    "68b1d914501145a3bf1d9ab5b9cb941135eac6def2703fefd37d67da94d9ef0b")
+    "9c66940429caf9b79ff87a71272edd974e97de131f4dcc91e5622d22e5a9815c")
 
 
 def test_v6s_digest_is_the_same_on_every_interpreter():
@@ -375,6 +375,104 @@ def test_reformatting_keeps_the_hash():
         '    "PAYOUT",\n)', 1)
     assert wrapped != gate
     assert sha(**{"bettor_entry_gate.py": wrapped}) == BASE
+
+
+def _unhashed_reads(manifest: dict) -> set:
+    """Every module-level name a hashed symbol READS that is not itself
+    hashed, as "module.py:name". Names in a module the boundary covers are
+    checked against the manifest; an attribute of any other package module
+    (`evb.evaluate`) is reported as that module's. Stdlib is not reported."""
+    import ast
+    out = set()
+    for module, wanted in manifest.items():
+        tree = ast.parse(source(module))
+        names, aliases = {}, {}
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef)):
+                names[n.name] = n
+            elif isinstance(n, ast.Assign):
+                for t in n.targets:
+                    if isinstance(t, ast.Name):
+                        names[t.id] = n
+            elif isinstance(n, ast.AnnAssign) \
+                    and isinstance(n.target, ast.Name):
+                names[n.target.id] = n
+            elif isinstance(n, ast.ImportFrom) and (
+                    (n.level == 1 and n.module is None)
+                    or (n.level == 0 and n.module == "sportsassets")):
+                for a in n.names:
+                    aliases[a.asname or a.name] = a.name + ".py"
+            elif isinstance(n, ast.ImportFrom) and n.level >= 1:
+                # `from .x import y` would hide a dependency from the scan
+                raise AssertionError("%s: from-import of names from a "
+                                     "package module; import the module"
+                                     % module)
+        for sym in wanted:
+            for x in ast.walk(names[sym]):
+                if isinstance(x, ast.Name) and isinstance(x.ctx, ast.Load) \
+                        and x.id in names and x.id not in wanted:
+                    out.add("%s:%s" % (module, x.id))
+                if isinstance(x, ast.Attribute) \
+                        and isinstance(x.value, ast.Name) \
+                        and x.value.id in aliases:
+                    target = aliases[x.value.id]
+                    if target not in manifest \
+                            or x.attr not in manifest[target]:
+                        out.add("%s:%s" % (target, x.attr))
+    return out
+
+
+def test_the_v2_boundary_is_closed_under_reference():
+    """A hashed symbol that reads an unhashed name is hashed by NAME only:
+    the value can change behaviour without moving the digest. V1 had such
+    holes in BETTOR's own modules (LANES, PROV_*, NO_EXECUTION_ACTIONS, the
+    entry gate). V2 has none except the declared ones -- and a NEW one, e.g. decide
+    calling into another package module, fails here rather than in
+    production."""
+    assert _unhashed_reads(cs.DECISION_PATH) == set(cs.DECLARED_UNHASHED)
+
+
+def test_v1_was_not_closed_and_that_is_recorded():
+    holes = _unhashed_reads(cs.DECISION_PATH_V1)
+    assert "shadow_lanes.py:LANES" in holes
+    assert "shadow.py:NO_EXECUTION_ACTIONS" in holes
+    assert "bettor_entry_gate.py:admit" in holes
+
+
+def test_the_declared_rn1_exclusions_are_exactly_the_owner_directive():
+    rn1 = {k for k, why in cs.DECLARED_UNHASHED.items()
+           if why == "owner directive 2026-09-19"}
+    assert rn1 == {"shadow_lanes.py:RN1_PROVENANCES"}
+    # the directive's own guard still holds
+    for name in cs.DECISION_PATH["shadow_lanes.py"]:
+        assert not name.startswith("PROV_RN1") and name != "RN1_PROVENANCES"
+
+
+@pytest.mark.parametrize("module,old,new", [
+    # every BETTOR decision would raise LaneViolation
+    ("shadow_lanes.py", "LANES = (RN1_SHADOW, BETTOR_EV_SHADOW)",
+     "LANES = (RN1_SHADOW,)"),
+    # every BETTOR decision would raise LineageAmbiguous
+    ("shadow_lanes.py",
+     'PROV_MARKET_MICROSTRUCTURE = "MARKET_MICROSTRUCTURE"',
+     'PROV_MARKET_MICROSTRUCTURE = "MICROSTRUCTURE"'),
+    # a whale provenance relabelled as an independent one
+    ("shadow_lanes.py", 'PROV_WHALE_ACTION = "WHALE_ACTION"',
+     'PROV_WHALE_ACTION = "SPREAD"'),
+    # a BUY would no longer have to state why it dominated
+    ("shadow.py",
+     "NO_EXECUTION_ACTIONS = frozenset({NO_TRADE, HOLD, HOLD_TO_SETTLEMENT,",
+     "NO_EXECUTION_ACTIONS = frozenset({NO_TRADE, HOLD, HOLD_TO_SETTLEMENT, "
+     "BUY,"),
+])
+def test_a_value_read_by_the_decision_path_moves_the_v2_hash(module, old,
+                                                             new):
+    assert sha(**{module: mutate(module, old, new)}) != BASE
+    # ... and none of these moved V1's, which is why V2 needed closing.
+    assert cs.semantic_code_sha_v1(
+        overrides={module: mutate(module, old, new)}) \
+        == cs.semantic_code_sha_v1()
 
 
 def test_v1_still_reproduces_v5s_frozen_number_from_the_frozen_commit():

@@ -116,13 +116,60 @@ BOUNDARY_VERSION_V1 = "BETTOR_DECISION_PATH_V1"
 #       and 2532d20b on 3.13. V2 serialises the tree itself (`_canon`), so
 #       the number is a property of the source, checkable from any box.
 #
+#   NOT CLOSED UNDER REFERENCE. V1 hashed `INDEPENDENT_PROVENANCES`,
+#       `assert_lineage`, `ACTIONS` and `decision_record` by the NAMES they
+#       read, not the values of those names: PROV_*, LANES, SIGNAL_RN1,
+#       WHALE_PROVENANCES, NO_EXECUTION_ACTIONS ... were outside. Editing
+#       `LANES = (RN1_SHADOW,)` refused every BETTOR decision, and
+#       `PROV_MARKET_MICROSTRUCTURE = "X"` made every lineage ambiguous,
+#       without moving the hash. V2 is closed: every module-level name a
+#       hashed symbol reads, in a module the boundary covers, is hashed --
+#       except DECLARED_UNHASHED below, each named with its reason, and
+#       test_the_v2_boundary_is_closed_under_reference fails on any other.
+#
 # OUT, AS BEFORE: `bettor_ev_bridge.evaluate` -- the action table is
 # evidence the gate reads, priced by the research engine outside this
 # package (declaration: actionEvEngineIsImportedNotCopied).
 DECISION_PATH = dict(DECISION_PATH_V1)
 DECISION_PATH["shadow_bettor.py"] = DECISION_PATH_V1["shadow_bettor.py"] + (
     "_admissible_entry_record",
+    # the clock `decide` stamps a decision with when none is passed
+    "_now",
 )
+DECISION_PATH["shadow_lanes.py"] = DECISION_PATH_V1["shadow_lanes.py"] + (
+    # THE LINEAGE WALL'S VOCABULARY, by value. assert_lineage reads LANES
+    # and SIGNAL_RN1 for BETTOR's own verdict; INDEPENDENT_PROVENANCES and
+    # DECLARED_PROVENANCES are unions of these names.
+    "RN1_SHADOW", "LANES", "SIGNAL_RN1",
+    "PROV_MARKET_MICROSTRUCTURE", "PROV_L2", "PROV_ORDER_FLOW",
+    "PROV_SPREAD", "PROV_DEPTH", "PROV_CROSS_MARKET_RELATIVE_VALUE",
+    "PROV_EXTERNAL_CONSENSUS", "PROV_SPORT_FUNDAMENTALS", "PROV_PLAYER_DATA",
+    "PROV_MODEL_DISAGREEMENT", "PROV_SHORT_HORIZON_PRICE",
+    "PROV_EXECUTION_STATE",
+    "PROV_WHALE_ACTION", "PROV_WHALE_ACCOUNT_IDENTITY",
+    "PROV_WHALE_FUTURE_ACTION", "PROV_WHALE_DERIVED_TARGET",
+    "PROV_WHALE_MIRROR_DECISION", "GENERIC_WHALE_PROVENANCES",
+    "WHALE_PROVENANCES",
+)
+DECISION_PATH["shadow.py"] = DECISION_PATH_V1["shadow.py"] + (
+    # ACTIONS' members by value, and the set decision_record uses to decide
+    # which actions must state why they dominated.
+    "CANCEL", "CASH_OUT", "COMPLETE_COMPLEMENT", "HOLD_TO_SETTLEMENT",
+    "PAIR", "REDUCE", "REPRICE", "NO_EXECUTION_ACTIONS",
+)
+# READ BY A HASHED SYMBOL AND DELIBERATELY NOT HASHED -- the complete list.
+DECLARED_UNHASHED = {
+    # Owner directive 2026-09-19: RN1's provenance vocabulary stays out of
+    # BETTOR's boundary (test_rn1_symbols_are_outside_the_boundary). It IS
+    # read by assert_lineage on BETTOR's lane (via WHALE_PROVENANCES), so an
+    # edit to it can change BETTOR's lineage verdict without moving this
+    # hash. Recorded here so the residual is a decision, not an accident.
+    # (with the PROV_RN1_* members it is built from)
+    "shadow_lanes.py:RN1_PROVENANCES": "owner directive 2026-09-19",
+    # The action table: evidence the gate reads, priced by the research
+    # engine (actionEvEngineIsImportedNotCopied).
+    "bettor_ev_bridge.py:evaluate": "research engine, imported not copied",
+}
 DECISION_PATH["bettor_entry_gate.py"] = (
     "NOT_IDENTIFIED", "REQUIREMENTS",
     "R_NO_QUALIFIED_MODEL", "R_MODEL_TARGET_MISMATCH", "R_MODEL_NOT_FROZEN",

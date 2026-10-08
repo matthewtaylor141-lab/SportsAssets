@@ -260,6 +260,42 @@ def test_v6_is_v5_plus_its_named_deltas_and_nothing_else():
     assert bpol.policy_sha(d) == bpol.V5_FROZEN_POLICY_SHA
 
 
+# THE VERSION LEDGER. One version name, one declaration, one decision path:
+# (POLICY_SHA, POLICY_CODE_SHA, codeBoundary). APPEND a row for a new
+# version; an EDITED row is a rewrite of what production froze -- the R30A
+# re-pin of 98aaa204 under V5 is the failure this exists to make visible.
+LEDGER = {
+    "BETTOR_EV_SHADOW_V5": (
+        "1887fe6ee4624e31aaf2ccbd286f619e2717f78a4927b34faf131205dc684b47",
+        "92a190a086aeafc8b611a7cd856576f83435d4f27e030e92fc16b5f2281a2228",
+        "BETTOR_DECISION_PATH_V1"),
+    "BETTOR_EV_SHADOW_V6": (
+        "1b6e4ef5318032b7e855fb330c86089f9f89f997bbba0254b64d4d0a4595f1e5",
+        "9c66940429caf9b79ff87a71272edd974e97de131f4dcc91e5622d22e5a9815c",
+        "BETTOR_DECISION_PATH_V2"),
+}
+
+
+def test_the_running_version_is_bound_to_exactly_one_declaration_and_code():
+    """A declaration edit under a frozen version is REFUSED at boot, and a
+    refused boot sets storeReady False: collection stops too, not only
+    decisions. A decision-path edit is POLICY_CODE_DRIFT. Both fail here,
+    in CI, first. The remedy for either is a new version and a new row."""
+    version = bpol.BETTOR_POLICY_VERSION
+    assert version in LEDGER, "append %s to LEDGER (never edit a row)" % version
+    assert (bpol.POLICY_SHA, bpol.POLICY_CODE_SHA, bpol.CODE_BOUNDARY) \
+        == LEDGER[version], (
+        "%s is bound to %s / %s; this build's declaration or decision path "
+        "differs -- declare the next version" % ((version,) + LEDGER[version][:2]))
+    assert bpol.DECLARATION["codeBoundary"] == LEDGER[version][2]
+
+
+def test_the_ledger_agrees_with_the_recorded_v5_constants():
+    assert LEDGER["BETTOR_EV_SHADOW_V5"] == (
+        bpol.V5_FROZEN_POLICY_SHA, bpol.V5_FROZEN_POLICY_CODE_SHA,
+        bpol.V5_FROZEN_CODE_BOUNDARY)
+
+
 def test_v5s_recorded_numbers_are_constants_and_never_recomputed():
     assert bpol.V5_FROZEN_POLICY_SHA.startswith("1887fe6ee4624e31")
     assert bpol.V5_FROZEN_POLICY_CODE_SHA.startswith("92a190a086aeafc8")
@@ -313,7 +349,14 @@ def test_the_production_path_supplies_no_entry_inputs():
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            if isinstance(node, ast.Constant) and node.value == "entryInputs":
+            # the key as a string, as a keyword (dict(op, entryInputs=...))
+            # or as an attribute -- every spelling that could supply it
+            if (isinstance(node, ast.Constant)
+                    and node.value in ("entryInputs", "entry_inputs")) \
+                    or (isinstance(node, ast.keyword)
+                        and node.arg in ("entryInputs", "entry_inputs")) \
+                    or (isinstance(node, ast.Attribute)
+                        and node.attr in ("entryInputs", "entry_inputs")):
                 uses.append(path.relative_to(SRC).as_posix())
     assert uses == ["shadow_bettor.py"], uses
     assert 'opportunity.get("entryInputs")' in (SRC / "shadow_bettor.py").read_text()

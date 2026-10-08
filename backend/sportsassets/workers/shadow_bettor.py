@@ -438,8 +438,12 @@ async def run() -> None:
             "policyCodeSha": bpol.POLICY_CODE_SHA[:16],
             # THE STORED SIDE OF THE COMPARISON, so a readback shows both
             # numbers without parsing policyIntegrityWhy.
-            "frozenPolicyCodeSha": str(
-                (frozen or {}).get("policyCodeSha") or "NOT_ATTEMPTED")[:16],
+            # REFUSED compares no code sha, so it says NOT_COMPARED rather
+            # than NOT_ATTEMPTED (the freeze WAS attempted).
+            "frozenPolicyCodeSha": (
+                str(frozen["policyCodeSha"])[:16]
+                if (frozen or {}).get("policyCodeSha")
+                else "NOT_COMPARED" if frozen else "NOT_ATTEMPTED"),
             "codeShaMatches": (frozen or {}).get("codeShaMatches"),
             "universe": bettor.UNIVERSE_VERSION,
             "pBettor": "NOT_ESTABLISHED",

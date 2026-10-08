@@ -256,7 +256,7 @@ def test_wiring_the_mapping_did_not_move_the_policy_code_sha():
     # V6 (BETTOR_DECISION_PATH_V2) is interpreter-independent, so the
     # literal holds on every interpreter, not only the gated one.
     assert base == (
-        "68b1d914501145a3bf1d9ab5b9cb941135eac6def2703fefd37d67da94d9ef0b")
+        "9c66940429caf9b79ff87a71272edd974e97de131f4dcc91e5622d22e5a9815c")
 
 
 # ── a venue-stated non-sport is not an unknown ───────────────────────

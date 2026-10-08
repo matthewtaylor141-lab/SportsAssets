@@ -393,13 +393,14 @@ def decide(opportunity: dict, market_state: dict | None, *,
            decision_ts=None, inventory=None) -> dict:
     """BETTOR's own prospective decision.
 
-    NO_TRADE TODAY, ALWAYS, AND HONESTLY. This function has no path that
-    produces a BUY or a SELL, and that is correct rather than
-    unfinished: there is no validated independent EV to act on, and a
-    lane that traded anyway would be manufacturing the very claim the
-    dataset exists to test. When Action EV is registered the gate opens
-    here, in one place, and every row written before it is still
-    readable as what BETTOR believed at the time.
+    NO_TRADE ON THE PRODUCTION PATH. Since 70ca3a4 (BETTOR_EV_SHADOW_V6)
+    this function has ONE path that returns an admitted entry -- the
+    entry gate's verdict, below -- and it is reachable only when the
+    caller supplies `entryInputs`, which the production worker never
+    does. Everything else is NO_TRADE: there is no validated independent
+    EV to act on, and a lane that traded anyway would be manufacturing
+    the very claim the dataset exists to test. Every row written before
+    the gate opens is still readable as what BETTOR believed at the time.
     """
     decision_ts = decision_ts or _now()
     blocks = blockers_for(opportunity, market_state)
@@ -411,9 +412,9 @@ def decide(opportunity: dict, market_state: dict | None, *,
     # written down and auditable, not an assertion that no comparison
     # was possible.
     #
-    # THE GATE DOES NOT MOVE. Nothing here can produce a BUY or a SELL.
-    # The table is evidence, and a positive EV in it is a research
-    # finding, never an instruction.
+    # THE TABLE IS NOT THE GATE. A positive EV in it is a research
+    # finding, never an instruction; only bettor_entry_gate.admit, below,
+    # can return an entry, and only on inputs production never supplies.
     # NO SIZE IS PASSED, DELIBERATELY. BETTOR has no sizing policy --
     # SIZING_POLICY_VERSION is NOT_APPLICABLE -- so the order size is
     # genuinely not identified. Handing the book's availableDepth in as
