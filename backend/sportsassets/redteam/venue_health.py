@@ -101,19 +101,51 @@ def stream_gap(stream_beat: dict | None, *, now: float) -> str | None:
     return None
 
 
+def api_stream_gap(pmx_primary: dict | None, *, markable) -> str | None:
+    """PURE. Why the DECIDING process's stream (sportsassets-api: the books
+    the held marks and the decision path read) is a gap, or None. Read from
+    completion's market_data.pmx_primary (the newest held-mark run's persisted
+    digest). Judged only while held positions are markable -- that is what
+    this stream is for. FAIL CLOSED: no evidence, a run older than
+    HEARTBEAT_MAX_AGE_S, a gap state or any stream not connected is a gap."""
+    if not int(markable or 0):
+        return None
+    pp = pmx_primary if isinstance(pmx_primary, dict) else None
+    if not pp:
+        return "API_STREAM_EVIDENCE_ABSENT"
+    age = pp.get("run_age_s")
+    if age is None or float(age) > HEARTBEAT_MAX_AGE_S:
+        return "API_STREAM_RUN_STALE"
+    state = str(pp.get("state") or "")
+    if not state:
+        return "API_STREAM_STATE_UNREADABLE"
+    if state in STREAM_GAP_STATES:
+        return "API_STREAM_%s" % state
+    if pp.get("connected") is not True:
+        return "API_STREAM_NOT_CONNECTED:%s" % state
+    return None
+
+
 def polymarket_health(held: dict | None, stream_beat: dict | None, *,
-                      now: float) -> VenueHealth:
+                      now: float, api_stream: dict | None = None,
+                      judge_api_stream: bool = False) -> VenueHealth:
     """POLYMARKET_US from the PMUS paths only: held books current over held
-    books markable; a stream gap open is a gap (`stream_gap`, fail closed).
-    A missing held read is zero current books."""
+    books markable; a stream gap open is a gap (`stream_gap`, fail closed),
+    in the workers' stream and -- when `judge_api_stream` -- in the deciding
+    process's stream (`api_stream_gap`). A missing held read is zero current
+    books."""
     held = held or {}
     den = int(held.get("markable") or 0)
     num = int(held.get("freshly_manageable") or 0)
     gaps = 1 if stream_gap(stream_beat, now=now) else 0
+    if judge_api_stream and api_stream_gap(api_stream, markable=den):
+        gaps += 1
     return VenueHealth(POLYMARKET_US, num, den, max(0, den - num), gaps,
                        False, float(held.get("as_of") or now),
                        "bettor_paper_freshness (held PMUS books) + "
-                       "institutional_md stream state")
+                       "institutional_md stream state" + (
+                           " + sportsassets-api stream (pmx_primary)"
+                           if judge_api_stream else ""))
 
 
 def report(items: list, *, min_rate: float = MIN_RATE) -> dict:
@@ -159,12 +191,14 @@ def denominators(*, held: dict | None, priority: dict | None,
 
 
 async def read(conn, *, held: dict | None, priority: dict | None,
-               total: dict | None, now: float) -> dict:
+               total: dict | None, now: float,
+               api_stream: dict | None = None) -> dict:
     from .. import kalshi_ws as KWS
     kb = await _beat(conn, "kalshi_market_data")
     k = kalshi_health(kb, now=now)
     sb = await _beat(conn, "institutional_md")
-    p = polymarket_health(held, sb, now=now)
+    p = polymarket_health(held, sb, now=now, api_stream=api_stream,
+                          judge_api_stream=True)
     rep = report([p, k])
     # WHICH mechanism serves the Kalshi books (WebSocket primary on the
     # dedicated plane, or REST fallback, every reason named). Reported, not
@@ -176,6 +210,8 @@ async def read(conn, *, held: dict | None, priority: dict | None,
     return {"venues": rep, "isolated": set(rep) == {KALSHI, POLYMARKET_US},
             "kalshi_mechanism": mech,
             "polymarket_stream_gap": stream_gap(sb, now=now),
+            "polymarket_api_stream_gap": api_stream_gap(
+                api_stream, markable=(held or {}).get("markable")),
             "blended_status": None,
             "cross_venue_pair": pair_gate(rep, POLYMARKET_US, KALSHI),
             "freshness": denominators(held=held, priority=priority,

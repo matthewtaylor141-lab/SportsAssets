@@ -331,22 +331,34 @@ def _red(md):
             "completion": {"small_live": "SHADOW", "market_data": md}}
 
 
-def test_s8_no_plane_snapshot_reads_the_deciding_process():
+def test_s8_no_current_plane_snapshot_is_rest_and_the_process_only_reported():
+    """The harness reads PMX from the dedicated plane's CURRENT snapshot
+    only: a stale snapshot -- even one that says fresh > 0 -- is REST with
+    the fresh count withheld, and the deciding process's own stream is
+    REPORTED in provenance, never substituted into a harness input."""
     pp = CR.pmx_primary_block(_run(), FEEDS, markable=11, now=10_000.0)
+    assert pp["source"] == "PMX_GRPC"           # the process stream is up
     e, prov = PA.collect(red=_red({"snapshot": "MARKET_PLANE_SNAPSHOT_STALE_"
-                                               "19660s", "fresh": None,
+                                               "19660s", "fresh": 812,
+                                   "subscription_mode": "ALL",
                                    "pmx_primary": pp}),
                          scoreboard={}, release=None, now=10_000.0)
-    assert e["pmx_primary_source"] == "PMX_GRPC"
-    assert e["pmx_grpc_fresh_count"] == 9
-    assert "deciding-process" in prov["pmx_primary_source"]["source"]
+    assert e["pmx_primary_source"] == "REST"
+    assert "pmx_grpc_fresh_count" not in e
+    rep = prov["pmx_primary_source"]["deciding_process_report"]
+    assert rep["source"] == "PMX_GRPC" and rep["held_fresh_from_stream"] == 9
     g = PA.evaluate(red=_red({"snapshot": "NO_MARKET_PLANE_SNAPSHOT",
                               "pmx_primary": pp}),
                     scoreboard={}, release=None, now=10_000.0)["gates"]
-    assert g["pmx_grpc_primary"]["pass"] is True
-    # ... and nothing else is decided from it: priority freshness stays the
-    # plane's, absent here, so the gate fails
+    assert g["pmx_grpc_primary"]["pass"] is False
     assert g["priority_freshness"]["pass"] is False
+    # a CURRENT plane snapshot is the only road to PMX_GRPC
+    e, _ = PA.collect(red=_red({"snapshot": "CURRENT", "fresh": 812,
+                                "subscription_mode": "ALL",
+                                "pmx_primary": pp}),
+                      scoreboard={}, release=None, now=10_000.0)
+    assert (e["pmx_primary_source"], e["pmx_grpc_fresh_count"]) == (
+        "PMX_GRPC", 812)
 
 
 def test_s8_unproven_primary_fails_the_gate_and_a_current_plane_wins():
@@ -379,3 +391,142 @@ def test_the_persisted_market_data_carries_the_primary_evidence():
     from sportsassets.agents import paper_mark_refresh as PMR
     assert 'out["market_data"]["institutional_refusals"]' in \
         inspect.getsource(PMR.refresh)
+
+
+# ── R: adversarial review of 884ebb7a ──────────────────────────────────
+
+@pytest.mark.parametrize("stream,rest,src", [
+    (1, 10, CR.PMX_REST), (5, 5, CR.PMX_REST), (6, 5, CR.PMX_GRPC)])
+def test_r1_primary_means_the_majority_held_mark_source(stream, rest, src):
+    feeds = {"held_marks_by_source": {"INSTITUTIONAL_STREAM": stream,
+                                      "REST": rest},
+             "fresh_marks_by_source": {"INSTITUTIONAL_STREAM": stream,
+                                       "REST": rest}}
+    b = CR.pmx_primary_block(_run(), feeds, markable=stream + rest,
+                             now=10_000.0)
+    assert b["source"] == src
+    if src == CR.PMX_REST:
+        assert "STREAM_NOT_THE_MAJORITY_HELD_MARK_SOURCE" in b["why"]
+        g = PA.evaluate(red=_red({"snapshot": "NO_MARKET_PLANE_SNAPSHOT",
+                                  "pmx_primary": b}),
+                        scoreboard={}, release=None, now=10_000.0)["gates"]
+        assert g["pmx_grpc_primary"]["pass"] is False
+
+
+def test_r2_a_held_market_preempts_entries_this_pass_does_not_want():
+    """retain() frees only entries idle RETAIN_IDLE_S; 200 entries named
+    inside that window (focus churn, the decision path's own wants) must
+    still not refuse a newly held market."""
+    _start()
+    now = 10_000.0
+    IS.BOOKS._clock = lambda: now
+    recent = ["aec-cand-%03d" % i for i in range(IS.MAX_SYMBOLS)]
+    with IS.BOOKS._lock:
+        for s in recent:
+            IS.BOOKS._markets[s] = IS._new_market(now - 60.0)
+    FU.note_held_first([SLUG])
+
+    class Client:
+        def read(self, name, symbol=""):
+            rec = copy.deepcopy(AEC) if symbol == SLUG else None
+            return {"status": 200, "ms": 3,
+                    "body": {"instruments": [rec] if rec else []}}
+    got = asyncio.run(IAS.refresh_once(client=Client(), symbols=[], now=now))
+    assert got["subscribed"] == 1
+    assert SLUG in IS.BOOKS.wanted()
+    assert IS._TRANSPORT.subs and IS._TRANSPORT.subs[-1] == [SLUG]
+    r = IAS.primary_report()
+    assert r["held_subscribed"] == 1 and r["held_preempted"] == IS.MAX_SYMBOLS
+    assert r["dropped_at_cap"] == 1          # the first try, counted
+
+
+def test_r3_a_re_want_on_the_same_connection_keeps_its_ack():
+    now = {"t": 0.0}
+    b = IS.ResidentBooks(clock=lambda: now["t"])
+    b.want(["A"])
+    b.on_connected("c1")
+    b.on_ack(added=["A"])
+    now["t"] = IS.RETAIN_IDLE_S + 1.0
+    assert b.retain([]) == ["A"]
+    b.want(["A"])                 # still subscribed at the venue
+    assert b.digest()["acked"] == 1
+    now["t"] += IS.RETAIN_IDLE_S + 1.0
+    b.retain([])
+    b.on_connected("c2")          # a new connection forgets it
+    b.want(["A"])
+    assert b.digest()["acked"] == 0
+
+
+def test_r3_the_venue_side_set_is_bounded_by_recycling_the_connection():
+    """Nothing is unsubscribed, so evicted entries stay subscribed at the
+    venue; past SUBSCRIBED_RECYCLE_AT the watchdog (the one place that ends
+    a call) recycles the connection and nothing new is sent on it."""
+    import time as _t
+
+    class Call:
+        cancelled = 0
+
+        def cancel(self):
+            Call.cancelled += 1
+    books = IS.ResidentBooks()
+    t = IS.GrpcBidiTransport(books, lambda: "t",
+                             modules=IS.load_generated())
+    t._subscribed = {"S%04d" % i for i in range(IS.SUBSCRIBED_RECYCLE_AT)}
+    t.subscribe(["NEW"])
+    assert t.recycles == 1 and t._recycle.is_set()
+    assert t._q.empty()           # nothing sent: the next connection asks
+    done = t._watchdog(Call())
+    deadline = _t.monotonic() + 5.0
+    while Call.cancelled == 0 and _t.monotonic() < deadline:
+        _t.sleep(0.05)
+    done.set()
+    assert Call.cancelled == 1
+    assert IS.SUBSCRIBED_RECYCLE_AT < 1000      # documented per stream
+    assert IS.OUTBOUND_COMMANDS == ("subscribe", "keepalive")
+    t2 = IS.GrpcBidiTransport(IS.ResidentBooks(), lambda: "t",
+                              modules=IS.load_generated())
+    t2.subscribe(["A", "B"])
+    assert not t2._q.empty() and t2.recycles == 0
+
+
+@pytest.mark.parametrize("pp,reason", [
+    (None, "API_STREAM_EVIDENCE_ABSENT"),
+    ({"run_age_s": 400.0, "state": "CONNECTED", "connected": True},
+     "API_STREAM_RUN_STALE"),
+    ({"run_age_s": 20.0, "state": "GAVE_UP", "connected": False},
+     "API_STREAM_GAVE_UP"),
+    ({"run_age_s": 20.0, "state": "IDLE_NO_SYMBOLS_REQUESTED",
+      "connected": False},
+     "API_STREAM_NOT_CONNECTED:IDLE_NO_SYMBOLS_REQUESTED"),
+])
+def test_r4_venue_health_also_judges_the_deciding_stream(pp, reason):
+    held = {"markable": 11, "freshly_manageable": 11, "as_of": 1000.0}
+    beat = {"at": 990.0, "detail": {"stream": {
+        "state": "CONNECTED", "connected": True}}}
+    assert VH.api_stream_gap(pp, markable=11) == reason
+    rep = VH.report([VH.polymarket_health(held, beat, now=1000.0,
+                                          api_stream=pp,
+                                          judge_api_stream=True)])
+    assert rep["POLYMARKET_US"]["green"] is False
+    ok = {"run_age_s": 20.0, "state": "CONNECTED", "connected": True}
+    assert VH.api_stream_gap(ok, markable=11) is None
+    assert VH.api_stream_gap(None, markable=0) is None   # nothing to mark
+    rep = VH.report([VH.polymarket_health(held, beat, now=1000.0,
+                                          api_stream=ok,
+                                          judge_api_stream=True)])
+    assert rep["POLYMARKET_US"]["green"] is True
+
+
+def test_r4_the_red_team_evidence_names_both_stream_gaps():
+    from sportsassets.redteam import readiness as RR
+    src = inspect.getsource(RR)
+    assert '"polymarket_stream_gap": vh.get(' in src
+    assert '"polymarket_api_stream_gap": vh.get(' in src
+    assert 'api_stream=md.get("pmx_primary")' in src
+
+
+def test_r5_no_boot_line_labels_the_process_with_the_pre_stream_constants():
+    from sportsassets.workers import shadow_experimental as SX
+    src = inspect.getsource(SX.run)
+    assert "streamTarget=pmx.STREAM_TARGET" not in src
+    assert "marketDataMechanism=pmx.MARKET_DATA_MECHANISM" not in src

@@ -211,7 +211,8 @@ async def evaluate(conn, *, now: float | None = None,
     unk = {"rate": None, "green": False, "status": "UNAVAILABLE",
            "source": "UNAVAILABLE", "numerator": None, "denominator": None}
     vh = await sec.run("venue_health", lambda: VH.read(
-        conn, held=held, priority=pri, total=None, now=now), {
+        conn, held=held, priority=pri, total=None, now=now,
+        api_stream=md.get("pmx_primary")), {
             "venues": {}, "isolated": None, "cross_venue_pair": None,
             "freshness": {"held": dict(unk), "priority": dict(unk)}})
     venues = vh["venues"]
@@ -225,7 +226,16 @@ async def evaluate(conn, *, now: float | None = None,
          for b in v.get("blockers") or ()],
         {"venues": venues, "isolated": vh["isolated"],
          "cross_venue_pair": vh["cross_venue_pair"],
-         "freshness": vh["freshness"]})
+         "freshness": vh["freshness"],
+         # WHY a PMX stream counts as a gap (None = no gap); absent from
+         # the evidence before, so a readback could not tell
+         "polymarket_stream_gap": vh.get("polymarket_stream_gap",
+                                         "VENUE_HEALTH_UNREAD"),
+         "polymarket_api_stream_gap": vh.get("polymarket_api_stream_gap",
+                                             "VENUE_HEALTH_UNREAD"),
+         # which mechanism serves the Kalshi books (reported, not a gate)
+         "kalshi_mechanism": vh.get("kalshi_mechanism",
+                                    "VENUE_HEALTH_UNREAD")})
     rows, open_disc = await sec.run("truth_quorum", lambda: C.quorum_rows(
         conn, now=now, venue_confirmed=bool(venue.get("venue_confirmed")),
         market_data_green=pm_green), ([], None))

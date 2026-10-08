@@ -884,6 +884,16 @@ async def tick(pool, *, now=None) -> dict:
 # ── boot ─────────────────────────────────────────────────────────────
 
 
+def _mechanisms() -> dict:
+    """pmx.market_data_mechanisms for THIS process (stream armed or not).
+    Never raises: a boot line is not worth a crash."""
+    try:
+        from .. import institutional_stream as istream
+        return pmx.market_data_mechanisms(stream_enabled=istream.enabled())
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": type(exc).__name__}
+
+
 async def run() -> None:
     if _off("SHADOW_EXPERIMENTAL"):
         log.info("shadow_experimental: collection off by switch")
@@ -937,8 +947,13 @@ async def run() -> None:
                 # named as a fallback, and neither is inferred.
                 primaryLatencyRegime=DIRECT,
                 fallbackLatencyRegime=xstore.REGIME_BRIDGE,
-                marketDataMechanism=pmx.MARKET_DATA_MECHANISM,
-                streamTarget=pmx.STREAM_TARGET,
+                # THE LANE prices from the REST-swept books
+                # (institutional_book); the process ALSO arms the PMX gRPC
+                # stream. Named apart, never the pre-stream constants as
+                # the process's label (they said NOT_IDENTIFIED for a
+                # target the stream connects to).
+                laneBookMechanism=pmx.MARKET_DATA_MECHANISM,
+                marketDataMechanisms=_mechanisms(),
                 sealExpiryS=SEAL_EXPIRY_S,
                 disclosure=xp.EXPERIMENTAL_DISCLOSURE)
     log.info("shadow_experimental: %s", boot)

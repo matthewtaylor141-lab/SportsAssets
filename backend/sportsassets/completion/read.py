@@ -255,8 +255,10 @@ def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
                  refusal (identity / same-book / not current / SLA)
 
     `source` is PMX_GRPC only when the run is inside PMX_RUN_MAX_AGE_S, the
-    stream is CONNECTED with >= 1 current resident book, and >= 1 held mark
-    came from it; otherwise REST with every reason named."""
+    stream is CONNECTED with >= 1 current resident book, >= 1 held mark
+    came from it, AND the stream is the majority source of the freshly
+    manageable held marks (more than the REST family); otherwise REST with
+    every reason named."""
     run = run or {}
     md = run.get("market_data") or {}
     inst = ((md.get("streams") or {}).get("institutional")) or {}
@@ -280,6 +282,11 @@ def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
         why.append("NO_CURRENT_RESIDENT_L2_BOOK")
     if stream_fresh <= 0:
         why.append("NO_HELD_MARK_FROM_THE_STREAM")
+    elif stream_fresh <= rest_fresh:
+        # PRIMARY MEANS THE MAIN SOURCE. One stream mark beside ten REST
+        # marks is REST with a stream attached (red-team closure #5: PMX
+        # must not silently fall back to REST under a PMX label).
+        why.append("STREAM_NOT_THE_MAJORITY_HELD_MARK_SOURCE")
     den = int(markable or 0)
     return {
         "source": PMX_REST if why else PMX_GRPC, "why": why,

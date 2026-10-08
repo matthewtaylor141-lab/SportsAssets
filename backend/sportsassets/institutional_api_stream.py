@@ -97,7 +97,8 @@ _REQUESTED: dict = {}
 _ATTEMPT: dict = {}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
                 "refdata_reads": 0, "refdata_failures": 0, "backlog": 0,
-                "held_wanted": 0, "held_subscribed": 0}
+                "held_wanted": 0, "held_subscribed": 0,
+                "held_preempted": 0}
 #: The last focus universe computed here (members without identity).
 _UNIVERSE: dict = {}
 
@@ -177,6 +178,7 @@ def primary_report(*, now=None) -> dict:
         "venue_receipt_lag_s": d.get("venue_receipt_lag_s"),
         "dropped_at_cap": d.get("dropped_at_cap"),
         "evicted": d.get("evicted"),
+        "held_preempted": _STATE.get("held_preempted"),
         "by_refusal": d.get("by_refusal"),
         "held_wanted": _STATE.get("held_wanted"),
         "held_subscribed": _STATE.get("held_subscribed"),
@@ -276,7 +278,7 @@ def reset() -> None:
         _UNIVERSE.clear()
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
                   refdata_failures=0, backlog=0, held_wanted=0,
-                  held_subscribed=0)
+                  held_subscribed=0, held_preempted=0)
 
 
 async def _focus_symbols(get_pool, focus) -> list:
@@ -471,6 +473,16 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
               + [s for s in priced if s not in held_set])
     IS.BOOKS.retain(wanted)
     IS.want(priced)
+    # THE GUARANTEE, not a likelihood: `retain` frees only entries idle for
+    # RETAIN_IDLE_S, so focus churn or the decision path's own wants inside
+    # that window can still fill the bound. A held market the bound refused
+    # takes the slot of an entry THIS pass does not want. `wanted` is at
+    # most MAX_SYMBOLS + HELD_SYMBOL_BUDGET = IS.MAX_SYMBOLS, so it fits.
+    have = set(IS.BOOKS.wanted())
+    if any(s in held_set and s not in have for s in priced):
+        _STATE["held_preempted"] = int(_STATE.get("held_preempted") or 0) \
+            + len(IS.BOOKS.retain(wanted, idle_s=0.0))
+        IS.want(priced)
     _STATE.update(backlog=backlog,
                   held_wanted=sum(1 for s in wanted if s in held_set),
                   held_subscribed=sum(1 for s in priced if s in held_set))

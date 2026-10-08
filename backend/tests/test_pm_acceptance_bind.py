@@ -26,7 +26,8 @@ def green_red() -> dict:
                                    "universal_market_plane_started_here":
                                        False},
                 "market_plane": {"state": "DEDICATED_RUNNING"}},
-            "market_data": {"fresh": 812, "subscription_mode": "ALL"},
+            "market_data": {"snapshot": "CURRENT", "fresh": 812,
+                            "subscription_mode": "ALL"},
             "settlement": {"settlement_proven": True},
             "gate_evidence": {
                 "software_reds_zero": {"evidence": {"software": 0}},

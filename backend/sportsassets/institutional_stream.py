@@ -151,6 +151,14 @@ RESTART_AFTER_REFUSAL_S = 1800.0
 #: focus universe is recomputed every 60 s and the held-mark refresh names
 #: held markets every run; 30 min is many passes of neither naming it).
 RETAIN_IDLE_S = 1800.0
+#: NOTHING IS EVER UNSUBSCRIBED (OUTBOUND_COMMANDS), so an entry `retain`
+#: evicts stays subscribed AT THE VENUE for the connection's life. Before
+#: `retain` existed the local bound (MAX_SYMBOLS) also bounded the venue-side
+#: set; now a long-lived connection would keep growing past the documented
+#: 1,000 symbols per stream. Past this many symbols subscribed on one
+#: connection the transport recycles it (a local cancel, no new command):
+#: the next connection subscribes only what the books want (<= MAX_SYMBOLS).
+SUBSCRIBED_RECYCLE_AT = 2 * MAX_SYMBOLS
 
 VENUE_SEQUENCE = "NOT_PROVIDED_BY_VENUE"
 OPEN_STATES = ("INSTRUMENT_STATE_OPEN",)
@@ -255,8 +263,12 @@ class ResidentBooks:
         self._acks = 0
         self._dropped_at_cap = 0
         self._dropped_recent: list = []
-        #: entries `retain` evicted (not wanted for RETAIN_IDLE_S)
+        #: entries `retain` evicted (not wanted for RETAIN_IDLE_S), and the
+        #: venue ack each carried on THIS connection: the venue still holds
+        #: the subscription, so a re-want on the same connection is acked
+        #: (cleared on every new connection)
         self._evicted = 0
+        self._evicted_acked: dict = {}
         self._refusal = None
         self._markets: dict = {}
         self._instruments: dict = {}
@@ -318,6 +330,9 @@ class ResidentBooks:
                                                 + [s])[-10:]
                         continue
                     self._markets[s] = _new_market(at)
+                    if self._connected and self._evicted_acked.pop(
+                            s, None) == self._conn_seq:
+                        self._markets[s]["acked_seq"] = self._conn_seq
                     fresh.append(s)
                 self._markets[s]["wanted_at"] = at
         return fresh
@@ -338,6 +353,9 @@ class ResidentBooks:
                 if s in keep:
                     continue
                 if at - float(m.get("wanted_at") or 0.0) > idle:
+                    if self._connected and m.get("acked_seq") == \
+                            self._conn_seq:
+                        self._evicted_acked[s] = self._conn_seq
                     del self._markets[s]
                     out.append(s)
             self._evicted += len(out)
@@ -372,6 +390,7 @@ class ResidentBooks:
             self._connected_at = now
             self._last_life_at = now
             self._refusal = None
+            self._evicted_acked.clear()
             for m in self._markets.values():
                 m["hw"] = None          # a venue clock is per connection
                 m["acked_seq"] = None
@@ -891,6 +910,10 @@ class GrpcBidiTransport:
         # Interruptible by stop() unless a test injects its own sleep.
         self._sleep = sleep or self._stop.wait
         self._subscribed: set = set()
+        #: set when the venue-side set outgrew SUBSCRIBED_RECYCLE_AT: the
+        #: watchdog (the one place that ends a call) recycles the connection
+        self._recycle = threading.Event()
+        self.recycles = 0
         self._connected = False
         self._reauth_used = False
         self.consecutive_failures = 0
@@ -942,6 +965,13 @@ class GrpcBidiTransport:
             return
         new = [s for s in symbols or () if s and s not in self._subscribed]
         if not new:
+            return
+        if len(self._subscribed) + len(new) > SUBSCRIBED_RECYCLE_AT:
+            # the venue-side set outgrew the bound (evicted entries are never
+            # unsubscribed): recycle; the next connection subscribes
+            # books.wanted(), which already holds `new`
+            self.recycles += 1
+            self._recycle.set()
             return
         self._q.put(self._subscribe_request(new))
         self._subscribed.update(new)
@@ -1010,6 +1040,7 @@ class GrpcBidiTransport:
         # ALREADY_SUBSCRIBED, which is benign) instead of being lost.
         self._q = queue.Queue()
         self._subscribed = set()
+        self._recycle.clear()         # this connection asks for wanted() only
         symbols = self.books.wanted()
         if not symbols and not self.subscribe_all:
             # NEVER an empty subscribe in this mode: the venue reads it as ALL
@@ -1088,7 +1119,11 @@ class GrpcBidiTransport:
         def watch():
             while not done.wait(1.0) and not self._stop.is_set():
                 silence = self.books.silence_s()
-                if silence is not None and silence > WATCHDOG_S:
+                # ...and a connection whose venue-side subscription set
+                # outgrew SUBSCRIBED_RECYCLE_AT is ended the same way, so
+                # the next one subscribes only what the books want
+                if self._recycle.is_set() or (
+                        silence is not None and silence > WATCHDOG_S):
                     try:
                         call.cancel()
                     except Exception:                         # noqa: BLE001
@@ -1300,7 +1335,10 @@ def digest() -> dict:
         out = getattr(t, "outbound", None)
         return dict(BOOKS.digest(), start=dict(_START),
                     subscription_mode=mode,
-                    outbound=dict(out) if isinstance(out, dict) else None)
+                    outbound=dict(out) if isinstance(out, dict) else None,
+                    venue_subscribed=(len(getattr(t, "_subscribed", ()) or ())
+                                      if t is not None else None),
+                    recycles=getattr(t, "recycles", None))
     except Exception as exc:                                  # noqa: BLE001
         return {"version": VERSION, "digest_failed": type(exc).__name__}
 
