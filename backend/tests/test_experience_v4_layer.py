@@ -402,3 +402,11 @@ def test_inferred_team_logo_needs_its_own_card_or_monitor_league():
     assert src.count("https://") == 2
     assert "var POLY_ICON='https://polymarket.com/images/brand/icon-blue.png';" in src
     assert "var ESPN='https://a.espncdn.com/i/teamlogos/';" in src
+
+
+def test_rail_placement_listener_survives_older_safari():
+    # MediaQueryList.addEventListener is Safari 14+; an exception here would abort the rest of the
+    # layer's setup (Broadcast shell, decorate observer) on an older iPhone
+    src = js()
+    assert "matchMedia('(max-width:760px)').addEventListener('change',placeRail)" not in src
+    assert "if(mq&&mq.addEventListener)mq.addEventListener('change',placeRail);else if(mq&&mq.addListener)mq.addListener(placeRail);" in src
