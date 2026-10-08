@@ -901,7 +901,13 @@ function boot() {
   render();
   mountScene().then(() => { const m = want.match(/^desk=([a-z_]+)$/); if (m) openDesk(m[1], {keepHash: true}); });
   if (S.view === 'capital') HQ.readCapital();
-  setTimeout(() => { const h = $('#hq-hint'); if (h) h.classList.add('gone'); }, 9000);
+  // the hint fades (#hq-hint.gone: a .6 s opacity transition), then leaves the
+  // layout. A CSS transition only advances on painted frames: on a frame-
+  // starved WebGL page (production preview 37834226533: 0 fps on desktop and
+  // iPad Command) the 'gone' hint stayed at opacity 1 under the CRITICAL bar
+  // and the HUD columns. A timer runs without frames, so `hidden` makes gone
+  // mean gone; hq-scene.js hides it the same way when the room is dragged.
+  setTimeout(() => { const h = $('#hq-hint'); if (h) { h.classList.add('gone'); setTimeout(() => { h.hidden = true; }, 700); } }, 9000);
 }
 window.__hqModel = HQ;
 if (doc.readyState === 'loading') doc.addEventListener('DOMContentLoaded', boot); else boot();
