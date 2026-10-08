@@ -34,6 +34,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..config import settings
+from ..venue_key import SecretNotEd25519
 from .pmus_account import _act_ts, _amt, _any_ts
 
 _raw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
@@ -1074,9 +1075,15 @@ def _paged(call, params: dict, max_pages: int,
 
 def _fetch_raw() -> dict:
     from polymarket_us import PolymarketUS
+    from ..venue_key import signing_secret
 
     cfg = settings()
-    client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
+    # PRECONDITION (P1 closeout): a slot holding no Ed25519 key raises
+    # SecretNotEd25519 here, before any client -- production signed nothing
+    # and logged three tracebacks per refresh ("The seed must be exactly 32
+    # bytes long", api/track_record.py _paged)
+    client = PolymarketUS(key_id=cfg.pmus_key_id,
+                          secret_key=signing_secret(cfg.pmus_secret_key))
     # Positions page to EOF (cap 40 = 4,000). The old cap of 8 pages was
     # sized for the engine sleeve alone; once the copy sleeve ran hundreds
     # of clips a day the account blew through 800 rows and every position
@@ -2157,6 +2164,13 @@ async def track_record(since: str | None = None,
                             _raw_cache["ts"] = time.time()
                             await _archive_and_union(
                                 _raw_cache["data"]["activities"])
+                        except SecretNotEd25519 as exc:
+                            # deterministic, named, one line: the persisted
+                            # payload keeps serving
+                            logging.getLogger(__name__).warning(
+                                "background cold fetch refused (%s): the "
+                                "PMUS_SECRET_KEY slot holds no Ed25519 key",
+                                exc)
                         except Exception:  # noqa: BLE001
                             logging.getLogger(__name__).exception(
                                 "background cold fetch failed")

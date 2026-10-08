@@ -228,10 +228,11 @@ def venue_positions_block(hb, *, now: float) -> dict:
         return dict(out, status="OWNER_CREDENTIAL_REQUIRED",
                     credential_type=("POLYMARKET_US_RETAIL_API_KEY "
                                      "(Ed25519, polymarket.us/developer)"),
-                    owner_action=("enter a Polymarket US retail Ed25519 API "
-                                  "key in the PMUS key-id / secret slots of "
-                                  "sportsassets-workers; the slot now holds "
-                                  "no Ed25519 key, so positions are "
+                    owner_action=("enter the FUNDED account's Polymarket US "
+                                  "retail Ed25519 API key in PMUS_KEY_ID / "
+                                  "PMUS_SECRET_KEY of sportsassets-workers "
+                                  "AND sportsassets-api; both slots hold the "
+                                  "PMX RSA client, so positions are "
                                   "LEDGER_DERIVED, never venue-confirmed"),
                     workaround="NONE (auth is never worked around)")
     return dict(out, status="NOT_CONFIRMED",

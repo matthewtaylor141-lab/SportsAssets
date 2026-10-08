@@ -586,7 +586,18 @@ def _boot_marker(at: str) -> dict:
             # RED TEAM credential-class guard: each logical slot's CLASS by
             # shape only (never a value, length or prefix), so a key in the
             # wrong slot blocks that path and names the owner action
-            "credential_classes": _credential_classes()}
+            "credential_classes": _credential_classes(),
+            # PMUS retail credential census: every candidate env NAME ->
+            # shape enum (pmus_credential_census), never a value
+            "pmus_credential_census": _pmus_census()}
+
+
+def _pmus_census() -> dict:
+    try:
+        from .. import pmus_credential_census as PCC
+        return PCC.census(service="sportsassets-workers")
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": type(exc).__name__}
 
 
 def _credential_classes() -> dict:

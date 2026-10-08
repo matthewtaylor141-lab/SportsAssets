@@ -13,6 +13,7 @@ import time
 from typing import Any
 
 from ..config import settings
+from ..venue_key import signing_secret
 
 _cache: dict[str, Any] = {"ts": 0.0, "data": None}
 _CACHE_TTL = 30.0
@@ -354,7 +355,8 @@ def _fetch_sync() -> dict:
     from polymarket_us import PolymarketUS
 
     cfg = settings()
-    client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
+    client = PolymarketUS(key_id=cfg.pmus_key_id,
+                          secret_key=signing_secret(cfg.pmus_secret_key))
     balances = client.account.balances() or {}
     positions: dict[str, dict] = {}
     cursor = ""
@@ -401,7 +403,7 @@ def _fetch_all_positions_sync() -> dict[str, dict]:
 
     cfg = settings()
     client = PolymarketUS(key_id=cfg.pmus_key_id,
-                          secret_key=cfg.pmus_secret_key)
+                          secret_key=signing_secret(cfg.pmus_secret_key))
     positions: dict[str, dict] = {}
     cursor = ""
     for _ in range(50):
@@ -526,7 +528,7 @@ def _fetch_week_activities_sync(oldest_day: str) -> list[dict]:
 
     cfg = settings()
     client = PolymarketUS(key_id=cfg.pmus_key_id,
-                          secret_key=cfg.pmus_secret_key)
+                          secret_key=signing_secret(cfg.pmus_secret_key))
     acts: list[dict] = []
     cursor = ""
     for _ in range(80):

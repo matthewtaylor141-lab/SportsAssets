@@ -1280,3 +1280,4 @@ tests/test_pm_evidence_package_parity.py
 tests/test_pm_golden_production.py
 tests/test_pm_scoreboard_bind.py
 tests/test_pm_acceptance_bind.py
+tests/test_pmus_credential_census.py

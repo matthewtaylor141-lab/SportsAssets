@@ -452,14 +452,28 @@ def credential_classes(env=None) -> dict:
         return {MDI.SHAPE_PMUS_RETAIL: "POLYMARKET_US_ED25519",
                 MDI.SHAPE_RSA_PEM: "RSA_PEM"}.get(shape, "UNRECOGNISED_SHAPE")
 
+    def pm(c):
+        return "POLYMARKET_EXCHANGE_RSA_M2M" if c == "RSA_PEM" else c
+
     pmx = cls("PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
-    pmus = cls("PMUS_EXECMIRROR_KEY_ID", "PMUS_EXECMIRROR_SECRET_KEY") or \
-        cls("PMUS_KEY_ID", "PMUS_SECRET_KEY")
+    # EVERY PMUS slot present in this process is classified, and the slot
+    # class is the first one that does NOT match (P1 closeout 2026-10-07):
+    # the execution-mirror pair used to be read first and HID the funded
+    # pair -- production's API reported PMUS = POLYMARKET_US_ED25519 while
+    # its PMUS_KEY_ID / PMUS_SECRET_KEY held the PMX RSA key that
+    # track_record and pmus_account sign with.
+    pmus_slots = {"PMUS_KEY_ID/PMUS_SECRET_KEY":
+                  pm(cls("PMUS_KEY_ID", "PMUS_SECRET_KEY")),
+                  "PMUS_EXECMIRROR_KEY_ID/PMUS_EXECMIRROR_SECRET_KEY":
+                  pm(cls("PMUS_EXECMIRROR_KEY_ID",
+                         "PMUS_EXECMIRROR_SECRET_KEY"))}
+    present = [c for c in pmus_slots.values() if c is not None]
+    pmus = next((c for c in present if c != "POLYMARKET_US_ED25519"),
+                present[0] if present else None)
     kal = cls("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PEM")
-    return {"PMX": "POLYMARKET_EXCHANGE_RSA_M2M" if pmx == "RSA_PEM" else pmx,
-            "PMUS": ("POLYMARKET_EXCHANGE_RSA_M2M" if pmus == "RSA_PEM"
-                     else pmus),
-            "KALSHI": "KALSHI_RSA_API_KEY" if kal == "RSA_PEM" else kal}
+    return {"PMX": pm(pmx), "PMUS": pmus,
+            "KALSHI": "KALSHI_RSA_API_KEY" if kal == "RSA_PEM" else kal,
+            "PMUS_SLOTS": pmus_slots}
 
 
 def credentials(by_process: dict) -> dict:
@@ -469,7 +483,7 @@ def credentials(by_process: dict) -> dict:
     merged: dict = {}
     for _p, slots in by_process.items():
         for slot, c in (slots or {}).items():
-            if c is not None:
+            if c is not None and slot in RTCRED.EXPECTED:
                 merged.setdefault(slot, set()).add(c)
     mism, missing, verdicts = [], [], {}
     for slot, want in RTCRED.EXPECTED.items():
@@ -488,10 +502,16 @@ def credentials(by_process: dict) -> dict:
         _ = g
     actions = []
     if any(m.startswith("CREDENTIAL_CLASS_MISMATCH:PMUS") for m in mism):
+        where = sorted(
+            "%s %s" % (p, slot)
+            for p, s in by_process.items()
+            for slot, c in ((s or {}).get("PMUS_SLOTS") or {}).items()
+            if c is not None and c != RTCRED.EXPECTED["PMUS"])
         actions.append("enter a Polymarket US retail Ed25519 API key "
                        "(polymarket.us/developer) in the PMUS key-id / "
-                       "secret slots; the slot holds an RSA PEM key (the "
-                       "PMX class). Authentication is never weakened.")
+                       "secret slots%s; the slot holds an RSA PEM key (the "
+                       "PMX class). Authentication is never weakened." % (
+                           (" (" + ", ".join(where) + ")") if where else ""))
     return result("CREDENTIAL_CLASSES", RED if mism else GREEN, mism,
                   {"expected": dict(RTCRED.EXPECTED), "by_process":
                    {p: dict(s or {}) for p, s in by_process.items()},

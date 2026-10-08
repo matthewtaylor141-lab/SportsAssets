@@ -102,6 +102,17 @@ async def workers_credential_classes(conn) -> dict | None:
     return v.get("credential_classes")
 
 
+async def workers_pmus_census(conn) -> dict | None:
+    """The workers' PMUS credential census from their boot heartbeat (names
+    and shape enums only, pmus_credential_census)."""
+    r = await conn.fetchrow(
+        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
+    if r is None:
+        return None
+    v = C._j(r["value"]) or {}
+    return v.get("pmus_credential_census")
+
+
 async def release_receipt(conn, sha: str) -> dict | None:
     if not sha or sha == "UNKNOWN" or not await C._has(
             conn, "red_team_release_receipts"):
@@ -153,6 +164,7 @@ SECTION_CONTROLS = {
     "capacity": ("CAPACITY",),
     "karen": ("KAREN_VALUE",),
     "credential_classes": ("CREDENTIAL_CLASSES",),
+    "pmus_census": ("CREDENTIAL_CLASSES",),
     "release_receipt": ("RELEASE", "MIGRATION_INTEGRITY"),
     "migrations": ("MIGRATION_INTEGRITY",),
     "fee_evidence": ("FEE_EVIDENCE",),
@@ -228,6 +240,11 @@ async def evaluate(conn, *, now: float | None = None,
         "workers": await sec.run("credential_classes",
                                  lambda: workers_credential_classes(conn),
                                  None)})
+    from .. import pmus_credential_census as PCC
+    controls["CREDENTIAL_CLASSES"]["evidence"]["pmus_census"] = {
+        "sportsassets-api": PCC.census(service="sportsassets-api"),
+        "sportsassets-workers": await sec.run(
+            "pmus_census", lambda: workers_pmus_census(conn), None)}
     rel = await sec.run("release_receipt", lambda: release_receipt(conn, sha),
                         None)
     controls["MIGRATION_INTEGRITY"] = C.migrations(
