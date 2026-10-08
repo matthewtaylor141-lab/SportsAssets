@@ -160,13 +160,13 @@ export async function createFloor(host, opts) {
   renderer.setPixelRatio(dpr);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.10;
+  renderer.toneMappingExposure = 1.26;
   renderer.shadowMap.enabled = !phone;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#05090e');
-  scene.fog = new THREE.Fog('#05090e', 22, 48);
+  scene.background = new THREE.Color('#081521');
+  scene.fog = new THREE.Fog('#0a1a28', 24, 54);
 
   // a soft in-scene environment for reflections (no HDR file)
   {
@@ -180,8 +180,8 @@ export async function createFloor(host, opts) {
   }
 
   /* lights */
-  scene.add(new THREE.HemisphereLight('#bcd6ff', '#0b1210', phone ? 1.1 : 0.92));
-  const key = new THREE.DirectionalLight('#fff1e2', 2.0);
+  scene.add(new THREE.HemisphereLight('#cfe3ff', '#0c1821', phone ? 1.28 : 1.08));
+  const key = new THREE.DirectionalLight('#fff4e9', 2.18);
   key.position.set(-3, 16, 15);
   if (!phone) {
     key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
@@ -190,7 +190,7 @@ export async function createFloor(host, opts) {
   }
   scene.add(key);
   // hq6 face fill: the room stays dark while faces/hands remain legible.
-  const faceFill = new THREE.DirectionalLight('#c7ddff', phone ? 0.32 : 0.58); // hq6 face fill
+  const faceFill = new THREE.DirectionalLight('#d5e7ff', phone ? 0.46 : 0.72); // hq6 face fill
   faceFill.position.set(0, 7, 14); scene.add(faceFill);
   const sideFill = new THREE.DirectionalLight('#86c8ff', phone ? 0.14 : 0.26);
   sideFill.position.set(9, 4, 7); scene.add(sideFill);
@@ -629,6 +629,11 @@ export async function createFloor(host, opts) {
       const gait = Math.sin(av.phase);
       av.ctl._turn('chest', -0.018, 0, gait * 0.022);
       av.ctl._turn('head', 0.008 * Math.cos(av.phase), 0, -gait * 0.010);
+    }
+    // V4 lifelike micro-presence: subtle breathing and monitor gaze only while stationary.
+    if (!av.walk && !o.reducedMotion && (p.target || 0) < 0.15) {
+      av.ctl._turn('chest', 0.006 * Math.sin(T * 0.72 + av.phase), 0, 0.006 * Math.sin(T * 0.43 + av.phase));
+      av.ctl._turn('head', 0.005 * Math.sin(T * 0.61 + av.phase), 0.018 * Math.sin(T * 0.34 + av.phase), 0);
     }
     const tgt = av.walk ? 0 : (p.target || 0);
     p.type = damp(p.type, tgt, 3, dt);

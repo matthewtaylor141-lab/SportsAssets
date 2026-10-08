@@ -1,0 +1,340 @@
+/* BETTOR EXPERIENCE V4
+ * Presentation-only layer for Command, Trading Floor and Trader Mode.
+ * No API, authority, order, cancel, funding, settlement, risk or profitability semantics.
+ */
+:root{
+  --v3-bg:#07111e;
+  --v3-bg2:#0b1829;
+  --v3-panel:rgba(13,28,47,.74);
+  --v3-panel-strong:rgba(15,33,55,.90);
+  --v3-line:rgba(157,201,244,.17);
+  --v3-line-strong:rgba(157,201,244,.34);
+  --v3-ink:#f3f8ff;
+  --v3-muted:#9db0c7;
+  --v3-cyan:#74e6ff;
+  --v3-blue:#78a7ff;
+  --v3-green:#55dfad;
+  --v3-amber:#efbd75;
+  --v3-red:#ff7f8a;
+  --v3-brass:#e6c391;
+  --v3-shadow:0 20px 60px rgba(0,0,0,.26);
+  --v3-radius:16px;
+  --v3-safe-bottom:max(14px,env(safe-area-inset-bottom));
+  --v3-safe-top:max(0px,env(safe-area-inset-top));
+}
+
+html.bt-exp-v4,body.bt-exp-v4{background:var(--v3-bg);}
+body.bt-exp-v4{color:var(--v3-ink);}
+body.bt-exp-v4 :focus-visible{outline:2px solid var(--v3-cyan)!important;outline-offset:3px!important;}
+body.bt-exp-v4 button,body.bt-exp-v4 a{touch-action:manipulation;}
+body.bt-exp-v4 .bt-v4-hidden{display:none!important;}
+
+/* Unified workspace switcher ------------------------------------------------ */
+.bt-v4-workspaces{display:flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--v3-line);border-radius:12px;background:rgba(6,15,27,.72);backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);box-shadow:0 8px 24px rgba(0,0,0,.12);}
+.bt-v4-workspaces a,.bt-v4-workspaces button{height:32px;min-width:72px;padding:0 11px;border:0;border-radius:8px;background:transparent;color:var(--v3-muted);display:inline-flex;align-items:center;justify-content:center;font:650 11px/1 "IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;letter-spacing:.11em;text-transform:uppercase;text-decoration:none;white-space:nowrap;}
+.bt-v4-workspaces a:hover,.bt-v4-workspaces button:hover{background:rgba(116,230,255,.07);color:var(--v3-ink);text-decoration:none;}
+.bt-v4-workspaces [aria-current="page"]{background:linear-gradient(180deg,rgba(116,230,255,.18),rgba(116,230,255,.06));color:var(--v3-ink);box-shadow:inset 0 -2px 0 var(--v3-cyan);}
+.bt-v4-workspaces .bt-v4-dot{width:6px;height:6px;border-radius:50%;background:var(--v3-cyan);box-shadow:0 0 10px var(--v3-cyan);margin-left:6px;}
+
+/* Command palette ---------------------------------------------------------- */
+#bt-v4-palette{position:fixed;inset:0;z-index:1000;display:none;place-items:start center;padding:12vh 18px;background:rgba(1,6,12,.60);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);}
+body.bt-v4-palette-open #bt-v4-palette{display:grid;}
+.bt-v4-palette-card{width:min(680px,100%);border:1px solid var(--v3-line-strong);border-radius:18px;background:linear-gradient(180deg,rgba(17,37,61,.98),rgba(8,20,35,.98));box-shadow:0 30px 100px rgba(0,0,0,.48);overflow:hidden;}
+.bt-v4-palette-head{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--v3-line);}
+.bt-v4-palette-head b{font:700 12px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.16em;text-transform:uppercase;}
+.bt-v4-palette-head span{margin-left:auto;color:var(--v3-muted);font:500 10px/1 "IBM Plex Mono",monospace;}
+.bt-v4-palette-list{display:grid;grid-template-columns:1fr 1fr;padding:8px;gap:4px;}
+.bt-v4-palette-list a{display:flex;flex-direction:column;gap:4px;padding:14px;border-radius:12px;color:var(--v3-ink);text-decoration:none;border:1px solid transparent;}
+.bt-v4-palette-list a:hover,.bt-v4-palette-list a:focus-visible{background:rgba(116,230,255,.08);border-color:var(--v3-line);text-decoration:none;}
+.bt-v4-palette-list b{font:650 15px/1.2 "IBM Plex Sans Condensed",sans-serif;}
+.bt-v4-palette-list small{font:500 10px/1.4 "IBM Plex Mono",monospace;color:var(--v3-muted);}
+
+/* Evidence drawer ---------------------------------------------------------- */
+#bt-v4-evidence{position:fixed;z-index:950;right:12px;top:72px;width:min(390px,calc(100vw - 24px));max-height:calc(100vh - 92px);display:none;flex-direction:column;border:1px solid var(--v3-line-strong);border-radius:16px;background:linear-gradient(180deg,rgba(16,34,56,.98),rgba(7,18,31,.98));box-shadow:var(--v3-shadow);overflow:hidden;}
+body.bt-v4-evidence-open #bt-v4-evidence{display:flex;}
+.bt-v4-evidence-head{display:flex;align-items:center;gap:10px;padding:14px 15px;border-bottom:1px solid var(--v3-line);}
+.bt-v4-evidence-head b{font:700 12px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.15em;text-transform:uppercase;}
+.bt-v4-evidence-head button{margin-left:auto;width:34px;height:34px;border:1px solid var(--v3-line);border-radius:9px;background:rgba(255,255,255,.03);color:var(--v3-ink);}
+.bt-v4-evidence-body{padding:14px 15px 18px;overflow:auto;}
+.bt-v4-evidence-grid{display:grid;grid-template-columns:108px minmax(0,1fr);gap:8px 10px;font:500 10px/1.45 "IBM Plex Mono",monospace;}
+.bt-v4-evidence-grid dt{color:var(--v3-muted);text-transform:uppercase;letter-spacing:.08em;}
+.bt-v4-evidence-grid dd{margin:0;color:var(--v3-ink);overflow-wrap:anywhere;}
+.bt-v4-evidence-snapshot{margin-top:14px;padding-top:13px;border-top:1px solid var(--v3-line);font:500 10px/1.55 "IBM Plex Mono",monospace;color:var(--v3-muted);white-space:pre-wrap;overflow-wrap:anywhere;}
+
+/* Global V3 action buttons ------------------------------------------------- */
+.bt-v4-actions{display:flex;align-items:center;gap:6px;}
+.bt-v4-action{height:34px;padding:0 11px;border:1px solid var(--v3-line);border-radius:9px;background:rgba(6,16,29,.62);color:var(--v3-muted);font:650 10px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.11em;text-transform:uppercase;}
+.bt-v4-action:hover{color:var(--v3-ink);border-color:var(--v3-line-strong);background:rgba(116,230,255,.08);}
+
+/* Pulse -------------------------------------------------------------------- */
+#bt-v4-pulse{position:fixed;left:50%;bottom:18px;z-index:80;transform:translateX(-50%);display:flex;align-items:center;gap:9px;max-width:min(720px,calc(100vw - 30px));padding:8px 11px;border:1px solid var(--v3-line);border-radius:999px;background:rgba(7,18,31,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 12px 40px rgba(0,0,0,.24);font:600 10px/1.2 "IBM Plex Mono",monospace;color:var(--v3-muted);pointer-events:none;}
+#bt-v4-pulse i{width:7px;height:7px;border-radius:50%;background:var(--v3-green);box-shadow:0 0 10px var(--v3-green);flex:none;}
+#bt-v4-pulse[data-tone="warn"] i{background:var(--v3-amber);box-shadow:0 0 10px var(--v3-amber);}
+#bt-v4-pulse[data-tone="bad"] i{background:var(--v3-red);box-shadow:0 0 10px var(--v3-red);}
+#bt-v4-pulse b{color:var(--v3-ink);font-weight:650;white-space:nowrap;}
+#bt-v4-pulse span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* COMMAND ------------------------------------------------------------------ */
+body.hq.bt-exp-v4{background:radial-gradient(120% 90% at 50% 16%,#173051 0,#0b1829 38%,#07111e 72%,#050b14 100%);}
+body.hq.bt-exp-v4 #hq-stage{background:radial-gradient(110% 80% at 50% 26%,#17355c 0,#0c1b2f 48%,#07111e 100%);}
+body.hq.bt-exp-v4 #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.46) 0,rgba(5,12,22,0) 130px),linear-gradient(0deg,rgba(5,12,22,.58) 0,rgba(5,12,22,0) 180px);}
+body.hq.bt-exp-v4 #hq-top{background:linear-gradient(180deg,rgba(7,17,30,.82),rgba(7,17,30,.42));backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);border-bottom:1px solid rgba(155,201,244,.08);}
+body.hq.bt-exp-v4 .ins{background:linear-gradient(180deg,rgba(18,37,61,.68),rgba(8,21,37,.55));border-color:var(--v3-line);box-shadow:0 14px 34px rgba(0,0,0,.12);}
+body.hq.bt-exp-v4 .ins:hover{border-color:rgba(157,201,244,.27);}
+body.hq.bt-exp-v4 .big{font-size:44px;letter-spacing:-.03em;}
+body.hq.bt-exp-v4 .hud-col.left{width:300px;}
+body.hq.bt-exp-v4 .hud-col.right{width:318px;}
+body.hq.bt-exp-v4 .view-command [data-render="capital"]{border-color:rgba(116,230,255,.28);box-shadow:0 18px 54px rgba(0,0,0,.18),inset 0 0 0 1px rgba(116,230,255,.03);}
+body.hq.bt-exp-v4 .view-command [data-render="attention"]{max-height:230px;overflow:auto;}
+body.hq.bt-exp-v4 .view-command [data-render="team"]{background:linear-gradient(180deg,rgba(15,32,52,.72),rgba(7,18,31,.57));}
+body.hq.bt-exp-v4 .mate{border-radius:9px;padding:7px 6px;}
+body.hq.bt-exp-v4 .mate:hover{background:rgba(116,230,255,.075);}
+body.hq.bt-exp-v4 .tag .box{border-radius:10px;clip-path:none;background:rgba(8,20,34,.80);box-shadow:0 10px 30px rgba(0,0,0,.15);}
+body.hq.bt-exp-v4 .cap-core{filter:drop-shadow(0 0 30px rgba(116,230,255,.22));}
+body.hq.bt-exp-v4 .curve path.line,body.hq.bt-exp-v4 .spark path.line{stroke:var(--v3-cyan);}
+body.hq.bt-exp-v4 .hq-foot{opacity:.68;}
+body.hq.bt-exp-v4.bt-v4-focus-mode .view-command [data-render="coverage"],
+body.hq.bt-exp-v4.bt-v4-focus-mode .view-command [data-render="tape"],
+body.hq.bt-exp-v4.bt-v4-focus-mode .view-command [data-render="funnel"]{opacity:.40;filter:saturate(.7);}
+body.hq.bt-exp-v4.bt-v4-focus-mode .view-command [data-render="capital"],
+body.hq.bt-exp-v4.bt-v4-focus-mode .view-command [data-render="attention"]{border-color:rgba(116,230,255,.36);}
+
+/* FLOOR -------------------------------------------------------------------- */
+body.fl.bt-exp-v4{background:radial-gradient(120% 80% at 50% 10%,#152b46 0,#091522 48%,#060d16 100%);}
+body.fl.bt-exp-v4 .fl-top{background:linear-gradient(180deg,rgba(9,20,34,.92),rgba(8,18,30,.78));border-bottom-color:var(--v3-line);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}
+body.fl.bt-exp-v4 .fl-stage{background:radial-gradient(ellipse at 50% 25%,#17334e 0,#0b1827 48%,#06101a 100%);}
+body.fl.bt-exp-v4 .fl-wall .wall-screen,body.fl.bt-exp-v4 .fl-wallflow .wall-screen{border-color:rgba(116,230,255,.22);box-shadow:0 18px 50px rgba(0,0,0,.20),0 0 30px rgba(116,230,255,.04);}
+body.fl.bt-exp-v4 .fl-roster{background:rgba(7,17,29,.88);border-top-color:var(--v3-line);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);}
+body.fl.bt-exp-v4 .fl-agent{border-radius:12px;border-color:rgba(157,201,244,.10);background:rgba(255,255,255,.025);}
+body.fl.bt-exp-v4 .fl-agent:hover,body.fl.bt-exp-v4 .fl-agent[aria-current="true"]{background:rgba(116,230,255,.07);border-color:rgba(116,230,255,.24);}
+body.fl.bt-exp-v4 .fl-panel{background:linear-gradient(180deg,rgba(16,34,56,.97),rgba(7,18,31,.98));border-color:var(--v3-line-strong);box-shadow:0 24px 90px rgba(0,0,0,.42);}
+body.fl.bt-exp-v4 .fl-btn{min-height:38px;border-radius:9px;}
+body.fl.bt-exp-v4 .fl-title h1{letter-spacing:-.03em;}
+body.fl.bt-exp-v4 .fl-hint{opacity:.68;}
+
+/* TRADER ------------------------------------------------------------------- */
+body.bt-page-trader.bt-exp-v4{background:radial-gradient(120% 70% at 50% 0,#132d3f 0,#081923 46%,#061118 100%);color:#eef8f4;}
+body.bt-page-trader.bt-exp-v4 .topbar{background:rgba(7,18,25,.88)!important;border-bottom-color:rgba(116,213,180,.15)!important;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);}
+body.bt-page-trader.bt-exp-v4 .topbar nav a{color:#92aaa0;}
+body.bt-page-trader.bt-exp-v4 .topbar nav [aria-current]{color:#effaf5;border-color:#6fdeb5;}
+body.bt-page-trader.bt-exp-v4 main{max-width:1900px;}
+body.bt-page-trader.bt-exp-v4 .metrics{position:sticky;top:76px;z-index:25;background:rgba(8,24,30,.91)!important;border-color:rgba(112,214,181,.18)!important;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 10px 36px rgba(0,0,0,.20)!important;}
+body.bt-page-trader.bt-exp-v4 .metric{border-color:rgba(112,214,181,.12)!important;}
+body.bt-page-trader.bt-exp-v4 .metric-value{font-size:27px;}
+body.bt-page-trader.bt-exp-v4 .brain-rail{border-color:rgba(112,214,181,.16);box-shadow:0 10px 30px rgba(0,0,0,.15);}
+body.bt-page-trader.bt-exp-v4 .brain-node{min-height:58px;}
+body.bt-page-trader.bt-exp-v4 .cockpit{height:320px;margin-bottom:18px;border-color:rgba(125,205,178,.18);background:linear-gradient(180deg,#19333a 0,#13272d 60%,#0c2026 100%);box-shadow:0 20px 54px rgba(0,0,0,.24);}
+body.bt-page-trader.bt-exp-v4 .architecture{opacity:.56;filter:saturate(.72) brightness(.72);}
+body.bt-page-trader.bt-exp-v4 .monitors{top:45px;height:205px;left:7%;right:7%;gap:12px;}
+body.bt-page-trader.bt-exp-v4 .monitor{height:188px;box-shadow:0 10px 28px rgba(0,0,0,.36),0 0 0 1px rgba(135,220,190,.10);}
+body.bt-page-trader.bt-exp-v4 .monitor-main{height:205px;}
+body.bt-page-trader.bt-exp-v4 .desk-surface{opacity:.40;height:58px;bottom:42px;}
+body.bt-page-trader.bt-exp-v4 .desk-caption{height:46px;background:rgba(8,24,28,.90);border-top-color:rgba(112,214,181,.15);color:#edf8f3;}
+body.bt-page-trader.bt-exp-v4 .desk-caption small,body.bt-page-trader.bt-exp-v4 .desk-source{color:#8aa79b;}
+body.bt-page-trader.bt-exp-v4 .workspace-toolbar{position:sticky;top:142px;z-index:23;padding:10px 0;background:linear-gradient(180deg,rgba(6,17,23,.96),rgba(6,17,23,.82));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);}
+body.bt-page-trader.bt-exp-v4 .workspace{grid-template-columns:minmax(0,1fr) 290px;gap:16px;}
+body.bt-page-trader.bt-exp-v4 .position-wall{grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;}
+body.bt-page-trader.bt-exp-v4 .position-card{background:linear-gradient(180deg,rgba(12,31,35,.96),rgba(7,22,27,.96));border-color:rgba(112,214,181,.14);box-shadow:0 10px 30px rgba(0,0,0,.16);}
+body.bt-page-trader.bt-exp-v4 .position-card:hover{border-color:rgba(112,214,181,.30);box-shadow:0 14px 38px rgba(0,0,0,.24);}
+body.bt-page-trader.bt-exp-v4 .card-score{background:rgba(255,255,255,.035);}
+body.bt-page-trader.bt-exp-v4 .activity-panel{background:linear-gradient(180deg,rgba(10,27,31,.96),rgba(5,17,22,.96));border-color:rgba(112,214,181,.14);}
+body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .activity-panel{display:none;}
+body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .workspace{grid-template-columns:1fr;}
+body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-columns:repeat(5,minmax(0,1fr));}
+
+/* Tablet ------------------------------------------------------------------- */
+@media (max-width:1180px) and (min-width:761px){
+  body.hq.bt-exp-v4 .hud-col.left{width:270px;}
+  body.hq.bt-exp-v4 .hud-col.right{width:286px;}
+  body.bt-page-trader.bt-exp-v4 .workspace{grid-template-columns:1fr;}
+  body.bt-page-trader.bt-exp-v4 .activity-panel{position:static;}
+  body.bt-page-trader.bt-exp-v4 .position-wall{grid-template-columns:repeat(3,minmax(0,1fr));}
+  body.bt-page-trader.bt-exp-v4 .workspace-toolbar{top:140px;}
+}
+@media (min-width:900px) and (max-width:1180px) and (orientation:landscape){
+  body.bt-page-trader.bt-exp-v4 .position-wall{grid-template-columns:repeat(4,minmax(0,1fr));}
+}
+
+/* Mobile Command: the real WebGL HQ remains visible ----------------------- */
+@media (max-width:760px){
+  #bt-v4-pulse{left:12px;right:12px;bottom:calc(72px + var(--v3-safe-bottom));transform:none;max-width:none;border-radius:12px;}
+  #bt-v4-pulse b{font-size:9px;}
+  .bt-v4-palette-list{grid-template-columns:1fr;}
+  .bt-v4-workspaces a,.bt-v4-workspaces button{min-width:0;flex:1;height:38px;padding:0 8px;font-size:10px;}
+  #bt-v4-evidence{top:auto;right:8px;left:8px;bottom:calc(8px + var(--v3-safe-bottom));width:auto;max-height:78vh;}
+  .bt-v4-evidence-grid{grid-template-columns:90px minmax(0,1fr);}
+
+  body.hq.bt-exp-v4{background:radial-gradient(140% 70% at 50% 0,#17365d 0,#0b192b 50%,#07111e 100%) fixed;}
+  body.hq.bt-exp-v4 #hq-stage{display:none!important;}
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:fixed;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.16),rgba(5,12,22,0) 50%,rgba(5,12,22,.78) 100%);}
+  body.hq.bt-exp-v4[data-view="command"] main#hq-hud{padding-top:calc(48svh + 10px);}
+  body.hq.bt-exp-v4[data-view="command"] .view-command [data-render="capital"]{background:linear-gradient(180deg,rgba(17,37,61,.90),rgba(8,21,37,.88));}
+  body.hq.bt-exp-v4 #hq-top{background:rgba(7,17,30,.84);}
+  body.hq.bt-exp-v4 .big{font-size:42px;}
+  body.hq.bt-exp-v4 .team{gap:7px;scroll-padding:14px;}
+  body.hq.bt-exp-v4 .mate{min-width:128px;border-radius:12px;background:rgba(15,31,50,.76);}
+  body.hq.bt-exp-v4 #hq-desk .ins{background:linear-gradient(180deg,rgba(16,34,56,.99),rgba(7,18,31,.99));border-top:1px solid var(--v3-line-strong);border-radius:18px 18px 0 0;}
+
+  body.fl.bt-exp-v4 .fl-screen{min-height:100svh;}
+  body.fl.bt-exp-v4 .fl-top{padding:8px 12px;min-height:58px;}
+  body.fl.bt-exp-v4 .fl-title{display:none;}
+  body.fl.bt-exp-v4 .fl-tools{gap:5px;}
+  body.fl.bt-exp-v4 .fl-tools .fl-btn{min-width:42px;padding:0 9px;font-size:10px;}
+  body.fl.bt-exp-v4 .fl-stage{height:68svh;min-height:470px;border-bottom:1px solid var(--v3-line);}
+  body.fl.bt-exp-v4 .fl-wallflow{padding:10px 10px 0;}
+  body.fl.bt-exp-v4 .fl-roster{display:flex!important;grid-template-columns:none!important;gap:7px;overflow-x:auto;overflow-y:hidden;padding:8px 10px 10px;min-height:84px;scroll-snap-type:x mandatory;scrollbar-width:none;}
+  body.fl.bt-exp-v4 .fl-roster::-webkit-scrollbar{display:none;}
+  body.fl.bt-exp-v4 .fl-agent{flex:0 0 132px;min-width:132px;scroll-snap-align:start;padding:8px;}
+  body.fl.bt-exp-v4 .fl-panel{left:6px;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));max-height:72svh;border-radius:18px;}
+  body.fl.bt-exp-v4 .fl-hint{left:12px;right:12px;bottom:10px;text-align:center;font-size:10px;}
+  body.fl.bt-exp-v4 .fl-foot{font-size:10px;}
+
+  body.bt-page-trader.bt-exp-v4 main{padding:16px 12px 20px;}
+  body.bt-page-trader.bt-exp-v4 .topbar{height:58px;padding:0 12px;}
+  body.bt-page-trader.bt-exp-v4 .metrics{top:58px;grid-template-columns:repeat(3,1fr);margin-bottom:12px;}
+  body.bt-page-trader.bt-exp-v4 .metric-value{font-size:22px;}
+  body.bt-page-trader.bt-exp-v4 .brain-rail{overflow-x:auto;display:flex;scroll-snap-type:x mandatory;scrollbar-width:none;}
+  body.bt-page-trader.bt-exp-v4 .brain-node{flex:0 0 44vw;scroll-snap-align:start;}
+  body.bt-page-trader.bt-exp-v4 .cockpit{height:312px;padding:0;margin-bottom:14px;}
+  body.bt-page-trader.bt-exp-v4 .cockpit-topline{z-index:8;}
+  body.bt-page-trader.bt-exp-v4 .monitors{position:relative;left:auto;right:auto;top:auto;height:228px;padding:42px 12px 0;display:flex!important;gap:9px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;scroll-padding:12px;scrollbar-width:none;perspective:none;align-items:stretch;}
+  body.bt-page-trader.bt-exp-v4 .monitors::-webkit-scrollbar{display:none;}
+  body.bt-page-trader.bt-exp-v4 .monitor,body.bt-page-trader.bt-exp-v4 .monitor-left,body.bt-page-trader.bt-exp-v4 .monitor-main,body.bt-page-trader.bt-exp-v4 .monitor-right{display:block!important;flex:0 0 82vw;height:185px;transform:none!important;scroll-snap-align:center;}
+  body.bt-page-trader.bt-exp-v4 .monitor-neck,body.bt-page-trader.bt-exp-v4 .monitor-base,body.bt-page-trader.bt-exp-v4 .desk-surface{display:none;}
+  body.bt-page-trader.bt-exp-v4 .desk-caption{height:44px;padding:0 11px;}
+  body.bt-page-trader.bt-exp-v4 .workspace-toolbar{position:static;padding:8px 0;background:transparent;}
+  body.bt-page-trader.bt-exp-v4 .position-wall,body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-columns:1fr;}
+  body.bt-page-trader.bt-exp-v4 .activity-panel{margin-top:0;}
+  body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .activity-panel{display:none;}
+}
+
+@media (max-width:430px){
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage{height:44svh;}
+  body.hq.bt-exp-v4[data-view="command"] main#hq-hud{padding-top:calc(44svh + 8px);}
+  body.fl.bt-exp-v4 .fl-stage{height:64svh;min-height:430px;}
+  body.bt-page-trader.bt-exp-v4 .monitor,body.bt-page-trader.bt-exp-v4 .monitor-left,body.bt-page-trader.bt-exp-v4 .monitor-main,body.bt-page-trader.bt-exp-v4 .monitor-right{flex-basis:86vw;}
+}
+
+@media (prefers-reduced-motion:reduce){
+  body.bt-exp-v4 *,body.bt-exp-v4 *::before,body.bt-exp-v4 *::after{scroll-behavior:auto!important;animation:none!important;transition:none!important;}
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   BETTOR EXPERIENCE V4 · LIVE FLOOR + TRADER OPERATING SYSTEM
+   V4 is evidence-led gamification: motion highlights only rendered changes.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root{
+  --v4-cyan:#72e7ff;--v4-blue:#557dff;--v4-violet:#8c77ff;--v4-lime:#4be2aa;
+  --v4-amber:#f0bd6a;--v4-red:#ff6f7f;--v4-panel:rgba(8,19,34,.80);
+  --v4-line:rgba(132,193,255,.20);--v4-line2:rgba(132,193,255,.34);
+}
+body.bt-exp-v4{--v4-safe-bottom:env(safe-area-inset-bottom,0px)}
+
+/* Team + venue identity */
+.bt-v4-team-logo{width:28px;height:28px;object-fit:contain;flex:0 0 28px;filter:drop-shadow(0 3px 8px rgba(0,0,0,.22));}
+.monitor-inner .bt-v4-team-logo{width:24px;height:24px;flex-basis:24px}
+.card-score .team-row{grid-template-columns:auto auto minmax(0,1fr) auto!important}
+.card-score .team-row .bt-v4-team-logo+.team-abbr{margin-left:2px}
+.bt-v4-venue-wrap{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.bt-v4-venue-logo{width:17px;height:17px;object-fit:contain;border-radius:4px;background:#2e5cff}
+.bt-v4-kalshi-mark{display:inline-flex;align-items:center;height:17px;padding:0 5px;border-radius:4px;background:#050d0a;color:#00dd94;font:750 8px/1 var(--mono,ui-monospace);letter-spacing:.05em}
+
+/* Live-change feedback: only applied after a rendered value actually changes. */
+@keyframes btV4DataChange{0%{box-shadow:0 0 0 0 rgba(114,231,255,.58);background:rgba(114,231,255,.22)}35%{box-shadow:0 0 0 5px rgba(114,231,255,.08)}100%{box-shadow:0 0 0 0 transparent;background:transparent}}
+.bt-v4-live-change{animation:btV4DataChange .82s ease-out!important;border-radius:5px}
+
+/* ── FLOOR: cinematic live headquarters ─────────────────────────────── */
+body.fl.bt-exp-v4 .fl-stage{background:
+  radial-gradient(100% 70% at 50% 16%,rgba(63,126,190,.28),transparent 56%),
+  radial-gradient(80% 45% at 50% 100%,rgba(50,225,188,.09),transparent 70%),
+  linear-gradient(180deg,#0b1928,#06101a 58%,#040a10)}
+body.fl.bt-exp-v4 .fl-stage:after{content:"";position:absolute;inset:0;pointer-events:none;z-index:1;background:linear-gradient(90deg,rgba(114,231,255,.035) 1px,transparent 1px),linear-gradient(rgba(114,231,255,.025) 1px,transparent 1px);background-size:72px 72px;mask-image:linear-gradient(to bottom,transparent 0,#000 28%,#000 76%,transparent 100%)}
+body.fl.bt-exp-v4 .fl-wall{transform:scale(1.05);transform-origin:50% 0}
+body.fl.bt-exp-v4 .wall-screen{border-color:rgba(114,231,255,.28)!important;box-shadow:0 18px 55px rgba(0,0,0,.26),0 0 28px rgba(67,144,255,.08)!important}
+body.fl.bt-exp-v4 .fl-agent{position:relative;overflow:hidden}
+body.fl.bt-exp-v4 .fl-agent:before{content:"";position:absolute;inset:0;border-top:2px solid var(--a);opacity:.75;pointer-events:none}
+body.fl.bt-exp-v4 .fl-agent[data-v4-activity="active"]{background:linear-gradient(180deg,rgba(31,72,91,.72),rgba(7,19,30,.88));box-shadow:inset 0 0 28px color-mix(in srgb,var(--a) 12%,transparent)}
+body.fl.bt-exp-v4 .fl-agent[data-v4-activity="warn"]{box-shadow:inset 0 0 0 1px rgba(240,189,106,.20)}
+body.fl.bt-exp-v4 .fl-panel{border-color:rgba(114,231,255,.24);background:linear-gradient(180deg,rgba(10,25,39,.97),rgba(5,14,23,.98));box-shadow:0 30px 100px rgba(0,0,0,.52),0 0 40px rgba(74,151,255,.08)}
+
+#bt-v4-floor-command{position:absolute;z-index:9;left:18px;top:18px;display:flex;flex-direction:column;gap:8px;width:min(250px,calc(100% - 36px));pointer-events:auto}
+.bt-v4-shift{padding:12px 13px;border:1px solid var(--v4-line2);border-radius:13px;background:linear-gradient(180deg,rgba(9,23,40,.88),rgba(5,15,27,.78));backdrop-filter:blur(16px);box-shadow:0 15px 40px rgba(0,0,0,.24)}
+.bt-v4-shift-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font:700 10px/1 var(--mono,ui-monospace);letter-spacing:.12em;text-transform:uppercase;color:#a9c8e6}
+.bt-v4-live-dot{width:7px;height:7px;border-radius:50%;display:inline-block;background:var(--v4-lime);box-shadow:0 0 14px var(--v4-lime);margin-right:6px}
+.bt-v4-shift[data-tone="warn"] .bt-v4-live-dot{background:var(--v4-amber);box-shadow:0 0 12px var(--v4-amber)}
+.bt-v4-shift[data-tone="bad"] .bt-v4-live-dot{background:var(--v4-red);box-shadow:0 0 12px var(--v4-red)}
+.bt-v4-shift-kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin-top:11px}
+.bt-v4-shift-kpis span{min-width:0;padding:8px 7px;border:1px solid rgba(132,193,255,.10);border-radius:9px;background:rgba(255,255,255,.025)}
+.bt-v4-shift-kpis b{display:block;font:650 20px/1 var(--cond,system-ui);color:#f2f7ff}
+.bt-v4-shift-kpis small{display:block;margin-top:4px;font:600 8px/1.15 var(--mono,ui-monospace);letter-spacing:.08em;text-transform:uppercase;color:#7f9bb5}
+.bt-v4-camera-bar{display:flex;gap:5px;flex-wrap:wrap;padding:6px;border:1px solid var(--v4-line);border-radius:12px;background:rgba(5,15,27,.70);backdrop-filter:blur(12px)}
+.bt-v4-camera-bar button{min-height:34px;border:1px solid transparent;border-radius:8px;background:transparent;color:#9db6cf;padding:0 9px;font:650 9px/1 var(--mono,ui-monospace);letter-spacing:.04em;cursor:pointer}
+.bt-v4-camera-bar button:hover,.bt-v4-camera-bar button:focus-visible{background:rgba(114,231,255,.09);border-color:rgba(114,231,255,.22);color:#ecf7ff}
+
+/* ── TRADER: primary operating page ────────────────────────────────── */
+body.bt-page-trader.bt-exp-v4 main{max-width:1900px}
+body.bt-page-trader.bt-exp-v4 .page-heading{margin-bottom:14px}
+body.bt-page-trader.bt-exp-v4 .metrics{top:68px;z-index:25}
+body.bt-page-trader.bt-exp-v4 .cockpit{height:300px;margin-bottom:14px}
+body.bt-page-trader.bt-exp-v4 .monitors{top:43px;height:210px;left:5%;right:5%}
+body.bt-page-trader.bt-exp-v4 .monitor{height:194px}
+body.bt-page-trader.bt-exp-v4 .monitor-main{height:211px}
+body.bt-page-trader.bt-exp-v4 .desk-surface{opacity:.72;height:62px}
+body.bt-page-trader.bt-exp-v4 .workspace-toolbar{margin-bottom:9px}
+body.bt-page-trader.bt-exp-v4 .position-card{isolation:isolate}
+body.bt-page-trader.bt-exp-v4 .position-card:before{content:"";position:absolute;inset:0 0 auto;height:2px;background:linear-gradient(90deg,transparent,rgba(114,231,255,.65),transparent);opacity:.45;pointer-events:none}
+body.bt-page-trader.bt-exp-v4 .position-card.focused{transform:translateY(-2px);box-shadow:0 22px 55px rgba(0,0,0,.22),0 0 0 1px rgba(93,230,195,.32)}
+body.bt-page-trader.bt-exp-v4 .card-head{min-height:42px}
+body.bt-page-trader.bt-exp-v4 .tiny-button.bt-v4-broadcast-button{width:auto;padding:0 7px;font:700 8px/1 var(--mono,ui-monospace);letter-spacing:.06em;color:#9fdfff;border:1px solid rgba(114,231,255,.18);border-radius:6px}
+
+#bt-v4-game-ribbon{position:sticky;top:135px;z-index:23;display:flex;gap:7px;overflow:auto;padding:7px 3px 9px;margin:-1px 0 9px;scroll-snap-type:x mandatory;scrollbar-width:none;background:linear-gradient(180deg,rgba(3,11,18,.96),rgba(3,11,18,.78),transparent);backdrop-filter:blur(10px)}
+#bt-v4-game-ribbon::-webkit-scrollbar{display:none}
+.bt-v4-ribbon-item{scroll-snap-align:start;flex:0 0 205px;display:grid;grid-template-columns:36px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:48px;padding:6px 8px;border:1px solid rgba(111,203,177,.13);border-radius:10px;background:linear-gradient(145deg,rgba(11,30,35,.92),rgba(5,17,23,.90));color:#dcebe5;text-align:left;cursor:pointer}
+.bt-v4-ribbon-item:hover,.bt-v4-ribbon-item[aria-current="true"]{border-color:rgba(114,231,255,.38);background:linear-gradient(145deg,rgba(16,42,48,.98),rgba(7,23,30,.96));box-shadow:0 10px 30px rgba(0,0,0,.16)}
+.bt-v4-ribbon-logos{display:flex;width:36px;align-items:center}
+.bt-v4-ribbon-logos img{width:22px;height:22px;object-fit:contain;background:rgba(255,255,255,.04);border-radius:50%;padding:1px}
+.bt-v4-ribbon-logos img+img{margin-left:-8px}
+.bt-v4-ribbon-main{min-width:0}
+.bt-v4-ribbon-main b{display:block;font:650 10px/1.2 var(--cond,system-ui);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bt-v4-ribbon-main small{display:block;margin-top:3px;color:#7fa29a;font:500 8px/1.2 var(--mono,ui-monospace);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bt-v4-ribbon-state{font:700 8px/1 var(--mono,ui-monospace);color:#89d7bd;text-transform:uppercase;text-align:right}
+.bt-v4-ribbon-state.warn{color:#e7b66c}.bt-v4-ribbon-state.bad{color:#ff8492}
+
+#bt-v4-trader-rail{position:fixed;right:18px;bottom:20px;z-index:50;display:flex;gap:5px;padding:6px;border:1px solid rgba(114,231,255,.18);border-radius:12px;background:rgba(4,14,22,.88);backdrop-filter:blur(14px);box-shadow:0 14px 45px rgba(0,0,0,.32)}
+#bt-v4-trader-rail button{height:34px;border:0;border-radius:8px;background:transparent;color:#95b1a8;padding:0 10px;font:700 9px/1 var(--mono,ui-monospace);cursor:pointer}
+#bt-v4-trader-rail button:hover,#bt-v4-trader-rail button:focus-visible{background:rgba(75,226,170,.10);color:#e8fbf4}
+
+/* Full-screen position broadcast: cloned from already-rendered evidence. */
+#bt-v4-broadcast{position:fixed;inset:0;z-index:100;display:none;background:radial-gradient(100% 70% at 50% 0,#102d36 0,#051116 60%,#02080c 100%);color:#edf9f5;overflow:auto}
+body.bt-v4-broadcast-open #bt-v4-broadcast{display:block}
+.bt-v4-broadcast-shell{min-height:100%;padding:calc(18px + env(safe-area-inset-top)) 22px calc(24px + env(safe-area-inset-bottom));display:grid;grid-template-rows:auto auto 1fr;gap:14px}
+.bt-v4-broadcast-top{display:flex;align-items:center;gap:10px;position:sticky;top:0;z-index:2;padding:7px 0;background:linear-gradient(180deg,#06141a 55%,transparent)}
+.bt-v4-broadcast-top .bt-v4-brand{display:flex;align-items:center;gap:9px;margin-right:auto;font:700 11px/1 var(--mono,ui-monospace);letter-spacing:.12em;text-transform:uppercase;color:#9dc9bd}
+.bt-v4-broadcast-top img{height:22px;width:auto}
+.bt-v4-broadcast-top button{height:38px;border:1px solid rgba(114,231,255,.18);border-radius:9px;background:rgba(255,255,255,.03);color:#dff5ef;padding:0 12px;font:650 10px var(--mono,ui-monospace);cursor:pointer}
+.bt-v4-broadcast-score{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(420px,1.5fr) minmax(260px,.85fr);gap:12px}
+.bt-v4-broadcast-pane{min-height:250px;border:1px solid rgba(107,215,184,.15);border-radius:14px;background:linear-gradient(180deg,rgba(10,28,34,.94),rgba(5,17,22,.94));padding:16px;box-shadow:0 20px 60px rgba(0,0,0,.20)}
+.bt-v4-broadcast-pane.center{border-color:rgba(114,231,255,.24);background:linear-gradient(180deg,rgba(11,31,39,.98),rgba(4,16,22,.98))}
+.bt-v4-broadcast-pane .monitor-inner{height:100%;min-height:218px;background:transparent!important;padding:0!important;border:0!important;overflow:visible!important}
+.bt-v4-broadcast-card{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,.7fr);gap:14px}
+.bt-v4-broadcast-position,.bt-v4-broadcast-tape{border:1px solid rgba(114,231,255,.13);border-radius:14px;background:rgba(6,18,24,.92);padding:15px;min-width:0}
+.bt-v4-broadcast-position .position-card{max-width:900px;margin:auto;background:rgba(7,22,28,.98)!important}
+.bt-v4-broadcast-tape{overflow:auto;max-height:55vh}
+
+@media(max-width:1000px){
+  .bt-v4-broadcast-score{grid-template-columns:1fr 1.25fr}.bt-v4-broadcast-score .bt-v4-broadcast-pane:last-child{grid-column:1/-1;min-height:190px}
+  .bt-v4-broadcast-card{grid-template-columns:1fr}.bt-v4-broadcast-tape{max-height:280px}
+}
+@media(max-width:760px){
+  #bt-v4-floor-command{left:10px;top:10px;width:calc(100% - 20px);pointer-events:none}.bt-v4-shift,.bt-v4-camera-bar{pointer-events:auto}
+  .bt-v4-shift{padding:9px 10px;max-width:220px}.bt-v4-shift-kpis{gap:4px;margin-top:7px}.bt-v4-shift-kpis span{padding:6px}.bt-v4-shift-kpis b{font-size:17px}.bt-v4-camera-bar{align-self:flex-start;max-width:96vw;overflow-x:auto;flex-wrap:nowrap}
+  body.fl.bt-exp-v4 .fl-roster{padding-bottom:calc(9px + var(--v4-safe-bottom))}
+  body.bt-page-trader.bt-exp-v4 .cockpit{height:285px}
+  #bt-v4-game-ribbon{top:120px;margin-left:-2px;margin-right:-2px}.bt-v4-ribbon-item{flex-basis:178px}
+  #bt-v4-trader-rail{left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));justify-content:space-between;overflow:auto}
+  #bt-v4-trader-rail button{flex:0 0 auto}
+  .bt-v4-broadcast-shell{padding-left:10px;padding-right:10px}.bt-v4-broadcast-score{grid-template-columns:1fr;}.bt-v4-broadcast-score .bt-v4-broadcast-pane:last-child{grid-column:auto}.bt-v4-broadcast-pane{min-height:190px;padding:11px}.bt-v4-broadcast-card{display:block}.bt-v4-broadcast-tape{margin-top:10px}
+}
+@media(prefers-reduced-motion:reduce){.bt-v4-live-change{animation:none!important}.bt-v4-live-dot{box-shadow:none!important}}
