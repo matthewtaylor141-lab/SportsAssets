@@ -12,6 +12,8 @@ function abbr(s){return String(s||'?').replace(/[^A-Za-z0-9 ]/g,'').split(/\s+/)
 function sport(p){const s=String(p.sport||'').toUpperCase();if(s&&s!=='UNCLASSIFIED')return s;
  const id=String(p.event_id||'').toLowerCase();return id.startsWith('mlb-')?'MLB':id.startsWith('nfl-')?'NFL':id.startsWith('cfb-')?'NCAAF':id.startsWith('nba-')?'NBA':id.startsWith('nhl-')?'NHL':'SPORT';}
 function gameHTML(p,screen=false){const g=p.game||{},now=Date.now()/1000;
+ const liveGame=window.TraderLiveScores && window.TraderLiveScores.render(p,screen,now);
+ if(liveGame!==null && liveGame!==undefined)return liveGame;
  if(!['CURRENT','STALE'].includes(g.status))return`<div class="score-unavailable"><span>${E(sport(p))} · GAME STATE</span><b>${E(p.title||'Game identity unavailable')}</b><span>${p.state==='SETTLEMENT_PENDING'?'Awaiting venue settlement':E(g.why==='SCORE_EVENT_IDENTITY_UNPROVEN'?'Score identity not verified':'Live score feed unavailable')}</span></div>`;
  const fresh=g.status==='CURRENT'&&C.fresh(g.source_at,now,15),clk=C.clock(g,now);
  const inning=C.finite(g.inning)?`${g.inning_half==='TOP'?'▲':g.inning_half==='BOTTOM'?'▼':''} ${g.inning}`:g.period||g.game_status||'Game state';
