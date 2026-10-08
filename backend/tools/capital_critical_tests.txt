@@ -1337,3 +1337,5 @@ tests/test_rc5_pmx_consumer_books.py
 tests/test_rc5_feed_ownership_authority.py
 # (RC6) a close this client made (websockets keepalive 1011, frame cap 1009) is never an eviction; provider / no-frame closes still stop the feed at EVICTIONS_MAX; every close named by side, code and reason
 tests/test_rc6_feed_close_provenance.py
+# (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
+tests/test_rc6_held_watch_identity.py
