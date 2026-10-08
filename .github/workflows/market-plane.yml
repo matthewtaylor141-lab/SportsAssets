@@ -1,10 +1,12 @@
-# THE DEDICATED, STRUCTURALLY ORDERLESS MARKET PLANE -- KALSHI_WS_ONLY
-# (closeout 2026-10-08). Creates / deploys / suspends sportsassets-market-
-# plane from ops/render_market_plane_kalshi_ws_only.json: the Kalshi
-# authenticated WebSocket order-book runtime, alone, on its own Render
-# service. The service gets DATABASE_URL and the EXISTING Kalshi key (copied
-# value for value from the services that already hold them -- never printed,
-# never changed) and nothing else; market_plane_guard locks the process
+# THE DEDICATED, STRUCTURALLY ORDERLESS MARKET PLANE (closeout 2026-10-08).
+# Creates / deploys / suspends sportsassets-market-plane from
+# ops/render_market_plane_provision.json -- the owner's spec
+# (ops/render_market_plane_service.yaml): the universal market plane on one
+# PMX subscribe-all market-data stream plus the authenticated Kalshi
+# WebSocket order-book runtime, on its own Render service. The service gets
+# DATABASE_URL, the three PMX market-data values and the EXISTING Kalshi key
+# (copied value for value from sportsassets-workers, which holds all six --
+# never printed, never changed) and nothing else; market_plane_guard locks the process
 # against every venue write, blocks the order-client modules from import and
 # refuses to run beside an order-capable credential. render.yaml is not
 # touched (a Blueprint sync would redeploy the collector).
