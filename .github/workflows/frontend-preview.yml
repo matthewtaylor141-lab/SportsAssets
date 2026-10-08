@@ -76,7 +76,32 @@ jobs:
           curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
           kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
           echo "== proxy =="; cat out/proxy.json
-          ! grep -rl "${ADMIN_TOKEN:-no-token-supplied}" out >/dev/null 2>&1 || { echo "token found in artifact: refused"; rm -rf out; exit 1; }
+          # the token must never reach the artifact: name any file that holds
+          # it (never its content), keep only what is clean, and fail the job
+          if [ -n "${ADMIN_TOKEN:-}" ]; then
+            hits=$(grep -rlF -- "$ADMIN_TOKEN" out || true)
+            if [ -n "$hits" ]; then
+              echo "token bytes found in: $hits (token length ${#ADMIN_TOKEN})"
+              python3 - "$hits" <<'PY'
+          import json, os, sys
+          tok = os.environ["ADMIN_TOKEN"]
+          for f in sys.argv[1].split():
+              if f.endswith(".json"):
+                  def walk(v, p):
+                      if isinstance(v, dict):
+                          for k, x in v.items():
+                              if tok in str(k): print("  key at", p, "contains it")
+                              walk(x, p + "/" + str(k))
+                      elif isinstance(v, list):
+                          for i, x in enumerate(v): walk(x, p + "/" + str(i))
+                      elif tok in str(v): print("  value at", f, p)
+                  walk(json.load(open(f)), "")
+              os.remove(f)
+          PY
+              echo "files holding the token were removed; failing so this is looked at"
+              exit 1
+            fi
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
