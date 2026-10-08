@@ -269,8 +269,7 @@ def test_the_kill_switch_retires_only_this_loop_and_no_neighbour(
 
 
 @pytest.mark.parametrize("why", ["MANIFEST_ABSENT", "INSUFFICIENT_COVERAGE",
-                                 "RUN_CLOSED", "RUN_ROW_UNREADABLE",
-                                 "NO_CREDENTIALS"])
+                                 "RUN_CLOSED", "NO_CREDENTIALS"])
 def test_a_configuration_refusal_backs_off_on_the_acquisition_ladder(
         monkeypatch, incentive_mode, why):
     async def refused(**_kw):
@@ -281,6 +280,59 @@ def test_a_configuration_refusal_backs_off_on_the_acquisition_ladder(
     asyncio.run(bl.main(sleep=spy))
     asyncio.run(bl.main(sleep=spy))
     assert spy.delays == list(bl.NOSTART_BACKOFF_S[:2])
+
+
+@pytest.mark.parametrize("why", sorted(bl._DELEGATE_DB_TRANSIENT))
+def test_a_database_blip_after_authorisation_polls_and_never_escalates(
+        monkeypatch, incentive_mode, why):
+    """The control AND the allowance were open (the delegate reads them
+    first) and a later database read failed before any socket existed. The
+    run is authorised and its ET window is running: it polls IDLE_POLL_S
+    every pass and the acquisition rung never moves."""
+    async def refused(**_kw):
+        return {"started": False, "why": why, "observe": obs.OBSERVE_VERSION}
+
+    monkeypatch.setattr(obs, "run", refused)
+    spy = SleepSpy()
+    for _ in range(5):
+        out = asyncio.run(bl.main(sleep=spy))
+        assert out != LOOP_DISABLED and "parked" not in out
+    assert spy.delays == [bl.IDLE_POLL_S] * 5
+    assert bl._nostart_rung == 0
+
+
+def test_the_database_blip_names_are_the_delegates_own():
+    """A renamed refusal would silently fall back onto the ladder."""
+    from sportsassets import bettor_incentive_journal as jrnl
+    from sportsassets import bettor_incentive_state as st
+    assert st.S_UNREADABLE in bl._DELEGATE_DB_TRANSIENT
+    jsrc = Path(jrnl.__file__).read_text()
+    for name in bl._DELEGATE_DB_TRANSIENT - {st.S_UNREADABLE}:
+        assert f'"{name}"' in jsrc, name
+    assert not (bl._DELEGATE_DB_TRANSIENT & bl._CONTROL_REASONS)
+    assert st.S_CLOSED not in bl._DELEGATE_DB_TRANSIENT
+
+
+def test_a_started_delegated_run_resets_the_acquisition_ladder(
+        monkeypatch, incentive_mode):
+    """As the general path does after a start: a full day of observation
+    is progress, so the next refusal starts at the first rung again."""
+    answers = iter([
+        {"started": False, "why": "RUN_CLOSED"},
+        {"started": False, "why": "RUN_CLOSED"},
+        {"started": True, "end_why": obs.END_CONTROL},
+        {"started": False, "why": "RUN_CLOSED"},
+    ])
+
+    async def scripted(**_kw):
+        return dict(next(answers), observe=obs.OBSERVE_VERSION)
+
+    monkeypatch.setattr(obs, "run", scripted)
+    spy = SleepSpy()
+    for _ in range(4):
+        asyncio.run(bl.main(sleep=spy))
+    assert spy.delays == [bl.NOSTART_BACKOFF_S[0], bl.NOSTART_BACKOFF_S[1],
+                          bl.NOSTART_BACKOFF_S[0]]
 
 
 def test_an_enabled_lane_still_runs_and_is_held_by_nothing(

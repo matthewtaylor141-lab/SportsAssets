@@ -66,6 +66,13 @@ from sportsassets import bettor_live_control as ctl         # noqa: E402
 from sportsassets import bettor_market_stream as ms         # noqa: E402
 from sportsassets.workers import bettor_live_loop as bll    # noqa: E402
 
+# THE SUPERVISOR CONTRACT'S HOLDS ARE ASSERTED IN CI
+# (tests/test_bettor_live_delegated_lane_parks.py). This rehearsal asks only
+# what `main()` DECIDES, so it does not wait out a park (S0 / S1 / S1b would
+# otherwise hold PARK_MAX_S each) or a backoff (S2-S4: 300 + 900 + 1800 s).
+bll.PARK_MAX_S = 0.0
+bll.NOSTART_BACKOFF_S = (0.0,)
+
 RESULTS: list = []
 WORK = tempfile.mkdtemp(prefix="incentive-rehearsal-")
 
