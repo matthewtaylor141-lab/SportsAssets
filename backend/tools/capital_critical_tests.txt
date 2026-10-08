@@ -1271,6 +1271,10 @@ tests/test_kalshi_canonical_db.py
 tests/test_kalshi_ws_market_data.py
 tests/test_kalshi_contract_terms.py
 tests/test_kalshi_contract_terms_db.py
+# (RC5) the pair settlement-difference policy: every outcome class priced or
+# refused by name; separate markets' fair prices never summed to $1, and only
+# an exact complement payout table reaches Adriana's engine
+tests/test_settlement_pair_policy.py
 # (red team closeout V1) package 51/51 byte-identical, canonical exposure lock on the PAPER entry path, chaos matrix C01-C30, readiness interlock + append-only receipts on a migrated database
 tests/test_red_team_package_parity.py
 tests/test_red_team_exposure_lock.py

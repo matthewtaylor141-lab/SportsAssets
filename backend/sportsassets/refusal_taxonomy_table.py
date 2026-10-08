@@ -1508,6 +1508,27 @@ TABLE = {
     "KALSHI_MD_TRUNCATED_REQUEST_BUDGET": (S, DATA, "INGESTION"),
     "KALSHI_MD_TRUNCATED_REQUEST_FAILED": (S, DATA, "INGESTION"),
     "CLAIMS_NOT_COMPLEMENTARY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC5) the pair settlement-difference policy (settlement_pair_policy):
+    # a pair whose payout rule is unknown in some outcome class, whose
+    # classes are not all enumerated, that is no complement in ordinary
+    # completion, or whose priced floor (separate markets' fair prices at
+    # their worst case, never summed to $1) is below the complement payout
+    "SETTLEMENT_PAIR_PAYOUT_RULE_UNKNOWN": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PAYOUT_TOKEN_UNREADABLE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_STATE_IMPOSSIBLE_ON_ONE_LEG_ONLY": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_STAKE_BACK_WITHOUT_AN_ENTRY_PRICE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_NOT_COMPLEMENTARY_IN_ORDINARY_COMPLETION": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_OUTCOME_CLASS_NOT_ENUMERATED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PARTIAL_PLAY_GRADING_NOT_ESTABLISHED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "SETTLEMENT_PAIR_PRICED_FLOOR_BELOW_THE_COMPLEMENT_PAYOUT": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
     # (315) Red Team Closeout V1: the package's stream-currency gate as the
     # institutional stream's last word; the canonical exposure lock's
     # refusals (an ENTRY carrying its canonical claim / event past the
