@@ -380,3 +380,25 @@ def test_phone_position_wall_is_one_full_width_column():
     assert "body.bt-page-trader.bt-exp-v4 .activity-panel{position:static;}" in phone
     # two rows of metrics are not pinned over ~40% of a phone screen; the compact ribbon stays sticky
     assert "body.bt-page-trader.bt-exp-v4 .metrics{position:static;" in phone
+
+
+# --- labels and logos -------------------------------------------------------
+
+
+def test_card_broadcast_button_is_not_labelled_live():
+    # every card is a PAPER position (SMALL LIVE = SHADOW): a 'LIVE' button on each one read as live trading
+    src = js()
+    assert "bt.textContent='LIVE'" not in src and "Open live position broadcast" not in src
+    assert "bt.textContent='VIEW';bt.title='Open the full-screen position broadcast (PAPER / SHADOW)'" in src
+    assert "POSITION BROADCAST · PAPER / SHADOW" in src
+
+
+def test_inferred_team_logo_needs_its_own_card_or_monitor_league():
+    # a scoreboard outside a card / monitor used to take the league of the FIRST .sport-tag on the page
+    src = js()
+    assert "sb.closest('.monitor-inner')||d,league=" not in src
+    assert "var card=sb.closest('.position-card')||sb.closest('.monitor-inner');if(!card)return;var league=sportOf(card)" in src
+    # logo hosts stay the two fixed constants (no host taken from page data)
+    assert src.count("https://") == 2
+    assert "var POLY_ICON='https://polymarket.com/images/brand/icon-blue.png';" in src
+    assert "var ESPN='https://a.espncdn.com/i/teamlogos/';" in src
