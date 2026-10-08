@@ -182,9 +182,12 @@ body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-
 
   body.hq.bt-exp-v4{background:radial-gradient(140% 70% at 50% 0,#17365d 0,#0b192b 50%,#07111e 100%) fixed;}
   body.hq.bt-exp-v4 #hq-stage{display:none!important;}
-  body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:fixed;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}
+  /* The hero scrolls with the page and its clearance sits directly under the top bar. Fixed, with the
+     clearance on the HUD, it painted over the in-flow CRITICAL bar (#hq-alert sits before the HUD) and left
+     a blank band of that height between the freshness strip and Management Equity (CI run 37783164445). */
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:absolute;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}
   body.hq.bt-exp-v4[data-view="command"] #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.16),rgba(5,12,22,0) 50%,rgba(5,12,22,.78) 100%);}
-  body.hq.bt-exp-v4[data-view="command"] main#hq-hud{padding-top:calc(48svh + 10px);}
+  body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(48svh + 10px);}
   body.hq.bt-exp-v4[data-view="command"] .view-command [data-render="capital"]{background:linear-gradient(180deg,rgba(17,37,61,.90),rgba(8,21,37,.88));}
   body.hq.bt-exp-v4 #hq-top{background:rgba(7,17,30,.84);}
   body.hq.bt-exp-v4 .big{font-size:42px;}
@@ -227,7 +230,7 @@ body.bt-page-trader.bt-exp-v4.bt-v4-tape-collapsed .position-wall{grid-template-
 
 @media (max-width:430px){
   body.hq.bt-exp-v4[data-view="command"] #hq-stage{height:44svh;}
-  body.hq.bt-exp-v4[data-view="command"] main#hq-hud{padding-top:calc(44svh + 8px);}
+  body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(44svh + 8px);}
   body.fl.bt-exp-v4 .fl-stage{height:64svh;min-height:430px;}
   body.bt-page-trader.bt-exp-v4 .monitor,body.bt-page-trader.bt-exp-v4 .monitor-left,body.bt-page-trader.bt-exp-v4 .monitor-main,body.bt-page-trader.bt-exp-v4 .monitor-right{flex-basis:86vw;}
 }

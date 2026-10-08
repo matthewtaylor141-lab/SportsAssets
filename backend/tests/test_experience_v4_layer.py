@@ -248,3 +248,36 @@ def test_added_controls_are_44px_on_coarse_pointers():
                 ".bt-v4-palette-list a", ".bt-v4-palette-list button"):
         assert sel in block, sel
     assert "min-height:44px;min-width:44px;" in block
+
+
+# --- phone Command: hero, CRITICAL bar and equity ---------------------------
+#
+# Integrator finding (5), CI preview run 37783164445 (V3 = V4's code): with
+# the layer, iPhone Command showed the restored WebGL HQ and the freshness
+# strip, then a full screen of blank space before Management Equity, and the
+# CRITICAL attention card production shows first was gone (only echoed in the
+# Pulse). Cause: the phone hero was position:fixed below the top bar and its
+# clearance was padding-top on main#hq-hud -- but #hq-alert and #hq-fresh sit
+# BEFORE the HUD in flow, so they were painted under the fixed 3D stage (the
+# freshness strip only showed because its backdrop-filter makes a stacking
+# context) and the HUD's padding became the blank band. Locally (synthetic
+# reads, 390x844): CRITICAL bar covered by the canvas, freshness 209-417 px,
+# equity at 796 px, a 379 px gap; after: bar visible at 433 px, freshness at
+# 578 px, equity at 798 px with a 12 px gap.
+
+
+def test_phone_hero_scrolls_and_its_clearance_sits_under_the_top_bar():
+    sheet = css()
+    assert 'body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:absolute;left:0;right:0;top:54px;height:48svh;' in sheet
+    assert 'body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(48svh + 10px);}' in sheet
+    assert 'body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(44svh + 8px);}' in sheet
+    # the clearance must not come back as HUD padding (the blank band) or the hero as position:fixed
+    assert 'main#hq-hud{padding-top:calc(' not in sheet
+    assert '#hq-stage{display:block!important;position:fixed;' not in sheet
+
+
+def test_phone_command_keeps_the_real_webgl_hq():
+    # the restored phone 3D HQ stays (the installer's hq.js edits are untouched)
+    hq = (COMMAND / "hq.js").read_text(encoding="utf-8")
+    assert "mod.createHQ(stage, {phone: PHONE," in hq
+    assert "if (PHONE || !stage) return;" not in hq
