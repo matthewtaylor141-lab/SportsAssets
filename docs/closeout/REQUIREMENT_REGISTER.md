@@ -50,38 +50,38 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 |---|---|---|---|---|---|---|
 | B1 | Workers OOM root cause (analytics settle pass read the whole archive) | RC4 9b94ef5c | test_analytics_archive_bounded | no workers OOM since 05:16:03Z (7.5+ h at 12:50Z) | DEPLOYED | 60-min window inside RC5 acceptance |
 | B2 | Premap sweep holds one page | RC4 f4c758e6 | test_premap_memory_bound | same | DEPLOYED | same |
-| B3 | Market plane OOM at 2 GiB: attribute and bound (no larger instance) | in progress: rc5/plane-memory (attribution harness, registry/coverage/heartbeat bounds) | full-mode boot test pending | plane 1.4-2.0 GB resident, repeated oomKilled | OPEN | finish, gate, deploy, prove OOM-free window |
-| B4 | SizedBooks.unwant releases instrument records (review patch) | RC5 263a7ad7 (patch was malformed; applied by hand) | test_market_plane_unwant_releases_instruments (3, fail on base) | ~23 MB per catalogue rotation; not the main driver | LOCAL | ship in RC5 |
-| B5 | Audrey "paper pass not completed" alert reads the last completed pass | RC5 eab1bdbc | test_audrey_pass_alert_reads_completion (4, fail on base) | false "unknown time" alerts 05:20Z / 06:20Z | LOCAL | ship in RC5; confirm no false alert after deploy |
+| B3 | Market plane OOM at 2 GiB: attribute and bound (no larger instance) | RC5 merge 109c3e10 (rc5/plane-memory c3aacd6c): coverage pass, populate(full), Kalshi walk/persist and assignment refdata page instead of holding the universe; heartbeat detail bounded (16k); memory block in the heartbeat; tools/market_plane_memory.py attribution harness | full-mode boot test under the orderless guard; harness at production cardinality: highest step peak 1,956.5 -> 448.9 MB, steady 471-477 MB over ten passes | 39 oomKilled on 7fd4574e (2 GiB) before RC5 | PUBLISHED (814f76c2; interim release 93dc6f41) | gates; deploy plane; >= 60 min clean window then 2-3 h across Kalshi walks; heartbeat memory block readback |
+| B4 | SizedBooks.unwant releases instrument records (review patch) | RC5 263a7ad7 (patch was malformed; applied by hand) | test_market_plane_unwant_releases_instruments (3, fail on base) | ~23 MB per catalogue rotation; not the main driver | PUBLISHED (814f76c2) | ships with B3 |
+| B5 | Audrey "paper pass not completed" alert reads the last completed pass | RC5 eab1bdbc | test_audrey_pass_alert_reads_completion (4, fail on base) | false "unknown time" alerts 05:20Z / 06:20Z | PUBLISHED (814f76c2) | confirm no false alert after deploy |
 
 ### C. Acceptance harness (PM defects 2026-10-08 02:30Z)
 
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
-| C1 | historical_paper_immutable bound to pre/post fingerprint receipt (fixed cutoff, watermark, deterministic order); missing/conflicting = UNPROVEN | in progress: rc5/acceptance-harness | new binder + DB tests | RC4 pre/post fingerprints identical (manual) | OPEN | finish, gate |
-| C2 | no-OOM from complete Render event windows for API/workers/plane; injected OOM must turn RED | in progress: rc5/acceptance-harness | injected-failure fixture | RC4 replay: plane FAILED with 2 oomKilled | OPEN | finish, gate |
-| C3 | Declared schema paths in evidence_packet; READ_UNAVAILABLE never GREEN | in progress: rc5/acceptance-harness | reordered / contradictory / partial / absent tests | | OPEN | finish, gate |
-| C4 | post_receipt default OFF (zero POSTs), false receipt preserved append-only, attestation verified (not continue-on-error) | in progress: rc5/acceptance-harness | workflow + receipt tests | earlier false receipt for 08828d04 preserved | OPEN | finish, gate |
-| C5 | Plane memory/events/log counts in the packet | in progress: rc5/acceptance-harness | | | OPEN | finish |
+| C1 | historical_paper_immutable bound to pre/post fingerprint receipt (fixed cutoff, watermark, deterministic order); missing/conflicting = UNPROVEN | RC5 merge 6b67ce41 (rc5/acceptance-harness c5a633d0); judge runs from the workflow's own commit | new binder + DB tests | RC4 pre/post fingerprints identical (manual) | PUBLISHED (814f76c2); PRE baseline 37792438140 (cutoff 14:12Z, signature verified) | gate; run POST after deploy |
+| C2 | no-OOM from complete Render event windows for API/workers/plane; injected OOM must turn RED | RC5 merge 6b67ce41 (rc5/acceptance-harness c5a633d0); judge runs from the workflow's own commit | injected-failure fixture | RC4 replay: plane FAILED with 2 oomKilled | PUBLISHED (814f76c2); PRE baseline 37792438140 (cutoff 14:12Z, signature verified) | gate; run POST after deploy |
+| C3 | Declared schema paths in evidence_packet; READ_UNAVAILABLE never GREEN | RC5 merge 6b67ce41 (rc5/acceptance-harness c5a633d0); judge runs from the workflow's own commit | reordered / contradictory / partial / absent tests | PUBLISHED (814f76c2); PRE baseline 37792438140 (cutoff 14:12Z, signature verified) | gate; run POST after deploy |
+| C4 | post_receipt default OFF (zero POSTs), false receipt preserved append-only, attestation verified (not continue-on-error) | RC5 merge 6b67ce41 (rc5/acceptance-harness c5a633d0); judge runs from the workflow's own commit | workflow + receipt tests | earlier false receipt for 08828d04 preserved | PUBLISHED (814f76c2); PRE baseline 37792438140 (cutoff 14:12Z, signature verified) | gate; run POST after deploy |
+| C5 | Plane memory/events/log counts in the packet | RC5 merge 6b67ce41 (rc5/acceptance-harness c5a633d0); judge runs from the workflow's own commit | | | PUBLISHED (814f76c2); PRE baseline 37792438140 (cutoff 14:12Z, signature verified) | gate; run POST after deploy |
 
 ### D. Market data, Kalshi, PMUS
 
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
-| D1 | PMX gRPC primary: subscribe-all semantics, acks, L2, identity, same-book arbitration, gaps, recovery, bounded storage | RC4 (accounting, plane-only harness input, majority rule) | test_p1_pmx_grpc_primary_accounting | plane snapshot stale whenever the plane is OOM-restarting | DEPLOYED (source); consumer use OPEN | rc5/pmx-consumer-books |
-| D2 | Consumer use of PMX books (QUOTE_STALE / PROBABILITY_DEADLINE first losses capped by REST budget) | in progress: rc5/pmx-consumer-books | | SOFTWARE first losses 73/h after RC4 | OPEN | finish, gate, census by source |
-| D3 | Dedicated plane in approved full mode, orderless guard, full-mode boot test with mocked transports | guard RC4; boot test in progress (rc5/plane-memory) | test_market_plane_orderless_guard (22) | plane provisioned 05:15Z; 6 values copied byte-exact from workers (disclosed to owner) | DEPLOYED (guard); boot test OPEN | finish |
-| D4 | Kalshi key classes (RSA-PSS + Ed25519) everywhere a signer exists; PEM bytes preserved | in progress: rc5/kalshi-keyclass-pmus-signer | | plane GET account/limits 200 with Ed25519 | OPEN | finish |
-| D5 | PMUS funded readers refuse the wrong key class before network; never substitute institutional positions | in progress: rc5/kalshi-keyclass-pmus-signer | test_pmus_credential_census | PMUS_KEY_ID/SECRET hold the PMX RSA client | EXTERNAL (funded retail Ed25519 key absent) + code OPEN | finish code; owner provides retail key |
-| D6 | Priority freshness >= 95% on full denominator | | | 116/139 (83%) | OPEN | rc5/pmx-consumer-books census |
+| D1 | PMX gRPC primary: subscribe-all semantics, acks, L2, identity, same-book arbitration, gaps, recovery, bounded storage | RC4 (accounting, plane-only harness input, majority rule) | test_p1_pmx_grpc_primary_accounting | plane snapshot stale whenever the plane is OOM-restarting | DEPLOYED (source); consumer use PUBLISHED (D2) | see D2 |
+| D2 | Consumer use of PMX books (QUOTE_STALE / PROBABILITY_DEADLINE first losses capped by REST budget) | RC5 merge 74fa9b38 (rc5/pmx-consumer-books 49aaee89): paper_pmx_books serves paper owner + collector calibration reads only when proven (exact identity, acknowledged on this connection, current under the decision bound, received <= 6 s, per-symbol same-book SUPPORTED), REST otherwise, counted by source; requested-symbol set no longer frozen at 32; gRPC transport connected flag fixed; stale / restarted plane certifies nothing; PMX_CONSUMER_BOOKS=off kill switch | test_rc5_pmx_consumer_books (29), test_rc5_plane_certification (10), test_rc5_feed_ownership_authority (6), all fail on base | RC4: held marks REST 4 / stream 0; paper owner 847 reads, 243 REST, 19 HTTP 429 | PUBLISHED | gate; paper_mark_refresh_runs.market_data.book_sources pmx_share after deploy |
+| D3 | Dedicated plane in approved full mode, orderless guard, full-mode boot test with mocked transports | guard RC4; boot test RC5 109c3e10 | test_market_plane_orderless_guard (22); full-mode boot test | plane provisioned 05:15Z; 6 values copied byte-exact from workers (disclosed to owner) | DEPLOYED (guard); boot test PUBLISHED (814f76c2) | gate |
+| D4 | Kalshi key classes (RSA-PSS + Ed25519) everywhere a signer exists; PEM bytes preserved | RC5 merge 9c123a22 (rc5/kalshi-keyclass-pmus-signer a5b5d2c1): kalshi_key.py; four loader refusals classified | lane suites | plane GET account/limits 200 with Ed25519 | PUBLISHED (814f76c2) | gate; deploy |
+| D5 | PMUS funded readers refuse the wrong key class before network; never substitute institutional positions | RC5 merge 9c123a22: PMUS credential gate | test_pmus_credential_census + lane suites | PMUS_KEY_ID/SECRET hold the PMX RSA client | EXTERNAL (funded retail Ed25519 key absent) + code PUBLISHED (814f76c2) | owner provides the funded retail key |
+| D6 | Priority freshness >= 95% on full denominator | plane memory (B3) keeps the plane up; transport connected flag (D2) makes the census name the real per-symbol refusal | | 116/139 (83%) RC4; radar priority_universe 0.9753 with the plane up vs 0.0588 just after an OOM (14:27Z) | OPEN | measure after deploy on the unchanged denominator; finished games (STARTED_GT_4H) counted as misses are a denominator question for the PM, not changed here |
 
 ### E. Management, settlement, accounting
 
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
-| E1 | Xavier strict no-growth, protection never lost in transition, full population | RC4 entry guard (cannot price / protect) | test_exploration_entry_xavier_manageability | complete packets 0/3 (waiting for evidence) | OPEN | rc5/xavier-no-growth audit |
-| E2 | Priced settlement-difference policy; unknown payout refused | in progress: rc5/settlement-difference-epoch-b | | | OPEN | finish |
-| E3 | $500,000 epoch exact reconciliation (4 carried EPOCH_OPEN_MARK_UNVERIFIED, $141.80 post-epoch cash outside) | in progress: rc5/settlement-difference-epoch-b | | equity $458,852 (-8.23%) not re-baseable | OPEN | finish |
+| E1 | Xavier strict no-growth, protection never lost in transition, full population | RC4 entry guard; RC5 merge 207c3efe (rc5/xavier-no-growth 46e6b72b): full held population, packet currency, live and remainder protection, no-price KeyError, abandoned EXIT restores protection | test_exploration_entry_xavier_manageability + lane suites (fail on base) | complete packets 0/3 (waiting for evidence) | PUBLISHED (814f76c2) | gate; held-population census after deploy |
+| E2 | Priced settlement-difference policy; unknown payout refused | RC5 merge bc294e05 (rc5/settlement-difference-epoch-b cfe8e6d1): settlement_pair_policy.py bound into adriana_claims | lane suites | | PUBLISHED (814f76c2) | gate |
+| E3 | $500,000 epoch exact reconciliation (4 carried EPOCH_OPEN_MARK_UNVERIFIED, $141.80 post-epoch cash outside) | RC5 merge bc294e05: bettor_paper_epoch reconciliation block | lane suites | equity $458,852 (-8.23%) not re-baseable | PUBLISHED (814f76c2) | readback after deploy |
 | E4 | Fixture normalization, rotation, WNBA namespace, aliases, schema hygiene, SOFTWARE first losses | RC4 (12 leagues admitted, first-loss producers) | RC4 suites | SOFTWARE 73/h after deploy | DEPLOYED (partial) | census on RC5 |
 
 ### F. Frontend and live scores
@@ -90,7 +90,7 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 |---|---|---|---|---|---|---|
 | F1 | Experience V3 applied exactly (superseded by V4) | 18bc48ea + freeze fix e01a7d4d (claude/uiux-experience-v3) | verifier 30/30; 19 files 242 passed | CI preview 37783164445: occlusion, header clipping, touch < 44 px, phone Command blank band | PUBLISHED (not for production) | fixes carried into V4 |
 | F2 | Experience V4 applied exactly + necessary fixes; device acceptance; publish | in progress: claude/experience-v4-live-game-state | verifier 33/33 required | | OPEN | finish, CI preview with production data, reviewer, publish |
-| F3 | Live Game State backend (migration 316, flags OFF, real-PG tests, isolation) | in progress: claude/live-game-state-v1 | 7 real-PG tests required | | OPEN | finish, gates, census |
+| F3 | Live Game State backend (migration 316, flags OFF, real-PG tests, isolation) | RC5 merge 5da59304 (claude/live-game-state-v1 4fc7b0e9): migration 316 + rollback, TRACKED_TO 316, display-only proofs | real-PG tests | census expected to show 0 established fixtures: the adapter reads premap keys us_premap does not carry; no score provider is authorized, flags stay OFF | PUBLISHED (814f76c2) | gate; 316 applies on deploy; census research/lgs_held_fixture_census.sql |
 | F4 | Live Game State frontend (in V4 branch) | in progress | 20 Node tests | | OPEN | finish |
 | F5 | Collector hosting within existing resources, minimal DB permissions | | | no dedicated service exists; a new paid service is not authorized | OPEN | propose hosting; owner decision if new spend needed |
 | F6 | Read-only frontend preview harness (Netlify publishes only the production branch) | 01df6c0f.. (claude/session-njaewf, CI-only) | runs 37783159982 / 37783164445 | | PUBLISHED | reuse for V4 |
@@ -99,7 +99,7 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
-| G1 | ADMIN_TOKEN strength (production accepts a 2-character admin credential; it is the HMAC signing key) | throttle 7ad4b746 (RC5) | test_admin_token_guard (8) | frontend-preview 37781022031 printed token length 2; owner notified 2026-10-08 13:16Z | EXTERNAL (rotation is the owner's) + mitigation LOCAL | owner rotates ADMIN_TOKEN (Render API/workers + GitHub secret) |
+| G1 | ADMIN_TOKEN strength (production accepts a 2-character admin credential; it is the HMAC signing key) | throttle 7ad4b746 (RC5) | test_admin_token_guard (8) | frontend-preview 37781022031 printed token length 2; owner notified 2026-10-08 13:16Z | EXTERNAL (rotation is the owner's) + mitigation PUBLISHED (814f76c2) | owner rotates ADMIN_TOKEN (Render API/workers + GitHub secret) |
 | G2 | No secrets in messages, artifacts, bundles or logs | frontend-preview guard; plane.sh masking | | | ongoing | audit pass |
 
 ### H. Economics
@@ -111,4 +111,6 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 
 ## Change log
 
+- 2026-10-08 16:10Z: PMX consumer books merged (74fa9b38); taxonomy + touched suites 204 passed, completion / plane / packet readers 761 passed (38 files).
+- 2026-10-08 15:35Z: six RC5 lanes merged (6b67ce41, 207c3efe, bc294e05, 9c123a22, 5da59304, 109c3e10) and published at 814f76c2; interim release 93dc6f41 (tree equal) pushed so the plane fix can deploy once gated. PMX consumer lane (D2/D6) and the V4 frontend (F2/F4) still in flight.
 - 2026-10-08 13:55Z: register created on the RC5 branch (claude/red-team-closeout-v1) with RC4 baseline, RC5 local commits 7ad4b746 / eab1bdbc / 263a7ad7 and the in-flight lanes.
