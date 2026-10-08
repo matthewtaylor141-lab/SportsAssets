@@ -52,6 +52,10 @@ logging.basicConfig(
 )
 for _name in ("httpx", "httpcore"):
     logging.getLogger(_name).setLevel(logging.WARNING)
+# secret-bearing URLs never reach a log line (log_redaction)
+from .. import log_redaction as _log_redaction  # noqa: E402
+
+_log_redaction.install()
 
 log = logging.getLogger(__name__)
 
