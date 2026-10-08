@@ -36,6 +36,7 @@ import uuid
 
 import pytest
 
+from sportsassets import bettor_paper_freshness as PMF
 from sportsassets import bettor_paper_ledger as L
 from sportsassets import bettor_paper_simulator as SIM
 from sportsassets import open_position_canon as CANON
@@ -193,4 +194,184 @@ async def test_the_monitored_census_counts_a_held_position_outside_the_window(
         assert m["numerator"] < m["denominator"]
         assert m["detail"]["view_truncated_for"] == []
     finally:
+        await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 2 · A HISTORICAL COMPLETE REVIEW NEVER KEEPS A STALE PACKET GREEN
+# ═════════════════════════════════════════════════════════════════════
+
+def _complete(**over):
+    d = {"complete": True, "reviewed_at": NOW - 10.0,
+         "expires_at": NOW + 15.0, "book_observed_at": NOW - 20.0}
+    d.update(over)
+    return d
+
+
+def test_a_complete_packet_is_current_only_inside_its_own_limits():
+    ok = PMF.packet_currency(_complete(), now=NOW, last_fill_at=NOW - 3600)
+    assert ok == {"current": True, "why": None}
+    # the probability expired (its own source stamp + its limit)
+    v = PMF.packet_currency(_complete(expires_at=NOW - 0.001), now=NOW,
+                            last_fill_at=NOW - 3600)
+    assert v == {"current": False, "why": PMF.PK_PROBABILITY_EXPIRED}
+    # no recorded expiry: never assumed current
+    v = PMF.packet_currency(_complete(expires_at=None), now=NOW,
+                            last_fill_at=None)
+    assert v == {"current": False, "why": PMF.PK_NO_RECORDED_EXPIRY}
+    # the book it was walked on is past the 300 s mark SLA now
+    v = PMF.packet_currency(
+        _complete(book_observed_at=NOW - PMF.SLA_S - 1), now=NOW,
+        last_fill_at=None)
+    assert v == {"current": False, "why": PMF.PK_BOOK_PAST_SLA}
+    v = PMF.packet_currency(_complete(book_observed_at=None), now=NOW,
+                            last_fill_at=None)
+    assert v == {"current": False, "why": PMF.PK_BOOK_PAST_SLA}
+    # the position filled again after the review: it reviewed another qty
+    v = PMF.packet_currency(_complete(), now=NOW, last_fill_at=NOW - 1)
+    assert v == {"current": False, "why": PMF.PK_POSITION_CHANGED}
+    # a recorded INCOMPLETE packet is incomplete whatever its stamps
+    v = PMF.packet_currency(_complete(complete=False), now=NOW,
+                            last_fill_at=None)
+    assert v == {"current": False, "why": PMF.PK_RECORDED_INCOMPLETE}
+    assert PMF.packet_currency(None, now=NOW, last_fill_at=None) == {
+        "current": False, "why": PMF.PK_NO_REVIEW}
+
+
+def test_the_limits_are_the_existing_ones():
+    """No new threshold: the book limit IS the mark SLA, and the probability
+    limit is the one the review recorded with its evidence."""
+    assert PMF.SLA_S == L.MARK_STALE_AFTER_S == 300.0
+    # the probability's limit is read off the review's own valuation block
+    rec = PMF.packet_record({
+        "complete": True, "reviewed_at": NOW - 10.0,
+        "expires_at": NOW + 15.0, "expiry_missing": False,
+        "book_observed_at": NOW - 20.0, "book_missing": False})
+    assert rec["expires_at"] == NOW + 15.0
+    assert PMF.packet_record(dict(rec, expiry_missing=True))[
+        "expires_at"] is None
+
+
+async def _held_hold(conn, tag):
+    """A held, protected position whose review at AT is COMPLETE on a fresh
+    probability (source AT-8, 30 s limit -> expires AT+22) and HOLDs (p 0.95
+    out-values the 0.80 bid): nothing is cancelled, the protection rests."""
+    a, g, slug = await XRF._held(conn, tag, entry_age_s=3600)
+    await XRF._reading(conn, slug, decided_at=AT - 3, pin_age_s=5.0, p=0.95)
+    rv, m, alts, sales = await XRF._review(conn, a, g)
+    pk = H.j(rv["selection"])["management_packet"]
+    assert pk["gate"]["complete"] is True, pk["gate"]
+    assert m["evidence_state"] == PX.E_FRESH
+    assert sales == 0
+    exp = H.j(rv["selection"])["valuation"]["expires_at"]
+    assert exp == pytest.approx(AT + 22.0)
+    return a, g, slug
+
+
+@pg
+async def test_a_complete_review_whose_evidence_expired_is_not_complete_now():
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await _held_hold(conn, "xhpstale")
+        slugs.append(slug)
+        acct = a["account_id"]
+        pk = next(p["position_key"] for p in await L.positions(conn, acct)
+                  if p["group_id"] == g)
+        # INSIDE the probability's own life: complete, protected, no refusal
+        iv = await PMF.strategy_management_integrity(conn, acct, XRF.CG,
+                                                     now=AT + 5)
+        assert iv["packet_incomplete"] == [], iv
+        assert iv["refusal"] is None, iv
+        # no review since, and the probability expired at AT+22: the old
+        # COMPLETE gate is history, not the packet's state now
+        iv = await PMF.strategy_management_integrity(conn, acct, XRF.CG,
+                                                     now=AT + 120)
+        assert pk in iv["packet_incomplete"], iv
+        assert iv["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
+        assert iv["packet_not_current"] == [
+            {"position_key": pk, "why": PMF.PK_PROBABILITY_EXPIRED}]
+        # the protection itself is still valid: only the packet is stale
+        assert iv["protection_not_valid"] == []
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()
+
+
+@pg
+async def test_the_entry_rail_refuses_growth_on_a_stale_complete_packet():
+    """The allocation rail under the ledger lock reads the same integrity:
+    a new ENTRY of the strategy is refused once the complete packet's
+    evidence has expired with no newer review."""
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await _held_hold(conn, "xhprail")
+        slugs.append(slug)
+        got = await PMF.allocation_refusal(
+            conn, account_id=a["account_id"], strategy=XRF.CG, now=AT + 120)
+        assert got is not None
+        assert got["refusal"] == PMF.R_PACKETS_BLOCK_ALLOCATION
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()
+
+
+@pg
+async def test_the_xavier_complete_gate_is_red_on_a_stale_complete_packet():
+    """The capital-readiness / completion gate `xavier_complete` reads the
+    same integrity: GREEN while current, RED once the evidence expired."""
+    from sportsassets.capital_readiness import feeds as CRF
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await _held_hold(conn, "xhpgate")
+        slugs.append(slug)
+        now_ok = await CRF.gate_xavier_complete(
+            conn, {"account_id": a["account_id"], "now": AT + 5})
+        assert now_ok["value"] is True, now_ok
+        later = await CRF.gate_xavier_complete(
+            conn, {"account_id": a["account_id"], "now": AT + 120})
+        assert later["value"] is False
+        assert later["reason"] == "XAVIER_PACKETS_INCOMPLETE"
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()
+
+
+@pg
+async def test_a_fill_after_the_complete_review_makes_it_history():
+    """The position changed after its complete review (a new fill): the
+    review's packet was about another quantity."""
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await _held_hold(conn, "xhpfill")
+        slugs.append(slug)
+        acct = a["account_id"]
+        # a sale of 1 contract fills at AT+4 (after the AT review)
+        sale = H.order(a, key="s1", direction="SELL", role="EXIT", qty=1,
+                       limit=0.30, slug=slug, at=AT + 1, group_id=g)
+        await conn.execute(
+            "UPDATE paper_orders SET state='CANCEL_PENDING' WHERE group_id=$1"
+            " AND role='STANDING_PROTECTION' AND state='RESTING'", g)
+        oid = await conn.fetchval(
+            "SELECT order_id FROM paper_orders WHERE group_id=$1 AND role="
+            "'STANDING_PROTECTION' AND state='CANCEL_PENDING'", g)
+        await SIM.simulate_order(conn, oid, now=AT + 1, fee_fn=H.zero_fee)
+        got = await L.submit_order(conn, sale, now=AT + 1)
+        assert got["ok"], got
+        await H.observe(conn, slug, AT + 3.5, bids=[(0.80, 100)])
+        filled = await SIM.simulate_order(conn, got["order"]["order_id"],
+                                          now=AT + 4, fee_fn=H.zero_fee)
+        assert filled["state"] == "FILLED", filled
+        iv = await PMF.strategy_management_integrity(conn, acct, XRF.CG,
+                                                     now=AT + 5)
+        pk = next(p["position_key"] for p in await L.positions(conn, acct)
+                  if p["group_id"] == g)
+        assert pk in iv["packet_incomplete"]
+        assert {"position_key": pk, "why": PMF.PK_POSITION_CHANGED} in \
+            iv["packet_not_current"]
+    finally:
+        await XRF._purge(conn, slugs)
         await conn.close()
