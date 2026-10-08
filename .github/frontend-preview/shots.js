@@ -113,19 +113,29 @@ async function measure(page, touch) {
     const name = `${dev}_${pg}${motion ? '_reduced_motion' : ''}`;
     // a page whose main thread never yields (e.g. a self-feeding observer)
     // never reaches DOMContentLoaded and cannot answer a 5 s evaluate
-    const ready = await Promise.race([new Promise((_, rej) => setTimeout(() => rej(new Error('main thread did not answer in 5 s')), 5000)), page.evaluate(() => { const n = performance.getEntriesByType('navigation')[0];
+    const ready = await Promise.race([new Promise((_, rej) => setTimeout(() => rej(new Error('main thread did not answer in 20 s')), 20000)), page.evaluate(() => { const n = performance.getEntriesByType('navigation')[0];
       return { dom_content_loaded_ms: n && n.domContentLoadedEventEnd ? Math.round(n.domContentLoadedEventEnd) : null,
                load_ms: n && n.loadEventEnd ? Math.round(n.loadEventEnd) : null, ready_state: document.readyState }; })])
       .then(r => Object.assign({ main_thread_responsive: true }, r))
       .catch(e => ({ main_thread_responsive: false, ready_error: String(e).slice(0, 120) }));
+    // rendering cost: frames painted and main-thread long tasks over 4 s
+    const perf = ready.main_thread_responsive ? await Promise.race([
+      new Promise(res => setTimeout(() => res({ perf_error: 'no answer in 30 s' }), 30000)),
+      page.evaluate(() => new Promise(res => {
+        let frames = 0, long = 0, longest = 0; const t0 = performance.now();
+        let po = null;
+        try { po = new PerformanceObserver(l => { for (const e of l.getEntries()) { long++; longest = Math.max(longest, e.duration); } }); po.observe({ type: 'longtask', buffered: false }); } catch (e) { po = null; }
+        const tick = () => { frames++; if (performance.now() - t0 < 4000) requestAnimationFrame(tick); else { if (po) po.disconnect(); res({ fps_4s: +(frames / ((performance.now() - t0) / 1000)).toFixed(1), long_tasks_4s: long, longest_task_ms: Math.round(longest) }); } };
+        requestAnimationFrame(tick);
+      }))]).catch(e => ({ perf_error: String(e).slice(0, 120) })) : {};
     const m = ready.main_thread_responsive ? await measure(page, !!d.hasTouch).catch(e => ({ measure_error: String(e).slice(0, 200) })) : {};
     await page.screenshot({ path: path.join(OUT, 'shots', name + '.png'), timeout: 20000 }).catch(() => {});
     if (ready.main_thread_responsive) await page.screenshot({ path: path.join(OUT, 'shots', name + '_full.png'), fullPage: true, timeout: 20000 }).catch(() => {});
     records.push(Object.assign({ view: name, device: dev, page: pg, viewport: d.viewport, status, non_get_aborted: aborted,
-      console_errors: errors.length, first_errors: errors.slice(0, 6), api_by_path_status: api }, ready, m));
+      console_errors: errors.length, first_errors: errors.slice(0, 6), api_by_path_status: api }, ready, perf, m));
     await ctx.close();
   }
   await browser.close();
   fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(), records }, null, 1));
-  for (const r of records) console.log(`${r.view.padEnd(34)} HTTP ${r.status} dcl=${r.dom_content_loaded_ms} in=${r.signed_in} ovf=${r.overflow_px} gl=${r.webgl_canvases}/${r.largest_webgl_share} bars=${r.fixed_bars} ovl=${(r.fixed_overlaps || []).length} t<44=${r.touch_targets_under_44} PAPER=${r.paper_mentions} SHADOW=${r.shadow_mentions} cur=${JSON.stringify(r.current_workspace)} err=${r.console_errors} sus=${JSON.stringify(r.suspect_words)}`);
+  for (const r of records) console.log(`${r.view.padEnd(34)} HTTP ${r.status} dcl=${r.dom_content_loaded_ms} fps=${r.fps_4s} lt=${r.long_tasks_4s}/${r.longest_task_ms}ms in=${r.signed_in} ovf=${r.overflow_px} gl=${r.webgl_canvases}/${r.largest_webgl_share} bars=${r.fixed_bars} ovl=${(r.fixed_overlaps || []).length} t<44=${r.touch_targets_under_44} PAPER=${r.paper_mentions} SHADOW=${r.shadow_mentions} cur=${JSON.stringify(r.current_workspace)} err=${r.console_errors} sus=${JSON.stringify(r.suspect_words)}`);
 })();

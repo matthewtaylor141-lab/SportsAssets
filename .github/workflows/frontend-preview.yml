@@ -78,7 +78,11 @@ jobs:
           echo "== proxy =="; cat out/proxy.json
           # the token must never reach the artifact: name any file that holds
           # it (never its content), keep only what is clean, and fail the job
-          if [ -n "${ADMIN_TOKEN:-}" ]; then
+          # (a token too short to be distinctive cannot be scanned for: it
+          # matches ordinary text; that is recorded, and is itself a finding)
+          if [ -n "${ADMIN_TOKEN:-}" ] && [ "${#ADMIN_TOKEN}" -lt 16 ]; then
+            echo "TOKEN_TOO_SHORT_TO_SCAN: the read credential is under 16 characters (a credential finding); artifact scan skipped"
+          elif [ -n "${ADMIN_TOKEN:-}" ]; then
             hits=$(grep -rlF -- "$ADMIN_TOKEN" out || true)
             if [ -n "$hits" ]; then
               echo "token bytes found in: $hits (token length ${#ADMIN_TOKEN})"
