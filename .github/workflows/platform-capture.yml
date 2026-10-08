@@ -2,24 +2,32 @@ name: platform-capture
 
 # A READ-ONLY SCREEN RECORDING OF THE REAL COMMAND FRONTEND, ENCRYPTED.
 #
-# The target ref's frontend is built as Netlify builds it and served with
-# the read-only preview server (.github/frontend-preview/serve.js: GET/HEAD
-# only, the read token added server side, never in the page). capture.js
-# either discovers the routes (screenshots, clickable elements, headings) or
-# records a walkthrough plan from Chromium's own compositor frames.
+# source=production records https://command.bettortoken.com itself (the
+# deployed build); source=candidate builds target_ref as Netlify does and
+# serves it with the read-only preview server (.github/frontend-preview/
+# serve.js). Either way the existing read credential is added outside the
+# page (Playwright request layer, or the preview server), GET/HEAD only.
+# capture.js discovers routes or records a walkthrough plan from Chromium's
+# own compositor frames; nothing is injected into the product.
 #
-# THIS REPOSITORY IS PUBLIC, so nothing readable leaves the runner: every
-# output is encrypted to the RSA public key given as an input (AES-256 data
-# key, RSA-OAEP wrapped); only the holder of the private key can open the
-# artifact. The logs carry step names and timings only. Nothing is deployed;
-# production (command.bettortoken.com) is untouched.
+# THIS REPOSITORY IS PUBLIC. Nothing readable leaves the runner: all output
+# is encrypted with age (X25519 recipient given as an input; authenticated
+# encryption) and the ciphertext is checked before the only upload step,
+# which runs on success only. A cleanup step removes every plaintext file
+# and browser profile on success and on failure. Logs carry step numbers,
+# kinds, counts and sizes only. Nothing is deployed or changed.
 
 on:
   workflow_dispatch:
     inputs:
-      target_ref:
-        description: "branch or 40-hex commit whose frontend is recorded"
+      source:
+        description: "production (command.bettortoken.com) or candidate (build target_ref)"
         required: true
+        type: choice
+        options: [production, candidate]
+      target_ref:
+        description: "candidate only: branch or 40-hex commit whose frontend is recorded"
+        required: false
         type: string
       mode:
         description: "discover or record"
@@ -30,8 +38,8 @@ on:
         description: "record mode: plan file under .github/frontend-preview/plans/ (harness ref)"
         required: false
         type: string
-      pubkey_b64:
-        description: "base64 of the PEM RSA public key every output is encrypted to"
+      recipient:
+        description: "age X25519 recipient (age1...) every output is encrypted to"
         required: true
         type: string
 
@@ -45,82 +53,96 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
+      - name: Recipient
+        env:
+          RCPT: ${{ inputs.recipient }}
+        run: |
+          echo "$RCPT" | grep -Eq '^age1[02-9ac-hj-np-z]{58}$' || { echo "recipient refused"; exit 1; }
       - name: Harness (this ref)
         uses: actions/checkout@v4
         with:
           path: harness
-      - name: Target ref
+      - name: Target ref (candidate)
+        if: inputs.source == 'candidate'
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.target_ref }}
           path: target
           fetch-depth: 1
-      - name: Recipient key
-        env:
-          PUB: ${{ inputs.pubkey_b64 }}
-        run: |
-          echo "$PUB" | base64 -d > "$RUNNER_TEMP/pub.pem"
-          openssl pkey -pubin -in "$RUNNER_TEMP/pub.pem" -noout -text | head -1
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Build the target frontend (as Netlify does)
+      - name: Build the candidate frontend (as Netlify does)
+        if: inputs.source == 'candidate'
         working-directory: target/frontend
         run: |
           npm ci --no-audit --no-fund
           npm run build
-          echo "target $(git -C .. rev-parse HEAD)"
-      - name: Playwright (Chromium) and ffmpeg
+      - name: Playwright (Chromium), ffmpeg, age
         run: |
           mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
           npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
           npx playwright install --with-deps chromium >/dev/null 2>&1
-          which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null)
-          ffmpeg -hide_banner -version | head -1
-      - name: Serve and capture (read only)
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq ffmpeg age >/dev/null
+          ffmpeg -hide_banner -version | head -1; age --version
+      - name: Capture (read only)
         env:
-          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          READ_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SOURCE: ${{ inputs.source }}
           MODE: ${{ inputs.mode }}
           PLAN: ${{ inputs.plan }}
         run: |
-          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          [ -n "${READ_TOKEN:-}" ] && echo "::add-mask::$READ_TOKEN"
           mkdir -p cap
-          git -C target rev-parse HEAD > cap/target_sha.txt
-          node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 cap &
-          SERVER=$!
-          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
           P=""
           if [ "$MODE" = record ]; then
             case "$PLAN" in *[!A-Za-z0-9._-]*|"") echo "plan name refused"; exit 1;; esac
-            P="harness/.github/frontend-preview/plans/$PLAN"
+            P="$GITHUB_WORKSPACE/harness/.github/frontend-preview/plans/$PLAN"
             test -f "$P"
           fi
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/capture.js http://127.0.0.1:8787 cap "$MODE" "$P"
-          curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
-          kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
+          if [ "$SOURCE" = candidate ]; then
+            git -C target rev-parse HEAD > cap/target_sha.txt
+            ADMIN_TOKEN="$READ_TOKEN" node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 cap &
+            SERVER=$!
+            for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
+            BASE=http://127.0.0.1:8787
+            READ_TOKEN="" NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/capture.js "$BASE" cap "$MODE" "$P"
+            kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
+          else
+            curl -s https://command.bettortoken.com/build.json > cap/production_build.json || true
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/capture.js https://command.bettortoken.com cap "$MODE" "$P"
+          fi
           if [ "$MODE" = record ]; then
-            python3 harness/.github/frontend-preview/assemble.py cap capture.mp4
-            mv cap/capture.mp4 capture.mp4
-            ffprobe -v error -show_entries format=duration:stream=width,height,codec_name,pix_fmt -of compact capture.mp4
+            python3 harness/.github/frontend-preview/assemble.py cap "$RUNNER_TEMP/capture.mp4"
+            ffprobe -v error -show_entries format=duration:stream=width,height,codec_name,pix_fmt,r_frame_rate -of compact "$RUNNER_TEMP/capture.mp4"
+            mv "$RUNNER_TEMP/capture.mp4" cap/capture.mp4
             rm -rf cap/frames cap/frames.ffconcat
-            mv capture.mp4 cap/
           fi
           du -sh cap
-      - name: Encrypt every output to the recipient key
+      - name: Encrypt (age) and verify before upload
+        env:
+          RCPT: ${{ inputs.recipient }}
         run: |
-          tar -C cap -cf capture.tar .
-          rm -rf cap
-          openssl rand 32 > datakey.bin
-          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in capture.tar -out capture.tar.enc -pass file:datakey.bin
-          openssl pkeyutl -encrypt -pubin -inkey "$RUNNER_TEMP/pub.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in datakey.bin -out datakey.bin.enc
-          sha256sum capture.tar | cut -d' ' -f1 > capture.tar.sha256
-          shred -u datakey.bin capture.tar 2>/dev/null || rm -f datakey.bin capture.tar
-          mkdir enc && mv capture.tar.enc datakey.bin.enc capture.tar.sha256 enc/
+          tar -C cap -cf "$RUNNER_TEMP/capture.tar" .
+          sha256sum "$RUNNER_TEMP/capture.tar" | cut -d' ' -f1 > capture.tar.sha256
+          mkdir -p enc
+          age -r "$RCPT" -o enc/capture.tar.age "$RUNNER_TEMP/capture.tar"
+          head -c 21 enc/capture.tar.age | grep -q '^age-encryption.org/v1' || { echo "ciphertext header missing"; rm -rf enc; exit 1; }
+          [ "$(stat -c %s enc/capture.tar.age)" -gt "$(stat -c %s "$RUNNER_TEMP/capture.tar")" ] || { echo "ciphertext size check failed"; rm -rf enc; exit 1; }
+          mv capture.tar.sha256 enc/
           ls -la enc
       - uses: actions/upload-artifact@v4
         with:
           name: platform-capture-${{ github.run_id }}
           path: enc
           retention-days: 3
+          if-no-files-found: error
+      - name: Remove plaintext and browser profiles (always)
+        if: always()
+        run: |
+          for f in "$RUNNER_TEMP/capture.tar" "$RUNNER_TEMP/capture.mp4"; do [ -f "$f" ] && shred -u "$f" || true; done
+          [ -d cap ] && find cap -type f -exec shred -u {} + 2>/dev/null; rm -rf cap
+          rm -rf /tmp/playwright* /tmp/.org.chromium.* "$HOME/.config/chromium" 2>/dev/null || true
+          echo cleaned
