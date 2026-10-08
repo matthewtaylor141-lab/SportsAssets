@@ -1327,3 +1327,7 @@ tests/test_xavier_sale_transition_keeps_the_remainder_protected.py
 tests/test_trader_live_game_real_db.py
 tests/test_live_game_state_integration.py
 tests/test_trader_live_game_package_parity.py
+# (RC5) the dedicated market plane's memory: coverage / populate / Kalshi persist one page at a time (RC4 parity, row for row), the assignment and certify refdata reads slim, the shard plan by counts, the heartbeat bounded with every reader field and RSS by step
+tests/test_market_plane_memory_bound.py
+# (RC5) the dedicated market plane's FULL-MODE boot (main() under market_plane_guard, UMP_AND_KALSHI_WS) with mocked transports: authentication, reference data and both subscriptions reach the mocks; every submit / cancel / funding path is refused before the wire (zero such requests recorded)
+tests/test_market_plane_full_mode_boot.py

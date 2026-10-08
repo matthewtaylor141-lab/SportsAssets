@@ -116,12 +116,18 @@ def _get_json(tx, pacer, url, params, timeout_s):
 def walk(transport=None, *, max_requests: int = DEFAULT_MAX_REQUESTS,
          pacing_s: float = DEFAULT_PACING_S, timeout_s: float = TIMEOUT_S,
          max_pages_per_series: int = MAX_PAGES_PER_SERIES,
-         sleep=time.sleep, clock=time.monotonic) -> dict:
+         sleep=time.sleep, clock=time.monotonic, project=None) -> dict:
     """One full catalogue walk. Never raises (except a NonGetRefused, which
     no code path here can produce). Returns {complete, stopped, requests,
     series_total, series_complete, series_truncated, series_unread,
     markets, ...}; every market carries `_series` (ticker, title, tags,
-    category) as the venue listed it."""
+    category) as the venue listed it.
+
+    `project(market, series) -> dict` keeps, per market, only what its
+    consumer reads, as each page is read (the market plane passes
+    market_plane.populate.kalshi_slim: a page's full objects are dropped
+    with the page instead of accumulating ~75k of them for the whole walk).
+    None keeps the venue object whole, `_series` added."""
     tx = transport or GetOnlyTransport()
     pacer = _Pacer(pacing_s, sleep, clock)
     out = {"version": VERSION, "base": BASE, "method": "GET",
@@ -196,7 +202,8 @@ def walk(transport=None, *, max_requests: int = DEFAULT_MAX_REQUESTS,
                 break
             for m in body.get("markets") or []:
                 if isinstance(m, dict) and m.get("ticker"):
-                    got.append(dict(m, _series=meta))
+                    got.append(project(m, meta) if project is not None
+                               else dict(m, _series=meta))
             nxt = body.get("cursor") or None
             if not nxt:
                 break

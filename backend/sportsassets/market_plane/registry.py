@@ -68,6 +68,14 @@ async def assign_missing_shards(conn, *, max_per_stream=1000,max_streams=20)->di
     plan["subscribable"]=len(order)
     plan["shards_required_for_all"]=-(-len(order)//int(max_per_stream)) if order else 0
     plan["assignments"]=None
+    # (RC5) EACH SHARD BY ITS COUNT, NEVER ITS MEMBER LIST. The plan rides
+    # every heartbeat (each 2 s pass) and every SNAPSHOT event (each 60 s):
+    # with one subscribe-all shard of 32,937 symbols its member list made
+    # the heartbeat detail 1,401,121 characters (production readback,
+    # pm-acceptance 37738089957) and each snapshot 1.4 MB. No reader reads
+    # the members (the registry's subscription_shard column holds them).
+    plan["shards"]=[{"shard":x["shard"],"count":x["count"]}
+                    for x in plan.get("shards") or ()]
     return plan
 
 async def desired_contracts(conn)->list[dict]:
@@ -122,6 +130,43 @@ async def assigned_contracts(conn) -> list:
         " WHERE venue='POLYMARKET_US' AND active AND subscription_shard IS NOT NULL "
         "   AND refdata IS NOT NULL "
         " ORDER BY subscription_shard, contract_id")]
+
+
+#: (RC5) THE REFDATA FIELDS THE PLANE READS, extracted by the database.
+#: ResidentBooks.set_instrument reads exactly priceScale, fractionalQtyScale
+#: (pmx_institutional.scales_of), state and productId; the certifier reads
+#: priceScale / price_scale and fractionalQtyScale / qty_scale. A refdata
+#: record is a full ListInstruments object (~2.3 KB of JSON, the rules text
+#: twice in its metadata): every assignment pass (30 s) read and parsed all
+#: 32,937 of them, +52 MB for the rows and +165 MB for the parsed objects,
+#: the latter alive until the next pass rebound them. An object keeps only
+#: these keys (an absent key -> JSON null, which .get() reads as absent, as
+#: before); a value that is not a JSON object passes through whole, so the
+#: readers see exactly what they saw.
+SLIM_REFDATA_SQL = (
+    "CASE WHEN jsonb_typeof(refdata) = 'object' THEN jsonb_build_object("
+    "  %s) ELSE refdata END")
+INSTRUMENT_KEYS = ("priceScale", "fractionalQtyScale", "state", "productId")
+CERT_SCALE_KEYS = ("priceScale", "price_scale", "fractionalQtyScale",
+                   "qty_scale")
+
+
+def slim_refdata_sql(keys) -> str:
+    return SLIM_REFDATA_SQL % ", ".join(
+        "'%s', refdata->'%s'" % (k, k) for k in keys)
+
+
+async def assigned_instruments(conn) -> list:
+    """assigned_contracts with each refdata reduced to INSTRUMENT_KEYS (the
+    fields Manager.sync -> set_instrument reads): the same rows, the same
+    order, the same values for every key the books read."""
+    return await conn.fetch(
+        "SELECT contract_id, subscription_shard, "
+        + slim_refdata_sql(INSTRUMENT_KEYS) + " AS refdata "
+        "  FROM market_plane_registry "
+        " WHERE venue='POLYMARKET_US' AND active AND subscription_shard IS NOT NULL "
+        "   AND refdata IS NOT NULL "
+        " ORDER BY subscription_shard, contract_id")
 
 
 async def refdata_due(conn, *, now: float, unlisted_retry_s: float,

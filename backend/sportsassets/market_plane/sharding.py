@@ -14,8 +14,13 @@ def assign_stable(symbols, existing=None, *, max_per_stream=DEFAULT_MAX_PER_STRE
     reconnecting merely because the universe changed.
     """
     syms=sorted({str(s).strip() for s in symbols or () if str(s).strip()})
+    # (RC5) membership against a SET: against the sorted list it was one
+    # scan per existing assignment -- 5.9 s of CPU at the production
+    # 32,948 assigned symbols on every 30 s assignment pass, the plane's
+    # event loop (and, through the GIL, its stream thread) held for all of it
+    member=set(syms)
     existing={str(k):int(v) for k,v in (existing or {}).items()
-              if str(k) in syms and 0 <= int(v) < int(max_streams)}
+              if str(k) in member and 0 <= int(v) < int(max_streams)}
     loads={i:0 for i in range(int(max_streams))}; assigned={}
     # keep existing only while its shard still has room
     for s in syms:
