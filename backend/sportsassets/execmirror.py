@@ -77,6 +77,34 @@ SUBMITTING_STALE_S = 30.0
 PACE_S = 0.25
 MAX_PROTECTION_ROWS = 12
 MANAGEMENT_EVERY_S = 60.0
+#: AUDREY'S UNIVERSE: every group with an actual order (sent or excluded),
+#: and every decision whose ACTUAL branch sent nothing (paper only, refused,
+#: or no lane) -- reconciled too, so a missed or refused actual execution is
+#: recorded beside its paper sibling. 14 days.
+AUDREY_UNIVERSE_SQL = """
+    SELECT DISTINCT group_id FROM execmirror_orders
+     WHERE group_id IS NOT NULL AND (venue_order_id IS NOT NULL OR state = 'EXCLUDED')
+       AND created_at > now() - interval '14 days'
+    UNION
+    SELECT DISTINCT group_id FROM execution_intents
+     WHERE actual_state IN ('PAPER_ONLY', 'REFUSED', 'LANE_NOT_RUNNING')
+       AND created_at > now() - interval '14 days'"""
+#: AUDREY WHILE THE LANE IS OFF OR STOPPED (RC6). Her reconciliation ran only
+#: in the RUNNING branch of `tick`, so the owner's emergency stop (2026-10-03
+#: 02:39Z, SMALL LIVE = SHADOW) stopped it too: production pm-acceptance
+#: 37836393458 (2026-10-08 20:10Z) reads the red-team TRUTH_QUORUM with
+#: MISSING_SOURCE + STALE_SOURCE:AUDREY_RECONCILIATION (newest
+#: smalllive_reconciliations row older than 900 s) while execmirror.tick is
+#: HEALTHY in the API. A reconciliation is a record (database rows and the
+#: last account snapshot; no venue call), and a stopped lane is exactly when
+#: it must keep running. Off the RUNNING branch the pass is BOUNDED: the
+#: universe now holds every PAPER_ONLY decision (50 intents in the 2.5 h
+#: before that readback, ~480 a day, thousands over 14 days), each group ~10
+#: reads on the runner's one session; 25 groups a minute (an OPEN actual
+#: position's group every pass, then never reconciled, then the oldest)
+#: clears new decisions ~75x faster than they arrive and keeps the tick's
+#: reviews unblocked. The RUNNING pass is unchanged.
+AUDREY_LANE_OFF_BATCH = 25
 VENUE = "POLYMARKET"
 PAPER_ACCOUNT = "paper_acct_main"
 BUY_ROLES = ("ENTRY", "HEDGE")
@@ -1171,9 +1199,12 @@ class Mirror:
         if not ctl.get("enabled"):
             # ACTUAL POSITIONS ARE STILL MANAGED WHILE THE LANE IS OFF: the
             # review is a record (a BBO read, a probability read, a row);
-            # nothing is planned, submitted or cancelled here.
-            return {"state": "DISABLED",
-                    "xavier_live_reviews": await self._reviews_only(conn)}
+            # nothing is planned, submitted or cancelled here. Audrey's
+            # reconciliation is a record too and keeps her cadence.
+            out = {"state": "DISABLED",
+                   "xavier_live_reviews": await self._reviews_only(conn)}
+            out.update(await self._audrey_lane_off(conn))
+            return out
         fp = EP.keys_present()["key_fingerprint"]
         if ctl.get("account_fingerprint") and fp != ctl["account_fingerprint"]:
             await conn.execute("UPDATE execmirror_control SET enabled = false,"
@@ -1184,8 +1215,10 @@ class Mirror:
         if ctl.get("stopped"):
             out = await self.emergency_stop(conn, ctl)
             if out.get("state") == "STOPPED" and ctl.get("stop_done_at"):
-                # after the stop has completed: reviews only (records)
+                # after the stop has completed: reviews and Audrey's
+                # reconciliation only (records)
                 out["xavier_live_reviews"] = await self._reviews_only(conn)
+                out.update(await self._audrey_lane_off(conn))
             return out
         out = {"state": "RUNNING"}
         if self._buying_power is None:
@@ -2128,18 +2161,43 @@ class Mirror:
         return rid
 
     # --- Audrey reconciles the chain independently ---------------------------
-    async def audrey_reconcile(self, conn) -> int:
-        groups = await conn.fetch(
-            """SELECT DISTINCT group_id FROM execmirror_orders
-                WHERE group_id IS NOT NULL AND (venue_order_id IS NOT NULL OR state = 'EXCLUDED')
-                  AND created_at > now() - interval '14 days'
-               UNION
-               -- a decision whose ACTUAL branch sent nothing (paper only, refused,
-               -- or no lane): reconciled too, so a missed or refused actual
-               -- execution is recorded beside its paper sibling
-               SELECT DISTINCT group_id FROM execution_intents
-                WHERE actual_state IN ('PAPER_ONLY', 'REFUSED', 'LANE_NOT_RUNNING')
-                  AND created_at > now() - interval '14 days'""")
+    async def _audrey_lane_off(self, conn) -> dict:
+        """AUDREY'S RECONCILIATION WHILE THE LANE IS OFF OR STOPPED: on her
+        own cadence, a bounded pass (AUDREY_LANE_OFF_BATCH groups: an open
+        actual position's first, then never reconciled, then the oldest;
+        see `audrey_reconcile`). Records only -- the database rows of the
+        chain and the last account snapshot; no venue call, nothing
+        planned, submitted or cancelled. Never raises into the runner. {}
+        when not due."""
+        if self._now() - self._last_management < MANAGEMENT_EVERY_S:
+            return {}
+        self._last_management = self._now()
+        try:
+            return {"audrey_reconciled": await self.audrey_reconcile(
+                conn, limit=AUDREY_LANE_OFF_BATCH)}
+        except Exception:                                     # noqa: BLE001
+            log.exception("audrey reconciliation (lane off) failed")
+            return {"audrey_reconciled": None}
+
+    async def audrey_reconcile(self, conn, *, limit: int | None = None) -> int:
+        """Every group of the universe (the RUNNING lane's pass, unchanged),
+        or with `limit` the bounded lane-off pass: groups holding an OPEN
+        actual position first (every pass, as runtime_slo's
+        RECONCILIATION_AGE expects of them), then never reconciled, then
+        the oldest reconciliation."""
+        if limit is None:
+            groups = await conn.fetch(AUDREY_UNIVERSE_SQL)
+        else:
+            groups = await conn.fetch(
+                "SELECT u.group_id FROM (" + AUDREY_UNIVERSE_SQL + ") u "
+                "  LEFT JOIN smalllive_reconciliations r "
+                "    ON r.group_id = u.group_id "
+                "  LEFT JOIN (SELECT DISTINCT group_id FROM smalllive_handoffs"
+                "              WHERE state = 'OPEN') h "
+                "    ON h.group_id = u.group_id "
+                " ORDER BY (h.group_id IS NOT NULL) DESC, "
+                "          r.reconciled_at ASC NULLS FIRST, u.group_id "
+                " LIMIT $1", int(limit))
         snap = await conn.fetchrow(
             "SELECT reconciliation, at FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
         n = 0

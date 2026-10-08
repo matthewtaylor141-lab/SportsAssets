@@ -1337,3 +1337,5 @@ tests/test_rc5_pmx_consumer_books.py
 tests/test_rc5_feed_ownership_authority.py
 # (RC6 Archer) an economic duplicate is ONE level re-filled on distinct observations; refills before the seen-crossing fix are HISTORICAL (listed, never rewritten), at or after it CURRENT; distinct levels of one size are not duplicates (production's 18 groups)
 tests/test_paper_economic_duplicate_rule.py
+# (RC6 Archer) Audrey's reconciliation keeps her cadence while the small-live lane is off or stopped: records only, no venue, bounded (open actual position first, never reconciled, then oldest)
+tests/test_audrey_reconciles_while_the_lane_is_off.py
