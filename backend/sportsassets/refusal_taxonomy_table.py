@@ -2084,6 +2084,100 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    'PAPER_HISTORY_BACKDATED_ROWS':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_BASELINE_ABSENT':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_BASELINE_NOT_BEFORE_DEPLOY':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_BASELINE_PROVENANCE_UNVERIFIED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_BASELINE_WATERMARK_NOT_SETTLED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_CHANGED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_COLUMNS_CHANGED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_CUTOFF_MISMATCH':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_DEPLOY_TIME_UNKNOWN':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_DIFFERENT_DATABASE':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_FINGERPRINT_MALFORMED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_POST_FINGERPRINT_ABSENT':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_POST_NOT_AFTER_BASELINE':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_POST_WATERMARK_NOT_SETTLED':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_RECEIPT_ABSENT':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_SESSION_SETTINGS_DIFFER':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PAPER_HISTORY_TABLE_NOT_IN_RECEIPT':
+        'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PMX_PLANE_SNAPSHOT_NOT_CURRENT':
+        'pm_bind/acceptance: a PMX-primary evidence reason of the PM acceptance judge (dedicated-plane snapshot) -- evidence quality, never a trading, decision, order or collector refusal',
+    'PMX_SNAPSHOT_NOT_FROM_A_RUNNING_DEDICATED_PLANE':
+        'pm_bind/acceptance: a PMX-primary evidence reason of the PM acceptance judge (dedicated-plane snapshot) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_DEPLOYS_UNREADABLE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_DEPLOY_NOT_ON_RELEASE_SHA':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENTS_CURSOR_CHAIN_BROKEN':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENTS_MALFORMED':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENTS_READ_FAILED':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENTS_TRUNCATED':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENT_OF_ANOTHER_SERVICE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENT_OF_ANOTHER_SERVICES_INSTANCE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENT_WINDOW_DOES_NOT_COVER_LIVE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_EVENT_WINDOW_UNREADABLE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_FAILURE_EVENT_IN_WINDOW':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_INSTANCE_METRICS_UNREADABLE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_INSTANCE_OF_ANOTHER_SERVICE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_LIVE_DEPLOY_AMBIGUOUS':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_LIVE_DEPLOY_NOT_FOUND':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_LIVE_SINCE_UNREADABLE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_METRICS_OF_ANOTHER_SERVICE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_NO_INSTANCE_OBSERVED_IN_WINDOW':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_OTHER_DEPLOY_IN_WINDOW':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_SERVICE_ABSENT':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_SERVICE_AMBIGUOUS':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_SERVICE_LOOKUP_UNREADABLE':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_SERVICE_NOT_READ':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_SERVICE_SUSPENDED':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_UNCLASSIFIED_EVENT_IN_WINDOW':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    'RUNTIME_WINDOW_RECEIPT_ABSENT':
+        'pm_bind/acceptance: a Render runtime-window evidence reason of the PM acceptance judge (deploys, instances, paginated event window) -- evidence quality, never a trading, decision, order or collector refusal',
+    "ADMIN_TOKEN_ATTEMPTS_THROTTLED":
+        "api/admin_token_guard: the HTTP 429 a caller gets after too many "
+        "WRONG X-Admin-Token guesses -- an access-control response to a "
+        "request, never a trading, decision, order or collector refusal",
     "EXIT_ORDER_CREATED":
         "paper_exit_intents: the intent's SUCCESS resolution (the exit order "
         "was created on fresh evidence)",
