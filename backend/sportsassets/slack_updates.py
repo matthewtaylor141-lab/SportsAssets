@@ -72,6 +72,35 @@ async def _row(conn, key):
     return json.loads(v) if isinstance(v, str) else (v or {})
 
 
+async def last_completed_pass_at(conn, attempt: dict) -> float | None:
+    """WHEN A PAPER PASS LAST COMPLETED -- not when one was last attempted.
+
+    2026-10-08 05:20Z / 06:20Z: Audrey posted "paper agent pass has not
+    completed for an unknown time" while passes were completing (production
+    paper_session_health: 9,815 passes, 0 errors, heartbeat 06:48:27Z). The
+    alert read ingestion_state['paper_session_last_pass'], which records the
+    LAST ATTEMPT; an attempt cut by the 90 s hard timeout
+    (PAPER_PASS_RAISED_OR_TIMED_OUT) writes no "at", so one slow pass erased
+    the time of every completed one. The completion time is
+    paper_session_health.heartbeat_at, written only by passes that ran; the
+    attempt record still counts when it is itself a pass that ran."""
+    at = None
+    try:
+        v = await conn.fetchval(
+            "SELECT extract(epoch FROM max(heartbeat_at))::float8 "
+            "  FROM paper_session_health")
+        at = float(v) if v is not None else None
+    except Exception:                                           # noqa: BLE001
+        at = None
+    if (attempt or {}).get("ran") and attempt.get("at") is not None:
+        try:
+            a = float(attempt["at"])
+            at = a if at is None else max(at, a)
+        except (TypeError, ValueError):
+            pass
+    return at
+
+
 async def snapshot(conn, now: float) -> dict:
     """One read of everything an update reports, from the same functions the
     pages use (account_section, pnl_by_strategy, paper_brief.reconcile)."""
@@ -94,7 +123,7 @@ async def snapshot(conn, now: float) -> dict:
     ps = await _row(conn, "paper_session_last_pass")
     return {"at": now, "account": acct, "pnl": pnl, "reconcile": rc,
             "research": research, "cycle_at": cyc.get("at"),
-            "pass_at": ps.get("at")}
+            "pass_at": await last_completed_pass_at(conn, ps)}
 
 
 def _kind() -> str:
