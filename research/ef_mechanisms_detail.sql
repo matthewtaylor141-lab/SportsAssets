@@ -7,13 +7,31 @@
 -- receipts with no runner-up route. This says why, from the scans' own
 -- refusal counters and the receipts' own candidate lists.
 
-\echo '== 5b.1 Adriana: refusal codes summed over every scan (by_code)'
-SELECT k.key AS code, sum((k.value)::text::numeric) AS refusals, count(*) AS scans
+\echo '== 5b.1 Adriana: refusal and skip codes summed over every scan (by_code -> by_code / skipped), and book freshness'
+SELECT 'by_code' AS kind, k.key AS code, sum((k.value)::text::numeric) AS n, count(*) AS scans
   FROM adriana_arb_scans s
   CROSS JOIN LATERAL jsonb_each(
-       CASE WHEN jsonb_typeof(s.by_code) = 'object' THEN s.by_code ELSE '{}'::jsonb END) AS k(key, value)
+       CASE WHEN jsonb_typeof(s.by_code -> 'by_code') = 'object' THEN s.by_code -> 'by_code'
+            ELSE '{}'::jsonb END) AS k(key, value)
  WHERE jsonb_typeof(k.value) = 'number'
- GROUP BY 1 ORDER BY refusals DESC LIMIT 40;
+ GROUP BY 1, 2
+UNION ALL
+SELECT 'skipped', k.key, sum((k.value)::text::numeric), count(*)
+  FROM adriana_arb_scans s
+  CROSS JOIN LATERAL jsonb_each(
+       CASE WHEN jsonb_typeof(s.by_code -> 'skipped') = 'object' THEN s.by_code -> 'skipped'
+            ELSE '{}'::jsonb END) AS k(key, value)
+ WHERE jsonb_typeof(k.value) = 'number'
+ GROUP BY 1, 2
+UNION ALL
+SELECT 'totals', 'markets_read / books_fresh / structures / opportunities',
+       sum(s.markets_read), sum(s.books_fresh)
+  FROM adriana_arb_scans s
+UNION ALL
+SELECT 'totals', 'structures_considered / opportunities',
+       sum(s.structures_considered), sum(s.opportunities)
+  FROM adriana_arb_scans s
+ ORDER BY 1, 3 DESC;
 
 \echo '== 5b.2 Adriana: verdicts and structure kinds summed over every scan'
 SELECT 'by_verdict' AS dim, k.key, sum((k.value)::text::numeric) AS n
