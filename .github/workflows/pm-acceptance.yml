@@ -1,28 +1,62 @@
 # PM EVIDENCE & ACCEPTANCE PACK V1 -- THE INDEPENDENT RELEASE / ACCEPTANCE
-# RECEIPT, RUN FROM OUTSIDE (2026-10-07).
+# RECEIPT, RUN FROM OUTSIDE (2026-10-07; repaired after the PM review of the
+# RC4 run 37738089957, 2026-10-08).
 #
 # For one 40-hex SHA this job establishes, from MACHINE sources only:
 #   lineage     git merge-base --is-ancestor <accepted production base> SHA
 #   gates       the GitHub conclusions of backend-tests, capital-critical,
 #               commit-guard and engine-diagnostic ON THAT EXACT SHA (the
 #               newest run of each; anything but success is not green)
-#   deployed    Render's LIVE deploy commit of sportsassets-api and of
-#               sportsassets-workers (tested = release = deployed) and the
-#               OOM / server_failed events since each went live
+#   runtime     for sportsassets-api, -workers AND -market-plane: the one
+#               Render service of that exact name, its live deploy id and
+#               commit, the instances that ran, and EVERY page of its event
+#               window since it went live (cursor-chained, complete or
+#               named truncated); the oomKilled / server_failed / restart
+#               verdict over that window binds no_oom (pm_bind.acceptance.
+#               runtime_window). RC4's no_oom was the workers' process age
+#               (76.7 min) while the market plane had been oomKilled twice.
+#   PAPER       the historical PAPER fingerprint, read only with this job's
+#               own connection: a PRE receipt (an earlier run's attested
+#               capture, input paper_baseline_run_id) and a POST receipt at
+#               the PRE receipt's FIXED cutoff bind historical_paper_
+#               immutable (pm_bind.acceptance.paper_history). Without a
+#               baseline it is UNPROVEN, and this run's capture becomes the
+#               baseline for the next. It was hard-coded True.
 #   production  GET /api/command/{release,red-team,pm-acceptance,venues,
 #               completion-readiness} (ADMIN_TOKEN, read role)
-# then POSTs the release receipt to the serving API, which accepts it ONLY
-# when deployed_sha is its own RENDER_GIT_COMMIT, appends it (migration 315)
-# and never edits it. A receipt is EVIDENCE, never authority: nothing here
-# can place, cancel, size, fund or authorize anything, and no setting,
-# credential or limit is read or changed.
 #
-# Finally the byte-identical package harness is re-run HERE over the API's
-# machine evidence with the gate / lineage fields replaced by what this job
-# read from GitHub itself, and must reach the same RED / YELLOW / GREEN. A
+# HOW A RELEASE IS ACCEPTED. (1) Before the deploy, dispatch this job on the
+# release being replaced: its artifact holds paper_history_capture.json
+# (cutoff 15 min behind the run, committed-row watermark) inside its attested
+# packet. (2) Deploy. (3) After at least 60 minutes, dispatch it on the new
+# SHA with paper_baseline_run_id = run (1).
+#
+# The release receipt is POSTed ONLY when post_receipt is exactly "on" (the
+# default is off; .github/pm-acceptance/post_receipt.py is the only sender).
+# The API accepts it ONLY when deployed_sha is its own RENDER_GIT_COMMIT,
+# appends it (migration 315) and never edits it; a new receipt supersedes
+# earlier ones BY REFERENCE (supersedes), never by deleting them. A receipt
+# is EVIDENCE, never authority: nothing here can place, cancel, size, fund
+# or authorize anything, and no setting, credential or limit is read or
+# changed. Every database read is under default_transaction_read_only=on.
+#
+# THE JUDGE IS THIS WORKFLOW'S OWN COMMIT (checked out to judge/), NEVER THE
+# RELEASE UNDER TEST: the binder, the packet builder, the receipt sender and
+# the fingerprint SQL all run from judge/, so a release cannot weaken the
+# code that judges it, and a baseline can be captured on a release that
+# predates that code. The release's own tree (checked out at the root) is
+# used only for its lineage.
+#
+# The byte-identical package harness is re-run HERE twice: over the API's
+# own evidence with the CI fields replaced by this job's GitHub reads (must
+# reach the API's state once a receipt is held), and with no_oom and
+# historical_paper_immutable re-bound from this job's own receipts -- the
+# independent verdict. The packet is attested and the attestation is
+# VERIFIED (not continue-on-error); signed_acceptance.json says whether the
+# packet is a signed acceptance: verified AND SHA256SUMS match AND GREEN. A
 # RED or YELLOW state is the truthful output, not a job failure; the job
-# fails only when the evidence cannot be read or the two harness runs
-# disagree.
+# fails when the evidence cannot be read, the two harness runs disagree, or
+# the packet is not what was signed.
 name: pm-acceptance
 
 on:
@@ -32,41 +66,70 @@ on:
         description: "40-hex release SHA (tested = release = deployed)"
         required: true
       post_receipt:
-        description: "on = POST the release receipt to the serving API (evidence only); blank = read only"
+        description: "on = POST the release receipt to the serving API (evidence only); off (default) = read only"
         required: false
-        default: "on"
+        type: choice
+        options:
+          - "off"
+          - "on"
+        default: "off"
       implementation_sha:
         description: "optional 40-hex implementation SHA the release tree was tested as (recorded in the evidence packet)"
+        required: false
+        default: ""
+      paper_baseline_run_id:
+        description: "optional run id of an EARLIER pm-acceptance run (before the deploy) whose attested PAPER fingerprint is the PRE receipt; blank = capture a baseline only"
+        required: false
+        default: ""
+      supersedes_receipt_id:
+        description: "optional earlier release receipt id (rel:<12 hex>:<epoch>) the posted receipt supersedes BY REFERENCE (never deleted)"
         required: false
         default: ""
 
 permissions:
   contents: read
+  # the baseline run's artifact (gh run download) and gate conclusions
   actions: read
-  # the evidence packet's Sigstore attestation (evidence only; no write to
-  # the repository, no deploy, no secret)
+  # the evidence packet's Sigstore attestation and its verification
+  # (evidence only; no write to the repository, no deploy, no secret)
   id-token: write
   attestations: write
 
 jobs:
   accept:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       BASE: https://sportsassets-api.onrender.com
       ACCEPTED_BASE: a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd
       SHA: ${{ inputs.sha }}
       REPO: ${{ github.repository }}
     steps:
-      - name: Validate the SHA
+      - name: Validate the SHA and the optional ids
         shell: bash
+        env:
+          BASELINE_RUN: ${{ inputs.paper_baseline_run_id }}
+          SUPERSEDES: ${{ inputs.supersedes_receipt_id }}
         run: |
           echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || { echo "not a full 40-hex sha: $SHA"; exit 1; }
+          if [ -n "$BASELINE_RUN" ] && ! echo "$BASELINE_RUN" | grep -Eq '^[0-9]{1,20}$'; then
+            echo "paper_baseline_run_id is not a run id: $BASELINE_RUN"; exit 1
+          fi
+          if [ -n "$SUPERSEDES" ] && ! echo "$SUPERSEDES" | grep -Eq '^rel:[0-9a-f]{12}:[0-9]+$'; then
+            echo "supersedes_receipt_id is not a receipt id: $SUPERSEDES"; exit 1
+          fi
 
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      # THE JUDGE: this workflow's own commit, never the release under test
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: judge
           persist-credentials: false
 
       - name: Lineage (accepted production base is an ancestor; the release is the tracked branch)
@@ -114,35 +177,142 @@ jobs:
           jq -c '{backend_tests_green, capital_critical_green, commit_guard_green, engine_diagnostic_green}' acc/gates.json
           jq -r '.runs | to_entries[] | "  \(.key): \(.value.id // "-") \(.value.status // "absent")/\(.value.conclusion // "-") \(.value.html_url // "")"' acc/gates.json
 
-      - name: Render deploys and OOM events (read only)
+      - name: Render services, deploys, instances and the event window (read only, paginated)
         shell: bash
         env:
           KEY: ${{ secrets.RENDER_API_KEY }}
         run: |
           set +e
-          [ -z "${KEY:-}" ] && { echo "no RENDER_API_KEY: deployed commits NOT_ESTABLISHED"; echo '{}' > acc/render.json; exit 0; }
+          mkdir -p acc
+          # the later steps always find a render.json, even if this one fails
+          echo '{}' > acc/render.json
+          [ -z "${KEY:-}" ] && { echo "no RENDER_API_KEY: runtime window NOT_ESTABLISHED"; exit 0; }
           echo "::add-mask::$KEY"
           API=https://api.render.com/v1
-          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
-          out='{}'
+          # rget <file> <path>: the body to the file, the HTTP status on stdout
+          rget() { curl -sS --max-time 60 -o "$1" -w '%{http_code}' -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$2" 2>/dev/null || echo 000; }
+          END=$(date -u +%FT%TZ); FLOOR=$(date -u -d '-6 hours' +%FT%TZ)
+          MAXP=50; LIMIT=100; memhttp='{}'
           for svc in sportsassets-api sportsassets-workers sportsassets-market-plane; do
-            id=$(get "/services?name=$svc&limit=20" | jq -r --arg n "$svc" '.[]? | select(.service.name==$n) | .service.id' | head -1)
-            if [ -z "$id" ]; then
-              out=$(jq --arg s "$svc" '.[$s] = {present:false}' <<<"$out"); echo "$svc: ABSENT"; continue
-            fi
-            get "/services/$id/deploys?limit=20" > "acc/deploys_$svc.json"
-            live=$(jq -c '[.[]? | .deploy | select(.status=="live")] | first // {}' "acc/deploys_$svc.json")
-            commit=$(jq -r '.commit.id // empty' <<<"$live"); fin=$(jq -r '.finishedAt // empty' <<<"$live")
-            get "/services/$id/events?limit=100" > "acc/events_$svc.json"
-            ooms=$(jq --arg f "$fin" '[.[]? | .event | select($f == "" or .timestamp >= $f)
-                     | select((.details|tostring|test("oom|out of memory";"i")))] | length' "acc/events_$svc.json")
-            fails=$(jq --arg f "$fin" '[.[]? | .event | select($f == "" or .timestamp >= $f)
-                     | select(.type=="server_failed")] | length' "acc/events_$svc.json")
-            out=$(jq --arg s "$svc" --arg c "$commit" --arg f "$fin" --argjson o "${ooms:-null}" --argjson x "${fails:-null}" \
-                  '.[$s] = {present:true, live_commit:$c, live_since:$f, oom_events_since_live:$o, server_failed_since_live:$x}' <<<"$out")
-            echo "$svc: live=$commit since=$fin oom_since_live=$ooms server_failed_since_live=$fails"
+            # exactly one service of this exact name, or the service is not bound
+            code=$(rget "acc/render_lookup_$svc.json" "/services?name=$svc&limit=20")
+            id=$(jq -r --arg n "$svc" '[.[]? | select(.service.name==$n) | .service.id] | if length == 1 then .[0] else empty end' "acc/render_lookup_$svc.json" 2>/dev/null)
+            [ -z "$id" ] && { echo "$svc: NOT BOUND (lookup HTTP $code)"; continue; }
+            rget "acc/deploys_$svc.json" "/services/$id/deploys?limit=20" >/dev/null
+            since=$(jq -r '[.[]? | .deploy | select(.status=="live")] | if length == 1 then .[0].finishedAt // empty else empty end' "acc/deploys_$svc.json" 2>/dev/null)
+            [ -z "$since" ] && { echo "$svc: no single live deploy"; continue; }
+            S="$(echo "$since" | cut -c1-19)Z"
+            # EVERY page of the events since live, each requested with the
+            # previous page's last cursor; the stop reason is recorded and
+            # the binder re-derives completeness from the pages themselves
+            reqs='[]'; cursor=""; p=0; stop=""
+            while :; do
+              f=$(printf 'events_%s_p%03d.json' "$svc" "$p")
+              code=$(rget "acc/$f" "/services/$id/events?limit=$LIMIT&startTime=$S&endTime=$END${cursor:+&cursor=$cursor}")
+              reqs=$(jq -c --arg c "$cursor" --arg h "$code" --arg f "$f" '. + [{cursor:$c, http:$h, page:$f}]' <<<"$reqs")
+              [ "$code" = 200 ] || { stop="HTTP_$code"; break; }
+              n=$(jq 'if type == "array" then length else -1 end' "acc/$f" 2>/dev/null)
+              [ -n "$n" ] && [ "$n" -ge 0 ] 2>/dev/null || { stop=NOT_A_LIST; break; }
+              [ "$n" -lt "$LIMIT" ] && { stop=SHORT_PAGE; break; }
+              oldest=$(jq -r '[.[].event.timestamp] | min' "acc/$f")
+              [[ "$oldest" < "$S" ]] && { stop=REACHED_BEFORE_LIVE; break; }
+              cursor=$(jq -r '.[-1].cursor // empty' "acc/$f")
+              [ -z "$cursor" ] && { stop=NO_CURSOR; break; }
+              p=$((p+1)); [ "$p" -ge "$MAXP" ] && { stop=PAGE_CAP; break; }
+            done
+            jq -n --arg s "$S" --arg e "$END" --argjson l $LIMIT --argjson r "$reqs" --arg st "$stop" \
+              '{start:$s, end:$e, limit:$l, requests:$r, stopped:$st}' > "acc/render_events_$svc.json"
+            # memory since live (<= 6 h): the instances that ran, per instance
+            M="$S"; [[ "$M" < "$FLOOR" ]] && M=$FLOOR
+            code=$(rget "acc/mem_$svc.json" "/metrics/memory?resource=$id&startTime=$M&endTime=$END&resolutionSeconds=60")
+            memhttp=$(jq -c --arg s "$svc" --arg h "$code" '.[$s] = $h' <<<"$memhttp")
+            echo "$svc: $id live since $since; events $(jq length <<<"$reqs") page(s) stop=$stop; memory HTTP $code"
           done
-          echo "$out" > acc/render.json
+          jq -n --arg at "$END" --argjson m "$memhttp" '{collected_at:$at, memory_http:$m}' > acc/render_collection.json
+          # render.json from the SAME verified window the binder reads
+          python3 -I - <<'PY'
+          import json, os, pathlib, sys
+          sys.path.insert(0, "judge/backend")
+          from sportsassets.pm_bind import acceptance as PA
+          out = PA.render_summary(PA.load_runtime(pathlib.Path("acc")),
+                                  expected_commit=os.environ["SHA"])
+          json.dump(out, open("acc/render.json", "w"), indent=1)
+          for svc, s in out.items():
+              print("%s: %s %s live=%s since=%s oom=%s server_failed=%s restarts=%s instances=%s %s" % (
+                  svc, s["status"], s["service_id"], s["live_commit"], s["live_since"],
+                  s["oom_events_since_live"], s["server_failed_since_live"],
+                  s["restarts_since_live"], ",".join(s["instances"]), ";".join(s["reasons"])[:400]))
+          PY
+
+      - name: Historical PAPER fingerprint (read only; PRE receipt and POST at its fixed cutoff)
+        shell: bash
+        env:
+          KEY: ${{ secrets.RENDER_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN: ${{ inputs.paper_baseline_run_id }}
+          PAPER_DB: sportsassets-db
+        run: |
+          set +e
+          mkdir -p acc
+          SQL=judge/.github/pm-acceptance/paper_history_fingerprint.sql
+          WF=.github/workflows/pm-acceptance.yml
+          CUTOFF=""
+          # 1. THE PRE RECEIPT: the capture inside an EARLIER run of THIS
+          #    workflow, verified by that run's attestation and by the hash
+          #    its packet recorded for the capture
+          if [ -n "${BASELINE_RUN:-}" ]; then
+            B="$RUNNER_TEMP/baseline"; mkdir -p "$B/art"
+            gh api "repos/$REPO/actions/runs/$BASELINE_RUN" > "$B/run.json" 2>/dev/null || echo '{}' > "$B/run.json"
+            gh run download "$BASELINE_RUN" --repo "$REPO" --dir "$B/art" >/dev/null 2>&1
+            pkt=$(find "$B/art" -maxdepth 2 -name evidence_packet.json | head -1)
+            cap="$(dirname "${pkt:-$B/none/x}")/paper_history_capture.json"
+            att=false
+            if [ -n "$pkt" ] && gh attestation verify "$pkt" --repo "$REPO" --signer-workflow "$REPO/$WF" >/dev/null 2>&1; then att=true; fi
+            capsha=""; inpkt=""
+            [ -f "$cap" ] && { capsha=$(sha256sum "$cap" | cut -d' ' -f1); cp "$cap" acc/paper_history_pre.json; }
+            [ -n "$pkt" ] && inpkt=$(jq -r '.input_files_sha256["paper_history_capture.json"] // empty' "$pkt" 2>/dev/null)
+            jq -n --arg id "$BASELINE_RUN" --argjson att $att --arg h "$capsha" --arg i "$inpkt" --slurpfile run "$B/run.json" \
+              '{run_id:$id, workflow_path:($run[0].path // null), repository:($run[0].repository.full_name // null),
+                head_sha:($run[0].head_sha // null), created_at:($run[0].created_at // null),
+                event:($run[0].event // null), conclusion:($run[0].conclusion // null),
+                attestation_verified:$att, capture_sha256:$h, capture_sha256_in_packet:$i}' > acc/paper_history_baseline.json
+            CUTOFF=$(jq -r '.cutoff // empty' acc/paper_history_pre.json 2>/dev/null)
+            echo "baseline run $BASELINE_RUN: $(jq -c '{workflow_path, repository, head_sha, attestation_verified}' acc/paper_history_baseline.json) cutoff=${CUTOFF:-UNREADABLE}"
+            # a baseline that cannot be read is not replaced by a fresh cutoff:
+            # the POST is still taken at no cutoff of its own, and stays UNPROVEN
+            [ -z "$CUTOFF" ] && { echo "baseline unreadable: PAPER history UNPROVEN"; exit 0; }
+          fi
+          # 2. no baseline: this run CAPTURES one, its cutoff FIXED 15 min
+          #    behind the run (the watermark settles in 10)
+          [ -z "$CUTOFF" ] && CUTOFF=$(date -u -d '-15 minutes' +%FT%H:%M:00Z)
+          echo "$CUTOFF" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' || { echo "refused: cutoff '$CUTOFF'"; exit 1; }
+          [ -z "${KEY:-}" ] && { echo "no RENDER_API_KEY: PAPER fingerprint NOT_ESTABLISHED"; exit 0; }
+          echo "::add-mask::$KEY"
+          # the research-sql read-only guard, over this file
+          KW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'
+          if grep -qE '^[[:space:]]*\\' "$SQL" || sed -e 's/--.*$//' "$SQL" | grep -qiE "$KW"; then
+            echo "refused: $SQL is not a read-only query"; exit 1
+          fi
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$PAPER_DB&limit=20" | jq -r --arg n "$PAPER_DB" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1)
+          [ -z "$PG" ] && { echo "no database named $PAPER_DB: PAPER fingerprint NOT_ESTABLISHED"; exit 0; }
+          get "/postgres/$PG/connection-info" > "$RUNNER_TEMP/ci.json"
+          EXT=$(jq -r '.externalConnectionString // empty' "$RUNNER_TEMP/ci.json"); PW=$(jq -r '.password // empty' "$RUNNER_TEMP/ci.json")
+          rm -f "$RUNNER_TEMP/ci.json"
+          [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no external connection string: PAPER fingerprint NOT_ESTABLISHED"; exit 0; }
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          # READ ONLY, and the row text rendered in one fixed zone / style
+          PGOPTIONS="-c statement_timeout=600000 -c default_transaction_read_only=on -c TimeZone=UTC -c DateStyle=ISO,MDY -c IntervalStyle=postgres -c extra_float_digits=1" \
+            timeout 720 psql "$EXT" -X -A -t -q -v ON_ERROR_STOP=1 -v cutoff="$CUTOFF" -f "$SQL" > "$RUNNER_TEMP/fp.json" 2> "$RUNNER_TEMP/fp.err"
+          rc=$?
+          if [ "$rc" = 0 ] && jq -e '.version' "$RUNNER_TEMP/fp.json" >/dev/null 2>&1; then
+            jq . "$RUNNER_TEMP/fp.json" > acc/paper_history_capture.json
+            jq -c '{cutoff, captured_at, watermark, rows: (.tables | map_values(.rows))}' acc/paper_history_capture.json
+          else
+            echo "PAPER fingerprint failed (psql exit $rc): $(grep -v -F "${PW:-unset}" "$RUNNER_TEMP/fp.err" | head -5)"
+          fi
 
       - name: Production readbacks (ADMIN_TOKEN, read role)
         shell: bash
@@ -155,6 +325,7 @@ jobs:
           get() {
             code=$(curl -s -o "acc/$1.json" -w '%{http_code}' --max-time 150 \
                    -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$2" || echo 000)
+            printf '%s\t%s\t%s\n' "$1" "$code" "$(date -u +%FT%TZ)" >> acc/readback_http.tsv
             echo "== $1 GET $2 -> HTTP $code ($(wc -c < "acc/$1.json") bytes) at $(date -u +%FT%TZ)"
           }
           get release /api/command/release
@@ -166,11 +337,13 @@ jobs:
           jq -c '{status, why, red_team: .data.readiness.status, blockers: .data.readiness.blockers}' acc/red_team.json | cut -c1-3000
           jq -c '{status, pm_state: .data.pm_acceptance.pm_state, golden: {passed: .data.golden.passed, total: .data.golden.total, appended: .data.golden.appended_passed, green: .data.golden.green}}' acc/pm_before.json | cut -c1-2000
 
-      - name: POST the release receipt (evidence only)
+      - name: POST the release receipt (evidence only; only when post_receipt is exactly on)
         if: ${{ inputs.post_receipt == 'on' }}
         shell: bash
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          POST_RECEIPT: ${{ inputs.post_receipt }}
+          SUPERSEDES_RECEIPT_ID: ${{ inputs.supersedes_receipt_id }}
         run: |
           set +e
           echo "::add-mask::$ADMIN_TOKEN"
@@ -194,11 +367,9 @@ jobs:
              migration_fingerprint_match: $m,
              workers_deployed_sha: ($r[0]["sportsassets-workers"].live_commit // null),
              pm_acceptance: ($p[0].data.pm_acceptance // null)}' > acc/receipt_body.json
-          code=$(curl -s -o acc/receipt_resp.json -w '%{http_code}' --max-time 60 -X POST \
-                 -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
-                 --data @acc/receipt_body.json "$BASE/api/admin/red-team/release-receipt" || echo 000)
-          echo "release receipt POST -> HTTP $code: $(head -c 1500 acc/receipt_resp.json)"
-          case "$code" in 200) ;; *) echo "receipt not accepted (the API refuses a SHA it is not serving)";; esac
+          # the ONLY sender: posts nothing unless POST_RECEIPT is exactly "on";
+          # supersedes earlier receipts by reference, never deletes one
+          python3 -I judge/.github/pm-acceptance/post_receipt.py acc
 
       - name: Re-read PM acceptance and re-run the package harness here
         shell: bash
@@ -207,19 +378,28 @@ jobs:
         run: |
           set -o pipefail
           echo "::add-mask::$ADMIN_TOKEN"
-          curl -s -o acc/pm_after.json --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/command/pm-acceptance"
-          PYTHONPATH=backend python3 -I - <<'PY'
-          import json, os, sys
-          sys.path.insert(0, "backend")
+          code=$(curl -s -o acc/pm_after.json -w '%{http_code}' --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/command/pm-acceptance" || echo 000)
+          printf '%s\t%s\t%s\n' pm_after "$code" "$(date -u +%FT%TZ)" >> acc/readback_http.tsv
+          python3 -I - <<'PY'
+          import json, os, pathlib, sys, time
+          # the judge's code, never the release's (python3 -I: no cwd on the path)
+          sys.path.insert(0, "judge/backend")
           from sportsassets.pm_evidence.pm_acceptance import harness as H
-          spec = json.load(open("backend/sportsassets/pm_evidence/data/acceptance_spec.json"))
+          from sportsassets.pm_bind import acceptance as PA
+          spec = json.load(open("judge/backend/sportsassets/pm_evidence/data/acceptance_spec.json"))
+          acc = pathlib.Path("acc")
+          sha = os.environ["SHA"]
+          # this job's OWN receipts: written whatever the API answers
+          _, ind = PA.independent({}, runtime=PA.load_runtime(acc), paper=PA.load_paper(acc),
+                                  expected_commit=sha, now=time.time())
+          json.dump(ind["runtime_window"], open("acc/runtime_window.json", "w"), indent=1, default=str)
+          json.dump(ind["paper_history"], open("acc/paper_history.json", "w"), indent=1, default=str)
           pm = json.load(open("acc/pm_after.json"))
           if pm.get("status") != "OK":
               print("pm-acceptance readback unavailable:", pm.get("why")); sys.exit(1)
           api = pm["data"]["pm_acceptance"]
           lin = json.load(open("acc/lineage.json")); g = json.load(open("acc/gates.json"))
           ren = json.load(open("acc/render.json"))
-          sha = os.environ["SHA"]
           ev = dict(api["evidence_input"])
           # the CI fields, as THIS job read them from GitHub / git
           ev.update(accepted_base_sha=lin["accepted_base_sha"], tested_sha=sha,
@@ -229,16 +409,29 @@ jobs:
                     capital_critical=g["capital_critical_green"],
                     commit_guard=g["commit_guard_green"],
                     engine_diagnostic=g["engine_diagnostic_green"])
+          # (1) the API's own inputs with the CI fields replaced: must agree
+          same = H.evaluate(ev, spec)
+          # (2) THE INDEPENDENT VERDICT: no_oom and historical PAPER re-bound
+          # from this job's receipts; whatever the API put there is dropped
+          ev2, ind = PA.independent(ev, runtime=PA.load_runtime(acc), paper=PA.load_paper(acc),
+                                    expected_commit=sha, now=time.time())
+          mine = H.evaluate(ev2, spec)
           wk = (ren.get("sportsassets-workers") or {}).get("live_commit")
           ap = (ren.get("sportsassets-api") or {}).get("live_commit")
-          mine = H.evaluate(ev, spec)
+          rw, ph = ind["runtime_window"], ind["paper_history"]
           out = {"sha": sha, "api_live_commit": ap, "workers_live_commit": wk,
                  "api_serving_sha": ev.get("deployed_sha"),
                  "render": ren, "api_pm_state": api["pm_state"],
+                 "same_input_pm_state": same["pm_state"],
                  "independent_pm_state": mine["pm_state"],
                  "critical_failures": mine["critical_failures"],
                  "economic_or_evidence_gaps": mine["economic_or_evidence_gaps"],
                  "fields_without_machine_evidence": api["fields_without_machine_evidence"],
+                 "unproven": ind["unproven"],
+                 "replaced_from_api": ind["replaced_from_api"],
+                 "independent_evidence_input": ev2,
+                 "runtime_window": {k: rw.get(k) for k in ("status", "no_oom_minutes", "observation_minutes", "reasons")},
+                 "paper_history": {k: ph.get(k) for k in ("status", "immutable", "cutoff", "pre_captured_at", "post_captured_at", "reasons")},
                  "release_receipt": pm["data"].get("release_receipt"),
                  "golden": {k: pm["data"]["golden"].get(k) for k in ("passed", "total", "appended_passed", "appended_total", "green")},
                  "scoreboard_reconciliation": pm["data"]["scoreboard"].get("reconciliation"),
@@ -248,16 +441,19 @@ jobs:
           print(json.dumps(out, default=str)[:6000])
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
               f.write("## PM acceptance for `%s`\n\n" % sha)
-              f.write("* PM state (API): **%s**; independent re-run: **%s**\n" % (api["pm_state"], mine["pm_state"]))
+              f.write("* PM state (API): **%s**; same inputs here: **%s**; independent: **%s**\n" % (api["pm_state"], same["pm_state"], mine["pm_state"]))
+              f.write("* runtime window: **%s** (no_oom_minutes %s); PAPER history: **%s**\n" % (rw["status"], rw["no_oom_minutes"], ph["status"]))
               f.write("* API live `%s`, workers live `%s`, serving `%s`\n" % (ap, wk, ev.get("deployed_sha")))
               f.write("* critical failures: %s\n" % (", ".join(mine["critical_failures"]) or "none"))
               f.write("* economic / evidence gaps: %s\n" % (", ".join(mine["economic_or_evidence_gaps"]) or "none"))
+              f.write("* unproven: %s\n" % (json.dumps(ind["unproven"])[:1500] or "none"))
           bad = []
           # the receipt the API holds was built from the same GitHub reads, so
-          # after it is accepted both runs must agree; before (read only) the
-          # API cannot know the gates and is RED by construction
-          if pm["data"].get("release_receipt") and mine["pm_state"] != api["pm_state"]:
-              bad.append("HARNESS_DISAGREES:%s!=%s" % (mine["pm_state"], api["pm_state"]))
+          # after it is accepted both runs over the SAME inputs must agree;
+          # before (read only) the API cannot know the gates and is RED by
+          # construction
+          if pm["data"].get("release_receipt") and same["pm_state"] != api["pm_state"]:
+              bad.append("HARNESS_DISAGREES:%s!=%s" % (same["pm_state"], api["pm_state"]))
           if bad:
               print("FAIL", bad); sys.exit(1)
           PY
@@ -275,15 +471,16 @@ jobs:
           npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
           npx playwright install --with-deps chromium >/dev/null 2>&1
           cd "$GITHUB_WORKSPACE"
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node .github/pm-acceptance/viewports.js
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node judge/.github/pm-acceptance/viewports.js
 
-      - name: Production evidence packet (extra readbacks, memory, log counts)
+      - name: Production evidence packet (extra readbacks, log counts for all three services)
         if: always()
         shell: bash
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           KEY: ${{ secrets.RENDER_API_KEY }}
           IMPL_SHA: ${{ inputs.implementation_sha }}
+          JUDGE_SHA: ${{ github.sha }}
         run: |
           set +e
           mkdir -p acc
@@ -293,10 +490,12 @@ jobs:
             echo "implementation_sha is not 40-hex; recorded as absent"; IMPL_SHA=""
           fi
           export IMPL_SHA
-          # READ-ONLY readbacks the packet cites (GET, read role)
+          # READ-ONLY readbacks the packet cites (GET, read role); each GET's
+          # HTTP status is recorded so a failed read is READ_UNAVAILABLE
           get() {
             code=$(curl -s -o "acc/$1.json" -w '%{http_code}' --max-time 150 \
                    -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$2" || echo 000)
+            printf '%s\t%s\t%s\n' "$1" "$code" "$(date -u +%FT%TZ)" >> acc/readback_http.tsv
             echo "== $1 GET $2 -> HTTP $code ($(wc -c < "acc/$1.json") bytes)"
           }
           if [ -n "${ADMIN_TOKEN:-}" ]; then
@@ -312,33 +511,32 @@ jobs:
             get paper_reconciliation /api/command/paper/reconciliation
             get loop_health /api/command/loop-health
           fi
-          # Render: memory since each service went live (<= 6 h) and the
-          # named log lines since then (counts; hasMore = at least 100)
+          # Render: the named log lines since each service went live (<= 6 h;
+          # counts; hasMore = at least 100), for ALL THREE services
           if [ -n "${KEY:-}" ]; then
             API=https://api.render.com/v1
-            rget() { curl -sS --max-time 60 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
             END=$(date -u +%FT%TZ); FLOOR=$(date -u -d '-6 hours' +%FT%TZ)
-            for svc in sportsassets-api sportsassets-workers; do
-              id=$(rget "/services?name=$svc&limit=20" | jq -r --arg n "$svc" '.[]? | select(.service.name==$n) | .service.id' | head -1)
-              [ -z "$id" ] && continue
-              owner=$(rget "/services/$id" | jq -r '.ownerId // empty')
+            for svc in sportsassets-api sportsassets-workers sportsassets-market-plane; do
+              id=$(jq -r --arg n "$svc" '[.[]? | select(.service.name==$n) | .service.id] | if length == 1 then .[0] else empty end' "acc/render_lookup_$svc.json" 2>/dev/null)
+              owner=$(jq -r --arg n "$svc" '[.[]? | select(.service.name==$n) | .service.ownerId] | if length == 1 then .[0] // empty else empty end' "acc/render_lookup_$svc.json" 2>/dev/null)
+              [ -z "$id" ] && { echo "$svc: not bound; log counts READ_UNAVAILABLE"; continue; }
               since=$(jq -r --arg s "$svc" '.[$s].live_since // empty' acc/render.json 2>/dev/null | cut -c1-19)
               START="${since:+${since}Z}"; [ -z "$START" ] && START=$FLOOR
               [[ "$START" < "$FLOOR" ]] && START=$FLOOR
-              rget "/metrics/memory?resource=$id&startTime=$START&endTime=$END&resolutionSeconds=60" > "acc/mem_$svc.json"
-              echo "$svc memory $START..$END: $(jq -c '[.[]? | {labels, n: (.values|length), max_mb: ([.values[]?.value] | max / 1048576 | floor)}]' "acc/mem_$svc.json" | cut -c1-600)"
               for pair in "churn|exited cleanly; restarting" "crash|crashed; restarting" \
                           "migration_changed|WAS ALREADY APPLIED" "policy_drift|POLICY_CODE_DRIFT" \
                           "memory_error|MemoryError"; do
                 name=${pair%%|*}; text=${pair#*|}
                 q="/logs?ownerId=$owner&resource=$id&startTime=$START&endTime=$END&limit=100&direction=backward&text=$(printf '%s' "$text" | jq -sRr @uri)"
-                rget "$q" | jq --arg f "$text" --arg w "$START..$END" '. + {_filter: $f, _window: $w}' > "acc/logs_${svc}_${name}.json"
-                echo "  $svc '$text': $(jq '.logs | length' "acc/logs_${svc}_${name}.json") lines (hasMore=$(jq '.hasMore' "acc/logs_${svc}_${name}.json"))"
+                code=$(curl -sS --max-time 60 -o "$RUNNER_TEMP/log.json" -w '%{http_code}' -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$q" 2>/dev/null || echo 000)
+                jq --arg f "$text" --arg w "$START..$END" --arg h "$code" '. + {_filter: $f, _window: $w, _http: $h}' "$RUNNER_TEMP/log.json" > "acc/logs_${svc}_${name}.json" 2>/dev/null \
+                  || jq -n --arg f "$text" --arg w "$START..$END" --arg h "$code" '{_filter: $f, _window: $w, _http: $h, _unparsed: true}' > "acc/logs_${svc}_${name}.json"
+                echo "  $svc '$text': HTTP $code, $(jq '.logs | length' "acc/logs_${svc}_${name}.json" 2>/dev/null) lines (hasMore=$(jq '.hasMore' "acc/logs_${svc}_${name}.json" 2>/dev/null))"
               done
             done
           fi
-          python3 -I backend/tools/evidence_packet.py acc
-          jq -c '{identity, gates, policy: .policy_integrity, migrations: .migrations.control, memory, log_counts}' acc/evidence_packet.json | cut -c1-6000
+          python3 -I judge/backend/tools/evidence_packet.py acc
+          jq -c '{identity, gates, policy: .policy_integrity, policy_identity, migrations: .migrations.control, memory_identity, log_counts}' acc/evidence_packet.json | cut -c1-6000
           {
             echo "## Production evidence packet"
             echo
@@ -347,12 +545,39 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Attest the evidence packet (Sigstore, evidence only)
+      - name: Attest the evidence packet and its manifest (Sigstore, evidence only)
         if: always()
-        continue-on-error: true
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: acc/evidence_packet.json
+          subject-path: |
+            acc/evidence_packet.json
+            acc/SHA256SUMS
+
+      - name: Verify the attestation and SHA256SUMS (signed acceptance)
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          WF=.github/workflows/pm-acceptance.yml
+          gh attestation verify acc/evidence_packet.json --repo "$REPO" --signer-workflow "$REPO/$WF"
+          VERIFY_PACKET_RC=$?
+          gh attestation verify acc/SHA256SUMS --repo "$REPO" --signer-workflow "$REPO/$WF"
+          VERIFY_SUMS_RC=$?
+          export VERIFY_PACKET_RC VERIFY_SUMS_RC
+          # signed acceptance = verified AND SHA256SUMS match AND GREEN; this
+          # step fails when the packet is not what was signed
+          python3 -I judge/.github/pm-acceptance/signed_acceptance.py acc
+          rc=$?
+          {
+            echo "## Signed acceptance"
+            echo
+            echo '```'
+            cat acc/signed_acceptance.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
 
       - uses: actions/upload-artifact@v4
         if: always()
