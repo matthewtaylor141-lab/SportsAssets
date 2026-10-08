@@ -1087,6 +1087,10 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+# RC5: the management epoch reconciles exactly (opening + itemised changes =
+# management equity; + itemised differences = ledger equity), each carried
+# mark verified from records at the epoch instant or UNVERIFIED by name.
+tests/test_paper_management_epoch_reconciliation.py
 # Coverage failures + first-loss census (2026-10-05): the event ledger stages
 # venue-identity and WS-unusable refusals (and the funnel derives the stage
 # for rows written without one), a sticky-key valuation is attributed by its

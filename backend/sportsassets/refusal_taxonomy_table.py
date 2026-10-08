@@ -276,6 +276,19 @@ TABLE = {
     "ARCHER_AND_SCOUT_NEVER_MARK_RELEASE_ELIGIBILITY": (S, CAP, "OUT_OF_FUNNEL"),
     # management epoch (bettor_paper_epoch): no defensible epoch mark
     "EPOCH_OPEN_MARK_UNVERIFIED": (S, FRESH, "ACCOUNTING"),
+    # ...and its precise reason, read from the recorded observations: our
+    # read path held no current book at the epoch instant (never read, read
+    # too long before, every read failed, or the book had no exit side), or
+    # the market had ended and is not re-read by design. A data gap of ours
+    # for the mark either way: no venue fault is claimed.
+    "EPOCH_MARK_NO_BOOK_OF_THIS_MARKET_OBSERVED_BY_THE_EPOCH": (
+        S, FRESH, "ACCOUNTING"),
+    "EPOCH_MARK_LAST_ERROR_FREE_BOOK_OLDER_THAN_THE_BOUND": (
+        S, FRESH, "ACCOUNTING"),
+    "EPOCH_MARK_MARKET_IN_A_TERMINAL_STATE_BEFORE_THE_EPOCH": (
+        S, DATA, "ACCOUNTING"),
+    "EPOCH_MARK_EVERY_READ_IN_THE_WINDOW_FAILED": (S, FRESH, "ACCOUNTING"),
+    "EPOCH_BOOK_HAS_NO_EXIT_SIDE": (S, DATA, "ACCOUNTING"),
     "ARCHER_HAS_NO_AUTHORITY": (E, RAIL, "OUT_OF_FUNNEL"),
     "ARCHER_NOT_DEPLOYED": (S, CAP, "ACCOUNTING"),
     # (266) the execution agent's HISTORICAL ALIAS: records written before
