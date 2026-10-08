@@ -2149,6 +2149,11 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    "HEARTBEAT_SECTION_OVER_BOUND_OMITTED":
+        "workers/universal_market_plane: a plane heartbeat section larger "
+        "than its 16,000-character bound is replaced by this marker (no "
+        "reader reads it) -- a memory bound on a readback, never a trading, "
+        "decision, order or collector refusal",
     'PAPER_HISTORY_BACKDATED_ROWS':
         'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
     'PAPER_HISTORY_BASELINE_ABSENT':
