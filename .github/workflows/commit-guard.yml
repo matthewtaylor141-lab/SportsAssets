@@ -75,6 +75,27 @@ jobs:
           fi
           echo "all pushed commits declare their deploy intent"
 
+      - name: the applied-migration manifest is append-only against the release
+        run: |
+          # backend/migrations/APPLIED_MIGRATIONS.sha256 is production's own
+          # schema_migrations.content_sha record. tests/test_applied_migrations_
+          # are_immutable.py holds every listed file to its line; THIS holds the
+          # lines themselves: every line claude/release-api carries must still
+          # be present verbatim, so an applied migration cannot be edited
+          # together with its manifest line in one push. New lines are allowed.
+          M=backend/migrations/APPLIED_MIGRATIONS.sha256
+          git rev-parse -q --verify "origin/claude/release-api^{commit}" >/dev/null || git fetch -q --no-tags origin "+refs/heads/claude/release-api:refs/remotes/origin/claude/release-api" || true
+          if ! git cat-file -e "origin/claude/release-api:$M" 2>/dev/null; then
+            echo "claude/release-api carries no manifest yet: nothing to hold"; exit 0
+          fi
+          lost=$(comm -23 <(git show "origin/claude/release-api:$M" | grep -E '^[0-9a-f]{64}  ' | LC_ALL=C sort) \
+                          <(git show "$GITHUB_SHA:$M" 2>/dev/null | grep -E '^[0-9a-f]{64}  ' | LC_ALL=C sort))
+          if [ -n "$lost" ]; then
+            echo "::error::APPLIED_MIGRATIONS.sha256 lost or changed lines the release carries (append-only; put the change in a NEW migration):"
+            echo "$lost"; exit 1
+          fi
+          echo "applied-migration manifest: every released line intact"
+
       - name: every workflow is startable, and has room to be edited
         run: |
           set -e

@@ -76,3 +76,28 @@ def test_a_mutated_applied_migration_is_caught(tmp_path):
     assert m[name] == ("ae8ef15e2f2779e877d8619a6e565f8b798ebd9b9daccff6"
                        "6a4cded26172e8a3")
     assert sha(MIG / name) == m[name]
+
+
+def test_manifest_lines_are_sha256sum_format_with_no_null_hash():
+    """`cd backend/migrations && grep -v '^#' APPLIED_MIGRATIONS.sha256 |
+    sha256sum -c` must work as an independent check, and a NULL recorded
+    hash is never adopted into the manifest."""
+    bad = [ln for ln in MANIFEST.read_text().splitlines()
+           if ln.strip() and not ln.startswith("#")
+           and not re.fullmatch(r"[0-9a-f]{64}  \d{3}_[A-Za-z0-9_]+\.sql", ln)]
+    assert bad == [], bad
+
+
+def test_the_refresh_query_ships_with_the_manifest_and_is_read_only():
+    """The manifest names the query that produced it; that query is in the
+    same lineage and passes research-sql's read-only keyword guard."""
+    q = MIG.parents[1] / "research" / "rt_schema_migrations_manifest.sql"
+    assert q.exists(), q
+    sql = "\n".join(re.sub(r"--.*$", "", ln) for ln in q.read_text()
+                    .splitlines() if not ln.lstrip().startswith("\\echo"))
+    assert not re.search(
+        r"\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|"
+        r"copy|vacuum|reindex|refresh|call|do|merge|lock|set\s+role)\b",
+        sql, re.I)
+    assert "FROM schema_migrations" in sql and "content_sha" in sql
+    assert "research/rt_schema_migrations_manifest.sql" in MANIFEST.read_text()

@@ -61,14 +61,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Lineage (accepted production base is an ancestor)
+      - name: Lineage (accepted production base is an ancestor; the release is the tracked branch)
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p acc
           if git merge-base --is-ancestor "$ACCEPTED_BASE" "$SHA"; then d=true; else d=false; fi
           echo "descendant_of_base=$d ($ACCEPTED_BASE -> $SHA)"
-          jq -n --arg b "$ACCEPTED_BASE" --arg s "$SHA" --argjson d $d \
-            '{accepted_base_sha:$b, sha:$s, descendant_of_base:$d}' > acc/lineage.json
+          # THE RELEASE IS THE BRANCH BOTH RENDER SERVICES TRACK
+          # (render-ops api-branch-get: claude/release-api, autoDeploy=no).
+          # release_sha is READ from that branch, never copied from the input:
+          # a build deployed by commit id while claude/release-api was left
+          # behind (08828d04 live, branch at a91be09f, 2026-10-07) is then
+          # RELEASE_SHA_DIFFERS_FROM_TESTED_SHA, not a silent pass. Unreadable
+          # stays unreadable: the receipt is refused (NOT_A_FULL_SHA) and the
+          # RELEASE control stays UNKNOWN.
+          rel=$(gh api "repos/$REPO/branches/claude/release-api" --jq .commit.sha 2>/dev/null || true)
+          echo "$rel" | grep -Eq '^[0-9a-f]{40}$' || rel="UNREADABLE"
+          echo "release_branch=claude/release-api release_sha=$rel tested=$SHA"
+          jq -n --arg b "$ACCEPTED_BASE" --arg s "$SHA" --arg r "$rel" --argjson d $d \
+            '{accepted_base_sha:$b, sha:$s, descendant_of_base:$d,
+              release_branch:"claude/release-api", release_sha:$r}' > acc/lineage.json
 
       - name: Exact-SHA gate conclusions (GitHub)
         shell: bash
@@ -163,7 +177,7 @@ jobs:
           jq -n --slurpfile l acc/lineage.json --slurpfile g acc/gates.json --slurpfile p acc/pm_before.json \
                 --slurpfile r acc/render.json \
                 --arg s "$SHA" --argjson m "${mig:-false}" '
-            {accepted_base_sha: $l[0].accepted_base_sha, tested_sha: $s, release_sha: $s,
+            {accepted_base_sha: $l[0].accepted_base_sha, tested_sha: $s, release_sha: $l[0].release_sha,
              deployed_sha: $s, descendant_of_base: $l[0].descendant_of_base,
              backend_tests_green: $g[0].backend_tests_green,
              capital_critical_green: $g[0].capital_critical_green,
@@ -201,7 +215,7 @@ jobs:
           ev = dict(api["evidence_input"])
           # the CI fields, as THIS job read them from GitHub / git
           ev.update(accepted_base_sha=lin["accepted_base_sha"], tested_sha=sha,
-                    release_sha=sha,
+                    release_sha=lin["release_sha"],
                     is_descendant_of_accepted_base=lin["descendant_of_base"],
                     backend_tests=g["backend_tests_green"],
                     capital_critical=g["capital_critical_green"],

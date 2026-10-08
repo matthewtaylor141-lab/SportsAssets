@@ -2,8 +2,11 @@
 #
 # Each line: <sha256 of the file's text> <filename>, exactly as production's
 # schema_migrations.content_sha recorded it when the migration ran (read back
-# 2026-10-07 23:10 UTC from sportsassets-db via research/rt_schema_migrations_manifest.sql,
-# 223 versions, 001..315). tests/test_applied_migrations_are_immutable.py fails
+# 2026-10-07T23:22:49Z from sportsassets-db by research-sql run 37701912289 with
+# research/rt_schema_migrations_manifest.sql, 223 versions, 001..315, none NULL;
+# the API's red-team applied_fingerprint 7a6acb7f... is the same 223 rows).
+# Independent check: grep -v '^#' APPLIED_MIGRATIONS.sha256 | sha256sum -c
+# tests/test_applied_migrations_are_immutable.py fails
 # when a listed file's bytes change: a change to an applied migration never
 # runs (scripts/migrate.py skips a version it has seen), so it belongs in a NEW
 # migration. After a release applies new migrations, append their lines from
