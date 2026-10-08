@@ -84,6 +84,65 @@ DIGEST_LOG_EVERY_S = 60.0
 #: market plane's alone (institutional_stream.MODE_SUBSCRIBE_ALL).
 SUBSCRIPTION_MODE = "EXPLICIT_SYMBOL_LIST"   # = IS.MODE_EXPLICIT (pinned)
 
+#: ── THE DECISION PATH'S ASKED SYMBOLS (RC5, PMX consumer books) ─────────
+#:
+#: THE DEFECT. `request` recorded every symbol the decision path asked about
+#: into a set that was NEVER pruned and refused new entries at MAX_SYMBOLS
+#: (32): the first 32 distinct slugs asked after a boot held the slots for
+#: the process's life, so every later candidate -- each new game -- was
+#: never bootstrapped or subscribed. And the asked symbols shared only the
+#: focus universe's 32 slots (production RC4: focus 30 -> 2 slots), while
+#: the held budget's 168 slots stood 165 empty (held_wanted 3). So the PMX
+#: books a consumer could use (paper_pmx_books) were never the books it
+#: asked for.
+#:
+#: NOW. The asked set keeps the most recently asked MAX_REQUESTED symbols
+#: (the least recently asked leaves first; one idle REQUEST_IDLE_S leaves
+#: on the next pass), every consumer read refreshes its instant
+#: (paper_pmx_books), and the asked symbols that do not fit the focus bound
+#: fill the stream's SPARE capacity AFTER the held markets: held first,
+#: always; the per-process total stays STREAM_MAX_SYMBOLS (200, far inside
+#: the venue's documented 1,000 per stream). Nothing is unsubscribed
+#: (OUTBOUND_COMMANDS); an entry nobody asks for ages out of the books by
+#: RETAIN_IDLE_S as before.
+#: = institutional_stream.MAX_SYMBOLS (a test pins it)
+STREAM_MAX_SYMBOLS = 200
+MAX_REQUESTED = STREAM_MAX_SYMBOLS
+#: = institutional_stream.RETAIN_IDLE_S (a test pins it)
+REQUEST_IDLE_S = 1800.0
+
+#: ── REFDATA THE DEDICATED PLANE ALREADY HOLDS (RC5) ──────────────────────
+#:
+#: Each symbol's refdata was a separate POST /v1/refdata/instruments read
+#: from this process (refdata_reads 138 since boot, production RC4
+#: readback 06:39Z), on an endpoint the venue caps at 6 calls a minute
+#: (market_plane.refdata_universe) and the plane already spends 5 of. The
+#: plane persists the venue's own record for every registry member
+#: (market_plane_registry.refdata, refdata_at; the same endpoint, the same
+#: exact-symbol selection, refdata_progress.instrument_response). So:
+#:   * a focus / held / first-32 asked symbol takes the plane's record only
+#:     when it was persisted within REFDATA_REFRESH_S (this process's own
+#:     refresh interval, never longer); otherwise its REST read happens
+#:     exactly as before;
+#:   * a SPARE-capacity asked symbol takes the plane's record ONLY -- one
+#:     persisted within PLANE_REFDATA_MAX_AGE_S (the plane's own cache life,
+#:     venue guidance: pull once, cache, follow changes incrementally) -- and
+#:     is NEVER a REST read: the new capacity adds no load on the capped
+#:     endpoint. A stale, dead or restarting plane simply leaves it
+#:     unsubscribed (re-asked after RETRY_UNLISTED_S).
+#: Identity is still proven only by institutional_contract_map on the
+#: record, and the instrument's live state is the stream's own.
+#: = market_plane.refdata_universe.FULL_REFRESH_S (a test pins it)
+PLANE_REFDATA_MAX_AGE_S = 24 * 3600.0
+PLANE_REFDATA_SQL = """
+    SELECT contract_id, refdata, extract(epoch FROM refdata_at) AS at
+      FROM market_plane_registry
+     WHERE venue = 'POLYMARKET_US' AND contract_id = ANY($1::text[])
+       AND refdata IS NOT NULL
+       AND coalesce(refdata->>'unlisted', 'false') <> 'true'
+       AND refdata_at > now() - make_interval(secs => $2)
+"""
+
 LONG_INTENTS = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG", "YES",
                 "LONG", "BUY_YES", "BUY_LONG")
 
@@ -95,10 +154,15 @@ REFDATA: dict = {}
 _REQUESTED: dict = {}
 #: symbol -> epoch s of the last refdata attempt (bounds REST reads).
 _ATTEMPT: dict = {}
+#: symbol -> when a SPARE-capacity ask last found no plane record. Kept
+#: apart from _ATTEMPT so a symbol that later fits the core set is never
+#: held back from its REST bootstrap by a plane-only miss.
+_PLANE_TRIED: dict = {}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
                 "refdata_reads": 0, "refdata_failures": 0, "backlog": 0,
                 "held_wanted": 0, "held_subscribed": 0,
-                "held_preempted": 0}
+                "held_preempted": 0, "refdata_from_plane": 0,
+                "asked_spare": 0}
 #: The last focus universe computed here (members without identity).
 _UNIVERSE: dict = {}
 
@@ -114,16 +178,33 @@ def _leg(order_intent) -> str | None:
     return None
 
 
-def request(symbol) -> None:
+def request(symbol, *, now=None) -> None:
     """The decision path asked about this symbol. Recorded only while the
-    stream runs here; never a venue call."""
+    stream runs here; never a venue call. Every ask refreshes its instant;
+    a full set gives up its LEAST RECENTLY asked symbol, never the new ask
+    (see MAX_REQUESTED)."""
     s = str(symbol or "").strip()
     if not s or not running():
         return
+    at = float(time.time() if now is None else now)
     with _LOCK:
-        if s not in _REQUESTED and len(_REQUESTED) >= MAX_SYMBOLS:
-            return
-        _REQUESTED[s] = time.time()
+        if s in _REQUESTED:
+            _REQUESTED.pop(s)
+        elif len(_REQUESTED) >= MAX_REQUESTED:
+            oldest = min(_REQUESTED, key=_REQUESTED.get)
+            _REQUESTED.pop(oldest, None)
+        _REQUESTED[s] = at
+
+
+def asked_symbols(*, now=None) -> list:
+    """The asked symbols, most recently asked first; one not asked for
+    REQUEST_IDLE_S is dropped here."""
+    at = float(time.time() if now is None else now)
+    with _LOCK:
+        for s in [s for s, t in _REQUESTED.items()
+                  if at - float(t) > REQUEST_IDLE_S]:
+            _REQUESTED.pop(s, None)
+        return sorted(_REQUESTED, key=lambda s: -float(_REQUESTED[s]))
 
 
 def identity_mapper(slug, order_intent=None) -> dict | None:
@@ -184,6 +265,10 @@ def primary_report(*, now=None) -> dict:
         "held_subscribed": _STATE.get("held_subscribed"),
         "refdata_reads": _STATE.get("refdata_reads"),
         "refdata_failures": _STATE.get("refdata_failures"),
+        # refdata taken from the plane's persisted record instead of a read
+        "refdata_from_plane": _STATE.get("refdata_from_plane"),
+        # asked symbols subscribed in the spare capacity after held markets
+        "asked_spare": _STATE.get("asked_spare"),
         "bootstrap_backlog": _STATE.get("backlog"),
         "last_error": _STATE.get("last_error"),
         "at": d.get("at")}
@@ -214,9 +299,11 @@ def describe() -> dict:
             "held_wanted": _STATE.get("held_wanted"),
             "held_subscribed": _STATE.get("held_subscribed"),
             "bootstrap_backlog": _STATE.get("backlog"),
-            "requested": asked[:MAX_SYMBOLS],
+            "requested": asked[:MAX_REQUESTED],
             "refdata_reads": _STATE.get("refdata_reads"),
             "refdata_failures": _STATE.get("refdata_failures"),
+            "refdata_from_plane": _STATE.get("refdata_from_plane"),
+            "asked_spare": _STATE.get("asked_spare"),
             "last_error": _STATE.get("last_error"),
             "focus_universe": FU.summary(universe_snapshot())}
 
@@ -275,10 +362,12 @@ def reset() -> None:
         REFDATA.clear()
         _REQUESTED.clear()
         _ATTEMPT.clear()
+        _PLANE_TRIED.clear()
         _UNIVERSE.clear()
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
                   refdata_failures=0, backlog=0, held_wanted=0,
-                  held_subscribed=0, held_preempted=0)
+                  held_subscribed=0, held_preempted=0, refdata_from_plane=0,
+                  asked_spare=0)
 
 
 async def _focus_symbols(get_pool, focus) -> list:
@@ -373,10 +462,14 @@ def _bootstrap_one(client, symbol, bootstrap):
     return W.bootstrap_instrument(client, symbol)
 
 
-def _due(symbol, at) -> bool:
+def _due(symbol, at, *, plane_only: bool = False) -> bool:
+    """`plane_only`: a spare-capacity symbol, also held back for
+    RETRY_UNLISTED_S after the plane had no record for it."""
     with _LOCK:
         have = REFDATA.get(symbol)
         tried = _ATTEMPT.get(symbol)
+        if plane_only and _PLANE_TRIED.get(symbol) is not None:
+            tried = max(float(tried or 0.0), float(_PLANE_TRIED[symbol]))
     if have is not None:
         return at - have["at"] >= REFDATA_REFRESH_S
     return tried is None or at - tried >= RETRY_UNLISTED_S
@@ -387,7 +480,7 @@ def pending(now=None) -> list:
     at = float(now if now is not None else time.time())
     with _LOCK:
         asked = list(_REQUESTED)
-    return [s for s in asked if _due(s, at)]
+    return [s for s in asked if _due(s, at, plane_only=True)]
 
 
 def _held_extra(already) -> list:
@@ -404,14 +497,50 @@ def _held_extra(already) -> list:
     return out
 
 
+async def plane_refdata(get_pool, symbols, *,
+                        max_age_s: float = PLANE_REFDATA_MAX_AGE_S) -> dict:
+    """{symbol: {"record", "at"}} for THESE symbols from the dedicated
+    plane's persisted refdata (PLANE_REFDATA_SQL): only records persisted
+    within `max_age_s`, listed, and naming exactly the symbol. {} on any
+    failure (the REST bootstrap then reads, exactly as before). Read only;
+    never raises."""
+    syms = sorted({str(s) for s in symbols or () if s})
+    if get_pool is None or not syms:
+        return {}
+    try:
+        import json
+        pool = await get_pool()
+        async with pool.acquire() as c:
+            if not await c.fetchval(
+                    "SELECT to_regclass('market_plane_registry') IS NOT NULL"):
+                return {}
+            rows = await c.fetch(PLANE_REFDATA_SQL, syms, float(max_age_s))
+        out = {}
+        for r in rows:
+            rec = r["refdata"]
+            if isinstance(rec, str):
+                rec = json.loads(rec)
+            if isinstance(rec, dict) and rec.get("symbol") == \
+                    r["contract_id"] and r["at"] is not None:
+                out[r["contract_id"]] = {"record": rec, "at": float(r["at"])}
+        return out
+    except Exception:                                         # noqa: BLE001
+        return {}
+
+
 async def refresh_once(get_pool=None, *, client=None, focus=None,
                        bootstrap=None, now=None, symbols=None,
-                       held=None, max_bootstraps=None) -> dict:
+                       held=None, max_bootstraps=None,
+                       plane_records=None) -> dict:
     """ONE pass: focus set + asked symbols (<= MAX_SYMBOLS), then the held
-    markets beyond them (<= HELD_SYMBOL_BUDGET) -> refdata (only when due:
-    never held, older than REFDATA_REFRESH_S, or a failed / unlisted symbol
-    after RETRY_UNLISTED_S; at most `max_bootstraps` per pass, the rest is
-    the backlog the next pass takes) -> set_instrument -> want."""
+    markets beyond them (<= HELD_SYMBOL_BUDGET), then the asked symbols that
+    did not fit into the stream's spare capacity (<= STREAM_MAX_SYMBOLS)
+    -> refdata (only when due: never held, older than REFDATA_REFRESH_S, or a
+    failed / unlisted symbol after RETRY_UNLISTED_S; the plane's persisted
+    record first when `plane_records` (async symbols -> {symbol: {record,
+    at}}) has one inside REFDATA_REFRESH_S, else a REST read, at most
+    `max_bootstraps` per pass, the rest is the backlog the next pass takes)
+    -> set_instrument -> want."""
     at = float(now if now is not None else time.time())
     if symbols is None:
         try:
@@ -419,8 +548,7 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
         except Exception as exc:                              # noqa: BLE001
             symbols = []
             _STATE["last_error"] = "focus: %s" % type(exc).__name__
-    with _LOCK:
-        asked = list(_REQUESTED)
+    asked = asked_symbols(now=at)
     wanted = []
     for s in list(symbols) + asked:
         if s and s not in wanted:
@@ -432,12 +560,61 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
              [:HELD_SYMBOL_BUDGET])
     held_set = set(held_names)
     wanted = wanted + extra
+    # THE ASKED SYMBOLS THAT DID NOT FIT, into the spare capacity AFTER the
+    # held markets (see MAX_REQUESTED): most recently asked first
+    room = max(0, STREAM_MAX_SYMBOLS - len(wanted))
+    spare = [s for s in asked if s and s not in wanted][:room]
+    spare_set = set(spare)
+    wanted = wanted + spare
+    # THE PLANE'S PERSISTED REFDATA FIRST (PLANE_REFDATA_SQL): a due symbol
+    # it holds a record for -- within REFDATA_REFRESH_S, or for a spare
+    # symbol within PLANE_REFDATA_MAX_AGE_S -- needs no REST read
+    with _LOCK:
+        for s in [s for s, t in _PLANE_TRIED.items()
+                  if at - float(t) >= RETRY_UNLISTED_S]:
+            _PLANE_TRIED.pop(s, None)        # bounded: only live retries
+    due = [s for s in wanted if _due(s, at, plane_only=s in spare_set)]
+    got_plane = {}
+    if due and plane_records is not None:
+        try:
+            got_plane = await plane_records(due) or {}
+        except Exception:                                     # noqa: BLE001
+            got_plane = {}
+    for s in due:
+        g = got_plane.get(s) or {}
+        rec = g.get("record")
+        try:
+            rec_at = float(g.get("at"))
+        except (TypeError, ValueError):
+            rec_at = None
+        spare_only = s in spare_set
+        limit = PLANE_REFDATA_MAX_AGE_S if spare_only else REFDATA_REFRESH_S
+        if rec_at is None or not isinstance(rec, dict) or \
+                rec.get("symbol") != s or not (0.0 <= at - rec_at < limit):
+            if spare_only:
+                # NEVER a REST read for spare capacity: re-asked of the plane
+                # after the retry interval, like an unlisted symbol
+                with _LOCK:
+                    _PLANE_TRIED[s] = at
+            continue
+        with _LOCK:
+            # a core / held symbol keeps the record's own age (re-asked when
+            # the PLANE's record turns REFDATA_REFRESH_S); a spare symbol is
+            # re-checked against the plane every REFDATA_REFRESH_S
+            REFDATA[s] = {"record": rec, "at": at if spare_only else rec_at,
+                          "source": "MARKET_PLANE_REGISTRY",
+                          "plane_refdata_at": rec_at}
+        IS.set_instrument(s, rec)
+        _STATE["refdata_from_plane"] = int(
+            _STATE.get("refdata_from_plane") or 0) + 1
     cap = BOOTSTRAPS_PER_PASS if max_bootstraps is None else int(
         max_bootstraps)
     boot = 0
     attempted = 0
     backlog = 0
     for s in wanted:
+        if s in spare_set:
+            continue        # spare capacity: the plane's record only
         if not _due(s, at):
             continue
         if attempted >= cap:
@@ -477,7 +654,8 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
     # RETAIN_IDLE_S, so focus churn or the decision path's own wants inside
     # that window can still fill the bound. A held market the bound refused
     # takes the slot of an entry THIS pass does not want. `wanted` is at
-    # most MAX_SYMBOLS + HELD_SYMBOL_BUDGET = IS.MAX_SYMBOLS, so it fits.
+    # most STREAM_MAX_SYMBOLS (MAX_SYMBOLS + HELD_SYMBOL_BUDGET, then the
+    # spare capacity up to the same total), so it fits.
     have = set(IS.BOOKS.wanted())
     if any(s in held_set and s not in have for s in priced):
         _STATE["held_preempted"] = int(_STATE.get("held_preempted") or 0) \
@@ -486,14 +664,18 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
     _STATE.update(backlog=backlog,
                   held_wanted=sum(1 for s in wanted if s in held_set),
                   held_subscribed=sum(1 for s in priced if s in held_set))
+    _STATE["asked_spare"] = len(spare)
     return {"wanted": len(wanted), "bootstrapped": boot,
             "subscribed": len(priced), "held_extra": len(extra),
-            "backlog": backlog}
+            "asked_spare": len(spare), "backlog": backlog}
 
 
 async def _run(get_pool, *, client, focus, bootstrap) -> None:
     last_focus, focus_cache = 0.0, []
     last_log = None
+
+    async def _plane(symbols):
+        return await plane_refdata(get_pool, symbols)
     while True:
         try:
             if last_log is None or \
@@ -511,11 +693,11 @@ async def _run(get_pool, *, client, focus, bootstrap) -> None:
                 except Exception as exc:                      # noqa: BLE001
                     _STATE["last_error"] = "focus: %s" % type(exc).__name__
                 await refresh_once(client=client, bootstrap=bootstrap,
-                                   symbols=focus_cache)
+                                   symbols=focus_cache, plane_records=_plane)
                 await persist_universe(get_pool)
             elif pending() or _STATE.get("backlog"):
                 await refresh_once(client=client, bootstrap=bootstrap,
-                                   symbols=focus_cache)
+                                   symbols=focus_cache, plane_records=_plane)
             await asyncio.sleep(LOOP_S)
         except asyncio.CancelledError:
             raise

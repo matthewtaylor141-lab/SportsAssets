@@ -4833,10 +4833,89 @@ def _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
     return nb > float(deadline_epoch_s)
 
 
+#: ── THE PMX INSTITUTIONAL BOOK BEFORE THE REST READ (RC5) ────────────
+#:
+#: PRODUCTION (release 7fd4574e, first-loss census per hour after RC4):
+#: QUOTE_STALE_ON_ARRIVAL 35, PROBABILITY_DEADLINE_PASSED 13 and
+#: BOOK_READ_DID_NOT_FINISH_INSIDE_THE_DECISION_DEADLINE 2 -- every one a
+#: candidate queued behind, or cut by, the per-key authenticated REST book
+#: budget (~0.23 req/s, 429 with Retry-After 7-10 s), while this process's
+#: own PMX gRPC stream held 30 acknowledged, current L2 books that no
+#: decision read. The remedy named in 22b3420c ("a non-REST candidate book
+#: source") is this: `venue_quote` asks paper_pmx_books first and, ONLY
+#: under its rule, judges the resident PMX book exactly as it judges a REST
+#: book (currency, our processing delay from ITS receipt, depth, the
+#: executable grid). No request is made for it, so it neither waits on nor
+#: spends the budget; every other candidate reads REST exactly as before.
+PMX_BOOK_BEFORE_REST_RULE = (
+    "the collector's venue book read asks paper_pmx_books first: the "
+    "deciding process's resident PMX book serves the read only with exact "
+    "identity, the venue's ack on this connection, the stream's decision-"
+    "bound current(), this symbol's own same-book evidence and our receipt "
+    "inside the paper owner's shared-read age; it is then judged exactly as "
+    "a REST book with its own receipt instant. Otherwise REST, unchanged. "
+    "Every read is counted by source and every fallback by its reason")
+
+
+#: True only around the paper / calibration collector reads (the money line
+#: and line contracts of a candidate): the reads the PMX book may serve
+_PMX_ALLOWED: contextvars.ContextVar = contextvars.ContextVar(
+    "collector_venue_read_pmx_allowed", default=False)
+#: the book source of a REST read (= paper_pmx_books.SOURCE_REST, pinned)
+_REST_SOURCE = "REST"
+_PMX_SOURCE = "PMX_GRPC"
+#: a valuation priced off a PMX book is a paper / calibration record: it is
+#: never offered to the funded connector (P5's owner approval governs stream
+#: books on any funded or actual decision)
+R_PMX_BOOK_NOT_A_FUNDED_INPUT = "PMX_BOOK_PRICED_RECORD_IS_PAPER_ONLY"
+
+
+def _tapped_book_read(slug: str) -> dict:
+    """The collector's REST book read (`_read_book_blocking`, unchanged),
+    run as a same-book sample when the stream holds the slug exactly
+    (paper_market_data.tapped). Runs in the reader's thread; never alters
+    the read."""
+    from .. import paper_market_data as _PMD
+    return _PMD.tapped(slug, lambda: _read_book_blocking(slug))
+
+
+def _note_book_source(into: dict, vq) -> None:
+    """Count ONE collector book read by the source that served it (a quote
+    with no source named -- a stand-in, or a read refused before any source
+    was asked -- is REST, as every read was before)."""
+    src = (vq or {}).get("book_source") or _REST_SOURCE
+    d = into.setdefault("venue_book_sources",
+                        {_PMX_SOURCE: 0, _REST_SOURCE: 0})
+    d[src] = d.get(src, 0) + 1
+
+
+def _pmx_book_for_collector(slug, *, now) -> tuple:
+    """(book_source, the PMX read or None) for ONE collector book read. A
+    None is a REST read, counted here with the reason. Never raises."""
+    from .. import paper_pmx_books as PCB
+    try:
+        got = PCB.consumer_read(slug, consumer=PCB.C_COLLECTOR, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        got = {"ok": False, "refusal": "%s:%s" % (PCB.R_RAISED,
+                                                  type(exc).__name__)}
+    if got.get("ok"):
+        return PCB.SOURCE_PMX, got["read"]
+    PCB.note_rest(PCB.C_COLLECTOR, got.get("refusal"))
+    return PCB.SOURCE_REST, None
+
+
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                       subscription=None, revalidation=None,
-                      deadline_epoch_s=None):
+                      deadline_epoch_s=None, pmx_allowed=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
+
+    `pmx_allowed` (PMX_BOOK_BEFORE_REST_RULE): None reads the context the
+    caller set (`_PMX_ALLOWED`), which is True only around the paper /
+    calibration collector reads (the candidate's money line and its line
+    contracts). Every other caller -- the funded pair inputs, the hedge
+    candidate quoter, the admin probe -- reads REST exactly as before: a
+    stream book reaches a funded or actual decision only under the owner's
+    P5 live-stream-book approval, never through this seam.
 
     `intent` IS THE SIDE, AND IT IS REQUIRED. This used to take an
     `outcome_index` that it accepted and never read: it returned BEST_ASK
@@ -4932,50 +5011,88 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     # not sent seconds later to a venue that rate-limits us.
     bound = read_dispatch_bound(request_sent_at, deadline_epoch_s)
     timeout = bound["timeout_s"]
-    try:
-        # the reader takes the deadline from the same context variable
-        # (asyncio.to_thread copies the context into its thread)
-        _dl_token = _READ_DEADLINE.set(bound["gate_deadline_epoch_s"])
+    # ── THE PMX INSTITUTIONAL BOOK, FIRST (PMX_BOOK_BEFORE_REST_RULE) ────
+    # The deciding process's own resident PMX book stands in for this REST
+    # read only under paper_pmx_books' rule (exact identity, the venue's
+    # ack on this connection, the stream's decision-bound current(), this
+    # symbol's own same-book evidence, our receipt <= the paper owner's
+    # shared-read age). No request is made for it, so it neither waits on
+    # nor spends the per-key REST book budget that the queue behind this
+    # candidate is starved by. Everything after the read -- currency, our
+    # processing delay, depth, the grid -- judges it exactly as a REST book,
+    # with ITS receipt instant. Otherwise: the REST read, exactly as before.
+    if pmx_allowed is None:
+        pmx_allowed = bool(_PMX_ALLOWED.get())
+    book_source, pmx = (_pmx_book_for_collector(slug, now=request_sent_at)
+                        if pmx_allowed else (_REST_SOURCE, None))
+    if pmx is not None:
+        book = pmx
+    else:
         try:
-            book = await asyncio.wait_for(
-                asyncio.to_thread(_read_book_blocking, slug),
-                timeout=timeout)
-        finally:
-            _READ_DEADLINE.reset(_dl_token)
-    except Exception as exc:                                   # noqa: BLE001
-        if (bound["probability_binds"]
-                and isinstance(exc, (asyncio.TimeoutError, TimeoutError))):
-            return _past_deadline(slug, deadline_epoch_s, request_sent_at,
-                                  "AWAIT_ABANDONED_AT_THE_DEADLINE")
-        return {"ok": False, "refusal": R_VENUE_READ_FAILED,
-                "why": "book read failed: %s" % type(exc).__name__,
-                "exception": type(exc).__name__,
-                "diagnostic": _venue_diagnostic(slug, exc,
-                                                stage="BOOK_READ_AWAIT")}
-    if _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
-                                                 bound):
-        return _past_deadline(slug, deadline_epoch_s, request_sent_at,
-                              "REFUSED_BY_OUR_GATE:%s" % book.get("error"))
-    if book.get("error"):
-        diag = book.get("diagnostic") or {}
-        return {"ok": False, "refusal": R_VENUE_READ_ERROR,
-                "why": "venue read error: %s" % book["error"],
-                "venue_error": _sanitize(book["error"], limit=80),
-                # OUR GATE NAMED AS OURS (`venue_read_refusal`).
-                "refused_by": book.get("refused_by"),
-                "diagnostic": diag}
+            # the reader takes the deadline from the same context variable
+            # (asyncio.to_thread copies the context into its thread)
+            _dl_token = _READ_DEADLINE.set(bound["gate_deadline_epoch_s"])
+            try:
+                # a paper / calibration read is ALSO a same-book sample
+                # when the stream holds the slug exactly (paper_market_data
+                # .tapped, TAP_WHY_CONSUMER): no request added, the read
+                # returned unchanged
+                book = await asyncio.wait_for(
+                    asyncio.to_thread(_tapped_book_read if pmx_allowed
+                                      else _read_book_blocking, slug),
+                    timeout=timeout)
+            finally:
+                _READ_DEADLINE.reset(_dl_token)
+        except Exception as exc:                               # noqa: BLE001
+            if (bound["probability_binds"]
+                    and isinstance(exc, (asyncio.TimeoutError,
+                                         TimeoutError))):
+                return dict(_past_deadline(
+                    slug, deadline_epoch_s, request_sent_at,
+                    "AWAIT_ABANDONED_AT_THE_DEADLINE"),
+                    book_source=book_source)
+            return {"ok": False, "refusal": R_VENUE_READ_FAILED,
+                    "why": "book read failed: %s" % type(exc).__name__,
+                    "exception": type(exc).__name__,
+                    "book_source": book_source,
+                    "diagnostic": _venue_diagnostic(slug, exc,
+                                                    stage="BOOK_READ_AWAIT")}
+        if _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
+                                                     bound):
+            return dict(_past_deadline(
+                slug, deadline_epoch_s, request_sent_at,
+                "REFUSED_BY_OUR_GATE:%s" % book.get("error")),
+                book_source=book_source)
+        if book.get("error"):
+            diag = book.get("diagnostic") or {}
+            return {"ok": False, "refusal": R_VENUE_READ_ERROR,
+                    "why": "venue read error: %s" % book["error"],
+                    "venue_error": _sanitize(book["error"], limit=80),
+                    # OUR GATE NAMED AS OURS (`venue_read_refusal`).
+                    "refused_by": book.get("refused_by"),
+                    "book_source": book_source,
+                    "diagnostic": diag}
 
-    read_at = time.time()
-    # THE INSTANT THE VERDICT IS TAKEN AT: never before our own receipt of
-    # the payload (see the docstring, D8).
-    verdict_at = (read_at if now is None
-                  else max(float(now), float(read_at)))
+    if pmx is not None:
+        # OUR RECEIPT of the PMX book is the stream's receipt of its last
+        # full update -- never this instant (nothing is made fresher than it
+        # is); the verdict is still taken now, so our processing delay is
+        # measured from that receipt
+        read_at = float(book["observed_at"])
+        verdict_at = max(time.time() if now is None else float(now), read_at)
+    else:
+        read_at = time.time()
+        # THE INSTANT THE VERDICT IS TAKEN AT: never before our own receipt
+        # of the payload (see the docstring, D8).
+        verdict_at = (read_at if now is None
+                      else max(float(now), float(read_at)))
     snap = bs.snapshot(book.get("marketData"), symbol=slug,
                        captured_at=read_at)
     ask = snap.get("BEST_ASK")
     if ask in (None, bs.NOT_IDENTIFIED):
         return {"ok": False, "refusal": R_NO_DEPTH,
                 "why": "the book has no ask side",
+                "book_source": book_source,
                 "parse_status": snap.get("PARSE_STATUS")}
     depth_raw = (snap.get("DISPLAYED_DEPTH_AT_T0") or {}).get("ask")
     try:
@@ -4984,6 +5101,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         depth = 0.0
     if depth <= 0:
         return {"ok": False, "refusal": R_NO_DEPTH,
+                "book_source": book_source,
                 "why": "the ask side shows no displayed quantity"}
 
     # THE VENUE'S OWN CLOCK, when it gives one. WHAT IT MEANS IS NOT
@@ -5124,6 +5242,11 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                            bound_s=MAX_VENUE_QUOTE_AGE_S)
     clock["book_currency"] = currency
     clock["http_observer"] = book.get("http_observer")
+    # WHICH SOURCE SERVED THE BOOK (PMX_BOOK_BEFORE_REST_RULE), and for a
+    # PMX book its own evidence: receipt age, connection, ack, same-book
+    clock["book_source"] = book_source
+    if pmx is not None:
+        clock["pmx"] = book.get("pmx")
     # BOTH INSTANTS ON THE RECORD, so a reader can see which one judged it.
     clock["caller_instant_epoch_s"] = (None if now is None else float(now))
     clock["verdict_instant_epoch_s"] = float(verdict_at)
@@ -5154,7 +5277,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 venue_clock_basis=age_basis)
             if CV.other_intent(intent) else None),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
-        "http_observation": book.get("http_observation")}
+        "http_observation": book.get("http_observation"),
+        "book_source": book_source}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
     if currency["verdict"] == vc.CONTRADICTED:
         return {"ok": False, "refusal": R_BOOK_CURRENCY_CONTRADICTED,
@@ -5209,7 +5333,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "why": ("the ladder this intent must consume is not "
                         "readable: %s" % (lad.get("book_was")
                                           or lad.get("parse_status"))),
-                "acquisition": lad, "slug": slug}
+                "acquisition": lad, "slug": slug, "book_source": book_source}
     # ── ONLY DEPTH AN ORDER WE CAN SEND IS ABLE TO REACH ─────────────
     #
     # BEFORE anything values, sizes or ranks this ladder: a level whose wire
@@ -5229,11 +5353,14 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "excluded_unrepresentable_qty": lad.get(
                     "excluded_unrepresentable_qty"),
                 "acquisition": lad, "slug": slug, "intent": intent,
-                "book_currency": currency, "read_at": read_at}
+                "book_currency": currency, "read_at": read_at,
+                "book_source": book_source}
     sized = (bs.fill_across_levels(lad, float(size))
              if size else None)
 
     return {"ok": True,
+            # WHICH SOURCE SERVED THE BOOK (PMX_BOOK_BEFORE_REST_RULE)
+            "book_source": book_source,
             # `ask` is kept for every existing reader and is now
             # explicitly the YES-denominated API price of the best level
             # ON THE SIDE THIS INTENT CONSUMES.
@@ -9766,12 +9893,21 @@ async def _line_instrument(conn, MF, *, cache, pair, contract, inst, job,
     read_at = time.time()
     _cev = book_currency_evidence(slug)
     # `lq`: the line instrument's book read (the money line's is `vq`)
-    lq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
-                           now=read_at,
-                           subscription=_cev.get("subscription"),
-                           revalidation=_cev.get("revalidation"))
+    # A PAPER / CALIBRATION READ: the PMX book may serve it
+    # (PMX_BOOK_BEFORE_REST_RULE)
+    _px_token = _PMX_ALLOWED.set(True)
+    try:
+        lq = await venue_quote(conn, us_slug=slug, intent=inst["intent"],
+                               now=read_at,
+                               subscription=_cev.get("subscription"),
+                               revalidation=_cev.get("revalidation"))
+    finally:
+        _PMX_ALLOWED.reset(_px_token)
+    _note_book_source(report, lq)
     report["venue_reads"] += 1
-    report["venue_requests"] += 1
+    if lq.get("book_source") != _PMX_SOURCE:
+        # a PMX book is no request to the venue
+        report["venue_requests"] += 1
     calibration_only = None
     if not lq.get("ok"):
         calibration_only = _calibration_only_basis(lq)
@@ -10317,7 +10453,18 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            "reads_bounded_by_probability_deadline": 0,
            # every event WITH A PINNACLE PRICE, measured when it came up --
            # mapped or not, evaluated or not
-           "arrival_lag_every_priced": [], "arrival_ours_every_priced": []}
+           "arrival_lag_every_priced": [], "arrival_ours_every_priced": [],
+           # which source served each candidate's book (PMX_BOOK_BEFORE_
+           # REST_RULE)
+           "venue_book_sources": {_PMX_SOURCE: 0, _REST_SOURCE: 0}}
+    # THE SAME-BOOK EVIDENCE THE PMX BOOK RULE READS (paper_pmx_books
+    # (e)), reloaded when due for the symbols this process's stream holds.
+    # Never raises; with no stream here it loads nothing.
+    try:
+        from .. import paper_pmx_books as _PCB
+        await _PCB.refresh_evidence(conn)
+    except Exception:                                          # noqa: BLE001
+        log.debug("pmx same-book evidence not refreshed", exc_info=True)
 
     # THE OPEN BOOK, READ ONCE PER CYCLE. The risk rails are measured
     # against it plus the position being proposed, so it has to be read
@@ -11307,6 +11454,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # context variable set around THIS call only (asyncio.to_thread
             # copies it into the reader's thread).
             _dl_token = _READ_DEADLINE.set(probability_deadline(_pe))
+            # A PAPER / CALIBRATION READ: the PMX book may serve it
+            # (PMX_BOOK_BEFORE_REST_RULE), carried like the deadline
+            _px_token = _PMX_ALLOWED.set(True)
             try:
                 vq = await venue_quote(
                     conn, us_slug=ident["us_market_slug"],
@@ -11314,8 +11464,15 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     subscription=_cev.get("subscription"),
                     revalidation=_cev.get("revalidation"))
             finally:
+                _PMX_ALLOWED.reset(_px_token)
                 _READ_DEADLINE.reset(_dl_token)
-            lat["venue_requests"] += 1
+            # WHICH SOURCE SERVED THIS CANDIDATE'S BOOK (PMX_BOOK_BEFORE_
+            # REST_RULE): counted per cycle (latency.venue_book_sources, on
+            # the heartbeat); the quote's own venue_clock names it too
+            _note_book_source(lat, vq)
+            if vq.get("book_source") != _PMX_SOURCE:
+                # a PMX book is no request to the venue
+                lat["venue_requests"] += 1
             if vq.get("refusal") == R_READ_PAST_PROBABILITY_DEADLINE:
                 lat["reads_bounded_by_probability_deadline"] += 1
                 # OUR READ'S WAIT TOOK IT PAST THE RULE: first in its
@@ -12055,7 +12212,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     # worth reading in a cycle report.
                     rec["event_key"] = quote.get("event_id")
                     rec["order_intent"] = contract.get("buy_intent")
-                    funded = await _funded_attempt(conn, rec, now=now)
+                    # A RECORD PRICED OFF A PMX BOOK IS PAPER ONLY
+                    # (PMX_BOOK_BEFORE_REST_RULE): never offered to the
+                    # funded connector, not even to be refused there
+                    funded = ({"ok": False,
+                               "refusal": R_PMX_BOOK_NOT_A_FUNDED_INPUT}
+                              if vq.get("book_source") == _PMX_SOURCE
+                              else await _funded_attempt(conn, rec, now=now))
                     if funded is not None:
                         rec["funded"] = funded
                         tally["FUNDED:" + str(funded.get("refusal")
@@ -12273,6 +12436,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        lat["arrival_ours_every_priced"])},
                "deduplicated_requests": lat["deduplicated_requests"],
                "venue_requests": lat["venue_requests"],
+               # WHICH SOURCE SERVED EACH CANDIDATE'S BOOK THIS CYCLE
+               # (PMX_BOOK_BEFORE_REST_RULE); the reasons a PMX book did
+               # not serve are in paper_pmx_books.telemetry()
+               "venue_book_sources": dict(lat.get("venue_book_sources") or {
+                   _PMX_SOURCE: 0, _REST_SOURCE: 0}),
+               "venue_book_source_rule": PMX_BOOK_BEFORE_REST_RULE,
                "reads_bounded_by_probability_deadline":
                    lat["reads_bounded_by_probability_deadline"],
                "read_bound_rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE,
@@ -12508,7 +12677,9 @@ def _paper_market_data_digest() -> dict:
         return {k: t.get(k) for k in (
             "version", "rest_requests_per_min", "responses_2xx_per_min",
             "responses_429_per_min", "totals", "queue_depth",
-            "held_registered", "venue_hold", "streams", "auth_lanes")}
+            "held_registered", "venue_hold", "streams", "auth_lanes",
+            # (RC5) PMX_GRPC vs REST per consumer, fallbacks by reason
+            "book_sources")}
     except Exception as exc:                                   # noqa: BLE001
         return {"unavailable": type(exc).__name__}
 
@@ -13140,6 +13311,10 @@ def _freshness_digest(out: dict) -> dict | None:
                 "on_arrival_every_priced_event"),
             "deduplicated_requests": lat.get("deduplicated_requests"),
             "venue_requests": lat.get("venue_requests"),
+            # (RC5) WHICH BOOK EACH CANDIDATE'S venue_quote JUDGED: the
+            # deciding process's PMX institutional stream or the REST read,
+            # every REST fallback by its reason (paper_pmx_books)
+            "venue_book_sources": lat.get("venue_book_sources"),
             # DEFERRALS REACH THE OPERATOR SURFACE TOO. A count and a
             # bounded sample: without them a rising evaluation count and a
             # falling stale rate could both be produced by examining fewer,

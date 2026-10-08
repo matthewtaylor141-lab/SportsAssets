@@ -600,6 +600,17 @@ class ResidentBooks:
             "depth": {"bids": len(m.get("bids") or ()),
                       "offers": len(m.get("offers") or ()),
                       "requested": DEPTH},
+            # THE VENUE'S ACK OF THIS SYMBOL ON THIS CONNECTION (evidence
+            # only; current() decides nothing on it). A consumer that stands
+            # a resident book in for a REST read requires it
+            # (paper_pmx_books (b)): a book the venue has not confirmed
+            # subscribing on this connection is not shown to be the
+            # subscription's.
+            "subscription": {
+                "acked_seq": m.get("acked_seq"),
+                "acked_on_current_connection": bool(
+                    connected and m.get("acked_seq") is not None
+                    and m.get("acked_seq") == seq)},
             "venue_sequence": VENUE_SEQUENCE,
             "bounds": {"max_silence_s": MAX_SILENCE_S,
                        "max_snapshot_age_s": bound,

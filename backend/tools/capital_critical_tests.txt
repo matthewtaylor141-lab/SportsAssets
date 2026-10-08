@@ -1288,3 +1288,5 @@ tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
+# (RC5 PMX consumer books) the PMX book serves paper / collector calibration reads only: never a funded input, never a funded-module import, REST exactly as before on every unproven read
+tests/test_rc5_pmx_consumer_books.py

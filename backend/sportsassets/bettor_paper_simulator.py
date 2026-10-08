@@ -398,7 +398,15 @@ async def record_book(conn, *, slug: str, read: dict, source: str,
     md = read.get("marketData") if isinstance(read, dict) else None
     at = float((read or {}).get("observed_at") or time.time())
     err = (read or {}).get("error")
-    if isinstance(read, dict) and read.get("shared_read"):
+    if isinstance(read, dict) and read.get("book_source") == "PMX_GRPC" \
+            and not str(source).startswith("PAPER_INSTITUTIONAL_STREAM"):
+        # THE PMX INSTITUTIONAL BOOK served this read (paper_pmx_books):
+        # recorded under the stream's source name, the reader's after it,
+        # with the stream's receipt instant -- so every mark and decision
+        # names the feed it came from (bettor_paper_freshness.mark_source
+        # -> INSTITUTIONAL_STREAM), never a REST read it was not.
+        source = "PAPER_INSTITUTIONAL_STREAM:%s" % source
+    elif isinstance(read, dict) and read.get("shared_read"):
         # A READ THIS PROCESS ALREADY MADE seconds earlier, answered without a
         # second venue request; recorded with its ORIGINAL receipt instant.
         source = "%s:SHARED_READ" % source

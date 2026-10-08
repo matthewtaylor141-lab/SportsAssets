@@ -16,6 +16,16 @@ transport every `PaperMarketDataClient` uses, delegates to it -- and nothing
 else. It adds no venue, key or request path; it orders and shares the reads
 that already existed:
 
+  0. THE PMX INSTITUTIONAL BOOK FIRST (RC5, paper_pmx_books). On the keyed
+     lane, a book the deciding process's own PMX institutional stream holds
+     answers the read -- with its OWN receipt instant, no venue request --
+     only with exact identity, the venue's acknowledgement on the current
+     connection, the stream's decision-bound current(), that symbol's own
+     same-book evidence, and our receipt inside CACHE_MAX_AGE_S (the age
+     at which step 1 already answers without a request; never wider).
+     Anything else falls to steps 1-4 below exactly as before, counted with
+     the reason (`telemetry()["book_sources"]`). PMX_CONSUMER_BOOKS=off
+     restores the REST family for every read.
   1. CACHE. A successful read this process made within CACHE_MAX_AGE_S
      (`ext_pinnacle_loop.recent_book`, the existing _RECENT_BOOKS) answers
      with its ORIGINAL receipt instant (`shared_read`). Nothing is made
@@ -378,11 +388,16 @@ class Owner:
                  clock=time.time, max_in_flight: int = MAX_IN_FLIGHT,
                  cache_max_age_s: float = CACHE_MAX_AGE_S,
                  public_transport=None, public_state=None,
-                 same_book_tap=None):
+                 same_book_tap=None, pmx_source=None):
         self._transport = transport
         self._recent = recent
         self._gate = gate
         self._clock = clock
+        # THE PMX INSTITUTIONAL BOOK, FIRST (paper_pmx_books). None: the
+        # process's own (`consumer_read`; it answers REST whenever the
+        # stream does not run here); False: off; a callable (tests):
+        # f(slug, *, now, max_receipt_age_s, not_before_epoch) -> answer
+        self._pmx = pmx_source
         # THE PUBLIC-GATEWAY LANE: its own transport, its own pace / hold
         # state, one request at a time, HELD reads only
         self._public_transport = public_transport
@@ -407,7 +422,7 @@ class Owner:
             "responses_2xx", "responses_429", "responses_other",
             "read_errors", "queue_deadline_refusals",
             "discovery_deferred_during_hold", "coalesce_deadline_refusals",
-            "refused_foreign_venue")}
+            "refused_foreign_venue", "pmx_books")}
         self._by_lane = {ln: {"reads": 0, "dispatches": 0,
                               "queue_wait_s": 0.0} for ln in LANES}
 
@@ -444,8 +459,13 @@ class Owner:
         return ln if ln in _RANK else LANE_DISCOVERY
 
     def tap_for(self, slug):
-        """The same-book tap for a HELD read of `slug`, or None."""
-        if self._tap is False or not self.is_held(slug):
+        """The same-book tap for a REST read of `slug` that the stream holds
+        EXACTLY, or None. Held reads (TAP_WHY) and, since RC5, every other
+        keyed read this owner dispatches (TAP_WHY_CONSUMER: the candidates
+        the PMX consumer rule needs per-symbol evidence for) -- the read
+        itself is never altered, retried or delayed beyond the two
+        in-memory stream reads, and no request is added."""
+        if self._tap is False:
             return None
         tap = self._tap
         if tap is None:
@@ -564,6 +584,23 @@ class Owner:
         self._note("reads")
         with self._cv:
             self._by_lane[ln]["reads"] += 1
+        # 0. THE PMX INSTITUTIONAL BOOK, FIRST (paper_pmx_books): the
+        #    deciding process's own resident book, ONLY with exact identity,
+        #    the venue's ack on this connection, the stream's decision-bound
+        #    current(), this symbol's own same-book evidence and our receipt
+        #    inside THIS owner's shared-read age (cache_max_age_s) -- the age
+        #    at which a REST read is already answered without a request.
+        #    The keyed lane only: the public lane serves held marks, and the
+        #    held-mark refresh asks the stream for those itself. Anything
+        #    else: the REST family below, exactly as before, counted with
+        #    the reason the PMX book did not serve.
+        if auth == AUTH_KEYED and self._pmx is not False:
+            got = self._pmx_book(slug, not_before_epoch)
+            if got.get("ok"):
+                self._note("pmx_books")
+                return dict(got["read"], owner_lane=ln, served_by="PMX_GRPC",
+                            auth_lane=AUTH_KEYED)
+            _pmx_note_rest(got.get("refusal"))
         # 1. THE CACHE
         hit = self._cached(slug, not_before_epoch)
         if hit is not None:
@@ -620,6 +657,22 @@ class Owner:
                 self._flights.pop((auth, slug), None)
             fl["event"].set()
 
+    def _pmx_book(self, slug, not_before_epoch) -> dict:
+        """The PMX consumer rule's answer for this read; never raises."""
+        try:
+            if callable(self._pmx):
+                return self._pmx(slug, now=self._clock(),
+                                 max_receipt_age_s=self.cache_max_age_s,
+                                 not_before_epoch=not_before_epoch) or {}
+            from . import paper_pmx_books as PCB
+            return PCB.consumer_read(slug, consumer=PCB.C_PAPER_OWNER,
+                                     now=self._clock(),
+                                     max_receipt_age_s=self.cache_max_age_s,
+                                     not_before_epoch=not_before_epoch)
+        except Exception as exc:                               # noqa: BLE001
+            return {"ok": False,
+                    "refusal": "PMX_SOURCE_RAISED:%s" % type(exc).__name__}
+
     def _dispatch(self, slug, ln, deadline_epoch_s) -> dict:
         # 4. THE VENUE'S HOLD: discovery yields while it is in force
         if ln == LANE_DISCOVERY:
@@ -650,7 +703,10 @@ class Owner:
                     return tr(slug)
             tap = self.tap_for(slug)
             try:
-                out = tap.wrap(slug, call) if tap is not None else call()
+                out = (tap.wrap(slug, call,
+                                why=TAP_WHY if ln == LANE_HELD
+                                else TAP_WHY_CONSUMER)
+                       if tap is not None else call())
             except Exception as exc:                           # noqa: BLE001
                 out = {"marketData": None, "error": type(exc).__name__}
             out = dict(out or {})
@@ -772,7 +828,30 @@ class Owner:
                                 "seconds_left": round(float(
                                     g.get("seconds_left") or 0.0), 3),
                                 "reason": g.get("reason")},
-                    streams=stream_updates())
+                    streams=stream_updates(),
+                    # WHICH SOURCE SERVED EACH CONSUMER READ in this process
+                    # (this owner and the collector's venue_quote): PMX_GRPC
+                    # or REST, every fallback by its reason
+                    book_sources=_book_sources(at))
+
+
+def _book_sources(at) -> dict:
+    try:
+        from . import paper_pmx_books as PCB
+        return PCB.telemetry(now=at)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"error": type(exc).__name__}
+
+
+def _pmx_note_rest(refusal) -> None:
+    """This owner read is answered by the REST family (cache, coalesced,
+    dispatched or refused by the owner): counted once, with the reason the
+    PMX book did not serve. Never raises."""
+    try:
+        from . import paper_pmx_books as PCB
+        PCB.note_rest(PCB.C_PAPER_OWNER, refusal)
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def _default_recent(slug, *, max_age_s):
@@ -1128,9 +1207,11 @@ def default_institutional():
 # same 1 s window, the same verdicts -- so held symbols accrue evidence at the
 # held-mark cadence, held first, and no request is added.
 #
-# ONLY WHERE IT MEANS SOMETHING: the slug is a registered held market, the
-# institutional stream runs in this process and the slug maps EXACTLY on the
-# refdata this process holds. Otherwise the read runs untouched. The read's
+# ONLY WHERE IT MEANS SOMETHING: the institutional stream runs in this
+# process and the slug maps EXACTLY on the refdata this process holds -- a
+# registered held market's read (TAP_WHY) and, since RC5, every other keyed
+# consumer read (TAP_WHY_CONSUMER; `tapped` for the collector's own read).
+# Otherwise the read runs untouched. The read's
 # own answer is returned unchanged (the tap never alters, retries or delays
 # it beyond the two in-memory stream reads). On the public-gateway lane the
 # lane's pace is taken BEFORE stream read #1 (and the transport then skips
@@ -1140,6 +1221,16 @@ def default_institutional():
 
 TAP_VERSION = "HELD_MARK_SAME_BOOK_TAP_V1"
 TAP_WHY = "HELD_MARK_READ_TAP: the held-mark refresh's own retail read"
+#: (RC5) THE SAME TAP ON EVERY OTHER CONSUMER REST READ of a symbol the
+#: stream holds exactly -- the paper pass's discovery / manage reads through
+#: this owner and the collector's venue_quote read (`tapped`). The PMX
+#: consumer rule (paper_pmx_books (e)) admits a symbol only on ITS OWN
+#: same-book evidence, and before this only held and focus symbols ever
+#: accrued any (production RC4: 9 durable certificates over 32,937 plane
+#: contracts). Same sample, same 1 s window, same same-instant rule, same
+#: verdicts; no request added; the read returned unchanged.
+TAP_WHY_CONSUMER = ("CONSUMER_READ_TAP: a paper or collector consumer's own "
+                    "retail read")
 TAP_MAX_PENDING = 2000
 _prepaced: contextvars.ContextVar = contextvars.ContextVar(
     "paper_public_lane_prepaced", default=False)
@@ -1164,7 +1255,7 @@ class SameBookTap:
         except Exception:                                      # noqa: BLE001
             return False
 
-    def wrap(self, slug, call):
+    def wrap(self, slug, call, why=None):
         """Run `call()` (the held read) inside one same-book sample; return
         exactly what `call()` returned (or raise what it raised)."""
         from . import institutional_same_book as SB
@@ -1194,7 +1285,7 @@ class SameBookTap:
         try:
             row = SB.sample(slug, record=rec, books_current=self._current,
                             retail_read=retail_read, clock=self._clock,
-                            focus={"why": TAP_WHY})
+                            focus={"why": why or TAP_WHY})
         except Exception:                                      # noqa: BLE001
             row = None
         if "exc" in got:
@@ -1236,6 +1327,21 @@ class SameBookTap:
 
 
 _TAP: dict = {"tap": None}
+
+
+def tapped(slug, call):
+    """A consumer's own REST read outside this owner (the collector's
+    venue_quote read), run as a same-book sample when the process's tap
+    applies to `slug` (TAP_WHY_CONSUMER); otherwise `call()` untouched.
+    Returns exactly what `call()` returns, or raises what it raises."""
+    try:
+        tap = default_same_book_tap()
+        use = tap is not None and tap.applies(slug)
+    except Exception:                                          # noqa: BLE001
+        use = False
+    if not use:
+        return call()
+    return tap.wrap(slug, call, why=TAP_WHY_CONSUMER)
 
 
 def default_same_book_tap():
