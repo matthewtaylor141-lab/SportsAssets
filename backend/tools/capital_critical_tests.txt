@@ -1287,3 +1287,4 @@ tests/test_bettor_policy_v6_integrity.py
 tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
+tests/test_analytics_archive_bounded.py

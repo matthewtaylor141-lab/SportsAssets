@@ -662,15 +662,38 @@ async def _settle_pmus_from_venue(pool, *,
         # one. Slug-matching against our rows bounds the work instead.
         arch_total = await pool.fetchval(
             "SELECT count(*) FROM pmus_activity_archive")
+        # ONLY THE SLUGS THIS PASS GRADES, AND ONLY THE TWO FIGURES IT READS
+        # (workers OOM 2026-10-08 01:33:57Z at the 2 GiB limit). The pass
+        # fetched EVERY archived resolution -- 99,120 payloads, 609 MB of
+        # positionResolution JSON, read back 04:20Z -- as Python strings
+        # and json-parsed each, every ~9.5 min, to grade 52 rows on 47
+        # slugs: a ~600 MB burst each cycle, 46-70 s after `positions
+        # persist`. The filter and the field extraction run in the
+        # database; the latest resolution per slug still wins (ORDER BY ts)
+        # and `realized` is read exactly as before (after, else before).
+        need = sorted({r["slug"] for r in rows if r["slug"]})
         arch = await pool.fetch(
             """
-            SELECT payload->'positionResolution' AS pr, ts
+            SELECT lower(payload->'positionResolution'->>'marketSlug')
+                       AS slug,
+                   payload->'positionResolution'->'afterPosition'
+                       ->'realized' AS after_realized,
+                   payload->'positionResolution'->'beforePosition'
+                       ->'realized' AS before_realized,
+                   ts
             FROM pmus_activity_archive
             WHERE payload->>'type' = 'ACTIVITY_TYPE_POSITION_RESOLUTION'
+              AND lower(payload->'positionResolution'->>'marketSlug')
+                  = ANY($1::text[])
             ORDER BY ts
-            """)
+            """, need)
 
         def _amt(v) -> float:
+            if isinstance(v, str):
+                try:
+                    v = json.loads(v)
+                except ValueError:
+                    pass
             if isinstance(v, dict):
                 v = v.get("value")
             try:
@@ -680,16 +703,11 @@ async def _settle_pmus_from_venue(pool, *,
 
         arch_truth: dict[str, dict] = {}
         for r in arch:
-            pr = r["pr"]
-            if isinstance(pr, str):
-                pr = json.loads(pr)
-            pr = pr or {}
-            slug = (pr.get("marketSlug") or "").lower()
+            slug = (r["slug"] or "").lower()
             if not slug:
                 continue
-            realized = (_amt((pr.get("afterPosition") or {}).get("realized"))
-                        or _amt((pr.get("beforePosition") or {})
-                                .get("realized")))
+            realized = (_amt(r["after_realized"])
+                        or _amt(r["before_realized"]))
             ts_iso = (_dt.fromtimestamp(float(r["ts"] or 0), timezone.utc)
                       .isoformat() if r["ts"] else "")
             arch_truth[slug] = {"realized": realized, "ts": ts_iso}
@@ -702,6 +720,7 @@ async def _settle_pmus_from_venue(pool, *,
         # run silently added nothing — never again invisible).
         summary["archive"] = {"scanned": len(arch),
                               "table_total": int(arch_total or 0),
+                              "slugs_requested": len(need),
                               "slugs": len(arch_truth), "added": added,
                               "err": None}
     except Exception as exc:  # noqa: BLE001 — narrows coverage, visibly
@@ -827,18 +846,50 @@ async def run_cycle() -> dict:
     ONE clock reading for the replay and the rollup: the replay cuts its
     window buckets at `now`, and compute_rollups refuses any other instant."""
     now = datetime.now(tz=timezone.utc)
+    rss = _RssSteps()
     states = await rebuild_positions(now=now)
+    rss.mark("rebuild_positions")
     rollups = compute_rollups(states, now=now)
+    rss.mark("compute_rollups")
     await persist_rollups(rollups)
+    rss.mark("persist_rollups")
     alerts = await validate_against_leaderboard(states)
+    rss.mark("validate_against_leaderboard")
     n_positions, n_rollups = len(states), len(rollups)
     # The book has no reader past this point; release it before the settle
     # passes rather than stack it under their own fetches (pool_settle_live
     # pulls every pmus_activity_archive resolution row) on the 2 GiB box.
     del states, rollups
     engine_settled = await settle_engine_fills()
+    rss.mark("settle_engine_fills")
     ai_settled = await settle_ai_trades()
+    rss.mark("settle_ai_trades")
     # LIVE beta orders settle with the same resolution data.
     await pool_settle_live()
+    rss.mark("pool_settle_live")
+    log.info("analytics cycle RSS by step (MB): %s", rss.steps)
     return {"positions": n_positions, "rollup_rows": n_rollups, "drift_alerts": alerts,
-            "engine_settled": engine_settled, "ai_settled": ai_settled}
+            "engine_settled": engine_settled, "ai_settled": ai_settled,
+            "rss_mb_by_step": rss.steps}
+
+
+class _RssSteps:
+    """Current RSS after each run_cycle step (/proc/self/statm; None where
+    unreadable), so the next memory question is answered by the cycle's
+    own log line instead of by correlation."""
+
+    def __init__(self):
+        self.steps: dict = {"start": self._rss()}
+
+    @staticmethod
+    def _rss():
+        try:
+            import os
+            with open("/proc/self/statm") as fh:
+                pages = int(fh.read().split()[1])
+            return round(pages * os.sysconf("SC_PAGE_SIZE") / 1048576.0, 1)
+        except Exception:                                   # noqa: BLE001
+            return None
+
+    def mark(self, step: str) -> None:
+        self.steps[step] = self._rss()
