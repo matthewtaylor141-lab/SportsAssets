@@ -174,7 +174,7 @@ async function record(browser, plan) {
   const ctx = await newContext(browser);
   const page = await ctx.newPage(); watchApi(page);
   const cdp = await ctx.newCDPSession(page);
-  const index = []; let n = 0; let T = 0; let vt = false;
+  const index = []; let n = 0; let T = 0; let vt = false; let vtFps = FPS;
   const shot = async () => {
     const r = await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 90, optimizeForSpeed: true });
     const file = String(n++).padStart(6, '0') + '.jpg';
@@ -185,24 +185,28 @@ async function record(browser, plan) {
   // the page is 3D, then a capture placed exactly 1/30 s after the last
   const stepFrame = async (input) => {
     if (input) await input();
-    if (vt) await page.evaluate(ms => window.__vt && window.__vt.step(ms), 1000 * DT).catch(() => {});
+    // a 3D segment may step at 15 fps: each capture then holds two output
+    // frames and the virtual clock advances 1/15 s, so timing stays exact
+    const dt = vt ? 1 / vtFps : DT;
+    if (vt) await page.evaluate(ms => window.__vt && window.__vt.step(ms), 1000 * dt).catch(() => {});
     else await sleep(12);
-    index.push({ file: await shot(), t: T, kind: vt ? 'vt' : 'step' }); T += DT;
+    index.push({ file: await shot(), t: T, kind: vt ? 'vt' + vtFps : 'step' }); T += dt;
   };
   // a real-time hold: captures as fast as the page allows, timeline 1:1
   const holdReal = async (ms) => {
     const end = Date.now() + ms; let last = Date.now();
     while (Date.now() < end) { const file = await shot(); const now = Date.now(); index.push({ file, t: T, kind: 'real' }); T += (now - last) / 1000; last = now; }
   };
-  const hold = async (ms) => { if (vt) { for (let k = 0, N = Math.round(ms / 1000 * FPS); k < N; k++) await stepFrame(); } else await holdReal(ms); };
+  const rate = () => vt ? vtFps : FPS;
+  const hold = async (ms) => { if (vt) { for (let k = 0, N = Math.round(ms / 1000 * rate()); k < N; k++) await stepFrame(); } else await holdReal(ms); };
   const glide = async (x, y, ms = 900) => {
-    const sx = mouse.x, sy = mouse.y, N = Math.max(4, Math.round(ms / 1000 * FPS));
+    const sx = mouse.x, sy = mouse.y, N = Math.max(4, Math.round(ms / 1000 * rate()));
     for (let k = 1; k <= N; k++) { const q = k / N, e = q < .5 ? 2 * q * q : 1 - Math.pow(-2 * q + 2, 2) / 2;
       await stepFrame(() => page.mouse.move(sx + (x - sx) * e, sy + (y - sy) * e)); }
     mouse = { x, y };
   };
   const wheel = async (dy, ms = 2000) => {
-    const N = Math.max(6, Math.round(ms / 1000 * FPS)); let done = 0;
+    const N = Math.max(6, Math.round(ms / 1000 * rate())); let done = 0;
     for (let k = 1; k <= N; k++) { const q = k / N, want = Math.round(dy * (q < .5 ? 2 * q * q : 1 - Math.pow(-2 * q + 2, 2) / 2));
       await stepFrame(async () => { if (want !== done) { await page.mouse.wheel(0, want - done); done = want; } await sleep(40); }); }
   };
@@ -220,8 +224,8 @@ async function record(browser, plan) {
     try {
       if (s.chapter) mark(i, 'chapter', s.chapter);
       else if (s.goto) { if (s === first) continue; vt = false; mark(i, 'goto', s.goto); await page.goto(BASE + sub(s.goto), { waitUntil: 'load', timeout: 90000 }); await page.mouse.move(mouse.x, mouse.y); }
-      else if (s.vt !== undefined) { vt = !!s.vt; await page.evaluate(on => { if (window.__vt) on ? window.__vt.start() : window.__vt.stop(); }, vt); mark(i, vt ? 'vt_on' : 'vt_off');
-        if (vt && s.warm) { for (let k = 0; k < s.warm; k++) await page.evaluate(ms => window.__vt.step(ms), 1000 * DT); mark(i, 'vt_warm_uncaptured', s.warm); } }
+      else if (s.vt !== undefined) { vt = !!s.vt; vtFps = s.fps || FPS; await page.evaluate(on => { if (window.__vt) on ? window.__vt.start() : window.__vt.stop(); }, vt); mark(i, vt ? 'vt_on' : 'vt_off');
+        if (vt && s.warm) { for (let k = 0; k < s.warm; k++) await page.evaluate(ms => window.__vt.step(ms), 1000 / vtFps); mark(i, 'vt_warm_uncaptured', s.warm); } }
       else if (s.wait) await hold(s.wait);
       else if (s.move) { const p = await locate(page, s.move); await glide(p.x + (s.move.dx || 0), p.y + (s.move.dy || 0), s.ms || 900); }
       else if (s.moveTo) await glide(s.moveTo[0], s.moveTo[1], s.ms || 900);
