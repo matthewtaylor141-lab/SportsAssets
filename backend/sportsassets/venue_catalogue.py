@@ -1367,10 +1367,29 @@ class SideKeyGuard:
 
     The first writer of a qualified pair has already been written unqualified
     when the second arrives; `requalify` names it so the caller rewrites it
-    (and deletes the unqualified row the earlier write left)."""
+    (and deletes the unqualified row the earlier write left).
+
+    WHAT IT HOLDS IS BOUNDED BY THE EVENT, NOT THE REFRESH (2026-10-08, the
+    workers OOM). It kept every admitted row dict for the whole refresh --
+    measured ~105 MB for the 86,088-row full sweep and ~55 MB for the
+    44,496-row calendar lane -- although a row body is only ever read back by
+    the caller while the event that admitted it is being written: the
+    rewrite of a qualified pair replaces the first row in that event's own
+    write list, and a first row admitted by an EARLIER event cannot be in it
+    (its key was held before this event began, so no row of this event
+    carrying that unqualified key was admitted). So the refresh-long record
+    per key is (market_slug, intent) -- all the refusal / duplicate /
+    qualification decisions read -- and the bodies are kept only until the
+    caller says the event is done (`end_event`). Decisions, counters,
+    examples and the rewrite of a same-event pair are unchanged; for a first
+    row from an earlier event the rewrite names the same identifier, side
+    and market (what the caller's DELETE and its write-list match read)."""
 
     def __init__(self):
+        #: (identifier, side_norm) -> (market_slug, intent), whole refresh
         self._held: dict = {}
+        #: (identifier, side_norm) -> the row admitted under it, current event
+        self._rows: dict = {}
         self.qualified = 0
         self.refused = 0
         self.examples: list = []
@@ -1388,21 +1407,29 @@ class SideKeyGuard:
         key = (row.get("identifier"), row.get("side_norm"))
         prior = self._held.get(key)
         if prior is None:
-            self._held[key] = {"market_slug": row.get("market_slug"),
-                               "intent": row.get("intent"), "row": row}
+            self._held[key] = (row.get("market_slug"), row.get("intent"))
+            self._rows[key] = row
             return row, None
-        if prior["market_slug"] != row.get("market_slug"):
+        prior_slug, prior_intent = prior
+        if prior_slug != row.get("market_slug"):
             self.refused += 1
             if len(self.examples) < MAX_EXAMPLES:
                 self.examples.append({"case": D_SIDE_KEY_HELD_BY_ANOTHER_MARKET,
                                       "identifier": key[0], "side_norm": key[1],
-                                      "held_by": prior["market_slug"],
+                                      "held_by": prior_slug,
                                       "refused": row.get("market_slug")})
             return None, None
-        if prior["intent"] == row.get("intent"):
+        if prior_intent == row.get("intent"):
             # the venue listed the same side twice: one row, nothing lost
             return None, None
-        first = dict(prior["row"])
+        prior_row = self._rows.get(key)
+        if prior_row is None:
+            # admitted by an earlier event of this refresh, whose body is no
+            # longer held (see the class docstring): the same key, market and
+            # intent the decision above read
+            prior_row = {"identifier": key[0], "side_norm": key[1],
+                         "market_slug": prior_slug, "intent": prior_intent}
+        first = dict(prior_row)
         first["side_norm"] = "%s [%s]" % (key[1], self._marker(first.get("intent")))
         second = dict(row)
         second["side_norm"] = "%s [%s]" % (key[1], self._marker(row.get("intent")))
@@ -1410,12 +1437,10 @@ class SideKeyGuard:
             self.refused += 1
             return None, None
         self.qualified += 1
-        self._held[(key[0], first["side_norm"])] = {
-            "market_slug": first.get("market_slug"),
-            "intent": first.get("intent"), "row": first}
-        self._held[(key[0], second["side_norm"])] = {
-            "market_slug": second.get("market_slug"),
-            "intent": second.get("intent"), "row": second}
+        for q in (first, second):
+            self._held[(key[0], q["side_norm"])] = (q.get("market_slug"),
+                                                    q.get("intent"))
+            self._rows[(key[0], q["side_norm"])] = q
         if len(self.examples) < MAX_EXAMPLES:
             self.examples.append({"case": K_SIDE_KEY_QUALIFIED,
                                   "identifier": key[0], "side_norm": key[1],
@@ -1423,6 +1448,11 @@ class SideKeyGuard:
         # the caller rewrites `first` under its qualified key and deletes the
         # unqualified row its earlier write left behind
         return second, {"rewrite": first, "delete_side_norm": key[1]}
+
+    def end_event(self) -> None:
+        """The caller finished writing one event: its row bodies are never
+        read back again, only the per-key (market_slug, intent) record."""
+        self._rows.clear()
 
     def receipt(self) -> dict:
         return {"qualified_pairs": self.qualified,
