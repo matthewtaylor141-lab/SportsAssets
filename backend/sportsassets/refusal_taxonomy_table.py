@@ -28,6 +28,16 @@ TABLE = {
     "STRATEGY_OPEN_POSITIONS_CANNOT_BE_FRESHLY_MANAGED": (S, FRESH, "ORDER"),
     "STRATEGY_STALE_MANAGEMENT_RATE_COULD_NOT_BE_READ": (S, DATA, "ORDER"),
     "XAVIER_MANAGEMENT_PACKET_INCOMPLETE": (S, FRESH, "MANAGEMENT"),
+    # (xavier_complete closeout) exploration refuses an entry its manager
+    # could not manage: Xavier's own held read cannot price the contract
+    # (a management-capability gap: no feed fixture, an unheld family...),
+    # or the entry price leaves no cent <= 0.99 for the cost-recovery
+    # protection (the price itself); its held read raising is a DB error
+    "XAVIER_HELD_READ_CANNOT_PRICE_THIS_CONTRACT": (
+        S, CAP, "RISK_ADMISSION"),
+    "XAVIER_CANNOT_PROTECT_THIS_ENTRY_NO_PROTECTIVE_PRICE": (
+        E, PRICE, "RISK_ADMISSION"),
+    "XAVIER_HELD_READ_RAISED_AT_ENTRY": (S, DATA, "RISK_ADMISSION"),
     # (313) the persisted EXIT intent's explicit abandonments: what stopped
     # an EXIT that had already cancelled its protection (the protection is
     # restored by the same review whenever inventory remains)
