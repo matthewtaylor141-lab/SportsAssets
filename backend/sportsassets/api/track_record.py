@@ -44,6 +44,23 @@ _raw_cache: dict[str, Any] = {"ts": 0.0, "data": None}
 # those are the calls that make money (audit 2026-08-04).
 _RAW_TTL = 180.0
 _lock = asyncio.Lock()
+#: refusal names already logged by this process (one line per reason: a
+#: Render env change restarts the process, so the reason cannot change
+#: underneath a running one)
+_REFUSAL_LOGGED: dict[str, bool] = {}
+
+
+def _funded_refusal() -> str | None:
+    """venue_key.R_NOT_ED25519 when the funded PMUS_SECRET_KEY holds no
+    Ed25519 key in any encoding (FORMAT only, no client, no socket), else
+    None. Checked BEFORE a cold fetch is spawned: a deterministic refusal
+    is never re-attempted per request."""
+    from ..venue_key import signing_secret
+    try:
+        signing_secret(settings().pmus_secret_key)
+    except SecretNotEd25519 as exc:
+        return str(exc)
+    return None
 # Refresh health, surfaced in the payload: a snapshot that quietly stopped
 # refreshing must be VISIBLE as stale, not indistinguishable from live.
 _refresh_health: dict[str, Any] = {"error": None, "error_at": 0.0,
@@ -2153,6 +2170,18 @@ async def track_record(since: str | None = None,
         # block a page, refuse, or step the record backward.
         persisted = await _load_persisted()
         if persisted is not None:
+            refused = _funded_refusal()
+            if refused is not None:
+                if not _REFUSAL_LOGGED.get(refused):
+                    _REFUSAL_LOGGED[refused] = True
+                    logging.getLogger(__name__).warning(
+                        "track record live refresh refused (%s): the "
+                        "PMUS_SECRET_KEY slot holds no Ed25519 key; serving "
+                        "the persisted payload, labelled", refused)
+                # the persisted payload, SAID to be persisted and not live
+                return {"configured": True, "restored_across_deploy": True,
+                        "served_by": "cold_boot_persisted", **persisted,
+                        "live_refresh_refused": refused}
             if not _lock.locked():
                 async def _cold() -> None:
                     async with _lock:

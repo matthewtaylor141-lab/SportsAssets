@@ -441,12 +441,19 @@ def credential_classes(env=None) -> dict:
     """{slot: class | None} from THIS process's environment, by shape only
     (market_data_identity.slot_shape): never a value, length or prefix."""
     from .. import market_data_identity as MDI
+    from .. import venue_key as VK
     env = os.environ if env is None else env
 
     def cls(kid, sec):
-        shape = MDI.slot_shape(env.get(kid, ""), env.get(sec, ""))
+        s = env.get(sec, "")
+        shape = MDI.slot_shape(env.get(kid, ""), s)
         if shape == MDI.SHAPE_ABSENT:
             return None
+        # slot_shape calls ANY PEM "RSA". A PEM holding an Ed25519 key
+        # (PKCS#8, 119 chars -- Kalshi issues Ed25519 by default) is not
+        # an RSA key: naming it RSA made a non-RSA slot read MATCHES.
+        if shape == MDI.SHAPE_RSA_PEM and VK._decode(s) is not None:
+            return "ED25519_PEM"
         # something present that is neither shape is a MISMATCH, never
         # "not provisioned"
         return {MDI.SHAPE_PMUS_RETAIL: "POLYMARKET_US_ED25519",
@@ -502,19 +509,52 @@ def credentials(by_process: dict) -> dict:
         _ = g
     actions = []
     if any(m.startswith("CREDENTIAL_CLASS_MISMATCH:PMUS") for m in mism):
-        where = sorted(
-            "%s %s" % (p, slot)
-            for p, s in by_process.items()
-            for slot, c in ((s or {}).get("PMUS_SLOTS") or {}).items()
-            if c is not None and c != RTCRED.EXPECTED["PMUS"])
+        want = RTCRED.EXPECTED["PMUS"]
+        where = []
+        for p, s in sorted(by_process.items()):
+            s = s or {}
+            slots = s.get("PMUS_SLOTS")
+            if isinstance(slots, dict):
+                where += ["%s %s holds %s" % (p, slot, c)
+                          for slot, c in sorted(slots.items())
+                          if c is not None and c != want]
+            elif s.get("PMUS") not in (None, want):
+                # a process on a build without PMUS_SLOTS (deploy skew):
+                # still named, with the slot it classified
+                where.append("%s PMUS holds %s" % (p, s["PMUS"]))
         actions.append("enter a Polymarket US retail Ed25519 API key "
                        "(polymarket.us/developer) in the PMUS key-id / "
-                       "secret slots%s; the slot holds an RSA PEM key (the "
-                       "PMX class). Authentication is never weakened." % (
-                           (" (" + ", ".join(where) + ")") if where else ""))
+                       "secret slots%s; no slot named here holds one. "
+                       "Authentication is never weakened." % (
+                           (" (" + "; ".join(where) + ")") if where else ""))
+    if any(m.startswith("CREDENTIAL_CLASS_MISMATCH:KALSHI") and
+           "ED25519_PEM" in m for m in mism):
+        # NOT AN OWNER ACTION: Ed25519 is a Kalshi-documented key type
+        # (docs.kalshi.com/getting_started/api_keys: Ed25519 recommended, or
+        # RSA) and the WebSocket market-data signer (kalshi_ws) accepts it.
+        # What does not is code: the REST order signer, and the red-team
+        # package's expected class, which predates Ed25519.
+        actions.append("KALSHI_PRIVATE_KEY_PEM holds an Ed25519 key, a "
+                       "Kalshi-documented key type the WebSocket market-data "
+                       "signer accepts; the REST order signer "
+                       "(kalshi_venue.load_private_key, Kalshi live money "
+                       "NOT ACTIVATED) and the package's expected class "
+                       "KALSHI_RSA_API_KEY accept RSA only. Code remedy: "
+                       "Ed25519 in the REST signer and the expected class.")
+    # a PMUS slot that holds NOTHING is not a mismatch (it blocks only its
+    # own path) -- but one present slot must not hide another's absence:
+    # an API with only the execution-mirror pair reads PMUS MATCHES while
+    # the FUNDED pair is provisioned nowhere
+    absent_pmus = sorted(
+        "%s %s" % (p, slot) for p, s in by_process.items()
+        for slot, c in (((s or {}).get("PMUS_SLOTS") or {}).items()
+                        if isinstance((s or {}).get("PMUS_SLOTS"), dict)
+                        else ())
+        if c is None)
     return result("CREDENTIAL_CLASSES", RED if mism else GREEN, mism,
                   {"expected": dict(RTCRED.EXPECTED), "by_process":
                    {p: dict(s or {}) for p, s in by_process.items()},
+                   "pmus_slots_not_provisioned": absent_pmus,
                    "verdicts": verdicts, "not_provisioned": missing,
                    "owner_actions": actions,
                    "values_exposed": False})

@@ -93,24 +93,38 @@ async def karen_counterfactuals(conn) -> tuple:
             "not certified, so this is never capital evidence)")
 
 
+async def workers_boot_credentials(conn) -> tuple[dict | None, dict | None]:
+    """(credential_classes, pmus_credential_census) from ONE read of the
+    workers' boot heartbeat -- names and shape enums only, and the boot
+    instant it was taken at (env changes restart the process)."""
+    r = await conn.fetchrow(
+        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
+    if r is None:
+        return None, None
+    v = C._j(r["value"]) or {}
+    census = v.get("pmus_credential_census")
+    if isinstance(census, dict):
+        census = dict(census, taken_at_boot=v.get("at"))
+    return v.get("credential_classes"), census
+
+
 async def workers_credential_classes(conn) -> dict | None:
-    r = await conn.fetchrow(
-        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
-    if r is None:
-        return None
-    v = C._j(r["value"]) or {}
-    return v.get("credential_classes")
+    return (await workers_boot_credentials(conn))[0]
 
 
-async def workers_pmus_census(conn) -> dict | None:
-    """The workers' PMUS credential census from their boot heartbeat (names
-    and shape enums only, pmus_credential_census)."""
-    r = await conn.fetchrow(
-        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
-    if r is None:
-        return None
-    v = C._j(r["value"]) or {}
-    return v.get("pmus_credential_census")
+def api_pmus_census() -> tuple[dict, dict]:
+    """THIS process's census and its timing; never raises (an env-only
+    read, so no savepoint), and a failure is recorded, never a pass."""
+    from .. import pmus_credential_census as PCC
+    t0 = time.monotonic()
+    try:
+        out = PCC.census(service="sportsassets-api")
+        return out, {"ms": round((time.monotonic() - t0) * 1000.0, 1),
+                     "ok": True}
+    except Exception as exc:                                    # noqa: BLE001
+        return ({"error": type(exc).__name__},
+                {"ms": round((time.monotonic() - t0) * 1000.0, 1),
+                 "ok": False, "why": type(exc).__name__})
 
 
 async def release_receipt(conn, sha: str) -> dict | None:
@@ -164,7 +178,8 @@ SECTION_CONTROLS = {
     "capacity": ("CAPACITY",),
     "karen": ("KAREN_VALUE",),
     "credential_classes": ("CREDENTIAL_CLASSES",),
-    "pmus_census": ("CREDENTIAL_CLASSES",),
+    # an env-only read (no savepoint): its timing is recorded by hand
+    "pmus_census_api": ("CREDENTIAL_CLASSES",),
     "release_receipt": ("RELEASE", "MIGRATION_INTEGRITY"),
     "migrations": ("MIGRATION_INTEGRITY",),
     "fee_evidence": ("FEE_EVIDENCE",),
@@ -235,16 +250,16 @@ async def evaluate(conn, *, now: float | None = None,
     saved, false_cost, ksrc = await sec.run(
         "karen", lambda: karen_counterfactuals(conn), (None, None, None))
     controls["KAREN_VALUE"] = C.karen(saved, false_cost, source=ksrc)
+    wcls, wcensus = await sec.run("credential_classes",
+                                  lambda: workers_boot_credentials(conn),
+                                  (None, None))
     controls["CREDENTIAL_CLASSES"] = C.credentials({
-        "api": C.credential_classes(),
-        "workers": await sec.run("credential_classes",
-                                 lambda: workers_credential_classes(conn),
-                                 None)})
-    from .. import pmus_credential_census as PCC
+        "api": C.credential_classes(), "workers": wcls})
+    # the census is EVIDENCE beside the classes: one workers_boot read for
+    # both, and the API's own census never raises out of the readout
+    acensus, sec.timings["pmus_census_api"] = api_pmus_census()
     controls["CREDENTIAL_CLASSES"]["evidence"]["pmus_census"] = {
-        "sportsassets-api": PCC.census(service="sportsassets-api"),
-        "sportsassets-workers": await sec.run(
-            "pmus_census", lambda: workers_pmus_census(conn), None)}
+        "sportsassets-api": acensus, "sportsassets-workers": wcensus}
     rel = await sec.run("release_receipt", lambda: release_receipt(conn, sha),
                         None)
     controls["MIGRATION_INTEGRITY"] = C.migrations(

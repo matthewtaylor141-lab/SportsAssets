@@ -281,3 +281,129 @@ def test_the_workers_boot_marker_carries_the_census_without_values(
     assert c["funded_slot_shape"] == PCC.P_RSA
     no_leak(c)
     no_leak(got["credential_classes"])
+
+
+# ── review round: no class or owner action a readback does not carry ───
+
+_ED_PEM = _ED.private_bytes(S.Encoding.PEM, S.PrivateFormat.PKCS8,
+                            S.NoEncryption()).decode()
+
+
+def test_an_ed25519_pem_is_never_called_rsa():
+    """slot_shape calls ANY PEM 'RSA'. An Ed25519 PKCS#8 PEM (119 chars --
+    the production KALSHI_PRIVATE_KEY_PEM length on both services) is not
+    an RSA key: in the KALSHI slot it read KALSHI_RSA_API_KEY / MATCHES."""
+    assert len(_ED_PEM) == 119
+    k = C.credential_classes({"KALSHI_API_KEY_ID": KALSHI_KID,
+                              "KALSHI_PRIVATE_KEY_PEM": _ED_PEM})
+    assert k["KALSHI"] == "ED25519_PEM"
+    g = C.credentials({"api": k})
+    assert g["evidence"]["verdicts"]["KALSHI"] == "MISMATCH_PATH_BLOCKED"
+    assert any("RSA only" in a for a in g["evidence"]["owner_actions"])
+    # an RSA Kalshi key still matches
+    r = C.credential_classes({"KALSHI_API_KEY_ID": KALSHI_KID,
+                              "KALSHI_PRIVATE_KEY_PEM": RSA_PEM})
+    assert r["KALSHI"] == "KALSHI_RSA_API_KEY"
+    # an Ed25519 PEM in the funded PMUS slot is not "the PMX RSA class"
+    p = C.credential_classes({"PMUS_KEY_ID": FUNDED_KID,
+                              "PMUS_SECRET_KEY": _ED_PEM})
+    assert p["PMUS"] == "ED25519_PEM"
+    act = " ".join(C.credentials({"api": p})["evidence"]["owner_actions"])
+    assert "RSA" not in act and "ED25519_PEM" in act
+    no_leak(g)
+
+
+def test_the_owner_action_states_the_class_found_and_survives_deploy_skew():
+    odd = C.credential_classes({"PMUS_KEY_ID": FUNDED_KID,
+                                "PMUS_SECRET_KEY": "truncated-paste"})
+    act = " ".join(C.credentials({"api": odd})["evidence"]["owner_actions"])
+    assert "UNRECOGNISED_SHAPE" in act and "RSA" not in act
+    # workers still on a build without PMUS_SLOTS: still named
+    old_workers = {"PMX": "POLYMARKET_EXCHANGE_RSA_M2M",
+                   "PMUS": "POLYMARKET_EXCHANGE_RSA_M2M", "KALSHI": None}
+    g = C.credentials({"api": C.credential_classes(api_env()),
+                       "workers": old_workers})
+    act = " ".join(g["evidence"]["owner_actions"])
+    assert "api PMUS_KEY_ID/PMUS_SECRET_KEY holds" in act
+    assert "workers PMUS holds POLYMARKET_EXCHANGE_RSA_M2M" in act
+
+
+def test_the_completion_owner_action_carries_only_evidence():
+    from sportsassets.completion import read as CR
+    hb = {"detail": {"positions_source": {
+        "source": "FUNDED_ACCOUNT_LEDGER_DERIVED",
+        "primary_refusal": CR.R_PMUS_NOT_ED25519,
+        "pmus_slot_is_pmx_rsa_client": True,
+        "pmx_client_id_equals_pmus_key_id": True}}, "beat_at": 100.0}
+    rsa_api = CR.api_funded_slot_shape(api_env())
+    v = CR.venue_positions_block(hb, now=100.0, api_slot_shape=rsa_api)
+    a = v["owner_action"]
+    assert "sportsassets-workers (mirror_shadow heartbeat: the slot holds " \
+        "the PMX RSA client)" in a
+    assert "sportsassets-api (this process: RSA_PEM_PRIVATE_KEY_SHAPE" in a
+    # the API slot fixed: only the workers are named
+    ok_api = CR.api_funded_slot_shape(api_env(PMUS_KEY_ID=FUNDED_KID,
+                                              PMUS_SECRET_KEY=RETAIL_SEC))
+    a2 = CR.venue_positions_block(hb, now=100.0,
+                                  api_slot_shape=ok_api)["owner_action"]
+    assert "sportsassets-api" not in a2 and "sportsassets-workers" in a2
+    # not read: pointed at the readback that has it, never asserted
+    a3 = CR.venue_positions_block(hb, now=100.0)["owner_action"]
+    assert "its slot is not read here" in a3
+    assert "both slots hold" not in a + a2 + a3
+    no_leak(v)
+
+
+def test_track_record_refusal_is_labelled_logged_once_never_respawned(
+        monkeypatch, caplog):
+    from sportsassets.api import track_record as TR
+    made: list = []
+    _no_client(monkeypatch, made)
+    _settings(monkeypatch, TR, PMX_CID, RSA_PEM)
+    TR._raw_cache.update(ts=0.0, data=None)
+    TR._payload_cache.update(ts=0.0, data=None)
+    TR._REFUSAL_LOGGED.clear()
+
+    async def persisted():
+        return {"summary": {"settled": 1}}
+    monkeypatch.setattr(TR, "_load_persisted", persisted)
+    monkeypatch.setattr(TR, "_fetch_raw", lambda: pytest.fail(
+        "a cold fetch was spawned for a deterministic refusal"))
+
+    async def go():
+        a = await TR.track_record()
+        b = await TR.track_record()
+        await asyncio.sleep(0)          # any spawned task would run here
+        return a, b
+    caplog.set_level("WARNING")
+    a, b = asyncio.run(go())
+    for r in (a, b):
+        assert r["live_refresh_refused"] == VK.R_NOT_ED25519
+        assert r["served_by"] == "cold_boot_persisted"
+    assert made == []
+    lines = [m for m in caplog.messages if "live refresh refused" in m]
+    assert len(lines) == 1
+    no_leak(a)
+
+
+def test_the_api_census_never_raises_out_of_the_readout(monkeypatch):
+    from sportsassets.redteam import readiness as R
+
+    def boom(**_k):
+        raise RuntimeError("injected")
+    monkeypatch.setattr(PCC, "census", boom)
+    out, timing = R.api_pmus_census()
+    assert out == {"error": "RuntimeError"}
+    assert timing["ok"] is False
+    assert R.SECTION_CONTROLS["pmus_census_api"] == ("CREDENTIAL_CLASSES",)
+
+
+def test_an_absent_funded_slot_is_reported_beside_a_present_execmirror_slot():
+    only_exec = C.credential_classes({"PMUS_EXECMIRROR_KEY_ID": RETAIL_KID,
+                                      "PMUS_EXECMIRROR_SECRET_KEY":
+                                          RETAIL_SEC})
+    g = C.credentials({"api": only_exec})
+    # not a mismatch (absence blocks only its own path) -- but visible
+    assert g["evidence"]["verdicts"]["PMUS"] == "MATCHES"
+    assert g["evidence"]["pmus_slots_not_provisioned"] == [
+        "api PMUS_KEY_ID/PMUS_SECRET_KEY"]

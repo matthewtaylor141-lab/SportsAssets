@@ -318,7 +318,38 @@ def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
 
 # ── venue positions / arbitrage / settlement ───────────────────────────
 
-def venue_positions_block(hb, *, now: float) -> dict:
+def _pmus_slot_where(ps: dict, api_slot_shape: str | None) -> list:
+    """WHERE the funded key must go, each service with the evidence that
+    names it -- never a claim no readback carries."""
+    if ps.get("pmus_slot_is_pmx_rsa_client"):
+        w = ("the PMX RSA client" if ps.get("pmx_client_id_equals_pmus_key_id")
+             else "an RSA PEM key")
+    else:
+        w = "no Ed25519 key"
+    where = ["sportsassets-workers (mirror_shadow heartbeat: the slot holds "
+             "%s)" % w]
+    if api_slot_shape is None:
+        where.append("sportsassets-api (its slot is not read here: red-team "
+                     "CREDENTIAL_CLASSES by_process.api.PMUS_SLOTS)")
+    elif api_slot_shape != "PMUS_RETAIL_ED25519_API_KEY_SHAPE":
+        where.append("sportsassets-api (this process: %s)" % api_slot_shape)
+    return where
+
+
+def api_funded_slot_shape(env=None) -> str | None:
+    """THIS (API) process's funded slot SHAPE enum, never a value."""
+    import os
+    from .. import market_data_identity as MDI
+    env = os.environ if env is None else env
+    try:
+        return MDI.slot_shape(env.get("PMUS_KEY_ID", ""),
+                              env.get("PMUS_SECRET_KEY", ""))
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+def venue_positions_block(hb, *, now: float,
+                          api_slot_shape: str | None = None) -> dict:
     if hb is None:
         return {"status": "UNREADABLE", "why": "NO_MIRROR_SHADOW_HEARTBEAT",
                 "venue_confirmed": False}
@@ -340,10 +371,10 @@ def venue_positions_block(hb, *, now: float) -> dict:
                                      "(Ed25519, polymarket.us/developer)"),
                     owner_action=("enter the FUNDED account's Polymarket US "
                                   "retail Ed25519 API key in PMUS_KEY_ID / "
-                                  "PMUS_SECRET_KEY of sportsassets-workers "
-                                  "AND sportsassets-api; both slots hold the "
-                                  "PMX RSA client, so positions are "
-                                  "LEDGER_DERIVED, never venue-confirmed"),
+                                  "PMUS_SECRET_KEY of %s; until then "
+                                  "positions are LEDGER_DERIVED, never "
+                                  "venue-confirmed" % " AND ".join(
+                                      _pmus_slot_where(ps, api_slot_shape))),
                     workaround="NONE (auth is never worked around)")
     return dict(out, status="NOT_CONFIRMED",
                 why="HEARTBEAT_STALE" if age > MIRROR_HEARTBEAT_MAX_AGE_S
@@ -620,7 +651,8 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
 
     async def _venue():
         return venue_positions_block(await _heartbeat(conn, "mirror_shadow"),
-                                     now=now)
+                                     now=now,
+                                     api_slot_shape=api_funded_slot_shape())
     venue = await sec.run("venue_positions", _venue, dict(down_))
 
     async def _arb():
