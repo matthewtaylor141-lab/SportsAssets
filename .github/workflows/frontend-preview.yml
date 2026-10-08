@@ -1,0 +1,85 @@
+name: frontend-preview
+
+# A READ-ONLY PREVIEW OF ANY FRONTEND REF AGAINST PRODUCTION DATA.
+#
+# Netlify publishes only the production branch for this site (branch and
+# deploy-preview aliases answer 404), so a frontend branch is previewed here
+# instead: the target ref's frontend is built exactly as Netlify builds it
+# (npm ci + npm run build in frontend/), served on the runner with the target
+# ref's own netlify.toml redirects (.github/frontend-preview/serve.js), and
+# loaded in Chromium at the agreed desktop / iPhone / iPad views plus
+# landscape and reduced-motion runs (.github/frontend-preview/shots.js).
+#
+# READ ONLY: /api/command/* is proxied to the production API like the Netlify
+# rule, but only GET/HEAD are forwarded (anything else is refused by the
+# server, and aborted in the browser too). The read-role token is added by
+# the server process; the page, URLs, cookies and artifacts never carry it.
+# Nothing is deployed; production (command.bettortoken.com) is untouched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "branch or 40-hex commit whose frontend is previewed"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frontend-preview-${{ inputs.target_ref }}
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Harness (this ref)
+        uses: actions/checkout@v4
+        with:
+          path: harness
+      - name: Target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          path: target
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the target frontend (as Netlify does)
+        working-directory: target/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          echo "target $(git -C .. rev-parse HEAD)"
+          cat dist/command/build.json || true
+      - name: Playwright (Chromium)
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+      - name: Serve and capture the device matrix (read only)
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          mkdir -p out
+          git -C target rev-parse HEAD > out/target_sha.txt
+          cp target/frontend/dist/command/build.json out/build.json 2>/dev/null || true
+          node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 out &
+          SERVER=$!
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/shots.js http://127.0.0.1:8787 out
+          curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
+          kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
+          echo "== proxy =="; cat out/proxy.json
+          ! grep -rl "${ADMIN_TOKEN:-no-token-supplied}" out >/dev/null 2>&1 || { echo "token found in artifact: refused"; rm -rf out; exit 1; }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-preview-${{ github.run_id }}
+          path: out
+          retention-days: 30
