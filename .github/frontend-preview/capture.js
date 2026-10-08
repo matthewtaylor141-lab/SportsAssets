@@ -175,12 +175,27 @@ async function record(browser, plan) {
   const page = await ctx.newPage(); watchApi(page);
   const cdp = await ctx.newCDPSession(page);
   const index = []; let n = 0; let T = 0; let vt = false; let vtFps = FPS;
-  const shot = async () => {
-    const r = await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 90, optimizeForSpeed: true });
-    const file = String(n++).padStart(6, '0') + '.jpg';
-    await fs.promises.writeFile(path.join(frames, file), Buffer.from(r.data, 'base64'));
-    return file;
-  };
+  // Frames come from Chromium's own compositor (screencast): on these pages an
+  // explicit captureScreenshot re-composites the blurred HUD in software (about
+  // 5 s a frame on the Floor) while the compositor's frame costs a fraction.
+  // A frame is accepted only if it was produced after the step that should
+  // appear in it, and only for the current document (after a navigation the
+  // old page's last frame is never reused; a capture is forced instead).
+  let latest = null, nav = 0; const waiters = [];
+  page.on('framenavigated', fr => { if (fr === page.mainFrame()) { nav++; latest = null; } });
+  cdp.on('Page.screencastFrame', f => {
+    cdp.send('Page.screencastFrameAck', { sessionId: f.sessionId }).catch(() => {});
+    latest = { data: f.data, ts: f.metadata.timestamp, nav, seq: (latest ? latest.seq : 0) + 1 };
+    for (let k = waiters.length - 1; k >= 0; k--) if (waiters[k].after <= latest.ts) { waiters[k].resolve(latest); waiters.splice(k, 1); }
+  });
+  const frameAfter = (after, ms) => new Promise(res => { if (latest && latest.nav === nav && latest.ts >= after) return res(latest);
+    const w = { after, resolve: res }; waiters.push(w); setTimeout(() => { const k = waiters.indexOf(w); if (k >= 0) { waiters.splice(k, 1); res(null); } }, ms); });
+  const write = async (b64) => { const file = String(n++).padStart(6, '0') + '.jpg'; await fs.promises.writeFile(path.join(frames, file), Buffer.from(b64, 'base64')); return file; };
+  const forced = async () => (await cdp.send('Page.captureScreenshot', { format: 'jpeg', quality: 90, optimizeForSpeed: true })).data;
+  // a frame for "now": the compositor's newest frame of this document, or a forced capture
+  const shotAfter = async (after, ms) => { const f = await frameAfter(after, ms); if (f) return write(f.data);
+    if (latest && latest.nav === nav) return write(latest.data); return write(await forced()); };
+  const shot = async () => shotAfter(Date.now() / 1000 - 0.05, 400);
   // one stepped frame: optional input, the virtual clock advanced 1/30 s when
   // the page is 3D, then a capture placed exactly 1/30 s after the last
   const stepFrame = async (input) => {
@@ -188,14 +203,23 @@ async function record(browser, plan) {
     // a 3D segment may step at 15 fps: each capture then holds two output
     // frames and the virtual clock advances 1/15 s, so timing stays exact
     const dt = vt ? 1 / vtFps : DT;
-    if (vt) await page.evaluate(ms => window.__vt && window.__vt.step(ms), 1000 * dt).catch(() => {});
-    else await sleep(12);
-    index.push({ file: await shot(), t: T, kind: vt ? 'vt' + vtFps : 'step' }); T += dt;
+    const before = Date.now() / 1000;
+    const ran = vt ? await page.evaluate(ms => window.__vt ? window.__vt.step(ms) : 0, 1000 * dt).catch(() => 0) : 0;
+    // a step that ran the scene's frame callbacks repaints the canvas: wait for
+    // that frame; a flat step (cursor / scroll) repaints quickly or not at all
+    index.push({ file: await shotAfter(before, ran > 0 ? 8000 : 600), t: T, kind: vt ? 'vt' + vtFps : 'step' }); T += dt;
   };
   // a real-time hold: captures as fast as the page allows, timeline 1:1
+  // a real-time hold: every compositor frame of the hold at its own time (1:1)
   const holdReal = async (ms) => {
-    const end = Date.now() + ms; let last = Date.now();
-    while (Date.now() < end) { const file = await shot(); const now = Date.now(); index.push({ file, t: T, kind: 'real' }); T += (now - last) / 1000; last = now; }
+    const t0 = Date.now(), T0 = T; let seen = -1;
+    index.push({ file: await shot(), t: T0, kind: 'real' }); seen = latest ? latest.seq : -1;
+    while (Date.now() - t0 < ms) {
+      const f = await frameAfter(Date.now() / 1000, Math.max(50, ms - (Date.now() - t0)));
+      if (f && f.seq !== seen && f.nav === nav) { seen = f.seq; const tt = T0 + Math.max(0, f.ts - t0 / 1000);
+        if (tt < T0 + ms / 1000) index.push({ file: await write(f.data), t: tt, kind: 'real' }); }
+    }
+    T = T0 + ms / 1000;
   };
   const rate = () => vt ? vtFps : FPS;
   const hold = async (ms) => { if (vt) { for (let k = 0, N = Math.round(ms / 1000 * rate()); k < N; k++) await stepFrame(); } else await holdReal(ms); };
@@ -218,6 +242,7 @@ async function record(browser, plan) {
   const first = plan.find(s => s.goto);
   if (first) { await page.goto(BASE + first.goto, { waitUntil: 'load', timeout: 90000 }).catch(() => {}); await sleep(first.settle || 9000); }
   await page.mouse.move(mouse.x, mouse.y);
+  await cdp.send('Page.startScreencast', { format: 'jpeg', quality: 90, maxWidth: VIEW.width, maxHeight: VIEW.height, everyNthFrame: 1 });
   mark(-1, 'capture_start', { base: BASE });
   for (let i = 0; i < plan.length; i++) {
     const s = plan[i];
@@ -258,6 +283,7 @@ async function record(browser, plan) {
   }
   mark(plan.length, 'capture_end');
   index.push({ file: await shot(), t: T, kind: 'end' });
+  await cdp.send('Page.stopScreencast').catch(() => {});
   fs.writeFileSync(path.join(OUT, 'frames.json'), JSON.stringify(index));
   fs.writeFileSync(path.join(OUT, 'capture_log.json'), JSON.stringify({ base: BASE, viewport: VIEW, fps: FPS, frames: index.length,
     video_seconds: +T.toFixed(2), vars: VARS, stats: STATS, log }, null, 1));

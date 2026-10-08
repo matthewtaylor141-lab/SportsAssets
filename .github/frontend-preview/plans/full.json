@@ -1,114 +1,532 @@
 [
- {"chapter": "A. COMMAND -> TRADING FLOOR"},
- {"goto": "/", "settle": 200000},
- {"vt": true},
- {"wait": 4000},
- {"moveTo": [180, 190], "ms": 900},
- {"wait": 1500},
- {"moveTo": [1700, 210], "ms": 1000},
- {"wait": 1500},
- {"moveTo": [520, 260], "ms": 900},
- {"click": {"sel": "#hq-nav button[data-go='floor']"}, "ms": 700, "after": 6500},
- {"drag": [1180, 640, 900, 610], "ms": 1800, "optional": true},
- {"wait": 1500},
- {"click": {"sel": "button[data-desk='derek']"}, "ms": 900, "after": 3500, "optional": true},
- {"vt": false},
- {"chapter": "A2. TRADING FLOOR PAGE: desks, avatars, camera views, an agent desk"},
- {"goto": "/floor"},
- {"wait": 14000},
- {"vt": true, "warm": 70},
- {"wait": 5000},
- {"click": {"sel": "#hq5-floorbar button[data-v='active']"}, "ms": 900, "after": 4000, "optional": true},
- {"click": {"sel": "#hq5-floorbar button[data-v='map']"}, "ms": 700, "after": 3500, "optional": true},
- {"click": {"sel": "#hq5-floorbar button[data-v='overview']"}, "ms": 700, "after": 3000, "optional": true},
- {"click": {"sel": "#roster button[data-slug='derek']"}, "ms": 1000, "after": 5000, "optional": true},
- {"click": {"sel": "#roster button[data-slug='karen']"}, "ms": 800, "after": 4000, "optional": true},
- {"vt": false},
-
- {"chapter": "B. ONE TRACEABLE POSITION: Position Rooms -> one room (recorded decision, orders, Xavier, Archer, Audrey, Karen)"},
- {"click": {"sel": "aside.bt-hq2-shell a[href='/positions']", "navigates": true}, "ms": 900, "after": 6000},
- {"move": {"sel": "a.pr-card", "nth": 0}, "ms": 900},
- {"wait": 2500},
- {"remember": {"name": "ROOM", "sel": "a.pr-card", "nth": 0, "attr": "href"}},
- {"click": {"sel": "a.pr-card", "nth": 0, "navigates": true}, "ms": 600, "after": 7000},
- {"snapshot": "room_top"},
- {"scrollTo": {"text": "Legs & orders", "exact": true, "top": 140}, "optional": true},
- {"wait": 5000},
- {"scroll": {"dy": 520, "ms": 1800}},
- {"wait": 4500},
- {"scrollTo": {"text": "Settlement scenarios", "exact": true, "top": 140}, "optional": true},
- {"wait": 4000},
- {"scrollTo": {"text": "Xavier · decision", "exact": true, "top": 120}, "optional": true},
- {"wait": 6000},
- {"scroll": {"dy": 480, "ms": 1600}},
- {"wait": 5000},
- {"scrollTo": {"text": "Archer · execution", "exact": true, "top": 120}, "optional": true},
- {"wait": 5000},
- {"scrollTo": {"text": "Audrey · audit", "exact": true, "top": 120}, "optional": true},
- {"wait": 5000},
- {"scrollTo": {"text": "Karen · challenge", "exact": true, "top": 120}, "optional": true},
- {"wait": 5000},
- {"snapshot": "room_bottom"},
-
- {"chapter": "C. REFUSALS: Derek's recorded refusals, then the operations desk refusals queue"},
- {"goto": "/derek"},
- {"wait": 6000},
- {"scrollTo": {"text": "Recent decisions & outputs", "exact": true, "top": 120}, "optional": true},
- {"wait": 6500},
- {"scroll": {"dy": 420, "ms": 1600}},
- {"wait": 5000},
- {"click": {"sel": "aside.bt-hq2-shell a[href='/ops']", "navigates": true}, "ms": 900, "after": 6000, "optional": true},
- {"scrollTo": {"text": "LOST OPPORTUNITIES · REFUSALS", "exact": false, "top": 120}, "optional": true},
- {"wait": 7000},
- {"scroll": {"dy": 380, "ms": 1500}},
- {"wait": 5000},
- {"snapshot": "ops_refusals"},
-
- {"chapter": "D. ARCHER AND CONTROLS: paper orders and fills, Archer's desk, capital and exposure controls (inspection only)"},
- {"scrollTo": {"text": "ORDERS & FILLS · PAPER", "exact": false, "top": 120}, "optional": true},
- {"wait": 7000},
- {"scrollTo": {"text": "CAPITAL · EXPOSURE", "exact": false, "top": 120}, "optional": true},
- {"wait": 6500},
- {"goto": "/archer"},
- {"wait": 7000},
- {"scroll": {"dy": 420, "ms": 1600}},
- {"wait": 5000},
- {"goto": "/allocator"},
- {"wait": 6000},
- {"scrollTo": {"text": "Mandate & authority boundary", "exact": true, "top": 120}, "optional": true},
- {"wait": 6500},
- {"snapshot": "controls"},
-
- {"chapter": "E. TRADER MODE AND XAVIER: every open position, then each position's recorded state"},
- {"goto": "/trader"},
- {"wait": 8000},
- {"click": {"sel": "#positions .card-focus", "nth": 0}, "ms": 900, "after": 7000, "optional": true},
- {"click": {"sel": "#positions .card-focus", "nth": 1}, "ms": 900, "after": 7000, "optional": true},
- {"click": {"sel": "#positions .card-focus", "nth": 2}, "ms": 900, "after": 7000, "optional": true},
- {"click": {"sel": "[data-view='orders']"}, "ms": 900, "after": 6000, "optional": true},
- {"click": {"sel": "[data-view='positions']"}, "ms": 700, "after": 3000, "optional": true},
- {"scroll": {"dy": 500, "ms": 1800}},
- {"wait": 8000},
- {"snapshot": "trader"},
-
- {"chapter": "F. AUDREY: audit, reconciliation and challenges"},
- {"goto": "/audrey"},
- {"wait": 7000},
- {"scrollTo": {"text": "Recent decisions & outputs", "exact": true, "top": 120}, "optional": true},
- {"wait": 6000},
- {"scrollTo": {"text": "Challenges", "exact": true, "top": 120}, "optional": true},
- {"wait": 5000},
- {"scrollTo": {"text": "Collaboration timeline · 24 h", "exact": true, "top": 120}, "optional": true},
- {"wait": 5000},
- {"goto": "$ROOM"},
- {"wait": 6000},
- {"scrollTo": {"text": "Audrey · audit", "exact": true, "top": 120}, "optional": true},
- {"wait": 6000},
- {"snapshot": "audrey"},
-
- {"chapter": "G. CLOSING: the trading floor"},
- {"click": {"sel": "aside.bt-hq2-shell a[href='/floor']", "navigates": true}, "ms": 900, "after": 14000, "optional": true},
- {"vt": true, "warm": 70},
- {"wait": 14000},
- {"vt": false}
+ {
+  "chapter": "A. COMMAND -> TRADING FLOOR"
+ },
+ {
+  "goto": "/",
+  "settle": 300000
+ },
+ {
+  "vt": true,
+  "fps": 15
+ },
+ {
+  "wait": 4000
+ },
+ {
+  "moveTo": [
+   180,
+   190
+  ],
+  "ms": 900
+ },
+ {
+  "wait": 1500
+ },
+ {
+  "moveTo": [
+   1700,
+   210
+  ],
+  "ms": 1000
+ },
+ {
+  "wait": 1500
+ },
+ {
+  "moveTo": [
+   520,
+   260
+  ],
+  "ms": 900
+ },
+ {
+  "click": {
+   "sel": "#hq-nav button[data-go='floor']"
+  },
+  "ms": 700,
+  "after": 6500
+ },
+ {
+  "drag": [
+   1180,
+   640,
+   900,
+   610
+  ],
+  "ms": 1800,
+  "optional": true
+ },
+ {
+  "wait": 1500
+ },
+ {
+  "click": {
+   "sel": "button[data-desk='derek']"
+  },
+  "ms": 900,
+  "after": 3500,
+  "optional": true
+ },
+ {
+  "vt": false
+ },
+ {
+  "chapter": "A2. TRADING FLOOR PAGE: desks, avatars, camera views, an agent desk"
+ },
+ {
+  "goto": "/floor"
+ },
+ {
+  "wait": 14000
+ },
+ {
+  "vt": true,
+  "warm": 70,
+  "fps": 24
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "click": {
+   "sel": "#hq5-floorbar button[data-v='active']"
+  },
+  "ms": 900,
+  "after": 4000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#hq5-floorbar button[data-v='map']"
+  },
+  "ms": 700,
+  "after": 3500,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#hq5-floorbar button[data-v='overview']"
+  },
+  "ms": 700,
+  "after": 3000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#roster button[data-slug='derek']"
+  },
+  "ms": 1000,
+  "after": 5000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#roster button[data-slug='karen']"
+  },
+  "ms": 800,
+  "after": 4000,
+  "optional": true
+ },
+ {
+  "vt": false
+ },
+ {
+  "chapter": "B. ONE TRACEABLE POSITION: Position Rooms -> one room (recorded decision, orders, Xavier, Archer, Audrey, Karen)"
+ },
+ {
+  "click": {
+   "sel": "aside.bt-hq2-shell a[href='/positions']",
+   "navigates": true
+  },
+  "ms": 900,
+  "after": 6000
+ },
+ {
+  "move": {
+   "sel": "a.pr-card",
+   "nth": 0
+  },
+  "ms": 900
+ },
+ {
+  "wait": 2500
+ },
+ {
+  "remember": {
+   "name": "ROOM",
+   "sel": "a.pr-card",
+   "nth": 0,
+   "attr": "href"
+  }
+ },
+ {
+  "click": {
+   "sel": "a.pr-card",
+   "nth": 0,
+   "navigates": true
+  },
+  "ms": 600,
+  "after": 7000
+ },
+ {
+  "snapshot": "room_top"
+ },
+ {
+  "scrollTo": {
+   "text": "Legs & orders",
+   "exact": true,
+   "top": 140
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "scroll": {
+   "dy": 520,
+   "ms": 1800
+  }
+ },
+ {
+  "wait": 4500
+ },
+ {
+  "scrollTo": {
+   "text": "Settlement scenarios",
+   "exact": true,
+   "top": 140
+  },
+  "optional": true
+ },
+ {
+  "wait": 4000
+ },
+ {
+  "scrollTo": {
+   "text": "Xavier · decision",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "scroll": {
+   "dy": 480,
+   "ms": 1600
+  }
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "scrollTo": {
+   "text": "Archer · execution",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "scrollTo": {
+   "text": "Audrey · audit",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "scrollTo": {
+   "text": "Karen · challenge",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "snapshot": "room_bottom"
+ },
+ {
+  "chapter": "C. REFUSALS: Derek's recorded refusals, then the operations desk refusals queue"
+ },
+ {
+  "goto": "/derek"
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "scrollTo": {
+   "text": "Recent decisions & outputs",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6500
+ },
+ {
+  "scroll": {
+   "dy": 420,
+   "ms": 1600
+  }
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "click": {
+   "sel": "aside.bt-hq2-shell a[href='/ops']",
+   "navigates": true
+  },
+  "ms": 900,
+  "after": 6000,
+  "optional": true
+ },
+ {
+  "scrollTo": {
+   "text": "LOST OPPORTUNITIES · REFUSALS",
+   "exact": false,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 7000
+ },
+ {
+  "scroll": {
+   "dy": 380,
+   "ms": 1500
+  }
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "snapshot": "ops_refusals"
+ },
+ {
+  "chapter": "D. ARCHER AND CONTROLS: paper orders and fills, Archer's desk, capital and exposure controls (inspection only)"
+ },
+ {
+  "scrollTo": {
+   "text": "ORDERS & FILLS · PAPER",
+   "exact": false,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 7000
+ },
+ {
+  "scrollTo": {
+   "text": "CAPITAL · EXPOSURE",
+   "exact": false,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6500
+ },
+ {
+  "goto": "/archer"
+ },
+ {
+  "wait": 7000
+ },
+ {
+  "scroll": {
+   "dy": 420,
+   "ms": 1600
+  }
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "goto": "/allocator"
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "scrollTo": {
+   "text": "Mandate & authority boundary",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6500
+ },
+ {
+  "snapshot": "controls"
+ },
+ {
+  "chapter": "E. TRADER MODE AND XAVIER: every open position, then each position's recorded state"
+ },
+ {
+  "goto": "/trader"
+ },
+ {
+  "wait": 8000
+ },
+ {
+  "click": {
+   "sel": "#positions .card-focus",
+   "nth": 0
+  },
+  "ms": 900,
+  "after": 7000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#positions .card-focus",
+   "nth": 1
+  },
+  "ms": 900,
+  "after": 7000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "#positions .card-focus",
+   "nth": 2
+  },
+  "ms": 900,
+  "after": 7000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "[data-view='orders']"
+  },
+  "ms": 900,
+  "after": 6000,
+  "optional": true
+ },
+ {
+  "click": {
+   "sel": "[data-view='positions']"
+  },
+  "ms": 700,
+  "after": 3000,
+  "optional": true
+ },
+ {
+  "scroll": {
+   "dy": 500,
+   "ms": 1800
+  }
+ },
+ {
+  "wait": 8000
+ },
+ {
+  "snapshot": "trader"
+ },
+ {
+  "chapter": "F. AUDREY: audit, reconciliation and challenges"
+ },
+ {
+  "goto": "/audrey"
+ },
+ {
+  "wait": 7000
+ },
+ {
+  "scrollTo": {
+   "text": "Recent decisions & outputs",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "scrollTo": {
+   "text": "Challenges",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "scrollTo": {
+   "text": "Collaboration timeline · 24 h",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 5000
+ },
+ {
+  "goto": "$ROOM"
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "scrollTo": {
+   "text": "Audrey · audit",
+   "exact": true,
+   "top": 120
+  },
+  "optional": true
+ },
+ {
+  "wait": 6000
+ },
+ {
+  "snapshot": "audrey"
+ },
+ {
+  "chapter": "G. CLOSING: the trading floor"
+ },
+ {
+  "click": {
+   "sel": "aside.bt-hq2-shell a[href='/floor']",
+   "navigates": true
+  },
+  "ms": 900,
+  "after": 14000,
+  "optional": true
+ },
+ {
+  "vt": true,
+  "warm": 70,
+  "fps": 24
+ },
+ {
+  "wait": 14000
+ },
+ {
+  "vt": false
+ }
 ]
