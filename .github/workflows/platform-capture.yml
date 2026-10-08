@@ -53,7 +53,7 @@ concurrency:
 jobs:
   capture:
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 240
     steps:
       - name: Recipient
         env:
