@@ -73,6 +73,9 @@ async def _held_freshness(pool) -> dict:
 
 PARITY_WINDOW_S = 60.0
 PARITY_SAMPLE = 20
+#: = completion.read.SNAPSHOT_MAX_AGE_S (a test pins them equal): a plane
+#: publication older than the readback's own snapshot bound is STALE
+PARITY_STALE_AFTER_S = 600.0
 
 
 def _top(levels, best) -> float | None:
@@ -150,7 +153,14 @@ async def parity_read(c) -> dict:
                           "skew_s": round(r["observed_at"].timestamp()
                                           - float(rcv), 1)})
     cmp_ = n["rest_in_window"]
-    return dict(out, status="OK", published_at=ev["at"].timestamp(),
+    # A PUBLICATION OF A PLANE THAT HAS SINCE STOPPED OR RESTARTED is not
+    # evidence of now (RC5; the plane OOM-cycles): past the readback's own
+    # snapshot bound it is STALE, its age stated, its counts kept as history
+    pub_age = max(0.0, time.time() - ev["at"].timestamp())
+    return dict(out, status=("OK" if pub_age <= PARITY_STALE_AFTER_S
+                             else "STALE_PLANE_PUBLICATION"),
+                published_at=ev["at"].timestamp(),
+                published_age_s=round(pub_age, 1),
                 counts=n, parity_rate=(round(n["top_equal"] / cmp_, 4)
                                        if cmp_ else None),
                 differences=diffs)

@@ -1094,6 +1094,17 @@ class GrpcBidiTransport:
                 self._requests(first, conn_done),
                 metadata=[("authorization", "Bearer %s" % token)])
             self.books.on_connected("grpc-%s" % uuid.uuid4().hex[:12])
+            # THE TRANSPORT'S OWN CONNECTED FLAG, kept true for this
+            # connection's life (RC5). It was set False at construction and
+            # never maintained, so every reader of it -- the market plane's
+            # shard digest and its priority-freshness census
+            # (sharded_stream.Manager.shard_digest "connected") -- read a
+            # live, delivering stream as not connected: the census named
+            # SHARD_NOT_CONNECTED for every priority member that was not
+            # fresh (19 of 19 in production, 2026-10-08 06:38Z snapshot,
+            # while the same shard held 14,229 fresh books) and never the
+            # stream's own refusal for the symbol.
+            self._connected = True
             watchdog = self._watchdog(responses)
             for resp in responses:
                 delivered += 1
@@ -1126,6 +1137,7 @@ class GrpcBidiTransport:
                                                   code or ""))
             return "error" if not delivered else "ended"
         finally:
+            self._connected = False
             conn_done.set()
             if watchdog is not None:
                 watchdog.set()

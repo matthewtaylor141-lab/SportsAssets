@@ -95,6 +95,10 @@ TABLE = {
     # connector: the same rail as a paper record (A_PAPER_RECORD_NEVER_
     # REACHES_THE_FUNDED_PATH), by design
     "PMX_BOOK_PRICED_RECORD_IS_PAPER_ONLY": (E, RAIL, "ORDER"),
+    # (RC5) why the dedicated plane's snapshot may not stand for now in the
+    # completion readback (a stale / absent plane, a restart gap)
+    "MARKET_PLANE_HEARTBEAT_ABSENT": (S, DATA, "INGESTION"),
+    "MARKET_PLANE_SNAPSHOT_FROM_A_PREVIOUS_RUNTIME": (S, FRESH, "INGESTION"),
     # (P1) venue isolation and the mirror shadow's credential precondition
     "NOT_A_POLYMARKET_US_MARKET_KALSHI_TICKER_REFUSED": (S, CAP, "VENUE_BOOK"),
     "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY": (S, DATA, "INGESTION"),
