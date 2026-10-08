@@ -27,6 +27,15 @@ PATH it was read from:
 The packet and every input file are hash-manifested (SHA256SUMS), so the
 packet is checkable against the bytes the job actually received.
 
+RC6: the two judge-held halves of red-team controls the API reads UNKNOWN
+for an absence (not a finding) are reported at declared paths beside the
+API's control: fresh_db.json (capital-critical's attested fresh-database
+receipt of the release SHA; MIGRATION_INTEGRITY read
+FRESH_DB_RESULT_NOT_IN_THIS_PROCESS on 69a8a07e) and release_verdict.json
+(the release receipt the sender would POST, judged by the API's own gate;
+RELEASE read NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA). The scorecard binds
+them; the packet only reports them.
+
     python3 -I backend/tools/evidence_packet.py <acc dir>
 
 Stdlib only; reads files, writes evidence_packet.json and SHA256SUMS.
@@ -68,6 +77,20 @@ ENVELOPED = ("red_team", "venues", "completion", "pm_before", "pm_after",
              "capital_readiness", "profitability_scoreboard",
              "revenue_readiness")
 MEMORY_RESOLUTION_S = 60
+#: the fresh-database readback (tools/fresh_db_receipt.py readback), each
+#: field read only at its declared path; the applied map stays in the file
+FRESH_DB_FIELDS = ("reason", "provenance.run_id", "provenance.workflow_path",
+                   "provenance.head_sha", "provenance.conclusion",
+                   "provenance.attestation_verified",
+                   "provenance.receipt_sha256", "receipt.version",
+                   "receipt.sha", "receipt.result", "receipt.reasons",
+                   "receipt.build_outcome", "receipt.migrations_in_tree",
+                   "receipt.migrations_applied", "receipt.fingerprint",
+                   "receipt.tree_fingerprint", "receipt.server_version")
+#: the judge's release receipt (tools/release_verdict.py)
+RELEASE_VERDICT_FIELDS = ("version", "sha", "running_api_sha",
+                          "running_api_sha_source", "status", "refused",
+                          "release_gate", "body", "posted")
 
 
 def load(acc: pathlib.Path, name: str):
@@ -478,7 +501,12 @@ def build(acc: pathlib.Path, *, now: float | None = None) -> dict:
                           "evidence.applied_fingerprint",
                           "evidence.repo_fingerprint",
                           "evidence.edited_in_place",
-                          "evidence.applied_not_in_build")}},
+                          "evidence.applied_not_in_build")},
+            # the half the API cannot hold: capital-critical's fresh build
+            "fresh_db": {k: declared(rb, "fresh_db", tuple(k.split(".")))
+                         for k in FRESH_DB_FIELDS}},
+        "release_verdict": {k: declared(rb, "release_verdict", (k,))
+                            for k in RELEASE_VERDICT_FIELDS},
         # THE BETTOR POLICY'S OWN COMPONENT, keyed by the primary lane it
         # belongs to: never the environment's (benchmark) policyVersion,
         # never a record found by name elsewhere in the body

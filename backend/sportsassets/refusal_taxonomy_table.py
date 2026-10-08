@@ -2182,6 +2182,61 @@ NOT_REFUSAL = {
         "than its 16,000-character bound is replaced by this marker (no "
         "reader reads it) -- a memory bound on a readback, never a trading, "
         "decision, order or collector refusal",
+    # RC6 deploy integrity: the judge-held halves of MIGRATION_INTEGRITY
+    # and RELEASE (backend/tools is not scanned by the taxonomy test;
+    # classified anyway and pinned by test_rc6_deploy_integrity)
+    'FRESH_DB_APPLIED_MIGRATIONS_UNREADABLE':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_APPLIED_NOT_IN_TREE':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_BUILD_STEP_NOT_SUCCESS':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_CONTENT_SHA_DIFFERS_FROM_TREE':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_MIGRATION_NOT_APPLIED':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_NOT_A_FULL_SHA':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_NO_CAPITAL_CRITICAL_RUN_FOR_THE_SHA':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_NOT_IN_THE_RUN_ARTIFACT':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_NOT_JSON':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_TREE_HAS_NO_MIGRATIONS':
+        "tools/fresh_db_receipt: a fresh-database receipt evidence reason (capital-critical's own build of the release SHA, read by the pm-acceptance judge) -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_BUILD_FAILED':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_COUNT_DIFFERS_FROM_RUNNING':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_FINGERPRINT_DIFFERS_FROM_RUNNING':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_READBACK_ABSENT':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_ABSENT':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_ATTESTATION_NOT_VERIFIED':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_MALFORMED':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_NOT_FOR_THE_RELEASE_SHA':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_NOT_FROM_CAPITAL_CRITICAL':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'FRESH_DB_RECEIPT_NOT_FROM_THE_GATE_RUN':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RELEASE_VERDICT_ABSENT':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RELEASE_VERDICT_INCONSISTENT':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RELEASE_VERDICT_NOT_FOR_THE_RELEASE_SHA':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RELEASE_VERDICT_REFUSED':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RUNNING_API_NOT_ON_THE_RELEASE_SHA':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    'RUNNING_MIGRATION_FINGERPRINT_UNREADABLE':
+        "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
     'PAPER_HISTORY_BACKDATED_ROWS':
         'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
     'PAPER_HISTORY_BASELINE_ABSENT':

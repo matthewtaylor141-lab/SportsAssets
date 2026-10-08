@@ -1335,3 +1335,5 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (RC6 deploy integrity) capital-critical's attested fresh-database receipt fingerprints exactly as the API's MIGRATION_INTEGRITY control does; the judge binds it (absent / unverified = UNPROVEN, mismatch = RED, never overrules an API finding) and the RELEASE unit passes only on a GREEN verdict for the release SHA, never on a receipt's presence; nothing is posted
+tests/test_rc6_deploy_integrity.py

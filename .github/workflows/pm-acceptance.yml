@@ -7,6 +7,16 @@
 #   gates       the GitHub conclusions of backend-tests, capital-critical,
 #               commit-guard and engine-diagnostic ON THAT EXACT SHA (the
 #               newest run of each; anything but success is not green)
+#   fresh DB    the fresh-database receipt of THAT capital-critical run
+#               (its own PostgreSQL 16 build of the SHA with production's
+#               runner), its attestation verified (RC6): the half of
+#               MIGRATION_INTEGRITY the serving API cannot hold
+#               (FRESH_DB_RESULT_NOT_IN_THIS_PROCESS on 69a8a07e)
+#   release     the release receipt the sender would POST, judged by the
+#               API's own release gate, written on EVERY run into the
+#               attested packet and POSTed never by it (RC6): RELEASE read
+#               UNKNOWN, NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA, because
+#               post_receipt stays off
 #   runtime     for sportsassets-api, -workers AND -market-plane: the one
 #               Render service of that exact name, its live deploy id and
 #               commit, the instances that ran, and EVERY page of its event
@@ -180,6 +190,31 @@ jobs:
                     engine_diagnostic: latest("engine-diagnostic")}}' > acc/gates.json
           jq -c '{backend_tests_green, capital_critical_green, commit_guard_green, engine_diagnostic_green}' acc/gates.json
           jq -r '.runs | to_entries[] | "  \(.key): \(.value.id // "-") \(.value.status // "absent")/\(.value.conclusion // "-") \(.value.html_url // "")"' acc/gates.json
+
+      - name: The fresh-database receipt (capital-critical's own build of this exact SHA, attested)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          mkdir -p acc
+          # THE RUN THE CI ROW READS: the newest capital-critical run on the
+          # SHA (gates.json), its artifact, its fresh-database receipt and
+          # that receipt's Sigstore attestation by capital-critical.yml.
+          # Nothing is judged here; an absent or unverified receipt is
+          # recorded with its reason and the scorecard calls it UNPROVEN.
+          CCWF=.github/workflows/capital-critical.yml
+          D="$RUNNER_TEMP/freshdb"; mkdir -p "$D/art"; echo '{}' > "$D/run.json"
+          CC=$(jq -r '.runs.capital_critical.id // empty' acc/gates.json 2>/dev/null)
+          RCPT=""; att=false
+          if echo "$CC" | grep -Eq '^[0-9]{1,20}$'; then
+            gh api "repos/$REPO/actions/runs/$CC" > "$D/run.json" 2>/dev/null || echo '{}' > "$D/run.json"
+            gh run download "$CC" --repo "$REPO" --name "capital-critical-$SHA" --dir "$D/art" >/dev/null 2>&1
+            RCPT=$(find "$D/art" -maxdepth 2 -name fresh-db-receipt.json | head -1)
+            if [ -n "$RCPT" ] && gh attestation verify "$RCPT" --repo "$REPO" --signer-workflow "$REPO/$CCWF" >/dev/null 2>&1; then att=true; fi
+          fi
+          python3 -I judge/backend/tools/fresh_db_receipt.py readback --run-id "$CC" --run "$D/run.json" \
+            --receipt "$RCPT" --attestation-verified "$att" --out acc/fresh_db.json
 
       - name: Render services, deploys, instances and the event window (read only, paginated)
         shell: bash
@@ -549,6 +584,10 @@ jobs:
               && FP=$(find "$RUNNER_TEMP/fp" -name preview.json | head -1)
             [ -n "$FP" ] && cp "$FP" acc/frontend_preview.json && FP=acc/frontend_preview.json
           fi
+          # THE RELEASE RECEIPT FOR THE RUNNING SHA, judged as the API judges
+          # a posted one and kept in the attested packet; never POSTed here
+          python3 -I judge/backend/tools/release_verdict.py acc --sha "$SHA" \
+            || echo "release verdict failed to run (recorded as absent)"
           python3 -I judge/backend/tools/scorecard_14.py acc --release-sha "$SHA" ${FP:+--frontend-preview "$FP"} \
             | tee -a "$GITHUB_STEP_SUMMARY" || echo "scorecard failed to run (recorded as absent)"
           python3 -I judge/backend/tools/evidence_packet.py acc
