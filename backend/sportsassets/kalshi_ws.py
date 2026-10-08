@@ -30,15 +30,24 @@ none is assumed (this runtime opens ONE connection).
 STRUCTURALLY READ-ONLY: this module and its runtime import no order,
 cancel, funding, Small Live or capital code (tests/test_kalshi_ws_market_
 data.py checks the import closure). The credential is used only to sign
-the handshake and the limits read.
+the handshake and the limits read. That is OUR code's boundary, not the
+key's: Kalshi documents no read-only key class, so the key itself is
+account-wide (market_plane_guard is the process-level wall).
+
+THE KEY (RC5, 2026-10-08): loaded and signed by kalshi_key, the one
+implementation every Kalshi signer shares -- the value EXACTLY as
+configured (production's Ed25519 PEM is 119 characters with its trailing
+newline; it used to be .strip()ped here before loading), the type read from
+the parsed key, Ed25519 or RSA-PSS by that type.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import time
 from decimal import Decimal
+
+from . import kalshi_key as KK
 
 VERSION = "KALSHI_WS_ORDERBOOK_V1"
 WS_URL = "wss://external-api-ws.kalshi.com/trade-api/ws/v2"
@@ -68,17 +77,15 @@ R_NO_CREDENTIAL = "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED"
 
 # ── signing (the handshake and the limits read) ─────────────────────────
 
-def load_private_key(pem: str):
-    from cryptography.hazmat.primitives import serialization
-    text = str(pem or "").strip()
-    if not text:
+def load_private_key(pem):
+    """Either documented Kalshi key type (Ed25519 or RSA) from the value
+    AS CONFIGURED -- never stripped first; a paste repair (base64 of the
+    PEM, escaped newlines) only when the value does not load as given.
+    ValueError(R_NO_CREDENTIAL) when there is nothing; otherwise a
+    kalshi_key.KeyRefused (a ValueError) naming why it is not a key."""
+    if pem is None or not str(pem).strip():
         raise ValueError(R_NO_CREDENTIAL)
-    if "-----BEGIN" not in text:
-        try:
-            text = base64.b64decode(text).decode("utf-8")
-        except Exception as exc:                                # noqa: BLE001
-            raise ValueError("KALSHI_KEY_NOT_PEM") from exc
-    return serialization.load_pem_private_key(text.encode(), password=None)
+    return KK.load_private_key(pem)
 
 
 def signing_message(ts_ms: str, method: str, path: str) -> bytes:
@@ -88,18 +95,10 @@ def signing_message(ts_ms: str, method: str, path: str) -> bytes:
 
 
 def sign(private_key, ts_ms: str, method: str, path: str) -> str:
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import (
-        Ed25519PrivateKey)
-    msg = signing_message(ts_ms, method, path)
-    if isinstance(private_key, Ed25519PrivateKey):
-        sig = private_key.sign(msg)
-    else:
-        sig = private_key.sign(msg, padding.PSS(
-            mgf=padding.MGF1(hashes.SHA256()),
-            salt_length=padding.PSS.DIGEST_LENGTH), hashes.SHA256())
-    return base64.b64encode(sig).decode("ascii")
+    """Ed25519 or RSA-PSS by the key's own type (kalshi_key.sign); any
+    other key type is refused by name before anything is signed (it used
+    to fall through to the RSA call and fail with a TypeError)."""
+    return KK.sign(private_key, signing_message(ts_ms, method, path))
 
 
 def auth_headers(key_id: str, private_key, method: str, path: str, *,

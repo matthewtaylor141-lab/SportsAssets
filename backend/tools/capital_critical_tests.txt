@@ -526,6 +526,10 @@ tests/test_kalshi_venue.py
 tests/test_kalshi_mapping_and_selection.py
 tests/test_kalshi_isolation.py
 tests/test_kalshi_smalllive_migration.py
+# (RC5) both documented Kalshi key types (Ed25519, RSA) in every signer from the
+# configured bytes as given; the control accepts them truthfully; the order
+# signer stays unreachable with a now-loadable key
+tests/test_kalshi_key_classes.py
 tests/test_smalllive_not_mirrored_migration.py
 # PinnAPI the sole probability authority of the investment policy (V3,
 # owner 2026-10-03): a single-source PinnAPI valuation qualifies, recorded

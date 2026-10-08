@@ -26,7 +26,13 @@ DEDICATED_ONLY_LOOPS; it is not in LOOPS).
 
 STRUCTURALLY READ-ONLY: imports kalshi_ws, the db helpers and nothing that
 can place, cancel, fund or authorize (test_kalshi_ws_market_data checks the
-import closure).
+import closure). That is a property of THIS CODE and its process
+(market_plane_guard), never of the key: Kalshi documents no read-only API
+key class, so the key is account-wide. The heartbeat says so
+(`credential_scope`) beside the key's documented type (`key`: Ed25519 or
+RSA, read from the parsed key; RC5 2026-10-08). A key that is present but
+not a documented Kalshi key is named in the heartbeat (OWNER_ACTION_REQUIRED,
+the kalshi_key refusal) instead of raising out of the runtime.
 """
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ import logging
 import os
 import time
 
+from .. import kalshi_key as KK
 from .. import kalshi_market_data as KMD
 from .. import kalshi_ws as KWS
 from ..db import get_pool, heartbeat
@@ -51,12 +58,19 @@ LOOKAHEAD_S = 36 * 3600.0
 LOOKBACK_S = 4 * 3600.0
 MAX_MARKETS = 2000
 OWNER_ACTION = (
-    "provision a Kalshi API key (RSA or Ed25519; read-only use) as "
+    "provision a Kalshi API key (Ed25519 -- Kalshi's default -- or RSA) as "
     "KALSHI_API_KEY_ID + KALSHI_PRIVATE_KEY_PEM on the dedicated "
     "sportsassets-market-plane service ONLY -- never on sportsassets-api or "
     "the shared workers. The WebSocket handshake requires authentication "
     "even for public order books (docs: websockets/websocket-connection). "
-    "This grants no order, cancel, funding or capital authority.")
+    "Kalshi documents no read-only key class: the key is account-wide, and "
+    "this service only reads because its own code cannot do anything else "
+    "(market_plane_guard), not because the key is scoped. This code path "
+    "places, cancels and funds nothing.")
+#: the key's scope, stated as what it is: Kalshi has no read-only key class
+CREDENTIAL_SCOPE = ("ACCOUNT_WIDE_KEY_NO_PROVIDER_READ_ONLY_CLASS; read-only "
+                    "by this process's code (market_plane_guard), not by the "
+                    "key")
 
 
 async def wanted_tickers(conn, *, now: float) -> list:
@@ -159,7 +173,8 @@ async def record_limits(conn, lim: dict | None) -> None:
         str(lim.get("source") or "GET " + KWS.LIMITS_PATH))
 
 
-def health(books: KWS.WsBooks, sub, *, now: float, limits, pace) -> dict:
+def health(books: KWS.WsBooks, sub, *, now: float, limits, pace,
+           key: dict | None = None) -> dict:
     c = books.counts()
     ages = [now - b["updated_at"] for t, b in books.books.items()
             if books.current(t)["ok"] and b["updated_at"]]
@@ -180,7 +195,17 @@ def health(books: KWS.WsBooks, sub, *, now: float, limits, pace) -> dict:
                           "basis": "WS snapshot on the current subscription "
                                    "and an unbroken sequence"},
             "account_limits": limits, "rest_recovery_pacing": pace,
+            "key": key, "credential_scope": CREDENTIAL_SCOPE,
             "authority": "MARKET_DATA_READ_ONLY_NO_ORDER_AUTHORITY"}
+
+
+def key_class(env) -> dict:
+    """The configured key's documented TYPE and the form it loaded in,
+    never its value (kalshi_key.describe)."""
+    d = KK.describe(env.get(KWS.PRIVATE_KEY_PEM_ENV))
+    return {"type": d.get("type"), "form": d.get("form"),
+            "refusal": d.get("refusal"),
+            "documented_types": list(KK.APPROVED_KEY_TYPES)}
 
 
 async def run(get_pool_fn=get_pool, *, env=None) -> None:
@@ -198,7 +223,25 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
                 pass
             await asyncio.sleep(300)
     key_id = str(env.get(KWS.KEY_ID_ENV)).strip()
-    pk = KWS.load_private_key(env.get(KWS.PRIVATE_KEY_PEM_ENV))
+    key = key_class(env)
+    try:
+        pk = KWS.load_private_key(env.get(KWS.PRIVATE_KEY_PEM_ENV))
+    except ValueError as exc:
+        # PRESENT BUT NOT A DOCUMENTED KALSHI KEY: named, never a crash loop
+        # (it used to raise out of run()); no connection is attempted
+        why = getattr(exc, "code", None) or str(exc)
+        while True:
+            try:
+                await heartbeat(SERVICE, "blocked", {
+                    "domain": KMD.HEALTH_DOMAIN, "source": "KALSHI_WEBSOCKET",
+                    "state": "OWNER_ACTION_REQUIRED", "why": why,
+                    "key": key, "credential_scope": CREDENTIAL_SCOPE,
+                    "owner_action": OWNER_ACTION,
+                    "rest_fallback": "kalshi_market_data (shared workers) "
+                                     "remains the book source until then"})
+            except Exception:                                   # noqa: BLE001
+                pass
+            await asyncio.sleep(300)
     books = KWS.WsBooks()
     want: list = []
     sub = KWS.Subscriber(KWS.websockets_connect(key_id, pk), books,
@@ -240,7 +283,7 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
                                     else "degraded",
                                     health(books, sub, now=now,
                                            limits=state["limits"],
-                                           pace=pace), con=conn)
+                                           pace=pace, key=key), con=conn)
                     last["beat"] = now
         except asyncio.CancelledError:
             task.cancel()
