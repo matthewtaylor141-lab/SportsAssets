@@ -26,6 +26,17 @@ retail key under another name is reported as present, with the role its name
 was provisioned for; it is never treated as the funded account's key (the
 mirror_positions_source PMX_FALLBACK_REJECTED rule: a positions read of
 another account reports the funded account as flat).
+
+A CORRECT CENSUS IS NOT A REPAIRED SIGNER (RC5, 2026-10-08). The census
+names the class; the readers must also refuse. FUNDED_READERS lists every
+reader of the funded pair and FUNDED_READER_GATES the gate that refuses each
+of them BY NAME before any request when the funded slot holds no Ed25519
+key -- three gates cover them all, and tests/test_pmus_funded_readers_refuse
+proves each reader against a transport that fails if touched, plus a source
+scan that every funded client is built at one of the gates. The census
+carries `funded_reconciliation`: venue-confirmable only with the funded key
+itself; otherwise NOT_VENUE_CONFIRMABLE, and no institutional (PMX) or
+other-account positions stand in for it.
 """
 from __future__ import annotations
 
@@ -73,7 +84,9 @@ PAIRS = (
 #: identifiers without a secret of their own, compared with every key id
 IDENTIFIERS = ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID")
 FUNDED = "PMUS_FUNDED"
-#: the readers of the funded pair -- the routing the census is read against
+#: the readers of the funded pair -- the routing the census is read against.
+#: The first five are the readers the P1 census named; the rest (RC5) read
+#: the funded account through the shared pmus client as well.
 FUNDED_READERS = (
     "workers: mirror_shadow.account_positions_walk / tick_positions",
     "workers: mirror_live.account_positions_walk",
@@ -81,7 +94,59 @@ FUNDED_READERS = (
     "api: pmus_account._fetch_sync / _fetch_all_positions_sync / "
     "_fetch_week_activities_sync",
     "api+workers: pmus._get_client (funded lane, reconcile, live_executor)",
+    "workers: mirror_live._pm_held / _position_echo",
+    "api+workers: pmus.account_holds / position_side / balances / "
+    "activities reads",
+    "workers: venue_reconcile",
+    "api: reconcile_read",
+    "api+workers: bettor_funded_account / bettor_live_read / "
+    "bettor_account_onboarding / bettor_funded_investigation / "
+    "calibration_evidence",
 )
+#: the funded slot holds no Ed25519 key: the refusal every gate names
+#: (venue_key.R_NOT_ED25519 == mirror_shadow.R_PMUS_SECRET_NOT_ED25519)
+R_FUNDED_NOT_ED25519 = "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY"
+#: WHERE each funded reader is refused, by name, before any request
+FUNDED_READER_GATES = (
+    {"gate": "pmus._install_credential_gate (pmus._get_client / "
+             "_get_read_client)",
+     "when": "every AUTHENTICATED request on the shared funded client, "
+             "before the SDK signs",
+     "refusal": R_FUNDED_NOT_ED25519,
+     "covers": ["api+workers: pmus._get_client (funded lane, reconcile, "
+                "live_executor)",
+                "workers: mirror_live._pm_held / _position_echo",
+                "api+workers: pmus.account_holds / position_side / balances "
+                "/ activities reads",
+                "workers: venue_reconcile", "api: reconcile_read",
+                "api+workers: bettor_funded_account / bettor_live_read / "
+                "bettor_account_onboarding / bettor_funded_investigation / "
+                "calibration_evidence"]},
+    {"gate": "venue_key.signing_secret (before the client is constructed)",
+     "when": "before any client exists",
+     "refusal": R_FUNDED_NOT_ED25519,
+     "covers": ["api: track_record._fetch_raw",
+                "api: pmus_account._fetch_sync / _fetch_all_positions_sync "
+                "/ _fetch_week_activities_sync"]},
+    {"gate": "mirror_shadow.pmus_secret_unusable_reason (before pacing or "
+             "any page)",
+     "when": "before the walk's first page",
+     "refusal": R_FUNDED_NOT_ED25519,
+     "covers": ["workers: mirror_shadow.account_positions_walk / "
+                "tick_positions",
+                "workers: mirror_live.account_positions_walk"]},
+)
+FR_CONFIRMABLE = "VENUE_CONFIRMABLE_WITH_THE_FUNDED_KEY_ONLY"
+FR_NOT_CONFIRMABLE = "NOT_VENUE_CONFIRMABLE_FUNDED_SLOT_UNUSABLE"
+FR_ABSENT = "NOT_VENUE_CONFIRMABLE_FUNDED_SLOT_ABSENT"
+#: what stands in for a venue reading when the funded slot is unusable:
+#: nothing from another account (mirror_positions_source.PMX_FALLBACK_
+#: REJECTED; a retail-shaped key under another name is a different account
+#: until proven otherwise)
+NO_SUBSTITUTE = ("NO_INSTITUTIONAL_OR_OTHER_ACCOUNT_POSITIONS_SUBSTITUTED: a "
+                 "funded read is refused and unreadable; mirror_shadow plans "
+                 "on the funded ledger, labelled LEDGER_DERIVED_NOT_VENUE_"
+                 "CONFIRMED")
 #: names whose CLASS is fixed by their own provisioning and is never a PMUS
 #: retail candidate, whatever their bytes look like (a VAPID P-256 scalar is
 #: 32 bytes; a Kalshi key id is a UUID)
@@ -168,6 +233,8 @@ def census(env=None, *, service: str | None = None) -> dict:
                         "key_id_equals": id_eq.get(kid_env, []),
                         "secret_equals": sec_eq.get(sec_env, [])}
     pairs[FUNDED]["readers"] = list(FUNDED_READERS)
+    pairs[FUNDED]["reader_gates"] = [dict(g, covers=list(g["covers"]))
+                                     for g in FUNDED_READER_GATES]
     others = {}
     for name in sorted(str(n) for n in env.keys()):
         if name in known or name.upper().startswith(NOT_PMUS_PREFIXES):
@@ -191,6 +258,21 @@ def census(env=None, *, service: str | None = None) -> dict:
     verdict = (V_FUNDED_USABLE if fshape in RETAIL_SHAPES
                else V_FUNDED_ABSENT if fshape == P_ABSENT
                else V_ELSEWHERE if (retail_under or material) else V_NONE)
+    if fshape in RETAIL_SHAPES:
+        recon = {"state": FR_CONFIRMABLE,
+                 "account": "FUNDED_RETAIL_ACCOUNT (the funded slot's key)"}
+    else:
+        incomplete = fshape in (P_ABSENT, P_KEY_ID_ONLY, P_SECRET_ONLY)
+        recon = {"state": FR_ABSENT if incomplete else FR_NOT_CONFIRMABLE,
+                 "proven_by": "funded slot shape %s in this process" % fshape,
+                 "funded_readers": (
+                     "no complete pair: no authenticated client is built and "
+                     "the SDK refuses an authenticated call before sending "
+                     "(AuthenticationError)" if incomplete else
+                     "refused by name before any request (%s)"
+                     % R_FUNDED_NOT_ED25519),
+                 "substitute": NO_SUBSTITUTE,
+                 "other_retail_pairs_not_used": retail_under}
     return {"version": VERSION, "service": service,
             "values_exposed": False,
             "pairs": pairs,
@@ -205,4 +287,5 @@ def census(env=None, *, service: str | None = None) -> dict:
             "account_identity": ("NOT_PROVABLE_BY_SHAPE: a retail-shaped key "
                                  "under another name is reported, never "
                                  "routed to the funded readers"),
+            "funded_reconciliation": recon,
             "verdict": verdict}

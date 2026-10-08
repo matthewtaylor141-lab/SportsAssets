@@ -292,18 +292,28 @@ _ED_PEM = _ED.private_bytes(S.Encoding.PEM, S.PrivateFormat.PKCS8,
 def test_an_ed25519_pem_is_never_called_rsa():
     """slot_shape calls ANY PEM 'RSA'. An Ed25519 PKCS#8 PEM (119 chars --
     the production KALSHI_PRIVATE_KEY_PEM length on both services) is not
-    an RSA key: in the KALSHI slot it read KALSHI_RSA_API_KEY / MATCHES."""
+    an RSA key: in the KALSHI slot it read KALSHI_RSA_API_KEY / MATCHES.
+
+    RC5 (owner 2026-10-08): it is a DOCUMENTED Kalshi key type (Ed25519,
+    Kalshi's default) and every Kalshi signer now signs with it, so the slot
+    names it by its parsed type, KALSHI_ED25519_API_KEY, and that class
+    MATCHES -- never under the RSA name, and with no "RSA only" remedy."""
     assert len(_ED_PEM) == 119
     k = C.credential_classes({"KALSHI_API_KEY_ID": KALSHI_KID,
                               "KALSHI_PRIVATE_KEY_PEM": _ED_PEM})
-    assert k["KALSHI"] == "ED25519_PEM"
+    assert k["KALSHI"] == "KALSHI_ED25519_API_KEY"
+    assert "RSA" not in k["KALSHI"]
     g = C.credentials({"api": k})
-    assert g["evidence"]["verdicts"]["KALSHI"] == "MISMATCH_PATH_BLOCKED"
-    assert any("RSA only" in a for a in g["evidence"]["owner_actions"])
-    # an RSA Kalshi key still matches
+    assert g["evidence"]["verdicts"]["KALSHI"] == "MATCHES"
+    assert not any(b.startswith("CREDENTIAL_CLASS_MISMATCH:KALSHI")
+                   for b in g["blockers"])
+    assert not any("RSA only" in a for a in g["evidence"]["owner_actions"])
+    # an RSA Kalshi key still matches, under its own name
     r = C.credential_classes({"KALSHI_API_KEY_ID": KALSHI_KID,
                               "KALSHI_PRIVATE_KEY_PEM": RSA_PEM})
     assert r["KALSHI"] == "KALSHI_RSA_API_KEY"
+    assert C.credentials({"api": r})["evidence"]["verdicts"]["KALSHI"] == \
+        "MATCHES"
     # an Ed25519 PEM in the funded PMUS slot is not "the PMX RSA class"
     p = C.credential_classes({"PMUS_KEY_ID": FUNDED_KID,
                               "PMUS_SECRET_KEY": _ED_PEM})

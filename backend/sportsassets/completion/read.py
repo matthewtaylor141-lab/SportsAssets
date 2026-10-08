@@ -355,25 +355,68 @@ def api_funded_slot_shape(env=None) -> str | None:
         return None
 
 
+#: the shadow's venue walk was attempted with a usable key and produced no
+#: reading (mirror_shadow.tick_positions: receipt "unreadable"); the venue
+#: (or the transport) said no -- not a credential finding
+WHY_VENUE_WALK_FAILED = "VENUE_WALK_FAILED_NO_READING"
+#: a non-venue source with no credential refusal beside it: nothing proves a
+#: credential is missing, so no owner blocker is declared
+WHY_NO_CREDENTIAL_PROOF = "NOT_VENUE_CONFIRMED_NO_CREDENTIAL_FINDING"
+API_READERS_REFUSED = "REFUSED_BEFORE_ANY_REQUEST"
+
+
+def _credential_proof(ps: dict, api_slot_shape: str | None) -> list:
+    """THE EVIDENCE that the funded credential is unusable, per service,
+    each item a finding a readback carries (never a value): the workers'
+    own precondition refusal (mirror_shadow read the secret's FORMAT and
+    sent nothing) and this API process's slot SHAPE."""
+    proof = []
+    if ps.get("primary_refusal") == R_PMUS_NOT_ED25519:
+        proof.append("sportsassets-workers: mirror_shadow precondition %s "
+                     "(the secret's format, read before any request)%s"
+                     % (R_PMUS_NOT_ED25519,
+                        "; slot shape %s" % ps["pmus_slot_shape"]
+                        if ps.get("pmus_slot_shape") else ""))
+    if api_slot_shape and api_slot_shape != "PMUS_RETAIL_ED25519_API_KEY_SHAPE":
+        proof.append("sportsassets-api: funded slot shape %s (this process)"
+                     % api_slot_shape)
+    return proof
+
+
 def venue_positions_block(hb, *, now: float,
                           api_slot_shape: str | None = None) -> dict:
+    """VENUE-CONFIRMED only when the shadow's venue walk actually produced a
+    reading (RC5: a walk attempted with a usable key that FAILED used to
+    carry source = the venue walk and read VENUE_CONFIRMED). An owner
+    credential blocker only on a finding that proves the funded credential
+    unusable (`_credential_proof`); a failed walk with a usable key is not
+    one. No other source -- the funded ledger, an institutional (PMX) or
+    another account's reading -- is ever venue confirmation."""
     if hb is None:
         return {"status": "UNREADABLE", "why": "NO_MIRROR_SHADOW_HEARTBEAT",
                 "venue_confirmed": False}
     age = now - (hb.get("beat_at") or 0)
     ps = (hb.get("detail") or {}).get("positions_source") or {}
     src = ps.get("source")
-    confirmed = src == VENUE_CONFIRMED_SOURCE and age <= \
-        MIRROR_HEARTBEAT_MAX_AGE_S
+    walked = src == VENUE_CONFIRMED_SOURCE and not ps.get("unreadable") \
+        and not ps.get("refusal")
+    confirmed = walked and age <= MIRROR_HEARTBEAT_MAX_AGE_S
+    proof = _credential_proof(ps, api_slot_shape)
     out = {"venue_confirmed": confirmed, "source": src,
            "authority": ps.get("authority"),
            "primary_refusal": ps.get("primary_refusal"),
            "heartbeat_age_s": round(age, 1)}
+    if api_slot_shape is not None:
+        out["api_funded_readers"] = {
+            "slot_shape": api_slot_shape,
+            "state": ("USABLE" if api_slot_shape ==
+                      "PMUS_RETAIL_ED25519_API_KEY_SHAPE"
+                      else API_READERS_REFUSED)}
     if confirmed:
         return dict(out, status="VENUE_CONFIRMED")
-    if ps.get("primary_refusal") == R_PMUS_NOT_ED25519 or (
-            src and src != VENUE_CONFIRMED_SOURCE):
+    if ps.get("primary_refusal") == R_PMUS_NOT_ED25519:
         return dict(out, status="OWNER_CREDENTIAL_REQUIRED",
+                    credential_proof=proof,
                     credential_type=("POLYMARKET_US_RETAIL_API_KEY "
                                      "(Ed25519, polymarket.us/developer)"),
                     owner_action=("enter the FUNDED account's Polymarket US "
@@ -383,9 +426,16 @@ def venue_positions_block(hb, *, now: float,
                                   "venue-confirmed" % " AND ".join(
                                       _pmus_slot_where(ps, api_slot_shape))),
                     workaround="NONE (auth is never worked around)")
-    return dict(out, status="NOT_CONFIRMED",
-                why="HEARTBEAT_STALE" if age > MIRROR_HEARTBEAT_MAX_AGE_S
-                else "NO_VENUE_POSITIONS_SOURCE")
+    if age > MIRROR_HEARTBEAT_MAX_AGE_S:
+        why = "HEARTBEAT_STALE"
+    elif src == VENUE_CONFIRMED_SOURCE:
+        why = WHY_VENUE_WALK_FAILED
+    elif src:
+        why = WHY_NO_CREDENTIAL_PROOF
+    else:
+        why = "NO_VENUE_POSITIONS_SOURCE"
+    return dict(out, status="NOT_CONFIRMED", why=why,
+                **({"credential_proof": proof} if proof else {}))
 
 
 async def arbitrage_block(conn) -> dict:
@@ -524,18 +574,43 @@ def owner_blockers(runtime, venue, refdata_universe) -> list:
                        "sportsassets-workers) in its dashboard; DATABASE_URL "
                        "from sportsassets-db; and, for the Kalshi WebSocket "
                        "book runtime beside it, KALSHI_API_KEY_ID + "
-                       "KALSHI_PRIVATE_KEY_PEM (a Kalshi API key, read-only "
-                       "use -- Kalshi rep 2026-10-07). Nothing else: no PMUS "
+                       "KALSHI_PRIVATE_KEY_PEM (the existing Kalshi API key, "
+                       "Ed25519 or RSA, copied byte for byte; Kalshi "
+                       "documents no read-only key class, so the key is "
+                       "account-wide and the plane only reads because "
+                       "market_plane_guard -- local code, not the provider "
+                       "-- refuses every order path). Nothing else: no PMUS "
                        "key, no LIVE_TRADING_ENABLED, no Kalshi trading "
                        "switch, no admin token" % DEDICATED_SPEC),
             "why_owner": ("render-ops has no service-create action and the "
                           "PMX secret values are entered by the owner, never "
                           "copied by automation")})
-    if venue.get("status") == "OWNER_CREDENTIAL_REQUIRED":
+    if venue.get("status") == "OWNER_CREDENTIAL_REQUIRED" and \
+            venue.get("credential_proof"):
+        # declared only beside the finding that proves it (RC5): the
+        # services' own refusals / slot shapes, never an inference
         out.append({"code": "OWNER_CREDENTIAL_REQUIRED",
                     "item": "PMUS_RETAIL_POSITION_CONFIRMATION",
                     "credential_type": venue.get("credential_type"),
+                    "proven_by": list(venue.get("credential_proof")),
                     "action": venue.get("owner_action")})
+    afr = venue.get("api_funded_readers") or {}
+    if venue.get("status") == "VENUE_CONFIRMED" and \
+            afr.get("state") == API_READERS_REFUSED:
+        # the workers' slot is fixed and venue-confirmed, the API's is not:
+        # its funded readers (track record, account card, reconcile read)
+        # still refuse before any request, proven by this process's shape
+        out.append({"code": "OWNER_CREDENTIAL_REQUIRED",
+                    "item": "PMUS_API_FUNDED_READERS",
+                    "credential_type": ("POLYMARKET_US_RETAIL_API_KEY "
+                                        "(Ed25519, polymarket.us/developer)"),
+                    "proven_by": ["sportsassets-api: funded slot shape %s "
+                                  "(this process)" % afr.get("slot_shape")],
+                    "action": ("enter the FUNDED account's Polymarket US "
+                               "retail Ed25519 API key in PMUS_KEY_ID / "
+                               "PMUS_SECRET_KEY of sportsassets-api; until "
+                               "then the API's funded readers refuse before "
+                               "any request")})
     sc = (refdata_universe or {}).get("state_change_stream") or {}
     out.append({"code": "OWNER_ACTION_REQUIRED",
                 "item": "INSTRUMENT_STATE_CHANGE_SUBSCRIPTION_SCHEMA",

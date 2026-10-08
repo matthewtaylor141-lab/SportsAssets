@@ -19,7 +19,8 @@ transaction).
   multiple_testing    preregistered candidate set; no post-holdout selection
   capacity            positive-capacity frontier; deployment capped
   karen_value         saved loss - false-block opportunity cost
-  credential_classes  PMX / PMUS / KALSHI slot classes (shape only)
+  credential_classes  PMX / PMUS / KALSHI slot classes (shape only; KALSHI
+                      by the parsed key type, Ed25519 or RSA, never a value)
   migration_integrity applied fingerprints == this build's files
   fee_evidence        versioned fee schedules per venue / series
   settlement_certs    certified rules fingerprints, invalidations
@@ -437,9 +438,64 @@ def karen(saved_loss_usd, false_block_cost_usd, *, source: str) -> dict:
 
 # ── credentials (shape only) ─────────────────────────────────────────────
 
+#: the Kalshi classes, read from the PARSED key (kalshi_key), never from the
+#: PEM header (Kalshi: "The PEM header does not identify the key type")
+KALSHI_RSA_API_KEY = "KALSHI_RSA_API_KEY"
+KALSHI_ED25519_API_KEY = "KALSHI_ED25519_API_KEY"
+#: a key that parses but is neither documented Kalshi type
+KALSHI_KEY_TYPE_NOT_DOCUMENTED = "KALSHI_KEY_TYPE_NOT_ED25519_OR_RSA"
+
+#: THE CLASSES EACH SLOT ACCEPTS. The red-team package's EXPECTED (imported
+#: byte for byte, test_red_team_package_parity) names ONE class per slot and
+#: predates Kalshi's Ed25519 keys: KALSHI = KALSHI_RSA_API_KEY. Kalshi
+#: documents two key types, Ed25519 (recommended; the default) and RSA
+#: (kalshi_key.DOCS), and since RC5 every Kalshi signer in this repository
+#: signs with either (kalshi_key: kalshi_ws's handshake and limits read,
+#: kalshi_venue's REST client). Production's Kalshi key is Ed25519 and the
+#: plane's signed account-limits read answers 200 with it, yet this control
+#: read RED (CREDENTIAL_CLASS_MISMATCH:KALSHI:ED25519_PEM, pm-acceptance run
+#: 37738089957). So KALSHI accepts both documented classes; PMX and PMUS keep
+#: the package's single class. This widens no authority: a class names a key
+#: type, and Kalshi live money stays NOT ACTIVATED behind kalshi_venue's own
+#: gate. A class outside the set is still a MISMATCH.
+APPROVED_CLASSES = {
+    "PMX": (RTCRED.EXPECTED["PMX"],),
+    "PMUS": (RTCRED.EXPECTED["PMUS"],),
+    "KALSHI": (KALSHI_ED25519_API_KEY, RTCRED.EXPECTED["KALSHI"]),
+}
+APPROVED_BASIS = {
+    "KALSHI": "docs.kalshi.com getting_started/api_keys: Ed25519 "
+              "(recommended) or RSA; type read from the parsed key "
+              "(kalshi_key); captured at %s" % "research/kalshi_canonical_"
+              "venue/REP_PRODUCTION_CONTRACT_2026-10-07/docs/getting_started_"
+              "api_keys.md",
+}
+
+
+def kalshi_class(key_id: str, pem) -> str | None:
+    """The Kalshi slot's class from the PARSED key, never its value: None
+    when nothing is configured; KALSHI_ED25519_API_KEY / KALSHI_RSA_API_KEY
+    for the two documented types; KALSHI_KEY_TYPE_NOT_ED25519_OR_RSA for a
+    key of another algorithm; UNRECOGNISED_SHAPE for anything that is not a
+    loadable key (or a key id without a key)."""
+    from .. import kalshi_key as KK
+    kid = str(key_id or "").strip()
+    if not kid and not (pem is not None and str(pem).strip()):
+        return None
+    d = KK.describe(pem)
+    if d.get("type") == KK.KEY_ED25519:
+        return KALSHI_ED25519_API_KEY
+    if d.get("type") == KK.KEY_RSA:
+        return KALSHI_RSA_API_KEY
+    if d.get("refusal") == KK.R_KEY_TYPE_NOT_DOCUMENTED:
+        return KALSHI_KEY_TYPE_NOT_DOCUMENTED
+    return "UNRECOGNISED_SHAPE"
+
+
 def credential_classes(env=None) -> dict:
     """{slot: class | None} from THIS process's environment, by shape only
-    (market_data_identity.slot_shape): never a value, length or prefix."""
+    (market_data_identity.slot_shape): never a value, length or prefix.
+    The KALSHI slot is classified from the parsed key (kalshi_class)."""
     from .. import market_data_identity as MDI
     from .. import venue_key as VK
     env = os.environ if env is None else env
@@ -477,9 +533,11 @@ def credential_classes(env=None) -> dict:
     present = [c for c in pmus_slots.values() if c is not None]
     pmus = next((c for c in present if c != "POLYMARKET_US_ED25519"),
                 present[0] if present else None)
-    kal = cls("KALSHI_API_KEY_ID", "KALSHI_PRIVATE_KEY_PEM")
-    return {"PMX": pm(pmx), "PMUS": pmus,
-            "KALSHI": "KALSHI_RSA_API_KEY" if kal == "RSA_PEM" else kal,
+    # the value AS CONFIGURED (env.get, not stripped): the class is read
+    # from the same bytes the signers load
+    kal = kalshi_class(env.get("KALSHI_API_KEY_ID", ""),
+                       env.get("KALSHI_PRIVATE_KEY_PEM"))
+    return {"PMX": pm(pmx), "PMUS": pmus, "KALSHI": kal,
             "PMUS_SLOTS": pmus_slots}
 
 
@@ -493,20 +551,18 @@ def credentials(by_process: dict) -> dict:
             if c is not None and slot in RTCRED.EXPECTED:
                 merged.setdefault(slot, set()).add(c)
     mism, missing, verdicts = [], [], {}
-    for slot, want in RTCRED.EXPECTED.items():
+    for slot in RTCRED.EXPECTED:
+        ok = APPROVED_CLASSES[slot]
         got = sorted(merged.get(slot) or ())
-        g = RTCRED.credential_slot_gate({slot: got[0]} if len(got) == 1
-                                        else {})
         if not got:
             missing.append(slot)
             verdicts[slot] = "NOT_PROVISIONED_PATH_BLOCKED"
-        elif any(c != want for c in got):
+        elif any(c not in ok for c in got):
             mism.append("CREDENTIAL_CLASS_MISMATCH:%s:%s" % (
-                slot, ",".join(c for c in got if c != want)))
+                slot, ",".join(c for c in got if c not in ok)))
             verdicts[slot] = "MISMATCH_PATH_BLOCKED"
         else:
             verdicts[slot] = "MATCHES"
-        _ = g
     actions = []
     if any(m.startswith("CREDENTIAL_CLASS_MISMATCH:PMUS") for m in mism):
         want = RTCRED.EXPECTED["PMUS"]
@@ -527,20 +583,29 @@ def credentials(by_process: dict) -> dict:
                        "secret slots%s; no slot named here holds one. "
                        "Authentication is never weakened." % (
                            (" (" + "; ".join(where) + ")") if where else ""))
-    if any(m.startswith("CREDENTIAL_CLASS_MISMATCH:KALSHI") and
-           "ED25519_PEM" in m for m in mism):
-        # NOT AN OWNER ACTION: Ed25519 is a Kalshi-documented key type
-        # (docs.kalshi.com/getting_started/api_keys: Ed25519 recommended, or
-        # RSA) and the WebSocket market-data signer (kalshi_ws) accepts it.
-        # What does not is code: the REST order signer, and the red-team
-        # package's expected class, which predates Ed25519.
-        actions.append("KALSHI_PRIVATE_KEY_PEM holds an Ed25519 key, a "
-                       "Kalshi-documented key type the WebSocket market-data "
-                       "signer accepts; the REST order signer "
-                       "(kalshi_venue.load_private_key, Kalshi live money "
-                       "NOT ACTIVATED) and the package's expected class "
-                       "KALSHI_RSA_API_KEY accept RSA only. Code remedy: "
-                       "Ed25519 in the REST signer and the expected class.")
+    kal_bad = sorted({c for p, s in by_process.items()
+                      for c in [(s or {}).get("KALSHI")]
+                      if c is not None
+                      and c not in APPROVED_CLASSES["KALSHI"]})
+    if "ED25519_PEM" in kal_bad:
+        # DEPLOY SKEW, NOT AN OWNER ACTION: a process still on a build whose
+        # control classified the Kalshi PEM by shape (ED25519_PEM) and whose
+        # REST signer was RSA-only. The key is a documented type; the
+        # remedy is deploying this build there.
+        actions.append("a process still reports KALSHI ED25519_PEM: it runs "
+                       "a build that predates Ed25519 support in every "
+                       "Kalshi signer; deploy this build there (the key is "
+                       "a documented Kalshi type and needs no change)")
+    other = [c for c in kal_bad if c != "ED25519_PEM"]
+    if other:
+        where = sorted("%s holds %s" % (p, (s or {}).get("KALSHI"))
+                       for p, s in by_process.items()
+                       if (s or {}).get("KALSHI") in other)
+        actions.append("KALSHI_PRIVATE_KEY_PEM is not a Kalshi API private "
+                       "key of a documented type (%s); Kalshi documents "
+                       "Ed25519 (recommended) or RSA. Enter the existing "
+                       "key's PEM exactly as Kalshi issued it." % "; ".join(
+                           where))
     # a PMUS slot that holds NOTHING is not a mismatch (it blocks only its
     # own path) -- but one present slot must not hide another's absence:
     # an API with only the execution-mirror pair reads PMUS MATCHES while
@@ -552,7 +617,11 @@ def credentials(by_process: dict) -> dict:
                         else ())
         if c is None)
     return result("CREDENTIAL_CLASSES", RED if mism else GREEN, mism,
-                  {"expected": dict(RTCRED.EXPECTED), "by_process":
+                  {"expected": dict(RTCRED.EXPECTED),
+                   "approved": {k: list(v)
+                                for k, v in APPROVED_CLASSES.items()},
+                   "approved_basis": dict(APPROVED_BASIS),
+                   "by_process":
                    {p: dict(s or {}) for p, s in by_process.items()},
                    "pmus_slots_not_provisioned": absent_pmus,
                    "verdicts": verdicts, "not_provisioned": missing,

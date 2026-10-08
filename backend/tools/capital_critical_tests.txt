@@ -526,6 +526,10 @@ tests/test_kalshi_venue.py
 tests/test_kalshi_mapping_and_selection.py
 tests/test_kalshi_isolation.py
 tests/test_kalshi_smalllive_migration.py
+# (RC5) both documented Kalshi key types (Ed25519, RSA) in every signer from the
+# configured bytes as given; the control accepts them truthfully; the order
+# signer stays unreachable with a now-loadable key
+tests/test_kalshi_key_classes.py
 tests/test_smalllive_not_mirrored_migration.py
 # PinnAPI the sole probability authority of the investment policy (V3,
 # owner 2026-10-03): a single-source PinnAPI valuation qualifies, recorded
@@ -1294,6 +1298,10 @@ tests/test_pm_acceptance_receipts.py
 tests/test_pm_acceptance_paper_fingerprint_db.py
 tests/test_pm_acceptance_workflow.py
 tests/test_pmus_credential_census.py
+# (RC5) every funded PMUS reader refuses by name before any request when the
+# funded slot holds the wrong class; no other account's positions substitute;
+# venue-confirmed only on a reading; owner blockers only beside their proof
+tests/test_pmus_funded_readers_refuse.py
 tests/test_p1_pmx_grpc_primary_accounting.py
 tests/test_bettor_policy_v6_integrity.py
 tests/test_bettor_live_delegated_lane_parks.py
