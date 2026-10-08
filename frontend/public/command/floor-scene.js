@@ -160,13 +160,13 @@ export async function createFloor(host, opts) {
   renderer.setPixelRatio(dpr);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.10;
+  renderer.toneMappingExposure = 1.22;
   renderer.shadowMap.enabled = !phone;
   renderer.shadowMap.type = THREE.PCFShadowMap;
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#05090e');
-  scene.fog = new THREE.Fog('#05090e', 22, 48);
+  scene.background = new THREE.Color('#08131f');
+  scene.fog = new THREE.Fog('#0a1826', 23, 52);
 
   // a soft in-scene environment for reflections (no HDR file)
   {
@@ -180,8 +180,8 @@ export async function createFloor(host, opts) {
   }
 
   /* lights */
-  scene.add(new THREE.HemisphereLight('#bcd6ff', '#0b1210', phone ? 1.1 : 0.92));
-  const key = new THREE.DirectionalLight('#fff1e2', 2.0);
+  scene.add(new THREE.HemisphereLight('#cbe0ff', '#0c1720', phone ? 1.24 : 1.04));
+  const key = new THREE.DirectionalLight('#fff3e7', 2.15);
   key.position.set(-3, 16, 15);
   if (!phone) {
     key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
@@ -190,7 +190,7 @@ export async function createFloor(host, opts) {
   }
   scene.add(key);
   // hq6 face fill: the room stays dark while faces/hands remain legible.
-  const faceFill = new THREE.DirectionalLight('#c7ddff', phone ? 0.32 : 0.58); // hq6 face fill
+  const faceFill = new THREE.DirectionalLight('#d2e5ff', phone ? 0.42 : 0.68); // hq6 face fill
   faceFill.position.set(0, 7, 14); scene.add(faceFill);
   const sideFill = new THREE.DirectionalLight('#86c8ff', phone ? 0.14 : 0.26);
   sideFill.position.set(9, 4, 7); scene.add(sideFill);

@@ -1,0 +1,221 @@
+/* BETTOR EXPERIENCE V3
+ * Presentation-only layer for Command, Trading Floor and Trader Mode.
+ * No API, authority, order, cancel, funding, settlement, risk or profitability semantics.
+ */
+:root{
+  --v3-bg:#07111e;
+  --v3-bg2:#0b1829;
+  --v3-panel:rgba(13,28,47,.74);
+  --v3-panel-strong:rgba(15,33,55,.90);
+  --v3-line:rgba(157,201,244,.17);
+  --v3-line-strong:rgba(157,201,244,.34);
+  --v3-ink:#f3f8ff;
+  --v3-muted:#9db0c7;
+  --v3-cyan:#74e6ff;
+  --v3-blue:#78a7ff;
+  --v3-green:#55dfad;
+  --v3-amber:#efbd75;
+  --v3-red:#ff7f8a;
+  --v3-brass:#e6c391;
+  --v3-shadow:0 20px 60px rgba(0,0,0,.26);
+  --v3-radius:16px;
+  --v3-safe-bottom:max(14px,env(safe-area-inset-bottom));
+  --v3-safe-top:max(0px,env(safe-area-inset-top));
+}
+
+html.bt-exp-v3,body.bt-exp-v3{background:var(--v3-bg);}
+body.bt-exp-v3{color:var(--v3-ink);}
+body.bt-exp-v3 :focus-visible{outline:2px solid var(--v3-cyan)!important;outline-offset:3px!important;}
+body.bt-exp-v3 button,body.bt-exp-v3 a{touch-action:manipulation;}
+body.bt-exp-v3 .bt-v3-hidden{display:none!important;}
+
+/* Unified workspace switcher ------------------------------------------------ */
+.bt-v3-workspaces{display:flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--v3-line);border-radius:12px;background:rgba(6,15,27,.72);backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);box-shadow:0 8px 24px rgba(0,0,0,.12);}
+.bt-v3-workspaces a,.bt-v3-workspaces button{height:32px;min-width:72px;padding:0 11px;border:0;border-radius:8px;background:transparent;color:var(--v3-muted);display:inline-flex;align-items:center;justify-content:center;font:650 11px/1 "IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;letter-spacing:.11em;text-transform:uppercase;text-decoration:none;white-space:nowrap;}
+.bt-v3-workspaces a:hover,.bt-v3-workspaces button:hover{background:rgba(116,230,255,.07);color:var(--v3-ink);text-decoration:none;}
+.bt-v3-workspaces [aria-current="page"]{background:linear-gradient(180deg,rgba(116,230,255,.18),rgba(116,230,255,.06));color:var(--v3-ink);box-shadow:inset 0 -2px 0 var(--v3-cyan);}
+.bt-v3-workspaces .bt-v3-dot{width:6px;height:6px;border-radius:50%;background:var(--v3-cyan);box-shadow:0 0 10px var(--v3-cyan);margin-left:6px;}
+
+/* Command palette ---------------------------------------------------------- */
+#bt-v3-palette{position:fixed;inset:0;z-index:1000;display:none;place-items:start center;padding:12vh 18px;background:rgba(1,6,12,.60);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);}
+body.bt-v3-palette-open #bt-v3-palette{display:grid;}
+.bt-v3-palette-card{width:min(680px,100%);border:1px solid var(--v3-line-strong);border-radius:18px;background:linear-gradient(180deg,rgba(17,37,61,.98),rgba(8,20,35,.98));box-shadow:0 30px 100px rgba(0,0,0,.48);overflow:hidden;}
+.bt-v3-palette-head{display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid var(--v3-line);}
+.bt-v3-palette-head b{font:700 12px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.16em;text-transform:uppercase;}
+.bt-v3-palette-head span{margin-left:auto;color:var(--v3-muted);font:500 10px/1 "IBM Plex Mono",monospace;}
+.bt-v3-palette-list{display:grid;grid-template-columns:1fr 1fr;padding:8px;gap:4px;}
+.bt-v3-palette-list a{display:flex;flex-direction:column;gap:4px;padding:14px;border-radius:12px;color:var(--v3-ink);text-decoration:none;border:1px solid transparent;}
+.bt-v3-palette-list a:hover,.bt-v3-palette-list a:focus-visible{background:rgba(116,230,255,.08);border-color:var(--v3-line);text-decoration:none;}
+.bt-v3-palette-list b{font:650 15px/1.2 "IBM Plex Sans Condensed",sans-serif;}
+.bt-v3-palette-list small{font:500 10px/1.4 "IBM Plex Mono",monospace;color:var(--v3-muted);}
+
+/* Evidence drawer ---------------------------------------------------------- */
+#bt-v3-evidence{position:fixed;z-index:950;right:12px;top:72px;width:min(390px,calc(100vw - 24px));max-height:calc(100vh - 92px);display:none;flex-direction:column;border:1px solid var(--v3-line-strong);border-radius:16px;background:linear-gradient(180deg,rgba(16,34,56,.98),rgba(7,18,31,.98));box-shadow:var(--v3-shadow);overflow:hidden;}
+body.bt-v3-evidence-open #bt-v3-evidence{display:flex;}
+.bt-v3-evidence-head{display:flex;align-items:center;gap:10px;padding:14px 15px;border-bottom:1px solid var(--v3-line);}
+.bt-v3-evidence-head b{font:700 12px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.15em;text-transform:uppercase;}
+.bt-v3-evidence-head button{margin-left:auto;width:34px;height:34px;border:1px solid var(--v3-line);border-radius:9px;background:rgba(255,255,255,.03);color:var(--v3-ink);}
+.bt-v3-evidence-body{padding:14px 15px 18px;overflow:auto;}
+.bt-v3-evidence-grid{display:grid;grid-template-columns:108px minmax(0,1fr);gap:8px 10px;font:500 10px/1.45 "IBM Plex Mono",monospace;}
+.bt-v3-evidence-grid dt{color:var(--v3-muted);text-transform:uppercase;letter-spacing:.08em;}
+.bt-v3-evidence-grid dd{margin:0;color:var(--v3-ink);overflow-wrap:anywhere;}
+.bt-v3-evidence-snapshot{margin-top:14px;padding-top:13px;border-top:1px solid var(--v3-line);font:500 10px/1.55 "IBM Plex Mono",monospace;color:var(--v3-muted);white-space:pre-wrap;overflow-wrap:anywhere;}
+
+/* Global V3 action buttons ------------------------------------------------- */
+.bt-v3-actions{display:flex;align-items:center;gap:6px;}
+.bt-v3-action{height:34px;padding:0 11px;border:1px solid var(--v3-line);border-radius:9px;background:rgba(6,16,29,.62);color:var(--v3-muted);font:650 10px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.11em;text-transform:uppercase;}
+.bt-v3-action:hover{color:var(--v3-ink);border-color:var(--v3-line-strong);background:rgba(116,230,255,.08);}
+
+/* Pulse -------------------------------------------------------------------- */
+#bt-v3-pulse{position:fixed;left:50%;bottom:18px;z-index:80;transform:translateX(-50%);display:flex;align-items:center;gap:9px;max-width:min(720px,calc(100vw - 30px));padding:8px 11px;border:1px solid var(--v3-line);border-radius:999px;background:rgba(7,18,31,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 12px 40px rgba(0,0,0,.24);font:600 10px/1.2 "IBM Plex Mono",monospace;color:var(--v3-muted);pointer-events:none;}
+#bt-v3-pulse i{width:7px;height:7px;border-radius:50%;background:var(--v3-green);box-shadow:0 0 10px var(--v3-green);flex:none;}
+#bt-v3-pulse[data-tone="warn"] i{background:var(--v3-amber);box-shadow:0 0 10px var(--v3-amber);}
+#bt-v3-pulse[data-tone="bad"] i{background:var(--v3-red);box-shadow:0 0 10px var(--v3-red);}
+#bt-v3-pulse b{color:var(--v3-ink);font-weight:650;white-space:nowrap;}
+#bt-v3-pulse span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+
+/* COMMAND ------------------------------------------------------------------ */
+body.hq.bt-exp-v3{background:radial-gradient(120% 90% at 50% 16%,#173051 0,#0b1829 38%,#07111e 72%,#050b14 100%);}
+body.hq.bt-exp-v3 #hq-stage{background:radial-gradient(110% 80% at 50% 26%,#17355c 0,#0c1b2f 48%,#07111e 100%);}
+body.hq.bt-exp-v3 #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.46) 0,rgba(5,12,22,0) 130px),linear-gradient(0deg,rgba(5,12,22,.58) 0,rgba(5,12,22,0) 180px);}
+body.hq.bt-exp-v3 #hq-top{background:linear-gradient(180deg,rgba(7,17,30,.82),rgba(7,17,30,.42));backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);border-bottom:1px solid rgba(155,201,244,.08);}
+body.hq.bt-exp-v3 .ins{background:linear-gradient(180deg,rgba(18,37,61,.68),rgba(8,21,37,.55));border-color:var(--v3-line);box-shadow:0 14px 34px rgba(0,0,0,.12);}
+body.hq.bt-exp-v3 .ins:hover{border-color:rgba(157,201,244,.27);}
+body.hq.bt-exp-v3 .big{font-size:44px;letter-spacing:-.03em;}
+body.hq.bt-exp-v3 .hud-col.left{width:300px;}
+body.hq.bt-exp-v3 .hud-col.right{width:318px;}
+body.hq.bt-exp-v3 .view-command [data-render="capital"]{border-color:rgba(116,230,255,.28);box-shadow:0 18px 54px rgba(0,0,0,.18),inset 0 0 0 1px rgba(116,230,255,.03);}
+body.hq.bt-exp-v3 .view-command [data-render="attention"]{max-height:230px;overflow:auto;}
+body.hq.bt-exp-v3 .view-command [data-render="team"]{background:linear-gradient(180deg,rgba(15,32,52,.72),rgba(7,18,31,.57));}
+body.hq.bt-exp-v3 .mate{border-radius:9px;padding:7px 6px;}
+body.hq.bt-exp-v3 .mate:hover{background:rgba(116,230,255,.075);}
+body.hq.bt-exp-v3 .tag .box{border-radius:10px;clip-path:none;background:rgba(8,20,34,.80);box-shadow:0 10px 30px rgba(0,0,0,.15);}
+body.hq.bt-exp-v3 .cap-core{filter:drop-shadow(0 0 30px rgba(116,230,255,.22));}
+body.hq.bt-exp-v3 .curve path.line,body.hq.bt-exp-v3 .spark path.line{stroke:var(--v3-cyan);}
+body.hq.bt-exp-v3 .hq-foot{opacity:.68;}
+body.hq.bt-exp-v3.bt-v3-focus-mode .view-command [data-render="coverage"],
+body.hq.bt-exp-v3.bt-v3-focus-mode .view-command [data-render="tape"],
+body.hq.bt-exp-v3.bt-v3-focus-mode .view-command [data-render="funnel"]{opacity:.40;filter:saturate(.7);}
+body.hq.bt-exp-v3.bt-v3-focus-mode .view-command [data-render="capital"],
+body.hq.bt-exp-v3.bt-v3-focus-mode .view-command [data-render="attention"]{border-color:rgba(116,230,255,.36);}
+
+/* FLOOR -------------------------------------------------------------------- */
+body.fl.bt-exp-v3{background:radial-gradient(120% 80% at 50% 10%,#152b46 0,#091522 48%,#060d16 100%);}
+body.fl.bt-exp-v3 .fl-top{background:linear-gradient(180deg,rgba(9,20,34,.92),rgba(8,18,30,.78));border-bottom-color:var(--v3-line);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);}
+body.fl.bt-exp-v3 .fl-stage{background:radial-gradient(ellipse at 50% 25%,#17334e 0,#0b1827 48%,#06101a 100%);}
+body.fl.bt-exp-v3 .fl-wall .wall-screen,body.fl.bt-exp-v3 .fl-wallflow .wall-screen{border-color:rgba(116,230,255,.22);box-shadow:0 18px 50px rgba(0,0,0,.20),0 0 30px rgba(116,230,255,.04);}
+body.fl.bt-exp-v3 .fl-roster{background:rgba(7,17,29,.88);border-top-color:var(--v3-line);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);}
+body.fl.bt-exp-v3 .fl-agent{border-radius:12px;border-color:rgba(157,201,244,.10);background:rgba(255,255,255,.025);}
+body.fl.bt-exp-v3 .fl-agent:hover,body.fl.bt-exp-v3 .fl-agent[aria-current="true"]{background:rgba(116,230,255,.07);border-color:rgba(116,230,255,.24);}
+body.fl.bt-exp-v3 .fl-panel{background:linear-gradient(180deg,rgba(16,34,56,.97),rgba(7,18,31,.98));border-color:var(--v3-line-strong);box-shadow:0 24px 90px rgba(0,0,0,.42);}
+body.fl.bt-exp-v3 .fl-btn{min-height:38px;border-radius:9px;}
+body.fl.bt-exp-v3 .fl-title h1{letter-spacing:-.03em;}
+body.fl.bt-exp-v3 .fl-hint{opacity:.68;}
+
+/* TRADER ------------------------------------------------------------------- */
+body.bt-page-trader.bt-exp-v3{background:radial-gradient(120% 70% at 50% 0,#132d3f 0,#081923 46%,#061118 100%);color:#eef8f4;}
+body.bt-page-trader.bt-exp-v3 .topbar{background:rgba(7,18,25,.88)!important;border-bottom-color:rgba(116,213,180,.15)!important;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);}
+body.bt-page-trader.bt-exp-v3 .topbar nav a{color:#92aaa0;}
+body.bt-page-trader.bt-exp-v3 .topbar nav [aria-current]{color:#effaf5;border-color:#6fdeb5;}
+body.bt-page-trader.bt-exp-v3 main{max-width:1900px;}
+body.bt-page-trader.bt-exp-v3 .metrics{position:sticky;top:76px;z-index:25;background:rgba(8,24,30,.91)!important;border-color:rgba(112,214,181,.18)!important;backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 10px 36px rgba(0,0,0,.20)!important;}
+body.bt-page-trader.bt-exp-v3 .metric{border-color:rgba(112,214,181,.12)!important;}
+body.bt-page-trader.bt-exp-v3 .metric-value{font-size:27px;}
+body.bt-page-trader.bt-exp-v3 .brain-rail{border-color:rgba(112,214,181,.16);box-shadow:0 10px 30px rgba(0,0,0,.15);}
+body.bt-page-trader.bt-exp-v3 .brain-node{min-height:58px;}
+body.bt-page-trader.bt-exp-v3 .cockpit{height:320px;margin-bottom:18px;border-color:rgba(125,205,178,.18);background:linear-gradient(180deg,#19333a 0,#13272d 60%,#0c2026 100%);box-shadow:0 20px 54px rgba(0,0,0,.24);}
+body.bt-page-trader.bt-exp-v3 .architecture{opacity:.56;filter:saturate(.72) brightness(.72);}
+body.bt-page-trader.bt-exp-v3 .monitors{top:45px;height:205px;left:7%;right:7%;gap:12px;}
+body.bt-page-trader.bt-exp-v3 .monitor{height:188px;box-shadow:0 10px 28px rgba(0,0,0,.36),0 0 0 1px rgba(135,220,190,.10);}
+body.bt-page-trader.bt-exp-v3 .monitor-main{height:205px;}
+body.bt-page-trader.bt-exp-v3 .desk-surface{opacity:.40;height:58px;bottom:42px;}
+body.bt-page-trader.bt-exp-v3 .desk-caption{height:46px;background:rgba(8,24,28,.90);border-top-color:rgba(112,214,181,.15);color:#edf8f3;}
+body.bt-page-trader.bt-exp-v3 .desk-caption small,body.bt-page-trader.bt-exp-v3 .desk-source{color:#8aa79b;}
+body.bt-page-trader.bt-exp-v3 .workspace-toolbar{position:sticky;top:142px;z-index:23;padding:10px 0;background:linear-gradient(180deg,rgba(6,17,23,.96),rgba(6,17,23,.82));backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);}
+body.bt-page-trader.bt-exp-v3 .workspace{grid-template-columns:minmax(0,1fr) 290px;gap:16px;}
+body.bt-page-trader.bt-exp-v3 .position-wall{grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;}
+body.bt-page-trader.bt-exp-v3 .position-card{background:linear-gradient(180deg,rgba(12,31,35,.96),rgba(7,22,27,.96));border-color:rgba(112,214,181,.14);box-shadow:0 10px 30px rgba(0,0,0,.16);}
+body.bt-page-trader.bt-exp-v3 .position-card:hover{border-color:rgba(112,214,181,.30);box-shadow:0 14px 38px rgba(0,0,0,.24);}
+body.bt-page-trader.bt-exp-v3 .card-score{background:rgba(255,255,255,.035);}
+body.bt-page-trader.bt-exp-v3 .activity-panel{background:linear-gradient(180deg,rgba(10,27,31,.96),rgba(5,17,22,.96));border-color:rgba(112,214,181,.14);}
+body.bt-page-trader.bt-exp-v3.bt-v3-tape-collapsed .activity-panel{display:none;}
+body.bt-page-trader.bt-exp-v3.bt-v3-tape-collapsed .workspace{grid-template-columns:1fr;}
+body.bt-page-trader.bt-exp-v3.bt-v3-tape-collapsed .position-wall{grid-template-columns:repeat(5,minmax(0,1fr));}
+
+/* Tablet ------------------------------------------------------------------- */
+@media (max-width:1180px) and (min-width:761px){
+  body.hq.bt-exp-v3 .hud-col.left{width:270px;}
+  body.hq.bt-exp-v3 .hud-col.right{width:286px;}
+  body.bt-page-trader.bt-exp-v3 .workspace{grid-template-columns:1fr;}
+  body.bt-page-trader.bt-exp-v3 .activity-panel{position:static;}
+  body.bt-page-trader.bt-exp-v3 .position-wall{grid-template-columns:repeat(3,minmax(0,1fr));}
+  body.bt-page-trader.bt-exp-v3 .workspace-toolbar{top:140px;}
+}
+@media (min-width:900px) and (max-width:1180px) and (orientation:landscape){
+  body.bt-page-trader.bt-exp-v3 .position-wall{grid-template-columns:repeat(4,minmax(0,1fr));}
+}
+
+/* Mobile Command: the real WebGL HQ remains visible ----------------------- */
+@media (max-width:760px){
+  #bt-v3-pulse{left:12px;right:12px;bottom:calc(72px + var(--v3-safe-bottom));transform:none;max-width:none;border-radius:12px;}
+  #bt-v3-pulse b{font-size:9px;}
+  .bt-v3-palette-list{grid-template-columns:1fr;}
+  .bt-v3-workspaces a,.bt-v3-workspaces button{min-width:0;flex:1;height:38px;padding:0 8px;font-size:10px;}
+  #bt-v3-evidence{top:auto;right:8px;left:8px;bottom:calc(8px + var(--v3-safe-bottom));width:auto;max-height:78vh;}
+  .bt-v3-evidence-grid{grid-template-columns:90px minmax(0,1fr);}
+
+  body.hq.bt-exp-v3{background:radial-gradient(140% 70% at 50% 0,#17365d 0,#0b192b 50%,#07111e 100%) fixed;}
+  body.hq.bt-exp-v3 #hq-stage{display:none!important;}
+  body.hq.bt-exp-v3[data-view="command"] #hq-stage{display:block!important;position:fixed;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}
+  body.hq.bt-exp-v3[data-view="command"] #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.16),rgba(5,12,22,0) 50%,rgba(5,12,22,.78) 100%);}
+  body.hq.bt-exp-v3[data-view="command"] main#hq-hud{padding-top:calc(48svh + 10px);}
+  body.hq.bt-exp-v3[data-view="command"] .view-command [data-render="capital"]{background:linear-gradient(180deg,rgba(17,37,61,.90),rgba(8,21,37,.88));}
+  body.hq.bt-exp-v3 #hq-top{background:rgba(7,17,30,.84);}
+  body.hq.bt-exp-v3 .big{font-size:42px;}
+  body.hq.bt-exp-v3 .team{gap:7px;scroll-padding:14px;}
+  body.hq.bt-exp-v3 .mate{min-width:128px;border-radius:12px;background:rgba(15,31,50,.76);}
+  body.hq.bt-exp-v3 #hq-desk .ins{background:linear-gradient(180deg,rgba(16,34,56,.99),rgba(7,18,31,.99));border-top:1px solid var(--v3-line-strong);border-radius:18px 18px 0 0;}
+
+  body.fl.bt-exp-v3 .fl-screen{min-height:100svh;}
+  body.fl.bt-exp-v3 .fl-top{padding:8px 12px;min-height:58px;}
+  body.fl.bt-exp-v3 .fl-title{display:none;}
+  body.fl.bt-exp-v3 .fl-tools{gap:5px;}
+  body.fl.bt-exp-v3 .fl-tools .fl-btn{min-width:42px;padding:0 9px;font-size:10px;}
+  body.fl.bt-exp-v3 .fl-stage{height:68svh;min-height:470px;border-bottom:1px solid var(--v3-line);}
+  body.fl.bt-exp-v3 .fl-wallflow{padding:10px 10px 0;}
+  body.fl.bt-exp-v3 .fl-roster{display:flex!important;grid-template-columns:none!important;gap:7px;overflow-x:auto;overflow-y:hidden;padding:8px 10px 10px;min-height:84px;scroll-snap-type:x mandatory;scrollbar-width:none;}
+  body.fl.bt-exp-v3 .fl-roster::-webkit-scrollbar{display:none;}
+  body.fl.bt-exp-v3 .fl-agent{flex:0 0 132px;min-width:132px;scroll-snap-align:start;padding:8px;}
+  body.fl.bt-exp-v3 .fl-panel{left:6px;right:6px;bottom:calc(6px + env(safe-area-inset-bottom));max-height:72svh;border-radius:18px;}
+  body.fl.bt-exp-v3 .fl-hint{left:12px;right:12px;bottom:10px;text-align:center;font-size:10px;}
+  body.fl.bt-exp-v3 .fl-foot{font-size:10px;}
+
+  body.bt-page-trader.bt-exp-v3 main{padding:16px 12px 20px;}
+  body.bt-page-trader.bt-exp-v3 .topbar{height:58px;padding:0 12px;}
+  body.bt-page-trader.bt-exp-v3 .metrics{top:58px;grid-template-columns:repeat(3,1fr);margin-bottom:12px;}
+  body.bt-page-trader.bt-exp-v3 .metric-value{font-size:22px;}
+  body.bt-page-trader.bt-exp-v3 .brain-rail{overflow-x:auto;display:flex;scroll-snap-type:x mandatory;scrollbar-width:none;}
+  body.bt-page-trader.bt-exp-v3 .brain-node{flex:0 0 44vw;scroll-snap-align:start;}
+  body.bt-page-trader.bt-exp-v3 .cockpit{height:312px;padding:0;margin-bottom:14px;}
+  body.bt-page-trader.bt-exp-v3 .cockpit-topline{z-index:8;}
+  body.bt-page-trader.bt-exp-v3 .monitors{position:relative;left:auto;right:auto;top:auto;height:228px;padding:42px 12px 0;display:flex!important;gap:9px;overflow-x:auto;overflow-y:hidden;scroll-snap-type:x mandatory;scroll-padding:12px;scrollbar-width:none;perspective:none;align-items:stretch;}
+  body.bt-page-trader.bt-exp-v3 .monitors::-webkit-scrollbar{display:none;}
+  body.bt-page-trader.bt-exp-v3 .monitor,body.bt-page-trader.bt-exp-v3 .monitor-left,body.bt-page-trader.bt-exp-v3 .monitor-main,body.bt-page-trader.bt-exp-v3 .monitor-right{display:block!important;flex:0 0 82vw;height:185px;transform:none!important;scroll-snap-align:center;}
+  body.bt-page-trader.bt-exp-v3 .monitor-neck,body.bt-page-trader.bt-exp-v3 .monitor-base,body.bt-page-trader.bt-exp-v3 .desk-surface{display:none;}
+  body.bt-page-trader.bt-exp-v3 .desk-caption{height:44px;padding:0 11px;}
+  body.bt-page-trader.bt-exp-v3 .workspace-toolbar{position:static;padding:8px 0;background:transparent;}
+  body.bt-page-trader.bt-exp-v3 .position-wall,body.bt-page-trader.bt-exp-v3.bt-v3-tape-collapsed .position-wall{grid-template-columns:1fr;}
+  body.bt-page-trader.bt-exp-v3 .activity-panel{margin-top:0;}
+  body.bt-page-trader.bt-exp-v3.bt-v3-tape-collapsed .activity-panel{display:none;}
+}
+
+@media (max-width:430px){
+  body.hq.bt-exp-v3[data-view="command"] #hq-stage{height:44svh;}
+  body.hq.bt-exp-v3[data-view="command"] main#hq-hud{padding-top:calc(44svh + 8px);}
+  body.fl.bt-exp-v3 .fl-stage{height:64svh;min-height:430px;}
+  body.bt-page-trader.bt-exp-v3 .monitor,body.bt-page-trader.bt-exp-v3 .monitor-left,body.bt-page-trader.bt-exp-v3 .monitor-main,body.bt-page-trader.bt-exp-v3 .monitor-right{flex-basis:86vw;}
+}
+
+@media (prefers-reduced-motion:reduce){
+  body.bt-exp-v3 *,body.bt-exp-v3 *::before,body.bt-exp-v3 *::after{scroll-behavior:auto!important;animation:none!important;transition:none!important;}
+}

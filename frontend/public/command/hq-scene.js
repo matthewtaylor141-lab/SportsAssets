@@ -114,7 +114,7 @@ export async function createHQ(host, opts) {
   renderer.setPixelRatio(dpr);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.22;
+  renderer.toneMappingExposure = 1.34;
   renderer.shadowMap.enabled = HIGH;
   renderer.shadowMap.type = THREE.PCFShadowMap;
   renderer.shadowMap.autoUpdate = false;
@@ -125,8 +125,8 @@ export async function createHQ(host, opts) {
   host.insertBefore(canvas, host.firstChild);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color('#081325');
-  scene.fog = new THREE.FogExp2('#0a1628', phone ? 0.011 : 0.0085);
+  scene.background = new THREE.Color('#0b1b31');
+  scene.fog = new THREE.FogExp2('#10243d', phone ? 0.0105 : 0.0080);
   const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 220);
   camera.layers.enable(LAYER_NO_REFLECT);
 
@@ -231,8 +231,8 @@ export async function createHQ(host, opts) {
   }
 
   /* ── lights ────────────────────────────────────────────────────── */
-  scene.add(new THREE.HemisphereLight('#6c88b8', '#0c121c', phone ? 1.2 : 0.85));
-  const key = new THREE.DirectionalLight('#d6e4ff', HIGH ? 1.1 : 1.6);
+  scene.add(new THREE.HemisphereLight('#86a6d6', '#101b2a', phone ? 1.35 : 1.02));
+  const key = new THREE.DirectionalLight('#e0ebff', HIGH ? 1.28 : 1.72);
   key.position.set(8, 22, 6);
   if (HIGH) {
     key.castShadow = true; key.shadow.mapSize.set(2048, 2048);
@@ -244,8 +244,8 @@ export async function createHQ(host, opts) {
   wallSpill.position.set(0, 8, -15); wallSpill.target.position.set(0, 0, -2); scene.add(wallSpill, wallSpill.target);
   const coreLight = new THREE.PointLight('#6f9bff', 12, 12, 1.8); coreLight.position.set(0, 2.6, 0); scene.add(coreLight);
   // the ceiling wash: a broad, cool fill so the room reads as architecture, not a cave
-  const wash = new THREE.PointLight('#b9cdf0', HIGH ? 60 : 45, 38, 1.4); wash.position.set(0, 12.5, 1); scene.add(wash);
-  const front = new THREE.SpotLight('#cfe0ff', HIGH ? 70 : 55, 46, 0.75, 0.8, 1.2); front.position.set(0, 13, 16); front.target.position.set(0, 0.5, -3); scene.add(front, front.target);
+  const wash = new THREE.PointLight('#c4d8f7', HIGH ? 72 : 55, 38, 1.4); wash.position.set(0, 12.5, 1); scene.add(wash);
+  const front = new THREE.SpotLight('#d8e8ff', HIGH ? 84 : 66, 46, 0.75, 0.8, 1.2); front.position.set(0, 13, 16); front.target.position.set(0, 0.5, -3); scene.add(front, front.target);
 
   /* ── the floor: polished stone with real-time reflection (desktop) ─ */
   const floorTex = (() => {
