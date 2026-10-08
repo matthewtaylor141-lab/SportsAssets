@@ -26,6 +26,11 @@ on:
         description: "branch or 40-hex commit whose frontend is previewed"
         required: true
         type: string
+      recipient:
+        description: "age X25519 recipient (age1...): screenshots are encrypted to it; blank = screenshots are not uploaded (this repository is public)"
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -114,6 +119,27 @@ jobs:
               exit 1
             fi
           fi
+      - name: Screenshots never leave in the clear (public repository)
+        if: always()
+        env:
+          RCPT: ${{ inputs.recipient }}
+        run: |
+          mkdir -p out
+          shopt -s nullglob
+          imgs=(out/shots out/trader)
+          if [ -n "$RCPT" ] && echo "$RCPT" | grep -Eq '^age1[02-9ac-hj-np-z]{58}$'; then
+            curl -sSL --max-time 120 -o "$RUNNER_TEMP/age.tgz" https://github.com/FiloSottile/age/releases/download/v1.2.1/age-v1.2.1-linux-amd64.tar.gz
+            echo "7df45a6cc87d4da11cc03a539a7470c15b1041ab2b396af088fe9990f7c79d50  $RUNNER_TEMP/age.tgz" | sha256sum -c -
+            tar -C "$RUNNER_TEMP" --strip-components=1 -xzf "$RUNNER_TEMP/age.tgz" age/age
+            tar -cf "$RUNNER_TEMP/shots.tar" -C out $(cd out && ls -d shots trader 2>/dev/null)
+            "$RUNNER_TEMP/age" -r "$RCPT" -o out/screenshots.tar.age "$RUNNER_TEMP/shots.tar"
+            head -c 21 out/screenshots.tar.age | grep -q '^age-encryption.org/v1' || { rm -f out/screenshots.tar.age; echo "encryption check failed"; }
+            shred -u "$RUNNER_TEMP/shots.tar" 2>/dev/null || true
+          else
+            echo "no recipient: screenshots are not uploaded"
+          fi
+          rm -rf out/shots out/trader
+          ls out
       - uses: actions/upload-artifact@v4
         if: always()
         with:
