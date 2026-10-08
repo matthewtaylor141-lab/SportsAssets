@@ -1,0 +1,126 @@
+name: platform-capture
+
+# A READ-ONLY SCREEN RECORDING OF THE REAL COMMAND FRONTEND, ENCRYPTED.
+#
+# The target ref's frontend is built as Netlify builds it and served with
+# the read-only preview server (.github/frontend-preview/serve.js: GET/HEAD
+# only, the read token added server side, never in the page). capture.js
+# either discovers the routes (screenshots, clickable elements, headings) or
+# records a walkthrough plan from Chromium's own compositor frames.
+#
+# THIS REPOSITORY IS PUBLIC, so nothing readable leaves the runner: every
+# output is encrypted to the RSA public key given as an input (AES-256 data
+# key, RSA-OAEP wrapped); only the holder of the private key can open the
+# artifact. The logs carry step names and timings only. Nothing is deployed;
+# production (command.bettortoken.com) is untouched.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "branch or 40-hex commit whose frontend is recorded"
+        required: true
+        type: string
+      mode:
+        description: "discover or record"
+        required: true
+        type: choice
+        options: [discover, record]
+      plan:
+        description: "record mode: plan file under .github/frontend-preview/plans/ (harness ref)"
+        required: false
+        type: string
+      pubkey_b64:
+        description: "base64 of the PEM RSA public key every output is encrypted to"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Harness (this ref)
+        uses: actions/checkout@v4
+        with:
+          path: harness
+      - name: Target ref
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          path: target
+          fetch-depth: 1
+      - name: Recipient key
+        env:
+          PUB: ${{ inputs.pubkey_b64 }}
+        run: |
+          echo "$PUB" | base64 -d > "$RUNNER_TEMP/pub.pem"
+          openssl pkey -pubin -in "$RUNNER_TEMP/pub.pem" -noout -text | head -1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Build the target frontend (as Netlify does)
+        working-directory: target/frontend
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+          echo "target $(git -C .. rev-parse HEAD)"
+      - name: Playwright (Chromium) and ffmpeg
+        run: |
+          mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
+          npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
+          npx playwright install --with-deps chromium >/dev/null 2>&1
+          which ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg >/dev/null)
+          ffmpeg -hide_banner -version | head -1
+      - name: Serve and capture (read only)
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          MODE: ${{ inputs.mode }}
+          PLAN: ${{ inputs.plan }}
+        run: |
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          mkdir -p cap
+          git -C target rev-parse HEAD > cap/target_sha.txt
+          node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 cap &
+          SERVER=$!
+          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
+          P=""
+          if [ "$MODE" = record ]; then
+            case "$PLAN" in *[!A-Za-z0-9._-]*|"") echo "plan name refused"; exit 1;; esac
+            P="harness/.github/frontend-preview/plans/$PLAN"
+            test -f "$P"
+          fi
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/capture.js http://127.0.0.1:8787 cap "$MODE" "$P"
+          curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
+          kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
+          if [ "$MODE" = record ]; then
+            python3 harness/.github/frontend-preview/assemble.py cap capture.mp4
+            mv cap/capture.mp4 capture.mp4
+            ffprobe -v error -show_entries format=duration:stream=width,height,codec_name,pix_fmt -of compact capture.mp4
+            rm -rf cap/frames cap/frames.ffconcat
+            mv capture.mp4 cap/
+          fi
+          du -sh cap
+      - name: Encrypt every output to the recipient key
+        run: |
+          tar -C cap -cf capture.tar .
+          rm -rf cap
+          openssl rand 32 > datakey.bin
+          openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt -in capture.tar -out capture.tar.enc -pass file:datakey.bin
+          openssl pkeyutl -encrypt -pubin -inkey "$RUNNER_TEMP/pub.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -in datakey.bin -out datakey.bin.enc
+          sha256sum capture.tar | cut -d' ' -f1 > capture.tar.sha256
+          shred -u datakey.bin capture.tar 2>/dev/null || rm -f datakey.bin capture.tar
+          mkdir enc && mv capture.tar.enc datakey.bin.enc capture.tar.sha256 enc/
+          ls -la enc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: platform-capture-${{ github.run_id }}
+          path: enc
+          retention-days: 3

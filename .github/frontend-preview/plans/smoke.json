@@ -1,0 +1,13 @@
+[
+ {"chapter": "smoke: Command then a real click into the Floor"},
+ {"goto": "/", "settle": 8000},
+ {"wait": 3000},
+ {"moveTo": [960, 400], "ms": 1200},
+ {"scroll": {"dy": 500, "ms": 2500}},
+ {"wait": 2000},
+ {"scrollTop": 1500},
+ {"click": {"sel": "a[href='/floor'], a[href='floor.html'], a[href$='/floor']"}, "after": 9000, "optional": true},
+ {"wait": 6000},
+ {"drag": [1100, 600, 800, 560], "ms": 2000, "optional": true},
+ {"wait": 3000}
+]
