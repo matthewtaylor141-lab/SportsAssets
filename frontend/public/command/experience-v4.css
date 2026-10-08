@@ -31,7 +31,7 @@ body.bt-exp-v4 .bt-v4-hidden{display:none!important;}
 
 /* Unified workspace switcher ------------------------------------------------ */
 .bt-v4-workspaces{display:flex;align-items:center;gap:3px;padding:4px;border:1px solid var(--v3-line);border-radius:12px;background:rgba(6,15,27,.72);backdrop-filter:blur(16px) saturate(1.2);-webkit-backdrop-filter:blur(16px) saturate(1.2);box-shadow:0 8px 24px rgba(0,0,0,.12);}
-.bt-v4-workspaces a,.bt-v4-workspaces button{height:32px;min-width:72px;padding:0 11px;border:0;border-radius:8px;background:transparent;color:var(--v3-muted);display:inline-flex;align-items:center;justify-content:center;font:650 11px/1 "IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;letter-spacing:.11em;text-transform:uppercase;text-decoration:none;white-space:nowrap;}
+.bt-v4-workspaces a:not(.bt-trader-launch),.bt-v4-workspaces button{height:32px;min-width:72px;padding:0 11px;border:0;border-radius:8px;background:transparent;color:var(--v3-muted);display:inline-flex;align-items:center;justify-content:center;font:650 11px/1 "IBM Plex Sans Condensed","IBM Plex Sans",system-ui,sans-serif;letter-spacing:.11em;text-transform:uppercase;text-decoration:none;white-space:nowrap;}
 .bt-v4-workspaces a:hover,.bt-v4-workspaces button:hover{background:rgba(116,230,255,.07);color:var(--v3-ink);text-decoration:none;}
 .bt-v4-workspaces [aria-current="page"]{background:linear-gradient(180deg,rgba(116,230,255,.18),rgba(116,230,255,.06));color:var(--v3-ink);box-shadow:inset 0 -2px 0 var(--v3-cyan);}
 .bt-v4-workspaces .bt-v4-dot{width:6px;height:6px;border-radius:50%;background:var(--v3-cyan);box-shadow:0 0 10px var(--v3-cyan);margin-left:6px;}
@@ -44,8 +44,9 @@ body.bt-v4-palette-open #bt-v4-palette{display:grid;}
 .bt-v4-palette-head b{font:700 12px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.16em;text-transform:uppercase;}
 .bt-v4-palette-head span{margin-left:auto;color:var(--v3-muted);font:500 10px/1 "IBM Plex Mono",monospace;}
 .bt-v4-palette-list{display:grid;grid-template-columns:1fr 1fr;padding:8px;gap:4px;}
-.bt-v4-palette-list a{display:flex;flex-direction:column;gap:4px;padding:14px;border-radius:12px;color:var(--v3-ink);text-decoration:none;border:1px solid transparent;}
-.bt-v4-palette-list a:hover,.bt-v4-palette-list a:focus-visible{background:rgba(116,230,255,.08);border-color:var(--v3-line);text-decoration:none;}
+.bt-v4-palette-list a,.bt-v4-palette-list button{display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:14px;border-radius:12px;color:var(--v3-ink);text-decoration:none;border:1px solid transparent;background:transparent;text-align:left;cursor:pointer;}
+.bt-v4-palette-list a:hover,.bt-v4-palette-list a:focus-visible,.bt-v4-palette-list button:hover,.bt-v4-palette-list button:focus-visible{background:rgba(116,230,255,.08);border-color:var(--v3-line);text-decoration:none;}
+.bt-v4-palette-list button[aria-pressed="true"]{border-color:var(--v3-line-strong);}
 .bt-v4-palette-list b{font:650 15px/1.2 "IBM Plex Sans Condensed",sans-serif;}
 .bt-v4-palette-list small{font:500 10px/1.4 "IBM Plex Mono",monospace;color:var(--v3-muted);}
 
@@ -65,6 +66,17 @@ body.bt-v4-evidence-open #bt-v4-evidence{display:flex;}
 .bt-v4-actions{display:flex;align-items:center;gap:6px;}
 .bt-v4-action{height:34px;padding:0 11px;border:1px solid var(--v3-line);border-radius:9px;background:rgba(6,16,29,.62);color:var(--v3-muted);font:650 10px/1 "IBM Plex Sans Condensed",sans-serif;letter-spacing:.11em;text-transform:uppercase;}
 .bt-v4-action:hover{color:var(--v3-ink);border-color:var(--v3-line-strong);background:rgba(116,230,255,.08);}
+/* Command: the full action row lives in flow at the end of the HUD on phones only (see actionButtons) */
+.bt-v4-actions--flow{display:none;}
+@media (max-width:760px){
+  body.hq .bt-v4-actions--flow{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px;}
+}
+/* touch: every control this layer adds (or restyles) is at least 44 x 44 px where the pointer is coarse */
+@media (pointer:coarse){
+  .bt-v4-action,.bt-v4-workspaces a,.bt-v4-workspaces button,#bt-v4-trader-rail button,.bt-v4-camera-bar button,
+  .bt-v4-broadcast-top button,.bt-v4-evidence-head button,.bt-v4-palette-list a,.bt-v4-palette-list button,
+  body.bt-page-trader.bt-exp-v4 .tiny-button.bt-v4-broadcast-button{min-height:44px;min-width:44px;}
+}
 
 /* Pulse -------------------------------------------------------------------- */
 #bt-v4-pulse{position:fixed;left:50%;bottom:18px;z-index:80;transform:translateX(-50%);display:flex;align-items:center;gap:9px;max-width:min(720px,calc(100vw - 30px));padding:8px 11px;border:1px solid var(--v3-line);border-radius:999px;background:rgba(7,18,31,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);box-shadow:0 12px 40px rgba(0,0,0,.24);font:600 10px/1.2 "IBM Plex Mono",monospace;color:var(--v3-muted);pointer-events:none;}

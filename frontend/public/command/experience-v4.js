@@ -22,7 +22,8 @@
   body.setAttribute('data-experience','BETTOR_EXPERIENCE_V4');
 
   var routes={
-    command:{href:'/command/',label:'Command'},
+    // on command.bettortoken.com Command is "/" (the host rule maps /* to /command/:splat, so "/command/" 404s)
+    command:{href:'/',label:'Command'},
     floor:{href:'/floor',label:'Floor'},
     trader:{href:'/trader',label:'Trader'}
   };
@@ -43,7 +44,9 @@
       var hq=q('#hq-nav');
       if(hq){
         hq.classList.add('bt-v4-workspaces');
-        if(!q('[data-v4-trader]',hq)){
+        // command-polish.js already gives Command its one Trader Mode link (in this nav on desktop, docked on
+        // phones): a second 'Trader' entry duplicated it and pushed the status pills off the top bar
+        if(!q('[data-v4-trader]',hq)&&!q('a.bt-trader-launch,a[href="/trader"]')){
           var a=doc.createElement('a');
           a.href='/trader';a.textContent='Trader';a.setAttribute('data-v4-trader','');
           hq.appendChild(a);
@@ -77,7 +80,13 @@
     if(page==='trader'){
       var tape=doc.createElement('button');tape.className='bt-v4-action';tape.type='button';tape.textContent='Tape';tape.setAttribute('aria-pressed','true');tape.setAttribute('data-v4-tape-toggle','');box.appendChild(tape);
     }
-    var host=page==='command'?q('#hq-top'):(page==='floor'?q('.fl-tools'):q('.top-right'));
+    // Not in the crowded top bars: there they pushed the logo and the PAPER / SMALL LIVE SHADOW labels off
+    // screen on phones (CI preview run 37783164445) and, at 1440 px, the SHADOW pill off the right edge
+    // (production's Command bar has ~20 px to spare). Trader: the in-flow heading controls (they wrap at any
+    // width). Command: in flow at the end of the HUD, shown on phones; on wider screens the palette (with
+    // Evidence and Focus entries) opens with Cmd/Ctrl+K.
+    var host=page==='command'?q('#hq-hud'):(page==='floor'?q('.fl-tools'):(q('.heading-controls')||q('.top-right')));
+    if(page==='command') box.classList.add('bt-v4-actions--flow');
     if(host) host.appendChild(box);
   }
 
@@ -85,12 +94,14 @@
     var root=doc.createElement('div');root.id='bt-v4-palette';root.setAttribute('aria-hidden','true');
     root.innerHTML='<div class="bt-v4-palette-card" role="dialog" aria-modal="true" aria-label="BETTOR workspace palette">'+
       '<div class="bt-v4-palette-head"><b>BETTOR · Jump anywhere</b><span>Esc to close</span></div><div class="bt-v4-palette-list">'+
-      '<a href="/command/"><b>Command</b><small>Executive state · capital · risk · readiness</small></a>'+
+      '<a href="/"><b>Command</b><small>Executive state · capital · risk · readiness</small></a>'+
       '<a href="/floor"><b>Trading Floor</b><small>3D autonomous company · desks · collaboration</small></a>'+
       '<a href="/trader"><b>Trader Mode</b><small>Xavier · positions · protection · standing orders</small></a>'+
-      '<a href="/command/#markets"><b>Markets</b><small>Coverage · opportunity funnel · allocator view</small></a>'+
-      '<a href="/command/#capital"><b>Capital / Risk</b><small>Management epoch · exposure · concentration</small></a>'+
-      '<a href="/command/#reports"><b>Reports</b><small>Management briefing · evidence · release state</small></a>'+
+      '<a href="/#markets"><b>Markets</b><small>Coverage · opportunity funnel · allocator view</small></a>'+
+      '<a href="/#capital"><b>Capital / Risk</b><small>Management epoch · exposure · concentration</small></a>'+
+      '<a href="/#reports"><b>Reports</b><small>Management briefing · evidence · release state</small></a>'+
+      '<button type="button" data-v4-evidence-toggle><b>Evidence</b><small>Visible state of this page · nothing fetched</small></button>'+
+      (page==='command'?'<button type="button" data-v4-focus-toggle aria-pressed="false"><b>Focus</b><small>Dim coverage, tape and funnel · capital and attention stay</small></button>':'')+
       '</div></div>';
     body.appendChild(root);
     root.addEventListener('click',function(e){if(e.target===root) closePalette();});
@@ -170,9 +181,9 @@
 
   function wire(){
     doc.addEventListener('click',function(e){
-      if(e.target.closest('[data-v4-evidence-toggle]')){e.preventDefault();evidenceSnapshot();body.classList.toggle('bt-v4-evidence-open');return;}
+      if(e.target.closest('[data-v4-evidence-toggle]')){e.preventDefault();closePalette();evidenceSnapshot();body.classList.toggle('bt-v4-evidence-open');return;}
       if(e.target.closest('[data-v4-palette-toggle]')){e.preventDefault();openPalette();return;}
-      var f=e.target.closest('[data-v4-focus-toggle]');if(f){var on=!body.classList.contains('bt-v4-focus-mode');body.classList.toggle('bt-v4-focus-mode',on);f.setAttribute('aria-pressed',String(on));return;}
+      var f=e.target.closest('[data-v4-focus-toggle]');if(f){var on=!body.classList.contains('bt-v4-focus-mode');body.classList.toggle('bt-v4-focus-mode',on);qa('[data-v4-focus-toggle]').forEach(function(x){x.setAttribute('aria-pressed',String(on));});closePalette();return;}
       var t=e.target.closest('[data-v4-tape-toggle]');if(t){var show=body.classList.contains('bt-v4-tape-collapsed');body.classList.toggle('bt-v4-tape-collapsed',!show);t.setAttribute('aria-pressed',String(show));return;}
     });
     doc.addEventListener('keydown',function(e){

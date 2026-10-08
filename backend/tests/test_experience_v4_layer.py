@@ -156,3 +156,95 @@ def test_pulse_tone_is_never_a_default_green():
     # the Command echo of #hq-alert (CRITICAL items only) is always bad
     assert "if(crit) return ['Attention',crit,'bad'];" in src
     assert "#bt-v4-pulse[data-tone=\"neutral\"] i{background:var(--v3-muted);box-shadow:none;}" in css()
+
+
+# --- top bars, links and touch targets ------------------------------------
+#
+# Integrator findings (3) and (4), CI preview run 37783164445 (V3 = V4's
+# code): on iPhone Command the Evidence / cmd-K / Focus buttons pushed the
+# header so the BETTOR logo and the SMALL LIVE SHADOW badge were clipped; on
+# iPhone Trader the buttons were pushed off-screen ('EVIDE...'); the added
+# controls were 32-34 px tall on touch devices. Locally (synthetic reads):
+# desktop 1440 px Command header overflowed by 27 px and pushed the SMALL
+# LIVE SHADOW pill off-screen (it fits without V4); V4 also appended a
+# second 'Trader' link beside command-polish.js's 'Trader Mode', and its
+# palette linked to "/command/...", which on command.bettortoken.com (host
+# rule /* -> /command/:splat) is /command/command/ -> 404.
+
+
+def _command_host_resolves(path: str) -> bool:
+    """Apply netlify.toml's [[redirects]] for command.bettortoken.com in order
+    and report whether the result is a committed file (directories serve
+    index.html). Mirrors .github/frontend-preview/serve.js."""
+    import tomllib
+    rules = tomllib.loads((ROOT / "netlify.toml").read_text())["redirects"]
+    host = "https://command.bettortoken.com"
+    p = path.split("#", 1)[0].split("?", 1)[0] or "/"
+    for r in rules:
+        frm, to = r["from"], r["to"]
+        if frm.startswith(host):
+            frm = frm[len(host):] or "/"
+        elif frm.startswith("http"):
+            continue
+        if frm.endswith("/*"):
+            base = frm[:-1]
+            if p.startswith(base):
+                splat = p[len(base):]
+            elif p + "/" == base:
+                splat = ""
+            else:
+                continue
+        elif frm == p:
+            splat = ""
+        else:
+            continue
+        if to.startswith("http"):
+            return True  # proxied (the API)
+        p = to.replace(":splat", splat)
+        break
+    f = ROOT / "frontend" / "public" / p.lstrip("/")
+    if f.is_dir():
+        f = f / "index.html"
+    return f.is_file()
+
+
+def test_every_v4_link_resolves_on_the_command_host():
+    src = js()
+    hrefs = set(re.findall(r"""href=\"(/[^\"]*)\"""", src)) | set(re.findall(r"href:'(/[^']*)'", src))
+    assert "/" in hrefs and "/floor" in hrefs and "/trader" in hrefs
+    assert not [h for h in hrefs if h.startswith("/command/")], hrefs
+    bad = [h for h in sorted(hrefs) if not _command_host_resolves(h)]
+    assert not bad, bad
+    # the resolver itself must reject what was broken
+    assert not _command_host_resolves("/command/")
+
+
+def test_no_second_trader_link_beside_command_polish():
+    src = js()
+    assert "if(!q('[data-v4-trader]',hq)&&!q('a.bt-trader-launch,a[href=\"/trader\"]')){" in src
+
+
+def test_actions_are_not_appended_to_the_crowded_top_bars():
+    src = js()
+    assert "var host=page==='command'?q('#hq-hud'):(page==='floor'?q('.fl-tools'):(q('.heading-controls')||q('.top-right')));" in src
+    assert "if(page==='command') box.classList.add('bt-v4-actions--flow');" in src
+    # the original appended the row to #hq-top / .top-right
+    assert "var host=page==='command'?q('#hq-top'):(page==='floor'?q('.fl-tools'):q('.top-right'));" not in src
+    # Evidence and Focus stay reachable from the palette (Cmd/Ctrl+K) where the row is not shown
+    assert "data-v4-evidence-toggle><b>Evidence</b>" in src and "data-v4-focus-toggle aria-pressed=\"false\"><b>Focus</b>" in src
+    sheet = css()
+    assert ".bt-v4-actions--flow{display:none;}" in sheet
+    assert "body.hq .bt-v4-actions--flow{display:flex;" in sheet
+    # V4's switcher restyle leaves command-polish's Trader Mode link at its own size (it widened the bar 13 px)
+    assert ".bt-v4-workspaces a:not(.bt-trader-launch),.bt-v4-workspaces button{height:32px;" in sheet
+
+
+def test_added_controls_are_44px_on_coarse_pointers():
+    sheet = css()
+    block = sheet[sheet.index("@media (pointer:coarse){"):]
+    block = block[:block.index("}\n}") + 3]
+    for sel in (".bt-v4-action", ".bt-v4-workspaces a", "#bt-v4-trader-rail button", ".bt-v4-camera-bar button",
+                ".bt-v4-broadcast-top button", ".bt-v4-evidence-head button", ".tiny-button.bt-v4-broadcast-button",
+                ".bt-v4-palette-list a", ".bt-v4-palette-list button"):
+        assert sel in block, sel
+    assert "min-height:44px;min-width:44px;" in block
