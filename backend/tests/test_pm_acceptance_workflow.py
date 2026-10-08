@@ -75,7 +75,7 @@ def test_the_post_step_runs_only_on_on_and_only_through_the_sender():
     st = _step("POST the release receipt")
     assert st["if"] == "${{ inputs.post_receipt == 'on' }}"
     assert st["env"]["POST_RECEIPT"] == "${{ inputs.post_receipt }}"
-    assert "python3 -I .github/pm-acceptance/post_receipt.py acc" in \
+    assert "python3 -I judge/.github/pm-acceptance/post_receipt.py acc" in \
         st["run"]
     assert "continue-on-error" not in st
 
@@ -201,7 +201,8 @@ def test_the_attestation_is_verified_in_a_step_that_can_fail_the_job():
         assert ('gh attestation verify %s --repo "$REPO" --signer-workflow '
                 '"$REPO/$WF"' % subj) in run
     assert "WF=.github/workflows/pm-acceptance.yml" in run
-    assert "python3 -I .github/pm-acceptance/signed_acceptance.py acc" in run
+    assert "python3 -I judge/.github/pm-acceptance/signed_acceptance.py " \
+        "acc" in run
     assert run.strip().endswith("exit $rc")
     assert steps[ver]["env"]["GH_TOKEN"] == "${{ github.token }}"
     perms = _doc()["permissions"]
@@ -295,7 +296,8 @@ def test_the_paper_fingerprint_is_read_only_and_bound_to_its_baseline():
     assert "default_transaction_read_only=on" in run
     assert "-c TimeZone=UTC" in run
     assert '-v cutoff="$CUTOFF" -f "$SQL"' in run
-    assert "SQL=.github/pm-acceptance/paper_history_fingerprint.sql" in run
+    assert "SQL=judge/.github/pm-acceptance/paper_history_fingerprint.sql" \
+        in run
     assert 'gh run download "$BASELINE_RUN"' in run
     assert 'gh attestation verify "$pkt"' in run
     assert "capture_sha256_in_packet" in run
@@ -330,3 +332,32 @@ def test_the_render_step_pages_the_whole_event_window():
     assert "PA.render_summary(PA.load_runtime" in run
     # the old unpaginated read (?limit=100, no window, no cursor) is gone
     assert '/events?limit=100"' not in WF.read_text()
+
+
+# ── the judge is the workflow's own commit, never the release ─────────────
+
+def test_the_judging_code_runs_from_the_workflows_own_commit():
+    """Every script that judges the release (binder, harness spec, packet
+    builder, receipt sender, signed record, fingerprint SQL, viewports)
+    runs from judge/, the workflow's own commit: a release cannot weaken
+    the code that certifies it, and a baseline can be captured on a
+    release that predates that code (RC4 has none of it)."""
+    steps = _steps()
+    co = [s for s in steps if str(s.get("uses", "")).startswith(
+        "actions/checkout")]
+    assert [c["with"]["ref"] for c in co] == ["${{ inputs.sha }}",
+                                             "${{ github.sha }}"]
+    assert co[1]["with"]["path"] == "judge"
+    assert co[1]["with"]["persist-credentials"] is False
+    runs = "\n".join(s.get("run") or "" for s in steps)
+    # every interpreter call names a judge/ path (or reads stdin)
+    for m in re.finditer(r"(python3 -I|node)\s+(\S+)", runs):
+        assert m.group(2) == "-" or m.group(2).startswith("judge/"), \
+            m.group(0)
+    for m in re.finditer(r"sys\.path\.insert\(0, \"([^\"]+)\"\)", runs):
+        assert m.group(1) == "judge/backend", m.group(0)
+    assert 'open("judge/backend/sportsassets/pm_evidence/data/' \
+        'acceptance_spec.json")' in runs
+    assert "PYTHONPATH=backend" not in runs
+    assert _step("Production evidence packet")["env"]["JUDGE_SHA"] == \
+        "${{ github.sha }}"

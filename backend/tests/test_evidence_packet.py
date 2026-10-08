@@ -172,7 +172,8 @@ def test_the_builder_is_stdlib_only_and_writes_nothing_else(tmp_path):
 def test_pm_acceptance_builds_and_attests_the_packet():
     wf = (ROOT.parent / ".github" / "workflows" /
           "pm-acceptance.yml").read_text()
-    assert "python3 -I backend/tools/evidence_packet.py acc" in wf
+    # the judge's builder (the workflow's own commit), never the release's
+    assert "python3 -I judge/backend/tools/evidence_packet.py acc" in wf
     steps = yaml.safe_load(wf)["jobs"]["accept"]["steps"]
     att = [s for s in steps if "attest-build-provenance" in str(s.get(
         "uses"))]
@@ -450,3 +451,13 @@ def test_the_runtime_and_paper_receipts_are_in_the_packet(tmp_path):
         "value": "RED", "source": "acceptance.json",
         "path": "independent_pm_state"}
     assert p["acceptance"]["same_input_pm_state"]["value"] == EP.MISSING
+
+
+def test_the_packet_names_the_judge_commit(tmp_path, monkeypatch):
+    monkeypatch.setenv("JUDGE_SHA", "d" * 40)
+    assert EP.build(_acc(tmp_path), now=1.0)["identity"]["judge_sha"] == \
+        "d" * 40
+    monkeypatch.delenv("JUDGE_SHA")
+    (tmp_path / "x").mkdir()
+    assert EP.build(_acc(tmp_path / "x"), now=1.0)["identity"][
+        "judge_sha"] == EP.MISSING

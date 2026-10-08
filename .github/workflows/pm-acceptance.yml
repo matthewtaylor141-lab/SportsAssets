@@ -40,6 +40,13 @@
 # or authorize anything, and no setting, credential or limit is read or
 # changed. Every database read is under default_transaction_read_only=on.
 #
+# THE JUDGE IS THIS WORKFLOW'S OWN COMMIT (checked out to judge/), NEVER THE
+# RELEASE UNDER TEST: the binder, the packet builder, the receipt sender and
+# the fingerprint SQL all run from judge/, so a release cannot weaken the
+# code that judges it, and a baseline can be captured on a release that
+# predates that code. The release's own tree (checked out at the root) is
+# used only for its lineage.
+#
 # The byte-identical package harness is re-run HERE twice: over the API's
 # own evidence with the CI fields replaced by this job's GitHub reads (must
 # reach the API's state once a receipt is held), and with no_oom and
@@ -116,6 +123,13 @@ jobs:
         with:
           ref: ${{ inputs.sha }}
           fetch-depth: 0
+          persist-credentials: false
+
+      # THE JUDGE: this workflow's own commit, never the release under test
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: judge
           persist-credentials: false
 
       - name: Lineage (accepted production base is an ancestor; the release is the tracked branch)
@@ -218,7 +232,7 @@ jobs:
           # render.json from the SAME verified window the binder reads
           python3 -I - <<'PY'
           import json, os, pathlib, sys
-          sys.path.insert(0, "backend")
+          sys.path.insert(0, "judge/backend")
           from sportsassets.pm_bind import acceptance as PA
           out = PA.render_summary(PA.load_runtime(pathlib.Path("acc")),
                                   expected_commit=os.environ["SHA"])
@@ -240,7 +254,7 @@ jobs:
         run: |
           set +e
           mkdir -p acc
-          SQL=.github/pm-acceptance/paper_history_fingerprint.sql
+          SQL=judge/.github/pm-acceptance/paper_history_fingerprint.sql
           WF=.github/workflows/pm-acceptance.yml
           CUTOFF=""
           # 1. THE PRE RECEIPT: the capture inside an EARLIER run of THIS
@@ -355,7 +369,7 @@ jobs:
              pm_acceptance: ($p[0].data.pm_acceptance // null)}' > acc/receipt_body.json
           # the ONLY sender: posts nothing unless POST_RECEIPT is exactly "on";
           # supersedes earlier receipts by reference, never deletes one
-          python3 -I .github/pm-acceptance/post_receipt.py acc
+          python3 -I judge/.github/pm-acceptance/post_receipt.py acc
 
       - name: Re-read PM acceptance and re-run the package harness here
         shell: bash
@@ -366,12 +380,13 @@ jobs:
           echo "::add-mask::$ADMIN_TOKEN"
           code=$(curl -s -o acc/pm_after.json -w '%{http_code}' --max-time 150 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/command/pm-acceptance" || echo 000)
           printf '%s\t%s\t%s\n' pm_after "$code" "$(date -u +%FT%TZ)" >> acc/readback_http.tsv
-          PYTHONPATH=backend python3 -I - <<'PY'
+          python3 -I - <<'PY'
           import json, os, pathlib, sys, time
-          sys.path.insert(0, "backend")
+          # the judge's code, never the release's (python3 -I: no cwd on the path)
+          sys.path.insert(0, "judge/backend")
           from sportsassets.pm_evidence.pm_acceptance import harness as H
           from sportsassets.pm_bind import acceptance as PA
-          spec = json.load(open("backend/sportsassets/pm_evidence/data/acceptance_spec.json"))
+          spec = json.load(open("judge/backend/sportsassets/pm_evidence/data/acceptance_spec.json"))
           acc = pathlib.Path("acc")
           sha = os.environ["SHA"]
           # this job's OWN receipts: written whatever the API answers
@@ -456,7 +471,7 @@ jobs:
           npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
           npx playwright install --with-deps chromium >/dev/null 2>&1
           cd "$GITHUB_WORKSPACE"
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node .github/pm-acceptance/viewports.js
+          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node judge/.github/pm-acceptance/viewports.js
 
       - name: Production evidence packet (extra readbacks, log counts for all three services)
         if: always()
@@ -465,6 +480,7 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           KEY: ${{ secrets.RENDER_API_KEY }}
           IMPL_SHA: ${{ inputs.implementation_sha }}
+          JUDGE_SHA: ${{ github.sha }}
         run: |
           set +e
           mkdir -p acc
@@ -519,7 +535,7 @@ jobs:
               done
             done
           fi
-          python3 -I backend/tools/evidence_packet.py acc
+          python3 -I judge/backend/tools/evidence_packet.py acc
           jq -c '{identity, gates, policy: .policy_integrity, policy_identity, migrations: .migrations.control, memory_identity, log_counts}' acc/evidence_packet.json | cut -c1-6000
           {
             echo "## Production evidence packet"
@@ -552,7 +568,7 @@ jobs:
           export VERIFY_PACKET_RC VERIFY_SUMS_RC
           # signed acceptance = verified AND SHA256SUMS match AND GREEN; this
           # step fails when the packet is not what was signed
-          python3 -I .github/pm-acceptance/signed_acceptance.py acc
+          python3 -I judge/.github/pm-acceptance/signed_acceptance.py acc
           rc=$?
           {
             echo "## Signed acceptance"

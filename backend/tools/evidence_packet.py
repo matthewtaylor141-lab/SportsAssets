@@ -442,6 +442,9 @@ def build(acc: pathlib.Path, *, now: float | None = None) -> dict:
         "version": VERSION, "built_at": now,
         "identity": {
             "implementation_sha": os.environ.get("IMPL_SHA") or MISSING,
+            # the commit whose binder / builder / sender judged the release
+            # (the workflow's own, checked out to judge/), never the release
+            "judge_sha": os.environ.get("JUDGE_SHA") or MISSING,
             "tested_sha": lin.get("sha", MISSING),
             "release_branch": lin.get("release_branch", MISSING),
             "release_sha": lin.get("release_sha", MISSING),

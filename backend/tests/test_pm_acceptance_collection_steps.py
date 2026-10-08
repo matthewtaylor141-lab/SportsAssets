@@ -133,7 +133,9 @@ def _run(tmp_path, fake: FakeRender):
         script = script.replace(api, "API=http://127.0.0.1:%d/v1" %
                                 srv.server_address[1])
         (tmp_path / "step.sh").write_text(script)
-        (tmp_path / "backend").symlink_to(ROOT / "backend")
+        # the judge checkout (the workflow's own commit) is this tree
+        (tmp_path / "judge").mkdir()
+        (tmp_path / "judge" / "backend").symlink_to(ROOT / "backend")
         env = {"PATH": os.environ["PATH"], "KEY": KEY, "SHA": F.SHA,
                "HOME": str(tmp_path)}
         out = subprocess.run(
@@ -244,9 +246,9 @@ def _paper_run(tmp_path, *, baseline_run="", verify_rc="0"):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     work = tmp_path / ("run%s" % (baseline_run or "0"))
-    work.mkdir()
+    (work / "judge").mkdir(parents=True)
     for d in ("backend", ".github"):
-        (work / d).symlink_to(ROOT / d)
+        (work / "judge" / d).symlink_to(ROOT / d)
     bindir = tmp_path / "bin"
     bindir.mkdir(exist_ok=True)
     (bindir / "gh").write_text(FAKE_GH)
