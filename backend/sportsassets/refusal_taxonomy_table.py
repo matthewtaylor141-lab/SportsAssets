@@ -46,6 +46,13 @@ TABLE = {
     # a protection that cannot be priced is recorded instead of raising
     "HELD_BUT_NOT_HANDED_OFF_TO_XAVIER": (S, INT, "MANAGEMENT"),
     "NO_PROTECTIVE_PRICE": (E, PRICE, "MANAGEMENT"),
+    # (RC5 Kalshi key classes) the one Kalshi key loader refuses a key it
+    # cannot sign with, by name, before any request (an owner credential
+    # problem surfaced as a capability gap, like the plane's credential rule)
+    "KALSHI_PRIVATE_KEY_ABSENT": (S, CAP, "INGESTION"),
+    "KALSHI_KEY_NOT_PEM": (S, CAP, "INGESTION"),
+    "KALSHI_PRIVATE_KEY_UNLOADABLE": (S, CAP, "INGESTION"),
+    "KALSHI_KEY_TYPE_NOT_ED25519_OR_RSA": (S, CAP, "INGESTION"),
     # (270) paper mark freshness: the allocation rail (no ENTRY growth for a
     # strategy whose open positions cannot be freshly managed; fail-closed
     # when the rate cannot be read) and Xavier's incomplete management packet
