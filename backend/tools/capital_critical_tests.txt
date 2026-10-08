@@ -1288,3 +1288,5 @@ tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
+# (RC5) the dedicated market plane's memory: coverage / populate / Kalshi persist one page at a time (RC4 parity, row for row), the assignment and certify refdata reads slim, the shard plan by counts, the heartbeat bounded with every reader field and RSS by step
+tests/test_market_plane_memory_bound.py

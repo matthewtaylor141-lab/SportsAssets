@@ -155,13 +155,20 @@ class Manager:
     def discovery(self, *, limit=0)->dict:
         """Subscribe-all evidence: instruments the stream carried that the
         books do not hold (counted; the first `limit` named)."""
+        # (RC5) counted and sampled without copying the seen map (up to
+        # SEEN_MAX entries) and sorting every key for a 10-name sample on
+        # each snapshot: one list of its keys (taken under the GIL, as the
+        # stream thread inserts), the `limit` smallest of them
+        import heapq
         with self._lock:
             rec=self.shards.get(0) if self.subscribe_all else None
-            seen=dict(getattr(rec["books"],"seen",{}) or {}) if rec else {}
+            seen=getattr(rec["books"],"seen",None) or {} if rec else {}
             filtered=getattr(rec["transport"],"filtered_updates",0) if rec else 0
-        return {"mode":self.subscription_mode,"instruments_seen_outside_books":len(seen),
+            n=len(seen)
+            sample=heapq.nsmallest(int(limit),list(seen)) if limit else []
+        return {"mode":self.subscription_mode,"instruments_seen_outside_books":n,
                 "filtered_updates":filtered,"seen_cap":SEEN_MAX,
-                "sample":sorted(seen)[:int(limit)] if limit else []}
+                "sample":sample}
 
     def set_instrument(self,symbol,record)->bool:
         with self._lock:
