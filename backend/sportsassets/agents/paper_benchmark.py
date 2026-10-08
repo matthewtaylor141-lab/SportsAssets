@@ -1044,7 +1044,28 @@ def completed_game_match(cand: dict, row: dict, *,
     keep = {DP.C_IDENTITY, "payout_outcome_match",
             "probability_qualified_by_the_lane", "polymarket_us_contract"}
     checks = [c for c in base["checks"] if c["check"] in keep]
-    refusals = [c["refusal"] for c in checks if not c["passed"]]
+    # THE LANE'S OWN CODES RIDE BEHIND THE WRAPPER HERE TOO. `contract_match`
+    # appends them to ITS refusals (software census closure, d075e12f), but
+    # this match rebuilt its refusals from the checks alone, so they were
+    # dropped: every completed-game-kind decision (completed-game, maker,
+    # exploration) recorded PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE
+    # with nothing behind it, and the first-loss census -- which reads the
+    # code carried right after the wrapper (coverage_first_loss.LANE_
+    # WRAPPERS) -- could only class the loss by the wrapper (production
+    # 2026-10-08 01:40Z: 4 events in 1 h, 23 in 24 h, all decided by
+    # PINNACLE_COMPLETED_GAME_PAPER / PINNACLE_EXPLORATION_PAPER). They are
+    # carried from the check's own `lane_refusals` (the lane's probability-
+    # stage codes this policy applies), in the lane's order, right behind
+    # the wrapper. The checks, the verdict and `established` are unchanged:
+    # a lane code is present only when the wrapper already refuses.
+    refusals = []
+    for c in checks:
+        if c["passed"]:
+            continue
+        refusals.append(c["refusal"])
+        if c["check"] == "probability_qualified_by_the_lane":
+            refusals.extend(x for x in (c.get("lane_refusals") or [])
+                            if x not in refusals)
 
     def put(name, ok, refusal, detail, **ev):
         checks.append(dict({"check": name, "passed": bool(ok),

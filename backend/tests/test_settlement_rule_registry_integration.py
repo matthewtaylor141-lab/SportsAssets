@@ -488,7 +488,9 @@ def test_every_real_fixture_description_parses_as_documented():
         elif not st.startswith("tennis"):
             assert s["postponement_payout"] == R.LAST_FAIR_PRICE
             assert s["overtime_included"] in (True, False)
-    assert seen == 80
+    # 80 + the 24 listings of the 2026-10-08 capture of the leagues the
+    # venue listed later (pmus_basketball_hockey_winner_listings_2026_10_08)
+    assert seen == 104
 
 
 # ═════════════════════════════════════════════════════════════════════

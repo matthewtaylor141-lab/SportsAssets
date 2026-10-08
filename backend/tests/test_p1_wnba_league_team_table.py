@@ -106,7 +106,11 @@ def test_the_table_is_one_team_per_city_and_agrees_with_every_listing():
 
 def test_the_league_is_admitted_on_its_captured_wording():
     assert "wnba" in V.ADMITTED_WINNER_LEAGUES["basketball"]
-    assert V.LEAGUES_NOT_READ == {}
+    # PIN MOVED (2026-10-08): the only leagues listed and not read are the
+    # BSKT Cup boards of the second capture, by their different wording
+    # (test_ident_league_capture_2026_10_08); never the WNBA
+    assert set(V.LEAGUES_NOT_READ) == {"bsktcin", "bsktcua"}
+    assert "wnba" not in V.LEAGUES_NOT_READ
     assert devig.expected_outcomes("basketball", "h2h", league="wnba") == 2
     for m in WNBA:
         book = PB.book_grading_period("basketball", "wnba")
