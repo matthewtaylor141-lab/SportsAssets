@@ -341,11 +341,16 @@ def test_the_workflow_mutates_only_behind_confirm_and_never_prints_a_secret():
     for a in ("plan", "status"):
         assert "send " not in arms[a] and "send POST" not in arms[a], a
     assert "send POST /services " in arms["create"]
-    # values are masked and only lengths are printed
-    assert 'mask_value "$v"' in body and "(${#v} chars)" in body
-    for bad in ('echo "$v"', "echo $v", 'echo "$SEC_', "cat \"$TMP/body",
-                "set -x"):
+    # values are masked line by line and only their lengths are printed;
+    # they travel Render JSON -> jq -> body byte for byte, never through a
+    # shell variable (production plan run 37715995613: $(...) stripped the
+    # Kalshi PEM's trailing newline, 119 -> 118 chars)
+    assert 'mask_value "$(jq -r' in body and "| length' " in body
+    assert '--slurpfile sec "$TMP/secrets.jsonl"' in body
+    for bad in ('echo "$v"', "echo $v", 'export "SEC_', '$ENV["SEC_',
+                'cat "$TMP/body', "set -x"):
         assert bad not in body, bad
+    assert "create body names differ from the spec: refused" in body
     wf = (ROOT / ".github" / "workflows" / "market-plane.yml").read_text()
     assert "run: bash .github/market-plane/plane.sh" in wf
     assert "${{" not in body
