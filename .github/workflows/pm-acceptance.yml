@@ -35,10 +35,18 @@ on:
         description: "on = POST the release receipt to the serving API (evidence only); blank = read only"
         required: false
         default: "on"
+      implementation_sha:
+        description: "optional 40-hex implementation SHA the release tree was tested as (recorded in the evidence packet)"
+        required: false
+        default: ""
 
 permissions:
   contents: read
   actions: read
+  # the evidence packet's Sigstore attestation (evidence only; no write to
+  # the repository, no deploy, no secret)
+  id-token: write
+  attestations: write
 
 jobs:
   accept:
@@ -61,14 +69,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Lineage (accepted production base is an ancestor)
+      - name: Lineage (accepted production base is an ancestor; the release is the tracked branch)
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p acc
           if git merge-base --is-ancestor "$ACCEPTED_BASE" "$SHA"; then d=true; else d=false; fi
           echo "descendant_of_base=$d ($ACCEPTED_BASE -> $SHA)"
-          jq -n --arg b "$ACCEPTED_BASE" --arg s "$SHA" --argjson d $d \
-            '{accepted_base_sha:$b, sha:$s, descendant_of_base:$d}' > acc/lineage.json
+          # THE RELEASE IS THE BRANCH BOTH RENDER SERVICES TRACK
+          # (render-ops api-branch-get: claude/release-api, autoDeploy=no).
+          # release_sha is READ from that branch, never copied from the input:
+          # a build deployed by commit id while claude/release-api was left
+          # behind (08828d04 live, branch at a91be09f, 2026-10-07) is then
+          # RELEASE_SHA_DIFFERS_FROM_TESTED_SHA, not a silent pass. Unreadable
+          # stays unreadable: the receipt is refused (NOT_A_FULL_SHA) and the
+          # RELEASE control stays UNKNOWN.
+          rel=$(gh api "repos/$REPO/branches/claude/release-api" --jq .commit.sha 2>/dev/null || true)
+          echo "$rel" | grep -Eq '^[0-9a-f]{40}$' || rel="UNREADABLE"
+          echo "release_branch=claude/release-api release_sha=$rel tested=$SHA"
+          jq -n --arg b "$ACCEPTED_BASE" --arg s "$SHA" --arg r "$rel" --argjson d $d \
+            '{accepted_base_sha:$b, sha:$s, descendant_of_base:$d,
+              release_branch:"claude/release-api", release_sha:$r}' > acc/lineage.json
 
       - name: Exact-SHA gate conclusions (GitHub)
         shell: bash
@@ -163,7 +185,7 @@ jobs:
           jq -n --slurpfile l acc/lineage.json --slurpfile g acc/gates.json --slurpfile p acc/pm_before.json \
                 --slurpfile r acc/render.json \
                 --arg s "$SHA" --argjson m "${mig:-false}" '
-            {accepted_base_sha: $l[0].accepted_base_sha, tested_sha: $s, release_sha: $s,
+            {accepted_base_sha: $l[0].accepted_base_sha, tested_sha: $s, release_sha: $l[0].release_sha,
              deployed_sha: $s, descendant_of_base: $l[0].descendant_of_base,
              backend_tests_green: $g[0].backend_tests_green,
              capital_critical_green: $g[0].capital_critical_green,
@@ -201,7 +223,7 @@ jobs:
           ev = dict(api["evidence_input"])
           # the CI fields, as THIS job read them from GitHub / git
           ev.update(accepted_base_sha=lin["accepted_base_sha"], tested_sha=sha,
-                    release_sha=sha,
+                    release_sha=lin["release_sha"],
                     is_descendant_of_accepted_base=lin["descendant_of_base"],
                     backend_tests=g["backend_tests_green"],
                     capital_critical=g["capital_critical_green"],
@@ -239,6 +261,83 @@ jobs:
           if bad:
               print("FAIL", bad); sys.exit(1)
           PY
+
+      - name: Production evidence packet (extra readbacks, memory, log counts)
+        if: always()
+        shell: bash
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          KEY: ${{ secrets.RENDER_API_KEY }}
+          IMPL_SHA: ${{ inputs.implementation_sha }}
+        run: |
+          set +e
+          mkdir -p acc
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          [ -n "${KEY:-}" ] && echo "::add-mask::$KEY"
+          if [ -n "${IMPL_SHA:-}" ] && ! echo "$IMPL_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "implementation_sha is not 40-hex; recorded as absent"; IMPL_SHA=""
+          fi
+          export IMPL_SHA
+          # READ-ONLY readbacks the packet cites (GET, read role)
+          get() {
+            code=$(curl -s -o "acc/$1.json" -w '%{http_code}' --max-time 150 \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$2" || echo 000)
+            echo "== $1 GET $2 -> HTTP $code ($(wc -c < "acc/$1.json") bytes)"
+          }
+          if [ -n "${ADMIN_TOKEN:-}" ]; then
+            get shadow_health /api/command/shadow/health
+            get capital_readiness /api/command/capital-readiness
+            get canary /api/command/canary
+            get small_live "/api/command/small-live?limit=20"
+            get xavier_management /api/command/xavier/management
+            get paper_freshness "/api/command/paper/freshness?limit=0"
+            get market_plane /api/command/market-plane
+            get profitability_scoreboard /api/command/paper/profitability-scoreboard
+            get revenue_readiness /api/command/revenue-readiness
+            get paper_reconciliation /api/command/paper/reconciliation
+            get loop_health /api/command/loop-health
+          fi
+          # Render: memory since each service went live (<= 6 h) and the
+          # named log lines since then (counts; hasMore = at least 100)
+          if [ -n "${KEY:-}" ]; then
+            API=https://api.render.com/v1
+            rget() { curl -sS --max-time 60 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+            END=$(date -u +%FT%TZ); FLOOR=$(date -u -d '-6 hours' +%FT%TZ)
+            for svc in sportsassets-api sportsassets-workers; do
+              id=$(rget "/services?name=$svc&limit=20" | jq -r --arg n "$svc" '.[]? | select(.service.name==$n) | .service.id' | head -1)
+              [ -z "$id" ] && continue
+              owner=$(rget "/services/$id" | jq -r '.ownerId // empty')
+              since=$(jq -r --arg s "$svc" '.[$s].live_since // empty' acc/render.json 2>/dev/null | cut -c1-19)
+              START="${since:+${since}Z}"; [ -z "$START" ] && START=$FLOOR
+              [[ "$START" < "$FLOOR" ]] && START=$FLOOR
+              rget "/metrics/memory?resource=$id&startTime=$START&endTime=$END&resolutionSeconds=60" > "acc/mem_$svc.json"
+              echo "$svc memory $START..$END: $(jq -c '[.[]? | {labels, n: (.values|length), max_mb: ([.values[]?.value] | max / 1048576 | floor)}]' "acc/mem_$svc.json" | cut -c1-600)"
+              for pair in "churn|exited cleanly; restarting" "crash|crashed; restarting" \
+                          "migration_changed|WAS ALREADY APPLIED" "policy_drift|POLICY_CODE_DRIFT" \
+                          "memory_error|MemoryError"; do
+                name=${pair%%|*}; text=${pair#*|}
+                q="/logs?ownerId=$owner&resource=$id&startTime=$START&endTime=$END&limit=100&direction=backward&text=$(printf '%s' "$text" | jq -sRr @uri)"
+                rget "$q" | jq --arg f "$text" --arg w "$START..$END" '. + {_filter: $f, _window: $w}' > "acc/logs_${svc}_${name}.json"
+                echo "  $svc '$text': $(jq '.logs | length' "acc/logs_${svc}_${name}.json") lines (hasMore=$(jq '.hasMore' "acc/logs_${svc}_${name}.json"))"
+              done
+            done
+          fi
+          python3 -I backend/tools/evidence_packet.py acc
+          jq -c '{identity, gates, policy: .policy_integrity, migrations: .migrations.control, memory, log_counts}' acc/evidence_packet.json | cut -c1-6000
+          {
+            echo "## Production evidence packet"
+            echo
+            echo '```'
+            cat acc/SHA256SUMS
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Attest the evidence packet (Sigstore, evidence only)
+        if: always()
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: acc/evidence_packet.json
 
       - uses: actions/upload-artifact@v4
         if: always()
