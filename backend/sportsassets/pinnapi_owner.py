@@ -115,6 +115,62 @@ R_PROVIDER_REFUSED = "FEED_PROVIDER_REFUSED"
 R_STRAY_CANCELLATION = "FEED_OWNER_STRAY_CANCELLATION"
 
 
+#: ── WHAT AN "EVICTION" ACTUALLY WAS (RC6) ───────────────────────────────
+#:
+#: PRODUCTION (research-sql 37846538322, p0_first_loss_plumbing.sql, read
+#: 2026-10-08T21:24Z, release 69a8a07e): the API's owner reads state
+#: EVICTION_LOOP_SUSPECTED, refused FEED_EVICTION_LOOP_SUSPECTED, authority
+#: {epoch 4, FEED_SOCKET_CLOSED, granted false}; transitions LEASE_ACQUIRED
+#: 18:52:41Z, EPOCH_GRANTED 3, UNREQUESTED_CLOSE 18:55:40Z (recent 2),
+#: LEASE_ACQUIRED, EPOCH_GRANTED 4 18:55:43Z, UNREQUESTED_CLOSE 19:00:51Z
+#: (recent 3) -- and nothing since. No production session held the feed
+#: lease at 21:24Z (pg_locks), and only ext_pinnacle_loop ever starts an
+#: owner, so no holder of OURS can have evicted it. From 19:09Z every
+#: 15-minute cycle carried 85-104 FEED_OWNERSHIP_NOT_HELD rows (none
+#: between boots before), and pinnapi_reactive_attempts stopped.
+#:
+#: Each close was recorded with nothing but a count, so "another holder of
+#: the account key" was an inference the record could not check. The
+#: websocket library carries the close frame the provider sent (code and
+#: reason) or says that none came; the owner knows how long the socket had
+#: lived and how long since its last frame. Those facts now ride on every
+#: UNREQUESTED_CLOSE transition (the heartbeat 'pinnapi_feed_last' keeps
+#: the last 50), so the next readback can tell an eviction (a provider
+#: close frame that says so) from a liveness close (no frame, a long
+#: receive gap: our event loop or the network). The reason text is the
+#: provider's own, truncated; no header, key or payload is read. Evidence
+#: only: the eviction rule itself is unchanged here.
+CLOSE_REASON_MAX = 120
+CLOSE_FRAME_NONE = "NONE_RECEIVED"
+
+
+def close_facts(exc, *, now: float, last_rx: float, opened: float) -> dict:
+    """{close_error, close_code, close_reason, close_frame, rx_gap_s,
+    socket_age_s} of an unrequested close. Pure; never raises."""
+    out = {"close_error": type(exc).__name__, "close_code": None,
+           "close_reason": None, "close_frame": None,
+           "rx_gap_s": round(max(0.0, now - last_rx), 3),
+           "socket_age_s": round(max(0.0, now - opened), 3)}
+    try:
+        if hasattr(exc, "rcvd"):
+            # websockets' ConnectionClosed: `rcvd` is the provider's close
+            # frame, or None when the connection ended without one
+            frame = exc.rcvd
+            if frame is None:
+                out["close_frame"] = CLOSE_FRAME_NONE
+                return out
+            out["close_frame"] = "RECEIVED"
+            code, reason = getattr(frame, "code", None), \
+                getattr(frame, "reason", None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                out["close_code"] = code
+            if isinstance(reason, str) and reason:
+                out["close_reason"] = reason[:CLOSE_REASON_MAX]
+    except Exception:                                           # noqa: BLE001
+        pass
+    return out
+
+
 def _task_is_being_cancelled() -> bool:
     """True when the CURRENT task itself was asked to cancel (shutdown),
     as opposed to a CancelledError raised from a driver future."""
@@ -393,6 +449,7 @@ class FeedOwner:
             self.state = "RESYNCHRONIZING"
             last_live = time.monotonic()
             last_rx = time.monotonic()
+            opened = last_rx
             while not self.stop_event.is_set():
                 now = time.monotonic()
                 if now - last_live >= self.liveness_s:
@@ -414,15 +471,19 @@ class FeedOwner:
                         self.liveness_s, 1.0))
                 except asyncio.TimeoutError:
                     continue
-                except Exception:                               # noqa: BLE001
+                except Exception as exc:                        # noqa: BLE001
                     # a close we did not ask for after a healthy stream may
                     # be another holder of the account key evicting us
                     if delivered:
                         t = time.monotonic()
                         self.evictions = [x for x in self.evictions
                                           if t - x < EVICTION_WINDOW_S] + [t]
+                        # THE CLOSE'S OWN FACTS, so "eviction" is a finding
+                        # rather than an inference (close_facts, RC6)
                         self._note("UNREQUESTED_CLOSE",
-                                   recent=len(self.evictions))
+                                   recent=len(self.evictions),
+                                   **close_facts(exc, now=t, last_rx=last_rx,
+                                                 opened=opened))
                         if len(self.evictions) >= EVICTIONS_MAX:
                             self.refused = R_EVICTION_LOOP
                             self.cache.lost(R_EVICTION_LOOP)
