@@ -72,7 +72,14 @@ class SizedBooks:
             def unwant(self, symbols):
                 with self._lock:
                     for s in symbols or ():
-                        self._markets.pop(str(s),None)
+                        symbol=str(s)
+                        self._markets.pop(symbol,None)
+                        # a retired symbol releases its refdata record too:
+                        # in subscribe-all mode the assignment rotates
+                        # through the catalogue, and keeping every record
+                        # ever set defeats the books' bound (the next sync
+                        # re-sets it if the symbol is assigned again)
+                        self._instruments.pop(symbol,None)
             def want(self, symbols):
                 at=self._clock(); fresh=[]
                 with self._lock:
