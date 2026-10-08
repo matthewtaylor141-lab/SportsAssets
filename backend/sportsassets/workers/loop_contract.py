@@ -12,8 +12,13 @@ UNIVERSAL_MARKET_PLANE=off.
 A loop that is OFF BY CONFIGURATION returns LOOP_DISABLED instead of None.
 The supervisor then records it once and stops supervising that loop for the
 life of the process. Nothing else changes: a crash is still restarted, a
-clean None return is still restarted, and a database-controlled loop keeps
-returning None so its control row is still polled.
+clean None return is still restarted, and a database-controlled loop never
+returns LOOP_DISABLED for its database control, so that row is still
+polled -- an operator flips it with no deploy (render-ops sql obs-run /
+obs-stop). bettor_live's delegated incentive lane polls it by PARKING IN
+PLACE (bettor_live_loop._park, re-read every IDLE_POLL_S, returning after
+PARK_MAX_S) rather than by returning into the five-second restart; only that
+lane's environment kill switch (BETTOR_LIVE_LOOP=off) returns LOOP_DISABLED.
 """
 from __future__ import annotations
 
