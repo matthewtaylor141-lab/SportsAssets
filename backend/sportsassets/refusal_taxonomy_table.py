@@ -22,6 +22,30 @@ FRESH, INT = "FRESHNESS_PLUMBING", "INTEGRITY"
 EDGE, EV, PRICE, DEPTH, RAIL = "EDGE", "EV", "PRICE", "DEPTH", "RISK_RAIL"
 
 TABLE = {
+    # (RC5, economic funnel F2/F3 2026-10-08) codes that reached production
+    # records unclassified, so the funnel could not class its stopping
+    # points: exploration sizing found no quantity at the best level
+    # (paper_explore literal; 178 forward decisions), Adriana's claim-scan
+    # and structure codes (adriana_claims / adriana_arb / adriana), the
+    # canonical routing refusal (canonical_claims: every candidate
+    # ineligible on unknown fee / stale / no book) and the depth / book
+    # codes of the decision and management engines and archer
+    "NO_DEPTH_AT_THE_BEST_LEVEL": (E, DEPTH, "ORDER"),
+    "CLAIM_LEG_HAS_NO_EVALUABLE_ALIAS": (S, MAP, "VENUE_MAPPING"),
+    "PAYOFF_FLOOR_BELOW_COST": (E, EDGE, "EV"),
+    "STALE_BOOK": (S, FRESH, "FRESHNESS"),
+    "VOID_TERMS_NOT_ESTABLISHED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "BOOK_MISSING": (S, DATA, "VENUE_BOOK"),
+    "BOOK_TIME_IN_FUTURE": (S, INT, "VENUE_BOOK"),
+    "NO_EXECUTABLE_DEPTH": (E, DEPTH, "VENUE_BOOK"),
+    "NO_ELIGIBLE_ROUTE": (S, DATA, "VENUE_BOOK"),
+    "INSUFFICIENT_DEPTH": (E, DEPTH, "VENUE_BOOK"),
+    "NO_BOOK": (S, DATA, "VENUE_BOOK"),
+    # (RC5 Xavier no-growth) a canonical held position with no Xavier
+    # handoff is named in the management census (ours: a handoff gap), and
+    # a protection that cannot be priced is recorded instead of raising
+    "HELD_BUT_NOT_HANDED_OFF_TO_XAVIER": (S, INT, "MANAGEMENT"),
+    "NO_PROTECTIVE_PRICE": (E, PRICE, "MANAGEMENT"),
     # (270) paper mark freshness: the allocation rail (no ENTRY growth for a
     # strategy whose open positions cannot be freshly managed; fail-closed
     # when the rate cannot be read) and Xavier's incomplete management packet
