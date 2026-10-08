@@ -2285,6 +2285,59 @@ def probability_deadline(observed_epoch) -> float | None:
         return None
     return t + PINNACLE_MAX_AGE_S if math.isfinite(t) else None
 
+
+#: ── AN ABANDONED READ IS NEVER SENT (first-loss census, 2026-10-08) ──────
+#:
+#: THE DEFECT. `venue_quote` awaits a read for min(VENUE_TIMEOUT_S, the time
+#: to the candidate's probability deadline), but the request gate was told
+#: only the PROBABILITY deadline (or nothing). When that deadline lay beyond
+#: VENUE_TIMEOUT_S -- the FIRST candidate of every metered fetch: NCAAF quotes
+#: reach us ~15 s old, so its deadline is ~15 s out (research-sql
+#: 37412834338: queue position 0 VENUE_BOOK_READ_FAILED, position 1 at
+#: 15.6 s) -- the await was abandoned at 10 s (VENUE_TIMEOUT) while the
+#: reader's thread, still sleeping out the venue's 429 hold (Retry-After
+#: 7-10 s) or queued in the pacer, went on to DISPATCH the request seconds
+#: later, unawaited. The authenticated book endpoint answers 429 at ~0.23
+#: req/s (paper_market_data, READINESS_95_MATRIX row 2), so every such
+#: orphan spends that scarce budget for nobody and invites the next 429 --
+#: whose hold every later candidate of the fetch then waits on. And a hold
+#: that outlasted the await but not the deadline was SLEPT for the full
+#: VENUE_TIMEOUT_S instead of refused at once, spending the following
+#: candidates' 30 s window on a read that could not be used.
+#:
+#: THE REPAIR IS THE GATE'S OWN CONTRACT ("never blocks past the caller's
+#: deadline"): the read's dispatch deadline is the instant its caller STOPS
+#: AWAITING it -- the probability deadline when that comes first (exactly as
+#: before), else request instant + VENUE_TIMEOUT_S. No limit, clock, pacing
+#: gap, hold or timeout changes; the bound only ever refuses a request
+#: nobody is waiting for.
+READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE = (
+    "a venue book read is never dispatched after its caller stopped "
+    "awaiting it: its request-gate deadline is the earlier of the "
+    "candidate's probability deadline and request instant + VENUE_TIMEOUT_S, "
+    "so a 429 hold that outlasts the await is refused at once and an "
+    "abandoned read never reaches the venue; no limit, clock or pacing "
+    "changes")
+
+
+def read_dispatch_bound(request_sent_at: float, probability_deadline_s=None,
+                        timeout_s: float | None = None) -> dict:
+    """{"timeout_s", "gate_deadline_epoch_s", "probability_binds"} for one
+    read sent at `request_sent_at` (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE).
+    `probability_binds` is True when the candidate's probability deadline
+    is the earlier bound -- then the gate's deadline IS that deadline,
+    exactly as before this rule. Pure."""
+    cap = float(VENUE_TIMEOUT_S if timeout_s is None else timeout_s)
+    sent = float(request_sent_at)
+    if probability_deadline_s is not None:
+        left = float(probability_deadline_s) - sent
+        if left < cap:
+            return {"timeout_s": left,
+                    "gate_deadline_epoch_s": float(probability_deadline_s),
+                    "probability_binds": True}
+    return {"timeout_s": cap, "gate_deadline_epoch_s": sent + cap,
+            "probability_binds": False}
+
 #: The sharp books whose agreement counts toward per-outcome depth. Taken
 #: from `edge/fairvalue/feed.py`'s ANCHOR_BOOKS/SHARP_BOOKS set, which was
 #: built from observed production payloads. Pinnacle is the anchor and is
@@ -4667,6 +4720,32 @@ def _past_deadline(slug, deadline_epoch_s, started_at, how) -> dict:
             "rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE}
 
 
+def _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
+                                              bound) -> bool:
+    """Whether OUR gate's deadline refusal of this read is the candidate's
+    PROBABILITY deadline (-> PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_
+    COULD_FINISH) rather than the await bound alone. When the probability
+    deadline was the gate's deadline: exactly as before. When the gate was
+    handed the await bound (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE), only a
+    hold that ALSO outlasts the probability deadline is named so; a hold
+    that merely outlasts the await stays the gate's own refusal (the
+    calibration-only VENUE_GATE_COOLDOWN), never relabelled. Pure."""
+    if deadline_epoch_s is None or not isinstance(book, dict):
+        return False
+    if book.get("refused_by") != "OUR_REQUEST_GATE" or book.get("error") \
+            not in (_GATE_DEADLINE_PASSED, _GATE_COOLDOWN_PAST_DEADLINE):
+        return False
+    if (bound or {}).get("probability_binds", True):
+        return True
+    if book.get("error") != _GATE_COOLDOWN_PAST_DEADLINE:
+        return False
+    try:
+        nb = float((book.get("gate_detail") or {}).get("not_before_epoch_s"))
+    except (TypeError, ValueError):
+        return False
+    return nb > float(deadline_epoch_s)
+
+
 async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                       subscription=None, revalidation=None,
                       deadline_epoch_s=None):
@@ -4751,21 +4830,25 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     request_sent_at = time.time()
     # THE CANDIDATE'S OWN PROBABILITY DEADLINE BOUNDS THE READ
     # (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE): the argument, else the
-    # one the collector set around this call. None: unbounded, as before
-    # (every other caller).
+    # one the collector set around this call. None: no probability bound
+    # (every other caller) -- the await bound below still applies.
     if deadline_epoch_s is None:
         deadline_epoch_s = _READ_DEADLINE.get()
-    timeout = VENUE_TIMEOUT_S
-    if deadline_epoch_s is not None:
-        left = float(deadline_epoch_s) - request_sent_at
-        if left <= 0:
-            return _past_deadline(slug, deadline_epoch_s, request_sent_at,
-                                  "NOT_STARTED")
-        timeout = min(VENUE_TIMEOUT_S, left)
+    if deadline_epoch_s is not None \
+            and float(deadline_epoch_s) - request_sent_at <= 0:
+        return _past_deadline(slug, deadline_epoch_s, request_sent_at,
+                              "NOT_STARTED")
+    # AWAITED NO LONGER THAN min(VENUE_TIMEOUT_S, the probability deadline),
+    # and NEVER DISPATCHED AFTER THAT INSTANT
+    # (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE): the gate is handed the
+    # instant this await gives up, so a read abandoned at VENUE_TIMEOUT_S is
+    # not sent seconds later to a venue that rate-limits us.
+    bound = read_dispatch_bound(request_sent_at, deadline_epoch_s)
+    timeout = bound["timeout_s"]
     try:
         # the reader takes the deadline from the same context variable
         # (asyncio.to_thread copies the context into its thread)
-        _dl_token = _READ_DEADLINE.set(deadline_epoch_s)
+        _dl_token = _READ_DEADLINE.set(bound["gate_deadline_epoch_s"])
         try:
             book = await asyncio.wait_for(
                 asyncio.to_thread(_read_book_blocking, slug),
@@ -4773,7 +4856,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         finally:
             _READ_DEADLINE.reset(_dl_token)
     except Exception as exc:                                   # noqa: BLE001
-        if (deadline_epoch_s is not None and timeout < VENUE_TIMEOUT_S
+        if (bound["probability_binds"]
                 and isinstance(exc, (asyncio.TimeoutError, TimeoutError))):
             return _past_deadline(slug, deadline_epoch_s, request_sent_at,
                                   "AWAIT_ABANDONED_AT_THE_DEADLINE")
@@ -4782,9 +4865,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "exception": type(exc).__name__,
                 "diagnostic": _venue_diagnostic(slug, exc,
                                                 stage="BOOK_READ_AWAIT")}
-    if (deadline_epoch_s is not None and book.get("refused_by")
-            == "OUR_REQUEST_GATE" and book.get("error") in (
-                _GATE_DEADLINE_PASSED, _GATE_COOLDOWN_PAST_DEADLINE)):
+    if _gate_refused_at_the_probability_deadline(book, deadline_epoch_s,
+                                                 bound):
         return _past_deadline(slug, deadline_epoch_s, request_sent_at,
                               "REFUSED_BY_OUR_GATE:%s" % book.get("error"))
     if book.get("error"):
@@ -7431,13 +7513,20 @@ async def observation_quote(slug, side, *, now=None) -> dict:
     if hit is not None:
         book, read_at, sent, reused = hit["book"], hit["read_at"], 0, True
     else:
+        # NEVER SENT AFTER THIS AWAIT GIVES UP
+        # (READ_DISPATCH_BOUNDED_BY_THE_AWAIT_RULE): the observation's read
+        # spends the same scarce venue budget as a candidate's.
+        _ob = read_dispatch_bound(time.time(), None)
+        _ob_token = _READ_DEADLINE.set(_ob["gate_deadline_epoch_s"])
         try:
             book = await asyncio.wait_for(
                 asyncio.to_thread(_read_book_blocking, str(slug)),
-                timeout=VENUE_TIMEOUT_S)
+                timeout=_ob["timeout_s"])
         except Exception as exc:                                # noqa: BLE001
             return {"ok": False, "refusal": R_VENUE_READ_FAILED,
                     "error": type(exc).__name__, "dispatches": None}
+        finally:
+            _READ_DEADLINE.reset(_ob_token)
         sent, reused = book.get("attempts"), False
         if book.get("error"):
             return {"ok": False, "refusal": R_VENUE_READ_ERROR,
