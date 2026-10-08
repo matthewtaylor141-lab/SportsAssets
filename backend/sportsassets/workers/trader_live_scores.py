@@ -27,7 +27,8 @@ async def main():
         return
     dsn = os.getenv("TRADER_SCORE_DATABASE_URL") or os.getenv("DATABASE_URL")
     if not dsn:
-        raise RuntimeError("TRADER_SCORE_DATABASE_URL_OR_DATABASE_URL_REQUIRED")
+        # Two setting names, not one token (bettor_read_only_venue dsn_settings).
+        raise RuntimeError("TRADER_SCORE_DATABASE_URL OR DATABASE_URL REQUIRED")
     import asyncpg
     # Two connections: one holds the lease, one handles bounded display storage.
     pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2, command_timeout=3)

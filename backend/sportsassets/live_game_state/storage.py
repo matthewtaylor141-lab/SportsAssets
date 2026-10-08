@@ -187,7 +187,8 @@ ON CONFLICT(venue,event_id) DO UPDATE SET issue=excluded.issue,checked_at=exclud
 """, f.venue, f.event_id, why[:300], now)
 
     async def heartbeat(self, payload: dict, *, now: float):
-        body = json.dumps(payload, sort_keys=True, allow_nan=False)
+        # default=str: the repository's heartbeat rule (test_r30a_runtime_defects).
+        body = json.dumps(payload, sort_keys=True, allow_nan=False, default=str)
         if len(body.encode()) > MAX_RECORD_BYTES:
             raise ScoreError("SCORE_HEALTH_RECORD_TOO_LARGE")
         async with self.pool.acquire() as conn:
