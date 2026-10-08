@@ -958,6 +958,19 @@ class GrpcBidiTransport:
         return _outbound(pb2.BiDirectionalStreamMarketDataRequest(
             keepalive=pb2.KeepAliveCommand()))
 
+    def _recycle_at(self) -> int:
+        """The venue-side bound for THIS connection: SUBSCRIBED_RECYCLE_AT,
+        or the books' own capacity when larger -- a market-plane shard
+        (SizedBooks, up to 1,000 symbols in explicit mode) must not recycle
+        at the deciding stream's 400 on every connection. A shard therefore
+        recycles only past the documented 1,000 symbols per stream."""
+        cap = getattr(self.books, "max_symbols", None)
+        try:
+            return max(SUBSCRIBED_RECYCLE_AT, int(cap)) if cap else \
+                SUBSCRIBED_RECYCLE_AT
+        except (TypeError, ValueError):
+            return SUBSCRIBED_RECYCLE_AT
+
     def subscribe(self, symbols) -> None:
         """Queue a subscribe for symbols not already on the stream. In
         MODE_SUBSCRIBE_ALL nothing is sent: every instrument is on it."""
@@ -966,7 +979,7 @@ class GrpcBidiTransport:
         new = [s for s in symbols or () if s and s not in self._subscribed]
         if not new:
             return
-        if len(self._subscribed) + len(new) > SUBSCRIBED_RECYCLE_AT:
+        if len(self._subscribed) + len(new) > self._recycle_at():
             # the venue-side set outgrew the bound (evicted entries are never
             # unsubscribed): recycle; the next connection subscribes
             # books.wanted(), which already holds `new`

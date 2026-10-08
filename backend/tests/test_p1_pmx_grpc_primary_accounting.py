@@ -489,6 +489,27 @@ def test_r3_the_venue_side_set_is_bounded_by_recycling_the_connection():
     assert not t2._q.empty() and t2.recycles == 0
 
 
+def test_r3_a_market_plane_shard_recycles_only_past_its_own_capacity():
+    """A UMP explicit-mode shard (SizedBooks, max_symbols=1000) shares the
+    transport: it must not recycle at the deciding stream's 400 on every
+    connection (an endless reconnect loop in UMP_SUBSCRIBE_ALL=off), only
+    past the documented 1,000 symbols per stream."""
+    from sportsassets.market_plane.sharded_stream import SizedBooks
+    books = SizedBooks.create(IS.ResidentBooks, 1000, lambda: 0.0)
+    t = IS.GrpcBidiTransport(books, lambda: "t",
+                             modules=IS.load_generated())
+    assert t._recycle_at() == 1000
+    t.subscribe(["S%04d" % i for i in range(1000)])
+    assert t.recycles == 0 and not t._recycle.is_set()
+    assert len(t._subscribed) == 1000
+    t.subscribe(["ONE_MORE"])
+    assert t.recycles == 1 and t._recycle.is_set()
+    # the deciding stream's books keep the tighter bound
+    t2 = IS.GrpcBidiTransport(IS.ResidentBooks(), lambda: "t",
+                              modules=IS.load_generated())
+    assert t2._recycle_at() == IS.SUBSCRIBED_RECYCLE_AT
+
+
 @pytest.mark.parametrize("pp,reason", [
     (None, "API_STREAM_EVIDENCE_ABSENT"),
     ({"run_age_s": 400.0, "state": "CONNECTED", "connected": True},
