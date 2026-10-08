@@ -120,10 +120,22 @@ def collect(*, red: dict, scoreboard: dict, release: dict | None,
         "live_authorization.SMALL_LIVE_MODE / small_live_control")
     md = comp.get("market_data") or {}
     fresh_pmx = md.get("fresh")
-    put("pmx_primary_source", "PMX_GRPC" if (fresh_pmx or 0) > 0 and
-        md.get("subscription_mode") else ("REST" if md else None),
-        "market plane snapshot subscription")
-    put("pmx_grpc_fresh_count", fresh_pmx, "market plane snapshot")
+    pp = md.get("pmx_primary") or {}
+    if md.get("snapshot") != "CURRENT" and pp:
+        # NO CURRENT DEDICATED-PLANE SNAPSHOT: the PMX gRPC primary is read
+        # where it runs -- the deciding process's stream and the held marks
+        # it produced (completion pmx_primary_block). PMX_GRPC only with a
+        # connected stream, a current resident book and >= 1 held mark from
+        # it; the count is those held marks, never a subscription size.
+        src = ("deciding-process PMX gRPC stream (paper_mark_refresh_runs."
+               "market_data) + bettor_paper_freshness feeds")
+        put("pmx_primary_source", pp.get("source"), src)
+        put("pmx_grpc_fresh_count", pp.get("held_fresh_from_stream"), src)
+    else:
+        put("pmx_primary_source", "PMX_GRPC" if (fresh_pmx or 0) > 0 and
+            md.get("subscription_mode") else ("REST" if md else None),
+            "market plane snapshot subscription")
+        put("pmx_grpc_fresh_count", fresh_pmx, "market plane snapshot")
     kv = (((ctr.get("VENUE_HEALTH") or {}).get("evidence") or {}).get(
         "venues") or {}).get("KALSHI") or {}
     put("kalshi_market_data_current", kv.get("green") if kv else None,

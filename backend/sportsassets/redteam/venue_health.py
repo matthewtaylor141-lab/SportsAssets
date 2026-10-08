@@ -72,21 +72,44 @@ def kalshi_health(beat: dict | None, *, now: float) -> VenueHealth:
                        "kalshi_market_data heartbeat (KALSHI_HEALTH)")
 
 
+#: The institutional stream states that are a GAP for POLYMARKET_US (the
+#: stream's own names: institutional_stream.S_*). "REFUSED" was listed here,
+#: which the stream never reports -- its state is REFUSED_BY_VENUE.
+STREAM_GAP_STATES = ("RECONNECTING", "GAVE_UP", "REFUSED_BY_VENUE",
+                     "CREDENTIAL_REFUSED_BY_IDENTITY_GUARD",
+                     "TRANSPORT_UNAVAILABLE", "STOPPED")
+
+
+def stream_gap(stream_beat: dict | None, *, now: float) -> str | None:
+    """PURE. Why the institutional_md stream state is a gap, or None.
+    FAIL CLOSED: an absent heartbeat, one older than HEARTBEAT_MAX_AGE_S, or
+    a beat without a stream digest is a gap (unknown is never healthy); so is
+    a gap state, and -- as before -- any stream that is not connected
+    (IDLE_NO_SYMBOLS_REQUESTED and DISABLED_BY_CONFIGURATION included)."""
+    if stream_beat is None:
+        return "STREAM_HEARTBEAT_ABSENT"
+    if now - float(stream_beat.get("at") or 0.0) > HEARTBEAT_MAX_AGE_S:
+        return "STREAM_HEARTBEAT_STALE"
+    st = ((stream_beat.get("detail") or {}).get("stream"))
+    if not isinstance(st, dict) or not st.get("state"):
+        return "STREAM_STATE_UNREADABLE"
+    state = str(st.get("state"))
+    if state in STREAM_GAP_STATES:
+        return "STREAM_%s" % state
+    if st.get("connected") is not True:
+        return "STREAM_NOT_CONNECTED:%s" % state
+    return None
+
+
 def polymarket_health(held: dict | None, stream_beat: dict | None, *,
                       now: float) -> VenueHealth:
     """POLYMARKET_US from the PMUS paths only: held books current over held
-    books markable; a stream gap open is a gap. A missing held read is zero
-    current books."""
+    books markable; a stream gap open is a gap (`stream_gap`, fail closed).
+    A missing held read is zero current books."""
     held = held or {}
     den = int(held.get("markable") or 0)
     num = int(held.get("freshly_manageable") or 0)
-    gaps = 0
-    st = ((stream_beat or {}).get("detail") or {}).get("stream") or {}
-    if stream_beat is not None and now - stream_beat["at"] <= \
-            HEARTBEAT_MAX_AGE_S:
-        if st.get("connected") is False or st.get("state") in (
-                "RECONNECTING", "GAVE_UP", "REFUSED"):
-            gaps = 1
+    gaps = 1 if stream_gap(stream_beat, now=now) else 0
     return VenueHealth(POLYMARKET_US, num, den, max(0, den - num), gaps,
                        False, float(held.get("as_of") or now),
                        "bettor_paper_freshness (held PMUS books) + "
@@ -138,10 +161,11 @@ def denominators(*, held: dict | None, priority: dict | None,
 async def read(conn, *, held: dict | None, priority: dict | None,
                total: dict | None, now: float) -> dict:
     k = kalshi_health(await _beat(conn, "kalshi_market_data"), now=now)
-    p = polymarket_health(held, await _beat(conn, "institutional_md"),
-                          now=now)
+    sb = await _beat(conn, "institutional_md")
+    p = polymarket_health(held, sb, now=now)
     rep = report([p, k])
     return {"venues": rep, "isolated": set(rep) == {KALSHI, POLYMARKET_US},
+            "polymarket_stream_gap": stream_gap(sb, now=now),
             "blended_status": None,
             "cross_venue_pair": pair_gate(rep, POLYMARKET_US, KALSHI),
             "freshness": denominators(held=held, priority=priority,

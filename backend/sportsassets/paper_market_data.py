@@ -825,7 +825,21 @@ def stream_updates() -> dict:
                 "connected": d.get("connected"),
                 "connection_seq": d.get("connection_seq"),
                 "symbols": d.get("symbols"),
-                "by_refusal": d.get("by_refusal")}
+                "by_refusal": d.get("by_refusal"),
+                # PMX gRPC PRIMARY evidence of THIS process (the deciding
+                # one): venue acks on this connection, resident L2 books
+                # current under the decision / held-mark bounds, their ages,
+                # what the per-process bound refused or evicted
+                "at": d.get("at"), "target": d.get("target"),
+                "subscription_mode": d.get("subscription_mode"),
+                "acked": d.get("acked"),
+                "refused_symbols": d.get("refused_symbols"),
+                "current_books": d.get("current_books"),
+                "held_mark_current_books": d.get("held_mark_current_books"),
+                "book_age_s": d.get("book_age_s"),
+                "venue_receipt_lag_s": d.get("venue_receipt_lag_s"),
+                "dropped_at_cap": d.get("dropped_at_cap"),
+                "evicted": d.get("evicted")}
         try:
             from . import institutional_api_stream as IAS
             dd = IAS.describe()

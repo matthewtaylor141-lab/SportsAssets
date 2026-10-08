@@ -147,6 +147,11 @@ MAX_CONSECUTIVE_FAILURES = 8
 RESTART_AFTER_GAVE_UP_S = 900.0
 RESTART_AFTER_REFUSAL_S = 1800.0
 
+#: A local entry not wanted for this long is evictable by `retain` (the
+#: focus universe is recomputed every 60 s and the held-mark refresh names
+#: held markets every run; 30 min is many passes of neither naming it).
+RETAIN_IDLE_S = 1800.0
+
 VENUE_SEQUENCE = "NOT_PROVIDED_BY_VENUE"
 OPEN_STATES = ("INSTRUMENT_STATE_OPEN",)
 
@@ -190,6 +195,26 @@ R_STREAM_CURRENCY = "STREAM_CURRENCY_GATE_REFUSED"
 _BENIGN_SUBSCRIPTION_ERRORS = ("ALREADY_SUBSCRIBED", "NOT_SUBSCRIBED")
 
 
+def _log_transition(prev, new, why, symbols) -> None:
+    """ONE INFO line per state CHANGE (never per message): the stream's
+    lifecycle used to be invisible -- the only line was the boot state."""
+    if prev == new:
+        return
+    try:
+        log.info("institutional_stream: %s -> %s (%s) symbols=%d",
+                 prev, new, str(why or "")[:160], int(symbols))
+    except Exception:                                         # noqa: BLE001
+        pass
+
+
+def _dist(xs) -> dict | None:
+    if not xs:
+        return None
+    ys = sorted(xs)
+    return {"n": len(ys), "p50": round(ys[len(ys) // 2], 3),
+            "max": round(ys[-1], 3)}
+
+
 def _utc(ts) -> datetime | None:
     if ts is None:
         return None
@@ -225,6 +250,13 @@ class ResidentBooks:
         self._messages = 0
         self._stray = 0
         self._filtered = 0
+        #: subscription_ack messages, and symbols a `want` could not hold
+        #: because the per-process bound was full -- never silent
+        self._acks = 0
+        self._dropped_at_cap = 0
+        self._dropped_recent: list = []
+        #: entries `retain` evicted (not wanted for RETAIN_IDLE_S)
+        self._evicted = 0
         self._refusal = None
         self._markets: dict = {}
         self._instruments: dict = {}
@@ -248,7 +280,10 @@ class ResidentBooks:
 
     def set_state(self, state: str, why: str) -> None:
         with self._lock:
+            prev = self.state
             self.state, self.state_why = state, why
+            n = len(self._markets)
+        _log_transition(prev, state, why, n)
 
     def set_instrument(self, symbol: str, record) -> None:
         """The venue's refdata record for this symbol: ITS OWN scales (never a
@@ -265,7 +300,10 @@ class ResidentBooks:
                 "at": self._clock()}
 
     def want(self, symbols) -> list:
-        """Symbols the decision path needs. Returns the ones that are new."""
+        """Symbols the decision path needs. Returns the ones that are new.
+        A symbol the bound (MAX_SYMBOLS) cannot hold is COUNTED
+        (dropped_at_cap, the last few named), never silently lost: callers
+        pass held markets first, and `retain` frees entries nobody wants."""
         at = self._clock()
         fresh = []
         with self._lock:
@@ -275,11 +313,35 @@ class ResidentBooks:
                     continue
                 if s not in self._markets:
                     if len(self._markets) >= MAX_SYMBOLS:
+                        self._dropped_at_cap += 1
+                        self._dropped_recent = (self._dropped_recent
+                                                + [s])[-10:]
                         continue
                     self._markets[s] = _new_market(at)
                     fresh.append(s)
                 self._markets[s]["wanted_at"] = at
         return fresh
+
+    def retain(self, keep, *, idle_s: float = None, now=None) -> list:
+        """THE BOUND STAYS USABLE. Drop the local entries of symbols that
+        are not in `keep` and were last wanted more than `idle_s` ago (a
+        finished game, an expired candidate). Nothing is sent: an evicted
+        symbol's updates still arriving on this connection are STRAY
+        (counted, never stored); the next connection subscribes only what is
+        wanted. Returns the evicted symbols."""
+        at = float(now if now is not None else self._clock())
+        idle = float(RETAIN_IDLE_S if idle_s is None else idle_s)
+        keep = {str(k) for k in keep or ()}
+        out = []
+        with self._lock:
+            for s, m in list(self._markets.items()):
+                if s in keep:
+                    continue
+                if at - float(m.get("wanted_at") or 0.0) > idle:
+                    del self._markets[s]
+                    out.append(s)
+            self._evicted += len(out)
+        return out
 
     def wanted(self) -> list:
         with self._lock:
@@ -313,10 +375,13 @@ class ResidentBooks:
             for m in self._markets.values():
                 m["hw"] = None          # a venue clock is per connection
                 m["acked_seq"] = None
+            prev = self.state
             self.state, self.state_why = S_CONNECTED, "stream open"
             self._emit("connected", seq=self._conn_seq, conn_id=self._conn_id,
                        at=now)
-            return self._conn_seq
+            seq, n = self._conn_seq, len(self._markets)
+        _log_transition(prev, S_CONNECTED, "connection %d" % seq, n)
+        return seq
 
     def silence_s(self) -> float | None:
         with self._lock:
@@ -333,6 +398,7 @@ class ResidentBooks:
         with self._lock:
             self._last_life_at = self._clock()
             self._messages += 1
+            self._acks += 1
             self._emit("ack", at=self._last_life_at,
                        added=len(added or ()))
             for s in added or ():
@@ -424,10 +490,13 @@ class ResidentBooks:
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
                     gapped.append(s)
+            prev = self.state
             self.state, self.state_why = S_RECONNECTING, \
                 "stream ended: %s" % str(why)[:160]
             self._emit("disconnected", seq=self._conn_seq, at=now,
                        why=str(why)[:160], gapped=gapped)
+            n = len(self._markets)
+        _log_transition(prev, S_RECONNECTING, self.state_why, n)
 
     def on_refused(self, code: str) -> None:
         now = self._clock()
@@ -440,18 +509,24 @@ class ResidentBooks:
                     m["gap"] = {"reason": R_GAP_CONNECTION, "at": now,
                                 "seq": self._conn_seq}
                     gapped.append(s)
+            prev = self.state
             self.state, self.state_why = S_REFUSED, \
                 "venue refused the stream: %s" % code
             self._emit("refused", seq=self._conn_seq, at=now, code=str(code),
                        gapped=gapped)
+            n = len(self._markets)
+        _log_transition(prev, S_REFUSED, self.state_why, n)
 
     def on_gave_up(self, failures: int) -> None:
         with self._lock:
             self._connected = False
+            prev = self.state
             self.state, self.state_why = S_GAVE_UP, \
                 "%d consecutive attempts delivered nothing" % failures
             self._emit("gave_up", seq=self._conn_seq, at=self._clock(),
                        failures=int(failures))
+            n = len(self._markets)
+        _log_transition(prev, S_GAVE_UP, self.state_why, n)
 
     # ── the read the decision path makes ──────────────────────────────
 
@@ -620,7 +695,20 @@ class ResidentBooks:
         at = float(now if now is not None else self._clock())
         with self._lock:
             syms = list(self._markets)
+            seq = self._conn_seq
+            acked = sum(1 for m in self._markets.values()
+                        if self._connected and m.get("acked_seq") == seq)
+            refused_syms = sum(1 for m in self._markets.values()
+                               if m.get("refused"))
             base = {"version": VERSION, "state": self.state,
+                    "at": at, "target": GRPC_TARGET,
+                    "max_symbols": MAX_SYMBOLS,
+                    # symbols the venue acknowledged on THIS connection
+                    "acked": acked, "acks_total": self._acks,
+                    "refused_symbols": refused_syms,
+                    "dropped_at_cap": self._dropped_at_cap,
+                    "dropped_recent": list(self._dropped_recent),
+                    "evicted": self._evicted,
                     "why": self.state_why, "connection_seq": self._conn_seq,
                     "connected": self._connected, "messages": self._messages,
                     "stray_updates": self._stray,
@@ -632,11 +720,27 @@ class ResidentBooks:
                     "venue_refusal": dict(self._refusal or {}) or None,
                     "subscription_errors": list(self._errors[-5:])}
         by: dict = {}
+        ages, skews, held_ok = [], [], 0
         for s in syms:
             r = self.current(s, now=at)
             k = "OK" if r["ok"] else r["refusal"]
             by[k] = by.get(k, 0) + 1
-        return dict(base, symbols=len(syms), by_refusal=by)
+            h = r if r["ok"] else self.current(
+                s, now=at, max_snapshot_age_s=HELD_MARK_MAX_SNAPSHOT_AGE_S)
+            if h["ok"]:
+                held_ok += 1
+                snap = (h.get("evidence") or {}).get("snapshot") or {}
+                if snap.get("age_s") is not None:
+                    ages.append(float(snap["age_s"]))
+                if snap.get("lag_ms") is not None:
+                    skews.append(float(snap["lag_ms"]) / 1000.0)
+        return dict(base, symbols=len(syms), by_refusal=by,
+                    # RESIDENT L2 BOOKS current in THIS process: under the
+                    # decision bound (MAX_SNAPSHOT_AGE_S) and under the held-
+                    # mark bound (HELD_MARK_MAX_SNAPSHOT_AGE_S)
+                    current_books=by.get("OK", 0),
+                    held_mark_current_books=held_ok,
+                    book_age_s=_dist(ages), venue_receipt_lag_s=_dist(skews))
 
 
 def _new_market(at: float) -> dict:
@@ -1139,6 +1243,15 @@ def want(symbols) -> dict:
         return {"queued": 0, "why": type(exc).__name__}
 
 
+def retain(keep, *, idle_s=None) -> list:
+    """Evict local entries nobody wants (see ResidentBooks.retain). NEVER
+    RAISES."""
+    try:
+        return BOOKS.retain(keep, idle_s=idle_s)
+    except Exception:                                         # noqa: BLE001
+        return []
+
+
 def set_instrument(symbol, record) -> None:
     try:
         BOOKS.set_instrument(symbol, record)
@@ -1176,8 +1289,18 @@ def current_for_held_mark(symbol, *, now=None) -> dict:
 
 
 def digest() -> dict:
+    """THE LIVE state (`state`, `connected`, ...) plus the START record
+    (`start`: what start_default answered once, at boot -- by construction
+    IDLE_NO_SYMBOLS_REQUESTED for a stream that started). A reader that
+    wants to know what the stream is doing reads `state`, never
+    `start.state`."""
     try:
-        return dict(BOOKS.digest(), start=dict(_START))
+        t = _TRANSPORT
+        mode = getattr(t, "subscription_mode", None)
+        out = getattr(t, "outbound", None)
+        return dict(BOOKS.digest(), start=dict(_START),
+                    subscription_mode=mode,
+                    outbound=dict(out) if isinstance(out, dict) else None)
     except Exception as exc:                                  # noqa: BLE001
         return {"version": VERSION, "digest_failed": type(exc).__name__}
 

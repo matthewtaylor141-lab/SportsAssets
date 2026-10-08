@@ -74,6 +74,41 @@ TIMEOUT = (5.0, 30.0)
 # subscription nobody has verified.
 MARKET_DATA_MECHANISM = "REST_POLL_MAINTAINED_IN_MEMORY"
 STREAM_TARGET = "NOT_IDENTIFIED"
+#: SINCE 2026-10-03 THERE IS A STREAM (institutional_stream: the vendored
+#: official proto, BiDirectionalStreamMarketData on the documented
+#: production target). The two constants above still describe the REST
+#: sweep and nothing else; a process's label is `market_data_mechanisms`.
+STREAM_MECHANISM = "PMX_GRPC_BIDI_MARKET_DATA_STREAM"
+MECH_STREAM_PRIMARY = "PMX_GRPC_STREAM_PRIMARY_REST_FALLBACK"
+MECH_STREAM_NOT_CURRENT = "PMX_GRPC_STREAM_ARMED_NOT_CURRENT_REST_FALLBACK"
+
+
+def market_data_mechanisms(*, stream_enabled: bool,
+                           stream_digest: dict | None = None) -> dict:
+    """PURE. The mechanisms this process runs, by evidence: the REST
+    sweep (always MARKET_DATA_MECHANISM), and the gRPC stream when it is
+    armed here -- PRIMARY only while its live digest shows a connection
+    with at least one current resident book; otherwise ARMED_NOT_CURRENT.
+    Never claims a stream that is off, and never the boot record."""
+    from .institutional_stream import GRPC_TARGET
+    d = stream_digest if isinstance(stream_digest, dict) else {}
+    current = int(d.get("held_mark_current_books")
+                  or d.get("current_books") or 0)
+    if not stream_enabled:
+        mech, target = MARKET_DATA_MECHANISM, STREAM_TARGET
+    elif d.get("connected") and current > 0:
+        mech, target = MECH_STREAM_PRIMARY, GRPC_TARGET
+    else:
+        mech, target = MECH_STREAM_NOT_CURRENT, GRPC_TARGET
+    return {"mechanism": mech, "rest_sweep": MARKET_DATA_MECHANISM,
+            "stream": {"mechanism": STREAM_MECHANISM if stream_enabled
+                       else None, "enabled": bool(stream_enabled),
+                       "target": target, "state": d.get("state"),
+                       "connected": d.get("connected"),
+                       "requested": d.get("symbols"),
+                       "current_l2_books": d.get("current_books"),
+                       "held_mark_current_l2_books":
+                           d.get("held_mark_current_books")}}
 
 # §3: the evidence environment for anything this module returns.
 EVIDENCE_ENVIRONMENT = "DIRECT_INSTITUTIONAL_WORKER"

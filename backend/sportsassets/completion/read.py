@@ -51,6 +51,15 @@ R_PMUS_NOT_ED25519 = "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY"
 PROVEN_SETTLEMENT = ("SETTLEMENT_PROVEN_COMPATIBLE",
                      "SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED")
 DEDICATED_SPEC = "ops/render_market_plane_service.yaml"
+#: PMX gRPC PRIMARY IN THE DECIDING PROCESS. The held-mark refresh (API
+#: process) records the live institutional stream digest on every run
+#: (paper_mark_refresh_runs.market_data.streams.institutional); a run older
+#: than the mark SLA (bettor_paper_freshness.SLA_S, 300 s) is not evidence.
+PMX_RUN_MAX_AGE_S = 300.0
+PMX_GRPC = "PMX_GRPC"
+PMX_REST = "REST"
+#: held-mark feeds (bettor_paper_freshness.MARK_FEEDS) that are REST fallback
+REST_FEEDS = ("RETAIL_STREAM", "HARVEST", "REST", "PUBLIC_GATEWAY")
 
 
 def _j(x):
@@ -204,6 +213,107 @@ def market_data_block(snap, why, ump_detail) -> dict:
                 if active else None),
             "universe_pull": snap.get("refdata_universe")},
         "token": sub.get("token")}
+
+
+async def latest_mark_refresh(conn, account_id: str):
+    """The newest FINISHED held-mark refresh run with its per-source counts
+    and the market-data telemetry it recorded (migration 306), or None."""
+    if not await _has(conn, "paper_mark_refresh_runs"):
+        return None
+    n = await conn.fetchval(
+        "SELECT count(*) FROM information_schema.columns WHERE table_name = "
+        "'paper_mark_refresh_runs' AND column_name = ANY($1::text[])",
+        ["market_data", "sources", "institutional_books"])
+    if int(n or 0) < 3:
+        return None
+    r = await conn.fetchrow(
+        "SELECT run_id, finished_at, held_markets, institutional_books, "
+        "       sources, market_data FROM paper_mark_refresh_runs "
+        " WHERE account_id = $1 AND finished_at IS NOT NULL "
+        " ORDER BY started_at DESC, run_id DESC LIMIT 1", account_id)
+    if r is None:
+        return None
+    return {"run_id": r["run_id"], "finished_at": _epoch(r["finished_at"]),
+            "held_markets": r["held_markets"],
+            "institutional_books": r["institutional_books"],
+            "sources": _j(r["sources"]) or {},
+            "market_data": _j(r["market_data"]) or {}}
+
+
+def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
+    """PURE. PMX gRPC PRIMARY, SOURCE BY SOURCE, from the deciding process's
+    own record (never the dedicated plane's, never assumed):
+
+      stream     requested symbols, venue acks on the current connection,
+                 resident L2 books current (decision / held-mark bound), their
+                 ages -- the API stream digest the newest held-mark run saved
+      held       every markable held position's newest mark by source; the
+                 PMX share is FRESH + QUIET_VALID marks whose observation came
+                 from the institutional stream, over the SAME markable
+                 denominator as held freshness (bettor_paper_freshness)
+      fallback   REST-family marks, and why the primary was refused per
+                 refusal (identity / same-book / not current / SLA)
+
+    `source` is PMX_GRPC only when the run is inside PMX_RUN_MAX_AGE_S, the
+    stream is CONNECTED with >= 1 current resident book, and >= 1 held mark
+    came from it; otherwise REST with every reason named."""
+    run = run or {}
+    md = run.get("market_data") or {}
+    inst = ((md.get("streams") or {}).get("institutional")) or {}
+    f = feeds or {}
+    held_by = dict(f.get("held_marks_by_source") or {})
+    fresh_by = dict(f.get("fresh_marks_by_source") or {})
+    stream_fresh = int(fresh_by.get("INSTITUTIONAL_STREAM") or 0)
+    rest_fresh = sum(int(fresh_by.get(k) or 0) for k in REST_FEEDS)
+    age = (None if run.get("finished_at") is None
+           else round(float(now) - float(run["finished_at"]), 1))
+    current = int(inst.get("held_mark_current_books")
+                  or inst.get("current_books") or 0)
+    why = []
+    if not run:
+        why.append("NO_HELD_MARK_REFRESH_RUN_RECORDED")
+    elif age is None or age > PMX_RUN_MAX_AGE_S:
+        why.append("HELD_MARK_RUN_OLDER_THAN_%dS" % int(PMX_RUN_MAX_AGE_S))
+    if inst.get("state") != "CONNECTED":
+        why.append("STREAM_NOT_CONNECTED:%s" % inst.get("state"))
+    if current <= 0:
+        why.append("NO_CURRENT_RESIDENT_L2_BOOK")
+    if stream_fresh <= 0:
+        why.append("NO_HELD_MARK_FROM_THE_STREAM")
+    den = int(markable or 0)
+    return {
+        "source": PMX_REST if why else PMX_GRPC, "why": why,
+        "process": "sportsassets-api (deciding process)",
+        "evidence": "paper_mark_refresh_runs.market_data.streams."
+                    "institutional + bettor_paper_freshness feeds",
+        "run_id": run.get("run_id"), "run_age_s": age,
+        "subscription_mode": inst.get("subscription_mode"),
+        "target": inst.get("target"), "state": inst.get("state"),
+        "connected": inst.get("connected"),
+        "requested_symbols": inst.get("symbols"),
+        "acked_symbols": inst.get("acked"),
+        "refused_symbols": inst.get("refused_symbols"),
+        "current_l2_books": inst.get("current_books"),
+        "held_mark_current_l2_books": inst.get("held_mark_current_books"),
+        "book_age_s": inst.get("book_age_s"),
+        "venue_receipt_lag_s": inst.get("venue_receipt_lag_s"),
+        "dropped_at_cap": inst.get("dropped_at_cap"),
+        "held_subscribed": (inst.get("api_stream") or {}).get(
+            "held_subscribed"),
+        "held_wanted": (inst.get("api_stream") or {}).get("held_wanted"),
+        "held_markable": den,
+        "held_fresh_from_stream": stream_fresh,
+        "held_fresh_from_rest_fallback": rest_fresh,
+        "held_stream_rate": (round(stream_fresh / den, 4) if den else None),
+        "held_marks_by_source": held_by,
+        "fresh_marks_by_source": fresh_by,
+        "oldest_held_mark_age_s": f.get("oldest_held_mark_age_s"),
+        "institutional_books_last_run": run.get("institutional_books"),
+        "fallback_reasons": md.get("institutional_refusals"),
+        "accounting_rule": ("held freshness = (FRESH + QUIET_VALID) / "
+                            "markable from ANY source; PMX share = those "
+                            "whose newest observation is the institutional "
+                            "stream; REST counted apart, never merged")}
 
 
 # ── venue positions / arbitrage / settlement ───────────────────────────
@@ -471,7 +581,20 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
         "open_positions": fr.get("open_positions"),
         "fresh": ((fr.get("counts") or {}).get("FRESH") or {}).get("count"),
         "quiet_valid": ((fr.get("counts") or {}).get("QUIET_VALID") or {})
-        .get("count"), "target": fr.get("target_fresh_rate")}
+        .get("count"), "target": fr.get("target_fresh_rate"),
+        # SOURCE-SPECIFIC: the newest mark of every held position by feed
+        "marks_by_source": (fr.get("feeds") or {}).get(
+            "held_marks_by_source"),
+        "fresh_by_source": (fr.get("feeds") or {}).get(
+            "fresh_marks_by_source"),
+        "oldest_held_mark_age_s": (fr.get("feeds") or {}).get(
+            "oldest_held_mark_age_s")}
+
+    async def _pmx():
+        return await latest_mark_refresh(conn, account_id)
+    pmx_run = await sec.run("pmx_primary", _pmx, None)
+    market["pmx_primary"] = pmx_primary_block(
+        pmx_run, fr.get("feeds"), markable=fr.get("markable"), now=now)
 
     async def _gates():
         return await F.gates(conn, account_id=account_id, now=now,
