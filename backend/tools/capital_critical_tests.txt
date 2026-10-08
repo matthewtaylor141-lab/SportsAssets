@@ -1331,3 +1331,7 @@ tests/test_trader_live_game_package_parity.py
 tests/test_market_plane_memory_bound.py
 # (RC5) the dedicated market plane's FULL-MODE boot (main() under market_plane_guard, UMP_AND_KALSHI_WS) with mocked transports: authentication, reference data and both subscriptions reach the mocks; every submit / cancel / funding path is refused before the wire (zero such requests recorded)
 tests/test_market_plane_full_mode_boot.py
+# (RC5 PMX consumer books) the PMX book serves paper / collector calibration reads only: never a funded input, never a funded-module import, REST exactly as before on every unproven read
+tests/test_rc5_pmx_consumer_books.py
+# (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
+tests/test_rc5_feed_ownership_authority.py

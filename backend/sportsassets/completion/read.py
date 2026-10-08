@@ -172,7 +172,57 @@ async def latest_snapshot(conn, *, now: float):
     age = now - _epoch(r["at"])
     if age > SNAPSHOT_MAX_AGE_S:
         return None, "MARKET_PLANE_SNAPSHOT_STALE_%ds" % int(age)
-    return _j(r["payload"]) or {}, None
+    snap = _j(r["payload"]) or {}
+    if isinstance(snap, dict) and snap.get("computed_at") is None:
+        snap = dict(snap, computed_at=_epoch(r["at"]))
+    return snap, None
+
+
+#: ── A STALE, ABSENT OR RESTARTED PLANE CERTIFIES NOTHING (RC5) ───────────
+#:
+#: PRODUCTION (2026-10-08, release 7fd4574e): the dedicated plane was OOM-
+#: killed at its 2 GiB limit at 06:10:01Z and again at 06:12:10Z
+#: (events_sportsassets-market-plane), and is cycling every ~20-60 min since
+#: 05:16Z. Its books live only in its own process memory, so each restart
+#: discards every one; yet the readback called the plane's last SNAPSHOT
+#: "CURRENT" for up to SNAPSHOT_MAX_AGE_S (600 s) whatever happened after it
+#: -- and the acceptance harness reads PMX primary from exactly that
+#: (pm_bind.acceptance: snapshot CURRENT -> pmx_primary_source PMX_GRPC).
+#: A snapshot of a process that has stopped beating, or of a previous
+#: incarnation, is a record of books that no longer exist.
+#:
+#: SO a snapshot is CURRENT only when ALSO (thresholds unchanged, existing
+#: ones only):
+#:   * the plane's own liveness heartbeat (`universal_market_plane`, written
+#:     every pass) is at most UMP_HEARTBEAT_MAX_AGE_S old -- else
+#:     MARKET_PLANE_HEARTBEAT_ABSENT / _STALE_<s>s;
+#:   * it was computed by the RUNNING incarnation: not before that
+#:     incarnation's start (the plane's boot record, `market_plane`
+#:     heartbeat detail.started_at) -- else
+#:     MARKET_PLANE_SNAPSHOT_FROM_A_PREVIOUS_RUNTIME (the restart gap: the
+#:     new process has not yet published its own).
+#: Not CURRENT -> the readback withholds the plane's figures with the reason,
+#: and the harness reads PMX primary as REST. Nothing here moves a number.
+PLANE_BOOT_SERVICE = "market_plane"
+R_PLANE_HEARTBEAT_ABSENT = "MARKET_PLANE_HEARTBEAT_ABSENT"
+R_PLANE_PREVIOUS_RUNTIME = "MARKET_PLANE_SNAPSHOT_FROM_A_PREVIOUS_RUNTIME"
+
+
+def plane_snapshot_refusal(snap, ump, boot, *, now: float) -> str | None:
+    """PURE. None when the plane snapshot may stand for now; otherwise the
+    named reason it may not (see above). `ump` is the plane's liveness
+    heartbeat, `boot` its boot record ({detail.started_at}), each
+    {status, detail, beat_at} or None."""
+    if ump is None or ump.get("beat_at") is None:
+        return R_PLANE_HEARTBEAT_ABSENT
+    age = float(now) - float(ump["beat_at"])
+    if age > UMP_HEARTBEAT_MAX_AGE_S:
+        return "MARKET_PLANE_HEARTBEAT_STALE_%ds" % int(age)
+    started = _epoch(((boot or {}).get("detail") or {}).get("started_at"))
+    computed = _epoch((snap or {}).get("computed_at"))
+    if started is not None and computed is not None and computed < started:
+        return R_PLANE_PREVIOUS_RUNTIME
+    return None
 
 
 def market_data_block(snap, why, ump_detail) -> dict:
@@ -238,6 +288,28 @@ async def latest_mark_refresh(conn, account_id: str):
             "institutional_books": r["institutional_books"],
             "sources": _j(r["sources"]) or {},
             "market_data": _j(r["market_data"]) or {}}
+
+
+def consumer_reads_block(book_sources) -> dict:
+    """PURE. The deciding process's consumer book reads by source, from the
+    held-mark run's persisted owner telemetry (`book_sources`); UNREAD when
+    the run carried none (a build before RC5, or no run)."""
+    bs = book_sources if isinstance(book_sources, dict) else {}
+    if not bs.get("totals"):
+        return {"status": "UNREAD", "why": "NO_BOOK_SOURCE_TELEMETRY_ON_RUN"}
+    reasons: dict = {}
+    by = {}
+    for name, c in (bs.get("by_consumer") or {}).items():
+        by[name] = {"PMX_GRPC": int((c or {}).get("PMX_GRPC") or 0),
+                    "REST": int((c or {}).get("REST") or 0)}
+        for k, v in ((c or {}).get("fallback_reasons") or {}).items():
+            reasons[k] = reasons.get(k, 0) + int(v or 0)
+    top = dict(sorted(reasons.items(), key=lambda kv: -kv[1])[:10])
+    return {"status": "MEASURED", "scope": bs.get("scope"),
+            "totals": dict(bs.get("totals")), "by_consumer": by,
+            "pmx_share": bs.get("pmx_share"),
+            "fallback_reasons_top": top,
+            "enabled": bs.get("enabled"), "rule": bs.get("rule")}
 
 
 def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
@@ -317,6 +389,12 @@ def pmx_primary_block(run, feeds, *, markable, now: float) -> dict:
         "oldest_held_mark_age_s": f.get("oldest_held_mark_age_s"),
         "institutional_books_last_run": run.get("institutional_books"),
         "fallback_reasons": md.get("institutional_refusals"),
+        # CONSUMER USE, BY SOURCE (paper_pmx_books, RC5): every paper
+        # owner and collector book read of the deciding process, PMX_GRPC
+        # or REST, and every reason a PMX book did not serve -- the same
+        # run's persisted telemetry. Evidence beside `source`, never an
+        # input to it.
+        "consumer_reads": consumer_reads_block(md.get("book_sources")),
         "accounting_rule": ("held freshness = (FRESH + QUIET_VALID) / "
                             "markable from ANY source; PMX share = those "
                             "whose newest observation is the institutional "
@@ -681,7 +759,14 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
     runtime = runtime_block(boot, mem, ump, now=now)
 
     async def _snap():
-        return await latest_snapshot(conn, now=now)
+        s, w = await latest_snapshot(conn, now=now)
+        if s is not None:
+            # A STALE, ABSENT OR RESTARTED PLANE CERTIFIES NOTHING
+            w = plane_snapshot_refusal(
+                s, ump, await _heartbeat(conn, PLANE_BOOT_SERVICE), now=now)
+            if w is not None:
+                s = None
+        return s, w
     snap, why = await sec.run("market_data", _snap,
                               (None, "SECTION_UNAVAILABLE"))
     market = market_data_block(snap, why, (ump or {}).get("detail"))

@@ -374,6 +374,14 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
                     conn, [s for s, _ in pl["due"]])
             except Exception as exc:                            # noqa: BLE001
                 out["institutional_evidence"] = {"error": type(exc).__name__}
+        # THE CONSUMERS' PMX BOOK RULE reads per-symbol same-book evidence
+        # loaded here (paper_pmx_books (e)) for every symbol the stream
+        # holds, when due; with no stream in this process nothing loads.
+        try:
+            from .. import paper_pmx_books as PCB
+            out["pmx_consumer_evidence"] = await PCB.refresh_evidence(conn)
+        except Exception as exc:                                # noqa: BLE001
+            out["pmx_consumer_evidence"] = {"error": type(exc).__name__}
         rest_due: list = []
         for slug, evd in pl["terminal"].items():
             out["outcomes"][slug] = {"outcome": O_SKIP_TERMINAL,
