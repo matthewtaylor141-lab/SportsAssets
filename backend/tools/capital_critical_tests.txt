@@ -1290,3 +1290,5 @@ tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
 # (RC5 PMX consumer books) the PMX book serves paper / collector calibration reads only: never a funded input, never a funded-module import, REST exactly as before on every unproven read
 tests/test_rc5_pmx_consumer_books.py
+# (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
+tests/test_rc5_feed_ownership_authority.py

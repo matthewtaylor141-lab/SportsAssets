@@ -3631,6 +3631,84 @@ def validate_primary_pinnacle(quote: dict, *, at: float) -> dict:
         runtime_id=feed._STATE.get("runtime_id"))
 
 
+#: ── FEED_OWNERSHIP_NOT_HELD, BY THE AUTHORITY'S ACTUAL STATE (RC5) ───────
+#:
+#: PRODUCTION (first-loss census after RC4): FEED_OWNERSHIP_NOT_HELD 18 / h
+#: at the NORMALIZED stage -- collector ledger rows of events with no other
+#: Pinnacle source, refused because the leased WS cache had no authority at
+#: that instant. 691a5946 removed one cause (the paper backstop deciding a
+#: previous runtime's valuations, MODEL stage). What remains is the
+#: collapse in `pinnapi_primary.select`: EVERY not-synced state -- never
+#: granted, a socket closed (FEED_SOCKET_CLOSED), the provider silent, the
+#: lease or the control read lost (FEED_LEASE_CONNECTION_LOST_OR_NOT_HELD,
+#: FEED_CONTROL_READ_TIMED_OUT), or a NEW epoch granted and still awaiting
+#: its snapshots (FEED_EPOCH_NOT_RESYNCHRONIZED) -- reads as the one name,
+#: and nothing recorded which. The code is kept (its class, SOFTWARE, is
+#: unchanged: every one of those states is ours to keep short); the
+#: authority's own state at each refusal is now counted on the cycle
+#: (`pinnapi_authority_at_refusal`) so the next census names the cause.
+#: And a cycle that STARTS inside a reconnect waits for the resync exactly
+#: as the hold's first cycle already does (`_feed.wait_synced`, bounded by
+#: FIRST_SYNC_WAIT_S; at once when synced or not contending): its
+#: PinnAPI-only events are judged on a synced cache, not refused in bulk.
+#: No freshness rule, code, class or threshold moves.
+def pinnapi_authority_state() -> str:
+    """The in-process PinnAPI cache authority's state, by name: SYNCED,
+    GRANTED_AWAITING_RESYNC:<owner state>, NOT_GRANTED:<revocation reason>:
+    <owner state>, NO_OWNER_IN_THIS_PROCESS, or UNREADABLE:<exc>. Read
+    only; never raises."""
+    try:
+        from .. import pinnapi_feed as F
+        from .. import pinnapi_feed_runtime as feed
+        o = feed._STATE.get("owner")
+        if o is None:
+            return "NO_OWNER_IN_THIS_PROCESS"
+        a = o.cache.authority
+        if a.synced:
+            return "SYNCED"
+        if a.granted:
+            return "GRANTED_AWAITING_RESYNC:%s" % getattr(o, "state", None)
+        return "NOT_GRANTED:%s:%s" % (a.reason or F.R_NO_AUTHORITY,
+                                      getattr(o, "state", None))
+    except Exception as exc:                                   # noqa: BLE001
+        return "UNREADABLE:%s" % type(exc).__name__
+
+
+#: = pinnapi_feed.R_NO_AUTHORITY (pinned by a test)
+R_FEED_OWNERSHIP = "FEED_OWNERSHIP_NOT_HELD"
+
+
+def _note_authority_at_refusal(into: dict) -> str:
+    """Count ONE FEED_OWNERSHIP_NOT_HELD refusal by the authority's state at
+    that instant (`pinnapi_authority_state`). Returns the state."""
+    st = pinnapi_authority_state()
+    d = into.setdefault("pinnapi_authority_at_refusal", {})
+    d[st] = d.get(st, 0) + 1
+    return st
+
+
+#: The last pre-cycle resync wait, for the heartbeat (`_freshness_digest`).
+_FEED_RESYNC: dict = {"last": None, "waited_s": None}
+
+
+async def wait_for_feed_resync() -> str:
+    """Before a cycle: wait (bounded, FIRST_SYNC_WAIT_S) for the PinnAPI
+    owner to resynchronize when it is mid-reconnect; at once when synced,
+    not started or not contending. Returns wait_synced's name (also kept
+    in _FEED_RESYNC with the seconds waited). Never raises (cancellation
+    excepted)."""
+    t0 = time.monotonic()
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        got = await feed.wait_synced()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        got = "WAIT_FAILED:%s" % type(exc).__name__
+    _FEED_RESYNC.update(last=got, waited_s=round(time.monotonic() - t0, 3))
+    return got
+
+
 #: The marker `pinnapi_read_refusal` hands `pinnapi_primary.select` as a
 #: fallback, so the WS refusal reason select would otherwise discard comes back.
 _PINNAPI_REFUSAL_PROBE = "__pinnapi_read_refusal_probe__"
@@ -10929,6 +11007,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 _ws_code = "WS_REFERENCE_NOT_USABLE:%s" % _ws_reason
                 tally[_ws_code] = tally.get(_ws_code, 0) + 1
                 _step_refuse(_ws_code)
+                if _ws_reason == R_FEED_OWNERSHIP:
+                    _note_authority_at_refusal(lat)
                 # ITS LEDGER STAGE (coverage census, 2026-10-05): the row was
                 # written with none, so coverage_integrity ranked it 0 --
                 # never normalized -- whatever the WS reason was. Staged as
@@ -10949,6 +11029,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 for _c in _np:
                     tally[_c] = tally.get(_c, 0) + 1
                     _step_refuse(_c)
+                if R_FEED_OWNERSHIP in _np:
+                    _note_authority_at_refusal(lat)
                 _event_fields({"stage": no_pinnacle_stage(_np),
                                "ws_refusal": _ws_why.get("reason"),
                                "payload_absence":
@@ -12442,6 +12524,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "venue_book_sources": dict(lat.get("venue_book_sources") or {
                    _PMX_SOURCE: 0, _REST_SOURCE: 0}),
                "venue_book_source_rule": PMX_BOOK_BEFORE_REST_RULE,
+               # every FEED_OWNERSHIP_NOT_HELD refusal by the PinnAPI
+               # authority's state at that instant (pinnapi_authority_state)
+               "pinnapi_authority_at_refusal": dict(
+                   lat.get("pinnapi_authority_at_refusal") or {}),
                "reads_bounded_by_probability_deadline":
                    lat["reads_bounded_by_probability_deadline"],
                "read_bound_rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE,
@@ -13315,6 +13401,12 @@ def _freshness_digest(out: dict) -> dict | None:
             # deciding process's PMX institutional stream or the REST read,
             # every REST fallback by its reason (paper_pmx_books)
             "venue_book_sources": lat.get("venue_book_sources"),
+            # (RC5) FEED_OWNERSHIP_NOT_HELD refusals by the PinnAPI
+            # authority's state at that instant, and the last pre-cycle
+            # resync wait
+            "pinnapi_authority_at_refusal": lat.get(
+                "pinnapi_authority_at_refusal"),
+            "pinnapi_resync_before_cycle": dict(_FEED_RESYNC),
             # DEFERRALS REACH THE OPERATOR SURFACE TOO. A count and a
             # bounded sample: without them a rising evaluation count and a
             # falling stale rate could both be produced by examining fewer,
@@ -13877,6 +13969,8 @@ async def _hold_once(get_pool) -> str | None:
         servicing = asyncio.get_running_loop().create_task(
             _servicing_loop(pool, interval_s=SERVICING_INTERVAL_S,
                             fence=_child_fence))
+        # the first cycle of the hold already waited (above)
+        _cycles_in_hold = 0
         try:
             while True:
                 delay = IDLE_POLL_S
@@ -13911,8 +14005,20 @@ async def _hold_once(get_pool) -> str | None:
                     except Exception:                          # noqa: BLE001
                         log.warning("ext_pinnacle: cooldown drain failed",
                                     exc_info=True)
+                    # A CYCLE THAT STARTS INSIDE A PINNAPI RECONNECT WAITS
+                    # FOR THE RESYNC, exactly as the hold's first cycle did
+                    # above (bounded; at once when synced or not contending)
+                    # -- its PinnAPI-only events are then judged on a synced
+                    # cache instead of being refused FEED_OWNERSHIP_NOT_HELD
+                    # in bulk (RC5, `pinnapi_authority_state`)
+                    _resync = None
+                    if _cycles_in_hold:
+                        _resync = await wait_for_feed_resync()
+                    _cycles_in_hold += 1
                     t_cycle = time.monotonic()
                     out = await cycle(conn)
+                    if isinstance(out, dict) and _resync is not None:
+                        out["pinnapi_resync_before_cycle"] = _resync
                     log.info("ext_pinnacle: %s", out)
                     await _LH.record(conn, "ext_pinnacle.entry_cycle",
                                      process="api", phase=_LH.SUCCESS,
