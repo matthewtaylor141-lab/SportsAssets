@@ -1064,12 +1064,25 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                 conn, ctx, pos=pos, role=chosen, qty=decided["target_qty"],
                 limit=tl.get("limit_price"), wire=tl.get("wire_price"),
                 review_key="%s:%s:%s" % (group_id, pos["position_key"], at))
+            if action.get("ok") and action.get("order_id"):
+                # THE UNSOLD REMAINDER STAYS PROTECTED, IN THIS REVIEW: a
+                # REDUCE sells floor(q/2) and an EXIT only what the book
+                # absorbs; the cancel-first left the rest bare until a later
+                # review. Only the inventory the sale does NOT commit is
+                # protected (held_uncommitted, under the ledger lock): never
+                # a second sale of the same contracts, nothing when the
+                # sale commits the whole position.
+                action["remainder_protection"] = await _maintain_standing(
+                    conn, ctx, pos=pos, standing=[dict(s) for s in standing],
+                    prot=prot, md=md, at=at, SPO=SPO)
             if revalidating:
                 if action.get("ok") and action.get("order_id"):
-                    await XI.resolve(conn, xi, state=XI.S_EXIT_SUBMITTED,
-                                     resolution=XI.R_EXIT_ORDER_CREATED,
-                                     at=at, review_id=rid,
-                                     exit_order_id=action["order_id"])
+                    await XI.resolve(
+                        conn, xi, state=XI.S_EXIT_SUBMITTED,
+                        resolution=XI.R_EXIT_ORDER_CREATED, at=at,
+                        review_id=rid, exit_order_id=action["order_id"],
+                        protection_order_id=(action.get(
+                            "remainder_protection") or {}).get("order_id"))
                 else:
                     # THE EXIT NO LONGER QUALIFIES (refused): abandon it
                     # explicitly and restore the protection now
@@ -1308,12 +1321,42 @@ async def _submit_sale(conn, ctx, *, pos, role, qty, limit, wire,
                 "order_type", "intent")}}
 
 
+#: no cent recovers cost + sale fees + buffer: nothing can be placed, and an
+#: order already resting is never cancelled for want of a price to compare
+R_NO_PROTECTIVE_PRICE = "NO_PROTECTIVE_PRICE"
+
+
+async def _committed_sale_qty(conn, account_id: str, pos: dict) -> float:
+    """What a pending EXIT / REDUCE of this position already commits (its
+    unfilled remainder): the standing protection covers the rest only."""
+    return float(await conn.fetchval(
+        "SELECT coalesce(sum(qty - filled_qty), 0) FROM paper_orders "
+        " WHERE account_id=$1 AND group_id=$2 AND us_market_slug=$3 "
+        "   AND holding_side=$4 AND direction='SELL' "
+        "   AND role <> 'STANDING_PROTECTION' AND state = ANY($5::text[])",
+        account_id, pos["group_id"], pos["us_market_slug"],
+        pos["holding_side"], list(L.OPEN_STATES)) or 0)
+
+
 async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
                              SPO) -> dict:
-    """ONE live-or-potentially-live protective sale per group position."""
-    want_qty = float(pos["open_qty"])
+    """ONE live-or-potentially-live protective sale per group position.
+
+    ITS TARGET is the position less what a pending EXIT / REDUCE already
+    commits (the sale and the protection never overlap; a protection that
+    covers exactly the uncommitted remainder is kept, not churned). Without
+    a protective price (`prot` not ok) nothing is placed and a resting
+    order is kept -- the reason is recorded, never a KeyError that leaves
+    the review unwritten and an EXIT intent open."""
+    priced = bool((prot or {}).get("ok")) and \
+        (prot or {}).get("price") is not None
+    want_qty = float(pos["open_qty"]) - await _committed_sale_qty(
+        conn, ctx["account_id"], pos)
     live = [s for s in standing if s["state"] != "CANCEL_PENDING"]
     pending = [s for s in standing if s["state"] == "CANCEL_PENDING"]
+    if not live and not priced:
+        return {"taken": "NONE",
+                "why": (prot or {}).get("refusal") or R_NO_PROTECTIVE_PRICE}
     if live:
         s = live[0]
         # THE DETERMINISTIC LIFECYCLE: GTD expiry -> terminal confirmation
@@ -1329,6 +1372,12 @@ async def _maintain_standing(conn, ctx, *, pos, standing, prot, md, at,
                     "order_id": s["order_id"], "expired_at": exp,
                     "why": ("GTD expiry -> terminal confirmation -> "
                             "replacement on the next feasible pass")}
+        if not priced:
+            # no price to compare with: the resting protection is KEPT --
+            # never cancelled merely because a replacement cannot be priced
+            return {"taken": "KEEP_STANDING", "order_id": s["order_id"],
+                    "why": (prot or {}).get("refusal")
+                    or R_NO_PROTECTIVE_PRICE}
         remaining = float(s["qty"]) - float(s["filled_qty"])
         if abs(remaining - want_qty) < 1e-9 and \
                 abs(float(s["limit_price"]) - prot["price"]) < 1e-9:
