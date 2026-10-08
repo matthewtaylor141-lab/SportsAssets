@@ -112,6 +112,14 @@ async def lifespan(_: FastAPI):
         logging.getLogger(__name__).exception(
             "DB unavailable at boot — serving anyway, will retry lazily")
 
+    # A SHORT ADMIN SIGNING KEY IS NAMED IN THE PRIVATE LOG (never its value
+    # or length, never on a public route); see api/admin_token_guard.py.
+    try:
+        from . import admin_token_guard as _ATG
+        _ATG.warn_if_weak(settings().admin_token)
+    except Exception:  # noqa: BLE001
+        pass
+
     # THE PROVIDER ADAPTER, IMPORTED FROM THE INSTALLED SDK AT BOOT: a
     # missing or broken dependency is named here, not on the first chat.
     # No credential is read and no request is sent; failure only logs.
@@ -1154,6 +1162,21 @@ async def _track_origins(request, call_next):
                 _SEEN_ORIGINS[host] = time.time()
         except Exception:
             pass
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _throttle_wrong_admin_tokens(request, call_next):
+    # Wrong X-Admin-Token guesses are counted and, past their budget, refused
+    # before any route runs; the correct token is never throttled
+    # (api/admin_token_guard.py: the 2026-10-08 short-credential finding).
+    from fastapi.responses import JSONResponse
+    from . import admin_token_guard as _ATG
+    why = _ATG.check(request.headers,
+                     request.client.host if request.client else None,
+                     settings().admin_token)
+    if why:
+        return JSONResponse(status_code=429, content={"detail": why})
     return await call_next(request)
 
 

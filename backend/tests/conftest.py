@@ -24,6 +24,17 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_admin_token_budget():
+    """The wrong-X-Admin-Token throttle (api/admin_token_guard.py) is process
+    state; every test starts with a full budget, so tests that pin a wrong
+    token's 401 never see another test's guesses as a 429."""
+    from sportsassets.api import admin_token_guard
+    admin_token_guard.reset()
+    yield
+    admin_token_guard.reset()
+
+
+@pytest.fixture(autouse=True)
 def _legacy_net_cap(request, monkeypatch):
     """The per-market / per-game cap at $2,500 for every test written
     under it (2026-09-09 ~21:05Z, owner order: the $2,500 is per TRADE
