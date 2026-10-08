@@ -108,7 +108,7 @@ READBACKS = ("release", "red_team", "venues", "completion", "pm_before",
              "pm_after", "shadow_health", "capital_readiness", "canary",
              "small_live", "xavier_management", "paper_freshness",
              "market_plane", "profitability_scoreboard", "revenue_readiness",
-             "paper_reconciliation", "loop_health")
+             "paper_reconciliation", "loop_health", "frontend_viewports")
 
 
 def readback_status(acc: pathlib.Path) -> dict:
@@ -202,6 +202,9 @@ def build(acc: pathlib.Path, *, now: float | None = None) -> dict:
         "mirror_shadow": field(acc, "completion", "venue_positions",
                                data=comp),
         "xavier_management": xm if xm is not None else MISSING,
+        "frontend_viewports": (load(acc, "frontend_viewports")
+                               if load(acc, "frontend_viewports") is not None
+                               else MISSING),
         "canary": can if can is not None else MISSING,
         "memory": {p.stem[len("mem_"):]: mem_stats(load(acc, p.stem))
                    for p in sorted(acc.glob("mem_*.json"))},
