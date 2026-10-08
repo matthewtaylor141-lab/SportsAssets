@@ -1335,3 +1335,5 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (RC6 Archer) an economic duplicate is ONE level re-filled on distinct observations; refills before the seen-crossing fix are HISTORICAL (listed, never rewritten), at or after it CURRENT; distinct levels of one size are not duplicates (production's 18 groups)
+tests/test_paper_economic_duplicate_rule.py

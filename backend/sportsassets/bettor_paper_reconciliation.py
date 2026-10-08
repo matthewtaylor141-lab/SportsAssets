@@ -29,10 +29,40 @@ research run 37407847139, 2026-10-06):
     they are listed here explicitly as ECONOMIC_DUPLICATE_SUSPECT so they
     are never silently double counted in any claim.
 
+THE DUPLICATE RULE, CORRECTED (RC6, production pm-acceptance 37836393458,
+2026-10-08 20:10Z). The P0 rule grouped fills by (order, qty, price,
+instant) and called every group of two or more a duplicate "on distinct book
+observations" -- but never looked at the observation or the level. A fill's
+idempotency key is `<order>:obs<obs>:<wire>` (bettor_paper_simulator.
+_apply_takes, unchanged since the first simulator commit; paper_fills.
+idempotency_key is UNIQUE and the simulator is its only writer), and the fill
+id is sha256 of that key -- so every production fill's level is recoverable
+from its id alone. Of the 18 groups (71 fills, 3,732.79 "extra") the receipt
+listed:
+
+  * 13 are ONE wire level re-filled on 2-5 consecutive observations inside
+    ONE simulation step: true economic duplicates, extra 3,402.79 contracts,
+    the newest filled 2026-10-05 22:17:55Z -- before the seen-crossing fix
+    (release 221ce6b9, 2026-10-06 05:16Z). None since.
+  * 7 are DIFFERENT levels that happened to show the same size, taken in one
+    step at our limit (FILLED_AT_OUR_LIMIT_NO_PRICE_IMPROVEMENT), e.g. one
+    order 100 @ 0.75 from offers 0.18 and 0.19 on observation 67419 (the only
+    group after the fix). Each (market, side, wire, observation) level is
+    distinct liquidity, consumed once (paper_liquidity_consumed): these are
+    NOT duplicates.
+
+So a duplicate is now the SAME LEVEL re-filled: same order, wire level, qty,
+price and instant on more than one observation. A refill filled before the
+producer fix is HISTORICAL (listed, labelled, counted on its own, never
+rewritten); one filled at or after it is a CURRENT suspect and is what
+`economic_duplicate_suspect_groups` counts. The distinct-level groups the
+old rule named stay listed as NOT_A_DUPLICATE_DISTINCT_LEVELS.
+
 Never raises: an unreadable section is UNAVAILABLE with its reason.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import time
 
 from .open_position_canon import CANONICAL_OPEN_POSITIONS_SQL, OPEN_QTY_EPS
@@ -95,22 +125,125 @@ POSITIONS_SQL = """
      GROUP BY f.account_id, f.group_id, f.us_market_slug, f.holding_side
 """
 
-#: same order, same price, same qty, same instant, distinct fill ids: the
-#: resting step re-filled from a crossing level that was still displayed
-DUPLICATE_SQL = """
-    SELECT f.order_id, max(o.role) AS role, max(f.group_id) AS group_id,
-           max(f.us_market_slug) AS us_market_slug,
-           max(f.holding_side) AS holding_side, max(f.direction) AS direction,
-           f.qty, f.price, f.filled_at, count(*) AS n,
-           array_agg(f.fill_id ORDER BY f.book_obs_id) AS fill_ids,
-           array_agg(f.book_obs_id ORDER BY f.book_obs_id) AS obs_ids
-      FROM paper_fills f JOIN paper_orders o ON o.order_id = f.order_id
+#: THE PRODUCER FIX, EARLIEST EFFECTIVE INSTANT: release 221ce6b9 (P0
+#: closeout, committed 2026-10-06T05:16:06Z; API and workers deployed by
+#: render-ops 37420681808 / 37420886019, live at the 06:31Z readback
+#: 37424216891) carried the simulator's per-order seen-crossing memory
+#: (bettor_paper_simulator.SEEN_CROSSING_KEY). The COMMIT instant is the
+#: earliest the fix could have run anywhere, so a refill filled between it
+#: and the deploy counts as CURRENT (fail closed), never the reverse.
+PRODUCER_FIX_EFFECTIVE_AT = 1791263766.0
+PRODUCER_FIX_RELEASE = "221ce6b946d23a204aeae3254a3f98a525fe479d"
+
+L_SUSPECT = "ECONOMIC_DUPLICATE_SUSPECT"
+L_HISTORICAL = "ECONOMIC_DUPLICATE_HISTORICAL_BEFORE_PRODUCER_FIX"
+L_DISTINCT = "NOT_A_DUPLICATE_DISTINCT_LEVELS"
+#: at most this many candidate fills are read (production: 71)
+MAX_CANDIDATE_FILLS = 5000
+
+#: THE CANDIDATES: every fill of a group the P0 rule named (same order, qty,
+#: price and instant, more than one fill), WITH its wire level and book
+#: observation, so `classify_duplicates` can tell one level re-filled from
+#: different levels of the same size
+DUPLICATE_CANDIDATES_SQL = """
+    SELECT f.fill_id, f.order_id, o.role, f.group_id, f.us_market_slug,
+           f.holding_side, f.direction, f.qty, f.price, f.wire_price,
+           f.filled_at, extract(epoch FROM f.filled_at) AS filled_epoch,
+           f.book_obs_id
+      FROM paper_fills f
+      JOIN paper_orders o ON o.order_id = f.order_id
+      JOIN (SELECT order_id, qty, price, filled_at FROM paper_fills
+             WHERE ($1::text IS NULL OR account_id = $1)
+             GROUP BY order_id, qty, price, filled_at
+            HAVING count(*) > 1) c
+        ON c.order_id = f.order_id AND c.qty = f.qty AND c.price = f.price
+       AND c.filled_at = f.filled_at
      WHERE ($1::text IS NULL OR f.account_id = $1)
-     GROUP BY f.order_id, f.qty, f.price, f.filled_at
-    HAVING count(*) > 1
-     ORDER BY f.filled_at DESC
-     LIMIT 500
-"""
+     ORDER BY f.filled_at DESC, f.order_id, f.wire_price, f.book_obs_id
+     LIMIT """ + str(MAX_CANDIDATE_FILLS)
+
+
+def _iso(epoch: float) -> str:
+    return _dt.datetime.fromtimestamp(float(epoch), _dt.timezone.utc) \
+        .isoformat().replace("+00:00", "Z")
+
+
+def _wire(v) -> str:
+    return "%.6f" % float(v)
+
+
+def _group(fs: list, **extra) -> dict:
+    fs = sorted(fs, key=lambda f: (int(f["book_obs_id"] or 0),
+                                   str(f["fill_id"])))
+    f0 = fs[0]
+    out = {"order_id": f0["order_id"], "role": f0.get("role"),
+           "group_id": f0.get("group_id"),
+           "us_market_slug": f0.get("us_market_slug"),
+           "holding_side": f0.get("holding_side"),
+           "direction": f0.get("direction"), "qty": float(f0["qty"]),
+           "price": float(f0["price"]), "filled_at": str(f0["filled_at"]),
+           "filled_epoch": float(f0["filled_epoch"]), "n": len(fs), "fill_ids": [f["fill_id"] for f in fs],
+           "obs_ids": [f["book_obs_id"] for f in fs],
+           "wires": [float(f["wire_price"]) for f in fs]}
+    out.update(extra)
+    return out
+
+
+def classify_duplicates(fills: list, *,
+                        fixed_at: float = PRODUCER_FIX_EFFECTIVE_AT) -> dict:
+    """Pure. THE CANDIDATE FILLS (DUPLICATE_CANDIDATES_SQL rows), split into
+
+      current     the SAME wire level of one order filled at one instant on
+                  more than one book observation, at or after `fixed_at`;
+      historical  the same, filled before `fixed_at` (append-only history,
+                  listed, never rewritten);
+      distinct_levels  the P0 rule's (order, qty, price, instant) groups
+                  with NO level filled twice: different levels of the same
+                  size, each its own liquidity -- not a duplicate.
+
+    `extra_qty` of a refill group is qty x (n - 1): the first fill of the
+    level is real, every repeat is the duplicate."""
+    by_level: dict = {}
+    by_former: dict = {}
+    for f in fills or []:
+        former = (f["order_id"], float(f["qty"]), float(f["price"]),
+                  str(f["filled_at"]))
+        by_former.setdefault(former, []).append(f)
+        by_level.setdefault(former + (_wire(f["wire_price"]),),
+                            []).append(f)
+    current, historical, refill_former = [], [], set()
+    for key, fs in by_level.items():
+        if len({f["book_obs_id"] for f in fs}) < 2:
+            continue
+        refill_former.add(key[:4])
+        hist = float(fs[0]["filled_epoch"]) < float(fixed_at)
+        g = _group(fs, wire=float(fs[0]["wire_price"]),
+                   extra_qty=round(float(fs[0]["qty"]) * (len(fs) - 1), 6),
+                   label=L_HISTORICAL if hist else L_SUSPECT,
+                   basis=("one wire level of one order re-filled at one "
+                          "instant on %d book observations: a crossing "
+                          "level that was merely still displayed; "
+                          "append-only history, not rewritten" % len(fs)),
+                   window=("BEFORE_PRODUCER_FIX" if hist else
+                           "AT_OR_AFTER_PRODUCER_FIX"))
+        (historical if hist else current).append(g)
+    distinct = [
+        _group(fs, label=L_DISTINCT,
+               basis=("different wire levels of the same displayed size "
+                      "taken in one step at the order's limit; each "
+                      "(market, side, wire, observation) level is its own "
+                      "liquidity, consumed once -- not a duplicate"))
+        for key, fs in by_former.items() if key not in refill_former]
+
+    def _newest_first(gs):
+        return sorted(gs, key=lambda g: (g["filled_epoch"], g["order_id"],
+                                         g.get("wire") or 0.0),
+                      reverse=True)
+    return {"current": _newest_first(current),
+            "historical": _newest_first(historical),
+            "distinct_levels": _newest_first(distinct),
+            "former_rule_groups": len(by_former),
+            "former_rule_groups_with_a_refill": len(refill_former)}
 
 LIVE_PROTECTION_ON_CLOSED_SQL = """
     SELECT o.order_id, o.state, o.group_id, o.us_market_slug, o.holding_side
@@ -189,8 +322,8 @@ async def receipt(conn, account_id: str | None = None, *,
                                       {"group_id": r["group_id"],
                                        "us_market_slug": r["us_market_slug"]}
                                       for r in ph][:100]}
-            dups = [dict(r) for r in await conn.fetch(DUPLICATE_SQL,
-                                                      account_id)]
+            cand = [dict(r) for r in await conn.fetch(
+                DUPLICATE_CANDIDATES_SQL, account_id)]
             live_closed = [dict(r) for r in await conn.fetch(
                 LIVE_PROTECTION_ON_CLOSED_SQL, account_id)]
     except Exception as exc:                                    # noqa: BLE001
@@ -198,7 +331,11 @@ async def receipt(conn, account_id: str | None = None, *,
                    why="RECONCILIATION_READ_FAILED: %s: %s"
                        % (type(exc).__name__, str(exc)[:160]))
         return out
-    extra_qty = sum(float(d["qty"]) * (int(d["n"]) - 1) for d in dups)
+    dup = classify_duplicates(cand)
+    cur, hist = dup["current"], dup["historical"]
+
+    def _extra(gs):
+        return round(sum(g["extra_qty"] for g in gs), 6)
     out.update(
         status="OK",
         counts={
@@ -210,21 +347,43 @@ async def receipt(conn, account_id: str | None = None, *,
             "phantom_opens_by_legacy_reader": {
                 k: v["phantom_opens"] for k, v in phantoms.items()},
             "phantom_opens_in_canonical_readers": 0,
-            "economic_duplicate_suspect_groups": len(dups),
-            "economic_duplicate_suspect_extra_qty": round(extra_qty, 6),
+            # CURRENT: a level re-filled at or after the producer fix -- the
+            # number that must be zero
+            "economic_duplicate_suspect_groups": len(cur),
+            "economic_duplicate_suspect_extra_qty": _extra(cur),
+            # HISTORICAL: re-filled before the fix; immutable PAPER history,
+            # counted and listed on its own, never rewritten or dropped
+            "historical_economic_duplicate_groups": len(hist),
+            "historical_economic_duplicate_extra_qty": _extra(hist),
+            # what the P0 rule called a duplicate that is different levels
+            "same_instant_distinct_level_groups": len(
+                dup["distinct_levels"]),
+            "former_rule_groups": dup["former_rule_groups"],
+            "duplicate_candidate_fills": len(cand),
+            "duplicate_candidates_truncated": (
+                len(cand) >= MAX_CANDIDATE_FILLS),
             "live_protection_on_closed_positions": len(live_closed)},
         sections={
             "legacy_reader_phantoms": phantoms,
             "true_open": cls["true_open"][:500],
             "sub_contract_remainders": cls["sub_contract_remainders"],
-            "economic_duplicate_suspects": [
-                dict(d, qty=float(d["qty"]), price=float(d["price"]),
-                     filled_at=str(d["filled_at"]),
-                     label="ECONOMIC_DUPLICATE_SUSPECT",
-                     basis=("same order, price, qty and instant on distinct "
-                            "book observations; append-only history, not "
-                            "rewritten; the simulator no longer refills a "
-                            "still-displayed crossing level"))
-                for d in dups],
+            "economic_duplicate_rule": {
+                "rule": ("one order's SAME wire level filled at one instant "
+                         "on more than one book observation (a crossing "
+                         "level that was merely still displayed); extra = "
+                         "qty x (n - 1)"),
+                "producer_fix_effective_at": _iso(PRODUCER_FIX_EFFECTIVE_AT),
+                "producer_fix_release": PRODUCER_FIX_RELEASE,
+                "producer_fix": ("bettor_paper_simulator seen-crossing "
+                                 "memory per order (SEEN_CROSSING_KEY)"),
+                "historical_window": ("filled before %s: append-only PAPER "
+                                      "history, listed, never rewritten"
+                                      % _iso(PRODUCER_FIX_EFFECTIVE_AT)),
+                "current_window": ("filled at or after %s: counted as "
+                                   "economic_duplicate_suspect_groups"
+                                   % _iso(PRODUCER_FIX_EFFECTIVE_AT))},
+            "economic_duplicate_suspects": cur[:500],
+            "historical_economic_duplicates": hist[:500],
+            "same_instant_distinct_levels": dup["distinct_levels"][:500],
             "live_protection_on_closed_positions": live_closed})
     return out
