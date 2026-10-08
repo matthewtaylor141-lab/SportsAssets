@@ -11,6 +11,7 @@ import os
 import time
 from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 from .. import trader_mode as T
+from ..live_game_state.integration import enrich_snapshot as enrich_live_game_snapshot
 
 MAX_POSITIONS = 1000
 CACHE_S = 2.0
@@ -197,6 +198,7 @@ async def read(pool, *, account_id="paper_acct_main", now=None):
             snapshot["database_snapshot_at"] = at
             snapshot["score_feed"] = {"configured_evidence_events": len(games), "why": game_error or (
                 None if games else "NO_SCORE_PROVIDER_EVIDENCE_RECORDED")}
+            snapshot = await enrich_live_game_snapshot(conn, snapshot, now=evaluated_at)
             return snapshot
 
 
