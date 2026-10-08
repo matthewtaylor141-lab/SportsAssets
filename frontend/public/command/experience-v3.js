@@ -145,7 +145,9 @@
     var p=doc.createElement('div');p.id='bt-v3-pulse';p.setAttribute('aria-live','polite');p.innerHTML='<i></i><b></b><span></span>';body.appendChild(p);updatePulse();
   }
   function updatePulse(){
-    var p=q('#bt-v3-pulse');if(!p)return;var v=pulseText(),all=v.join(' ');p.dataset.tone=pulseTone(all);q('b',p).textContent=v[0];q('span',p).textContent=v[1];
+    var p=q('#bt-v3-pulse');if(!p)return;var v=pulseText(),all=v.join(' '),tone=pulseTone(all),b=q('b',p),s=q('span',p);
+    // write only real changes: an unchanged write is still a mutation the observer below would see
+    if(p.dataset.tone!==tone) p.dataset.tone=tone;if(b.textContent!==v[0]) b.textContent=v[0];if(s.textContent!==v[1]) s.textContent=v[1];
   }
 
   function traderEnhancements(){
@@ -166,7 +168,9 @@
       if((e.metaKey||e.ctrlKey)&&String(e.key).toLowerCase()==='k'){e.preventDefault();openPalette();return;}
       if(e.key==='Escape'){closePalette();body.classList.remove('bt-v3-evidence-open');}
     });
-    var mo=new MutationObserver(function(){updatePulse();if(body.classList.contains('bt-v3-evidence-open')) evidenceSnapshot();});
+    // ignore V3's own pulse / evidence writes: reacting to them re-triggers this observer forever
+    function own(n){for(;n;n=n.parentNode){if(n.id==='bt-v3-pulse'||n.id==='bt-v3-evidence') return true;}return false;}
+    var mo=new MutationObserver(function(recs){if(recs.every(function(r){return own(r.target);})) return;updatePulse();if(body.classList.contains('bt-v3-evidence-open')) evidenceSnapshot();});
     mo.observe(body,{subtree:true,childList:true,characterData:true,attributes:true,attributeFilter:['data-tone','class','hidden','aria-current']});
   }
 
