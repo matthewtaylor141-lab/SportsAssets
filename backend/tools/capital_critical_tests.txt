@@ -1288,3 +1288,10 @@ tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
+# (Live Game State V1, migration 316) display scores are DISPLAY ONLY: Trader response identical with BETTOR_DISPLAY_SCORES on vs off except
+# positions[].game / score_feed / snapshot digest (negative controls prove the comparison sees prices, packets, orders, P&L); a FINAL score
+# collected through the real collector settles nothing; a fresh score completes no stale packet or mark; the package's seven real-PostgreSQL
+# proofs on the installed migration; the production census equals the collector's verdict; installed code = package + two disclosed lines
+tests/test_trader_live_game_real_db.py
+tests/test_live_game_state_integration.py
+tests/test_trader_live_game_package_parity.py
