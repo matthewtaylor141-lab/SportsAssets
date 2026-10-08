@@ -2151,6 +2151,32 @@ for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(SOFTWARE_CENSUS_CLOSURE.items())):
     TABLE.setdefault(_k, _v)
 
+#: (RC6) THE PRIORITY ACTIVE REFRESH (market_plane.active_refresh): why the
+#: plane's REST book read of a priority member the stream went quiet on did
+#: not make it current, or why it was not read this pass. Freshness plumbing
+#: (budget, hold, transport, switch) or a book the software could not show
+#: current (data) -- SOFTWARE, never EXTERNAL; MARKET_NOT_OPEN's own row is
+#: the precedent for the market-state outcome.
+ACTIVE_REFRESH_STREAM = {
+    "ACTIVE_REFRESH_BOOK_READ_ANSWERED_429": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_READ_NOT_200": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_READ_TRANSPORT_FAILED": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_NO_BEARER_TOKEN": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_RESPONSE_IS_NOT_A_BOOK": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_SYMBOL_IS_NOT_THE_MEMBER": (S, INT, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_CARRIES_NO_VENUE_TIMESTAMP": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_STATE_UNKNOWN": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_MARKET_NOT_OPEN": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_BOOK_CROSSED": (S, DATA, "INGESTION"),
+    "ACTIVE_REFRESH_DEFERRED_BOOK_READ_BUDGET_SPENT": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_HELD_AFTER_A_VENUE_429": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_WAITING_TO_RETRY_A_FAILED_READ": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_OFF_BY_SWITCH": (S, FRESH, "INGESTION"),
+    "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED": (S, FRESH, "INGESTION"),
+}
+for _k, _v in ACTIVE_REFRESH_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
 #: although each says the software lacks or could not read something (an
 #: account id not supplied, exposure that could not be measured or was not
