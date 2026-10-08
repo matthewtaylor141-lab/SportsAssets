@@ -109,7 +109,8 @@ CANDIDATES_SQL = """
        AND NOT EXISTS (SELECT 1 FROM paper_hook_failures h
                         WHERE h.session_id = $4 AND h.valuation_id = v.id
                           AND h.strategy = 'DEREK_ENTRY_POLICY_V2'
-                          AND h.error = 'PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE')
+                          AND h.error IN ('PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE',
+                                          'PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME'))
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """
@@ -1156,6 +1157,17 @@ async def step(conn, ctx: dict) -> dict:
         if time.monotonic() > ctx["deadline"]:
             out["budget_exhausted"] = True
             break
+        # PRICED BY A FEED RUNTIME THAT NO LONGER EXISTS (red-team closeout,
+        # R_PREVIOUS_RUNTIME): its recheck could only refuse
+        # FEED_OWNERSHIP_NOT_HELD; left undecided, recorded
+        prev = previous_feed_runtime(row)
+        if prev is not None:
+            await record_previous_runtime(
+                conn, ctx=ctx, valuation_id=row.get("id"),
+                strategy="DEREK_ENTRY_POLICY_V2", prev=prev)
+            out["deferred"] += 1
+            out["previous_runtime"] = out.get("previous_runtime", 0) + 1
+            continue
         try:
             rec = await decide_one(conn, ctx, row)
         except Exception as exc:                                # noqa: BLE001
@@ -1321,6 +1333,97 @@ async def read_book_within_deadline(ctx: dict, slug: str, *,
         return await md.read_book(slug)
 
 
+#: ── A VALUATION PRICED BY A FEED RUNTIME THAT NO LONGER EXISTS ──────────
+#:
+#: (red-team closeout, FEED_OWNERSHIP_NOT_HELD.) A PinnAPI-priced valuation
+#: carries the feed runtime that priced it (`reference_input.runtime_id`, one
+#: per feed start: `pinnapi_feed_runtime.start_default`). Its recheck at the
+#: decision instant (`pinnapi_primary.validate`, `bettor_market_family.
+#: validate_reference`) refuses FEED_OWNERSHIP_NOT_HELD whenever the
+#: deciding process's runtime is another one -- correctly: a restart is a new
+#: cache and epoch, and no price of the old one is ever served again. But the
+#: paper-pass backstop selects EVERY undecided valuation of the last
+#: `valuation_lookback_s` (1800 s), so after each restart (every deploy) it
+#: decided the previous runtime's last undecided valuations -- the ones whose
+#: in-cycle decision the shutdown cut -- and recorded, for each, a refusal
+#: that was certain before it was made and says nothing about the market.
+#: In the coverage census such a decision is the event's FIRST loss (MODEL
+#: stage, before every later stage), whatever the current runtime's own
+#: decisions on the same event said. Production 2026-10-08 24 h census: one
+#: event, Vanderbilt v Ole Miss, first loss FEED_OWNERSHIP_NOT_HELD beside
+#: 66 BELOW_MIN_GROSS_EDGE decisions on it (ncaaf-funnel readback); the
+#: readback does not carry that decision's instant or runtime ids, so this
+#: is the mechanism the code admits, not a measured attribution of it.
+#:
+#: So the pass leaves it undecided, recorded: a DEFERRED `paper_hook_failures`
+#: row (stage PAPER_PASS, why = R_PREVIOUS_RUNTIME, with both runtime ids)
+#: that the candidates queries read so it is not re-selected (defined here:
+#: the benchmark module may import only paper_derek). Only when THIS process
+#: runs a feed (a current runtime id exists) and it is a different one: with no feed here the decision is made and refuses exactly as before
+#: (that is the truth: no feed here). Nothing is valued on any price; no
+#: threshold, clock or the 30 s rule moves.
+R_PREVIOUS_RUNTIME = "PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME"
+PREVIOUS_RUNTIME_COUNTS: dict = {"skipped": 0}
+
+
+def previous_feed_runtime(row: dict) -> dict | None:
+    """None, or the evidence that this valuation was priced by a PinnAPI
+    feed runtime other than this process's current one (R_PREVIOUS_RUNTIME).
+    Pure but for reading the in-process feed state; never raises."""
+    try:
+        from .. import pinnapi_feed_runtime as feed
+        from .. import pinnapi_primary as primary
+        ref = _row_reference(row)
+        if ref.get("provider") != primary.PROVIDER:
+            return None
+        cur = feed._STATE.get("runtime_id")
+        was = ref.get("runtime_id")
+        if not (isinstance(cur, str) and cur and isinstance(was, str)
+                and was) or cur == was:
+            return None
+        return {"why": R_PREVIOUS_RUNTIME, "valuation_runtime_id": was,
+                "current_runtime_id": cur,
+                "certain_refusal": "FEED_OWNERSHIP_NOT_HELD"}
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+async def record_previous_runtime(conn, *, ctx: dict, valuation_id,
+                                  strategy: str, prev: dict) -> dict:
+    """The DEFERRED row for a valuation priced by a previous feed runtime
+    (R_PREVIOUS_RUNTIME), and the step's result for it. Never raises."""
+    PREVIOUS_RUNTIME_COUNTS["skipped"] += 1
+    res = {"deferred": True, "why": R_PREVIOUS_RUNTIME,
+           "previous_runtime": dict(prev)}
+    try:
+        await conn.execute(
+            "INSERT INTO paper_hook_failures (session_id, account_id, "
+            " valuation_id, strategy, stage, outcome, elapsed_s, error, "
+            " detail) VALUES ($1,$2,$3,$4,'PAPER_PASS','DEFERRED',NULL,$5,"
+            " $6::jsonb)", ctx.get("session_id"), ctx.get("account_id"),
+            int(valuation_id), str(strategy), R_PREVIOUS_RUNTIME,
+            json.dumps(dict(prev, deferred=True), default=str))
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "previous-runtime valuation not recorded (valuation %s, %s)",
+            valuation_id, strategy, exc_info=True)
+    return res
+
+
+def _row_reference(row: dict) -> dict:
+    """The valuation row's persisted `settlement_comparison.reference_input`
+    (the price's provenance), or {}. Pure."""
+    scmp = (row or {}).get("settlement_comparison")
+    if isinstance(scmp, str):
+        try:
+            scmp = json.loads(scmp)
+        except ValueError:
+            scmp = None
+    return dict((scmp or {}).get("reference_input") or {}) \
+        if isinstance(scmp, dict) else {}
+
+
 #: ── A READ BOOK WITH NOBODY ON THE SIDE BOUGHT (software census closure) ──
 #:
 #: THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY joined two facts: a read that
@@ -1351,12 +1454,43 @@ def no_book_refusal(obs: dict | None, lv: dict | None) -> str:
     return R_NO_BOOK
 
 
+#: ── A READ OUR OWN MARKET-DATA OWNER NEVER SENT (red-team closeout) ──────
+#:
+#: THE REGRESSION. Since the shared paper market-data owner (221ce6b9,
+#: `paper_market_data`) every paper book read goes through it, and it
+#: refuses three reads BEFORE any venue request, by name: a DISCOVERY read
+#: while the venue's Retry-After hold is in force (PAPER_DISCOVERY_READ_
+#: DEFERRED_DURING_VENUE_HOLD -- production telemetry 2026-10-08 02:29Z:
+#: 220 in one process lifetime), a read whose turn in the shared queue
+#: would come after the caller's deadline, and a coalesced read whose leader
+#: did not answer inside it. Before the owner, the same hold reached the
+#: venue request gate, which refuses as OUR_REQUEST_GATE -- recognised here
+#: as a cut read, eligible for the one bounded book retry. The owner's
+#: refusals were not: each fell through to `no_book_refusal` and was
+#: recorded THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY -- a book that was
+#: never read, named as one that was read and found unreadable -- and the
+#: retry that exists for exactly this cooldown was never scheduled.
+#:
+#: Spelled here (this module does not import the owner); pinned equal to
+#: `paper_market_data`'s constants by tests/test_sw_book_family.py. Nothing
+#: else changes: the deadline, the hold, the retry's 30 s bound and every
+#: other read failure keep their meaning.
+OWNER_CUT_REFUSALS = frozenset((
+    "PAPER_MARKET_DATA_QUEUE_WAIT_EXCEEDED_THE_DEADLINE",
+    "PAPER_DISCOVERY_READ_DEFERRED_DURING_VENUE_HOLD",
+    "PAPER_COALESCED_READ_DEADLINE_EXCEEDED"))
+
+
 def book_deadline_refusal(got: dict) -> bool:
-    """The read was cut by the decision deadline: our own timeout, or the
-    venue request gate refusing to outlive the deadline it was given."""
+    """The read was cut by the decision deadline: our own timeout, the
+    venue request gate refusing to outlive the deadline it was given, or
+    the paper market-data owner refusing to send it inside the deadline or
+    the venue's hold (OWNER_CUT_REFUSALS) -- in no case a book that was
+    read."""
     g = got or {}
     return (g.get("error") == G.R_BOOK_READ_DEADLINE
-            or g.get("refused_by") == "OUR_REQUEST_GATE")
+            or g.get("refused_by") == "OUR_REQUEST_GATE"
+            or g.get("error") in OWNER_CUT_REFUSALS)
 
 
 # ═════════════════════════════════════════════════════════════════════

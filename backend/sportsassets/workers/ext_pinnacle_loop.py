@@ -3507,11 +3507,96 @@ def fixture_not_yet_posted(explain, event) -> dict | None:
             "named_elsewhere": list(ab.get("named_elsewhere") or [])}
 
 
+#: ── THE FIXTURE IS PRICED, ITS MONEY LINE IS NOT: TWO SOURCES AGREE ──
+#:
+#: MEASURED (live release 08828d04, coverage first-loss census): every 1 h
+#: census from 2026-10-07 00:33Z to 2026-10-08 02:29Z (ping readbacks
+#: 37552591368 .. 37718053655) carried the SAME three NCAAF games as
+#: NORMALIZED / FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE): Ohio State v
+#: Maryland, Notre Dame v Stanford, Northwestern v Ball State, all
+#: 2026-10-10. A ledger row's first refusal is FEED_MARKET_NOT_IN_CURRENT_
+#: STATE only when (pinnapi_primary.select) the feed matched exactly one
+#: fixture by both names and the start, its pricing record is held, and
+#: that record holds no full-game money line (s;0;m) -- AND the metered
+#: payload carried no Pinnacle h2h, else that is the fallback and no such
+#: row exists. The census row does not say what ELSE the record held, so
+#: the remaining question -- did we fail to hold the money line, or did
+#: Pinnacle not list one -- was not answerable from the row.
+#:
+#: SO THE ABSENCE IS NAMED BY ITS EVIDENCE, NOT ASSUMED. It is EXTERNAL
+#: (PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE) only when ALL
+#: hold:
+#:   1 the WS read refused FEED_MARKET_NOT_IN_CURRENT_STATE on the record
+#:     that prices the matched fixture, on a granted, synced epoch;
+#:   2 that record parsed (no unparsed last record) and holds at least one
+#:     OTHER open full-game market on the current epoch -- a spread, a
+#:     total -- so Pinnacle's current list for THIS game reached us, parsed,
+#:     and does not carry a money line (PinnAPI: a market not in the
+#:     authoritative list "has been closed by Pinnacle"); or the record's
+#:     own periods mark the full game closed;
+#:   3 the event is the METERED provider's own (not a PinnAPI-native seed)
+#:     and its payload carries no Pinnacle h2h (THEODDSAPI_PAYLOAD_HAS_NO_
+#:     PINNACLE_BOOK or THEODDSAPI_PINNACLE_HAS_NO_H2H_MARKET): the second,
+#:     independent source of Pinnacle's prices has none either.
+#: Any doubt -- a record holding NO other market (we may have missed its
+#: list), a full-game money line held under another key (a key-mapping
+#: question of ours), an unparsed record, a Pinnacle h2h in the payload, a
+#: seed -- keeps FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE). The evidence rides on
+#: the ledger row (`no_moneyline_evidence`). No freshness rule, tolerance,
+#: name table or identity rule changes.
+R_FIXTURE_LISTS_NO_MONEYLINE = \
+    "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE"
+
+
+def fixture_lists_no_moneyline(explain, event) -> dict | None:
+    """The evidence that Pinnacle lists no full-game money line for the
+    matched fixture (see R_FIXTURE_LISTS_NO_MONEYLINE), or None when any
+    condition fails. Pure."""
+    from .. import pinnapi_feed as F
+    ex = explain if isinstance(explain, dict) else {}
+    if ex.get("reason") != F.R_UNKNOWN_MARKET:
+        return None
+    ev = event if isinstance(event, dict) else {}
+    if ev.get("pinnapi_native") is not None or \
+            not isinstance(ev.get("bookmakers"), list):
+        return None
+    absent = pinnacle_absence_in_payload(ev)
+    if absent not in (R_PAYLOAD_HAS_NO_PINNACLE, R_PINNACLE_HAS_NO_H2H):
+        return None
+    prov = ex.get("provenance") if isinstance(ex.get("provenance"),
+                                              dict) else {}
+    ml = prov.get("market_list") if isinstance(prov.get("market_list"),
+                                               dict) else {}
+    if (ml.get("record_held") is not True
+            or ml.get("authority_synced") is not True
+            or ml.get("record_unparsed") is not False
+            or ml.get("money_line_held") is not False
+            or ml.get("full_game_moneyline_under_other_keys") != 0):
+        return None
+    try:
+        others = int(ml.get("other_full_game_open_markets") or 0)
+    except (TypeError, ValueError):
+        return None
+    closed = ml.get("full_game_period_closed") is True
+    if others < 1 and not closed:
+        return None
+    return {"ws_refusal": F.R_UNKNOWN_MARKET, "payload_absence": absent,
+            "basis": ("OTHER_FULL_GAME_MARKETS_LISTED_WITHOUT_A_MONEY_LINE"
+                      if others >= 1 else "FULL_GAME_PERIOD_CLOSED"),
+            "fixture_id": prov.get("fixture_id"),
+            "quote_event_id": prov.get("quote_event_id"),
+            "market_list": dict(ml)}
+
+
 def no_pinnacle_codes(explain, event) -> list:
     """The codes recorded for an event with no usable Pinnacle price, in
     order: the WS refusal reason, then the discovery payload's absence. A
     WS NO_EXACT_FIXTURE whose fixture both sources show unposted is
-    recorded PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED (fixture_not_yet_posted)."""
+    recorded PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED (fixture_not_yet_posted);
+    a FEED_MARKET_NOT_IN_CURRENT_STATE on a fixture whose record lists
+    other full-game markets but no money line, with no Pinnacle h2h in the
+    payload either, PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE
+    (fixture_lists_no_moneyline)."""
     ws = (explain or {}).get("reason")
     legacy = pinnacle_absence_in_payload(event)
     posted = fixture_not_yet_posted(explain, event)
@@ -3519,6 +3604,8 @@ def no_pinnacle_codes(explain, event) -> list:
         return ([R_FIXTURE_NOT_YET_POSTED, legacy]
                 + ([R_TEAMS_ONLY_AT_OTHER_STARTS]
                    if posted["named_elsewhere"] else []))
+    if fixture_lists_no_moneyline(explain, event) is not None:
+        return [R_FIXTURE_LISTS_NO_MONEYLINE, legacy]
     codes = [c for c in (ws, legacy) if c]
     return codes or [R_NO_PINNACLE_ON_EVENT]
 
@@ -10724,6 +10811,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                # POSTED); None otherwise
                                "not_yet_posted_evidence":
                                    fixture_not_yet_posted(_ws_why, event),
+                               # what the fixture's record does list, when
+                               # the two sources' agreement named the code
+                               # (R_FIXTURE_LISTS_NO_MONEYLINE); else None
+                               "no_moneyline_evidence":
+                                   fixture_lists_no_moneyline(_ws_why,
+                                                              event),
                                "formerly_recorded_as":
                                    R_NO_PINNACLE_ON_EVENT})
                 continue

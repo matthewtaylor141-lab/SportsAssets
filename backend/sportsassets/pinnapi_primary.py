@@ -337,7 +337,16 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     got = cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
                      evaluated_ms=at * 1000, max_age_s=max_age_s)
     if not got.get("ok"):
-        return fail(got.get("reason"), got.get("provenance"))
+        prov = got.get("provenance")
+        if got.get("reason") == F.R_UNKNOWN_MARKET and \
+                callable(getattr(cache, "market_list", None)):
+            # WHAT THE FIXTURE'S PRICING RECORD DOES HOLD (red-team
+            # closeout): the evidence ext_pinnacle_loop.
+            # fixture_lists_no_moneyline names Pinnacle's own absence by
+            prov = {"fixture_id": eid, "quote_event_id": qid,
+                    "fixture_match": name_basis,
+                    "market_list": cache.market_list(qid)}
+        return fail(got.get("reason"), prov)
     q = got["quote"]
     if (epoch(q.change_ms) is None or epoch(q.received_ms) is None
             or q.received_ms > at * 1000):

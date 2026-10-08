@@ -2025,6 +2025,21 @@ SOFTWARE_CENSUS_CLOSURE = {
     "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": (S, DATA, "PROBABILITY"),
     "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES": (
         S, DATA, "PROBABILITY"),
+    # (red-team closeout) the matched fixture's record lists other
+    # full-game markets but no money line (or its full game is closed) AND
+    # the metered payload carries no Pinnacle h2h --
+    # ext_pinnacle_loop.R_FIXTURE_LISTS_NO_MONEYLINE; EXTERNAL by
+    # bettor_external_shadow.EVALUABILITY_OF on that evidence. Any doubt
+    # keeps FEED_MARKET_NOT_IN_CURRENT_STATE (SOFTWARE).
+    "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE": (
+        S, DATA, "PROBABILITY"),
+    # (red-team closeout) a PinnAPI-priced valuation whose feed runtime is
+    # not the deciding process's current one: left undecided by the paper
+    # pass (a DEFERRED hook row, never a paper decision; its recheck could
+    # only refuse FEED_OWNERSHIP_NOT_HELD) -- paper_derek.
+    # R_PREVIOUS_RUNTIME; ours (a restart), never EXTERNAL
+    "PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME": (
+        S, CAP, "PROBABILITY"),
     # ECONOMIC by its evidence: the paper decision's book read SUCCEEDED and
     # the side it would buy from is published, well formed and empty (no
     # executable depth: the market's state, recorded on the observation) --

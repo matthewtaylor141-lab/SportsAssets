@@ -1190,6 +1190,44 @@ class FeedCache:
                     confirmation_is_a_decision_input=True)
         return {"ok": True, "quote": q, "provenance": prov}
 
+    def market_list(self, event_id) -> dict:
+        """WHAT THIS RECORD'S CURRENT MARKET LIST HOLDS, bounded: the
+        evidence beside a read that refused R_UNKNOWN_MARKET (red-team
+        closeout). Pure; reads only this cache. Every market counted is
+        OPEN, of the full game (period 0), on the CURRENT epoch -- so it
+        can only have come from a record of this fixture that parsed on
+        this connection (a new connection clears the cache). PinnAPI's
+        docs (tests/fixtures/pinnapi_ws_subscription_docs_2026_10_04.json):
+        a prematch_markets list "is the authoritative current snapshot from
+        Pinnacle -- any market ... NOT in this list has been closed by
+        Pinnacle"."""
+        ev = self.events.get(event_id)
+        held = isinstance(ev, dict)
+        ev = ev if held else {}
+        by_type: collections.Counter = collections.Counter()
+        for k in self._keys_of(event_id):
+            q = self.quotes.get(k)
+            if q is None or not q.open or q.epoch != self.authority.epoch:
+                continue
+            if (q.period or 0) == 0 and k[1] != FULL_GAME_MONEYLINE_KEY:
+                by_type[str(q.market_type)[:24]] += 1
+        return {"record_held": held, "epoch": self.authority.epoch,
+                "authority_synced": bool(self.authority.synced),
+                "record_unparsed": ev.get("_unparsed_since") is not None,
+                "authoritative_list": bool(ev.get("_authoritative")),
+                "markets_version": ev.get("_markets_version"),
+                "stream": ev.get("stream"), "is_live": ev.get("isLive"),
+                "full_game_period_closed": 0 in closed_periods(ev),
+                "money_line_key": FULL_GAME_MONEYLINE_KEY,
+                "money_line_held": (event_id, FULL_GAME_MONEYLINE_KEY)
+                in self.quotes,
+                # a full-game money line held under ANOTHER key would be a
+                # key-mapping question of ours, never Pinnacle's absence
+                "full_game_moneyline_under_other_keys":
+                    by_type.get("moneyline", 0),
+                "other_full_game_open_markets": sum(by_type.values()),
+                "other_full_game_open_by_type": dict(by_type)}
+
     # ── census / health (bounded, for the heartbeat) ────────────────
     def census(self, *, now_ms: Optional[float] = None) -> dict:
         """Bounded heartbeat view. `fresh_now` counts the markets that read

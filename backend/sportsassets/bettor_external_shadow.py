@@ -903,6 +903,11 @@ STAGES = (
         # and the evidence code that rides beside it
         "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED",
         "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES",
+        # (red-team closeout) the fixture is priced but Pinnacle lists no
+        # full-game money line for it: its record holds other full-game
+        # markets and no s;0;m, AND the metered payload has no Pinnacle h2h
+        # (ext_pinnacle_loop.fixture_lists_no_moneyline)
+        "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
         # ...NOW RECORDED BY CAUSE (P0 incident, ext_pinnacle_loop.
         # no_pinnacle_codes): what the discovery payload lacked, and the
         # PinnAPI refusal that left no WS price (2,534 rows/day had been
@@ -1271,6 +1276,15 @@ EVALUABILITY_OF = {
     # teams only at OTHER starts is that evidence, recorded beside it.
     "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": EXTERNAL_DEPENDENCY,
     "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES":
+        EXTERNAL_DEPENDENCY,
+    # (red-team closeout) TWO SOURCES AGREE PINNACLE LISTS NO MONEY LINE
+    # FOR A FIXTURE IT PRICES: the feed's record of the matched fixture
+    # parsed on the current epoch and holds other open full-game markets
+    # but no s;0;m (or its full game is closed), AND the metered payload
+    # carries no Pinnacle h2h (ext_pinnacle_loop.R_FIXTURE_LISTS_NO_
+    # MONEYLINE). A record holding nothing else keeps FEED_MARKET_NOT_IN_
+    # CURRENT_STATE, ours.
+    "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE":
         EXTERNAL_DEPENDENCY,
     # The catalogue lists only line markets for this fixture: no moneyline
     # exists there to price, the same kind of absence as no contract at all.
