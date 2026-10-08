@@ -182,7 +182,8 @@ def _group(fs: list, **extra) -> dict:
            "holding_side": f0.get("holding_side"),
            "direction": f0.get("direction"), "qty": float(f0["qty"]),
            "price": float(f0["price"]), "filled_at": str(f0["filled_at"]),
-           "filled_epoch": float(f0["filled_epoch"]), "n": len(fs), "fill_ids": [f["fill_id"] for f in fs],
+           "filled_epoch": float(f0["filled_epoch"]), "n": len(fs),
+           "fill_ids": [f["fill_id"] for f in fs],
            "obs_ids": [f["book_obs_id"] for f in fs],
            "wires": [float(f["wire_price"]) for f in fs]}
     out.update(extra)

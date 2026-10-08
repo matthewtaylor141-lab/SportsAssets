@@ -67,7 +67,7 @@ async def test_audrey_reconciles_while_the_lane_is_stopped_or_off(
         monkeypatch, lane):
     conn = await TE._conn()
     try:
-        acct, venue, mirror, (po,) = await _world(conn, monkeypatch)
+        _acct, venue, mirror, (po,) = await _world(conn, monkeypatch)
         if lane == "STOPPED":
             await conn.execute("UPDATE execmirror_control SET stopped = true,"
                                " stop_done_at = now() WHERE id = 1")
@@ -105,7 +105,7 @@ async def test_the_lane_off_pass_is_bounded_oldest_first_and_on_cadence(
     conn = await TE._conn()
     try:
         monkeypatch.setattr(M, "AUDREY_LANE_OFF_BATCH", 2)
-        acct, venue, mirror, pos = await _world(conn, monkeypatch, 3)
+        _acct, _venue, mirror, pos = await _world(conn, monkeypatch, 3)
         await conn.execute("UPDATE execmirror_control SET stopped = true,"
                            " stop_done_at = now() WHERE id = 1")
         t = [1_000_000.0]
@@ -145,7 +145,7 @@ async def test_an_open_actual_position_is_reconciled_on_every_lane_off_pass(
     conn = await TE._conn()
     try:
         monkeypatch.setattr(M, "AUDREY_LANE_OFF_BATCH", 2)
-        acct, venue, mirror, pos = await _world(conn, monkeypatch, 3)
+        _acct, _venue, mirror, pos = await _world(conn, monkeypatch, 3)
 
         async def no_reviews(conn_, **kw):
             return 0
