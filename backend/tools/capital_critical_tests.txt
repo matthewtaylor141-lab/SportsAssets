@@ -1335,3 +1335,5 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (RC6) a close this client made (websockets keepalive 1011, frame cap 1009) is never an eviction; provider / no-frame closes still stop the feed at EVICTIONS_MAX; every close named by side, code and reason
+tests/test_rc6_feed_close_provenance.py

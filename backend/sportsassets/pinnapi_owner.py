@@ -115,6 +115,92 @@ R_PROVIDER_REFUSED = "FEED_PROVIDER_REFUSED"
 R_STRAY_CANCELLATION = "FEED_OWNER_STRAY_CANCELLATION"
 
 
+#: ── WHO CLOSED THE SOCKET (RC6, production 2026-10-08) ──────────────────
+#:
+#: MEASURED (research-sql run 37839436591, the heartbeat's transitions and
+#: pg_locks). After the API restart at 18:39:27Z the owner logged three
+#: unrequested closes inside EVICTION_WINDOW_S -- the third at 19:00:51Z
+#: (epoch 3 lived 179 s, epoch 4 309 s) -- set refused =
+#: FEED_EVICTION_LOOP_SUSPECTED and returned for good. From then on no
+#: backend held the feed lease (7723901544120036), loop health read
+#: pinnapi_feed.heartbeat UNHEALTHY (WRITER_LOCK_HELD_BY_NO_BACKEND), every
+#: held read and every PinnAPI-only candidate answered
+#: FEED_OWNERSHIP_NOT_HELD (324 rows in the 19:00 hour, 174 in the next 26
+#: min) and 0 of 3 held PAPER positions had a current packet. Each close was
+#: counted as "another holder of the account key evicting us", yet nothing
+#: recorded WHO closed it: `except Exception` kept no close code and no side.
+#:
+#: THE DEFECT. PinnAPI's eviction is the PROVIDER closing the older socket
+#: when a newer one for the same key registers (docs: "opening a new socket
+#: will close any previous one for the same key"). A close THIS client
+#: initiated is never that. The websockets library fails the connection
+#: itself with 1011 "keepalive ping timeout" when its ping is not answered
+#: within ping_timeout -- which is what an event loop that cannot run for
+#: that long produces even though the provider answered (the API's loop
+#: watchdog recorded stalls at 18:52:21Z and 18:55:04-18:56:07Z, 19 s and
+#: 4-36 s before the first two closes) -- and with 1009 when a frame
+#: exceeds max_size. Counting those as evictions turned a stall of our own
+#: into the loss of the feed for the rest of the process's life.
+#:
+#: THE REPAIR. Every unrequested close is classified from the library's own
+#: record of the closing handshake (ConnectionClosed.rcvd / .sent /
+#: .rcvd_then_sent; `close_of`): SERVER (the provider's close frame came
+#: first), CLIENT (ours came first, or only ours exists), NO_CLOSE_FRAME
+#: (the connection ended with neither -- 1006) or UNKNOWN (not a websockets
+#: close at all). A CLIENT close is named R_CLIENT_CLOSED and reconnects
+#: with the ordinary backoff on a new epoch (resynchronized like any other).
+#: SERVER, NO_CLOSE_FRAME and UNKNOWN count toward EVICTIONS_MAX exactly as
+#: before -- an eviction may come with or without a close frame, so the
+#: owner still never fights. The side, the code and a bounded reason ride on
+#: the transition and on status(), so the next census names the cause. The
+#: lease, the writer fence, the arm row, EVICTIONS_MAX / EVICTION_WINDOW_S
+#: and the 30 s rule are unchanged.
+R_CLIENT_CLOSED = "FEED_SOCKET_CLOSED_BY_THIS_CLIENT"
+CLOSE_SERVER = "SERVER"
+CLOSE_CLIENT = "CLIENT"
+CLOSE_NO_FRAME = "NO_CLOSE_FRAME"
+CLOSE_UNKNOWN = "UNKNOWN"
+#: the sides an eviction by another holder of the key can look like
+EVICTION_CONSISTENT = (CLOSE_SERVER, CLOSE_NO_FRAME, CLOSE_UNKNOWN)
+#: RFC 6455 7.1.5: no close frame was received or sent
+ABNORMAL_CLOSURE = 1006
+CLOSE_REASON_MAX = 64
+
+
+def _close_frame(frame) -> dict:
+    """{code, reason} of one websockets Close frame; the reason is the
+    peer's own short text, bounded and printable only."""
+    try:
+        code = int(getattr(frame, "code"))
+    except (TypeError, ValueError, AttributeError):
+        code = None
+    reason = getattr(frame, "reason", None)
+    if reason is not None:
+        reason = "".join(ch for ch in str(reason)[:CLOSE_REASON_MAX]
+                         if ch.isprintable())
+    return {"code": code, "reason": reason}
+
+
+def close_of(exc) -> dict:
+    """WHO CLOSED THE SOCKET, from the exception `recv()` raised. Pure;
+    never raises. {"initiator", "code", "reason", "error"}: initiator is
+    SERVER, CLIENT, NO_CLOSE_FRAME or UNKNOWN (see R_CLIENT_CLOSED)."""
+    out = {"error": type(exc).__name__}
+    try:
+        if not (hasattr(exc, "rcvd") and hasattr(exc, "sent")):
+            return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
+        rcvd, sent = exc.rcvd, exc.sent
+        then = getattr(exc, "rcvd_then_sent", None)
+        if rcvd is not None and (sent is None or then is True):
+            return dict(out, initiator=CLOSE_SERVER, **_close_frame(rcvd))
+        if sent is not None:
+            return dict(out, initiator=CLOSE_CLIENT, **_close_frame(sent))
+        return dict(out, initiator=CLOSE_NO_FRAME, code=ABNORMAL_CLOSURE,
+                    reason=None)
+    except Exception:                                           # noqa: BLE001
+        return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
+
+
 def _task_is_being_cancelled() -> bool:
     """True when the CURRENT task itself was asked to cancel (shutdown),
     as opposed to a CancelledError raised from a driver future."""
@@ -250,6 +336,9 @@ class FeedOwner:
         self.writer_pid, self.writer_key = writer_pid, writer_key
         self.armed = armed              # async () -> bool, fail-closed
         self.evictions: list = []
+        #: every unrequested close by side (R_CLIENT_CLOSED) and the last one
+        self.closes_by_initiator: dict = {}
+        self.last_close: Optional[dict] = None
         #: the lease currently held (or being acquired), so a supervisor can
         #: discard it if this owner's task ever ends without retiring it
         self.lease = None
@@ -414,7 +503,19 @@ class FeedOwner:
                         self.liveness_s, 1.0))
                 except asyncio.TimeoutError:
                     continue
-                except Exception:                               # noqa: BLE001
+                except Exception as exc:                        # noqa: BLE001
+                    info = dict(close_of(exc), epoch=epoch,
+                                delivered=delivered)
+                    self.last_close = dict(info, at=round(self.clock(), 3))
+                    side = info["initiator"]
+                    self.closes_by_initiator[side] = \
+                        self.closes_by_initiator.get(side, 0) + 1
+                    if side == CLOSE_CLIENT:
+                        # OURS (keepalive timeout, frame cap): never another
+                        # holder of the key; reconnect like any lost socket
+                        self.cache.lost(R_CLIENT_CLOSED)
+                        self._note(R_CLIENT_CLOSED, close=info)
+                        return attempt
                     # a close we did not ask for after a healthy stream may
                     # be another holder of the account key evicting us
                     if delivered:
@@ -422,7 +523,7 @@ class FeedOwner:
                         self.evictions = [x for x in self.evictions
                                           if t - x < EVICTION_WINDOW_S] + [t]
                         self._note("UNREQUESTED_CLOSE",
-                                   recent=len(self.evictions))
+                                   recent=len(self.evictions), close=info)
                         if len(self.evictions) >= EVICTIONS_MAX:
                             self.refused = R_EVICTION_LOOP
                             self.cache.lost(R_EVICTION_LOOP)
@@ -477,6 +578,9 @@ class FeedOwner:
         return {"state": self.state, "refused": self.refused,
                 "writer_pid": self.writer_pid,
                 "recent_unrequested_closes": len(self.evictions),
+                "unrequested_closes_by_initiator": dict(
+                    self.closes_by_initiator),
+                "last_unrequested_close": self.last_close,
                 "lease_key": FEED_LOCK_KEY, "sport_ids": self.sport_ids,
                 "streams": self.streams, "transitions": self.events[-10:],
                 "cache": self.cache.census()}
