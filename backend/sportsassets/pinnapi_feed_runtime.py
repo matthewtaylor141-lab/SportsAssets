@@ -119,7 +119,8 @@ R_SCOPE_NOT_AN_ID = "SPORT_ID_NOT_AN_INTEGER"
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None, "held": None,
                 "scope": None, "discovery": None, "restarts": 0,
-                "last_restart": None}
+                "last_restart": None, "standdown": None,
+                "eviction_reentries": 0}
 CENSUS_S = 60.0
 #: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
 #: one bounded catalogue read per CENSUS_S, under its own timeout
@@ -219,6 +220,11 @@ def digest() -> dict:
     # task that ended can never update (P0 first-loss, 2026-10-06)
     d["owner_task"] = owner_task_state()
     d["last_owner_restart"] = _STATE.get("last_restart")
+    # THE STAND-DOWN, on the heartbeat: since when, until when, which
+    # re-entry is next, and how many there have been (RC6)
+    d["eviction_standdown"] = (dict(_STATE["standdown"])
+                               if _STATE.get("standdown") else None)
+    d["eviction_reentries"] = int(_STATE.get("eviction_reentries") or 0)
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
@@ -456,8 +462,9 @@ def families_with_a_priced_market() -> set:
 #: and nothing noticed -- the heartbeat kept writing its last state
 #: (STARTING) for 2.5 h while every candidate read FEED_OWNERSHIP_NOT_HELD.
 #: A task that ends while the owner was neither stopped nor refused (a
-#: refusal -- writer lock lost, eviction loop, provider refusal -- is a
-#: deliberate, permanent stop and stays one) is restarted here, once per
+#: refusal -- writer lock lost, provider refusal -- is a deliberate,
+#: permanent stop and stays one; an eviction loop is a stand-down since
+#: RC6, see EVICTION_STANDDOWN_S below) is restarted here, once per
 #: heartbeat pass, after its leaked lease session (if any) is discarded so
 #: the new attempt can take the lease. Authority is revoked first; the new
 #: run contends, resynchronizes and is fenced exactly like the first.
@@ -480,15 +487,98 @@ def owner_task_state() -> dict:
             "restarts": _STATE.get("restarts", 0)}
 
 
-def supervise() -> Optional[str]:
-    """Restart the owner task if it ended without being stopped or refused.
-    Returns how it had ended when it restarted it, else None. Never
-    raises; must run on the event loop."""
+#: ── AN EVICTION LOOP STANDS DOWN; IT NO LONGER ENDS THE FEED FOR GOOD (RC6) ─
+#:
+#: PRODUCTION (research-sql 37846538322, read 2026-10-08T21:24Z): the API's
+#: owner tripped EVICTION_LOOP_SUSPECTED at 19:00:51Z (unrequested closes
+#: ~18:52Z, 18:55:40Z, 19:00:51Z, each after minutes of healthy streaming)
+#: and, being refused, was never restarted: 2 h 24 min later it still read
+#: EVICTION_LOOP_SUSPECTED, no session held the feed lease, every 15-minute
+#: cycle since 19:09Z carried 85-104 FEED_OWNERSHIP_NOT_HELD rows (a
+#: SOFTWARE first loss: "every one of those states is ours to keep short",
+#: 49aaee89) and pinnapi_reactive_attempts stopped. Only a process restart
+#: could bring it back. No holder of OURS can have caused the closes (only
+#: ext_pinnacle_loop starts an owner, behind the feed lease); whether
+#: anything else did is exactly what pinnapi_owner.close_facts now records.
+#:
+#: THE RULE IS KEPT AND BOUNDED, NOT RELAXED. The owner still stops at
+#: EVICTIONS_MAX unrequested closes inside EVICTION_WINDOW_S, revokes its
+#: authority first and never fights inside a run. What changes is that an
+#: EVICTION_LOOP refusal is a STAND-DOWN with a stated length, not the end
+#: of the feed for the life of the process: after EVICTION_STANDDOWN_S[n]
+#: (30 min, then 1 h, 2 h, and 4 h for every later one) this supervisor
+#: re-enters the SAME owner once -- same runtime, lease, writer fence, arm
+#: row and resynchronization as any start; nothing is served before the
+#: provider's snapshots arrive on the new epoch. A real second holder of
+#: the key would therefore see at most EVICTIONS_MAX connections per
+#: stand-down, the stand-downs doubling. Every other refusal -- the
+#: decider's writer lock lost, the provider refusing the key or the plan,
+#: no key in this service -- stays permanent.
+EVICTION_STANDDOWN_S = (1800.0, 3600.0, 7200.0, 14400.0)
+
+
+def _standdown_s(n: int) -> float:
+    return EVICTION_STANDDOWN_S[min(max(0, n), len(EVICTION_STANDDOWN_S) - 1)]
+
+
+def _eviction_standdown(o, now: float) -> Optional[str]:
+    """Hold an EVICTION_LOOP refusal for its stand-down, then re-enter the
+    owner once. Returns "EVICTION_STANDDOWN_ENDED" when it re-entered, else
+    None. Must run on the event loop."""
+    from . import pinnapi_owner as O
+    sd = _STATE.get("standdown")
+    if sd is None or sd.get("ended_at") is not None:
+        n = int(_STATE.get("eviction_reentries") or 0)
+        sd = {"refused": O.R_EVICTION_LOOP, "since": now,
+              "seconds": _standdown_s(n), "until": now + _standdown_s(n),
+              "reentry": n + 1, "ended_at": None}
+        _STATE["standdown"] = sd
+        o._note("EVICTION_STANDDOWN", seconds=sd["seconds"],
+                until=round(sd["until"], 3), reentry=sd["reentry"])
+        log.warning("pinnapi feed: eviction loop suspected; standing down "
+                    "%.0fs before re-entry %d", sd["seconds"], sd["reentry"])
+        return None
+    if now < sd["until"]:
+        return None
+    # THE RE-ENTRY: a clean owner, contending from scratch. Authority stays
+    # revoked until the new epoch resynchronizes.
+    o.cache.lost(O.R_EVICTION_LOOP)
+    lease = getattr(o, "lease", None)
+    if lease is not None:
+        try:
+            lease.discard()
+        except Exception:                                       # noqa: BLE001
+            pass
+        o.lease = None
+    o.refused = None
+    o.evictions = []
+    o.state = "STARTING"
+    sd["ended_at"] = now
+    _STATE["eviction_reentries"] = sd["reentry"]
+    o._note("EVICTION_STANDDOWN_ENDED", reentry=sd["reentry"],
+            stood_down_s=round(now - sd["since"], 3))
+    log.warning("pinnapi feed: stand-down over after %.0fs; re-entering "
+                "(re-entry %d)", now - sd["since"], sd["reentry"])
+    _STATE["task"] = asyncio.get_running_loop().create_task(o.run())
+    return "EVICTION_STANDDOWN_ENDED"
+
+
+def supervise(now: Optional[float] = None) -> Optional[str]:
+    """Restart the owner task if it ended without being stopped or refused,
+    and re-enter an EVICTION_LOOP refusal after its stand-down. Returns how
+    it had ended when it restarted it, else None. Never raises; must run on
+    the event loop."""
     try:
         o, t = _STATE.get("owner"), _STATE.get("task")
         if o is None or t is None or not t.done():
             return None
-        if o.stop_event.is_set() or o.refused:
+        if o.stop_event.is_set():
+            return None
+        from . import pinnapi_owner as O
+        if o.refused == O.R_EVICTION_LOOP:
+            return _eviction_standdown(
+                o, time.time() if now is None else now)
+        if o.refused:
             return None
         how = owner_task_state().get("how")
         o.cache.lost(R_OWNER_TASK_ENDED)

@@ -1337,3 +1337,5 @@ tests/test_rc5_pmx_consumer_books.py
 tests/test_rc5_feed_ownership_authority.py
 # (RC6) every PinnAPI UNREQUESTED_CLOSE records its own facts (provider close frame code / reason or none received, receive gap, socket age); the eviction rule itself unchanged
 tests/test_rc6_pinnapi_close_facts.py
+# (RC6) an EVICTION_LOOP refusal is a stand-down (30 min, 1 h, 2 h, then 4 h) after which the same owner re-enters once, still stopping at EVICTIONS_MAX per run; writer-lock-lost, provider and key refusals stay permanent
+tests/test_rc6_pinnapi_eviction_standdown.py
