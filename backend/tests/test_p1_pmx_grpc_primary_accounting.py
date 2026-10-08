@@ -326,9 +326,50 @@ def test_s7_anything_unproven_is_rest_with_the_reason(run, feeds, why):
 
 # ── S8 ─────────────────────────────────────────────────────────────────
 
-def _red(md):
+def _red(md, plane="DEDICATED_RUNNING"):
+    # the snapshot is the DEDICATED plane's evidence only while the plane is
+    # read as running (pm_bind.acceptance, PM review of RC4)
     return {"implementation_sha": "a" * 40,
-            "completion": {"small_live": "SHADOW", "market_data": md}}
+            "completion": {"small_live": "SHADOW", "market_data": md,
+                           "runtime": {"market_plane": {"state": plane}}}}
+
+
+@pytest.mark.parametrize("plane", ["ABSENT", "STALE", None])
+def test_s8_a_current_snapshot_without_a_running_dedicated_plane_is_withheld(
+        plane):
+    """A CURRENT snapshot while the dedicated plane is not read as running
+    is not the dedicated plane's evidence: PMX primary acceptance is
+    withheld (REST, fresh count left out, the reason named) exactly as for
+    a stale or absent snapshot."""
+    md = {"snapshot": "CURRENT", "fresh": 812, "subscription_mode": "ALL"}
+    red = _red(md, plane)
+    if plane is None:
+        red["completion"].pop("runtime")
+    r = PA.evaluate(red=red, scoreboard={}, release=None, now=10_000.0)
+    assert r["evidence_input"]["pmx_primary_source"] == "REST"
+    assert "pmx_grpc_fresh_count" not in r["evidence_input"]
+    assert r["unproven"]["pmx_grpc_fresh_count"] == [
+        PA.R_PMX_PLANE_NOT_DEDICATED]
+    assert r["gates"]["pmx_grpc_primary"]["pass"] is False
+    assert PA.R_PMX_PLANE_NOT_DEDICATED in \
+        r["provenance"]["pmx_primary_source"]["source"]
+
+
+@pytest.mark.parametrize("md", [
+    {"snapshot": "MARKET_PLANE_SNAPSHOT_STALE_19660s", "fresh": 812,
+     "subscription_mode": "ALL"},
+    {"snapshot": "NO_MARKET_PLANE_SNAPSHOT"},
+    {"snapshot": None, "fresh": 812, "subscription_mode": "ALL"},
+    {}])
+def test_s8_a_stale_or_absent_plane_snapshot_withholds_primary_acceptance(md):
+    """PMX (defect 6): stale, absent, unlabelled or unread snapshot -> the
+    pmx_grpc_primary gate never passes and the fresh count is never read,
+    whatever the snapshot body claims."""
+    r = PA.evaluate(red=_red(md), scoreboard={}, release=None, now=10_000.0)
+    assert "pmx_grpc_fresh_count" not in r["evidence_input"]
+    assert r["evidence_input"].get("pmx_primary_source") in (None, "REST")
+    assert r["gates"]["pmx_grpc_primary"]["pass"] is False
+    assert "pmx_grpc_primary" in r["economic_or_evidence_gaps"]
 
 
 def test_s8_no_current_plane_snapshot_is_rest_and_the_process_only_reported():

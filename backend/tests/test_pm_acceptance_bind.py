@@ -1,12 +1,23 @@
 """PM Evidence Pack component 3 bound: the harness (byte-identical package)
 decides RED / YELLOW / GREEN from MACHINE evidence collected field by field
 (pm_bind.acceptance). Missing evidence is never success; a status narrative
-cannot be typed in; nothing here activates money."""
+cannot be typed in; nothing here activates money.
+
+Since the PM review of RC4 (2026-10-08) GREEN also needs the two receipts
+the API cannot produce about itself: the Render runtime window (no_oom) and
+the PRE / POST historical PAPER fingerprints (historical_paper_immutable).
+Neither is ever defaulted: the old green fixture reached GREEN only through
+a hard-coded True and the workers' process age."""
 from __future__ import annotations
 
 import copy
 
 from sportsassets.pm_bind import acceptance as PA
+
+try:
+    from tests import pm_acceptance_fixture as F
+except ImportError:                                             # pragma: no cover
+    import pm_acceptance_fixture as F  # type: ignore
 
 NOW = 1_791_400_000.0
 SHA = "a" * 40
@@ -65,10 +76,15 @@ def green_release() -> dict:
             "engine_diagnostic_green": True}
 
 
-def ev(red=None, board=None, rel="DEFAULT"):
+def ev(red=None, board=None, rel="DEFAULT", runtime="DEFAULT",
+       paper="DEFAULT"):
     return PA.evaluate(red=green_red() if red is None else red,
                        scoreboard=green_board() if board is None else board,
                        release=green_release() if rel == "DEFAULT" else rel,
+                       runtime=(F.render_raw() if runtime == "DEFAULT"
+                                else runtime),
+                       paper=(F.paper_receipt() if paper == "DEFAULT"
+                              else paper),
                        now=NOW)
 
 
@@ -97,9 +113,14 @@ def test_no_release_receipt_is_red_never_assumed():
 def test_empty_evidence_is_red_with_every_field_missing_but_the_invariants():
     r = PA.evaluate(red={}, scoreboard={}, release=None, now=NOW)
     assert r["pm_state"] == "RED"
-    assert set(r["evidence_input"]) == {"historical_paper_immutable",
-                                        "live_authority_shadow"}
+    # historical_paper_immutable is NOT an invariant: it was typed True
+    assert set(r["evidence_input"]) == {"live_authority_shadow"}
     assert r["evidence_input"]["live_authority_shadow"] is False
+    assert r["unproven"]["historical_paper_immutable"] == [
+        PA.R_PAPER_RECEIPT_ABSENT]
+    assert r["unproven"]["no_oom_minutes"] == [PA.R_RUNTIME_RECEIPT_ABSENT]
+    for g in ("historical_paper_immutable", "no_oom"):
+        assert g in r["critical_failures"]
 
 
 def test_tested_release_deployed_must_be_one_sha():
@@ -213,3 +234,58 @@ def test_red_team_reuses_only_a_fresh_ok_completion_read():
     CCR._CACHE["main"] = (NOW - 10, {"status": "UNAVAILABLE", "data": None})
     assert CR.cached_completion(NOW) is None
     CCR._CACHE.clear()
+
+
+# ── the two receipts (PM review of RC4) ─────────────────────────────────
+
+def test_the_api_read_without_receipts_never_certifies_paper_or_runtime():
+    """The API's own pm-acceptance read has neither receipt: both critical
+    gates fail with named reasons, never a typed True or a process age."""
+    r = ev(runtime=None, paper=None)
+    assert r["pm_state"] == "RED"
+    assert r["critical_failures"] == ["no_oom", "historical_paper_immutable"]
+    assert "historical_paper_immutable" not in r["evidence_input"]
+    assert "no_oom_minutes" not in r["evidence_input"]
+    assert r["runtime_window_status"] == PA.UNKNOWN
+    assert r["paper_history_status"] == PA.UNPROVEN
+
+
+def test_the_workers_process_age_is_never_no_oom_minutes():
+    """RC4: minutes_since_process_start 76.7 passed no_oom while the market
+    plane had been oomKilled twice. A long-lived worker is not a window."""
+    red = green_red()
+    red["completion"]["runtime"]["shared_workers"][
+        "minutes_since_process_start"] = 10_000
+    r = ev(red=red, runtime=None)
+    assert "no_oom_minutes" not in r["evidence_input"]
+    assert "no_oom" in r["critical_failures"]
+
+
+def test_green_receipts_bind_both_fields_with_their_sources():
+    r = ev()
+    assert r["evidence_input"]["no_oom_minutes"] == 75.0
+    assert r["evidence_input"]["historical_paper_immutable"] is True
+    assert "Render runtime receipt" in r["provenance"]["no_oom_minutes"][
+        "source"]
+    assert F.CUTOFF in r["provenance"]["historical_paper_immutable"][
+        "source"]
+    assert r["unproven"] == {}
+
+
+def test_a_changed_paper_history_is_red_false_not_unproven():
+    paper = F.paper_receipt()
+    paper["post"]["tables"]["paper_ledger"]["digest"] = "0" * 32
+    r = ev(paper=paper)
+    assert r["evidence_input"]["historical_paper_immutable"] is False
+    assert "historical_paper_immutable" in r["critical_failures"]
+    assert r["paper_history_status"] == PA.CHANGED
+
+
+def test_an_oom_in_the_window_is_red_through_the_binder():
+    raw = F.add_event(F.render_raw(), "sportsassets-market-plane",
+                      F.oom(F.SIDS["sportsassets-market-plane"],
+                            F.LIVE + 1800))
+    r = ev(runtime=raw)
+    assert r["evidence_input"]["no_oom_minutes"] == 0.0
+    assert r["pm_state"] == "RED" and "no_oom" in r["critical_failures"]
+
