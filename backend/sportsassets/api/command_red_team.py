@@ -15,7 +15,11 @@
                                      RENDER_GIT_COMMIT and tested == release
                                      == deployed; appended (315), never
                                      edited. A receipt is evidence, never
-                                     authority.
+                                     authority. It may SUPERSEDE earlier
+                                     receipts BY REFERENCE (supersedes):
+                                     the reference is appended as its own
+                                     control receipt and the earlier
+                                     receipts stay exactly as they are.
 
 The GETs run in READ ONLY transactions; nothing here can place, cancel,
 size, fund or authorize anything.
@@ -40,6 +44,9 @@ CACHE_S = 120.0
 STATEMENT_TIMEOUT_MS = 90000
 _CACHE: dict = {}
 _HEX = re.compile(r"^[0-9a-f]{40}$")
+#: a release receipt id as this API mints it: rel:<deployed[:12]>:<epoch>
+_RID = re.compile(r"^rel:[0-9a-f]{12}:[0-9]+$")
+MAX_SUPERSEDES = 20
 
 
 def envelope(status, why=None, *, data=None, computed_at=None) -> dict:
@@ -216,6 +223,20 @@ def validate_release(body: dict, *, running_sha: str) -> list:
     return out
 
 
+def validate_supersedes(v) -> tuple:
+    """(earlier receipt ids this receipt supersedes BY REFERENCE, refusals).
+
+    PM review of RC4 (2026-10-08): an earlier false receipt (08828d04,
+    green=false) must stay where it is; a new receipt names it, it never
+    replaces, edits or deletes it."""
+    if v is None:
+        return [], []
+    if not isinstance(v, list) or len(v) > MAX_SUPERSEDES or not all(
+            isinstance(x, str) and _RID.match(x) for x in v):
+        return [], ["NOT_A_RECEIPT_ID:supersedes"]
+    return sorted(set(v)), []
+
+
 @router.post("/api/admin/red-team/release-receipt",
              dependencies=[Depends(_admin)])
 async def release_receipt(body: dict = Body(...)) -> dict:
@@ -224,8 +245,10 @@ async def release_receipt(body: dict = Body(...)) -> dict:
     from ..redteam import controls as C
     running = (os.environ.get("RENDER_GIT_COMMIT") or "").strip().lower()
     bad = validate_release(body, running_sha=running)
-    if bad:
-        raise HTTPException(status_code=422, detail={"refused": bad})
+    sup, bad_sup = validate_supersedes(body.get("supersedes"))
+    if bad or bad_sup:
+        raise HTTPException(status_code=422, detail={"refused": bad +
+                                                     bad_sup})
     ev = ReleaseEvidence(
         tested_sha=str(body["tested_sha"]).lower(),
         release_sha=str(body["release_sha"]).lower(),
@@ -253,6 +276,16 @@ async def release_receipt(body: dict = Body(...)) -> dict:
         if not await C._has(conn, "red_team_release_receipts"):
             raise HTTPException(status_code=503,
                                 detail="MIGRATION_315_NOT_APPLIED")
+        if sup:
+            # a reference must name a receipt that exists: an unknown id is
+            # refused before anything is appended
+            found = {r["receipt_id"] for r in await conn.fetch(
+                "SELECT receipt_id FROM red_team_release_receipts "
+                " WHERE receipt_id = ANY($1::text[])", sup)}
+            missing = [x for x in sup if x not in found]
+            if missing:
+                raise HTTPException(status_code=422, detail={"refused": [
+                    "SUPERSEDED_RECEIPT_NOT_FOUND:%s" % x for x in missing]})
         await conn.execute(
             "INSERT INTO red_team_release_receipts (receipt_id, "
             " accepted_base_sha, tested_sha, release_sha, deployed_sha, "
@@ -281,7 +314,23 @@ async def release_receipt(body: dict = Body(...)) -> dict:
                 json.dumps(pa.get("critical_failures", []) + pa.get(
                     "economic_or_evidence_gaps", [])),
                 json.dumps(pa, default=str), h)
+        if sup:
+            # THE SUPERSESSION IS ITSELF APPENDED (append-only trigger of
+            # 315): this receipt -> the earlier ones, which are untouched
+            sev = {"receipt_id": rid, "supersedes": sup,
+                   "deployed_sha": running, "by_reference_only": True,
+                   "earlier_receipts_unchanged": True}
+            await conn.execute(
+                "INSERT INTO red_team_control_receipts (receipt_id, "
+                " implementation_sha, control, status, blockers, evidence, "
+                " evidence_hash) VALUES ($1,$2,'RELEASE_RECEIPT_SUPERSEDES',"
+                " $3,'[]'::jsonb,$4::jsonb,$5) ON CONFLICT (receipt_id) "
+                " DO NOTHING",
+                "sup:%s" % rid, running, "GREEN" if green else "RED",
+                json.dumps(sev, sort_keys=True),
+                hashlib.sha256(json.dumps(sev, sort_keys=True).encode())
+                .hexdigest())
     _CACHE.clear()
     return {"receipt_id": rid, "release_gate": {
-        "green": green, "blockers": blockers},
+        "green": green, "blockers": blockers}, "supersedes": sup,
         "authority": "EVIDENCE_ONLY_NO_AUTHORITY"}

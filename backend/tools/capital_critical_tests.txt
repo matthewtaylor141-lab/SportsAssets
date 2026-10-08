@@ -526,6 +526,10 @@ tests/test_kalshi_venue.py
 tests/test_kalshi_mapping_and_selection.py
 tests/test_kalshi_isolation.py
 tests/test_kalshi_smalllive_migration.py
+# (RC5) both documented Kalshi key types (Ed25519, RSA) in every signer from the
+# configured bytes as given; the control accepts them truthfully; the order
+# signer stays unreachable with a now-loadable key
+tests/test_kalshi_key_classes.py
 tests/test_smalllive_not_mirrored_migration.py
 # PinnAPI the sole probability authority of the investment policy (V3,
 # owner 2026-10-03): a single-source PinnAPI valuation qualifies, recorded
@@ -1087,6 +1091,10 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+# RC5: the management epoch reconciles exactly (opening + itemised changes =
+# management equity; + itemised differences = ledger equity), each carried
+# mark verified from records at the epoch instant or UNVERIFIED by name.
+tests/test_paper_management_epoch_reconciliation.py
 # Coverage failures + first-loss census (2026-10-05): the event ledger stages
 # venue-identity and WS-unusable refusals (and the funnel derives the stage
 # for rows written without one), a sticky-key valuation is attributed by its
@@ -1267,6 +1275,10 @@ tests/test_kalshi_canonical_db.py
 tests/test_kalshi_ws_market_data.py
 tests/test_kalshi_contract_terms.py
 tests/test_kalshi_contract_terms_db.py
+# (RC5) the pair settlement-difference policy: every outcome class priced or
+# refused by name; separate markets' fair prices never summed to $1, and only
+# an exact complement payout table reaches Adriana's engine
+tests/test_settlement_pair_policy.py
 # (red team closeout V1) package 51/51 byte-identical, canonical exposure lock on the PAPER entry path, chaos matrix C01-C30, readiness interlock + append-only receipts on a migrated database
 tests/test_red_team_package_parity.py
 tests/test_red_team_exposure_lock.py
@@ -1281,10 +1293,41 @@ tests/test_pm_evidence_package_parity.py
 tests/test_pm_golden_production.py
 tests/test_pm_scoreboard_bind.py
 tests/test_pm_acceptance_bind.py
+# (PM review of RC4, 2026-10-08) no_oom only from the complete Render runtime window, historical PAPER immutability only from pre / post fingerprints at one fixed cutoff, receipts posted only on an explicit on, attestation verified
+tests/test_pm_acceptance_receipts.py
+tests/test_pm_acceptance_paper_fingerprint_db.py
+tests/test_pm_acceptance_workflow.py
 tests/test_pmus_credential_census.py
+# (RC5) every funded PMUS reader refuses by name before any request when the
+# funded slot holds the wrong class; no other account's positions substitute;
+# venue-confirmed only on a reading; owner blockers only beside their proof
+tests/test_pmus_funded_readers_refuse.py
 tests/test_p1_pmx_grpc_primary_accounting.py
 tests/test_bettor_policy_v6_integrity.py
 tests/test_bettor_live_delegated_lane_parks.py
 tests/test_log_redaction.py
 tests/test_market_plane_orderless_guard.py
 tests/test_analytics_archive_bounded.py
+# RC5 Xavier no-growth: the management read model holds EVERY canonical held
+# position (production 2026-10-08 06:39Z: 100 newest handoffs, 0 open, while
+# 4 were held), a held position without a handoff is named, and a historical
+# complete review never keeps a stale packet green in the strict entry rail
+# or the xavier_complete gate (probability expiry, book SLA, later fill).
+tests/test_xavier_management_held_population_and_current_packets.py
+# RC5 Xavier no-growth: an EXIT / REDUCE that cancelled the protection
+# protects the remainder it does not sell in the same review (only the
+# uncommitted inventory: never a second sale of the same contracts, no
+# churn while the sale is pending), and a missing protective price is
+# recorded, never a KeyError that leaves the EXIT intent open.
+tests/test_xavier_sale_transition_keeps_the_remainder_protected.py
+# (Live Game State V1, migration 316) display scores are DISPLAY ONLY: Trader response identical with BETTOR_DISPLAY_SCORES on vs off except
+# positions[].game / score_feed / snapshot digest (negative controls prove the comparison sees prices, packets, orders, P&L); a FINAL score
+# collected through the real collector settles nothing; a fresh score completes no stale packet or mark; the package's seven real-PostgreSQL
+# proofs on the installed migration; the production census equals the collector's verdict; installed code = package + two disclosed lines
+tests/test_trader_live_game_real_db.py
+tests/test_live_game_state_integration.py
+tests/test_trader_live_game_package_parity.py
+# (RC5) the dedicated market plane's memory: coverage / populate / Kalshi persist one page at a time (RC4 parity, row for row), the assignment and certify refdata reads slim, the shard plan by counts, the heartbeat bounded with every reader field and RSS by step
+tests/test_market_plane_memory_bound.py
+# (RC5) the dedicated market plane's FULL-MODE boot (main() under market_plane_guard, UMP_AND_KALSHI_WS) with mocked transports: authentication, reference data and both subscriptions reach the mocks; every submit / cancel / funding path is refused before the wire (zero such requests recorded)
+tests/test_market_plane_full_mode_boot.py

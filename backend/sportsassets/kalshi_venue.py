@@ -28,23 +28,44 @@ WHERE EDGE-ENGINE'S CODE AND ITS PROSE DISAGREE, THE CODE WINS:
 
 CREDENTIALS (env names defined here, never logged, never returned):
     KALSHI_API_KEY_ID         the API key id (UUID-shaped)
-    KALSHI_PRIVATE_KEY_PEM    the RSA private key, PEM (PKCS#1 or PKCS#8,
-                              unencrypted); one-line pastes are repaired
-    KALSHI_PRIVATE_KEY_PATH   ... or a path to the same PEM file
+    KALSHI_PRIVATE_KEY_PEM    the private key, PEM, unencrypted, of either
+                              documented Kalshi key type: Ed25519 (PKCS#8,
+                              Kalshi's default) or RSA (PKCS#1 or PKCS#8).
+                              Read EXACTLY as configured, trailing newline
+                              included; only a value that does not load as
+                              given gets a paste repair (kalshi_key)
+    KALSHI_PRIVATE_KEY_PATH   ... or a path to the same PEM file (its bytes,
+                              unchanged)
     KALSHI_ENV                'prod' or 'demo' -- REQUIRED, no default
     KALSHI_SMALLLIVE_ENABLED  '1' / 'true' to allow submission; default OFF
 
 `credential_state()` reports presence, shape and a fingerprint only.
+
+KEY TYPES (RC5, 2026-10-08). This client signed with RSA-PSS only and
+refused every other key as "not an RSA private key". Kalshi documents two
+key types, Ed25519 (recommended) and RSA, and production's
+KALSHI_PRIVATE_KEY_PEM is an Ed25519 PKCS#8 PEM (119 characters with its
+trailing newline) that the dedicated plane already signs GET /account/limits
+with (200). So credential_state called a documented, working key
+KALSHI_CREDENTIAL_UNREADABLE. Loading, classifying and signing now go
+through kalshi_key, the one implementation every Kalshi signer uses: the key
+type is read from the PARSED key (Kalshi: "the PEM header does not identify
+the key type"), Ed25519 signs the pre-sign text itself, RSA keeps RSA-PSS /
+SHA-256 / MGF1-SHA256 / salt = digest length. The submission gate is
+unchanged: a loadable key is one precondition of five, the env switch
+defaults OFF, and no runner constructs this client
+(tests/test_kalshi_isolation.py). KALSHI LIVE MONEY = NOT ACTIVATED.
 """
 from __future__ import annotations
 
-import base64
 import hashlib
 import os
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Protocol
+
+from . import kalshi_key as KK
 
 VERSION = "KALSHI_VENUE_V1"
 
@@ -93,9 +114,12 @@ CONTRACT = {
                "404 gone, else error", "kalshi.py:995-1013"),
     "market_results": ("GET /markets?tickers=... status determined|finalized|"
                        "settled, result yes|no", "kalshi.py:1059-1075"),
-    "auth": ("RSA-PSS(SHA256, MGF1-SHA256, salt=digest) over "
+    "auth": ("by the PARSED key's type: Ed25519 over the pre-sign text, or "
+             "RSA-PSS(SHA256, MGF1-SHA256, salt=digest); pre-sign text "
              "'{ts_ms}{METHOD}{/trade-api/v2/path}', headers KALSHI-ACCESS-KEY/"
-             "-TIMESTAMP/-SIGNATURE (base64)", "kalshi.py:361-379"),
+             "-TIMESTAMP/-SIGNATURE (base64)",
+             "kalshi.py:361-379 (RSA); docs getting_started_api_keys "
+             "(Ed25519, captured 2026-10-07)"),
     "pem_repair": ("one-line / escaped-newline PEM repair", "kalshi.py:319-346"),
     # Not exercised by edge-engine:
     "order_by_id": ("GET /portfolio/orders/{order_id}", "UNVERIFIED"),
@@ -194,42 +218,44 @@ def fingerprint(key_id: str) -> str | None:
     return hashlib.sha256(key_id.encode()).hexdigest()[:12] if key_id else None
 
 
-def normalize_pem(pem: str) -> str:
-    """Repair the newlines an env-var paste destroys (kalshi.py:319-346):
-    literal backslash-n escapes become newlines, and a single-line key is
-    re-wrapped at 64 columns between its armour lines."""
-    pem = pem.strip().strip('"').strip("'")
-    if "\\n" in pem and "\n" not in pem:
-        pem = pem.replace("\\n", "\n")
-    if "\n" not in pem:
-        m = re.match(r"^(-----BEGIN [A-Z0-9 ]+-----)(.*?)(-----END [A-Z0-9 ]+-----)$",
-                     pem)
-        if m:
-            head, body, tail = m.groups()
-            body = re.sub(r"\s+", "", body)
-            wrapped = "\n".join(body[i:i + 64] for i in range(0, len(body), 64))
-            pem = f"{head}\n{wrapped}\n{tail}\n"
-    return pem
+def normalize_pem(pem: str | bytes) -> str:
+    """The PEM text that loads: the value EXACTLY as configured when it
+    loads as given (every byte, the trailing newline included), else the
+    paste repair that does (kalshi.py:319-346's repairs: literal
+    backslash-n escapes, a key squashed onto one line; plus base64 of the
+    whole PEM). A value no form of which loads is returned as given, so the
+    loader's own refusal is what the caller sees."""
+    raw = pem.decode("utf-8") if isinstance(pem, (bytes, bytearray)) else str(pem)
+    try:
+        _key, form = KK.load(raw)
+    except Exception:                                           # noqa: BLE001
+        return raw
+    for f, data in KK._candidates(raw):
+        if f == form:
+            return data.decode("utf-8")
+    return raw
 
 
-def _read_pem(env: Mapping[str, str]) -> str:
-    pem = _get(env, PRIVATE_KEY_PEM_ENV)
-    if pem:
+def _read_pem(env: Mapping[str, str]) -> str | bytes:
+    """THE CONFIGURED BYTES, UNCHANGED. The env value is handed on as set --
+    never stripped, so a PEM's trailing newline survives (production's
+    Ed25519 KALSHI_PRIVATE_KEY_PEM is 119 characters WITH it); a key file is
+    read as bytes. Presence alone is judged on the stripped value."""
+    pem = env.get(PRIVATE_KEY_PEM_ENV)
+    if pem is not None and str(pem).strip():
         return pem
     path = _get(env, PRIVATE_KEY_PATH_ENV)
     if not path:
         return ""
     with open(path, "rb") as f:
-        return f.read().decode()
+        return f.read()
 
 
-def load_private_key(pem: str):
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
-    key = load_pem_private_key(normalize_pem(pem).encode(), password=None)
-    if not isinstance(key, rsa.RSAPrivateKey):
-        raise ValueError("not an RSA private key")
-    return key
+def load_private_key(pem: str | bytes):
+    """Either documented Kalshi key type, Ed25519 or RSA (kalshi_key.load,
+    the type read from the parsed key). Any other key, or a value that does
+    not load, raises kalshi_key.KeyRefused -- a ValueError naming why."""
+    return KK.load_private_key(pem)
 
 
 def public_key_fingerprint(private_key) -> str:
@@ -267,13 +293,22 @@ def credential_state(env: Mapping[str, str] | None = None) -> dict:
            "private_key": None, "public_key_fingerprint": None}
     if has_pem or has_path:
         try:
-            k = load_private_key(_read_pem(env))
-            out["private_key"] = {"type": "RSA", "bits": k.key_size,
-                                  "loadable": True}
+            k, form = KK.load(_read_pem(env))
+            if KK.key_type(k) == KK.KEY_RSA:
+                out["private_key"] = {"type": "RSA", "bits": k.key_size,
+                                      "loadable": True}
+            else:
+                out["private_key"] = {"type": KK.KEY_ED25519,
+                                      "loadable": True}
+            # AS_GIVEN unless a paste repair was needed: the bytes are used
+            # as configured whenever they load
+            out["private_key_form"] = form
             out["public_key_fingerprint"] = public_key_fingerprint(k)
         except Exception as exc:                              # noqa: BLE001
             out["private_key"] = {"loadable": False,
                                   "error": type(exc).__name__}
+            if isinstance(exc, KK.KeyRefused):
+                out["private_key"]["refusal"] = exc.code
     out["complete"] = bool(kid and (out["private_key"] or {}).get("loadable")
                            and out["environment_valid"])
     if not (kid and (has_pem or has_path)):
@@ -306,31 +341,18 @@ def signing_message(ts_ms: str, method: str, path: str) -> bytes:
 
 
 def sign(private_key, ts_ms: str, method: str, path: str) -> str:
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.hashes import SHA256
-    sig = private_key.sign(
-        signing_message(ts_ms, method, path),
-        padding.PSS(mgf=padding.MGF1(SHA256()),
-                    salt_length=padding.PSS.DIGEST_LENGTH),
-        SHA256())
-    return base64.b64encode(sig).decode()
+    """base64 signature over the pre-sign text, by the key's own type:
+    Ed25519 signs the text itself, RSA is RSA-PSS / SHA-256 / MGF1-SHA256
+    / salt = digest length (kalshi_key.sign)."""
+    return KK.sign(private_key, signing_message(ts_ms, method, path))
 
 
 def verify(public_key, signature_b64: str, ts_ms: str, method: str,
            path: str) -> bool:
-    """For tests and self-checks: does this signature verify?"""
-    from cryptography.exceptions import InvalidSignature
-    from cryptography.hazmat.primitives.asymmetric import padding
-    from cryptography.hazmat.primitives.hashes import SHA256
-    try:
-        public_key.verify(
-            base64.b64decode(signature_b64), signing_message(ts_ms, method, path),
-            padding.PSS(mgf=padding.MGF1(SHA256()),
-                        salt_length=padding.PSS.DIGEST_LENGTH),
-            SHA256())
-        return True
-    except InvalidSignature:
-        return False
+    """For tests and self-checks: does this signature verify (under the
+    public key's own algorithm)?"""
+    return KK.verify(public_key, signature_b64,
+                     signing_message(ts_ms, method, path))
 
 
 def auth_headers(key_id: str, private_key, method: str, path: str,

@@ -24,6 +24,17 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_admin_token_budget():
+    """The wrong-X-Admin-Token throttle (api/admin_token_guard.py) is process
+    state; every test starts with a full budget, so tests that pin a wrong
+    token's 401 never see another test's guesses as a 429."""
+    from sportsassets.api import admin_token_guard
+    admin_token_guard.reset()
+    yield
+    admin_token_guard.reset()
+
+
+@pytest.fixture(autouse=True)
 def _legacy_net_cap(request, monkeypatch):
     """The per-market / per-game cap at $2,500 for every test written
     under it (2026-09-09 ~21:05Z, owner order: the $2,500 is per TRADE
@@ -565,3 +576,20 @@ def _profitability_bind_seeded(request, monkeypatch):
         return {"account_id": account_id, "at": now, "quarantined": [],
                 "strategies": {}, "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
     monkeypatch.setattr(PSTACK, "evaluate_quarantine", _no_quarantine)
+
+
+# BETTOR LIVE GAME STATE V1 (migration 316) ships its four test modules for
+# `python -m unittest discover -s tests`, where the tests directory itself is
+# on sys.path, so they import their shared synthetic fixtures top-level:
+# `from _bettor_live_game_state_test_helpers import ...`. Here `tests` is a
+# real package (tests/__init__.py) and pytest puts backend/ on sys.path, not
+# backend/tests/, so that import fails at collection. The installed test files
+# stay byte-identical to the package (its verifier compares them byte for byte;
+# tests/test_trader_live_game_package_parity.py pins them), so the ONE name is
+# aliased to the same module object instead of putting backend/tests/ on
+# sys.path for every test.
+import importlib as _importlib  # noqa: E402
+
+sys.modules.setdefault(
+    "_bettor_live_game_state_test_helpers",
+    _importlib.import_module("tests._bettor_live_game_state_test_helpers"))

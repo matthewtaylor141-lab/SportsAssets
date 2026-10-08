@@ -55,6 +55,39 @@ GET-only, cursor-complete, TRUNCATED by name) runs every KALSHI_EVERY_S in a
 background thread, kill switch KALSHI_CATALOGUE=off. Radar still audits the
 PMUS universe; Kalshi rows are counted beside it. No order module is
 imported or reachable.
+
+MEMORY (RC5, 2026-10-08). The dedicated service (Render standard, 2 GiB,
+MALLOC_ARENA_MAX=2) was OOM-killed at 2 GiB from 06:10:01Z, ~14 times by
+12:50Z, after RC4 deployed at 05:16:49Z: 736 -> 890 -> 1400 MB in the first
+three minutes, then a 1.4-1.9 GB plateau with spikes to 1998 MB; 1613 MB
+within a minute of the 06:12 restart. tools/market_plane_memory.py drives
+THIS run loop at production cardinality (synthetic rows) and reproduced it:
+RSS 940 MB after the boot pass, 1.68 GB after five, VmHWM 1.95 GB inside a
+coverage pass. Every megabyte was a pass holding the whole universe at once
+or a temporary that outlived its pass:
+
+  coverage_pass       every row + rules evidence + a result per contract
+                      (+1,081-1,531 MB peak)       -> one page at a time
+  populate (full)     the catalogue + the registry sha map + every tuple
+                      (+444 MB)                    -> one page at a time
+  Kalshi walk/persist 75,169 whole venue objects, then every tuple and
+                      rules row (+232 / +318 MB)   -> persisted fields only,
+                                                      one page at a time
+  assignment          32,937 full refdata records read and parsed every
+                      30 s, the parsed dict alive between passes (+52 /
+                      +165 MB)                     -> the four fields read,
+                                                      extracted by the DB
+  certify             the same records, parsed     -> the scale fields only
+  heartbeat/snapshot  the shard plan's member list: 1,401,121 characters
+                      per heartbeat (every 2 s), 1.4 MB per SNAPSHOT event
+                                                   -> counts per shard
+
+Nothing is evicted and nothing is subscribed less: the same contracts, books,
+coverage, certification and snapshot fields (parity tests in
+tests/test_market_plane_memory_bound.py). The heartbeat now carries
+`memory` {rss_mb, peak_mb, limit_mb, by_step}: the RSS after each step of
+the last pass and the largest rise each step has shown since boot, and a log
+line repeats it every MEMORY_LOG_EVERY_S.
 """
 from __future__ import annotations
 
@@ -132,6 +165,15 @@ def kalshi_enabled(env=None) -> bool:
         "off", "0", "false", "no")
 
 
+def kalshi_walk() -> dict:
+    """The plane's Kalshi catalogue walk: kalshi_catalogue.walk keeping, per
+    market, only the fields the registry and rules persisters read
+    (populate.kalshi_slim). The whole venue objects of 75,169 markets were
+    held from the first page to the persist (+232 MB, RC5 harness)."""
+    from .. import kalshi_catalogue as KC
+    return KC.walk(project=POP.kalshi_slim)
+
+
 async def kalshi_step(pool, task, *, now: float, last: float, env=None,
                       walk=None) -> tuple:
     """ONE scheduling decision for the Kalshi catalogue: start a walk in a
@@ -149,9 +191,10 @@ async def kalshi_step(pool, task, *, now: float, last: float, env=None,
         except Exception as exc:                                # noqa: BLE001
             report = {"error": type(exc).__name__, "finished_at": now,
                       "complete": False}
-        task = None
+        # the finished task holds the walk's result until it is dropped
+        task = res = None
     if task is None and kalshi_enabled(env) and now - last >= KALSHI_EVERY_S:
-        task = asyncio.ensure_future(asyncio.to_thread(walk or KC.walk))
+        task = asyncio.ensure_future(asyncio.to_thread(walk or kalshi_walk))
         last = now
     return task, last, report
 
@@ -303,8 +346,11 @@ async def certify(conn, mgr) -> dict:
     from .. import institutional_same_book as SB
     out = {"evaluated": 0, "supported": 0, "accumulating": 0,
            "contradicted": 0}
+    # (RC5) the scale fields only (registry.CERT_SCALE_KEYS), extracted by
+    # the database: the identity reads nothing else from a record
     rows = await conn.fetch(
-        "SELECT contract_id, refdata FROM market_plane_registry "
+        "SELECT contract_id, " + R.slim_refdata_sql(R.CERT_SCALE_KEYS)
+        + " AS refdata FROM market_plane_registry "
         " WHERE venue='POLYMARKET_US' AND active AND refdata IS NOT NULL "
         "   AND coalesce(refdata->>'unlisted','false') <> 'true' "
         "   AND subscription_shard IS NOT NULL")
@@ -312,6 +358,7 @@ async def certify(conn, mgr) -> dict:
     for r in rows:
         rd = POP._jsonish(r["refdata"]) or {}
         recs[r["contract_id"]] = rd
+    del rows
     syms = sorted(recs)
     for i in range(0, len(syms), 500):
         chunk = syms[i:i + 500]
@@ -339,6 +386,122 @@ async def certify(conn, mgr) -> dict:
             out["accumulating"] += int(not supported)
             out["contradicted"] += int(e.get("status") == "CONTRADICTED")
     return out
+
+
+async def sync_books(conn, mgr) -> dict:
+    """THE MANAGER'S SUBSCRIPTION FROM THE REGISTRY, once per assignment
+    pass: every contract holding a shard slot and the refdata fields its
+    book reads (registry.assigned_instruments). Before (RC4) the run loop
+    read every assigned contract's full refdata record and parsed it into a
+    dict that stayed bound in the loop until the next assignment pass
+    rebound it (+52 MB read, +165 MB parsed, at 32,937 contracts); here the
+    temporaries end with the call."""
+    rows = await R.assigned_instruments(conn)
+    assignments = {r["contract_id"]: r["subscription_shard"] for r in rows}
+    instruments = {r["contract_id"]: POP._jsonish(r["refdata"])
+                   for r in rows}
+    del rows
+    return mgr.sync(assignments, instruments)
+
+
+#: one INFO line with the per-step RSS at most this often
+MEMORY_LOG_EVERY_S = 60.0
+
+
+class StepMemory:
+    """THE PLANE'S RSS AFTER EACH STEP (RC5). Read from /proc after every
+    step that ran in a pass (procmem.rss_mb; None where unreadable): the
+    figure the last time the step ran, its rise over the step before it in
+    that pass, and the largest rise the step has shown since boot (`passes`
+    counts its runs) -- so the next memory question is answered by
+    the plane's own heartbeat (`memory`) and log line instead of by
+    correlation (analytics run_cycle's rss_mb_by_step is the precedent). A
+    rise includes the stream thread's book updates landing during the step.
+    VmHWM is read, never reset: `resources.peak_mb` stays the process's own
+    high-water."""
+
+    def __init__(self, rss=None):
+        from .. import procmem
+        self._rss = rss or procmem.rss_mb
+        self.by_step: dict = {}
+        self._prev = None
+        self.logged_at = 0.0
+
+    def begin(self) -> None:
+        self._prev = self._rss()
+
+    def mark(self, step: str) -> None:
+        cur, prev = self._rss(), self._prev
+        d = (round(cur - prev, 1) if cur is not None and prev is not None
+             else None)
+        e = self.by_step.setdefault(step, {"rss_mb": None, "delta_mb": None,
+                                           "max_delta_mb": None,
+                                           "passes": 0})
+        e["rss_mb"], e["delta_mb"] = cur, d
+        e["passes"] += 1
+        if d is not None and (e["max_delta_mb"] is None
+                              or d > e["max_delta_mb"]):
+            e["max_delta_mb"] = d
+        self._prev = cur
+
+    def digest(self) -> dict:
+        from .. import procmem
+        return {"rss_mb": procmem.rss_mb(), "peak_mb": procmem.peak_mb(),
+                "limit_mb": procmem.limit_mb(),
+                "by_step": {k: dict(v) for k, v in self.by_step.items()},
+                "basis": "RSS after each step the last time it ran (/proc);"
+                         " max_delta_mb: the largest rise since boot"}
+
+    def log_due(self, now: float) -> bool:
+        if now - self.logged_at < MEMORY_LOG_EVERY_S:
+            return False
+        self.logged_at = now
+        return True
+
+
+#: (RC5) THE HEARTBEAT DETAIL IS BOUNDED. It is written every pass (2 s) and
+#: read whole by every heartbeat reader, the shared workers' notification
+#: monitor every 10 s among them; RC4's carried the shard plan's member list
+#: (1,401,121 characters in production). The plan now carries counts; this
+#: bound keeps any other section from growing back: a section over
+#: HEARTBEAT_SECTION_MAX_CHARS is replaced by its size, by name. The fields
+#: the readers read (completion.read runtime_block: runtime,
+#: subscription_mode, market_data_streams, resources; status) are scalars or
+#: small and are never replaced.
+HEARTBEAT_SECTION_MAX_CHARS = 16_000
+HEARTBEAT_READER_FIELDS = ("arming", "subscription_mode",
+                           "market_data_streams", "runtime", "resources",
+                           "memory", "fresh")
+R_SECTION_OMITTED = "HEARTBEAT_SECTION_OVER_BOUND_OMITTED"
+
+
+def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
+                     memory=None) -> dict:
+    """The `universal_market_plane` heartbeat detail (one per pass)."""
+    from ..db import heartbeat_json
+    d = {
+        "arming": arming, "plan": state.get("plan"),
+        "subscription_mode": plan_cfg["mode"],
+        "market_data_streams": mgr.stream_count() if mgr else 0,
+        "sync": sync, "refdata": state.get("refdata"),
+        "runtime": os.environ.get("UMP_RUNTIME", "STANDALONE_UNLABELLED"),
+        "resources": runtime_resources(),
+        "populate": {k: v for k, v in (state.get("populate") or {})
+                     .items() if k != "excluded"},
+        "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
+            "enabled", "complete", "stopped", "markets", "requests",
+            "error")},
+        "fresh": len(fresh)}
+    if memory is not None:
+        d["memory"] = memory
+    for k, v in list(d.items()):
+        if k in HEARTBEAT_READER_FIELDS or not isinstance(v, (dict, list)):
+            continue
+        n = len(heartbeat_json(v))
+        if n > HEARTBEAT_SECTION_MAX_CHARS:
+            d[k] = {"omitted": R_SECTION_OMITTED, "chars": n,
+                    "bound": HEARTBEAT_SECTION_MAX_CHARS}
+    return d
 
 
 async def refdata_step(pool, client, planner, attempted: dict, *,
@@ -437,14 +600,17 @@ async def run() -> None:
                    "kalshi": {"enabled": kalshi_enabled()},
                    "subscription_plan": plan_cfg}
     kalshi_task, kalshi_last = None, 0.0
+    mem = StepMemory()
     while True:
         try:
             pool = await get_pool()
             now = time.time()
+            mem.begin()
             kalshi_task, kalshi_last, krep = await kalshi_step(
                 pool, kalshi_task, now=now, last=kalshi_last)
             if krep is not None:
                 state["kalshi"] = dict(krep, enabled=kalshi_enabled())
+                mem.mark("kalshi_persist")
             async with pool.acquire() as c:
                 if mgr is not None and planner is None:
                     planner = RU.Planner(
@@ -467,26 +633,21 @@ async def run() -> None:
                     if full:
                         last["full"] = now
                         seen_receipts = ids
-                assigned_rows = None
+                    mem.mark("populate_full" if full else "populate")
                 if mgr is not None and now - last["assign"] >= ASSIGN_EVERY_S:
                     state["plan"] = await R.assign_missing_shards(
                         c, max_per_stream=max_per, max_streams=max_streams)
                     state["plan"]["subscription_mode"] = plan_cfg["mode"]
                     last["assign"] = now
-                    assigned_rows = await R.assigned_contracts(c)
+                    state["sync"] = await sync_books(c, mgr)
+                    mem.mark("assign")
             sync = state.get("sync") or {}
             if mgr is not None:
-                if assigned_rows is not None:
-                    assignments = {r["contract_id"]: r["subscription_shard"]
-                                   for r in assigned_rows}
-                    instruments = {r["contract_id"]: POP._jsonish(
-                        r["refdata"]) for r in assigned_rows}
-                    sync = mgr.sync(assignments, instruments)
-                    state["sync"] = sync
                 # ONE refdata call slot per pass at most (the planner paces
                 # it to the venue's 6/min); priority contracts first
                 state["refdata"] = await refdata_step(
                     pool, client, planner, attempted, now=now)
+                mem.mark("refdata")
             now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
@@ -494,10 +655,12 @@ async def run() -> None:
                     state["coverage"] = await POP.coverage_pass(
                         c, fresh_symbols=fresh, now=now)
                     last["coverage"] = now
+                    mem.mark("coverage")
                 if mgr is not None and \
                         now - last["certify"] >= CERTIFY_EVERY_S:
                     state["certification"] = await certify(c, mgr)
                     last["certify"] = now
+                    mem.mark("certify")
                 if now - last["snapshot"] >= SNAPSHOT_EVERY_S:
                     state["token"] = keeper.digest() if keeper else None
                     state["refdata_universe"] = (planner.digest(now)
@@ -522,22 +685,20 @@ async def run() -> None:
                         c, "SNAPSHOT", "snapshot:%d" % int(now // 60), snap)
                     state["last_snapshot"] = snap
                     last["snapshot"] = now
+                    del snap, cen, books
+                    mem.mark("snapshot")
             status = "ok" if (state.get("last_snapshot") or {}).get(
                 "radar", {}).get("green") else "degraded"
-            await heartbeat(SERVICE, status, {
-                "arming": arming, "plan": state.get("plan"),
-                "subscription_mode": plan_cfg["mode"],
-                "market_data_streams": mgr.stream_count() if mgr else 0,
-                "sync": sync, "refdata": state.get("refdata"),
-                "runtime": os.environ.get("UMP_RUNTIME",
-                                          "STANDALONE_UNLABELLED"),
-                "resources": runtime_resources(),
-                "populate": {k: v for k, v in (state.get("populate") or {})
-                             .items() if k != "excluded"},
-                "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
-                    "enabled", "complete", "stopped", "markets", "requests",
-                    "error")},
-                "fresh": len(fresh)})
+            memory = mem.digest()
+            if mem.log_due(now):
+                log.info("universal_market_plane RSS by step (MB): %s "
+                         "rss=%s peak=%s limit=%s",
+                         {k: v["rss_mb"] for k, v in
+                          memory["by_step"].items()}, memory["rss_mb"],
+                         memory["peak_mb"], memory["limit_mb"])
+            await heartbeat(SERVICE, status, heartbeat_detail(
+                arming=arming, state=state, plan_cfg=plan_cfg, mgr=mgr,
+                sync=sync, fresh=fresh, memory=memory))
             await asyncio.sleep(INTERVAL_S)
         except asyncio.CancelledError:
             if mgr is not None:

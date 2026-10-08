@@ -210,6 +210,7 @@ def _get_client():
         # public endpoints only (market data, mapping)
         _client = PolymarketUS(**extra)
     _install_request_gate(_client)
+    _install_credential_gate(_client)
     return _client
 
 
@@ -251,7 +252,84 @@ def _get_read_client():
     _read_client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=sec,
                                 **extra)
     _install_request_gate(_read_client)
+    _install_credential_gate(_read_client)
     return _read_client
+
+
+#: the last credential-gate verdict of this process (names only, no value):
+#: what `_install_credential_gate` decided for the shared funded client
+CREDENTIAL_GATE: dict = {"installed": False, "why": "no client built yet"}
+
+
+def _install_credential_gate(client) -> dict:
+    """THE FUNDED CLIENT REFUSES BY NAME BEFORE IT SIGNS (RC5).
+
+    Production (pm-acceptance run 37738089957; PMUS credential census on
+    sportsassets-api and sportsassets-workers): PMUS_KEY_ID / PMUS_SECRET_KEY
+    hold the PMX INSTITUTIONAL RSA client (PMX_CLIENT_ID == PMUS_KEY_ID, an
+    RSA PEM), not the funded retail account's Ed25519 key. Every
+    authenticated SDK call through this shared client -- account_holds,
+    position_side, balances, the activities reads, mirror_live's own
+    positions pages, venue_reconcile, the API's reconcile read,
+    bettor_funded_account, bettor_live_read, the onboarding and
+    investigation reads -- then died inside the SDK signer with an anonymous
+    `ValueError: The seed must be exactly 32 bytes long`. Nothing was sent
+    (the SDK signs before it sends), but nothing said WHY either, and each
+    reader logged or swallowed a different symptom.
+
+    This puts the named refusal in front of the signer: when the client's
+    secret holds no Ed25519 key in any encoding AND the SDK cannot decode it
+    to a 32- or 64-byte seed either (venue_key.describe_secret_key) --
+    exactly the case in which the SDK signer raises on every request --
+    every AUTHENTICATED request raises
+    `venue_key.SecretNotEd25519(PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY)`
+    before any header is signed or any byte is sent. Public requests
+    (market data, mapping) pass unchanged. A request the SDK could have
+    signed is never refused here, so this changes only the NAME of a
+    failure that was already certain -- it adds no path, retries nothing,
+    and substitutes no other account's reading: a refused read is
+    unreadable, never another account's positions
+    (mirror_positions_source.PMX_FALLBACK_REJECTED).
+
+    NEVER RAISES. The verdict is returned and kept in CREDENTIAL_GATE."""
+    global CREDENTIAL_GATE
+    out: dict = {"installed": False, "why": None}
+    try:
+        from .venue_key import (R_NOT_ED25519, SecretNotEd25519,
+                                describe_secret_key)
+        sec = getattr(client, "secret_key", None)
+        if not sec:
+            out["why"] = ("no secret on this client: public endpoints only "
+                          "(the SDK refuses an authenticated call itself)")
+        else:
+            d = describe_secret_key(sec)
+            if d.get("usable_after_normalisation") or \
+                    d.get("sdk_reads_as_given"):
+                # an Ed25519 key: the SDK reads it as given, or
+                # _get_read_client re-encodes the same key; never gated
+                out["why"] = "the secret is an Ed25519 key; not gated"
+            else:
+                orig = getattr(client, "_request", None)
+                if orig is None:
+                    out["why"] = "the SDK client exposes no _request to gate"
+                elif getattr(orig, "_pmus_credential_gate", False):
+                    out.update(installed=True, already=True,
+                               refusal=R_NOT_ED25519)
+                else:
+                    def _request(method, path, *args, authenticated=False,
+                                 **kw):
+                        if authenticated:
+                            raise SecretNotEd25519(R_NOT_ED25519)
+                        return orig(method, path, *args,
+                                    authenticated=authenticated, **kw)
+                    _request._pmus_credential_gate = True
+                    client._request = _request
+                    out.update(installed=True, refusal=R_NOT_ED25519,
+                               secret_format=d.get("format"))
+    except Exception as exc:                                   # noqa: BLE001
+        out["why"] = "credential gate not installed: %s" % type(exc).__name__
+    CREDENTIAL_GATE = dict(out)
+    return out
 
 
 def _install_request_gate(client) -> dict:

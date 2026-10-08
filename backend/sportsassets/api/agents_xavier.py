@@ -563,7 +563,13 @@ async def xavier_management(response: Response,
     EXIT / REDUCE / VERIFIED_HEDGE / shadow REALLOCATE), review latency
     against its bound, the management-policy record and the value-add
     against the counterfactuals frozen at entry. Command Centre data, read
-    only (agents.xavier_management.management_view)."""
+    only (agents.xavier_management.management_view).
+
+    EVERY HELD POSITION is returned whatever `limit` says (the canonical
+    open population, a held position without a handoff included); `limit`
+    bounds only the CLOSED history beside it (xavier_management.
+    POPULATION_RULE -- the 100-newest-handoffs read hid all 4 held positions
+    on 2026-10-08)."""
     from ..agents import xavier_management as XM
     response.headers["Cache-Control"] = "no-store"
     pool = await _pool()

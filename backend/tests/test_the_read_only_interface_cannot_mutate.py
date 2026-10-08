@@ -312,22 +312,37 @@ def test_read_only_credential_capability_is_not_assumed_to_exist():
 
 
 def test_there_is_exactly_one_database_credential_and_that_is_stated():
-    """Measured: the package reads a single DSN setting."""
+    """Measured: the package reads the DSN settings it states. Until
+    migration 316 that was DATABASE_URL alone; Live Game State V1 added
+    TRADER_SCORE_DATABASE_URL, read by the display collector ONLY, and the
+    boundary must say it is an unprovisioned option, not a second role."""
     import os
     import re
     root = os.path.dirname(os.path.abspath(RO.__file__))
     found = set()
+    readers = {}
     for dirpath, _dirs, files in os.walk(root):
         for f in files:
             if not f.endswith(".py"):
                 continue
             with open(os.path.join(dirpath, f), "r",
                       encoding="utf-8", errors="replace") as fh:
-                found |= set(re.findall(r"[A-Z_]*DATABASE_URL[A-Z_]*",
-                                        fh.read()))
+                names = set(re.findall(r"[A-Z_]*DATABASE_URL[A-Z_]*",
+                                       fh.read()))
+            found |= names
+            for n in names:
+                readers.setdefault(n, set()).add(
+                    os.path.relpath(os.path.join(dirpath, f), root))
     db = RO.authority_boundary()["database"]
     assert found == set(db["dsn_settings"]), (found, db["dsn_settings"])
     assert db["credentials_found"] == len(found)
+    assert readers["TRADER_SCORE_DATABASE_URL"] == {
+        os.path.join("workers", "trader_live_scores.py"),
+        "bettor_read_only_venue.py"}
+    second = db["second_setting_is_not_a_second_role"]
+    assert "NO SUCH ROLE IS PROVISIONED" in second
+    assert "falls back to DATABASE_URL" in second
+    assert "NO READ-ONLY DATABASE ROLE" in db["consequence"]
 
 
 def test_the_boundary_states_that_the_kill_switch_row_is_writable():
@@ -439,4 +454,4 @@ def test_the_honest_summary_does_not_end_on_a_reassurance():
 def test_describe_carries_the_boundary_and_the_open_paths():
     d = RO.describe()
     assert d["reflection_paths_still_open"]["open_count"] == 4
-    assert d["authority_boundary"]["database"]["credentials_found"] == 1
+    assert d["authority_boundary"]["database"]["credentials_found"] == 2

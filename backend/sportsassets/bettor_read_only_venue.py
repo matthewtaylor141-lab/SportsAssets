@@ -340,8 +340,16 @@ def authority_boundary() -> dict:
                 "it"),
         },
         "database": {
-            "credentials_found": 1,
-            "dsn_settings": ["DATABASE_URL"],
+            "credentials_found": 2,
+            "dsn_settings": ["DATABASE_URL", "TRADER_SCORE_DATABASE_URL"],
+            "second_setting_is_not_a_second_role": (
+                "TRADER_SCORE_DATABASE_URL (migration 316) is read only by "
+                "the display score collector, workers/trader_live_scores.py, "
+                "which is not started by workers/all.py or render.yaml. It "
+                "exists so a least-privilege role CAN be given to that one "
+                "process. NO SUCH ROLE IS PROVISIONED: unset, the collector "
+                "falls back to DATABASE_URL, the same single credential, so "
+                "the consequence below is unchanged"),
             "consequence": (
                 "THERE IS NO READ-ONLY DATABASE ROLE. Every process that "
                 "can reach the database holds the same credential, so "
