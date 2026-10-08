@@ -144,8 +144,10 @@ K_ENTRY = "ENTRY_ALLOCATION_STALE_MANAGEMENT"
 #: (P1 closeout): beside the stale-mark rail, a new ENTRY of a strategy is
 #: refused when ANY APPLICABLE open position of it (every open position
 #: except one whose market is EXTERNAL_UNAVAILABLE -- terminal / halted at
-#: the venue, where no protection can rest) (a) has no review whose
-#: management packet was complete (an unreviewed position included), or (b)
+#: the venue, where no protection can rest) (a) has no management packet
+#: complete NOW (an unreviewed position included; a newest review complete
+#: once but whose evidence has since expired is NOT complete --
+#: packet_currency), or (b)
 #: has protection continuity other than PROTECTED_RESTING, or (c) shows a
 #: broken one-live-protection invariant / unknown protection state.
 #: Unreadable -> refused (fail closed). EXIT / REDUCE / protection orders
@@ -819,11 +821,33 @@ async def strategy_stale_management(conn, account_id: str, strategy: str,
                           FRESHLY_MANAGEABLE][:20]}
 
 
+#: THE NEWEST REVIEW(S) OF EACH GROUP, WITH WHAT MAKES THEIR GATE CURRENT:
+#: the recorded gate, the probability's own expiry (selection.valuation.
+#: expires_at = source stamp + the freshness limit recorded with the
+#: evidence, xavier_freshness.valuation_block) and the observation instant
+#: of the book the packet was judged on (management_packet.book.
+#: observed_at). Over a group's newest rows the earliest instant wins; a
+#: row without a numeric stamp makes it missing (never assumed).
 LATEST_PACKET_SQL = """
     SELECT group_id, extract(epoch FROM max(reviewed_at))::float8
                AS reviewed_at,
            bool_and(coalesce((selection->'management_packet'->'gate'
-                              ->>'complete')::boolean, false)) AS complete
+                              ->>'complete')::boolean, false)) AS complete,
+           min(CASE WHEN jsonb_typeof(selection->'valuation'->'expires_at')
+                         = 'number'
+                    THEN (selection->'valuation'->>'expires_at')::float8
+               END) AS expires_at,
+           bool_or(coalesce(jsonb_typeof(
+                       selection->'valuation'->'expires_at'), 'missing')
+                   <> 'number') AS expiry_missing,
+           min(CASE WHEN jsonb_typeof(selection->'management_packet'
+                                      ->'book'->'observed_at') = 'number'
+                    THEN (selection->'management_packet'->'book'
+                          ->>'observed_at')::float8
+               END) AS book_observed_at,
+           bool_or(coalesce(jsonb_typeof(selection->'management_packet'
+                                         ->'book'->'observed_at'),
+                            'missing') <> 'number') AS book_missing
       FROM (SELECT r.*, max(r.reviewed_at) OVER (PARTITION BY r.group_id)
                        AS newest
               FROM paper_xavier_reviews r
@@ -831,6 +855,92 @@ LATEST_PACKET_SQL = """
      WHERE reviewed_at = newest
      GROUP BY group_id
 """
+
+#: ── A HISTORICAL COMPLETE REVIEW IS NOT A CURRENT PACKET ──────────────
+#: Before this the newest review's RECORDED gate was taken as the packet's
+#: state NOW (the strict rail under the ledger lock, and the capital-
+#: readiness / completion gate `xavier_complete`): a review complete at
+#: 12:00:00 on a probability that expired at 12:00:22 still read COMPLETE at
+#: 12:30 when no newer review had been written (the pass deferred the group,
+#: its review raised, the pass did not run). A packet is complete NOW only
+#: while every time-limited element of it still is, each by ITS OWN
+#: existing limit -- nothing here defines a threshold:
+#:   probability  now <= the review's valuation expires_at (source stamp +
+#:                the limit recorded with that evidence: the 30 s rule)
+#:   book         now - the packet's book observed_at <= SLA_S (the 300 s
+#:                executable-mark SLA, = bettor_paper_ledger.
+#:                MARK_STALE_AFTER_S)
+#:   qty          no fill of the position after the review (it reviewed
+#:                another quantity)
+#:   protection   the protection-continuity state read LIVE now
+#:                (protections() -> protection_state at `now`) is
+#:                PROTECTED_RESTING: a protection cancelled (an EXIT's
+#:                cancel-first), expired or mismatched since the review makes
+#:                the packet incomplete now, whatever the review recorded.
+#:                Before this the gate `xavier_complete` read only the packet
+#:                list and never saw it.
+PK_NO_REVIEW = "NO_REVIEW_RECORDED"
+PK_RECORDED_INCOMPLETE = "LATEST_REVIEW_PACKET_INCOMPLETE"
+PK_NO_READ_INSTANT = "NO_READ_INSTANT_TO_JUDGE_CURRENCY"
+PK_POSITION_CHANGED = "POSITION_FILLED_SINCE_THE_COMPLETE_REVIEW"
+PK_NO_RECORDED_EXPIRY = "COMPLETE_REVIEW_RECORDED_NO_PROBABILITY_EXPIRY"
+PK_PROBABILITY_EXPIRED = "COMPLETE_REVIEW_PROBABILITY_EXPIRED"
+PK_BOOK_PAST_SLA = "COMPLETE_REVIEW_BOOK_PAST_THE_MARK_SLA"
+PK_PROTECTION_NOT_VALID_NOW = "COMPLETE_REVIEW_PROTECTION_NOT_VALID_NOW"
+PACKET_CURRENCY_RULE = (
+    "a packet is complete NOW only if the newest review recorded it complete"
+    " AND no fill of the position followed that review AND now <= its "
+    "probability's expires_at (source stamp + the recorded freshness limit)"
+    " AND its book is within the %.0f s mark SLA AND its protection is "
+    "PROTECTED_RESTING now; otherwise it is incomplete, the reason named"
+    % SLA_S)
+#: fills and reviews are stamped on the same paper clock; a fill this close
+#: to the review instant is the same instant, not a later change
+_SAME_INSTANT_S = 1e-6
+
+
+def packet_record(r) -> dict:
+    """One group's LATEST_PACKET_SQL row as the currency rule reads it
+    (pure): a stamp any newest row lacked is None, never a partial min."""
+    d = dict(r)
+    return {"complete": bool(d.get("complete")),
+            "reviewed_at": d.get("reviewed_at"),
+            "expires_at": (None if d.get("expiry_missing")
+                           else d.get("expires_at")),
+            "book_observed_at": (None if d.get("book_missing")
+                                 else d.get("book_observed_at"))}
+
+
+def packet_currency(rec: dict | None, *, now, last_fill_at,
+                    protection_state=PS_PROTECTED) -> dict:
+    """{current, why} (pure): whether the newest review's packet is
+    complete NOW (PACKET_CURRENCY_RULE). Anything unknown is not current.
+    `protection_state` is the position's continuity state read live at
+    `now` (protection_state()); callers judging the stamps alone omit it."""
+    def out(ok, why=None):
+        return {"current": ok, "why": why}
+    if not rec:
+        return out(False, PK_NO_REVIEW)
+    if not rec.get("complete"):
+        return out(False, PK_RECORDED_INCOMPLETE)
+    if now is None:
+        return out(False, PK_NO_READ_INSTANT)
+    now = float(now)
+    rv = rec.get("reviewed_at")
+    if last_fill_at is not None and (
+            rv is None or float(last_fill_at) > float(rv) + _SAME_INSTANT_S):
+        return out(False, PK_POSITION_CHANGED)
+    exp = rec.get("expires_at")
+    if exp is None:
+        return out(False, PK_NO_RECORDED_EXPIRY)
+    if now > float(exp):
+        return out(False, PK_PROBABILITY_EXPIRED)
+    book = rec.get("book_observed_at")
+    if book is None or now - float(book) > SLA_S:
+        return out(False, PK_BOOK_PAST_SLA)
+    if protection_state != PS_PROTECTED:
+        return out(False, PK_PROTECTION_NOT_VALID_NOW)
+    return out(True)
 
 
 def integrity_verdict(*, positions: list, packets: dict,
@@ -841,7 +951,14 @@ def integrity_verdict(*, positions: list, packets: dict,
     open positions (all but EXTERNAL_UNAVAILABLE markets, `classes` by
     position key): ANY incomplete packet or ANY protection other than
     PROTECTED_RESTING refuses; any broken invariant refuses. Positions
-    awaiting their first management are named (and count)."""
+    awaiting their first management are named (and count).
+
+    `packets` by group: a packet_record (the newest review's gate with its
+    stamps), judged CURRENT at `now` for each position (packet_currency:
+    a recorded-complete gate whose evidence expired, that predates the
+    position's last fill, or whose protection is not PROTECTED_RESTING now,
+    is incomplete and named in packet_not_current); a bare bool is taken as
+    already judged."""
     rv = reviewed_at or {}
     cls = classes or {}
     excluded = [p["position_key"] for p in positions
@@ -857,8 +974,23 @@ def integrity_verdict(*, positions: list, packets: dict,
     all_pos = positions
     positions = [p for p in positions if p["position_key"] not in excluded]
     n = len(positions)
+    not_current = []
+
+    def _complete_now(p) -> bool:
+        v = packets.get(p["group_id"])
+        if not isinstance(v, dict):
+            return bool(v)
+        cur = packet_currency(
+            v, now=now, last_fill_at=p.get("last_fill_at"),
+            protection_state=(protections.get(p["position_key"]) or {}).get(
+                "state"))
+        if v.get("complete") and not cur["current"]:
+            # complete when reviewed, history now: never green
+            not_current.append({"position_key": p["position_key"],
+                                "why": cur["why"]})
+        return cur["current"]
     incomplete = [p["position_key"] for p in positions
-                  if not packets.get(p["group_id"])]
+                  if not _complete_now(p)]
     pstate = {p["position_key"]: (protections.get(p["position_key"]) or {})
               .get("state") for p in positions}
     unprotected = [k for k, st in pstate.items()
@@ -881,6 +1013,8 @@ def integrity_verdict(*, positions: list, packets: dict,
             "protection_failure_rate": pr_rate,
             "max_rate": MAX_STALE_MANAGEMENT_RATE,
             "packet_incomplete": incomplete[:20],
+            "packet_not_current": not_current[:20],
+            "packet_rule": PACKET_CURRENCY_RULE,
             "protection_not_valid": [{"position_key": k,
                                       "state": pstate[k]}
                                      for k in unprotected][:20],
@@ -896,7 +1030,9 @@ async def strategy_management_integrity(conn, account_id: str, strategy: str,
     packets, reviewed = {}, {}
     if groups:
         for r in await conn.fetch(LATEST_PACKET_SQL, account_id, groups):
-            packets[r["group_id"]] = bool(r["complete"])
+            # the newest review's gate WITH its stamps: judged current at
+            # `now` in integrity_verdict, never taken as complete forever
+            packets[r["group_id"]] = packet_record(r)
             reviewed[r["group_id"]] = r["reviewed_at"]
     prot = await protections(conn, account_id, pos, now=now)
     rows = await classify_positions(conn, account_id, now=now, positions=pos)
