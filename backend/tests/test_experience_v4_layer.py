@@ -120,3 +120,39 @@ def test_layer_has_no_network_client_or_authority_path():
         assert re.search(pat, src, re.I) is None, pat
     for word in ("cancel", "place order", "submit order"):
         assert word not in src.lower(), word
+
+
+# --- the Pulse: never floating over content, never a default green --------
+#
+# CI preview run 37783164445 (V3 = V4's code, production data): the fixed
+# bottom-centre Pulse covered the Floor dock's status lines (Derek WORKING /
+# Karen REVIEWING on iPhone, Scout / Archer on desktop), the phone Command
+# 'Trader Mode' launcher and the desktop Trader position wall. Locally
+# (synthetic reads) it also showed a GREEN dot beside "Attention · API /
+# WORKER SHA MISMATCH" and beside a FIXTURE floor read: pulseTone() returned
+# 'good' for any text without one of its few bad / warn words.
+
+
+def test_pulse_is_docked_in_flow_or_hidden_never_fixed_over_content():
+    src = js()
+    assert "var host=page==='trader'?q('.page-heading > div'):null;" in src
+    assert "if(host){p.className='bt-v4-pulse-docked';host.appendChild(p);}else{p.hidden=true;body.appendChild(p);}" in src
+    # the original appended a fixed pill to <body> on every page
+    assert "p.innerHTML='<i></i><b></b><span></span>';body.appendChild(p);updatePulse();" not in src
+    sheet = css()
+    assert "#bt-v4-pulse.bt-v4-pulse-docked{position:static;" in sheet
+    assert "#bt-v4-pulse[hidden]{display:none!important;}" in sheet
+
+
+def test_pulse_tone_is_never_a_default_green():
+    src = js()
+    body = src[src.index("function pulseTone(text){"):src.index("function pulseText(){")]
+    assert "return 'neutral';" in body
+    assert body.count("return 'good'") == 1
+    # green needs a positive word; FIXTURE / SYNTHETIC / PREVIEW reads are a warning, a mismatch is bad
+    assert "FIXTURE|PREVIEW|REPLAY|SYNTHETIC" in body
+    assert "MISMATCH" in body
+    assert "if(/\\bLIVE\\b|\\bCURRENT\\b|\\bCONNECTED\\b|\\bFRESH\\b|\\bOK\\b/.test(text)) return 'good';" in body
+    # the Command echo of #hq-alert (CRITICAL items only) is always bad
+    assert "if(crit) return ['Attention',crit,'bad'];" in src
+    assert "#bt-v4-pulse[data-tone=\"neutral\"] i{background:var(--v3-muted);box-shadow:none;}" in css()

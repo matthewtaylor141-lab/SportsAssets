@@ -123,15 +123,19 @@
     q('#bt-v4-evidence .bt-v4-evidence-snapshot').textContent=snippets.filter(Boolean).slice(0,3).join('\n\n').slice(0,4500)||'No rendered evidence is visible yet.';
   }
 
+  // green only for a positive word; anything unrecognised is neutral, never a healthy green
+  // (the original default painted a green dot beside a CRITICAL attention title or a FIXTURE read)
   function pulseTone(text){
     text=String(text||'').toUpperCase();
-    if(/CRITICAL|ERROR|FAILED|MISALIGNED|STOPPED|UNAVAILABLE/.test(text)) return 'bad';
-    if(/STALE|WAITING|BLOCKED|DEGRADED|PARTIAL|UNKNOWN|CONNECTING/.test(text)) return 'warn';
-    return 'good';
+    if(/CRITICAL|ERROR|FAILED|MISALIGNED|MISMATCH|STOPPED|UNAVAILABLE|SIGN-IN REQUIRED/.test(text)) return 'bad';
+    if(/STALE|WAITING|BLOCKED|DEGRADED|PARTIAL|UNKNOWN|CONNECTING|NOT CONNECTED|DISCONNECTED|NO RECENT|FIXTURE|PREVIEW|REPLAY|SYNTHETIC|NOT YET/.test(text)) return 'warn';
+    if(/\bLIVE\b|\bCURRENT\b|\bCONNECTED\b|\bFRESH\b|\bOK\b/.test(text)) return 'good';
+    return 'neutral';
   }
   function pulseText(){
     if(page==='command'){
-      var crit=txt(q('#hq-alert .alert-txt b'));if(crit) return ['Attention',crit];
+      // #hq-alert renders CRITICAL attention items only: its echo is always 'bad'
+      var crit=txt(q('#hq-alert .alert-txt b'));if(crit) return ['Attention',crit,'bad'];
       var cap=txt(q('[data-render="capital"] .big'));if(cap) return ['Management equity',cap];
       return ['Command','Waiting for executive evidence'];
     }
@@ -141,11 +145,18 @@
     }
     var ctx=txt(q('#cockpit-context'));var conn=txt(q('#connection'));return ['Xavier',ctx||conn||'Waiting for native ledger'];
   }
+  // The Pulse never floats over content. Fixed at the bottom centre it covered the Floor dock's status lines,
+  // the phone Command 'Trader Mode' launcher and the Trader position wall (CI preview run 37783164445).
+  // Trader: docked in the page heading, in flow. Command and Floor already show the state it echoes
+  // (the CRITICAL bar / equity card, aria-live; the floor status and hq5 Company Pulse): kept hidden there.
   function pulse(){
-    var p=doc.createElement('div');p.id='bt-v4-pulse';p.setAttribute('aria-live','polite');p.innerHTML='<i></i><b></b><span></span>';body.appendChild(p);updatePulse();
+    var p=doc.createElement('div');p.id='bt-v4-pulse';p.setAttribute('aria-live','polite');p.innerHTML='<i></i><b></b><span></span>';
+    var host=page==='trader'?q('.page-heading > div'):null;
+    if(host){p.className='bt-v4-pulse-docked';host.appendChild(p);}else{p.hidden=true;body.appendChild(p);}
+    updatePulse();
   }
   function updatePulse(){
-    var p=q('#bt-v4-pulse');if(!p)return;var v=pulseText(),all=v.join(' '),tone=pulseTone(all),b=q('b',p),s=q('span',p);
+    var p=q('#bt-v4-pulse');if(!p||p.hidden)return;var v=pulseText(),all=v.slice(0,2).join(' '),tone=v[2]||pulseTone(all),b=q('b',p),s=q('span',p);
     // write only real changes: an unchanged write is still a mutation the observer in wire() would see
     if(p.dataset.tone!==tone) p.dataset.tone=tone;if(b.textContent!==v[0]) b.textContent=v[0];if(s.textContent!==v[1]) s.textContent=v[1];
   }

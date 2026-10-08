@@ -73,6 +73,10 @@ body.bt-v4-evidence-open #bt-v4-evidence{display:flex;}
 #bt-v4-pulse[data-tone="bad"] i{background:var(--v3-red);box-shadow:0 0 10px var(--v3-red);}
 #bt-v4-pulse b{color:var(--v3-ink);font-weight:650;white-space:nowrap;}
 #bt-v4-pulse span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+/* docked in the page flow (Trader heading) -- it never floats over content; hidden where the page shows the same state */
+#bt-v4-pulse.bt-v4-pulse-docked{position:static;left:auto;right:auto;bottom:auto;transform:none;z-index:auto;display:inline-flex;max-width:100%;margin-top:12px;border-radius:999px;}
+#bt-v4-pulse[hidden]{display:none!important;}
+#bt-v4-pulse[data-tone="neutral"] i{background:var(--v3-muted);box-shadow:none;}
 
 /* COMMAND ------------------------------------------------------------------ */
 body.hq.bt-exp-v4{background:radial-gradient(120% 90% at 50% 16%,#173051 0,#0b1829 38%,#07111e 72%,#050b14 100%);}
