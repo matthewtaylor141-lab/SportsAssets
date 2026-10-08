@@ -74,10 +74,14 @@ STATEMENT_TIMEOUT_MS = 3000
 #: fixtures, canonical claim aliases and SHADOW route receipts; no order
 #: authority, no ledger); 216..315 since the RED TEAM CLOSEOUT (315:
 #: append-only safety / readiness receipts, settlement certificates, Kalshi
-#: series fee terms, the holdout registry; no order authority, no ledger).
+#: series fee terms, the holdout registry; no order authority, no ledger);
+#: 216..316 since LIVE GAME STATE V1 (316: the Trader live-game DISPLAY
+#: sidecar -- append-only score bindings / observations, a rebuildable latest
+#: view and the collector heartbeat; display only, no price, order,
+#: settlement or ledger authority).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 315
+TRACKED_FROM, TRACKED_TO = 216, 316
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

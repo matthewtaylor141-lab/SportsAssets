@@ -1320,3 +1320,10 @@ tests/test_xavier_management_held_population_and_current_packets.py
 # churn while the sale is pending), and a missing protective price is
 # recorded, never a KeyError that leaves the EXIT intent open.
 tests/test_xavier_sale_transition_keeps_the_remainder_protected.py
+# (Live Game State V1, migration 316) display scores are DISPLAY ONLY: Trader response identical with BETTOR_DISPLAY_SCORES on vs off except
+# positions[].game / score_feed / snapshot digest (negative controls prove the comparison sees prices, packets, orders, P&L); a FINAL score
+# collected through the real collector settles nothing; a fresh score completes no stale packet or mark; the package's seven real-PostgreSQL
+# proofs on the installed migration; the production census equals the collector's verdict; installed code = package + two disclosed lines
+tests/test_trader_live_game_real_db.py
+tests/test_live_game_state_integration.py
+tests/test_trader_live_game_package_parity.py
