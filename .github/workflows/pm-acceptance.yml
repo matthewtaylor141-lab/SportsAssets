@@ -85,6 +85,10 @@ on:
         description: "optional earlier release receipt id (rel:<12 hex>:<epoch>) the posted receipt supersedes BY REFERENCE (never deleted)"
         required: false
         default: ""
+      frontend_preview_run_id:
+        description: "optional frontend-preview run id whose preview.json (authenticated device views of the deployed frontend) feeds the Command Center scorecard row; blank = that row is READ_UNAVAILABLE"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -479,6 +483,8 @@ jobs:
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           KEY: ${{ secrets.RENDER_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          FRONTEND_PREVIEW_RUN_ID: ${{ inputs.frontend_preview_run_id }}
           IMPL_SHA: ${{ inputs.implementation_sha }}
           JUDGE_SHA: ${{ github.sha }}
         run: |
@@ -535,6 +541,16 @@ jobs:
               done
             done
           fi
+          # THE OWNER'S 14-CATEGORY SCORECARD (judge code, machine evidence
+          # only; written before the manifest so SHA256SUMS covers it)
+          FP=""
+          if echo "${FRONTEND_PREVIEW_RUN_ID:-}" | grep -Eq '^[0-9]+$'; then
+            gh run download "$FRONTEND_PREVIEW_RUN_ID" -R "$REPO" -D "$RUNNER_TEMP/fp" >/dev/null 2>&1 \
+              && FP=$(find "$RUNNER_TEMP/fp" -name preview.json | head -1)
+            [ -n "$FP" ] && cp "$FP" acc/frontend_preview.json && FP=acc/frontend_preview.json
+          fi
+          python3 -I judge/backend/tools/scorecard_14.py acc --release-sha "$SHA" ${FP:+--frontend-preview "$FP"} \
+            | tee -a "$GITHUB_STEP_SUMMARY" || echo "scorecard failed to run (recorded as absent)"
           python3 -I judge/backend/tools/evidence_packet.py acc
           jq -c '{identity, gates, policy: .policy_integrity, policy_identity, migrations: .migrations.control, memory_identity, log_counts}' acc/evidence_packet.json | cut -c1-6000
           {
