@@ -235,3 +235,41 @@ async def test_a_resting_protection_is_kept_when_no_price_can_be_compared():
     finally:
         await XRF._purge(conn, slugs)
         await conn.close()
+
+
+@pg
+async def test_an_abandoned_continuation_with_a_price_restores_protection(
+        monkeypatch):
+    """The continuation's 'nothing selectable' branch was written for 'no
+    protective price', but it ran for ANY ACT_NONE: a fresh revalidation
+    whose selector selected nothing (here: the selector refuses) abandoned
+    the intent and left the position bare although a protective price
+    existed. The protection the EXIT cancelled is restored there now."""
+    from sportsassets.agents import xavier_policy as XP
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug, orders = await XC._exit_decided(conn, "xtrnone")
+        slugs.append(slug)
+        await XC._confirm_cancel(conn, orders, AT + 5)
+        assert not await XC._live_protection(conn, g)
+
+        def nothing(policy, **kw):
+            return {"selected": None, "selected_candidate": None,
+                    "refusal": "TEST_SELECTOR_SELECTED_NOTHING",
+                    "selection_reason": None}
+        monkeypatch.setattr(XP, "run", nothing)
+        rv, act, m = await XC._review(conn, a, g, AT + 10, PX.T_ORDER)
+        assert m["evidence_state"] == PX.E_FRESH
+        xi = await XC._intent(conn, g)
+        assert xi["state"] == XI.S_ABANDONED
+        assert xi["resolution"] == XI.R_PACKET
+        prot = await XC._live_protection(conn, g)
+        assert len(prot) == 1, act
+        assert xi["protection_order_id"] == prot[0]["order_id"]
+        assert act["protection_restored"]["taken"] == "PLACE_STANDING"
+        assert not [r for r in await _open_sells(conn, g)
+                    if r["role"] in ("EXIT", "REDUCE")]
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()

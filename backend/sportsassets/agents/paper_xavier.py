@@ -1140,10 +1140,20 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                     detail={"why": action["why"]})
                 action["protection_restored"] = prot_act
         elif revalidating:
-            # nothing selectable and no protective price: abandoned and
-            # recorded -- never left open
+            # NOTHING SELECTABLE: abandoned and recorded -- never left open.
+            # This branch runs for ANY no-order decision, not only "no
+            # protective price": a fresh revalidation whose selector chose
+            # nothing used to abandon the intent and leave the position
+            # bare although a price existed. The protection the EXIT
+            # cancelled is restored whenever one can be priced
+            # (_maintain_standing records NONE with the reason otherwise).
+            prot_act = await _maintain_standing(
+                conn, ctx, pos=pos, standing=[dict(s) for s in standing],
+                prot=prot, md=md, at=at, SPO=SPO)
+            action["protection_restored"] = prot_act
             await XI.resolve(conn, xi, state=XI.S_ABANDONED,
                              resolution=XI.R_PACKET, at=at, review_id=rid,
+                             protection_order_id=prot_act.get("order_id"),
                              detail={"decided": decided.get("action"),
                                      "protection_ok": bool(prot.get("ok"))})
         if xi is not None:
