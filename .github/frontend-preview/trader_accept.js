@@ -12,8 +12,10 @@
 //                 preview proxy (production data, GET only); every response
 //                 is kept in memory (never written out) and the last one is
 //                 the reference snapshot S
-//   phase FROZEN  from then on the page's polls are answered with S itself,
-//                 so the data cannot change: the DOM is read twice 10 s apart
+//   phase FROZEN  from then on the page's polls are answered with S itself
+//                 (only snapshot_at re-stamped, so the page's 15 s staleness
+//                 rule does not fire), so the data cannot change: the DOM is
+//                 read twice 10 s apart
 //                 and any price, P/L, count or score that moved was produced
 //                 by the page, not by the venue (a simulated quote fails here)
 //
@@ -127,7 +129,10 @@ const motionKeys = c => [c.bid, c.target, c.pnl, c.strip, (c.score_numbers || []
     await ctx.route('**/*', async route => {
       const req = route.request(); const m = req.method();
       if (m !== 'GET' && m !== 'HEAD') { aborted++; return route.abort(); }
-      if (frozenBody && new URL(req.url()).pathname === API) { frozenServed++; return route.fulfill({ status: 200, contentType: 'application/json', body: frozenBody }); }
+      // prices, orders and records stay exactly S; only snapshot_at moves to the
+      // moment of answering, so the page's own 15 s staleness rule does not
+      // (correctly) declare the feed stale while the data is held still
+      if (frozenBody && new URL(req.url()).pathname === API) { frozenServed++; const b = JSON.parse(frozenBody); b.snapshot_at = Date.now() / 1000; return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) }); }
       return route.continue();
     });
     const page = await ctx.newPage();
