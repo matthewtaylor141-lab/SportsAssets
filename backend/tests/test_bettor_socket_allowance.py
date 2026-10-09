@@ -27,6 +27,15 @@ from sportsassets import bettor_incentive_budget as bud
 from sportsassets import bettor_live_control as ctl
 from sportsassets import bettor_market_stream as ms
 
+#: the ingestion_state keys these tests create (neither is seeded by a
+#: migration): only they are removed afterwards. A wholesale DELETE also
+#: removed rows other suites own -- the migration-seeded Slack bridge
+#: control 'agent.slack.bridge' -- so every later Slack bridge test read the
+#: bridge OFF once both required gates gave this file its database (CI
+#: 37927445675 / 37927450586 on 5d83e0de: 11 failures)
+_OWN_KEYS = [ctl.BUDGET_KEY, ctl.CONTROL_KEY]
+_OWN_KEYS_SQL = "DELETE FROM ingestion_state WHERE key = ANY($1::text[])"
+
 PG_DSN = os.environ.get("BETTOR_TEST_PG_DSN")
 needs_pg = pytest.mark.skipif(not PG_DSN,
                               reason="BETTOR_TEST_PG_DSN names no server")
@@ -284,7 +293,7 @@ async def test_the_socket_allowance_refuses_before_exceeding_the_row():
         assert subs == [True] * 4 + [False, False]       # cap is 4
         assert await _reserved(pool, ctl.R_SOCK_SUBSCRIBE) == 4
     finally:
-        await pool.execute("DELETE FROM ingestion_state")
+        await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
         await pool.close()
 
 
@@ -304,7 +313,7 @@ async def test_a_crash_does_not_replenish_the_socket_allowance():
         assert got == [True, False, False]          # only the 3rd remained
         assert await _reserved(pool, ctl.R_SOCK_CONNECT) == 3
     finally:
-        await pool.execute("DELETE FROM ingestion_state")
+        await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
         await pool.close()
 
 
@@ -325,7 +334,7 @@ async def test_two_overlapping_workers_share_one_socket_allowance():
         assert sum(1 for r in ga + gb if r["ok"]) == 3    # not 6
         assert await _reserved(admin, ctl.R_SOCK_CONNECT) == 3
     finally:
-        await admin.execute("DELETE FROM ingestion_state")
+        await admin.execute(_OWN_KEYS_SQL, _OWN_KEYS)
         for p in (admin, a, b):
             await p.close()
 
@@ -345,7 +354,7 @@ async def test_a_stop_refuses_the_next_socket_attempt():
         assert r["ok"] is False and r["verdict"] == ctl.V_STOPPED
         assert await _reserved(pool, ctl.R_SOCK_CONNECT) == 0
     finally:
-        await pool.execute("DELETE FROM ingestion_state")
+        await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
         await pool.close()
 
 

@@ -27,6 +27,15 @@ from sportsassets import bettor_market_stream as ms
 from sportsassets import bettor_live_control as ctl
 from sportsassets.workers import bettor_incentive_observe as obs
 
+#: the ingestion_state keys these tests create (neither is seeded by a
+#: migration): only they are removed afterwards. A wholesale DELETE also
+#: removed rows other suites own -- the migration-seeded Slack bridge
+#: control 'agent.slack.bridge' -- so every later Slack bridge test read the
+#: bridge OFF once both required gates gave this file its database (CI
+#: 37927445675 / 37927450586 on 5d83e0de: 11 failures)
+_OWN_KEYS = [ctl.BUDGET_KEY, ctl.CONTROL_KEY]
+_OWN_KEYS_SQL = "DELETE FROM ingestion_state WHERE key = ANY($1::text[])"
+
 # The repo's convention for tests that need a real server. Skipping is
 # honest; a fake pool would prove nothing about a row lock.
 PG_DSN = os.environ.get("BETTOR_TEST_PG_DSN")
@@ -839,7 +848,7 @@ async def test_two_overlapping_workers_share_one_eight_request_ceiling():
             ga, gb = await asyncio.gather(burst(a), burst(b))
             total = (await bud.DurableLedger(
                 admin, probe_id="t-probe").read())["total_reserved"]
-            await admin.execute("DELETE FROM ingestion_state")
+            await admin.execute(_OWN_KEYS_SQL, _OWN_KEYS)
             return ga, gb, total
         finally:
             for p in (admin, a, b):
@@ -866,7 +875,7 @@ async def test_a_reservation_is_committed_before_the_caller_may_dispatch():
             # dispatch would.
             seen = (await bud.DurableLedger(
                 pool, probe_id="t-probe").read())["total_reserved"]
-            await pool.execute("DELETE FROM ingestion_state")
+            await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
             return r, seen
         finally:
             await pool.close()
@@ -897,7 +906,7 @@ async def test_removing_the_mode_cannot_start_general_discovery():
                                         probe_id="t-probe")
             bbo = await ctl.reserve(pool, ctl.R_ATTEMPT, probe_id="t-probe")
             ctrl = await ctl.read_control(pool)
-            await pool.execute("DELETE FROM ingestion_state")
+            await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
             return gen, inc, listing, bbo, ctrl
         finally:
             await pool.close()
@@ -925,7 +934,7 @@ async def test_a_stop_refuses_the_next_request_inside_the_same_transaction():
             L = bud.DurableLedger(pool, probe_id="t-probe")
             r = await L.spend(bud.K_MANIFEST)
             g = await ctl.reserve(pool, ctl.R_LISTING, probe_id="t-probe")
-            await pool.execute("DELETE FROM ingestion_state")
+            await pool.execute(_OWN_KEYS_SQL, _OWN_KEYS)
             return r, g
         finally:
             await pool.close()
