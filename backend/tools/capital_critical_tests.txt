@@ -1421,3 +1421,5 @@ tests/test_rc6_adriana_void_terms.py
 tests/test_rc6_kalshi_ws_merge_integration.py
 # (RC6.2 p-xavier SW-2) a held market that moves while a paper pass holds the lock is reviewed by that pass between its steps (not dropped after 30 s); the 30 s rule is judged on the provider stamp (a stale change reviewed in the pass is still STALE / WAITING); a notification past its window is dropped and counted; the scheduler's counters reach the feed heartbeat; each step's time is on the pass; the pass heartbeat ring keeps the newest beats
 tests/test_rc6_pxavier_held_review_in_pass.py
+# (RC6.2 p-xavier M-1/M-2) a xavier_complete gate GREEN over no counted open position is UNMEASURED (never a 1.0 rate in completion readiness or the pm-acceptance binding); an EXTERNAL_UNAVAILABLE held position is counted by the gate, never complete, named; the allocation rail is untouched
+tests/test_rc6_pxavier_xavier_gate_population.py
