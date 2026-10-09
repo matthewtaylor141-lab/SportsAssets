@@ -98,7 +98,15 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 
-VERSION = "VENUE_CATALOGUE_COMPLETENESS_V2"
+#: V2 -> V3 (P0 premap completeness, 2026-10-09): a page read that waited
+#: past its bound for its turn and was NEVER SENT is no longer counted as a
+#: request (V2 counted it: `walk.requests += 1  # it was sent`), and such a
+#: read -- or one sent and not answered -- is read again at the same offset
+#: instead of ending the pass (PageWalk.read_retried / read_resumed). The
+#: receipt names both (reads_unsent, reads_resent, resumed_reads,
+#: read_failures). Request totals are not comparable across V2 and V3 rows
+#: on the passes that had such a read.
+VERSION = "VENUE_CATALOGUE_COMPLETENESS_V3"
 
 # ── passes: which slice of the venue's calendar a request walks ──────────
 PASS_WINDOW = "WINDOW"                    # [now-back_h, now+fwd_h]: the sweep's own window
@@ -786,6 +794,34 @@ class PageWalk:
         self._resume = None
         self._resume_tail: list = []
         self._rewind_exclude: set = set()
+        #: (P0 premap completeness, 2026-10-09) page reads that did not
+        #: answer and were read again AT THE SAME OFFSET. A read that was
+        #: NEVER SENT (it waited past its bound for its turn on the
+        #: process's venue gate, or our own gate refused it) is not a
+        #: request and is not counted in `requests`; a read that was sent
+        #: and got no answer is a request (counted) and is re-sent at most
+        #: a bounded number of times. `resumed_reads` counts the pages that
+        #: answered after such a retry -- the walk resumed where it stopped
+        #: instead of ending the pass.
+        self.reads_unsent = 0
+        self.reads_resent = 0
+        self.resumed_reads = 0
+        self.read_failures: dict = {}
+
+    def read_retried(self, kind: str, *, sent: bool) -> None:
+        """A page read that did not answer is about to be read again at
+        the same offset. `sent` False: nothing reached the venue (no
+        request); True: the request went out, and it is counted."""
+        self.read_failures[kind] = self.read_failures.get(kind, 0) + 1
+        if sent:
+            self.requests += 1
+            self.reads_resent += 1
+        else:
+            self.reads_unsent += 1
+
+    def read_resumed(self) -> None:
+        """The page answered after at least one retry of the same offset."""
+        self.resumed_reads += 1
 
     @staticmethod
     def _key(ev) -> str | None:
@@ -993,6 +1029,10 @@ class PageWalk:
                 "max_requests": self.max_requests,
                 "max_offset": self.max_offset,
                 "already_read_elsewhere": self.already_read_elsewhere,
+                "reads_unsent": self.reads_unsent,
+                "reads_resent": self.reads_resent,
+                "resumed_reads": self.resumed_reads,
+                "read_failures": dict(self.read_failures),
                 "stopped": self.stopped, "error": self.error,
                 "natural_end": self.stopped in NATURAL_ENDS,
                 "complete": self.complete,
@@ -1036,7 +1076,8 @@ def rollup_slices(slices: list, *, not_read: list | None = None,
               "events_unique", "duplicates_across_pages", "overlap_catches",
               "shift_suspected", "rewind_reads", "rewind_catches",
               "shift_unrecovered", "probe_requests_failed",
-              "probe_requests_rejected"):
+              "probe_requests_rejected", "reads_unsent", "reads_resent",
+              "resumed_reads"):
         summed[k] = sum(int(x.get(k) or 0) for x in slices)
     err = next((x.get("error") for x in slices if x.get("error")), None)
     out = dict(summed, stopped=stopped, error=err,
@@ -1089,7 +1130,8 @@ MAX_PARTITION_BUCKETS_LISTED = 256
 _PARTITION_SUM_KEYS = ("requests", "pages_with_events", "events_received",
                        "duplicates_across_pages", "overlap_catches",
                        "shift_suspected", "rewind_reads", "rewind_catches",
-                       "probe_requests_failed", "probe_requests_rejected")
+                       "probe_requests_failed", "probe_requests_rejected",
+                       "reads_unsent", "reads_resent", "resumed_reads")
 
 
 def split_window(start: float, end: float) -> tuple:
