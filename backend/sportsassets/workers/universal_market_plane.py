@@ -119,6 +119,7 @@ from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
 from ..market_plane import refdata_progress as RP
 from ..market_plane import refdata_universe as RU
+from ..market_plane import snapshot_refresh as SR
 from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
 from ..market_plane.token_keeper import TokenKeeper
@@ -609,7 +610,8 @@ FRESHNESS_LOG_EVERY_S = 300.0
 async def freshness_loop(refresher, mgr, client, *, state: dict,
                          client_lock, bound: float = FRESH_SLA_S,
                          tick_s: float | None = None,
-                         clock=time.time) -> None:
+                         clock=time.time, snapper=None,
+                         token_fn=None) -> None:
     """THE PLANE'S FRESHNESS TASK (RC6 D1), beside the pass loop and never
     waiting on it.
 
@@ -632,6 +634,12 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     sampled every minute whatever the pass is doing, and a minute with no
     sample is an outage the readback counts.
 
+    THE SNAPSHOT-ONLY gRPC REFRESH (RC6 D1, market_plane.snapshot_refresh):
+    when `snapper` is given, the tick first offers it its call (at most one
+    a minute, every member due within 90 s of its bound, the venue's own
+    CreateMarketDataSubscription snapshot_only); the REST step then reads
+    only what that did not make current.
+
     Never raises but CancelledError: a failed step is counted in
     state["freshness_task"] (logged at most every FRESHNESS_LOG_EVERY_S)
     and the next tick tries again."""
@@ -644,6 +652,13 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     while True:
         try:
             pool = await get_pool()
+            if snapper is not None and refresher is not None and \
+                    token_fn is not None:
+                got_s = await snapper.step(refresher, mgr,
+                                           token_fn=token_fn, bound=bound,
+                                           clock=clock)
+                if got_s is not None:
+                    st["last_snapshot_call"] = got_s
             if refresher is not None:
                 # the task's own step digest (the heartbeat's `refresh`
                 # stays the pass's step): due / read / deferred, no reads
@@ -700,6 +715,14 @@ async def run() -> None:
              ("ON (%d book reads/min, bound %.0f s)"
               % (refresher.per_min, FRESH_SLA_S)) if refresher else
              (AR.R_REFRESH_NO_STREAM if mgr is None else AR.R_REFRESH_OFF))
+    # (RC6 D1) the snapshot-only gRPC refresh beside it: one call a minute
+    snapper = (SR.SnapshotRefresh() if refresher is not None
+               and SR.enabled() else None)
+    log.info("universal_market_plane: snapshot-only refresh %s",
+             ("ON (%s snapshot_only, <= %d symbols, every %.0f s)"
+              % (SR.RPC, SR.MAX_SYMBOLS_PER_CALL, SR.CALL_EVERY_S))
+             if snapper else SR.R_SNAPSHOT_OFF if refresher is not None
+             else "OFF (no refresh here)")
     watermark = 0.0
     last = {"populate": 0.0, "full": 0.0, "assign": 0.0, "coverage": 0.0,
             "certify": 0.0, "snapshot": 0.0}
@@ -729,7 +752,9 @@ async def run() -> None:
                             fresh_task.exception()).__name__
                 fresh_task = asyncio.ensure_future(freshness_loop(
                     refresher, mgr, client, state=state,
-                    client_lock=client_lock))
+                    client_lock=client_lock, snapper=snapper,
+                    token_fn=(keeper.token if keeper is not None
+                              else None)))
             kalshi_task, kalshi_last, krep = await kalshi_step(
                 pool, kalshi_task, now=now, last=kalshi_last)
             if krep is not None:
@@ -788,7 +813,7 @@ async def run() -> None:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
                     state["coverage"] = await POP.coverage_pass(
                         c, fresh_symbols=fresh, now=now,
-                        refreshed=(refresher.current(
+                        refreshed=(refresher.current_for_coverage(
                             mgr, now=now, bound=FRESH_SLA_S)
                             if refresher is not None else None))
                     last["coverage"] = now
@@ -817,7 +842,8 @@ async def run() -> None:
                     snap = await snapshot(c, mgr, state, now=snap_now,
                                           arming=arming, fresh=snap_fresh,
                                           caps=(max_streams, max_per),
-                                          refresher=refresher)
+                                          refresher=refresher,
+                                          snapper=snapper)
                     # THE CONSUMER PARITY BRIDGE (SHADOW): the priority
                     # members' PMX tops, one append-only event per pass;
                     # the API compares them with the REST books the paper
@@ -923,7 +949,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         except Exception:                                       # noqa: BLE001
             connected = {}
     by, sample, pmx = {}, [], {}
-    via_refresh, by_refresh = 0, {}
+    via_refresh, by_refresh, via_origin = 0, {}, {}
     quiet = {"stream_quiet_on_the_live_connection": 0,
              "of_which_symbol_acked_on_this_connection": 0,
              "snapshot_age_s": []}
@@ -948,8 +974,12 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         if s in fresh or (age is not None and age <= FRESH_SLA_S):
             continue
         if s in refreshed:
-            # a REST book the plane read within the bound (RC6)
+            # a REST book the plane read within the bound (RC6), or its
+            # snapshot-only gRPC read (RC6 D1), counted by origin
             via_refresh += 1
+            o = (refresher.origin_of(s) if refresher is not None
+                 and hasattr(refresher, "origin_of") else None) or "REST"
+            via_origin[o] = via_origin.get(o, 0) + 1
             continue
         cur = None      # the stream's read of this member, when one is made
         tier = "HELD" if int(r["priority"]) <= POP.P_HELD else "CANDIDATE"
@@ -1004,6 +1034,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         "acknowledged on the current connection, no gap since the snapshot"))
     return {"members": len(rows), "not_current": sum(by.values()),
             "current_via_refresh": via_refresh,
+            "current_via_refresh_by_origin": via_origin,
             "by_tier_reason_rest_phase": dict(sorted(
                 by.items(), key=lambda kv: -kv[1])),
             "by_refresh_outcome": dict(sorted(
@@ -1040,6 +1071,9 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
     origins = (cov or {}).get("rest_recovery_by_origin") or {}
     pr = tiers.get("PRIORITY") or {}
     al = tiers.get("ALL") or {}
+    # (RC6 D1) PMX_GRPC = the stream + the snapshot-only refresh, apart
+    snap = int((((cov or {}).get("pmx_grpc_by_origin") or {}).get(
+        "PRIORITY") or {}).get("PLANE_SNAPSHOT_REFRESH") or 0)
 
     def rate(t):
         den = int(t.get("total") or 0) - int(t.get(
@@ -1062,7 +1096,8 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
     return {
         "priority_universe": {
             "denominator": int(pr.get("total") or 0),
-            "current_pmx_stream": int(pr.get("PMX_GRPC") or 0),
+            "current_pmx_stream": int(pr.get("PMX_GRPC") or 0) - snap,
+            "current_pmx_snapshot_refresh": snap,
             "current_rest_fallback": int(pr.get("REST_RECOVERY") or 0),
             "current_rest_fallback_by_origin": (
                 dict(origins["PRIORITY"]) if origins.get("PRIORITY")
@@ -1097,7 +1132,8 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
 
 
 async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
-                   fresh: set, caps: tuple, refresher=None) -> dict:
+                   fresh: set, caps: tuple, refresher=None,
+                   snapper=None) -> dict:
     """ONE append-only market-plane snapshot: universe, registry, coverage,
     subscription plan, sources, freshness, latency, certification, catalogue
     completeness and Radar. Read by GET /api/command/market-plane.
@@ -1207,6 +1243,12 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now,
                                              refresh=refresh)
+    # (RC6 D1) the snapshot-only gRPC refresh's digest, or why it is off
+    freshness["priority_universe"]["snapshot_refresh"] = (
+        snapper.digest(now=now) if snapper is not None else
+        SR.off_digest(SR.R_SNAPSHOT_OFF if refresher is not None
+                      and not SR.enabled() else AR.R_REFRESH_NO_STREAM
+                      if refresher is None else SR.R_SNAPSHOT_OFF))
     try:
         freshness["priority_universe"]["census"] = await priority_census(
             conn, mgr, fresh=fresh, now=now, refreshed=refreshed,

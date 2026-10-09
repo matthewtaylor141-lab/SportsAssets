@@ -234,7 +234,8 @@ def market_data_block(snap, why, ump_detail) -> dict:
     num = None
     if pri:
         num = int(pri.get("current_pmx_stream") or 0) + int(
-            pri.get("current_rest_fallback") or 0)
+            pri.get("current_rest_fallback") or 0) + int(
+            pri.get("current_pmx_snapshot_refresh") or 0)
     den = None
     if pri:
         den = int(pri.get("denominator") or 0) - int(

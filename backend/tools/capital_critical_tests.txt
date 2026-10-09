@@ -1349,3 +1349,5 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 D1) the plane's snapshot-only gRPC refresh sends ONE request shape -- explicit symbols, snapshot_only, aggregated depth 10, never the empty (EVERY-instrument) list, never a continuous subscription -- refused before the wire otherwise; its books never enter the stream's books and count only for the bound from their receipt
+tests/test_rc6_d1_snapshot_refresh.py

@@ -299,6 +299,10 @@ class ActiveRefresh:
         self.last_pass: dict = {}
         self.totals = {"reads": 0, "current": 0, "not_current": 0,
                        "by_outcome": {}}
+        #: (RC6 D1) the origin of each member's newest CURRENT read: REST
+        #: (this module's `book` read) or SNAPSHOT (snapshot_refresh's
+        #: snapshot-only gRPC call); kept apart from the entries' shape
+        self.origins: dict = {}
 
     # -- the members -------------------------------------------------------
 
@@ -318,6 +322,8 @@ class ActiveRefresh:
         keep = {m[0] for m in out}
         for s in [s for s in self.entries if s not in keep]:
             del self.entries[s]
+        for s in [s for s in self.origins if s not in keep]:
+            del self.origins[s]
 
     def members_due(self, now: float) -> bool:
         return self.members_at is None or \
@@ -393,6 +399,16 @@ class ActiveRefresh:
             out[s] = e["ok_at"]
         return out
 
+    def current_for_coverage(self, mgr, *, now: float,
+                             bound: float) -> dict:
+        """`current` in the coverage pass's shape: a REST read's receipt
+        instant, or (receipt, "SNAPSHOT") for a snapshot-only gRPC read
+        (populate.coverage_pass counts that one PMX_GRPC, labelled)."""
+        return {s: ((at, "SNAPSHOT") if self.origins.get(s) == "SNAPSHOT"
+                    else at)
+                for s, at in self.current(mgr, now=now,
+                                          bound=bound).items()}
+
     def plan(self, mgr, *, now: float, bound: float,
              lead_s: float | None = None) -> tuple:
         """([symbol, ...] due now in refresh order, {reason: count}) over the
@@ -466,6 +482,7 @@ class ActiveRefresh:
         if o == CURRENT:
             t["current"] += 1
             e.update(ok_at=at, venue_ts=j["venue_ts"], levels=j["levels"])
+            self.origins[str(symbol)] = "REST"
         else:
             t["not_current"] += 1
             if o in _MARKET_OUTCOMES:
@@ -477,6 +494,28 @@ class ActiveRefresh:
             self.hold_until = max(self.hold_until, at + BACKOFF_429_S)
         return j
 
+    def record_snapshot(self, symbol: str, j: dict, *, at: float) -> None:
+        """(RC6 D1) Account one snapshot-only gRPC result (judged by
+        snapshot_refresh.judge_update, received at `at`) exactly like a REST
+        book: CURRENT stands for the bound from its receipt (origin
+        SNAPSHOT); the venue's word about the market (not open, no state,
+        crossed) ends an earlier current read and waits RETRY_NOT_OPEN_S. A
+        symbol the call did not return is NOT recorded here, so the REST
+        read stays free to try it. The REST totals are not touched."""
+        o = j.get("outcome")
+        e = self.entries.setdefault(symbol, {"ok_at": None, "tries": 0})
+        e.update(tried_at=at, outcome=o, tries=e["tries"] + 1,
+                 status=j.get("status"))
+        if o == CURRENT:
+            e.update(ok_at=at, venue_ts=j.get("venue_ts"),
+                     levels=j.get("levels"))
+            self.origins[str(symbol)] = "SNAPSHOT"
+        elif o in _MARKET_OUTCOMES:
+            e["ok_at"] = None
+
+    def origin_of(self, symbol: str) -> str | None:
+        return self.origins.get(str(symbol))
+
     def outcome_of(self, symbol: str) -> str | None:
         return (self.entries.get(symbol) or {}).get("outcome")
 
@@ -486,10 +525,13 @@ class ActiveRefresh:
         cur = self.current(mgr, now=now, bound=bound) if mgr is not None \
             else {}
         by_tier: dict = {}
+        by_origin: dict = {}
         tiers = {m[0]: m[1] for m in self.members}
         for s in cur:
             by_tier[tiers.get(s, TIER_CANDIDATE)] = by_tier.get(
                 tiers.get(s, TIER_CANDIDATE), 0) + 1
+            o = self.origins.get(s) or "REST"
+            by_origin[o] = by_origin.get(o, 0) + 1
         return {"version": VERSION, "enabled": True,
                 "endpoint": "GET /v1/orderbook/{symbol} (pmx_institutional "
                             "`book`, allow-listed)",
@@ -507,6 +549,7 @@ class ActiveRefresh:
                 "members": len(self.members),
                 "current_via_refresh": len(cur),
                 "current_via_refresh_by_tier": by_tier,
+                "current_via_refresh_by_origin": by_origin,
                 "last_pass": dict(self.last_pass),
                 "totals": {k: (dict(v) if isinstance(v, dict) else v)
                            for k, v in self.totals.items()},

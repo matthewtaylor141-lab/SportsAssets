@@ -297,6 +297,10 @@ def test_the_freshness_task_keeps_reading_while_a_slow_pass_runs(
         monkeypatch.setattr(POP, "required_sets_read", required)
         monkeypatch.setenv("KALSHI_CATALOGUE", "off")
         monkeypatch.delenv("UMP_ACTIVE_REFRESH", raising=False)
+        # (RC6 D1) the snapshot-only gRPC refresh would open a real channel
+        # to the venue: it is tested against an in-process venue in
+        # test_rc6_d1_snapshot_refresh.py; here no venue is ever reached
+        monkeypatch.setenv("UMP_SNAPSHOT_REFRESH", "off")
         try:
             await c.execute("UPDATE market_plane_registry SET active=false")
             await c.execute("DELETE FROM us_premap")
