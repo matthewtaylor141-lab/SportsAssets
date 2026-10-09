@@ -22,6 +22,18 @@ book of that sid goes GAP at once, its later deltas are ignored, the
 markets are resubscribed, and each book returns to CURRENT only when its
 fresh snapshot arrives. A pre-gap book is never routed.
 
+SNAPSHOTS ARE IN THE SEQUENCE TOO (RC6 red-team, replay). Kalshi: seq is
+"used for snapshot/delta consistency". A snapshot on a sid that is in
+sequence must be last + 1 like a delta: a REPLAYED or out-of-order
+snapshot (seq <= last) used to roll its book back to the older state while
+it stayed CURRENT, and a snapshot that SKIPPED a seq (a lost message for
+another market of the sid) used to advance the sid past the gap, so the
+other market served a book missing that update as CURRENT. Either now gaps
+the sid (R_SNAPSHOT_OUT_OF_SEQUENCE) and is not applied. A gapped sid stays
+untrusted -- a later snapshot on it is ignored -- until the venue
+announces it again (`subscribed`) or the connection ends; the resubscribe
+(a new subscription) restores CURRENT.
+
 Account limits: GET /trade-api/v2/account/limits is the authoritative
 usage tier and read / write token buckets; REST recovery pacing derives
 from the read bucket. The schema returns no WebSocket connection cap, so
@@ -73,6 +85,9 @@ R_SEQ_GAP = "KALSHI_WS_SEQUENCE_GAP"
 R_DISCONNECT = "KALSHI_WS_DISCONNECTED"
 R_SUB_ERROR = "KALSHI_WS_SUBSCRIPTION_ERROR"
 R_NO_CREDENTIAL = "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED"
+#: a snapshot whose seq is not last + 1 on an in-sequence sid (a replayed /
+#: out-of-order snapshot, or one that skipped a lost message)
+R_SNAPSHOT_OUT_OF_SEQUENCE = "KALSHI_WS_SNAPSHOT_OUT_OF_SEQUENCE"
 
 
 # ── signing (the handshake and the limits read) ─────────────────────────
@@ -168,8 +183,12 @@ class WsBooks:
         self.ticker_sid: dict = {}
         self.stats = {"snapshots": 0, "deltas": 0, "gaps": 0,
                       "disconnects": 0, "ignored_after_gap": 0,
-                      "errors": 0}
+                      "errors": 0, "snapshots_out_of_sequence": 0,
+                      "ignored_gapped_sid": 0}
         self.resubscribe: set = set()
+        #: sids whose sequence broke on this connection: nothing on them is
+        #: trusted again until the venue announces the sid anew
+        self.gapped_sids: set = set()
         self.connected = False
 
     def _book(self, t):
@@ -196,6 +215,8 @@ class WsBooks:
         self.sid_seq.clear()
         self.sid_markets.clear()
         self.ticker_sid.clear()
+        # sids are the connection's: a new connection starts clean
+        self.gapped_sids.clear()
 
     def _gap_sid(self, sid, why) -> None:
         self.stats["gaps"] += 1
@@ -204,6 +225,7 @@ class WsBooks:
             b.update(state=GAP, why=why)
             self.resubscribe.add(t)
         self.sid_seq[sid] = None
+        self.gapped_sids.add(sid)
 
     def on_message(self, m: dict, *, recv_at: float | None = None) -> str:
         """Apply one decoded WS message; returns what happened."""
@@ -211,6 +233,14 @@ class WsBooks:
         typ = m.get("type")
         sid = m.get("sid")
         if typ == "subscribed":
+            # the venue announcing a sid starts that subscription afresh: a
+            # sid number it reuses after a gap is a NEW subscription (its own
+            # snapshot follows); an in-sequence sid is never reset here
+            new = (m.get("msg") or {}).get("sid", sid)
+            if new in self.gapped_sids:
+                self.gapped_sids.discard(new)
+                self.sid_seq.pop(new, None)
+                self.sid_markets.pop(new, None)
             return "SUBSCRIBED"
         if typ == "error":
             self.stats["errors"] += 1
@@ -225,6 +255,23 @@ class WsBooks:
         if t is None or sid is None or seq is None:
             return "MALFORMED"
         if typ == "orderbook_snapshot":
+            if sid in self.gapped_sids:
+                # a broken subscription's in-flight (or replayed) snapshot:
+                # its place in the sequence cannot be known; the resubscribe
+                # delivers the fresh one
+                self.stats["ignored_gapped_sid"] += 1
+                return "IGNORED_GAPPED_SID"
+            last = self.sid_seq.get(sid)
+            if last is not None and seq != last + 1:
+                # replayed / out of order (seq <= last) or past a lost
+                # message (seq > last + 1): never applied, the sid is GAP
+                self.stats["snapshots_out_of_sequence"] += 1
+                self._gap_sid(sid, R_SNAPSHOT_OUT_OF_SEQUENCE)
+                b = self._book(t)
+                if b["sid"] == sid or b["state"] != CURRENT:
+                    b.update(state=GAP, why=R_SNAPSHOT_OUT_OF_SEQUENCE)
+                    self.resubscribe.add(t)
+                return "GAP"
             b = self._book(t)
             yes = {_d(p): _d(q) for p, q in msg.get("yes_dollars_fp") or []}
             no = {_d(p): _d(q) for p, q in msg.get("no_dollars_fp") or []}

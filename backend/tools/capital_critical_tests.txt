@@ -1367,3 +1367,7 @@ tests/test_rc6_archer_canonical_duplicates.py
 tests/test_rc6_order_lifecycle_and_protection.py
 # (RC6 archer-lifecycle) the truth quorum names each source exactly (CURRENT / STALE / MISSING, why, on whom it depends); Audrey's reconciliation is linked to the actual positions she reconciled and names the paper and actual positions it covers
 tests/test_rc6_audrey_quorum_traceability.py
+# (RC6 red-team scenarios) the owner's seven adversarial scenarios: a GAP Kalshi book is never re-stamped; reversed home/away never maps; another venue's key (a Kalshi PEM in the PMUS slot, the PMX key in the Kalshi slot) never signs; a replayed / out-of-sequence Kalshi snapshot gaps the sid; no pre-resync book is served; partials graded on the filled quantity; authority READ, never literals
+tests/test_red_team_scenarios.py
+# (RC6 red-team) KAREN_VALUE reads the twin's COUNTERFACTUAL book from one run; GREEN only when MEASURED, the twin's own reason named otherwise, unmeasured null never "0"
+tests/test_red_team_karen_value_db.py

@@ -237,7 +237,12 @@ def _get_read_client():
     cfg = settings()
     if not (cfg.pmus_key_id and cfg.pmus_secret_key):
         return _get_client()
-    from .venue_key import normalize_secret_key
+    from .venue_key import normalize_secret_key, pmus_slot_refusal
+    if pmus_slot_refusal(cfg.pmus_secret_key) is not None:
+        # judged on the value AS CONFIGURED: re-encoding another venue's PEM
+        # key file would strip the armour the gate refuses it by (RC6) --
+        # the shared client is gated by name
+        return _get_client()
     sec = normalize_secret_key(cfg.pmus_secret_key)
     if sec == cfg.pmus_secret_key:
         return _get_client()
@@ -291,20 +296,27 @@ def _install_credential_gate(client) -> dict:
     unreadable, never another account's positions
     (mirror_positions_source.PMX_FALLBACK_REJECTED).
 
+    ANOTHER VENUE'S KEY FILE (RC6 red-team, credential isolation): an
+    Ed25519 key that came as a PEM key file -- Kalshi's default key format,
+    never Polymarket US's -- is gated the same way, named
+    venue_key.R_PEM_KEY_FILE (venue_key.pmus_slot_refusal), so a Kalshi key
+    pasted into PMUS_SECRET_KEY never signs a Polymarket US request.
+
     NEVER RAISES. The verdict is returned and kept in CREDENTIAL_GATE."""
     global CREDENTIAL_GATE
     out: dict = {"installed": False, "why": None}
     try:
         from .venue_key import (R_NOT_ED25519, SecretNotEd25519,
-                                describe_secret_key)
+                                describe_secret_key, pmus_slot_refusal)
         sec = getattr(client, "secret_key", None)
         if not sec:
             out["why"] = ("no secret on this client: public endpoints only "
                           "(the SDK refuses an authenticated call itself)")
         else:
             d = describe_secret_key(sec)
-            if d.get("usable_after_normalisation") or \
-                    d.get("sdk_reads_as_given"):
+            refusal = pmus_slot_refusal(sec)
+            if refusal is None or (refusal == R_NOT_ED25519
+                                   and d.get("sdk_reads_as_given")):
                 # an Ed25519 key: the SDK reads it as given, or
                 # _get_read_client re-encodes the same key; never gated
                 out["why"] = "the secret is an Ed25519 key; not gated"
@@ -314,17 +326,19 @@ def _install_credential_gate(client) -> dict:
                     out["why"] = "the SDK client exposes no _request to gate"
                 elif getattr(orig, "_pmus_credential_gate", False):
                     out.update(installed=True, already=True,
-                               refusal=R_NOT_ED25519)
+                               refusal=getattr(orig, "_pmus_refusal",
+                                               refusal))
                 else:
                     def _request(method, path, *args, authenticated=False,
                                  **kw):
                         if authenticated:
-                            raise SecretNotEd25519(R_NOT_ED25519)
+                            raise SecretNotEd25519(refusal)
                         return orig(method, path, *args,
                                     authenticated=authenticated, **kw)
                     _request._pmus_credential_gate = True
+                    _request._pmus_refusal = refusal
                     client._request = _request
-                    out.update(installed=True, refusal=R_NOT_ED25519,
+                    out.update(installed=True, refusal=refusal,
                                secret_format=d.get("format"))
     except Exception as exc:                                   # noqa: BLE001
         out["why"] = "credential gate not installed: %s" % type(exc).__name__

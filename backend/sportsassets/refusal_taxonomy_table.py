@@ -133,6 +133,12 @@ TABLE = {
     # (P1) venue isolation and the mirror shadow's credential precondition
     "NOT_A_POLYMARKET_US_MARKET_KALSHI_TICKER_REFUSED": (S, CAP, "VENUE_BOOK"),
     "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY": (S, DATA, "INGESTION"),
+    # (RC6 red-team) the same slot holding a PEM key file -- another venue's
+    # key format (Kalshi's Ed25519 PEM): refused by the same gates
+    "PMUS_SECRET_SLOT_HOLDS_A_PEM_KEY_FILE": (S, DATA, "INGESTION"),
+    # (RC6 red-team) one key pair configured in two venues' slots
+    # (credential_isolation): the Kalshi signers refuse it
+    "CREDENTIAL_REUSED_ACROSS_VENUES": (S, DATA, "INGESTION"),
     # (P1 closeout) the mirror shadow's ledger-derived positions fallback
     # (mirror_positions_source): topology not the PMX RSA client, ledger
     # unreadable, neither source readable, a non-read statement refused
@@ -1609,6 +1615,9 @@ TABLE = {
     "KALSHI_WS_SEQUENCE_GAP": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_DISCONNECTED": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_SUBSCRIPTION_ERROR": (S, FRESH, "VENUE_BOOK"),
+    # (RC6 red-team) a replayed / out-of-order snapshot, or one past a lost
+    # message: the sid is GAP like a delta gap, the snapshot not applied
+    "KALSHI_WS_SNAPSHOT_OUT_OF_SEQUENCE": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
     # the dedicated market plane refuses to run beside an order-capable
     # credential (market_plane_guard): a provisioning defect, ours to fix

@@ -129,23 +129,58 @@ def normalize_secret_key(raw: str | None) -> str:
 #: the named refusal when a PMUS secret slot holds no Ed25519 key in any
 #: encoding (identical to workers.mirror_shadow.R_PMUS_SECRET_NOT_ED25519)
 R_NOT_ED25519 = "PMUS_SECRET_SLOT_HOLDS_NO_ED25519_KEY"
+#: the named refusal when a PMUS secret slot holds a PEM KEY FILE -- even an
+#: Ed25519 one (RC6 red-team, credential isolation). Polymarket US issues
+#: its API secret as base64 text, never as a key file; Kalshi issues its
+#: private key as a PEM file (Ed25519 PKCS#8 by default -- production's
+#: KALSHI_PRIVATE_KEY_PEM is one) and the PMX client's key is an RSA PEM. A
+#: PEM in this slot is therefore another venue's key: the red-team control
+#: already classifies it CREDENTIAL_CLASS_MISMATCH:PMUS:ED25519_PEM with the
+#: verdict MISMATCH_PATH_BLOCKED, yet every PMUS signer gate accepted it
+#: ("an Ed25519 key in any encoding") and would have signed Polymarket US
+#: requests with the Kalshi key. It only refuses; it weakens nothing.
+R_PEM_KEY_FILE = "PMUS_SECRET_SLOT_HOLDS_A_PEM_KEY_FILE"
 
 
 class SecretNotEd25519(RuntimeError):
-    """The slot holds a credential no PMUS signer can use. Deterministic: a
-    caller must not retry it; the message is the refusal name, never a
-    value."""
+    """The slot holds a credential no PMUS signer can use (no Ed25519 key,
+    or another venue's PEM key file). Deterministic: a caller must not
+    retry it; the message is the refusal name, never a value."""
+
+
+def is_pem_key_file(raw: str | None) -> bool:
+    """True when the value is PEM-armoured (-----BEGIN ...-----), however
+    pasted (quoted, JSON-escaped newlines). Format only, never the value."""
+    return bool(raw) and _PEM.search(
+        str(raw).replace("\\n", "\n")) is not None
+
+
+def pmus_slot_refusal(raw: str | None) -> str | None:
+    """THE ONE PMUS SIGNER PRECONDITION (every PMUS gate reads it): None when
+    `raw` may be handed to a PMUS signer -- empty (the callers' own "not
+    configured" answer) or a non-PEM Ed25519 key in any encoding; else the
+    named refusal: R_NOT_ED25519 (no Ed25519 key in any encoding, e.g. the
+    PMX RSA PEM -- unchanged) or R_PEM_KEY_FILE (an Ed25519 key that came as
+    a key file: another venue's)."""
+    if not raw:
+        return None
+    if _decode(raw) is None:
+        return R_NOT_ED25519
+    if is_pem_key_file(raw):
+        return R_PEM_KEY_FILE
+    return None
 
 
 def signing_secret(raw: str | None) -> str:
     """The secret a PMUS signer is handed: `normalize_secret_key(raw)` when
-    `raw` is an Ed25519 key in any encoding (the same key), else
-    SecretNotEd25519(R_NOT_ED25519) BEFORE any client, signature or socket.
-    Empty stays empty (the callers' own "not configured" answer)."""
+    `raw` passes `pmus_slot_refusal` (the same key, re-encoded), else
+    SecretNotEd25519(<the refusal name>) BEFORE any client, signature or
+    socket. Empty stays empty (the callers' own "not configured" answer)."""
     if not raw:
         return raw or ""
-    if _decode(raw) is None:
-        raise SecretNotEd25519(R_NOT_ED25519)
+    why = pmus_slot_refusal(raw)
+    if why is not None:
+        raise SecretNotEd25519(why)
     return normalize_secret_key(raw)
 
 

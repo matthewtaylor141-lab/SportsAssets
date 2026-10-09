@@ -174,11 +174,19 @@ async def pm_read(conn, *, now: float) -> dict:
                 for k, v in rel.items()},
             "red_team_status": res["status"],
             "read_timings": sec.timings,
-            "authority": {"small_live": "SHADOW",
-                          "kalshi_live_money": "NOT_ACTIVATED",
-                          "adriana": "SHADOW_ONLY",
-                          "historical_paper": "UNCHANGED",
-                          "authority_expanded": False}}
+            # the authority as READ by the red-team readiness (RC6), never
+            # literals: an unread or non-shadow lane says so here too
+            "authority": _authority_of(res)}
+
+
+def _authority_of(res: dict) -> dict:
+    a = (res or {}).get("authority") or {}
+    want = {"small_live": "SHADOW", "kalshi_live_money": "NOT_ACTIVATED",
+            "adriana": "SHADOW_ONLY"}
+    got = {k: a.get(k, "UNREAD") for k in want}
+    return dict(got, historical_paper="UNCHANGED",
+                authority_expanded=(got != want or a.get(
+                    "capital_authority_granted") is not False))
 
 
 @router.get("/api/command/pm-acceptance",

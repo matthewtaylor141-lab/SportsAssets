@@ -743,7 +743,14 @@ def _collect(*, red: dict, scoreboard: dict, release: dict | None,
     # NEVER typed True: only the pre / post fingerprint receipt binds it
     ph = _bind_paper(e, prov, unproven, paper,
                      deploy_started_at=rt.get("deploy_started_at"), now=now)
-    put("live_authority_shadow", comp.get("small_live") == "SHADOW",
+    # completion's `small_live` is a literal; the red-team readiness READS
+    # the lane (execmirror_control, RC6): when it carries that reading, a
+    # non-SHADOW or unread lane fails here too
+    read = (red.get("authority") or {}).get("small_live")
+    put("live_authority_shadow", comp.get("small_live") == "SHADOW"
+        and read in (None, "SHADOW"),
+        "red-team readiness authority.small_live (execmirror_control)"
+        if read is not None else
         "live_authorization.SMALL_LIVE_MODE / small_live_control")
     md = comp.get("market_data") or {}
     fresh_pmx = md.get("fresh")
