@@ -638,6 +638,70 @@ def register(event, **kwargs):
     return None
 
 
+def batch_index():
+    """ONE `pinnapi_primary.fixture_index` of the active scheduler's cache,
+    for a batch of `register` calls made with NO await between them; None
+    when no scheduler runs here (or the index cannot be built -- `register`
+    then scans, as before).
+
+    WHY (RC6). Production 2026-10-09 (the API loop watchdog's persisted ring,
+    research-sql rc6_api-responsive_loop_stalls.sql): two of twenty API loop
+    stalls of 2.5-3.4 s were the ext_pinnacle cycle registering a
+    competition's discovery seeds back to back, each `register` without an
+    index rebuilding the whole fixture view (and, on a miss, re-tokenising
+    every cached record for the absence check) -- the cost the discovery
+    pass already avoids by building the index once (fixture_index's own
+    docstring: ~7 ms per seed on 2,600 cached events, on the event loop).
+
+    THE SAME ANSWER, BY CONSTRUCTION: the cache is only written by
+    FeedCache.apply on this event loop, so with no await between building
+    the index and the last `register` of the batch the cache cannot change
+    under it, and `match_event(index=...)` answers exactly what the scan
+    answers. A caller that awaits inside its batch must not reuse it."""
+    if ACTIVE is None:
+        return None
+    try:
+        from . import pinnapi_primary as P
+        return P.fixture_index(ACTIVE.cache)
+    except Exception:                                           # noqa: BLE001
+        return None
+
+
+#: (RC6) a batch whose cache holds at least this many names not yet folded
+#: has them folded on the CPU lane before it builds its index on the loop
+WARM_COLD_NAMES_MIN = 200
+
+
+async def warm_names() -> int:
+    """Fold the active cache's not-yet-folded participant names on the API's
+    CPU lane (cpu_lane), BEFORE a batch builds its `batch_index` on the loop;
+    returns how many were folded (0: none cold enough to bother, or no
+    scheduler here). Awaited before the batch, never inside it.
+
+    WHY (RC6, the responsiveness harness). `fixture_index` folds and
+    canonicalises both names of every cached fixture; the memos make every
+    later batch a lookup, but the FIRST batch after a boot -- or after a
+    snapshot of fixtures never seen -- folds them all on the loop: ~0.1 s
+    for 2,600 events and the absence index on a quiet local core (LOCAL
+    BENCHMARK ONLY), 0.5-0.66 s holds in the harness at its load. Deploys
+    are when RC5's health-check restarts came (loop_watchdog). The answers
+    are the memos' own whichever thread fills them."""
+    if ACTIVE is None:
+        return 0
+    try:
+        from . import pinnapi_primary as P
+        pairs = P.cold_names(ACTIVE.cache)
+    except Exception:                                           # noqa: BLE001
+        return 0
+    if len(pairs) < WARM_COLD_NAMES_MIN:
+        return 0
+    try:
+        from . import cpu_lane
+        return await cpu_lane.run(P.warm_names, pairs)
+    except Exception:                                           # noqa: BLE001
+        return 0
+
+
 def start(pool, *, cycle):
     global ACTIVE
     # Independent rollout switch. Requires SQL in the delivery package first.
