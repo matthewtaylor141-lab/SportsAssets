@@ -189,7 +189,7 @@ class TestASaturatedPoolIsNeverQueued:
 
 # ── the real database, behind a proxy we can close or black-hole ─────────
 
-DSN = os.environ.get("DATABASE_URL", "")
+DSN = os.environ.get("RN1X_TEST_DSN", "") or os.environ.get("DATABASE_URL", "")
 needs_pg = pytest.mark.skipif(not DSN.startswith("postgres"),
                               reason="needs DATABASE_URL (a real Postgres)")
 

@@ -61,3 +61,26 @@ def test_every_no_default_test_database_variable_is_set_by_both_gates():
         env = _suite_env(wf)
         missing = sorted(v for v in needed if "%s: ${{ env.%s }}" % (v, dsn) not in env)
         assert not missing, (name, missing)
+
+
+#: a module-level DSN taken from DATABASE_URL alone (no RN1X_TEST_DSN):
+#: neither required gate sets DATABASE_URL in its suite step (only for the
+#: migration runner), so such a module skipped in every gate. capital-
+#: critical 37927450586 on 5d83e0de: test_rc6_api_responsive_offloop::
+#: test_the_registry_read_leaves_the_stored_records_behind SKIPPED, a
+#: capital-critical violation; the healthz and harness modules likewise.
+DATABASE_URL_ONLY = re.compile(
+    r"""^\w*DSN\w*\s*=\s*\(?\s*os\.environ\.get\(\s*["']DATABASE_URL["']""",
+    re.M)
+
+
+def test_no_test_module_takes_its_database_from_database_url_alone():
+    bad = []
+    for f in TESTS.rglob("*.py"):
+        if f.resolve() == Path(__file__).resolve():
+            continue
+        for m in DATABASE_URL_ONLY.finditer(f.read_text(encoding="utf-8")):
+            line = m.string[m.start():m.string.find("\n", m.start())]
+            if "RN1X_TEST_DSN" not in line:
+                bad.append("%s: %s" % (f.name, line.strip()))
+    assert not bad, bad

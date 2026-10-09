@@ -271,7 +271,7 @@ def test_a_mismatch_still_names_the_changed_records_from_the_registry():
     assert conn2.registry_reads == 0
 
 
-DSN = os.environ.get("DATABASE_URL", "")
+DSN = os.environ.get("RN1X_TEST_DSN", "") or os.environ.get("DATABASE_URL", "")
 needs_pg = pytest.mark.skipif(not DSN.startswith("postgres"),
                               reason="needs DATABASE_URL (a real Postgres)")
 

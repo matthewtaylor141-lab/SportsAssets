@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 BACKEND = Path(__file__).resolve().parents[1]
-DSN = os.environ.get("DATABASE_URL", "")
+DSN = os.environ.get("RN1X_TEST_DSN", "") or os.environ.get("DATABASE_URL", "")
 needs_pg = pytest.mark.skipif(not DSN.startswith("postgres"),
                               reason="needs DATABASE_URL (a real Postgres)")
 
@@ -127,7 +127,9 @@ def test_this_tree_passes_the_harness():
              "--phase-a", "10", "--phase-b", "8", "--phase-c", "8",
              "--json", str(out)],
             cwd=str(BACKEND), capture_output=True, text=True, timeout=420,
-            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1",
+                     DATABASE_URL=DSN))
+        assert out.exists(), (proc.returncode, proc.stderr[-3000:])
         report = json.loads(out.read_text())
     finally:
         if out.exists():
