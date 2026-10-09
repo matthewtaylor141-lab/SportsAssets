@@ -30,7 +30,8 @@
 // The ask is checked separately: the API carries it, and whether the page
 // shows it is recorded, not assumed.
 'use strict';
-const { chromium } = require('playwright');
+const pw = require('playwright');
+const H = require('./harness_env');
 const fs = require('fs');
 const path = require('path');
 
@@ -121,7 +122,8 @@ const motionKeys = c => [c.bid, c.target, c.pnl, c.strip, (c.score_numbers || []
 
 (async () => {
   fs.mkdirSync(path.join(OUT, 'trader'), { recursive: true });
-  const browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM || undefined, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+  const launched = await H.launch(pw);
+  const browser = launched.browser;
   const results = [];
   for (const [dev, d] of Object.entries(DEVICES)) {
     const ctx = await browser.newContext(Object.assign({}, d));
@@ -133,7 +135,7 @@ const motionKeys = c => [c.bid, c.target, c.pnl, c.strip, (c.score_numbers || []
       // moment of answering, so the page's own 15 s staleness rule does not
       // (correctly) declare the feed stale while the data is held still
       if (frozenBody && new URL(req.url()).pathname === API) { frozenServed++; const b = JSON.parse(frozenBody); b.snapshot_at = Date.now() / 1000; return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(b) }); }
-      return route.continue();
+      return H.continueRead(route, BASE);
     });
     const page = await ctx.newPage();
     page.on('pageerror', e => errors.push('pageerror: ' + String(e).slice(0, 200)));
@@ -249,7 +251,7 @@ const motionKeys = c => [c.bid, c.target, c.pnl, c.strip, (c.score_numbers || []
     await ctx.close();
   }
   await browser.close();
-  fs.writeFileSync(path.join(OUT, 'trader_accept.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(), results }, null, 1));
+  fs.writeFileSync(path.join(OUT, 'trader_accept.json'), JSON.stringify(Object.assign({ base: BASE, at: new Date().toISOString() }, H.describe(BASE, launched), { results }), null, 1));
   for (const r of results) {
     const a = r.api || {}, p = r.page || {}, F = r.fidelity || {};
     console.log(`TRADER ${r.device.padEnd(17)} ${r.verdict} api=${a.total_position_count}/${a.returned} orders=${a.standing_orders} games=${a.with_current_game} | page cards=${p.cards} wall=${p.wall_count} orders=${p.order_count} | missing=${(F.missing_cards || []).length} bid!=${(F.bid_mismatch || []).length} tgt!=${(F.target_mismatch || []).length} pnl!=${(F.pnl_mismatch || []).length} strip!=${(F.strip_mismatch || []).length} ask=${F.ask_shown}/${F.ask_in_api} moved=${(r.moved_while_frozen || []).length} focus=${r.focus ? r.focus.checked : 0} ov=${r.orders_view ? r.orders_view.rows + '/' + r.orders_view.api_standing : 'none'} imgs=${JSON.stringify((r.images || {}).hosts)} | ${JSON.stringify(r.failures || [])}`);

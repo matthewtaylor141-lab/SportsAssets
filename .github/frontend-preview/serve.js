@@ -10,8 +10,9 @@
 //   * the read-role X-Admin-Token is added HERE, server side. The browser
 //     never sees it: it is not in the page, a URL, a cookie or a response,
 //     and Set-Cookie from the API is dropped.
-// Every proxied call is counted by method/status and written to
-// <out>/proxy.json on exit (SIGTERM) and on GET /__preview/stats.
+// Every proxied call is counted by method/status, and every failed one is
+// recorded (time, path, status or error, latency), in <out>/proxy.json on
+// exit (SIGTERM) and on GET /__preview/stats.
 'use strict';
 const http = require('http');
 const https = require('https');
@@ -53,7 +54,20 @@ function match(pattern, p) {
 }
 
 const stats = { started_at: new Date().toISOString(), token_supplied: !!TOKEN,
-                rewrites: 0, static_404: 0, api: {}, refused_non_get: 0 };
+                rewrites: 0, static_404: 0, api: {}, refused_non_get: 0,
+                // every proxied read that did not answer 2xx/3xx: when, which
+                // path (no query string: it carries no credential, but stays
+                // out of the record anyway), what came back, and how long it
+                // took. Bounded; `failures_total` counts them all.
+                failures: [], failures_total: 0 };
+const MAX_FAILURES = 300;
+function failure(req, pathname, t0, what) {
+  stats.failures_total++;
+  if (stats.failures.length < MAX_FAILURES) {
+    stats.failures.push(Object.assign({ at: new Date().toISOString(), method: req.method, path: pathname,
+                                        ms: Date.now() - t0 }, what));
+  }
+}
 function dump() {
   if (!OUT) return;
   fs.mkdirSync(OUT, { recursive: true });
@@ -83,16 +97,22 @@ function proxy(req, res, target) {
   const headers = { accept: req.headers.accept || 'application/json',
                     'user-agent': 'bettor-frontend-preview' };
   if (TOKEN) headers['x-admin-token'] = TOKEN;
+  const t0 = Date.now();
   const up = https.request({ method: req.method, hostname: u.hostname, path: u.pathname + u.search,
                              headers, timeout: 90000 }, (r) => {
     key(req.method + ' ' + r.statusCode);
+    if (r.statusCode >= 400) failure(req, u.pathname, t0, { status: r.statusCode });
     const h = Object.assign({}, r.headers);
     delete h['set-cookie'];
     res.writeHead(r.statusCode, h);
     r.pipe(res);
   });
   up.on('timeout', () => up.destroy(new Error('timeout')));
-  up.on('error', (e) => { key(req.method + ' upstream-error'); if (!res.headersSent) res.writeHead(502); res.end(String(e.message || e)); });
+  up.on('error', (e) => {
+    key(req.method + ' upstream-error');
+    failure(req, u.pathname, t0, { status: 'upstream-error', error: String(e.code || e.message || e).slice(0, 120) });
+    if (!res.headersSent) res.writeHead(502); res.end(String(e.message || e));
+  });
   up.end();
 }
 

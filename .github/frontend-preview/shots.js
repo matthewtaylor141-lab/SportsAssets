@@ -12,7 +12,8 @@
 // console errors and API statuses. Every non-GET is aborted in the browser
 // as well as refused by the server. Screenshots go to <out>/shots/.
 'use strict';
-const { chromium } = require('playwright');
+const pw = require('playwright');
+const H = require('./harness_env');
 const fs = require('fs');
 const path = require('path');
 
@@ -139,7 +140,8 @@ async function measure(page, touch) {
 
 (async () => {
   fs.mkdirSync(path.join(OUT, 'shots'), { recursive: true });
-  const browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM || undefined, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
+  const launched = await H.launch(pw);
+  const browser = launched.browser;
   const records = [];
   for (const [dev, pg, motion] of VIEWS) {
     const d = DEVICES[dev];
@@ -148,11 +150,13 @@ async function measure(page, touch) {
     await ctx.route('**/*', route => {
       const m = route.request().method();
       if (m !== 'GET' && m !== 'HEAD') { aborted++; return route.abort(); }
-      return route.continue();
+      return H.continueRead(route, BASE);
     });
     const page = await ctx.newPage();
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
     page.on('pageerror', e => errors.push('pageerror: ' + String(e).slice(0, 200)));
+    // a read that never got an answer is counted too, never dropped
+    page.on('requestfailed', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' failed'; api[k] = (api[k] || 0) + 1; } });
     page.on('response', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' ' + r.status(); api[k] = (api[k] || 0) + 1; } });
     let status = null;
     // COMMAND polls its feeds, so 'networkidle' may never come: wait for the
@@ -186,6 +190,6 @@ async function measure(page, touch) {
     await ctx.close();
   }
   await browser.close();
-  fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(), records }, null, 1));
+  fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify(Object.assign({ base: BASE, at: new Date().toISOString() }, H.describe(BASE, launched), { records }), null, 1));
   for (const r of records) console.log(`${r.view.padEnd(34)} HTTP ${r.status} dcl=${r.dom_content_loaded_ms} fps=${r.fps_4s} lt=${r.long_tasks_4s}/${r.longest_task_ms}ms in=${r.signed_in} ovf=${r.overflow_px} gl=${r.webgl_canvases}/${r.largest_webgl_share} bars=${r.fixed_bars} ovl=${(r.fixed_overlaps || []).length} bg=${(r.background_layers || []).map(l => l.id + ':' + l.beneath.length).join(',') || 0} t<44=${r.touch_targets_under_44} PAPER=${r.paper_mentions} SHADOW=${r.shadow_mentions} cur=${JSON.stringify(r.current_workspace)} err=${r.console_errors} sus=${JSON.stringify(r.suspect_words)}`);
 })();

@@ -31,6 +31,18 @@ on:
         required: false
         type: string
         default: ""
+      host:
+        description: "preview = build target_ref and serve it locally (API reads proxied to production); production = the deployed site https://command.bettortoken.com itself (target_ref must equal its build.json sha)"
+        required: false
+        type: choice
+        options: [preview, production]
+        default: preview
+      engine:
+        description: "browser engine: chromium (default) or webkit; phones/tablets are emulated in it either way, never physical devices"
+        required: false
+        type: choice
+        options: [chromium, webkit]
+        default: chromium
 
 permissions:
   contents: read
@@ -58,37 +70,65 @@ jobs:
         with:
           node-version: "22"
       - name: Build the target frontend (as Netlify does)
+        if: inputs.host != 'production'
         working-directory: target/frontend
         run: |
           npm ci --no-audit --no-fund
           npm run build
           echo "target $(git -C .. rev-parse HEAD)"
           cat dist/command/build.json || true
-      - name: Playwright (Chromium)
+      - name: Playwright (${{ inputs.engine }})
+        env:
+          ENGINE: ${{ inputs.engine }}
         run: |
+          case "$ENGINE" in chromium|webkit) ;; *) echo "bad engine"; exit 1 ;; esac
           mkdir -p "$RUNNER_TEMP/pw" && cd "$RUNNER_TEMP/pw"
           npm init -y >/dev/null 2>&1 && npm install --no-audit --no-fund playwright@1.56.1 >/dev/null 2>&1
-          npx playwright install --with-deps chromium >/dev/null 2>&1
-      - name: Serve and capture the device matrix (read only)
+          npx playwright install --with-deps "$ENGINE" >/dev/null 2>&1
+      - name: Serve (or reach) and capture the device matrix (read only)
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          HOST_MODE: ${{ inputs.host }}
+          PW_ENGINE: ${{ inputs.engine }}
         run: |
           [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
           mkdir -p out
           git -C target rev-parse HEAD > out/target_sha.txt
-          cp target/frontend/dist/command/build.json out/build.json 2>/dev/null || true
-          node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 out &
-          SERVER=$!
-          for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/shots.js http://127.0.0.1:8787 out
-          # Trader device acceptance: the rendered page against the API's own
-          # snapshot on every device, then a frozen phase in which nothing may
-          # move (out/trader_accept.json + out/trader/*.png)
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/trader_accept.js http://127.0.0.1:8787 out \
-            || echo "trader acceptance exited non-zero (recorded; the scorecard reads its JSON)"
-          curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
-          kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
-          echo "== proxy =="; cat out/proxy.json
+          if [ "$HOST_MODE" = "production" ]; then
+            # THE DEPLOYED SITE ITSELF: what Netlify serves now, checked
+            # against the ref asked for; nothing is built or served here, and
+            # the read credential is added by the harness at the browser's
+            # request layer (harness_env.js), GET/HEAD /api/command/* only
+            BASE=https://command.bettortoken.com
+            curl -sS --max-time 30 "$BASE/build.json" -o out/build.json
+            LIVE=$(python3 -c "import json;print(json.load(open('out/build.json'))['sha'])")
+            WANT=$(cat out/target_sha.txt)
+            echo "{\"mode\": \"PRODUCTION_HOST\", \"host\": \"$BASE\", \"live_build_sha\": \"$LIVE\", \"target_sha\": \"$WANT\", \"match\": $([ "$LIVE" = "$WANT" ] && echo true || echo false)}" > out/run_mode.json
+            cat out/run_mode.json
+            [ "$LIVE" = "$WANT" ] || echo "PRODUCTION_BUILD_DIFFERS_FROM_TARGET (recorded in run_mode.json)"
+            export PROD_READ_TOKEN="$ADMIN_TOKEN"
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/shots.js "$BASE" out
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/trader_accept.js "$BASE" out \
+              || echo "trader acceptance exited non-zero (recorded; the scorecard reads its JSON)"
+            unset PROD_READ_TOKEN
+          else
+            echo '{"mode": "PREVIEW_BUILD", "host": "http://127.0.0.1:8787"}' > out/run_mode.json
+            cp target/frontend/dist/command/build.json out/build.json 2>/dev/null || true
+            node harness/.github/frontend-preview/serve.js target/frontend/dist target/netlify.toml 8787 out &
+            SERVER=$!
+            for i in $(seq 1 30); do curl -s -o /dev/null http://127.0.0.1:8787/__preview/stats && break; sleep 1; done
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/shots.js http://127.0.0.1:8787 out
+            # Trader device acceptance: the rendered page against the API's own
+            # snapshot on every device, then a frozen phase in which nothing may
+            # move (out/trader_accept.json + out/trader/*.png)
+            NODE_PATH="$RUNNER_TEMP/pw/node_modules" node harness/.github/frontend-preview/trader_accept.js http://127.0.0.1:8787 out \
+              || echo "trader acceptance exited non-zero (recorded; the scorecard reads its JSON)"
+            curl -s http://127.0.0.1:8787/__preview/stats > /dev/null
+            kill -TERM $SERVER; wait $SERVER 2>/dev/null || true
+            echo "== proxy =="; cat out/proxy.json
+          fi
+          echo "== trader acceptance verdicts =="
+          python3 -c "import json;d=json.load(open('out/trader_accept.json'));print([(r.get('device'),r.get('verdict')) for r in d.get('results',[])])" || true
           # the token must never reach the artifact: name any file that holds
           # it (never its content), keep only what is clean, and fail the job
           # (a token too short to be distinctive cannot be scanned for: it
