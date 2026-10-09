@@ -1088,8 +1088,10 @@ async def labelled(conn, *, after=None, through=None, outcomes_through=None,
     # without bound; Render restarted the API twice that day for an
     # unanswered /healthz. INFERRED FROM TIMING, NOT A STACK: the watchdog
     # now names the holder in the log (loop_watchdog). The rows are parsed
-    # in a worker thread; the result is the same lists in the same order.
-    return await asyncio.to_thread(labelled_rows, out, rows)
+    # in a worker thread (the API's CPU lane, cpu_lane); the result is the
+    # same lists in the same order.
+    from . import cpu_lane as _cpu
+    return await _cpu.run(labelled_rows, out, rows)
 
 
 def labelled_rows(out: dict, rows) -> dict:
@@ -1243,8 +1245,10 @@ async def labelled_conditional(conn, *, after=None, through=None,
     # OFF THE EVENT LOOP (RC6, see `labelled`): one payout-class partition,
     # one structure parse and one feature sha per labelled observation --
     # about 70 us a row on a quiet core (LOCAL BENCHMARK ONLY, synthetic
-    # rows: 0.70 s at 10,000), all of it on the API's loop before.
-    return await asyncio.to_thread(conditional_rows, out, lab, rows, keys)
+    # rows: 0.70 s at 10,000), all of it on the API's loop before. On the
+    # API's CPU lane (cpu_lane).
+    from . import cpu_lane as _cpu
+    return await _cpu.run(conditional_rows, out, lab, rows, keys)
 
 
 def conditional_rows(out: dict, lab: dict, rows, keys) -> dict:

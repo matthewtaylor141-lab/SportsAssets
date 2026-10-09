@@ -623,6 +623,34 @@ LABEL_SQL = """
 """
 
 
+def _label_rows(out: dict, got) -> dict:
+    """PURE (runs in a worker thread): append each fetched label row to the
+    column lists of `out`, in the rows' order. The parse labelled_observations
+    did inline on the event loop, verbatim."""
+    for r in got:
+        out["rows"].append(_j(r["features"]) or {})
+        out["labels"].append(float(r["outcome"]))
+        out["decision_ids"].append(r["observation_id"])
+        out["groups"].append(r["observation_id"])
+        out["fixtures"].append(r["fixture"])
+        out["decided_at"].append(float(r["decided_epoch"]))
+        out["feature_shas"].append(r["feature_sha"])
+        out["outcome_available_at"].append(float(r["outcome_epoch"]))
+        out["leg_outcomes"].append([{
+            "valuation_id": int(r["valuation_id"]),
+            "outcome": int(r["outcome"]),
+            "outcome_basis": r["outcome_basis"],
+            "read_at": round(float(r["outcome_epoch"]), 6)}])
+        out["pushes"].append(False)
+        out["outcome_versions"].append(None)
+        out["pinnacle_p"].append(_f(r["pinnacle_p"]))
+        out["price_basis"].append(r["price_basis"])
+        out["cohorts"].append(r["cohort"])
+        out["evidence_classes"].append(r["evidence_class"])
+        out["recorded_at"].append(float(r["recorded_epoch"]))
+    return out
+
+
 async def labelled_observations(conn, *, after=None, through=None,
                                 outcomes_through=None, decision_ids=None,
                                 cohorts=None) -> dict:
@@ -664,27 +692,17 @@ async def labelled_observations(conn, *, after=None, through=None,
     except Exception as exc:                                   # noqa: BLE001
         return dict(out, ok=False, refusal="THE_LABELS_COULD_NOT_BE_READ",
                     error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
-    for r in got:
-        out["rows"].append(_j(r["features"]) or {})
-        out["labels"].append(float(r["outcome"]))
-        out["decision_ids"].append(r["observation_id"])
-        out["groups"].append(r["observation_id"])
-        out["fixtures"].append(r["fixture"])
-        out["decided_at"].append(float(r["decided_epoch"]))
-        out["feature_shas"].append(r["feature_sha"])
-        out["outcome_available_at"].append(float(r["outcome_epoch"]))
-        out["leg_outcomes"].append([{
-            "valuation_id": int(r["valuation_id"]),
-            "outcome": int(r["outcome"]),
-            "outcome_basis": r["outcome_basis"],
-            "read_at": round(float(r["outcome_epoch"]), 6)}])
-        out["pushes"].append(False)
-        out["outcome_versions"].append(None)
-        out["pinnacle_p"].append(_f(r["pinnacle_p"]))
-        out["price_basis"].append(r["price_basis"])
-        out["cohorts"].append(r["cohort"])
-        out["evidence_classes"].append(r["evidence_class"])
-        out["recorded_at"].append(float(r["recorded_epoch"]))
+    # THE ROWS ARE PARSED IN A WORKER THREAD, OFF THE API EVENT LOOP (RC6).
+    # Production 2026-10-09 (the loop watchdog's persisted ring, research-sql
+    # rc6_api-responsive_loop_stalls.sql): four of twenty API loop stalls of
+    # 2.3-2.5 s were the paper session's Derek context verifying the research
+    # model's provenance -- this read and the re-hash after it -- on the loop
+    # (paper_derek._context -> research_model -> verify_provenance). The read
+    # stays on the loop (asyncpg); the per-row feature parse is the same code,
+    # moved into `_label_rows`, in the rows' own order, on the API's CPU
+    # lane (one worker thread for every such job: cpu_lane).
+    from .. import cpu_lane as _cpu
+    await _cpu.run(_label_rows, out, got)
     out["n_events"] = len({str(f) for f in out["fixtures"]})
     return dict(out, ok=True, refusal=None, n=len(out["labels"]),
                 target=FM.TARGET_ENTRY_PAYOUT,

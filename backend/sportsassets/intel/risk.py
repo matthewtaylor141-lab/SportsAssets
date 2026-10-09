@@ -32,8 +32,6 @@ contract has no paper settlement.
 """
 from __future__ import annotations
 
-import asyncio
-
 from . import common as C
 
 VERSION = "INTEL_RISK_V1"
@@ -371,8 +369,8 @@ async def _enrich(conn, positions: list, *, now) -> None:
                 vids[r["group_id"]] = int(r["valuation_id"])
     vals = await R.valuations_by_id(conn, vids.values())
     # OFF THE LOOP (RC6): one classification per position, pure
-    await asyncio.to_thread(classify_all, positions, now=now, pm=pm,
-                            vids=vids, vals=vals)
+    await C.offload(classify_all, positions, now=now, pm=pm, vids=vids,
+                    vals=vals)
 
 
 def classify_all(positions: list, *, now, pm: dict, vids: dict,
@@ -393,7 +391,7 @@ def classify_all(positions: list, *, now, pm: dict, vids: dict,
 # API's event loop, inside the intel cycle that 19 of 24 times on
 # 2026-10-08 ended 0-12 s after a >= 2 s loop stall record (see
 # calibration.load_records). The reads stay on the loop; everything after
-# them is pure and runs in asyncio.to_thread, exactly as before.
+# them is pure and runs off the loop (common.offload: the API's CPU lane).
 
 def paper_equity(snaps, *, now) -> dict:
     """The paper book's equity risk from its snapshot rows. PURE."""
@@ -430,8 +428,8 @@ async def paper_report(conn, *, now, account_id=C.PAPER_ACCOUNT,
         PAPER_FILLS_SQL, account_id, float(now) - days * 86400.0,
         R.MAX_ROWS)]
     setts = await R.latest_settlements(conn, account_id=account_id)
-    pos = await asyncio.to_thread(aggregate_paper, fills, setts,
-                                  account_id=account_id)
+    pos = await C.offload(aggregate_paper, fills, setts,
+                          account_id=account_id)
     await _enrich(conn, pos, now=now)
     books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
                                         if p["open_qty"] > OPEN_EPS])
@@ -440,9 +438,9 @@ async def paper_report(conn, *, now, account_id=C.PAPER_ACCOUNT,
         "  FROM paper_equity_snapshots WHERE account_id = $1 "
         "   AND at >= to_timestamp($2) ORDER BY at LIMIT $3",
         account_id, float(now) - 60 * 86400.0, R.MAX_ROWS)
-    eq = await asyncio.to_thread(paper_equity, snaps, now=now)
-    return await asyncio.to_thread(report, pos, book="PAPER", now=now,
-                                   books=books, equity=eq)
+    eq = await C.offload(paper_equity, snaps, now=now)
+    return await C.offload(report, pos, book="PAPER", now=now, books=books,
+                           equity=eq)
 
 
 async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
@@ -455,7 +453,7 @@ async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
     settled = {r["us_market_slug"] for r in await conn.fetch(
         "SELECT DISTINCT us_market_slug FROM paper_settlements "
         " WHERE us_market_slug = ANY($1::text[])", slugs)} if slugs else set()
-    pos = await asyncio.to_thread(aggregate_actual, fills, settled)
+    pos = await C.offload(aggregate_actual, fills, settled)
     await _enrich(conn, pos, now=now)
     books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
                                         if p["open_qty"] > OPEN_EPS])
@@ -463,6 +461,6 @@ async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
         "SELECT extract(epoch FROM at)::float8 AS at, balances "
         "  FROM execmirror_snapshots WHERE at >= to_timestamp($1) "
         " ORDER BY at LIMIT $2", float(now) - 60 * 86400.0, R.MAX_ROWS)
-    eq = await asyncio.to_thread(mirror_equity, snaps, now=now)
-    return await asyncio.to_thread(report, pos, book="ACTUAL", now=now,
-                                   books=books, equity=eq)
+    eq = await C.offload(mirror_equity, snaps, now=now)
+    return await C.offload(report, pos, book="ACTUAL", now=now, books=books,
+                           equity=eq)

@@ -41,7 +41,6 @@ strictly AFTER the overlay was frozen.
 """
 from __future__ import annotations
 
-import asyncio
 import math
 
 from .. import bettor_source_calibration as SC
@@ -611,9 +610,10 @@ async def load_records(conn, *, now, days=180.0, account_id=C.PAPER_ACCOUNT,
     # 2026-10-08 completed 0-12 s after a >= 2 s loop stall record
     # (render-ops logs, 'loop stall' / 'intel shadow cycle'), and Render
     # restarted the API twice for unanswered /healthz. Pure over what was
-    # read above, so the loop keeps serving while it runs.
-    return await asyncio.to_thread(build_records, vals, decs, pm, joined,
-                                   groups, setts)
+    # read above, so the loop keeps serving while it runs -- through
+    # common.offload (in the API process, its CPU lane: cpu_lane).
+    return await C.offload(build_records, vals, decs, pm, joined, groups,
+                           setts)
 
 
 def build_records(vals, decs, pm, joined, groups, setts) -> list:

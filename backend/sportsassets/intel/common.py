@@ -10,11 +10,21 @@ THE TWO RULES EVERY MODULE HERE FOLLOWS:
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import hashlib
 import json
 import math
 from zoneinfo import ZoneInfo
+
+#: (RC6 api-responsive) HOW A PURE INTEL COMPUTATION LEAVES THE EVENT LOOP:
+#: `await offload(fn, *args, **kwargs)`. asyncio.to_thread unless the hosting
+#: process installs its own -- the API's lifespan installs its CPU lane
+#: (api.app._install_cpu_lane -> cpu_lane.run: one worker thread for every
+#: pure job of the process, so the intel cycle's computations never compete
+#: with the loop and each other at once). Intel itself imports no executor:
+#: its import closure is pinned (tests/test_intel_is_shadow_only).
+offload = asyncio.to_thread
 
 LABEL = "SHADOW"
 AUTHORITY = "SHADOW_NO_AUTHORITY"

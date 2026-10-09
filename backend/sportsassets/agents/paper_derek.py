@@ -138,22 +138,90 @@ def holding_side_of(intent) -> str | None:
 # THE RESEARCH MODEL (paper only)
 # ═════════════════════════════════════════════════════════════════════
 
+#: (RC6) THE REGISTRY READ LEAVES THE TRAINING RECORDS IN THE REGISTRY.
+#:
+#: WHAT PRODUCTION SHOWED. research-sql rc6_api-responsive_workload_sizes.sql
+#: (2026-10-09 02:0xZ): the newest research model names 28,303 training
+#: decisions and its training_provenance is 16,095,248 characters, of which
+#: the stored `records` are 12,395,003. `SELECT *` brought it -- and up to
+#: nine older candidates -- to the API, and `_row` json-parsed the whole
+#: member on the event loop, at C speed, holding the interpreter lock: four
+#: of twenty API loop stalls of 2.3-2.5 s on 2026-10-09 were this context
+#: (paper_derek._context -> research_model -> verify_provenance). Nothing on
+#: this path reads the stored records except the mismatch diagnostic, which
+#: now reads them from the registry on that path alone
+#: (bettor_funded_model.verify_provenance). Every other member is read as
+#: before; the decision ids come as a text array in their stored order.
+#: verify_provenance still re-reads EVERY named record and re-hashes it --
+#: the check is unchanged, only the copy of the records it compares against
+#: is not shipped when it is not needed.
+REGISTRY_COLUMNS = (
+    "model_id", "model_key", "model_version", "state", "kernel", "estimator",
+    "features", "params", "fit_through", "train_rows", "train_base_rate",
+    "evaluation", "approved_at", "approved_by", "retired_at",
+    "retired_reason", "superseded_by", "created_at", "trained_through",
+    "outcomes_available_through")
+REGISTRY_SQL = (
+    "SELECT " + ", ".join(REGISTRY_COLUMNS) + ", "
+    "       CASE WHEN jsonb_typeof(training_provenance) = 'object' "
+    "            THEN training_provenance - 'records' - 'decision_ids' "
+    "            ELSE training_provenance END AS _provenance_slim, "
+    "       jsonb_typeof(training_provenance -> 'decision_ids') "
+    "         AS _provenance_ids_type, "
+    "       CASE WHEN jsonb_typeof(training_provenance -> 'decision_ids') "
+    "                 = 'array' "
+    "            THEN ARRAY(SELECT e FROM jsonb_array_elements_text("
+    "                 training_provenance -> 'decision_ids') "
+    "                 WITH ORDINALITY AS t(e, n) ORDER BY n) END "
+    "         AS _provenance_ids, "
+    "       CASE WHEN jsonb_typeof(training_provenance -> 'decision_ids') "
+    "                 NOT IN ('array') "
+    "            THEN training_provenance -> 'decision_ids' END "
+    "         AS _provenance_ids_raw "
+    "  FROM bettor_funded_models WHERE model_key = $1 "
+    "   AND state = $2 AND created_at <= to_timestamp($3) "
+    " ORDER BY created_at DESC LIMIT 10")
+
+
+def _registry_row(r) -> dict:
+    """A REGISTRY_SQL row as `bettor_funded_model._row` reads a full row:
+    the provenance without its stored records, its decision ids restored
+    in their stored order (or verbatim when not an array)."""
+    d = dict(r)
+    slim = d.pop("_provenance_slim", None)
+    ids_type = d.pop("_provenance_ids_type", None)
+    ids = d.pop("_provenance_ids", None)
+    raw = d.pop("_provenance_ids_raw", None)
+    if slim is None:
+        d["training_provenance"] = None
+        return d
+    prov = json.loads(slim) if isinstance(slim, str) else slim
+    if not isinstance(prov, dict):
+        d["training_provenance"] = prov          # not an object: verbatim
+        return d
+    prov = dict(prov)
+    if ids_type == "array":
+        prov["decision_ids"] = list(ids or [])
+    elif ids_type is not None:
+        prov["decision_ids"] = (json.loads(raw) if isinstance(raw, str)
+                                else raw)
+    d["training_provenance"] = prov
+    return d
+
+
 async def research_model(conn, *, at: float, verify: bool = True) -> dict:
     """THE NEWEST CANDIDATE RESEARCH MODEL registered before `at`, with its
     provenance verification. Never promotes; never raises."""
     from .. import bettor_funded_model as FM
     try:
-        rows = await conn.fetch(
-            "SELECT * FROM bettor_funded_models WHERE model_key = $1 "
-            "   AND state = $2 AND created_at <= to_timestamp($3) "
-            " ORDER BY created_at DESC LIMIT 10", FM.KEY_ENTRY_PAYOUT,
-            FM.STATE_CANDIDATE, float(at))
+        rows = await conn.fetch(REGISTRY_SQL, FM.KEY_ENTRY_PAYOUT,
+                                FM.STATE_CANDIDATE, float(at))
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "refusal": R_NO_RESEARCH_MODEL,
                 "why": "the model registry read failed: %s"
                        % type(exc).__name__}
     for r in rows:
-        m = FM._row(r)
+        m = FM._row(_registry_row(r))
         if FM.source_of(m) != FM.SOURCE_RESEARCH_OBSERVATIONS:
             continue
         out = {"ok": True, "refusal": None, "model": m,
