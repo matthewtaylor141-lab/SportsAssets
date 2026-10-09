@@ -343,7 +343,22 @@ def samples(prob: dict, registry: dict) -> dict:
                                  MIN_INDEPENDENT_EVENTS,
                              "source": "completion probability evidence "
                                        "(first ENTER per strategy x market x "
-                                       "side, event-clustered)"})
+                                       "side, event-clustered)",
+                             # WHICH partition, registered WHEN, over WHAT
+                             # (research_registry); absent = none registered
+                             "partition": ({
+                                 "study": registry.get("study"),
+                                 "plan_sha": registry.get("plan_sha"),
+                                 "registered_at": registry.get(
+                                     "registered_at"),
+                                 "counts": {k: len(v or ()) for k, v in
+                                            parts.items()},
+                                 "scope": ("the PAPER strategy-selection "
+                                           "study's events (paper_fills "
+                                           "fixtures), keyed-hash slices; "
+                                           "the probability evidence above "
+                                           "fits no parameter and reads no "
+                                           "holdout")} if parts else None)})
 
 
 def multiple_testing(registry: dict) -> dict:
@@ -358,12 +373,35 @@ def multiple_testing(registry: dict) -> dict:
     blockers = list(g["blockers"])
     if not pre:
         blockers.append("NO_PREREGISTERED_CANDIDATE_SET")
+    m = registry.get("measurement") or {}
+    if m.get("unregistered_tested"):
+        # a strategy in the measured data that the registration does not
+        # name is an unregistered candidate however the counts compare
+        blockers.append("UNREGISTERED_CANDIDATES_TESTED")
     return result("MULTIPLE_TESTING", GREEN if not blockers else RED,
                   blockers, {"candidates_tested": tested,
                              "preregistered": pre,
                              "selected_after_holdout": selected_after,
                              "pbo": "UNMEASURED" if pbo is None else pbo,
                              "dsr": "UNMEASURED" if dsr is None else dsr,
+                             # THE MEASURED VALUES and why one is missing
+                             # (research_registry.measure): a bool alone
+                             # could not say how far from acceptable
+                             "pbo_value": m.get("pbo"),
+                             "pbo_why": m.get("pbo_why"),
+                             "pbo_detail": m.get("pbo_detail"),
+                             "dsr_value": m.get("dsr"),
+                             "dsr_why": m.get("dsr_why"),
+                             "dsr_detail": m.get("dsr_detail"),
+                             "acceptance": m.get("acceptance"),
+                             "tested": m.get("tested"),
+                             "unregistered_tested": m.get(
+                                 "unregistered_tested"),
+                             "days": m.get("days"),
+                             "events": m.get("events"),
+                             "excluded": m.get("excluded"),
+                             "study": registry.get("study"),
+                             "plan_sha": registry.get("plan_sha"),
                              "champion": "CASH (no candidate beats it "
                                          "absolutely)"})
 
@@ -383,6 +421,15 @@ async def holdout_registry(conn) -> dict:
             out["preregistered"] = max(out["preregistered"],
                                        int(r["candidate_count"] or 0))
             out["partitions"] = d.get("partitions") or out["partitions"]
+            # the LATEST registration names the study the measurement runs
+            plan = d.get("plan") or {}
+            out["study"] = plan.get("study") or out.get("study")
+            out["plan_sha"] = d.get("plan_sha") or out.get("plan_sha")
+            out["registered_candidates"] = list(
+                plan.get("candidates") or out.get("registered_candidates")
+                or [])
+            out["registered_at"] = (r["at"].timestamp() if hasattr(
+                r["at"], "timestamp") else r["at"])
         elif r["kind"] == "HOLDOUT_OPEN":
             out["holdout_opens"] += 1
             opened_at = opened_at or r["at"]

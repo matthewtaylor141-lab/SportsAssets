@@ -1349,3 +1349,9 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 ev-audit) a de-vig price is finite and above 1.0 (NaN / inf refuse ODDS_NOT_A_PRICE); the PMUS schedule as published 2026-10-09 (Table Tennis 0.10 from 12:00 AM ET Oct 7, combo curve 0.06); capacity counts one opportunity once at sizes it evaluated, drops no size, proves capital only on eligible points
+tests/test_rc6_ev_audit_pricing.py
+# (RC6 ev-audit) probability labels are a position's latest settlement version; the twin's optimistic diagnosis is given the pre-activation book; re-evaluating one opportunity adds no capacity
+tests/test_rc6_ev_audit_evidence_db.py
+# (RC6 ev-audit) the research registry: one preregistration per plan sha before the interlock reads, keyed-hash event partition, holdout never read, PBO by CSCV and DSR (published example 0.9004), losing selections never accepted, unregistered strategies named
+tests/test_rc6_ev_audit_research_registry.py

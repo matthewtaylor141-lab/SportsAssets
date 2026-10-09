@@ -254,7 +254,8 @@ def ui_truth(metrics: dict, *, now: float) -> dict:
 SECTION_CONTROLS = {
     "venue_health": ("VENUE_HEALTH",),
     "truth_quorum": ("TRUTH_QUORUM",),
-    "attribution": ("PROFIT_BREAKERS", "ATTRIBUTION"),
+    # the attribution rows are also MULTIPLE_TESTING's PBO / DSR input
+    "attribution": ("PROFIT_BREAKERS", "ATTRIBUTION", "MULTIPLE_TESTING"),
     "holdout_registry": ("SAMPLE_INTEGRITY", "MULTIPLE_TESTING"),
     "capacity": ("CAPACITY",),
     "karen": ("KAREN_VALUE",),
@@ -331,6 +332,14 @@ async def evaluate(conn, *, now: float | None = None,
     controls["DIGITAL_TWIN"] = C.twin(comp.get("digital_twin") or {})
     reg = await sec.run("holdout_registry",
                         lambda: C.holdout_registry(conn), {})
+    # THE REGISTERED STUDY'S PBO / DSR over the attribution rows read above
+    # (pure; train + test events only, the holdout slice never read)
+    from . import research_registry as RREG
+    mt = RREG.measure(reg, attributed, fixtures)
+    reg = dict(reg, measurement=mt, pbo_ok=mt.get("pbo_ok"),
+               dsr_ok=mt.get("dsr_ok"),
+               candidates_tested=max(int(reg.get("candidates_tested") or 0),
+                                     int(mt.get("candidates_tested") or 0)))
     controls["SAMPLE_INTEGRITY"] = C.samples(comp.get("probability") or {},
                                              reg)
     controls["MULTIPLE_TESTING"] = C.multiple_testing(reg)
