@@ -24,11 +24,13 @@
 
    WHERE TOUCH IS EXPECTED: (pointer:coarse) -- phones and tablets, and the
    harness's touch devices (Chromium reports coarse when touch is emulated).
-   A mouse keeps the dense desktop sizes. The rules raise min-height /
-   min-width only, so a label never shrinks and PAPER / SHADOW badges keep
-   their own size; where a taller control would collide with something
-   positioned beneath it, that thing moves down by the same amount (the
-   comments name the arithmetic). Loaded last on Command, Floor and Trader. */
+   A mouse keeps the dense desktop sizes. The touch block raises min-height /
+   min-width, so a label never shrinks and PAPER / SHADOW badges keep their
+   own size; where a taller control would collide with something positioned
+   beneath it, that thing moves down by the same amount, and a scrolling bar
+   keeps its buttons whole (the comments name the arithmetic). Two sections
+   apply to every pointer: the Floor view bar / summary geometry and the
+   Command top bar on tablets. Loaded last on Command, Floor and Trader. */
 
 @media (pointer:coarse){
   /* COMMAND ---------------------------------------------------------------- */
