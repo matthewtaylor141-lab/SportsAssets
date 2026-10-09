@@ -478,10 +478,8 @@ async def load_and_detect(conn, *, now, cal_report=None, attributions=None,
             "   AND ($3::text IS NULL OR account_id = $3) "
             " ORDER BY coalesce(terminal_at, updated_at) DESC LIMIT $4",
             lo, hi, account_id, WINDOW_ROWS)]
-    import asyncio
-
-    out = await asyncio.to_thread(detect, obs, vrows, hb, orders,
-                                  cal_report, attributions or [], now=now)
+    out = await C.offload(detect, obs, vrows, hb, orders, cal_report,
+                          attributions or [], now=now)
     out["book_markets"] = ("PREFIX:%s" % slug_prefix if slugs is None
                            else len(slugs))
     out["window_rows_cap"] = WINDOW_ROWS

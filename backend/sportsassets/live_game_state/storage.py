@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .core import (Fixture, ScoreError, obj, epoch, league_of, digest, text,
-                   display, MAX_RECORD_BYTES, AUTHORITY)
+from .core import (Fixture, ScoreError, obj, epoch, league_of, digest, text, norm,
+                   display, MAX_RECORD_BYTES, AUTHORITY, LEAGUES, venue_league,
+                   ORIENTATION_VENUE, ORIENTATION_PROVIDER, MAX_EVENT_TEAM_TUPLES)
 
 LATEST_SQL = """
 SELECT venue,event_id,payload,issue FROM trader_display_score_latest
@@ -35,6 +36,81 @@ def object_value(v):
     return obj(v)
 
 
+VENUE = "POLYMARKET_US"
+
+
+def venue_participants(teams, tuples, *, start: float | None) -> dict | None:
+    """THE VENUE'S OWN TWO PARTICIPANTS of one event, from its us_premap team rows.
+
+    WHY (requirement register F3, research-sql runs 37880110851 and
+    37880299272). The adapter read premap keys home_team / away_team / league
+    / sport, which us_premap has never had: the collector that owns the table
+    (workers/premap._ensure_table) writes the venue team object of each side
+    -- team_id, team_name, team_safe_name, team_abbr, team_league -- plus the
+    market's game_start and sports_type. So every held market without a
+    fixture-metadata row refused CANONICAL_SCORE_FIXTURE_FIELDS_MISSING,
+    although every candidate event of the next 48 h in a score league names
+    exactly two venue team ids with one league code and one start, as does
+    every event a PAPER account has ever held.
+
+    `teams` is the event's DISTINCT team tuples (rows with a team_id), at most
+    MAX_EVENT_TEAM_TUPLES of them, and `tuples` how many there were. Returns
+    None when the event has no team row at all (the caller then refuses
+    CANONICAL_SCORE_FIXTURE_FIELDS_MISSING, as before); otherwise
+    {participants, code, families, start} or a NAMED refusal:
+
+      CANONICAL_VENUE_PARTICIPANTS_NOT_TWO      not exactly two team ids (a
+                                                futures board, a team-less
+                                                market), or more tuples than read
+      CANONICAL_VENUE_PARTICIPANT_NAME_UNPROVEN one team id under two names, or
+                                                a team id with no name at all
+      CANONICAL_VENUE_LEAGUE_NOT_ONE            the team rows do not state one
+                                                league code
+      CANONICAL_EVENT_START_NOT_ONE_INSTANT     the team rows do not state one
+                                                start, or not the held row's
+
+    Nothing is parsed from a title, slug or question, and nothing here says
+    which participant is home: the venue does not."""
+    if isinstance(teams, str):  # asyncpg hands jsonb over as text
+        try:
+            teams = json.loads(teams)
+        except ValueError:
+            teams = None
+    rows = [obj(t) for t in (teams if isinstance(teams, list) else [])]
+    if not rows and not tuples:
+        return None
+    if tuples > MAX_EVENT_TEAM_TUPLES or len(rows) != tuples:
+        raise ScoreError("CANONICAL_VENUE_PARTICIPANTS_NOT_TWO")
+    by_id: dict[str, list[dict]] = {}
+    for r in rows:
+        by_id.setdefault(text(r.get("team_id")), []).append(r)
+    if len(by_id) != 2 or "" in by_id:
+        raise ScoreError("CANONICAL_VENUE_PARTICIPANTS_NOT_TWO")
+    participants = []
+    for tid in sorted(by_id, key=lambda k: (len(k), k)):
+        named = {(text(r.get("team_name")), text(r.get("team_safe_name"))) for r in by_id[tid]}
+        if len(named) != 1:
+            raise ScoreError("CANONICAL_VENUE_PARTICIPANT_NAME_UNPROVEN")
+        [(name, safe)] = named
+        names = tuple(dict.fromkeys(n for n in (name, safe) if norm(n)))
+        if not names:
+            raise ScoreError("CANONICAL_VENUE_PARTICIPANT_NAME_UNPROVEN")
+        abbrs = {text(r.get("team_abbr")) for r in by_id[tid]}
+        participants.append({"team_id": tid, "names": names,
+                             "team_abbr": sorted(abbrs)[0] if len(abbrs) == 1 else None})
+    codes = {text(r.get("team_league")).lower() for r in rows}
+    if len(codes) != 1 or "" in codes:
+        raise ScoreError("CANONICAL_VENUE_LEAGUE_NOT_ONE")
+    starts = {epoch(r.get("game_start")) for r in rows}
+    if len(starts) != 1 or None in starts or (start is not None and starts != {start}):
+        raise ScoreError("CANONICAL_EVENT_START_NOT_ONE_INSTANT")
+    # a team row without a sportsMarketType states no family; it does not
+    # contradict one, and it cannot establish one either
+    families = sorted({f for r in rows if (f := text(r.get("sport_family")).lower())})
+    return {"participants": participants, "code": next(iter(codes)),
+            "families": families, "start": next(iter(starts))}
+
+
 def fixture_from_row(row: dict) -> Fixture:
     pm, fm = object_value(row.get("premap")), object_value(row.get("fixture_metadata"))
     event_id = text(pm.get("event_slug"), 250)
@@ -47,6 +123,29 @@ def fixture_from_row(row: dict) -> Fixture:
     league = next((v for k in (fm.get("competition"), pm.get("league"), pm.get("sport"))
                    if (v := league_of(k))), None)
     start = epoch(pm.get("game_start") or fm.get("scheduled_kickoff"))
+    orientation, home_names, away_names, venue_side = ORIENTATION_VENUE, (), (), None
+    if not home and not away:
+        # No row states home and away. The venue's own two team objects on the
+        # event's catalogue rows ARE the fixture's participants; which one is
+        # home is left to the score provider (core.ORIENTATION_PROVIDER).
+        try:
+            tuples = int(row.get("event_team_tuples") or 0)
+        except (TypeError, ValueError):
+            tuples = MAX_EVENT_TEAM_TUPLES + 1
+        venue_side = venue_participants(row.get("event_teams"), tuples, start=start)
+        if venue_side is not None:
+            p1, p2 = venue_side["participants"]
+            home, home_names = p1["names"][0], p1["names"][1:]
+            away, away_names = p2["names"][0], p2["names"][1:]
+            orientation = ORIENTATION_PROVIDER
+            start = venue_side["start"] if start is None else start
+            if not league:
+                league = venue_league(VENUE, venue_side["code"])
+                if not league:
+                    raise ScoreError("SCORE_LEAGUE_UNSUPPORTED")
+                # the venue's own sportsMarketType must be this league's sport
+                if venue_side["families"] != [LEAGUES[league][0]]:
+                    raise ScoreError("CANONICAL_VENUE_SPORT_FAMILY_MISMATCH")
     if not home or not away or not league or start is None:
         raise ScoreError("CANONICAL_SCORE_FIXTURE_FIELDS_MISSING")
     expected_key = "event:" + event_id
@@ -54,34 +153,68 @@ def fixture_from_row(row: dict) -> Fixture:
         raise ScoreError("CANONICAL_FIXTURE_JOIN_MISMATCH")
     if fm.get("orientation") and fm["orientation"] not in ("HOME_AWAY", "HOME_VS_AWAY", "home_away"):
         raise ScoreError("CANONICAL_HOME_AWAY_UNPROVEN")
-    ev = {"basis": "EXACT_VENUE_CATALOGUE_AND_FIXTURE_ROW", "event_id": event_id,
-          "market": row.get("us_market_slug"), "fixture_source": fm.get("source"),
-          "fixture_source_match_id": fm.get("source_match_id"),
-          "home": home, "away": away, "league": league, "scheduled_start": start}
+    if venue_side is None:
+        ev = {"basis": "EXACT_VENUE_CATALOGUE_AND_FIXTURE_ROW", "event_id": event_id,
+              "market": row.get("us_market_slug"), "fixture_source": fm.get("source"),
+              "fixture_source_match_id": fm.get("source_match_id"),
+              "home": home, "away": away, "league": league, "scheduled_start": start}
+    else:
+        ev = {"basis": "EXACT_VENUE_CATALOGUE_TEAM_ROWS", "event_id": event_id,
+              "market": row.get("us_market_slug"), "fixture_source": fm.get("source"),
+              "fixture_source_match_id": fm.get("source_match_id"),
+              "participants": venue_side["participants"], "orientation": orientation,
+              "venue_league_code": venue_side["code"], "league": league,
+              "scheduled_start": start}
     raw_meta = object_value(fm.get("raw"))
-    return Fixture("POLYMARKET_US", event_id, league, home, away, start, digest(ev),
-                   raw_meta.get("game_number") if isinstance(raw_meta.get("game_number"), int) else None)
+    return Fixture(VENUE, event_id, league, home, away, start, digest(ev),
+                   raw_meta.get("game_number") if isinstance(raw_meta.get("game_number"), int) else None,
+                   orientation=orientation, home_names=home_names, away_names=away_names)
 
 
 def fixture_query(canonical_sql: str) -> str:
+    # The event's team rows are read in ONE pass over us_premap for every held
+    # event at once (a semi-join on the held events), never one scan per market.
     return """
 WITH held AS (
 """ + canonical_sql + """
 ), markets AS (
  SELECT DISTINCT us_market_slug FROM held WHERE account_id=$1
+), joined AS (
+ SELECT p.us_market_slug,to_jsonb(pm) AS premap,to_jsonb(fm) AS fixture_metadata
+ FROM markets p
+ LEFT JOIN LATERAL (
+  SELECT u.* FROM us_premap u WHERE u.identifier=p.us_market_slug
+  AND u.market_slug=p.us_market_slug ORDER BY u.updated_at DESC,u.event_slug LIMIT 1
+ ) pm ON true
+ LEFT JOIN LATERAL (
+  SELECT m.* FROM venue_fixture_metadata m
+  WHERE m.venue IN ('PMUS','POLYMARKET_US') AND m.venue_fixture_key='event:'||pm.event_slug
+  ORDER BY m.retrieved_at DESC LIMIT 1
+ ) fm ON true
+ ORDER BY p.us_market_slug LIMIT 1001
+), team_rows AS (
+ SELECT DISTINCT u.event_slug,u.team_id,u.team_name,u.team_safe_name,u.team_abbr,
+        u.team_league,u.game_start,split_part(u.sports_type,'_',1) AS sport_family
+ FROM us_premap u
+ WHERE u.team_id IS NOT NULL
+   AND u.event_slug IN (SELECT j.premap->>'event_slug' FROM joined j)
+), ranked AS (
+ SELECT t.*,row_number() OVER (PARTITION BY t.event_slug ORDER BY t.team_id,t.team_name,
+        t.team_safe_name,t.team_abbr,t.team_league,t.game_start,t.sport_family) AS rk
+ FROM team_rows t
+), event_teams AS (
+ SELECT r.event_slug,count(*) AS tuples,
+        jsonb_agg(jsonb_build_object('team_id',r.team_id,'team_name',r.team_name,
+          'team_safe_name',r.team_safe_name,'team_abbr',r.team_abbr,'team_league',r.team_league,
+          'game_start',r.game_start,'sport_family',r.sport_family) ORDER BY r.rk)
+          FILTER (WHERE r.rk<=""" + str(MAX_EVENT_TEAM_TUPLES) + """) AS teams
+ FROM ranked r GROUP BY r.event_slug
 )
-SELECT p.us_market_slug,to_jsonb(pm) AS premap,to_jsonb(fm) AS fixture_metadata
-FROM markets p
-LEFT JOIN LATERAL (
- SELECT u.* FROM us_premap u WHERE u.identifier=p.us_market_slug
- AND u.market_slug=p.us_market_slug ORDER BY u.updated_at DESC,u.event_slug LIMIT 1
-) pm ON true
-LEFT JOIN LATERAL (
- SELECT m.* FROM venue_fixture_metadata m
- WHERE m.venue IN ('PMUS','POLYMARKET_US') AND m.venue_fixture_key='event:'||pm.event_slug
- ORDER BY m.retrieved_at DESC LIMIT 1
-) fm ON true
-ORDER BY p.us_market_slug LIMIT 1001
+SELECT j.us_market_slug,j.premap,j.fixture_metadata,et.teams AS event_teams,
+       coalesce(et.tuples,0) AS event_team_tuples
+FROM joined j
+LEFT JOIN event_teams et ON et.event_slug=j.premap->>'event_slug'
+ORDER BY j.us_market_slug
 """
 
 
@@ -124,9 +257,13 @@ class PostgresStore:
             except ScoreError as exc:
                 code = str(exc)
                 reasons[code] = reasons.get(code, 0)+1
-        return [f for f in fixtures.values() if f], {
+        established = [f for f in fixtures.values() if f]
+        by_orientation = {o: sum(f.orientation == o for f in established)
+                          for o in (ORIENTATION_VENUE, ORIENTATION_PROVIDER)}
+        return established, {
             "held_market_rows": min(len(rows), 1000), "truncated": len(rows) > 1000,
-            "established_fixtures": sum(f is not None for f in fixtures.values()),
+            "established_fixtures": len(established),
+            "established_by_orientation": by_orientation,
             "missing_by_reason": reasons,
             "scope": "CANONICAL_PAPER_HOLDINGS; NO TITLE-BASED IDENTITY INFERENCE"}
 

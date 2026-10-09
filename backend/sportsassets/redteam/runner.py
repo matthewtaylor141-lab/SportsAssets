@@ -5,8 +5,9 @@ then APPEND its receipts (migration 315, append-only): the readiness
 receipt, one control receipt per control (VENUE_HEALTH among them -- the
 two-leg sentinel reads it), one profit-breaker receipt per mechanism and
 one claim-exposure receipt per claim. A control / claim whose evidence is
-unchanged inside RECEIPT_MIN_GAP_S is not re-appended. It writes nothing
-else: no order, no authority, no PAPER row.
+unchanged inside RECEIPT_MIN_GAP_S is not re-appended. And, once per plan
+sha, the research study's PREREGISTER row (research_registry; RC6). It
+writes nothing else: no order, no authority, no PAPER row.
 
 Kill switch: RED_TEAM_RUNNER_ENABLED=0 (default on).
 """
@@ -152,13 +153,25 @@ def _num(v):
 
 async def pass_once(conn, *, now: float | None = None) -> dict:
     now = float(now if now is not None else time.time())
+    # THE STUDY'S PREREGISTRATION FIRST (research_registry): appended ONCE
+    # per plan sha, BEFORE the interlock reads anything, so the measurement
+    # never runs on an unregistered candidate set. Its own transaction: a
+    # refusal here is recorded and never costs the pass its receipts.
+    try:
+        from . import research_registry as RREG
+        async with conn.transaction():
+            prereg = await RREG.ensure_preregistered(
+                conn, implementation_sha=R.implementation_sha(), now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        prereg = {"status": "ERROR", "error": type(exc).__name__}
     async with conn.transaction(readonly=True):
         await conn.execute("SET LOCAL statement_timeout = 120000")
         res = await R.evaluate(conn, now=now)
     async with conn.transaction():
         wrote = await write_receipts(conn, res, now=now)
     out = {"status": res["status"], "blockers": res["blockers"],
-           "wrote": wrote, "sha": res["implementation_sha"]}
+           "wrote": wrote, "sha": res["implementation_sha"],
+           "preregistration": prereg}
     try:
         from .. import db as _db
         await _db.heartbeat(SERVICE, "ok", out, con=conn)

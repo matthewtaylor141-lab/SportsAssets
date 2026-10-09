@@ -975,10 +975,21 @@ def integrity_verdict(*, positions: list, packets: dict,
     positions = [p for p in positions if p["position_key"] not in excluded]
     n = len(positions)
     not_current = []
+    # EVERY INCOMPLETE POSITION WITH THE REASON IT IS INCOMPLETE NOW (RC6
+    # xavier-records): `packet_not_current` names only packets that were
+    # recorded complete; a packet recorded incomplete, or a position with no
+    # review at all, was a bare key in `packet_incomplete` with no reason on
+    # the gate's evidence. Record only: the verdict below is unchanged.
+    incomplete_why = []
 
     def _complete_now(p) -> bool:
         v = packets.get(p["group_id"])
         if not isinstance(v, dict):
+            if not v:
+                incomplete_why.append({
+                    "position_key": p["position_key"],
+                    "why": (PK_RECORDED_INCOMPLETE if v is False
+                            else PK_NO_REVIEW)})
             return bool(v)
         cur = packet_currency(
             v, now=now, last_fill_at=p.get("last_fill_at"),
@@ -988,6 +999,9 @@ def integrity_verdict(*, positions: list, packets: dict,
             # complete when reviewed, history now: never green
             not_current.append({"position_key": p["position_key"],
                                 "why": cur["why"]})
+        if not cur["current"]:
+            incomplete_why.append({"position_key": p["position_key"],
+                                   "why": cur["why"]})
         return cur["current"]
     incomplete = [p["position_key"] for p in positions
                   if not _complete_now(p)]
@@ -1008,11 +1022,18 @@ def integrity_verdict(*, positions: list, packets: dict,
     return {"open_positions": n,
             "rule": "STRICT_ANY_APPLICABLE_POSITION",
             "excluded_external_unavailable": excluded[:20],
+            "excluded_external_unavailable_count": len(excluded),
             "awaiting_first_management": awaiting[:20],
             "packet_incomplete_rate": pk_rate,
             "protection_failure_rate": pr_rate,
             "max_rate": MAX_STALE_MANAGEMENT_RATE,
             "packet_incomplete": incomplete[:20],
+            # the COUNTS, whole (the lists are bounded): of the applicable
+            # open positions, how many hold a packet complete NOW and how
+            # many do not -- each incomplete one with its reason
+            "packet_incomplete_count": len(incomplete),
+            "packet_complete_now_count": n - len(incomplete),
+            "packet_incomplete_why": incomplete_why[:20],
             "packet_not_current": not_current[:20],
             "packet_rule": PACKET_CURRENCY_RULE,
             "protection_not_valid": [{"position_key": k,

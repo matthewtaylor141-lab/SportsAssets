@@ -53,6 +53,28 @@ cancelled-or-void / partial):
 FEES: a Kalshi alias is a leg only with the published fee terms in force
 (kalshi_fees: the series / event multiplier); unknown terms drop it.
 
+(RC6) THE CROSS-MARKET PAIRS ARE RECORDED, NOT ONLY TALLIED. A pair of claim
+classes that complements exactly in ORDINARY completion but not in a
+cancelled / postponed state -- Kalshi NYY YES with PMUS's TB side, Kalshi
+NYY YES with Kalshi TB YES -- is precisely the cross-venue (or cross-market)
+arbitrage candidate; production RC5 tallied 28 such pairs a pass
+(settlement_pair_policy by_refusal) and recorded none, so the scan read
+"0 structures considered" while it priced them. Each such NEAR COMPLEMENT
+is now one REFUSED record (`near_records`): the policy's codes and
+guaranteed floor, every alias combination on DIFFERENT markets priced by
+the policy, and -- clearly labelled, never a verdict -- what the cheapest
+combination would cost and earn if each market's fair price were 0.50
+(`conditional_economics`: the engine's executable depth, per-venue fees,
+size). A near complement is never GUARANTEED_AFTER_COSTS: only an
+EXACT_COMPLEMENT payout table reaches the engine as a verdict. A pair that
+does not complement even in ordinary completion stays a tally (no
+structure exists). `records` keeps its meaning (complementary pairs).
+
+(RC6) THE VOID TERMS OF EVERY ALIAS (`alias_void_terms`): an alias's
+cancellation payout (its NEVER_COMPLETED token) and its postponement payout
+beyond every stated window, from its own parsed rules, counted by name --
+what completion's fail_closed reports for this scan.
+
 NO AUTHORITY: no order, cancel, credential or capital path; it imports the
 pure engine and the pure claim layer only.
 """
@@ -70,6 +92,67 @@ VERSION = "ADRIANA_CLAIMS_V1"
 AUTHORITY = dict(A.AUTHORITY)
 FP_SUBSTITUTE = Decimal("0.5")
 R_NOT_COMPLEMENT = "CLAIMS_NOT_COMPLEMENTARY"
+#: (RC6) a near complement whose aliases are all ineligible (no priced fee
+#: terms, an unknown state): named, never silently dropped
+R_NEAR_NO_ALIAS = "NEAR_COMPLEMENT_HAS_NO_EVALUABLE_ALIAS_COMBINATION"
+#: (RC6) why an alias's void terms are not established (the same names the
+#: recorded-books census uses: agents/adriana.R_VT_*)
+R_ALIAS_CANCELLATION_NOT_STATED = "VOID_TERMS_CANCELLATION_PAYOUT_NOT_STATED"
+R_ALIAS_POSTPONEMENT_NOT_STATED = "VOID_TERMS_POSTPONEMENT_PAYOUT_NOT_STATED"
+R_ALIAS_PAYOUT_NOT_FIXED = \
+    "VOID_TERMS_PAYOUT_RULE_IS_NOT_A_FIXED_OR_BOUNDED_PAYOUT"
+#: what the conditional economics of a near complement assume (a label on a
+#: REFUSED record, never a verdict)
+CONDITIONAL_LABEL = "CONDITIONAL_EACH_SEPARATE_MARKET_FAIR_PRICE_AT_0.50"
+
+
+def alias_void_terms(instruments, states) -> dict:
+    """THE VOID TERMS OF EVERY ALIAS READ. Pure. Established for an alias
+    when its own rules state the cancelled-game payout (NEVER_COMPLETED) and
+    the payout of a game completed beyond every stated postponement window,
+    each a fixed number or a fair price (bounded in [0, 1]); a stake back is
+    no fixed payout. {aliases, established, not_established{code: n},
+    rules{token kinds: n}}."""
+    beyond = [s for s in states if "@COMPLETED_AFTER_DELAY_OVER_" in s]
+    out = {"aliases": 0, "established": 0, "not_established": {},
+           "rules": {}}
+
+    def kind(tok):
+        t = str(tok)
+        return ("LAST_FAIR_PRICE" if "FP[" in t else
+                "STAKE_BACK" if t.startswith("SB[") else "FIXED:%s" % t)
+    for i in instruments:
+        v = i.vector or {}
+        out["aliases"] += 1
+        why = None
+        if v.get(CC.S_NEVER) is None:
+            why = R_ALIAS_CANCELLATION_NOT_STATED
+        elif any(v.get(s) is None for s in beyond):
+            why = R_ALIAS_POSTPONEMENT_NOT_STATED
+        elif any(str(v.get(s)).startswith("SB[")
+                 for s in [CC.S_NEVER] + beyond):
+            why = R_ALIAS_PAYOUT_NOT_FIXED
+        if why:
+            out["not_established"][why] = out["not_established"].get(
+                why, 0) + 1
+            continue
+        out["established"] += 1
+        k = "%s/%s" % (kind(v.get(CC.S_NEVER)),
+                       kind(v.get(beyond[0])) if beyond else "NO_BAND")
+        out["rules"][k] = out["rules"].get(k, 0) + 1
+    return out
+
+
+def merge_void_terms(parts) -> dict:
+    out = {"aliases": 0, "established": 0, "not_established": {},
+           "rules": {}}
+    for p in parts:
+        out["aliases"] += p.get("aliases", 0)
+        out["established"] += p.get("established", 0)
+        for k in ("not_established", "rules"):
+            for c, n in (p.get(k) or {}).items():
+                out[k][c] = out[k].get(c, 0) + n
+    return out
 
 
 def _aware(ts) -> datetime | None:
@@ -229,15 +312,20 @@ def _policy_refusal(fx: CC.Fixture, ia: CC.Instrument, ib: CC.Instrument,
 def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
                  max_age_s: float = A.DEFAULT_MAX_AGE_S,
                  max_skew_s: float = A.DEFAULT_MAX_SKEW_S,
-                 max_scan_qty: int = 2000) -> dict:
+                 max_scan_qty: int = 2000,
+                 near_records: bool = True) -> dict:
     """Every complementary claim pair of one fixture, evaluated. Returns
     {records, pairs_considered, pairs_not_complementary,
-    same_market_pairs_excluded, by_topology}.
+    same_market_pairs_excluded, by_topology, near_complement_pairs,
+    near_records}.
 
     Each complementary claim pair is evaluated over its alias combinations
     whose two legs are on DIFFERENT markets (a market's YES and NO are one
     pool and net: excluded, counted); the best guaranteed combination is
-    the record, else the best refusal."""
+    the record, else the best refusal. (RC6) Each NEAR complement (exact in
+    ordinary completion only) is one REFUSED record in `near_records`
+    (`near_record`), priced only when `near_records` (the shared workers'
+    digest passes False: it counts them, Adriana records them)."""
     states = built["states"]
     classes = built["classes"]
     mapping, names = adriana_states(states)
@@ -252,9 +340,10 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
     now_dt = _aware(now)
     out = {"records": [], "pairs_considered": 0,
            "pairs_not_complementary": 0, "same_market_pairs_excluded": 0,
-           "by_topology": {}}
+           "by_topology": {}, "near_records": [], "near_complement_pairs": 0}
     keys = sorted(classes)
     pairs = []
+    near = []
     family = str(fx.sport or "").lower() or None
     for fa, fb in combinations(keys, 2):
         ma, mb = classes[fa], classes[fb]
@@ -264,10 +353,14 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
             # PRICED EXPLICITLY, NOT ONLY COUNTED: what the pair pays in
             # each outcome class, a separate-market fair price at its worst
             # case, an unknown rule refused by name
-            _tally(out, SPP.evaluate_pair(policy_leg(ma[0]),
-                                          policy_leg(mb[0]), states,
-                                          sport_family=family), fa, fb,
-                   complementary=False)
+            pol0 = SPP.evaluate_pair(policy_leg(ma[0]), policy_leg(mb[0]),
+                                     states, sport_family=family)
+            _tally(out, pol0, fa, fb, complementary=False)
+            if ordinary_complement(pol0):
+                # (RC6) a complement in ordinary completion that differs in
+                # a cancelled / postponed state: the arbitrage candidate the
+                # policy refuses -- recorded, not only tallied
+                near.append((fa, fb, ma, mb))
             continue
         pairs.append((fa, fb, ma, mb))
     # ONE market's YES and NO net on the exchange (Kalshi rep 2026-10-07):
@@ -365,34 +458,159 @@ def scan_fixture(fx: CC.Fixture, built: dict, *, now: float,
         out["by_topology"][topology] = out["by_topology"].get(topology,
                                                               0) + 1
         out["records"].append(rec)
+    out["near_complement_pairs"] = len(near)
+    # (RC6) the shared workers' digest counts near complements but never
+    # prices them (`near_records=False`): only Adriana's own scan records
+    for fa, fb, ma, mb in (near if near_records else ()):
+        rec = near_record(fx, fa, fb, ma, mb, states=states, mapping=mapping,
+                          tie_rule=tie_rule, space=space, now_dt=now_dt,
+                          family=family, max_age_s=max_age_s,
+                          max_skew_s=max_skew_s, max_scan_qty=max_scan_qty)
+        topo = rec["claim_pair"]["topology"]
+        out["by_topology"][topo] = out["by_topology"].get(topo, 0) + 1
+        out["near_records"].append(rec)
     return out
 
 
+def ordinary_complement(pol: dict) -> bool:
+    """The policy found the pair EXACT in every ordinary-completion state
+    (its difference lies only in cancelled / postponed / partial states)."""
+    codes = {r.get("code") for r in pol.get("refusals") or []}
+    return SPP.R_NOT_COMPLEMENT not in codes and bool(
+        (pol.get("classes") or {}).get(SPP.C_NORMAL, {}).get("exact"))
+
+
+def near_record(fx: CC.Fixture, fa: str, fb: str, ma: list, mb: list, *,
+                states, mapping, tie_rule, space, now_dt, family,
+                max_age_s, max_skew_s, max_scan_qty) -> dict:
+    """ONE NEAR COMPLEMENT, REFUSED BY THE POLICY, with every alias
+    combination on different markets priced and the cheapest one's
+    conditional economics (labelled, never a verdict)."""
+    cands, dropped, combos = [], [], 0
+    for a in ma:
+        for b in mb:
+            if CC.same_market(a, b):
+                continue            # one pool that nets: never a structure
+            combos += 1
+            pol = SPP.evaluate_pair(policy_leg(a), policy_leg(b), states,
+                                    sport_family=family)
+            rec = _policy_refusal(fx, a, b, pol, now_dt)
+            ca, _na = contract_of(fx, a, mapping, tie_rule=tie_rule,
+                                  source=_source(a))
+            cb, _nb = contract_of(fx, b, mapping, tie_rule=tie_rule,
+                                  source=_source(b))
+            if ca is None or cb is None:
+                dropped.append({"venue_a": a.venue, "market_a": a.market_id,
+                                "venue_b": b.venue, "market_b": b.market_id,
+                                "why": _na if ca is None else _nb})
+            else:
+                books = [A.Book(i.venue, i.market_id, c.side, tuple(i.asks),
+                                _aware(i.observed_at))
+                         for i, c in ((a, ca), (b, cb))
+                         if i.observed_at is not None]
+                cond = A.evaluate_structure(
+                    [[ca], [cb]], books, space, now_dt,
+                    expect_kind=A.COMPLEMENT, max_age_s=max_age_s,
+                    max_skew_s=max_skew_s, max_scan_qty=max_scan_qty)
+                rec["inputs"]["books"] = cond["inputs"].get("books") or []
+                rec["inputs"]["skew_s"] = cond["inputs"].get("skew_s")
+                rec.update(conditional_on=CONDITIONAL_LABEL,
+                           conditional_verdict_not_a_verdict=cond["verdict"],
+                           conditional_reasons=cond.get("reasons")[:4],
+                           conditional_economics=cond.get("economics"))
+            cands.append((a, b, rec))
+
+    def rank(x):
+        eco = x[2].get("conditional_economics") or {}
+        try:
+            return (1, Decimal(str(eco.get("worst_case_net_profit"))))
+        except Exception:                                       # noqa: BLE001
+            return (0, Decimal(0))
+    if cands:
+        a, b, rec = max(cands, key=rank)
+        venues = {a.venue, b.venue}
+    else:
+        rec = A._record("STRUCTURE", A.COMPLEMENT, [{
+            "code": R_NEAR_NO_ALIAS, "detail": str(dropped)[:400]}],
+            {"event_key": fx.event_key, "legs": [
+                [{"venue": i.venue, "market_id": i.market_id,
+                  "side": i.side} for i in g] for g in (ma, mb)],
+             "books": [], "skew_s": None, "now": now_dt.isoformat()},
+            None, None)
+        venues = {i.venue for i in ma[:1] + mb[:1]}
+    assert rec["verdict"] == A.REFUSED       # a near complement never is one
+    rec["claim_pair"] = {
+        "claim_a": fa, "claim_b": fb, "basis": "CLAIM_CLASSES",
+        "near_complement": True,
+        "topology": "SAME_VENUE" if len(venues) == 1 else "CROSS_VENUE",
+        "aliases_a": len(ma), "aliases_b": len(mb),
+        "alias_combinations_evaluated": combos, "aliases_dropped": dropped,
+        "settlement_pair_policy": SPP.VERSION,
+        "rules": {_cid(i): i.rules_sha256 for i in ma + mb}}
+    return rec
+
+
 def census_result(scans: list, *, markets_read: int, books_fresh: int,
-                  skipped: dict) -> dict:
+                  skipped: dict, void_terms: dict | None = None,
+                  book_sources: dict | None = None,
+                  venues: dict | None = None,
+                  scope: dict | None = None) -> dict:
     """Shape the claim scans as an adriana.census result, so adriana.record
     writes them into the 265 tables unchanged (opportunities only for a
-    GUARANTEED_AFTER_COSTS engine verdict)."""
+    GUARANTEED_AFTER_COSTS engine verdict). (RC6) The near complements are
+    refusals beside the complementary pairs; `void_terms` (alias_void_terms
+    merged), `book_sources` and `venues` describe what the scan read, and
+    `scope` (canonical_claims_db.new_scope) what its fixture read covered
+    and cut."""
     opps, refs = [], []
     for s in scans:
         for rec in s["records"]:
             (opps if rec.get("verdict") == A.GUARANTEED_AFTER_COSTS
              else refs).append(rec)
+        refs += list(s.get("near_records") or [])
+    refs.sort(key=_closeness, reverse=True)
     summary = A.census_of(opps + refs)
+    vt = void_terms
+    if vt is not None:
+        vt = dict(vt, source="market_plane_rules (each alias's own parsed "
+                             "rules) + the verified Kalshi rulebook clauses")
     summary.update(markets_read=markets_read, skipped=skipped,
                    conditional_candidates=0,
                    claim_engine=VERSION,
                    by_topology=_sum_topology(scans),
                    pairs_not_complementary=sum(
                        s["pairs_not_complementary"] for s in scans),
+                   near_complement_pairs=sum(
+                       s.get("near_complement_pairs", 0) for s in scans),
                    same_market_pairs_excluded=sum(
                        s.get("same_market_pairs_excluded", 0)
                        for s in scans),
                    same_market_only_pairs=sum(
                        s.get("same_market_only_pairs", 0) for s in scans),
-                   settlement_pair_policy=_sum_policy(scans))
-    return {"opportunities": opps, "refusals": refs, "census": summary,
-            "books_fresh": books_fresh}
+                   settlement_pair_policy=_sum_policy(scans),
+                   void_terms=vt,
+                   void_terms_established=(
+                       None if vt is None else
+                       bool(vt.get("aliases")) and vt.get("established")
+                       == vt.get("aliases")),
+                   book_sources=book_sources)
+    if scope is not None:
+        summary["scope"] = scope
+    out = {"opportunities": opps, "refusals": refs, "census": summary,
+           "books_fresh": books_fresh}
+    if venues is not None:
+        out["venues"] = venues
+    return out
+
+
+def _closeness(rec) -> float:
+    """Refusals ranked by how close they came (the engine's net, else the
+    labelled conditional net), so the recorded cap keeps the nearest."""
+    eco = rec.get("economics") or rec.get("conditional_economics") or {}
+    try:
+        return float(eco.get("worst_case_net_profit"))
+    except (TypeError, ValueError):
+        return float("-inf")
 
 
 def _sum_policy(scans) -> dict:

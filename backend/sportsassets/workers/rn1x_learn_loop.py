@@ -318,7 +318,7 @@ async def run(pool_factory=None) -> None:
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("rn1x learn STANDBY: lock held elsewhere; retrying")
             await heartbeat(SERVICE, "idle",
-                            {"state": "STANDBY_NOT_THE_EVALUATOR"})
+                            {"state": "STANDBY_NOT_THE_EVALUATOR"}, con=conn)
             await asyncio.sleep(IDLE_S)
         log.info("rn1x learn: evaluator lock held")
         while True:
@@ -328,7 +328,15 @@ async def run(pool_factory=None) -> None:
                 idle = res.get("state") in ("STOPPED", "BLOCKED",
                                             "NO_SETTLED_POSITIONS_YET")
                 delay = IDLE_S if idle else CYCLE_S
-                await heartbeat(SERVICE, "idle" if idle else "ok", res)
+                # ON THE SESSION THIS LOOP ALREADY HOLDS (RC6; rn1x_shadow and
+                # ext_pinnacle already beat on theirs). Production 2026-10-08
+                # 18:37:41Z: this beat queued for a SECOND connection from the
+                # saturated shared pool, timed out inside asyncpg's
+                # Pool._acquire (db.HEARTBEAT_TIMEOUT_S), and the finished
+                # cycle was logged "rn1x learn cycle failed" -- its result
+                # lost with the beat.
+                await heartbeat(SERVICE, "idle" if idle else "ok", res,
+                                con=conn)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                           # noqa: BLE001
@@ -337,9 +345,17 @@ async def run(pool_factory=None) -> None:
                 try:
                     await heartbeat(SERVICE, "error",
                                     {"error": "%s: %s"
-                                     % (type(exc).__name__, exc)})
+                                     % (type(exc).__name__, exc)},
+                                    con=conn)
                 except Exception:                              # noqa: BLE001
-                    pass
+                    # the held session may be the casualty: the pool, so an
+                    # error beat is still attempted rather than dropped
+                    try:
+                        await heartbeat(SERVICE, "error",
+                                        {"error": "%s: %s"
+                                         % (type(exc).__name__, exc)})
+                    except Exception:                          # noqa: BLE001
+                        pass
             await asyncio.sleep(delay)
 
 

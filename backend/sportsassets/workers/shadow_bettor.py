@@ -189,6 +189,37 @@ def _market_state(subject: dict, quote: dict, captured_at) -> dict:
         **common)
 
 
+OPPORTUNITY_AND_DECISION_COMMIT_TOGETHER_RULE = (
+    "an opportunity and its decision are one transaction (the decision in "
+    "its own savepoint): a worker stopped between the two writes leaves "
+    "neither, so the next tick in the same cadence bucket writes both "
+    "instead of finding the opportunity already recorded and skipping the "
+    "decision; a decision that fails to write rolls back alone and the "
+    "observation commits with the failure named; a withheld decision "
+    "leaves the observation written and undecided, as before")
+
+
+class _one_session:                                         # noqa: N801
+    """`async with _one_session(pool) as conn:` -- one connection of the
+    pool for the opportunity + decision transaction. A stand-in that has
+    no `acquire` (a single connection) is used as it is."""
+
+    def __init__(self, pool):
+        self._pool = pool
+        self._cm = None
+
+    async def __aenter__(self):
+        if hasattr(self._pool, "acquire"):
+            self._cm = self._pool.acquire()
+            return await self._cm.__aenter__()
+        return self._pool
+
+    async def __aexit__(self, *exc):
+        if self._cm is not None:
+            return await self._cm.__aexit__(*exc)
+        return False
+
+
 async def _note(pool, stage, exc, opportunity_id, symbol) -> None:
     """Record the failure. NEVER raise from here: a writer that could
     fail while writing down its own failure is the shape of bug this
@@ -301,9 +332,42 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
         # discarded because the tenth raised, and the heartbeat said
         # nothing about why. Now the failure is written down in the
         # database's own words and the loop continues.
+        #
+        # THE OPPORTUNITY AND ITS DECISION LAND TOGETHER, OR NOT AT ALL
+        # (RC6, OPPORTUNITY_AND_DECISION_COMMIT_TOGETHER_RULE). They were
+        # two autocommitted writes, and the opportunity's id is its
+        # cadence bucket: a worker stopped between them (a deploy's
+        # SIGTERM cancels the tick wherever it is) left an opportunity
+        # with no decision, and every later tick in the SAME bucket was
+        # told was_new False by the opportunity's ON CONFLICT DO NOTHING
+        # and skipped the decision -- an orphan at 180 s, made by a
+        # restart, not by the policy. Now both are one transaction: a
+        # stop before the commit leaves NEITHER, and the next tick in the
+        # bucket writes both. Nothing else moves: the decision still runs
+        # in its own savepoint, so a decision that FAILS to write rolls
+        # back alone and the observation commits, with the failure
+        # recorded by name exactly as before; a decision WITHHELD by the
+        # integrity gate still leaves the observation written and
+        # undecided, on purpose (owner directive 2026-09-19 20:2xZ). The
+        # decision itself -- `decide`, its inputs, its clock -- is
+        # untouched (the V6 code boundary does not cover this worker).
+        decision_exc = None
+        decided = False
         try:
-            _oid, was_new = await bettor.record_opportunity(opportunity,
-                                                            pool=pool)
+            async with _one_session(pool) as conn:
+                async with conn.transaction():
+                    _oid, was_new = await bettor.record_opportunity(
+                        opportunity, pool=conn)
+                    if was_new and decision_writing_allowed:
+                        try:
+                            async with conn.transaction():      # savepoint
+                                _did, decided = await bettor.write_decision(
+                                    opportunity,
+                                    state if state["readable"] else None,
+                                    pool=conn)
+                        except Exception as exc:               # noqa: BLE001
+                            decision_exc = exc
+                            decided = False
         except Exception as exc:                               # noqa: BLE001
             stats["failures"] += 1
             stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
@@ -322,15 +386,15 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
             if not decision_writing_allowed:
                 stats["decisionsWithheld"] += 1
                 continue
-            try:
-                _did, decided = await bettor.write_decision(
-                    opportunity, state if state["readable"] else None,
-                    pool=pool)
-            except Exception as exc:                           # noqa: BLE001
+            if decision_exc is not None:
+                exc = decision_exc
                 stats["failures"] += 1
                 stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
                 log.warning("shadow_bettor: decision write failed for %s",
-                            subject["symbol"], exc_info=True)
+                            subject["symbol"], exc_info=(
+                                type(exc), exc, exc.__traceback__))
+                # after the commit: the failure row names an opportunity
+                # that now exists
                 await _note(pool, "DECISION_WRITE", exc,
                             opportunity["bettorOpportunityId"],
                             subject["symbol"])

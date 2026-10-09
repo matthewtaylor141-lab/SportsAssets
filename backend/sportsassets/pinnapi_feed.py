@@ -98,8 +98,11 @@ not validate is counted as UNPARSED and contributes nothing.
 """
 from __future__ import annotations
 
+import asyncio
 import collections
+import functools
 import math
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -111,6 +114,68 @@ FULL_GAME_MONEYLINE_KEY = "s;0;m"
 MAX_EVENTS = 4000
 MAX_MARKETS = 120_000
 RING = 4096
+
+# ── (RC6) THE SUBSCRIBE SNAPSHOT IS BUILT OFF THE EVENT LOOP ──────────
+#
+# A snapshot frame carries a whole (stream, sport): the 2026-10-01 soccer
+# prematch snapshot was 1,291 events, the cache held 31,849 markets on
+# 2026-10-04 and is sized for 45,136 (BOUNDS above). FeedCache.apply ran it
+# synchronously on the API event loop -- the owner (pinnapi_owner._own)
+# calls `cache.apply(msg)` inline after each recv -- at every connect and
+# every resync, and the API loop watchdog has recorded that very frame
+# holding the loop: 2.1 s and 2.2 s inside `_replace_event <- _apply <-
+# apply <- pinnapi_owner._own` (EventIndexedQuotes' docstring, research-sql
+# run 37231263685), before the per-event index; the index made each event
+# O(its markets), and the whole snapshot is still one call.
+#
+# NOW: a snapshot of at least SNAPSHOT_OFFLOOP_MIN_EVENTS events, applied
+# from a running event loop, is applied by the SAME `_apply` code to a
+# private copy of the cache (`_shadow`: the stores copied, every event's
+# metadata copied, counters as deltas) in a dedicated worker thread, and
+# the result is SWAPPED IN WHOLE on the loop (`_commit`): readers see the
+# cache before the snapshot or after it, never part of it. Every frame
+# that arrives meanwhile is queued in arrival order and applied after the
+# swap, exactly as if the snapshot had applied inline; the snapshot counts
+# as seen for the epoch's resynchronisation only at the swap. A new
+# connection discards the build and its queue (its epoch is gone); a build
+# whose epoch was revoked meanwhile is discarded, never swapped in. The
+# frame's receipt time is the one the owner passed with it, never the
+# commit's. Smaller snapshots, and any call without a running loop, apply
+# inline as before.
+SNAPSHOT_OFFLOOP_MIN_EVENTS = 100
+#: per-cache switch default (FeedCache.offload_snapshots)
+OFFLOOP_SNAPSHOTS = True
+#: notifications / queued frames handled per loop turn after a swap
+COMMIT_CHUNK = 2000
+#: apply()'s answer for a frame queued behind a build, and for the build
+APPLY_QUEUED = "QUEUED_BEHIND_SNAPSHOT_BUILD"
+APPLY_BUILDING = "SNAPSHOT_BUILDING_OFF_LOOP"
+_BUILDER = None
+_BUILDER_LOCK = threading.Lock()
+
+
+def _builder():
+    """ONE dedicated thread for snapshot builds: never queued behind the
+    process's default executor (desk sweeps, intel cycles)."""
+    global _BUILDER
+    with _BUILDER_LOCK:
+        if _BUILDER is None:
+            from concurrent.futures import ThreadPoolExecutor
+            _BUILDER = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="pinnapi-snapshot")
+        return _BUILDER
+
+
+class _ShadowAuthority:
+    """The authority a private build answers to: the epoch it was started
+    for, granted. The real authority is consulted at the swap."""
+    granted = True
+
+    def __init__(self, epoch):
+        self.epoch = epoch
+
+    def snapshot_seen(self, *_a) -> None:
+        return None
 
 # read refusals (named, never a silent None)
 R_NO_AUTHORITY = "FEED_OWNERSHIP_NOT_HELD"
@@ -532,6 +597,17 @@ class EventIndexedQuotes(dict):
         iterating), O(its own markets)."""
         return list(self.by_event.get(eid, ()))
 
+    @classmethod
+    def copy_of(cls, other: "EventIndexedQuotes") -> "EventIndexedQuotes":
+        """An independent copy (RC6, the off-loop snapshot build): the same
+        items and an index of its own, built at C speed (dict.update does
+        not call the per-item __setitem__); the Quote values are shared --
+        a snapshot build never mutates an existing Quote, it replaces it."""
+        out = cls()
+        dict.update(out, other)
+        out.by_event = {e: set(ks) for e, ks in other.by_event.items()}
+        return out
+
 
 # ── IN-PLAY: WHICH CHILD RECORD IS THE LIVE GAME (R30A RC3) ──────────
 #
@@ -718,15 +794,39 @@ class FeedCache:
         self.receipt_to_eval = Ring()
         self.last_frame_received_ms: Optional[float] = None
         self.last_change_received_ms: Optional[float] = None
+        # (RC6) the off-loop snapshot build (see SNAPSHOT_OFFLOOP_MIN_EVENTS)
+        self.offload_snapshots = OFFLOOP_SNAPSHOTS
+        self._pending: Optional[dict] = None
+        self._backlog: collections.deque = collections.deque()
+        self.snapshot_build_ms = Ring()
 
     # ── lifecycle ────────────────────────────────────────────────────
     def new_connection(self, subscriptions) -> int:
         """A new socket epoch. Everything from earlier epochs is dropped: a
-        reconnect never leaves an old price usable."""
+        reconnect never leaves an old price usable -- nor a snapshot still
+        being built for the old socket, nor the frames queued behind it."""
+        self._discard_pending("snapshot_builds_discarded_new_connection")
         self.events.clear()
         self.quotes.clear()
         self.counts["epochs"] += 1
         return self.authority.grant(subscriptions)
+
+    def _discard_pending(self, why: str) -> None:
+        pend, self._pending = self._pending, None
+        dropped = len(self._backlog)
+        self._backlog.clear()
+        if pend is None:
+            return
+        self.counts[why] += 1
+        if dropped:
+            self.counts["frames_dropped_with_a_discarded_build"] += dropped
+        task = pend.get("task")
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if task is not None and not task.done() and task is not current:
+            task.cancel()
 
     def lost(self, reason: str) -> None:
         self.authority.revoke(reason)
@@ -751,27 +851,179 @@ class FeedCache:
     # ── ingestion ────────────────────────────────────────────────────
     def apply(self, msg: dict, *, epoch: int,
               received_ms: Optional[float] = None) -> str:
+        if self._pending is not None:
+            # a snapshot is being built (or swapped in): every later frame
+            # waits its turn, in arrival order (bounded by the build: one
+            # snapshot's apply time of frames)
+            self._backlog.append((msg, epoch, received_ms))
+            self.counts["frames_queued_behind_snapshot_build"] += 1
+            return APPLY_QUEUED
+        if self._offloadable(msg, epoch):
+            return self._start_build(msg, epoch, received_ms)
+        return self._apply_inline(msg, epoch, received_ms)
+
+    # ── (RC6) the off-loop snapshot build ──────────────────────────
+    def _offloadable(self, msg, epoch) -> bool:
+        if not self.offload_snapshots or not isinstance(msg, dict) or \
+                msg.get("type") != "snapshot":
+            return False
+        evs = msg.get("events")
+        if not isinstance(evs, list) or \
+                len(evs) < SNAPSHOT_OFFLOOP_MIN_EVENTS:
+            return False
+        if epoch != self.authority.epoch or not self.authority.granted:
+            return False                  # inline: counted and ignored
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        return True
+
+    def _shadow(self, epoch) -> "FeedCache":
+        """A private copy to build on: the two stores copied, every event's
+        metadata dict copied (the build updates them in place), counters
+        started empty (merged back as deltas). Runs on the loop: copying
+        the stores is a C-speed pass, nothing like applying them."""
+        sh = FeedCache(authority=_ShadowAuthority(epoch), extract=self.extract,
+                       max_events=self.max_events,
+                       max_markets=self.max_markets)
+        sh.offload_snapshots = False
+        sh.events = collections.OrderedDict(
+            (k, dict(v) if isinstance(v, dict) else v)
+            for k, v in self.events.items())
+        sh.quotes = (EventIndexedQuotes.copy_of(self.quotes)
+                     if isinstance(self.quotes, EventIndexedQuotes)
+                     else type(self.quotes)(self.quotes))
+        return sh
+
+    def _start_build(self, msg, epoch, received_ms) -> str:
+        loop = asyncio.get_running_loop()
+        rx = received_ms if received_ms is not None else _now_ms()
+        token = object()
+        t0 = time.monotonic()
+        sh = self._shadow(epoch)
+        fut = loop.run_in_executor(_builder(), functools.partial(
+            sh._apply, msg, epoch=epoch, received_ms=rx))
+        self._pending = {"token": token, "epoch": epoch, "at": t0}
+        self._pending["task"] = loop.create_task(
+            self._commit(token, fut, sh, msg, epoch, rx, t0))
+        self.counts["snapshot_builds_started"] += 1
+        return APPLY_BUILDING
+
+    def _ours(self, token) -> bool:
+        return self._pending is not None and self._pending["token"] is token
+
+    async def _commit(self, token, fut, sh, msg, epoch, rx, t0) -> None:
+        try:
+            await fut
+            built = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:                                       # noqa: BLE001
+            built = False
+        if not self._ours(token):
+            return                        # superseded: a new connection
+        if not built:
+            # the same code failed in the thread: apply it inline, as before
+            # RC6. If that raises too, the snapshot was never seen: the epoch
+            # stays unsynchronised and every read refuses by that name
+            # (FEED_EPOCH_NOT_RESYNCHRONIZED) until the next connection
+            self.counts["snapshot_builds_failed"] += 1
+            try:
+                self._apply_inline(msg, epoch, rx)
+            except Exception:                                   # noqa: BLE001
+                self.counts["snapshot_apply_errors"] += 1
+        elif self.authority.granted and self.authority.epoch == epoch:
+            self._swap_in(sh)
+            if msg.get("sport_id") is not None:
+                self.authority.snapshot_seen(epoch, msg.get("stream"),
+                                             msg.get("sport_id"))
+            self.counts["snapshot_builds_swapped_in"] += 1
+            self.snapshot_build_ms.add((time.monotonic() - t0) * 1000.0)
+            await self._notify(sh._touched, token)
+        else:
+            # revoked (or re-granted) while it was built: never swapped in
+            self.counts["snapshot_builds_discarded_authority"] += 1
+        await self._drain(token)
+
+    def _swap_in(self, sh) -> None:
+        self.events, self.quotes = sh.events, sh.quotes
+        self.counts.update(sh.counts)
+        self.confirmations.update(sh.confirmations)
+        for fk, n in sh.frames_by_sport_type.items():
+            if fk in self.frames_by_sport_type or \
+                    len(self.frames_by_sport_type) < 256:
+                self.frames_by_sport_type[fk] += n
+        if sh.last_frame_received_ms is not None:
+            self.last_frame_received_ms = sh.last_frame_received_ms
+        if sh.last_change_received_ms is not None:
+            self.last_change_received_ms = sh.last_change_received_ms
+
+    async def _notify(self, touched, token) -> None:
+        """The snapshot's change notifications, as `apply` sends them, in
+        bounded slices (frames keep queueing meanwhile)."""
+        if self.on_change is None:
+            return
+        keys = list(touched)
+        for i in range(0, len(keys), COMMIT_CHUNK):
+            if i:
+                await asyncio.sleep(0)
+                if not self._ours(token) or self.on_change is None:
+                    return
+            self._notify_keys(keys[i:i + COMMIT_CHUNK])
+
+    async def _drain(self, token) -> None:
+        """The frames queued behind the build, in arrival order; a queued
+        snapshot that is itself off-loadable takes the rest of the queue
+        with it."""
+        n = 0
+        while self._backlog:
+            if not self._ours(token):
+                return
+            m, e, r = self._backlog.popleft()
+            if self._offloadable(m, e):
+                rest = self._backlog
+                self._backlog = collections.deque()
+                self._pending = None
+                self._start_build(m, e, r)
+                self._backlog = rest
+                return
+            try:
+                self._apply_inline(m, e, r)
+            except Exception:                                   # noqa: BLE001
+                self.counts["queued_frame_apply_errors"] += 1
+            n += 1
+            if n % COMMIT_CHUNK == 0:
+                await asyncio.sleep(0)
+        if self._ours(token):
+            self._pending = None
+
+    def _apply_inline(self, msg: dict, epoch: int,
+                      received_ms: Optional[float] = None) -> str:
         self._touched.clear()
         result = self._apply(msg, epoch=epoch, received_ms=received_ms)
         # Notify after the entire frame (including closed periods and bounds)
         # has applied. Consumers re-read authority; no callback can trade here.
         if self.on_change is not None:
-            # a held watch in the chain also hears PROVIDER-STAMPED
-            # confirmations of unchanged prices (pinnapi_held); every other
-            # consumer hears changes only, as before
-            held = getattr(self.on_change, "_held_chain", False)
-            for key in self._touched:
-                quote = self.quotes.get(key)
-                if quote is not None and (
-                        quote.change_ms is not None or (
-                            held and quote.confirmed_ms is not None
-                            and quote.confirmed_clock == CLOCK_PROVIDER)):
-                    try:
-                        quote.fixture_id = self.canonical_id(quote.event_id)
-                        self.on_change(quote)
-                    except Exception:
-                        self.counts["change_notification_errors"] += 1
+            self._notify_keys(self._touched)
         return result
+
+    def _notify_keys(self, keys) -> None:
+        # a held watch in the chain also hears PROVIDER-STAMPED
+        # confirmations of unchanged prices (pinnapi_held); every other
+        # consumer hears changes only, as before
+        held = getattr(self.on_change, "_held_chain", False)
+        for key in keys:
+            quote = self.quotes.get(key)
+            if quote is not None and (
+                    quote.change_ms is not None or (
+                        held and quote.confirmed_ms is not None
+                        and quote.confirmed_clock == CLOCK_PROVIDER)):
+                try:
+                    quote.fixture_id = self.canonical_id(quote.event_id)
+                    self.on_change(quote)
+                except Exception:
+                    self.counts["change_notification_errors"] += 1
 
     def _apply(self, msg: dict, *, epoch: int,
                received_ms: Optional[float] = None) -> str:
@@ -1287,4 +1539,12 @@ class FeedCache:
                     self.provider_to_receipt.summary(),
                 "receipt_to_evaluation_ms": self.receipt_to_eval.summary(),
                 "bounds": {"max_events": self.max_events,
-                           "max_markets": self.max_markets, "ring": RING}}
+                           "max_markets": self.max_markets, "ring": RING},
+                # (RC6) the off-loop snapshot build: on, building now, frames
+                # queued behind it, and how long the swapped-in builds took
+                "snapshot_build": {
+                    "off_loop": bool(self.offload_snapshots),
+                    "min_events": SNAPSHOT_OFFLOOP_MIN_EVENTS,
+                    "building": self._pending is not None,
+                    "queued_frames": len(self._backlog),
+                    "build_ms": self.snapshot_build_ms.summary()}}

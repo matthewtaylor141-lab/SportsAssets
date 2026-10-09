@@ -105,6 +105,27 @@ AUDREY_UNIVERSE_SQL = """
 #: clears new decisions ~75x faster than they arrive and keeps the tick's
 #: reviews unblocked. The RUNNING pass is unchanged.
 AUDREY_LANE_OFF_BATCH = 25
+#: THE POSITIONS A RECONCILIATION COVERS (RC6 archer-lifecycle): every
+#: PAPER position of the group -- (account, group, market, holding side),
+#: open = bought - sold - the latest settlement version, the canonical rule
+#: -- written into the reconciliation's chain beside the ACTUAL inventory
+#: (venue fills), so each smalllive_reconciliations row names the positions
+#: it reconciled and the two books are never one number.
+AUDREY_PAPER_POSITIONS_SQL = """
+    SELECT f.account_id, f.us_market_slug, f.holding_side,
+           coalesce(sum(f.qty) FILTER (WHERE f.direction = 'BUY'), 0)
+             - coalesce(sum(f.qty) FILTER (WHERE f.direction = 'SELL'), 0)
+             - coalesce(max(s.qty), 0) AS open_qty
+      FROM paper_fills f
+      LEFT JOIN (SELECT DISTINCT ON (position_key) position_key, qty
+                   FROM paper_settlements WHERE group_id = $1
+                  ORDER BY position_key, version DESC) s
+        ON s.position_key = 'paperpos:' || f.account_id || ':' || f.group_id
+                            || ':' || f.us_market_slug || ':'
+                            || f.holding_side
+     WHERE f.group_id = $1
+     GROUP BY f.account_id, f.us_market_slug, f.holding_side
+     ORDER BY 1, 2, 3"""
 VENUE = "POLYMARKET"
 PAPER_ACCOUNT = "paper_acct_main"
 BUY_ROLES = ("ENTRY", "HEDGE")
@@ -2344,7 +2365,25 @@ class Mirror:
             chain_doc = {"links": chain, "live_held": held,
                          "handoff_id": None if hrow is None else hrow["handoff_id"],
                          "account_snapshot_at": None if snap is None else snap["at"],
-                         "paper_and_actual_pnl_are_separate": True}
+                         "paper_and_actual_pnl_are_separate": True,
+                         # the positions this reconciliation covers, each
+                         # book under its own label (never one number)
+                         "positions": {
+                             "paper": [
+                                 {"position_key": "paperpos:%s:%s:%s:%s" % (
+                                     p["account_id"], gid, p["us_market_slug"],
+                                     p["holding_side"]),
+                                  "us_market_slug": p["us_market_slug"],
+                                  "holding_side": p["holding_side"],
+                                  "open_qty": str(p["open_qty"]),
+                                  "execution_environment": "PAPER_SIMULATED"}
+                                 for p in await conn.fetch(
+                                     AUDREY_PAPER_POSITIONS_SQL, gid)],
+                             "actual": {
+                                 "venue": VENUE, "us_market_slug": slug,
+                                 "live_held": str(held),
+                                 "basis": "execmirror_fills (venue fills)",
+                                 "execution_environment": "VENUE_CONFIRMED"}}}
             prev = await conn.fetchval(
                 "SELECT status FROM smalllive_reconciliations WHERE group_id = $1", gid)
             await conn.execute(

@@ -1389,6 +1389,18 @@ def _protective_note(o: dict) -> str | None:
                     if f > 0 else ""))
     if st in (S_CANCELLED, S_EXPIRED, S_REJECTED) and f <= 0:
         return "%s UNFILLED - CONTRIBUTES NO PROTECTION" % st
+    if st in (S_CANCELLED, S_EXPIRED) and f > 0:
+        # A TERMINAL ORDER THAT FILLED IN PART (production 2026-10-09: 7
+        # EXPIRED and 4 CANCELED protective sales, e.g. one EXPIRED at 2,695
+        # of 2,702): its filled part is protection; its unfilled remainder
+        # is gone and protects nothing. Before this it carried no note, so
+        # the expired remainder was never named.
+        q = _f(o.get("qty"))
+        gone = None if q is None else max(0.0, q - f)
+        return ("%s - ONLY THE FILLED %s COUNTS AS PROTECTION; ITS UNFILLED "
+                "%s %s - CONTRIBUTES NO PROTECTION" % (
+                    st, OST.fmt_qty(f), OST.fmt_qty(gone),
+                    "EXPIRED" if st == S_EXPIRED else "WAS CANCELLED"))
     return None
 
 

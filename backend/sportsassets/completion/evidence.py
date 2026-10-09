@@ -24,6 +24,20 @@
                 orders that reached a terminal state AFTER the diagnosis
                 window (fresh: the semantics were derived before these
                 orders existed), against their recorded PAPER outcomes.
+                Each order carries the books of its [eligible, expires]
+                window AND the last book observed at or before eligible_at:
+                the repaired replay never reads the latter (it skips every
+                book before eligibility); the OPTIMISTIC diagnosis needs it,
+                because the package twin crossed on exactly that book.
+                Without it (before RC6) every optimistic diagnosis saw no
+                pre-activation book and named every PAPER fill
+                CANCELLED_BEFORE_FIRST_ELIGIBLE_BOOK (production RC5: 7 of 7).
+
+  labels        a position's settlement is its LATEST version
+                (paper_settlements is versioned; a correction appends v2).
+                Reading every version kept a superseded WON / LOST as a
+                label after a correction to VOID / a venue price, and
+                dropped the market when v1 and v2 disagreed.
 
 Pure builders over plain rows, plus the bounded SELECTs that produce them.
 """
@@ -65,12 +79,18 @@ WITH d0 AS (
      AND d.decided_at > now() - make_interval(days => $1)
    ORDER BY d.strategy, d.us_market_slug, d.holding_side, d.decided_at),
 slugs AS (SELECT DISTINCT slug FROM d0),
+ps AS (
+  SELECT DISTINCT ON (position_key, settlement_event_key)
+         us_market_slug, holding_side, outcome, payout_per_contract,
+         settled_at
+    FROM paper_settlements
+   WHERE us_market_slug IN (SELECT slug FROM slugs)
+   ORDER BY position_key, settlement_event_key, version DESC),
 lab AS (
   SELECT us_market_slug slug,
          CASE WHEN holding_side='LONG' THEN payout_per_contract
               ELSE 1 - payout_per_contract END::float8 y, settled_at at
-    FROM paper_settlements WHERE outcome IN ('WON','LOST')
-     AND us_market_slug IN (SELECT slug FROM slugs)
+    FROM ps WHERE outcome IN ('WON','LOST')
   UNION ALL
   SELECT us_market_slug, CASE WHEN buy_intent ILIKE '%SHORT%' THEN 1 - outcome
                               ELSE outcome END::float8, outcome_at
@@ -135,8 +155,14 @@ SELECT json_build_object(
                    ORDER BY b.observed_at)
               FROM paper_book_observations b
              WHERE b.error IS NULL AND b.us_market_slug = o.us_market_slug
-               AND b.observed_at >= o.eligible_at
-               AND b.observed_at <= o.expires_at))::text AS j
+               AND ((b.observed_at >= o.eligible_at
+                     AND b.observed_at <= o.expires_at)
+                    OR b.obs_id = (
+                      SELECT p.obs_id FROM paper_book_observations p
+                       WHERE p.error IS NULL
+                         AND p.us_market_slug = o.us_market_slug
+                         AND p.observed_at <= o.eligible_at
+                       ORDER BY p.observed_at DESC LIMIT 1))))::text AS j
   FROM paper_orders o
  WHERE o.time_in_force IN ('IOC', 'FOK') AND o.terminal_at IS NOT NULL
    AND o.role IN ('ENTRY', 'EXIT', 'REDUCE')

@@ -20,8 +20,10 @@ and every unknown named (never a green it did not measure):
   twin           the repaired IOC twin's agreement on FRESH orders
   revenue        Revenue Reliability V1: agent licences, CASH-incumbent
                  tournament, regimes, demonstrated capacity, daily readiness
-  arbitrage      Adriana's latest scan: NO_ELIGIBLE_ARB unless a structure is
-                 GUARANTEED_AFTER_COSTS (void terms not established -> none)
+  arbitrage      Adriana's latest scans (census and cross-venue claim scan,
+                 each with its counts and age): NO_ELIGIBLE_ARB unless a
+                 structure is GUARANTEED_AFTER_COSTS; fail_closed states what
+                 the scans recorded about every contract's void terms
   venue_positions PMUS retail position confirmation: venue-confirmed, or the
                  exact owner credential it waits on
   readiness      readiness_gate.evaluate_readiness -> PAPER_SHADOW_ONLY until
@@ -33,6 +35,7 @@ It changes nothing: no authority, no limit, no credential, no order path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -233,7 +236,8 @@ def market_data_block(snap, why, ump_detail) -> dict:
     num = None
     if pri:
         num = int(pri.get("current_pmx_stream") or 0) + int(
-            pri.get("current_rest_fallback") or 0)
+            pri.get("current_rest_fallback") or 0) + int(
+            pri.get("current_pmx_snapshot_refresh") or 0)
     den = None
     if pri:
         den = int(pri.get("denominator") or 0) - int(
@@ -252,7 +256,13 @@ def market_data_block(snap, why, ump_detail) -> dict:
             "numerator": num, "denominator": den,
             "rate": (round(num / den, 4) if num is not None and den else None),
             "target": 0.95,
-            "members": pri.get("members")},
+            "members": pri.get("members"),
+            # (RC6 D1) ONE INSTANT, named: the coverage pass's verification
+            # instant and the snapshot's (absent before RC6 D1). The whole
+            # window is market_data.freshness_window.
+            "measure": "ONE_INSTANT",
+            "verified_at": pri.get("verified_at"),
+            "snapshot_computed_at": snap.get("computed_at")},
         "refdata": {
             "active_contracts": active or None,
             "pmx_listed": reg.get("pmx_listed"),
@@ -263,6 +273,176 @@ def market_data_block(snap, why, ump_detail) -> dict:
                 if active else None),
             "universe_pull": snap.get("refdata_universe")},
         "token": sub.get("token")}
+
+
+# ── the whole observation window (RC6 lane D1) ──────────────────────────
+#
+# market_data.priority_freshness is ONE instant. Production (research-sql
+# run 37870039455, RC5): over 24 h that instant ranged 0.01-1.00 with a
+# denominator of 77-306 re-chosen every pass, and the plane's snapshots
+# arrived p50 92 s / p90 248 s apart (gaps to 1,854 s no sample covered).
+# market_data.freshness_window is the plane's frozen-window measure
+# (market_plane.freshness_window): the hour's eligible membership frozen
+# with its sha256, one sample a minute at one verification instant, every
+# second no sample covers an OUTAGE counted eligible and not fresh, per
+# tier (HELD_POSITION / WORKING_ORDER / CANDIDATE and the management view),
+# venue, market family, period and phase, over 1 h / 6 h / 24 h (each from
+# when this build began measuring: the FIRST window ever written, read with
+# the newest window at or before the horizon's start at any age, so an
+# outage crossing a horizon's start is in its denominator). Integrated off
+# the event loop.
+
+async def freshness_window_block(conn, *, now: float) -> dict:
+    from ..market_plane import freshness_window as FW
+    if not await _has(conn, "market_plane_events"):
+        return {"status": "UNREADABLE", "why": "MARKET_PLANE_EVENTS_ABSENT"}
+    longest = max(h for _k, h in FW.HORIZONS)
+    wins, smps, since = await FW.fetch(conn, start=now - longest, end=now)
+    out = await asyncio.to_thread(FW.readback, wins, smps, since, now=now)
+    del wins, smps
+    orders = {"open_orders": 0, "markets": 0, "by_role": {}}
+    if await _has(conn, "paper_orders"):
+        for r in await conn.fetch(
+                "SELECT role, count(*) AS n, "
+                "       count(DISTINCT us_market_slug) AS m "
+                "  FROM paper_orders WHERE state = ANY($1::text[]) "
+                " GROUP BY 1 ORDER BY 1", list(FW.OPEN_ORDER_STATES)):
+            orders["by_role"][r["role"]] = int(r["n"])
+            orders["open_orders"] += int(r["n"])
+        orders["markets"] = int(await conn.fetchval(
+            "SELECT count(DISTINCT us_market_slug) FROM paper_orders "
+            " WHERE state = ANY($1::text[])", list(FW.OPEN_ORDER_STATES))
+            or 0)
+    out["working_orders_now"] = orders
+    out["status"] = ("MEASURED" if any(
+        (h or {}).get("status") == "MEASURED"
+        for h in out["horizons"].values()) else "UNMEASURED")
+    return out
+
+
+# ── the held positions' PinnAPI probability inputs (RC6 lane D1) ─────────
+#
+# Xavier reviews every open PAPER position (paper_xavier_reviews, about
+# every 100 s: research-sql run 37870039455, 627 reviews of 3 groups in
+# 6 h) and records the evidence state of the probability the review stood
+# on (measure.evidence_state): FRESH_CURRENT_PROBABILITY only when its own
+# source stamp is inside the Pinnacle freshness limit (30 s,
+# ext_pinnacle_loop.PINNACLE_MAX_AGE_S) at the review instant. That is the
+# per-sample series of the held positions' PinnAPI input freshness: in those
+# 6 h, 1 of 627 reviews stood on a fresh probability. Reported here with
+# the review instant, the probability's source stamp and its receipt kept
+# apart; an open position not reviewed for REVIEW_EXPECTED_S is a missed
+# sample, counted not fresh.
+
+PINNAPI_FRESH_STATE = "FRESH_CURRENT_PROBABILITY"
+REVIEW_EXPECTED_S = 300.0
+PINNAPI_HORIZONS = (("6h", 21600.0), ("24h", 86400.0))
+REVIEWS_SQL = (
+    "SELECT group_id, extract(epoch FROM reviewed_at)::float8 AS at, "
+    "       measure->>'evidence_state' AS state, "
+    "       measure->>'source' AS source, "
+    "       measure->>'pinnacle_at' AS p_at, "
+    "       measure->>'pinnacle_received_at' AS p_rcv, "
+    "       measure->>'pinnacle_limit_s' AS p_limit "
+    "  FROM paper_xavier_reviews "
+    " WHERE account_id = $1 AND reviewed_at > to_timestamp($2) "
+    " ORDER BY group_id, reviewed_at")
+
+
+def _f(v):
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def pinnapi_inputs_summary(rows, open_groups: dict, *, now: float,
+                           horizon_s: float,
+                           expected_s: float = REVIEW_EXPECTED_S) -> dict:
+    """PURE. Xavier's reviews over [now - horizon_s, now] -> the held
+    positions' PinnAPI input freshness per review sample, with the missed
+    samples of every group (open now or reviewed in the horizon): a group's
+    span runs from its first review in the horizon (or the horizon's start
+    when it is open now and was open then) to now when open, else to its
+    last review; it owes floor(span / expected_s) + 1 reviews."""
+    start = float(now) - float(horizon_s)
+    by: dict = {}
+    for r in rows:
+        at = _f(r.get("at"))
+        if at is None or at <= start or at > now:
+            continue
+        by.setdefault(r["group_id"], []).append(dict(r, at=at))
+    groups = set(by) | set(open_groups)
+    reviews = fresh = missing = 0
+    per, by_state = [], {}
+    for g in sorted(groups):
+        rs = by.get(g) or []
+        n_f = sum(1 for r in rs if r.get("state") == PINNAPI_FRESH_STATE)
+        for r in rs:
+            k = str(r.get("state") or "NO_STATE_RECORDED")
+            by_state[k] = by_state.get(k, 0) + 1
+        is_open = g in open_groups
+        first = rs[0]["at"] if rs else None
+        a = start if (is_open and (first is None or first - start
+                                   > expected_s)) else (first or start)
+        b = float(now) if is_open else (rs[-1]["at"] if rs else a)
+        owed = int(max(0.0, b - a) // expected_s) + 1
+        miss = max(0, owed - len(rs))
+        reviews += len(rs)
+        fresh += n_f
+        missing += miss
+        last = rs[-1] if rs else None
+        per.append({
+            "group_id": g, "open_now": is_open,
+            "us_market_slug": (open_groups.get(g) or {}).get("slug"),
+            "reviews": len(rs), "fresh": n_f, "missed": miss,
+            "last": None if last is None else {
+                "verified_at": last["at"],
+                "evidence_state": last.get("state"),
+                "source": last.get("source"),
+                "probability_source_at": _f(last.get("p_at")),
+                "probability_received_at": _f(last.get("p_rcv")),
+                "limit_s": _f(last.get("p_limit")),
+                "review_age_s": round(float(now) - last["at"], 1)}})
+    den = reviews + missing
+    return {"horizon_s": float(horizon_s), "groups": len(groups),
+            "reviews": reviews, "fresh_reviews": fresh,
+            "missed_reviews": missing,
+            "numerator": fresh, "denominator": den,
+            "rate": round(fresh / den, 4) if den else None,
+            "rate_reviews_only": (round(fresh / reviews, 4) if reviews
+                                  else None),
+            "by_evidence_state": dict(sorted(by_state.items(),
+                                             key=lambda kv: -kv[1])),
+            "per_group": per[:50]}
+
+
+async def pinnapi_held_inputs_block(conn, account_id: str, *,
+                                    now: float) -> dict:
+    from .. import bettor_paper_ledger as L
+    if not await _has(conn, "paper_xavier_reviews"):
+        return {"status": "UNREADABLE", "why": "XAVIER_REVIEWS_ABSENT"}
+    pos = await L.positions(conn, account_id)
+    open_groups = {p["group_id"]: {"slug": p.get("us_market_slug")}
+                   for p in pos}
+    longest = max(h for _k, h in PINNAPI_HORIZONS)
+    rows = [dict(r) for r in await conn.fetch(
+        REVIEWS_SQL, account_id, float(now) - longest)]
+    out = {"version": "PINNAPI_HELD_INPUT_FRESHNESS_V1",
+           "source": "paper_xavier_reviews.measure.evidence_state",
+           "rule": ("a review sample is fresh when Xavier's probability "
+                    "stood on FRESH_CURRENT_PROBABILITY (its own source stamp "
+                    "inside the Pinnacle limit at the review instant); an "
+                    "open position owes a review every %.0f s and a missed "
+                    "one counts not fresh" % REVIEW_EXPECTED_S),
+           "open_positions_now": len(open_groups), "horizons": {}}
+    for k, h in PINNAPI_HORIZONS:
+        out["horizons"][k] = pinnapi_inputs_summary(
+            rows, open_groups, now=now, horizon_s=h)
+    out["status"] = ("MEASURED" if any(
+        v["denominator"] for v in out["horizons"].values())
+        else "NO_HELD_POSITION_IN_THE_HORIZON")
+    return out
 
 
 async def latest_mark_refresh(conn, account_id: str):
@@ -516,16 +696,195 @@ def venue_positions_block(hb, *, now: float,
                 **({"credential_proof": proof} if proof else {}))
 
 
+#: (RC6) the two scans Adriana records on every pass (agents/adriana_runner)
+ARB_SCAN_KINDS = (("census", "adr-scan-%"), ("cross_venue", "adr-claims-%"))
+#: a scan older than three runner intervals (3 x 300 s) is not evidence of
+#: the terms the scan reads NOW
+ARB_SCAN_MAX_AGE_S = 900.0
+#: the base statement, kept verbatim while it is the truth (old rows without
+#: a recorded void-terms census, or no scan at all)
+ARB_FAIL_CLOSED_UNREAD = ("void terms not established -> every structure "
+                          "refused (agents/adriana.ESTABLISHED_VOID_TERMS)")
+#: (RC6) the scan kinds whose fixture read is capped (canonical_claims_db.
+#: MAX_FIXTURES): their terms cover only the fixtures the read reached
+ARB_SCOPED_KINDS = ("cross_venue",)
+
+
+def _unread_scope(kind: str, bc: dict) -> list:
+    """What a capped scan did NOT read although it could have priced it: a
+    readable fixture the cap cut, or a mapped PMUS market whose leg was not
+    read (no premap identity). Their terms are unread, so the scan cannot
+    establish the terms of its scope. A fixture with no readable Kalshi book
+    forms no structure and is not counted here (it stays named in scope).
+    A capped scan that recorded no scope is itself an unread scope."""
+    if kind not in ARB_SCOPED_KINDS:
+        return []
+    sc = bc.get("scope")
+    if not isinstance(sc, dict):
+        return ["the scan recorded no fixture scope"]
+    out = []
+    n = int(sc.get("cut_by_cap_readable") or 0)
+    if n:
+        out.append("%d readable fixture(s) cut by the %s-fixture cap (%s)" % (
+            n, sc.get("max_fixtures"),
+            ", ".join((sc.get("cut_by_cap_named") or [])[:min(n, 3)])))
+    m = int(sc.get("pmus_identity_missing") or 0)
+    if m:
+        out.append("%d mapped PMUS market(s) not read, no premap identity "
+                   "(%s)" % (m, ", ".join(
+                       (sc.get("pmus_identity_missing_named") or [])[:3])))
+    return out
+
+
+def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
+    """WHAT THE LATEST SCANS RECORDED ABOUT THE VOID / POSTPONEMENT TERMS OF
+    EVERY CONTRACT THEY READ, and the one-line statement of it. Pure.
+
+    `scans` {kind: row with by_code (its `void_terms` census), finished_at,
+    status, why}, one per ARB_SCAN_KINDS. ESTABLISHED only when EVERY kind
+    -- the recorded-books census AND the cross-venue claim scan -- has a
+    current scan (<= ARB_SCAN_MAX_AGE_S) with a recorded void-terms census
+    that read at least one contract, and every contract every scan read has
+    its terms established from its own captured rules. Missing evidence is
+    never neutral: a kind with no scan (NO_SCAN), a scan that read no
+    contract (READ_NO_CONTRACT, its status and why named), a stale scan or
+    one without a census establishes nothing, and the statement then
+    contains the words "void terms not established" with that state. A
+    capped scan (ARB_SCOPED_KINDS) establishes only if it read everything it
+    could price: a readable fixture its cap cut, or a mapped PMUS market it
+    could not read, leaves those terms unread (_unread_scope, named)."""
+    parts, by_kind, all_est = [], {}, True
+    for kind, _pat in ARB_SCAN_KINDS:
+        row = scans.get(kind)
+        if not row:
+            by_kind[kind] = {"state": "NO_SCAN"}
+            all_est = False
+            parts.append("%s: void terms not established (no scan of this "
+                         "kind recorded)" % kind)
+            continue
+        bc = _j(row.get("by_code")) or {}
+        vt = bc.get("void_terms")
+        age = (None if row.get("finished_at") is None
+               else round(now - _epoch(row["finished_at"]), 1))
+        n_key = "aliases" if "aliases" in (vt or {}) else "contracts"
+        n = int((vt or {}).get(n_key) or 0)
+        k = int((vt or {}).get("established") or 0)
+        d = {"scan_id": row.get("scan_id"), "age_s": age, "read": n,
+             "unit": n_key, "established": k,
+             "scan_status": row.get("status"), "scan_why": row.get("why"),
+             "not_established": (vt or {}).get("not_established") or {},
+             "rules": (vt or {}).get("rules") or {},
+             "source": (vt or {}).get("source")}
+        if vt is None:
+            d["state"] = "VOID_TERMS_CENSUS_NOT_RECORDED"
+            all_est = False
+            parts.append("%s: void terms not established (the scan recorded "
+                         "no void-terms census)" % kind)
+        elif age is None or age > ARB_SCAN_MAX_AGE_S:
+            d["state"] = "STALE_SCAN"
+            all_est = False
+            parts.append("%s: void terms not established (latest scan %s s "
+                         "old > %d s)" % (kind, age, ARB_SCAN_MAX_AGE_S))
+        elif n == 0:
+            # a scan that read nothing is no evidence of any term: never
+            # neutral (a census with one established contract and a
+            # cross-venue scan that read none is not "established")
+            d["state"] = "READ_NO_CONTRACT"
+            all_est = False
+            parts.append("%s: void terms not established (the scan read no "
+                         "contract; status %s%s)" % (
+                             kind, row.get("status") or "?",
+                             (", " + str(row["why"])) if row.get("why")
+                             else ""))
+        elif k < n:
+            all_est = False
+            d["state"] = "NOT_ESTABLISHED"
+            parts.append("%s: void terms not established for %d of %d %s (%s)"
+                         " -> those structures refused" % (
+                             kind, n - k, n, n_key, ", ".join(
+                                 "%s %d" % kv for kv in sorted(
+                                     d["not_established"].items()))))
+        else:
+            d["state"] = "ESTABLISHED"
+            parts.append("%s: void terms established for %d of %d %s from "
+                         "each one's own published rules (%s); separate "
+                         "markets' fair prices are never summed to $1, so "
+                         "structures across markets are refused at their "
+                         "priced void-state floor" % (
+                             kind, k, n, n_key, ", ".join(
+                                 "%s %d" % kv for kv in sorted(
+                                     d["rules"].items()))))
+        if d["state"] in ("ESTABLISHED", "NOT_ESTABLISHED"):
+            # what the read reached is not the scope: the rest is unread
+            unread = _unread_scope(kind, bc)
+            d["unread_scope"] = unread
+            if unread:
+                all_est = False
+                if d["state"] == "ESTABLISHED":
+                    d["state"] = "SCOPE_NOT_READ"
+                parts.append("%s: void terms not established for what the "
+                             "scan did not read: %s" % (kind,
+                                                        "; ".join(unread)))
+        by_kind[kind] = d
+    established = all_est
+    if not any(r for r in scans.values()):
+        statement = ARB_FAIL_CLOSED_UNREAD
+    else:
+        statement = "; ".join(parts)
+    # the invariant the evaluator reads: short of established, the words
+    # are always there (each non-established part above carries them;
+    # this keeps it true whatever a later edit of the parts does)
+    if not established and "void terms not established" not in statement:
+        statement = "void terms not established: " + statement
+    return {"established": established, "by_scan": by_kind,
+            "statement": statement,
+            "requires": [k for k, _ in ARB_SCAN_KINDS],
+            "max_scan_age_s": ARB_SCAN_MAX_AGE_S}
+
+
 async def arbitrage_block(conn) -> dict:
     if not await _has(conn, "adriana_arb_scans"):
         return {"verdict": "NO_ELIGIBLE_ARB", "why": "ADRIANA_TABLES_ABSENT",
                 "authority": "SHADOW_ONLY"}
+    # (RC6) the census and the claim-first scan share one started_at per
+    # pass; "latest" is the later-FINISHED row (the claim scan records
+    # second), named deterministically instead of whichever row sorts first
     r = await conn.fetchrow(
         "SELECT scan_id, started_at, finished_at, status, markets_read, "
         "       books_fresh, structures_considered, opportunities, "
         "       refusals_total FROM adriana_arb_scans "
-        " ORDER BY started_at DESC LIMIT 1")
+        " ORDER BY started_at DESC, finished_at DESC, scan_id DESC LIMIT 1")
     scan = dict(r) if r else {}
+    now = time.time()
+    by_kind = {}
+    for kind, pat in ARB_SCAN_KINDS:
+        k = await conn.fetchrow(
+            "SELECT scan_id, started_at, finished_at, status, why, "
+            "       markets_read, books_fresh, structures_considered, "
+            "       opportunities, refusals_total, by_code, venues "
+            "  FROM adriana_arb_scans WHERE scan_id LIKE $1 "
+            " ORDER BY started_at DESC, finished_at DESC LIMIT 1", pat)
+        by_kind[kind] = dict(k) if k else None
+    vt = arbitrage_void_terms(by_kind, now=now)
+
+    def brief(row):
+        if not row:
+            return None
+        bc = _j(row.get("by_code")) or {}
+        return {"scan_id": row["scan_id"], "status": row["status"],
+                "why": row["why"],
+                "age_s": round(now - _epoch(row["finished_at"]), 1),
+                "markets_read": row["markets_read"],
+                "books_fresh": row["books_fresh"],
+                "structures_considered": row["structures_considered"],
+                "opportunities": row["opportunities"],
+                "refusals_total": row["refusals_total"],
+                "near_complement_pairs": bc.get("near_complement_pairs"),
+                "book_sources": bc.get("book_sources"),
+                # (RC6) what the claim scan's fixture read covered and cut
+                # (cap, unreadable, unmodelled, PMUS identity), by name
+                "scope": bc.get("scope"),
+                "venues": _j(row.get("venues"))}
     n_ok = 0
     if await _has(conn, "adriana_arb_opportunities"):
         n_ok = int(await conn.fetchval(
@@ -543,12 +902,16 @@ async def arbitrage_block(conn) -> dict:
                         else "NO_ELIGIBLE_ARB"),
             "guaranteed_after_costs": n_ok,
             "refusals_by_reason": refusals,
-            "fail_closed": "void terms not established -> every structure "
-                           "refused (agents/adriana.ESTABLISHED_VOID_TERMS)",
+            # (RC6) computed from what the latest scans recorded about every
+            # contract they read (it was this constant whatever the terms)
+            "fail_closed": vt["statement"],
+            "void_terms": {k: v for k, v in vt.items() if k != "statement"},
             "latest_scan": {k: (str(v) if not isinstance(v, (int, float,
                                                               type(None)))
                                 else v) for k, v in scan.items()
                             },
+            # (RC6) each scan of the pass, with its own counts and age
+            "scans": {k: brief(v) for k, v in by_kind.items()},
             "authority": "SHADOW_ONLY"}
 
 
@@ -793,6 +1156,18 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
     pmx_run = await sec.run("pmx_primary", _pmx, None)
     market["pmx_primary"] = pmx_primary_block(
         pmx_run, fr.get("feeds"), markable=fr.get("markable"), now=now)
+
+    # (RC6 D1) the whole observation window, and the held positions'
+    # PinnAPI probability inputs, each its own section
+    async def _fwin():
+        return await freshness_window_block(conn, now=now)
+    market["freshness_window"] = await sec.run("freshness_window", _fwin,
+                                               dict(down_))
+
+    async def _pin():
+        return await pinnapi_held_inputs_block(conn, account_id, now=now)
+    market["pinnapi_held_inputs"] = await sec.run(
+        "pinnapi_held_inputs", _pin, dict(down_))
 
     async def _gates():
         return await F.gates(conn, account_id=account_id, now=now,

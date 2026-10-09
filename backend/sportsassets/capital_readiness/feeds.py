@@ -63,6 +63,8 @@ FRESHNESS_TARGET = 0.95
 MIRROR_HEARTBEAT_MAX_AGE_S = 900.0
 BIND_MODEL_MAX_AGE_S = 3600.0
 FIRST_LOSS_WINDOW_S = 3600.0
+#: how many SOFTWARE codes the software-reds gate names (evidence only)
+SOFTWARE_BY_CODE_MAX = 12
 
 UNAVAILABLE_AGENTS = {
     "ARCHER": ("NO_RECORDED_EXPECTED_FILL_COST_PER_ORDER: paper fills are "
@@ -985,8 +987,18 @@ async def gate_software_reds_zero(conn, ctx) -> dict:
                      why=got.get("why"))
     by = (got.get("totals") or {}).get("by_class") or {}
     sw = by.get("SOFTWARE")
+    # WHICH CODES THE SOFTWARE COUNT IS (RC6 lane C): the census's own
+    # by-code rows of class SOFTWARE, so the readback names what to fix
+    # without a second read. Evidence only: the gate's value is still
+    # `sw == 0`, read exactly as before.
+    by_code = [{"stage": r.get("stage"), "code": r.get("code"),
+                "events": r.get("events")}
+               for r in ((got.get("totals") or {}).get("by_code") or [])
+               if isinstance(r, dict) and r.get("class") == "SOFTWARE"]
     return _gate(sw == 0, "SOFTWARE_RED_FIRST_LOSSES_IN_LAST_HOUR",
                  software=sw, by_class=by, window_s=FIRST_LOSS_WINDOW_S,
+                 software_by_code=by_code[:SOFTWARE_BY_CODE_MAX],
+                 software_codes_truncated=len(by_code) > SOFTWARE_BY_CODE_MAX,
                  source="coverage_first_loss.read (1 h)")
 
 
@@ -1015,22 +1027,87 @@ async def gate_management_epoch_reconciled(conn, ctx) -> dict:
                  source="bettor_capital_authority.management_reconciliation")
 
 
+#: THE NEWEST REVIEW'S RECORDED PACKET GAPS of each named group: which
+#: management-packet elements (xavier_packet.ELEMENTS) that review found
+#: missing. Evidence only -- the verdict is the integrity's.
+LATEST_PACKET_MISSING_SQL = """
+    SELECT DISTINCT ON (group_id) group_id, reviewed_at,
+           selection->'management_packet'->'gate'->'missing' AS missing
+      FROM paper_xavier_reviews
+     WHERE account_id = $1 AND group_id = ANY($2::text[])
+     ORDER BY group_id, reviewed_at DESC
+"""
+
+
 async def gate_xavier_complete(conn, ctx) -> dict:
+    """GREEN only when every applicable open position's packet is complete
+    NOW (bettor_paper_freshness.strategy_management_integrity, strict: any).
+
+    THE EVIDENCE NAMES EVERY BLOCKER (RC6 xavier-records). Production
+    2026-10-08 20:03Z (pm-acceptance 37836393458, completion.json): the
+    gate listed three position keys and nothing else -- not why any of them
+    was incomplete, not which packet element was missing, not how many
+    applicable positions were complete. Its evidence now carries, per
+    incomplete position, the currency reason (packet_incomplete_why), the
+    live protection state and the newest review's missing elements, and the
+    whole counts (applicable, complete now, excluded as EXTERNAL_UNAVAILABLE).
+    The verdict, the rule and the strategies' integrity are unchanged."""
     from .. import bettor_paper_freshness as FR
     from .. import bettor_paper_ledger as L
     pos = await L.positions(conn, ctx["account_id"])
     strategies = sorted({p.get("strategy") or L.DEFAULT_STRATEGY
                          for p in pos})
     incomplete, per = [], {}
+    why, prot, excluded = [], [], []
+    applicable = complete_now = 0
     for s in strategies:
         iv = await FR.strategy_management_integrity(
             conn, ctx["account_id"], s, now=ctx["now"])
         per[s] = {"open_positions": iv.get("open_positions"),
-                  "packet_incomplete_rate": iv.get("packet_incomplete_rate")}
+                  "packet_incomplete_rate": iv.get("packet_incomplete_rate"),
+                  "packet_complete_now": iv.get("packet_complete_now_count")}
         incomplete += list(iv.get("packet_incomplete") or [])
+        why += list(iv.get("packet_incomplete_why") or [])
+        prot += list(iv.get("protection_not_valid") or [])
+        excluded += list(iv.get("excluded_external_unavailable") or [])
+        applicable += int(iv.get("open_positions") or 0)
+        complete_now += int(iv.get("packet_complete_now_count") or 0)
+    missing = {}
+    groups = sorted({p["group_id"] for p in pos
+                     if p["position_key"] in set(incomplete)})
+    if groups:
+        try:
+            async with conn.transaction():
+                for r in await conn.fetch(LATEST_PACKET_MISSING_SQL,
+                                          ctx["account_id"], groups):
+                    m = r["missing"]
+                    if isinstance(m, str):
+                        try:
+                            m = json.loads(m)
+                        except ValueError:
+                            m = None
+                    missing[r["group_id"]] = m
+        except Exception as exc:                                # noqa: BLE001
+            missing = {"_unread": "%s" % type(exc).__name__}
+    by_key = {p["position_key"]: p for p in pos}
+    pstate = {x["position_key"]: x.get("state") for x in prot}
+    blockers = []
+    for x in why[:20]:
+        p = by_key.get(x["position_key"]) or {}
+        blockers.append({
+            "position_key": x["position_key"], "why": x["why"],
+            "protection_state": pstate.get(x["position_key"],
+                                           FR.PS_PROTECTED),
+            "latest_review_missing": missing.get(p.get("group_id"))})
     return _gate(not incomplete, "XAVIER_PACKETS_INCOMPLETE",
                  open_positions=len(pos), strategies=per,
                  packet_incomplete=incomplete[:20],
+                 applicable_open_positions=applicable,
+                 complete_current_packets=complete_now,
+                 excluded_external_unavailable=excluded[:20],
+                 blockers=blockers,
+                 blockers_unread=missing.get("_unread"),
+                 rule=FR.PACKET_CURRENCY_RULE,
                  source="bettor_paper_freshness.strategy_management_integrity")
 
 

@@ -42,9 +42,13 @@ delta: contracts that moved from MAPPED_BUT_SETTLEMENT_NOT_PROVEN to a
 PROVEN state (and back). Decision-time attest remains the trading authority.
 
 KALSHI. `populate_kalshi` writes the GET-only sports catalogue's markets as
-registry rows (venue KALSHI, contract_id 'kalshi:'+ticker, venue ids only,
-desired_subscription false, a named KALSHI_ONTOLOGY_NOT_MAPPED gap: no sport,
-family or mapping is guessed) and their rules into market_plane_rules.
+registry rows (venue KALSHI, contract_id 'kalshi:'+ticker, desired_subscription
+false) and their rules into market_plane_rules. Each row's ontology is
+kalshi_ontology.classify's (RC6): game winners, spreads, game totals and team
+totals are mapped from the series' sports tag and the contract's own
+rules_primary sentence; every other contract stays a gap named by the
+classifier (nothing is guessed). A mapped Kalshi contract's settlement state
+is then evidence-based like any other (market_plane.settlement).
 
 MEMORY: ONE PAGE AT A TIME (RC5, 2026-10-08). sportsassets-market-plane was
 OOM-killed at 2 GiB from 06:10:01Z (~14 kills by 12:50Z). The three passes
@@ -71,6 +75,7 @@ the same rules texts loaded, one write transaction per pass as before.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -221,12 +226,40 @@ def _epoch(v):
         return None
 
 
+#: THE VENUE'S MARKET-KIND PREFIXES (copy_sports._KINDS, pinned equal by
+#: tests/test_rc6_coverage_waterfall.py): a MARKET slug carries one
+#: (`aec-nfl-ind-was-2026-10-04`, `asc-...`, `tsc-...`, `astatc-...`); the
+#: venue's EVENT slug does not (`nfl-ind-was-2026-10-04`).
+MARKET_KIND_PREFIXES = frozenset({"atc", "aec", "asc", "tsc", "astatc", "cpc"})
+
+
 def league_of(event_slug, team_league=None) -> str | None:
-    """The venue's league code: the event slug's second token
-    (`aec-mlb-nyy-bos-...` -> mlb), else the catalogue's team league."""
-    parts = str(event_slug or "").split("-")
-    if len(parts) >= 2 and parts[1]:
-        return parts[1].lower()
+    """The venue's league code, read off the slug by the venue's own grammar:
+    a MARKET slug's segment after its kind prefix (`aec-mlb-nyy-bos-...` ->
+    mlb), an EVENT slug's FIRST segment (`nfl-ind-was-2026-10-04` -> nfl,
+    `bun-2027-05-22-relegation` -> bun, `btc-range-hr-...` -> btc: the rule
+    venue_catalogue.league_of and copy_sports.league_of already state), else
+    the catalogue's team league.
+
+    RC6 (lane D2). This read the SECOND segment of every slug. us_premap's
+    event_slug is the venue's EVENT slug, which carries no kind prefix
+    (research-sql run 37871119335, W8: every one of the top 60 first segments
+    of the 74,288 active PMUS event ids is a league code -- cfb 24,024, nfl
+    15,810, nhl 5,101, ... -- and the second segment is a team code or a
+    futures subject), so the registry's `competition` was a TEAM code for
+    every listed game (pm-acceptance 37836393458 settlement breakdown keys
+    POLYMARKET_US|football|buf|TOTAL, ...|hou|MARGIN, ...), a futures
+    subject for every outright ('2027' 1,347, 'wins' 621, 'deespa' 524, ...:
+    10,846 outrights left SPORT_NOT_NORMALIZED because LEAGUE_SPORT was asked
+    about '2027'), and 'range' / 'above' for 1,343 BTC price markets that
+    NON_SPORTS_LEAGUES names for exclusion by their 'btc' code."""
+    parts = [p for p in str(event_slug or "").strip().lower().split("-") if p]
+    if parts:
+        if parts[0] in MARKET_KIND_PREFIXES:
+            if len(parts) >= 2:
+                return parts[1]
+        else:
+            return parts[0]
     return str(team_league).lower() if team_league else None
 
 
@@ -237,6 +270,15 @@ def _jsonish(v):
         except ValueError:
             return None
     return v
+
+
+def venue_lists_active(r: dict, *, now: float) -> bool:
+    """PURE. The catalogue market is listed in an active state and was seen
+    within ACTIVE_HORIZON_S: what makes its registry row active (besides
+    being held or a candidate)."""
+    seen = _epoch(r.get("updated_at")) or now
+    return (r.get("listing_state") in ACTIVE_LISTING_STATES
+            and now - seen <= ACTIVE_HORIZON_S)
 
 
 def contract_row(r: dict, *, now: float, held=frozenset(),
@@ -277,8 +319,7 @@ def contract_row(r: dict, *, now: float, held=frozenset(),
         "version": O.VERSION}
     start = _epoch(r.get("game_start"))
     seen = _epoch(r.get("updated_at")) or now
-    listed_active = (r.get("listing_state") in ACTIVE_LISTING_STATES
-                     and now - seen <= ACTIVE_HORIZON_S)
+    listed_active = venue_lists_active(r, now=now)
     reason = None
     if slug in held:
         prio, reason = P_HELD, "OPEN_PAPER_POSITION"
@@ -434,7 +475,8 @@ HAVE_SQL = ("SELECT contract_id, content_sha FROM market_plane_registry "
 
 
 async def populate(conn, *, since: float, now: float | None = None,
-                   full: bool = False) -> dict:
+                   full: bool = False, excluded_detail: bool = False
+                   ) -> dict:
     """Upsert every catalogue market changed since `since` (all of them when
     `full`), keep REQUIRED markets active, and (on a full pass) retire
     registry rows the catalogue no longer lists and nothing requires. Returns
@@ -448,12 +490,19 @@ async def populate(conn, *, since: float, now: float | None = None,
     (+444 MB VmHWM on a full pass at production cardinality). Every page's
     markets are distinct (the catalogue is GROUP BY market_slug), so a page
     never reads a row an earlier page wrote; the writes, the events and the
-    counts are those of the single-batch pass."""
+    counts are those of the single-batch pass.
+
+    `excluded_detail` (RC6, lane D2) also counts, by venue code, the
+    excluded markets the venue LISTS as active (`excluded_listed_active`:
+    the rows that would be active registry rows were their code a sports
+    league). Off, the output is the RC5 output exactly."""
     at = float(now if now is not None else time.time())
     held, cands, both_read = await required_sets_read(conn)
     required = held | cands
     out = {"read": 0, "upserted": 0, "changed": 0, "excluded": {},
            "required_added": 0, "retired": 0, "full": bool(full)}
+    if excluded_detail:
+        out["excluded_listed_active"] = {}
     seen_required = set()
     watermark = float(since)
     async with conn.transaction():
@@ -475,6 +524,9 @@ async def populate(conn, *, since: float, now: float | None = None,
                 if c is None:
                     lg = league_of(r.get("event_slug"), r.get("team_league"))
                     out["excluded"][lg] = out["excluded"].get(lg, 0) + 1
+                    if excluded_detail and venue_lists_active(r, now=at):
+                        xa = out["excluded_listed_active"]
+                        xa[lg] = xa.get(lg, 0) + 1
                     continue
                 if c["contract_id"] in required:
                     seen_required.add(c["contract_id"])
@@ -535,6 +587,46 @@ async def populate(conn, *, since: float, now: float | None = None,
     out["watermark"] = watermark
     out["required"] = {"held": len(held), "candidates": len(cands)}
     return out
+
+
+#: what a FULL pass's record says the exclusion rule is
+EXCLUDED_RULE = ("ontology.NON_SPORTS_LEAGUES, by the venue league code of "
+                 "the event slug (populate.league_of)")
+
+
+def full_pass_record(out: dict, *, at: float) -> dict:
+    """PURE. THE MARKETS A FULL POPULATE PASS KEPT OUT OF THE REGISTRY, by
+    name (RC6, lane D2, review finding 2).
+
+    A market whose venue code NON_SPORTS_LEAGUES names never becomes a
+    registry row, so it is in no coverage denominator (coverage.active, the
+    waterfall). Only a FULL pass reads the whole catalogue; an incremental
+    pass (every POPULATE_EVERY_S, since the watermark) counts only the rows
+    it read, and it replaces state["populate"]. The worker keeps this
+    record of the last full pass under its own key (state / snapshot
+    `populate_full`), which no incremental pass overwrites:
+
+      excluded               every catalogue market kept out, by code
+      excluded_listed_active those the venue lists as active (the rows the
+                             registry's active count would hold were the
+                             code a sports league), by code
+      at                     the full pass's time (its own clock; no
+                             source-event time is restated)"""
+    x = {str(k): int(v) for k, v in (out.get("excluded") or {}).items()}
+    xa = {str(k): int(v) for k, v in
+          (out.get("excluded_listed_active") or {}).items()}
+    return {"at": float(at), "full": bool(out.get("full")),
+            "read": out.get("read"), "upserted": out.get("upserted"),
+            "retired": out.get("retired"),
+            "rule": EXCLUDED_RULE,
+            "excluded": dict(sorted(x.items())),
+            "excluded_total": sum(x.values()),
+            "excluded_listed_active": (dict(sorted(xa.items()))
+                                       if "excluded_listed_active" in out
+                                       else None),
+            "excluded_listed_active_total": (sum(xa.values())
+                                             if "excluded_listed_active"
+                                             in out else None)}
 
 
 async def catalogue_completeness(conn) -> dict:
@@ -674,6 +766,8 @@ async def _fetch_chunked(conn, sql, ids, *args, key="slug"):
 BREAKDOWN_MAX_KEYS = 200
 #: active contracts classified (and their changes written) per page
 COVERAGE_PAGE = 5000
+#: the coverage pass yields to the event loop every this many contracts
+YIELD_EVERY_ROWS = 250
 
 COVERAGE_KEYS_SQL = ("SELECT contract_id FROM market_plane_registry "
                      " WHERE active ORDER BY priority, contract_id")
@@ -684,6 +778,22 @@ COVERAGE_ROWS_SQL = """
            settlement_evidence->>'rules_sha256' AS settlement_rules_sha
       FROM market_plane_registry WHERE contract_id = ANY($1::text[])
 """
+#: the rule text a terms comparison reads (Polymarket US: its one captured
+#: field; Kalshi: rules_primary) and, for a mapped Kalshi contract only, its
+#: rules_secondary -- where its postponement / cancellation terms are --
+#: appended (RC6): the comparison reads the contract's whole rule block
+RULES_TEXT_SQL = ("SELECT contract_id, rules_text FROM market_plane_rules "
+                  " WHERE contract_id = ANY($1::text[])")
+RULES_SECONDARY_SQL = ("SELECT contract_id, rules_secondary "
+                       "  FROM market_plane_rules "
+                       " WHERE contract_id = ANY($1::text[])")
+#: (RC6, lane D2) the same page with the venue market type and the event
+#: start, read only when the pass is asked for the line-family terms or the
+#: waterfall (coverage_pass `derivative_terms` / `waterfall`)
+COVERAGE_ROWS_SQL_RC6 = COVERAGE_ROWS_SQL.replace(
+    "family,\n           period,",
+    "family,\n           period, market_type, event_start,", 1)
+assert COVERAGE_ROWS_SQL_RC6 != COVERAGE_ROWS_SQL
 COVERAGE_WRITE_SQL = (
     "UPDATE market_plane_registry SET coverage_state = $2, "
     "       coverage_why = $3, coverage_at = to_timestamp($4) "
@@ -698,7 +808,10 @@ SETTLEMENT_WRITE_SQL = (
 
 async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                         rest_sla_s: float = 300.0, limit: int | None = None,
-                        refreshed: dict | None = None) -> dict:
+                        refreshed: dict | None = None,
+                        derivative_terms: bool = False,
+                        waterfall: bool = False,
+                        outside_registry: dict | None = None) -> dict:
     """Classify every ACTIVE registry contract and write the changed terminal
     states AND settlement states (market_plane.settlement, evidence only).
     Returns the matrix summary (counts by state, sport, family, why), the
@@ -731,11 +844,30 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     `rest_recovery_by_origin` per tier: PAPER_BOOK_OBSERVATION vs
     PLANE_ACTIVE_REFRESH, so the source of every REST_RECOVERY is visible.
     Absent (None), nothing is counted from it and the output is the RC5
-    output exactly."""
+    output exactly.
+
+    THE LINE TERMS AND THE WATERFALL (RC6, lane D2). `derivative_terms`
+    reads each page with its venue market type and passes it to
+    market_plane.settlement.state_for (a never-valued full-game or period
+    line contract is read against its family's captured terms, its text
+    loaded once per (fingerprint, family, line, period) as the money line's
+    is; a captured family withheld for want of fixture scope says so).
+    `waterfall` adds
+    `waterfall` (market_plane.waterfall): every active contract's target
+    tier and the stage it stopped at, counters only; with it,
+    `outside_registry` (the plane's last full_pass_record) is carried into
+    the waterfall as the markets kept out of the registry by name, beside
+    the sums and never in them. Both False: the RC5 / RC6-refresh output
+    exactly."""
     from .models import TERMINAL_STATES
     from .coverage import VERSION as MATRIX_VERSION
     from . import settlement as S
+    from . import waterfall as WF
     at = float(now if now is not None else time.time())
+    rows_sql = (COVERAGE_ROWS_SQL_RC6 if (derivative_terms or waterfall)
+                else COVERAGE_ROWS_SQL)
+    wf = WF.Waterfall(now=at) if waterfall else None
+    loaded_line = set()
     keys = [r["contract_id"] for r in await conn.fetch(
         COVERAGE_KEYS_SQL + (" LIMIT %d" % int(limit) if limit else ""))]
     rules_ok = True
@@ -761,9 +893,19 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     origins = None if refreshed is None else {
         t: {"PAPER_BOOK_OBSERVATION": 0, "PLANE_ACTIVE_REFRESH": 0}
         for t in ("PRIORITY", "ALL")}
+    # (RC6 D1) a refreshed value is its receipt instant (a REST book), or
+    # (receipt, "SNAPSHOT") for the plane's snapshot-only gRPC read: a PMX
+    # gRPC book, counted PMX_GRPC and labelled apart from the stream's
+    snap_by = None if refreshed is None else {
+        t: {"STREAM": 0, "PLANE_SNAPSHOT_REFRESH": 0}
+        for t in ("PRIORITY", "ALL")}
+
+    def _rcv(v):
+        return v[0] if isinstance(v, (tuple, list)) else v
     refreshed_ok = {} if refreshed is None else {
         k: v for k, v in refreshed.items()
-        if v is not None and 0.0 <= at - float(v) <= float(rest_sla_s)}
+        if v is not None and _rcv(v) is not None
+        and 0.0 <= at - float(_rcv(v)) <= float(rest_sla_s)}
     by_sport, by_why, by_venue = {}, {}, {}
     s_by_state = {k: 0 for k in S.STATES}
     s_by_basis, s_by_why, s_by_venue, brk = {}, {}, {}, {}
@@ -772,7 +914,7 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         for p0 in range(0, len(keys), COVERAGE_PAGE):
             ids = keys[p0:p0 + COVERAGE_PAGE]
             got = {r["contract_id"]: dict(r) for r in await conn.fetch(
-                COVERAGE_ROWS_SQL, ids)}
+                rows_sql, ids)}
             rows = [got[k] for k in ids if k in got]
             del got
             slugs = [r["contract_id"] for r in rows]
@@ -805,9 +947,28 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                 attested = bool(v.get("settlement_verdict")) or any(
                     str(x).startswith("SETTLEMENT")
                     for x in (v.get("refusals") or []))
+                lf = S.line_family(r) if derivative_terms else None
+                if lf is not None:
+                    # a full-game / period line contract's text, once per
+                    # (text, family, line, period) -- as the money line's
+                    if rr is None or attested or \
+                            not rr.get("rules_published") or \
+                            rr.get("venue") != VENUE:
+                        continue
+                    lk = S.line_key(rr.get("rules_sha256"), lf, s)
+                    if lk in S._LINE_CACHE and lk not in loaded_line:
+                        rr["rules_text"] = ""
+                    else:
+                        need.append(s)
+                        loaded_line.add(lk)
+                    continue
                 fam = S.h2h_family(r)
+                # (RC6) a MAPPED Kalshi full-event winner is compared like a
+                # Polymarket US one, on its own rule block (an unmapped
+                # Kalshi row has no family, so fam is None)
                 if rr is None or attested or not rr.get("rules_published") \
-                        or rr.get("venue") != VENUE or fam is None:
+                        or rr.get("venue") not in (VENUE, KALSHI) \
+                        or fam is None:
                     continue
                 tk = (rr.get("rules_sha256"), fam, r.get("competition"))
                 if tk in S._TERMS_CACHE and tk not in loaded_keys:
@@ -816,14 +977,28 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     need.append(s)
                     loaded_keys.add(tk)
             texts = await _fetch_chunked(
-                conn, "SELECT contract_id, rules_text FROM market_plane_rules "
-                      " WHERE contract_id = ANY($1::text[])", need,
-                key="contract_id") if need else {}
+                conn, RULES_TEXT_SQL, need, key="contract_id") if need else {}
+            kneed = [s for s in need
+                     if (rules.get(s) or {}).get("venue") == KALSHI]
+            seconds = await _fetch_chunked(
+                conn, RULES_SECONDARY_SQL, kneed,
+                key="contract_id") if kneed else {}
             for s, t in texts.items():
-                rules[s]["rules_text"] = t.get("rules_text")
+                txt = t.get("rules_text")
+                sec = (seconds.get(s) or {}).get("rules_secondary")
+                if txt is not None and sec:
+                    txt = "%s\n\n%s" % (txt, sec)
+                rules[s]["rules_text"] = txt
             n_texts += len(texts)
             changed, schanged = [], []
             for r in rows:
+                if n_rows and n_rows % YIELD_EVERY_ROWS == 0:
+                    # (RC6) a terms comparison is ~1 ms: the mapped Kalshi
+                    # full-event winners (4,052 of the 2026-10-09 catalogue)
+                    # add up to ~1 s of comparisons to a page, so the pass
+                    # hands the event loop back between rows (no output
+                    # changes: nothing here reads shared state)
+                    await asyncio.sleep(0)
                 s = r["contract_id"]
                 origin = None
                 if s in fresh_symbols:
@@ -832,18 +1007,28 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     src, fresh = "REST_RECOVERY", True
                     origin = "PAPER_BOOK_OBSERVATION"
                 elif s in refreshed_ok:
-                    src, fresh = "REST_RECOVERY", True
-                    origin = "PLANE_ACTIVE_REFRESH"
+                    v = refreshed_ok[s]
+                    if isinstance(v, (tuple, list)) and len(v) > 1 and \
+                            v[1] == "SNAPSHOT":
+                        src, fresh = "PMX_GRPC", True
+                        origin = "PLANE_SNAPSHOT_REFRESH"
+                    else:
+                        src, fresh = "REST_RECOVERY", True
+                        origin = "PLANE_ACTIVE_REFRESH"
                 else:
                     src, fresh = None, False
                 src_counts[src or "NONE"] += 1
                 st = S.state_for(r, valuation=vals.get(s),
                                  rules=rules.get(s), priced=priced.get(s),
-                                 rules_looked_up=rules_ok)
+                                 rules_looked_up=rules_ok,
+                                 derivative_terms=derivative_terms)
                 t = classify(r, valuation=vals.get(s), candidate=cands.get(s),
                              fresh_book=fresh, book_source=src,
                              external_codes=ext, settlement=st)
                 t["venue"] = r.get("venue")
+                if wf is not None:
+                    wf.add(r, t, valued=bool(
+                        (vals.get(s) or {}).get("has_probability")))
                 n_rows += 1
                 by_state[t["state"]] += 1
                 for tier in (("PRIORITY", "ALL") if (
@@ -853,8 +1038,13 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     if t["state"] == "EXTERNAL_DATA_UNAVAILABLE":
                         tiers[tier]["EXTERNAL_DATA_UNAVAILABLE"] += 1
                     tiers[tier][src or "NONE"] += 1
-                    if origins is not None and origin is not None:
+                    if origin == "PLANE_SNAPSHOT_REFRESH":
+                        snap_by[tier][origin] += 1
+                    elif origins is not None and origin is not None:
                         origins[tier][origin] += 1
+                    if snap_by is not None and src == "PMX_GRPC" and \
+                            origin is None:
+                        snap_by[tier]["STREAM"] += 1
                 if (t["state"], t["why"]) != (r.get("coverage_state"),
                                              r.get("coverage_why")):
                     changed.append((s, t["state"], t["why"], at))
@@ -926,6 +1116,9 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
          "version": MATRIX_VERSION}
     if origins is not None:
         m["rest_recovery_by_origin"] = origins
+        m["pmx_grpc_by_origin"] = snap_by
+    if wf is not None:
+        m["waterfall"] = wf.result(outside_registry=outside_registry)
     top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),
@@ -954,15 +1147,53 @@ KALSHI = "KALSHI"
 
 
 def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
-    """PURE. One Kalshi catalogue market -> its registry row. Venue ids
-    only; NO sport / family / period is assigned (no guessed mapping), so
-    the row stays a named ontology gap; never subscribed on the PMUS
-    streams (desired_subscription false)."""
+    """PURE. One Kalshi catalogue market -> its registry row; never
+    subscribed on the PMUS streams (desired_subscription false).
+
+    THE KALSHI ONTOLOGY (RC6, kalshi_ontology). Until RC6 every Kalshi row
+    was the one gap KALSHI_ONTOLOGY_NOT_MAPPED (no sport, family or period:
+    "no guessed mapping"; 76,467 active rows at RC5). kalshi_ontology.
+    classify now reads the series' own sports tag and the contract's own
+    rules_primary sentence -- anchored venue templates, a subject that is a
+    participant the sentence names (or the market's code in the event
+    ticker), the stated line, period and overtime clause -- and maps game
+    winners, spreads, game totals and team totals; the row then carries its
+    sport, family and period, and its settlement terms bound by the rule
+    block's own fingerprint (kalshi_ontology.bind_terms). Everything else
+    stays a gap NAMED by the classifier (player props, team-stat props,
+    other game props, outrights / season contracts, non-binary payouts,
+    unrecognised sentences, a ticker not under its event), never guessed.
+    It reads only fields the plane's walk keeps (KALSHI_PERSIST_KEYS +
+    _series), so both walks (the plane's and kalshi_market_data's) write
+    the same row."""
+    from .. import kalshi_ontology as KONT
     t = (market or {}).get("ticker")
     if not t:
         return None
     ser = dict(market.get("_series") or {})
-    ontology = {"gaps": ["KALSHI_ONTOLOGY_NOT_MAPPED"],
+    v = KONT.classify(market)
+    mapped = v["status"] == KONT.MAPPED
+    subj = v.get("subject") or {}
+    meaning = {"venue": KALSHI, "venue_contract_id": t,
+               "sport": v["sport"], "competition": ser.get("ticker"),
+               "event_id": market.get("event_ticker"),
+               "subject_type": subj.get("type") if mapped else None,
+               "subject_id": (subj.get("ticker_code") or
+                              subj.get("as_stated")) if mapped else None,
+               "period": v["period"] if mapped else None,
+               "metric": v["family"] if mapped else None,
+               "operator": v["operator"] if mapped else None,
+               "line": (float(v["line"]) if mapped and v["line"] is not None
+                        else None),
+               "side": None, "settlement_schema": None,
+               "raw_market_type": ser.get("ticker"),
+               "ontology_version": KONT.VERSION}
+    # (the row is rewritten on every walk: empty fields are not stored)
+    meaning = {k: x for k, x in meaning.items() if x is not None}
+    ontology = {"gaps": [] if mapped else [v["refusal"]],
+                "meaning": meaning,
+                "kalshi": KONT.stored(v),
+                "terms": KONT.bind_terms(market, v) if mapped else None,
                 "venue_ids": {"ticker": t,
                               "event_ticker": market.get("event_ticker"),
                               "series_ticker": ser.get("ticker")},
@@ -974,16 +1205,22 @@ def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
                 "close_time": market.get("close_time"),
                 "display_only": {"title": market.get("title"),
                                  "yes_sub_title": market.get("yes_sub_title")},
-                "basis": "VENUE_IDS", "version": O.VERSION}
+                "basis": ("VENUE_IDS+SERIES_SPORT_TAG+RULES_PRIMARY_TEMPLATE"
+                          if mapped else "VENUE_IDS"),
+                "version": O.VERSION}
+    sport = v["sport"]
+    family = v["family"] if mapped else None
+    period = v["period"] if mapped else None
     content = {"ontology": ontology, "event_id": market.get("event_ticker"),
-               "competition": ser.get("ticker")}
-    return {"contract_id": "kalshi:%s" % t, "venue": KALSHI, "sport": None,
+               "competition": ser.get("ticker"), "sport": sport,
+               "family": family, "period": period}
+    return {"contract_id": "kalshi:%s" % t, "venue": KALSHI, "sport": sport,
             "competition": ser.get("ticker"),
             "event_id": market.get("event_ticker"),
             "market_type": market.get("market_type"), "ontology": ontology,
             "active": True, "desired_subscription": False,
             "priority": P_REST, "required_reason": "VENUE_ACTIVE",
-            "family": None, "period": None, "event_start": None,
+            "family": family, "period": period, "event_start": None,
             "last_seen_at": now, "content_sha": _sha(content)}
 
 

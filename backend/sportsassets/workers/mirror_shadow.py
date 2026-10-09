@@ -1238,10 +1238,13 @@ def pmus_secret_unusable_reason(pmus=None, *, secret_fn=None) -> str | None:
     if not raw:
         return None
     from .. import venue_key as VK
-    d = VK.describe_secret_key(raw)
-    if d.get("present") and not d.get("usable_after_normalisation"):
+    # the one PMUS signer precondition: no Ed25519 key in any encoding ->
+    # R_PMUS_SECRET_NOT_ED25519 (the same string); another venue's PEM key
+    # file -> VK.R_PEM_KEY_FILE (RC6 red-team, credential isolation)
+    why = VK.pmus_slot_refusal(raw)
+    if why == VK.R_NOT_ED25519:
         return R_PMUS_SECRET_NOT_ED25519
-    return None
+    return why
 
 
 async def account_positions(pmus, basis_out: dict | None = None) -> dict[str, float] | None:

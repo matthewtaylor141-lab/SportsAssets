@@ -75,8 +75,13 @@ SPORT_PREFIXES = {
 LEAGUE_SPORT = {
     "nfl": "football", "cfb": "football", "ufl": "football",
     "nba": "basketball", "wnba": "basketball", "cbb": "basketball",
-    "ncaams": "basketball", "ncaaws": "basketball", "euroleague": "basketball",
-    "mlb": "baseball", "wbc": "baseball", "kbo": "baseball", "npb": "baseball",
+    # (RC6) NCAA men's / women's SOCCER: every typed venue row of these codes
+    # is a soccer market (research-sql run 37871400151 F3: ncaaws 333 /
+    # ncaams 132 rows, sport soccer from their own sportsMarketType; the
+    # c28 receipt files both tokens under soccer too). They read basketball
+    # here, which a futures market of either code would have inherited.
+    "ncaams": "soccer", "ncaaws": "soccer", "euroleague": "basketball",
+    "mlb": "baseball", "kbo": "baseball", "npb": "baseball",
     "nhl": "hockey", "khl": "hockey", "shl": "hockey",
     "epl": "soccer", "ucl": "soccer", "uel": "soccer", "uecl": "soccer",
     "unl": "soccer", "lal": "soccer", "sea": "soccer", "bun": "soccer",
@@ -106,7 +111,24 @@ LEAGUE_SPORT = {
 #: sports: crypto, entertainment, awards, weather, games): excluded from the
 #: sports universe by name, never silently
 NON_SPORTS_LEAGUES = {"btc", "eth", "sol", "ntflx", "nobel", "temp", "gtasc",
-                      "oscars", "emmys", "grammys", "box", "pol"}
+                      "oscars", "emmys", "grammys", "box", "pol",
+                      # (RC6) the venue's macro-economic and central-bank
+                      # markets, filed as `futures` beside the sports ones
+                      # (research-sql run 37871400151 F4, their own event
+                      # ids: uscpi-september-mom-2026-10-14, usfed-hike2-
+                      # 2026-12-31, ecb-2026-10-29, boj-2026-10-30, ...).
+                      # Unreachable before RC6: the league was read off the
+                      # SECOND slug segment, so none of them was ever seen
+                      # under its own code.
+                      "us", "uscpi", "uscpicore", "usfed", "usgas",
+                      "usunemp", "usnfp", "fed", "cut", "hike", "ecb", "boj",
+                      "boe", "boc", "boi", "bcb", "cbr"}
+#: (RC6) venue codes the venue uses for MORE THAN ONE sport: never mapped
+#: from the code alone (a named LEAGUE_CODE_AMBIGUOUS gap instead). `wbc`
+#: was read as the World Baseball Classic; every `wbc` market listed today is
+#: a World Boxing Council title future (research-sql run 37871400151 F4:
+#: 145 rows, wbc-bantamw-2026-12-31-champ .. wbc-welterw-2026-12-31-champ).
+AMBIGUOUS_LEAGUE_CODES = {"wbc": ("baseball", "boxing")}
 
 #: (integration) THE VENUE'S OWN LABEL WHEN NO TOKEN ABOVE MATCHES. The
 #: residual of sportsMarketType after the sport head, the subject word and
@@ -173,9 +195,12 @@ def parse_market_type(*, venue: str, contract_id: str, sports_market_type: str |
             sport, sport_head = canonical, p
             break
     sport_basis = "VENUE_MARKET_TYPE" if sport else None
+    ambiguous = False
     if sport is None and competition:
         lg = str(competition).strip().lower()
-        if lg in LEAGUE_SPORT:
+        if lg in AMBIGUOUS_LEAGUE_CODES:
+            ambiguous = True
+        elif lg in LEAGUE_SPORT:
             sport, sport_basis = LEAGUE_SPORT[lg], "VENUE_LEAGUE_CODE"
     period = "FULL_EVENT"
     for rx, value in _PERIOD_PATTERNS:
@@ -219,7 +244,8 @@ def parse_market_type(*, venue: str, contract_id: str, sports_market_type: str |
     )
     gaps = []
     if not sport:
-        gaps.append("SPORT_NOT_NORMALIZED")
+        gaps.append("LEAGUE_CODE_AMBIGUOUS" if ambiguous
+                    else "SPORT_NOT_NORMALIZED")
     if not metric:
         gaps.append("METRIC_NOT_NORMALIZED")
     return {"ok": not gaps, "meaning": meaning.to_dict(), "gaps": gaps,

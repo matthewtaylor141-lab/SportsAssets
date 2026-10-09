@@ -160,19 +160,30 @@ def test_maker_rebates_are_per_fill_and_carry_no_cap():
 # ── the coefficient is per sport, with effective dates ──────────────
 
 def test_theta_is_per_sport_and_the_table_tennis_change_is_represented():
-    """"The Table Tennis taker fee coefficient becomes 0.10, effective 11:59 PM
-    ET, Wednesday September 30, 2026." A single constant would have silently
+    """"The Table Tennis taker fee coefficient becomes 0.10" -- "Both of the
+    following take effect at 12:00 AM ET on Wednesday, October 7, 2026" (the
+    published page as re-read on 2026-10-09; on 2026-09-27 it read 11:59 PM ET
+    September 30, and that superseded instant is kept, labelled, in
+    CF.TABLE_TENNIS_SUPERSEDED_INSTANT). A single constant would have silently
     mispriced it from that instant."""
     assert CF.taker_coefficient(None, "2026-09-27T00:00:00Z") == Decimal("0.0695")
     assert CF.taker_coefficient("TABLE_TENNIS",
                                 "2026-09-27T00:00:00Z") == Decimal("0.0695")
     assert CF.taker_coefficient("TABLE_TENNIS",
-                                "2026-10-02T00:00:00Z") == Decimal("0.10")
-    # THE BOUNDARY, both sides of it. 11:59 PM ET Wed = 03:59Z Thu.
+                                "2026-10-08T00:00:00Z") == Decimal("0.10")
+    # BETWEEN THE SUPERSEDED AND THE PUBLISHED INSTANT the venue charged the
+    # exchange-wide coefficient: no 0.10 before 12:00 AM ET Oct 7.
     assert CF.taker_coefficient("TABLE_TENNIS",
-                                "2026-10-01T03:58:00Z") == Decimal("0.0695")
+                                "2026-10-01T03:59:00Z") == Decimal("0.0695")
     assert CF.taker_coefficient("TABLE_TENNIS",
-                                "2026-10-01T03:59:00Z") == Decimal("0.10")
+                                "2026-10-02T00:00:00Z") == Decimal("0.0695")
+    # THE BOUNDARY, both sides of it. 12:00 AM ET (EDT) Wed = 04:00Z Wed.
+    assert CF.taker_coefficient("TABLE_TENNIS",
+                                "2026-10-07T03:59:00Z") == Decimal("0.0695")
+    assert CF.taker_coefficient("TABLE_TENNIS",
+                                "2026-10-07T04:00:00Z") == Decimal("0.10")
+    assert CF.TABLE_TENNIS_SUPERSEDED_INSTANT["instant"] == \
+        "2026-10-01T03:59:00Z"
     assert CF.SCHEDULE_EFFECTIVE_EXCHANGE_WIDE == "2026-09-25T04:00:00Z"
 
 
@@ -185,11 +196,14 @@ def test_an_unknown_sport_falls_back_to_the_exchange_wide_coefficient():
 
 def test_a_combo_refuses_rather_than_being_priced_with_the_standard_curve():
     """"The taker side of a combo trade uses a separate fee curve." Pricing one
-    with the standard curve would UNDERSTATE the charge."""
+    with the standard curve would UNDERSTATE the charge. The curve's
+    (1 - p)^4 coefficient is 0.06 as published on 2026-10-09 (0.04 on
+    2026-09-27, kept as COMBO_CURVE_SUPERSEDED)."""
     got = CF.combo_fee()
     assert got["FEE"] is None
     assert got["BLOCKER"] == CF.R_COMBO_CURVE_NOT_IMPLEMENTED
-    assert "0.04" in got["published_curve"]
+    assert "0.06 x (1 - p)^4" in got["published_curve"]
+    assert "0.04 x (1 - p)^4" in CF.COMBO_CURVE_SUPERSEDED
     assert "understate" in got["why"]
 
 

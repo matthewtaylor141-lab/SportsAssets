@@ -1946,9 +1946,18 @@ async def refresh_unmetered_discovery(plan: dict, selection: dict, *,
                 r["discovery"] = "DISCOVERY_REFRESH_REFUSED:%s" % (
                     conf.get("refusal"),)
                 continue
+        # ONE fixture index for the whole batch (RC6, pinnapi_reactive.
+        # batch_index): no await between here and the last register, so the
+        # cache cannot change under it and every answer is the scan's. Its
+        # cold names are folded on the CPU lane first (warm_names), before
+        # the batch, never inside it.
+        if events:
+            await reactive.warm_names()
+        _idx = reactive.batch_index() if events else None
         for e in events:
             reactive.register(e, sport_key=r["key"], family=r["family"],
-                              received_at=got.get("received_at") or now)
+                              received_at=got.get("received_at") or now,
+                              index=_idx)
         r["discovery"] = "DISCOVERY_SEEDS_REFRESHED"
         r["discovery_events"] = len(events)
         out["competitions"][r["key"]] = len(events)
@@ -3154,7 +3163,21 @@ def rules_cache_reset() -> None:
     _RULES_CACHE.clear()
 
 
-def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
+def _rules_answer_is_cacheable(got) -> bool:
+    """Whether a rules read is the VENUE'S ANSWER (cached for the hour): the
+    text, or the venue saying it lists / publishes none for this slug. A
+    transport outcome -- our request gate's refusal, a 429, a timeout, a
+    connection error, named by its exception class -- is not an answer about
+    the contract and is never cached: the next candidate on the slug reads
+    again instead of being served the failure for an hour. Pure."""
+    from .. import bettor_live_read as lr
+    g = got if isinstance(got, dict) else {}
+    return bool(g.get("ok")) or g.get("error") in (lr.R_RULES_NOT_LISTED,
+                                                   lr.R_RULES_NOT_PUBLISHED)
+
+
+def _read_venue_rules_blocking(slug: str, *, now=None,
+                               valid_until=None) -> dict:
     """THE VENUE'S PUBLISHED SETTLEMENT PROSE for one contract.
 
     `bettor_venue_settlement.attest` could not establish the overtime rule
@@ -3164,6 +3187,12 @@ def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
     them, paced like every other venue call and cached for an hour, and
     never raises -- an unreadable prose is a named error, not an exception
     on the decision path.
+
+    `valid_until` (RULES_READ_AHEAD_RULE): a cached answer is served only if
+    it is still inside RULES_CACHE_TTL_S at that instant too; otherwise it
+    is read now. The read keeps its OWN instant (`read_at` is when it was
+    made, never `valid_until`), and the TTL is unchanged -- an answer is
+    only ever re-read sooner, never served longer.
     """
     import time as _t
 
@@ -3173,9 +3202,11 @@ def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
 
     at = float(now if now is not None else _t.time())
     hit = _RULES_CACHE.get(slug)
-    if hit is not None and (at - float(hit.get("read_at") or 0.0)
-                            ) <= RULES_CACHE_TTL_S:
-        return dict(hit, from_cache=True)
+    if hit is not None:
+        _read = float(hit.get("read_at") or 0.0)
+        _until = at if valid_until is None else max(at, float(valid_until))
+        if (_until - _read) <= RULES_CACHE_TTL_S:
+            return dict(hit, from_cache=True)
     try:
         pace()
         client = pmus._get_client()
@@ -3191,10 +3222,161 @@ def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
                 "from_cache": False}
     got["read_at"] = at
     got["from_cache"] = False
-    # Cache the ANSWER, including a named failure: a contract that
-    # publishes no prose should not be re-asked every cycle either.
-    _RULES_CACHE[slug] = dict(got)
+    # Cache the ANSWER, including the venue's named "none": a contract that
+    # publishes no prose should not be re-asked every cycle either. A
+    # TRANSPORT outcome (our gate, a 429, a timeout) is not an answer and is
+    # not cached (`_rules_answer_is_cacheable`): served for an hour, it left
+    # every candidate on the slug with no rules text for that hour.
+    if _rules_answer_is_cacheable(got):
+        _RULES_CACHE[slug] = dict(got)
     return got
+
+
+#: ── THE RULES READ LEAVES THE 30 s WINDOW (RC6 lane C, software reds) ──
+#:
+#: MEASURED (research-sql runs on claude/p0-closeout, 2026-10-09):
+#:   * rc6_swreds_rules_cache (37874370857): every calibration-only valuation
+#:     2026-10-08 16:00Z .. 2026-10-09 02:24Z -- football decision lag (book
+#:     read -> decision) p50 1.58 s when the venue rules text was read in the
+#:     window (272 rows) against 0.25 s when the hourly cache answered (144);
+#:     soccer 1.57 s against 0.51 s. NCAAF: 194 of 224 read it fresh.
+#:   * rc6_swreds_candidate_timing (37873120447): the 20:09Z cycle's seven
+#:     NCAAF candidates were read 47.5, 50.2, 52.4, 54.5, 56.6, 58.7, 60.8 s
+#:     into the cycle -- ~2.1 s each -- on quotes delivered 14.8 s old, and
+#:     the other ~44 mapped events were refused QUOTE_STALE_ON_ARRIVAL.
+#:   * the first-loss census re-run per hour (rc6_swreds_census_*):
+#:     QUOTE_STALE_ON_ARRIVAL the largest SOFTWARE first loss, 24-49 events
+#:     an hour with the PinnAPI feed up AND down; NCAAF events with a book
+#:     13-27 of 51 an hour (rc6_swreds_rotation, 37873995354).
+#: WHY THE WINDOW PAYS FOR IT. REQUEUE_AFTER_OUR_DELAY_RULE rotates a fetch's
+#: few fresh slots across the competition, so an NCAAF event is served about
+#: once in six fetches -- past the rules cache's hour -- and nearly every
+#: served candidate pays a paced listing read INSIDE its 30 s window.
+#:
+#: THE REPAIR IS WHEN THE READ IS MADE, NOT HOW OFTEN OR HOW LONG IT LIVES.
+#: After the cycle's time-critical work is done (every money-line window,
+#: the line-market pass, the joins), the events each competition still owes
+#: a fresh window -- the requeued ones, oldest first, exactly the order its
+#: next fetch serves them -- have their venue rules text read ahead through
+#: the same reader, request gate and pacing, into the same hourly cache with
+#: RULES_CACHE_TTL_S unchanged. An answer still inside its TTL at the next
+#: fetch is not read again; each read keeps its own instant; a read refused
+#: by our gate or lost in transport is not cached, so that candidate reads
+#: in its window exactly as before. Bounded: at most MAX_PER_CYCLE reads a
+#: cycle, inside RULES_READ_AHEAD_BUDGET_S (the gate refuses a venue hold
+#: that outlasts the budget instead of sleeping it out). The 30 s rule, its
+#: clock, the arrival check, the venue pacing and every gate are unchanged.
+RULES_READ_AHEAD_RULE = (
+    "the venue rules text of the events a competition still owes a fresh "
+    "window is read after the cycle's time-critical work, oldest owed first, "
+    "into the same hourly cache (TTL unchanged) through the same gate and "
+    "pacing; an answer still valid at the next fetch is not re-read, a "
+    "refused or failed read is not cached; at most MAX_PER_CYCLE reads "
+    "inside RULES_READ_AHEAD_BUDGET_S")
+#: the read-ahead's wall-clock budget per cycle: ~40 fresh reads at the
+#: measured 1.3 s each (1.58 - 0.25), inside a 900 s cycle whose measured
+#: elapsed time is ~290 s (heartbeat 2026-10-09T01:29:46Z, 292.1 s)
+RULES_READ_AHEAD_BUDGET_S = 60.0
+
+
+def _rules_read_ahead_digest(ra) -> dict | None:
+    """The read-ahead's counts for the heartbeat (no slug list). Never
+    raises."""
+    if not isinstance(ra, dict):
+        return None
+    return {k: ra.get(k) for k in (
+        "asked", "read", "already_valid", "not_cached", "budget_s",
+        "budget_spent", "elapsed_s", "error")
+        if k in ra} | {"errors": dict(list((ra.get("errors") or {})
+                                            .items())[:8])}
+
+
+def owed_rules_slugs(requeued_by_sport: dict, ledger: list, *,
+                     sport_order=(), limit: int = MAX_PER_CYCLE) -> list:
+    """The venue slugs whose rules text to read ahead (RULES_READ_AHEAD_RULE):
+    for each competition, its requeued events oldest first (the order its
+    next fetch serves them), mapped to the venue slug this cycle's ledger
+    recorded for them; competitions interleaved one event at a time, in
+    `sport_order` first; each slug once; at most `limit`. Pure."""
+    slug_of: dict = {}
+    for row in ledger or ():
+        if not isinstance(row, dict):
+            continue
+        pid, slug = row.get("provider_event_id"), row.get("us_market_slug")
+        if pid is not None and slug:
+            slug_of[(str(row.get("sport_key")), str(pid))] = str(slug)
+    keys = [k for k in sport_order if k in (requeued_by_sport or {})]
+    keys += sorted(k for k in (requeued_by_sport or {}) if k not in keys)
+    queues = []
+    for k in keys:
+        owed = requeued_by_sport.get(k) or {}
+        ordered = sorted(owed, key=lambda e: (float(owed[e] or 0.0), str(e)))
+        queues.append([slug_of[(str(k), str(e))] for e in ordered
+                       if (str(k), str(e)) in slug_of])
+    out: list = []
+    seen: set = set()
+    depth = 0
+    while len(out) < int(limit) and any(depth < len(q) for q in queues):
+        for q in queues:
+            if depth < len(q) and q[depth] not in seen:
+                seen.add(q[depth])
+                out.append(q[depth])
+                if len(out) >= int(limit):
+                    break
+        depth += 1
+    return out
+
+
+def rules_read_ahead_blocking(slugs, *, now=None, valid_for_s=None,
+                              budget_s=None, reader=None,
+                              clock=time.time) -> dict:
+    """Read ahead the venue rules text of `slugs`, in order
+    (RULES_READ_AHEAD_RULE). Runs in a worker thread; never raises. Each read
+    is a logical read of the request gate whose deadline is the budget's
+    end, so a venue hold that would outlast the budget is refused at once
+    (and, being a transport outcome, not cached). `valid_for_s`: an answer
+    that will still be inside its TTL that far ahead (the next fetch) is
+    not read again."""
+    from .. import venue_request_gate as grt
+    t0 = float(now if now is not None else clock())
+    budget = float(RULES_READ_AHEAD_BUDGET_S if budget_s is None
+                   else budget_s)
+    horizon = float(CYCLE_S if valid_for_s is None else valid_for_s)
+    end = t0 + budget
+    read = reader or _read_venue_rules_blocking
+    out = {"rule": RULES_READ_AHEAD_RULE, "asked": len(list(slugs or ())),
+           "read": 0, "already_valid": 0, "not_cached": 0,
+           "budget_s": budget, "budget_spent": False, "errors": {}}
+    for slug in list(slugs or ()):
+        now_t = clock()
+        if now_t >= end:
+            out["budget_spent"] = True
+            break
+        hit = _RULES_CACHE.get(slug)
+        if hit is not None and ((now_t + horizon)
+                                - float(hit.get("read_at") or 0.0)
+                                ) <= RULES_CACHE_TTL_S:
+            out["already_valid"] += 1
+            continue
+        rid = grt.begin_read(slug=slug, deadline_epoch_s=end)
+        grt.bind_read(rid)
+        try:
+            got = read(slug, valid_until=now_t + horizon)
+        except Exception as exc:                               # noqa: BLE001
+            got = {"ok": False, "error": type(exc).__name__}
+        finally:
+            grt.bind_read(None)
+            grt.end_read(rid)
+        if (got or {}).get("from_cache"):
+            out["already_valid"] += 1
+        elif _rules_answer_is_cacheable(got):
+            out["read"] += 1
+        else:
+            out["not_cached"] += 1
+            e = str((got or {}).get("error") or "UNKNOWN")
+            out["errors"][e] = out["errors"].get(e, 0) + 1
+    out["elapsed_s"] = round(clock() - t0, 3)
+    return out
 
 
 def market_grid_blocking(slug: str, *, now=None) -> dict:
@@ -10879,6 +11061,15 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 _row = _cov_rows.get(sport_key) or {}
                 _share = max(1, int(_eval_shares.get(sport_key) or 1))
                 _t_def = time.time()
+                # ONE fixture index for every deferred seed of this fetch
+                # (RC6, pinnapi_reactive.batch_index): the loop below has no
+                # await, so the cache cannot change under it and every
+                # registration answers exactly what its own scan would
+                _def_idx = None
+                if stream_seed is None and _i < len(events):
+                    from .. import pinnapi_reactive as reactive
+                    await reactive.warm_names()
+                    _def_idx = reactive.batch_index()
                 for _n, _k in enumerate(range(_i, len(events))):
                     _e = events[_k] if isinstance(events[_k], dict) else {}
                     _eid = _e.get("id")
@@ -10889,7 +11080,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         from .. import pinnapi_reactive as reactive
                         reactive.register(_e, sport_key=sport_key,
                                           family=family,
-                                          received_at=received_at)
+                                          received_at=received_at,
+                                          index=_def_idx)
                     candidate_deferrals.append({
                         "sport_key": sport_key, "family": family,
                         "token": _row.get("token"), "event_id": _eid,
@@ -12434,6 +12626,20 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                                     now=time.time())
     _t_observed = time.time()
     _rss_at["observed"] = _procmem.rss_mb()
+    # RULES_READ_AHEAD_RULE: every time-critical read of this cycle is done;
+    # the events each competition still owes a fresh window get their venue
+    # rules text now, so their next window spends nothing on it. Never fatal.
+    try:
+        rules_read_ahead = await asyncio.to_thread(
+            rules_read_ahead_blocking,
+            owed_rules_slugs(
+                _COVERAGE.get("requeued_after_our_delay") or {},
+                event_ledger, sport_order=[k for k, _ in sports_for_cycle],
+                limit=MAX_PER_CYCLE))
+    except Exception as exc:                                   # noqa: BLE001
+        rules_read_ahead = {"error": "RULES_READ_AHEAD_RAISED:%s"
+                            % type(exc).__name__}
+    _t_read_ahead = time.time()
     # WHERE THE CYCLE'S TIME WENT, per step, so the cadence can be read from
     # the heartbeat rather than inferred from `elapsed_s` alone. `servicing`
     # is ~0 while the servicing task is alive: the cycle then services nothing.
@@ -12443,13 +12649,15 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         "candidate_outcomes": round(_t_persisted - _t_entry, 3),
         "outcome_join": round(_t_joined - _t_persisted, 3),
         "calibration_measurement": round(_t_calibrated - _t_joined, 3),
-        "pair_observation": round(_t_observed - _t_calibrated, 3)}
+        "pair_observation": round(_t_observed - _t_calibrated, 3),
+        "rules_read_ahead": round(_t_read_ahead - _t_observed, 3)}
     step_rss_mb = _step_rss(_rss_at)
 
     out = {"ran": True, "state": "LIVE",
            "step_timing_s": step_timing_s,
            "step_rss_mb": step_rss_mb,
            "pair_observation": pair_observation,
+           "rules_read_ahead": rules_read_ahead,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
            "source_calibration_measurement": calibration_measurement,
@@ -13636,6 +13844,10 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 "servicing_cadence": _servicing_cadence_digest(),
                 # WHERE THIS CYCLE'S TIME WENT, per step.
                 "step_timing_s": out.get("step_timing_s"),
+                # RULES_READ_AHEAD_RULE: what the read-ahead did this cycle
+                # (counts and error names only; bounded)
+                "rules_read_ahead": _rules_read_ahead_digest(
+                    out.get("rules_read_ahead")),
                 # WHY A CYCLE STOPPED OR WAS BLOCKED. The early returns
                 # carry it and the heartbeat used to drop it, so a STOPPED
                 # row read `refusals: {}` and did not say why.

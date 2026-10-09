@@ -3138,6 +3138,18 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                          why="NO_SETTLEMENT_MEASURE_FOR_THIS_POSITION")
     if feed is None:
         return stale_out
+    # THE PROVIDER FIXTURE HANDED TO THE HELD READ (RC6 xavier-records,
+    # xavier_held_fixture): the entry valuation's PinnAPI key as before;
+    # for an entry keyed by the METERED provider, the fixture the PinnAPI
+    # matcher recorded for this same contract (production CSC: 1,939 held
+    # reads NO_FEED_EVENT while 25 PinnAPI valuations of the contract named
+    # fixture 1637577754). The read's own checks are unchanged.
+    held_fx = None
+    if contract is not None:
+        from .. import xavier_held_fixture as XHF
+        held_fx = await XHF.held_key(
+            conn, us_market_slug=pos.get("us_market_slug"),
+            entry_event_key=contract.get("event_key"), at=at)
     # THE HELD CONTRACT ON THE IN-PROCESS FEED: only an ok read under the
     # same limit becomes fresh; any refusal keeps the stale measure as is.
     try:
@@ -3145,7 +3157,8 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         # (pinnapi_feed_runtime.entry_fixture): identity the entry proved
         cur = await feed(
             conn, pos=(pos if contract is None else dict(
-                pos, entry_event_key=contract.get("event_key"),
+                pos, entry_event_key=(held_fx or {}).get(
+                    "event_key", contract.get("event_key")),
                 entry_line=(contract.get("line") if is_line else None))),
             at=at, max_age_s=max_age,
             payout_event=None if contract is None
@@ -3156,12 +3169,15 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
         cur = {"ok": False, "reason": "FEED_READ_FAILED",
                "error": type(exc).__name__}
     if not cur.get("ok"):
+        detail = {k: cur[k] for k in (
+            "sport_id", "feed_event_id", "market_key", "designation",
+            "identity_basis", "provenance", "why", "error")
+            if cur.get(k) is not None}
+        if held_fx is not None:
+            # the fixture the read was handed, and on what basis
+            detail["held_fixture"] = held_fx
         return dict(stale_out, feed_refusal=cur.get("reason"),
-                    feed_detail={k: cur[k] for k in (
-                        "sport_id", "feed_event_id", "market_key",
-                        "designation", "identity_basis", "provenance", "why",
-                        "error")
-                        if cur.get(k) is not None})
+                    feed_detail=detail)
     prov = cur["provenance"]
     # THE CHANGE INSTANT THE FEED'S OWN 30 s RULE WAS MEASURED FROM
     # (pinnapi_feed.Quote.change_ms, carried on the read's provenance as
@@ -3213,6 +3229,9 @@ async def xavier_measure(conn, ctx: dict, *, pos: dict,
                       "market_key": cur.get("market_key"),
                       "designation": cur.get("designation"),
                       "identity_basis": cur.get("identity_basis"),
+                      # the fixture the read was handed, and on what basis
+                      # (xavier_held_fixture; RC6 xavier-records)
+                      "held_fixture": held_fx,
                       "payout_event": cur.get("payout_event"),
                       "payout_is_complement": cur.get("payout_is_complement"),
                       "p_selection": cur.get("p_selection"),

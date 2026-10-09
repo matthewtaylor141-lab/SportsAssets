@@ -86,27 +86,199 @@ async def _has(conn, t: str) -> bool:
 
 # ── truth-source quorum ──────────────────────────────────────────────────
 
+#: EVERY QUORUM SOURCE BY NAME (RC6 archer-lifecycle): CURRENT (a row
+#: within max_age_s), STALE (rows, every one older), MISSING (no row at all).
+#: The imported quorum (red_team.truth_quorum, byte-for-byte the closeout
+#: package) skips a stale row before its presence check, so a STALE source
+#: is named MISSING_SOURCE as well; its blockers are kept verbatim and the
+#: evidence names each source exactly beside them.
+SRC_CURRENT, SRC_STALE, SRC_MISSING = "CURRENT", "STALE", "MISSING"
+#: an ACTUAL position (net venue fills, or an open hand-off to Xavier) whose
+#: group Audrey has not reconciled within max_age_s: her source is not
+#: current FOR IT, whatever else she reconciled
+B_UNRECONCILED_POSITION = "AUDREY_UNRECONCILED_POSITION"
+OWNER_RETAIL_KEY = ("OWNER: the funded account's Polymarket US retail "
+                    "Ed25519 API key in PMUS_KEY_ID / PMUS_SECRET_KEY "
+                    "(completion.venue_positions.owner_action)")
+#: THE ACCOUNT SNAPSHOT (execmirror_snapshots: balances, positions) is
+#: written by Mirror.snapshot on the RUNNING lane only. With the lane
+#: STOPPED (SMALL LIVE = SHADOW) it stays as old as the stop even once the
+#: key is in place: a current VENUE_BALANCE / VENUE_POSITIONS also needs an
+#: owner decision that a read-only account snapshot (balances, positions,
+#: open orders; no order path) may run while the lane is stopped
+OWNER_SNAPSHOT_WHILE_STOPPED = (
+    "OWNER: a decision that a read-only account snapshot (Mirror.snapshot: "
+    "balances, positions, open orders -- no order path) may run while the "
+    "lane is stopped; today only the RUNNING lane writes it")
+
+
+def _iso_ts(epoch) -> str | None:
+    import datetime as _dt
+    if epoch is None:
+        return None
+    return _dt.datetime.fromtimestamp(float(epoch), _dt.timezone.utc) \
+        .isoformat().replace("+00:00", "Z")
+
+
+def source_states(rows: list, *, now: float, max_age_s: float,
+                  source_detail: dict | None = None,
+                  venue: dict | None = None) -> dict:
+    """Pure. {source: {state, rows, newest_at (None when CURRENT), why,
+    dependency}} for every REQUIRED source, from the rows the quorum was
+    given, what the reader learned while reading them (`source_detail`)
+    and the completion's venue-position verdict (`venue`)."""
+    det = source_detail or {}
+    venue = venue or {}
+    out = {}
+    for src in RTQ.REQUIRED_SOURCES:
+        rs = [r for r in rows if r.source == src]
+        newest = max((float(r.as_of) for r in rs), default=None)
+        if not rs:
+            st = SRC_MISSING
+        elif any(now - float(r.as_of) <= max_age_s for r in rs):
+            st = SRC_CURRENT
+        else:
+            st = SRC_STALE
+        # STABLE EVIDENCE (the runner appends a control receipt only when
+        # its evidence changes): no age, and no instant for a CURRENT
+        # source -- a stale source's newest instant does not move
+        e = {"state": st, "rows": len(rs),
+             "newest_at": None if st == SRC_CURRENT else _iso_ts(newest),
+             "why": None, "dependency": None}
+        snap = det.get("snapshot") or {}
+        lane = det.get("lane_state") or "UNREAD"
+        snap_dep = ("the account snapshot is read through the funded retail "
+                    "client by the RUNNING execution-mirror lane only "
+                    "(Mirror.snapshot); the lane is %s and the venue "
+                    "position verdict is %s -- %s%s" % (
+                        lane, venue.get("primary_refusal")
+                        or venue.get("status") or "UNREAD",
+                        OWNER_RETAIL_KEY,
+                        "; " + OWNER_SNAPSHOT_WHILE_STOPPED
+                        if lane != "RUNNING" else ""))
+        if src == "VENUE_POSITIONS" and st != SRC_CURRENT:
+            if not venue.get("venue_confirmed"):
+                e["why"] = "NOT_VENUE_CONFIRMED:%s" % (
+                    venue.get("primary_refusal") or venue.get("status")
+                    or "VENUE_POSITIONS_UNREAD")
+            else:
+                e["why"] = ("NO_ACCOUNT_SNAPSHOT" if not snap.get("at")
+                            else "NEWEST_ACCOUNT_SNAPSHOT_AT:%s"
+                            % _iso_ts(snap["at"]))
+            e["dependency"] = snap_dep
+        elif src == "VENUE_BALANCE" and st != SRC_CURRENT:
+            e["why"] = ("NO_ACCOUNT_SNAPSHOT" if not snap.get("at") else
+                        "NEWEST_ACCOUNT_SNAPSHOT_AT:%s" % _iso_ts(snap["at"])
+                        if snap.get("has_balances") else
+                        "NEWEST_ACCOUNT_SNAPSHOT_HOLDS_NO_BALANCE")
+            e["dependency"] = snap_dep
+        elif src == "AUDREY_RECONCILIATION" and st != SRC_CURRENT:
+            e["why"] = ("NO_RECONCILIATION_ROW" if st == SRC_MISSING else
+                        "NEWEST_RECONCILIATION_AT:%s" % _iso_ts(newest))
+            e["dependency"] = ("execmirror.Mirror.tick: audrey_reconcile on "
+                               "the RUNNING lane, _audrey_lane_off while it "
+                               "is STOPPED or DISABLED (records only)")
+        elif src == "MARKET_DATA" and st == SRC_MISSING:
+            e["why"] = "POLYMARKET_US_VENUE_HEALTH_NOT_GREEN"
+        elif src == "INTERNAL_LEDGER" and st == SRC_MISSING:
+            e["why"] = "EXECUTION_MIRROR_FILLS_UNREAD"
+        out[src] = e
+    return out
+
+
+def audrey_linkage(positions: list, *, now: float,
+                   max_age_s: float) -> dict:
+    """Pure. Every ACTUAL position (`positions`: slug, group, held,
+    reconciled_at, status) against Audrey's reconciliation of its group:
+    current within max_age_s, or a named blocker."""
+    rows, blockers = [], []
+    for p in positions or []:
+        at = p.get("reconciled_at")
+        cur = at is not None and now - float(at) <= max_age_s
+        rows.append({"us_market_slug": p.get("us_market_slug"),
+                     "group_id": p.get("group_id"),
+                     "held": None if p.get("held") is None
+                     else float(p["held"]),
+                     "source": p.get("source"),
+                     "reconciliation_status": p.get("status"),
+                     "reconciled": at is not None, "current": cur})
+        if not cur:
+            blockers.append("%s:%s" % (B_UNRECONCILED_POSITION,
+                                       p.get("us_market_slug")
+                                       or p.get("group_id")))
+    return {"actual_positions": len(rows),
+            "reconciled_within_max_age": sum(1 for r in rows if r["current"]),
+            "positions": rows[:200], "blockers": sorted(set(blockers))}
+
+
 def quorum(rows: list, *, now: float, audrey_open_discrepancies: int | None,
-           max_age_s: float = QUORUM_MAX_AGE_S) -> dict:
+           max_age_s: float = QUORUM_MAX_AGE_S,
+           source_detail: dict | None = None,
+           venue: dict | None = None) -> dict:
     q = RTQ.truth_quorum(rows, max_age_s=max_age_s, now=now)
     blockers = list(q["blockers"])
     if audrey_open_discrepancies:
         blockers.append("AUDREY_OPEN_DISCREPANCIES:%d"
                         % audrey_open_discrepancies)
+    det = source_detail or {}
+    link = audrey_linkage(det.get("audrey_positions") or [], now=now,
+                          max_age_s=max_age_s)
+    blockers.extend(link["blockers"])
     claims = {k: sorted(v) for k, v in q["claims"].items()}
+    states = source_states(rows, now=now, max_age_s=max_age_s,
+                           source_detail=det, venue=venue)
     return result("TRUTH_QUORUM", GREEN if not blockers else RED, blockers,
                   {"sources_current": list(q["sources"]),
                    "required": list(RTQ.REQUIRED_SOURCES),
+                   # EXACTLY which sources are missing and which are only
+                   # stale (the blockers above are the imported quorum's,
+                   # verbatim: it names a stale source MISSING too)
+                   "sources": states,
+                   "missing_sources": sorted(
+                       k for k, v in states.items()
+                       if v["state"] == SRC_MISSING),
+                   "stale_sources": sorted(
+                       k for k, v in states.items()
+                       if v["state"] == SRC_STALE),
+                   # every ACTUAL position against Audrey's reconciliation
+                   # of its group (current or not; no clock in the record)
+                   "audrey": {k: v for k, v in link.items()
+                              if k != "blockers"},
                    "claims_by_source": claims, "max_age_s": max_age_s,
                    "effect": ("RED blocks NEW capital entry; exits, "
                               "reductions and protection stay available")})
 
 
+#: ACTUAL positions, each with Audrey's reconciliation of its group: net
+#: venue fills per (market, group), and every OPEN hand-off to Xavier
+AUDREY_POSITIONS_SQL = """
+    SELECT f.us_market_slug, f.group_id, f.held,
+           extract(epoch FROM r.reconciled_at) AS reconciled_at, r.status,
+           'execmirror_fills' AS source
+      FROM (SELECT us_market_slug, group_id,
+                   sum(CASE WHEN intent ILIKE '%SELL%' THEN -qty ELSE qty END)
+                       AS held
+              FROM execmirror_fills GROUP BY 1, 2) f
+      LEFT JOIN smalllive_reconciliations r ON r.group_id = f.group_id
+     WHERE f.held <> 0
+    UNION ALL
+    SELECT h.us_market_slug, h.group_id, h.live_held,
+           extract(epoch FROM r.reconciled_at), r.status,
+           'smalllive_handoffs (OPEN)'
+      FROM smalllive_handoffs h
+      LEFT JOIN smalllive_reconciliations r ON r.group_id = h.group_id
+     WHERE h.state = 'OPEN'
+"""
 async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
-                      market_data_green: bool) -> tuple:
+                      market_data_green: bool,
+                      detail: dict | None = None) -> tuple:
     """(PositionTruth rows, Audrey open discrepancies). Missing = absent
-    row (MISSING_SOURCE), never a zero row."""
+    row (MISSING_SOURCE), never a zero row. `detail`, when given, receives
+    what the read learned for the quorum's evidence: the newest account
+    snapshot, the lane state and every ACTUAL position with Audrey's
+    reconciliation of its group."""
     rows = []
+    det = detail if detail is not None else {}
     if await _has(conn, "execmirror_fills"):
         for r in await conn.fetch(
                 "SELECT us_market_slug k, sum(CASE WHEN intent ILIKE "
@@ -124,6 +296,18 @@ async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
         snap = await conn.fetchrow(
             "SELECT positions, balances, extract(epoch FROM at) AS at FROM "
             "execmirror_snapshots ORDER BY at DESC LIMIT 1")
+    det["snapshot"] = None if snap is None else {
+        "at": float(snap["at"]), "has_balances": bool(_j(snap["balances"])),
+        "positions_n": len(_j(snap["positions"]) or [])
+        if isinstance(_j(snap["positions"]), list) else None}
+    if await _has(conn, "execmirror_control"):
+        c = await conn.fetchrow(
+            "SELECT enabled, stopped, stop_done_at IS NOT NULL AS done "
+            "  FROM execmirror_control WHERE id = 1")
+        det["lane_state"] = (None if c is None else
+                             "DISABLED" if not c["enabled"] else
+                             "STOPPED" if c["stopped"] and c["done"] else
+                             "STOPPING" if c["stopped"] else "RUNNING")
     if snap is not None and venue_confirmed:
         pos = _j(snap["positions"]) or []
         n = 0
@@ -152,6 +336,10 @@ async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
             open_disc = int(r["d"] or 0)
             rows.append(PositionTruth("AUDREY_RECONCILIATION", "RECONCILED",
                                       Decimal(0), None, float(r["at"])))
+        if await _has(conn, "execmirror_fills") and \
+                await _has(conn, "smalllive_handoffs"):
+            det["audrey_positions"] = [
+                dict(x) for x in await conn.fetch(AUDREY_POSITIONS_SQL)]
     return rows, open_disc
 
 
@@ -343,7 +531,22 @@ def samples(prob: dict, registry: dict) -> dict:
                                  MIN_INDEPENDENT_EVENTS,
                              "source": "completion probability evidence "
                                        "(first ENTER per strategy x market x "
-                                       "side, event-clustered)"})
+                                       "side, event-clustered)",
+                             # WHICH partition, registered WHEN, over WHAT
+                             # (research_registry); absent = none registered
+                             "partition": ({
+                                 "study": registry.get("study"),
+                                 "plan_sha": registry.get("plan_sha"),
+                                 "registered_at": registry.get(
+                                     "registered_at"),
+                                 "counts": {k: len(v or ()) for k, v in
+                                            parts.items()},
+                                 "scope": ("the PAPER strategy-selection "
+                                           "study's events (paper_fills "
+                                           "fixtures), keyed-hash slices; "
+                                           "the probability evidence above "
+                                           "fits no parameter and reads no "
+                                           "holdout")} if parts else None)})
 
 
 def multiple_testing(registry: dict) -> dict:
@@ -358,12 +561,35 @@ def multiple_testing(registry: dict) -> dict:
     blockers = list(g["blockers"])
     if not pre:
         blockers.append("NO_PREREGISTERED_CANDIDATE_SET")
+    m = registry.get("measurement") or {}
+    if m.get("unregistered_tested"):
+        # a strategy in the measured data that the registration does not
+        # name is an unregistered candidate however the counts compare
+        blockers.append("UNREGISTERED_CANDIDATES_TESTED")
     return result("MULTIPLE_TESTING", GREEN if not blockers else RED,
                   blockers, {"candidates_tested": tested,
                              "preregistered": pre,
                              "selected_after_holdout": selected_after,
                              "pbo": "UNMEASURED" if pbo is None else pbo,
                              "dsr": "UNMEASURED" if dsr is None else dsr,
+                             # THE MEASURED VALUES and why one is missing
+                             # (research_registry.measure): a bool alone
+                             # could not say how far from acceptable
+                             "pbo_value": m.get("pbo"),
+                             "pbo_why": m.get("pbo_why"),
+                             "pbo_detail": m.get("pbo_detail"),
+                             "dsr_value": m.get("dsr"),
+                             "dsr_why": m.get("dsr_why"),
+                             "dsr_detail": m.get("dsr_detail"),
+                             "acceptance": m.get("acceptance"),
+                             "tested": m.get("tested"),
+                             "unregistered_tested": m.get(
+                                 "unregistered_tested"),
+                             "days": m.get("days"),
+                             "events": m.get("events"),
+                             "excluded": m.get("excluded"),
+                             "study": registry.get("study"),
+                             "plan_sha": registry.get("plan_sha"),
                              "champion": "CASH (no candidate beats it "
                                          "absolutely)"})
 
@@ -383,6 +609,15 @@ async def holdout_registry(conn) -> dict:
             out["preregistered"] = max(out["preregistered"],
                                        int(r["candidate_count"] or 0))
             out["partitions"] = d.get("partitions") or out["partitions"]
+            # the LATEST registration names the study the measurement runs
+            plan = d.get("plan") or {}
+            out["study"] = plan.get("study") or out.get("study")
+            out["plan_sha"] = d.get("plan_sha") or out.get("plan_sha")
+            out["registered_candidates"] = list(
+                plan.get("candidates") or out.get("registered_candidates")
+                or [])
+            out["registered_at"] = (r["at"].timestamp() if hasattr(
+                r["at"], "timestamp") else r["at"])
         elif r["kind"] == "HOLDOUT_OPEN":
             out["holdout_opens"] += 1
             opened_at = opened_at or r["at"]
@@ -403,37 +638,119 @@ def capacity(points: list, *, requested_usd) -> dict:
     g = RTC.capacity_frontier(pts) if pts else {
         "green": False, "max_positive_qty": 0, "best_qty": None,
         "best_expected_net": None, "blockers": ("NO_CAPACITY_EVIDENCE",)}
-    proven_usd = sum((D(p["capital_usd"]) for p in points
-                      if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
-                      and D(p["lb_ev_per_contract"]) > 0
-                      and D(p["expected_net"]) > 0), Decimal(0))
+    # PROVEN CAPITAL COUNTS ONLY ELIGIBLE POINTS AND EACH OPPORTUNITY ONCE
+    # (RC6 ev-audit). A point is eligible on exactly the frontier's own rule
+    # (lower-bound EV > 0, fill probability >= the frontier's minimum,
+    # expected net > 0) -- the fill-probability leg was missing here, so a
+    # point the frontier refused for fill probability still added capital.
+    # One opportunity (strategy, contract, side) evaluated in several size
+    # buckets is ONE position: its proven capital is its largest eligible
+    # evaluated size, never the sum over buckets.
+    min_fp = Decimal("0.80")
+    eligible = [p for p in points
+                if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
+                and D(p["lb_ev_per_contract"]) > 0
+                and D(p["fill_probability"]) >= min_fp
+                and D(p["expected_net"]) > 0]
+    per_opp: dict = {}
+    legacy = Decimal(0)
+    for p in eligible:
+        opp = p.get("opportunity_capital_usd")
+        if isinstance(opp, dict):
+            for k, usd in opp.items():
+                per_opp[k] = max(per_opp.get(k, Decimal(0)), D(usd))
+        else:
+            legacy += D(p["capital_usd"])
+    proven_usd = sum(per_opp.values(), Decimal(0)) + legacy
     cap = RTC.deployment_cap(requested_turnover=D(requested_usd),
                              proven_positive_capacity=proven_usd)
     return result("CAPACITY", GREEN if g["green"] else RED,
                   list(g["blockers"]),
                   {"points": len(pts), "max_positive_qty":
                    g["max_positive_qty"], "best_qty": g["best_qty"],
+                   "evaluations": sum(int(p.get("evaluations") or 0)
+                                      for p in points),
+                   "opportunities": sum(int(p.get("opportunities") or 0)
+                                        for p in points),
+                   "by_bucket": [{k: p.get(k) for k in (
+                       "bucket", "qty", "events", "opportunities",
+                       "evaluations", "lb_ev_per_contract",
+                       "fill_probability", "expected_net", "capital_usd")}
+                       for p in points],
                    "proven_positive_capacity_usd": str(proven_usd),
                    "requested_usd": str(D(requested_usd)),
                    "maximum_deployment_usd": str(cap),
                    "remainder_cash_usd": str(D(requested_usd) - cap),
-                   "rule": "turnover target never overrides economics"})
+                   "rule": "turnover target never overrides economics",
+                   "opportunity_rule": (
+                       "one opportunity = (strategy, contract, held side); "
+                       "its latest evaluation per size bucket; proven capital "
+                       "= its largest ELIGIBLE evaluated size, counted once")})
 
 
 # ── Karen ────────────────────────────────────────────────────────────────
 
-def karen(saved_loss_usd, false_block_cost_usd, *, source: str) -> dict:
-    v = RTK.karen_incremental_value(saved_loss_usd or 0,
-                                    false_block_cost_usd or 0)
-    measured = saved_loss_usd is not None and false_block_cost_usd is not None
+#: the two twin metrics KAREN_VALUE reads, as twin.scorecards.karen writes
+#: them: book COUNTERFACTUAL (a metric derived from a twin world; its basis
+#: book is named in the metric, `..._paper_basis`), never book PAPER
+KAREN_TWIN_METRICS = ("loss_avoided_paper_basis",
+                      "profit_sacrificed_paper_basis")
+KAREN_TWIN_BOOK = "COUNTERFACTUAL"
+#: the twin's own verdict that a value may be concluded from (twin.common.
+#: metric: INSUFFICIENT_SAMPLE is "shown, nothing concluded")
+KAREN_TWIN_CONCLUSIVE = "MEASURED"
+
+
+def karen_twin_blockers(rows: dict | None) -> list:
+    """Why the twin's Karen rows conclude nothing, per metric, named with the
+    twin's own status and reason (an absent row, UNAVAILABLE / UNPROVEN with
+    its reason, INSUFFICIENT_SAMPLE with its sample). [] when both metrics
+    are MEASURED with a value."""
+    out = []
+    for m in KAREN_TWIN_METRICS:
+        r = (rows or {}).get(m)
+        if r is None:
+            out.append("KAREN_TWIN_ROW_ABSENT:%s" % m)
+        elif r.get("status") == "INSUFFICIENT_SAMPLE":
+            out.append("KAREN_TWIN_INSUFFICIENT_SAMPLE:%s:%s" % (
+                m, r.get("sample_n")))
+        elif r.get("status") != KAREN_TWIN_CONCLUSIVE or r.get(
+                "value") is None:
+            out.append("KAREN_TWIN_%s:%s:%s" % (
+                r.get("status") or "NO_STATUS", m,
+                r.get("reason") or "NO_REASON"))
+    return out
+
+
+def karen(saved_loss_usd, false_block_cost_usd, *, source: str,
+          twin_rows: dict | None = None) -> dict:
+    """KAREN_VALUE: saved loss - false-block cost from the twin's
+    KAREN_BLOCK_ACCEPTED world. GREEN only when both values exist AND, when
+    the twin's rows are supplied, both are MEASURED in one run -- a value
+    the twin itself calls INSUFFICIENT_SAMPLE or UNAVAILABLE concludes
+    nothing. Otherwise UNKNOWN, with the twin's own reason named."""
+    why = [] if twin_rows is None else karen_twin_blockers(twin_rows)
+    measured = (saved_loss_usd is not None
+                and false_block_cost_usd is not None and not why)
+    # an unmeasured value is null, never "0" (it used to read
+    # saved_loss_usd "0" / value_added_usd "0" beside UNKNOWN)
+    ev = {"saved_loss_usd": (str(D(saved_loss_usd))
+                             if saved_loss_usd is not None else None),
+          "false_block_opportunity_cost_usd": (
+              str(abs(D(false_block_cost_usd)))
+              if false_block_cost_usd is not None else None),
+          "value_added_usd": (str(RTK.karen_incremental_value(
+              saved_loss_usd, false_block_cost_usd)) if measured else None),
+          "source": source,
+          "rule": "saved loss - false-block cost; never block count"}
+    if twin_rows is not None:
+        ev["twin"] = {"book": KAREN_TWIN_BOOK,
+                      "metrics": list(KAREN_TWIN_METRICS),
+                      "rows": {m: twin_rows.get(m)
+                               for m in KAREN_TWIN_METRICS}}
     return result("KAREN_VALUE", GREEN if measured else UNKNOWN,
-                  [] if measured else ["KAREN_COUNTERFACTUALS_UNMEASURED"],
-                  {"saved_loss_usd": str(D(saved_loss_usd)),
-                   "false_block_opportunity_cost_usd": str(
-                       abs(D(false_block_cost_usd))),
-                   "value_added_usd": str(v), "source": source,
-                   "rule": "saved loss - false-block cost; never block "
-                           "count"})
+                  [] if measured else
+                  ["KAREN_COUNTERFACTUALS_UNMEASURED"] + why, ev)
 
 
 # ── credentials (shape only) ─────────────────────────────────────────────
@@ -537,8 +854,12 @@ def credential_classes(env=None) -> dict:
     # from the same bytes the signers load
     kal = kalshi_class(env.get("KALSHI_API_KEY_ID", ""),
                        env.get("KALSHI_PRIVATE_KEY_PEM"))
+    # BY KEY (RC6 red-team): one key pair in two venues' slots, which no
+    # shape can tell apart (a Kalshi RSA key vs the PMX RSA key); names only
+    from .. import credential_isolation as CI
     return {"PMX": pm(pmx), "PMUS": pmus, "KALSHI": kal,
-            "PMUS_SLOTS": pmus_slots}
+            "PMUS_SLOTS": pmus_slots,
+            "CROSS_VENUE_KEY_REUSE": CI.reuse(env)}
 
 
 def credentials(by_process: dict) -> dict:
@@ -616,6 +937,19 @@ def credentials(by_process: dict) -> dict:
                         if isinstance((s or {}).get("PMUS_SLOTS"), dict)
                         else ())
         if c is None)
+    # ONE KEY PAIR IN TWO VENUES' SLOTS (credential_isolation, by key): RED
+    # in any process, whatever the shapes say; names only
+    reused = sorted("%s:%s" % (p, pair) for p, s in by_process.items()
+                    for pair in ((s or {}).get("CROSS_VENUE_KEY_REUSE")
+                                 or ()))
+    if reused:
+        mism = mism + ["CREDENTIAL_REUSED_ACROSS_VENUES:%s" % r
+                       for r in reused]
+        actions.append("one key pair is configured for two venues (%s): "
+                       "each venue's slot must hold that venue's own key; "
+                       "remove the other venue's key from the slot it was "
+                       "pasted into. The Kalshi signers refuse such a key."
+                       % "; ".join(reused))
     return result("CREDENTIAL_CLASSES", RED if mism else GREEN, mism,
                   {"expected": dict(RTCRED.EXPECTED),
                    "approved": {k: list(v)
@@ -624,6 +958,7 @@ def credentials(by_process: dict) -> dict:
                    "by_process":
                    {p: dict(s or {}) for p, s in by_process.items()},
                    "pmus_slots_not_provisioned": absent_pmus,
+                   "cross_venue_key_reuse": reused,
                    "verdicts": verdicts, "not_provisioned": missing,
                    "owner_actions": actions,
                    "values_exposed": False})

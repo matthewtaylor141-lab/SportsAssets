@@ -260,13 +260,28 @@ async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
             view = None
             o = FR._STATE.get("owner")
             entry = {}
+            matched = {}
             if slugs and o is not None and o.cache.authority.synced:
                 from . import pinnapi_census as C
+                from . import xavier_held_fixture as XHF
                 view = C.feed_event_view(o.cache)
                 entry = await held_entry_fixtures(conn, w)
+                # THE SAME FIXTURE THE HELD READ IS HANDED (RC6 xavier-
+                # records, xavier_held_fixture): where the entry named no
+                # PinnAPI fixture, the one the PinnAPI matcher recorded for
+                # the same contract -- so a held position the read now
+                # prices is a watch target too, and its changes trigger the
+                # review. Bounded; an unreadable answer resolves nothing.
+                got = await XHF.matched_fixtures(
+                    conn, [s for s in slugs if s not in entry])
+                if None in got:
+                    w.counts["MATCHED_FIXTURES_UNREAD"] += 1
+                matched = {s: XHF.PREFIX + str(r["feed_event_id"])
+                           for s, r in got.items() if s is not None}
             for s in slugs:
-                # the entry-proven fixture, only where the entry named one
-                k = entry.get(s)
+                # the entry-proven fixture where the entry named one, else
+                # the fixture the matcher recorded for the same contract
+                k = entry.get(s) or matched.get(s)
                 resolved[s] = await FR.held_event_id(
                     conn, s, view=view,
                     **({"entry_event_key": k} if k else {}))

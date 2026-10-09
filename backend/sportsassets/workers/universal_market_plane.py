@@ -113,11 +113,13 @@ from ..db import get_pool, heartbeat
 from ..market_plane import active_refresh as AR
 from ..market_plane import certification as CERT
 from ..market_plane import freshness as FR
+from ..market_plane import freshness_window as FW
 from ..market_plane import populate as POP
 from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
 from ..market_plane import refdata_progress as RP
 from ..market_plane import refdata_universe as RU
+from ..market_plane import snapshot_refresh as SR
 from ..market_plane import rules as RULES
 from ..market_plane.sharded_stream import Manager
 from ..market_plane.token_keeper import TokenKeeper
@@ -132,6 +134,12 @@ POPULATE_EVERY_S = 10.0
 FULL_POPULATE_EVERY_S = 1800.0
 ASSIGN_EVERY_S = 30.0
 COVERAGE_EVERY_S = 120.0
+#: (RC6, lane D2) the coverage pass reads each never-valued full-game or
+#: period line contract against its family's captured terms and reports the
+#: target-universe waterfall (market_plane.waterfall). Evidence only;
+#: neither can make a contract PRICEABLE. COVERAGE_WATERFALL=off restores
+#: the RC5 pass.
+COVERAGE_WATERFALL_ENV = "COVERAGE_WATERFALL"
 CERTIFY_EVERY_S = 300.0
 SNAPSHOT_EVERY_S = 60.0
 #: a by-symbol refdata read that failed (not a proven absence) is not
@@ -333,19 +341,50 @@ def latency_report(mgr, *, now: float) -> dict:
     return rep
 
 
+def record_populate(state: dict, pop: dict, *, full: bool,
+                    now: float) -> None:
+    """THE POPULATE RESULT INTO THE PLANE'S STATE. `populate` is the last
+    pass of either kind (an incremental pass every POPULATE_EVERY_S replaces
+    it); `populate_full` is the last FULL pass's record of the markets it
+    kept out of the registry by name (populate.full_pass_record), kept
+    under its own key so no incremental pass overwrites it (RC6, lane D2,
+    review finding 2: the non-sports markets the slug grammar retires from
+    the registry stay counted, by code, with the pass time)."""
+    state["populate"] = pop
+    if full:
+        state["populate_full"] = POP.full_pass_record(pop, at=now)
+
+
+def coverage_waterfall_on() -> bool:
+    """COVERAGE_WATERFALL (default on): the RC6 coverage readings."""
+    return os.environ.get(COVERAGE_WATERFALL_ENV, "on").strip().lower() \
+        not in ("off", "0", "false", "no")
+
+
+#: the venue league code of an event slug, in SQL: populate.league_of's
+#: grammar (a market-kind prefix -> the next segment, else the first)
+_LEAGUE_SQL = ("(CASE WHEN lower(split_part(coalesce(event_slug,''),'-',1)) "
+               "        = ANY($4::text[]) "
+               "      THEN lower(split_part(coalesce(event_slug,''),'-',2)) "
+               "      ELSE lower(split_part(coalesce(event_slug,''),'-',1)) "
+               " END)")
+
+
 async def venue_active_count(conn, *, now: float) -> int:
     """Active SPORTS contracts the venue catalogue lists (non-sports leagues
-    excluded by name)."""
+    excluded by name). (RC6) The league is read by populate.league_of's
+    grammar: the venue's event slug carries its league FIRST, so the second
+    segment this read before was a team code and excluded nothing."""
     try:
         return int(await conn.fetchval(
             "SELECT count(DISTINCT market_slug) FROM us_premap "
             " WHERE market_slug IS NOT NULL "
             "   AND listing_state = ANY($1::text[]) "
             "   AND updated_at > to_timestamp($2) "
-            "   AND NOT (lower(split_part(coalesce(event_slug,''),'-',2)) "
-            "            = ANY($3::text[]))",
+            "   AND NOT (" + _LEAGUE_SQL + " = ANY($3::text[]))",
             list(POP.ACTIVE_LISTING_STATES), now - POP.ACTIVE_HORIZON_S,
-            sorted(POP.O.NON_SPORTS_LEAGUES)) or 0)
+            sorted(POP.O.NON_SPORTS_LEAGUES),
+            sorted(POP.MARKET_KIND_PREFIXES)) or 0)
     except Exception:                                           # noqa: BLE001
         return -1
 
@@ -420,6 +459,8 @@ async def sync_books(conn, mgr) -> dict:
 
 #: one INFO line with the per-step RSS at most this often
 MEMORY_LOG_EVERY_S = 60.0
+#: (RC6) boundaries of each full cycle the heartbeat keeps (memory.cycles)
+CYCLE_RING = 24
 
 
 class StepMemory:
@@ -432,17 +473,52 @@ class StepMemory:
     correlation (analytics run_cycle's rss_mb_by_step is the precedent). A
     rise includes the stream thread's book updates landing during the step.
     VmHWM is read, never reset: `resources.peak_mb` stays the process's own
-    high-water."""
+    high-water.
 
-    def __init__(self, rss=None):
+    (RC6) ACROSS FULL CYCLES. Each boundary of a full cycle of the plane's
+    universe (market_plane.memory_cycles.CYCLE_STEPS: the full catalogue
+    populate, a finished full refdata pull, a persisted Kalshi walk) is
+    kept with the RSS right after it and the FLOOR since the previous one
+    (the lowest RSS at the start of a pass), the last CYCLE_RING of each;
+    the heartbeat carries them and their trend (`memory.cycles`,
+    `memory.cycle_growth`). A bounded working set has a flat floor from
+    cycle to cycle; a leak's rises (tools/plane_memory_cycles.py reads the
+    same from the logs of a plane that predates this)."""
+
+    def __init__(self, rss=None, clock=None):
+        import collections
+
         from .. import procmem
+        from ..market_plane import memory_cycles as MC
         self._rss = rss or procmem.rss_mb
+        self._clock = clock or time.time
         self.by_step: dict = {}
         self._prev = None
         self.logged_at = 0.0
+        self.cycles = {k: collections.deque(maxlen=CYCLE_RING)
+                       for k in MC.CYCLE_STEPS}
+        self._floor = {k: None for k in MC.CYCLE_STEPS}
 
     def begin(self) -> None:
         self._prev = self._rss()
+        if self._prev is not None:
+            for k, f in self._floor.items():
+                if f is None or self._prev < f:
+                    self._floor[k] = self._prev
+
+    def cycle(self, kind: str, cur=None) -> None:
+        """A full cycle of `kind` just closed: keep the RSS now (`cur`, when
+        the caller has just read it) and the floor since the last one; the
+        next floor starts here."""
+        if kind not in self.cycles:
+            return
+        if cur is None:
+            cur = self._rss()
+        floor = self._floor.get(kind)
+        self.cycles[kind].append({
+            "at": round(self._clock(), 1), "rss_mb": cur,
+            "floor_mb": floor if floor is not None else cur})
+        self._floor[kind] = cur
 
     def mark(self, step: str) -> None:
         cur, prev = self._rss(), self._prev
@@ -457,14 +533,24 @@ class StepMemory:
                               or d > e["max_delta_mb"]):
             e["max_delta_mb"] = d
         self._prev = cur
+        if step in self.cycles:
+            self.cycle(step, cur)
 
     def digest(self) -> dict:
         from .. import procmem
+        from ..market_plane import memory_cycles as MC
+        lim = procmem.limit_mb()
+        cycles = {k: list(v) for k, v in self.cycles.items() if v}
         return {"rss_mb": procmem.rss_mb(), "peak_mb": procmem.peak_mb(),
-                "limit_mb": procmem.limit_mb(),
+                "limit_mb": lim,
                 "by_step": {k: dict(v) for k, v in self.by_step.items()},
+                "cycles": cycles,
+                "cycle_growth": {k: MC.growth(v, limit_mb=lim)
+                                 for k, v in cycles.items()},
                 "basis": "RSS after each step the last time it ran (/proc);"
-                         " max_delta_mb: the largest rise since boot"}
+                         " max_delta_mb: the largest rise since boot;"
+                         " cycles: the RSS after each full-cycle boundary"
+                         " and the floor since the previous one"}
 
     def log_due(self, now: float) -> bool:
         if now - self.logged_at < MEMORY_LOG_EVERY_S:
@@ -501,7 +587,8 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         "runtime": os.environ.get("UMP_RUNTIME", "STANDALONE_UNLABELLED"),
         "resources": runtime_resources(),
         "populate": {k: v for k, v in (state.get("populate") or {})
-                     .items() if k != "excluded"},
+                     .items() if k not in ("excluded",
+                                           "excluded_listed_active")},
         "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
             "enabled", "complete", "stopped", "markets", "requests",
             "error")},
@@ -509,6 +596,11 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         # deferred and why, counts only
         "refresh": {k: v for k, v in (state.get("refresh") or {}).items()
                     if k != "reads"},
+        # (RC6 D1) the freshness task beside the pass: ticks, errors; the
+        # frozen-window sampler's last sample (counts, never the members)
+        "freshness_task": dict(state.get("freshness_task") or {}),
+        "freshness_window": dict((state.get("freshness_window") or {})
+                                 .get("last") or {}),
         "fresh": len(fresh)}
     if memory is not None:
         d["memory"] = memory
@@ -523,13 +615,15 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
 
 
 async def refdata_step(pool, client, planner, attempted: dict, *,
-                       now: float) -> dict:
+                       now: float, lock=None) -> dict:
     """ONE refdata call slot (refdata_universe.Planner decides which): a
     batched by-symbol read for priority contracts, the next full-pull page,
     or a batched read for contracts added since the last complete pull.
     Persists only registry members; a COMPLETE pull proves absent exactly
     the contracts that were pending when it started and never appeared.
-    Returns this slot's digest. Raises nothing it can name."""
+    Returns this slot's digest. Raises nothing it can name. `lock` (RC6 D1)
+    is the plane's one PMX client lock, shared with the freshness task's
+    book reads: the call is made holding it."""
     out = {"action": None}
     async with pool.acquire() as c:
         pend = await R.refdata_pending_split(
@@ -547,7 +641,11 @@ async def refdata_step(pool, client, planner, attempted: dict, *,
         if action.get("start"):
             planner.pull["pending_at_start"] = await R.refdata_pending_ids(c)
     body = planner.body_for(action)
-    res = await asyncio.to_thread(client.read_instruments, body)
+    if lock is not None:
+        async with lock:
+            res = await asyncio.to_thread(client.read_instruments, body)
+    else:
+        res = await asyncio.to_thread(client.read_instruments, body)
     done_at = time.time()
     # paced from the slot's start: call STARTS stay >= interval apart
     got = planner.record(action, res, now=now)
@@ -586,6 +684,93 @@ async def refdata_step(pool, client, planner, attempted: dict, *,
     return out
 
 
+#: (RC6 D1) THE FRESHNESS TASK'S TICK: one refresh step a second, beside
+#: the pass. The budget (12 book reads in any 60 s, >= 1 s apart) is the
+#: refresher's own; this only decides how often it is asked.
+FRESHNESS_TICK_S = 1.0
+#: a failing freshness step is logged at most this often (counted always)
+FRESHNESS_LOG_EVERY_S = 300.0
+
+
+async def freshness_loop(refresher, mgr, client, *, state: dict,
+                         client_lock, bound: float = FRESH_SLA_S,
+                         tick_s: float | None = None,
+                         clock=time.time, snapper=None,
+                         token_fn=None) -> None:
+    """THE PLANE'S FRESHNESS TASK (RC6 D1), beside the pass loop and never
+    waiting on it.
+
+    WHY. The pass made the refresh's reads (one per pass) and production's
+    pass is minutes long: SNAPSHOT events, one per pass at most, arrived
+    p50 92 s / p90 248 s / p99 739 s apart over 24 h and every one of the
+    newest 40 more than 197 s apart (research-sql run 37870039455), so the
+    RC6 budget of 12 book reads a minute became about 0.25. Here one refresh
+    step runs every FRESHNESS_TICK_S whatever the pass is doing (coverage,
+    certification and snapshot queries await the database, and this task
+    runs in those awaits). The pass keeps its own step, so a stuck task
+    still leaves one read a pass; both drivers share the refresher (one
+    budget, one in-flight set) and the client lock (one PMX client, never
+    two calls at once -- the refdata slot takes it too).
+
+    THE FROZEN-WINDOW SAMPLE (RC6 D1, measurement): every
+    freshness_window.SAMPLE_EVERY_S the same task freezes the hour's
+    eligible membership (once; persisted) and samples it at one instant,
+    persisted as FRESHNESS_SAMPLE -- so the measure is the whole window,
+    sampled every minute whatever the pass is doing, and a minute with no
+    sample is an outage the readback counts.
+
+    THE SNAPSHOT-ONLY gRPC REFRESH (RC6 D1, market_plane.snapshot_refresh):
+    when `snapper` is given, the tick first offers it its call (at most one
+    a minute, every member due within 90 s of its bound, the venue's own
+    CreateMarketDataSubscription snapshot_only); the REST step then reads
+    only what that did not make current.
+
+    Never raises but CancelledError: a failed step is counted in
+    state["freshness_task"] (logged at most every FRESHNESS_LOG_EVERY_S)
+    and the next tick tries again."""
+    tick = FRESHNESS_TICK_S if tick_s is None else float(tick_s)
+    st = state.setdefault("freshness_task", {})
+    st.update(started_at=clock(), ticks=0, errors=0, last_error=None,
+              tick_s=tick)
+    fw = state.setdefault("freshness_window", {})
+    logged = 0.0
+    while True:
+        try:
+            pool = await get_pool()
+            if snapper is not None and refresher is not None and \
+                    token_fn is not None:
+                got_s = await snapper.step(refresher, mgr,
+                                           token_fn=token_fn, bound=bound,
+                                           clock=clock)
+                if got_s is not None:
+                    st["last_snapshot_call"] = got_s
+            if refresher is not None:
+                # the task's own step digest (the heartbeat's `refresh`
+                # stays the pass's step): due / read / deferred, no reads
+                got = await AR.step(
+                    pool, client, refresher, mgr, bound=bound, clock=clock,
+                    lock=client_lock)
+                st["last_refresh"] = {k: v for k, v in got.items()
+                                      if k not in ("reads", "by_reason")}
+                st["reads"] = int(st.get("reads") or 0) + int(
+                    got.get("read") or 0)
+            await FW.step(pool, mgr, refresher, fw, now=clock(),
+                          sla_s=bound)
+            st["ticks"] += 1
+            st["last_tick_at"] = clock()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                                # noqa: BLE001
+            st["errors"] += 1
+            st["last_error"] = type(exc).__name__
+            if clock() - logged >= FRESHNESS_LOG_EVERY_S:
+                logged = clock()
+                log.warning("market plane freshness task step failed (%s); "
+                            "%d failures so far", type(exc).__name__,
+                            st["errors"])
+        await asyncio.sleep(tick)
+
+
 async def run() -> None:
     if not enabled():
         log.info("universal_market_plane: off by switch (%s)", ENV_FLAG)
@@ -615,6 +800,14 @@ async def run() -> None:
              ("ON (%d book reads/min, bound %.0f s)"
               % (refresher.per_min, FRESH_SLA_S)) if refresher else
              (AR.R_REFRESH_NO_STREAM if mgr is None else AR.R_REFRESH_OFF))
+    # (RC6 D1) the snapshot-only gRPC refresh beside it: one call a minute
+    snapper = (SR.SnapshotRefresh() if refresher is not None
+               and SR.enabled() else None)
+    log.info("universal_market_plane: snapshot-only refresh %s",
+             ("ON (%s snapshot_only, <= %d symbols, every %.0f s)"
+              % (SR.RPC, SR.MAX_SYMBOLS_PER_CALL, SR.CALL_EVERY_S))
+             if snapper else SR.R_SNAPSHOT_OFF if refresher is not None
+             else "OFF (no refresh here)")
     watermark = 0.0
     last = {"populate": 0.0, "full": 0.0, "assign": 0.0, "coverage": 0.0,
             "certify": 0.0, "snapshot": 0.0}
@@ -627,11 +820,26 @@ async def run() -> None:
                    "subscription_plan": plan_cfg}
     kalshi_task, kalshi_last = None, 0.0
     mem = StepMemory()
+    # (RC6 D1) the plane's one PMX client is shared by the refdata slot and
+    # both refresh drivers: one call at a time
+    client_lock = asyncio.Lock()
+    fresh_task = None
     while True:
         try:
             pool = await get_pool()
             now = time.time()
             mem.begin()
+            if fresh_task is None or fresh_task.done():
+                if fresh_task is not None and not fresh_task.cancelled() \
+                        and fresh_task.exception() is not None:
+                    state.setdefault("freshness_task", {})[
+                        "restarted_after"] = type(
+                            fresh_task.exception()).__name__
+                fresh_task = asyncio.ensure_future(freshness_loop(
+                    refresher, mgr, client, state=state,
+                    client_lock=client_lock, snapper=snapper,
+                    token_fn=(keeper.token if keeper is not None
+                              else None)))
             kalshi_task, kalshi_last, krep = await kalshi_step(
                 pool, kalshi_task, now=now, last=kalshi_last)
             if krep is not None:
@@ -652,9 +860,9 @@ async def run() -> None:
                             seen_receipts.get("full")))
                 if full or now - last["populate"] >= POPULATE_EVERY_S:
                     pop = await POP.populate(c, since=watermark, now=now,
-                                             full=full)
+                                             full=full, excluded_detail=full)
                     watermark = max(watermark, pop.get("watermark") or 0.0)
-                    state["populate"] = pop
+                    record_populate(state, pop, full=full, now=now)
                     last["populate"] = now
                     if full:
                         last["full"] = now
@@ -672,23 +880,32 @@ async def run() -> None:
                 # ONE refdata call slot per pass at most (the planner paces
                 # it to the venue's 6/min); priority contracts first
                 state["refdata"] = await refdata_step(
-                    pool, client, planner, attempted, now=now)
+                    pool, client, planner, attempted, now=now,
+                    lock=client_lock)
                 mem.mark("refdata")
+                if state["refdata"].get("finished") is not None:
+                    mem.cycle("refdata_full_pull")
             if refresher is not None:
                 # (RC6) a fresh REST book for the priority members the
-                # stream has gone quiet on, inside the book-read budget
+                # stream has gone quiet on, inside the book-read budget;
+                # (RC6 D1) the freshness task makes the same step every
+                # second beside this pass -- one budget, one client lock
                 state["refresh"] = await AR.step(pool, client, refresher,
-                                                 mgr, bound=FRESH_SLA_S)
+                                                 mgr, bound=FRESH_SLA_S,
+                                                 lock=client_lock)
                 mem.mark("refresh")
             now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
+                    rc6 = coverage_waterfall_on()
                     state["coverage"] = await POP.coverage_pass(
                         c, fresh_symbols=fresh, now=now,
-                        refreshed=(refresher.current(
+                        refreshed=(refresher.current_for_coverage(
                             mgr, now=now, bound=FRESH_SLA_S)
-                            if refresher is not None else None))
+                            if refresher is not None else None),
+                        derivative_terms=rc6, waterfall=rc6,
+                        outside_registry=state.get("populate_full"))
                     last["coverage"] = now
                     mem.mark("coverage")
                 if mgr is not None and \
@@ -697,13 +914,26 @@ async def run() -> None:
                     last["certify"] = now
                     mem.mark("certify")
                 if now - last["snapshot"] >= SNAPSHOT_EVERY_S:
+                    # (RC6 D1) THE SNAPSHOT IS VERIFIED WHEN IT IS MADE.
+                    # `now` is the pass's instant before coverage and
+                    # certification -- minutes earlier in production -- and
+                    # the census read the books (which kept changing) as if
+                    # at that instant: a book received since counted with a
+                    # negative age, a refresh received since did not count,
+                    # and computed_at named an instant nothing was verified
+                    # at. The stream's fresh set and the census are taken
+                    # now; the coverage tiers keep their own instant
+                    # (priority_universe.verified_at).
+                    snap_now = time.time()
+                    snap_fresh = fresh_symbols(mgr, now=snap_now)
                     state["token"] = keeper.digest() if keeper else None
-                    state["refdata_universe"] = (planner.digest(now)
+                    state["refdata_universe"] = (planner.digest(snap_now)
                                                  if planner else None)
-                    snap = await snapshot(c, mgr, state, now=now,
-                                          arming=arming, fresh=fresh,
+                    snap = await snapshot(c, mgr, state, now=snap_now,
+                                          arming=arming, fresh=snap_fresh,
                                           caps=(max_streams, max_per),
-                                          refresher=refresher)
+                                          refresher=refresher,
+                                          snapper=snapper)
                     # THE CONSUMER PARITY BRIDGE (SHADOW): the priority
                     # members' PMX tops, one append-only event per pass;
                     # the API compares them with the REST books the paper
@@ -714,14 +944,15 @@ async def run() -> None:
                     if books:
                         await R.record_event(
                             c, PRIORITY_BOOKS_KIND,
-                            "pbooks:%d" % int(now // 60),
-                            {"at": now, "books": books,
+                            "pbooks:%d" % int(snap_now // 60),
+                            {"at": snap_now, "books": books,
                              "mode": "SHADOW_PARITY_NO_DECISION_EFFECT"})
                     await R.record_event(
-                        c, "SNAPSHOT", "snapshot:%d" % int(now // 60), snap)
+                        c, "SNAPSHOT", "snapshot:%d" % int(snap_now // 60),
+                        snap)
                     state["last_snapshot"] = snap
                     last["snapshot"] = now
-                    del snap, cen, books
+                    del snap, cen, books, snap_fresh
                     mem.mark("snapshot")
             status = "ok" if (state.get("last_snapshot") or {}).get(
                 "radar", {}).get("green") else "degraded"
@@ -737,6 +968,8 @@ async def run() -> None:
                 sync=sync, fresh=fresh, memory=memory))
             await asyncio.sleep(INTERVAL_S)
         except asyncio.CancelledError:
+            if fresh_task is not None:
+                fresh_task.cancel()
             if mgr is not None:
                 mgr.stop()
             if keeper is not None:
@@ -806,7 +1039,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         except Exception:                                       # noqa: BLE001
             connected = {}
     by, sample, pmx = {}, [], {}
-    via_refresh, by_refresh = 0, {}
+    via_refresh, by_refresh, via_origin = 0, {}, {}
     quiet = {"stream_quiet_on_the_live_connection": 0,
              "of_which_symbol_acked_on_this_connection": 0,
              "snapshot_age_s": []}
@@ -831,8 +1064,12 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         if s in fresh or (age is not None and age <= FRESH_SLA_S):
             continue
         if s in refreshed:
-            # a REST book the plane read within the bound (RC6)
+            # a REST book the plane read within the bound (RC6), or its
+            # snapshot-only gRPC read (RC6 D1), counted by origin
             via_refresh += 1
+            o = (refresher.origin_of(s) if refresher is not None
+                 and hasattr(refresher, "origin_of") else None) or "REST"
+            via_origin[o] = via_origin.get(o, 0) + 1
             continue
         cur = None      # the stream's read of this member, when one is made
         tier = "HELD" if int(r["priority"]) <= POP.P_HELD else "CANDIDATE"
@@ -887,6 +1124,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         "acknowledged on the current connection, no gap since the snapshot"))
     return {"members": len(rows), "not_current": sum(by.values()),
             "current_via_refresh": via_refresh,
+            "current_via_refresh_by_origin": via_origin,
             "by_tier_reason_rest_phase": dict(sorted(
                 by.items(), key=lambda kv: -kv[1])),
             "by_refresh_outcome": dict(sorted(
@@ -923,6 +1161,9 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
     origins = (cov or {}).get("rest_recovery_by_origin") or {}
     pr = tiers.get("PRIORITY") or {}
     al = tiers.get("ALL") or {}
+    # (RC6 D1) PMX_GRPC = the stream + the snapshot-only refresh, apart
+    snap = int((((cov or {}).get("pmx_grpc_by_origin") or {}).get(
+        "PRIORITY") or {}).get("PLANE_SNAPSHOT_REFRESH") or 0)
 
     def rate(t):
         den = int(t.get("total") or 0) - int(t.get(
@@ -945,7 +1186,8 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
     return {
         "priority_universe": {
             "denominator": int(pr.get("total") or 0),
-            "current_pmx_stream": int(pr.get("PMX_GRPC") or 0),
+            "current_pmx_stream": int(pr.get("PMX_GRPC") or 0) - snap,
+            "current_pmx_snapshot_refresh": snap,
             "current_rest_fallback": int(pr.get("REST_RECOVERY") or 0),
             "current_rest_fallback_by_origin": (
                 dict(origins["PRIORITY"]) if origins.get("PRIORITY")
@@ -955,6 +1197,13 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
                 "EXTERNAL_DATA_UNAVAILABLE") or 0),
             "rate": rate(pr), "target": 0.95,
             "members": "OPEN_PAPER_POSITION + EVALUATED_CANDIDATE (6 h)",
+            # (RC6 D1) THE INSTANT THESE COUNTS WERE VERIFIED: the coverage
+            # pass's own (it took the stream's fresh set then), not the
+            # snapshot's -- the two are minutes apart when a pass is slow
+            "verified_at": (cov or {}).get("computed_at"),
+            "verified_age_s": (None if (cov or {}).get("computed_at") is None
+                               else round(float(now) - float(
+                                   cov["computed_at"]), 1)),
             "active_refresh": refresh},
         "held_positions": held,
         "total_universe": {
@@ -973,7 +1222,8 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
 
 
 async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
-                   fresh: set, caps: tuple, refresher=None) -> dict:
+                   fresh: set, caps: tuple, refresher=None,
+                   snapper=None) -> dict:
     """ONE append-only market-plane snapshot: universe, registry, coverage,
     subscription plan, sources, freshness, latency, certification, catalogue
     completeness and Radar. Read by GET /api/command/market-plane.
@@ -1083,6 +1333,12 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                                              subscribed=subscribed,
                                              fresh=len(fresh), now=now,
                                              refresh=refresh)
+    # (RC6 D1) the snapshot-only gRPC refresh's digest, or why it is off
+    freshness["priority_universe"]["snapshot_refresh"] = (
+        snapper.digest(now=now) if snapper is not None else
+        SR.off_digest(SR.R_SNAPSHOT_OFF if refresher is not None
+                      and not SR.enabled() else AR.R_REFRESH_NO_STREAM
+                      if refresher is None else SR.R_SNAPSHOT_OFF))
     try:
         freshness["priority_universe"]["census"] = await priority_census(
             conn, mgr, fresh=fresh, now=now, refreshed=refreshed,
@@ -1137,10 +1393,19 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                          "stale_subscribed": stale},
         "sources": cov.get("source_counts"),
         "freshness": freshness,
+        # (RC6 D1) the frozen-window sampler's newest sample (counts, its
+        # window's membership hash), beside the two denominators -- never
+        # blended into them; the whole window is completion.read's
+        # market_data.freshness_window
+        "freshness_window_last_sample": dict(
+            (state.get("freshness_window") or {}).get("last") or {}),
         "latency": lat, "certification": dict(
             cert, last_pass=state.get("certification")),
         "catalogue": state.get("catalogue"),
         "populate": {k: v for k, v in (state.get("populate") or {}).items()},
+        # (RC6) the last FULL pass's markets kept out of the registry by
+        # name, by code: no incremental pass replaces it
+        "populate_full": state.get("populate_full"),
         "refdata": state.get("refdata"),
         "refdata_universe": state.get("refdata_universe"),
         "runtime": {"label": os.environ.get("UMP_RUNTIME",

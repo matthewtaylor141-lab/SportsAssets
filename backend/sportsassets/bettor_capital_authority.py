@@ -1023,14 +1023,30 @@ async def blocker_census(conn, account_id: str, *, since: float = 0.0,
     """THE DISTINCT CONTRACT / SIDE BLOCKER CENSUS: refused entries keyed by
     unique opportunity (opportunity_funnel.opportunity_key) and contract /
     side, by binding refusal, ranked by executable EV at the decision."""
-    from .profitability import opportunity_funnel as OF
-    rows = [dict(r) for r in await conn.fetch(
+    got = await conn.fetch(
         "SELECT strategy, stage, refusal, us_market_slug, holding_side, "
         "       fixture, line, scope, gross_edge_pp, edge_shortfall_pp, "
         "       expected_fees_usd, slippage_usd, adverse_selection_usd, "
         "       total_executable_ev_usd, refused_at "
         "  FROM paper_entry_refusal_census WHERE account_id = $1 "
-        "   AND refused_at >= $2", account_id, _ts(since))]
+        "   AND refused_at >= $2", account_id, _ts(since))
+    # THE TALLY RUNS IN A WORKER THREAD, OFF THE API EVENT LOOP (RC6).
+    # Production 2026-10-09 (the loop watchdog's persisted ring, research-sql
+    # rc6_api-responsive_loop_stalls.sql): an API loop stall of 2.5 s was the
+    # red-team readiness pass -> completion read -> capital-readiness feeds
+    # -> this census, keying every refused entry since the cutover on the
+    # loop. The read stays on the loop; the tally is the same pure code, in
+    # `_blocker_tally`, over the rows in their read order, on the API's CPU
+    # lane (one worker thread for every such job: cpu_lane).
+    from . import cpu_lane as _cpu
+    return await _cpu.run(_blocker_tally, got, since=since, top=top)
+
+
+def _blocker_tally(got, *, since: float, top: int) -> dict:
+    """PURE (worker thread): the blocker census over the fetched refusal
+    rows -- what `blocker_census` did inline on the event loop, verbatim."""
+    from .profitability import opportunity_funnel as OF
+    rows = [dict(r) for r in got]
     by_refusal: dict = {}
     by_contract: dict = {}
     unkeyed = 0

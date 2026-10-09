@@ -314,8 +314,7 @@ async def census(conn, *, now: float) -> dict:
         "(the sweep writes open markets and prunes closed ones later)"
         % PO.CATALOGUE_RESEEN_S)
     try:
-        rows = [dict(r) for r in await conn.fetch(
-            CATALOGUE_SQL, at - PO.CATALOGUE_RESEEN_S)]
+        rows = await conn.fetch(CATALOGUE_SQL, at - PO.CATALOGUE_RESEEN_S)
     except Exception as exc:                                   # noqa: BLE001
         return dict(out, ok=False, refusal="VENUE_CATALOGUE_READ_FAILED",
                     error=type(exc).__name__)
@@ -357,6 +356,27 @@ async def census(conn, *, now: float) -> dict:
                 " ORDER BY us_market_slug, decided_at DESC", since):
             decided[r["us_market_slug"]] = dict(r)
 
+    # THE CLASSIFICATION RUNS IN A WORKER THREAD, OFF THE API EVENT LOOP
+    # (RC6). Production 2026-10-09 (the loop watchdog's persisted ring,
+    # research-sql rc6_api-responsive_loop_stalls.sql): three of twenty API
+    # loop stalls of 3.0-3.5 s were this census, run by Derek after every
+    # ext_pinnacle cycle, classifying the whole venue catalogue on the loop
+    # (derek.after_cycle -> census -> classify_listing). The reads above stay
+    # on the loop; the per-listing classification and the tallies are the
+    # same pure code, in `_classify_all`, over the rows in their read order,
+    # on the API's CPU lane (one worker thread for every such job: cpu_lane).
+    from .. import cpu_lane as _cpu
+    got = await _cpu.run(_classify_all, rows, mand=mand, req=req,
+                         valued=valued, touched=touched, decided=decided)
+    return dict(out, ok=True, refusal=None, **got, window_s=CURRENT_WINDOW_S)
+
+
+def _classify_all(rows, *, mand: dict, req: dict, valued: dict,
+                  touched: dict, decided: dict) -> dict:
+    """PURE (worker thread): every catalogue listing classified to its final
+    state with its reason, and the census tallies -- what `census` did inline
+    on the event loop, verbatim."""
+    rows = [dict(r) for r in rows]
     states = {s: 0 for s in FINAL_STATES}
     reasons: dict = {s: {} for s in FINAL_STATES}
     sample: dict = {s: [] for s in FINAL_STATES}
@@ -453,10 +473,9 @@ async def census(conn, *, now: float) -> dict:
             by_league.items(),
             key=lambda kv: -sum(kv[1]["states"].values()))[:40]),
     }
-    return dict(out, ok=True, refusal=None, categories=categories,
-                blocked_by_reason=blocked_by_reason, reasons_by_state=reasons,
-                sample=sample,
-                window_s=CURRENT_WINDOW_S)
+    return {"categories": categories,
+            "blocked_by_reason": blocked_by_reason,
+            "reasons_by_state": reasons, "sample": sample}
 
 
 async def record(conn, got: dict) -> str | None:

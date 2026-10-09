@@ -30,12 +30,19 @@ reports both files DIFFERENT, and a re-run of its installer refuses them
 compatibility diff, not drift. The package's 118 component tests run
 unchanged in this suite (tests/test_live_game_state_*.py); their count is
 pinned so none can be dropped.
+
+A FIX TO THE PACKAGE IS A DISCLOSED LANE PATCH (LANE_PATCHES): a unified
+diff kept under tests/fixtures/, pinned by sha256, touching only the files it
+names, reversed hunk by hunk before the two lines above -- so the package
+MANIFEST hash still proves that nothing else moved. RC6 lane G2 (the
+canonical fixture adapter, requirement register F3) is the first.
 """
 from __future__ import annotations
 
 import ast
 import hashlib
 import pathlib
+import re
 
 BACKEND = pathlib.Path(__file__).resolve().parents[1]
 
@@ -82,6 +89,30 @@ COMPAT_DIFFS = {
         "        raise RuntimeError(\"TRADER_SCORE_DATABASE_URL_OR_DATABASE_URL_REQUIRED\")\n")],
 }
 
+#: DISCLOSED LANE PATCHES: unified diffs of installed package files against the
+#: installed baseline, each pinned by sha256. `_package_bytes` reverses every
+#: hunk (its installed text must occur exactly once) BEFORE the COMPAT_DIFFS,
+#: so the result must still hash to the package MANIFEST: nothing but the
+#: disclosed hunks can differ.
+#:
+#: RC6 lane G2 (requirement register F3): the canonical fixture adapter read
+#: premap keys us_premap never carried (home_team / away_team / league /
+#: sport; research-sql run 37880110851), so no held fixture without a
+#: fixture-metadata row could ever be established. The patch reads the
+#: venue's own two team objects of the event (storage.venue_participants),
+#: names the venue league codes production shows per sport
+#: (core.VENUE_LEAGUE_CODES), and lets a fixture whose venue states no
+#: home/away match a provider game in either orientation with a unique
+#: full-name assignment (core.assign_sides). Its tests are
+#: tests/test_rc6_lgs_venue_fixture_adapter.py.
+LANE_PATCHES = {
+    "tests/fixtures/live_game_state_lane_g2.patch":
+        "227eb2a6b8565838504652ab361c344c95c785e532dc8b691ecdd806f84d7456",
+}
+#: the package files a lane patch may touch
+LANE_PATCHED_FILES = {"sportsassets/live_game_state/core.py",
+                      "sportsassets/live_game_state/storage.py"}
+
 #: the package's component tests, per module (118 in all)
 PACKAGE_TEST_COUNTS = {"test_live_game_state_collector.py": 15,
                        "test_live_game_state_core.py": 62,
@@ -89,8 +120,51 @@ PACKAGE_TEST_COUNTS = {"test_live_game_state_collector.py": 15,
                        "test_live_game_state_providers.py": 28}
 
 
+def _lane_hunks(patch_text: str) -> dict:
+    """{installed path: [(installed block, baseline block), ...]} of a unified
+    diff, each hunk consumed by the line counts of its own @@ header."""
+    out: dict = {}
+    lines = patch_text.splitlines(keepends=True)
+    i, path = 0, None
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("+++ b/backend/"):
+            path = line[len("+++ b/backend/"):].strip()
+        elif line.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@", line)
+            assert m and path, line
+            old_n, new_n = int(m.group(1) or 1), int(m.group(2) or 1)
+            installed, baseline = [], []
+            i += 1
+            while old_n or new_n:
+                tag, body = lines[i][:1], lines[i][1:]
+                assert tag in (" ", "+", "-"), lines[i]
+                if tag in (" ", "+"):
+                    installed.append(body)
+                    new_n -= 1
+                if tag in (" ", "-"):
+                    baseline.append(body)
+                    old_n -= 1
+                i += 1
+            out.setdefault(path, []).append(("".join(installed), "".join(baseline)))
+            continue
+        i += 1
+    return out
+
+
+def _all_lane_hunks() -> dict:
+    out: dict = {}
+    for rel in LANE_PATCHES:
+        for path, hunks in _lane_hunks((BACKEND / rel).read_text(encoding="utf-8")).items():
+            out.setdefault(path, []).extend(hunks)
+    return out
+
+
 def _package_bytes(rel: str) -> bytes:
     text = (BACKEND / rel).read_text(encoding="utf-8")
+    for installed, baseline in _all_lane_hunks().get(rel, []):
+        assert text.count(installed) == 1, (rel, installed[:200])
+        text = text.replace(installed, baseline)
     for installed, package in COMPAT_DIFFS.get(rel, []):
         assert text.count(installed) == 1, (rel, installed)
         text = text.replace(installed, package)
@@ -108,6 +182,20 @@ def test_the_compatibility_diff_is_exactly_two_files():
     for rel in COMPAT_DIFFS:
         raw = (BACKEND / rel).read_bytes()
         assert hashlib.sha256(raw).hexdigest() != PACKAGE_SHA256[rel], rel
+
+
+def test_every_lane_patch_is_pinned_and_touches_only_its_disclosed_files():
+    for rel, want in LANE_PATCHES.items():
+        assert hashlib.sha256((BACKEND / rel).read_bytes()).hexdigest() == want, rel
+    hunks = _all_lane_hunks()
+    assert set(hunks) == LANE_PATCHED_FILES
+    for rel, pairs in hunks.items():
+        assert pairs and all(inst != base for inst, base in pairs), rel
+        assert hashlib.sha256((BACKEND / rel).read_bytes()).hexdigest() != PACKAGE_SHA256[rel], rel
+        # a hunk that no longer matches the installed file is drift, not a pass
+        text = (BACKEND / rel).read_text(encoding="utf-8")
+        for inst, _ in pairs:
+            assert text.count(inst) == 1, (rel, inst[:200])
 
 
 def test_the_package_tree_has_no_unlisted_module():

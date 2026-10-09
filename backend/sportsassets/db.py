@@ -55,6 +55,54 @@ _connect_lock: asyncio.Lock | None = None
 _connect_lock_loop: asyncio.AbstractEventLoop | None = None
 _walk_gen = 0
 
+# THE POOL REMEMBERS ITS LOOP, AND A DEAD LOOP'S POOL IS NEVER HANDED OUT
+# (RC6, the full-suite-only failure of test_three_agents_form_one_linked_
+# trace). The connect lock above is per loop for exactly the reason the
+# pool was not: asyncio.run() -- one per test, one per restart of a worker
+# through asyncio.run, one per sync caller that runs a coroutine to
+# completion -- makes a fresh loop and CLOSES it at the end. get_pool()
+# returned `_pool` whatever loop had built it, so the first caller on a
+# later loop was handed a pool whose every connection and timer belongs to
+# a loop that no longer runs: `pool.acquire()` raised RuntimeError('Event
+# loop is closed') inside the request handler (a 500 at the API) and
+# close_pool() raised the same out of its caller's cleanup. Reproduced on
+# 412c4962 by one earlier test that calls get_pool() and leaves the pool,
+# then the three-agents trace: it failed at its first API read.
+#
+# The rule: a pool whose OWN loop is CLOSED is dead. asyncpg's Pool keeps
+# the loop it was built on (`Pool._loop`, pinned by
+# tests/test_rc6_db_pool_dead_loop.py so an asyncpg upgrade that moves it
+# fails loudly there). Such a pool is dropped -- its connections terminated
+# best effort, since no loop is left to await their goodbye on -- and the
+# caller's own loop builds the replacement through the same single-flight
+# connect. A pool whose loop is still OPEN, even if it is not the caller's,
+# is left exactly as before (never closed from another loop, never replaced
+# underneath its owner), and so is any pool that names no loop (a stand-in a
+# caller or a test put there): this rule only ever removes a pool nobody can
+# use.
+
+
+def _drop_pool_of_a_closed_loop() -> bool:
+    """Forget `_pool` when the event loop it was built on is closed (see
+    above). True when one was dropped. Never raises."""
+    global _pool
+    pool = _pool
+    loop = getattr(pool, "_loop", None) if pool is not None else None
+    if not isinstance(loop, asyncio.AbstractEventLoop) or not loop.is_closed():
+        return False
+    _pool = None
+    try:
+        # synchronous: closes every connection's transport without awaiting
+        # the (dead) loop. On a closed loop the transport cannot schedule
+        # its own close callback and raises; the sockets then go with the
+        # dropped objects.
+        pool.terminate()
+    except Exception:  # noqa: BLE001 -- best effort on a dead loop
+        log.info("db: dropped a pool whose event loop is closed "
+                 "(its connections could not be terminated on that loop)")
+    return True
+
+
 # The heartbeat write's ceiling (2026-09-05), on BOTH legs of the
 # write: the acquire and the statement. Poller.run()'s beat is
 # "logged when it cannot be written, never a raise" -- but a raise is
@@ -106,6 +154,7 @@ def _lock() -> asyncio.Lock:
 
 async def get_pool() -> asyncpg.Pool:
     global _pool, _walk_gen
+    _drop_pool_of_a_closed_loop()
     if _pool is not None:
         return _pool
     # the walk we may end up queued behind (see _walk_gen above)
@@ -171,8 +220,124 @@ def pool_stats() -> dict | None:
         return None
 
 
+# ── THE HEALTH PROBE NEVER QUEUES ON A SATURATED POOL (RC6, 2026-10-09) ──
+#
+# WHAT PRODUCTION SHOWED. RC5 (release 69a8a07e) was restarted twice by the
+# platform for "HTTP health check failed (timed out after 5 seconds)" --
+# 2026-10-08 16:34:42Z and 18:39:26Z (render-ops events). In the minutes
+# before each, the pool was saturated: the feed heartbeat and the rn1x learn
+# heartbeat timed out INSIDE asyncpg's Pool._acquire (16:32:38Z, 18:37:41Z,
+# 18:37:43Z, 18:38:17Z), and browser reads took 13-28 s. /healthz then
+# queued its SELECT 1 behind every other waiter for up to its 2 s ceiling,
+# and the loop watchdog's persisted ring (research-sql
+# rc6_api-responsive_loop_stalls.sql, 2026-10-09 01:31Z) shows stalls of
+# 2.3-3.5 s in full (ended_lag_s): 2 s of queueing plus a 3.5 s stall is a
+# 5.5 s answer, and the platform restarts on 5 s.
+#
+# THE FIX IS NOT A LONGER TIMEOUT AND NOT A HEALTHIER-LOOKING ANSWER. When
+# the pool's own counters say every connection is out and none is idle
+# (pool_saturated), the probe does not queue: `db_ok` is false AT ONCE, with
+# the reason POOL_SATURATED_NOT_QUEUED -- exactly what the 2 s race used to
+# conclude, two seconds sooner. When a connection is free, the SELECT 1 runs
+# under the same 2 s ceiling as before, so a slow or dead database is still
+# `db_ok` false (TIMEOUT / ERROR:<type>). Probes that arrive while one is in
+# flight share it (single flight), so concurrent checkers never stack
+# connections on a pool that is struggling.
+#
+# THE COUNTERS ALONE MISS A GROWING POOL (found by the responsiveness
+# harness, tools/api_responsiveness_harness.py). asyncpg counts a connection
+# only once it is open, so while the pool opens connections for a burst of
+# waiters (after a quiet spell closed its idle ones) it reads size < max --
+# "room to grow" -- though every slot is taken and the next acquire queues:
+# the probe waited its full 2 s there (TIMEOUT) in 2 of 5 harness runs.
+# What decides whether an acquire waits is whether the pool's queue of free
+# slots is empty; `acquire_would_wait` reads that (the counters remain the
+# answer for a pool without one, e.g. a stand-in).
+HEALTH_PROBE_TIMEOUT_S = 2.0
+PROBE_OK = "OK"
+PROBE_NO_POOL = "NO_POOL"
+PROBE_POOL_SATURATED = "POOL_SATURATED_NOT_QUEUED"
+PROBE_TIMEOUT = "TIMEOUT"
+_probe_inflight: tuple | None = None    # (loop, task) of the probe in flight
+
+
+def pool_saturated(stats: dict | None) -> bool:
+    """True when the counters say an acquire would WAIT: every connection
+    the pool may open is open and none is idle. Unknown counters (None) are
+    not saturation -- the probe then runs and its ceiling decides."""
+    if not stats:
+        return False
+    try:
+        return int(stats["size"]) >= int(stats["max"]) and \
+            int(stats["idle"]) <= 0
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def acquire_would_wait(pool, stats: dict | None) -> bool:
+    """True when an acquire on `pool` would wait now: its queue of free
+    slots (asyncpg's Pool._queue, an asyncio.Queue: `get` suspends exactly
+    when it is empty) holds none. Read, never awaited. A pool without that
+    queue is judged by its counters (pool_saturated)."""
+    q = getattr(pool, "_queue", None)
+    empty = getattr(q, "empty", None)
+    if callable(empty):
+        try:
+            return bool(empty())
+        except Exception:  # noqa: BLE001 -- fall back to the counters
+            pass
+    return pool_saturated(stats)
+
+
+async def _probe_once(pool, timeout: float) -> dict:
+    import time as _t
+    t0 = _t.monotonic()
+    try:
+        await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=timeout)
+        why, ok = PROBE_OK, True
+    except asyncio.TimeoutError:
+        why, ok = PROBE_TIMEOUT, False
+    except Exception as exc:  # noqa: BLE001 -- the check always answers
+        why, ok = "ERROR:%s" % type(exc).__name__, False
+    return {"ok": ok, "why": why, "s": round(_t.monotonic() - t0, 3)}
+
+
+async def health_probe(pool, stats: dict | None, *,
+                       timeout: float = HEALTH_PROBE_TIMEOUT_S) -> dict:
+    """{"ok", "why", "s", "shared"}: may THIS process's pool serve a query
+    now? Never builds a pool, never queues on a saturated one, never longer
+    than `timeout`, never raises."""
+    global _probe_inflight
+    if pool is None:
+        return {"ok": False, "why": PROBE_NO_POOL, "s": 0.0, "shared": False}
+    if acquire_would_wait(pool, stats):
+        return {"ok": False, "why": PROBE_POOL_SATURATED, "s": 0.0,
+                "shared": False}
+    loop = asyncio.get_running_loop()
+    held = _probe_inflight
+    if held is not None and held[0] is loop and held[2] is pool \
+            and not held[1].done():
+        task, shared = held[1], True
+    else:
+        task, shared = loop.create_task(_probe_once(pool, timeout)), False
+        _probe_inflight = (loop, task, pool)
+    try:
+        # shielded: a checker that hangs up does not cancel the probe the
+        # others are waiting on; the probe ends on its own ceiling
+        got = await asyncio.shield(task)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        got = {"ok": False, "why": "ERROR:%s" % type(exc).__name__,
+               "s": None}
+    return dict(got, shared=shared)
+
+
 async def close_pool() -> None:
     global _pool
+    if _drop_pool_of_a_closed_loop():
+        # nothing is left to close gracefully: its loop is gone
+        return
     if _pool is not None:
         await _pool.close()
         _pool = None

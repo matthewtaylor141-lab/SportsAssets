@@ -1355,3 +1355,67 @@ tests/test_rc6_pinnapi_close_record.py
 tests/test_rc6_pinnapi_client_close_backoff.py
 # (RC6) a PinnAPI EVICTION_LOOP refusal is a stand-down (30 min, 1 h, 2 h, then 4 h; monotonic; escalation per process) after which the same owner re-enters once and serves only after its new epoch resyncs; a record belongs to its runtime (another runtime's retired, a hold change cuts it short, kept on the heartbeat); PINNAPI_EVICTION_STANDDOWN=off is the pre-RC6 permanent refusal; writer-lock-lost, provider and key refusals stay permanent
 tests/test_rc6_pinnapi_eviction_standdown.py
+# (RC6 CI) every database a test suite reads without a default (RN1X_TEST_DSN, BETTOR_TEST_PG_DSN) is given to it by BOTH required gates; the 44 bettor live-store / canary / incentive / socket-allowance tests skipped in every gate through 732cc0c6
+tests/test_ci_sets_every_test_database.py
+# (RC6 xavier-records) every held paper position carries an accountable management record (identity, remaining qty, the probability's three clocks and why it is not current, decision and alternatives, next review or price condition, orders with their ACTUAL states, live protection, residual exposure, the packet NOW by the gate's rule, every blocker); the assessment persists the limitation; the xavier_complete gate names every blocker with whole counts, verdict unchanged
+tests/test_rc6_xavier_management_record.py
+# (RC6 xavier-records) a held contract entered on a metered event key is read on the PinnAPI fixture the matcher recorded for the same contract (both measures, the exploration entry check, the held watch); a PinnAPI entry key is never overridden; the read's own checks still refuse a wrong fixture
+tests/test_rc6_xavier_held_fixture.py
+# (RC6 archer-lifecycle) the economic-duplicate rule on the canonical identity of observed liquidity, the READ: a fill on a copy row of one read, or above what the previous examined row showed (the seen-crossing memory), is a duplicate; production's 18 P0 groups re-verified (12 duplicates, 6 not; all historical)
+tests/test_rc6_archer_canonical_duplicates.py
+# (RC6 archer-lifecycle) PAPER order lifecycle through every state with its quantity accounting and position linkage; only filled quantity is protection in every reader, an expired or cancelled remainder is named as contributing none; Xavier's review records its own position's filled protection; the venue-confirmed book read apart
+tests/test_rc6_order_lifecycle_and_protection.py
+# (RC6 archer-lifecycle) the truth quorum names each source exactly (CURRENT / STALE / MISSING, why, on whom it depends); Audrey's reconciliation is linked to the actual positions she reconciled and names the paper and actual positions it covers
+tests/test_rc6_audrey_quorum_traceability.py
+# (RC6 red-team scenarios) the owner's seven adversarial scenarios: a GAP Kalshi book is never re-stamped; reversed home/away never maps; another venue's key (a Kalshi PEM in the PMUS slot, the PMX key in the Kalshi slot) never signs; a replayed / out-of-sequence Kalshi snapshot gaps the sid; no pre-resync book is served; partials graded on the filled quantity; authority READ, never literals
+tests/test_red_team_scenarios.py
+# (RC6 red-team) KAREN_VALUE reads the twin's COUNTERFACTUAL book from one run; GREEN only when MEASURED, the twin's own reason named otherwise, unmeasured null never "0"
+tests/test_red_team_karen_value_db.py
+# (RC6 sw-reds) a module pool whose event loop is closed is never handed out: the next loop (API request, worker cycle) builds its own; open other-loop pools and stand-ins untouched (the full-suite-only three-agents failure)
+tests/test_rc6_db_pool_dead_loop.py
+# (RC6 sw-reds) a BETTOR shadow opportunity and its decision commit together: a worker stopped between them leaves no orphan in its bucket, a same-bucket retry decides once; V6 policy sha unchanged
+tests/test_rc6_opportunity_decision_atomic.py
+# (RC6 sw-reds) venue rules text of events still owed a fresh window is read after the cycle's time-critical work into the same hourly cache (TTL unchanged); refused or failed reads are not cached; bounded
+tests/test_rc6_rules_read_ahead.py
+# (RC6 sw-reds) the software-reds gate names the SOFTWARE codes it counts (bounded); its value is still software == 0
+tests/test_rc6_software_reds_gate_names_codes.py
+# (RC6 ev-audit) a de-vig price is finite and above 1.0 (NaN / inf refuse ODDS_NOT_A_PRICE); the PMUS schedule as published 2026-10-09 (Table Tennis 0.10 from 12:00 AM ET Oct 7, combo curve 0.06); capacity counts one opportunity once at sizes it evaluated, drops no size, proves capital only on eligible points
+tests/test_rc6_ev_audit_pricing.py
+# (RC6 ev-audit) probability labels are a position's latest settlement version; the twin's optimistic diagnosis is given the pre-activation book; re-evaluating one opportunity adds no capacity
+tests/test_rc6_ev_audit_evidence_db.py
+# (RC6 ev-audit) the research registry: one preregistration per plan sha before the interlock reads, keyed-hash event partition, holdout never read, PBO by CSCV and DSR (published example 0.9004), losing selections never accepted, unregistered strategies named
+tests/test_rc6_ev_audit_research_registry.py
+# (RC6 lane E) the 14-category scorecard pins its evaluator and inputs (an input naming another release is UNMEASURED, never graded as this release's), Kalshi's credential unit reads Kalshi's own verdict while the Red-team aggregate stays, and every declared unit is unchanged
+tests/test_scorecard_14.py
+# (RC6 lane E) release lineage (implementation tree == release tree, single parent, gates on both SHAs), rollback readiness (what ran before per Render, its gates, its schema), the upgrade-path binding and the grading-logic diff against the pinned prior evaluator
+tests/test_rc6e_deploy_lineage.py
+# (RC6 lane E) the upgrade path on real PostgreSQL: the previous release's schema with representative rows, this release's migrations by production's runner, nothing applied changed, nothing seeded lost, the previous release on the new schema
+tests/test_rc6e_upgrade_path.py
+# (RC6 lane G2) the Live Game State fixture adapter reads the venue's own two team objects of the held event (us_premap team_id / names / team_league, one start); only league codes production shows per sport; unordered pairs bind a provider game only by full-name equality with a unique assignment; census SQL = collector verdict; display only
+tests/test_rc6_lgs_venue_fixture_adapter.py
+# (RC6 judge) every gate the judge reads (the release, its implementation, the rollback target) comes from the newest run that CONCLUDED via the one grading file; a cancelled or skipped run carries no verdict and is listed
+tests/test_pm_acceptance_gate_runs.py
+# (RC6 D1) the plane's snapshot-only gRPC refresh sends ONE request shape -- explicit symbols, snapshot_only, aggregated depth 10, never the empty (EVERY-instrument) list, never a continuous subscription -- refused before the wire otherwise; its books never enter the stream's books and count only for the bound from their receipt
+tests/test_rc6_d1_snapshot_refresh.py
+# (RC6 D1) freshness measured over the whole window: an outage of any length crossing a horizon's start is eligible and not fresh, only time before the first window ever written is unmeasured, the frozen membership is never re-chosen
+tests/test_rc6_d1_freshness_window.py
+# (RC6 api-responsive) Derek's research-model provenance check (28,303 records) and the capital authority's blocker census (83,477 refusals) answer exactly as before, computed off the API event loop; the registry read leaves the 16 MB stored records behind and names changed records from the registry on a mismatch
+tests/test_rc6_api_responsive_offloop.py
+# (RC6 lane K) Kalshi WS books: every message of a sid (snapshots too) is sequence-checked, a gapped sid is dead, one gap resubscribes each market exactly once (ack-bound, in-flight snapshots before/after the resubscribe ack), only dead sids are unsubscribed (no book current on a dropped sid), a reconnect subscribes each market once and books return CURRENT only on a fresh snapshot
+tests/test_rc6_kalshi_ws_sequencing.py
+# (RC6 lane K) Kalshi ontology: real catalogue rows mapped (winner / spread / total / team total) from the series tag and the contract's own rules sentence, or refused by name; mapped rows leave the code-controlled gap and are settlement-judged on their own rules
+tests/test_rc6_kalshi_ontology.py
+# (RC6 lane K) Kalshi credentials are Kalshi's own: the control's verdict per venue slot is independent, no signer reads another venue's env names
+tests/test_rc6_kalshi_credential_isolation.py
+# (RC6 coverage) the market plane reads the venue's event-slug grammar: the league is the event slug's first segment; non-sports codes are excluded by name; an ambiguous code is a named gap, never a sport
+tests/test_rc6_coverage_slug_grammar.py
+# (RC6 coverage) full-game and period line contracts read against their cited terms and NEVER proven (the priced settlement-difference policy still refuses every non-money-line); the target-universe waterfall sums exactly; COVERAGE_WATERFALL=off is the RC5 pass
+tests/test_rc6_coverage_waterfall.py
+# (RC6 coverage) a Kalshi series leaves the target universe only by a named class (match, fight, period, map and set winners are target families; an unrecognised series is UNCLASSIFIED), checked against all 1,351 active series' own rules texts
+tests/test_rc6_coverage_kalshi_series.py
+# (RC6 coverage) the markets kept out of the registry by name stay counted by code with the full pass's time: no incremental pass overwrites populate_full; the snapshot and the waterfall carry it, never in the sums
+tests/test_rc6_coverage_outside_registry.py
+# (RC6 Adriana) void terms read per contract from its own captured, sha-cited rules (never defaulted); on established fair-price terms a two-market structure is refused at its void-state floor (never summed to $1, never an opportunity); near complements recorded REFUSED; completion states the terms the scans recorded
+tests/test_rc6_adriana_void_terms.py
+# (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
+tests/test_rc6_kalshi_ws_merge_integration.py

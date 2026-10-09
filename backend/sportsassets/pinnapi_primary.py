@@ -8,6 +8,7 @@ its Pinnacle entry is replaced, never counted as a second Pinnacle book.
 from __future__ import annotations
 
 from datetime import datetime
+import functools
 import math
 import re
 import unicodedata
@@ -57,6 +58,8 @@ R_NOT_IN_FEED = N.R_NOT_IN_FEED
 CANONICAL = "CANONICAL"
 RAW = ("__raw_records__",)
 EVICTED = ("__events_evicted__",)
+#: (RC6) the index's per-(sport, family) absence pass, built on first miss
+ABSENCE = "__absence__"
 MATCH_EXACT = "EXACT_FOLDED_NAMES"
 MATCH_CANONICAL = "CANONICAL_NAMES"
 
@@ -86,10 +89,64 @@ def name(value):
     # (PINNAPI_PRIMARY_NO_EXACT_FIXTURE, UEFA Nations League 2026-10-05). The
     # conjunction is dropped from every name; every other token must still be
     # identical, in order.
-    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    #
+    # (RC6) ONCE PER NAME, NOT PER CALL. The fold is a pure function of the
+    # text `str(value or "")`, and `fixture_index` folds both names of every
+    # cached fixture for every registration batch, on the API's event loop:
+    # 60 ms for 2,600 events on a quiet local core (LOCAL BENCHMARK ONLY;
+    # 6-8x that on the production CPU, see test_rc6_api_responsive_offloop),
+    # nearly all of it re-folding names it folded the batch before. The memo
+    # is keyed by that text, so it answers exactly what the fold answers;
+    # bounded at pinnapi_names.MEMO_NAMES texts.
+    return _name_of_text(str(value or ""))
+
+
+@functools.lru_cache(maxsize=N.MEMO_NAMES)
+def _name_of_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text).casefold()
     text = "".join(c for c in text if not unicodedata.combining(c))
     return " ".join(t for t in re.findall(r"[^\W_]+", text.replace("&", " "))
                     if t != "and")
+
+
+#: (RC6) the (name text, family) pairs `warm_names` has folded, so a batch
+#: knows which of its cache's names are still cold; bounded like the memos
+_WARM: set = set()
+
+
+def cold_names(cache) -> list:
+    """[(name text, family)] of the cache's participants that `warm_names`
+    has not folded yet -- set lookups only, cheap enough for the loop."""
+    out, seen = [], set()
+    for ev in list(cache.events.values()):
+        if not isinstance(ev, dict):
+            continue
+        fam = FAMILY_OF_SPORT.get(ev.get("sport_id"))
+        for p in ev.get("participants") or []:
+            if not (isinstance(p, dict) and p.get("name")):
+                continue
+            key = (str(p.get("name")), fam)
+            if key not in _WARM and key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+def warm_names(pairs) -> int:
+    """PURE but for the memos: fold, canonicalise and tokenise each (name,
+    family) exactly as `fixture_index` and the absence pass will, so the
+    batch that follows finds them memoised. Run off the loop (on the CPU
+    lane, pinnapi_reactive.warm_names); the answers are the memos' own."""
+    if len(_WARM) + len(pairs) > N.MEMO_NAMES:
+        _WARM.clear()
+    for text, fam in pairs:
+        name(text)
+        N.canonical(text, fam, side="feed")
+        if fam:
+            N._tokens(text, fam)
+        N._acronym(text)
+        _WARM.add((text, fam))
+    return len(pairs)
 
 
 def fixture_index(cache) -> dict:
@@ -214,10 +271,19 @@ def match_event(cache, event, family, *, index=None, explain=None):
     records = index.get(RAW) if index is not None else \
         [v for v in cache.events.values() if isinstance(v, dict)]
     evicted = index.get(EVICTED, 0) if index is not None else _evicted(cache)
+    # (RC6) a batch's misses share ONE inverted pass over the raw records
+    # (pinnapi_names.AbsenceIndex): the same answer, without a full scan of
+    # the feed per seed
+    prepared = None
+    if index is not None:
+        prepared = index.get((ABSENCE, sid, family))
+        if prepared is None:
+            prepared = index[(ABSENCE, sid, family)] = N.AbsenceIndex(
+                records, sid, family)
     ab = N.absence(records, sport_id=sid, start=start,
                    home=event.get("home_team"), away=event.get("away_team"),
                    family=family, evicted=evicted,
-                   tolerance_s=START_TOLERANCE_S)
+                   tolerance_s=START_TOLERANCE_S, prepared=prepared)
     ex.update(absence=ab)
     return None, (N.R_NOT_IN_FEED if ab["absent"] else R_NO_EXACT)
 

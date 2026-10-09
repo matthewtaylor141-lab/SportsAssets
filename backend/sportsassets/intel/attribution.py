@@ -38,8 +38,6 @@ side), because it is the same contract's outcome.
 """
 from __future__ import annotations
 
-import asyncio
-
 from . import common as C
 
 VERSION = "INTEL_ATTRIBUTION_V1"
@@ -282,8 +280,7 @@ async def load_paper(conn, *, now, days=60.0, account_id=C.PAPER_ACCOUNT,
     # OFF THE LOOP (RC6): up to `limit` decisions attributed fill by fill --
     # the second-longest hold of the intel cycle at its bound (see
     # calibration.load_records for the production stalls). Pure.
-    return await asyncio.to_thread(paper_rows, decs, groups, fills, sidx,
-                                   acts, vals)
+    return await C.offload(paper_rows, decs, groups, fills, sidx, acts, vals)
 
 
 def paper_rows(decs, groups, fills, sidx, acts, vals) -> list:
@@ -377,8 +374,7 @@ async def load_actual(conn, *, now, days=60.0, limit=5000) -> list:
     vals = await R.valuations_by_id(conn, [r.get("valuation_id")
                                            for r in rows])
     # OFF THE LOOP (RC6), as load_paper. Pure.
-    return await asyncio.to_thread(actual_rows, rows, fills, decs, sidx,
-                                   vals)
+    return await C.offload(actual_rows, rows, fills, decs, sidx, vals)
 
 
 def actual_rows(rows, fills, decs, sidx, vals) -> list:

@@ -195,6 +195,12 @@ async def test_actual_is_submitted_while_the_paper_simulator_is_stalled(env, mon
             "SELECT count(*) FROM smalllive_handoffs WHERE group_id = $1", it["group_id"]))
         assert await e.conn.fetchval(
             "SELECT count(*) FROM paper_fills WHERE group_id = $1", it["group_id"]) == 0
+        # the lane records its timeline with its outcome (_finish), AFTER the
+        # Xavier handoff: read it once the intent left SUBMITTING (capital-
+        # critical 37927450586 read it between the two writes)
+        assert await _wait(lambda: e.conn.fetchval(
+            "SELECT actual_state <> $2 FROM execution_intents WHERE intent_id = $1",
+            it["intent_id"], EI.A_SUBMITTING))
         it = dict(await e.conn.fetchrow(
             "SELECT * FROM execution_intents WHERE intent_id = $1", it["intent_id"]))
         tl = json.loads(it["timeline"]) if isinstance(it["timeline"], str) else it["timeline"]

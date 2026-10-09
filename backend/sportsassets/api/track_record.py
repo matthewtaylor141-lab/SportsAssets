@@ -2198,8 +2198,8 @@ async def track_record(since: str | None = None,
                             # payload keeps serving
                             logging.getLogger(__name__).warning(
                                 "background cold fetch refused (%s): the "
-                                "PMUS_SECRET_KEY slot holds no Ed25519 key",
-                                exc)
+                                "PMUS_SECRET_KEY slot holds no key a PMUS "
+                                "signer may use", exc)
                         except Exception:  # noqa: BLE001
                             logging.getLogger(__name__).exception(
                                 "background cold fetch failed")

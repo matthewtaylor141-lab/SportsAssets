@@ -20,16 +20,34 @@ Adriana (Head of Arbitrage, SHADOW_ONLY) runs one census pass at a time:
      markets with the pure engine (adriana_arb.pair_scanner): settlement and
      payoff equivalence, synchronized freshness, executable depth on every
      leg, every fee, slippage and cost, the largest profitable matched size.
-  4. FAIL CLOSED ON SETTLEMENT TERMS NOT READ. What a venue pays when an
-     event is cancelled or postponed decides whether a structure can lose.
-     No Polymarket US void / postponement terms are recorded where this
-     census can read them, so the engine is run with a declared HYPOTHESIS
-     (both legs settle 50-50) only to measure the economics, and every
-     structure is then REFUSED with VOID_TERMS_NOT_ESTABLISHED -- a
+  4. VOID TERMS FROM EACH CONTRACT'S OWN CAPTURED RULES, ELSE FAIL CLOSED.
+     What a venue pays when an event is cancelled or postponed decides
+     whether a structure can lose. (RC6) Each contract's terms are read from
+     ITS OWN published rules as the market plane captured them
+     (market_plane_rules: the venue's text, its sha256, the source and the
+     registry parser version), re-parsed here with the current parser and
+     accepted only when the text still hashes to the recorded fingerprint
+     (`contract_void_terms`). Polymarket US states, for every totals and
+     spreads line in production (research-sql 37873179784 G: 4,166 spread
+     and 2,640 total rows, all "delayed"), that a game "delayed, postponed,
+     or suspended and not rescheduled to a date within two weeks [two
+     calendar days on NBA / NHL lines] ... will settle to the last fair
+     market price": ONE market's price, a number in [0, 1] nobody names in
+     advance. Two markets' fair prices are never summed to $1
+     (settlement_pair_policy, owner directive RC5), so on established terms
+     a structure over two markets is guaranteed only the sum of each leg's
+     LOWER bound in those states -- 0 -- and is REFUSED by its priced
+     void-state floor (R_VOID_STATE_FLOOR), never an opportunity. A contract
+     whose terms are not captured, not stated, ambiguous (manual review) or
+     whose text no longer hashes to the record keeps the declared
+     HYPOTHESIS (both legs settle 50-50) only to measure the economics, and
+     its structures are REFUSED with VOID_TERMS_NOT_ESTABLISHED -- a
      structure that would be proven under that hypothesis is counted as a
      CONDITIONAL candidate, never as an opportunity. An opportunity row is
      written only for a structure whose every outcome reconciles on terms
-     actually established (`ESTABLISHED_VOID_TERMS`, empty today).
+     actually established. `ESTABLISHED_VOID_TERMS` stays the explicit
+     family-level declaration (empty: none is declared); when a caller
+     passes `void_terms` the per-contract read is not used.
   5. KALSHI / POLYMARKET (international): the engine prices them, but no
      book of either venue is recorded in Postgres, so the census states
      each venue UNAVAILABLE with the reason -- never an empty success.
@@ -58,6 +76,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from .. import settlement_rule_registry as SRR
 from . import adriana_arb as A
 from . import pos_authority as PA
 from . import registry as R
@@ -69,31 +88,83 @@ MAX_MARKETS = 800
 MAX_RECORDED_REFUSALS = 150
 MAX_AGE_S = A.DEFAULT_MAX_AGE_S
 MAX_SKEW_S = A.DEFAULT_MAX_SKEW_S
+#: (RC6) the claim-first scan's own census keys recorded beside the counts
+#: (bounded: tallies and at most a handful of examples each)
+SCAN_SUMMARY_KEYS = ("pairs_not_complementary", "near_complement_pairs",
+                     "same_market_pairs_excluded", "same_market_only_pairs",
+                     "settlement_pair_policy", "by_topology", "book_sources",
+                     "exceptional_state_refusals_proven_under_hypothesis",
+                     "claim_engine", "scope")
 
 R_NO_SCHEMA = "MIGRATION_265_NOT_APPLIED"
 VOID_TERMS_NOT_ESTABLISHED = "VOID_TERMS_NOT_ESTABLISHED"
-#: (venue, family) whose cancellation / postponement payout is established
-#: from recorded venue terms. Empty: none is, so nothing is proven.
+#: (venue, family) whose cancellation / postponement payout is DECLARED
+#: established for the whole family. Empty: none is declared; each contract's
+#: own captured rules are read instead (`contract_void_terms`).
 ESTABLISHED_VOID_TERMS: dict = {}
 #: the hypothesis the economics are MEASURED under (never a verdict)
 HYPOTHESIS = {"void_payout": Decimal("0.5"), "postponed_payout": Decimal("0.5"),
               "label": "HYPOTHESIS_BOTH_LEGS_SETTLE_50_50_ON_VOID_OR_POSTPONEMENT"}
 
+# ── (RC6) THE VOID TERMS OF ONE CONTRACT, FROM ITS OWN CAPTURED RULES ─────
+#: where the census reads them (migration 312; the premap sweep writes the
+#: venue's own description at no extra venue request)
+VOID_TERMS_SOURCE = "market_plane_rules"
+#: what one contract HELD is guaranteed in a cancelled / unrescheduled game
+#: under each payout rule the registry parser can state: (YES, NO). A last
+#: fair market price is ONE market's number in [0, 1] -- its guarantee is 0
+#: on either side, and two markets' prices are never summed to $1
+#: (settlement_pair_policy B_SEPARATE); a scalar 0.50 is 0.50 on both sides.
+#: Anything else (stake back, an unread rule) is not a fixed payout.
+PAYOUT_LOWER_BOUND = {
+    SRR.LAST_FAIR_PRICE: (Decimal("0"), Decimal("0")),
+    SRR.SCALAR_0_50: (Decimal("0.5"), Decimal("0.5")),
+}
+#: why a contract's void / postponement terms are NOT established (each
+#: counted by name in the scan, never a silent default)
+R_VT_RULES_NOT_CAPTURED = "VOID_TERMS_RULES_NOT_CAPTURED"
+R_VT_RULES_NOT_PUBLISHED = "VOID_TERMS_RULES_NOT_PUBLISHED_BY_THE_VENUE"
+R_VT_FINGERPRINT_DIFFERS = "VOID_TERMS_RULES_TEXT_DIFFERS_FROM_ITS_FINGERPRINT"
+R_VT_CONFLICT = "VOID_TERMS_RULES_IN_CONFLICT"
+R_VT_MANUAL_REVIEW = "VOID_TERMS_MANUAL_REVIEW_IS_NOT_A_PAYOUT"
+R_VT_VOID_NOT_STATED = "VOID_TERMS_CANCELLATION_PAYOUT_NOT_STATED"
+R_VT_POSTPONEMENT_NOT_STATED = "VOID_TERMS_POSTPONEMENT_PAYOUT_NOT_STATED"
+R_VT_WINDOW_NOT_STATED = "VOID_TERMS_POSTPONEMENT_WINDOW_NOT_STATED"
+R_VT_RULE_NOT_FIXED = "VOID_TERMS_PAYOUT_RULE_IS_NOT_A_FIXED_OR_BOUNDED_PAYOUT"
+#: a structure whose ordinary-completion floor is positive but whose
+#: cancelled / postponed floor -- each leg at the lower bound of ITS OWN
+#: market's stated payout -- is lower: the venue's terms, read and
+#: established, are what refuse it (classified as the settlement policy's
+#: priced-floor refusal is: SOFTWARE / SETTLEMENT)
+R_VOID_STATE_FLOOR = "VOID_STATE_FLOOR_ON_ESTABLISHED_TERMS_BELOW_THE_STRUCTURE"
+
 FAMILY_OF_PREFIX = {"tsc": A.TOTAL, "asc": A.SPREAD}
 SKIP_FAMILY = {"aec": "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED",
                "atc": "MONEYLINE_TIE_AND_OVERTIME_TERMS_NOT_MODELLED",
                "astatc": "PROP_FAMILY_NOT_MODELLED"}
+#: (RC6) the venue's own slug forms, read off production (research-sql
+#: 37873179784 F2): the football full-game total carries `total-` before
+#: its line (tsc-cfb-airf-nill-2026-10-10-total-19pt5, 2,640 active rows
+#: read SLUG_GRAMMAR_NOT_READ before), and football quarters are `1q`..`4q`
+#: (tsc-...-1q-10pt5, asc-...-3q-neg-1pt5). A team total (`tt-`, `tt1h-`,
+#: `tt2h-`), a tennis / esports / first-five form (`tg-`, `st-`, `gs-`,
+#: `ss-`, `tot-`, `f5-`, `m2tr-`) is a different subject: never matched.
 _SLUG = re.compile(
     r"^(?P<pfx>tsc|asc)-(?P<lg>[a-z0-9]+)-(?P<a>[a-z0-9]+)-(?P<b>[a-z0-9]+)-"
-    r"(?P<date>\d{4}-\d{2}-\d{2})(?:-(?P<seg>fh|sh|1h|2h|q[1-4]|p[1-3]))?-"
+    r"(?P<date>\d{4}-\d{2}-\d{2})"
+    r"(?:-(?P<seg>fh|sh|1h|2h|q[1-4]|[1-4]q|p[1-3])|-(?P<total>total))?-"
     r"(?:(?P<sign>neg|pos)-)?(?P<line>\d+(?:pt\d+)?)$")
 
 AUTHORITY = dict(A.AUTHORITY)
 VENUES_NOT_RECORDED = {
-    A.KALSHI: ("NO_KALSHI_BOOK_SOURCE: no Kalshi order book is recorded in "
-               "Postgres (the admin board is an in-memory cache and the "
-               "suspended edge-shadow service kept its own SQLite); the "
-               "engine prices Kalshi legs, the census cannot read any"),
+    # (RC6) true of THIS census, which reads paper_book_observations only;
+    # since migration 314 Kalshi books ARE recorded (kalshi_books_current)
+    # and the claim-first cross-venue scan (adr-claims-*) reads them
+    A.KALSHI: ("NO_KALSHI_BOOK_SOURCE_IN_THIS_CENSUS: the recorded-books "
+               "census reads Polymarket US books (paper_book_observations) "
+               "only; Kalshi books (kalshi_books_current) are read by the "
+               "claim-first cross-venue scan recorded beside it "
+               "(adr-claims-*)"),
     A.POLYMARKET: ("NO_POLYMARKET_INTERNATIONAL_BOOK_SOURCE: no book is "
                    "recorded and no fee schedule is known"),
 }
@@ -132,12 +203,17 @@ def parse_slug(slug: str) -> dict | None:
         return None
     if fam == A.TOTAL and g["sign"]:
         return None
+    if g["total"] and fam != A.TOTAL:
+        return None
     # the threshold the YES side must clear on the integer underlying
     # (total points; or margin a - b, which is above +L for 'neg-L' and
     # above -L for 'pos-L')
     thr = line if fam == A.TOTAL else (line if g["sign"] == "neg" else -line)
+    seg = g["seg"] or ""
+    if re.fullmatch(r"[1-4]q", seg):
+        seg = "q" + seg[0]          # the venue's 1q is the period Q1
     period = {"fh": "FIRST_HALF", "1h": "FIRST_HALF", "sh": "SECOND_HALF",
-              "2h": "SECOND_HALF"}.get(g["seg"] or "", (g["seg"] or "FULL").upper())
+              "2h": "SECOND_HALF"}.get(seg, (seg or "FULL").upper())
     event = "%s-%s-%s-%s" % (g["lg"], g["a"], g["b"], g["date"])
     return {"family": fam, "league": g["lg"], "a": g["a"], "b": g["b"],
             "date": g["date"], "period": period, "line": line,
@@ -169,13 +245,116 @@ def _aware(ts) -> datetime | None:
     return None
 
 
-def build_universe(rows, *, void_terms=None) -> dict:
+def _iso(ts) -> str | None:
+    at = _aware(ts)
+    return at.isoformat() if at else None
+
+
+def _lfp_sentence(text) -> str | None:
+    """The venue's own sentence that states the last-fair-price payout,
+    verbatim (the citation a reader checks the term against)."""
+    for s in re.split(r"(?<=\.)\s+", " ".join(str(text or "").split())):
+        if re.search(r"fair\s+(?:market\s+)?price", s, re.I):
+            return s[:400]
+    return None
+
+
+def contract_void_terms(row: dict) -> dict:
+    """THE CANCELLATION / POSTPONEMENT TERMS ONE POLYMARKET US CONTRACT'S OWN
+    CAPTURED RULES STATE. Pure.
+
+    `row` carries the market_plane_rules columns read beside the book
+    (rules_published, rules_sha256, rules_text, rules_parse_status,
+    rules_parser_version, rules_source, rules_observed_at). The captured text
+    is re-parsed with the current registry parser and accepted only when it
+    still hashes to the recorded fingerprint; the terms are ESTABLISHED only
+    when the text states a cancellation payout, a postponement payout and the
+    postponement window, each a payout this census can bound
+    (PAYOUT_LOWER_BOUND), with no manual-review clause and no conflict.
+    Returns {"established", "why", "void_rule", "postponement_payout",
+    "window_h", "void_lo" (YES, NO), "postponed_lo" (YES, NO), "rule_id",
+    "citation"} -- never a default."""
+    cite = {"source": row.get("rules_source") or VOID_TERMS_SOURCE,
+            "rules_sha256": row.get("rules_sha256"),
+            "parser_version": row.get("rules_parser_version"),
+            "captured_at": _iso(row.get("rules_observed_at"))}
+    out = {"established": False, "why": None, "void_rule": None,
+           "postponement_payout": None, "window_h": None, "void_lo": None,
+           "postponed_lo": None, "rule_id": None, "citation": cite}
+    if row.get("rules_published") is None and not row.get("rules_sha256"):
+        return dict(out, why=R_VT_RULES_NOT_CAPTURED)
+    if row.get("rules_published") is False or not row.get("rules_text"):
+        return dict(out, why=R_VT_RULES_NOT_PUBLISHED)
+    ev = SRR.polymarket_us_rule_evidence(row.get("rules_text"))
+    if ev.get("rules_sha256") != row.get("rules_sha256"):
+        return dict(out, why=R_VT_FINGERPRINT_DIFFERS)
+    if str(row.get("rules_parse_status") or "") == SRR.CONFLICT:
+        return dict(out, why=R_VT_CONFLICT)
+    cite = dict(cite, parsed_with=SRR.PARSER_VERSION,
+                clause=_lfp_sentence(row.get("rules_text")))
+    out["citation"] = cite
+    if SRR.SC_MANUAL_LFMP in (ev.get("special_conditions") or ()):
+        return dict(out, why=R_VT_MANUAL_REVIEW)
+    s = ev.get("settlement") or {}
+    vr, pp = s.get("void_rule"), s.get("postponement_payout")
+    w = s.get("postponement_window_hours")
+    out.update(void_rule=vr, postponement_payout=pp, window_h=w)
+    if vr is None:
+        return dict(out, why=R_VT_VOID_NOT_STATED)
+    if pp is None:
+        return dict(out, why=R_VT_POSTPONEMENT_NOT_STATED)
+    if w is None:
+        return dict(out, why=R_VT_WINDOW_NOT_STATED)
+    if vr not in PAYOUT_LOWER_BOUND or pp not in PAYOUT_LOWER_BOUND:
+        return dict(out, why=R_VT_RULE_NOT_FIXED)
+    return dict(out, established=True, void_lo=PAYOUT_LOWER_BOUND[vr],
+                postponed_lo=PAYOUT_LOWER_BOUND[pp],
+                # compared for equality across legs by the engine: the RULE,
+                # never a value (two markets' fair prices are two numbers)
+                rule_id="VENUE_RULES:VOID=%s;POSTPONED_BEYOND_%gH=%s" % (
+                    vr, float(w), pp))
+
+
+def _vt_summary(terms: dict) -> dict:
+    """The void-terms census of the contracts read (counts by name)."""
+    est = [t for t in terms.values() if t["established"]]
+    why: dict[str, int] = {}
+    rules: dict[str, int] = {}
+    wins: dict[str, int] = {}
+    for t in terms.values():
+        if not t["established"]:
+            why[t["why"]] = why.get(t["why"], 0) + 1
+            continue
+        k = "%s/%s" % (t["void_rule"], t["postponement_payout"])
+        rules[k] = rules.get(k, 0) + 1
+        wk = "%g" % float(t["window_h"])
+        wins[wk] = wins.get(wk, 0) + 1
+    return {"source": "%s (each contract's own published rules: text, "
+                      "sha256, source, parser version)" % VOID_TERMS_SOURCE,
+            "contracts": len(terms), "established": len(est),
+            "not_established": why, "rules": rules, "windows_h": wins,
+            "valuation": "a last fair market price is ONE market's number "
+                         "in [0, 1]: guaranteed 0 per leg, two markets "
+                         "never summed to $1 (settlement_pair_policy)",
+            "examples": [{"market_id": m, **t["citation"]}
+                         for m, t in sorted(terms.items())
+                         if t["established"]][:3]}
+
+
+def build_universe(rows, *, void_terms=None, hypothesis_only=False) -> dict:
     """Contracts, books and outcome spaces from recorded rows. Pure.
 
     `rows`: dicts with us_market_slug, observed_at, offers, bids, error,
-    sport (catalogue sports_type, may be None). Every row that cannot become
-    a contract is counted under its reason in `skipped`."""
+    sport (catalogue sports_type, may be None) and, when read, the contract's
+    captured rules (contract_void_terms). Every row that cannot become a
+    contract is counted under its reason in `skipped`.
+
+    Terms, in order: `void_terms` / ESTABLISHED_VOID_TERMS declared for a
+    family; else (unless `hypothesis_only`) the contract's own captured
+    rules; else the HYPOTHESIS, flagged not established."""
     vt = dict(ESTABLISHED_VOID_TERMS if void_terms is None else void_terms)
+    per_contract = void_terms is None and not hypothesis_only
+    terms: dict[str, dict] = {}
     skipped: dict[str, int] = {}
     parsed = []
     for r in rows:
@@ -207,34 +386,48 @@ def build_universe(rows, *, void_terms=None) -> dict:
         spaces[key] = space
         for r, p in items:
             slug = r["us_market_slug"]
-            terms = vt.get((A.POLYMARKET_US, p["family"]))
-            vp = (terms or HYPOTHESIS)["void_payout"]
-            pp = (terms or HYPOTHESIS)["postponed_payout"]
+            fam = vt.get((A.POLYMARKET_US, p["family"]))
+            ct = contract_void_terms(r) if per_contract and not fam else None
+            if ct is not None:
+                terms[slug] = ct
             # one venue, one event: every leg shares the venue's grading of
-            # that event, so the window is the event's date (identical for
-            # every leg by construction, compared for equality only)
+            # that event, so the window starts on the event's date (identical
+            # for every leg by construction, compared for equality only)
             day = datetime.strptime(p["date"], "%Y-%m-%d").replace(
                 tzinfo=timezone.utc)
+            window = timedelta(days=2)
+            if fam:
+                vp = (fam["void_payout"],) * 2
+                pp = (fam["postponed_payout"],) * 2
+                void_rule = fam.get("rule", "ESTABLISHED")
+            elif ct is not None and ct["established"]:
+                # the venue's own stated payout, at the lower bound each leg
+                # is guaranteed whatever its market's fair price turns out
+                vp, pp = ct["void_lo"], ct["postponed_lo"]
+                void_rule = ct["rule_id"]
+                window = timedelta(hours=float(ct["window_h"]))
+            else:
+                vp = (HYPOTHESIS["void_payout"],) * 2
+                pp = (HYPOTHESIS["postponed_payout"],) * 2
+                void_rule = HYPOTHESIS["label"]
             spec = A.SettlementSpec(
                 event_key=key, family=p["family"], period=p["period"],
                 subject=p["subject"], line=p["threshold"],
                 resolution_source="POLYMARKET_US:%s" % p["league"].upper(),
-                settle_window=(day.isoformat(),
-                               (day + timedelta(days=2)).isoformat()),
-                void_rule=terms.get("rule", "ESTABLISHED") if terms
-                else HYPOTHESIS["label"],
+                settle_window=(day.isoformat(), (day + window).isoformat()),
+                void_rule=void_rule,
                 # a half-point line on an integer underlying cannot push
                 tie_rule=A.TIE_IMPOSSIBLE)
             sport = (r.get("sport") or p["league"]).upper()
             yes = A.Contract(A.POLYMARKET_US, slug, A.YES, spec,
                              A.over_under_payoff(space, "OVER", p["threshold"],
-                                                 void_payout=vp,
-                                                 postponed_payout=pp),
+                                                 void_payout=vp[0],
+                                                 postponed_payout=pp[0]),
                              sport=sport)
             no = A.Contract(A.POLYMARKET_US, slug, A.NO, spec,
                             A.over_under_payoff(space, "UNDER", p["threshold"],
-                                                void_payout=vp,
-                                                postponed_payout=pp),
+                                                void_payout=vp[1],
+                                                postponed_payout=pp[1]),
                             sport=sport)
             contracts += [yes, no]
             at = _aware(r.get("observed_at"))
@@ -247,33 +440,107 @@ def build_universe(rows, *, void_terms=None) -> dict:
                 declared_single_instrument={(A.POLYMARKET_US, slug)})
             books += [A.Book(A.POLYMARKET_US, slug, A.YES, tuple(offers), at),
                       A.Book(A.POLYMARKET_US, slug, A.NO, tuple(no_asks), at)]
+    if vt:
+        established = True                 # declared for the family
+    else:
+        established = bool(terms) and all(t["established"]
+                                          for t in terms.values())
     return {"contracts": contracts, "books": books, "spaces": spaces,
             "skipped": skipped, "markets": len(parsed),
-            "void_terms_established": bool(vt)}
+            "family_terms": vt, "terms": terms,
+            "void_terms": None if vt else _vt_summary(terms),
+            "void_terms_established": established}
 
 
 def _closeness(rec) -> float:
-    eco = rec.get("economics") or {}
+    eco = rec.get("economics") or rec.get("conditional_economics") or {}
     try:
         return float(eco.get("worst_case_net_profit"))
     except (TypeError, ValueError):
         return float("-inf")
 
 
+def _pair_key(rec) -> tuple:
+    return tuple(sorted((alt.get("venue"), alt.get("market_id"),
+                         alt.get("side"))
+                        for leg in _legs(rec) for alt in leg))
+
+
+def _exceptional_floor(rec) -> dict | None:
+    """When the structure is a hedge in ordinary completion (positive floor
+    over the regular outcomes) but pays less in a cancelled / postponed game:
+    {regular_floor, exceptional_floor, outcomes}. Else None."""
+    t = (rec.get("payoff_table") or {}).get("payout_by_outcome") or {}
+    exc = {o: v for o, v in t.items() if o in A.REQUIRED_NONSTANDARD}
+    reg = [Decimal(str(v)) for o, v in t.items()
+           if o not in A.REQUIRED_NONSTANDARD]
+    if not exc or not reg:
+        return None
+    lo_reg = min(reg)
+    lo_exc = min(Decimal(str(v)) for v in exc.values())
+    if lo_reg <= 0 or lo_exc >= lo_reg:
+        return None
+    return {"regular_floor": str(lo_reg), "exceptional_floor": str(lo_exc),
+            "outcomes": sorted(o for o, v in exc.items()
+                               if Decimal(str(v)) == lo_exc)}
+
+
 def census(rows, now: datetime, *, void_terms=None, **kw) -> dict:
     """ONE CENSUS PASS over recorded rows. Pure. Every considered structure
-    is in exactly one of `opportunities` / `refusals`."""
+    is in exactly one of `opportunities` / `refusals`.
+
+    A structure is decided on terms only when EVERY leg's terms are
+    established (declared for the family, or read from the contract's own
+    captured rules). On established last-fair-price terms its cancelled /
+    postponed floor is the sum of each leg's lower bound (0): the engine
+    refuses it there and R_VOID_STATE_FLOOR names why; the same structure is
+    re-run under the HYPOTHESIS only to report what it would have been
+    (`conditional_on`, `conditional_economics`), never as a verdict."""
+    mx = dict(max_age_s=kw.get("max_age_s", MAX_AGE_S),
+              max_skew_s=kw.get("max_skew_s", MAX_SKEW_S))
     u = build_universe(rows, void_terms=void_terms)
     opps, refs, cen = A.pair_scanner(
-        u["contracts"], u["books"], now, outcome_spaces=u["spaces"],
-        max_age_s=kw.get("max_age_s", MAX_AGE_S),
-        max_skew_s=kw.get("max_skew_s", MAX_SKEW_S))
-    vt = dict(ESTABLISHED_VOID_TERMS if void_terms is None else void_terms)
+        u["contracts"], u["books"], now, outcome_spaces=u["spaces"], **mx)
+    vt = u["family_terms"]
 
     def established(rec) -> bool:
-        return bool(vt) and all((A.POLYMARKET_US, f) in vt
-                                for f in _families(rec))
-    proven, refused, conditional = [], list(refs), 0
+        if vt:
+            return all((A.POLYMARKET_US, f) in vt for f in _families(rec))
+        mids = [alt.get("market_id") for leg in _legs(rec) for alt in leg]
+        return bool(mids) and all((u["terms"].get(m) or {}).get(
+            "established") for m in mids)
+
+    twin: dict = {}
+    if not vt and any(t["established"] for t in u["terms"].values()):
+        h = build_universe(rows, void_terms=void_terms, hypothesis_only=True)
+        ho, hr, _hc = A.pair_scanner(h["contracts"], h["books"], now,
+                                     outcome_spaces=h["spaces"], **mx)
+        twin = {_pair_key(r): r for r in ho + hr}
+
+    def leg_terms(rec):
+        return {m: {k: t.get(k) for k in ("established", "why", "void_rule",
+                                         "postponement_payout", "window_h",
+                                         "rule_id", "citation")}
+                for m in {alt.get("market_id") for leg in _legs(rec)
+                          for alt in leg}
+                for t in [u["terms"].get(m)] if t is not None}
+
+    proven, refused = [], []
+    conditional = exceptional = 0
+    if twin:
+        # a structure with ANY leg whose terms are not established is judged
+        # exactly as before, all its legs under the hypothesis (its
+        # established leg's lower bound would only add a VOID_RULE_DIFFERS)
+        hopps, hrefs = [], []
+        for rec in opps + refs:
+            if established(rec):
+                (hopps if rec["verdict"] == A.GUARANTEED_AFTER_COSTS
+                 else hrefs).append(rec)
+                continue
+            h = twin.get(_pair_key(rec), rec)
+            (hopps if h["verdict"] == A.GUARANTEED_AFTER_COSTS
+             else hrefs).append(h)
+        opps, refs = hopps, hrefs
     for rec in opps:
         if established(rec):
             proven.append(rec)
@@ -288,23 +555,58 @@ def census(rows, now: datetime, *, void_terms=None, **kw) -> dict:
                                        "the venue's terms are not read"}]
                    + list(rec.get("reasons") or []))
         refused.append(rec)
-    for rec in refused:
-        codes = A.reason_codes(rec)
-        if not established(rec) and VOID_TERMS_NOT_ESTABLISHED not in codes:
-            rec["reasons"] = list(rec.get("reasons") or []) + [
-                {"code": VOID_TERMS_NOT_ESTABLISHED,
-                 "detail": "venue cancellation / postponement terms not "
-                           "read; also refused for the reasons above"}]
+    for rec in refs:
+        if established(rec) and not vt:
+            ex = _exceptional_floor(rec)
+            if ex is not None:
+                rec = dict(rec, reasons=[{
+                    "code": R_VOID_STATE_FLOOR,
+                    "detail": ("each leg's own published rules settle a "
+                               "cancelled / unrescheduled game at ITS "
+                               "market's payout (%s); bounded per leg, never "
+                               "summed across markets, the structure is "
+                               "guaranteed %s there against %s in ordinary "
+                               "completion" % (
+                                   ", ".join(sorted({t.get("rule_id") or "?"
+                                                     for t in leg_terms(
+                                                         rec).values()})),
+                                   ex["exceptional_floor"],
+                                   ex["regular_floor"])),
+                    "outcomes": ex["outcomes"]}]
+                    + list(rec.get("reasons") or []))
+                tw = twin.get(_pair_key(rec))
+                if tw is not None and tw["verdict"] == \
+                        A.GUARANTEED_AFTER_COSTS:
+                    exceptional += 1
+                    rec.update(conditional_on=HYPOTHESIS["label"],
+                               conditional_economics=tw.get("economics"),
+                               conditional_books=(tw.get("inputs") or {}).get(
+                                   "books"))
+        elif not established(rec):
+            codes = A.reason_codes(rec)
+            if VOID_TERMS_NOT_ESTABLISHED not in codes:
+                rec["reasons"] = list(rec.get("reasons") or []) + [
+                    {"code": VOID_TERMS_NOT_ESTABLISHED,
+                     "detail": "venue cancellation / postponement terms not "
+                               "read; also refused for the reasons above"}]
+        refused.append(rec)
+    if not vt:
+        for rec in proven + refused:
+            lt = leg_terms(rec)
+            if lt:
+                rec["void_terms"] = lt
     refused.sort(key=_closeness, reverse=True)
     summary = A.census_of(proven + refused)
     summary.update(
         markets_read=u["markets"], skipped=u["skipped"],
         conditional_candidates=conditional,
+        exceptional_state_refusals_proven_under_hypothesis=exceptional,
         contracts=len(u["contracts"]), outcome_spaces=len(u["spaces"]),
         same_market_pairs_not_considered=cen.get(
             "same_market_pairs_not_considered", 0),
         hypothesis=HYPOTHESIS["label"],
-        void_terms_established=u["void_terms_established"])
+        void_terms_established=u["void_terms_established"],
+        void_terms=u["void_terms"])
     fresh = sum(1 for b in u["books"] if b.side == A.YES and b.observed_at
                 and (now - b.observed_at).total_seconds() <= MAX_AGE_S)
     return {"opportunities": proven, "refusals": refused, "census": summary,
@@ -332,10 +634,26 @@ async def schema(conn) -> bool:
                           "adriana_arb_refusals")])
 
 
+#: (RC6) each market's captured rules, read beside its book (migration
+#: 312); a database without the table reads every rule as not captured
+_RULES_COLS = (
+    "r.rules_published, r.rules_sha256, r.rules_text, "
+    "r.parse_status AS rules_parse_status, "
+    "r.parser_version AS rules_parser_version, r.source AS rules_source, "
+    "r.observed_at AS rules_observed_at")
+_NO_RULES_COLS = (
+    "NULL::boolean AS rules_published, NULL::text AS rules_sha256, "
+    "NULL::text AS rules_text, NULL::text AS rules_parse_status, "
+    "NULL::text AS rules_parser_version, NULL::text AS rules_source, "
+    "NULL::timestamptz AS rules_observed_at")
+
+
 async def read_rows(conn, *, now: float, window_s: float = BOOK_WINDOW_S,
                     limit: int = MAX_MARKETS) -> list:
     """The newest recorded book of each market observed in the window, with
-    its catalogue sport. Read only."""
+    its catalogue sport and its captured rules. Read only."""
+    has_rules = bool(await conn.fetchval(
+        "SELECT to_regclass('market_plane_rules') IS NOT NULL"))
     rows = await conn.fetch(
         "WITH latest AS (SELECT DISTINCT ON (us_market_slug) obs_id, "
         "       us_market_slug, observed_at, offers, bids, error "
@@ -344,8 +662,12 @@ async def read_rows(conn, *, now: float, window_s: float = BOOK_WINDOW_S,
         " ORDER BY us_market_slug, observed_at DESC) "
         "SELECT l.*, (SELECT p.sports_type FROM us_premap p "
         "              WHERE p.market_slug = l.us_market_slug "
-        "                AND p.sports_type IS NOT NULL LIMIT 1) AS sport "
-        "  FROM latest l ORDER BY l.observed_at DESC LIMIT $2",
+        "                AND p.sports_type IS NOT NULL LIMIT 1) AS sport, "
+        + (_RULES_COLS if has_rules else _NO_RULES_COLS) +
+        "  FROM latest l "
+        + ("LEFT JOIN market_plane_rules r "
+           "       ON r.contract_id = l.us_market_slug " if has_rules else "")
+        + " ORDER BY l.observed_at DESC LIMIT $2",
         now - window_s, limit)
     return [dict(r) for r in rows]
 
@@ -390,25 +712,32 @@ async def record(conn, result: dict, *, started: float, finished: float,
             "ON CONFLICT (scan_id) DO NOTHING",
             scan_id, started, finished, status, why,
             "%s+%s" % (VERSION, A.VERSION),
-            json.dumps(venue_support(result), default=str),
+            json.dumps(result.get("venues") or venue_support(result),
+                       default=str),
             int(c.get("markets_read") or 0), int(result.get("books_fresh") or 0),
             len(result["opportunities"]) + len(result["refusals"]),
             len(result["opportunities"]), len(result["refusals"]), len(refs),
             json.dumps(c.get("by_verdict") or {}),
             json.dumps(c.get("by_structure_kind") or {}),
-            json.dumps({"by_code": c.get("by_refusal_code") or {},
-                        "by_primary_code": c.get("by_primary_refusal_code")
-                        or {},
-                        "skipped": c.get("skipped") or {},
-                        "conditional_candidates": c.get(
-                            "conditional_candidates", 0),
-                        "same_market_pairs_not_considered": c.get(
-                            "same_market_pairs_not_considered", 0)}),
+            json.dumps(dict({
+                "by_code": c.get("by_refusal_code") or {},
+                "by_primary_code": c.get("by_primary_refusal_code") or {},
+                "skipped": c.get("skipped") or {},
+                "conditional_candidates": c.get("conditional_candidates", 0),
+                "same_market_pairs_not_considered": c.get(
+                    "same_market_pairs_not_considered", 0),
+                # (RC6) the void / postponement terms of every contract the
+                # scan read, by name: what completion's fail_closed states
+                "void_terms": c.get("void_terms"),
+                "void_terms_established": c.get("void_terms_established")},
+                **{k: c[k] for k in SCAN_SUMMARY_KEYS if k in c}),
+                default=str),
             json.dumps({"book_window_s": BOOK_WINDOW_S,
                         "max_markets": MAX_MARKETS, "max_age_s": MAX_AGE_S,
                         "max_skew_s": MAX_SKEW_S,
                         "max_recorded_refusals": MAX_RECORDED_REFUSALS,
-                        "hypothesis": HYPOTHESIS["label"]}),
+                        "hypothesis": HYPOTHESIS["label"],
+                        "void_terms_source": VOID_TERMS_SOURCE}),
             json.dumps(AUTHORITY))
         if not made.endswith("1"):
             return {"ok": True, "created": False, "scan_id": scan_id}
@@ -470,7 +799,16 @@ async def record(conn, result: dict, *, started: float, finished: float,
                     "payoff_table": rec.get("payoff_table"),
                     # (claim-first scans) the canonical claims, the basis
                     # and the topology read off the routes actually used
-                    "claim_pair": rec.get("claim_pair")}, default=str),
+                    "claim_pair": rec.get("claim_pair"),
+                    # (RC6) each leg's void terms as read, with their
+                    # citation; what the structure would have been under
+                    # the hypothesis (never a verdict); the pair policy
+                    "void_terms": rec.get("void_terms"),
+                    "conditional_economics": rec.get(
+                        "conditional_economics"),
+                    "conditional_books": rec.get("conditional_books"),
+                    "settlement_pair_policy": rec.get(
+                        "settlement_pair_policy")}, default=str),
                 finished)
     return {"ok": True, "created": True, "scan_id": scan_id,
             "opportunity_ids": opp_ids, "refusals_recorded": len(refs)}
@@ -521,23 +859,33 @@ async def collaborate(conn, *, scan_id: str, opportunity_ids: list,
         message_kind="REVIEW_REQUEST", subject_type="adriana_census_day",
         subject_id=day,
         summary=("Daily arbitrage census for audit: %d structures, %d proven, "
-                 "%d refused, %d conditional on unread settlement terms. "
-                 "Kalshi books are not recorded." % (
+                 "%d refused, %d conditional on unread settlement terms, %d "
+                 "refused at their void-state floor on established terms. "
+                 "The claim-first cross-venue scan is recorded beside it." % (
                      len(result["opportunities"]) + len(result["refusals"]),
                      len(result["opportunities"]), len(result["refusals"]),
-                     c.get("conditional_candidates", 0))),
+                     c.get("conditional_candidates", 0),
+                     c.get("exceptional_state_refusals_proven_under_"
+                           "hypothesis", 0))),
         evidence_refs=[{"kind": "adriana_arb_scans", "id": scan_id}],
         created_at=now)
     out["review_requests"] += int(bool(a.get("created")))
     blockers = []
-    if not (ESTABLISHED_VOID_TERMS):
+    # (RC6) a blocker while ANY contract read lacks established terms (each
+    # contract's own captured rules), named by reason -- not while a family
+    # declaration is merely absent
+    if not (ESTABLISHED_VOID_TERMS) and not c.get("void_terms_established"):
+        vts = c.get("void_terms") or {}
         blockers.append(("adriana-task-void-terms",
                          "Establish Polymarket US cancellation / postponement "
                          "payouts for totals and spreads from recorded venue "
                          "terms",
                          {"blocker": VOID_TERMS_NOT_ESTABLISHED,
-                          "why": "every structure stays REFUSED until the "
-                                 "venue's void terms are read and recorded"}))
+                          "why": "every structure on a contract whose own "
+                                 "rules do not state its void terms stays "
+                                 "REFUSED until they are read and recorded",
+                          "not_established": vts.get("not_established"),
+                          "contracts": vts.get("contracts")}))
     blockers.append(("adriana-task-kalshi-books",
                      "Record Kalshi order books (read-only) so cross-venue "
                      "pairs can be evaluated",
