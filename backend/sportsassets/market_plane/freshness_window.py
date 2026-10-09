@@ -325,6 +325,12 @@ def classify(m: dict, *, mgr, refreshed: dict, entries: dict, paper: dict,
     p = paper.get(s)
     p_at = None if p is None else _epoch(p.get("at"))
     if p_at is not None and 0.0 <= now - p_at <= sla_s:
+        # the held-position rule's order: the read's own not-open state
+        # first (a current read of a closed market is not a current book)
+        ext, why = external_from(p.get("market_state"), read_at=p_at,
+                                 now=now, sla_s=sla_s, source="PAPER_REST")
+        if ext:
+            return C_EXTERNAL, why, None, None
         return C_PAPER, None, p_at, _epoch(p.get("venue_ts"))
     # NOT CURRENT: is the market itself not open, by the venue's own word?
     if cur is not None:

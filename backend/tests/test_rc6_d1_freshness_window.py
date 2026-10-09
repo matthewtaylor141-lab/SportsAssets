@@ -214,6 +214,14 @@ def test_external_needs_the_venues_own_word_terminal_or_inside_the_bound():
         "outcome": AR.R_REFRESH_NOT_OPEN, "tried_at": now - 400}},
         paper={}, kalshi={}, now=now, sla_s=SLA)
     assert got[0] == "U"
+    # a paper read inside the bound of a CLOSED market is not a current
+    # book: the held-position rule judges the state first
+    got = F.classify(mem, mgr=None, refreshed={}, entries={}, paper={
+        "x": {"at": now - 20, "venue_ts": None,
+              "market_state": "MARKET_STATE_CLOSED"}}, kalshi={},
+        now=now, sla_s=SLA)
+    assert got[:2] == ("X", "PAPER_REST:MARKET_STATE_TERMINAL:"
+                            "MARKET_STATE_CLOSED")
 
 
 def test_a_kalshi_member_is_current_only_with_a_readable_book_in_the_bound():
