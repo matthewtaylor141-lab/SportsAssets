@@ -16,7 +16,10 @@ and registered by the production code (`setup`, run once, from this tree).
 
 PHASES. idle (the loop alone), seq (decisions one after another), burst (N
 decisions at once, each on its own pool connection, as concurrent valuation
-hooks would). A 2 ms ticker on the loop records every tick's lateness
+hooks would), burst_keyed (N decisions of ONE session -- its context cache
+key -- at once from a cold context: production starts up to 9 in one
+second), arrivals (one session's decisions every --arrive-every s from a
+cold context, the per-valuation hook's shape). A 2 ms ticker on the loop records every tick's lateness
 (lag = the interval past 2 ms); the collector's pauses are timed apart.
 Decision latency is each context step's wall time, waiting for a pool
 connection included. Every decision must end VERIFIED, or the run says
@@ -26,7 +29,7 @@ USAGE (from backend/; the database must be your own scratch one):
     python tests/_provenance_offload_bench.py setup --dsn DSN [--records N]
     python tests/_provenance_offload_bench.py measure --dsn DSN \\
         --backend /path/to/<tree>/backend --label L [--seq 8] [--burst 16] \\
-        [--json OUT]
+        [--burst-keyed 9] [--arrive-every 0.5 --arrive-for 15] [--json OUT]
     python tests/_provenance_offload_bench.py teardown --dsn DSN
 `setup` refuses a database that already holds research observations or
 entry-payout models (it would fit them too); `teardown` removes only what
@@ -285,6 +288,47 @@ async def _measure(args) -> dict:
     b = time.perf_counter()
     out["phases"]["burst"] = clock.window(a, b)
     out["phases"]["burst"]["wall_s"] = round(b - a, 3)
+    from sportsassets import bettor_funded_model as FM
+    hashes = [0]
+    real = FM._records_sha
+
+    def counted(*a, **k):
+        hashes[0] += 1
+        return real(*a, **k)
+
+    def cold():
+        # the session's cache (and, on a tree that has them, its flights)
+        # empty, as at a TTL expiry or a process start
+        PD._CONTEXT_CACHE.clear()
+        getattr(PD, "_CONTEXT_FLIGHTS", {}).clear()
+
+    async def keyed(key):
+        t0 = time.perf_counter()
+        async with pool.acquire() as c:
+            d = await PD._context(c, {"now": time.time(),
+                                      "context_cache_key": key})
+        m = d["model"]
+        return (time.perf_counter() - t0,
+                bool(m.get("ok") and m.get("provenance_verified")),
+                m.get("refusal"))
+    # KEYED BURST: N decisions of ONE session at once from a cold context
+    # (production starts up to 9 decisions within one second): how many
+    # verifications they cost and what each waits.
+    burst_keyed = []
+    if args.burst_keyed > 0:
+        await asyncio.sleep(0.5)
+        FM._records_sha = counted
+        hashes[0] = 0
+        cold()
+        a = time.perf_counter()
+        burst_keyed = await asyncio.gather(*(
+            keyed(PREFIX + "burst-session")
+            for _ in range(args.burst_keyed)))
+        b = time.perf_counter()
+        FM._records_sha = real
+        out["phases"]["burst_keyed"] = clock.window(a, b)
+        out["phases"]["burst_keyed"].update(wall_s=round(b - a, 3),
+                                            verifications=hashes[0])
     # ARRIVALS: the per-valuation hook's own shape -- decisions of ONE
     # session (its context cache key, the tree's own TTL) arriving every
     # `arrive_every` s, the cache cold at the start as after each TTL
@@ -292,31 +336,15 @@ async def _measure(args) -> dict:
     # decisions arriving meanwhile wait.
     arrivals = []
     if args.arrive_for > 0:
-        from sportsassets import bettor_funded_model as FM
-        hashes = [0]
-        real = FM._records_sha
-
-        def counted(*a, **k):
-            hashes[0] += 1
-            return real(*a, **k)
         FM._records_sha = counted
-        PD._CONTEXT_CACHE.clear()
+        hashes[0] = 0
+        cold()
         key = PREFIX + "session"
-
-        async def keyed():
-            t0 = time.perf_counter()
-            async with pool.acquire() as c:
-                d = await PD._context(c, {"now": time.time(),
-                                          "context_cache_key": key})
-            m = d["model"]
-            return (time.perf_counter() - t0,
-                    bool(m.get("ok") and m.get("provenance_verified")),
-                    m.get("refusal"))
         await asyncio.sleep(0.5)
         a = time.perf_counter()
         tasks = []
         while time.perf_counter() - a < args.arrive_for:
-            tasks.append(asyncio.ensure_future(keyed()))
+            tasks.append(asyncio.ensure_future(keyed(key)))
             await asyncio.sleep(args.arrive_every)
         arrivals = await asyncio.gather(*tasks)
         b = time.perf_counter()
@@ -332,7 +360,7 @@ async def _measure(args) -> dict:
     out["machine_load_1m_at_end"] = round(os.getloadavg()[0], 2)
     out["loop_holders_sampled"] = holder.top()
     for name, got in (("seq", seq), ("burst", burst),
-                      ("arrivals", arrivals)):
+                      ("burst_keyed", burst_keyed), ("arrivals", arrivals)):
         if not got:
             continue
         lat = [s for s, _ok, _r in got]
@@ -364,6 +392,7 @@ def main(argv=None) -> int:
     p.add_argument("--idle", type=float, default=2.0)
     p.add_argument("--seq", type=int, default=8)
     p.add_argument("--burst", type=int, default=16)
+    p.add_argument("--burst-keyed", type=int, default=0)
     p.add_argument("--arrive-every", type=float, default=0.5)
     p.add_argument("--arrive-for", type=float, default=15.0)
     p.add_argument("--json", default=None)
