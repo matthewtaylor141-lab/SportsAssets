@@ -174,9 +174,10 @@ class WsBooks:
       * every in-sequence message advances the sid, including a delta for a
         market whose book is not CURRENT on that sid (it used to be skipped
         without advancing, so the sid's next message looked like a gap);
-      * a sid that has gapped is DEAD until the connection ends (it is being
-        unsubscribed): nothing on it is applied, and a snapshot still in
-        flight on it never makes a book CURRENT -- its market is
+      * a sid that has gapped is DEAD until the connection ends, or until
+        the venue acknowledges a new subscription under the same number
+        (it is being unsubscribed): nothing on it is applied, and a snapshot
+        still in flight on it never makes a book CURRENT -- its market is
         resubscribed if, and only if, the gap did not already do so (the
         market was not bound to the sid) and no live sid serves or awaits
         it: one gap, one resubscribe per market;
@@ -236,6 +237,16 @@ class WsBooks:
         on another sid keeps that sid."""
         if sid is None:
             return
+        if sid in self.dead_sids:
+            # the venue announced a sid number this connection already saw
+            # die (the docs promise no unique sid): a NEW subscription under
+            # a reused number. One connection delivers in order, so every
+            # message of the old subscription preceded this ack: its
+            # sequence and markets start afresh (left dead, the new
+            # subscription's snapshots would be ignored until a reconnect)
+            self.dead_sids.discard(sid)
+            self.sid_seq.pop(sid, None)
+            self.sid_markets.pop(sid, None)
         self.sid_markets.setdefault(sid, set()).update(tickers)
         for t in tickers:
             b = self._book(t)
@@ -504,8 +515,12 @@ class Subscriber:
                 except ValueError:
                     continue
                 if m.get("type") == "subscribed":
-                    self.books.bind((m.get("msg") or {}).get("sid"),
+                    sid = (m.get("msg") or {}).get("sid")
+                    self.books.bind(sid,
                                     self.pending.pop(m.get("id"), None) or [])
+                    # a reused sid number is a new subscription: if it gaps
+                    # it is unsubscribed again
+                    self.unsubscribed_sids.discard(sid)
                 self.books.on_message(m, recv_at=self.clock())
                 if self._needs_repair():
                     await self._resubscribe_gapped(ws)

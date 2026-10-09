@@ -327,34 +327,46 @@ def test_the_readback_names_what_caused_the_resubscribes():
 #       (and re-stamped fresh by the worker's reassert every cycle).
 
 class VenueWS(FakeWS):
-    """FakeWS that checks the subscriber's invariants on every step:
-      * an unsubscribe names only sids the books have gapped (dead);
-      * no book is current() ok on a sid the subscriber unsubscribed."""
+    """FakeWS that checks the subscriber's invariants on every step, from
+    what actually crossed the wire (so the check reads the same on any
+    version of the subscriber):
+      * an unsubscribe never names a LIVE sid -- one whose sequence the
+        books still trust, or that the books have not declared dead;
+      * no book is current() ok on a sid this socket was told to
+        unsubscribe (until the venue announces that sid number anew)."""
 
     def __init__(self, script, b, sub_ref, on_empty=None):
         super().__init__(script, on_empty)
         self.b = b
         self.sub_ref = sub_ref
         self.violations = []
+        self.dropped = set()
 
     async def send(self, s):
         m = json.loads(s)
         if m["cmd"] == "unsubscribe":
-            live = set(m["params"]["sids"]) - set(self.b.dead_sids)
+            dead = getattr(self.b, "dead_sids", None)
+            live = {x for x in m["params"]["sids"]
+                    if self.b.sid_seq.get(x) is not None
+                    or (dead is not None and x not in dead)}
             if live:
                 self.violations.append(("UNSUBSCRIBED_LIVE_SID", sorted(live)))
+            self.dropped.update(m["params"]["sids"])
         self.sent.append(m)
 
     def _check_current(self):
-        sub = self.sub_ref[0]
         for t, bk in self.b.books.items():
-            if self.b.current(t)["ok"] and bk["sid"] in sub.unsubscribed_sids:
+            if self.b.current(t)["ok"] and bk["sid"] in self.dropped:
                 self.violations.append(("CURRENT_ON_UNSUBSCRIBED_SID", t,
                                         bk["sid"]))
 
     async def recv(self):
         self._check_current()
-        return await super().recv()
+        raw = await super().recv()
+        m = json.loads(raw)
+        if m.get("type") == "subscribed":
+            self.dropped.discard((m.get("msg") or {}).get("sid"))
+        return raw
 
 
 def _drive(script, wanted, *, at_end=None):
@@ -424,7 +436,7 @@ def test_one_gap_resubscribes_each_market_exactly_once(ordering):
     # every book CURRENT again, on the one live resubscription
     for t in ("K-A", "K-B", "K-C"):
         assert seen[t]["ok"] and seen[t]["sid"] == 4, (t, seen[t])
-    assert sub.unsubscribed_sids == {3}
+    assert ws.dropped == {3}
 
 
 def test_a_late_dead_sid_snapshot_never_drops_the_live_resubscription():
@@ -518,3 +530,30 @@ def test_only_dead_sids_are_ever_unsubscribed_and_each_once():
     assert ws.sent[1]["params"] == {"sids": [8]}
     assert sub.resubscribes == 0
     assert seen["K-A"]["ok"] and seen["K-A"]["sid"] == 3
+
+
+def test_a_sid_number_the_venue_reuses_is_a_new_subscription():
+    """The venue's docs promise no unique sid. If the resubscribe is
+    acknowledged under the number of the sid that just died, that ack
+    starts a NEW subscription (one in-order connection: the old one's
+    messages all came before it). Its snapshot makes the book CURRENT --
+    left dead, the market waited GAP until the next reconnect -- and if
+    the reborn sid gaps it is unsubscribed again."""
+    script = [subscribed(1, 3), snap(3, 1, "K-A"), delta(3, 3, "K-A"),
+              subscribed(3, 3),                      # reused number
+              snap(3, 1, "K-A", yes=(("0.48", "12"),)), delta(3, 2, "K-A")]
+    ws, sub, b, seen = _drive(script, ["K-A"])
+    assert ws.violations == [], ws.violations
+    assert [m["cmd"] for m in ws.sent] == [
+        "subscribe", "unsubscribe", "subscribe"], ws.sent
+    assert seen["K-A"]["ok"] and seen["K-A"]["sid"] == 3
+    assert b.stats["deltas"] == 1
+    # the reborn sid gaps: unsubscribed again, A resubscribed once more
+    script2 = script + [delta(3, 4, "K-A")]
+    ws2, sub2, b2, seen2 = _drive(script2, ["K-A"])
+    assert ws2.violations == [], ws2.violations
+    assert [m["cmd"] for m in ws2.sent] == [
+        "subscribe", "unsubscribe", "subscribe", "unsubscribe",
+        "subscribe"], ws2.sent
+    assert ws2.sent[3]["params"] == {"sids": [3]}
+    assert sub2.resubscribes == 2 and not seen2["K-A"]["ok"]
