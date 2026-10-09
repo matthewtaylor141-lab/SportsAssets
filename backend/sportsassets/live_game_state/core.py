@@ -46,6 +46,47 @@ LEAGUE_ALIASES = {
 VENUES = {"POLYMARKET_US", "KALSHI"}
 PROVIDERS = {"ESPN", "THE_ODDS_API"}
 
+# WHICH SIDE IS HOME, AND WHO SAYS SO.
+#
+# VENUE_HOME_AWAY: an exact venue fixture row states home and away (the
+# fixture-metadata row, or explicit home/away keys on the catalogue row); the
+# provider game must carry the same orientation.
+#
+# PROVIDER_HOME_AWAY: the venue catalogue names exactly two participants and
+# does NOT say which is home. us_premap stores the venue's own per-side team
+# object (team_id, team_name, team_safe_name, team_abbr, team_league) and the
+# collector never reads `ordering` (workers/premap._side_team), so nothing on
+# the venue side establishes home/away. The fixture is then an unordered pair
+# of venue participants (`home`/`away` hold them in venue team-id order and
+# MEAN NOTHING about home); a provider game matches only when each of its two
+# teams equals exactly one participant, and the provider's own homeAway is
+# what the binding records as home and away. Because the two participants'
+# names are disjoint (Fixture refuses otherwise), the assignment is unique.
+ORIENTATION_VENUE = "VENUE_HOME_AWAY"
+ORIENTATION_PROVIDER = "PROVIDER_HOME_AWAY"
+ORIENTATIONS = (ORIENTATION_VENUE, ORIENTATION_PROVIDER)
+
+# THE VENUE'S OWN LEAGUE CODE (us_premap.team_league, the venue team object's
+# `league`, stored lower-case) -> the score league, per venue. The event's
+# team rows must also state, in the venue's own sportsMarketType (its prefix
+# up to the first underscore), the sport family of that league (LEAGUES[..][0]).
+# Only codes production shows on GAME rows of that family are listed
+# (research-sql run 37880299272, rc6_lgs-adapter_league_names.sql section 1:
+# nfl / cfb football, mlb baseball, nba / wnba basketball, nhl hockey,
+# epl / mls / ucl soccer). Deliberately absent: `ncaams` / `ncaaws`, which are
+# NCAA men's / women's SOCCER on the venue (soccer rows only), NOT basketball;
+# `cbb`, seen only on a futures event so far. An absent code is
+# SCORE_LEAGUE_UNSUPPORTED, never a guess.
+VENUE_LEAGUE_CODES: dict[str, dict[str, str]] = {
+    "POLYMARKET_US": {
+        "nfl": "NFL", "cfb": "NCAAF", "mlb": "MLB", "nba": "NBA",
+        "wnba": "WNBA", "nhl": "NHL", "epl": "EPL", "mls": "MLS", "ucl": "UCL",
+    },
+}
+#: at most this many distinct venue team tuples are read per event; more is
+#: not two participants and is refused, never truncated into a pair
+MAX_EVENT_TEAM_TUPLES = 16
+
 
 class ScoreError(ValueError):
     """Safe reason code; never include credential-bearing URLs in this error."""
@@ -99,6 +140,11 @@ def league_of(v: Any) -> str | None:
     return n if n in LEAGUES else None
 
 
+def venue_league(venue: str, code: Any) -> str | None:
+    """The score league a venue's own league code names, or None."""
+    return VENUE_LEAGUE_CODES.get(venue, {}).get(text(code).lower())
+
+
 def digest(v: Any) -> str:
     return hashlib.sha256(json.dumps(v, sort_keys=True, separators=(",", ":"),
                                     allow_nan=False).encode()).hexdigest()
@@ -130,13 +176,31 @@ class Fixture:
     start_at: float
     evidence_id: str
     game_number: int | None = None
+    # ORIENTATION_VENUE (the venue states home/away) or ORIENTATION_PROVIDER
+    # (an unordered venue pair: `home`/`away` are participant 1/2 in venue
+    # team-id order, and only the bound provider game says which is home)
+    orientation: str = ORIENTATION_VENUE
+    # further names the venue itself states for the SAME participant (its
+    # team_safe_name beside team_name); each must equal a provider name in
+    # full, exactly as `home`/`away` must -- never a substring or a city
+    home_names: tuple[str, ...] = ()
+    away_names: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.venue not in VENUES or not self.event_id or len(self.event_id) > 250:
             raise ScoreError("CANONICAL_EVENT_IDENTITY_MISSING")
         if self.league not in LEAGUES:
             raise ScoreError("SCORE_LEAGUE_UNSUPPORTED")
+        if self.orientation not in ORIENTATIONS:
+            raise ScoreError("CANONICAL_HOME_AWAY_UNPROVEN")
+        if not isinstance(self.home_names, tuple) or not isinstance(self.away_names, tuple):
+            raise ScoreError("CANONICAL_PARTICIPANTS_INVALID")
         if not norm(self.home) or not norm(self.away) or norm(self.home) == norm(self.away):
+            raise ScoreError("CANONICAL_PARTICIPANTS_INVALID")
+        # one participant's names never name the other: the assignment of a
+        # provider team to a participant must be unique
+        if (any(not norm(n) for n in self.home_names + self.away_names) or
+                self.names("home") & self.names("away")):
             raise ScoreError("CANONICAL_PARTICIPANTS_INVALID")
         if epoch(self.start_at) is None or not self.evidence_id:
             raise ScoreError("CANONICAL_FIXTURE_EVIDENCE_MISSING")
@@ -147,11 +211,22 @@ class Fixture:
     def key(self) -> tuple[str, str]:
         return self.venue, self.event_id
 
+    def names(self, side: str) -> frozenset[str]:
+        """Every normalized venue name of one participant ('home' / 'away')."""
+        first, more = (self.home, self.home_names) if side == "home" else (self.away, self.away_names)
+        return frozenset(norm(n) for n in (first,) + more)
+
     @property
     def fingerprint(self) -> str:
-        return digest({"venue": self.venue, "event_id": self.event_id, "league": self.league,
-                       "home": norm(self.home), "away": norm(self.away), "start_at": self.start_at,
-                       "game_number": self.game_number})
+        base = {"venue": self.venue, "event_id": self.event_id, "league": self.league,
+                "home": norm(self.home), "away": norm(self.away), "start_at": self.start_at,
+                "game_number": self.game_number}
+        # A fixture with the venue's own home/away and one name per side keeps
+        # the digest it always had; anything else is a different identity.
+        if self.orientation != ORIENTATION_VENUE or self.home_names or self.away_names:
+            base.update(orientation=self.orientation, home_names=sorted(self.names("home")),
+                        away_names=sorted(self.names("away")))
+        return digest(base)
 
 
 class Aliases:
@@ -178,18 +253,49 @@ class Aliases:
         return self._map.get((league, n), (n, None))
 
 
+def _participant_names(fixture: Fixture, aliases: Aliases, side: str) -> dict[str, str | None]:
+    """{alias-resolved normalized name: alias evidence or None} of one participant."""
+    first, more = (fixture.home, fixture.home_names) if side == "home" else (fixture.away, fixture.away_names)
+    out: dict[str, str | None] = {}
+    for n in (first,) + more:
+        c, ev = aliases.resolve(fixture.league, n)
+        if c and (c not in out or out[c] is None):
+            out[c] = ev
+    return out
+
+
+def assign_sides(fixture: Fixture, g: dict, aliases: Aliases | None = None) -> tuple[bool, list[str]] | None:
+    """Whether the provider game's two teams are this fixture's two participants:
+    (swapped, alias evidence) or None. `swapped` is True only for a
+    PROVIDER_HOME_AWAY fixture whose participant 2 is the provider's home team.
+    Full normalized equality of whole names only (no substring, city or
+    abbreviation), and each provider team equals exactly one participant."""
+    aliases = aliases or Aliases()
+    hs = _participant_names(fixture, aliases, "home")
+    as_ = _participant_names(fixture, aliases, "away")
+    if not hs or not as_ or set(hs) & set(as_):
+        return None  # an alias made one name stand for both participants
+    h, hr = aliases.resolve(fixture.league, text(g.get("home")))
+    a, ar = aliases.resolve(fixture.league, text(g.get("away")))
+    if not h or not a or h == a:
+        return None
+    provider_refs = [r for r in (hr, ar) if r]
+    if h in hs and a in as_:
+        return False, [r for r in (hs[h], as_[a]) if r] + provider_refs
+    if fixture.orientation == ORIENTATION_PROVIDER and h in as_ and a in hs:
+        return True, [r for r in (as_[h], hs[a]) if r] + provider_refs
+    return None
+
+
 def match_fixture(fixture: Fixture, games: list[dict], aliases: Aliases | None = None,
                   binding: dict | None = None) -> tuple[dict | None, str, list[str]]:
     aliases = aliases or Aliases()
-    expected_h, eh = aliases.resolve(fixture.league, fixture.home)
-    expected_a, ea = aliases.resolve(fixture.league, fixture.away)
     hits, refs = {}, []
     for g in games:
         if g.get("league") != fixture.league or g.get("provider") not in PROVIDERS:
             continue
-        h, hr = aliases.resolve(fixture.league, text(g.get("home")))
-        a, ar = aliases.resolve(fixture.league, text(g.get("away")))
-        if (h, a) != (expected_h, expected_a) or h == a:
+        sides = assign_sides(fixture, g, aliases)
+        if sides is None:
             continue
         start = epoch(g.get("start_at"))
         if start is None or abs(start - fixture.start_at) > START_TOLERANCE_S:
@@ -208,7 +314,7 @@ def match_fixture(fixture: Fixture, games: list[dict], aliases: Aliases | None =
         if key in hits and hits[key] != g:
             return None, "DUPLICATE_PROVIDER_ID_CONFLICT", []
         hits[key] = g
-        refs.extend(r for r in (eh, ea, hr, ar) if r)
+        refs.extend(sides[1])
     if len(hits) != 1:
         return None, "AMBIGUOUS_SCORE_FIXTURE" if hits else "SCORE_FIXTURE_NOT_MATCHED", []
     return next(iter(hits.values())), "EXACT_LEAGUE_PARTICIPANTS_START", sorted(set(refs))
@@ -368,13 +474,24 @@ def bind_game(fixture: Fixture, g: dict, *, alias_refs: list[str] | None = None,
     provider = g.get("provider")
     if provider not in PROVIDERS:
         raise ScoreError("SCORE_PROVIDER_UNSUPPORTED")
+    sides = assign_sides(fixture, checked, aliases)
+    if sides is None:  # match_fixture just accepted it; never reached
+        raise ScoreError("SCORE_FIXTURE_NOT_MATCHED")
+    swapped = sides[0]
+    # The venue participant the PROVIDER calls home, and the one it calls away.
+    home, away = (fixture.away, fixture.home) if swapped else (fixture.home, fixture.away)
     binding = {"venue": fixture.venue, "event_id": fixture.event_id,
                "fixture_fingerprint": fixture.fingerprint, "fixture_evidence_id": fixture.evidence_id,
                "provider": provider, "provider_event_id": g["provider_event_id"],
                "provider_home_id": g["home_id"], "provider_away_id": g["away_id"],
-               "league": fixture.league, "home": fixture.home, "away": fixture.away,
+               "league": fixture.league, "home": home, "away": away,
                "start_at": fixture.start_at, "game_number": fixture.game_number,
                "basis": "EXACT_LEAGUE_PARTICIPANTS_START", "alias_evidence": alias_refs or []}
+    if fixture.orientation != ORIENTATION_VENUE:
+        # the venue named an unordered pair; home/away above are the provider's
+        binding.update(basis="EXACT_LEAGUE_PARTICIPANT_PAIR_START",
+                       venue_orientation=fixture.orientation,
+                       home_away_source=provider)
     binding["binding_id"] = digest(binding)
     raw = dict(g, schema=SCHEMA, source=provider, venue=fixture.venue, event_id=fixture.event_id,
                identity_verified=True, identity=binding, mapping_evidence_id=binding["binding_id"],

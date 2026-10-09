@@ -1349,3 +1349,5 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 lane G2) the Live Game State fixture adapter reads the venue's own two team objects of the held event (us_premap team_id / names / team_league, one start); only league codes production shows per sport; unordered pairs bind a provider game only by full-name equality with a unique assignment; census SQL = collector verdict; display only
+tests/test_rc6_lgs_venue_fixture_adapter.py
