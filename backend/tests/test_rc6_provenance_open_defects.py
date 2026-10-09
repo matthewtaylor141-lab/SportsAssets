@@ -1,51 +1,55 @@
-"""RC6 PROVENANCE -- OPEN DEFECTS, kept failing on purpose until fixed
-(nothing is skipped or xfailed): two ways a verified success survives a
-change today, and one way the offload multiplies the verification.
+"""RC6 PROVENANCE -- THE THREE DEFECTS, CLOSED: no verified success survives
+a change to a vector under its stored identity (D1) or a change to the
+training set behind a session's cached context (D2), and one session's
+concurrent decisions verify a cold context once (D3).
 
 The owner's directive (2026-10-09): "never cache a successful verification
 across changed training records or settlements; ... changed feature vectors
 still refuse; ... verify CPU offloading and bounded concurrency under
 parallel PAPER decisions". test_rc6_provenance_refuses_after_change proves
 the check itself refuses every change it covers, on the same model object,
-recomputed each call. D1 and D2 name what it does not cover; neither was
-introduced by the offload: both FAIL on production's RC6 source (dfb474de),
-on the uploaded offload patch applied to it, and on the successor
-(72714028) alike. D3 WAS introduced by moving the check off the loop: it
-passes on dfb474de and fails on the patch and on 72714028. The fixes belong
-to bettor_funded_model.py and agents/paper_derek.py (the api-responsive
-lane's files); each test states the fix it expects.
+recomputed each call; these three pin what it did not cover. D1 and D2 were
+not introduced by the offload: both failed on production's RC6 source
+(dfb474de), on the uploaded offload patch applied to it, and on the
+successor (72714028) alike. D3 was introduced by moving the check off the
+loop: it passed on dfb474de and failed on the patch and on 72714028. All
+three failed on ec7b715f (RC6.1 + these tests) and pass on the fix.
+test_rc6_provenance_cache_and_flight pins the fixes' contracts beyond these
+three (every kind of change through the cached context, every bypass of the
+change counter, the flight's failure, deadline, bound and instant rules,
+the stopped lane).
 
-D1 · A FEATURE VECTOR REWRITTEN UNDER A STALE IDENTITY STILL VERIFIES.
+D1 · A FEATURE VECTOR REWRITTEN UNDER A STALE IDENTITY REFUSES.
     A training record carries the decision's `feature_sha` AS STORED and the
-    vector's KEY schema -- never the vector's values. A vector whose values
-    change while its stored identity does not (the research table is
+    vector's KEY schema -- never the vector's values -- so a vector whose
+    values changed while its stored identity did not (the research table is
     append-only by trigger, so: a corruption, a restore, an operator's
-    repair with the trigger off) re-hashes to the same digest, and the check
-    the PAPER decision runs (`verify_provenance`, no refit) PASSES. The refit
-    (`check_params=True`, used by register and promote) does catch it -- this
-    test shows both. EXPECTED FIX: in `_reproduce` (the lane), refuse
-    R_TRAINING_RECORDS_DO_NOT_REPRODUCE when `feature_sha(rows[i])` differs
-    from `feature_shas[i]` for any record, naming the decisions. That compares
-    the vector with its own recorded identity, changes no digest and no
-    stored model; deploy it only after a production read-only count of
-    vectors whose stored identity does not recompute (none expected: every
-    writer uses bettor_funded_model.feature_sha).
+    repair with the trigger off) re-hashes to the same digest. THE CONTRACT:
+    `bettor_funded_model._reproduce` (the lane) checks every vector against
+    its own stored identity BEFORE the digest and refuses
+    R_TRAINING_RECORDS_DO_NOT_REPRODUCE naming the decisions
+    (`changed_records`), so the check a PAPER decision runs
+    (`verify_provenance`, no refit) refuses, the refit (register / promote)
+    refuses, and Derek's model read refuses RESEARCH_MODEL_PROVENANCE_NOT_
+    VERIFIED. No digest and no stored model changes. Before deploying it, a
+    production read-only count of vectors whose stored identity does not
+    recompute (none expected: every writer stores bettor_funded_model.
+    feature_sha of the vector it stores).
 
-D2 · THE PAPER DECISION'S CONTEXT SERVES A CACHED SUCCESS FOR UP TO 300 s.
-    paper_derek._context keeps a session's context (CONTEXT_TTL_S = 300 s),
-    research model and its `provenance_verified` included. A label corrected
-    one second after a verified context is not seen by any PAPER decision of
-    that session until the TTL lapses: each decision uses a model whose
-    training set no longer reproduces. EXPECTED FIX (no TTL or bound
-    changed): a cache hit is served only while a cheap server-side
-    fingerprint of the model's training rows is unchanged -- read before the
-    verification and stored with it, e.g. md5 over (valuation id, outcome,
-    outcome_basis, outcome_at, outcome_known, record_purpose, features,
-    feature_sha) of the observations the model names, joined in SQL from
-    the registry's own decision ids (no id list crosses the loop) -- and a
-    changed fingerprint recomputes the context, re-verifying.
+D2 · THE PAPER DECISION'S CACHED CONTEXT DOES NOT OUTLIVE A CORRECTION.
+    paper_derek._context keeps a session's context (CONTEXT_TTL_S = 300 s,
+    unchanged), research model and its `provenance_verified` included. THE
+    CONTRACT: the training set's change stamp (migration 365: a counter
+    moved in the writer's own transaction by every UPDATE / DELETE /
+    TRUNCATE that can alter a verified training record, a label, a
+    settlement or the stored digest, plus the catalog identity of the
+    triggers that move it and of the tables they watch) is read BEFORE the
+    verification and stored with the context; a later decision is served
+    the cached verification only when the stamp, read after it arrived, is
+    the same. A label corrected one second after a verified context makes
+    the session's next decision recompute -- and refuse, as the ledger does.
 
-D3 · ONE SESSION'S CONCURRENT DECISIONS EACH RE-VERIFY A COLD CONTEXT.
+D3 · ONE SESSION'S CONCURRENT DECISIONS VERIFY A COLD CONTEXT ONCE.
     Described at the test (no database: the stand-in ledger of
     test_rc6_provenance_lane_bounds).
 
@@ -173,22 +177,24 @@ def test_d2_a_paper_decisions_cached_context_does_not_outlive_a_correction(
 # D3 · ONE SESSION'S CONCURRENT DECISIONS EACH RE-VERIFY A COLD CONTEXT
 # ═════════════════════════════════════════════════════════════════════
 #
-# INTRODUCED BY THE OFFLOAD (passes on production's RC6 source dfb474de,
-# fails on 72714028 and on the uploaded patch). On the loop, the first
-# decision's verification held the loop until its context was cached, so
-# the decisions arriving meanwhile found it cached: the blocking loop was an
-# accidental single flight. Off the loop, every decision of the session
-# that arrives while the first verification runs misses the cache too and
-# queues ITS OWN full verification on the one lane. LOCAL bench
+# INTRODUCED BY THE OFFLOAD (passed on production's RC6 source dfb474de,
+# failed on 72714028, on the uploaded patch and on ec7b715f). On the loop,
+# the first decision's verification held the loop until its context was
+# cached, so the decisions arriving meanwhile found it cached: the blocking
+# loop was an accidental single flight. Off the loop, every decision of the
+# session that arrived while the first verification ran missed the cache
+# too and queued ITS OWN full verification on the one lane. LOCAL bench
 # (tests/_provenance_offload_bench.py arrivals, 28,303 records, decisions
 # every 0.5 s from a cold context): 2 verifications per expiry on
 # dfb474de, 5-6 on 72714028; decision p95 2.1-2.4 s -> 4.9-8.1 s, and 2 of
-# 28 decisions past the 8 s decision deadline (cut: no decision). Production
-# verifies in 2.3-4.2 s (the RC6 stall ring), so each 300 s expiry would
-# cut several. EXPECTED FIX: one flight per context key -- concurrent
-# misses await the computation in flight (a waiter whose flight is
-# cancelled or fails computes its own); nothing is served after the flight
-# completes except through the cache (with D2's fingerprint).
+# 28 decisions past the 8 s decision deadline (cut: no decision).
+# THE CONTRACT: one flight per context key (paper_derek._lead). Concurrent
+# misses await the computation in flight, shielded: a waiter's own deadline
+# cuts only that waiter; a flight that fails or is cut resolves to nothing
+# -- nothing cached -- and its waiters try again (one leads a new flight);
+# a waiter is served the flight's context only when the flight read the
+# ledger after the waiter arrived or the change stamp (D2) is unchanged
+# since the flight's read; at most MAX_CONTEXT_FLIGHTS keys hold a flight.
 
 def test_d3_one_sessions_concurrent_decisions_verify_a_cold_context_once():
     from sportsassets.agents import paper_derek as PD

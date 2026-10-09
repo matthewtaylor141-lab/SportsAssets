@@ -90,8 +90,12 @@ def _label_rows(n: int, seed: int = 7) -> list:
 class _Conn:
     """One decision's connection: the registry read (either shape --
     production RC6's SELECT * or the successor's slim REGISTRY_SQL), the
-    research label read, the mismatch diagnostic's stored-records read;
-    every other read answers empty."""
+    research label read, the mismatch diagnostic's stored-records read, the
+    training set's change stamp (migration 365; this ledger never changes
+    while a scenario runs, so its stamp is one constant); every other read
+    answers empty."""
+
+    STAMP = "stand-in-ledger:unchanged"
 
     def __init__(self, labels, model_row, prov):
         self.labels, self.model_row, self.prov = labels, model_row, prov
@@ -114,6 +118,8 @@ class _Conn:
         return []
 
     async def fetchval(self, sql, *a):
+        if "research_training_set_changes" in sql:
+            return self.STAMP
         if "training_provenance->'records'" in sql:
             return json.dumps(self.prov["records"])
         return None

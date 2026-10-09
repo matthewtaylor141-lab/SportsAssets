@@ -1423,3 +1423,7 @@ tests/test_rc6_kalshi_ws_merge_integration.py
 tests/test_rc6_provenance_refuses_after_change.py
 # (RC6 provenance-proof) 16/32/64 parallel PAPER decisions: each verified or refused by name, every re-hash on the one lane thread exactly once, queue drained, loop gap < 0.25 s; a saturated or shut-down lane fails closed (no decision sees a verified model, withdrawn jobs never run)
 tests/test_rc6_provenance_lane_bounds.py
+# (RC6 provenance-fix) the three defects closed: a vector rewritten under its stored identity refuses (checked against its own feature_sha before the digest); a session's cached context does not outlive a corrected label (served only while the training set's change stamp is the one read before its verification); one session's concurrent decisions on a cold context run ONE verification
+tests/test_rc6_provenance_open_defects.py
+# (RC6 provenance-fix) through a session's cached context every change refuses on the next decision (label, void, deleted valuation or observation, vector with or without its identity, gained feature, moved fixture, re-based or re-read settlement, rewritten registry digest) and every bypass of the change counter still reads as a change; the single flight: a waiter's deadline cuts only it, a cut or failed flight caches nothing, a change mid-flight re-verifies, an unreadable stamp serves nothing, bounded table; a stopped lane is a named refusal
+tests/test_rc6_provenance_cache_and_flight.py

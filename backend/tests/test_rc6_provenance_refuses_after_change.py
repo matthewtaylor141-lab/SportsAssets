@@ -37,7 +37,9 @@ trigger (migration 170), so the last two are written with the trigger
 bypassed (session_replication_role = replica) -- a corruption or an
 operator's repair, which is exactly what the provenance check exists to
 catch. A vector rewritten WITHOUT its identity is
-test_rc6_provenance_open_defects (it is NOT refused today).
+test_rc6_provenance_open_defects D1 (refused since the identity check); the
+same changes through a session's CACHED context are
+test_rc6_provenance_cache_and_flight.
 
 ISOLATION. Every test runs in ONE transaction that is rolled back: the
 other research observations and research models are hidden inside it, so
