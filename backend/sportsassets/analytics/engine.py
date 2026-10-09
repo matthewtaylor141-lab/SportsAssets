@@ -24,6 +24,7 @@ from typing import NamedTuple
 
 from ..db import get_pool
 from ..sports import is_sport
+from . import identity_census as IC
 from .positions import EPS, Fill, Position, market_result
 
 log = logging.getLogger(__name__)
@@ -296,6 +297,40 @@ async def rebuild_positions(now: datetime | None = None) -> list[PositionState]:
     return list(states.values())
 
 
+#: the newest identity-debt census _persist_positions took (run_cycle hands
+#: it to the analytics heartbeat)
+LAST_IDENTITY_CENSUS: dict = {}
+
+
+def _own_wallet_addresses() -> set[str]:
+    """Our own Polymarket wallets, lowercase: the configured funder (proxy)
+    address. Empty when none is configured -- the census then says so
+    (own_wallets_configured 0) rather than inventing an owner."""
+    try:
+        from ..config import settings
+        addr = str(getattr(settings(), "pm_funder", "") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — no config is no own wallet
+        addr = ""
+    return {addr} if addr else set()
+
+
+async def _own_whale_ids(pool) -> tuple[set, int]:
+    """(roster ids whose address is one of our own wallets, how many own
+    wallets are configured). A roster read that fails names no owner."""
+    addrs = _own_wallet_addresses()
+    if not addrs:
+        return set(), 0
+    try:
+        rows = await pool.fetch(
+            "SELECT id FROM whales WHERE lower(address) = ANY($1::text[])",
+            sorted(addrs))
+        return {r["id"] for r in rows}, len(addrs)
+    except Exception:  # noqa: BLE001 — the census is measurement
+        log.warning("positions persist: own-wallet roster read failed; the "
+                    "identity census names no own wallet this cycle")
+        return set(), len(addrs)
+
+
 async def _persist_positions(states: list[PositionState]) -> None:
     pool = await get_pool()
     # NOT NULL rescue (incident 2026-08-11/12): a single un-enriched
@@ -321,14 +356,21 @@ async def _persist_positions(states: list[PositionState]) -> None:
         except Exception:  # noqa: BLE001 — rescue is best-effort
             pass
     persistable = [st for st in states if st.condition_id]
-    dropped = len(states) - len(persistable)
-    if dropped:
-        log.warning(
-            "positions persist: %d row(s) still missing condition_id "
-            "after token-catalog rescue — dead-lettered (tokens: %s); "
-            "the snapshot persists without them",
-            dropped,
-            [st.token_id for st in states if not st.condition_id][:5])
+    # THE DEAD-LETTER, COUNTED AND CLASSIFIED (RC6 identity lane): by owner
+    # (a tracked research wallet, or one of our own wallets) and by activity
+    # (historical debt vs active), logged when it CHANGES -- it used to log
+    # the same bare count every cycle (10,902 on release 732cc0c6) -- and an
+    # ACTIVE state of our own refused by name. Nothing is rescued past the
+    # catalog above, nothing deleted: the dead-lettered states stay out of
+    # the snapshot exactly as before.
+    unknown = [st for st in states if not st.condition_id]
+    as_of = next((st.as_of for st in states if st.as_of is not None),
+                 None) or datetime.now(tz=timezone.utc)
+    own_ids, own_n = (await _own_whale_ids(pool)) if unknown else (set(), 0)
+    census = IC.census(unknown, now=as_of, own_whale_ids=own_ids,
+                       own_wallets_configured=own_n)
+    LAST_IDENTITY_CENSUS["census"] = census
+    IC.log_on_change(census, log)
     rows = [
         (st.whale_id, st.condition_id, st.token_id, st.outcome, st.outcome_index,
          round(st.position.shares, 6), round(st.position.avg_cost, 6),
@@ -847,6 +889,7 @@ async def run_cycle() -> dict:
     window buckets at `now`, and compute_rollups refuses any other instant."""
     now = datetime.now(tz=timezone.utc)
     rss = _RssSteps()
+    LAST_IDENTITY_CENSUS.clear()   # this cycle's census, never the last one's
     states = await rebuild_positions(now=now)
     rss.mark("rebuild_positions")
     rollups = compute_rollups(states, now=now)
@@ -868,9 +911,14 @@ async def run_cycle() -> dict:
     await pool_settle_live()
     rss.mark("pool_settle_live")
     log.info("analytics cycle RSS by step (MB): %s", rss.steps)
+    census = IC.summary(LAST_IDENTITY_CENSUS.get("census"))
     return {"positions": n_positions, "rollup_rows": n_rollups, "drift_alerts": alerts,
             "engine_settled": engine_settled, "ai_settled": ai_settled,
-            "rss_mb_by_step": rss.steps}
+            "rss_mb_by_step": rss.steps,
+            # the dead-letter census (RC6 identity lane) and, when an
+            # ACTIVE position of our own has no identity, its refusal
+            "identity_debt": census,
+            "refusal": (census or {}).get("refusal")}
 
 
 class _RssSteps:
