@@ -258,28 +258,28 @@ export function createModel(B, opts) {
     if (!d) return {status: x ? x.status : 'LOADING', why: x && x.why, rows: []};
     return {status: 'OK', readAt: x.lastOk, rows: (d.outputs || []).filter((r) => r.kind === 'xavier_management_assessments')};
   }
-  /* Xavier's management state over the OPEN book only: floor/xavier outputs
-   * are a 24 h timeline, so a settled position's last assessment would still
-   * read as 'stale'. The denominator is equity/live paper.open_positions.count;
-   * an assessment counts only when its group is one of those open positions
-   * (the newest per group). 0 open positions is 0 -- never a timeline row. */
-  const GROUP_KEYS = ['group_id', 'position_key', 'key'];
+  /* Xavier's management state over the OPEN book only, from the field the
+   * API serves for it: floor/xavier position_book (command_floor.py
+   * _xavier_positions / position_view) -- {open, shown, positions_truncated,
+   * positions:[{group_id, current_review:{recommendation_state,
+   * management_state, ...} | null, why}]}, open PAPER positions only. The
+   * floor/xavier outputs rows are a 24 h timeline and carry no group id, so
+   * they are never matched to a position here. A null current_review is an
+   * UNREVIEWED position, never a fresh one. equity/live
+   * paper.open_positions.count is cross-checked; 0 open is 0. */
+  const MGMT_STALE = (cr) => /WAITING_FOR_FRESH_EVIDENCE|UNAVAILABLE/.test(cr.management_state || '') || /^(STALE|INVALID)$/.test(cr.recommendation_state || '');
   function managementOpen() {
-    const p = equity().paper, op = p && p.open_positions;
-    if (!op || !fin(op.count)) return {status: 'UNAVAILABLE', why: equity().status === 'LOADING' ? 'reading equity/live' : 'equity/live carried no open-position count', open: null, rows: []};
-    if (op.count === 0) return {status: 'OK', open: 0, rows: []};
-    const xd = xavierDecisions();
-    if (xd.status !== 'OK') return {status: xd.status, why: xd.why, open: op.count, rows: []};
-    const keys = new Set();
-    (op.rows || []).forEach((r) => GROUP_KEYS.forEach((k) => { if (r[k] != null) keys.add(String(r[k])); }));
-    const newest = new Map();
-    xd.rows.filter((r) => !r.superseded_by).forEach((r) => {
-      const k = GROUP_KEYS.map((f) => r[f]).find((v) => v != null && keys.has(String(v)));
-      if (k == null) return;
-      const at = epoch(r.at != null ? r.at : r.assessed_at), cur = newest.get(String(k));
-      if (!cur || (at != null && (cur.at == null || at > cur.at))) newest.set(String(k), {at, row: r});
-    });
-    return {status: 'OK', open: op.count, rows: Array.from(newest.values()).map((x) => x.row), readAt: xd.readAt};
+    const p = equity().paper, op = p && p.open_positions, eqOpen = op && fin(op.count) ? op.count : null;
+    const x = R.detail.xavier, d = x && x.data, pb = d && d.position_book;
+    if (!pb || !fin(pb.open)) {
+      if (eqOpen === 0) return {status: 'OK', open: 0, shown: 0, rows: [], reviewed: 0, stale: [], truncated: false, equityOpen: 0};
+      if (!d) return {status: x ? x.status : 'LOADING', why: x && x.why, open: eqOpen, rows: []};
+      return {status: 'UNAVAILABLE', why: 'floor/xavier carried no position_book', open: eqOpen, rows: []};
+    }
+    const rows = (pb.positions || []).map((r) => ({group_id: r.group_id, review: r.current_review || null, why: r.why || null}));
+    const reviewed = rows.filter((r) => r.review), stale = reviewed.filter((r) => MGMT_STALE(r.review));
+    return {status: 'OK', open: pb.open, shown: fin(pb.shown) ? pb.shown : rows.length, rows, reviewed: reviewed.length, stale,
+      truncated: !!pb.positions_truncated, equityOpen: eqOpen, mismatch: eqOpen != null && eqOpen !== pb.open, readAt: x.lastOk};
   }
   /* the PAPER equity history (equity/curve), oldest first; a point is a real recorded equity */
   function curve() {
