@@ -1345,3 +1345,7 @@ tests/test_rc6_deploy_integrity.py
 tests/test_paper_economic_duplicate_rule.py
 # (RC6 Archer) Audrey's reconciliation keeps her cadence while the small-live lane is off or stopped: records only, no venue, bounded (open actual position first, never reconciled, then oldest)
 tests/test_audrey_reconciles_while_the_lane_is_off.py
+# (RC6) a close this client made (websockets keepalive 1011, frame cap 1009) is never an eviction; provider / no-frame closes still stop the feed at EVICTIONS_MAX; every close named by side, code and reason
+tests/test_rc6_feed_close_provenance.py
+# (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
+tests/test_rc6_held_watch_identity.py

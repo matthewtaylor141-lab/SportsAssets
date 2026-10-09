@@ -788,6 +788,96 @@ def entry_fixture(entry_event_key, view: dict, sid):
     return hits[0] if len(hits) == 1 else None
 
 
+#: ── ONE FIXTURE IDENTITY FOR THE HELD READS AND THE HELD WATCH (RC6) ────
+#:
+#: The held READ learned two things in the closeout (d075e12f): held LINE
+#: contracts (spreads / totals / team totals, `held_line_quote`) and the
+#: ENTRY-PROVEN provider fixture (`entry_fixture`). The held WATCH -- which
+#: provider fixtures are Xavier's priority targets, whose changes and
+#: provider-stamped confirmations trigger an immediate review
+#: (pinnapi_held.refresh -> held_event_id) -- learned neither: it refused
+#: every non-moneyline contract HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE
+#: and matched exact names only.
+#:
+#: MEASURED. research-sql run 37840684877 (complete-packet reviews since
+#: 2026-10-07 04:37Z): the held NFL spread asc-nfl-tb-dal-2026-10-08-pos-9pt5
+#: (papergrp:bfaade40...) was read current from this cache 267 times
+#: (CURRENT_BLEND_HELD_CACHE, EXACT_STRUCTURED_NAMES), yet as a non-target it
+#: was reviewed only on the 60 s backstop: 2-7 complete reviews an hour on
+#: 2026-10-08 13:00-18:59Z. Its provider confirmations come only when
+#: Pinnacle bumps the matchup (PinnAPI forwards prematch_matchups for
+#: CHANGED matchups only -- 13 single-matchup frames in 15 s for ~1,300
+#: events, ws_sample run 36940200143; production confirmations
+#: PREMATCH_MATCHUPS_VERSION_UNCHANGED 0 against PREMATCH_MARKETS_
+#: AUTHORITATIVE_LIST 140,424, research-sql run 37841015429), so a backstop
+#: review lands inside the 30 s after a bump only by chance. Four groups were
+#: read current ONLY through the entry-proven fixture (75a2dd90, f8cac471,
+#: c077f868, c3da878f: identity ENTRY_PROVEN_PROVIDER_FIXTURE) and so were
+#: never targets either.
+#:
+#: THE REPAIR: `held_fixture` is the identity, used by both reads and by
+#: `held_event_id`. A held line contract whose venue family is proven
+#: resolves to its fixture by the line read's own event identity; the
+#: entry-proven fixture applies where exact names find nothing. The watch
+#: still listens on the fixture's full-game money line (a matchup bump
+#: re-delivers every market of it); a review it triggers reads the HELD
+#: contract's own quote under the unchanged 30 s rule -- nothing is made
+#: fresh by the trigger, and nothing is read that the review would not.
+def held_line_type_refusal(sports_type) -> Optional[str]:
+    """None when the venue type is a line family whose payoff equivalence
+    is proven (the held line read prices it), else the named refusal --
+    the line read's own first two checks. Pure."""
+    from . import bettor_market_family as MF
+    fam = MF.venue_line_family(sports_type)
+    if fam.get("refusal"):
+        return R_HELD_TYPE_UNPROVED
+    st = MF.family_status(fam["sport"], fam["family"])
+    if not st.get("proven"):
+        return st.get("refusal") or R_HELD_TYPE_UNPROVED
+    return None
+
+
+def held_fixture(row: dict, *, event_rows, view: dict, sport_ids,
+                 synced: bool, entry_event_key=None, line: bool = False,
+                 start=None) -> tuple:
+    """(state, feed fixture id, sport id, identity basis) for ONE held
+    contract -- THE identity of the held reads and the held watch. A
+    moneyline contract: the census's contract_match. A line contract
+    (`line`, `start` its finite game start): the same event identity
+    without the moneyline family check. Either: the entry-proven provider
+    fixture when exact names find nothing. Pure."""
+    from . import pinnapi_census as C
+    if not line:
+        state, eid, sid = C.contract_match(
+            row, event_rows or [row], view,
+            subscribed_sports=set(sport_ids), synced=synced)
+    else:
+        sid = C.sport_id_of(row.get("sports_type"))
+        if sid is None:
+            return C.S_UNMAPPED_SPORT, None, None, None
+        if sid not in set(sport_ids):
+            return C.S_OUT_OF_SCOPE, None, sid, None
+        if not synced:
+            return C.S_FEED_NOT_SYNCED, None, sid, None
+        same = [r for r in (event_rows or [])
+                if C.sport_id_of(r.get("sports_type")) == sid
+                and r.get("event_slug") == row.get("event_slug")] or [row]
+        teams, leagues, starts = C.group_event(same)
+        state, eid = C.event_identity(teams, leagues, starts,
+                                      row.get("event_slug"), start,
+                                      view.get(sid, []))
+        if state == C.S_NO_FEED_EVENT:
+            state, eid = C.split_name_identity(same, sid, start,
+                                               view.get(sid, []))
+    identity = IDENTITY_EXACT
+    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
+        fx = entry_fixture(entry_event_key, view, sid)
+        if fx is not None:
+            state, eid, identity = C.S_SUPPORTED, fx["id"], \
+                IDENTITY_ENTRY_FIXTURE
+    return state, eid, sid, identity
+
+
 def held_quote(row: dict, *, event_rows=None, payout_event,
                payout_is_complement: bool,
                at: float, max_age_s: float, sport_ids, synced: bool,
@@ -816,14 +906,9 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
         if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
             return {"ok": False, "reason": R_BAD_COMPLEMENT}
         sel = pay[4:-1]
-    state, eid, sid = C.contract_match(row, event_rows or [row], view, subscribed_sports=set(
-        sport_ids), synced=synced)
-    identity = IDENTITY_EXACT
-    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
-        fx = entry_fixture(entry_event_key, view, sid)
-        if fx is not None:
-            state, eid, identity = C.S_SUPPORTED, fx["id"], \
-                IDENTITY_ENTRY_FIXTURE
+    state, eid, sid, identity = held_fixture(
+        row, event_rows=event_rows, view=view, sport_ids=sport_ids,
+        synced=synced, entry_event_key=entry_event_key)
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
@@ -923,13 +1008,10 @@ def held_line_quote(row: dict, *, event_rows=None, payout_event,
     from . import bettor_market_family as MF
     from . import bettor_pinnacle_devig as devig
     from . import pinnapi_census as C
+    why = held_line_type_refusal(row.get("sports_type"))
+    if why is not None:
+        return {"ok": False, "reason": why}
     fam = MF.venue_line_family(row.get("sports_type"))
-    if fam.get("refusal"):
-        return {"ok": False, "reason": R_HELD_TYPE_UNPROVED}
-    st = MF.family_status(fam["sport"], fam["family"])
-    if not st.get("proven"):
-        return {"ok": False, "reason": st.get("refusal")
-                or R_HELD_TYPE_UNPROVED}
     try:
         line = float(entry_line)
         start = float(row["game_start"])
@@ -948,29 +1030,12 @@ def held_line_quote(row: dict, *, event_rows=None, payout_event,
         if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
             return {"ok": False, "reason": R_BAD_COMPLEMENT}
         name = pay[4:-1]
-    sid = C.sport_id_of(row.get("sports_type"))
-    if sid is None:
-        return {"ok": False, "reason": C.S_UNMAPPED_SPORT}
-    if sid not in set(sport_ids):
-        return {"ok": False, "reason": C.S_OUT_OF_SCOPE, "sport_id": sid}
-    if not synced:
-        return {"ok": False, "reason": C.S_FEED_NOT_SYNCED, "sport_id": sid}
-    same = [r for r in (event_rows or [])
-            if C.sport_id_of(r.get("sports_type")) == sid
-            and r.get("event_slug") == row.get("event_slug")] or [row]
-    teams, leagues, starts = C.group_event(same)
-    state, eid = C.event_identity(teams, leagues, starts,
-                                  row.get("event_slug"), start,
-                                  view.get(sid, []))
-    if state == C.S_NO_FEED_EVENT:
-        state, eid = C.split_name_identity(same, sid, start,
-                                           view.get(sid, []))
-    identity = IDENTITY_EXACT
-    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
-        fx = entry_fixture(entry_event_key, view, sid)
-        if fx is not None:
-            state, eid, identity = C.S_SUPPORTED, fx["id"], \
-                IDENTITY_ENTRY_FIXTURE
+    state, eid, sid, identity = held_fixture(
+        row, event_rows=event_rows, view=view, sport_ids=sport_ids,
+        synced=synced, entry_event_key=entry_event_key, line=True,
+        start=start)
+    if state == C.S_UNMAPPED_SPORT:
+        return {"ok": False, "reason": state}
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
@@ -1096,11 +1161,14 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                       view=view, entry_event_key=entry_event_key)
 
 
-async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:
-    """(feed event id, None) for a held contract matched to ONE provider
-    event of this process's cache under the census's own identity (same
-    teams, start within tolerance, full-game moneyline family), else
-    (None, named reason). Read only; no network.
+async def held_event_id(conn, us_market_slug, *, view=None,
+                        entry_event_key=None) -> tuple:
+    """(feed fixture id, None) for a held contract matched to ONE provider
+    fixture of this process's cache under THE held reads' own identity
+    (`held_fixture`: same teams, start within tolerance; a full-game
+    moneyline, or a line contract whose family is proven; the entry-proven
+    fixture `entry_event_key` where exact names find nothing), else (None,
+    named reason). Read only; no network.
 
     `view` (R30A): the feed event view (pinnapi_census.feed_event_view) the
     caller already built for this pass. pinnapi_held.refresh resolves EVERY
@@ -1119,19 +1187,31 @@ async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:
         row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
         if row is None:
             return None, R_NOT_IN_CATALOGUE
-        if row["sports_type"] not in HELD_FULL_GAME_TYPES:
-            return None, R_HELD_TYPE_UNPROVED
+        # RC6: a held LINE contract the held read prices is a target too
+        line = row["sports_type"] not in HELD_FULL_GAME_TYPES
+        if line:
+            why = held_line_type_refusal(row["sports_type"])
+            if why is not None:
+                return None, why
         event_rows = ([dict(r) for r in await conn.fetch(
             held_event_sql(), row["event_slug"])] if row["event_slug"]
             else [])
     except Exception as exc:                                    # noqa: BLE001
         return None, "%s:%s" % (R_CATALOGUE_UNREADABLE, type(exc).__name__)
+    start = None
+    if line:
+        try:
+            start = float(row["game_start"])
+            if not math.isfinite(start):
+                raise ValueError("invalid time")
+        except (TypeError, ValueError, KeyError, OverflowError):
+            return None, R_HELD_TIME_UNPROVED
     if view is None:
         view = C.feed_event_view(o.cache)
-    state, eid, _sid = C.contract_match(
-        dict(row), event_rows or [dict(row)], view,
-        subscribed_sports=set(o.sport_ids),
-        synced=bool(o.cache.authority.synced))
+    state, eid, _sid, _basis = held_fixture(
+        dict(row), event_rows=event_rows or [dict(row)], view=view,
+        sport_ids=o.sport_ids, synced=bool(o.cache.authority.synced),
+        entry_event_key=entry_event_key, line=line, start=start)
     if state != C.S_SUPPORTED or eid is None:
         return None, state
     return eid, None
