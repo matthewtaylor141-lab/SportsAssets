@@ -136,11 +136,13 @@ const WS_TABS = [
 // classic desk (two tabs); allocator the workspace only; archer / scout their
 // framed page under the floor strip
 const TABBED = ['derek', 'xavier', 'audrey', 'karen'];
-const agentControls = a => AGENT_NAV.concat(TABBED.includes(a) ? WS_TABS : [], [
-  { name: 'Talk to the agent', sel: '#bt-agent2-talk',
-    expect: TABBED.includes(a) ? { attr: ['#tab-desk', 'aria-selected', 'true'] } : { any: [{ inView: '#page' }, { visible: '#state' }, { visible: '#ws-root' }] } },
-  nav('Back to floor', '.bt-agent2-actions a[href="/floor"]', '/floor'),
-], SHELL);
+// Talk opens the conversation: the desk tab (two-tab agents) or the framed
+// page brought into view with the live strip still above it (archer, scout).
+// Allie has no conversation desk: her page draws no Talk (hq2-agent.js)
+const agentControls = a => AGENT_NAV.concat(TABBED.includes(a) ? WS_TABS : [],
+  a === 'allocator' ? [] : [{ name: 'Talk to the agent', sel: '#bt-agent2-talk',
+    expect: TABBED.includes(a) ? { attr: ['#tab-desk', 'aria-selected', 'true'] } : { inView: '#page', visible: '#ws-root .wsx-strip' } }],
+  [nav('Back to floor', '.bt-agent2-actions a[href="/floor"]', '/floor')], SHELL);
 const HQ_VIEWS = ['command', 'floor', 'markets', 'capital', 'reports'];
 const CONTROLS = {
   command: [
@@ -614,6 +616,15 @@ async function tapOnce(page, handle, touch, twin) {
   return at;
 }
 
+// Recorded in every page before its own scripts: when the page last asked
+// for a SMOOTH scroll (scrollIntoView / scrollTo / scrollBy with behavior
+// 'smooth'). The call itself goes through unchanged. A smooth scroll only
+// advances on painted frames: on a frame-starved page (software GL, 0-1 fps)
+// it starts seconds after the request, so stillness alone does not mean rest.
+const SMOOTH_MARK = `(() => { const mark = (o) => { if (o && typeof o === 'object' && o.behavior === 'smooth') window.__previewSmoothAt = performance.now(); };
+  const siv = Element.prototype.scrollIntoView; Element.prototype.scrollIntoView = function (o) { mark(o); return siv.apply(this, arguments); };
+  for (const k of ['scrollTo', 'scrollBy']) { const f = window[k]; window[k] = function (o) { mark(o); return f.apply(this, arguments); }; } })();`;
+
 // tap each declared control and check where it lands (see CONTROLS)
 async function runControls(page, capture, pg, d, cdp) {
   const vp = d.viewport, touch = !!d.hasTouch;
@@ -644,8 +655,19 @@ async function runControls(page, capture, pg, d, cdp) {
     }
     if (c.when && !c.when(vp)) { res.not_this_layout.push(c.name); continue; }
     const expect = typeof c.expect === 'function' ? c.expect(vp) : c.expect;
-    // every control starts from the page at rest: scrolled to the top (a
-    // finger reaches the next control from there, not from where the last left it)
+    // every control starts from the page at rest. A smooth scroll the last
+    // control started is let finish first (Talk brings the agent's frame into
+    // view 80 ms after its tap; tapped mid-scroll, the next touch landed on
+    // whatever scrolled under the finger -- into the frame on Archer / Scout
+    // and landscape Audrey): the page must hold still for 400 ms, and for 3 s
+    // after a smooth scroll it asked for (SMOOTH_MARK: on a frame-starved page
+    // it began 2.1 s after Talk) -- at most 4 s in all. Then it is scrolled to
+    // the top (a finger reaches the next control from there, not from where
+    // the last left it)
+    await page.evaluate(() => new Promise((res) => { let last = scrollY, still = 0, n = 0;
+      const t = setInterval(() => { n++; if (scrollY === last) still++; else { still = 0; last = scrollY; }
+        const asked = window.__previewSmoothAt != null && performance.now() - window.__previewSmoothAt < 3000;
+        if ((still >= 4 && !asked) || n >= 40) { clearInterval(t); res(); } }, 100); })).catch(() => {});
     await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' })).catch(() => {});
     await page.waitForTimeout(120);
     // the first match a user can get to: shown, or inside a closed <details>
@@ -787,6 +809,7 @@ async function findRoom(browser) {
       if (capture.on) { const u = new URL(req.url()); if (u.pathname.startsWith('/api/')) capture.requests.push(u.pathname + u.search); }
       return route.continue();
     });
+    await ctx.addInitScript(SMOOTH_MARK);
     page = await ctx.newPage();
     const cdp = d.hasTouch ? await ctx.newCDPSession(page).catch(() => null) : null;
     if (insets && cdp) { try { await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets }); } catch (e) { errors.push('safe-area override: ' + String(e).slice(0, 120)); } }

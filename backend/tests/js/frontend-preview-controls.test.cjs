@@ -79,8 +79,10 @@ test('every agent page taps all nine links of its navigation, the shell rail, Co
     const names = H.CONTROLS[a].map(c => c.name);
     for (const n of ['agents: COMMAND', 'agents: Trading floor', 'agents: derek', 'agents: xavier', 'agents: audrey', 'agents: karen', 'agents: allocator', 'agents: archer', 'agents: scout'])
       assert.ok(names.includes(n), a + ' ' + n);
-    for (const n of ['rail: Operations', 'rail: HQ', 'rail: Floor', 'rail: Positions', 'rail: Economics', 'rail: Company', 'Company Pulse', 'header: incidents', 'Talk to the agent', 'Back to floor'])
+    for (const n of ['rail: Operations', 'rail: HQ', 'rail: Floor', 'rail: Positions', 'rail: Economics', 'rail: Company', 'Company Pulse', 'header: incidents', 'Back to floor'])
       assert.ok(names.includes(n), a + ' ' + n);
+    // Talk wherever a conversation exists; Allie has none and her page draws no Talk
+    assert.equal(names.includes('Talk to the agent'), a !== 'allocator', a);
     const nav = H.CONTROLS[a].find(c => c.name === 'agents: archer');
     assert.deepEqual(plain(nav.expect), { nav: '/archer' });
     assert.equal(nav.sel, 'body > nav a[data-agent="archer"]');
@@ -243,4 +245,40 @@ test('a touch device stays one for every control; the desk opens from the team l
   assert.equal(desk.sel, '[data-render="team"] [data-desk]');
   assert.deepEqual(plain(desk.expect), { bodyClass: 'desk-open', visible: '#hq-desk' });
   assert.ok(desk.optional && desk.close.sel === '#hq-desk [data-close-desk]');
+});
+
+test('Talk lands on the conversation: the desk tab, or the framed page with the live strip kept', () => {
+  const talk = (a) => H.CONTROLS[a].find(c => c.name === 'Talk to the agent');
+  for (const a of ['derek', 'xavier', 'audrey', 'karen']) assert.deepEqual(plain(talk(a).expect), { attr: ['#tab-desk', 'aria-selected', 'true'] });
+  // an error note in place of the page is no longer a landing (#state was accepted)
+  for (const a of ['archer', 'scout']) assert.deepEqual(plain(talk(a).expect), { inView: '#page', visible: '#ws-root .wsx-strip' });
+  assert.equal(talk('allocator'), undefined);
+});
+
+test('every control starts from a page at rest: a smooth scroll the last one started is let finish', () => {
+  const i = SRC.indexOf('async function runControls(');
+  const settle = SRC.indexOf("if ((still >= 4 && !asked) || n >= 40) { clearInterval(t); res(); } }, 100); })).catch(() => {});", i);
+  const top = SRC.indexOf("await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: 'instant' })).catch(() => {});", i);
+  const find = SRC.indexOf('let idx = await find();', i);
+  assert.ok(settle > i && settle < top && top < find);
+  // 400 ms still, and 3 s after a smooth scroll the page asked for; at most 4 s
+  assert.ok(SRC.includes("const asked = window.__previewSmoothAt != null && performance.now() - window.__previewSmoothAt < 3000;"));
+  // the marker is installed in every view before the page's own scripts
+  assert.ok(SRC.indexOf('await ctx.addInitScript(SMOOTH_MARK);') < SRC.indexOf('page = await ctx.newPage();\n    const cdp'));
+  // it records smooth requests only, and every call goes through unchanged
+  const mark = /const SMOOTH_MARK = `([\s\S]*?)`;/.exec(SRC)[1];
+  const calls = [];
+  function El() {} El.prototype.scrollIntoView = function (o) { calls.push(['siv', o]); };
+  const win = { scrollTo(o) { calls.push(['to', o]); }, scrollBy(o) { calls.push(['by', o]); } };
+  let now = 1000;
+  const ctx = { window: win, Element: El, performance: { now: () => now } };
+  vm.runInNewContext(mark, ctx);
+  new El().scrollIntoView({ block: 'center', behavior: 'instant' });
+  win.scrollTo({ top: 0, behavior: 'instant' });
+  assert.equal(win.__previewSmoothAt, undefined);
+  now = 2500; new El().scrollIntoView({ behavior: 'smooth' });
+  assert.equal(win.__previewSmoothAt, 2500);
+  now = 4000; win.scrollBy({ top: 10, behavior: 'smooth' });
+  assert.equal(win.__previewSmoothAt, 4000);
+  assert.deepEqual(calls.map(c => c[0]), ['siv', 'to', 'siv', 'by']);
 });
