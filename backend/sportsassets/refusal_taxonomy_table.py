@@ -1680,6 +1680,25 @@ TABLE = {
     # (RC6 red-team) a replayed / out-of-order snapshot, or one past a lost
     # message: the sid is GAP like a delta gap, the snapshot not applied
     "KALSHI_WS_SNAPSHOT_OUT_OF_SEQUENCE": (S, FRESH, "VENUE_BOOK"),
+    # (RC6 plane hang) a market's repairs ran past the bound: the session
+    # ends, every book GAP until the reconnect's snapshots (it was never
+    # classified when it was added)
+    "KALSHI_WS_RESUBSCRIBE_STORM": (S, FRESH, "VENUE_BOOK"),
+    # (rc6.2 kalshi-protocol) the documented WebSocket protocol: a book GAP
+    # because the venue ended the subscription (`unsubscribed`), its `ok`
+    # listed the sid without the market, or a control frame took a seq a
+    # separate counter could have; the session ends (every book GAP, the
+    # reconnect re-subscribes) on a second gap during a get_snapshot, past
+    # the command-rate or per-market snapshot bound, when the venue ends
+    # the subscription (error 10 / 25) or refuses our one subscribe
+    "KALSHI_WS_UNSUBSCRIBED_BY_VENUE": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_MARKET_NOT_HELD_BY_VENUE": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_CONTROL_SEQUENCE_AMBIGUOUS": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_GAP_DURING_RECOVERY": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_COMMAND_RATE_BOUND": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_SNAPSHOT_REQUEST_BOUND": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_SUBSCRIPTION_ENDED": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_SUBSCRIBE_REFUSED": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
     # the dedicated market plane refuses to run beside an order-capable
     # credential (market_plane_guard): a provisioning defect, ours to fix
