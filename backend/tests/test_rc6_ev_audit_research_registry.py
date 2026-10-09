@@ -331,3 +331,58 @@ def test_a_new_plan_sha_is_a_new_registration_appended_once(monkeypatch):
 def uuid_hex16():
     import uuid
     return uuid.uuid4().hex[:16]
+
+
+def _direct_pbo(matrix, blocks):
+    """CSCV written out directly (concatenated rows, statistics.stdev), as
+    an independent check of the block-sum implementation."""
+    import itertools
+    import statistics
+    t, n = len(matrix), len(matrix[0])
+    base, extra = divmod(t, blocks)
+    edges, at = [], 0
+    for b in range(blocks):
+        size = base + (1 if b < extra else 0)
+        edges.append((at, at + size))
+        at += size
+
+    def sr(xs):
+        m = sum(xs) / len(xs)
+        sd = statistics.stdev(xs) if len(xs) > 1 else 0.0
+        if sd == 0:
+            return 0.0 if m == 0 else math.copysign(math.inf, m)
+        # the method's declared tie tolerance (RR.SHARPE_TIE_DECIMALS)
+        return round(m / sd, RR.SHARPE_TIE_DECIMALS)
+
+    def ranks(v):
+        return [sum(1 for y in v if y < x) + (sum(1 for y in v if y == x)
+                                              + 1) / 2.0 for x in v]
+    below, combos = 0, list(itertools.combinations(range(blocks),
+                                                   blocks // 2))
+    for ins in combos:
+        ir = [r for b in ins for r in matrix[edges[b][0]:edges[b][1]]]
+        orr = [r for b in range(blocks) if b not in ins
+               for r in matrix[edges[b][0]:edges[b][1]]]
+        isr = [sr([row[j] for row in ir]) for j in range(n)]
+        osr = [sr([row[j] for row in orr]) for j in range(n)]
+        best = max(range(n), key=lambda j: (isr[j], -j))
+        w = ranks(osr)[best] / (n + 1.0)
+        below += math.log(w / (1 - w)) <= 0
+    return below / len(combos)
+
+
+def test_the_block_sum_cscv_equals_the_direct_computation():
+    for s in range(30):
+        rnd = random.Random(s)
+        t, n = rnd.randint(4, 24), rnd.randint(2, 6)
+        m = [[0.0 if rnd.random() < 0.3 else rnd.gauss(-1, 3)
+              for _ in range(n)] for _ in range(t)]
+        b = RR.blocks_for(t)
+        assert RR.pbo_cscv(m, blocks=b)["pbo"] == pytest.approx(
+            _direct_pbo(m, b), abs=1e-12), s
+
+
+def test_the_measurement_runs_off_the_api_loop():
+    import inspect
+    from sportsassets.redteam import readiness as R
+    assert "asyncio.to_thread(RREG.measure" in inspect.getsource(R.evaluate)

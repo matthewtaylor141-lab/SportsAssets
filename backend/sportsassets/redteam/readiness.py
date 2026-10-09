@@ -334,8 +334,10 @@ async def evaluate(conn, *, now: float | None = None,
                         lambda: C.holdout_registry(conn), {})
     # THE REGISTERED STUDY'S PBO / DSR over the attribution rows read above
     # (pure; train + test events only, the holdout slice never read)
+    # (a worker thread: up to 12,870 CSCV splits must not hold the API loop)
+    import asyncio
     from . import research_registry as RREG
-    mt = RREG.measure(reg, attributed, fixtures)
+    mt = await asyncio.to_thread(RREG.measure, reg, attributed, fixtures)
     reg = dict(reg, measurement=mt, pbo_ok=mt.get("pbo_ok"),
                dsr_ok=mt.get("dsr_ok"),
                candidates_tested=max(int(reg.get("candidates_tested") or 0),

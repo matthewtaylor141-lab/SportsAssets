@@ -200,9 +200,39 @@ def blocks_for(days: int) -> int:
     return s if s >= CSCV_MIN_BLOCKS else 0
 
 
+#: Sharpe ratios are COMPARED at this many decimals: two candidates whose
+#: ratios are mathematically equal (a common shape on sparse daily P&L) tie,
+#: whatever the float rounding of the route that computed them.
+SHARPE_TIE_DECIMALS = 10
+
+
+def _tie(x: float) -> float:
+    return round(x, SHARPE_TIE_DECIMALS) if math.isfinite(x) else x
+
+
+def _sharpe_from_sums(cnt: int, s: float, q: float) -> float:
+    """sharpe() from a count, a sum and a sum of squares (the same
+    conventions: 0 for a flat zero series, +-inf for a flat non-zero one).
+    A variance within float noise of zero is zero."""
+    if cnt == 0:
+        return 0.0
+    m = s / cnt
+    if cnt < 2:
+        return 0.0 if m == 0 else math.copysign(math.inf, m)
+    var = (q - s * s / cnt) / (cnt - 1)
+    if var <= 1e-12 * max(1.0, q / cnt):
+        return 0.0 if m == 0 else math.copysign(math.inf, m)
+    return m / math.sqrt(var)
+
+
 def pbo_cscv(matrix: list, *, blocks: int) -> dict:
     """CSCV over `matrix` (rows = time, columns = candidates, in a declared
-    order). The in-sample best is the first maximum in column order."""
+    order). The in-sample best is the first maximum in column order.
+
+    Each split's Sharpe ratios come from per-block sums and sums of squares
+    (exactly the sample mean and variance of the concatenated rows), so a
+    16-block run (12,870 splits) costs O(splits x blocks x candidates), not
+    O(splits x days x candidates): it runs inside the API's readiness read."""
     t = len(matrix)
     n = len(matrix[0]) if matrix else 0
     if n < 2:
@@ -215,14 +245,24 @@ def pbo_cscv(matrix: list, *, blocks: int) -> dict:
         size = base + (1 if b < extra else 0)
         edges.append((at, at + size))
         at += size
+    cnt = [e - s for s, e in edges]
+    bs = [[sum(matrix[r][j] for r in range(s, e)) for j in range(n)]
+          for s, e in edges]
+    bq = [[sum(matrix[r][j] ** 2 for r in range(s, e)) for j in range(n)]
+          for s, e in edges]
+    tot_s = [sum(bs[b][j] for b in range(blocks)) for j in range(n)]
+    tot_q = [sum(bq[b][j] for b in range(blocks)) for j in range(n)]
     logits, below = [], 0
     combos = list(itertools.combinations(range(blocks), blocks // 2))
     for ins in combos:
-        ins_rows = [r for b in ins for r in matrix[edges[b][0]:edges[b][1]]]
-        oos_rows = [r for b in range(blocks) if b not in ins
-                    for r in matrix[edges[b][0]:edges[b][1]]]
-        is_sr = [sharpe([row[j] for row in ins_rows]) for j in range(n)]
-        oos_sr = [sharpe([row[j] for row in oos_rows]) for j in range(n)]
+        ic = sum(cnt[b] for b in ins)
+        i_s = [sum(bs[b][j] for b in ins) for j in range(n)]
+        i_q = [sum(bq[b][j] for b in ins) for j in range(n)]
+        is_sr = [_tie(_sharpe_from_sums(ic, i_s[j], i_q[j]))
+                 for j in range(n)]
+        oos_sr = [_tie(_sharpe_from_sums(t - ic, tot_s[j] - i_s[j],
+                                         tot_q[j] - i_q[j]))
+                  for j in range(n)]
         best = max(range(n), key=lambda j: (is_sr[j], -j))
         w = _ranks(oos_sr)[best] / (n + 1.0)
         lam = math.log(w / (1.0 - w))
