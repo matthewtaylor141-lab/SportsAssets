@@ -504,3 +504,66 @@ async def test_equity_cache_cannot_cross_epoch(conn,monkeypatch,view):
     finally:
         E._LIVE.update(at=0,payload=None)
         E._CURVES.clear()
+
+
+@pytest.mark.parametrize('state',['QUARANTINED','SHADOW_ONLY','RETIRED','REDUCED_SIZE'])
+async def test_registered_epoch_inherits_strategy_restrictions(conn,state):
+    from sportsassets import bettor_strategy_lifecycle as LC
+    await LC.record(conn,account_id=L.ACCOUNT_ID,strategy='DEREK',
+        from_state=LC.ACTIVE_CHALLENGER,to_state=state,rule_id='historical-risk',
+        actor=LC.AUTOMATIC_ACTOR,evidence={'historical_loss_retained':True},
+        why='synthetic historical restriction',at=H.T0)
+    r=await activate(conn)
+    cur=await LC.current_state(conn,r['account_id'],'DEREK')
+    assert cur['state']==state
+    gate=await LC.decision_gate(conn,account_id=r['account_id'],strategy='DEREK',at=time.time())
+    assert gate['state']==state
+    if state in LC.NO_ENTRY_STATES:
+        assert gate['refusal']==LC.ENTRY_STATE_REFUSAL[state] and gate['size_factor']==0
+    else:
+        assert gate['size_factor']==LC.decision_size_factor(state)<1
+    assert (await LC.current_state(conn,L.ACCOUNT_ID,'DEREK'))['state']==state
+
+
+async def test_epoch_strategy_recovery_requires_named_person_and_preserves_source_quarantine(conn):
+    from sportsassets import bettor_strategy_lifecycle as LC
+    await LC.record(conn,account_id=L.ACCOUNT_ID,strategy='DEREK',from_state=LC.ACTIVE_CHALLENGER,
+        to_state=LC.QUARANTINED,rule_id='historical-risk',actor=LC.AUTOMATIC_ACTOR,
+        evidence={'synthetic':True},why='historical restriction',at=H.T0)
+    first=await activate(conn)
+    second=await activate(conn,'second-epoch')
+    acct=second['account_id']
+    inherited=await LC.current_state(conn,acct,'DEREK')
+    assert inherited['state']==LC.QUARANTINED and inherited['inherited_from_account_id']==L.ACCOUNT_ID
+    denied=await LC.transition(conn,account_id=acct,strategy='DEREK',to_state=LC.SHADOW_ONLY,
+        actor=LC.AUTOMATIC_ACTOR,why='must not automatically recover')
+    assert not denied['ok']
+    allowed=await LC.transition(conn,account_id=acct,strategy='DEREK',to_state=LC.SHADOW_ONLY,
+        actor='person:synthetic-owner',why='explicit synthetic recovery review')
+    assert allowed['ok']
+    event=await conn.fetchrow('SELECT * FROM paper_strategy_lifecycle_events WHERE event_id=$1',allowed['event_id'])
+    assert event['actor']=='person:synthetic-owner' and event['from_state']==LC.QUARANTINED
+    assert event['rules_sha']==LC.RULES_SHA and event['evidence'] and event['why']
+    assert (await LC.current_state(conn,first['account_id'],'DEREK'))['state']==LC.QUARANTINED
+    assert (await LC.current_state(conn,L.ACCOUNT_ID,'DEREK'))['state']==LC.QUARANTINED
+    await LC.transition(conn,account_id=acct,strategy='DEREK',to_state=LC.REDUCED_SIZE,
+        actor='person:synthetic-owner',why='separate declared step')
+    denied=await LC.transition(conn,account_id=acct,strategy='DEREK',to_state=LC.ACTIVE_CHALLENGER,
+        actor='person:synthetic-owner',why='no forward samples')
+    assert not denied['ok'] and denied['refusal']==LC.R_TRANSITION_NO_FORWARD_EVIDENCE
+
+
+@pytest.mark.parametrize('fault',['cycle','read_error','too_deep'])
+async def test_malformed_epoch_policy_ancestry_fails_closed(monkeypatch,fault):
+    from sportsassets import bettor_strategy_lifecycle as LC
+    async def schema(c): return True
+    monkeypatch.setattr(LC,'schema',schema)
+    class Broken:
+        async def fetchrow(self,*args): return None
+        async def fetchval(self,sql,*args):
+            if 'to_regclass' in sql: return True
+            if fault=='read_error': raise RuntimeError('unreadable inherited policy')
+            return args[0] if fault=='cycle' else args[0]+'_parent'
+    gate=await LC.decision_gate(Broken(),account_id='registered_epoch',strategy='DEREK',at=1000)
+    assert not gate['ok'] and gate['size_factor']==0
+    assert gate['refusal']==LC.R_LIFECYCLE_UNREADABLE

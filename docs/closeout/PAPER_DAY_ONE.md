@@ -11,7 +11,10 @@ learning, risk views and position rooms resolve this pointer. Each epoch has a
 separate account, session, one $500,000 funding entry and an opening equity
 snapshot; its cash, PnL and drawdown derive from that ledger. Its frozen effective
 risk and sizing policy comes from the source session, including registered
-successive epochs. Losses are never erased or relabelled as profits.
+successive epochs. Losses are never erased or relabelled as profits. Strategy lifecycle reads
+inherit the nearest recorded state through registered epoch ancestry; opening
+a new account cannot release quarantine, retirement or reduced sizing. Existing
+named-person recovery rules and forward-evidence requirements remain unchanged.
 
 Read-only inspection: `python -m sportsassets.tools.paper_day_one read`.
 The authenticated `GET /api/command/paper/day-one` reports the selected account;

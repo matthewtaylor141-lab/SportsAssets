@@ -457,25 +457,58 @@ async def schema(conn) -> bool:
 
 
 async def current_state(conn, account_id: str, strategy: str) -> dict:
-    """{ok, state, since, event_id, rule_id}. No row = the INITIAL state.
-    Absent table or a failed read = ok False (callers refuse)."""
+    """Read the latest local state, or inherit it through registered epochs.
+
+    A new cash account is not strategy recovery. Until an explicit transition
+    on that account, source quarantine/retirement/size restrictions still apply.
+    Missing schema, failed reads or malformed ancestry refuse admission.
+    """
     if not await schema(conn):
         return {"ok": False, "state": None, "why": "MIGRATION_290_NOT_APPLIED"}
+    from . import bettor_paper_ledger as L
+    source = account_id
+    seen = set()
     try:
-        r = await conn.fetchrow(
-            "SELECT event_id, to_state, rule_id, recorded_at FROM "
-            " paper_strategy_lifecycle_events WHERE account_id = $1 "
-            "   AND strategy = $2 ORDER BY event_id DESC LIMIT 1",
-            account_id, strategy)
+        epoch_schema = None
+        for _ in range(64):
+            if source in seen:
+                return {"ok": False, "state": None, "why": "EPOCH_POLICY_ANCESTRY_CYCLE"}
+            seen.add(source)
+            r = await conn.fetchrow(
+                "SELECT event_id, to_state, rule_id, recorded_at FROM "
+                " paper_strategy_lifecycle_events WHERE account_id = $1 "
+                "   AND strategy = $2 ORDER BY event_id DESC LIMIT 1",
+                source, strategy)
+            if r is not None:
+                out = {"ok": True, "state": r["to_state"], "event_id": r["event_id"],
+                       "rule_id": r["rule_id"],
+                       "since": float(r["recorded_at"].timestamp())}
+                if source != account_id:
+                    out.update(basis="REGISTERED_EPOCH_INHERITED_STATE",
+                               inherited_from_account_id=source)
+                return out
+            if source == L.ACCOUNT_ID:
+                break
+            if epoch_schema is None:
+                epoch_schema = bool(await conn.fetchval(
+                    "SELECT to_regclass('public.paper_account_epochs')"))
+            if not epoch_schema:
+                break
+            parent = await conn.fetchval(
+                "SELECT previous_account_id FROM paper_account_epochs WHERE account_id=$1",
+                source)
+            if parent is None:
+                break
+            if not isinstance(parent, str) or not parent:
+                return {"ok": False, "state": None, "why": "EPOCH_POLICY_ANCESTRY_INVALID"}
+            source = parent
+        else:
+            return {"ok": False, "state": None, "why": "EPOCH_POLICY_ANCESTRY_TOO_DEEP"}
     except Exception as exc:                                    # noqa: BLE001
         return {"ok": False, "state": None, "why": type(exc).__name__}
-    if r is None:
-        return {"ok": True, "state": INITIAL_STATE, "since": None,
-                "event_id": None, "rule_id": None,
-                "basis": "NO_EVENT_ROW_INITIAL_STATE"}
-    return {"ok": True, "state": r["to_state"], "event_id": r["event_id"],
-            "rule_id": r["rule_id"],
-            "since": float(r["recorded_at"].timestamp())}
+    return {"ok": True, "state": INITIAL_STATE, "since": None,
+            "event_id": None, "rule_id": None,
+            "basis": "NO_EVENT_ROW_INITIAL_STATE"}
 
 
 async def record(conn, *, account_id: str, strategy: str, from_state,
