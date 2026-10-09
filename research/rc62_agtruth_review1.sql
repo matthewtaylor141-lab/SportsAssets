@@ -3,7 +3,7 @@ SELECT loop_name, process, starts, successes, errors, last_start_at, last_succes
 \echo R2 capability heartbeat and control
 SELECT key, value FROM ingestion_state WHERE key LIKE 'agent.capabilities%';
 \echo R3 claim path statements in pg_stat_statements
-SELECT calls, round(mean_exec_time::numeric,2) AS mean_ms, round(max_exec_time::numeric,2) AS max_ms, rows, left(query, 160) AS q FROM pg_stat_statements WHERE (query ILIKE '%FROM agent_tasks WHERE task_id=ANY%' OR query ILIKE '%FROM ingestion_state WHERE key=$1 FOR %' OR query ILIKE '%status=$4 AND (spec->>$5)::double precision>$6%' OR query ILIKE '%ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT DO NOTHING%') ORDER BY calls DESC LIMIT 12;
+SELECT calls, round(mean_exec_time::numeric,2) AS mean_ms, round(max_exec_time::numeric,2) AS max_ms, rows, left(query, 160) AS q FROM pg_stat_statements WHERE (query ILIKE '%FROM agent_tasks WHERE task_id=ANY%' OR query ILIKE '%FROM ingestion_state WHERE key=$1 FOR %' OR query ILIKE '%status=$4 AND (spec->>$5)::double precision>$6%') ORDER BY calls DESC LIMIT 12;
 \echo R4 capability task events last 48h by hour and kind
 SELECT date_trunc('hour', at) AS hr, kind, count(*) FROM agent_task_events WHERE task_id LIKE 'capwork:%' AND at > now() - interval '48 hours' GROUP BY 1,2 ORDER BY 1 DESC, 2 LIMIT 60;
 \echo R5 open capability tasks by status
