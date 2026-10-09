@@ -78,6 +78,13 @@ FALLBACK_REST_RATE_PER_S = 10.0
 SUBSCRIBE_CHUNK = 100
 #: subscribe commands awaiting the venue's `subscribed` ack, kept at most
 MAX_PENDING_SUBSCRIBES = 512
+#: (RC6 plane hang, 2026-10-09) resubscribes of ONE market since a snapshot
+#: last made its book CURRENT, at most, in one session; one past it ends
+#: the session (Subscriber.ResubscribeStorm): every book GAP, a reconnect
+#: after the run loop's backoff subscribes each wanted market once
+MAX_RESUBSCRIBES_WITHOUT_RECOVERY = 2
+#: the session's end when a market is resubscribed past that bound
+R_RESUBSCRIBE_STORM = "KALSHI_WS_RESUBSCRIBE_STORM"
 
 CURRENT = "CURRENT"
 GAP = "GAP"
@@ -528,11 +535,35 @@ def chunks(xs: list, n: int = SUBSCRIBE_CHUNK):
 
 # ── the runtime (one connection) ─────────────────────────────────────────
 
+class ResubscribeStorm(RuntimeError):
+    """A market was resubscribed more than MAX_RESUBSCRIBES_WITHOUT_RECOVERY
+    times with no snapshot making its book CURRENT in between: the session's
+    repairs are not converging, so the session ends (fail closed)."""
+
+    code = R_RESUBSCRIBE_STORM
+
+
 class Subscriber:
     """One authenticated connection: subscribe the wanted markets in
     chunks, apply messages, resubscribe on a gap, reconnect on a drop.
     `connect` is an async callable returning a socket with async send /
-    recv / close (websockets in production, a fake in tests)."""
+    recv / close (websockets in production, a fake in tests).
+
+    THE REPAIRS ARE BOUNDED (RC6 plane hang, 2026-10-09). Production
+    sportsassets-market-plane, RC6.1 (3d5af039), one connection, no
+    disconnect: 4,716 gaps, 1,286,756 resubscribes, 1,440,903 snapshots on
+    dead sids, every one of 397 books GAP (pm-acceptance 37954055578,
+    venues.json KALSHI_HEALTH.mechanism.ws). Every snapshot of a market not
+    bound to the dead sid it arrived on resubscribed that market at once, and
+    the venue answered each resubscribe with a snapshot that again arrived on
+    a sid the books had declared dead -- an open loop: each message sent a
+    subscribe, the session never ran out of frames to read, and it held the
+    plane's one event loop (no universal_market_plane pass completed after
+    15:22:06Z; CPU 1.0, RSS +10 MB/min). Now each market's resubscribes are
+    counted until a snapshot makes its book CURRENT; one past
+    MAX_RESUBSCRIBES_WITHOUT_RECOVERY ends the session (ResubscribeStorm):
+    every book GAP (on_disconnected), the run loop's backoff, a fresh
+    connection that subscribes each wanted market once."""
 
     def __init__(self, connect, books: WsBooks, *, wanted,
                  clock=time.time, backoff=(1, 2, 5, 10, 30, 60)):
@@ -550,6 +581,10 @@ class Subscriber:
         self.connections = 0
         self.resubscribes = 0
         self.last_error = None
+        # market -> resubscribes since a snapshot last made it CURRENT (this
+        # session); sessions ended by a storm, counted
+        self.unrecovered: dict = {}
+        self.storms = 0
 
     def forget(self, tickers) -> int:
         """(RC6) The markets no longer wanted: their books dropped
@@ -562,6 +597,8 @@ class Subscriber:
         held = sum(1 for t in gone if t in self.books.books)
         self.books.forget(gone)
         self.subscribed.difference_update(gone)
+        for t in gone:
+            self.unrecovered.pop(t, None)
         # an unacknowledged subscribe no longer names them
         for k, ts in list(self.pending.items()):
             self.pending[k] = [t for t in ts if t not in gone]
@@ -596,6 +633,20 @@ class Subscriber:
         todo = sorted(self.books.resubscribe)
         if not todo:
             return
+        # a market resubscribed past the bound with no snapshot making it
+        # CURRENT since: the repairs do not converge -- end the session
+        # before sending (fail closed; nothing is resubscribed again here)
+        over = [t for t in todo if self.unrecovered.get(t, 0)
+                >= MAX_RESUBSCRIBES_WITHOUT_RECOVERY]
+        if over:
+            self.storms += 1
+            raise ResubscribeStorm(
+                "%s: %d market(s) resubscribed %d times without a snapshot "
+                "making them current (e.g. %s)" % (
+                    R_RESUBSCRIBE_STORM, len(over),
+                    MAX_RESUBSCRIBES_WITHOUT_RECOVERY, over[0]))
+        for t in todo:
+            self.unrecovered[t] = self.unrecovered.get(t, 0) + 1
         for t in todo:
             self.books.ticker_sid.pop(t, None)
         self.resubscribes += 1
@@ -621,6 +672,7 @@ class Subscriber:
             # caused; the RC5 production readback shows 10 connections and
             # 18 resubscribes). Each book stays GAP until its fresh snapshot.
             self.books.resubscribe.clear()
+            self.unrecovered.clear()
             await self._subscribe(ws, want)
             n = 0
             while max_messages is None or n < max_messages:
@@ -637,7 +689,11 @@ class Subscriber:
                     # a reused sid number is a new subscription: if it gaps
                     # it is unsubscribed again
                     self.unsubscribed_sids.discard(sid)
-                self.books.on_message(m, recv_at=self.clock())
+                if self.books.on_message(m, recv_at=self.clock()) == \
+                        "SNAPSHOT":
+                    # its book is CURRENT again: its repairs converged
+                    self.unrecovered.pop(
+                        (m.get("msg") or {}).get("market_ticker"), None)
                 if self._needs_repair():
                     await self._resubscribe_gapped(ws)
                 add = [t for t in self.wanted() if t not in self.subscribed]
