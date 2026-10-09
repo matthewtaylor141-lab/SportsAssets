@@ -1433,3 +1433,11 @@ tests/test_mirror_shadow_venue_confirmation.py
 tests/test_positions_identity_census.py
 # Signed acceptance requires the checksummed source verdict to agree with its copied packet value.
 tests/test_signed_acceptance_consistency.py
+# (RC6.1 api-stall2) the profitability warehouse lineage is built off the API event loop (in the API on its CPU lane, through intel.common.offload) over one index of its context per block, in slices of at most warehouse.BUILD_SLICE_S, record for record what the pre-index build (b3f1b0cd, verbatim) built on production-shaped context, the same exceptions where it raised; a production-size block keeps the loop's longest gap under the watchdog's 1.0 s lag threshold (production 14:48Z and 15:49Z: 8.7 s and 13.7 s on the loop), and a Command read's lane job submitted while it is built waits under 1.0 s; the economics compute stays on asyncio.to_thread, off the lane
+tests/test_rc6_api_stall2_profitability.py
+# (RC6.1 api-stall2) rn1x model prepare answers exactly what b3f1b0cd's prepare answered on 40,000 fills (its digest fed row by row), and learn.evaluate exactly what b3f1b0cd's evaluate answered, with the dataset build and every learn replay on the CPU lane (the evaluation in slices, cpu_lane.run_steps); production-size runs keep the loop's longest gap under 1.0 s and a small fraction of the work; a Command read's lane job submitted during a production-size model fit (on its own asyncio.to_thread, as on b3f1b0cd) or learn evaluation waits under 1.0 s, inside the paper hook's 8 s deadline
+tests/test_rc6_api_stall2_rn1x.py
+# (RC6.1 api-stall2) the PinnAPI owner: decode_frame is json.loads (production-shaped frames, a fuzzed corpus, the same exception for what json.loads refuses) without one GIL hold for a whole frame; a queued burst is applied one frame per loop turn and leaves the cache exactly as inline application does
+tests/test_rc6_api_stall2_pinnapi.py
+# (RC6.1 api-stall2) the ext_pinnacle cycle's PinnAPI reads match by the feed cache's current-generation index, a fresh scan's answer at every instant as frames land; a run of refused events is refused by exactly the scan's reasons while the loop gets a turn between events, on a production-size synced feed cache
+tests/test_rc6_api_stall2_ext_pinnacle.py

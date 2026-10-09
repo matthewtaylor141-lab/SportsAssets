@@ -32,6 +32,8 @@ prunes stays referenced (its absence is then itself evidence).
 """
 from __future__ import annotations
 
+import time
+
 from . import common as C
 
 VERSION = "POS_WAREHOUSE_V1"
@@ -85,9 +87,175 @@ def _stage(present, ids, why, **extra):
     return d
 
 
+# ── (RC6.1 api-stall2) ONE INDEX OF THE CONTEXT PER BLOCK, OFF THE LOOP ──
+#
+# PRODUCTION 2026-10-09 (render-ops logs run 37949540216; the API loop
+# watchdog's ring, research-sql rc6_api-responsive_loop_stalls.sql run
+# 37950182966): the hourly cycle held the API event loop 8.7 s at 14:48Z,
+# task profitability/runner.py:run, the loop thread in `rows` <- `build` <-
+# runner `warehouse` -- every position filtered every context list (up to
+# reads.MAX_ROWS rows each: reviews, ledger, findings, regimes ...) on the
+# loop, positions x rows. Now the runner builds a block's records off the
+# loop a slice at a time (`build_some` through common.offload: the API's CPU
+# lane), and `build` reads the context through an `Index`: each list grouped once by the field its
+# filter keys on, so a position looks at only the rows that can match --
+# then applies the SAME filter to them, in the list's order. Same rows,
+# same order, same records (tests/test_rc6_api_stall2_profitability.py
+# compares them with the pre-index build on production-shaped data). A list
+# that cannot be grouped (not a list, a row without the field, an
+# unhashable value) is scanned exactly as before.
+class Index:
+    """The read-only lookups `build` makes of ONE `ctx`, built once."""
+
+    def __init__(self, ctx: dict):
+        self.ctx = ctx
+        self._groups: dict = {}
+        self._vals = None
+        self._prev = None
+        self._regimes = None
+
+    def _group(self, name, field, via_get):
+        k = (name, field, via_get)
+        if k not in self._groups:
+            lst = self.ctx.get(name)
+            out = None
+            if isinstance(lst, list):
+                out = {}
+                try:
+                    for i, r in enumerate(lst):
+                        v = r.get(field) if via_get else r[field]
+                        out.setdefault(v, []).append(i)
+                except Exception:                              # noqa: BLE001
+                    out = None
+            self._groups[k] = out
+        return self._groups[k]
+
+    def rows(self, name, pred, *keyed):
+        """`[r for r in ctx[name] if pred(r)]` (None when the list is), where
+        `keyed` = (field, keys[, via_get]) pairs name every way `pred` can
+        hold: r[field] (or r.get(field)) equals one of `keys`."""
+        lst = self.ctx.get(name)
+        if lst is None:
+            return None
+        hit: set = set()
+        for spec in keyed:
+            field, keys = spec[0], spec[1]
+            grp = self._group(name, field, bool(spec[2:] and spec[2]))
+            if grp is None:
+                return [r for r in lst if pred(r)]
+            try:
+                for key in keys:
+                    hit.update(grp.get(key, ()))
+            except TypeError:                     # an unhashable key: scan
+                return [r for r in lst if pred(r)]
+        return [lst[i] for i in sorted(hit) if pred(lst[i])]
+
+    def vals(self) -> dict:
+        if self._vals is None:
+            self._vals = {int(v["id"]): v
+                          for v in (self.ctx.get("valuations") or [])}
+        return self._vals
+
+    def previous(self, book, key):
+        """The first `previous` row of (book, position key), in list order."""
+        lst = self.ctx.get("previous") or []
+        if self._prev is None:
+            self._prev = False
+            if isinstance(lst, list):
+                try:
+                    idx: dict = {}
+                    for p in lst:
+                        idx.setdefault((p["book"], p["position_key"]), p)
+                    self._prev = idx
+                except Exception:                              # noqa: BLE001
+                    self._prev = False
+        if self._prev is not False:
+            try:
+                return self._prev.get((book, key))
+            except TypeError:
+                pass
+        return next((p for p in lst
+                     if p["book"] == book and p["position_key"] == key),
+                    None)
+
+    def regime_before(self, rg, t):
+        """(True, `[r for r in rg if r["at"] <= t][-1]["run_id"]`), or
+        (False, None) when no row is at or before t -- by bisection when `rg`
+        is the context's list and its `at` are finite numbers in
+        non-decreasing order (the read's ORDER BY computed_at), else by that
+        scan."""
+        if self._regimes is None:
+            self._regimes = False
+            lst = self.ctx.get("regimes")
+            try:
+                ats = [r["at"] for r in lst]
+                if all(type(a) in (int, float) and a == a for a in ats) and \
+                        all(ats[i] <= ats[i + 1] for i in range(len(ats) - 1)):
+                    self._regimes = (lst, ats)
+            except Exception:                                  # noqa: BLE001
+                self._regimes = False
+        if self._regimes is not False and self._regimes[0] is rg and \
+                type(t) in (int, float) and t == t:
+            ats, lo, hi = self._regimes[1], 0, len(self._regimes[1])
+            while lo < hi:                     # bisect_right(ats, t)
+                mid = (lo + hi) // 2
+                if t < ats[mid]:
+                    hi = mid
+                else:
+                    lo = mid + 1
+            return (True, rg[lo - 1]["run_id"]) if lo else (False, None)
+        before = [r for r in rg if r["at"] <= t]
+        return (True, before[-1]["run_id"]) if before else (False, None)
+
+
+def build_all(positions, econ_by_key: dict, *, ctx: dict,
+              decisions: dict) -> list:
+    """`build` for every position of ONE block (in order), over one `Index`
+    of its `ctx`, in one call."""
+    index = Index(ctx)
+    return [build(p, econ_by_key.get((p["book"], p["position_key"])),
+                  ctx=ctx, decisions=decisions, index=index)
+            for p in positions]
+
+
+#: (RC6.1 api-stall2) the longest one `build_some` call runs before it
+#: returns what it has built (the same bound as cpu_lane.SLICE_S, which this
+#: layer may not import). A scheduling bound: it decides where one off-loop
+#: job ends and the next begins, never what a record holds.
+BUILD_SLICE_S = 0.25
+
+
+def build_some(positions, start: int, econ_by_key: dict, *, ctx: dict,
+               decisions: dict, index: Index,
+               budget_s: float = BUILD_SLICE_S) -> tuple:
+    """(records, next start): `build` for positions[start], [start + 1], ...
+    in order, over `index` (an `Index` of this same `ctx`, shared by every
+    slice of the block), until the list ends or `budget_s` has passed
+    (checked after each record). The runner calls it until `next start`
+    reaches the end, so the slices together are `build_all`'s records, in
+    its order. Pure; a record that raises raises here, as in `build_all`.
+
+    WHY SLICES (RC6.1 api-stall2). In the API each call is one job on the
+    CPU lane, where other jobs wait behind the one running -- some under a
+    deadline (cpu_lane's docstring). A 1,200-position block is ~3 s of
+    builds; one slice at a time, nothing queued waits more than one."""
+    end = time.monotonic() + budget_s
+    out, i, n = [], start, len(positions)
+    while i < n:
+        p = positions[i]
+        out.append(build(p, econ_by_key.get((p["book"], p["position_key"])),
+                         ctx=ctx, decisions=decisions, index=index))
+        i += 1
+        if time.monotonic() >= end:
+            break
+    return out, i
+
+
 def build(pos: dict, econ: dict | None, *, ctx: dict,
-          decisions: dict) -> dict:
-    """The lineage record of ONE position (store adds run id, revision)."""
+          decisions: dict, index: Index | None = None) -> dict:
+    """The lineage record of ONE position (store adds run id, revision).
+    `index` (an `Index` of this same `ctx`) is shared across a block."""
+    ix = index if index is not None and index.ctx is ctx else Index(ctx)
     g = pos.get("group_id")
     slug = pos.get("us_market_slug")
     side = pos.get("holding_side")
@@ -99,51 +267,57 @@ def build(pos: dict, econ: dict | None, *, ctx: dict,
     vids = sorted({int(d["valuation_id"]) for d in decs
                    if d.get("valuation_id") is not None}
                   | set(src.get("valuation_ids") or []))
-    vals = {int(v["id"]): v for v in (ctx.get("valuations") or [])}
+    vals = ix.vals()
     myvals = [vals[v] for v in vids if v in vals]
-
-    def rows(name, pred):
-        lst = ctx.get(name)
-        return None if lst is None else [r for r in lst if pred(r)]
+    rows = ix.rows
 
     ids_all = {g, pos["position_key"], *dids}
-    reviews = rows("reviews", lambda r: r["group_id"] == g) if book == \
-        "PAPER" else rows("actual_reviews", lambda r: r["group_id"] == g)
+    by_g = ("group_id", (g,))
+    reviews = rows("reviews", lambda r: r["group_id"] == g, by_g) \
+        if book == "PAPER" else rows("actual_reviews",
+                                     lambda r: r["group_id"] == g, by_g)
     theses = rows("theses", lambda r: r["group_id"] == g
                   and r["position_kind"] == kind
-                  and r.get("us_market_slug") in (slug, None))
+                  and r.get("us_market_slug") in (slug, None), by_g)
     assess = rows("assessments", lambda r: r["group_id"] == g
-                  and r["position_kind"] == kind)
+                  and r["position_kind"] == kind, by_g)
     vadd = rows("value_add", lambda r: r["group_id"] == g
-                and r["position_kind"] == kind)
+                and r["position_kind"] == kind, by_g)
     pms = rows("postmortems", lambda r: r["group_id"] == g
                and r["book"] == book and r.get("us_market_slug") in (slug, None)
-               and str(r.get("holding_side") or side) == str(side))
-    chal = rows("challenges", lambda r: r["target_id"] in ids_all)
-    finds = rows("findings", lambda r: r["subject"] in ids_all)
-    adec = rows("agent_decisions", lambda r: r["subject"] in ids_all)
+               and str(r.get("holding_side") or side) == str(side), by_g)
+    chal = rows("challenges", lambda r: r["target_id"] in ids_all,
+                ("target_id", ids_all))
+    finds = rows("findings", lambda r: r["subject"] in ids_all,
+                 ("subject", ids_all))
+    adec = rows("agent_decisions", lambda r: r["subject"] in ids_all,
+                ("subject", ids_all))
     ledger = rows("ledger", lambda r: r["group_id"] == g and (
-        r.get("position_key") in (None, pos["position_key"]))) \
+        r.get("position_key") in (None, pos["position_key"])), by_g) \
         if book == "PAPER" else []
     attr = rows("attribution", lambda r: r["subject_id"] == g
-                and r["book"] == book)
-    siz = rows("sizing", lambda r: r["decision_id"] in dids)
-    alloc = rows("allocations", lambda r: r["decision_id"] in dids)
-    cap = rows("capacity", lambda r: r["candidate_id"] in dids)
+                and r["book"] == book, ("subject_id", (g,)))
+    siz = rows("sizing", lambda r: r["decision_id"] in dids,
+               ("decision_id", dids))
+    alloc = rows("allocations", lambda r: r["decision_id"] in dids,
+                 ("decision_id", dids))
+    cap = rows("capacity", lambda r: r["candidate_id"] in dids,
+               ("candidate_id", dids))
     intents = rows("intents", lambda r: r["group_id"] == g
-                   or r.get("decision_id") in dids)
+                   or r.get("decision_id") in dids, by_g,
+                   ("decision_id", dids, True))
     handoffs = list(src.get("handoff_ids") or [])
     if book == "PAPER":
         handoffs += [r["handoff_id"] for r in (rows(
-            "paper_handoffs", lambda r: r["group_id"] == g) or [])]
+            "paper_handoffs", lambda r: r["group_id"] == g, by_g) or [])]
     regimes = []
     rg = ctx.get("regimes")
     for d in decs:
         t = C.epoch(d.get("decided_at"))
         if rg and t is not None:
-            before = [r for r in rg if r["at"] <= t]
-            if before:
-                regimes.append(before[-1]["run_id"])
+            found, run_id = ix.regime_before(rg, t)
+            if found:
+                regimes.append(run_id)
 
     def ids(lst, key):
         return [] if lst is None else [r[key] for r in lst]
@@ -202,9 +376,7 @@ def build(pos: dict, econ: dict | None, *, ctx: dict,
                                         if d.get("simulator_version")}),
     }
     # ── union with the previous revision (append-only knowledge) ─────
-    prev = next((p for p in (ctx.get("previous") or [])
-                 if p["book"] == book
-                 and p["position_key"] == pos["position_key"]), None)
+    prev = ix.previous(book, pos["position_key"])
     if prev:
         for k in ARRAYS:
             rec[k] = _union(prev.get(k), rec[k], ints=k in INT_ARRAYS)

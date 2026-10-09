@@ -171,8 +171,43 @@ async def prepare(conn, *, days: int = 30, limit: int = 40000,
     prediction set, not negatives.
     """
     at = float(now if now is not None else time.time())
-    rows = [dict(r) for r in await conn.fetch(
-        FILLS_SQL, list(LIVE_SOURCES), str(int(days)), int(limit))]
+    fetched = await conn.fetch(
+        FILLS_SQL, list(LIVE_SOURCES), str(int(days)), int(limit))
+    # OFF THE EVENT LOOP (RC6.1 api-stall2): everything after the read is
+    # pure -- the rows copied out of the records, the dataset build over up
+    # to `limit` (40,000) fills, the map back to source trades and the
+    # dataset digest. On the loop it held the API 1.2 s (render-ops logs run
+    # 37949540216, 2026-10-09 14:44:28Z: task rn1x_model_loop.py:run at
+    # rn1x_model_loop.py:215 <genexpr> <- prepare <- cycle -- the digest's
+    # per-row sort). Now it runs on the API's CPU lane. The fetched records
+    # are this call's own and immutable; the connection is not touched.
+    from .. import cpu_lane
+    return await cpu_lane.run(_prepare_rows, fetched, at)
+
+
+def _closed_digest(closed: list) -> str:
+    """sha256(json.dumps([sorted((k, str(v)) for k, v in r.items() if not
+    k.startswith("_")) for r in closed], sort_keys=True, default=str)
+    .encode()).hexdigest()[:16] -- the digest prepare has always carried, fed
+    row by row: json.dumps of a list is "[" + ", ".join(json.dumps(item))
+    + "]" with the same options, so the bytes hashed are the same. (RC6.1
+    api-stall2) One json.dumps of every closed row was a single C call that
+    held the GIL -- and so the API loop -- for the whole encode, wherever
+    it ran; row by row it passes a bytecode boundary between rows."""
+    h = hashlib.sha256(b"[")
+    for i, r in enumerate(closed):
+        if i:
+            h.update(b", ")
+        h.update(json.dumps(
+            sorted((k, str(v)) for k, v in r.items() if not k.startswith("_")),
+            sort_keys=True, default=str).encode())
+    h.update(b"]")
+    return h.hexdigest()[:16]
+
+
+def _prepare_rows(fetched, at: float) -> dict:
+    """`prepare`'s pure part, over the fetched fills (oldest first)."""
+    rows = [dict(r) for r in fetched]
     built = ds.build(rows, horizon_s=HORIZON_S, observation_end=at)
     table = built["rows"] if isinstance(built, dict) else built
 
@@ -211,10 +246,7 @@ async def prepare(conn, *, days: int = 30, limit: int = 40000,
             open_.append(r)
         else:
             closed.append(r)
-    sha = hashlib.sha256(json.dumps(
-        [sorted((k, str(v)) for k, v in r.items() if not k.startswith("_"))
-         for r in closed], sort_keys=True, default=str
-    ).encode()).hexdigest()[:16]
+    sha = _closed_digest(closed)
     return {"observation_end": at, "horizon_s": HORIZON_S,
             "source_rows": len(rows), "built_rows": len(table),
             "closed": closed, "open": open_,
@@ -622,7 +654,12 @@ async def cycle(conn, *, now=None) -> dict:
     # (loop watchdog, 2026-10-02 14:43:48Z: LOOP MainThread in
     # rn1x_model_loop.fit -> learn/kernel.fit), longer than /healthz's 5 s
     # deadline. In a worker thread the loop keeps serving between GIL
-    # switches; `fit` is pure (no connection, no shared state).
+    # switches; `fit` is pure (no connection, no shared state). (RC6.1
+    # api-stall2) NOT on the API's CPU lane, where `prepare`'s pure part
+    # runs: the fit is 30-50 s in one call, and every lane job queued
+    # behind it -- the paper context's model check under its 8 s deadline,
+    # a Command read's tally -- would wait for all of it (cpu_lane's
+    # docstring).
     fitted = await asyncio.to_thread(fit, prep["closed"])
     out["fit"] = {k: v for k, v in fitted.items()
                   if k not in ("model", "baseline")}

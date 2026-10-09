@@ -12,6 +12,16 @@ and an asyncio timeout; the pure computation of the heavier components runs
 off the event loop (asyncio.to_thread). Writes are revisions only when
 content changed, so the tables grow with events, not with cycles.
 
+(RC6.1 api-stall2) THE WAREHOUSE WAS STILL ON THE LOOP. Production
+2026-10-09: the API loop held 8.7 s at 14:48Z and 13.7 s at 15:49Z, task
+profitability/runner.py:run, inside warehouse.build's per-position filters
+of every context list (warehouse.Index). A block's records are now built
+off the loop, over one index of its context, in slices of at most
+warehouse.BUILD_SLICE_S (warehouse.build_some), each through
+`common.offload` -- in the API its CPU lane (cpu_lane), elsewhere
+asyncio.to_thread -- so the build neither holds the loop nor keeps the
+lane's other jobs waiting behind a whole block.
+
 FAILURE-ISOLATED. A component that raises or times out rolls back its own
 savepoint, is recorded FAILED / TIMEOUT in pos_runs, and the components
 after it run with that input absent (and say so). Nothing propagates to the
@@ -251,10 +261,14 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
                 conn, positions=blk["positions"],
                 decisions=blk["decisions"], account_id=acct or account_id,
                 now=now)
-            for p in blk["positions"]:
-                recs.append(WH.build(p, by_key.get((p["book"],
-                                                    p["position_key"])),
-                                     ctx=ctx, decisions=blk["decisions"]))
+            # OFF THE LOOP, over ONE index of this block's context, a
+            # slice at a time (the module docstring; warehouse.build_some)
+            index, pos, i = WH.Index(ctx), blk["positions"], 0
+            while i < len(pos):
+                part, i = await C.offload(
+                    WH.build_some, pos, i, by_key, ctx=ctx,
+                    decisions=blk["decisions"], index=index)
+                recs.extend(part)
         lin = await ST.save_lineage(conn, run_id=run_id, now=now,
                                     records=recs)
         lids = await ST.latest_lineage_ids(

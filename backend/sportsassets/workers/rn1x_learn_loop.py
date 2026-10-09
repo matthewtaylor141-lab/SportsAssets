@@ -148,6 +148,14 @@ async def _seeds(conn, limit: int) -> list:
     return out
 
 
+def _evaluate_and_digest(seeds: list):
+    """Steps (cpu_lane.run_steps) returning (learn.evaluate(seeds),
+    _dataset_sha(seeds)): the evaluation's own steps, then the digest -- one
+    pass over the rows, a few milliseconds -- in the last."""
+    ev = yield from learn.evaluate_steps(seeds)
+    return ev, _dataset_sha(seeds)
+
+
 def _dataset_sha(seeds: list) -> str:
     """Which evidence produced this verdict, as one digest.
 
@@ -247,8 +255,18 @@ async def cycle(conn, *, code_sha="unknown") -> dict:
                         "nothing here to say a challenger did worse than"),
                 "challengers": learn.challenger_names()}
 
-    ev = learn.evaluate(seeds)
-    sha = _dataset_sha(seeds)
+    # OFF THE EVENT LOOP (RC6.1 api-stall2). `learn.evaluate` replays every
+    # seed through bettor_rn1x_run.run once per arm and scenario, and the
+    # digest walks every row: pure Python over up to MAX_POSITIONS settled
+    # positions. On the loop it held the API 1.8 s (render-ops logs run
+    # 37949540216, 2026-10-09 14:47:40Z: task rn1x_learn_loop.py:run at
+    # bettor_rn1x_run.py:150 run <- bettor_rn1x_learn.py:260 evaluate <-
+    # rn1x_learn_loop.py:250 cycle). Both run on the API's CPU lane, in
+    # slices of at most cpu_lane.SLICE_S, so the several seconds of replay
+    # never make the lane's other jobs wait behind it (cpu_lane.run_steps);
+    # the seeds are this cycle's own, read above and not touched meanwhile.
+    from .. import cpu_lane
+    ev, sha = await cpu_lane.run_steps(_evaluate_and_digest(seeds))
     cutoff = time.time()
     receipts = []
     for name in learn.challenger_names():

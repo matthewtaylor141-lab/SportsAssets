@@ -56,7 +56,110 @@ WRITER_SQL = """SELECT EXISTS (SELECT 1 FROM pg_locks
      AND ((classid::bigint << 32) | objid::bigint) = $1)"""
 EVICTIONS_MAX = 3            # unrequested closes after a healthy stream...
 EVICTION_WINDOW_S = 600.0    # ...within this window -> stop, never fight
-BIG_FRAME = 256 * 1024       # decoded off the event loop
+BIG_FRAME = 256 * 1024       # decoded off the event loop (decode_frame)
+
+
+# ── (RC6.1 api-stall2) A BIG FRAME IS DECODED ONE ELEMENT AT A TIME ──────
+#
+# PRODUCTION (render-ops logs run 37949540216, RC6.1 deployed 14:42Z). The
+# feed started at 14:44:27Z and synced at 14:44:46Z; the API loop watchdog
+# then logged lags of 1.6 s (14:45:03Z, gc 0.18 s of it) and 1.9 s
+# (14:45:43Z, gc 0.24 s) "held by task=none (a loop callback, not a task)
+# inner=ssl.py:859 read <- runners.py:118 run" while RSS went 241 -> 630 MB.
+# The loop thread was inside uvloop's TLS read -- SSLObject.read releases the
+# GIL around every record and must take it back -- while another thread held
+# the GIL: the subscribe snapshot (a whole (stream, sport), up to
+# WS_MAX_FRAME_BYTES) was decoded by ONE `json.loads` call on a worker
+# thread, and a C call hands the GIL over only when it returns. LOCAL
+# REPRODUCTION (LOCAL BENCHMARK ONLY: uvloop reading a TLS stream on the loop
+# while a thread decodes a 7 MB, 1,300-event snapshot with one call): the
+# loop's longest gap was 1.6 s and the sampled loop frame was `ssl.py:859
+# read` / `runners.py:118 run` -- the production signature.
+#
+# NOW: `decode_frame` returns exactly what `json.loads` returns, but decodes
+# the envelope's top-level members itself and a top-level ARRAY member (the
+# snapshot's `events`, a list's `data`) element by element with the standard
+# decoder's own scanner, so the worker thread passes a bytecode boundary --
+# where CPython hands the GIL to a waiting thread every switch interval --
+# between any two elements: the longest hold is one element's decode, not
+# the frame's. Anything that is not a JSON object, or that this reader does
+# not follow, is decoded by `json.loads` itself, so a malformed frame raises
+# exactly what it raised before. Small frames are still decoded inline by
+# `json.loads`, and the thread is the same `asyncio.to_thread` as before.
+_DECODER = json.JSONDecoder()
+_WS = json.decoder.WHITESPACE.match
+
+
+def _array(s: str, idx: int):
+    vals = []
+    idx = _WS(s, idx + 1).end()
+    if s[idx:idx + 1] == "]":
+        return vals, idx + 1
+    while True:
+        val, idx = _DECODER.raw_decode(s, idx)
+        vals.append(val)
+        idx = _WS(s, idx).end()
+        nxt = s[idx:idx + 1]
+        if nxt == ",":
+            idx = _WS(s, idx + 1).end()
+            continue
+        if nxt == "]":
+            return vals, idx + 1
+        raise ValueError("not a JSON array at %d" % idx)
+
+
+def _decode_members(s):
+    if isinstance(s, (bytes, bytearray)):
+        # json.loads' own reading of a binary frame
+        s = s.decode(json.detect_encoding(s), "surrogatepass")
+    if not isinstance(s, str) or s.startswith("﻿"):
+        raise ValueError("not a str json.loads decodes as is")
+    idx = _WS(s, 0).end()
+    if s[idx:idx + 1] != "{":
+        raise ValueError("not a JSON object")
+    out: dict = {}
+    idx = _WS(s, idx + 1).end()
+    if s[idx:idx + 1] == "}":
+        idx += 1
+    else:
+        while True:
+            if s[idx:idx + 1] != '"':
+                raise ValueError("expected a member name at %d" % idx)
+            key, idx = json.decoder.scanstring(s, idx + 1, True)
+            idx = _WS(s, idx).end()
+            if s[idx:idx + 1] != ":":
+                raise ValueError("expected ':' at %d" % idx)
+            idx = _WS(s, idx + 1).end()
+            if s[idx:idx + 1] == "[":
+                val, idx = _array(s, idx)
+            else:
+                val, idx = _DECODER.raw_decode(s, idx)
+            # a repeated name keeps its first position and its last value,
+            # as json.loads' dict(pairs) does
+            out[key] = val
+            idx = _WS(s, idx).end()
+            nxt = s[idx:idx + 1]
+            if nxt == ",":
+                idx = _WS(s, idx + 1).end()
+                continue
+            if nxt == "}":
+                idx += 1
+                break
+            raise ValueError("expected ',' or '}' at %d" % idx)
+    if _WS(s, idx).end() != len(s):
+        raise ValueError("extra data at %d" % idx)
+    return out
+
+
+def decode_frame(raw):
+    """`json.loads(raw)` -- the same value, and for a frame json.loads
+    refuses the same exception (json.loads decodes whatever this reader
+    does not follow) -- decoded so that no single C call holds the GIL for
+    the whole frame (see above). Pure: the owner runs it on a thread."""
+    try:
+        return _decode_members(raw)
+    except Exception:                                           # noqa: BLE001
+        return json.loads(raw)
 
 R_WRITER_LOST = "FEED_DECIDER_WRITER_LOCK_NOT_HELD"
 R_DISARMED = "FEED_DISARMED_BY_CONTROL_ROW"
@@ -631,6 +734,18 @@ class FeedOwner:
             last_live = time.monotonic()
             last_rx = time.monotonic()
             while not self.stop_event.is_set():
+                # (RC6.1 api-stall2) ONE FRAME PER LOOP TURN. `ws.recv()`
+                # does not suspend while frames are already queued -- one TLS
+                # read can queue thousands of small prematch_markets frames
+                # -- so this loop decoded and applied a whole burst without
+                # ever giving the event loop back: the stall recorded at
+                # 14:47:40Z (2.35 s, task FeedOwner.run, the loop thread in
+                # json.loads from _own; the lag line named _put <-
+                # _replace_event <- _apply <- _apply_inline). Each frame
+                # still applies whole, in arrival order; other tasks may now
+                # run between two frames, as they already could whenever
+                # recv() waited.
+                await asyncio.sleep(0)
                 now = time.monotonic()
                 if now - last_live >= self.liveness_s:
                     ok, why = await self._guards(lease)
@@ -685,7 +800,7 @@ class FeedOwner:
                 rx_ms = self.clock() * 1000.0     # before decoding
                 last_rx = time.monotonic()
                 try:
-                    msg = (await asyncio.to_thread(json.loads, raw)
+                    msg = (await asyncio.to_thread(decode_frame, raw)
                            if len(raw) > BIG_FRAME else json.loads(raw))
                 except Exception:                               # noqa: BLE001
                     continue
