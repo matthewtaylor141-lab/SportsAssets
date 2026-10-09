@@ -168,6 +168,13 @@ _MARKET_OUTCOMES = frozenset({R_REFRESH_NOT_OPEN, R_REFRESH_STATE_UNKNOWN,
                               R_REFRESH_CROSSED})
 
 TIER_HELD, TIER_CANDIDATE = "HELD", "CANDIDATE"
+#: (RC6 D1) a market a PAPER order is still working on (a hedge or an exit
+#: on another market than the position's): refreshed like a held one
+TIER_ORDER = "WORKING_ORDER"
+#: the PAPER ledger's working-order states (bettor_paper_ledger.OPEN_STATES;
+#: freshness_window.OPEN_ORDER_STATES, a test pins both)
+OPEN_ORDER_STATES = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
+                     "CANCEL_PENDING")
 PHASE_RANK = {"IN_PLAY_OR_RECENT": 0, "PREGAME": 1, "STARTED_GT_4H": 2,
               "NO_START": 3}
 
@@ -216,12 +223,21 @@ def phase_of(start, *, now: float) -> str:
     return "PREGAME"
 
 
-def tier_of(priority) -> str:
+def tier_of(priority, orders: bool = False) -> str:
     from .populate import P_HELD
     try:
-        return TIER_HELD if int(priority) <= P_HELD else TIER_CANDIDATE
+        if int(priority) <= P_HELD:
+            return TIER_HELD
     except (TypeError, ValueError):
-        return TIER_CANDIDATE
+        pass
+    return TIER_ORDER if orders else TIER_CANDIDATE
+
+
+def _field(r, k):
+    try:
+        return r[k]
+    except (KeyError, IndexError, TypeError):
+        return None
 
 
 def _px(level):
@@ -295,6 +311,8 @@ class ActiveRefresh:
         #: the two drivers (the pass and the freshness task) never read one
         #: member twice at once
         self.inflight: set = set()
+        #: whether this database has the PAPER orders table (read once)
+        self.orders_table = None
         self.hold_until = 0.0
         self.last_pass: dict = {}
         self.totals = {"reads": 0, "current": 0, "not_current": 0,
@@ -312,7 +330,7 @@ class ActiveRefresh:
         out = []
         for r in rows or ():
             s = str(r["contract_id"])
-            out.append((s, tier_of(r["priority"]),
+            out.append((s, tier_of(r["priority"], bool(_field(r, "orders"))),
                         phase_of(r["event_start"], now=now),
                         _epoch(r["event_start"])))
             if len(out) >= MAX_TRACKED:
@@ -453,7 +471,7 @@ class ActiveRefresh:
                 n("REFRESH_CURRENT_DUE_FOR_RE_READ")
             lapse = self.lapse_at(s, stream_received_at=stream_rcv,
                                   bound=bound)
-            due.append(((0 if tier == TIER_HELD else 1),
+            due.append(((0 if tier in (TIER_HELD, TIER_ORDER) else 1),
                         float("-inf") if lapse is None else lapse,
                         PHASE_RANK.get(phase, 3),
                         start if start is not None else float("inf"),
@@ -567,6 +585,18 @@ MEMBERS_SQL = (
     "SELECT contract_id, priority, event_start FROM market_plane_registry "
     " WHERE active AND priority <= $1 "
     " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2")
+#: (RC6 D1) the priority members AND every market a PAPER order is working
+#: on (its working order needs a current book as much as the position does;
+#: freshness_window measures it as WORKING_ORDER)
+MEMBERS_WITH_ORDERS_SQL = (
+    "SELECT r.contract_id, r.priority, r.event_start, "
+    "       (o.slug IS NOT NULL) AS orders "
+    "  FROM market_plane_registry r LEFT JOIN ("
+    "       SELECT DISTINCT us_market_slug AS slug FROM paper_orders "
+    "        WHERE state = ANY($3::text[])) o ON o.slug = r.contract_id "
+    " WHERE r.active AND (r.priority <= $1 OR o.slug IS NOT NULL) "
+    " ORDER BY (o.slug IS NULL), r.priority, r.event_start NULLS LAST, "
+    "          r.contract_id LIMIT $2")
 
 
 class _NoLock:
@@ -595,7 +625,18 @@ async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
     if ref.members_due(now):
         try:
             async with pool.acquire() as c:
-                rows = await c.fetch(MEMBERS_SQL, P_CANDIDATE, MAX_TRACKED)
+                has_orders = ref.orders_table
+                if has_orders is None:
+                    try:
+                        has_orders = ref.orders_table = bool(
+                            await c.fetchval("SELECT to_regclass("
+                                             "'paper_orders') IS NOT NULL"))
+                    except Exception:                           # noqa: BLE001
+                        has_orders = False      # not cached: probed again
+                rows = (await c.fetch(MEMBERS_WITH_ORDERS_SQL, P_CANDIDATE,
+                                      MAX_TRACKED, list(OPEN_ORDER_STATES))
+                        if has_orders else
+                        await c.fetch(MEMBERS_SQL, P_CANDIDATE, MAX_TRACKED))
             ref.set_members(rows, now=now)
             del rows
         except Exception as exc:                                # noqa: BLE001

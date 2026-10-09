@@ -338,3 +338,103 @@ def test_the_freshness_task_keeps_reading_while_a_slow_pass_runs(
     # the task said what it did
     ft = beats[0][2]["freshness_task"]
     assert ft["ticks"] >= 1 and ft["errors"] == 0
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §4 a working order's market is refreshed like a held position's
+# ═════════════════════════════════════════════════════════════════════
+
+def test_the_order_states_are_the_ledgers():
+    from sportsassets import bettor_paper_ledger as L
+    from sportsassets.market_plane import freshness_window as FW
+    assert AR.OPEN_ORDER_STATES == tuple(L.OPEN_STATES) == \
+        FW.OPEN_ORDER_STATES
+    assert AR.tier_of(80, True) == AR.TIER_ORDER
+    assert AR.tier_of(0, True) == AR.TIER_HELD
+    assert AR.tier_of(10, False) == AR.TIER_CANDIDATE
+
+
+def test_a_working_order_member_is_planned_with_the_held_ones():
+    clock = H.Clock(T0)
+    syms = ["cand-soon", "hedge-mkt", "held-1"]
+    m, books = H.plane(clock, syms)
+    for s in syms:
+        H.update(books, s, T0)
+    clock.t = T0 + 400.0
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh()
+    ref.set_members([dict(H.member("cand-soon", 10, T0 + 60), orders=False),
+                     dict(H.member("hedge-mkt", 80, T0 + 9000), orders=True),
+                     dict(H.member("held-1", 0, T0 + 9000), orders=False)],
+                    now=clock.t)
+    assert {s: t for s, t, _p, _st in ref.members} == {
+        "cand-soon": "CANDIDATE", "hedge-mkt": "WORKING_ORDER",
+        "held-1": "HELD"}
+    due, _c = ref.plan(m, now=clock.t, bound=BOUND)
+    assert due[-1] == "cand-soon" and set(due[:2]) == {"hedge-mkt",
+                                                        "held-1"}
+
+
+@pg
+def test_the_member_read_includes_every_working_order_market():
+    """Against Postgres: a registry contract outside the priority tier with
+    a RESTING paper order on it is read into the refresher as WORKING_ORDER
+    (on 412c4962 the member read was priority <= P_CANDIDATE only)."""
+    import asyncpg
+    try:
+        from tests import paper_harness as PH
+    except ImportError:                                         # noqa: BLE001
+        import paper_harness as PH
+
+    async def go():
+        c = await asyncpg.connect(DSN)
+        tr = c.transaction()
+        await tr.start()
+        try:
+            acct = await PH.new_account(c, "fsub")
+            await c.execute(
+                "INSERT INTO market_plane_registry (contract_id, venue, "
+                " active, desired_subscription, updated_at, priority, "
+                " required_reason, event_start, last_seen_at) VALUES "
+                " ('rc6d1-hedge-mkt', 'POLYMARKET_US', true, true, now(), 80,"
+                " 'VENUE_ACTIVE', now() + interval '3 hours', now()) "
+                "ON CONFLICT (contract_id) DO UPDATE SET active = true, "
+                " priority = 80")
+            await c.execute(
+                "INSERT INTO paper_orders (order_id, idempotency_key, "
+                " account_id, session_id, group_id, role, direction, "
+                " holding_side, intent, us_market_slug, fixture, label, "
+                " order_type, time_in_force, allow_partial, qty, "
+                " limit_price, wire_price, filled_qty, state, decided_at, "
+                " eligible_at, expires_at, simulator_version) VALUES "
+                " ('paperord:rc6d1', 'paperord:rc6d1', $1, $2, 'g-rc6d1', "
+                " 'HEDGE', 'BUY', 'LONG', 'ORDER_INTENT_BUY_LONG', "
+                " 'rc6d1-hedge-mkt', 'fx', '{}'::jsonb, 'RESTING', 'GTD', "
+                " true, 10, 0.4, 0.4, 0, 'RESTING', now(), now(), "
+                " now() + interval '1 hour', 'TEST')",
+                acct["account_id"], acct["session_id"])
+            ref = AR.ActiveRefresh()
+
+            class One:
+                def acquire(self):
+                    class A:
+                        async def __aenter__(self_):
+                            return c
+
+                        async def __aexit__(self_, *a):
+                            return False
+                    return A()
+            await AR.step(One(), None, ref, None, bound=BOUND,
+                          clock=lambda: T0, read=lambda s: {})
+            from sportsassets.market_plane import freshness_window as FW
+            el = {m["contract_id"]: m for m in await FW.eligible(c)}
+            return ref, el
+        finally:
+            await tr.rollback()
+            await c.close()
+    ref, el = run(go())
+    tiers = {s: t for s, t, _p, _st in ref.members}
+    assert tiers.get("rc6d1-hedge-mkt") == "WORKING_ORDER"
+    assert ref.orders_table is True
+    assert el["rc6d1-hedge-mkt"]["tier"] == "WORKING_ORDER"
+    assert el["rc6d1-hedge-mkt"]["orders"] is True
