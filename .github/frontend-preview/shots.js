@@ -156,7 +156,9 @@ async function measure(page, touch) {
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
     page.on('pageerror', e => errors.push('pageerror: ' + String(e).slice(0, 200)));
     // a read that never got an answer is counted too, never dropped
-    page.on('requestfailed', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' failed'; api[k] = (api[k] || 0) + 1; } });
+    // (with the browser's own reason: a 304 revalidation the page then
+    // aborts reads differently from a network error or a timeout)
+    page.on('requestfailed', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const f = r.failure(); const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' failed:' + ((f && f.errorText) || '?'); api[k] = (api[k] || 0) + 1; } });
     page.on('response', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' ' + r.status(); api[k] = (api[k] || 0) + 1; } });
     let status = null;
     // COMMAND polls its feeds, so 'networkidle' may never come: wait for the
