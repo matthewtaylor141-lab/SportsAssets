@@ -1393,3 +1393,5 @@ tests/test_rc6e_deploy_lineage.py
 tests/test_rc6e_upgrade_path.py
 # (RC6 lane G2) the Live Game State fixture adapter reads the venue's own two team objects of the held event (us_premap team_id / names / team_league, one start); only league codes production shows per sport; unordered pairs bind a provider game only by full-name equality with a unique assignment; census SQL = collector verdict; display only
 tests/test_rc6_lgs_venue_fixture_adapter.py
+# (RC6 judge) every gate the judge reads (the release, its implementation, the rollback target) comes from the newest run that CONCLUDED via the one grading file; a cancelled or skipped run carries no verdict and is listed
+tests/test_pm_acceptance_gate_runs.py
