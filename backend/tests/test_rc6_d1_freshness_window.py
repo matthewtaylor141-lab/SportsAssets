@@ -404,7 +404,14 @@ class _OnePool:
 
 
 async def _seed(c, rows):
+    """Inside the test's rolled-back transaction: only these registry rows
+    active, and no other test's working PAPER order left open (each would be
+    an eligible WORKING_ORDER member here)."""
     await c.execute("UPDATE market_plane_registry SET active=false")
+    await c.execute(
+        "UPDATE paper_orders SET state = 'CANCELED', terminal_at = now(), "
+        " terminal_reason = 'TEST_ISOLATION' WHERE state = ANY($1::text[])",
+        list(FW().OPEN_ORDER_STATES))
     for cid, prio, mt, fam in rows:
         await c.execute(
             "INSERT INTO market_plane_registry (contract_id, venue, active, "
