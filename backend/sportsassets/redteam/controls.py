@@ -654,6 +654,9 @@ def multiple_testing(registry: dict, read: dict | None = None) -> dict:
                              "days": m.get("days"),
                              "events": m.get("events"),
                              "excluded": m.get("excluded"),
+                             # observations made before / after the
+                             # registration (a label; no rule added)
+                             "provenance": m.get("provenance"),
                              "study": registry.get("study"),
                              "plan_sha": registry.get("plan_sha"),
                              "champion": "CASH (no candidate beats it "

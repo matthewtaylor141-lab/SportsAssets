@@ -1423,3 +1423,5 @@ tests/test_rc6_kalshi_ws_merge_integration.py
 tests/test_rc6_p_evcontrols_attribution_read.py
 # (RC6.2 p-evcontrols) the executable-EV verdict prices its whole declared window (a cut read is CASH by name, never a verdict over a subset); the digital twin never certifies on a cut population (TWIN_READ_TRUNCATED)
 tests/test_rc6_p_evcontrols_ev_twin_read.py
+# (RC6.2 p-evcontrols) the strategy-selection study reports which observations were made before / after its registration (a label: the measurement, the plan and its sha unchanged, no rule added)
+tests/test_rc6_p_evcontrols_study_provenance.py
