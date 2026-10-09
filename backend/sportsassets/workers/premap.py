@@ -6999,7 +6999,15 @@ async def _read_events_page(client, q: dict, walk) -> dict:
     retries already counted on the walk; the caller counts the last attempt
     as a request only when `sent`), or the original exception for a failure
     that is not retried (a 429, an offset refusal, an answered failure),
-    which the caller names exactly as before."""
+    which the caller names exactly as before.
+
+    A READ OUR GATE REFUSED DURING THE VENUE'S 429 COOLDOWN (P0-429
+    integration) is never sent: it is read again at the same offset only
+    after the cooldown (and any hold) has run out, and when the retries or
+    the pass's time bound run out the pass stops RATE_LIMITED_BY_VENUE --
+    the 429's stop, so no fallback follows it -- not REQUEST_FAILED."""
+    from .. import venue_pace
+
     unsent_left = max(0, int(PAGE_READ_UNSENT_RETRIES))
     resends_left = max(0, int(PAGE_READ_RESENDS))
     retried = False
@@ -7016,6 +7024,11 @@ async def _read_events_page(client, q: dict, walk) -> dict:
             if got is None:
                 raise
             kind, sent = got
+            # (P0-429 integration) OUR gate refused this read while the
+            # venue's 429 cooldown stands: rate-limited, never sent -- the
+            # pass stops RATE_LIMITED_BY_VENUE when the retries run out
+            cooled = (_our_gate_refused(exc) is not None
+                      and venue_pace.cooldown_left() > 0)
             last = type(exc).__name__
             if not isinstance(exc, _ReadNotSent):
                 refusal = getattr(exc, "refusal", None)
@@ -7027,13 +7040,16 @@ async def _read_events_page(client, q: dict, walk) -> dict:
                 pause = RESEND_PAUSE_S
             else:
                 can = unsent_left > 0
-                pause = max(UNSENT_RETRY_PAUSE_S, _gate_hold_left())
+                pause = max(UNSENT_RETRY_PAUSE_S, _gate_hold_left(),
+                            venue_pace.cooldown_left())
             if not can:
                 walk.read_failures[kind] = walk.read_failures.get(kind, 0) + 1
                 if not sent:
                     walk.reads_unsent += 1
                 raise _PageReadFailed(kind, sent=sent, why="retries exhausted"
-                                      " at " + why, stop=vc.STOP_ERROR) from exc
+                                      " at " + why,
+                                      stop=(vc.STOP_RATE_LIMITED if cooled
+                                            else vc.STOP_ERROR)) from exc
             if walk.deadline is not None and (
                     walk._clock() + pause >= walk.deadline):
                 walk.read_failures[kind] = walk.read_failures.get(kind, 0) + 1
@@ -7041,7 +7057,8 @@ async def _read_events_page(client, q: dict, walk) -> dict:
                     walk.reads_unsent += 1
                 raise _PageReadFailed(kind, sent=sent, why="no room left in "
                                       "the pass's wall-time bound at " + why,
-                                      stop=vc.STOP_WALL_TIME) from exc
+                                      stop=(vc.STOP_RATE_LIMITED if cooled
+                                            else vc.STOP_WALL_TIME)) from exc
             walk.read_retried(kind, sent=sent)
             if sent:
                 resends_left -= 1

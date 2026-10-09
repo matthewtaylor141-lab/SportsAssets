@@ -55,6 +55,7 @@ NO TEST HERE SUBMITS AN ORDER.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 
 import httpx
@@ -146,6 +147,30 @@ def clock(monkeypatch):
     monkeypatch.setattr(GRT, "_cooldown_sleep", c.sleep, raising=False)
     monkeypatch.setattr(GRT, "_hold_sleep", c.hold_sleep, raising=False)
     return c
+
+
+@pytest.fixture
+def no_wall_pause(monkeypatch):
+    """premap's pause before re-reading a page our gate refused
+    (_read_events_page: max(UNSENT_RETRY_PAUSE_S, the hold, the cooldown
+    left)) without wall time: the fake clock does not move, so the cooldown
+    is still in force when the read is asked again -- it is refused again,
+    up to 1 + PAGE_READ_UNSENT_RETRIES attempts. Records each pause."""
+    real_sleep = asyncio.sleep
+    pauses: list = []
+
+    async def _sleep(delay, result=None):
+        if delay and delay > 0:
+            pauses.append(float(delay))
+        return await real_sleep(0, result=result)
+
+    monkeypatch.setattr(premap.asyncio, "sleep", _sleep)
+    return pauses
+
+
+#: the attempts one page read makes while our gate refuses it (the
+#: integrated candidate's _read_events_page re-reads a refused page)
+ATTEMPTS = 1 + premap.PAGE_READ_UNSENT_RETRIES
 
 
 @pytest.fixture(autouse=True)
@@ -466,7 +491,7 @@ async def test_the_calendar_and_fast_lanes_wait_a_floor_cooldown_out_and_complet
 
 @pg
 async def test_a_cooldown_past_the_cap_at_the_full_sweep_sends_nothing_and_never_falls_back(
-        monkeypatch, clock):
+        monkeypatch, clock, no_wall_pause):
     """The first review's reproduction, through the real stack, with a
     cooldown the sweep may not wait out (the venue's Retry-After of 60 s):
     refused at once -- never after sleeping part of it. Before the first fix
@@ -490,26 +515,33 @@ async def test_a_cooldown_past_the_cap_at_the_full_sweep_sends_nothing_and_never
         assert vc.PASS_MARKETS_FALLBACK not in rec["passes"]
         # the ladder ended on the FIRST refused rung (one claim, one
         # refusal), named rate-limited -- never "no variant answered"
-        assert len(claims) == 1
+        assert len(claims) == ATTEMPTS
         assert w["stopped"] == vc.STOP_RATE_LIMITED
         assert _past(w["error"]) and _past(summary["err"])
         # refused at once: the transport slept nothing of it
         assert clock.sleeps == [] and clock.hold_sleeps == []
         # the venue was never asked: the record never says it answered 429
-        assert summary["err"].startswith("NOT_SENT: ")
+        assert premap.READ_REFUSED_BY_OUR_GATE in summary["err"]
         assert "the venue rate-limited" not in summary["err"]
         # a read our gate withheld is not a request
         assert rec["requests"] == 0 and w["requests"] == 0
         assert w["probe_requests_failed"] == 0
-        assert _not_sent_past(rec) == sum(_not_sent_notes(rec).values()) == 1
+        # every attempt at the probe page was withheld, and is on the
+        # receipt as a read never sent -- never as a request
+        assert w["reads_unsent"] == ATTEMPTS
+        assert w["read_failures"] == {premap.READ_REFUSED_BY_OUR_GATE: ATTEMPTS}
+        # each re-read waited the cooldown's remainder first (never the bare
+        # 1 s pause into a cooldown that still stands)
+        assert len(no_wall_pause) == ATTEMPTS - 1
+        assert min(no_wall_pause) >= LONG_RETRY_AFTER_S - 1.0
         assert NOTE_WAITS not in rec["notes"]
         assert rec["outcome"] == "FAILED"
         assert summary["receipt_history"]["appended"] is True
         assert await conn.fetchval("SELECT count(*) FROM us_premap") == 0
         # the transport counted the deferral, attributed to the sweep
         st = VP.rate_limit_state()
-        assert st["deferred_total"] == deferred_before + 1
-        assert st["by_source"]["premap_full"]["deferred"] == 1
+        assert st["deferred_total"] == deferred_before + ATTEMPTS
+        assert st["by_source"]["premap_full"]["deferred"] == ATTEMPTS
     finally:
         await tx.rollback()
         await conn.close()
@@ -517,7 +549,7 @@ async def test_a_cooldown_past_the_cap_at_the_full_sweep_sends_nothing_and_never
 
 @pg
 async def test_a_cooldown_past_the_cap_armed_mid_walk_stops_the_pass_rate_limited_and_counts_only_what_was_sent(
-        monkeypatch, clock):
+        monkeypatch, clock, no_wall_pause):
     """A cooldown past the cap is armed while the probe page is in flight
     (another walker's 429, the venue's Retry-After of 60 s). The 200 already
     in flight changes nothing; the per-event detail repair and the next page
@@ -551,7 +583,11 @@ async def test_a_cooldown_past_the_cap_armed_mid_walk_stops_the_pass_rate_limite
         # the receipt counts what was SENT, nothing our gate withheld
         assert rec["requests"] == w["requests"] == 1
         assert rec["requests_outside_page_walks"].get("event_detail", 0) == 0
-        assert _not_sent_past(rec) == sum(_not_sent_notes(rec).values()) == 2
+        # the detail repair, withheld once, is noted; the next page, withheld
+        # on every attempt, is on the receipt as a read never sent
+        assert _not_sent_past(rec) == sum(_not_sent_notes(rec).values()) == 1
+        assert w["reads_unsent"] == ATTEMPTS
+        assert w["read_failures"] == {premap.READ_REFUSED_BY_OUR_GATE: ATTEMPTS}
         # rows read before the cooldown are kept; no fallback
         assert summary["mode"] == "events/partial"
         assert vc.PASS_MARKETS_FALLBACK not in rec["passes"]
@@ -568,7 +604,7 @@ async def test_a_cooldown_past_the_cap_armed_mid_walk_stops_the_pass_rate_limite
 
 @pg
 async def test_a_cooldown_refusal_in_a_partition_bucket_aborts_it_rate_limited_never_counted(
-        monkeypatch, clock):
+        monkeypatch, clock, no_wall_pause):
     """The window truncates (3 requests), the partition walks its first
     bucket -- refused by our gate. Before the fix the bucket stopped
     REQUEST_FAILED with a request it never sent."""
@@ -581,7 +617,7 @@ async def test_a_cooldown_refusal_in_a_partition_bucket_aborts_it_rate_limited_n
         rec = summary["completeness"]
         w = rec["passes"][vc.PASS_WINDOW]
         sent = [c for c in venue.calls if c[0] == "events"]
-        assert len(sent) == 3 and venue.list_attempts == 4
+        assert len(sent) == 3 and venue.list_attempts == 3 + ATTEMPTS
         part = w["partition"]
         assert part["aborted_by"] == vc.STOP_RATE_LIMITED
         bucket = [b for b in part["buckets"] if not b["root"]][0]
@@ -597,7 +633,7 @@ async def test_a_cooldown_refusal_in_a_partition_bucket_aborts_it_rate_limited_n
 
 @pg
 async def test_a_cooldown_in_force_stops_the_calendar_lane_named_and_sends_nothing(
-        monkeypatch, clock):
+        monkeypatch, clock, no_wall_pause):
     """Before the fix the AHEAD pass's slices were each refused, labelled
     REQUEST_FAILED and counted, and the lane went on to STARTED_EARLIER."""
     window, ahead, earlier = build_board()
@@ -608,7 +644,7 @@ async def test_a_cooldown_in_force_stops_the_calendar_lane_named_and_sends_nothi
         _wire(monkeypatch, conn, venue)
         cal = await premap.calendar_refresh()
         rec = cal["completeness"]
-        assert venue.calls == [] and venue.list_attempts == 1
+        assert venue.calls == [] and venue.list_attempts == ATTEMPTS
         assert rec["passes"][vc.PASS_AHEAD]["stopped"] == vc.STOP_RATE_LIMITED
         assert rec["passes"][vc.PASS_STARTED_EARLIER]["stopped"] == \
             vc.STOP_NOT_RUN
@@ -622,7 +658,7 @@ async def test_a_cooldown_in_force_stops_the_calendar_lane_named_and_sends_nothi
 
 @pg
 async def test_the_markets_fallback_never_counts_a_page_our_gate_withheld(
-        monkeypatch, clock):
+        monkeypatch, clock, no_wall_pause):
     """A DEAD events board (502 on every rung, no cooldown) takes the
     fallback, as R30A allows; a 429 elsewhere arms the cooldown as its first
     markets.list page is due. Before the fix that page was REQUEST_FAILED
