@@ -83,8 +83,13 @@ async def refresh(conn, *, pos: dict, contract: dict | None,
         label = "CURRENT_BLEND"
     else:
         try:
+            # the provider fixture the caller resolved for the held read
+            # (xavier_held_fixture: the entry's PinnAPI key, or the fixture
+            # the PinnAPI matcher recorded for this contract); the entry's
+            # own key when none was resolved
             cur = await held_feed(
-                conn, pos=dict(pos, entry_event_key=c.get("event_key"),
+                conn, pos=dict(pos, entry_event_key=c.get(
+                                   "held_event_key", c.get("event_key")),
                                entry_line=c.get("line") if c.get("market") in
                                ("spread", "total", "team_total") else None),
                 payout_event=c["payout_event"],

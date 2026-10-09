@@ -1357,3 +1357,7 @@ tests/test_rc6_pinnapi_client_close_backoff.py
 tests/test_rc6_pinnapi_eviction_standdown.py
 # (RC6 CI) every database a test suite reads without a default (RN1X_TEST_DSN, BETTOR_TEST_PG_DSN) is given to it by BOTH required gates; the 44 bettor live-store / canary / incentive / socket-allowance tests skipped in every gate through 732cc0c6
 tests/test_ci_sets_every_test_database.py
+# (RC6 xavier-records) every held paper position carries an accountable management record (identity, remaining qty, the probability's three clocks and why it is not current, decision and alternatives, next review or price condition, orders with their ACTUAL states, live protection, residual exposure, the packet NOW by the gate's rule, every blocker); the assessment persists the limitation; the xavier_complete gate names every blocker with whole counts, verdict unchanged
+tests/test_rc6_xavier_management_record.py
+# (RC6 xavier-records) a held contract entered on a metered event key is read on the PinnAPI fixture the matcher recorded for the same contract (both measures, the exploration entry check, the held watch); a PinnAPI entry key is never overridden; the read's own checks still refuse a wrong fixture
+tests/test_rc6_xavier_held_fixture.py

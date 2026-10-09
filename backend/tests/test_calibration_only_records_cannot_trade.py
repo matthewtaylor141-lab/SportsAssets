@@ -769,7 +769,48 @@ READERS = {
     # (test_the_held_watch_reads_only_its_entry_valuations_event_key_by_id).
     "pinnapi_held.py": (
         "BY_ID_FROM_A_HELD_ENTRY_DECISION_FIXTURE_IDENTITY_NEVER_SELECTS", 1),
+    # (RC6 xavier-records) THE HELD CONTRACT'S PINNAPI FIXTURE
+    # (CONTRACT_FIXTURES_SQL): for a venue contract Xavier holds (or the
+    # exploration entry check asks about), the newest PinnAPI fixture id the
+    # PinnAPI matcher recorded on a row it wrote FROM the PinnAPI feed
+    # (settlement_comparison.reference_input.feed_event_id) -- only to hand
+    # the held read a fixture it then re-checks (start, outcome, the 30 s
+    # rule). Both purposes, like pinnapi_held.py above: every production
+    # PinnAPI row is CALIBRATION_ONLY, and the row's probability, price and
+    # purpose are never read. It selects no candidate, sizes and places
+    # nothing, and writes nothing
+    # (test_the_held_fixture_read_takes_only_the_matched_fixture_identity).
+    "xavier_held_fixture.py": (
+        "BY_CONTRACT_PINNAPI_FIXTURE_IDENTITY_FOR_THE_HELD_READ_NEVER_SELECTS",
+        1),
 }
+
+
+def test_the_held_fixture_read_takes_only_the_matched_fixture_identity():
+    """The classification of xavier_held_fixture.py above, pinned: its one
+    read of the table is by venue contract, from rows the PinnAPI feed wrote
+    (the provider on the row AND on its recorded reference input), takes the
+    row id, its decision instant and the recorded fixture identity -- never
+    a probability, a price or a purpose -- and is bounded. The module writes
+    no table."""
+    from sportsassets import xavier_held_fixture as XHF
+
+    sql = " ".join(XHF.CONTRACT_FIXTURES_SQL.split())
+    assert "FROM external_valuations v" in sql
+    assert "v.us_market_slug = ANY($1::text[])" in sql
+    assert "v.provider = 'pinnapi.com/raw-websocket'" in sql
+    assert ("v.settlement_comparison->'reference_input'->>'provider' = "
+            "'pinnapi.com/raw-websocket'") in sql
+    assert set(re.findall(r"\bv\.(\w+)", sql)) == {
+        "us_market_slug", "id", "decided_at", "settlement_comparison",
+        "provider"}
+    took = set(re.findall(r"'reference_input'->>?'(\w+)'", sql))
+    assert took == {"feed_event_id", "fixture_match", "provider"}
+    assert "LIMIT %d" % XHF.MAX_SLUGS in sql
+    src = inspect.getsource(XHF)
+    assert src.count("external_valuations") == 1
+    for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ", "execute("):
+        assert verb not in src, verb
 
 
 def test_the_held_watch_reads_only_its_entry_valuations_event_key_by_id():

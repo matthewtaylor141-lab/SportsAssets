@@ -163,6 +163,12 @@ def test_no_funded_module_imports_the_paper_modules():
                # or cancel call; the actual lane hands its review hook in
                # from app.py, so execmirror imports no paper module
                "agents/xavier_management.py",
+               # (RC6 xavier-records) the management READBACK's record of
+               # each held paper position (management_view): reads the paper
+               # ledger's positions, the review rows, the orders and the
+               # protection state; writes nothing, holds no order, submit or
+               # cancel call, and imports no funded module
+               "agents/xavier_management_record.py",
                # the held-position watch on the PinnAPI feed: on a held
                # market's price change it SCHEDULES a paper Xavier review
                # (paper_runtime.schedule_held_review); no write, no order

@@ -160,12 +160,22 @@ async def xavier_can_price(conn, *, cand: dict, at: float,
     key (the entry-proven fixture) and, for a line, its line. The read runs
     in its own savepoint that is ALWAYS rolled back (it writes nothing), so
     a read the 1 s budget cancelled mid-statement can never leave the
-    caller's transaction aborted."""
+    caller's transaction aborted.
+
+    THE PROVIDER FIXTURE IS THE ONE MANAGEMENT WILL HAND THE READ (RC6
+    xavier-records, xavier_held_fixture): the entry valuation's PinnAPI key,
+    or -- for a metered event key -- the fixture the PinnAPI matcher
+    recorded for this same contract, resolved in its own savepoint before
+    the held read's. The entry asks the reader exactly what Xavier's review
+    will ask it: no stricter, no looser."""
     from .. import bettor_market_family as MF
+    from .. import xavier_held_fixture as XHF
     from . import paper_xavier as PX
     is_line = str(cand.get("market") or "") in MF.LINE_FAMILIES
+    fx = await XHF.held_key(conn, us_market_slug=cand.get("us_market_slug"),
+                            entry_event_key=cand.get("event_key"), at=at)
     pos = {"us_market_slug": cand.get("us_market_slug"),
-           "entry_event_key": cand.get("event_key"),
+           "entry_event_key": fx.get("event_key", cand.get("event_key")),
            "entry_line": cand.get("line") if is_line else None}
     try:
         sp = conn.transaction()
@@ -189,6 +199,7 @@ async def xavier_can_price(conn, *, cand: dict, at: float,
                       "HELD_READ_REFUSED_ONLY_FOR_CURRENCY_OR_NOT_EVALUATED"
                       if can else "HELD_READ_CANNOT_PRICE_THIS_CONTRACT"),
             "reader": "paper_xavier._held_feed",
+            "held_fixture": fx,
             "held_read": {k: got.get(k) for k in (
                 "sport_id", "feed_event_id", "market_key", "designation",
                 "identity_basis", "error") if got.get(k) is not None}}

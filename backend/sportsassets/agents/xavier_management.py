@@ -637,6 +637,17 @@ def actual_alternatives(*, evidence: dict, held: int, exit_px,
         alts, evidence_state=state), "recommendation": rec}
 
 
+def _held_fixture_of(evidence: dict) -> dict | None:
+    """The provider fixture the held read was handed (xavier_held_fixture),
+    as the measure carries it: on its `feed` when the read priced the
+    contract, on its `feed_detail` when it refused. Pure."""
+    for k in ("feed", "feed_detail"):
+        v = (evidence or {}).get(k)
+        if isinstance(v, dict) and v.get("held_fixture") is not None:
+            return v["held_fixture"]
+    return None
+
+
 def assessment(*, kind: str, group_id: str, review_id: str, thesis: dict |
                None, at: float, lat: dict, evidence: dict,
                venue_economics: dict, thesis_state: dict, alternatives: list,
@@ -661,6 +672,21 @@ def assessment(*, kind: str, group_id: str, review_id: str, thesis: dict |
         limit = thesis.get("probability_limit_s")
     valuation = XF.valuation_block(dict(evidence, evidence_state=state),
                                    assessed_at=at, limit_s=limit)
+    # WHY THE PROBABILITY IS NOT CURRENT, PERSISTED (RC6 xavier-records).
+    # `probability_limitation` was put on this row's dict and never written
+    # (the table has no column for it), and the held PinnAPI read's refusal
+    # stayed on the review's measure only: production 2026-10-08 20:03Z
+    # showed three held positions STALE_ENTRY_TIME_PROBABILITY with no
+    # reason on the assessment or the readback. They ride in the valuation
+    # object the row already stores (migration 222's jsonb column -- no new
+    # column, no migration); the valuation's hash is unchanged (it covers
+    # the identity of the reading, not this explanation).
+    valuation["limitation"] = {
+        "probability_limitation": evidence.get("probability_limitation"),
+        "feed_refusal": evidence.get("feed_refusal"),
+        "why": (str(evidence.get("why"))[:300]
+                if evidence.get("why") is not None else None),
+        "held_fixture": _held_fixture_of(evidence)}
     return {"assessment_id": "xma:" + _sha([kind, review_id])[:32],
             "position_kind": kind, "group_id": group_id,
             "review_id": review_id,
@@ -1859,7 +1885,13 @@ def position_view(*, kind: str, group_id: str, ref: dict, thesis: dict |
             "probability": a.get("probability"),
             "source": a.get("probability_source"),
             "age_s": a.get("probability_age_s"),
-            "discretionary_permitted": a.get("discretionary_permitted")},
+            "discretionary_permitted": a.get("discretionary_permitted"),
+            # why it is not current, as the assessment persisted it (RC6;
+            # null on rows written before -- the management record then
+            # reads it from the review's own measure)
+            "limitation": ((a.get("valuation") or {}).get("limitation")
+                           if isinstance(a.get("valuation"), dict)
+                           else None)},
         "thesis": {"thesis_id": (thesis or {}).get("thesis_id"),
                    "state": (a or {}).get("thesis_state") or (
                        TH_NONE if thesis is None else None),
@@ -2034,10 +2066,13 @@ async def management_view(conn, *, limit: int = 100,
     # position -- its own open qty, the latest settlement subtracted, never
     # "any settlement in the group" -- whatever its age, handed off or not
     not_handed: list = []
+    open_accounts: dict = {}
     for r in await conn.fetch(OPEN_PAPER_REFS_SQL):
         handed = r["handoff_id"] is not None
         if not handed:
             not_handed.append(r["group_id"])
+        open_accounts[(r["group_id"], r["us_market_slug"],
+                       r["holding_side"])] = r["account_id"]
         refs.append((K_PAPER, r["group_id"], {
             "handoff_id": r["handoff_id"], "market": r["us_market_slug"],
             "holding_side": r["holding_side"],
@@ -2083,6 +2118,7 @@ async def management_view(conn, *, limit: int = 100,
                 vas[(v["group_id"], v["position_kind"])] = v
     by_ev, by_th, by_rs = {}, {}, {}
     overdue = missing = shadow = 0
+    record_refs: list = []
     vctx = await validity_context(
         conn, [(k, g, ref.get("market"), ref.get("holding_side"))
                for k, g, ref, _ in refs if ref["state"] == "OPEN"], now=at)
@@ -2108,7 +2144,40 @@ async def management_view(conn, *, limit: int = 100,
             shadow += 1 if (pv["reallocate"] or {}).get("recommended") else 0
         else:
             pv["review_overdue"] = None
+        if kind == K_PAPER and ref["state"] == "OPEN":
+            record_refs.append({
+                "account_id": open_accounts.get(
+                    (g, ref.get("market"), ref.get("holding_side"))),
+                "group_id": g, "market": ref.get("market"),
+                "holding_side": ref.get("holding_side"),
+                "review_due_at": pv.get("next_review_due_at"),
+                "assessment": a, "display": pv.get("freshness"),
+                "view": pv})
         out["positions"].append(pv)
+    # THE MANAGEMENT RECORD OF EVERY HELD PAPER POSITION (RC6 xavier-
+    # records, agents/xavier_management_record): identity and remaining
+    # qty, the probability with its three clocks and why it is not current,
+    # the decision and every alternative, the next review or price
+    # condition, the orders with their ACTUAL states, the live protection,
+    # the residual exposure, the packet NOW by the gate's own rule and every
+    # blocker by name. Read only; a record that cannot be read says so and
+    # is counted as incomplete.
+    recs: list = []
+    if record_refs:
+        from . import xavier_management_record as XMR
+        try:
+            got = await XMR.records_for(conn, record_refs, now=at)
+        except Exception as exc:                                # noqa: BLE001
+            got = {}
+            out["management_records_unread"] = "%s: %s" % (
+                type(exc).__name__, str(exc)[:160])
+        for rr in record_refs:
+            rec = got.get((rr["group_id"], rr["market"],
+                           rr["holding_side"])) or {
+                "unread": XMR.R_RECORD_UNREAD,
+                "why": "NO_RECORD_READ_FOR_THIS_OPEN_POSITION"}
+            rr["view"]["management_record"] = rec
+            recs.append(rec)
     out["summary"] = {
         "positions": len(refs),
         "open_positions": sum(1 for r in refs if r[2]["state"] == "OPEN"),
@@ -2127,6 +2196,9 @@ async def management_view(conn, *, limit: int = 100,
         "value_add_rows": len(vas),
         "policy_status": policy["status"],
         "policy_approved": policy["approved"]}
+    if record_refs:
+        from . import xavier_management_record as XMR
+        out["summary"]["management_records"] = XMR.summary(recs)
     out["status"] = "OK" if refs else "EMPTY"
     out["why"] = None if refs else "NO_POSITION_HAS_BEEN_HANDED_TO_XAVIER"
     return out
