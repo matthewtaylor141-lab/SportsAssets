@@ -557,3 +557,19 @@ def test_the_run_loop_proves_a_quiet_member_with_one_snapshot_call(
     assert sr["enabled"] is True and sr["totals"]["current"] == 1
     assert beats[0][2]["freshness_task"]["last_snapshot_call"]["current"] \
         == 1
+
+
+def test_a_book_without_a_state_takes_the_streams_own_fallback():
+    """The venue states a market's state on an update only when it is not
+    the default; the stream then falls back to its last known state, else
+    the refdata record's (institutional_stream.current). So does this."""
+    S = SR()
+    clock, m, books, ref, syms = _quiet(1)
+    snap = S.SnapshotRefresh()
+
+    def bare(tok, ss):
+        return {"status": "ENDED", "updates": [(IS.decode_update(upd(
+            "q-00", with_state=False).update, pb2), clock.t)]}
+    got = run(snap.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
+                        clock=clock, caller=bare))
+    assert got["current"] == 1 and ref.origin_of("q-00") == "SNAPSHOT"

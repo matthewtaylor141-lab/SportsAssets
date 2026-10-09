@@ -219,16 +219,14 @@ def judge_update(u: dict, *, asked: set, refdata_state=None) -> dict:
     return dict(out, outcome=CURRENT)
 
 
-def _refdata_state(mgr, s):
-    """The plane's refdata record's state for `s` (the stream's fallback),
-    from the books' instrument record; None when not held."""
+def _refdata_state(mgr, s, *, now: float, bound: float):
+    """The state the stream itself would fall back to for `s` -- its last
+    update's, else the plane's refdata record's (institutional_stream
+    current(): evidence.market.state) -- or None when the books do not hold
+    it. Read through the books' public read, never their internals."""
     try:
-        sid = mgr.symbol_to_shard.get(s)
-        if sid is None:
-            return None
-        books = mgr.shards[sid]["books"]
-        with books._lock:
-            return (books._instruments.get(s) or {}).get("refdata_state")
+        r = mgr.current(s, now=now, max_snapshot_age_s=bound) or {}
+        return ((r.get("evidence") or {}).get("market") or {}).get("state")
     except Exception:                                           # noqa: BLE001
         return None
 
@@ -313,8 +311,8 @@ class SnapshotRefresh:
         current = 0
         for u, at in res.get("updates") or ():
             j = judge_update(u, asked=asked,
-                             refdata_state=_refdata_state(mgr, u.get(
-                                 "symbol")))
+                             refdata_state=_refdata_state(
+                                 mgr, u.get("symbol"), now=at, bound=bound))
             o = j["outcome"]
             t["by_outcome"][o] = t["by_outcome"].get(o, 0) + 1
             if o == R_SNAPSHOT_NOT_ASKED:
