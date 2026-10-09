@@ -35,8 +35,9 @@ const FID = vm.runInNewContext('(() => {' + block(TRADER, 'TRADER FIDELITY') + '
 
 // synthetic stand-ins with the production shapes
 const SLUG = 'tst-leakcheck-event-2026-10-09';
-const KEY = 'PB:EVT:' + SLUG;
-const KEY_MKT = 'PB:MKT:tst-leakcheck-market-2026-10-09-yes';
+// position_rooms.BOOK_CODES / position.js KEY_RE: PAPER, ACTUAL-POLYMARKET, ACTUAL-KALSHI
+const KEY = 'PAPER:EVT:' + SLUG;
+const KEY_MKT = 'ACTUAL-KALSHI:MKT:tst-leakcheck-market-2026-10-09-yes';
 const ENC = encodeURIComponent(KEY);
 const sha12 = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 12);
 const P1 = 'paperpos:paper_leakcheck_acct:grp-leak-0001:tst-leakcheck-market-1:LONG';
@@ -148,7 +149,7 @@ test('every record is scrubbed of every identifier the harness read, in every sp
 test('identifiers: keys, their parts, slugs and ids; never a plain word', () => {
   const ids = PA.collectIdentifiers([ROOMS, SNAP]);
   for (const x of [KEY, SLUG, KEY_MKT, P1, 'paper_leakcheck_acct', 'grp-leak-0001', 'tst-leakcheck-market-1', ORDER, REVIEW, 'tst-leakcheck-event-1', TITLE]) assert.ok(ids.has(x), x);
-  for (const x of ['PB', 'EVT', 'LONG', 'SHORT', 'DEREK', 'XAVIER', 'PAPER', 'xavier', 'paperpos', '1001']) assert.ok(!ids.has(x), x);
+  for (const x of ['PAPER', 'ACTUAL-KALSHI', 'EVT', 'MKT', 'LONG', 'SHORT', 'DEREK', 'XAVIER', 'xavier', 'paperpos', '1001']) assert.ok(!ids.has(x), x);
   // a plain word is never replaced: the harness's own vocabulary stays intact
   assert.deepEqual(PA.scrubDeep({ view: 'desktop_xavier', a: '/xavier' }, ['xavier', 'desktop']), { view: 'desktop_xavier', a: '/xavier' });
   // a query value is hashed wherever it appears, a public one is kept
