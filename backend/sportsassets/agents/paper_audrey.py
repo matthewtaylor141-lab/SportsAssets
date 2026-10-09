@@ -461,9 +461,16 @@ async def build_report(conn, *, session: dict, account_id: str, day,
 
 
 async def write_report(conn, *, session: dict, account_id: str,
-                       now: float) -> dict:
+                       now: float, final: bool | None = None) -> dict:
+    """Write the report for the day containing `now` (a new version only
+    when its content changes). `final` (RC6.2): the closing write for a day
+    that has turned passes final=True -- it runs at an instant INSIDE the
+    day it covers (start of the new day - 1 ms), so `now >= end` can never
+    mark it; None keeps the instant rule. A final write whose content equals
+    the newest non-final version still writes one final version."""
     day, start, end = day_bounds(now, session.get("reporting_tz")
                                  or "America/New_York")
+    is_final = float(now) >= end if final is None else bool(final)
     rep = await build_report(conn, session=session, account_id=account_id,
                              day=day, start=start, end=end, now=now)
     body = dict(rep)
@@ -471,10 +478,11 @@ async def write_report(conn, *, session: dict, account_id: str,
         {k: v for k, v in body.items() if k != "window"}, sort_keys=True,
         default=str).encode()).hexdigest()
     last = await conn.fetchrow(
-        "SELECT version, digest FROM paper_audrey_reports WHERE "
+        "SELECT version, digest, final FROM paper_audrey_reports WHERE "
         " session_id=$1 AND report_day=$2 ORDER BY version DESC LIMIT 1",
         session["session_id"], day)
-    if last is not None and last["digest"] == digest:
+    if last is not None and last["digest"] == digest and (
+            last["final"] or not is_final):
         return {"written": False, "report_day": str(day),
                 "version": last["version"], "why": "NO_CHANGE",
                 "report": rep}
@@ -485,11 +493,11 @@ async def write_report(conn, *, session: dict, account_id: str,
         " report_day, reporting_tz, version, generated_at, final, reconciles,"
         " report, digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)"
         " ON CONFLICT DO NOTHING", rid, session["session_id"], account_id,
-        day, rep["reporting_tz"], ver, L._ts(now), float(now) >= end,
+        day, rep["reporting_tz"], ver, L._ts(now), is_final,
         rep["reconciliation"]["reconciles"], json.dumps(rep, default=str),
         digest)
     return {"written": True, "report_id": rid, "report_day": str(day),
-            "version": ver, "report": rep}
+            "version": ver, "final": is_final, "report": rep}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -640,9 +648,11 @@ async def step(conn, ctx: dict) -> dict:
     if due:
         # The previous day's final version first, when the day turned.
         if last is not None and last["report_day"] != day:
+            # (RC6.2) marked final explicitly: start - 1 ms lies inside
+            # the day it closes, so the instant rule never made it final
             await write_report(conn, session=sess,
                                account_id=ctx["account_id"],
-                               now=start - 0.001)
+                               now=start - 0.001, final=True)
         rep = await write_report(conn, session=sess,
                                  account_id=ctx["account_id"], now=rep_now)
         r = rep["report"]
