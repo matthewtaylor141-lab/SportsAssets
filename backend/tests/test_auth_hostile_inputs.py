@@ -2,6 +2,7 @@
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 import time
+import asyncio
 
 import pytest
 from fastapi import HTTPException
@@ -17,12 +18,14 @@ GOOD = "a-correct-test-key-of-at-least-32-characters"
 def isolated_auth(monkeypatch):
     G.reset()
     A._UNLOCK_HITS.clear()
+    A._PING_HITS.clear()
     monkeypatch.setattr(A, "settings", lambda: SimpleNamespace(
         admin_token=GOOD, desk_password="test-password",
         operator_password="test-operator-password", engine_ingest_token=GOOD))
     yield
     G.reset()
     A._UNLOCK_HITS.clear()
+    A._PING_HITS.clear()
 
 
 @pytest.mark.parametrize("route", ["/healthz", "/api/command/snapshot",
@@ -178,3 +181,38 @@ def test_concurrent_unlock_guesses_cannot_overspend_the_client_budget():
     assert verdicts.count(False) == 10
     assert verdicts.count(True) == 110
     assert len(hits["shared"]) == 10
+
+
+def test_headerless_ping_cannot_allocate_unbounded_client_state():
+    async def requests():
+        for i in range(1200):
+            request = SimpleNamespace(headers={}, client=SimpleNamespace(host=str(i)))
+            if i < 1000:
+                result = await A.admin_ping(request, x_admin_token="")
+                assert result["match"] is False
+            else:
+                with pytest.raises(HTTPException) as exc:
+                    await A.admin_ping(request, x_admin_token="")
+                assert exc.value.status_code == 429
+            assert len(A._PING_HITS) <= 1000
+    asyncio.run(requests())
+
+
+def test_ping_cannot_reset_its_budget_by_spoofing_the_leftmost_hop():
+    client = TestClient(A.app)
+    for i in range(10):
+        response = client.post("/api/admin/ping", headers={
+            "x-forwarded-for": "spoof-%d, 203.0.113.7" % i})
+        assert response.status_code == 200
+    response = client.post("/api/admin/ping", headers={
+        "x-forwarded-for": "another-spoof, 203.0.113.7"})
+    assert response.status_code == 429
+
+
+def test_ping_preserves_its_existing_limit_even_for_the_correct_credential():
+    client = TestClient(A.app)
+    for _ in range(10):
+        response = client.post("/api/admin/ping", headers={"x-admin-token": GOOD})
+        assert response.status_code == 200 and response.json()["match"] is True
+    assert client.post("/api/admin/ping", headers={
+        "x-admin-token": GOOD}).status_code == 429

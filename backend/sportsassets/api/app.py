@@ -1786,21 +1786,11 @@ async def admin_ping(request: Request,
     whether a non-default token is configured on the server and whether this
     attempt matched, so the UI can say 'wrong token' vs 'env not applied'
     instead of one ambiguous failure message."""
-    import hmac
-    import time as _t
-
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
-    now = _t.time()
-    hits = [t for t in _PING_HITS.get(ip, []) if now - t < 60]
-    if len(hits) >= 10:
+    # Headerless requests bypass the wrong-header middleware; the public
+    # diagnostic still needs the bounded, atomic client budget. Preserve
+    # its ten-per-minute limit for every caller, including the right key.
+    if _throttled(_PING_HITS, request):
         raise HTTPException(status_code=429, detail="slow down")
-    hits.append(now)
-    _PING_HITS[ip] = hits
-    if len(_PING_HITS) > 1000:      # bound the map; drop stale IPs
-        for k in [k for k, v in _PING_HITS.items()
-                  if not v or now - v[-1] > 300][:500]:
-            _PING_HITS.pop(k, None)
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
     return {
