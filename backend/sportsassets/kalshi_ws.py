@@ -168,9 +168,13 @@ class WsBooks:
         self.ticker_sid: dict = {}
         self.stats = {"snapshots": 0, "deltas": 0, "gaps": 0,
                       "disconnects": 0, "ignored_after_gap": 0,
-                      "errors": 0}
+                      "errors": 0, "forgotten": 0,
+                      "ignored_not_tracked": 0}
         self.resubscribe: set = set()
         self.connected = False
+        #: (RC6) markets the runtime stopped tracking in THIS session (see
+        #: `forget`); cleared with the session
+        self.forgotten: set = set()
 
     def _book(self, t):
         return self.books.setdefault(t, {
@@ -180,7 +184,52 @@ class WsBooks:
 
     def want(self, tickers) -> None:
         for t in tickers:
+            self.forgotten.discard(t)
             self._book(t)
+
+    def forget(self, tickers) -> dict:
+        """(RC6) Stop holding the books of markets no longer tracked:
+        {sid: [tickers]} of the live subscriptions they were on.
+
+        WHY. Nothing removed a book: the runtime's wanted set rolls (the
+        fixtures starting within [now - 4 h, now + 36 h]) but every market
+        it ever wanted kept its book -- and counted in its freshness, as
+        CURRENT -- for the life of the process. Production 2026-10-09 03:11Z
+        (research-sql rc6_api-responsive_kalshi_ws_growth.sql): the
+        heartbeat held 235 books, 235/235 "current", while the wanted set
+        was 185; 50 of the CURRENT books were markets no longer tracked.
+        A message still in flight for a forgotten market keeps its sid's
+        sequence (an unbroken seq stays unbroken, a jump is still a gap)
+        and never brings the book back (on_message)."""
+        out: dict = {}
+        for t in tickers:
+            if t not in self.books:
+                continue
+            self.books.pop(t, None)
+            sid = self.ticker_sid.pop(t, None)
+            if sid is not None:
+                self.sid_markets.get(sid, set()).discard(t)
+                out.setdefault(sid, []).append(t)
+            self.resubscribe.discard(t)
+            self.forgotten.add(t)
+            self.stats["forgotten"] += 1
+        return {k: sorted(v) for k, v in out.items()}
+
+    def _not_tracked(self, typ, sid, seq) -> str:
+        """A message for a forgotten market: no book, but its sid's
+        sequence is kept exactly as a tracked market's message keeps it."""
+        self.stats["ignored_not_tracked"] += 1
+        if typ == "orderbook_snapshot":
+            self.sid_seq[sid] = seq
+            return "IGNORED_NOT_TRACKED"
+        last = self.sid_seq.get(sid)
+        if last is None:
+            return "IGNORED_NOT_TRACKED"
+        if seq != last + 1:
+            self._gap_sid(sid, R_SEQ_GAP)
+            return "GAP"
+        self.sid_seq[sid] = seq
+        return "IGNORED_NOT_TRACKED"
 
     def on_connected(self) -> None:
         self.connected = True
@@ -196,6 +245,8 @@ class WsBooks:
         self.sid_seq.clear()
         self.sid_markets.clear()
         self.ticker_sid.clear()
+        # a new session subscribes only what is wanted
+        self.forgotten.clear()
 
     def _gap_sid(self, sid, why) -> None:
         self.stats["gaps"] += 1
@@ -224,6 +275,8 @@ class WsBooks:
         seq = m.get("seq")
         if t is None or sid is None or seq is None:
             return "MALFORMED"
+        if t in self.forgotten:
+            return self._not_tracked(typ, sid, seq)
         if typ == "orderbook_snapshot":
             b = self._book(t)
             yes = {_d(p): _d(q) for p, q in msg.get("yes_dollars_fp") or []}
@@ -340,6 +393,19 @@ class Subscriber:
         self.connections = 0
         self.resubscribes = 0
         self.last_error = None
+
+    def forget(self, tickers) -> int:
+        """(RC6) The markets no longer wanted: their books dropped
+        (WsBooks.forget) and out of the tracked subscription. No command is
+        sent (the socket carries subscribe / unsubscribe only): the venue
+        keeps sending their messages until the session ends -- each one
+        ignored, its sid's sequence kept -- and the next session subscribes
+        the wanted set alone. Returns how many books were dropped."""
+        gone = set(tickers)
+        held = sum(1 for t in gone if t in self.books.books)
+        self.books.forget(gone)
+        self.subscribed.difference_update(gone)
+        return held
 
     async def _subscribe(self, ws, tickers) -> None:
         for c in chunks(sorted(tickers)):
