@@ -730,7 +730,12 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     priority 20, N in 8-47 of 53 samples, ~3.8 a sample). Each tick hands
     the window this task holds to the refresher (`set_frozen`); its members
     join the live list with their frozen tier. Same budget, same gap, same
-    bound, same order; nothing removed from either list.
+    bound; nothing removed from either list. The members only the window
+    holds are outside the scorecard's instant denominator and share the
+    same 12 reads a minute, so the order between the two lists is the
+    owner's (active_refresh.list_order; by default the live list first:
+    the window's other members get every read the live list does not
+    need -- independent review rev2).
 
     THE SNAPSHOT-ONLY gRPC REFRESH (RC6 D1, market_plane.snapshot_refresh):
     when `snapper` is given, the tick first offers it its call (at most one
@@ -811,11 +816,16 @@ async def run() -> None:
              plan_cfg["mode"], plan_cfg["streams"], plan_cfg["books_capacity"])
     # (RC6) the priority active refresh rides the armed stream's client and
     # books; off by switch, or absent when no stream is armed
-    refresher = (AR.ActiveRefresh(per_minute=AR.per_min(os.environ))
+    # (RC6.2) the order between the live registry list and the members only
+    # the frozen window holds is the owner's (UMP_REFRESH_LIST_ORDER;
+    # LIVE_FIRST unless set): the budget is the same in every order
+    refresher = (AR.ActiveRefresh(per_minute=AR.per_min(os.environ),
+                                  order=AR.list_order(os.environ))
                  if mgr is not None and AR.enabled() else None)
     log.info("universal_market_plane: priority active refresh %s",
-             ("ON (%d book reads/min, bound %.0f s)"
-              % (refresher.per_min, FRESH_SLA_S)) if refresher else
+             ("ON (%d book reads/min, bound %.0f s, list order %s)"
+              % (refresher.per_min, FRESH_SLA_S, refresher.order))
+             if refresher else
              (AR.R_REFRESH_NO_STREAM if mgr is None else AR.R_REFRESH_OFF))
     # (RC6 D1) the snapshot-only gRPC refresh beside it: one call a minute
     snapper = (SR.SnapshotRefresh() if refresher is not None
@@ -1037,8 +1047,9 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
     coverage pass (populate.REST_BOOK_SQL / paper_book_counts): the newest
     error-free read, inside the bound, whose own state does not say the
     market is not open (REST_MARKET_NOT_OPEN names one that does), and
-    `refresh_held_market_terminal` counts the members the refresh no longer
-    re-reads because the venue said the market has ended -- each still a
+    `refresh_held_market_terminal` counts the members the refresh does not
+    re-read now (for an hour after the read, active_refresh.RETRY_ENDED_S)
+    because the venue said the market has ended -- each still a
     member, still not current."""
     rows = await conn.fetch(
         "SELECT contract_id, priority, required_reason, event_start, "
@@ -1143,7 +1154,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
             # the venue said the market has ended: still a member, still
             # not current, counted here by name of the rule
             if hasattr(refresher, "held_terminal") and \
-                    refresher.held_terminal(s, stream_received_at=((
+                    refresher.held_terminal(s, now=now, stream_received_at=((
                         (cur or {}).get("evidence") or {}).get(
                             "snapshot") or {}).get("received_at")):
                 held_terminal += 1

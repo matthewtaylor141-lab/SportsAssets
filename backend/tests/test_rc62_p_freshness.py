@@ -27,12 +27,16 @@ the coverage pass of 2026-10-09 05:18:59Z. The census taken at that instant
       at +65 s, 184 at +66 s (its tenth open read at +65 s). With the
       owner's snapshot-only read on, also 184 (it adds nothing here: the 8
       left are closed markets).
-  §2  the read plan: a market whose own book read states a TERMINAL state
-      (freshness_window.TERMINAL_STATES, the held-position rule's) is held
-      out of the plan while it stays a member -- named, NOT current, in the
-      denominator, released by newer stream evidence; a transient not-open
-      market keeps its 900 s retry and is read after every member that can
-      be current. The budget is unchanged.
+  §2  the read plan: a market whose own book read says it has ENDED
+      (active_refresh.ENDED_STATES: expired, terminated, settled, resolved)
+      is held out of the plan for an hour, then read again last -- named,
+      NOT current, in the denominator, released at once by newer stream
+      evidence; any other not-open market (CLOSED, the enum's 0, and the
+      match-and-close auction included: independent review rev2) keeps its
+      900 s retry and is read after every member that can be current. A
+      market read CLOSED that the venue then opens is read again and
+      current (on c07830f2 it was read once and never again). The budget is
+      unchanged.
   §3  the paper runtime's book reads count current in the coverage pass
       and the census only as the frozen window counts them (and the
       held-position rule, on every state it names): the newest error-free
@@ -48,6 +52,12 @@ the coverage pass of 2026-10-09 05:18:59Z. The census taken at that instant
       b3f1b0cd it is read once, before it leaves, and coded N for the rest
       of the window (production window 15:00Z on the RC6.1 plane,
       research-sql 37959672993: 8 such members, ~3.8 a sample).
+  §5  (independent review rev2) which list the budget serves first when it
+      binds -- the owner's decision, LIVE_FIRST by default: with 70 quiet
+      live + 15 quiet frozen-only members the live members are as current
+      as with no frozen-only member (60.0; c07830f2: about 49.5), and with
+      30 + 15 every member of both lists is current. BY_LAPSE (c07830f2)
+      and BOTH_FIRST are measured beside it; the budget is the same.
 
 The replay's 174 already-current members are SYNTHETIC stand-ins with the
 production counts (159 on the stream, 15 through a REST read); the 18 carry
@@ -237,8 +247,9 @@ def _no_window_over_budget(starts):
 
 
 @pytest.mark.parametrize("closed_state", [
-    "INSTRUMENT_STATE_EXPIRED",        # terminal: the reference data's word
+    "INSTRUMENT_STATE_EXPIRED",        # ended: the reference data's word
     "INSTRUMENT_STATE_SUSPENDED",      # transient: still never read first
+    "INSTRUMENT_STATE_CLOSED",         # not ended (review rev2): read last
 ])
 def test_the_scorecard_instant_reaches_184_of_192_inside_a_minute(
         monkeypatch, closed_state):
@@ -266,8 +277,13 @@ def test_the_scorecard_instant_reaches_184_of_192_inside_a_minute(
     # the budget reaches the markets that can be current first
     assert all(t_o < t_c for t_o, s_o in venue.reads if s_o in set(opn)
                for t_c, s_c in venue.reads if s_c in set(closed))
-    if closed_state in FW.TERMINAL_STATES:
+    if closed_state in AR.ENDED_STATES:
         assert read_closed == []                       # held: it has ended
+    else:
+        # due again (its 900 s retry has run out): read, with what the
+        # minute's budget leaves after the open members (12 - 10)
+        assert read_closed and set(read_closed) <= set(closed)
+        assert len(venue.reads) == 12
     fresh, refreshed, cen = _census(m, ref, rows, now)
     assert len(fresh) == N_STREAM
     assert set(opn) <= set(refreshed) and not set(closed) & set(refreshed)
@@ -342,27 +358,126 @@ def test_a_market_whose_book_read_says_it_has_ended_is_held_out_of_the_plan():
     # named, never current, its record kept (the member stays a member)
     assert ref.current(m, now=later, bound=BOUND) == {}
     assert ref.entries["cand-soon"]["state"] == "INSTRUMENT_STATE_EXPIRED"
-    assert ref.held_terminal("cand-soon")
+    assert ref.held_terminal("cand-soon", now=later)
     assert ref.outcome_of("cand-soon") == AR.R_REFRESH_NOT_OPEN
-    # a whole day later, still held
-    due, counts = ref.plan(m, now=now + 86400.0, bound=BOUND)
+    # (independent review rev2) never without a limit: RETRY_ENDED_S after
+    # its read it is due again, after every member that may be current
+    assert AR.RETRY_ENDED_S == 3600.0
+    due, counts = ref.plan(m, now=now + AR.RETRY_ENDED_S - 1.0, bound=BOUND)
     assert "cand-soon" not in due
+    due, counts = ref.plan(m, now=now + AR.RETRY_ENDED_S, bound=BOUND)
+    assert due[-1] == "cand-soon" and AR.R_REFRESH_HELD_TERMINAL not in counts
+    assert not ref.held_terminal("cand-soon", now=now + AR.RETRY_ENDED_S)
 
 
-@pytest.mark.parametrize("state", sorted(
-    s for s in FW.TERMINAL_STATES if s.startswith("INSTRUMENT_STATE_")))
-def test_every_terminal_instrument_state_holds(state):
+@pytest.mark.parametrize("state", sorted(AR.ENDED_STATES))
+def test_every_ended_state_holds_for_its_hour(state):
     clock, m, books, ref = _quiet()
     ref.record("cand-old", H.rest_book("cand-old", state=state), at=clock.t)
     due, counts = ref.plan(m, now=clock.t + 1000.0, bound=BOUND)
     assert "cand-old" not in due and counts[AR.R_REFRESH_HELD_TERMINAL] == 1
+    due, counts = ref.plan(m, now=clock.t + AR.RETRY_ENDED_S, bound=BOUND)
+    assert "cand-old" in due
+
+
+#: (independent review rev2) the window's TERMINAL words that do NOT say the
+#: market has ended: CLOSED is the enum's 0, stated on active programmes not
+#: yet open; the match-and-close auction is a phase
+NOT_ENDED_TERMINAL = sorted(FW.TERMINAL_STATES - AR.ENDED_STATES)
+
+
+def test_the_ended_states_are_the_windows_terminal_states_less_closed():
+    assert AR.ENDED_STATES < FW.TERMINAL_STATES
+    assert NOT_ENDED_TERMINAL == [
+        "CLOSED", "INSTRUMENT_STATE_CLOSED",
+        "INSTRUMENT_STATE_MATCH_AND_CLOSE_AUCTION", "MARKET_STATE_CLOSED",
+        "MARKET_STATE_MATCH_AND_CLOSE_AUCTION"]
+    # every state the institutional enum names that ends a market is held
+    assert {"INSTRUMENT_STATE_EXPIRED", "INSTRUMENT_STATE_TERMINATED"} <= \
+        AR.ENDED_STATES
+
+
+@pytest.mark.parametrize("state", NOT_ENDED_TERMINAL)
+def test_a_closed_or_auction_state_is_never_held_and_keeps_its_retry(state):
+    """Review rev2 finding 1: on c07830f2 every TERMINAL_STATES word held
+    the member with no limit. A CLOSED / auction read waits the 900 s
+    not-open retry, then is due again -- after every member that may be
+    current."""
+    clock, m, books, ref = _quiet()
+    now = clock.t
+    ref.record("cand-old", H.rest_book("cand-old", state=state), at=now)
+    assert not ref.held_terminal("cand-old", now=now + 1.0)
+    due, counts = ref.plan(m, now=now + AR.RETRY_NOT_OPEN_S - 1.0,
+                           bound=BOUND)
+    assert "cand-old" not in due and AR.R_REFRESH_HELD_TERMINAL not in counts
+    assert counts[AR.R_REFRESH_RETRY_WAIT] == 1
+    due, counts = ref.plan(m, now=now + AR.RETRY_NOT_OPEN_S, bound=BOUND)
+    assert due[-1] == "cand-old" and AR.R_REFRESH_HELD_TERMINAL not in counts
+
+
+class _OpensLater:
+    """The venue's REST book for one member: `before` until `opens_at`,
+    then OPEN. Every read is recorded (instant, state answered)."""
+
+    def __init__(self, clock, before, opens_at):
+        self.clock, self.before, self.opens_at = clock, before, opens_at
+        self.reads: list = []
+
+    def read(self, name, symbol=""):
+        assert name == "book"
+        st = OPEN if self.clock.t >= self.opens_at else self.before
+        self.reads.append((self.clock.t, st))
+        return H.rest_book(symbol, at=self.clock.t, state=st)
+
+
+@pytest.mark.parametrize("before,retry", [
+    ("INSTRUMENT_STATE_CLOSED", AR.RETRY_NOT_OPEN_S),
+    ("MARKET_STATE_CLOSED", AR.RETRY_NOT_OPEN_S),
+    ("INSTRUMENT_STATE_MATCH_AND_CLOSE_AUCTION", AR.RETRY_NOT_OPEN_S),
+    ("INSTRUMENT_STATE_EXPIRED", AR.RETRY_ENDED_S),
+])
+def test_a_market_read_not_open_that_then_opens_is_read_again_and_current(
+        monkeypatch, before, retry):
+    """Independent review rev2, finding 1 (probe_rev2 P2), through the
+    plane's REAL freshness task for two hours. A quiet candidate with no
+    stream book on this connection is read `before`; the venue opens it 10
+    minutes later and the stream sends nothing. On c07830f2 every
+    freshness_window.TERMINAL_STATES word -- CLOSED, the enum's 0, stated on
+    active programmes not yet open, included -- held it with no limit: one
+    read in two hours and never current again. Here a CLOSED / auction read
+    is retried after 900 s (b3f1b0cd's retry), an ENDED one after an hour;
+    the retry reads it OPEN and it is current from then on, re-read before
+    each read lapses, never more than 12 reads in any 60 s."""
+    clock = H.Clock(H.T0)
+    s = "cand-not-open-then-open"
+    m, books = H.plane(clock, [s])          # no stream book: never streamed
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh()
+    venue = _OpensLater(clock, before, opens_at=H.T0 + 600.0)
+    state = _drive(monkeypatch, clock, m, books, ref, venue,
+                   [H.member(s, 10, H.T0 + 86400.0)], seconds=7200)
+    reads = venue.reads
+    assert state["freshness_task"]["errors"] == 0
+    _no_window_over_budget([t for t, _st in reads])
+    assert reads[0] == (H.T0, before)                # read at once
+    assert len(reads) >= 2, ("read once, never again: %r" % reads)
+    # the retry: not before its wait, within a second of it
+    assert retry <= reads[1][0] - reads[0][0] <= retry + 1.0
+    assert reads[1][1] == OPEN
+    # then current for the rest of the two hours, re-read inside the bound
+    again = [t for t, _st in reads[1:]]
+    assert all(b - a <= BOUND - AR.REFRESH_LEAD_S + 1.0
+               for a, b in zip(again, again[1:]))
+    assert clock.t - again[-1] <= BOUND
+    assert s in ref.current(m, now=clock.t, bound=BOUND)
+    assert len(reads) >= (7200 - retry) // BOUND
 
 
 def test_newer_stream_evidence_releases_the_hold():
     clock, m, books, ref = _quiet()
     now = clock.t
     ref.record("cand-soon", H.rest_book(
-        "cand-soon", state="INSTRUMENT_STATE_CLOSED"), at=now)
+        "cand-soon", state="INSTRUMENT_STATE_TERMINATED"), at=now)
     # the stream later sends the market OPEN, then goes quiet again (after
     # the not-open read's own retry wait, which is unchanged)
     clock.t = now + AR.RETRY_NOT_OPEN_S
@@ -387,7 +502,7 @@ def test_an_open_read_or_a_failed_read_never_holds():
         "cand-soon", state="INSTRUMENT_STATE_EXPIRED"), at=now)
     # a later read of the same member that is CURRENT clears the state
     ref.record("cand-soon", H.rest_book("cand-soon"), at=now + 10.0)
-    assert not ref.held_terminal("cand-soon")
+    assert not ref.held_terminal("cand-soon", now=now + 11.0)
     assert "state" not in ref.entries["cand-soon"]
     # a failed read (after the stream released the hold) replaces the
     # outcome: the member is retried on the failed read's own wait, never
@@ -396,32 +511,42 @@ def test_an_open_read_or_a_failed_read_never_holds():
         "cand-later", state="INSTRUMENT_STATE_EXPIRED"), at=now)
     ref.record("cand-later", {"status": 503}, at=now + 10.0)
     assert ref.outcome_of("cand-later") == AR.R_REFRESH_NOT_200
-    assert not ref.held_terminal("cand-later")
+    assert not ref.held_terminal("cand-later", now=now + 11.0)
 
 
 def test_a_not_open_market_is_read_after_every_member_that_can_be_current():
     """Same tier, both never current (lapse first of all): the member whose
     last read said not open (its retry due) goes after the one that may be
-    open. Tier still comes first: a HELD not-open market before a
-    CANDIDATE."""
+    open, and (review rev2) one whose last read said the market has ended,
+    due again after its hour, after those. Tier still comes first: a HELD
+    not-open market before a CANDIDATE."""
     clock = H.Clock(H.T0)
     syms = ["held-closed", "cand-closed-retry", "cand-never-read",
-            "cand-lapsed"]
+            "cand-lapsed", "cand-ended-retry", "cand-closed-word"]
     m, books = H.plane(clock, syms)
     H.update(books, "cand-lapsed", H.T0)
-    clock.t = H.T0 + 1000.0
+    clock.t = H.T0 + 4000.0
     books.on_heartbeat()
     ref = AR.ActiveRefresh()
     ref.set_members([H.member("held-closed", 0, H.T0 + 9000),
+                     H.member("cand-ended-retry", 10, H.T0 + 30),
                      H.member("cand-closed-retry", 10, H.T0 + 60),
+                     H.member("cand-closed-word", 10, H.T0 + 61),
                      H.member("cand-never-read", 10, H.T0 + 9000),
                      H.member("cand-lapsed", 10, H.T0 + 9000)], now=clock.t)
     for s in ("held-closed", "cand-closed-retry"):
         ref.record(s, H.rest_book(s, state="INSTRUMENT_STATE_HALTED"),
                    at=clock.t - AR.RETRY_NOT_OPEN_S - 1.0)
+    ref.record("cand-closed-word", H.rest_book(
+        "cand-closed-word", state="INSTRUMENT_STATE_CLOSED"),
+        at=clock.t - AR.RETRY_NOT_OPEN_S - 2.0)
+    ref.record("cand-ended-retry", H.rest_book(
+        "cand-ended-retry", state="INSTRUMENT_STATE_EXPIRED"),
+        at=clock.t - AR.RETRY_ENDED_S - 1.0)
     due, _c = ref.plan(m, now=clock.t, bound=BOUND)
     assert due == ["held-closed", "cand-never-read", "cand-lapsed",
-                   "cand-closed-retry"]
+                   "cand-closed-retry", "cand-closed-word",
+                   "cand-ended-retry"]
 
 
 def test_a_snapshot_read_holds_only_on_the_books_own_terminal_state():
@@ -430,11 +555,11 @@ def test_a_snapshot_read_holds_only_on_the_books_own_terminal_state():
     j = {"outcome": AR.R_REFRESH_NOT_OPEN, "state": "INSTRUMENT_STATE_EXPIRED",
          "state_from": SR.STATE_FROM_UPDATE, "status": "SNAPSHOT"}
     ref.record_snapshot("cand-soon", j, at=now)
-    assert ref.held_terminal("cand-soon")
+    assert ref.held_terminal("cand-soon", now=now + 1.0)
     # a stateless book judged on a fallback state is not the book's own word
     ref.record_snapshot("cand-later", dict(
         j, state_from=SR.STATE_FROM_FALLBACK), at=now)
-    assert not ref.held_terminal("cand-later")
+    assert not ref.held_terminal("cand-later", now=now + 1.0)
     due, counts = ref.plan(m, now=now + AR.RETRY_NOT_OPEN_S + 1.0,
                            bound=BOUND)
     assert "cand-soon" not in due and "cand-later" in due
@@ -452,7 +577,8 @@ def test_the_digest_and_the_census_name_the_held_members():
         "INSTRUMENT_STATE_EXPIRED": 1, "INSTRUMENT_STATE_SUSPENDED": 1}
     assert d["held_market_terminal"] == {
         "n": 1, "by_state": {"INSTRUMENT_STATE_EXPIRED": 1},
-        "members": ["cand-soon"]}
+        "retry_s": AR.RETRY_ENDED_S, "members": ["cand-soon"]}
+    assert d["list_order"] == AR.LIST_LIVE_FIRST
     # the budget is the venue's figure, unchanged
     assert d["budget"]["per_min"] == 12 and d["bound_s"] == BOUND
     rows = H._members(now)
@@ -489,7 +615,7 @@ def test_the_hold_is_classified_in_the_refusal_taxonomy():
     from sportsassets import refusal_taxonomy_table as TT
     assert TT.TABLE[AR.R_REFRESH_HELD_TERMINAL] == ("SOFTWARE", TT.DATA,
                                                     "INGESTION")
-    assert AR.TERMINAL_STATES is FW.TERMINAL_STATES
+    assert AR.ENDED_STATES <= FW.TERMINAL_STATES
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -955,3 +1081,202 @@ def test_against_postgres_a_member_that_leaves_mid_window_is_still_refreshed(
     # the live list (MEMBERS_WITH_ORDERS_SQL) no longer holds it
     assert {m[0] for m in ref._live} == {STAYS, STREAMED}
 
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §5 which list the budget serves first when it binds (review rev2)
+# ═════════════════════════════════════════════════════════════════════
+#
+# Independent review rev2 of c07830f2, finding 2: the members only the frozen
+# window holds are outside the scorecard's instant denominator (the coverage
+# pass's PRIORITY tier, registry priority <= 10) and share the same 12 reads
+# a minute. In plain earliest-lapse order they take reads from the instant
+# population whenever more members are quiet than the budget can hold
+# (probe_rev2 P1: 70 quiet live + 15 quiet frozen-only members -> 49.6 live
+# members current on average, 60.0 with no frozen window). The order is the
+# owner's (active_refresh.list_order); LIVE_FIRST, the default, serves the
+# live list first and the frozen-only members with every read it does not
+# need. The budget is the same in every order.
+
+WS5 = FW.window_start_of(1_800_007_200.0)
+#: the real sampler, taken before any test patches it (a test below runs the
+#: task twice inside one monkeypatch scope)
+_REAL_FW_STEP = FW.step
+
+
+def _capacity_rows(n_live, n_fo, start):
+    rows = []
+    for i in range(n_live + n_fo):
+        s = ("cap-live-%03d" % i) if i < n_live else (
+            "cap-fonly-%03d" % (i - n_live))
+        rows.append({"contract_id": s, "venue": FW.VENUE_PMUS,
+                     "priority": 10, "active": True,
+                     "market_type": "soccer_team_full_time_winner",
+                     "family": "WINNER", "period": "FULL_EVENT",
+                     "event_id": "ev-" + s, "line": None,
+                     "event_start": _dt.datetime.fromtimestamp(
+                         start + 86400.0 + i, UTC)})
+    return rows
+
+
+def _capacity_run(monkeypatch, *, n_live, n_fo, order=None, minutes=30,
+                  freeze_fo=True):
+    """The plane's REAL freshness task and REAL frozen-window sampler for
+    `minutes` inside one window. Every member is quiet (its last stream
+    book past the bound, spread so no two lapse together) and the venue
+    answers every book read OPEN. All n_live + n_fo members are at registry
+    priority 10 when the window freezes; two minutes in the n_fo leave the
+    live list (priority 20), so they are members only the frozen window
+    holds (with freeze_fo False they are never members: the budget's
+    baseline with the same n_live). Returns ([(live current,
+    frozen-only current)] at each minute from minute 10, the refresher, the
+    book read instants)."""
+    start = WS5 + 5.0
+    rows = _capacity_rows(n_live, n_fo, start)
+    conn = _RegistryConn(rows)
+    fo = [r["contract_id"] for r in rows[n_live:]]
+    live = [r["contract_id"] for r in rows[:n_live]]
+    if not freeze_fo:
+        for s in fo:
+            conn.reg[s]["priority"] = 20
+    clock = H.Clock(start)
+    m, books = H.plane(clock, live + fo)
+    for i, s in enumerate(live + fo):
+        H.update(books, s, start - BOUND - 10.0 - i)
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh() if order is None else AR.ActiveRefresh(
+        order=order)
+    reads: list = []
+    series: list = []
+
+    class Venue:
+        def read(self, name, symbol=""):
+            assert name == "book"
+            reads.append(clock.t)
+            return H.rest_book(symbol, at=clock.t)
+    real_step = _REAL_FW_STEP
+    ticks = [0]
+
+    async def get_pool():
+        return _ConnPool(conn)
+
+    async def fw_step(*a, **kw):
+        got = await real_step(*a, **kw)
+        ticks[0] += 1
+        clock.t += 1.0
+        books.on_heartbeat()
+        if ticks[0] == 120:
+            # after the window froze at its first sample (as in section 4)
+            for s in fo:
+                conn.reg[s]["priority"] = 20            # VENUE_ACTIVE
+        if ticks[0] % 60 == 0 and ticks[0] >= 600:
+            cur = ref.current(m, now=clock.t, bound=BOUND)
+            series.append((sum(1 for s in live if s in cur),
+                           sum(1 for s in fo if s in cur)))
+        if ticks[0] >= minutes * 60:
+            raise asyncio.CancelledError()
+        return got
+    monkeypatch.setattr(W, "get_pool", get_pool)
+    monkeypatch.setattr(W.FW, "step", fw_step)
+    state: dict = {}
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await W.freshness_loop(ref, m, Venue(), state=state,
+                                   client_lock=asyncio.Lock(), bound=BOUND,
+                                   tick_s=0.0, clock=clock)
+    run(go())
+    assert state["freshness_task"]["errors"] == 0, state["freshness_task"]
+    _no_window_over_budget(reads)
+    assert ref.members_frozen_only == (n_fo if freeze_fo else 0)
+    return series, ref, reads
+
+
+def _avg(xs):
+    return sum(xs) / float(len(xs))
+
+
+def test_when_the_budget_binds_the_live_list_is_served_first(monkeypatch):
+    """70 quiet live members + 15 quiet frozen-only members, 12 reads a
+    minute (the budget holds about 57-60 at once). With the default order
+    the live members are exactly as current as with no frozen-only member
+    at all, and the frozen-only members take no read the live list needs.
+    On c07830f2 (no list order) the live average is about 50 -- the
+    frozen-only members took about 10 of the budget's places."""
+    base, _r, _x = _capacity_run(monkeypatch, n_live=70, n_fo=15,
+                                 freeze_fo=False)
+    got, ref, reads = _capacity_run(monkeypatch, n_live=70, n_fo=15)
+    assert ref.order == AR.LIST_LIVE_FIRST
+    live_base = _avg([a for a, _b in base])
+    live = _avg([a for a, _b in got])
+    assert live_base >= 55.0                       # the budget binds
+    assert live >= live_base - 0.5, (live, live_base, got)
+    assert _avg([b for _a, b in got]) <= 0.5
+    # the same budget: about 12 reads a minute, whichever list
+    assert len(reads) <= 12 * 30
+
+
+def test_when_the_budget_does_not_bind_the_frozen_only_members_are_served(
+        monkeypatch):
+    """30 quiet live + 15 quiet frozen-only members: 45 fit inside the
+    budget, so with the default order every one of them is current at every
+    minute from minute 10 -- the frozen window's leavers are still served
+    for the whole window (review rev1, c07830f2)."""
+    got, _ref, _x = _capacity_run(monkeypatch, n_live=30, n_fo=15)
+    assert set(got) == {(30, 15)}, got
+
+
+@pytest.mark.parametrize("order", [AR.LIST_BY_LAPSE, AR.LIST_BOTH_FIRST])
+def test_the_owners_other_orders_trade_live_reads_for_frozen_ones(
+        monkeypatch, order):
+    """The owner's alternatives, measured on the same 70 + 15: BY_LAPSE
+    (c07830f2 as reviewed) and BOTH_FIRST (members of both lists first, then
+    live-only and frozen-only together; here every live member is also in
+    the window, so it serves them like LIVE_FIRST) -- the budget the same in
+    each."""
+    base, _r, _x = _capacity_run(monkeypatch, n_live=70, n_fo=15,
+                                 freeze_fo=False)
+    got, ref, _x = _capacity_run(monkeypatch, n_live=70, n_fo=15, order=order)
+    assert ref.order == order
+    live_base = _avg([a for a, _b in base])
+    live, fo = _avg([a for a, _b in got]), _avg([b for _a, b in got])
+    if order == AR.LIST_BY_LAPSE:
+        assert live <= live_base - 5.0 and fo >= 5.0, (live, fo, live_base)
+    else:
+        assert live >= live_base - 0.5 and fo <= 0.5, (live, fo, live_base)
+
+
+def test_the_list_order_is_the_owners_switch_and_defaults_to_live_first():
+    assert AR.list_order({}) == AR.LIST_LIVE_FIRST
+    assert AR.list_order({AR.LIST_ORDER_ENV: "by_lapse"}) == AR.LIST_BY_LAPSE
+    assert AR.list_order({AR.LIST_ORDER_ENV: " BOTH_FIRST "}) == \
+        AR.LIST_BOTH_FIRST
+    assert AR.list_order({AR.LIST_ORDER_ENV: "other"}) == AR.LIST_LIVE_FIRST
+    assert AR.ActiveRefresh().order == AR.LIST_LIVE_FIRST
+    assert AR.ActiveRefresh(order="nonsense").order == AR.LIST_LIVE_FIRST
+    # the plan's ranks: LIVE_FIRST puts the frozen-only member after the
+    # live one whatever its tier or lapse; BOTH_FIRST puts a live-only
+    # member after the members of both lists; BY_LAPSE ranks none
+    now = WS5 + 60.0
+    win = _frozen_win([_fm("both"), _fm("fonly", "HELD_POSITION")], ws=WS5)
+    for order, rank in ((AR.LIST_LIVE_FIRST, {"fonly": 1}),
+                        (AR.LIST_BOTH_FIRST, {"fonly": 1, "lonly": 1}),
+                        (AR.LIST_BY_LAPSE, {})):
+        ref = AR.ActiveRefresh(order=order)
+        ref.set_members([H.member("both", 10, None),
+                         H.member("lonly", 10, None)], now=now)
+        ref.set_frozen(win, now=now)
+        assert ref.list_rank == rank, order
+        assert {m[0] for m in ref.members} == {"both", "lonly", "fonly"}
+    clock = H.Clock(now)
+    m, books = H.plane(clock, ["both", "lonly", "fonly"])
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh()
+    ref.set_members([H.member("both", 10, None),
+                     H.member("lonly", 10, None)], now=now)
+    ref.set_frozen(win, now=now)
+    due, _c = ref.plan(m, now=now, bound=BOUND)
+    assert due[-1] == "fonly"                      # a HELD tier, still last
+    d = ref.digest(now=now, bound=BOUND, mgr=m)
+    assert d["list_order"] == AR.LIST_LIVE_FIRST
+    assert d["current_via_refresh_frozen_only"] == 0

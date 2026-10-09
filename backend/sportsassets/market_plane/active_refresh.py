@@ -103,16 +103,28 @@ RC6.1 freshness task, 8 of the first 12 reads go to markets that cannot be
 current and 4 of the 10 quiet OPEN members are current a minute later
 (tests/test_rc62_p_freshness.py). Two rules, the budget unchanged:
   * a member whose newest read -- the REST book's own `state`, or a
-    snapshot update's own state -- is TERMINAL (freshness_window.
-    TERMINAL_STATES, the held-position rule's: the market has ended) is
-    HELD OUT of the read plan while it stays a member
-    (R_REFRESH_HELD_TERMINAL, counted by name, named in the digest and the
-    census). It stays NOT current and stays in every denominator: nothing
-    is excluded, it is only not re-read. Newer stream evidence (a stream
-    book received after that read) releases the hold.
-  * any other not-open market keeps its RETRY_NOT_OPEN_S retry and, when
-    due, is read AFTER every member of its tier that may be current
-    (unless the stream has newer evidence than that read).
+    snapshot update's own state -- says the market has ENDED (ENDED_STATES:
+    expired, terminated, settled, resolved) is HELD OUT of the read plan
+    for RETRY_ENDED_S (one hour) and then read again, after every member
+    that may be current (R_REFRESH_HELD_TERMINAL, counted by name, named in
+    the digest and the census). It stays NOT current and stays in every
+    denominator: nothing is excluded, it is only read less often. Newer
+    stream evidence (a stream book received after that read) releases the
+    hold at once.
+  * any other not-open market -- INSTRUMENT_STATE_CLOSED and the
+    match-and-close auction included -- keeps its RETRY_NOT_OPEN_S (900 s)
+    retry and, when due, is read AFTER every member of its tier that may be
+    current (unless the stream has newer evidence than that read).
+ENDED_STATES IS NARROWER THAN freshness_window.TERMINAL_STATES (independent
+review rev2 of 3a86235d). CLOSED is the InstrumentState enum's 0, the value
+a stateless book is left with (snapshot_refresh), and the venue states it on
+active programmes not yet open (research/beta48/acceptance/P3_RESULT_AND_
+DECISIONS.md: eFootball day_of / live, crypto 1h): a market read CLOSED can
+open later. Held without a limit, such a member -- read CLOSED, then opened
+with no stream book on this connection -- was read once and never current
+again; on its 900 s retry it is read again and current from then on. The
+match-and-close auction is a phase, not an end. Neither is ever held. The
+window's TERMINAL_STATES (what it codes X) is not changed here.
 The record keeps the state the read stated (`state`, only while its newest
 read said not open), and the totals count not-open reads by state, so the
 states the venue answers with are read back in production.
@@ -131,8 +143,35 @@ about 3.8 a sample, with book reads at 6.3-9.0 a minute. `set_frozen` joins
 the window's members to the live list for the window (and the carry of its
 last sample), each with its frozen tier or its live tier when that is the
 more urgent; `plan` and `current` read the joined list, so a frozen member
-is read and counted current exactly like a live one. The budget, the gap,
-the bound and the order are unchanged; nothing is removed from either list.
+is read and counted current like a live one. The budget, the gap and the
+bound are unchanged; nothing is removed from either list.
+
+WHICH LIST IS SERVED FIRST WHEN THE BUDGET BINDS (independent review rev2 of
+c07830f2). The members only the frozen window holds are outside the
+scorecard's instant denominator (the coverage pass's PRIORITY tier, registry
+priority <= 10), and they share the same 12 reads a minute. Read in plain
+earliest-lapse order, they take reads from instant-population members
+whenever more members are quiet than the budget holds (reviewer probe: 70
+quiet live + 15 quiet frozen-only members at 12 a minute -> 49.6 live
+members current on average, against 60.0 with no frozen window; production
+projection over the 391 snapshots of 2026-10-09 03:26-14:42Z, REST only,
+research-sql 37972207792 / 37977856584: 0.9362 and 185 snapshots >= 0.95
+live first, 0.9345 (round robin) to 0.9340 (every unserved place charged
+to the live list) and 184 by lapse; 10Z 0.8891 against 0.8818-0.8841, 12Z
+0.9365 against 0.9294-0.9303). The order between the two lists is THE
+OWNER'S DECISION (UMP_REFRESH_LIST_ORDER, `list_order`):
+  * LIVE_FIRST (default): every member of the live registry list (the
+    instant population, in both lists or not) before every member only the
+    frozen window holds. The frozen-only members get every read the live
+    list does not need -- all of them while the budget does not bind (the
+    15:00Z window: 6.35 reads a minute) -- and none it does need, so the
+    instant measure is the one 3a86235d had.
+  * BOTH_FIRST: members in both lists first, then live-only and
+    frozen-only members together by earliest lapse.
+  * BY_LAPSE: no list order (c07830f2 as reviewed): the window gains what
+    the instant measure loses while the budget binds.
+In every order the budget, the gap, the bound and the membership are the
+same; the list rank comes before the tier, the not-open rank and the lapse.
 
 THE BOUND IS NOT CHANGED. The plane's FRESH_SLA_S (300 s, the held-mark SLA)
 is passed in by the caller and is the only age used; REFRESH_LEAD_S only
@@ -153,7 +192,6 @@ import time
 from datetime import datetime
 
 from .. import institutional_stream as IS
-from .freshness_window import TERMINAL_STATES
 
 log = logging.getLogger(__name__)
 
@@ -175,6 +213,10 @@ BACKOFF_429_S = 60.0
 REFRESH_LEAD_S = 15.0
 RETRY_FAILED_S = 60.0
 RETRY_NOT_OPEN_S = 900.0
+#: (RC6.2) a market whose newest read said it has ENDED (ENDED_STATES) is
+#: read again after this long, after every member that may be current: no
+#: hold is without a limit (independent review rev2)
+RETRY_ENDED_S = 3600.0
 MEMBERS_EVERY_S = 30.0
 MAX_TRACKED = 2000
 #: the registry's started-long-ago boundary, as the census phases it
@@ -207,9 +249,21 @@ R_REFRESH_HOLD_429 = "ACTIVE_REFRESH_HELD_AFTER_A_VENUE_429"
 R_REFRESH_RETRY_WAIT = "ACTIVE_REFRESH_WAITING_TO_RETRY_A_FAILED_READ"
 R_REFRESH_OFF = "ACTIVE_REFRESH_OFF_BY_SWITCH"
 R_REFRESH_NO_STREAM = "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED"
-#: (RC6.2) the member's newest read stated a TERMINAL market state: not
-#: re-read while it stays a member (it stays NOT current, in the denominator)
+#: (RC6.2) the member's newest read said the market has ENDED: not re-read
+#: for RETRY_ENDED_S (it stays NOT current, in the denominator)
 R_REFRESH_HELD_TERMINAL = "ACTIVE_REFRESH_HELD_MARKET_STATE_TERMINAL"
+#: (RC6.2, independent review rev2) THE STATES THAT HOLD A MEMBER OUT OF THE
+#: READ PLAN: the market has ended -- expired, terminated, settled,
+#: resolved, in the institutional enum's and the market-state names. A
+#: SUBSET of freshness_window.TERMINAL_STATES (a test pins it): CLOSED (the
+#: enum's 0, stated on active programmes not yet open) and the
+#: match-and-close auction (a phase) are NOT in it -- a market read so keeps
+#: the RETRY_NOT_OPEN_S retry and can be current again.
+ENDED_STATES = frozenset({
+    "INSTRUMENT_STATE_EXPIRED", "INSTRUMENT_STATE_TERMINATED",
+    "MARKET_STATE_EXPIRED", "MARKET_STATE_TERMINATED",
+    "MARKET_STATE_SETTLED", "MARKET_STATE_RESOLVED",
+    "EXPIRED", "SETTLED", "RESOLVED"})
 #: the snapshot result's own-state marker (snapshot_refresh.STATE_FROM_UPDATE)
 _STATE_FROM_UPDATE = "UPDATE"
 #: how many held members the digest names (it counts them all)
@@ -257,6 +311,25 @@ def per_min(env=None) -> int:
     except (TypeError, ValueError):
         v = BOOK_READS_PER_MIN_DEFAULT
     return max(1, min(BOOK_READS_PER_MIN_MAX, v))
+
+
+#: (RC6.2, independent review rev2) THE ORDER BETWEEN THE LIVE REGISTRY LIST
+#: AND THE FROZEN WINDOW'S OTHER MEMBERS when the budget binds -- the
+#: owner's decision (module docstring). LIVE_FIRST is the default: the
+#: scorecard's instant population is never read after a member only the
+#: frozen window holds. The budget is the same in every order.
+LIST_ORDER_ENV = "UMP_REFRESH_LIST_ORDER"
+LIST_LIVE_FIRST, LIST_BOTH_FIRST, LIST_BY_LAPSE = (
+    "LIVE_FIRST", "BOTH_FIRST", "BY_LAPSE")
+LIST_ORDERS = (LIST_LIVE_FIRST, LIST_BOTH_FIRST, LIST_BY_LAPSE)
+
+
+def list_order(env=None) -> str:
+    """UMP_REFRESH_LIST_ORDER, one of LIST_ORDERS; LIVE_FIRST when unset or
+    not one of them."""
+    env = os.environ if env is None else env
+    v = str(env.get(LIST_ORDER_ENV) or "").strip().upper()
+    return v if v in LIST_ORDERS else LIST_LIVE_FIRST
 
 
 def _epoch(v):
@@ -362,18 +435,23 @@ class ActiveRefresh:
     read starts inside the budget window, the 429 hold and the totals."""
 
     def __init__(self, *, per_minute: int = BOOK_READS_PER_MIN_DEFAULT,
-                 clock=time.time):
+                 clock=time.time, order: str | None = None):
         self.per_min = max(1, min(BOOK_READS_PER_MIN_MAX, int(per_minute)))
         self._clock = clock
+        #: (RC6.2) the order between the live list and the frozen-only
+        #: members (LIST_ORDERS; the owner's decision, LIVE_FIRST default)
+        self.order = order if order in LIST_ORDERS else LIST_LIVE_FIRST
         self.members: list = []          # [(symbol, tier, phase, start)]
         self.members_at = None
         #: (RC6.2) the live registry list [(symbol, tier, event start)] and
         #: the frozen window's members {symbol: (tier, event start)} the
-        #: member list is composed of; the frozen window's key
+        #: member list is composed of; the frozen window's key; each
+        #: member's list rank under `order` (absent: 0)
         self._live: list = []
         self.frozen: dict = {}
         self.frozen_key = None
         self.members_frozen_only = 0
+        self.list_rank: dict = {}
         self.entries: dict = {}
         self._starts: collections.deque = collections.deque(
             maxlen=self.per_min)
@@ -450,9 +528,12 @@ class ActiveRefresh:
     def _compose(self, now: float) -> None:
         """members = the live list (each tier raised to its frozen tier when
         that is the more urgent), then every frozen member the live list
-        does not hold, in the window's order; records of members in
-        neither are dropped."""
-        out, seen = [], set()
+        does not hold, in the window's order; each member's list rank under
+        `order` (independent review rev2: LIVE_FIRST ranks the frozen-only
+        members after the live list, BOTH_FIRST ranks the members of both
+        lists first, BY_LAPSE ranks none); records of members in neither
+        are dropped."""
+        out, seen, rank = [], set(), {}
         frozen = self.frozen
         for s, tier, start in self._live:
             f = frozen.get(s)
@@ -460,11 +541,16 @@ class ActiveRefresh:
                 tier = f[0]
             out.append((s, tier, phase_of(start, now=now), _epoch(start)))
             seen.add(s)
+            if self.order == LIST_BOTH_FIRST and frozen and f is None:
+                rank[s] = 1                 # live only, a window held
         n_live = len(out)
         for s, (tier, start) in frozen.items():
             if s not in seen:
                 out.append((s, tier, phase_of(start, now=now), _epoch(start)))
+                if self.order in (LIST_LIVE_FIRST, LIST_BOTH_FIRST):
+                    rank[s] = 1             # the frozen window's only
         self.members = out
+        self.list_rank = rank
         self.members_frozen_only = len(out) - n_live
         keep = {m[0] for m in out}
         for s in [s for s in self.entries if s not in keep]:
@@ -540,24 +626,43 @@ class ActiveRefresh:
         except (TypeError, ValueError):
             return False
 
-    def held_terminal(self, s, *, stream_received_at=None) -> bool:
+    @staticmethod
+    def _ended(e) -> bool:
+        """The member's newest read said the market is not open and its own
+        state says the market has ENDED (ENDED_STATES)."""
+        return ((e or {}).get("outcome") == R_REFRESH_NOT_OPEN
+                and str((e or {}).get("state") or "").upper()
+                in ENDED_STATES)
+
+    def held_terminal(self, s, *, now: float,
+                      stream_received_at=None) -> bool:
         """(RC6.2) The member's newest read (the REST book's own state, or a
-        snapshot update's own state) said the market has ENDED (TERMINAL_
-        STATES) and the stream holds nothing newer: it is not re-read while
-        it stays a member. It stays NOT current and in every denominator."""
+        snapshot update's own state) said the market has ENDED
+        (ENDED_STATES -- never CLOSED or the match-and-close auction), that
+        read is younger than RETRY_ENDED_S, and the stream holds nothing
+        newer: it is not re-read now. It stays NOT current and in every
+        denominator, and is read again (last) once RETRY_ENDED_S has
+        passed."""
         e = self.entries.get(s) or {}
-        if e.get("outcome") != R_REFRESH_NOT_OPEN:
+        if not self._ended(e):
             return False
-        if str(e.get("state") or "").upper() not in TERMINAL_STATES:
+        t = e.get("tried_at")
+        try:
+            if t is None or float(now) - float(t) >= RETRY_ENDED_S:
+                return False
+        except (TypeError, ValueError):
             return False
         return not self._newer_stream(e, stream_received_at)
 
     def _not_open_rank(self, e, stream_received_at) -> int:
-        """1 when the member's newest read said the market is not open and
-        the stream has nothing newer (read after every member that may be
-        current), else 0."""
-        return int((e or {}).get("outcome") == R_REFRESH_NOT_OPEN
-                   and not self._newer_stream(e, stream_received_at))
+        """0 when the member may be current; 1 when its newest read said
+        the market is not open and the stream has nothing newer (read after
+        every member that may be current); 2 when that read also said the
+        market has ENDED (read after those)."""
+        if (e or {}).get("outcome") != R_REFRESH_NOT_OPEN or \
+                self._newer_stream(e, stream_received_at):
+            return 0
+        return 2 if self._ended(e) else 1
 
     def current(self, mgr, *, now: float, bound: float) -> dict:
         """{symbol: receipt instant} of the members CURRENT VIA THE REFRESH
@@ -593,10 +698,13 @@ class ActiveRefresh:
         members. Due: held by the plane's books, the stream refusing for
         snapshot currency, no current refresh that is not yet within
         `lead_s` (REFRESH_LEAD_S) of the bound, not waiting to retry, not
-        held for a TERMINAL market state (RC6.2), no read of it in flight.
-        Order: HELD first, then (RC6.2) a market the venue last said is not
-        open after every one that may be current, then earliest lapse, then
-        event start (module docstring)."""
+        held for an ENDED market state (RC6.2: RETRY_ENDED_S), no read of
+        it in flight. Order: (RC6.2) the list rank (`order`: by default the
+        live registry list before the members only the frozen window
+        holds), then HELD first, then (RC6.2) a market the venue last said
+        is not open after every one that may be current and an ended one
+        after those, then earliest lapse, then event start (module
+        docstring)."""
         counts: dict = {}
         due = []
         lead = REFRESH_LEAD_S if lead_s is None else float(lead_s)
@@ -622,9 +730,9 @@ class ActiveRefresh:
             if self._refresh_current(e, now=now, bound=bound - lead):
                 n("REFRESH_CURRENT")
                 continue
-            if self.held_terminal(s, stream_received_at=stream_rcv):
-                # (RC6.2) the venue said the market has ended: no read can
-                # make it current; named, not current, still a member
+            if self.held_terminal(s, now=now, stream_received_at=stream_rcv):
+                # (RC6.2) the venue said the market has ended: not re-read
+                # for RETRY_ENDED_S; named, not current, still a member
                 n(R_REFRESH_HELD_TERMINAL)
                 continue
             tried = e.get("tried_at")
@@ -638,7 +746,8 @@ class ActiveRefresh:
                 n("REFRESH_CURRENT_DUE_FOR_RE_READ")
             lapse = self.lapse_at(s, stream_received_at=stream_rcv,
                                   bound=bound)
-            due.append(((0 if tier in (TIER_HELD, TIER_ORDER) else 1),
+            due.append((self.list_rank.get(s, 0),
+                        (0 if tier in (TIER_HELD, TIER_ORDER) else 1),
                         self._not_open_rank(e, stream_rcv),
                         float("-inf") if lapse is None else lapse,
                         PHASE_RANK.get(phase, 3),
@@ -752,17 +861,17 @@ class ActiveRefresh:
 
     def held_terminal_members(self, mgr=None, *, now: float,
                               bound: float) -> dict:
-        """{symbol: state} of the members held out of the plan for a
-        TERMINAL state now (the stream's newest receipt checked when the
-        books are given). Read-only."""
+        """{symbol: state} of the members held out of the plan for an ENDED
+        state now (the stream's newest receipt checked when the books are
+        given). Read-only."""
         out = {}
         for s, _t, _p, _st in self.members:
             e = self.entries.get(s) or {}
-            if e.get("outcome") != R_REFRESH_NOT_OPEN:
+            if not self._ended(e):
                 continue
             got = self._stream(mgr, s, now=now, bound=bound) \
                 if mgr is not None else None
-            if self.held_terminal(s, stream_received_at=(
+            if self.held_terminal(s, now=now, stream_received_at=(
                     got[2] if got is not None else None)):
                 out[s] = e.get("state")
         return out
@@ -777,6 +886,7 @@ class ActiveRefresh:
         by_tier: dict = {}
         by_origin: dict = {}
         tiers = {m[0]: m[1] for m in self.members}
+        live = {m[0] for m in self._live}
         for s in cur:
             by_tier[tiers.get(s, TIER_CANDIDATE)] = by_tier.get(
                 tiers.get(s, TIER_CANDIDATE), 0) + 1
@@ -803,13 +913,21 @@ class ActiveRefresh:
                 "members_frozen_only": self.members_frozen_only,
                 "frozen_window_start": (self.frozen_key[0]
                                         if self.frozen_key else None),
+                # (RC6.2, review rev2) the owner's list order and how many
+                # of the members current through the refresh are members
+                # only the frozen window holds (the budget's split)
+                "list_order": self.order,
                 "current_via_refresh": len(cur),
+                "current_via_refresh_frozen_only": sum(
+                    1 for s in cur if s not in live),
                 "current_via_refresh_by_tier": by_tier,
                 "current_via_refresh_by_origin": by_origin,
-                # (RC6.2) the members not re-read because the venue said
-                # the market has ended: counted, named, still members
+                # (RC6.2) the members not re-read for RETRY_ENDED_S because
+                # the venue said the market has ended: counted, named,
+                # still members
                 "held_market_terminal": {
                     "n": len(held), "by_state": held_by,
+                    "retry_s": RETRY_ENDED_S,
                     "members": sorted(held)[:HELD_NAMED_MAX]},
                 "last_pass": dict(self.last_pass),
                 "totals": {k: (dict(v) if isinstance(v, dict) else v)
