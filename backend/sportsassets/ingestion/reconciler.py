@@ -429,6 +429,120 @@ async def _taker_census(http, pool, whale: dict,
 
 TAKER_CENSUS_ENV = "RECONCILE_TAKER_CENSUS"
 
+# ── THE RUN'S OWN ACCOUNT OF WHAT IT INGESTED LATE AND WHAT IT LEFT UNSWEPT
+#
+# RC6 identity lane. Production, release 732cc0c6: run 5698 logged
+# "reconciliation ingested 10 missed fills: {'cov:0x...': {'complete':
+# False, ...}, ..." -- a per-wallet dict of twenty addresses that the log
+# line cut off, naming no fill. The ten could be found only by elimination
+# (research-sql run 37928503493: whale 40's ten poll rows trade_id
+# 227269616-227269628, fills 03:24:27-03:25:11Z, inserted together at
+# 03:35:34Z, 623-667 s after the fill, no paper, live, rn1x or ai_trades
+# row derived from any of them). And the walk's reach was never compared
+# with the run before it: in the 34 runs of 2026-10-08/09, whale 40's walk
+# stopped short of the previous run's newest row in 14 of them -- 30,213 s
+# that NO run swept (worst 7,156 s), whale 26 in 7 (9,481 s), whale 2 in one
+# (339 s) -- while the heartbeat read 'ok' / 'drift'. A fill the poller's
+# window missed inside such a hole is never ingested at all.
+#
+# Now each run records (a) every fill it ingested late, by trade id, with
+# its lag and what our books derived from it, and (b) per wallet, whether
+# its walk reached back to the previous run's newest row, and the unswept
+# seconds when it did not -- a named refusal on a non-'ok' heartbeat. The
+# walk itself is unchanged: the same requests, the same depth (no venue
+# read is added; closing a hole needs either more reads per burst wallet,
+# which the request-rate rule forbids without the owner, or a budget-
+# neutral reallocation across wallets, a design change to a reviewed walk).
+#: at most this many late fills are itemised per run (the count is exact)
+MISSED_RECORD_MAX = 200
+#: a wallet's walk stopped short of the previous run's newest row: the fills
+#: between them were swept by no run
+R_COVERAGE_HOLE = "RECONCILER_WALK_DID_NOT_REACH_THE_PREVIOUS_RUN"
+#: the heartbeat status of a run that left a hole (not a success beat)
+STATUS_COVERAGE_GAP = "coverage_gap"
+#: the newest row each wallet's previous finished run served (its cov.newest)
+PREV_COVERAGE_SQL = (
+    "SELECT id, details FROM reconciliation_runs "
+    "WHERE id < $1 AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1")
+#: what OUR books derived from each late fill (by the source trade id)
+BOOK_LINKS_SQL = """
+SELECT t.id,
+       (SELECT count(*) FROM live_orders lo WHERE lo.trade_id = t.id) AS live_orders,
+       (SELECT count(*) FROM ai_trades a WHERE a.trade_id = t.id) AS ai_trades,
+       (SELECT count(*) FROM rn1x_positions x WHERE x.source_trade_id = t.id)
+           AS rn1x_positions
+  FROM trades t WHERE t.id = ANY($1::bigint[])
+"""
+
+
+def previous_newest(details) -> dict[str, float]:
+    """{address: the newest venue ts the previous run's walk served} from
+    that run's details -- only for wallets whose walk did not fail. Pure."""
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            return {}
+    pw = (details or {}).get("per_wallet") if isinstance(details, dict) else None
+    out: dict[str, float] = {}
+    for k, v in (pw or {}).items():
+        if not str(k).startswith("cov:") or not isinstance(v, dict):
+            continue
+        addr = str(k)[4:]
+        if ("failed:" + addr) in pw:
+            continue
+        n = v.get("newest")
+        if isinstance(n, (int, float)) and not isinstance(n, bool) and n > 1e9:
+            out[addr] = float(n)
+    return out
+
+
+def coverage_continuity(prev: dict[str, float], walks: list[dict]) -> dict:
+    """Did each wallet's walk reach back to the previous run's newest row?
+    Pure. `walks`: [{whale_id, address, reach_oldest, complete, failed}],
+    reach_oldest the venue ts of the deepest row the walk INGESTED (border
+    rows included). A wallet is
+      REACHED     its walk ingested a row at or before the previous newest,
+                  or exhausted the feed (complete);
+      HOLE        it stopped short: (previous newest, reach_oldest) was swept
+                  by no run -- hole_s seconds;
+      UNMEASURED  the walk failed, ingested no row, or no previous run
+                  recorded the wallet."""
+    holes, reached, unmeasured = [], 0, []
+    for w in walks:
+        p = prev.get(w["address"])
+        r = w.get("reach_oldest")
+        if w.get("failed") or p is None or (r is None and not w.get("complete")):
+            unmeasured.append(w["whale_id"])
+        elif w.get("complete") or r <= p:
+            reached += 1
+        else:
+            holes.append({"whale_id": w["whale_id"],
+                          "hole_s": round(r - p, 3),
+                          "from_ts": p, "to_ts": r})
+    holes.sort(key=lambda h: (-h["hole_s"], h["whale_id"]))
+    return {"wallets": len(walks), "reached": reached,
+            "wallets_with_hole": len(holes),
+            "hole_seconds": round(sum(h["hole_s"] for h in holes), 3),
+            "max_hole_s": holes[0]["hole_s"] if holes else 0.0,
+            "holes": holes, "unmeasured": sorted(unmeasured),
+            "refusal": R_COVERAGE_HOLE if holes else None,
+            "rule": ("a wallet's walk must ingest a row at or before the "
+                     "previous run's newest (or exhaust the feed); otherwise "
+                     "the seconds between them were swept by no run")}
+
+
+def run_status(missed: int, failed_n: int, n_whales: int,
+               coverage: dict) -> str:
+    """The run's heartbeat status: 'error' when every wallet failed, else
+    'coverage_gap' when a wallet's walk left a hole (fills nobody swept),
+    else 'drift' when it ingested missed fills, else 'ok'."""
+    if n_whales and failed_n == n_whales:
+        return "error"
+    if coverage.get("wallets_with_hole"):
+        return STATUS_COVERAGE_GAP
+    return "ok" if missed == 0 else "drift"
+
 
 def _taker_census_switch(cfg) -> bool:
     """The census switch read fail-closed: the settings field when
@@ -464,9 +578,20 @@ async def reconcile_once(depth: int = 500,
     whales = await pool.fetch("SELECT id, address, username FROM whales WHERE active AND NOT banned")
     missed = 0
     per_wallet: dict = {}
+    # the previous finished run's newest row per wallet (coverage
+    # continuity, RC6 identity lane); unreadable = every wallet UNMEASURED
+    prev_row = None
+    try:
+        prev_row = await pool.fetchrow(PREV_COVERAGE_SQL, run_id)
+        prev_cov = previous_newest(prev_row["details"]) if prev_row else {}
+    except Exception:  # noqa: BLE001 — measurement, never the walk
+        prev_cov = {}
+    late: list[dict] = []           # the fills this run ingested late
+    walks: list[dict] = []          # per wallet: how far back it ingested
     async with httpx.AsyncClient(base_url=cfg.data_api_base, timeout=20) as http:
         for whale in whales:
             wallet_missed = 0
+            reach_oldest: float | None = None
             offset = 0
             # COVERAGE EVIDENCE for the S1 corroboration sweep (fleet
             # round 6): a run that fetched only the newest `depth` rows
@@ -749,8 +874,24 @@ async def reconcile_once(depth: int = 500,
                         except Exception:  # noqa: BLE001
                             dirty += 1
                             continue
+                        if ts_r > 1e9:
+                            # how far back this walk INGESTED: the DEEPEST
+                            # row it served (walk order, border rows
+                            # included), never a bare min() -- one late-
+                            # indexed OLD row served mid-walk (the r21
+                            # shape) must not fake a reach the walk never
+                            # had; a misordered tail can only over-alarm
+                            reach_oldest = ts_r
                         if was_new:
                             wallet_missed += 1
+                            if len(late) < MISSED_RECORD_MAX:
+                                late.append({
+                                    "trade_id": _tid,
+                                    "whale_id": whale["id"],
+                                    "side": ev.side,
+                                    "fill_ts": ts_r,
+                                    "ingest_lag_s": round(time.time() - ts_r, 1),
+                                    "has_condition_id": bool(ev.condition_id)})
                         if taker_census:
                             walk_rows[ev.dedupe_key] = (ts_r, _tx_ident(ev.tx_hash))
                     witness = idents[-OVERLAP_K:]
@@ -845,12 +986,38 @@ async def reconcile_once(depth: int = 500,
                     walk_floor=cov.get("oldest"))
             per_wallet[whale["address"]] = wallet_missed
             missed += wallet_missed
+            cov_w = per_wallet.get("cov:" + whale["address"]) or {}
+            walks.append({"whale_id": whale["id"],
+                          "address": whale["address"],
+                          "reach_oldest": reach_oldest,
+                          "complete": bool(cov_w.get("complete")),
+                          "failed": ("failed:" + whale["address"])
+                          in per_wallet})
 
+    coverage = coverage_continuity(prev_cov, walks)
+    coverage["previous_run_id"] = (prev_row["id"] if prev_cov and prev_row
+                                   else None)
+    if late:
+        # WHAT OUR BOOKS DERIVED FROM EACH LATE FILL, by its source trade
+        # id (live copies, the AI follower, the rn1x paper experiment) --
+        # so each one reconciles to our ledgers by identity, not by count
+        try:
+            links = {r["id"]: dict(r) for r in await pool.fetch(
+                BOOK_LINKS_SQL, [m["trade_id"] for m in late])}
+        except Exception:  # noqa: BLE001 — measurement
+            links = None
+        for m in late:
+            lk = None if links is None else links.get(m["trade_id"])
+            m["book_links"] = (None if lk is None else {
+                k: int(lk[k] or 0)
+                for k in ("live_orders", "ai_trades", "rn1x_positions")})
     await pool.execute(
         "UPDATE reconciliation_runs SET finished_at=now(), missed=$2, details=$3::jsonb WHERE id=$1",
         run_id,
         missed,
-        json.dumps({"per_wallet": per_wallet}),
+        json.dumps({"per_wallet": per_wallet, "coverage": coverage,
+                    "missed_fills": late,
+                    "missed_fills_truncated": missed > len(late)}),
     )
     # round 27 (minor): status derived solely from `missed` let a
     # TOTAL-LOSS run (every wallet's walk failed; nothing ingested,
@@ -861,12 +1028,39 @@ async def reconcile_once(depth: int = 500,
     # every sibling: all wallets failed -> 'error'; partial failures
     # ride the detail so the dashboard can see degradation.
     failed_n = sum(1 for k in per_wallet if str(k).startswith("failed:"))
-    if whales and failed_n == len(whales):
-        status = "error"
-    else:
-        status = "ok" if missed == 0 else "drift"
+    # a wallet whose walk stopped short of the previous run left fills that
+    # NO run swept: a named, non-success status (RC6 identity lane), never
+    # 'ok' / 'drift'
+    status = run_status(missed, failed_n, len(whales), coverage)
     await heartbeat("reconciler", status,
-                    {"missed": missed, "failed": failed_n})
+                    {"missed": missed, "failed": failed_n,
+                     "missed_fills_recorded": len(late),
+                     "wallets_with_hole": coverage["wallets_with_hole"],
+                     "hole_seconds": coverage["hole_seconds"],
+                     "max_hole_s": coverage["max_hole_s"],
+                     "unmeasured": len(coverage["unmeasured"]),
+                     "refusal": coverage["refusal"]})
     if missed:
-        log.warning("reconciliation ingested %s missed fills: %s", missed, per_wallet)
-    return {"run_id": run_id, "missed": missed, "per_wallet": per_wallet}
+        # ONE BOUNDED LINE, by whale id (never the address, never the whole
+        # per-wallet dict the log used to cut off); every late fill is in
+        # reconciliation_runs.details.missed_fills by trade id
+        by_whale: dict = {}
+        for m in late:
+            by_whale[m["whale_id"]] = by_whale.get(m["whale_id"], 0) + 1
+        log.warning(
+            "reconciliation run %s ingested %d missed fill(s) late (by whale "
+            "id: %s%s); itemised by trade id in reconciliation_runs.details."
+            "missed_fills", run_id, missed,
+            ", ".join("%s=%d" % kv for kv in sorted(by_whale.items())),
+            "" if missed == len(late) else "; %d itemised of %d" % (
+                len(late), missed))
+    if coverage["wallets_with_hole"]:
+        worst = coverage["holes"][0]
+        log.warning(
+            "reconciliation run %s %s: %d of %d wallet(s) not reached back to "
+            "the previous run's newest row -- %.0f s swept by no run (worst "
+            "whale id %s, %.0f s)", run_id, R_COVERAGE_HOLE,
+            coverage["wallets_with_hole"], coverage["wallets"],
+            coverage["hole_seconds"], worst["whale_id"], worst["hole_s"])
+    return {"run_id": run_id, "missed": missed, "per_wallet": per_wallet,
+            "coverage": coverage, "missed_fills": late}

@@ -401,6 +401,8 @@ def _w(name, cadence_s, *sources, note=None, armed=None,
 # walk ran and found misses), 'idle', 'high' (memory: measured, and high),
 # 'off' (retention told not to delete), 'no_universe', 'no_focus_set',
 # 'no_eligible_population', 'already_sealed' are passes that ran.
+# 'coverage_gap' (reconciler, RC6 identity lane) is a pass that ran but
+# left fills that no run swept (a named refusal on the beat): NOT a success.
 WORKERS_LOOPS = (
     _w("poller", None, _hb("poller", "ok", "idle")),
     _w("chain_listener", None, _hb("chain_listener", "ok")),

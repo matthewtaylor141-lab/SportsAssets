@@ -77,6 +77,9 @@ class _FakePool:
         if "reconciliation_runs SET" in sql:
             self.details = json.loads(a[2])
 
+    async def fetchrow(self, sql, *a, timeout=None):
+        return None                               # no previous run
+
 
 def _wire(monkeypatch, feed):
     """Wire reconcile_once to the crafted feed; return (pool, calls)."""
@@ -231,7 +234,14 @@ def test_total_loss_run_heartbeats_error_not_ok(monkeypatch):
     asyncio.run(rec.reconcile_once(depth=500))
     assert beats and beats[-1][1] == "error", \
         "a dead backstop must never wear a green heartbeat"
-    assert beats[-1][2] == {"missed": 0, "failed": 1}
+    # (RC6 identity lane: the detail also carries the run's late-fill and
+    # coverage-continuity account; a failed wallet is UNMEASURED, never a
+    # hole and never reached)
+    assert beats[-1][2] == {"missed": 0, "failed": 1,
+                            "missed_fills_recorded": 0,
+                            "wallets_with_hole": 0, "hole_seconds": 0,
+                            "max_hole_s": 0.0, "unmeasured": 1,
+                            "refusal": None}
 
     # the healthy control keeps its ok, now with failed=0 visible
     pool2, calls = _wire(monkeypatch, _feed())
@@ -347,6 +357,11 @@ class _StatementPool(_FakePool):
         self.stmts.append(("execute", sql, list(a)))
         return await super().execute(sql, *a, timeout=timeout)
 
+    async def fetchrow(self, sql, *a, timeout=None):
+        # RC6 identity lane: the previous run's coverage (none here)
+        self.stmts.append(("fetchrow", sql, list(a)))
+        return None
+
 
 def test_the_walks_statements_and_requests_are_the_recorded_golden(monkeypatch):
     pool = _StatementPool()
@@ -381,18 +396,33 @@ def test_the_walks_statements_and_requests_are_the_recorded_golden(monkeypatch):
     out = asyncio.run(rec.reconcile_once(depth=500))
     cov = {"complete": False, "oldest": float(TOP_TS - 584 * STEP),
            "newest": float(TOP_TS), "dirty": 0}
+    # RC6 identity lane: the run also states its coverage continuity (no
+    # previous run here, so the one wallet is UNMEASURED) and the late fills
+    # it ingested, itemised (none) -- the walk's requests are unchanged
+    coverage = {"wallets": 1, "reached": 0, "wallets_with_hole": 0,
+                "hole_seconds": 0, "max_hole_s": 0.0, "holes": [],
+                "unmeasured": [7], "refusal": None,
+                "rule": rec.coverage_continuity({}, [])["rule"],
+                "previous_run_id": None}
     assert out == {"run_id": 1, "missed": 0,
-                   "per_wallet": {"cov:" + WALLET: cov, WALLET: 0}}
+                   "per_wallet": {"cov:" + WALLET: cov, WALLET: 0},
+                   "coverage": coverage, "missed_fills": []}
     assert pool.stmts == [
         ("fetchval", "INSERT INTO reconciliation_runs DEFAULT VALUES RETURNING id", []),
         ("fetch", "SELECT id, address, username FROM whales WHERE active AND NOT banned", []),
+        ("fetchrow", rec.PREV_COVERAGE_SQL, [1]),
         ("fetchval", MUTANT_PROBE_SQL,
          ["0x" + format(1, "064x"), "10000", float(TOP_TS), 120.0]),
         ("execute",
          "UPDATE reconciliation_runs SET finished_at=now(), missed=$2, details=$3::jsonb WHERE id=$1",
-         [1, 0, json.dumps({"per_wallet": {"cov:" + WALLET: cov, WALLET: 0}})]),
+         [1, 0, json.dumps({"per_wallet": {"cov:" + WALLET: cov, WALLET: 0},
+                            "coverage": coverage, "missed_fills": [],
+                            "missed_fills_truncated": False})]),
     ]
-    assert beats == [("reconciler", "ok", {"missed": 0, "failed": 0})]
+    assert beats == [("reconciler", "ok", {
+        "missed": 0, "failed": 0, "missed_fills_recorded": 0,
+        "wallets_with_hole": 0, "hole_seconds": 0, "max_hole_s": 0.0,
+        "unmeasured": 1, "refusal": None})]
     assert calls == [("/trades", {"user": WALLET, "limit": 100, "offset": o,
                                   "takerOnly": "false"})
                      for o in (0, 97, 194, 291, 388, 485, 582)]
