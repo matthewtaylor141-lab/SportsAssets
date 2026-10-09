@@ -3,8 +3,14 @@ ESTABLISHED IS NOT LEFT UNKNOWN FOR WANT OF EVIDENCE THE LANE ALREADY HOLDS.
 
 Production (research-sql runs 37941166989, 37946119133, 37945671144,
 2026-10-09): every one of 264 valued soccer money lines in 24 h read
-settlement verdict UNKNOWN. Two software defects, before the genuinely
-missing evidence (domestic leagues have no organiser source at all):
+settlement verdict UNKNOWN. Two software defects fixed here, before the
+SOFTWARE gap this lane does not close (rework): no per-competition organiser
+schedule reader is built for the domestic and other leagues (epl, bun, sea,
+lal, mls, lmx, ... -- at least 235 valued money lines in 24 h, readback
+37949739839 R5). That is the same evidence class as the UEFA match API
+reader below, not missing evidence; whether an organiser's undocumented endpoint, or a cited
+competition-format declaration, may serve as the authoritative source is a
+reviewer / owner question:
 
   1  THE SOURCE WAS LOOKED UP BY THE ODDS PROVIDER'S SPORT KEY. PinnAPI
      quotes carry the generic 'pinnapi_soccer', which no declared source can
