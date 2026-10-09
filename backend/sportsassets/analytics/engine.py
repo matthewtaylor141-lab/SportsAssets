@@ -367,8 +367,12 @@ async def _persist_positions(states: list[PositionState]) -> None:
     as_of = next((st.as_of for st in states if st.as_of is not None),
                  None) or datetime.now(tz=timezone.utc)
     own_ids, own_n = (await _own_whale_ids(pool)) if unknown else (set(), 0)
+    # OUR OWN BOOKS, every cycle (bounded, read only): our positions are
+    # never in the tracked wallets' replay above, so this is where an
+    # ACTIVE row of ours without identity is found and refused
+    own_books = await IC.read_own_books(pool, now=as_of)
     census = IC.census(unknown, now=as_of, own_whale_ids=own_ids,
-                       own_wallets_configured=own_n)
+                       own_wallets_configured=own_n, own_books=own_books)
     LAST_IDENTITY_CENSUS["census"] = census
     IC.log_on_change(census, log)
     rows = [

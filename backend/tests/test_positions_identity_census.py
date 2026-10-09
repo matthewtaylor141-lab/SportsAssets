@@ -56,8 +56,22 @@ def _state(whale, tok, *, cid=None, last=OLD, buys=((10, 0.5),), sells=(),
 @pytest.fixture(autouse=True)
 def _fresh_signature():
     IC._LAST["signature"] = None
+    IC._OWN_HIST.update(at=None, rows=None, as_of=None, error=None)
     yield
     IC._LAST["signature"] = None
+    IC._OWN_HIST.update(at=None, rows=None, as_of=None, error=None)
+
+
+def _own_rows(active=None, hist=None):
+    """OWN_ACTIVE_SQL / OWN_HISTORICAL_SQL rows: every book read, zeros
+    unless given ({book: (rows, unknown)})."""
+    a = [{"book": b, "rows_n": (active or {}).get(b, (0, 0))[0],
+          "unknown_n": (active or {}).get(b, (0, 0))[1]}
+         for b in IC.OWN_BOOKS]
+    h = [{"book": b, "rows_n": (hist or {}).get(b, (0, 0))[0],
+          "unknown_n": (hist or {}).get(b, (0, 0))[1], "newest_at": OLD}
+         for b, (kind, _u) in IC.OWN_BOOKS.items() if kind == "PAPER"]
+    return a, h
 
 
 # ── the census, pure ──────────────────────────────────────────────────
@@ -149,15 +163,22 @@ class _Conn:
 
 
 class _Pool:
-    def __init__(self, own_ids=()):
+    def __init__(self, own_ids=(), own_active=None, own_hist=None,
+                 own_fails=False):
         self.sink = {}
         self.own_ids = list(own_ids)
         self.sql: list = []
+        self.own = _own_rows(own_active, own_hist)
+        self.own_fails = own_fails
 
     async def fetch(self, sql, arg):
         self.sql.append(sql)
         if "FROM whales" in sql:
             return [{"id": i} for i in self.own_ids]
+        if sql in (IC.OWN_ACTIVE_SQL, IC.OWN_HISTORICAL_SQL):
+            if self.own_fails:
+                raise RuntimeError("own books unreadable")
+            return self.own[0 if sql == IC.OWN_ACTIVE_SQL else 1]
         assert "market_tokens" in sql
         return [{"token_id": "tok-b", "condition_id": "0xrescued"}]
 
@@ -301,3 +322,241 @@ def test_the_own_wallet_roster_read_runs_on_postgres(monkeypatch):
 
     wid, (ids, n) = asyncio.run(main())
     assert ids == {wid} and n == 1
+
+
+# ── OUR OWN BOOKS (read directly: our positions are never in the replay) ──
+# Production (research-sql run 37927888187, 2026-10-09): live_orders 51 open,
+# 0 without identity; the legacy PAPER AI follower 328,669 open rows, every
+# one placed over 30 days ago, 68,449 with no condition and a token the
+# catalog never held; paper_fills / rn1x 0; small live, funded, Kalshi and
+# registered books empty. Before this, the census could name an own position
+# only when our funder address was on the tracked roster -- which it is not
+# -- so its refusal could never fire for a row of ours.
+
+PROD_ACTIVE = {IC.BOOK_LIVE: (51, 0), IC.BOOK_RN1X: (40, 0),
+               IC.BOOK_PAPER: (210, 0)}
+PROD_HIST = {IC.BOOK_AI: (328_669, 68_449), IC.BOOK_RN1X: (2_371, 0),
+             IC.BOOK_PAPER: (1_009, 0)}
+
+
+def _own(active=None, hist=None, hist_read=True):
+    a, h = _own_rows(active, hist)
+    return IC.own_books_census(a, hist_rows=h if hist_read else None,
+                               hist_as_of=NOW.isoformat() if hist_read
+                               else None)
+
+
+def test_production_own_books_are_counted_legacy_paper_debt_never_refused():
+    ob = _own(PROD_ACTIVE, PROD_HIST)
+    assert ob["status"] == IC.OWN_MEASURED and ob["active_unknown"] == 0
+    assert ob["active_rows"] == 301
+    assert ob["historical_unknown"] == 68_449
+    assert ob["books"][IC.BOOK_AI][IC.HISTORICAL]["unknown_identity"] == 68_449
+    assert ob["books"][IC.BOOK_AI]["kind"] == "PAPER"
+    # an ACTUAL book has no historical scope: an ACTUAL row is ACTIVE at any age
+    assert ob["books"][IC.BOOK_LIVE][IC.HISTORICAL] is None
+    assert "PAPER_ENGINE_FILLS_LEGACY" in ob["not_scanned"]
+    c = IC.census([], now=NOW, own_books=ob)
+    assert c["refusal"] is None and c["own_active"] == 0
+    # our legacy debt keeps the census off "clean": counted and visible
+    assert c["status"] == IC.ST_HISTORICAL
+    text = IC.line(c)
+    assert "PAPER_AI_FOLLOWER 68449" in text and "ACTIVE 0 unknown of 301" in text
+
+
+@pytest.mark.parametrize("book", [IC.BOOK_LIVE, IC.BOOK_SMALL_LIVE,
+                                  IC.BOOK_FUNDED, IC.BOOK_KALSHI,
+                                  IC.BOOK_REGISTERED, IC.BOOK_AI,
+                                  IC.BOOK_PAPER, IC.BOOK_RN1X])
+def test_an_active_row_of_any_own_book_without_identity_is_refused(book):
+    active = dict(PROD_ACTIVE)
+    rows, _ = active.get(book, (0, 0))
+    active[book] = (rows + 1, 1)
+    c = IC.census([], now=NOW, own_books=_own(active, PROD_HIST))
+    assert c["refusal"] == IC.R_OWN_ACTIVE_IDENTITY_UNKNOWN
+    assert c["status"] == IC.ST_REFUSED and c["own_active"] == 1
+    assert c["own_active_by_source"] == {"roster_wallet": 0, "own_books": 1}
+    assert c["own_books"]["active_unknown_by_book"] == {book: 1}
+
+
+def test_own_books_unreadable_is_unmeasured_never_clean():
+    ob = IC.own_books_census(None, error="RuntimeError")
+    assert ob["status"] == IC.OWN_UNMEASURED and ob["active_unknown"] is None
+    c = IC.census([], now=NOW, own_books=ob)
+    assert c["status"] == IC.ST_OWN_UNMEASURED and c["refusal"] is None
+    # a book missing from the read is unmeasured too, never zero
+    a, _h = _own_rows()
+    partial = IC.own_books_census([r for r in a if r["book"] != IC.BOOK_LIVE])
+    assert partial["status"] == IC.OWN_UNMEASURED
+    assert partial["books_unread"] == [IC.BOOK_LIVE]
+    assert IC.census([], now=NOW, own_books=partial)["status"] == \
+        IC.ST_OWN_UNMEASURED
+
+
+def test_row_totals_moving_do_not_relog_unknown_counts_moving_do():
+    a = IC.census([], now=NOW, own_books=_own(PROD_ACTIVE, PROD_HIST))
+    busier = dict(PROD_ACTIVE, **{IC.BOOK_LIVE: (60, 0)})
+    b = IC.census([], now=NOW, own_books=_own(busier, PROD_HIST))
+    assert IC.signature(a) == IC.signature(b)
+    debt = dict(PROD_HIST, **{IC.BOOK_AI: (328_669, 68_450)})
+    d = IC.census([], now=NOW, own_books=_own(PROD_ACTIVE, debt))
+    assert IC.signature(a) != IC.signature(d)
+
+
+def test_the_historical_read_runs_at_most_once_per_interval():
+    class P:
+        def __init__(self):
+            self.sql = []
+            self.own = _own_rows(PROD_ACTIVE, PROD_HIST)
+
+        async def fetch(self, sql, start):
+            self.sql.append(sql)
+            assert start == NOW - IC.ACTIVE_WINDOW
+            return self.own[0 if sql == IC.OWN_ACTIVE_SQL else 1]
+
+    p, t = P(), [1000.0]
+    for dt_s in (0.0, 600.0, 2999.0):
+        t[0] = 1000.0 + dt_s
+        ob = asyncio.run(IC.read_own_books(p, now=NOW, clock=lambda: t[0]))
+        assert ob["historical_unknown"] == 68_449
+        assert ob["historical_as_of"] == NOW.isoformat()
+    assert p.sql.count(IC.OWN_ACTIVE_SQL) == 3
+    assert p.sql.count(IC.OWN_HISTORICAL_SQL) == 1
+    t[0] = 1000.0 + IC.OWN_HISTORICAL_EVERY_S
+    asyncio.run(IC.read_own_books(p, now=NOW, clock=lambda: t[0]))
+    assert p.sql.count(IC.OWN_HISTORICAL_SQL) == 2
+
+
+def test_the_persist_refuses_an_active_own_book_row_with_no_funder_on_the_roster(
+        monkeypatch, caplog):
+    """THE GAP THIS CLOSES: no own wallet configured (production's roster
+    holds none of ours), no dead-lettered own state -- and still an ACTIVE
+    ACTUAL row of ours with no identity is refused by name, on the census
+    the heartbeat carries."""
+    pool = _Pool(own_active=dict(PROD_ACTIVE, **{IC.BOOK_LIVE: (52, 1)}),
+                 own_hist=PROD_HIST)
+    _wire(monkeypatch, pool, funder="")
+    with caplog.at_level(logging.WARNING, logger=eng.__name__):
+        asyncio.run(eng._persist_positions(_book()))
+    errs = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errs) == 1
+    assert IC.R_OWN_ACTIVE_IDENTITY_UNKNOWN in errs[0].getMessage()
+    assert "ACTUAL_LIVE_ORDERS 1" in errs[0].getMessage()
+    c = eng.LAST_IDENTITY_CENSUS["census"]
+    assert c["refusal"] == IC.R_OWN_ACTIVE_IDENTITY_UNKNOWN
+    assert c["own_wallets_configured"] == 0
+    assert IC.summary(c)["own_books"]["active_unknown"] == 1
+    # the snapshot still persists exactly as before
+    assert {r[1] for r in pool.sink["rows"]} == {"0xok", "0xrescued"}
+
+
+def test_the_persist_reads_own_books_every_cycle_even_with_no_dead_letter(
+        monkeypatch, caplog):
+    pool = _Pool(own_hist=PROD_HIST)
+    _wire(monkeypatch, pool)
+    with caplog.at_level(logging.WARNING, logger=eng.__name__):
+        asyncio.run(eng._persist_positions([_state(2, "tok-a", cid="0xok")]))
+    assert IC.OWN_ACTIVE_SQL in pool.sql
+    c = eng.LAST_IDENTITY_CENSUS["census"]
+    assert c["dead_lettered"] == 0 and c["status"] == IC.ST_HISTORICAL
+    warns = [r.getMessage() for r in caplog.records
+             if r.levelno >= logging.WARNING]
+    assert len(warns) == 1 and "PAPER_AI_FOLLOWER 68449" in warns[0]
+
+
+def test_the_persist_names_own_books_unmeasured_when_the_read_fails(
+        monkeypatch, caplog):
+    pool = _Pool(own_fails=True)
+    _wire(monkeypatch, pool)
+    with caplog.at_level(logging.WARNING, logger=eng.__name__):
+        asyncio.run(eng._persist_positions(_book()))
+    c = eng.LAST_IDENTITY_CENSUS["census"]
+    assert c["status"] == IC.ST_OWN_UNMEASURED
+    assert c["own_books"]["error"] == "RuntimeError"
+    assert any("own books UNMEASURED" in r.getMessage()
+               for r in caplog.records if r.levelno >= logging.WARNING)
+    assert {r[1] for r in pool.sink["rows"]} == {"0xok", "0xrescued"}
+
+
+@pg
+def test_the_own_books_reads_run_on_postgres_and_count_what_they_say():
+    """Both statements on the real schema: an ACTUAL open order with no slug,
+    no condition and an unknown token is ACTIVE unknown at any age; a PAPER
+    follower row is ACTIVE inside the window and HISTORICAL outside; a token
+    the catalog knows, or a condition, is identity; closed rows and
+    settled orders are not counted."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    async def main():
+        c = await asyncpg.connect(DSN)
+        tx = c.transaction()
+        await tx.start()
+        try:
+            now = await c.fetchval("SELECT now()")
+            base = await IC.read_own_books(c, now=now, clock=lambda: 0.0)
+            IC._OWN_HIST.update(at=None, rows=None, as_of=None, error=None)
+            await c.execute(
+                "INSERT INTO markets (condition_id) VALUES ('0xidlknown')")
+            await c.execute(
+                "INSERT INTO market_tokens (token_id, condition_id) VALUES "
+                "('idl-known', '0xidlknown')")
+            old = now - IC.ACTIVE_WINDOW - timedelta(days=4)
+            recent = now - timedelta(days=1)
+            for tok, cid, status, at in (
+                    ("idl-a1", None, "open", recent),      # ACTIVE unknown
+                    ("idl-a2", "", "open", recent),         # ACTIVE unknown
+                    ("idl-known", None, "open", recent),    # catalog: known
+                    ("idl-a3", "0xidlc", "open", recent),   # condition: known
+                    ("idl-h1", None, "open", old),          # HISTORICAL unknown
+                    ("idl-s1", None, "settled", recent)):   # not open
+                await c.execute(
+                    "INSERT INTO ai_trades (asset, condition_id, side, "
+                    "his_price, clip_target, shares, status, placed_at) "
+                    "VALUES ($1, $2, 'BUY', 0.5, 1, 2, $3, $4)",
+                    tok, cid, status, at)
+            for tok, slug, cid, status, shares, at in (
+                    ("idl-l1", None, None, "filled", 3, old),    # unknown
+                    ("idl-l2", "us-slug", None, "filled", 3, old),
+                    ("idl-l3", None, None, "exiting", 3, recent),  # unknown
+                    ("idl-l4", None, None, "settled", 3, recent),
+                    ("idl-l5", None, None, "filled", 0, recent)):
+                await c.execute(
+                    "INSERT INTO live_orders (asset, condition_id, side, "
+                    "his_price, limit_price, requested_usd, requested_shares,"
+                    " status, filled_shares, placed_at, us_market_slug) "
+                    "VALUES ($1, $2, 'BUY', 0.5, 0.5, 1, 2, $3, $4, $5, $6)",
+                    tok, cid, status, shares, at, slug)
+            got = await IC.read_own_books(c, now=now, clock=lambda: 0.0)
+            return base, got
+        finally:
+            await tx.rollback()
+            await c.close()
+
+    base, got = asyncio.run(main())
+    assert base["status"] == got["status"] == IC.OWN_MEASURED
+    b0, b1 = base["books"], got["books"]
+
+    def delta(book, scope, key):
+        return b1[book][scope][key] - b0[book][scope][key]
+
+    assert delta(IC.BOOK_AI, IC.ACTIVE, "rows") == 4
+    assert delta(IC.BOOK_AI, IC.ACTIVE, "unknown_identity") == 2
+    assert delta(IC.BOOK_AI, IC.HISTORICAL, "rows") == 1
+    assert delta(IC.BOOK_AI, IC.HISTORICAL, "unknown_identity") == 1
+    assert delta(IC.BOOK_LIVE, IC.ACTIVE, "rows") == 3
+    assert delta(IC.BOOK_LIVE, IC.ACTIVE, "unknown_identity") == 2
+    c = IC.census([], now=NOW, own_books=got)
+    assert c["refusal"] == IC.R_OWN_ACTIVE_IDENTITY_UNKNOWN
+    assert c["own_books"]["active_unknown_by_book"][IC.BOOK_LIVE] >= 2
+
+
+def test_the_research_file_runs_the_exact_statements_the_census_runs():
+    """research/rc6_identity_own_books.sql is the production readback of
+    this census: it must be the code's own two statements, $1 the window."""
+    import pathlib
+    sql = (pathlib.Path(__file__).resolve().parents[2] / "research"
+           / "rc6_identity_own_books.sql").read_text()
+    w = "(now() - interval '30 days')"
+    assert IC.OWN_ACTIVE_SQL.strip().replace("$1", w) + ";" in sql
+    assert IC.OWN_HISTORICAL_SQL.strip().replace("$1", w) + ";" in sql
+    assert IC.ACTIVE_WINDOW.days == 30
