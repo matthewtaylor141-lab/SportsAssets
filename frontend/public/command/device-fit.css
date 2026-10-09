@@ -86,6 +86,38 @@
   .workspace-toolbar .search input{min-height:44px;min-width:44px;width:100%;}
   .card-actions .tiny-button{min-width:44px;min-height:44px;}
   .orders-view .table-focus{min-height:44px;}
+
+  /* THE SHELL (hq2-shell.js, every page under it: agents, ops, positions,
+     floor) ------------------------------------------------------------------ */
+  /* the Company Pulse button and its agent list were raised on the Floor only
+     (27-37 px and 8 list rows under 44 on every other shell page) */
+  .hq5-pulse-btn,.hq5-pulse-agent{min-height:44px;}
+  /* the side rail's links shrink to their label (HQ 20 px, Floor 40 px wide
+     on an iPad): each takes the rail's width */
+  .bt-hq2 .bt-hq2-nav a{min-width:44px;align-self:stretch;}
+
+  /* AGENT PAGES (agent.html) ------------------------------------------------ */
+  /* the agent navigation: 26-38 px tall (phone) / 36 px (tablet) */
+  /* (flex items of the nav already: min-height applies, the two-line phone
+     label keeps its layout) */
+  body.bt-hq2>nav[aria-label="AI agents"] a{min-height:44px;}
+  body.bt-hq2>nav[aria-label="AI agents"]{min-height:56px;}
+  /* the person panel's identity summary (36 px), Talk / Back to floor (34 px),
+     the Work / Conversation tabs (37 px), the floor link (18 px) */
+  .hq6-agent-person summary,.bt-agent2-actions button,.bt-agent2-actions a,.ws-tabs button{min-height:44px;}
+  .bt-agent2-actions a{display:inline-flex;align-items:center;}
+  .wsx-floor{display:inline-flex;align-items:center;min-height:44px;}
+
+  /* OPERATIONS DESK (ops.html) ---------------------------------------------- */
+  /* section jumps 23 px; sortable column heads 26 px; row / view selects 24 px */
+  .od-jump a{min-height:44px;display:inline-flex;align-items:center;}
+  .od-t th[data-sort]{height:44px;}
+  .od-ctl select{min-height:44px;}
+
+  /* POSITION ROOMS (position.html) ------------------------------------------ */
+  /* the bar's brand (28 px), links (32 px) and Refresh (29 px) */
+  .pr-brand,.pr-nav a,#pr-refresh{min-height:44px;}
+  .pr-nav a{display:inline-flex;align-items:center;}
 }
 @media (pointer:coarse) and (max-width:780px){
   body.fl .cf-floor-hud{top:68px;}
@@ -136,7 +168,7 @@
    panel moves down with the taller bar (row 1 is the 54 px workspace bar,
    row 2 the 26 px pills: 92 px). */
 @media (min-width:761px) and (max-width:1180px){
-  body.hq{--top:92px;}
+  body.hq{--top:calc(92px + var(--sa-t));}
   body.hq #hq-top{flex-wrap:wrap;align-content:center;row-gap:4px;}
   /* basis 0 keeps the workspace bar on row 1 beside the brand (its 624 px
      would otherwise wrap at 820 px); max-content keeps it from stretching */
@@ -152,8 +184,206 @@
    tall), and the columns start 10 px below the strip. With a desk open the
    original right edge (418 px, beside the desk) still applies. */
 @media (min-width:761px) and (max-width:1000px){
-  body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:18px;right:18px;}
-  body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:18px;right:18px;}
+  body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}
+  body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}
   body.hq[data-view="command"] .hud-col{top:calc(var(--top) + 95px);}
   body.hq.has-critical[data-view="command"] .hud-col{top:calc(var(--top) + 163px);}
+}
+
+/* SHELL PAGES CLEAR OF THE SHELL (every pointer) --------------------------- */
+/* hq2-shell.js pins a 92 px rail on the left (at <= 780 px a 66 px tab bar at
+   the bottom), a 64 px page bar on top (58 px) and command-ops.js its status
+   strip under that (var(--ops-hdr-h); body.ops-hdr-on is already padded by
+   it). The shell offsets only the wrappers it knows, and two pages have
+   their own:
+     agent.html     its navigation (<- COMMAND, Trading floor, the seven
+                    agents) sat at the top of the body, under the page bar,
+                    the strip and the rail: not one of its nine links took a
+                    tap on any device (harness REACHABILITY + CONTROLS,
+                    synthetic reads, f90dafdd);
+     position.html  its sticky bar (top 0, z-index 20) ran under the page bar
+                    and the strip, and the page under the rail (the heading
+                    cut at the left edge on desktop).
+   Each moves below the bar / strip and right of the rail; what the shell
+   already offset gives back the space the moved block now takes. */
+@media (min-width:781px){
+  body.bt-hq2>nav[aria-label="AI agents"]{margin:64px 0 0 92px;}
+  body.bt-hq2.pr-body{padding-left:92px;padding-top:64px;}
+  body.bt-hq2.pr-body.ops-hdr-on{padding-top:calc(64px + var(--ops-hdr-h));}
+  body.bt-hq2.pr-body .pr-bar{top:64px;}
+  body.bt-hq2.pr-body.ops-hdr-on .pr-bar{top:calc(64px + var(--ops-hdr-h));}
+  /* the person column stays under the strip when it sticks (command-final's
+     top:78px!important put it beneath the strip) */
+  body.bt-hq2.ops-hdr-on.command-final-agent .hq6-agent-person{top:calc(76px + var(--ops-hdr-h))!important;}
+}
+@media (max-width:780px){
+  /* the page bar is 64 px at every width (hq5-workspace.css height:64px
+     !important beats hq2-brand.css's 58 px), and the strip sits under it */
+  body.bt-hq2>nav[aria-label="AI agents"]{margin-top:64px;}
+  body.bt-hq2.pr-body{padding-top:64px;}
+  body.bt-hq2.pr-body.ops-hdr-on{padding-top:calc(64px + var(--ops-hdr-h));}
+  body.bt-hq2.pr-body .pr-bar{top:64px;}
+  body.bt-hq2.pr-body.ops-hdr-on .pr-bar{top:calc(64px + var(--ops-hdr-h));}
+}
+/* the agent layout's own top padding cleared the page bar the navigation now
+   clears (76 px; 70 px on a phone) */
+body.bt-hq2>nav[aria-label="AI agents"]~.hq6-agent-layout{padding-top:12px;}
+
+
+/* THE SHELL UNDER THE NOTCH AND OVER THE HOME INDICATOR (every pointer) ---- */
+/* Measured with the device's insets applied (harness SAFE AREA: iPhone 47 px
+   status bar / 34 px home indicator, landscape 47 px notch sides / 21 px
+   indicator, iPad 24 / 20 px; synthetic reads, f90dafdd): the page bar's
+   title and Company Pulse sat under the status bar of the installed app, the
+   phone tab bar's six links on the home indicator (32 px into it), and in
+   landscape the side rail's links under the notch (up to 37 px). env() is 0
+   wherever there is no notch or indicator (every desktop, a browser tab in
+   portrait), so each value below is the shell's own value there. The bars'
+   paint still runs to the screen edge; their content moves inside. */
+:root{--sa-t:env(safe-area-inset-top,0px);--sa-r:env(safe-area-inset-right,0px);
+  --sa-b:env(safe-area-inset-bottom,0px);--sa-l:env(safe-area-inset-left,0px);}
+body.bt-hq2 .bt-hq2-pagebar{height:calc(64px + var(--sa-t))!important;padding-top:var(--sa-t);padding-right:calc(24px + var(--sa-r));}
+body.bt-hq2 .bt-hq2-content-offset{padding-top:calc(64px + var(--sa-t))!important;}
+body.ops-hdr-on .hq5-pulse-pop{top:calc(72px + var(--ops-hdr-h) + var(--sa-t));right:calc(18px + var(--sa-r));}
+body.ops-hdr-on .hq5-floorbar,body.ops-hdr-on .hq5-floor-summary{top:calc(76px + var(--ops-hdr-h) + var(--sa-t));}
+body.ops-hdr-on .hq5-floor-summary{right:calc(20px + var(--sa-r));}
+body.meeting-real-floor .fl-screen{padding-top:calc(64px + var(--sa-t))!important;}
+body.ops-hdr-on.meeting-real-floor .fl-stage{min-height:calc(100dvh - 64px - var(--ops-hdr-h) - var(--sa-t))!important;}
+body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(76px + var(--ops-hdr-h) + var(--sa-t))!important;}
+.ops-desk-page .od-main{padding-top:calc(78px + var(--sa-t));padding-right:calc(18px + var(--sa-r));}
+/* a section jump lands below the bar and strip, the inset included */
+.ops-desk-page .od-panel{scroll-margin-top:calc(80px + var(--ops-hdr-h,46px) + var(--sa-t));}
+@media (min-width:781px){
+  /* the side rail: its paint under the notch, its links beside it */
+  body.bt-hq2 .bt-hq2-shell{width:calc(92px + var(--sa-l));padding-left:calc(10px + var(--sa-l));padding-top:calc(18px + var(--sa-t));padding-bottom:calc(16px + var(--sa-b));}
+  body.bt-hq2 .bt-hq2-pagebar{left:calc(92px + var(--sa-l));}
+  /* the strip scrolls sideways under 1100 px: its box ends at the notch, so
+     no cell scrolls in under it */
+  body.bt-hq2 .ops-hdr{left:calc(92px + var(--sa-l));right:var(--sa-r);}
+  body.bt-hq2 .bt-hq2-content-offset{padding-left:calc(92px + var(--sa-l))!important;}
+  body.meeting-real-floor .fl-screen{padding-left:calc(92px + var(--sa-l))!important;}
+  .hq6-agent-layout{margin-left:calc(92px + var(--sa-l));padding-right:calc(18px + var(--sa-r));}
+  .ops-desk-page .od-main{padding-left:calc(110px + var(--sa-l));}
+  body.bt-hq2>nav[aria-label="AI agents"]{margin:calc(64px + var(--sa-t)) var(--sa-r) 0 calc(92px + var(--sa-l));}
+  body.bt-hq2.pr-body{padding-left:calc(92px + var(--sa-l));padding-right:var(--sa-r);padding-top:calc(64px + var(--sa-t));}
+  body.bt-hq2.pr-body.ops-hdr-on{padding-top:calc(64px + var(--ops-hdr-h) + var(--sa-t));}
+  body.bt-hq2.pr-body .pr-bar{top:calc(64px + var(--sa-t));}
+  body.bt-hq2.pr-body.ops-hdr-on .pr-bar{top:calc(64px + var(--ops-hdr-h) + var(--sa-t));}
+  body.bt-hq2.ops-hdr-on.command-final-agent .hq6-agent-person{top:calc(76px + var(--ops-hdr-h) + var(--sa-t))!important;}
+  /* the sticky person column scrolls inside itself: its foot ends above the
+     home indicator (iPad landscape: "NOW" / the mission title 8-20 px into it) */
+  body.bt-hq2.ops-hdr-on .hq6-agent-person{max-height:calc(100vh - 92px - var(--ops-hdr-h) - var(--sa-t) - var(--sa-b));}
+}
+/* a landscape phone is a wide screen only 390 px tall: the side rail's logo,
+   six 61 px links and foot ran past the bottom edge (Company at y 453-514 on
+   a 390 px screen: no tap reached it). Below 560 px of height the rail
+   tightens (44 px logo, 44 px links, 2 px gaps: Company ends at 346 px, above
+   the 21 px indicator) and scrolls if it must. Its foot (the READ system
+   light) leaves the rail there: the page bar shows the same state from the
+   same read (hq2-shell.js update(): #bt-hq2-system and #bt-hq2-live), and it
+   would sit on the indicator. */
+@media (min-width:781px) and (max-height:560px){
+  body.bt-hq2 .bt-hq2-shell{overflow-y:auto;scrollbar-width:none;}
+  body.bt-hq2 .bt-hq2-logo{width:44px;height:44px;flex:none;}
+  body.bt-hq2 .bt-hq2-nav{margin-top:10px;gap:2px!important;}
+  body.bt-hq2 .bt-hq2-nav a{min-height:44px!important;padding-top:5px;padding-bottom:5px;gap:3px;}
+  body.bt-hq2 .bt-hq2-shell-foot{display:none;}
+}
+@media (max-width:780px){
+  /* the bottom tab bar: its links above the home indicator, clear of the side insets */
+  body.bt-hq2 .bt-hq2-shell{height:calc(66px + var(--sa-b));padding:7px calc(12px + var(--sa-r)) calc(7px + var(--sa-b)) calc(12px + var(--sa-l));}
+  body.bt-hq2{padding-bottom:calc(72px + var(--sa-b));}
+  body.bt-hq2 .bt-hq2-pagebar{padding-left:calc(14px + var(--sa-l));padding-right:calc(14px + var(--sa-r));}
+  body.bt-hq2 .bt-hq2-content-offset{padding-top:calc(58px + var(--sa-t))!important;}
+  body.meeting-real-floor .fl-screen{padding-top:calc(58px + var(--sa-t))!important;}
+  body.meeting-real-floor .fl-roster{bottom:calc(72px + var(--sa-b))!important;}
+  body.meeting-real-floor .fl-panel{bottom:calc(72px + var(--sa-b))!important;}
+  body.ops-hdr-on .hq5-pulse-pop{top:calc(64px + var(--ops-hdr-h) + var(--sa-t));right:calc(8px + var(--sa-r));}
+  body.ops-hdr-on .hq5-floorbar{top:calc(66px + var(--ops-hdr-h) + var(--sa-t));}
+  body.ops-hdr-on.meeting-real-floor .fl-stage{height:calc(100dvh - 124px - var(--ops-hdr-h) - var(--sa-t) - var(--sa-b))!important;}
+  .ops-desk-page .od-main{padding:calc(70px + var(--sa-t)) calc(10px + var(--sa-r)) calc(90px + var(--sa-b)) calc(10px + var(--sa-l));}
+  body.bt-hq2>nav[aria-label="AI agents"]{margin-top:calc(64px + var(--sa-t));padding-left:calc(8px + var(--sa-l));padding-right:calc(8px + var(--sa-r));}
+  body.bt-hq2.pr-body{padding-top:calc(64px + var(--sa-t));}
+  body.bt-hq2.pr-body.ops-hdr-on{padding-top:calc(64px + var(--ops-hdr-h) + var(--sa-t));}
+  body.bt-hq2.pr-body .pr-bar{top:calc(64px + var(--sa-t));}
+  body.bt-hq2.pr-body.ops-hdr-on .pr-bar{top:calc(64px + var(--ops-hdr-h) + var(--sa-t));}
+}
+/* a landscape phone (under 560 px tall): the position bar stuck under the
+   fixed page bar and strip left too little screen (the book tabs, scrolled to
+   the middle, sat under it); there it scrolls with the page */
+@media (max-height:560px){
+  body.bt-hq2.pr-body .pr-bar,body.bt-hq2.pr-body.ops-hdr-on .pr-bar{position:relative;top:auto;}
+}
+
+/* AGENT WORKSPACE HERO BESIDE THE PERSON COLUMN (every pointer) ------------ */
+/* workspace.css lays the hero out in three columns of at least 220 + 260 +
+   200 px (+ gaps and padding: 776 px) and drops to two only below a 980 px
+   VIEWPORT; beside the agent's person column (command-final.css: 330-420 px,
+   the rail and the gaps take 564 px) the work column is narrower than that
+   below a ~1340 px viewport. At 1180 px (iPad landscape) the heartbeat column
+   ran 209 px past the screen: the layout viewport widened to 1389 px and the
+   fixed page bar and strip with it (harness, synthetic reads, f90dafdd;
+   scrollWidth 1389 vs clientWidth 1180). Between 981 and 1360 px the hero
+   takes the two-column form it already has below 980 px. */
+@media (min-width:981px) and (max-width:1360px){
+  .hq6-agent-layout .wsx-hero{grid-template-columns:1fr 1fr;}
+  .hq6-agent-layout .wsx-hb{grid-column:1/-1;}
+}
+
+/* COMMAND AND TRADER UNDER THE NOTCH (every pointer) ----------------------- */
+/* Measured with the insets (harness SAFE AREA, synthetic reads, f90dafdd):
+   Command's top bar (sticky / fixed at top 0) put the brand and the FEEDS /
+   SMALL LIVE pills 25-43 px into an iPhone's 47 px status bar; Trader's
+   wordmark, current-view link and PAPER / SHADOW badge sat 30-41 px into it
+   (15 px into an iPad's 24 px). Command hangs every panel from var(--top), so
+   the bar grows by the inset and its content moves below it; Trader's bar is
+   in the page, so the page starts below the inset. On a landscape phone (a
+   wide layout 390 px tall) the HUD columns, the bottom strip and the panels
+   keep clear of the notch sides and the indicator. env() is 0 elsewhere. */
+/* (761-1180 px: calc(92px + inset), in COMMAND ON TABLETS above) */
+@media (min-width:1181px){body.hq{--top:calc(60px + var(--sa-t));}}
+body.hq #hq-top{padding-top:var(--sa-t);padding-left:calc(20px + var(--sa-l));padding-right:calc(20px + var(--sa-r));}
+@media (max-width:760px){
+  body.hq{--top:calc(54px + var(--sa-t));}
+  body.hq #hq-top{padding-left:calc(14px + var(--sa-l));padding-right:calc(14px + var(--sa-r));}
+  body.hq main#hq-hud{padding-left:calc(14px + var(--sa-l));padding-right:calc(14px + var(--sa-r));}
+  /* the desk sheet rises from the bottom edge: its last lines above the indicator */
+  body.hq #hq-desk .ins{padding-bottom:calc(20px + var(--sa-b));}
+}
+@media (min-width:761px){
+  body.hq .hud-col.left{left:calc(18px + var(--sa-l));}
+  body.hq .hud-col.right{right:calc(18px + var(--sa-r));}
+  body.hq .hud-col{bottom:calc(var(--bottom) + 14px + var(--sa-b));}
+  body.hq .hud-bottom{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));bottom:calc(14px + var(--sa-b));}
+  body.hq .floor-legend,body.hq .markets-left{left:calc(18px + var(--sa-l));bottom:calc(14px + var(--sa-b));}
+  body.hq #hq-desk,body.hq .drawer{right:calc(18px + var(--sa-r));bottom:calc(14px + var(--sa-b));}
+  body.hq .cap-grid{inset:calc(var(--top) + 8px) calc(18px + var(--sa-r)) calc(14px + var(--sa-b)) calc(18px + var(--sa-l));}
+  body.hq .sheet{bottom:calc(14px + var(--sa-b));}
+  body.hq .hq-foot{right:calc(22px + var(--sa-r));bottom:calc(2px + var(--sa-b));}
+  body.hq #hq-caption{bottom:calc(var(--bottom) + 30px + var(--sa-b));}
+}
+/* Trader: the page starts below the status bar and inside the notch sides
+   (experience-v4.js marks the body bt-page-trader; :has() covers a page
+   whose script has not run) */
+body.bt-page-trader,body:has(>header.topbar){padding-top:var(--sa-t);padding-left:var(--sa-l);padding-right:var(--sa-r);}
+#toast{bottom:calc(24px + var(--sa-b));}
+.bt-v4-broadcast-shell{padding-left:calc(22px + var(--sa-l));padding-right:calc(22px + var(--sa-r));}
+
+
+/* COMMAND: THE DRAG HINT OUT OF THE STRIPS' WAY (every pointer) ----------- */
+/* The 9-second hint ("Drag to look around ...") hung at the top centre, the
+   slot the freshness strip and the CRITICAL bar now hold on the Command,
+   Floor and Markets views (#hq-fresh top +8 px, #hq-hint top +12 px: 15,170
+   px2 overlap at 820 px, 15,614 at 844 px; harness, synthetic reads; the hint
+   painted beneath them, half hidden). On a wide screen it moves to the free
+   centre above the bottom strip on the Command view (measured clear at 1180
+   and 1440 px); where no slot is free (Floor: the legend at 1180 px; Markets:
+   the opportunity drawer; tablets and landscape phones: the HUD columns fill
+   the width) it is not drawn. */
+@media (min-width:1001px){
+  body.hq[data-view="command"] #hq-hint{top:auto;bottom:calc(var(--bottom) + 26px + var(--sa-b));}
+  body.hq[data-view="floor"] #hq-hint,body.hq[data-view="markets"] #hq-hint{display:none;}
+}
+@media (min-width:761px) and (max-width:1000px){
+  body.hq #hq-hint{display:none;}
 }

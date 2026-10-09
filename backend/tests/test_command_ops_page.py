@@ -86,8 +86,9 @@ def test_every_command_final_page_also_loads_the_ops_layer_after_it():
 
 def test_the_ops_page_loads_its_layers_in_order_with_relative_references():
     refs = re.findall(r'(?:href|src)="([^"]+\.(?:css|js))"', OPS_HTML)
+    # device-fit.css last: touch targets, the shell and the notch (RC6 device acceptance)
     assert refs == ['hq2-brand.css', 'hq5-workspace.css', 'hq6-complete.css', 'brand/brand.css',
-                    'command-final.css', 'command-ops.css', 'ops-desk.css',
+                    'command-final.css', 'command-ops.css', 'ops-desk.css', 'device-fit.css',
                     'hq2-shell.js', 'ops-taxonomy.js', 'hq5-workspace.js', 'hq6-complete.js',
                     'command-final.js', 'command-ops.js', 'ops-desk.js']
     for panel in ("funnel", "coverage", "opportunities", "blotter", "agents", "refusals",

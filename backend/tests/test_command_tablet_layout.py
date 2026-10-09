@@ -43,7 +43,9 @@ def fit() -> str:
 
 def test_status_pills_get_their_own_row_on_tablets():
     tab = _block(fit(), "@media (min-width:761px) and (max-width:1180px){")
-    assert "body.hq{--top:92px;}" in tab
+    # 92 px, plus the status-bar inset of an installed app (env() is 0 without one)
+    assert "body.hq{--top:calc(92px + var(--sa-t));}" in tab
+    assert ":root{--sa-t:env(safe-area-inset-top,0px);" in fit()
     assert "body.hq #hq-top{flex-wrap:wrap;align-content:center;row-gap:4px;}" in tab
     assert "body.hq #hq-top>#hq-nav{flex:1 1 0;min-width:0;max-width:max-content;}" in tab
     assert "body.hq #hq-status{flex:0 0 100%;justify-content:flex-end;margin-left:0;}" in tab
@@ -63,8 +65,10 @@ def test_status_pills_get_their_own_row_on_tablets():
 
 def test_portrait_alert_and_freshness_span_the_view_above_the_columns():
     por = _block(fit(), "@media (min-width:761px) and (max-width:1000px){")
-    assert 'body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:18px;right:18px;}' in por
-    assert 'body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:18px;right:18px;}' in por
+    # 18 px from each edge, plus the notch's side inset on a landscape phone (0 elsewhere)
+    assert 'body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}' in por
+    assert 'body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}' in por
+    assert "--sa-r:env(safe-area-inset-right,0px);" in fit() and "--sa-l:env(safe-area-inset-left,0px);}" in fit()
     hq = (COMMAND / "hq.css").read_text(encoding="utf-8")
     # where hq.css puts them under the bar: alert +6 px; freshness +8 px, or +76 px under an alert
     assert "#hq-alert { position: fixed; z-index: 22; top: calc(var(--top) + 6px);" in hq
