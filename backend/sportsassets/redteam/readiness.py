@@ -25,7 +25,7 @@ from . import venue_health as VH
 
 VERSION = "RED_TEAM_READINESS_V1"
 ACCOUNT_ID = "paper_acct_main"
-from ..paper_account_context import selected_account as _selected_account
+from ..simulated_account_context import selected_account as _selected_account
 CAPACITY_WINDOW_DAYS = 14
 QTY_GRID = ((1, 10), (11, 50), (51, 100), (101, 500), (501, 10 ** 9))
 METRIC_MAX_AGE_S = 900.0

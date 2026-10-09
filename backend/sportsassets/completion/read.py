@@ -1107,7 +1107,7 @@ async def read(conn, *, account_id: str | None = None,
                now: float | None = None) -> dict:
     """The whole readback, inside the caller's READ ONLY transaction; every
     section in its own savepoint with its own budget and timing."""
-    from ..paper_account_context import selected_account
+    from ..simulated_account_context import selected_account
     account_id = account_id or await selected_account(conn)
     from ..capital_readiness import feeds as F
     from ..revenue_reliability import read as RR

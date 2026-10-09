@@ -211,7 +211,7 @@ def ledger_reconciliation(claimed: list, positions: list, *,
 
 async def read(conn, *, now: float, account_id: str | None = None,
                attributed=None, fixtures=None) -> dict:
-    from ..paper_account_context import selected_account
+    from ..simulated_account_context import selected_account
     account_id = account_id or await selected_account(conn)
     th = thresholds()
     since = cohort_start(th)

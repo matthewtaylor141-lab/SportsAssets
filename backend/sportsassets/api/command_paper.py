@@ -108,7 +108,7 @@ async def account_payload(conn, *, entries: int = 50,
                         empty_why="NO_LEDGER_ENTRIES")
     out["account"] = bal
     out["ledger"] = led
-    from .. import bettor_day_one as E
+    from .. import bettor_paper_day_one as E
     if acct != L.ACCOUNT_ID:
         out['epoch'] = await E.read(conn, acct)
     out["session"] = await session_brief(conn, bal.get("data") or {})
@@ -129,7 +129,7 @@ async def account_payload(conn, *, entries: int = 50,
 
 @router.get('/api/command/paper/day-one', dependencies=[Depends(require_read)])
 async def day_one_epoch():
-    from .. import bettor_day_one as E
+    from .. import bettor_paper_day_one as E
     pool = await _pool()
     async with pool.acquire() as conn:
         return await E.read(conn)
@@ -226,7 +226,7 @@ async def stream_events(acquire, *, last_event_id: int | None,
             latest = await L.latest_entries(conn, acct, limit=20)
             epoch = None
             if acct.startswith('paper_day_one_'):
-                from .. import bettor_day_one as E
+                from .. import bettor_paper_day_one as E
                 epoch = await E.read(conn, acct, bal=bal)
         cursor = int(bal.get("last_sequence") or 0)
         snapshot = dict(_labels(), sequence=cursor, balances=bal,

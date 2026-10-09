@@ -15,7 +15,7 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-from sportsassets import bettor_day_one as E
+from sportsassets import bettor_paper_day_one as E
 from sportsassets import bettor_paper_ledger as L
 from sportsassets import bettor_paper_session as S
 from sportsassets import bettor_paper_simulator as SIM
@@ -403,3 +403,15 @@ async def test_upgrade_proof_refuses_changed_guard_execution_context(conn):
     await conn.execute('ALTER FUNCTION paper_epoch_order_owner() SECURITY DEFINER')
     changed = await tool.snapshot(conn)
     assert 'proven_dormant_epoch_triggers' not in changed['paper_orders']
+
+
+def test_simulated_selector_has_no_writer_dependencies_or_calls():
+    import ast
+    from sportsassets import simulated_account_context as C
+    tree = ast.parse(pathlib.Path(C.__file__).read_text())
+    assert not any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in ast.walk(tree))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    assert all(n.func.attr in ('fetchval', 'startswith') for n in calls)
+    for call in calls:
+        if call.func.attr == 'fetchval':
+            assert isinstance(call.args[0], ast.Constant) and call.args[0].value.startswith('SELECT ')

@@ -3,7 +3,7 @@ import argparse
 import asyncio
 import json
 
-from .. import bettor_day_one as E
+from .. import bettor_paper_day_one as E
 from ..db import get_pool
 
 

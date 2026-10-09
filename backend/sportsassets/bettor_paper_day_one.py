@@ -32,7 +32,7 @@ def epoch_account(epoch_id):
 
 
 async def selected_account(conn):
-    from .paper_account_context import selected_account as resolve
+    from .simulated_account_context import selected_account as resolve
     return await resolve(conn)
 
 

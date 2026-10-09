@@ -925,7 +925,7 @@ async def read(conn, account_id: str, *, bal: dict, now: float,
     """The management book for `account_id` from the ledger tables, with
     current marks taken from `bal` (bettor_paper_ledger.balances)."""
     if await conn.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL") and await conn.fetchval('SELECT EXISTS(SELECT 1 FROM paper_account_epochs WHERE account_id=$1)', account_id):
-        from . import bettor_day_one as E
+        from . import bettor_paper_day_one as E
         return await E.read(conn, account_id, bal=bal)
     if now < epoch_at:
         return {"status": "NOT_STARTED", "epoch_id": EPOCH_ID,

@@ -16,7 +16,7 @@ import tempfile
 import time
 from decimal import Decimal
 
-from .bettor_day_one import EpochRefused
+from .bettor_paper_day_one import EpochRefused
 
 REPO = 'matthewtaylor141-lab/SportsAssets'
 WORKFLOW = REPO + '/.github/workflows/pm-acceptance.yml'

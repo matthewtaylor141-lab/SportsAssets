@@ -898,7 +898,7 @@ async def read_management(conn, acct: str, *, now: float, bal: dict,
     try:
         async with conn.transaction():
             if acct != 'paper_acct_main':
-                from .. import bettor_day_one as E
+                from .. import bettor_paper_day_one as E
                 epoch = await E.read(conn, acct)
                 if epoch.get('day_one'):
                     return dict(epoch, status='OK', read_model='ACCOUNT_BACKED_EPOCH',

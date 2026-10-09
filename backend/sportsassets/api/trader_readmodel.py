@@ -12,7 +12,7 @@ import time
 from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 from .. import trader_mode as T
 from ..live_game_state.integration import enrich_snapshot as enrich_live_game_snapshot
-from ..paper_account_context import selected_account
+from ..simulated_account_context import selected_account
 
 MAX_POSITIONS = 1000
 CACHE_S = 2.0

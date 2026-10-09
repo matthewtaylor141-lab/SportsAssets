@@ -63,7 +63,7 @@ async def profitability_os(
     now = time.time()
     try:
         async def load(conn):
-            from ..paper_account_context import selected_account
+            from ..simulated_account_context import selected_account
             acct = account_id or await selected_account(conn)
             return await R.load_all(conn, account_id=acct, now=now, window_days=float(window_days))
         inputs = await _read_only(load)

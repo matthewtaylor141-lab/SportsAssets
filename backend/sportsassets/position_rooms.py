@@ -2416,7 +2416,7 @@ async def load(conn, *, book: str, venue: str, now: float | None = None,
     """Every row one book's rooms are built from. Read only."""
     at = float(now if now is not None else time.time())
     if book == B_PAPER and account_id is None:
-        from .paper_account_context import selected_account
+        from .simulated_account_context import selected_account
         account_id = await selected_account(conn)
     if book == B_PAPER:
         base = await _paper(conn, at, account_id)
