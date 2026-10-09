@@ -72,6 +72,31 @@ async def _decisions(conn, acct, vid) -> dict:
         "   AND valuation_id=$2", acct["session_id"], vid)}
 
 
+async def _no_foreign_valuation_in_the_pass_window(conn, now) -> None:
+    """THE PASS DECIDES EVERY ENTRY-EXPERIMENT VALUATION IN ITS WINDOW.
+
+    `paper_pass` (and its backstops) decide each valuation of the experiment
+    decided within `valuation_lookback_s` (1800 s) of the pass instant, in
+    the proof's own session, whoever wrote it. A proof whose session-wide
+    figures are its own valuation's alone therefore needs that window to
+    hold none but its own. A row another proof left there is decided too:
+    one more decision per strategy, and a STALE or NO_RESEARCH_MODEL refusal
+    in the Audrey report depending only on how old the leftover reading is.
+    Checked after this proof's purge, before it writes its own valuation,
+    and named here rather than surfacing as a count."""
+    lookback = float(PL.config()["entry"]["valuation_lookback_s"])
+    rows = await conn.fetch(
+        "SELECT id, us_market_slug, decided_at FROM external_valuations "
+        " WHERE experiment_id = $1 AND us_market_slug IS NOT NULL "
+        "   AND decided_at > to_timestamp($2) ORDER BY id",
+        ext.EXPERIMENT_ID, float(now) - lookback)
+    assert not rows, (
+        "another proof left entry-experiment valuations inside this pass's "
+        "window; their writer must remove them: %s"
+        % [(r["id"], r["us_market_slug"], str(r["decided_at"]))
+           for r in rows])
+
+
 async def _ledger_matches_balances(conn, acct_id, now) -> dict:
     b = await L.balances(conn, acct_id, now=now)
     s = await conn.fetchrow(
@@ -326,6 +351,7 @@ async def test_lifecycle_enter_order_fill_cash_xavier_audrey_settle(bench_on):
     try:
         await PL.purge_everything(conn)
         await PL.purge_research_models(conn)
+        await _no_foreign_valuation_in_the_pass_window(conn, now)
         funded_before = await H.funded_table_counts(conn)
         acct = await PL.new_account(conn, "bench", now=now)
         v = await PL.valuation(conn, decided_at=now - 10, p_pin=0.62)
@@ -920,6 +946,7 @@ async def test_repeated_valuations_and_restarts_duplicate_nothing(
     try:
         await PL.purge_everything(conn)
         await PL.purge_research_models(conn)
+        await _no_foreign_valuation_in_the_pass_window(conn, now)
         monkeypatch.setenv(S.ENV_FLAG, "on")
         acct = await PL.new_account(conn, "benchrst", now=now)
         v = await PL.valuation(conn, decided_at=now - 2, p_pin=0.62)

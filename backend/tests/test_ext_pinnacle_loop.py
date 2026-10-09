@@ -239,6 +239,59 @@ def test_basketball_and_hockey_are_not_requested_at_all():
 DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
+
+@pytest.fixture(scope="module")
+def own_cycle_valuations():
+    """THE ROWS THESE CYCLES WRITE LEAVE WITH THIS MODULE.
+
+    The cycle tests below drive the REAL collector against the shared test
+    database, so the row `test_one_cycle_writes_a_complete_refusal_record`
+    persists is a genuine entry-experiment valuation
+    (`aec-soccer-mci-mun-2026-09-24-city`) decided at the wall-clock instant
+    the cycle ran. It used to be left behind, inside every later paper
+    pass's valuation window (`valuation_lookback_s`, 1800 s): a pass run
+    within 30 minutes decided it in that proof's own session -- one more
+    decision per strategy (the benchmark's restart proof counted 4 where it
+    had made 2) and, once the reading was past the 30 s freshness rule, a
+    PROBABILITY_EVIDENCE_STALE refusal in the lifecycle proof's Audrey
+    report -- or did not, by how long the files run between them took.
+
+    So the experiment rows created after this module's first cycle test
+    began are removed when the module ends: those rows and only those (the
+    id high-water mark is read first; `external_valuations.id` is a
+    bigserial and no table references it). Within the module nothing
+    changes: each test sees exactly the database it saw before."""
+    import asyncio
+
+    asyncpg = pytest.importorskip("asyncpg")
+    exists = "SELECT to_regclass('external_valuations') IS NOT NULL"
+
+    async def _high_water() -> int:
+        conn = await asyncpg.connect(DSN)
+        try:
+            if not await conn.fetchval(exists):
+                return 0            # the first cycle test creates the table
+            return int(await conn.fetchval(
+                "SELECT coalesce(max(id), 0) FROM external_valuations"))
+        finally:
+            await conn.close()
+
+    async def _remove_created_after(high_water: int) -> None:
+        conn = await asyncpg.connect(DSN)
+        try:
+            if await conn.fetchval(exists):
+                await conn.execute(
+                    "DELETE FROM external_valuations "
+                    " WHERE experiment_id = $1 AND id > $2",
+                    ext.EXPERIMENT_ID, high_water)
+        finally:
+            await conn.close()
+
+    high_water = asyncio.run(_high_water())
+    yield
+    asyncio.run(_remove_created_after(high_water))
+
+
 def _fresh_iso(offset_s: float = -2.0) -> str:
     """A quote stamped a couple of seconds ago, in the provider's format.
 
@@ -359,7 +412,8 @@ def _event(stamp=None):
 
 @pg
 @pytest.mark.asyncio
-async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
+async def test_one_cycle_writes_a_complete_refusal_record(
+        monkeypatch, own_cycle_valuations):
     """The whole point of item 2: fresh odds -> mapping -> venue quote ->
     fees -> gate -> a persisted row. The row here is a REFUSAL, because
     the venue settlement rule is not established -- and it must still
@@ -554,7 +608,8 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
 
 @pg
 @pytest.mark.asyncio
-async def test_a_second_cycle_does_not_double_count(monkeypatch):
+async def test_a_second_cycle_does_not_double_count(
+        monkeypatch, own_cycle_valuations):
     """Item 5 asks for a subsequent cycle processing new data without
     duplicate accounting. Re-evaluating the SAME quote must not create a
     second row for the same observation."""
@@ -608,7 +663,8 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
 
 @pg
 @pytest.mark.asyncio
-async def test_refusals_before_scoring_are_still_counted(monkeypatch):
+async def test_refusals_before_scoring_are_still_counted(
+        monkeypatch, own_cycle_valuations):
     """THE GAP THE FIRST LIVE RUN EXPOSED.
 
     The census showed `evaluated 0` with an empty refusal list while every
