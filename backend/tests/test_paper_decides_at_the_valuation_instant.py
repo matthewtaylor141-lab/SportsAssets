@@ -36,7 +36,8 @@ pg = pytest.mark.skipif(not H.DSN, reason="needs RN1X_TEST_DSN")
 
 
 def _wire(monkeypatch, acct, transport):
-    monkeypatch.setattr(PR, "DEFAULT_ACCOUNT_ID", acct["account_id"])
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(PR.L, "selected_account", AsyncMock(return_value=acct["account_id"]))
     monkeypatch.setitem(PR._CLIENT, "client", PL.client(transport))
     scheduled = []
 

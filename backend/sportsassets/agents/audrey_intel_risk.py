@@ -119,10 +119,13 @@ def _f(v):
 
 
 async def recompute(conn, *, book: str, now: float,
-                    account_id: str = PAPER_ACCOUNT,
+                    account_id: str = None,
                     days: float = 45.0) -> dict:
     since = float(now) - float(days) * 86400.0
     if book == "PAPER":
+        if account_id is None:
+            from ..simulated_account_context import selected_account
+            account_id = await selected_account(conn)
         r = await conn.fetchrow(PAPER_SQL, account_id, since)
     else:
         r = await conn.fetchrow(ACTUAL_SQL, since)
@@ -179,9 +182,12 @@ async def _finding(conn, *, book, run_id, disagreements, now,
 
 
 async def check(conn, *, run_id: str, book: str, primary: dict, now: float,
-                account_id: str = PAPER_ACCOUNT) -> dict:
+                account_id: str = None) -> dict:
     """Recompute, compare, persist every comparison, file a finding on a
     disagreement. Returns the comparison."""
+    if account_id is None:
+        from ..simulated_account_context import selected_account
+        account_id = await selected_account(conn)
     audrey = await recompute(conn, book=book, now=now, account_id=account_id)
     rows = compare(primary, audrey)
     bad = [r for r in rows if r["agrees"] is False]

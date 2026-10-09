@@ -281,7 +281,8 @@ async def env(monkeypatch, new_strategies_off):
 
     e.acct = await PL.new_account(e.conn, "reactive", now=e.t0)
     e.venue = _Venue(e.game.us_slug)
-    monkeypatch.setattr(PR, "DEFAULT_ACCOUNT_ID", e.acct["account_id"])
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(PR.L, "selected_account", AsyncMock(return_value=e.acct["account_id"]))
     monkeypatch.setitem(PR._CLIENT, "client",
                         G.PaperMarketDataClient(e.venue))
     monkeypatch.setattr(RT, "paper_pass_hook",

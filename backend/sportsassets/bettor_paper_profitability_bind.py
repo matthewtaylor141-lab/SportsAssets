@@ -1461,16 +1461,20 @@ async def schema(conn) -> bool:
 
 
 async def latest_models(conn, account_id: str) -> dict:
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     rows = await conn.fetch(
-        "SELECT DISTINCT ON (kind) kind, model_id, payload, fitted_at, "
+        "SELECT DISTINCT ON (kind) kind, model_id, payload, fitted_at, account_id, "
         "       observations FROM paper_profitability_models "
-        " WHERE account_id = $1 ORDER BY kind, fitted_at DESC, model_id DESC",
-        account_id)
+        " WHERE account_id = ANY($1::text[]) AND ($2 OR observations > 0) "
+        " ORDER BY kind, fitted_at DESC, model_id DESC",
+        accounts, len(accounts) == 1)
     out = {}
     for r in rows:
         p = _j(r["payload"]) or {}
         out[r["kind"]] = dict(p, model_id=r["model_id"],
-                              fitted_at=_epoch(r["fitted_at"]))
+                              fitted_at=_epoch(r["fitted_at"]),
+                              source_account_id=r['account_id'])
     return out
 
 
@@ -1990,8 +1994,9 @@ async def regime_observations(conn, account_id: str, strategy: str, *,
     from . import bettor_capital_authority as CA
     from . import bettor_paper_ledger as L
     from . import bettor_strategy_lifecycle as LC
-    pos = positions if positions is not None else await L.positions(
-        conn, account_id, include_closed=True)
+    pos = await L.lineage_positions(conn, account_id, supplied=positions)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     mine = [p for p in pos if LC.strategy_of(p, L.DEFAULT_STRATEGY)
             == strategy and (_num(p.get("first_fill_at")) or 0) >= since
             and LC.closed_at(p) is not None]
@@ -2000,9 +2005,9 @@ async def regime_observations(conn, account_id: str, strategy: str, *,
         "       AS decided_at, o.counterfactual_pnl_usd "
         "  FROM paper_shadow_counterfactuals s "
         "  JOIN paper_shadow_counterfactual_outcomes o USING (shadow_id) "
-        " WHERE s.account_id = $1 AND s.strategy = $2 AND s.decided_at >= $3"
+        " WHERE s.account_id = ANY($1::text[]) AND s.strategy = $2 AND s.decided_at >= $3"
         "   AND o.outcome NOT IN ('NO_FILL', 'VOID_REFUND') "
-        "   AND o.filled_qty > 0", account_id, strategy, CA._ts(since))]
+        "   AND o.filled_qty > 0", accounts, strategy, CA._ts(since))]
     meta = await premap(conn, [p["us_market_slug"] for p in mine]
                         + [r["us_market_slug"] for r in sh])
     out: dict = {}
@@ -2403,15 +2408,22 @@ async def fit_all(conn, *, account_id: str, now: float) -> dict:
     """Fit and record CALIBRATION, EXECUTION and RESIDUAL. Each fit fails
     alone (recorded as an error); the gate then keeps reading the previous
     fit or, with none, the conservative defaults."""
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
+    async def history(fn, *, paired=False):
+        values = [await fn(aid) for aid in accounts]
+        if paired:
+            return tuple([row for value in values for row in value[i]] for i in (0,1))
+        return [row for value in values for row in value]
     out: dict = {}
     for kind, fn in (
-            ("CALIBRATION", lambda: calibration_observations(
-                conn, account_id, now=now)),
-            ("EXECUTION", lambda: execution_observations(
-                conn, account_id, now=now)),
-            ("RESIDUAL", lambda: residual_observations(conn, account_id)),
-            ("MANAGEMENT", lambda: management_observations(
-                conn, account_id, now=now))):
+            ("CALIBRATION", lambda: history(lambda aid: calibration_observations(
+                conn, aid, now=now))),
+            ("EXECUTION", lambda: history(lambda aid: execution_observations(
+                conn, aid, now=now), paired=True)),
+            ("RESIDUAL", lambda: history(lambda aid: residual_observations(conn, aid))),
+            ("MANAGEMENT", lambda: history(lambda aid: management_observations(
+                conn, aid, now=now)))):
         try:
             async with conn.transaction():
                 got = await fn()
@@ -2423,7 +2435,12 @@ async def fit_all(conn, *, account_id: str, now: float) -> dict:
                 payload = fit_management(got)
             else:
                 payload = fit_residuals(got)
+            if len(accounts) > 1 and not payload.get('observations'):
+                out[kind] = {'observations':0, 'recorded':False,
+                             'why':'NO_MEASURED_LINEAGE_OBSERVATIONS'}
+                continue
             payload["fitted_at"] = now
+            payload['training_account_ids'] = accounts
             mid = await record_model(conn, account_id=account_id, kind=kind,
                                      payload=payload, at=now)
             out[kind] = {"model_id": mid,

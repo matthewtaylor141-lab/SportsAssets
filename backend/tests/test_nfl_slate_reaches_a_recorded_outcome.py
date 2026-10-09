@@ -692,7 +692,8 @@ def _stub(monkeypatch, slugs: dict):
 
 
 def _wire_paper(monkeypatch, acct, transport):
-    monkeypatch.setattr(PR, "DEFAULT_ACCOUNT_ID", acct["account_id"])
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(PR.L, "selected_account", AsyncMock(return_value=acct["account_id"]))
     monkeypatch.setitem(PR._CLIENT, "client", PL.client(transport))
     monkeypatch.setattr(RT, "paper_pass_hook",
                         lambda **kw: {"scheduled": False,

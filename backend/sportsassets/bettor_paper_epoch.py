@@ -1114,6 +1114,8 @@ async def read(conn, account_id: str, *, bal: dict, now: float,
                itemise: bool = False) -> dict:
     """The management book for `account_id` from the ledger tables, with
     current marks taken from `bal` (bettor_paper_ledger.balances)."""
+    if await conn.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL") and await conn.fetchval('SELECT EXISTS(SELECT 1 FROM paper_account_epochs WHERE account_id=$1)', account_id):
+        return await read_account_epoch(conn, account_id, bal=bal)
     if now < epoch_at:
         return {"status": "NOT_STARTED", "epoch_id": EPOCH_ID,
                 "epoch_start": EPOCH_START_LOCAL, "label": LABEL}
@@ -1198,3 +1200,58 @@ async def read(conn, account_id: str, *, bal: dict, now: float,
         "pre_management_result_is": rc["pre_management_result_is"]}
     book["computed_at"] = now
     return book
+
+
+async def read_account_epoch(conn, account=None, *, bal=None):
+    account = account or await L.selected_account(conn)
+    if not await conn.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL"):
+        return {'account_id': account, 'day_one': False, 'status': 'UNAVAILABLE', 'why': 'MIGRATION_317_NOT_APPLIED'}
+    epoch = await conn.fetchrow('SELECT * FROM paper_account_epochs WHERE account_id=$1', account)
+    if not epoch:
+        return {'account_id': account, 'day_one': False}
+    bal = bal or await L.balances(conn, account)
+    snapshots = await conn.fetch('SELECT equity_usd FROM paper_equity_snapshots WHERE account_id=$1 ORDER BY at', account)
+    peak, current = float(OPENING_EQUITY_USD), None
+    for point in snapshots:
+        if point['equity_usd'] is not None:
+            current = float(point['equity_usd'])
+            peak = max(peak, current)
+    dd = {'current_drawdown_usd': None if current is None else peak-current,
+          'peak_equity_usd': peak}
+    cs = await L.cash_state(conn, account)
+    equity = bal.get('total_equity_usd')
+    total = None if equity is None else float(Decimal(str(equity)) - OPENING_EQUITY_USD)
+    gap = None if equity is None or bal.get('unrealized_pnl_usd') is None else float(Decimal(str(equity)) - OPENING_EQUITY_USD - Decimal(str(bal['realized_pnl_usd'])) - Decimal(str(bal['unrealized_pnl_usd'])))
+    turnover = await conn.fetchval('SELECT coalesce(sum(qty*price),0) FROM paper_fills WHERE account_id=$1', account)
+    current_dd = dd.get('current_drawdown_usd')
+    peak = dd.get('peak_equity_usd')
+    opening = L._j(epoch['opening_receipt'])
+    return {'account_id': account, 'day_one': True, 'label': 'BETTOR PAPER — DAY ONE',
+            'read_model': 'ACCOUNT_BACKED_EPOCH', 'drawdown_basis': 'RECORDED_NEW_ACCOUNT_EQUITY_SNAPSHOTS',
+            'epoch_id': epoch['epoch_id'], 'opened_at': L._epoch(epoch['opened_at']),
+            'opening_equity_usd': 500000.0, 'opening_verified': True,
+            'status': 'OK' if cs['running_balance_agrees'] and gap is not None and abs(gap) < .005 else 'DOES_NOT_RECONCILE',
+            'epoch_start': epoch['opened_at'].isoformat(), 'epoch_start_at': L._epoch(epoch['opened_at']),
+            'equity_usd': equity, 'cash_usd': bal.get('available_usd'),
+            'cash_including_reserved_usd': bal.get('cash_usd'), 'reserved_usd': bal.get('reserved_usd'),
+            'marked_open_position_value_usd': bal.get('open_position_value_usd'),
+            'unmarked_carried_at_basis_usd': 0, 'carried_positions': 0, 'carried_unverified': 0,
+            'realized_pnl_usd': bal.get('realized_pnl_usd'), 'unrealized_pnl_usd': bal.get('unrealized_pnl_usd'),
+            'total_pnl_usd': total, 'return_pct': None if total is None else total/5000,
+            'trading_turnover_usd': float(turnover), 'drawdown_usd': current_dd,
+            'drawdown_pct': None if current_dd is None or not peak else current_dd/peak*100,
+            'opening': {'available_cash_usd': opening['balances']['available_usd'],
+                        'reserved_usd': opening['balances']['reserved_usd'],
+                        'cash_including_reserved_usd': opening['balances']['cash_usd'],
+                        'carried_position_mark_value_usd': 0},
+            'exposure': {'basis_usd': sum(float(p['cost_basis_usd']) for p in bal.get('open_positions', [])),
+                         'unmarked': len(bal.get('unmarked_positions', []))},
+            'identity': {'gap_usd': gap, 'holds': gap is not None and abs(gap) < .005},
+            'ledger_reconciliation': {'reconciles': cs['running_balance_agrees'], 'gap_usd': 0 if cs['running_balance_agrees'] else None,
+                                      'post_epoch_cash_held_outside_usd': 0},
+            'pre_management_history': {'account_id': epoch['previous_account_id'], 'archived': True,
+                                       'balances_at_cutover': L._j(epoch['historical_receipt'])['balances']},
+            'opening_receipt': L._j(epoch['opening_receipt']), 'balances': bal,
+            'historical_account_id': epoch['previous_account_id'],
+            'historical_receipt': L._j(epoch['historical_receipt']),
+            'real_money_submission': 'DISABLED'}

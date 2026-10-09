@@ -88,6 +88,8 @@ def test_the_import_graph_reaches_no_order_or_paper_writer_module():
     # the module is the read model, and the closure is small and explicit
     assert reached == {
         "position_rooms.py", "bettor_book_snapshot.py",
+        # Read-only durable simulated account selector; no writer imports.
+        "simulated_account_context.py",
         "bettor_venue_native_identity.py", "bettor_venue_mapping.py",
         "bettor_venue_realism.py", "bettor_sport_mapping.py",
         "market_labels.py", "team_logos.py",

@@ -568,7 +568,9 @@ async def test_the_cockpit_endpoint_defaults_to_investment(monkeypatch):
     try:
         now = time.time()
         a, g = await _seed(conn, now)
-        monkeypatch.setattr(L, "ACCOUNT_ID", a["account_id"])
+        async def selected_account(conn):
+            return a["account_id"]
+        monkeypatch.setattr(L, "selected_account", selected_account)
 
         async def pool():
             return _Pool(conn)

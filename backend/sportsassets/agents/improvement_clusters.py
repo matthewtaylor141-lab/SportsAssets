@@ -748,11 +748,13 @@ _LAST_STEP: dict = {}
 
 
 async def step(conn, ctx: dict) -> dict:
-    """THE PAPER-PASS HOOK, on the main account's pass, at most every
+    """THE PAPER-PASS HOOK, on the selected account's pass, at most every
     REFRESH_EVERY_S in this process. Never raises."""
+    from ..simulated_account_context import selected_account
+    selected = await selected_account(conn)
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     at = float(clock())
-    if ctx.get("account_id") != MAIN_PAPER_ACCOUNT and \
+    if ctx.get("account_id") != selected and \
             not ctx.get("agent_work_any_account"):
         return {"ran": False, "why": "NOT_THE_MAIN_PAPER_ACCOUNT"}
     last = _LAST_STEP.get("refresh")

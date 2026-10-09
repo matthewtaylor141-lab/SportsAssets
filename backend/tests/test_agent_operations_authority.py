@@ -76,7 +76,8 @@ def test_the_queue_imports_no_order_execution_or_paper_module():
     imps = _imports(AW, "sportsassets.agents")
     allowed = ("sportsassets.agent_work_state",
                "sportsassets.agents.work_queue",
-               "sportsassets.agents.karen_runner")
+               "sportsassets.agents.karen_runner",
+               "sportsassets.simulated_account_context.selected_account")
     for imp in imps:
         if imp.startswith("sportsassets"):
             assert any(imp == a or imp.startswith(a + ".") for a in allowed), \
@@ -144,7 +145,8 @@ def test_the_cluster_runner_writes_only_its_own_tables():
 def test_the_cluster_modules_import_no_order_execution_or_paper_module():
     for path, pkg, allowed in (
             (RCC, "sportsassets.agents",
-             ("sportsassets.agents.karen_runner",)),
+             ("sportsassets.agents.karen_runner",
+              "sportsassets.simulated_account_context.selected_account")),
             # (R30B review) the human steps' admin route reads the admin
             # token check from api.app, as the clear-halt route does
             (RCC_API, "sportsassets.api",
@@ -193,7 +195,8 @@ def test_lesson_usage_writes_only_its_own_records():
 
 def test_lesson_usage_imports_no_order_execution_or_paper_module():
     allowed = ("sportsassets.api.command_validation",
-               "sportsassets.profitability.validation")
+               "sportsassets.profitability.validation",
+               "sportsassets.simulated_account_context.selected_account")
     for imp in _imports(LU, "sportsassets.agents"):
         if imp.startswith("sportsassets"):
             assert any(imp == a or imp.startswith(a + ".")
@@ -330,3 +333,23 @@ def test_301_and_its_rollback_keep_every_registry_row_of_the_current_225():
         got = _registry(f)
         assert {k: got.get(k) for k in cur} == cur, f.name
     assert {"live_parity_cutover", "live_approvals"} <= set(cur)
+
+
+def test_the_account_resolver_allowed_above_is_select_only():
+    """The account selector grants no order or financial write authority."""
+    path = ROOT / "simulated_account_context.py"
+    tree = ast.parse(path.read_text())
+    assert not any(isinstance(n, (ast.Import, ast.ImportFrom))
+                   for n in ast.walk(tree))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute)
+             and isinstance(n.func.value, ast.Name)
+             and n.func.value.id == "conn"]
+    assert calls
+    for call in calls:
+        assert call.func.attr in {"fetch", "fetchval"}
+        assert isinstance(call.args[0], ast.Constant)
+        assert call.args[0].value.lstrip().upper().startswith("SELECT ")
+    assert not _writes(path)
+    for word in ORDER_CALLS:
+        assert word not in path.read_text(), word

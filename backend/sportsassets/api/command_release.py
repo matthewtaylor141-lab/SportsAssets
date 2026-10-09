@@ -80,8 +80,9 @@ STATEMENT_TIMEOUT_MS = 3000
 #: view and the collector heartbeat; display only, no price, order,
 #: settlement or ledger authority); 216..365 since the RC6 PROVENANCE FIX
 #: (365: the research training set's change stamp -- a counter and its
-#: triggers; no price, order, settlement or ledger authority; 317..364 are
-#: held by parallel RC6 lanes and absent from this build).
+#: triggers; no price, order, settlement or ledger authority; 318..364 are
+#: held by parallel RC6 lanes and absent from this build; 317 is the
+#: account-backed PAPER epoch, with no live authority).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
 TRACKED_FROM, TRACKED_TO = 216, 365

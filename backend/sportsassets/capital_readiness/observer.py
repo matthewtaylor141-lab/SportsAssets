@@ -124,7 +124,7 @@ async def observe(conn, *, now=None, source_sha=None, account_id=None,
     a scale trial set only when its inputs changed."""
     if account_id is None:
         from .. import bettor_paper_ledger as L
-        account_id = L.ACCOUNT_ID
+        account_id = await L.selected_account(conn)
     now = float(time.time() if now is None else now)
     ev = await _read_phase(conn, account_id=account_id, now=now,
                            source_sha=source_sha, readers=readers)

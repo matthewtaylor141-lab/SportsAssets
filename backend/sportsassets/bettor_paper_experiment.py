@@ -87,7 +87,8 @@ async def _epoch(conn, sql, *args):
 # SECTIONS
 # ═════════════════════════════════════════════════════════════════════
 
-async def session(conn, now: float, acct: str = L.ACCOUNT_ID) -> dict:
+async def session(conn, now: float, acct: str = None) -> dict:
+    acct = acct or await L.selected_account(conn)
     s = await conn.fetchrow(
         "SELECT session_id, account_id, status, "
         " extract(epoch FROM started_at) AS started_at, config_sha, "
@@ -210,13 +211,14 @@ async def refusals(conn, now: float) -> dict:
     return out
 
 
-async def closest(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
+async def closest(conn, now: float, acct: str = None) -> list:
     """The closest investment-policy evaluations of the last 24 h: the
     LATEST decision per market and recorded policy version (not one row per
     cycle), decisions under the SERVING version first, then historical
     versions, each ranked by gross edge. Every row carries its recorded
     policy_version, whether that is the serving version, and its age -- a
     historical refusal describes the rules in force when it was made."""
+    acct = acct or await L.selected_account(conn)
     # the serving version as the operations read names it (the policy
     # module's own constant, read through bettor_paper_ops -- this read
     # model never imports the benchmark module)
@@ -251,7 +253,8 @@ async def closest(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
 
 
 async def standing_orders(conn, now: float,
-                          acct: str = L.ACCOUNT_ID) -> dict:
+                          acct: str = None) -> dict:
+    acct = acct or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT order_id, strategy, role, us_market_slug, fixture, "
         "       holding_side, order_type, time_in_force, qty, filled_qty, "
@@ -276,7 +279,8 @@ async def standing_orders(conn, now: float,
             "an_order_is_not_a_fill": True}
 
 
-async def fills(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
+async def fills(conn, now: float, acct: str = None) -> list:
+    acct = acct or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT f.fill_id, f.strategy, f.role, f.direction, f.us_market_slug,"
         "       f.holding_side, f.qty, f.price, f.fee_usd, f.gross_usd, "
@@ -290,7 +294,8 @@ async def fills(conn, now: float, acct: str = L.ACCOUNT_ID) -> list:
 
 
 async def positions_and_account(conn, now: float,
-                                acct: str = L.ACCOUNT_ID) -> dict:
+                                acct: str = None) -> dict:
+    acct = acct or await L.selected_account(conn)
     b = await L.balances(conn, acct, now=now)
     allpos = await L.positions(conn, acct, include_closed=True)
     marks = {p.get("position_key"): p for p in (b.get("open_positions")
@@ -434,7 +439,8 @@ async def throughput(conn, now: float) -> dict:
 # ═════════════════════════════════════════════════════════════════════
 
 async def experiment(conn, *, now: float | None = None,
-                     account_id: str = L.ACCOUNT_ID) -> dict:
+                     account_id: str = None) -> dict:
+    account_id = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {
         "version": VERSION, "as_of": at, "paper_only": True,

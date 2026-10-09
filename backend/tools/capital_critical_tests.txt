@@ -1091,6 +1091,10 @@ tests/test_r30a_entry_fill_window.py
 tests/test_a_recorded_enter_always_gets_its_order.py
 tests/test_a_failed_venue_read_still_reaches_the_agents.py
 tests/test_paper_management_epoch.py
+
+# Account-backed PAPER Day One: real funding, immutable losses, acceptance,
+# atomic cutover, concurrency, stale ownership, rollback and protection.
+tests/test_day_one_paper_epoch.py
 # RC5: the management epoch reconciles exactly (opening + itemised changes =
 # management equity; + itemised differences = ledger equity), each carried
 # mark verified from records at the epoch instant or UNVERIFIED by name.

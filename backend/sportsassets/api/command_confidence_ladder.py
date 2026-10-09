@@ -143,17 +143,18 @@ async def live_state(conn) -> dict:
     return out
 
 
-async def _read(conn, now: float) -> dict:
+async def _read(conn, now: float, *, account_id: str | None = None) -> dict:
     from .. import bettor_paper_ledger as L
     from ..profitability import confidence_ladder as CL
     from . import command_validation as CV
+    account_id = account_id or await L.selected_account(conn)
     nested = conn.is_in_transaction()
     tr = conn.transaction(readonly=not nested)
     await tr.start()
     try:
         await conn.execute("SET LOCAL statement_timeout = %d"
                            % STATEMENT_TIMEOUT_MS)
-        data, why = await CV.gather(conn, L.ACCOUNT_ID, now=now)
+        data, why = await CV.gather(conn, account_id, now=now)
         cutover = await CV.production_cutover_epoch(conn)
         overall, by, pwhy = await parity_inputs(conn)
         live = await live_state(conn)
@@ -161,7 +162,7 @@ async def _read(conn, now: float) -> dict:
         recent = {r["strategy"]: int(r["n"]) for r in await conn.fetch(
             "SELECT strategy, count(*) AS n FROM paper_decisions "
             " WHERE account_id = $1 AND decided_at >= to_timestamp($2) "
-            " GROUP BY strategy", L.ACCOUNT_ID,
+            " GROUP BY strategy", account_id,
             now - RECENT_DECISION_DAYS * 86400.0)}
     finally:
         await tr.rollback()
@@ -198,15 +199,18 @@ async def _read(conn, now: float) -> dict:
 
 @router.get(PATH, dependencies=[Depends(require_read)])
 async def confidence_ladder() -> dict:
+    from .. import bettor_paper_ledger as L
     from ..profitability import common as C
     now = time.time()
-    hit = _CACHE.get("ladder")
-    if hit and now - hit[0] < CACHE_S:
-        return hit[1]
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            got = await _read(conn, now)
+            account_id = await L.selected_account(conn)
+            key = account_id
+            hit = _CACHE.get(key)
+            if hit and now - hit[0] < CACHE_S:
+                return hit[1]
+            got = await _read(conn, now, account_id=account_id)
     except Exception as exc:                                    # noqa: BLE001
         return C.envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,
                                                      str(exc)[:160]),
@@ -219,5 +223,6 @@ async def confidence_ladder() -> dict:
                                   "evidence only; TRAINING / BENCHMARK / "
                                   "UNCLASSIFIED strategies stay at level 0 "
                                   "with their reason")})
-    _CACHE["ladder"] = (now, out)
+    _CACHE.clear()
+    _CACHE[key] = (now, out)
     return out

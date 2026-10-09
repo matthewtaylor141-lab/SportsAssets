@@ -65,6 +65,7 @@ async def test_real_persona_fact_path_receives_scoped_evidence(monkeypatch):
     monkeypatch.setattr(F,'_regclass',AsyncMock(return_value=True))
     monkeypatch.setattr(B,'cg_parameters',AsyncMock(return_value={'values':{'min_gross_edge_pp':.5},'version_id':'v2','source':'record'}))
     conn=AsyncMock();conn.fetch.return_value=[row(),row('other',account_id='other')]
+    conn.fetchval.return_value=False  # No epoch-selector schema in this legacy fixture.
     facts=F.Facts();out=await F._agent_memory(conn,facts,'derek',question='fill quality',now=NOW)
     assert len(out['lessons'])==1
     text=' '.join(f['text'] for f in facts.items)

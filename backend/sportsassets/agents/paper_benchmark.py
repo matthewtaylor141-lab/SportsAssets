@@ -2191,7 +2191,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     # (a race between this read and the lock is still refused there). Other
     # accounts' policies are unchanged. An unreadable answer refuses.
     from .. import bettor_paper_limits as LIMITS
-    if LIMITS.uses_owner_policy(ctx["account_id"]):
+    if await LIMITS.uses_account_policy(conn, ctx["account_id"]):
         try:
             held_same = await L.same_contract_held(
                 conn, ctx["account_id"], STRATEGY,
@@ -2950,7 +2950,7 @@ async def cross_strategy_exposure(conn, *, account_id: str, strategy: str,
     entry whose position is still open. Read-only; never raises (an
     unreadable answer is treated as held, so it refuses)."""
     from .. import bettor_paper_limits as LIMITS
-    if LIMITS.uses_owner_policy(account_id):
+    if await LIMITS.uses_account_policy(conn, account_id):
         return {"held": False, "by": [], "allocation_rule": "NO_FIXTURE_ALLOCATION_LIMIT", "capital_policy": LIMITS.VERSION}
     try:
         rows = await conn.fetch(

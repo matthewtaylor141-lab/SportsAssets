@@ -308,7 +308,7 @@ async def reconcile(conn, *, now: float, account_id: str | None = None,
                     entries: int = LEDGER_ENTRIES_SHOWN) -> dict:
     """THE LEDGER, READ AND RECONCILED (read-only). Every check names the
     two figures it compares; `reconciled` is True only when all pass."""
-    acct = account_id or ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     out: dict[str, Any] = {"present": False, "account_id": acct,
                            "as_of": iso(now), "data_label": L.DATA_LABEL}
     if not await _regclass(conn, "paper_ledger"):
@@ -399,7 +399,7 @@ async def reconcile(conn, *, now: float, account_id: str | None = None,
 async def summary(conn, *, now: float, account_id: str | None = None) -> dict:
     """The paper experiment now (see the module docstring). Never raises: a
     part that cannot be read is named in `unavailable`."""
-    acct = account_id or ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     out: dict[str, Any] = {
         "present": False, "account_id": acct, "as_of": iso(now),
         "data_label": L.DATA_LABEL,
