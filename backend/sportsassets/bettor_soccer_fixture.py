@@ -390,7 +390,12 @@ def _day(v):
         return None
 
 
-async def upsert(conn, key, ev: dict, *, sport_family="soccer") -> dict:
+async def upsert(conn, key, ev: dict, *, sport_family="soccer",
+                 reader_version=None) -> dict:
+    """ONE venue_fixture_metadata row under the venue's own event key.
+    `reader_version` names the reader that produced the evidence (this
+    module's by default; the MLB schedule reader's for a venue-native MLB
+    game, RC6.2)."""
     try:
         await conn.execute(
             UPSERT_SQL, VENUE, str(key), sport_family, ev.get("competition"),
@@ -402,7 +407,8 @@ async def upsert(conn, key, ev: dict, *, sport_family="soccer") -> dict:
             ev.get("orientation"), ev.get("source_match_id"),
             ev.get("source"), ev.get("source_url"),
             _ts(ev.get("retrieved_at")),
-            VERSION, json.dumps(list(ev.get("refusals") or [])),
+            reader_version or VERSION,
+            json.dumps(list(ev.get("refusals") or [])),
             json.dumps(ev.get("raw") or {}, default=str))
     except Exception as exc:                                   # noqa: BLE001
         return {"persisted": False, "error": type(exc).__name__,

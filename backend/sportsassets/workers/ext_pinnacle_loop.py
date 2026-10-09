@@ -6385,6 +6385,142 @@ async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
     return dict(row, venue_fixture_key=key, acquisition=acq)
 
 
+#: (RC6.2, p-coverage) the venue league codes the league schedule reader
+#: (bettor_fixture_metadata: the MLB Stats API) covers. KBO / NPB have no
+#: organiser source here and are refused by their own code.
+MLB_VENUE_LEAGUES = frozenset({"mlb"})
+
+
+async def acquire_venue_baseball_scope(conn, *, event_slug, home, away,
+                                       commence_iso, now, cache,
+                                       fetcher=None) -> dict:
+    """THE SCOPE EVIDENCE FOR A VENUE-NATIVE MLB CONTRACT (RC6.2).
+
+    THE DEFECT. A baseball contract whose identity came from the venue's own
+    catalogue has no global condition id, so it was refused
+    FIXTURE_METADATA_HAS_NO_CONDITION_KEY and its comparison never saw the
+    phase, the format or the game state (production, research-sql runs
+    37941166989 M7 / 37949739839 R5: every venue-native MLB / KBO / NPB money
+    line valued in 24 h read UNKNOWN). The SAME league schedule the
+    condition-keyed path reads (bettor_fixture_metadata: parse_games,
+    match_fixture, evidence_from -- unchanged) is now read for it and the
+    evidence persisted under the venue's OWN namespaced event key
+    (venue_fixture_metadata, migration 183), exactly as the soccer path
+    does; never under a borrowed or invented condition id. A league the
+    schedule does not cover is refused by its code."""
+    from .. import bettor_soccer_fixture as SF
+
+    def _epoch_start(r):
+        # the condition-keyed store returns the actual start as epoch
+        # seconds (FIXTURE_META_SQL) and context_for reads it as a number;
+        # the venue store returns ISO text -- converted here, once
+        out = dict(r)
+        if out.get("actual_start_at") is not None:
+            out["actual_start_at"] = fmeta_mod._epoch(out["actual_start_at"])
+        return out
+    key = SF.venue_fixture_key(event_slug)
+    base = {"read": False, "venue_fixture_key": key, "key_kind":
+            "VENUE_NATIVE_EVENT", "error": None}
+    code = SF.venue_league_of(event_slug)
+    if code not in MLB_VENUE_LEAGUES:
+        r = "%s:%s" % (SF.R_NO_SOURCE, code)
+        acq = {"attempted": False, "refusal": r, "venue_league": code,
+               "why": ("no league schedule source is declared for the venue "
+                       "league %r, so the phase, the format and the game "
+                       "state cannot be established from an authoritative "
+                       "source" % (code,))}
+        return dict(base, refusal=r, acquisition=acq)
+    row = await SF.read(conn, key)
+    need = fstore.needs_acquisition(row, now=now)
+    acq = {"attempted": False, "decided": need, "source": fmeta_mod.SOURCE,
+           "source_basis": "VENUE_LEAGUE_CODE", "venue_league": code}
+    if not need.get("acquire"):
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    if not (str(home or "").strip() and str(away or "").strip()):
+        acq.update(refusal=SF.R_BINDING,
+                   why="the odds provider gave no pair of team names")
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    acquisition=acq)
+    dates = _official_date_candidates(commence_iso)
+    if not dates:
+        acq.update(refusal="COMMENCE_TIME_NOT_READABLE",
+                   why="the event's commence time could not be read")
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    acquisition=acq)
+    acq.update(attempted=True, dates_tried=[])
+    fetch = fetcher or _fetch_schedule_blocking
+    import datetime as _dt
+    for date_str in dates:
+        if date_str not in cache:
+            if len([k for k in cache if cache[k] is not None]) >= \
+                    FIXTURE_MAX_DATES_PER_CYCLE:
+                acq.update(refusal="FIXTURE_FETCH_BUDGET_SPENT",
+                           why="this cycle's schedule-read bound is spent")
+                return dict(_epoch_start(row), venue_fixture_key=key,
+                            acquisition=acq)
+            got = await asyncio.to_thread(fetch, date_str)
+            cache[date_str] = got if got.get("ok") else None
+            if not got.get("ok"):
+                acq.setdefault("fetch_errors", []).append(
+                    {"date": date_str, "error": got.get("error"),
+                     "url": got.get("url")})
+        got = cache.get(date_str)
+        if got is None:
+            continue
+        parsed = fmeta_mod.parse_games(got["payload"])
+        if not parsed.get("ok"):
+            acq.setdefault("parse_refusals", []).append(
+                {"date": date_str, "refusal": parsed.get("refusal")})
+            continue
+        m = fmeta_mod.match_fixture(parsed["games"], home=home, away=away,
+                                   official_date=date_str)
+        acq["dates_tried"].append({"date": date_str,
+                                   "games": parsed.get("total"),
+                                   "matched": bool(m.get("ok")),
+                                   "refusal": m.get("refusal")})
+        if not m.get("ok"):
+            continue
+        at = _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        ev = fmeta_mod.evidence_from(m["game"], retrieved_at=at,
+                                     source_url=got["url"])
+        start = ev.get("actual_start_at")
+        vrow = {"competition": "MLB", "phase": ev.get("phase"),
+                "game_format": ev.get("game_format"),
+                "play_has_begun": ev.get("play_has_begun"),
+                "event_state_raw": ev.get("event_state_raw"),
+                "actual_start_at": (
+                    _dt.datetime.fromtimestamp(float(start),
+                                               _dt.timezone.utc).isoformat()
+                    if start is not None else None),
+                "scheduled_kickoff": None,
+                "start_evidence": ev.get("start_evidence"),
+                "official_date": ev.get("official_date"),
+                "home_team": ev.get("home"), "away_team": ev.get("away"),
+                "orientation": "SAME",
+                "source_match_id": (str(ev["game_pk"])
+                                    if ev.get("game_pk") is not None
+                                    else None),
+                "source": ev.get("source"), "source_url": ev.get("source_url"),
+                "retrieved_at": at, "refusals": ev.get("refusals"),
+                "raw": {"game": m["game"],
+                        "phase_uncovered": ev.get("phase_uncovered"),
+                        "scheduled_innings": ev.get("scheduled_innings")}}
+        acq["write"] = await SF.upsert(conn, key, vrow,
+                                       sport_family="baseball",
+                                       reader_version=fmeta_mod.VERSION)
+        acq["evidence_refusals"] = list(ev.get("refusals") or [])
+        fresh = await SF.read(conn, key)
+        return dict(_epoch_start(fresh), venue_fixture_key=key,
+                    key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    acq["refusal"] = acq.get("refusal") or fmeta_mod.R_NO_MATCH
+    acq["why"] = acq.get("why") or (
+        "no schedule date returned exactly one game for %r vs %r"
+        % (away, home))
+    return dict(_epoch_start(row), venue_fixture_key=key, acquisition=acq)
+
+
 # ── (RC6.2, p-coverage) THE QUOTE'S OWN PRE-MATCH / IN-PLAY LABEL ──────
 #
 # THE DEFECT. The entry lane established the quote context ONLY from the
@@ -6505,6 +6641,14 @@ async def acquire_fixture_scope(conn, *, condition_id, home, away,
             conn, event_slug=venue_event_slug, sport_key=sport_key,
             home=home, away=away, commence_iso=commence_iso, now=now,
             cache=cache, fetcher=venue_fetcher)
+    if not str(condition_id or "").strip() and \
+            str(sport_family or "") == "baseball" and \
+            str(venue_event_slug or "").strip():
+        # (RC6.2) A VENUE-NATIVE BASEBALL CONTRACT: the league schedule
+        # under the venue's own event key, as the soccer path above
+        return await acquire_venue_baseball_scope(
+            conn, event_slug=venue_event_slug, home=home, away=away,
+            commence_iso=commence_iso, now=now, cache=cache, fetcher=fetcher)
     if not str(condition_id or "").strip():
         acq = {"attempted": False, "refusal": R_FIXTURE_KEY_ABSENT,
                "why": ("no global condition id to key the fixture row by "

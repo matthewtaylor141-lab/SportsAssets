@@ -270,3 +270,118 @@ def test_disagreeing_context_evidence_leaves_the_verdict_unknown():
     assert s["compatibility"] == ST.UNKNOWN
     assert any(b.startswith("SETTLEMENT_QUOTE_CONTEXT_NOT_ESTABLISHED")
                for b in s["blockers"])
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 3. A VENUE-NATIVE MLB GAME: THE LEAGUE SCHEDULE UNDER THE VENUE'S KEY
+# ═════════════════════════════════════════════════════════════════════
+#
+# Production (research-sql runs 37941166989 M7, 37949739839 R5): every
+# venue-native baseball money line valued in 24 h (mlb, kbo, npb) read
+# UNKNOWN, refused FIXTURE_METADATA_HAS_NO_CONDITION_KEY before any schedule
+# was read. The MLB game below is the league's own shape as the shape probe
+# records it (tests/test_the_entry_lane_acquires_its_own_scope.GAME).
+
+from sportsassets import bettor_fixture_metadata as FM  # noqa: E402
+
+MLB_GAME = {
+    "gamePk": 824950, "gameType": "R", "scheduledInnings": 9,
+    "doubleHeader": "N", "gameNumber": 1,
+    "officialDate": "2026-09-25",
+    "gameDate": "2026-09-26T01:40:00Z",
+    "status": {"detailedState": "Scheduled", "abstractGameState": "Preview"},
+    "teams": {"away": {"team": {"name": "Houston Astros"}},
+              "home": {"team": {"name": "Athletics"}}},
+}
+
+
+def _mlb_fetcher(calls, game):
+    def fetch(date_str):
+        calls.append(date_str)
+        g = dict(game)
+        return {"ok": True, "url": FM.SOURCE_URL % date_str,
+                "payload": {"totalGames": 1,
+                            "dates": [{"games": [g]}]
+                            if date_str == g["officialDate"] else []}}
+    return fetch
+
+
+@pg
+async def test_a_venue_native_mlb_game_gets_its_scope_under_its_own_key():
+    conn = await H.connect()
+    slug = "mlb-hou-ath-2026-09-25"
+    key = SF.venue_fixture_key(slug)
+    try:
+        await conn.execute("DELETE FROM venue_fixture_metadata WHERE "
+                           " venue_fixture_key = $1", key)
+        before = await conn.fetchval("SELECT count(*) FROM fixture_metadata")
+        calls = []
+        got = await X.acquire_fixture_scope(
+            conn, condition_id=None, home="Athletics", away="Houston Astros",
+            commence_iso="2026-09-26T01:40:00Z", now=time.time(), cache={},
+            sport_family="baseball", sport_key="pinnapi_baseball",
+            venue_event_slug=slug, fetcher=_mlb_fetcher(calls, MLB_GAME))
+        assert got["read"] is True, got.get("acquisition")
+        assert got["phase"] == ST.PHASE_REGULAR
+        assert got["game_format"] == ST.FMT_NINE
+        assert got["play_has_begun"] is False
+        assert got["acquisition"]["source_basis"] == "VENUE_LEAGUE_CODE"
+        assert calls == ["2026-09-26", "2026-09-25"]
+        row = await conn.fetchrow("SELECT sport_family, reader_version, "
+                                  " source, source_match_id FROM "
+                                  " venue_fixture_metadata WHERE venue='PMUS'"
+                                  " AND venue_fixture_key=$1", key)
+        assert (row["sport_family"], row["reader_version"], row["source"],
+                row["source_match_id"]) == ("baseball", FM.VERSION, FM.SOURCE,
+                                            "824950")
+        # NO GLOBAL ID WAS INVENTED OR BORROWED
+        assert await conn.fetchval(
+            "SELECT count(*) FROM fixture_metadata") == before
+        # the attest inputs: the playoff-free regular-season capture admits it
+        assert ST.admit_scope(sport_family="baseball", phase=got["phase"],
+                              game_format=got["game_format"])["ok"] is True
+
+        # A GAME IN PROGRESS: the reported start is a NUMBER the context
+        # rule reads (the venue store returns text; never a crash)
+        live = dict(MLB_GAME, status={"detailedState": "In Progress",
+                                      "abstractGameState": "Live"})
+        await conn.execute("DELETE FROM venue_fixture_metadata WHERE "
+                           " venue_fixture_key = $1", key)
+        got2 = await X.acquire_fixture_scope(
+            conn, condition_id=None, home="Athletics", away="Houston Astros",
+            commence_iso="2026-09-26T01:40:00Z", now=time.time(), cache={},
+            sport_family="baseball", venue_event_slug=slug,
+            fetcher=_mlb_fetcher([], live))
+        assert got2["play_has_begun"] is True
+        assert isinstance(got2["actual_start_at"], float)
+        ctx = X.fmeta_mod.context_for(
+            {"play_has_begun": True,
+             "actual_start_at": got2["actual_start_at"],
+             "retrieved_at": got2["retrieved_at"]},
+            observed_at=got2["actual_start_at"] + 60)
+        assert ctx["context"] == ST.CTX_LIVE
+    finally:
+        await conn.execute("DELETE FROM venue_fixture_metadata WHERE "
+                           " venue_fixture_key = $1", key)
+        await conn.close()
+
+
+@pg
+async def test_a_venue_native_kbo_or_npb_game_is_refused_by_its_league():
+    conn = await H.connect()
+    try:
+        n0 = await conn.fetchval("SELECT count(*) FROM venue_fixture_metadata")
+        for slug, code in (("kbo-sls-sla-2026-10-09", "kbo"),
+                           ("npb-ygo-ybo-2026-10-11", "npb")):
+            got = await X.acquire_fixture_scope(
+                conn, condition_id=None, home="A", away="B",
+                commence_iso="2026-10-09T09:00:00Z", now=time.time(),
+                cache={}, sport_family="baseball", venue_event_slug=slug,
+                fetcher=_mlb_fetcher([], MLB_GAME))
+            assert got["read"] is False
+            assert got["acquisition"]["refusal"] == \
+                "%s:%s" % (SF.R_NO_SOURCE, code)
+        assert await conn.fetchval(
+            "SELECT count(*) FROM venue_fixture_metadata") == n0
+    finally:
+        await conn.close()
