@@ -417,7 +417,10 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
                                  record=record, certificates=cert,
                                  fee_evidence=fee_ev)
             routes_n += len(routes)
-            scans.append(AC.scan_fixture(fx, built, now=now))
+            # (RC6) counted for the digest, never priced here: Adriana's
+            # own runner records the near complements
+            scans.append(AC.scan_fixture(fx, built, now=now,
+                                         near_records=False))
     census = AC.census_result(scans, markets_read=aliases_n, books_fresh=0,
                               skipped={})["census"]
     return {"fixtures_priced": len(scans), "aliases": aliases_n,

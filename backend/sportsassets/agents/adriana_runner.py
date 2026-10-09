@@ -148,32 +148,34 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
         conn, at if fixed else None))
     cn = (len(claims["opportunities"]) + len(claims["refusals"])
           if claims is not None else 0)
-    if cn:
-        # recorded only when a complementary claim pair was evaluated: an
-        # empty claim pass is in the summary, never an empty scan row
+    if claims is not None:
+        # (RC6) RECORDED EVERY PASS. Before, a pass with no complementary
+        # pair wrote no row, so the readback's "claim scan" was the last
+        # pass that had one: production 2026-10-08 ~20:03Z read
+        # adr-claims-1791436419188 (05:13Z, 15 h old) while the scan ran
+        # every 5 min and priced 56 claim pairs a pass. A pass that read no
+        # fixture says so (NO_EVIDENCE, why); one that read fixtures but
+        # found no structure is OK with zero structures and its counts.
         cscan = "adr-claims-%d" % int(at * 1000)
+        cstatus, cwhy = "OK", None
+        if not claims["census"].get("markets_read"):
+            cstatus = "NO_EVIDENCE"
+            cwhy = ("NO_ESTABLISHED_KALSHI_FIXTURE_WITH_A_READABLE_BOOK_IN_"
+                    "THE_CLAIM_WINDOW")
         crec = await _phase(summary, "claims_record", AD.record(
             conn, claims, started=at, finished=at + (time.monotonic() - t0),
-            scan_id=cscan, status="OK", why=None))
+            scan_id=cscan, status=cstatus, why=cwhy))
         if crec and crec.get("created") and claims.get("opportunities"):
             summary["claims_sentinel"] = await _phase(
                 summary, "claims_sentinel", _sentinel(
                     conn, claims, cscan, at if fixed else time.time()))
         cc = claims["census"]
         summary["claims"] = {
-            "scan": (crec or {}).get("scan_id"),
+            "scan": (crec or {}).get("scan_id"), "status": cstatus,
             "structures": cn, "opportunities": len(claims["opportunities"]),
             "refusals": len(claims["refusals"]),
+            "near_complement_pairs": cc.get("near_complement_pairs"),
             "by_topology": cc.get("by_topology"),
-            "pairs_not_complementary": cc.get("pairs_not_complementary"),
-            "settlement_pair_policy": cc.get("settlement_pair_policy")}
-    elif claims is not None:
-        # no complementary pair to record, yet every claim pair WAS priced
-        # by the pair settlement policy (separate-market fair prices at
-        # their worst case, never $1): its verdicts ride the run summary
-        cc = claims.get("census") or {}
-        summary["claims"] = {
-            "scan": None, "structures": 0,
             "pairs_not_complementary": cc.get("pairs_not_complementary"),
             "settlement_pair_policy": cc.get("settlement_pair_policy")}
     elapsed = round(time.monotonic() - t0, 3)

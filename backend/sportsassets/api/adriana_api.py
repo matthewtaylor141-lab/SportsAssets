@@ -116,7 +116,7 @@ async def _workspace() -> dict:
                    verdicts=list(AD.A.VERDICTS),
                    structure_kinds=list(AD.A.STRUCTURE_KINDS),
                    refusal_codes=list(AD.A.REFUSAL_CODES)
-                   + [AD.VOID_TERMS_NOT_ESTABLISHED],
+                   + [AD.VOID_TERMS_NOT_ESTABLISHED, AD.R_VOID_STATE_FLOOR],
                    hard_rule=("GUARANTEED_AFTER_COSTS only when every "
                               "outcome, the settlement terms, the executable "
                               "size and every cost reconcile; anything else "

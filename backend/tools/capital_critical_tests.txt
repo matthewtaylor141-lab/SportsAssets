@@ -1349,3 +1349,5 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 Adriana) void terms read per contract from its own captured, sha-cited rules (never defaulted); on established fair-price terms a two-market structure is refused at its void-state floor (never summed to $1, never an opportunity); near complements recorded REFUSED; completion states the terms the scans recorded
+tests/test_rc6_adriana_void_terms.py

@@ -264,6 +264,71 @@ async def assemble(conn, *, now: float | None = None) -> list:
     return out
 
 
+def book_census(insts, *, now: float, sla_s: float = KMD.BOOK_SLA_S) -> dict:
+    """(RC6) Per venue: aliases read, with a book, with a book inside the
+    engine's own age bound -- and the PMUS markets mapped to a Kalshi
+    fixture that have NO recorded book in the window, by name (the
+    cross-venue scan's missing leg is a named gap, never a silent one)."""
+    out: dict = {}
+    for i in insts:
+        v = out.setdefault(i.venue, {"aliases": 0, "with_book": 0,
+                                     "fresh": 0, "markets_without_book": []})
+        v["aliases"] += 1
+        if i.observed_at is None:
+            if i.market_id not in v["markets_without_book"]:
+                v["markets_without_book"].append(i.market_id)
+            continue
+        v["with_book"] += 1
+        if now - float(i.observed_at) <= sla_s:
+            v["fresh"] += 1
+    for v in out.values():
+        v["markets_without_book_n"] = len(v["markets_without_book"])
+        v["markets_without_book"] = v["markets_without_book"][:12]
+    return out
+
+
+def merge_book_census(parts) -> dict:
+    out: dict = {}
+    for p in parts:
+        for venue, v in p.items():
+            o = out.setdefault(venue, {"aliases": 0, "with_book": 0,
+                                       "fresh": 0, "markets_without_book": [],
+                                       "markets_without_book_n": 0})
+            for k in ("aliases", "with_book", "fresh",
+                      "markets_without_book_n"):
+                o[k] += v.get(k, 0)
+            room = 12 - len(o["markets_without_book"])
+            if room > 0:
+                o["markets_without_book"] += v["markets_without_book"][:room]
+    return out
+
+
+#: what each venue's book is read from in this scan (venue support, named)
+BOOK_SOURCE = {"KALSHI": "kalshi_books_current (the WebSocket runtime, REST "
+                         "bootstrap / recovery)",
+               "POLYMARKET_US": "paper_book_observations (the paper path's "
+                                "recorded reads, newest within %ds)"
+                                % int(PMUS_BOOK_WINDOW_S)}
+
+
+def venue_support(books: dict) -> dict:
+    out = {}
+    for venue, src in BOOK_SOURCE.items():
+        v = books.get(venue) or {}
+        n = v.get("aliases", 0)
+        out[venue] = {"status": "SUPPORTED" if v.get("with_book") else
+                      "UNAVAILABLE",
+                      "why": None if v.get("with_book") else (
+                          "NO_ALIAS_OF_THIS_VENUE_IN_THE_SCAN" if not n else
+                          "NO_RECORDED_BOOK_FOR_ANY_ALIAS_IN_THE_WINDOW"),
+                      "source": src, "aliases": n,
+                      "with_book": v.get("with_book", 0),
+                      "fresh": v.get("fresh", 0),
+                      "markets_without_book_n": v.get(
+                          "markets_without_book_n", 0)}
+    return out
+
+
 async def claims_census(conn, *, now: float | None = None) -> dict:
     """Adriana's claim-first census over the persisted evidence, shaped for
     adriana.record (pure engine + pure claim layer; no write here)."""
@@ -271,6 +336,7 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
     live = now is None
     now = float(now if now is not None else time.time())
     scans, aliases, fresh = [], 0, 0
+    vts, bks = [], []
     from .redteam import settlement as RTS
     assembled = await assemble(conn, now=now)
     if live:
@@ -280,6 +346,10 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
         # ahead of ours still is; staleness only gets stricter.
         now = max(now, time.time())
     for fx, built, insts in assembled:
+        # the void terms of every alias READ (before the certificates strip
+        # any: an alias is read whether or not it may be a leg)
+        vts.append(AC.alias_void_terms(insts, built["states"]))
+        bks.append(book_census(insts, now=now))
         # the settlement certificates, read only: an alias whose rules
         # fingerprint is not the certified one is no leg (red team)
         built, _cert = await RTS.apply(conn, built)
@@ -287,5 +357,7 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
         fresh += sum(1 for i in insts if i.observed_at is not None
                      and now - float(i.observed_at) <= KMD.BOOK_SLA_S)
         scans.append(AC.scan_fixture(fx, built, now=now))
+    books = merge_book_census(bks)
     return AC.census_result(scans, markets_read=aliases, books_fresh=fresh,
-                            skipped={})
+                            skipped={}, void_terms=AC.merge_void_terms(vts),
+                            book_sources=books, venues=venue_support(books))
