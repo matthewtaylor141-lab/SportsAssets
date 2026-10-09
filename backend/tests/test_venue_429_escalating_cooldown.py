@@ -662,3 +662,187 @@ def test_the_api_processs_heartbeat_digest_carries_its_own_cooldown(clock):
     digest = LOOP._rate_control_digest()
     got = digest["process_request_totals"]["escalating_429_cooldown"]
     assert got["cooldown_active"] is True and got["last_429"]["path"].endswith("/book")
+
+
+# ════════════════════════════════════════════════════════════════════
+# 10 · THE DATA-API HOST: NEVER A ZERO-SECOND RETRY, THE SAME ESCALATION
+# ════════════════════════════════════════════════════════════════════
+
+class AClock:
+    """ratelimit's fake clock (as tests/test_e10_priority_lane.py's)."""
+
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def now(self):
+        return self.t
+
+    async def sleep(self, d):
+        await asyncio.sleep(0)
+        self.t += max(0.0, float(d))
+
+
+@pytest.fixture
+def aclock(monkeypatch):
+    c = AClock()
+    monkeypatch.setattr(ratelimit, "_clock", c.now)
+    monkeypatch.setattr(ratelimit, "_sleep", c.sleep)
+    monkeypatch.setattr(VP, "_rand", lambda: 0.5, raising=False)
+    monkeypatch.setattr(ratelimit, "_throttle", ratelimit.Throttle(6.0))
+    return c
+
+
+class _Resp:
+    def __init__(self, status, headers=None):
+        self.status_code = status
+        self.headers = headers or {}
+
+
+class _Http:
+    def __init__(self, clock, statuses, headers=None):
+        self.clock = clock
+        self.statuses = list(statuses)
+        self.headers = headers or {}
+        self.at: list = []
+        self.cooldowns: list = []
+
+    async def get(self, url, params=None):
+        self.at.append(self.clock.t)
+        state = getattr(ratelimit.data_api_throttle(), "cooldown_state", None)
+        self.cooldowns.append(state()["cooldown_s"] if state else None)
+        st = self.statuses.pop(0) if self.statuses else 429
+        return _Resp(st, self.headers if st == 429 else {})
+
+
+def test_polite_get_never_retries_a_429_at_zero_seconds(aclock):
+    http = _Http(aclock, [429, 200], headers={"Retry-After": "0"})
+    resp = asyncio.run(ratelimit.polite_get(http, "/trades", params={"user": "0xabc"}))
+    assert resp.status_code == 200
+    gap = http.at[1] - http.at[0]
+    assert gap >= 5.0, "retried %.3f s after a 429" % gap
+    assert VP.COOLDOWN_FLOOR_S == 5.0
+    st = ratelimit.data_api_throttle().cooldown_state()
+    assert st["consecutive_429"] == 0 and st["resets"] == 1 and st["cooldown_active"] is False
+    assert st["last_429"]["path"] == "/trades", "the path alone -- never the wallet in the query"
+
+
+def test_nine_consecutive_data_api_429s_escalate_strictly_to_the_cap_with_no_request_inside(aclock):
+    http = _Http(aclock, [429] * 9)
+    resp = asyncio.run(ratelimit.polite_get(http, "/trades", retries=8))
+    assert resp.status_code == 429 and len(http.at) == 9
+    thr = ratelimit.data_api_throttle()
+    # the cooldown each request was preceded by: strictly increasing to the cap
+    waits = http.cooldowns[1:] + [thr.cooldown_state()["cooldown_s"]]
+    for a, b in zip(waits, waits[1:]):
+        assert b > a or a == b == VP.COOLDOWN_CAP_S, waits
+    assert waits[0] == pytest.approx(5.5) and waits[-1] == VP.COOLDOWN_CAP_S
+    # and no request went inside one: each gap is at least its cooldown
+    gaps = [b - a for a, b in zip(http.at, http.at[1:])]
+    assert all(g >= w - 1e-6 for g, w in zip(gaps, waits)), (gaps, waits)
+    assert thr.cooldown_state()["consecutive_429"] == 9
+
+
+def test_inside_a_data_api_cooldown_normal_callers_are_held_and_priority_is_bounded(aclock):
+    async def go():
+        thr = ratelimit.data_api_throttle()
+        out = thr.note_429(retry_after_s=None, path="/trades")
+        armed = aclock.t
+        until = armed + out["seconds_left"]
+        served: list = []
+
+        async def one(name, prio):
+            await thr.acquire(priority=prio)
+            served.append((name, aclock.t))
+        tasks = [asyncio.create_task(one("n1", False)),
+                 asyncio.create_task(one("p1", True)),
+                 asyncio.create_task(one("n2", False))]
+        await asyncio.gather(*tasks)
+        return served, armed, until, thr
+    served, armed, until, thr = asyncio.run(go())
+    by = dict(served)
+    assert by["p1"] <= armed + VP.PRIORITY_COOLDOWN_MAX_WAIT_S + 1e-6, "priority starved"
+    assert by["p1"] >= armed + VP.PRIORITY_COOLDOWN_MAX_WAIT_S - 1e-6
+    assert by["n1"] >= until and by["n2"] >= until, "a normal slot inside the cooldown"
+    assert thr.cooldown_state()["priority_served_in_cooldown"] == 1
+
+
+# ════════════════════════════════════════════════════════════════════
+# 11 · THE EXIT WORKER'S DIRECT DATA-API READS FEED THE HOST'S COOLDOWN
+# ════════════════════════════════════════════════════════════════════
+
+class _PosResp:
+    def __init__(self, status, rows=None, headers=None):
+        self.status_code = status
+        self._rows = rows or []
+        self.headers = headers or {}
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(self.status_code)
+
+    def json(self):
+        return self._rows
+
+
+class _PosHttp:
+    def __init__(self, clock, answers):
+        self.clock = clock
+        self.answers = list(answers)
+        self.at: list = []
+        self.params: list = []
+
+    async def get(self, path, params=None):
+        self.at.append(self.clock.t)
+        self.params.append(dict(params or {}))
+        return self.answers.pop(0) if self.answers else _PosResp(429)
+
+
+def test_the_exit_workers_positions_walk_arms_the_host_cooldown_and_never_retries_into_it(aclock, monkeypatch):
+    """whale_exits' walk takes its slot and GETs directly (no polite_get).
+    Its 429 was invisible to the host's cooldown and its retry went 2 s
+    later; now the 429 arms the cooldown every data-api caller waits on, the
+    retry waits it out, and the 2xx that answers lifts it."""
+    from sportsassets.workers import whale_exits as WE
+    orig = asyncio.sleep
+    monkeypatch.setattr(asyncio, "sleep", lambda d: orig(0))   # the walk's own 2 s
+    rows = [{"asset": "a%d" % i, "size": 1} for i in range(3)]
+    http = _PosHttp(aclock, [_PosResp(429, headers={"Retry-After": "0"}),
+                             _PosResp(200, rows)])
+    sizes, sibs, seen = asyncio.run(WE._fetch_positions(http, "0xw"))
+    assert seen == 3 and len(http.at) == 2
+    gap = http.at[1] - http.at[0]
+    assert gap >= 5.0, "the retry went %.3f s after a 429" % gap
+    assert VP.COOLDOWN_FLOOR_S == 5.0
+    st = ratelimit.data_api_throttle().cooldown_state()
+    assert st["rate_limited_total"] == 1 and st["resets"] == 1
+    assert st["cooldown_active"] is False and st["consecutive_429"] == 0
+    assert st["last_429"]["path"] == "/positions", "the path alone, never the wallet"
+
+
+def test_the_mirrors_per_market_read_arms_the_host_cooldown_and_holds_the_other_callers(aclock):
+    from sportsassets.workers import whale_exits as WE
+
+    async def go():
+        http = _PosHttp(aclock, [_PosResp(429)])
+        got = await WE.market_positions(http, "0xw", "0xcond", priority=True)
+        armed = aclock.t
+        # the poller's next /trades, a normal caller, is held to the end
+        other = _Http(aclock, [200])
+        await ratelimit.polite_get(other, "/trades")
+        return got, armed, other
+    got, armed, other = asyncio.run(go())
+    assert got is None, "a 429 is still unreadable: fail closed, as before"
+    held = other.at[0] - armed
+    assert held >= 5.0, "the next caller went %.3f s after the 429" % held
+    st = ratelimit.data_api_throttle().cooldown_state()
+    assert st["rate_limited_total"] == 1 and st["resets"] == 1
+    assert held >= st["cooldown_s"] - 1e-6
+
+
+def test_a_stand_in_throttle_without_the_cooldown_is_left_alone():
+    class _Bare:
+        async def wait(self):
+            return None
+    assert ratelimit.observe_data_api_response(_PosResp(429), throttle=_Bare()) is None
+    assert ratelimit.observe_data_api_response(_PosResp(200), throttle=_Bare()) is None
+    assert ratelimit.observe_data_api_response(object(), throttle=_Bare()) is None
