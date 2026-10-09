@@ -116,11 +116,17 @@ def test_non_sports_codes_are_excluded_by_name():
 
 
 def test_an_ambiguous_league_code_is_a_named_gap_not_a_sport():
-    c = POP.contract_row(_row("wbc-bantamw-2026-12-31-champ", "futures"),
+    # (RC6.2, p-coverage) a weight-class slug now resolves the ambiguity
+    # (tests/test_rc62_coverage_ontology.py: every production wbc row is a
+    # boxing title future); the code ALONE still never names a sport
+    c = POP.contract_row(_row("wbc-usa-jpn-2026-03-17", "futures"),
                          now=time.time())
     assert c["sport"] is None
     assert c["ontology"]["gaps"] == ["LEAGUE_CODE_AMBIGUOUS"]
     assert "wbc" not in O.LEAGUE_SPORT
+    b = POP.contract_row(_row("wbc-bantamw-2026-12-31-champ", "futures"),
+                         now=time.time())
+    assert b["sport"] == "boxing" and b["ontology"]["gaps"] == []
 
 
 def test_ncaa_soccer_codes_read_soccer():
