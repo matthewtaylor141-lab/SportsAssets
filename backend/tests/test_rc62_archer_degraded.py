@@ -7,8 +7,8 @@ the floor desk read IDLE, and the agent_archer service heartbeat said 'ok'
 HEALTHY. The Archer results-phase timeout fix (e5b12392) is already an
 ancestor of rc6/int-62; this is the display truth:
 
-  desk   runs > 0 and errors >= runs -> WAITING with `degraded` (from the
-         recorded runs / errors / last_error), even over a recent output
+  desk   the lifetime agent_status counters are never shown as
+         "N of M runs errored" (errors also counts non-run heartbeats)
   loop   newest success beat carries non-empty phase_errors -> DEGRADED
          (named), and a capital-critical DEGRADED loop is not healthy
 """
@@ -32,28 +32,15 @@ def _desk(status, signals=()):
                            signals=list(signals))
 
 
-def test_every_run_errored_is_degraded_not_idle():
-    s = _desk(ARCHER_ALL_ERRORED)
-    assert s["state"] == "WAITING", s
-    assert s["degraded"] == {"why": "EVERY_RECORDED_RUN_ERRORED",
-                             "runs": 1017, "errors": 1017,
-                             "last_error": "results:TimeoutError"}
-    assert "1017 of 1017" in s["detail"]
-    assert "results:TimeoutError" in s["detail"]
-
-
-def test_a_recent_output_does_not_hide_the_error_rate():
-    s = _desk(ARCHER_ALL_ERRORED, [{"at": NOW - 10, "hint": "WORKING_ON",
-                                    "label": "Estimated execution"}])
-    assert s["state"] == "WAITING" and s["degraded"]
-
-
-def test_a_run_that_succeeded_is_not_degraded():
-    st = dict(ARCHER_ALL_ERRORED, errors=1016)
-    assert FL.run_errors_degraded(st) is None
-    assert _desk(st)["state"] == "IDLE"
-    assert FL.run_errors_degraded({"runs": 0, "errors": 0}) is None
-    assert FL.run_errors_degraded(None) is None
+def test_lifetime_counters_never_read_as_every_run_errored():
+    # (RC6.2 be-truth review) agent_status runs/errors are lifetime counters
+    # and `errors` also counts non-run heartbeats (e.g. a gate hook raising),
+    # so the desk never presents them as "N of M runs errored".
+    for st in (ARCHER_ALL_ERRORED, dict(ARCHER_ALL_ERRORED, runs=1, errors=2)):
+        s = _desk(st)
+        assert "degraded" not in s, s
+        assert "runs errored" not in s["detail"], s
+        assert "EVERY_RECORDED_RUN_ERRORED" not in repr(s), s
 
 
 def _archer_spec():
