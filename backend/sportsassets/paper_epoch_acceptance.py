@@ -91,7 +91,7 @@ def validate_contents(files, *, release_sha, now):
 
 def _trust_anchors():
     root_bytes = None
-    for path, digest in ((pathlib.Path(GH_PATH), GH_SHA256), (ROOT_PATH, ROOT_SHA256)):
+    for path, digest in ((ROOT_PATH, ROOT_SHA256), (pathlib.Path(GH_PATH), GH_SHA256)):
         try:
             content = path.read_bytes()
             if path.is_symlink() or not path.is_file() or hashlib.sha256(content).hexdigest() != digest:

@@ -809,15 +809,17 @@ _LAST: dict = {}
 
 
 async def step(conn, ctx: dict) -> dict:
-    """THE PAPER-PASS HOOK, on the main account's pass: retrieval at most
+    """THE PAPER-PASS HOOK, on the selected account's pass: retrieval at most
     every STEP_EVERY_S, the usefulness evaluation (and any supersession) at
     most every EVALUATE_EVERY_S, in this process. Never raises."""
+    from ..simulated_account_context import selected_account
+    selected = await selected_account(conn)
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     at = float(clock())
     acct = ctx.get("account_id")
-    if acct != MAIN_PAPER_ACCOUNT and not ctx.get("agent_work_any_account"):
+    if acct != selected and not ctx.get("agent_work_any_account"):
         return {"ran": False, "why": "NOT_THE_MAIN_PAPER_ACCOUNT"}
-    acct = acct or MAIN_PAPER_ACCOUNT
+    acct = acct or selected
     out: dict[str, Any] = {"ran": False}
     last = _LAST.get("retrieve")
     if last is None or not 0 <= at - last < STEP_EVERY_S:

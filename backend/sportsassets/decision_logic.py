@@ -42,6 +42,8 @@ import pathlib
 #: NOT_DECISION_LOGIC with the reason; tests/test_live_parity.py fails on a
 #: new import that is neither.
 DECISION_LOGIC_FILES = (
+    # Durable PAPER selection and inherited risk population affect admissions.
+    "simulated_account_context.py",
     # this identity itself, the canonical intents, both adapters, parity
     # and the live gates
     "decision_logic.py", "canonical_intent.py", "canonical_components.py", "allie_capital.py",

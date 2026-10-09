@@ -125,7 +125,8 @@ async def test_the_launch_configuration_trains_through_the_real_cycle(
         acct = await PL.new_account(conn, "launch", now=t_start)
         t = PL.Transport(t_start)
         t.set(DT.US_SLUG, offers=[(0.50, 5000)], bids=[(0.48, 5000)])
-        monkeypatch.setattr(PR, "DEFAULT_ACCOUNT_ID", acct["account_id"])
+        from unittest.mock import AsyncMock
+        monkeypatch.setattr(PR.L, "selected_account", AsyncMock(return_value=acct["account_id"]))
         monkeypatch.setitem(PR._CLIENT, "client", PL.client(t))
         monkeypatch.setattr(RT, "paper_pass_hook",
                             lambda **kw: {"scheduled": False})

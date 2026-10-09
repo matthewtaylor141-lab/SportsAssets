@@ -752,7 +752,8 @@ async def line_env(monkeypatch, new_strategies_off):
         books={e.game.us_slug: ([(0.50, 400)], [(0.52, 400)]),
                e.line_slug: ([(0.40, 400)], [(0.52, 400)])},
         prose={e.game.us_slug: RI.VENUE_PROSE, e.line_slug: LINE_PROSE})
-    monkeypatch.setattr(PR, "DEFAULT_ACCOUNT_ID", e.acct["account_id"])
+    from unittest.mock import AsyncMock
+    monkeypatch.setattr(PR.L, "selected_account", AsyncMock(return_value=e.acct["account_id"]))
     monkeypatch.setitem(PR._CLIENT, "client",
                         G.PaperMarketDataClient(e.venue))
     monkeypatch.setattr(RT, "paper_pass_hook",

@@ -62,7 +62,7 @@ STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "logging",
           "math", "os", "random", "time", "uuid", "zoneinfo", "typing",
           "contextlib", "dataclasses", "decimal", "collections", "copy",
           "statistics", "glob", "re"}
-ALLOWED_PROJECT = {"sportsassets", "sportsassets.intel",
+ALLOWED_PROJECT = {"sportsassets.simulated_account_context", "sportsassets", "sportsassets.intel",
                    "sportsassets.intel.common",
                    "sportsassets.intel.attribution",
                    # SELECT-only, pinned by tests/test_intel_is_shadow_only

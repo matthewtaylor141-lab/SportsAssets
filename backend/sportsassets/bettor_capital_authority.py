@@ -938,8 +938,15 @@ async def step(conn, ctx: dict) -> dict:
     if last is not None and 0 <= now - last < RUN_EVERY_S:
         return {"ran": False, "why": "RAN_WITHIN_RUN_EVERY_S"}
     _LAST_RUN[acct] = now
-    got = await settle_shadows(conn, now=now, account_id=acct)
-    return dict(got, ran=True)
+    from .simulated_account_context import risk_history_accounts
+    out = {"examined": 0, "settled": 0, "pending": 0, "errors": 0}
+    accounts = {}
+    for aid in await risk_history_accounts(conn, acct):
+        got = await settle_shadows(conn, now=now, account_id=aid)
+        accounts[aid] = got
+        for key in out:
+            out[key] += got.get(key, 0)
+    return dict(out, accounts=accounts, ran=True)
 
 
 # ═════════════════════════════════════════════════════════════════════

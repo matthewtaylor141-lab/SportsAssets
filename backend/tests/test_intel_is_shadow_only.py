@@ -54,7 +54,7 @@ SHADOW_MODULES = INTEL + [AUDREY]
 STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "logging",
           "math", "os", "random", "time", "uuid", "zoneinfo", "typing",
           "contextlib", "dataclasses", "decimal", "collections"}
-ALLOWED_PROJECT = {"sportsassets.bettor_source_calibration",
+ALLOWED_PROJECT = {"sportsassets.simulated_account_context", "sportsassets.bettor_source_calibration",
                    "sportsassets.bettor_pinnacle_devig",
                    "sportsassets.agents", "sportsassets.agents."
                    "audrey_intel_risk", "sportsassets", "sportsassets.intel"}

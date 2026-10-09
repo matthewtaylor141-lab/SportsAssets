@@ -1,6 +1,11 @@
 -- Logical rollback preserves every account and financial row. This DDL
 -- reversal is allowed only before activation has recorded any evidence.
 DO $$ BEGIN
+ -- A snapshot established before the advisory lock cannot see a concurrent
+ -- activation. Refuse those isolation levels before any destructive DDL.
+ IF current_setting('transaction_isolation') <> 'read committed' THEN
+  RAISE EXCEPTION 'Refusing rollback 317: isolation must be read committed';
+ END IF;
  -- Serialize the evidence precheck and every DROP with activation and
  -- the scheduled PAPER pass; a DDL wait must not invalidate the precheck.
  PERFORM pg_advisory_xact_lock(1346457682);

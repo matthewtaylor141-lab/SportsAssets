@@ -20,6 +20,8 @@ from sportsassets import bettor_capital_authority as CA
 from sportsassets import paper_epoch_acceptance as A
 from sportsassets import bettor_paper_day_one as E
 
+PRODUCTION_FORWARD_ECONOMICS = CA.forward_economics
+
 
 async def test_forged_verifier_root_and_shell_sha_cannot_activate(conn,tmp_path,monkeypatch):
     data=green_files(now=time.time())
@@ -56,13 +58,14 @@ async def test_loss_budget_and_forward_economics_survive_cutover(conn):
         evidence_source='SYNTHETIC_REVIEW', at=now-900)
     strategy = L.DEFAULT_STRATEGY
     before = await CA.stopping_rules_now(conn, L.ACCOUNT_ID, strategy, now=now)
-    forward = await CA.forward_economics(conn, L.ACCOUNT_ID, strategy, now=now)
+    forward = await PRODUCTION_FORWARD_ECONOMICS(conn, L.ACCOUNT_ID, strategy, now=now)
+    assert forward['ok'] and forward['verdict'] != CA.POSITIVE
     assert before['ok'] and any(r['rule_id']=='LOSS_BUDGET_QUARANTINE' for r in before['firing'])
     new = await activate(conn, 'risk-history')
     after = await CA.stopping_rules_now(conn, new['account_id'], strategy, now=now)
     assert after['firing'] == before['firing']
     assert after['rolling'] == before['rolling']
-    assert await CA.forward_economics(conn, new['account_id'], strategy, now=now) == forward
+    assert await PRODUCTION_FORWARD_ECONOMICS(conn, new['account_id'], strategy, now=now) == forward
     assert (await CA.stopping_rules_now(conn, new['account_id'], strategy, now=now, positions=[]))['firing'] == before['firing']
     regime = await B.regime_observations(conn, new['account_id'], strategy, since=now-2000)
     assert sum(len(v['paper']) for v in regime.values()) == 1
@@ -170,6 +173,7 @@ async def test_deployment_recheck_under_activation_lock_rolls_back_without_fundi
         assert not await conn.fetchval('SELECT EXISTS(SELECT 1 FROM paper_account_epochs)')
         raise ValueError('DEPLOYED_RELEASE_CHANGED_WHILE_WAITING')
     from sportsassets import bettor_paper_day_one as E
+
     with pytest.raises(ValueError,match='DEPLOYED_RELEASE_CHANGED'):
         await E._activate_verified(conn,epoch_id='changed-release',request_id='changed-release',
             proof={'release_sha':SHA,'packet_digest':'b'*64},deployment_check=changed)

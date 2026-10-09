@@ -32,7 +32,7 @@ STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "logging",
           "contextlib", "dataclasses", "decimal", "collections", "copy",
           "statistics", "re", "socket", "functools", "pathlib"}
 #: the named project modules the view may reach, each pure or SELECT-only
-ALLOWED_PROJECT = {
+ALLOWED_PROJECT = {"sportsassets.simulated_account_context",
     "sportsassets", "sportsassets.api",
     "sportsassets.profitability", "sportsassets.profitability.common",
     "sportsassets.intel", "sportsassets.intel.common",
