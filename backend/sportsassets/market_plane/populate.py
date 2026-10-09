@@ -697,8 +697,8 @@ SETTLEMENT_WRITE_SQL = (
 
 
 async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
-                        rest_sla_s: float = 300.0, limit: int | None = None
-                        ) -> dict:
+                        rest_sla_s: float = 300.0, limit: int | None = None,
+                        refreshed: dict | None = None) -> dict:
     """Classify every ACTIVE registry contract and write the changed terminal
     states AND settlement states (market_plane.settlement, evidence only).
     Returns the matrix summary (counts by state, sport, family, why), the
@@ -719,7 +719,19 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     pass began (a key this pass loaded is not treated as cached, though a
     later page finds it in the cache). The changes go into ONE transaction,
     opened at the first page that has any and committed at the end (rolled
-    back if the pass raises), as before."""
+    back if the pass raises), as before.
+
+    THE PLANE'S OWN REST REFRESH (RC6, market_plane.active_refresh):
+    `refreshed` {contract_id: receipt instant} are the members the plane
+    re-read through the venue's REST book because the stream had gone quiet
+    on them. Each is REST_RECOVERY exactly like a paper REST observation --
+    a REST book received within `rest_sla_s` -- after the stream and after
+    the paper observation (an existing source keeps the credit, so the
+    refresh counts only what it adds), and the output then carries
+    `rest_recovery_by_origin` per tier: PAPER_BOOK_OBSERVATION vs
+    PLANE_ACTIVE_REFRESH, so the source of every REST_RECOVERY is visible.
+    Absent (None), nothing is counted from it and the output is the RC5
+    output exactly."""
     from .models import TERMINAL_STATES
     from .coverage import VERSION as MATRIX_VERSION
     from . import settlement as S
@@ -746,6 +758,12 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                           "EXTERNAL_DATA_UNAVAILABLE": 0, "total": 0},
              "ALL": {"PMX_GRPC": 0, "REST_RECOVERY": 0, "NONE": 0,
                      "EXTERNAL_DATA_UNAVAILABLE": 0, "total": 0}}
+    origins = None if refreshed is None else {
+        t: {"PAPER_BOOK_OBSERVATION": 0, "PLANE_ACTIVE_REFRESH": 0}
+        for t in ("PRIORITY", "ALL")}
+    refreshed_ok = {} if refreshed is None else {
+        k: v for k, v in refreshed.items()
+        if v is not None and 0.0 <= at - float(v) <= float(rest_sla_s)}
     by_sport, by_why, by_venue = {}, {}, {}
     s_by_state = {k: 0 for k in S.STATES}
     s_by_basis, s_by_why, s_by_venue, brk = {}, {}, {}, {}
@@ -807,10 +825,15 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
             changed, schanged = [], []
             for r in rows:
                 s = r["contract_id"]
+                origin = None
                 if s in fresh_symbols:
                     src, fresh = "PMX_GRPC", True
                 elif s in rest:
                     src, fresh = "REST_RECOVERY", True
+                    origin = "PAPER_BOOK_OBSERVATION"
+                elif s in refreshed_ok:
+                    src, fresh = "REST_RECOVERY", True
+                    origin = "PLANE_ACTIVE_REFRESH"
                 else:
                     src, fresh = None, False
                 src_counts[src or "NONE"] += 1
@@ -830,6 +853,8 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     if t["state"] == "EXTERNAL_DATA_UNAVAILABLE":
                         tiers[tier]["EXTERNAL_DATA_UNAVAILABLE"] += 1
                     tiers[tier][src or "NONE"] += 1
+                    if origins is not None and origin is not None:
+                        origins[tier][origin] += 1
                 if (t["state"], t["why"]) != (r.get("coverage_state"),
                                              r.get("coverage_why")):
                     changed.append((s, t["state"], t["why"], at))
@@ -899,6 +924,8 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         await tr.commit()
     m = {"total": n_rows, "by_state": by_state, "silent_omissions": 0,
          "version": MATRIX_VERSION}
+    if origins is not None:
+        m["rest_recovery_by_origin"] = origins
     top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),

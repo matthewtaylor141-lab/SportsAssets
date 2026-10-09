@@ -88,6 +88,18 @@ tests/test_market_plane_memory_bound.py). The heartbeat now carries
 `memory` {rss_mb, peak_mb, limit_mb, by_step}: the RSS after each step of
 the last pass and the largest rise each step has shown since boot, and a log
 line repeats it every MEMORY_LOG_EVERY_S.
+
+PRIORITY ACTIVE REFRESH (RC6). Priority freshness read 114 PMX + 1 REST of
+186 (0.618) in the 2026-10-08 20:07Z snapshot: 56 of the 72 members not
+current were quiet candidates the healthy subscribe-all stream had not
+re-sent inside the 300 s bound (STREAM:SNAPSHOT_OLDER_THAN_THE_BOUND). Each
+pass, after the refdata slot, market_plane.active_refresh re-reads such
+members through the venue's allow-listed REST book (HELD first, then
+CANDIDATE by event start; at most the venue's 12 GetOrderBook reads a
+minute; 429 held; every outcome counted); the coverage pass counts a current
+refresh as REST_RECOVERY labelled PLANE_ACTIVE_REFRESH, and the census names
+each remaining miss with its refresh outcome. The bound, the stream's books
+and the PMX parity books are unchanged. UMP_ACTIVE_REFRESH=off removes it.
 """
 from __future__ import annotations
 
@@ -96,7 +108,9 @@ import logging
 import os
 import time
 
+from .. import institutional_stream as IS
 from ..db import get_pool, heartbeat
+from ..market_plane import active_refresh as AR
 from ..market_plane import certification as CERT
 from ..market_plane import freshness as FR
 from ..market_plane import populate as POP
@@ -491,6 +505,10 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
             "enabled", "complete", "stopped", "markets", "requests",
             "error")},
+        # (RC6) this pass of the priority active refresh: due / read /
+        # deferred and why, counts only
+        "refresh": {k: v for k, v in (state.get("refresh") or {}).items()
+                    if k != "reads"},
         "fresh": len(fresh)}
     if memory is not None:
         d["memory"] = memory
@@ -589,6 +607,14 @@ async def run() -> None:
     log.info("universal_market_plane: streams %s (%s) mode=%s streams=%d "
              "books=%d", "ARMED" if mgr else "NOT_ARMED", arming["why"],
              plan_cfg["mode"], plan_cfg["streams"], plan_cfg["books_capacity"])
+    # (RC6) the priority active refresh rides the armed stream's client and
+    # books; off by switch, or absent when no stream is armed
+    refresher = (AR.ActiveRefresh(per_minute=AR.per_min(os.environ))
+                 if mgr is not None and AR.enabled() else None)
+    log.info("universal_market_plane: priority active refresh %s",
+             ("ON (%d book reads/min, bound %.0f s)"
+              % (refresher.per_min, FRESH_SLA_S)) if refresher else
+             (AR.R_REFRESH_NO_STREAM if mgr is None else AR.R_REFRESH_OFF))
     watermark = 0.0
     last = {"populate": 0.0, "full": 0.0, "assign": 0.0, "coverage": 0.0,
             "certify": 0.0, "snapshot": 0.0}
@@ -648,12 +674,21 @@ async def run() -> None:
                 state["refdata"] = await refdata_step(
                     pool, client, planner, attempted, now=now)
                 mem.mark("refdata")
+            if refresher is not None:
+                # (RC6) a fresh REST book for the priority members the
+                # stream has gone quiet on, inside the book-read budget
+                state["refresh"] = await AR.step(pool, client, refresher,
+                                                 mgr, bound=FRESH_SLA_S)
+                mem.mark("refresh")
             now = time.time()  # source ages checked AFTER the catch-up work
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
                     state["coverage"] = await POP.coverage_pass(
-                        c, fresh_symbols=fresh, now=now)
+                        c, fresh_symbols=fresh, now=now,
+                        refreshed=(refresher.current(
+                            mgr, now=now, bound=FRESH_SLA_S)
+                            if refresher is not None else None))
                     last["coverage"] = now
                     mem.mark("coverage")
                 if mgr is not None and \
@@ -667,7 +702,8 @@ async def run() -> None:
                                                  if planner else None)
                     snap = await snapshot(c, mgr, state, now=now,
                                           arming=arming, fresh=fresh,
-                                          caps=(max_streams, max_per))
+                                          caps=(max_streams, max_per),
+                                          refresher=refresher)
                     # THE CONSUMER PARITY BRIDGE (SHADOW): the priority
                     # members' PMX tops, one append-only event per pass;
                     # the API compares them with the REST books the paper
@@ -723,12 +759,29 @@ PRIORITY_CENSUS_SAMPLE = 40
 PRIORITY_BOOKS_KIND = "PRIORITY_PMX_BOOKS"
 
 
-async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
+#: (RC6) the stream refusal QUIET_VALID would stand in for, in the
+#: counterfactual the census reports (never counted)
+QUIET_COUNTERFACTUAL_REFUSAL = "STREAM:%s" % IS.R_SNAPSHOT_OLD
+
+
+async def priority_census(conn, mgr, *, fresh: set, now: float,
+                          refreshed: dict | None = None,
+                          refresher=None) -> dict:
     """EVERY PRIORITY MEMBER THAT IS NOT CURRENT, CLASSIFIED (owner closeout
     item 3): by tier (held / candidate), refdata state, shard assignment,
     the stream's own refusal for the symbol, and the age of its latest
     REST / public book. Read only; nothing is excluded from the denominator
-    here -- this names why each member is not current."""
+    here -- this names why each member is not current.
+
+    (RC6) A member CURRENT VIA THE PLANE'S ACTIVE REFRESH (`refreshed`, the
+    refresher's own `current` at this instant) is current, counted apart
+    (`current_via_refresh`). Every member still not current carries its
+    last refresh outcome (`refresh`; NOT_YET_READ when none was made, None
+    when the refresh does not run here), counted in `by_refresh_outcome`.
+    `quiet_valid_counterfactual` counts the members a QUIET_VALID rule
+    (connection live, symbol acknowledged on the current connection, no gap
+    since the snapshot) would make current: REPORTED FOR THE PM'S DECISION,
+    NEVER COUNTED -- the numerator does not read it."""
     rows = await conn.fetch(
         "SELECT contract_id, priority, required_reason, event_start, "
         "       CASE WHEN refdata IS NULL THEN 'REFDATA_PENDING' "
@@ -753,6 +806,11 @@ async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
         except Exception:                                       # noqa: BLE001
             connected = {}
     by, sample, pmx = {}, [], {}
+    via_refresh, by_refresh = 0, {}
+    quiet = {"stream_quiet_on_the_live_connection": 0,
+             "of_which_symbol_acked_on_this_connection": 0,
+             "snapshot_age_s": []}
+    refreshed = refreshed or {}
     for r in rows:
         s = r["contract_id"]
         age = rest.get(s)
@@ -772,6 +830,11 @@ async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
                           "received_at": sn.get("received_at")}
         if s in fresh or (age is not None and age <= FRESH_SLA_S):
             continue
+        if s in refreshed:
+            # a REST book the plane read within the bound (RC6)
+            via_refresh += 1
+            continue
+        cur = None      # the stream's read of this member, when one is made
         tier = "HELD" if int(r["priority"]) <= POP.P_HELD else "CANDIDATE"
         if r["refdata_state"] != "PMX_LISTED":
             why = r["refdata_state"]
@@ -795,19 +858,47 @@ async def priority_census(conn, mgr, *, fresh: set, now: float) -> dict:
         rest_k = ("NO_REST_BOOK_6H" if age is None else "REST_OLDER_THAN_300S")
         k = "%s|%s|%s|%s" % (tier, why, rest_k, phase)
         by[k] = by.get(k, 0) + 1
+        ro = None
+        if refresher is not None:
+            ro = refresher.outcome_of(s) or "NOT_YET_READ"
+            by_refresh[ro] = by_refresh.get(ro, 0) + 1
+        if why == QUIET_COUNTERFACTUAL_REFUSAL and isinstance(cur, dict):
+            # every check current() makes before the snapshot age passed:
+            # running, scaled, connected, this connection's snapshot, no
+            # gap, the venue clock, the stream alive -- only the age failed
+            ev = cur.get("evidence") or {}
+            quiet["stream_quiet_on_the_live_connection"] += 1
+            quiet["of_which_symbol_acked_on_this_connection"] += int(bool(
+                (ev.get("subscription") or {}).get(
+                    "acked_on_current_connection")))
+            sa = (ev.get("snapshot") or {}).get("age_s")
+            if sa is not None:
+                quiet["snapshot_age_s"].append(float(sa))
         if len(sample) < PRIORITY_CENSUS_SAMPLE:
             sample.append({"contract_id": s, "tier": tier, "why": why,
                            "rest_age_s": None if age is None
-                           else round(age, 1), "phase": phase})
+                           else round(age, 1), "phase": phase,
+                           "refresh": ro})
+    ages = sorted(quiet.pop("snapshot_age_s"))
+    quiet["snapshot_age_s"] = ({"n": len(ages), "p50": round(
+        ages[len(ages) // 2], 1), "max": round(ages[-1], 1)} if ages else None)
+    quiet.update(counted=False, rule=(
+        "QUIET_VALID (PM decision, not implemented): connection live, symbol "
+        "acknowledged on the current connection, no gap since the snapshot"))
     return {"members": len(rows), "not_current": sum(by.values()),
+            "current_via_refresh": via_refresh,
             "by_tier_reason_rest_phase": dict(sorted(
-                by.items(), key=lambda kv: -kv[1])), "sample": sample,
+                by.items(), key=lambda kv: -kv[1])),
+            "by_refresh_outcome": dict(sorted(
+                by_refresh.items(), key=lambda kv: -kv[1])),
+            "quiet_valid_counterfactual": quiet, "sample": sample,
             "pmx_books": pmx}
 
 
 async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
                                  subscribed: int, fresh: int,
-                                 now: float) -> dict:
+                                 now: float, refresh: dict | None = None
+                                 ) -> dict:
     """THE TWO DENOMINATORS, never blended (owner, 2026-10-06).
 
       priority_universe   open PAPER positions + evaluated candidates (the
@@ -820,8 +911,16 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
       total_universe      every active sports contract: subscription
                           eligible, streamed, current via fallback, stale,
                           overflow, external -- nothing excluded to raise it
+
+    (RC6) The priority REST fallback is labelled by origin
+    (`current_rest_fallback_by_origin`: PAPER_BOOK_OBSERVATION, the paper
+    runtime's reads; PLANE_ACTIVE_REFRESH, the plane's own book reads of
+    members the stream went quiet on -- the coverage pass's count, None when
+    that pass ran without the refresh), and `active_refresh` is the
+    refresh's digest (budget, outcomes, members current through it).
     """
     tiers = (cov or {}).get("freshness_tiers") or {}
+    origins = (cov or {}).get("rest_recovery_by_origin") or {}
     pr = tiers.get("PRIORITY") or {}
     al = tiers.get("ALL") or {}
 
@@ -848,11 +947,15 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
             "denominator": int(pr.get("total") or 0),
             "current_pmx_stream": int(pr.get("PMX_GRPC") or 0),
             "current_rest_fallback": int(pr.get("REST_RECOVERY") or 0),
+            "current_rest_fallback_by_origin": (
+                dict(origins["PRIORITY"]) if origins.get("PRIORITY")
+                is not None else None),
             "not_current": int(pr.get("NONE") or 0),
             "external_unavailable": int(pr.get(
                 "EXTERNAL_DATA_UNAVAILABLE") or 0),
             "rate": rate(pr), "target": 0.95,
-            "members": "OPEN_PAPER_POSITION + EVALUATED_CANDIDATE (6 h)"},
+            "members": "OPEN_PAPER_POSITION + EVALUATED_CANDIDATE (6 h)",
+            "active_refresh": refresh},
         "held_positions": held,
         "total_universe": {
             "active_contracts": total_active,
@@ -870,10 +973,12 @@ async def freshness_denominators(conn, cov: dict, reg: dict, plan: dict, *,
 
 
 async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
-                   fresh: set, caps: tuple) -> dict:
+                   fresh: set, caps: tuple, refresher=None) -> dict:
     """ONE append-only market-plane snapshot: universe, registry, coverage,
     subscription plan, sources, freshness, latency, certification, catalogue
-    completeness and Radar. Read by GET /api/command/market-plane."""
+    completeness and Radar. Read by GET /api/command/market-plane.
+    `refresher` is the priority active refresh (RC6), or None where it does
+    not run (off by switch, or no stream armed: said so in the digest)."""
     venue_active = await venue_active_count(conn, now=now)
     reg = dict(await conn.fetchrow(
         "SELECT count(*) FILTER (WHERE active) AS active, "
@@ -967,12 +1072,21 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
                                 and hasattr(mgr, "stream_count") else 0),
         "market_data_streams_expected": sub_plan["streams"],
         "firm_stream_budget": FIRM_STREAM_BUDGET})
+    if refresher is not None:
+        refresh = refresher.digest(now=now, bound=FRESH_SLA_S, mgr=mgr)
+        refreshed = refresher.current(mgr, now=now, bound=FRESH_SLA_S)
+    else:
+        refresh = AR.off_digest(AR.R_REFRESH_OFF if not AR.enabled()
+                                else AR.R_REFRESH_NO_STREAM)
+        refreshed = None
     freshness = await freshness_denominators(conn, cov, reg, plan,
                                              subscribed=subscribed,
-                                             fresh=len(fresh), now=now)
+                                             fresh=len(fresh), now=now,
+                                             refresh=refresh)
     try:
         freshness["priority_universe"]["census"] = await priority_census(
-            conn, mgr, fresh=fresh, now=now)
+            conn, mgr, fresh=fresh, now=now, refreshed=refreshed,
+            refresher=refresher)
     except Exception as exc:                                    # noqa: BLE001
         freshness["priority_universe"]["census"] = {
             "error": type(exc).__name__}
