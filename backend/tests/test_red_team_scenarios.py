@@ -493,14 +493,22 @@ class _FakeWS:
         self.closed = True
 
 
-def test_replay_end_to_end_the_subscriber_resubscribes_and_serves_only_fresh():
+def test_replay_end_to_end_the_subscriber_asks_a_fresh_snapshot_and_serves_only_fresh():
+    """(RC6.2; was test_replay_end_to_end_the_subscriber_resubscribes_and_
+    serves_only_fresh, which pinned unsubscribe + subscribe.) The docs make a
+    repeated subscribe a merge into the existing sid (changelog 2025-09-25),
+    so the repair after the replay is update_subscription get_snapshot on
+    the same sid; the venue's replies follow the documented protocol (our
+    command's `subscribed`, an `ok` taking the sid's next seq, the fresh
+    snapshot on sid 3). The rolled-back seq-1 book is still never served."""
     seen = []
     first = _snap(3, 1, "K-NYY", [("0.43", "100")])
-    ws = _FakeWS([{"type": "subscribed", "msg": {"channel": "orderbook_delta",
-                                                 "sid": 3}},
+    ws = _FakeWS([{"type": "subscribed", "id": 1,
+                   "msg": {"channel": "orderbook_delta", "sid": 3}},
                   first, _delta(3, 2, "K-NYY", "0.44", "5"),
                   first,                                   # replayed
-                  _snap(4, 1, "K-NYY", [("0.47", "10")])])
+                  {"type": "ok", "id": 2, "sid": 3, "seq": 3},
+                  _snap(3, 4, "K-NYY", [("0.47", "10")])])
     books = KWS.WsBooks(clock=lambda: NOW)
     real = books.on_message
 
@@ -520,8 +528,9 @@ def test_replay_end_to_end_the_subscriber_resubscribes_and_serves_only_fresh():
     served = [bk for _o, bk in seen if bk is not None]
     assert served == [[["0.43", "100"]], [["0.43", "100"], ["0.44", "5"]],
                       [["0.47", "10"]]]
-    assert [m["cmd"] for m in ws.sent] == ["subscribe", "unsubscribe",
-                                           "subscribe"]
+    assert [m["cmd"] for m in ws.sent] == ["subscribe", "update_subscription"]
+    assert ws.sent[1]["params"] == {"sid": 3, "market_tickers": ["K-NYY"],
+                                    "action": "get_snapshot"}
     assert sub.resubscribes == 1
 
 

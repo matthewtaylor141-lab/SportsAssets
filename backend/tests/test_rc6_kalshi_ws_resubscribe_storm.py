@@ -24,6 +24,17 @@ it and answers `ok` (the sid and a seq of the sid's own sequence -- the
 documented OK Response carries both), then the added markets' snapshots on
 that sid. Whatever the venue's exact reason, the client must not answer it
 with an unbounded number of subscribes.
+
+RC6.2 (the documented protocol). That venue IS the documented one (changelog
+2025-09-25: a repeated subscribe is merged into the existing sid). The client
+now sends ONE subscribe and update_subscription add_markets for the other
+chunks, takes every `ok` into the sid's sequence, and repairs a gap with
+get_snapshot on the same sid: against this venue there is no storm at all.
+Three tests here pinned the RC6.1 storm itself (that it HAPPENS and is cut by
+the bound); they now pin its absence with the same bounds asserted tighter,
+and the bound that ends a session whose repairs run away is exercised through
+the RC6.2 command-rate bound (MAX_RESUBSCRIBES_WITHOUT_RECOVERY is kept
+beneath it: tests/test_rc62_kalshi_ws_protocol.py).
 """
 from __future__ import annotations
 
@@ -117,6 +128,8 @@ def _session(budget: int, wanted=WANTED):
             "max_current": 0}
 
     def probe():
+        seen["max_current"] = max(seen["max_current"],
+                                  books.counts()["current"])
         seen["max_dead_sids"] = max(seen["max_dead_sids"],
                                     len(books.dead_sids))
         seen["max_sid_market_entries"] = max(
@@ -134,35 +147,45 @@ def _session(budget: int, wanted=WANTED):
     return venue, sub, books, seen
 
 
-def test_the_production_storm_is_bounded_and_ends_the_session():
+def test_the_production_storm_shape_is_bounded_and_never_storms():
+    """(RC6.2; was test_the_production_storm_is_bounded_and_ends_the_session,
+    which asserted the storm happened and the bound ended it.) Against the
+    venue that stormed RC6.1, every bound that test held is held tighter:
+    the session reads every frame the venue has (no repair loop to cut),
+    ONE subscribe and ceil(397 / 100) - 1 add_markets in all, each market
+    named exactly once, no dead sid, every market CURRENT; the session's end
+    still leaves every book GAP for the reconnect."""
     budget = 60_000
     venue, sub, books, seen = _session(budget)
-    # the repairs did not converge: the session ended itself, fail closed,
-    # long before the venue ran out of messages
-    assert isinstance(seen["ended"], KWS.ResubscribeStorm), seen
-    assert seen["ended"].code == KWS.R_RESUBSCRIBE_STORM
-    assert sub.storms == 1
-    assert venue.delivered < budget // 10, venue.delivered
-    # each market resubscribed at most the bound: the initial chunks plus
-    # MAX_RESUBSCRIBES_WITHOUT_RECOVERY per market, never more
+    # nothing to cut: the session ended only because the venue had no more
+    # frames, with no bound reached
+    assert isinstance(seen["ended"], ConnectionError), seen
+    assert sub.storms == 0 and sub.session_ends == {}
     n_chunks = -(-len(WANTED) // KWS.SUBSCRIBE_CHUNK)
-    assert venue.subscribes() <= n_chunks + \
+    assert venue.delivered == 1 + (n_chunks - 1) + len(WANTED) \
+        < budget // 10, venue.delivered
+    # ONE subscribe (the old bound: the chunks plus the resubscribe bound)
+    assert venue.subscribes() == 1 <= n_chunks + \
         KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY * len(WANTED), venue.subscribes()
+    assert [m["cmd"] for m in venue.sent] == ["subscribe"] + [
+        "update_subscription"] * (n_chunks - 1)
     per_market = {}
     for m in venue.sent:
-        if m["cmd"] == "subscribe":
-            for t in m["params"]["market_tickers"]:
-                per_market[t] = per_market.get(t, 0) + 1
-    assert max(per_market.values()) <= \
+        for t in m["params"]["market_tickers"]:
+            per_market[t] = per_market.get(t, 0) + 1
+    assert set(per_market) == set(WANTED)
+    assert max(per_market.values()) == 1 <= \
         1 + KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY, max(per_market.values())
+    assert sub.resubscribes == 0 and seen["counts"]["gaps"] == 0
+    assert seen["max_current"] == len(WANTED)
     # the session's end leaves every book GAP for the reconnect
     assert seen["counts"]["current"] == 0
     assert all(b["state"] == KWS.GAP for b in books.books.values())
-    # bounded state: the dead-sid bookkeeping never grew with the budget
+    # bounded state: no dead sid at all, one sid's markets
     # (production: 4,716 dead sids, 1.44M dead-sid snapshots in one session)
-    assert seen["max_dead_sids"] <= KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY \
-        + 2, seen["max_dead_sids"]
-    assert seen["max_sid_market_entries"] <= 4 * len(WANTED), seen
+    assert seen["max_dead_sids"] == 0 <= \
+        KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY + 2, seen["max_dead_sids"]
+    assert seen["max_sid_market_entries"] == len(WANTED) <= 4 * len(WANTED)
 
 
 def test_the_bound_does_not_depend_on_how_long_the_venue_keeps_talking():
@@ -174,9 +197,11 @@ def test_the_bound_does_not_depend_on_how_long_the_venue_keeps_talking():
 
 
 def test_a_market_whose_repairs_converge_is_never_counted_against_it():
-    # one subscribe, one sid, no merge: a lost message gaps the sid, each
-    # market is resubscribed once and its fresh snapshot makes it CURRENT
-    # again (its count resets) -- three separate gaps never end the session
+    # one subscribe, one sid: a lost message gaps the sid, each market is
+    # asked for a snapshot once (RC6.2: get_snapshot on the same sid; it was
+    # a resubscribe acknowledged as a new sid) and its fresh snapshot makes
+    # it CURRENT again (its count resets) -- three separate gaps never end
+    # the session
     wanted = ["K-A", "K-B"]
 
     def snap(sid, seq, t):
@@ -192,13 +217,16 @@ def test_a_market_whose_repairs_converge_is_never_counted_against_it():
     def ack(cmd, sid):
         return {"type": "subscribed", "id": cmd,
                 "msg": {"channel": "orderbook_delta", "sid": sid}}
-    # cmd ids: 1 subscribe; per gap g: unsubscribe 2g, resubscribe 2g + 1
+
+    def ok(cmd, sid, seq):
+        return {"type": "ok", "id": cmd, "sid": sid, "seq": seq}
+    # cmd ids: 1 subscribe; per gap g: get_snapshot g + 1 (on sid 1)
     script = [ack(1, 1), snap(1, 1, "K-A"), snap(1, 2, "K-B")]
     for g in range(1, 4):
-        sid = g
-        script += [delta(sid, 4, "K-A"),               # seq 3 lost: gap
-                   ack(2 * g + 1, sid + 1), snap(sid + 1, 1, "K-A"),
-                   snap(sid + 1, 2, "K-B")]
+        base = 5 * g - 2                               # 3, 8, 13 lost
+        script += [delta(1, base + 1, "K-A"),          # gap
+                   ok(g + 1, 1, base + 2), snap(1, base + 3, "K-A"),
+                   snap(1, base + 4, "K-B")]
     seen = {}
 
     class WS:
@@ -230,35 +258,54 @@ def test_a_market_whose_repairs_converge_is_never_counted_against_it():
     assert sub.storms == 0 and sub.resubscribes == 3
     assert books.stats["gaps"] == 3
     assert seen["current"] == 2
+    assert [m["params"].get("action") for m in WS.sent] == [
+        None, "get_snapshot", "get_snapshot", "get_snapshot"]
 
 
-def test_run_reconnects_after_a_storm_and_names_it():
-    # through Subscriber.run as production runs it: each storm ends its
-    # session, the error is named (the heartbeat's last_error), and the
-    # next connection subscribes each wanted market once
-    venues = []
-    stop = None
+def test_run_reconnects_after_a_storm_and_names_it(monkeypatch):
+    # through Subscriber.run as production runs it. (RC6.2) Against the
+    # venue that stormed RC6.1 no session storms: each ends only when that
+    # venue has nothing more to send, and every connection subscribes each
+    # wanted market exactly once (one subscribe, the rest add_markets on its
+    # sid). Then a session whose commands run away -- the command-rate bound
+    # set below one session's needs -- is ended by the bound, named (the
+    # heartbeat's last_error), counted as a storm, and the next connection
+    # starts over with ONE subscribe.
+    def run(n):
+        venues = []
+        holder = {}
 
-    async def connect():
-        v = MergingVenue(60_000)
-        venues.append(v)
-        if len(venues) >= 3:
-            stop.set()
-        return v
-    books = KWS.WsBooks(clock=lambda: NOW)
-    sub = KWS.Subscriber(connect, books, wanted=lambda: list(WANTED),
-                         clock=lambda: NOW, backoff=(0,))
+        async def connect():
+            v = MergingVenue(60_000)
+            venues.append(v)
+            if len(venues) >= n:
+                holder["stop"].set()
+            return v
+        books = KWS.WsBooks(clock=lambda: NOW)
+        sub = KWS.Subscriber(connect, books, wanted=lambda: list(WANTED),
+                             clock=lambda: NOW, backoff=(0,))
 
-    async def go():
-        nonlocal stop
-        stop = asyncio.Event()
-        await asyncio.wait_for(sub.run(stop=stop), timeout=60)
-    asyncio.run(go())
-    assert sub.connections == 3 and sub.storms == 3
-    assert sub.last_error == "ResubscribeStorm"
+        async def go():
+            holder["stop"] = asyncio.Event()
+            await asyncio.wait_for(sub.run(stop=holder["stop"]), timeout=60)
+        asyncio.run(go())
+        return sub, venues
+    sub, venues = run(3)
+    assert sub.connections == 3 and sub.storms == 0
+    assert sub.last_error == "ConnectionError"
     for v in venues:
-        first = [m for m in v.sent if m["cmd"] == "subscribe"][:4]
+        assert v.subscribes() == 1 <= 4 + \
+            KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY * len(WANTED)
+        first = v.sent[:4]
         assert sorted(t for m in first for t in
                       m["params"]["market_tickers"]) == sorted(WANTED)
-        assert v.subscribes() <= 4 + \
-            KWS.MAX_RESUBSCRIBES_WITHOUT_RECOVERY * len(WANTED)
+        assert len(v.sent) == 4
+    monkeypatch.setattr(KWS, "MAX_COMMANDS_PER_MINUTE", 3)
+    sub, venues = run(3)
+    assert sub.connections == 3 and sub.storms == 3
+    assert sub.last_error == "CommandRateBound"
+    assert sub.session_ends == {KWS.R_COMMAND_RATE: 3}
+    for v in venues:
+        assert [m["cmd"] for m in v.sent] == ["subscribe",
+                                              "update_subscription",
+                                              "update_subscription"]

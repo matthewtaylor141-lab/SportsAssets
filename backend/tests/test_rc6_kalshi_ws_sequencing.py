@@ -5,9 +5,22 @@ CONTRACT_2026-10-07/docs/websockets_orderbook-updates.md): every message of
 a subscription -- the `orderbook_snapshot` of each market AND every
 `orderbook_delta` -- carries the subscription's `sid` and a per-sid `seq`
 "that should be checked if you want to guarantee you received all the
-messages. Used for snapshot/delta consistency". A duplicate subscribe is not
-refused (error code 6 "already subscribed" is retired): it opens a SECOND
-sid for the same market.
+messages. Used for snapshot/delta consistency".
+
+RC6.2 (the documented protocol; docs.kalshi.com changelog 2025-09-25:
+"Repeated subscriptions on the same WebSocket call will no longer error. If
+passing the same market tickers as before, no action will be taken. If
+passing new market tickers, they will be added to your existing
+subscription."): a repeated subscribe does NOT open a second sid -- it merges
+into the existing one and is answered by `ok` (with the sid's next seq). So
+a gap is repaired on the SAME sid by update_subscription get_snapshot
+(orderbook-updates: "get_snapshot returns an orderbook_snapshot for the
+requested market_tickers without modifying the subscription"), never by
+unsubscribe + subscribe. The tests below that pinned the RC6 repair
+(unsubscribe the dead sid, resubscribe on a new one) now pin that action,
+with the same safety properties (one repair per market per gap, no book
+CURRENT on a subscription the venue does not feed, CURRENT again only from
+a fresh snapshot in sequence).
 
 Production RC5 (pm-acceptance 37836393458, venues.json KALSHI_HEALTH.
 mechanism.ws): connections 10, resubscribes 18 -- every reconnect re-sent a
@@ -60,6 +73,17 @@ def delta(sid, seq, t, price="0.44", d="5", side="yes"):
 def subscribed(cmd_id, sid):
     return {"type": "subscribed", "id": cmd_id,
             "msg": {"channel": "orderbook_delta", "sid": sid}}
+
+
+def ok(cmd_id, sid, seq):
+    """The venue's `ok` to an update_subscription on `sid`: it carries the
+    sid's next seq (asyncapi OK Response: sid, seq, msg)."""
+    return {"type": "ok", "id": cmd_id, "sid": sid, "seq": seq}
+
+
+def get_snapshot(sid, tickers):
+    return {"sid": sid, "market_tickers": list(tickers),
+            "action": "get_snapshot"}
 
 
 def books():
@@ -241,14 +265,19 @@ def test_reconnect_recovery_through_run():
     assert sub.resubscribes == 0
 
 
-def test_a_gap_still_unsubscribes_the_broken_sid_and_resubscribes_once():
+def test_a_gap_asks_the_same_sid_for_snapshots_once():
+    """(RC6.2; was test_a_gap_still_unsubscribes_the_broken_sid_and_
+    resubscribes_once) the documented repair: ONE get_snapshot on the same
+    sid (never unsubscribe + subscribe), and both books CURRENT again only
+    from the fresh snapshots that follow its `ok` in the sid's sequence."""
     ws = FakeWS([subscribed(1, 3), snap(3, 1, "K-A"), snap(3, 2, "K-B"),
                  delta(3, 4, "K-A"),                 # seq 3 lost
-                 subscribed(3, 4), snap(4, 1, "K-A"), snap(4, 2, "K-B")])
+                 ok(2, 3, 5), snap(3, 6, "K-A"), snap(3, 7, "K-B")])
     seen = {}
     b = KWS.WsBooks(clock=lambda: NOW)
-    ws.on_empty = lambda: seen.update(a=b.current("K-A"),
-                                      bb=b.current("K-B"))
+    ws.on_empty = lambda: seen.update(
+        a=b.current("K-A"), bb=b.current("K-B"),
+        sids={b.books["K-A"]["sid"], b.books["K-B"]["sid"]})
 
     async def connect():
         return ws
@@ -260,18 +289,19 @@ def test_a_gap_still_unsubscribes_the_broken_sid_and_resubscribes_once():
             await sub.session()
     asyncio.run(go())
     cmds = [m["cmd"] for m in ws.sent]
-    assert cmds == ["subscribe", "unsubscribe", "subscribe"], ws.sent
-    assert ws.sent[1]["params"] == {"sids": [3]}
-    assert ws.sent[2]["params"]["market_tickers"] == ["K-A", "K-B"]
+    assert cmds == ["subscribe", "update_subscription"], ws.sent
+    assert ws.sent[1]["params"] == get_snapshot(3, ["K-A", "K-B"])
     assert sub.resubscribes == 1 and b.stats["gaps"] == 1
-    assert seen["a"]["ok"] and seen["bb"]["ok"]
+    assert seen["a"]["ok"] and seen["bb"]["ok"] and seen["sids"] == {3}
 
 
-def test_a_pending_market_of_a_gapped_subscription_is_resubscribed_too():
+def test_a_pending_market_of_a_gapped_subscription_is_asked_for_too():
     """K-C was subscribed in the same command as K-A; the sid gapped before
-    K-C's snapshot arrived. Unsubscribing the sid drops K-C's subscription
-    too, so K-C must be resubscribed (it used to wait for a snapshot that
-    could never come, until the next reconnect)."""
+    K-C's snapshot arrived (the lost message may have been it). K-C must be
+    asked for with K-A (it used to wait for a snapshot that could never
+    come, until the next reconnect). (RC6.2; was test_a_pending_market_of_a_
+    gapped_subscription_is_resubscribed_too: the request is the documented
+    get_snapshot on the same sid, not unsubscribe + subscribe.)"""
     ws = FakeWS([subscribed(1, 3), snap(3, 1, "K-A"),
                  delta(3, 3, "K-A")])                # seq 2 lost
     b = KWS.WsBooks(clock=lambda: NOW)
@@ -285,9 +315,9 @@ def test_a_pending_market_of_a_gapped_subscription_is_resubscribed_too():
         with pytest.raises(ConnectionError):
             await sub.session()
     asyncio.run(go())
-    assert [m["cmd"] for m in ws.sent] == ["subscribe", "unsubscribe",
-                                          "subscribe"], ws.sent
-    assert ws.sent[2]["params"]["market_tickers"] == ["K-A", "K-C"]
+    assert [m["cmd"] for m in ws.sent] == ["subscribe",
+                                          "update_subscription"], ws.sent
+    assert ws.sent[1]["params"] == get_snapshot(3, ["K-A", "K-C"])
 
 
 def test_the_readback_names_what_caused_the_resubscribes():
@@ -402,87 +432,142 @@ def _subscribe_counts(ws):
     return n
 
 
-# A, B, C subscribed together (cmd 1 -> sid 3); A's delta skips seq 2; the
-# resubscribe is cmd 3 (cmd 2 is the unsubscribe) and the venue acks it as
-# sid 4. B's and C's snapshots on sid 3 were already in flight.
+# A, B, C subscribed together (cmd 1 -> sid 3); A's delta skips seq 2. RC6
+# repaired by unsubscribe (cmd 2) + a resubscribe (cmd 3) the venue acked as
+# sid 4. RC6.2, the documented protocol: the repair is cmd 2, get_snapshot
+# {sid 3, [A, B, C]}; the venue answers `ok` (the sid's next seq) and the
+# fresh snapshots follow on sid 3, in its sequence. B's and C's first
+# snapshots (from the subscribe) were already in flight; arriving in
+# sequence after the gap's baseline, they are real snapshots. The ordering
+# names are kept: "the resubscribe ack" is now get_snapshot's `ok`.
 _HEAD = [subscribed(1, 3), snap(3, 1, "K-A"), delta(3, 3, "K-A")]
 _ORDERINGS = {
     "in_flight_before_the_resubscribe_ack": _HEAD + [
         snap(3, 4, "K-B"), snap(3, 5, "K-C"),
-        subscribed(3, 4), snap(4, 1, "K-A"), snap(4, 2, "K-B"),
-        snap(4, 3, "K-C")],
+        ok(2, 3, 6), snap(3, 7, "K-A"), snap(3, 8, "K-B"),
+        snap(3, 9, "K-C")],
     "in_flight_after_the_resubscribe_ack": _HEAD + [
-        subscribed(3, 4), snap(4, 1, "K-A"), snap(4, 2, "K-B"),
-        snap(3, 4, "K-C"),                              # late, dead sid
-        snap(4, 3, "K-C")],
+        ok(2, 3, 4), snap(3, 5, "K-A"), snap(3, 6, "K-B"),
+        snap(3, 7, "K-C"),                       # late: the subscribe's
+        snap(3, 8, "K-C")],
     "one_before_one_after": _HEAD + [
         snap(3, 4, "K-B"),
-        subscribed(3, 4), snap(4, 1, "K-A"), snap(4, 2, "K-B"),
-        snap(3, 5, "K-C"),                              # late, dead sid
-        delta(4, 3, "K-A"), snap(4, 4, "K-C"), delta(4, 5, "K-B")],
+        ok(2, 3, 5), snap(3, 6, "K-A"), snap(3, 7, "K-B"),
+        snap(3, 8, "K-C"),                       # late: the subscribe's
+        delta(3, 9, "K-A"), snap(3, 10, "K-C"), delta(3, 11, "K-B")],
 }
 
 
+def _snapshot_requests(ws):
+    """market -> how many get_snapshot commands named it"""
+    n = {}
+    for m in ws.sent:
+        if m["cmd"] == "update_subscription" and \
+                m["params"]["action"] == "get_snapshot":
+            for t in m["params"]["market_tickers"]:
+                n[t] = n.get(t, 0) + 1
+    return n
+
+
 @pytest.mark.parametrize("ordering", sorted(_ORDERINGS))
-def test_one_gap_resubscribes_each_market_exactly_once(ordering):
+def test_one_gap_asks_each_market_snapshot_exactly_once(ordering):
+    """(RC6.2; was test_one_gap_resubscribes_each_market_exactly_once) one
+    gap: ONE get_snapshot naming each market of the sid once (it used to be
+    one resubscribe per market after unsubscribing the sid); nothing is
+    ever unsubscribed; every book CURRENT again on the one live sid."""
     ws, sub, b, seen = _drive(_ORDERINGS[ordering], ["K-A", "K-B", "K-C"])
     assert ws.violations == [], ws.violations
     assert [m["cmd"] for m in ws.sent] == [
-        "subscribe", "unsubscribe", "subscribe"], ws.sent
-    assert ws.sent[1]["params"] == {"sids": [3]}
-    # the initial subscribe and ONE resubscribe per market
-    assert _subscribe_counts(ws) == {"K-A": 2, "K-B": 2, "K-C": 2}
+        "subscribe", "update_subscription"], ws.sent
+    assert ws.sent[1]["params"] == get_snapshot(3, ["K-A", "K-B", "K-C"])
+    # the initial subscribe once, and ONE snapshot request per market
+    assert _subscribe_counts(ws) == {"K-A": 1, "K-B": 1, "K-C": 1}
+    assert _snapshot_requests(ws) == {"K-A": 1, "K-B": 1, "K-C": 1}
     assert sub.resubscribes == 1 and b.stats["gaps"] == 1
-    # every book CURRENT again, on the one live resubscription
+    # every book CURRENT again, on the one live subscription
     for t in ("K-A", "K-B", "K-C"):
-        assert seen[t]["ok"] and seen[t]["sid"] == 4, (t, seen[t])
-    assert ws.dropped == {3}
+        assert seen[t]["ok"] and seen[t]["sid"] == 3, (t, seen[t])
+    assert ws.dropped == set()
 
 
-def test_a_late_dead_sid_snapshot_never_drops_the_live_resubscription():
-    """Reviewer reproduction (2): after the resubscribe's ack (sid 4) and
-    A's and B's fresh snapshots on it, C's snapshot from the dead sid 3
-    arrives. Sid 4 must stay subscribed (no unsubscribe names it), A and B
-    stay CURRENT on it -- the venue keeps feeding it, so their deltas
-    apply -- and C waits for its own sid-4 snapshot, not a third sid."""
-    script = _HEAD + [subscribed(3, 4), snap(4, 1, "K-A"),
-                      snap(4, 2, "K-B"), snap(3, 4, "K-C"),
-                      delta(4, 3, "K-A", price="0.45", d="7"),
-                      delta(4, 4, "K-B", price="0.46", d="9")]
+def test_a_late_snapshot_never_drops_the_live_subscription():
+    """Reviewer reproduction (2), RC6.2 (was test_a_late_dead_sid_snapshot_
+    never_drops_the_live_resubscription; the repair is now get_snapshot on
+    the same sid, so there is no second sid for the late snapshot to come
+    from): after get_snapshot's `ok` and A's and B's fresh snapshots, C's
+    LATE first snapshot (the subscribe's, in flight) arrives. No command
+    names the live sid for removal (nothing is ever unsubscribed); A and B
+    stay CURRENT -- the venue keeps feeding the sid, so their deltas apply.
+    C's late snapshot is in sequence after the gap's baseline: a real book
+    of the subscription, CURRENT. The same late snapshot OUT of sequence (a
+    replay of a seq at or below the baseline) is never applied: C stays
+    without a book, and that second gap while the get_snapshot is
+    outstanding ends the session (no further command)."""
+    tail = [delta(3, 8, "K-A", price="0.45", d="7"),
+            delta(3, 9, "K-B", price="0.46", d="9")]
+    script = _HEAD + [ok(2, 3, 4), snap(3, 5, "K-A"),
+                      snap(3, 6, "K-B"), snap(3, 7, "K-C")] + tail
     ws, sub, b, seen = _drive(script, ["K-A", "K-B", "K-C"])
     assert ws.violations == [], ws.violations
-    unsubs = [m["params"]["sids"] for m in ws.sent
-              if m["cmd"] == "unsubscribe"]
-    assert unsubs == [[3]], ws.sent
-    assert _subscribe_counts(ws) == {"K-A": 2, "K-B": 2, "K-C": 2}
+    assert not [m for m in ws.sent if m["cmd"] == "unsubscribe"], ws.sent
+    assert _subscribe_counts(ws) == {"K-A": 1, "K-B": 1, "K-C": 1}
+    assert _snapshot_requests(ws) == {"K-A": 1, "K-B": 1, "K-C": 1}
     assert seen["K-A"]["ok"] and seen["K-B"]["ok"]
-    assert seen["K-A"]["sid"] == seen["K-B"]["sid"] == 4
+    assert seen["K-A"]["sid"] == seen["K-B"]["sid"] == 3
     assert b.stats["deltas"] == 2
     assert ["0.45", "7"] in seen["K-A"]["book"]["orderbook_fp"]["yes_dollars"]
     assert ["0.46", "9"] in seen["K-B"]["book"]["orderbook_fp"]["yes_dollars"]
-    assert not seen["K-C"]["ok"] and seen["K-C"]["book"] is None
-    # C is awaited on the live sid 4 (bound by its ack), not resubscribed
-    assert seen["K-C"]["state"] in (KWS.GAP, KWS.PENDING)
+    assert seen["K-C"]["ok"] and seen["K-C"]["sid"] == 3
+    # the late snapshot replayed below the baseline instead: never applied
+    late = _HEAD + [ok(2, 3, 4), snap(3, 5, "K-A"), snap(3, 6, "K-B"),
+                    snap(3, 2, "K-C")]
+    ended = {}
+    b2 = KWS.WsBooks(clock=lambda: NOW)
+
+    def at_end(bk, sn):
+        pass
+    ws2 = VenueWS(late, b2, [])
+
+    async def connect():
+        return ws2
+    sub2 = KWS.Subscriber(connect, b2, wanted=lambda: ["K-A", "K-B", "K-C"],
+                          clock=lambda: NOW)
+    ws2.sub_ref.append(sub2)
+
+    async def go():
+        try:
+            await sub2.session()
+        except Exception as exc:                                # noqa: BLE001
+            ended["exc"] = exc
+    asyncio.run(go())
+    assert isinstance(ended["exc"], KWS.GapDuringRecovery)
+    assert ws2.violations == []
+    assert [m["cmd"] for m in ws2.sent] == ["subscribe",
+                                           "update_subscription"]
+    assert b2.stats["snapshots"] == 3            # A (twice) and B, never C
 
 
-def test_a_gap_inside_a_100_market_snapshot_burst_sends_one_resubscribe():
+def test_a_gap_inside_a_100_market_snapshot_burst_sends_one_get_snapshot():
     """One subscribe of 100 markets (one chunk) acked as sid 3; the second
     message is lost, so the first delta gaps the sid while 99 snapshots are
-    still in flight on it. Exactly one unsubscribe and ONE resubscribe of
-    the 100 markets follow -- not 99 single-market subscribes."""
+    still in flight on it. Exactly ONE get_snapshot of the 100 markets
+    follows -- not 99 single-market requests, never an unsubscribe. (RC6.2;
+    was ..._sends_one_resubscribe: the documented repair is on the same
+    sid, where the 99 in-flight snapshots arrive in sequence after the gap's
+    baseline and are real books -- no dead-sid snapshot exists any more.)"""
     ts = ["K-%03d" % i for i in range(100)]
     script = [subscribed(1, 3), snap(3, 1, ts[0]), delta(3, 3, ts[0])]
     script += [snap(3, 4 + i, t) for i, t in enumerate(ts[1:])]
-    script += [subscribed(3, 4)]
-    script += [snap(4, 1 + i, t) for i, t in enumerate(ts)]
+    script += [ok(2, 3, 103)]
+    script += [snap(3, 104 + i, t) for i, t in enumerate(ts)]
     ws, sub, b, seen = _drive(script, ts)
     assert ws.violations == [], ws.violations
     assert [m["cmd"] for m in ws.sent] == [
-        "subscribe", "unsubscribe", "subscribe"]
-    assert ws.sent[2]["params"]["market_tickers"] == ts
+        "subscribe", "update_subscription"]
+    assert ws.sent[1]["params"] == get_snapshot(3, ts)
     assert sub.resubscribes == 1
-    assert b.stats["ignored_dead_sid"] == 99
-    assert all(seen[t]["ok"] and seen[t]["sid"] == 4 for t in ts)
+    assert b.stats["ignored_dead_sid"] == 0 and b.stats["gaps"] == 1
+    assert all(seen[t]["ok"] and seen[t]["sid"] == 3 for t in ts)
 
 
 def test_a_dead_sid_snapshot_resubscribes_an_unbound_market_once():
@@ -514,10 +599,15 @@ def test_a_market_awaited_on_a_live_sid_is_not_resubscribed_by_a_dead_one():
     assert b.current("K-C")["ok"]
 
 
-def test_only_dead_sids_are_ever_unsubscribed_and_each_once():
-    """An error on a sid kills it: it is unsubscribed once even when none
-    of its markets needs a resubscribe, and a repeated error (the venue's
-    reply to that unsubscribe, say) sends nothing more."""
+def test_no_sid_is_ever_unsubscribed_and_an_error_elsewhere_sends_nothing():
+    """(RC6.2; was test_only_dead_sids_are_ever_unsubscribed_and_each_once,
+    which pinned an unsubscribe of the errored sid 8.) The docs: only
+    errors 10 and 25 end a subscription; code 7 is "Unknown subscription
+    ID - The command references a subscription ID that is not active in the
+    session". Sid 8 is not ours (first seen after our ack): its errors are
+    counted and answered by NO command -- an unsubscribe of a number the
+    venue may have reused for a live subscription could end it (the RC6
+    acceptance oracle's blocking finding). Our sid 3 is untouched."""
     script = [subscribed(1, 3), snap(3, 1, "K-A"),
               {"type": "error", "id": 0, "sid": 8,
                "msg": {"code": 7, "msg": "Unknown subscription ID"}},
@@ -526,37 +616,67 @@ def test_only_dead_sids_are_ever_unsubscribed_and_each_once():
               delta(3, 2, "K-A")]
     ws, sub, b, seen = _drive(script, ["K-A"])
     assert ws.violations == [], ws.violations
-    assert [m["cmd"] for m in ws.sent] == ["subscribe", "unsubscribe"]
-    assert ws.sent[1]["params"] == {"sids": [8]}
+    assert [m["cmd"] for m in ws.sent] == ["subscribe"]
     assert sub.resubscribes == 0
     assert seen["K-A"]["ok"] and seen["K-A"]["sid"] == 3
+    assert b.stats["ignored_unknown_sid"] == 2 and b.stats["gaps"] == 0
 
 
 def test_a_sid_number_the_venue_reuses_is_a_new_subscription():
-    """The venue's docs promise no unique sid. If the resubscribe is
-    acknowledged under the number of the sid that just died, that ack
-    starts a NEW subscription (one in-order connection: the old one's
-    messages all came before it). Its snapshot makes the book CURRENT --
-    left dead, the market waited GAP until the next reconnect -- and if
-    the reborn sid gaps it is unsubscribed again."""
-    script = [subscribed(1, 3), snap(3, 1, "K-A"), delta(3, 3, "K-A"),
-              subscribed(3, 3),                      # reused number
-              snap(3, 1, "K-A", yes=(("0.48", "12"),)), delta(3, 2, "K-A")]
-    ws, sub, b, seen = _drive(script, ["K-A"])
-    assert ws.violations == [], ws.violations
-    assert [m["cmd"] for m in ws.sent] == [
-        "subscribe", "unsubscribe", "subscribe"], ws.sent
-    assert seen["K-A"]["ok"] and seen["K-A"]["sid"] == 3
-    assert b.stats["deltas"] == 1
-    # the reborn sid gaps: unsubscribed again, A resubscribed once more
-    script2 = script + [delta(3, 4, "K-A")]
-    ws2, sub2, b2, seen2 = _drive(script2, ["K-A"])
-    assert ws2.violations == [], ws2.violations
-    assert [m["cmd"] for m in ws2.sent] == [
-        "subscribe", "unsubscribe", "subscribe", "unsubscribe",
-        "subscribe"], ws2.sent
-    assert ws2.sent[3]["params"] == {"sids": [3]}
-    assert sub2.resubscribes == 2 and not seen2["K-A"]["ok"]
+    """The venue's docs promise no unique sid. RC6.2: only errors 10 / 25
+    end a subscription, and the session then ends (the run loop reconnects
+    after its backoff): the next connection's subscribe, acknowledged under
+    the SAME number, is a NEW subscription -- its own snapshot makes the
+    book CURRENT, nothing of the old one is reused -- and if that reborn sid
+    gaps it is repaired on itself by get_snapshot (it used to be
+    unsubscribed again and resubscribed, which the docs make a merge)."""
+    s1 = [subscribed(1, 3), snap(3, 1, "K-A"), delta(3, 2, "K-A"),
+          {"type": "error", "id": 0, "sid": 3, "seq": 3,
+           "msg": {"code": 10, "msg": "Channel error"}},
+          delta(3, 4, "K-A")]                         # never read
+    s2 = [subscribed(2, 3),                           # the number reused
+          snap(3, 1, "K-A", yes=(("0.48", "12"),)), delta(3, 2, "K-A")]
+
+    def run(scripts):
+        b = KWS.WsBooks(clock=lambda: NOW)
+        socks = [VenueWS(sc, b, []) for sc in scripts]
+        seen, ends = {}, []
+        socks[-1].on_empty = lambda: seen.update(
+            a=dict(b.current("K-A"), sid=b.books["K-A"]["sid"]))
+        pool = list(socks)
+
+        async def connect():
+            return pool.pop(0)
+        sub = KWS.Subscriber(connect, b, wanted=lambda: ["K-A"],
+                             clock=lambda: NOW)
+        for s in socks:
+            s.sub_ref.append(sub)
+
+        async def go():
+            for _ in socks:
+                try:
+                    await sub.session()
+                except Exception as exc:                        # noqa: BLE001
+                    ends.append(type(exc).__name__)
+        asyncio.run(go())
+        return socks, sub, b, seen, ends
+    socks, sub, b, seen, ends = run([s1, s2])
+    assert ends == ["SubscriptionEnded", "ConnectionError"]
+    for s in socks:
+        assert s.violations == [], s.violations
+        assert [m["cmd"] for m in s.sent] == ["subscribe"], s.sent
+    assert socks[0].script == [delta(3, 4, "K-A")]  # nothing read after it
+    assert seen["a"]["ok"] and seen["a"]["sid"] == 3
+    assert seen["a"]["book"]["orderbook_fp"]["yes_dollars"] == [
+        ["0.44", "5"], ["0.48", "12"]]
+    assert b.stats["deltas"] == 2 and sub.resubscribes == 0
+    # the reborn sid gaps: ONE get_snapshot on it, never an unsubscribe
+    socks2, sub2, b2, seen2, ends2 = run([s1, s2 + [delta(3, 4, "K-A")]])
+    assert [m["cmd"] for m in socks2[1].sent] == ["subscribe",
+                                                 "update_subscription"]
+    assert socks2[1].sent[1]["params"] == get_snapshot(3, ["K-A"])
+    assert sub2.resubscribes == 1 and not seen2["a"]["ok"]
+    assert all(s.violations == [] for s in socks2)
 
 
 def test_the_books_alone_treat_a_reannounced_dead_sid_as_new():
