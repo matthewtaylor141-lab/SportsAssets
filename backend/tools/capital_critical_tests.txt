@@ -1351,3 +1351,5 @@ tests/test_rc6_feed_close_provenance.py
 tests/test_rc6_held_watch_identity.py
 # (RC6 coverage) the market plane reads the venue's event-slug grammar: the league is the event slug's first segment; non-sports codes are excluded by name; an ambiguous code is a named gap, never a sport
 tests/test_rc6_coverage_slug_grammar.py
+# (RC6 coverage) full-game and period line contracts read against their cited terms and NEVER proven (the priced settlement-difference policy still refuses every non-money-line); the target-universe waterfall sums exactly; COVERAGE_WATERFALL=off is the RC5 pass
+tests/test_rc6_coverage_waterfall.py

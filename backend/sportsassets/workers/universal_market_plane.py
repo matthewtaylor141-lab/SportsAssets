@@ -132,6 +132,12 @@ POPULATE_EVERY_S = 10.0
 FULL_POPULATE_EVERY_S = 1800.0
 ASSIGN_EVERY_S = 30.0
 COVERAGE_EVERY_S = 120.0
+#: (RC6, lane D2) the coverage pass reads each never-valued full-game or
+#: period line contract against its family's captured terms and reports the
+#: target-universe waterfall (market_plane.waterfall). Evidence only;
+#: neither can make a contract PRICEABLE. COVERAGE_WATERFALL=off restores
+#: the RC5 pass.
+COVERAGE_WATERFALL_ENV = "COVERAGE_WATERFALL"
 CERTIFY_EVERY_S = 300.0
 SNAPSHOT_EVERY_S = 60.0
 #: a by-symbol refdata read that failed (not a proven absence) is not
@@ -331,6 +337,12 @@ def latency_report(mgr, *, now: float) -> dict:
     rep["distribution_scope"] = ("IN_PROCESS (book readable on replacement); "
                                  "CROSS_PROCESS_NOT_CUT_OVER")
     return rep
+
+
+def coverage_waterfall_on() -> bool:
+    """COVERAGE_WATERFALL (default on): the RC6 coverage readings."""
+    return os.environ.get(COVERAGE_WATERFALL_ENV, "on").strip().lower() \
+        not in ("off", "0", "false", "no")
 
 
 #: the venue league code of an event slug, in SQL: populate.league_of's
@@ -695,11 +707,13 @@ async def run() -> None:
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
+                    rc6 = coverage_waterfall_on()
                     state["coverage"] = await POP.coverage_pass(
                         c, fresh_symbols=fresh, now=now,
                         refreshed=(refresher.current(
                             mgr, now=now, bound=FRESH_SLA_S)
-                            if refresher is not None else None))
+                            if refresher is not None else None),
+                        derivative_terms=rc6, waterfall=rc6)
                     last["coverage"] = now
                     mem.mark("coverage")
                 if mgr is not None and \

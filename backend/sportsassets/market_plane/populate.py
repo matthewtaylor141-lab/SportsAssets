@@ -712,6 +712,13 @@ COVERAGE_ROWS_SQL = """
            settlement_evidence->>'rules_sha256' AS settlement_rules_sha
       FROM market_plane_registry WHERE contract_id = ANY($1::text[])
 """
+#: (RC6, lane D2) the same page with the venue market type and the event
+#: start, read only when the pass is asked for the line-family terms or the
+#: waterfall (coverage_pass `derivative_terms` / `waterfall`)
+COVERAGE_ROWS_SQL_RC6 = COVERAGE_ROWS_SQL.replace(
+    "family,\n           period,",
+    "family,\n           period, market_type, event_start,", 1)
+assert COVERAGE_ROWS_SQL_RC6 != COVERAGE_ROWS_SQL
 COVERAGE_WRITE_SQL = (
     "UPDATE market_plane_registry SET coverage_state = $2, "
     "       coverage_why = $3, coverage_at = to_timestamp($4) "
@@ -726,7 +733,9 @@ SETTLEMENT_WRITE_SQL = (
 
 async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                         rest_sla_s: float = 300.0, limit: int | None = None,
-                        refreshed: dict | None = None) -> dict:
+                        refreshed: dict | None = None,
+                        derivative_terms: bool = False,
+                        waterfall: bool = False) -> dict:
     """Classify every ACTIVE registry contract and write the changed terminal
     states AND settlement states (market_plane.settlement, evidence only).
     Returns the matrix summary (counts by state, sport, family, why), the
@@ -759,11 +768,27 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     `rest_recovery_by_origin` per tier: PAPER_BOOK_OBSERVATION vs
     PLANE_ACTIVE_REFRESH, so the source of every REST_RECOVERY is visible.
     Absent (None), nothing is counted from it and the output is the RC5
-    output exactly."""
+    output exactly.
+
+    THE LINE TERMS AND THE WATERFALL (RC6, lane D2). `derivative_terms`
+    reads each page with its venue market type and passes it to
+    market_plane.settlement.state_for (a never-valued full-game or period
+    line contract is read against its family's captured terms, its text
+    loaded once per (fingerprint, family, line, period) as the money line's
+    is; a captured family withheld for want of fixture scope says so).
+    `waterfall` adds
+    `waterfall` (market_plane.waterfall): every active contract's target
+    tier and the stage it stopped at, counters only. Both False: the RC5 /
+    RC6-refresh output exactly."""
     from .models import TERMINAL_STATES
     from .coverage import VERSION as MATRIX_VERSION
     from . import settlement as S
+    from . import waterfall as WF
     at = float(now if now is not None else time.time())
+    rows_sql = (COVERAGE_ROWS_SQL_RC6 if (derivative_terms or waterfall)
+                else COVERAGE_ROWS_SQL)
+    wf = WF.Waterfall(now=at) if waterfall else None
+    loaded_line = set()
     keys = [r["contract_id"] for r in await conn.fetch(
         COVERAGE_KEYS_SQL + (" LIMIT %d" % int(limit) if limit else ""))]
     rules_ok = True
@@ -800,7 +825,7 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
         for p0 in range(0, len(keys), COVERAGE_PAGE):
             ids = keys[p0:p0 + COVERAGE_PAGE]
             got = {r["contract_id"]: dict(r) for r in await conn.fetch(
-                COVERAGE_ROWS_SQL, ids)}
+                rows_sql, ids)}
             rows = [got[k] for k in ids if k in got]
             del got
             slugs = [r["contract_id"] for r in rows]
@@ -833,6 +858,21 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                 attested = bool(v.get("settlement_verdict")) or any(
                     str(x).startswith("SETTLEMENT")
                     for x in (v.get("refusals") or []))
+                lf = S.line_family(r) if derivative_terms else None
+                if lf is not None:
+                    # a full-game / period line contract's text, once per
+                    # (text, family, line, period) -- as the money line's
+                    if rr is None or attested or \
+                            not rr.get("rules_published") or \
+                            rr.get("venue") != VENUE:
+                        continue
+                    lk = S.line_key(rr.get("rules_sha256"), lf, s)
+                    if lk in S._LINE_CACHE and lk not in loaded_line:
+                        rr["rules_text"] = ""
+                    else:
+                        need.append(s)
+                        loaded_line.add(lk)
+                    continue
                 fam = S.h2h_family(r)
                 if rr is None or attested or not rr.get("rules_published") \
                         or rr.get("venue") != VENUE or fam is None:
@@ -867,11 +907,15 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                 src_counts[src or "NONE"] += 1
                 st = S.state_for(r, valuation=vals.get(s),
                                  rules=rules.get(s), priced=priced.get(s),
-                                 rules_looked_up=rules_ok)
+                                 rules_looked_up=rules_ok,
+                                 derivative_terms=derivative_terms)
                 t = classify(r, valuation=vals.get(s), candidate=cands.get(s),
                              fresh_book=fresh, book_source=src,
                              external_codes=ext, settlement=st)
                 t["venue"] = r.get("venue")
+                if wf is not None:
+                    wf.add(r, t, valued=bool(
+                        (vals.get(s) or {}).get("has_probability")))
                 n_rows += 1
                 by_state[t["state"]] += 1
                 for tier in (("PRIORITY", "ALL") if (
@@ -954,6 +998,8 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
          "version": MATRIX_VERSION}
     if origins is not None:
         m["rest_recovery_by_origin"] = origins
+    if wf is not None:
+        m["waterfall"] = wf.result()
     top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),
