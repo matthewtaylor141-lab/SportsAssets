@@ -160,16 +160,52 @@ function mgCurve(m) {
   const pts = [{t: t0, v: m.opening_equity_usd}].concat(cv.points.filter((x) => x.t >= t0).map((x) => ({t: x.t, v: x.v + off})));
   return {points: pts, why: cv.why || (cv.status === 'LOADING' ? 'reading equity/curve' : 'fewer than two recorded points since the management start')};
 }
+/* The ledger's own available cash (bettor_paper_ledger.balances), served as
+   pre_management_history.ledger_available_usd, else equity/live paper
+   available_usd. The epoch's cash and equity are RE-BASED management figures
+   and differ from the ledger by the served reconciliation bridge. */
+function ledgerAvail(m) {
+  const h = (m && m.pre_management_history) || {}, p = HQ.equity().paper;
+  return fin(h.ledger_available_usd) ? h.ledger_available_usd : p && fin(p.available_usd) ? p.available_usd : null;
+}
+const MG_BRIDGE_LABEL = {
+  LEDGER_FUNDING_MINUS_OPENING_EQUITY: 'ledger funding − opening equity',
+  PRE_EPOCH_REALIZED_RESULT_OF_POSITIONS_FLAT_AT_THE_EPOCH: 'pre-epoch realized (flat at the epoch)',
+  PRE_EPOCH_MARK_TO_MARKET_RESULT_OF_CARRIED_POSITIONS: 'pre-epoch result of carried positions',
+  UNVERIFIED_CARRIED_POSITION_WHOLE_LEDGER_RESULT: 'unverified carried position',
+  POST_EPOCH_CORRECTION_OF_A_PRE_EPOCH_SETTLEMENT: 'correction of a pre-epoch settlement',
+  POST_EPOCH_CASH_ON_A_POSITION_FLAT_AT_THE_EPOCH: 'post-epoch cash, position flat at the epoch',
+  LEDGER_CASH_NOT_ATTRIBUTED_TO_ANY_POSITION: 'unattributed ledger cash'};
+const MG_BRIDGE_MAX = 8;
+/* management equity + each served difference = ledger equity, every figure as
+   the API serves it (reconciliation.differences_to_ledger); nothing is summed
+   here: past MG_BRIDGE_MAX lines the rest is named by count beside the served
+   differences_total_usd */
+function mgBridgeHTML(m) {
+  const rc = m && m.reconciliation, items = rc && Array.isArray(rc.differences_to_ledger) ? rc.differences_to_ledger : null;
+  if (!items) return '<div class="mg-bridge" style="grid-column:1/-1"><span class="why">bridge to the ledger not served</span></div>';
+  const line = (k, v, cls) => '<li' + (cls ? ' class="' + cls + '"' : '') + '><span>' + esc(k) + '</span><b class="num">' + (v != null ? esc(v) : '<span class="dna">N/A</span>') + '</b></li>';
+  const shown = items.slice(0, MG_BRIDGE_MAX), rest = items.length - shown.length;
+  return '<div class="mg-bridge" style="grid-column:1/-1"><div class="k">Bridge to the ledger</div><ul>' +
+    line('management equity (re-based)', U.usd(fin(rc.management_equity_usd) ? rc.management_equity_usd : m.equity_usd, 2)) +
+    shown.map((i) => line('+ ' + (MG_BRIDGE_LABEL[i.item] || U.words(i.item || 'ITEM').toLowerCase()) + (i.market ? ' · ' + i.market : ''), U.signedUsd(i.amount_usd, 2))).join('') +
+    (rest > 0 ? line('+ ' + rest + ' more item' + (rest === 1 ? '' : 's') + ' (all differences ' + (U.signedUsd(rc.differences_total_usd, 2) || '—') + ')', null, 'more') : '') +
+    line('= ledger equity', U.usd(rc.ledger_equity_usd, 2), 'tot') +
+    (fin(rc.ledger_gap_usd) && Math.abs(rc.ledger_gap_usd) > 0.01 ? line('bridge gap', U.signedUsd(rc.ledger_gap_usd, 2), 'gap') : '') +
+    '</ul></div>';
+}
 function mgKpis(m, kv) {
-  const ex = m.exposure || {};
+  const ex = m.exposure || {}, la = ledgerAvail(m);
   return kv('Opening equity', U.usd(m.opening_equity_usd, 0), 'Oct 5, 2026 00:00 ET') +
-    kv('Current equity', U.usd(m.equity_usd, 0), m.status === 'OK' ? 'reconciles to the ledger' : 'DOES NOT RECONCILE', m.status === 'OK' ? '' : 'warn') +
+    kv('Current equity (re-based)', U.usd(m.equity_usd, 0), m.status === 'OK' ? 'management epoch · bridge to the ledger below' : 'DOES NOT RECONCILE', m.status === 'OK' ? '' : 'warn') +
+    mgBridgeHTML(m) +
     kv('Realized P&L', U.signedUsd(m.realized_pnl_usd, 0), 'since management start', tone(m.realized_pnl_usd)) +
     kv('Unrealized P&L', U.signedUsd(m.unrealized_pnl_usd, 0), 'since management start', tone(m.unrealized_pnl_usd)) +
     kv('Total P&L', U.signedUsd(m.total_pnl_usd, 0), 'since management start', tone(m.total_pnl_usd)) +
     kv('Return', pct(m.return_pct), 'on $500,000', tone(m.return_pct)) +
     kv('Drawdown', fin(m.drawdown_usd) ? U.usd(m.drawdown_usd, 0) : null, 'from HWM ' + (U.usd(m.high_water_mark_usd, 0) || '—') + (fin(m.drawdown_pct) ? ' · ' + m.drawdown_pct.toFixed(2) + '%' : ''), m.drawdown_usd > 0 ? 'neg' : '') +
-    kv('Cash', U.usd(m.cash_usd, 0), 'available') +
+    kv('Cash (re-based)', U.usd(m.cash_usd, 0), 'management epoch, not the ledger') +
+    kv('Ledger cash available', U.usd(la, 2), 'paper ledger balance now') +
     kv('Reserved', U.usd(m.reserved_usd, 0), 'resting orders') +
     kv('Marked value', U.usd(m.marked_open_position_value_usd, 0), (ex.open_positions != null ? ex.open_positions + ' open' : '') + (ex.unmarked ? ' · ' + ex.unmarked + ' unmarked at basis' : '')) +
     kv('Exposure', U.usd(ex.basis_usd, 0), 'management basis of open positions');
@@ -203,7 +239,7 @@ function mgCapitalHTML(m, compact) {
     '<span class="' + (m.drawdown_usd > 0 ? 'neg' : '') + '">' + esc('DD ' + (U.usd(m.drawdown_usd, 0) || '—')) + '</span><span class="dim">from HWM</span></div>' +
     (cv.points.length > 1 ? sparkSVG(cv.points) : '<div class="why" style="margin-top:10px">' + esc(cv.why) + '</div>') +
     '<div class="kv">' +
-      kv('Cash', U.usd(m.cash_usd, 0), 'reserved ' + (U.usd(m.reserved_usd, 0) || '—')) +
+      kv('Cash (re-based)', U.usd(m.cash_usd, 0), 'ledger available ' + (U.usd(ledgerAvail(m), 2) || '—')) +
       kv('Marked value', U.usd(m.marked_open_position_value_usd, 0), ((m.exposure || {}).open_positions != null ? m.exposure.open_positions + ' open' : null)) +
       kv('Realized P&L', U.signedUsd(m.realized_pnl_usd, 0), 'since start', tone(m.realized_pnl_usd)) +
       kv('Unrealized', U.signedUsd(m.unrealized_pnl_usd, 0), 'since start', tone(m.unrealized_pnl_usd)) +
@@ -680,7 +716,7 @@ function dailyReport() {
   const enter = fu.stages && fu.stages.find((s) => s.k === 'entered_events'), fills = fu.stages && fu.stages.find((s) => s.k === 'filled_events'), prov = fu.stages && fu.stages[0];
   const dc = p && p.day_change || {}, m = mgmt();
   if (m) {
-    const hl = 'Management equity stands at ' + U.usd(m.equity_usd, 0) + ', ' + U.signedUsd(m.total_pnl_usd, 0) + ' (' + pct(m.return_pct) + ') since the management start on Oct 5, 2026 (opening equity $500,000), with ' + (U.usd(m.cash_usd, 0) || 'an unknown amount') + ' cash and ' + (U.usd(m.marked_open_position_value_usd, 0) || 'an unknown amount') + ' in marked open positions.';
+    const hl = 'Management equity stands at ' + U.usd(m.equity_usd, 0) + ', ' + U.signedUsd(m.total_pnl_usd, 0) + ' (' + pct(m.return_pct) + ') since the management start on Oct 5, 2026 (opening equity $500,000; re-based management figures), with ' + (U.usd(m.cash_usd, 0) || 'an unknown amount') + ' re-based cash (ledger available ' + (U.usd(ledgerAvail(m), 2) || 'not served') + ') and ' + (U.usd(m.marked_open_position_value_usd, 0) || 'an unknown amount') + ' in marked open positions.';
     return '<p class="mg-start">' + esc(m.label || MG_LABEL) + '</p><h2>Headline</h2><p>' + esc(hl) + ' SMALL LIVE is ' + esc((q.small && q.small.status) || 'not readable') + '; nothing on this page can place, cancel or size an order.</p>' +
       '<h2>The book · management epoch</h2><div class="kv">' + mgKpis(m, kv) + '</div>' + mgUnverifiedHTML(m) +
       '<h2>Pre-management history</h2><p>' + esc('Ledger equity ' + (U.usd(p.equity_usd, 0) || '—') + ' since funding; ledger realized ' + (U.signedUsd(p.realized_pnl_usd, 0) || '—') + '. Kept for audit, not in the management figures.') + '</p>' +
