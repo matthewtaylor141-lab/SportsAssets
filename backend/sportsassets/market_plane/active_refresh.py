@@ -166,6 +166,11 @@ R_REFRESH_NO_STREAM = "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED"
 #: RETRY_FAILED_S: the venue said what the market is
 _MARKET_OUTCOMES = frozenset({R_REFRESH_NOT_OPEN, R_REFRESH_STATE_UNKNOWN,
                               R_REFRESH_CROSSED})
+#: the snapshot results that are the venue's word and so share the REST
+#: read's state: a current book, the market not open by its own word, a
+#: crossed book. Every other snapshot result is the snapshot's alone.
+SNAPSHOT_SHARED_OUTCOMES = frozenset({CURRENT, R_REFRESH_NOT_OPEN,
+                                      R_REFRESH_CROSSED})
 
 TIER_HELD, TIER_CANDIDATE = "HELD", "CANDIDATE"
 #: (RC6 D1) a market a PAPER order is still working on (a hedge or an exit
@@ -522,8 +527,20 @@ class ActiveRefresh:
         read stays free to try it. The REST totals are not touched."""
         o = j.get("outcome")
         e = self.entries.setdefault(symbol, {"ok_at": None, "tries": 0})
+        if o not in SNAPSHOT_SHARED_OUTCOMES:
+            # A SNAPSHOT RESULT THAT PROVES NOTHING (a stateless book on an
+            # unproven fallback, no state at all, no venue clock ...) is the
+            # snapshot's alone: it never touches the REST read's retry state
+            # (tried_at / outcome) or an earlier current read (ok_at), so the
+            # REST read -- whose body states the market's own state -- stays
+            # free to read the member at once (final review of 1dff0d5f:
+            # with the snapshot step first in every tick, a shared retry
+            # wait meant the REST read never happened).
+            e.update(snapshot_outcome=o, snapshot_tried_at=at)
+            return
         e.update(tried_at=at, outcome=o, tries=e["tries"] + 1,
-                 status=j.get("status"))
+                 status=j.get("status"), snapshot_outcome=o,
+                 snapshot_tried_at=at)
         if o == CURRENT:
             e.update(ok_at=at, venue_ts=j.get("venue_ts"),
                      levels=j.get("levels"))
@@ -535,7 +552,17 @@ class ActiveRefresh:
         return self.origins.get(str(symbol))
 
     def outcome_of(self, symbol: str) -> str | None:
-        return (self.entries.get(symbol) or {}).get("outcome")
+        e = self.entries.get(symbol) or {}
+        return e.get("outcome") or e.get("snapshot_outcome")
+
+    def snapshot_unprovable(self, symbol: str, *, now: float) -> bool:
+        """A member the snapshot could not prove within RETRY_NOT_OPEN_S:
+        the snapshot planner leaves it to the REST read."""
+        e = self.entries.get(symbol) or {}
+        t = e.get("snapshot_tried_at")
+        return (t is not None and e.get("snapshot_outcome")
+                not in SNAPSHOT_SHARED_OUTCOMES
+                and now - float(t) < RETRY_NOT_OPEN_S)
 
     # -- the evidence ------------------------------------------------------
 

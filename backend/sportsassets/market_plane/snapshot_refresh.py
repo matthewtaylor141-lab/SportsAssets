@@ -121,9 +121,16 @@ STATE_FROM_UPDATE, STATE_FROM_FALLBACK = "UPDATE", "FALLBACK"
 
 
 def enabled(env=None) -> bool:
+    """OFF unless UMP_SNAPSHOT_REFRESH is set on (final review of 1dff0d5f):
+    the call is documented for the read:marketdata credential and spends no
+    REST budget, but it opens a second market-data stream a minute against
+    the firm's pooled 20 (the venue's recorded architecture for this plane
+    is ONE market-data stream) and the venue's abuse-prevention rules name
+    'polling for data available via streaming'; the credential also carries
+    the primary stream. Turning it on is the owner's decision."""
     env = os.environ if env is None else env
-    return str(env.get(ENV_FLAG, "on")).strip().lower() not in (
-        "off", "0", "false", "no")
+    return str(env.get(ENV_FLAG, "off")).strip().lower() in (
+        "on", "1", "true", "yes")
 
 
 class SnapshotRefused(IS.OutboundRefused):
@@ -370,6 +377,9 @@ class SnapshotRefresh:
             return None
         due, _counts = ref.plan(mgr, now=now, bound=bound,
                                 lead_s=SNAPSHOT_LEAD_S)
+        # a member the snapshot could not prove is the REST read's for
+        # RETRY_NOT_OPEN_S (final review of 1dff0d5f)
+        due = [s for s in due if not ref.snapshot_unprovable(s, now=now)]
         syms = due[:MAX_SYMBOLS_PER_CALL]
         if not syms:
             # nothing due: no call, and the minute is not spent

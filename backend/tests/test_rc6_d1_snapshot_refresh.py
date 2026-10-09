@@ -649,10 +649,12 @@ def test_a_stateless_book_on_a_stale_not_open_fallback_stays_counted():
     # still eligible and NOT current in the window -- never EXTERNAL
     assert _window_code(m, ref, s, clock.t)[0] == "N"
     assert ref.current(m, now=clock.t, bound=BOUND) == {}
-    # the 60 s retry of a read that proved nothing, not the 900 s market wait
-    due, counts = ref.plan(m, now=clock.t + 30, bound=BOUND)
-    assert due == [] and counts[AR.R_REFRESH_RETRY_WAIT] == 1
-    assert ref.plan(m, now=clock.t + 61, bound=BOUND)[0] == [s]
+    # a snapshot read that proved nothing never holds the REST read: it is
+    # due at once (final review of 1dff0d5f: a shared retry wait, with the
+    # snapshot step first in every tick, meant the REST read never came) --
+    # and the snapshot planner leaves the member to it
+    assert ref.plan(m, now=clock.t + 1, bound=BOUND)[0] == [s]
+    assert ref.snapshot_unprovable(s, now=clock.t + 1)
     # named: a SOFTWARE outcome, counted
     assert ref.outcome_of(s) == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
     assert snap.totals["by_outcome"][S.R_SNAPSHOT_FALLBACK_NOT_PROVEN] == 1
@@ -827,7 +829,9 @@ def test_the_run_loop_proves_a_quiet_member_with_one_snapshot_call(
         monkeypatch.setattr(POP, "required_sets_read", required)
         monkeypatch.setenv("KALSHI_CATALOGUE", "off")
         monkeypatch.delenv("UMP_ACTIVE_REFRESH", raising=False)
-        monkeypatch.delenv("UMP_SNAPSHOT_REFRESH", raising=False)
+        # the snapshot read is OFF by default (owner decision); this test
+        # pins what it does when the owner turns it on
+        monkeypatch.setenv("UMP_SNAPSHOT_REFRESH", "on")
         try:
             await c.execute("UPDATE market_plane_registry SET active=false")
             await c.execute("DELETE FROM us_premap")
@@ -890,7 +894,12 @@ def test_a_book_without_a_state_on_a_quiet_member_is_not_current():
     by = snap.digest(now=clock.t)["by_state_from"]
     assert by and all(not k.startswith("UPDATE") for k in by), by
     assert not any(k.endswith("|CURRENT") for k in by), by
-    clock.t += 61
+    # the member is the REST read's now: the snapshot planner skips it
+    assert run(S.SnapshotRefresh().step(ref, m, token_fn=lambda: TOKEN,
+                                        bound=BOUND, clock=clock,
+                                        caller=bare)) is None
+    assert ref.plan(m, now=clock.t, bound=BOUND)[0] == ["q-00"]
+    clock.t += AR.RETRY_NOT_OPEN_S + 1
     snap2 = S.SnapshotRefresh()
 
     def stated(tok, ss):
@@ -942,3 +951,33 @@ def test_a_newer_paper_read_stating_not_open_beats_an_older_refresh():
     assert code({s: {"at": clock.t - 60, "market_state": "closed"}}, now) == "R"
     assert code({s: {"at": clock.t + 20, "market_state": "closed"}}, now) == "X"
     assert code({s: {"at": clock.t + 20, "market_state": "open"}}, now) == "R"
+
+
+def test_the_rest_read_comes_in_the_loops_own_order_when_snapshots_prove_nothing():
+    """Final review of 1dff0d5f, reproduced through the loop's real order
+    (snapshot step, then the REST step, every 1 s tick) with a venue whose
+    snapshot books carry no state and a REST book stating OPEN: with the
+    shared retry state the REST read never happened in 15 minutes and the
+    member was fresh 0 % of the time. Now the REST read lands on the first
+    tick and the member is current through it (R)."""
+    S = SR()
+    clock, m, ref, s = _one("INSTRUMENT_STATE_OPEN")
+    snap = S.SnapshotRefresh()
+    rest_reads = []
+
+    def rest_reader(sym, *, at):
+        rest_reads.append(at)
+        return H.rest_book(sym, at=at)
+    ticks = 0
+    while ticks < 120 and not rest_reads:
+        run(snap.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
+                      clock=clock, caller=_snapshot_of(clock)))
+        due, _ = ref.plan(m, now=clock.t, bound=BOUND)
+        for sym in due[:1]:
+            ref.start(clock.t, sym)
+            ref.record(sym, rest_reader(sym, at=clock.t), at=clock.t)
+        clock.t += 1.0
+        ticks += 1
+    assert rest_reads, "the REST read never came"
+    assert rest_reads[0] - T0 <= 400 + 61
+    assert _window_code(m, ref, s, clock.t)[0] == "R"

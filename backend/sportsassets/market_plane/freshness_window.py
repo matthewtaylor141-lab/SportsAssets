@@ -370,8 +370,9 @@ def classify(m: dict, *, mgr, refreshed: dict, entries: dict, paper: dict,
     if not held:
         return C_UNHELD, "NOT_HELD_BY_THE_PLANE_BOOKS", None, None
     why = "STREAM:%s" % str(cur.get("refusal") or "NOT_CURRENT")[:60]
-    if e.get("outcome") and e.get("outcome") != "CURRENT":
-        why += "|REFRESH:%s" % str(e.get("outcome"))[:60]
+    ro = e.get("outcome") or e.get("snapshot_outcome")
+    if ro and ro != "CURRENT":
+        why += "|REFRESH:%s" % str(ro)[:60]
     return C_NOT, why, _epoch(((cur.get("evidence") or {}).get(
         "snapshot") or {}).get("received_at")), None
 
