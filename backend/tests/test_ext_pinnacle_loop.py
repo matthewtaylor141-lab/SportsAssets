@@ -357,6 +357,75 @@ def _event(stamp=None):
     }
 
 
+#: THE ONE VENUE CONTRACT the whole-cycle proof values, and its event.
+CYCLE_SLUG = "aec-soccer-mci-mun-2026-09-24-city"
+CYCLE_EVENT_SLUG = "soccer-mci-mun-2026-09-24"
+
+#: The serial tables the cycle appends to for that contract, with their ids.
+_CYCLE_SERIAL = (("external_valuations", "id"),
+                 ("ext_candidate_outcomes", "id"),
+                 ("bettor_pair_observation_attempts", "attempt_id"))
+
+
+async def _cycle_high_water(conn) -> dict:
+    """Each serial table's highest id BEFORE the cycle runs, so the cleanup
+    removes only the rows this proof's own cycle wrote."""
+    out = {}
+    for table, col in _CYCLE_SERIAL:
+        if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table):
+            out[table] = await conn.fetchval(
+                f"SELECT coalesce(max({col}), 0) FROM {table}")
+    return out
+
+
+async def _drop_what_the_cycle_wrote(conn, marks: dict) -> None:
+    """THE CYCLE PROOF REMOVES WHAT IT WROTE (a shared test database).
+
+    Its valuation is a real, wall-clock-current ENTRY_DECISION row of the
+    entry experiment. Left behind, every paper pass a later test runs within
+    `valuation_lookback_s` (30 min) takes it as a candidate and records a
+    decision on it under that test's own fresh account: the opportunity
+    funnel's real-writer proof counted eight unique opportunities where its
+    pass was given seven. So the valuation goes, with the in-cycle rows
+    keyed to it (the Derek research observation and entry decision, by
+    valuation id), the cycle's per-candidate records for this contract (only
+    ids above the high-water mark taken before the cycle), and the two venue
+    catalogue rows this proof seeded. The research
+    and attempt records are append-only by trigger, so -- as every proof
+    that purges its own records does -- the deletes run with the triggers
+    off for this one transaction."""
+    async def _has(table):
+        return await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                                   table)
+    async with conn.transaction():
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        vids = []
+        if "external_valuations" in marks:
+            vids = [int(r["id"]) for r in await conn.fetch(
+                "SELECT id FROM external_valuations WHERE experiment_id = $1"
+                "   AND us_market_slug = $2 AND id > $3",
+                ext.EXPERIMENT_ID, CYCLE_SLUG, marks["external_valuations"])]
+        if vids:
+            for table in ("derek_research_observations",
+                          "derek_entry_decisions"):
+                if await _has(table):
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE valuation_id = "
+                        "ANY($1::bigint[])", vids)
+            await conn.execute(
+                "DELETE FROM external_valuations WHERE id = "
+                "ANY($1::bigint[])", vids)
+        for table, col in _CYCLE_SERIAL[1:]:
+            if table in marks:
+                await conn.execute(
+                    f"DELETE FROM {table} WHERE {col} > $1 "
+                    "AND us_market_slug = $2", marks[table], CYCLE_SLUG)
+        if await _has("us_premap"):
+            await conn.execute(
+                "DELETE FROM us_premap WHERE event_slug = $1",
+                CYCLE_EVENT_SLUG)
+
+
 @pg
 @pytest.mark.asyncio
 async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
@@ -366,9 +435,12 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
     carry every field management needs to see why."""
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(DSN)
+    marks = None
     try:
         await conn.execute(
             open("migrations/103_external_valuations.sql").read())
+        # (before anything is seeded or written: the cleanup's scope)
+        marks = await _cycle_high_water(conn)
         # THE VENUE'S CATALOGUE, which the period check reads for the
         # kind, the event, the side and the sibling count. `us_premap`
         # is created by the copy lane's bootstrap, not by a migration,
@@ -549,7 +621,11 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         assert row["order_submitted"] is False
         assert int(row["outcome_books"]) == 2
     finally:
-        await conn.close()
+        try:
+            if marks is not None:
+                await _drop_what_the_cycle_wrote(conn, marks)
+        finally:
+            await conn.close()
 
 
 @pg
