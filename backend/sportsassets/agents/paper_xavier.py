@@ -636,7 +636,7 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     intent = DP.LONG if pos["holding_side"] == "LONG" else DP.SHORT
     contract = await conn.fetchrow(
         "SELECT v.id,v.us_market_slug,v.payout_event,v.payout_is_complement,"
-        "       v.event_key,v.market,v.line "
+        "       v.event_key,v.market,v.line,v.observed_at,v.received_at "
         "FROM external_valuations v JOIN paper_decisions d ON d.valuation_id=v.id "
         "JOIN paper_orders o ON o.decision_id=d.decision_id "
         "WHERE o.group_id=$1 AND o.us_market_slug=$2 AND o.holding_side=$3 AND o.account_id=$4 "
@@ -657,13 +657,32 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
     model = (ctx.get("derek") or {}).get("model")
     if model is None:
         model = await PD.research_model(conn, at=at, verify=False)
+    # THE PROVIDER FIXTURE HANDED TO THE HELD READ (RC6 xavier-records,
+    # xavier_held_fixture): the entry's PinnAPI key, or for a metered entry
+    # key the fixture the PinnAPI matcher recorded for this same contract.
+    # Only the held read's input; the stored-valuation lookup above keeps
+    # the entry's own event key.
+    held_fx = None
+    held_contract = dict(contract) if contract is not None else None
+    if held_contract is not None:
+        from .. import xavier_held_fixture as XHF
+        held_fx = await XHF.held_key(
+            conn, us_market_slug=pos["us_market_slug"],
+            entry_event_key=held_contract.get("event_key"), at=at)
+        held_contract["held_event_key"] = held_fx.get("event_key")
     got = await MR.refresh(
-        conn,pos=pos,contract=dict(contract) if contract is not None else None,
+        conn,pos=pos,contract=held_contract,
         stored=dict(v) if v is not None else None,model=model,levels_buy=levels_buy,
         at=at,max_age_s=max_age,score=PD.score,blend=DP.blend,held_feed=_held_feed,
         clock=lambda: _clock(ctx))
     if got.get("ok"):
+        if isinstance(got.get("feed"), dict):
+            # the held read priced it: the fixture it was handed, and why
+            got = dict(got, feed=dict(got["feed"], held_fixture=held_fx))
         return dict(got,model_label=PD.MODEL_LABEL)
+    detail = got.get("feed_detail")
+    if held_fx is not None:
+        detail = dict(detail or {}, held_fixture=held_fx)
     d = await conn.fetchrow(
         "SELECT d.p_blended,d.decided_at FROM paper_decisions d "
         "JOIN paper_orders o ON o.decision_id=d.decision_id "
@@ -672,11 +691,24 @@ async def _measure(conn, ctx, *, pos: dict, levels_buy: list) -> dict:
         "ORDER BY o.created_at,o.order_id LIMIT 1",
         pos["group_id"],pos["us_market_slug"],pos["holding_side"],ctx["account_id"])
     if d is not None:
+        # THE ENTRY READING'S OWN STAMPS (RC6 xavier-records): the blend was
+        # taken on the entry valuation's Pinnacle reading, so its source and
+        # receipt instants are that row's -- recorded beside the decision
+        # instant, never substituted for it (production TB-DAL showed
+        # source_at NOT_RECORDED on every stale review of a Derek position;
+        # the benchmark measure has always carried these)
+        e_obs = None if contract is None else contract.get("observed_at")
+        e_rcv = None if contract is None else contract.get("received_at")
         return {"p":float(d["p_blended"]),"source":"ENTRY_TIME_MEASURE",
                 "at":L._epoch(d["decided_at"]),"stale":True,"void_applied":False,
-                "why":got.get("why"),"feed_refusal":got.get("feed_refusal")}
+                "entry_pinnacle_at":None if e_obs is None else L._epoch(e_obs),
+                "entry_pinnacle_received_at":(None if e_rcv is None
+                                              else L._epoch(e_rcv)),
+                "why":got.get("why"),"feed_refusal":got.get("feed_refusal"),
+                "feed_detail":detail}
     return {"p":None,"source":None,"stale":True,"why":R_NO_MEASURE,
-            "feed_refusal":got.get("feed_refusal"),"refresh_detail":got.get("why")}
+            "feed_refusal":got.get("feed_refusal"),"refresh_detail":got.get("why"),
+            "feed_detail":detail}
 
 
 def last_evidence_expiry(last: dict | None) -> float | None:

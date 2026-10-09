@@ -130,6 +130,12 @@ DECISION_LOGIC_FILES = (
     # whether a review's probability is current, so a change restarts the
     # forward window
     "xavier_measure_refresh.py",
+    # (RC6 xavier-records) the provider fixture handed to the held read:
+    # for a metered entry key, the fixture the PinnAPI matcher recorded for
+    # the same contract -- it changes whether a review's probability is
+    # current (and which contracts exploration may enter), so a change
+    # restarts the forward window
+    "xavier_held_fixture.py",
     # (closeout) the persisted EXIT intent: whether an EXIT that cancelled
     # its protection is executed, waits its bounded window or is abandoned
     # with the protection restored -- it changes which management actions
