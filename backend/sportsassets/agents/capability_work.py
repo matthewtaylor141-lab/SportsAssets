@@ -117,7 +117,38 @@ def ready(task,dependencies,now):
             and all(dependencies.get(x)=='CLOSED_NO_CHANGE' for x in s.get('dependencies',[])))
 
 
+# The claim reads every column except ``outcome``: that column holds each
+# task's recorded investigation (up to five tool snapshots) and is never
+# needed to claim -- execute/save_investigation/finish re-read the row.
+CLAIM_COLUMNS='task_id,assignee,created_by,kind,title,spec,status,directive_id,evidence,created_at,updated_at'
+
+
 async def claim(conn,now):
+    """Claim at most one ready task in a CONSTANT number of round trips.
+
+    rc6.2 agent-truth, DEFENSIVE BOUND. The scan used to issue one
+    dependency query per candidate (up to 300) and one UPDATE + one event
+    INSERT per rejected task inside the tick's 5 s CLAIM budget, so a large
+    not-yet-ready queue could need hundreds of round trips. Now: one
+    candidate read (without ``outcome``), one dependency read for the whole
+    candidate set, one bulk rejection and one bulk event insert, then the
+    single claim. Decisions are the same, in the same order: a rejection
+    decided earlier in the pass is visible to later candidates, exactly as
+    the per-row reads saw it.
+
+    This does NOT explain or fix the production loop errors. Readback
+    (research-sql run 37978689499): the claim worked at its hourly budget
+    (24 CLAIMED per hour through 2026-10-08, with 16 DEPENDENCY_FAILED
+    committed per hour, so rejections were not rolled back); 0 tasks were
+    open when 'CLAIM: TimeoutError' was recorded, so the base ran the same
+    few statements this does; the last error is now 'HEARTBEAT:
+    TimeoutError', a phase that never touches the claim; and the
+    per-candidate dependency query shows max 68 ms. The mass REJECTED
+    comes from finish(): REVIEW_INCOMPLETE on every claimed review spends
+    MAX_ATTEMPTS and dependents then cascade DEPENDENCY_FAILED. The open
+    causes are review-phase failures in execute/finish and unattributed
+    waits (pool acquire, the ingestion_state row lock, event-loop stalls).
+    """
     async with conn.transaction():
         c=await control(conn,True)
         if c.get('enabled') is not True:return None
@@ -126,25 +157,38 @@ async def claim(conn,now):
         if c['spent']>=c['hourly_limit']:return None
         active=await conn.fetchval("SELECT count(*) FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status='IN_PROGRESS' AND (spec->>'lease_until')::double precision>$3",KIND,ACCOUNT,now)
         if active>=2:return None
-        rs=await conn.fetch("SELECT * FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,(spec->>'due_at')::double precision,task_id LIMIT 300 FOR UPDATE SKIP LOCKED",KIND,ACCOUNT)
-        for raw in rs:
-            t=row(raw);s=t['spec']
-            deps={r['task_id']:r['status'] for r in await conn.fetch('SELECT task_id,status FROM agent_tasks WHERE task_id=ANY($1::text[])',s['dependencies'])}
+        rs=await conn.fetch("SELECT "+CLAIM_COLUMNS+" FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,(spec->>'due_at')::double precision,task_id LIMIT 300 FOR UPDATE SKIP LOCKED",KIND,ACCOUNT)
+        candidates=[row(r) for r in rs]
+        wanted=sorted({str(d) for t in candidates for d in (t['spec'].get('dependencies') or [])})
+        statuses={}
+        if wanted:
+            statuses={r['task_id']:r['status'] for r in await conn.fetch('SELECT task_id,status FROM agent_tasks WHERE task_id=ANY($1::text[])',wanted)}
+        rejected=[];chosen=None
+        for t in candidates:
+            s=t['spec']
+            deps={x:statuses[x] for x in (s.get('dependencies') or []) if x in statuses}
             if s.get('attempts',0)>=MAX_ATTEMPTS and s.get('lease_until',0)<=now:
-                await conn.execute("UPDATE agent_tasks SET status='REJECTED',updated_at=to_timestamp($2) WHERE task_id=$1",t['task_id'],now)
-                await event(conn,t['task_id'],'RETRY_BUDGET_EXHAUSTED','SYSTEM',{},now)
+                rejected.append((t['task_id'],'RETRY_BUDGET_EXHAUSTED',{}))
+                statuses[t['task_id']]='REJECTED'
                 continue
             if any(v in ('REJECTED','CANCELLED') for v in deps.values()):
-                await conn.execute("UPDATE agent_tasks SET status='REJECTED',updated_at=to_timestamp($2) WHERE task_id=$1",t['task_id'],now)
-                await event(conn,t['task_id'],'DEPENDENCY_FAILED','SYSTEM',{'dependencies':deps},now)
+                rejected.append((t['task_id'],'DEPENDENCY_FAILED',{'dependencies':deps}))
+                statuses[t['task_id']]='REJECTED'
                 continue
             if not ready(t,deps,now):continue
-            s.update(attempts=s['attempts']+1,claim_token=uuid.uuid4().hex,lease_until=now+LEASE_S)
-            await conn.execute("UPDATE agent_tasks SET status='IN_PROGRESS',spec=$2::jsonb,updated_at=to_timestamp($3) WHERE task_id=$1",t['task_id'],json.dumps(s),now)
-            c['spent']+=1;await save_control(conn,c)
-            await event(conn,t['task_id'],'CLAIMED','SYSTEM',{'attempt':s['attempts'],'lease_until':s['lease_until']},now)
-            t['status']='IN_PROGRESS';return t
-    return None
+            chosen=t;break
+        if rejected:
+            ids=[x[0] for x in rejected]
+            await conn.execute("UPDATE agent_tasks SET status='REJECTED',updated_at=to_timestamp($2) WHERE task_id=ANY($1::text[])",ids,now)
+            await conn.execute("INSERT INTO agent_task_events(task_id,at,kind,actor,detail) SELECT x.task_id,to_timestamp($2),x.kind,'SYSTEM',x.detail::jsonb FROM unnest($1::text[],$3::text[],$4::text[]) WITH ORDINALITY AS x(task_id,kind,detail,n) ORDER BY x.n",
+                               ids,now,[x[1] for x in rejected],[json.dumps(x[2],default=str,allow_nan=False) for x in rejected])
+        if chosen is None:return None
+        t=chosen;s=t['spec']
+        s.update(attempts=s['attempts']+1,claim_token=uuid.uuid4().hex,lease_until=now+LEASE_S)
+        await conn.execute("UPDATE agent_tasks SET status='IN_PROGRESS',spec=$2::jsonb,updated_at=to_timestamp($3) WHERE task_id=$1",t['task_id'],json.dumps(s),now)
+        c['spent']+=1;await save_control(conn,c)
+        await event(conn,t['task_id'],'CLAIMED','SYSTEM',{'attempt':s['attempts'],'lease_until':s['lease_until']},now)
+        t['status']='IN_PROGRESS';return t
 
 
 async def event(conn,tid,kind,actor,detail,now):

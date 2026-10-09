@@ -22,7 +22,13 @@ WHERE EDGE-ENGINE'S CODE AND ITS PROSE DISAGREE, THE CODE WINS:
     `/portfolio/events/orders` because the legacy path answers HTTP 410,
     with `side: bid|ask` on a YES-only book and fixed-point STRING
     price/count. We build the V2 body. `/portfolio/orders` remains the
-    verified path for LISTING orders and for DELETE (kalshi.py:606, 1001).
+    path for LISTING orders (kalshi.py:606) and for reading ONE order
+    (docs api-reference/orders/get-order: "get /portfolio/orders/
+    {order_id}", 200 with a required `order` object; the docs list no
+    events variant). CANCEL moved to the documented V2 path
+    (api-reference/orders/cancel-order-v2: "delete /portfolio/events/
+    orders/{order_id}", response order_id, client_order_id, reduced_by,
+    ts_ms) -- rc6.2 agent-truth.
   * The fee prose (kalshi.py:8, 394-399) calls maker orders fee-free.
     We do NOT adopt that default (see kalshi_orders.fee_for).
 
@@ -110,8 +116,11 @@ CONTRACT = {
     "create_order_ack": ("order|body: filled_count|fill_count|matched_count, "
                          "else remaining_count; order_id|id; status",
                          "kalshi.py:494-527"),
-    "cancel": ("DELETE /portfolio/orders/{order_id}: 200/204 cancelled, "
-               "404 gone, else error", "kalshi.py:995-1013"),
+    "cancel": ("DELETE /portfolio/events/orders/{order_id}: 200 cancelled "
+               "with {order_id, client_order_id, reduced_by (fixed-point "
+               "count string), ts_ms}, 404 gone, else error",
+               "docs.kalshi.com api-reference/orders/cancel-order-v2 "
+               "(fetched 2026-10-09)"),
     "market_results": ("GET /markets?tickers=... status determined|finalized|"
                        "settled, result yes|no", "kalshi.py:1059-1075"),
     "auth": ("by the PARSED key's type: Ed25519 over the pre-sign text, or "
@@ -122,7 +131,10 @@ CONTRACT = {
              "(Ed25519, captured 2026-10-07)"),
     "pem_repair": ("one-line / escaped-newline PEM repair", "kalshi.py:319-346"),
     # Not exercised by edge-engine:
-    "order_by_id": ("GET /portfolio/orders/{order_id}", "UNVERIFIED"),
+    "order_by_id": ("GET /portfolio/orders/{order_id}: 200 {order: {...}}; "
+                    "the docs list no /portfolio/events variant",
+                    "docs.kalshi.com api-reference/orders/get-order "
+                    "(fetched 2026-10-09); never exercised"),
     "post_only_flag": ("no venue post-only flag is sent; post-only is enforced "
                        "against the book before submission", "UNVERIFIED"),
     "fill_or_kill": ("FOK is not sent; edge-engine only uses IOC and GTC",
@@ -163,6 +175,11 @@ class Refusal:
     detail: dict = field(default_factory=dict)
     sent: bool = False
     ok: bool = False
+
+
+#: the documented V2 cancel (docs.kalshi.com api-reference/orders/
+#: cancel-order-v2: "delete /portfolio/events/orders/{order_id}")
+CANCEL_PATH = "/portfolio/events/orders/%s"
 
 
 @dataclass(frozen=True)
@@ -552,4 +569,4 @@ class KalshiClient:
     def cancel(self, order_id: str) -> Response | Refusal:
         """Cancel needs the credential but NOT the enable switch: an
         emergency stop must be able to cancel with submission off."""
-        return self._send("DELETE", "/portfolio/orders/%s" % order_id, auth=True)
+        return self._send("DELETE", CANCEL_PATH % order_id, auth=True)

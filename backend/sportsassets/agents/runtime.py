@@ -201,6 +201,83 @@ def derek_end_state(cycle: dict | None, hook: dict | None) -> tuple:
                 list((c.get("refusals") or {}).items())[:10])})
 
 
+#: Derek's PAPER strategy as paper_decisions records it (pinned equal to
+#: paper_derek.STRATEGY by tests/test_rc62_derek_heartbeat_truth.py; not
+#: imported, so the funded runtime never loads the paper decision module)
+DEREK_PAPER_STRATEGY = "DEREK_ENTRY_POLICY_V2"
+DEREK_PAPER_WINDOW_S = 3600.0
+
+
+async def derek_paper_record(conn, *, now: float | None = None) -> dict | None:
+    """Derek's RECORDED paper decisions in the last hour: count and the
+    newest one. The window is (at - 1 h, at], bounded above as well as
+    below, in the count AND the latest subquery: a row dated after ``at``
+    is not one of his last-hour decisions and is never named as his
+    latest action. READ ONLY, in its own savepoint, bounded; None when the
+    record cannot be read (the heartbeat then says only what the funded
+    cycle measured, labelled as such)."""
+    at = _now(now)
+    try:
+        async with asyncio.timeout(2):
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "SELECT count(*) AS n, max(decided_at) AS newest_at,"
+                    " (SELECT jsonb_build_object('decision_id', d.decision_id,"
+                    " 'decided_at', extract(epoch FROM d.decided_at),"
+                    " 'verdict', d.verdict, 'refusal', d.refusal)"
+                    " FROM paper_decisions d WHERE d.strategy = $1"
+                    " AND d.decided_at > to_timestamp($2)"
+                    " AND d.decided_at <= to_timestamp($3)"
+                    " ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT 1)"
+                    " AS latest FROM paper_decisions WHERE strategy = $1"
+                    " AND decided_at > to_timestamp($2)"
+                    " AND decided_at <= to_timestamp($3)",
+                    DEREK_PAPER_STRATEGY, at - DEREK_PAPER_WINDOW_S, at)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        log.warning("agents: Derek paper record unreadable (%s)", _err(exc))
+        return None
+    latest = row["latest"] if row else None
+    if isinstance(latest, str):
+        import json
+        latest = json.loads(latest)
+    return {"decisions_1h": int(row["n"] or 0) if row else 0,
+            "latest": dict(latest) if latest else None}
+
+
+def derek_truthful_state(state, activity, waiting, paper: dict | None) -> tuple:
+    """rc6.2 agent-truth. Pure. The collection cycle measures only the
+    FUNDED path (valuation rows written for funded entry); while that
+    path is quarantined Derek still decides on PAPER every cycle. Before,
+    the heartbeat said WAITING_FOR_EVIDENCE 'NO_DECISION_RECORDED:...'
+    while paper_decisions held 390 of his decisions in the hour. A
+    funded-path 'nothing recorded' is now labelled as the funded path's,
+    and when he recorded paper decisions the state is DECISION_RECORDED
+    naming the count and his latest decision. FAILED / BLOCKED /
+    provider waits and a funded DECISION_RECORDED are left as measured."""
+    if state != R.S_WAITING_FOR_EVIDENCE or not str(
+            activity or "").startswith("NO_DECISION_RECORDED:"):
+        return state, activity, waiting
+    funded = "FUNDED_PATH_" + str(activity)
+    w = dict(waiting or {})
+    w["funded_path"] = str(activity)
+    if paper is None:
+        w["paper_decisions_1h"] = None
+        return state, funded, w
+    n = int(paper.get("decisions_1h") or 0)
+    latest = paper.get("latest")
+    w["paper_decisions_1h"] = n
+    w["latest_paper_decision"] = latest
+    if n <= 0:
+        return state, funded, w
+    lv = (latest or {}).get("verdict") or "UNKNOWN"
+    lr = (latest or {}).get("refusal")
+    return (R.S_DECISION_RECORDED,
+            "PAPER_DECISIONS_RECORDED_1H:%d:LATEST_%s%s" % (
+                n, lv, (":" + str(lr)) if lr else ""), w)
+
+
 async def derek_cycle_finished(conn, *, cycle: dict,
                                now: float | None = None) -> dict:
     """`derek.after_cycle(conn, cycle=<cycle result>, now=now)`, guarded,
@@ -209,6 +286,10 @@ async def derek_cycle_finished(conn, *, cycle: dict,
     hook = await call_hook(conn, R.DEREK, "derek", "after_cycle",
                            kwargs={"cycle": cycle}, now=at)
     state, activity, waiting = derek_end_state(cycle, hook)
+    if state == R.S_WAITING_FOR_EVIDENCE:
+        state, activity, waiting = derek_truthful_state(
+            state, activity, waiting,
+            await derek_paper_record(conn, now=at))
     # PAPER: this cycle's valuations are freshest now; the paper pass runs
     # in the background on its own connection and never delays the cycle.
     paper = paper_pass_hook(trigger="COLLECTION_CYCLE")

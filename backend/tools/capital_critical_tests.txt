@@ -1445,3 +1445,11 @@ tests/test_rc6_api_stall2_ext_pinnacle.py
 tests/test_venue_429_escalating_cooldown.py
 # (RC6 P0-429 review) the catalogue sweep reads OUR gate's 429-cooldown refusal as rate-limited and never sent: no markets fallback, no further probe rung or detail read, the pass/bucket/slice stops RATE_LIMITED_BY_VENUE with the refusal named, and a withheld read is never counted as a request
 tests/test_premap_429_cooldown_never_sent.py
+# (rc6.2 agent-truth) defensive bound, not the production timeout's cause: the capability claim runs in a constant number of round trips (a synthetic 180-task not-ready queue at 30 ms per statement claims inside the tick's 5 s CLAIM budget; the base needs 185 round trips), and bulk rejections plus their events match the per-row decisions
+tests/test_rc62_capability_claim_bounded.py
+# (rc6.2 agent-truth) Derek's heartbeat is derived from his recorded paper_decisions (count in the hour (now-1h, now], bounded above so a later-dated row is never counted or named latest, and latest decision); a funded-path 'nothing recorded' is labelled FUNDED_PATH_; FAILED/BLOCKED/funded decisions untouched; unreadable record never raises
+tests/test_rc62_derek_heartbeat_truth.py
+# (rc6.2 agent-truth) the Kalshi worker's claims pass evaluates at the read-time clock: a WebSocket book persisted while the pass reads is not BOOK_TIME_IN_FUTURE (production 2,124 in 24 h); explicit clocks stay fixed; receipts stay SHADOW/NONE
+tests/test_rc62_kalshi_claims_read_clock.py
+# (rc6.2 agent-truth) Kalshi cancel goes to the documented V2 path DELETE /portfolio/events/orders/{id} and parses reduced_by as a Decimal (unreadable flagged, never zero; an ack for another order is ERROR); get-order keeps the documented GET /portfolio/orders/{id}
+tests/test_rc62_kalshi_cancel_v2.py

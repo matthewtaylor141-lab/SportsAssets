@@ -371,12 +371,25 @@ def coverage(fixtures: dict) -> dict:
     return by
 
 
-async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
+async def claims_pass(pool, *, now: float | None = None,
+                      record: bool = True) -> dict:
     """Canonical claims over the PERSISTED evidence (canonical_claims_db, the
     same assembler Adriana's runner reads): aliases, the best all-in route
     of every claim at RECEIPT_QTY, and the claim-first structures for the
     digest. Adriana records her own scan in her runner; nothing here writes
-    an arbitrage record."""
+    an arbitrage record.
+
+    THE READ-TIME CLOCK (rc6.2 agent-truth). `now=None` (the worker) is
+    live: the pass is evaluated as of the moment the books were READ, as
+    canonical_claims_db.claims_census does for Adriana. Before, the worker
+    passed now=time.time() taken BEFORE the assembler read the books, so a
+    WebSocket book persisted while the pass was reading was observed after
+    `now` and canonical_venue.quotes refused it BOOK_TIME_IN_FUTURE
+    (production 24 h: 2,124 Kalshi candidates). A venue clock ahead of ours
+    is still refused; staleness only gets stricter. An explicit `now`
+    stays a fixed evaluation instant. Receipts stay SHADOW."""
+    live = now is None
+    now = float(now if now is not None else time.time())
     from .. import canonical_claims_db as KCDB
     from ..agents import adriana_claims as AC
     routes_n, aliases_n, equivalences, best_routes = 0, 0, [], []
@@ -389,6 +402,8 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
         # (RC6) what the fixture read covered and cut, for the digest
         scope = KCDB.new_scope()
         assembled = await KCDB.assemble(c, now=now, scope=scope)
+        if live:
+            now = max(now, time.time())
         for fx, built, insts in assembled:
             aliases_n += len(insts)
             # settlement certificates: decide, append, strip (red team)
@@ -557,7 +572,8 @@ async def run() -> None:
                 fresh = await db_freshness(c, [t for _e, t in tracked],
                                            now=time.time())
             rec_now = now - last_record >= RECORD_EVERY_S
-            claims = await claims_pass(pool, now=time.time(), record=rec_now)
+            # live: evaluated at the read-time clock (claims_pass docstring)
+            claims = await claims_pass(pool, record=rec_now)
             if rec_now:
                 last_record = now
             # drop finished fixtures from memory (bounded)
