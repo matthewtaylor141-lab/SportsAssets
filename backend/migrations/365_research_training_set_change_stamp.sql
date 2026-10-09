@@ -109,15 +109,32 @@ COMMENT ON TABLE research_training_set_changes IS
     '(migration 365). paper_derek serves a cached provenance verification '
     'only while the stamp is the one read before that verification.';
 
+-- ONE MOVE PER STATEMENT. The first matching row of a statement moves the
+-- counter and the transaction remembers it (a transaction-local setting
+-- holding the transaction's id and the statement's start); the statement's
+-- later rows return at once. A reader in another transaction needs one
+-- move per writing transaction (the move commits with the change); a
+-- reader in the SAME transaction reads the stamp in a statement of its own,
+-- and any change after that read is a later statement, which moves it
+-- again. A savepoint rolled back undoes the move and the setting together.
+-- (Moving the one counter row once per changed ROW made a correction of
+-- 28,303 settled valuations take 44.7 s instead of 2.0 s LOCAL: each update
+-- of a row its own transaction already updated walks that row's versions.)
 CREATE OR REPLACE FUNCTION research_training_set_changed()
 RETURNS trigger AS $$
+DECLARE
+    me text := txid_current()::text || '@' || statement_timestamp()::text;
 BEGIN
+    IF current_setting('research_training_set.moved_in', true) = me THEN
+        RETURN NULL;
+    END IF;
     UPDATE research_training_set_changes
        SET changes = changes + 1,
            last_changed_at = clock_timestamp(),
            last_change = jsonb_build_object('table', TG_TABLE_NAME,
                                             'op', TG_OP, 'level', TG_LEVEL)
      WHERE scope = 'DEREK_RESEARCH_TRAINING_SET';
+    PERFORM set_config('research_training_set.moved_in', me, true);
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;

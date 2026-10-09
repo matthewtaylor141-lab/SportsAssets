@@ -403,6 +403,36 @@ def test_the_production_writers_do_not_move_the_stamp(monkeypatch):
     assert again is first and hashes == 1
 
 
+def test_the_counter_moves_once_per_statement_and_a_rolled_back_move_returns(
+        monkeypatch):
+    """A correction of many rows moves the counter once (not once per row);
+    every later statement that changes a training record moves it again,
+    in the same transaction too; a savepoint rolled back takes its move
+    with it and the next change moves it again."""
+    async def body(conn, made, spy):
+        vids = [made[i][0] for i in (20, 21, 22)]
+        n = [await _counter(conn)]
+        await conn.execute("UPDATE external_valuations SET outcome = "
+                           "1 - outcome WHERE id = ANY($1::bigint[])", vids)
+        n.append(await _counter(conn))
+        await conn.execute("UPDATE external_valuations SET outcome = "
+                           "1 - outcome WHERE id = $1", vids[0])
+        n.append(await _counter(conn))
+        await conn.execute("SAVEPOINT sp")
+        await conn.execute("UPDATE external_valuations SET outcome = "
+                           "1 - outcome WHERE id = $1", vids[1])
+        n.append(await _counter(conn))
+        await conn.execute("ROLLBACK TO SAVEPOINT sp")
+        n.append(await _counter(conn))
+        await conn.execute("UPDATE external_valuations SET outcome = "
+                           "1 - outcome WHERE id = $1", vids[2])
+        n.append(await _counter(conn))
+        return n
+
+    n = _ledger_run(monkeypatch, body)
+    assert [b - n[0] for b in n] == [0, 1, 2, 3, 2, 3], n
+
+
 def test_the_stamp_read_is_cheap(monkeypatch):
     """What a cache hit costs (the md5 prototype: ~257 ms of Postgres at
     production's 28,303 records). Bound generous for a loaded runner."""
