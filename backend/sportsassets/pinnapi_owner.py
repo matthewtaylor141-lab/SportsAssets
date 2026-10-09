@@ -165,6 +165,31 @@ EVICTION_CONSISTENT = (CLOSE_SERVER, CLOSE_NO_FRAME, CLOSE_UNKNOWN)
 #: RFC 6455 7.1.5: no close frame was received or sent
 ABNORMAL_CLOSURE = 1006
 CLOSE_REASON_MAX = 64
+#:
+#: AN AMBIGUOUS RECORD IS EVICTION-CONSISTENT (RC6 integration review). When
+#: the library recorded BOTH close frames but not which came first
+#: (rcvd_then_sent None), the side cannot be read. The xavier cut called that
+#: CLIENT -- never counted toward EVICTIONS_MAX, so a provider close frame
+#: that may have been an eviction could be fought indefinitely. It is
+#: UNKNOWN now (EVICTION_CONSISTENT), carrying the PROVIDER's frame's code
+#: and reason, which is what an eviction would say.
+#:
+#: THE CLOSE'S OWN FACTS, IN THE SAME RECORD (rc6/pipeline-reds abf4ea43).
+#: Beside the side, code and reason: how long since the socket's last
+#: received frame (`rx_gap_s`: a long gap points at our event loop or the
+#: network, not at a newer holder) and how long the socket had lived
+#: (`socket_age_s`), both on the monotonic clock. One record per close --
+#: the transition's `close`, `last_unrequested_close`, the heartbeat -- never
+#: a second, parallel one. No header, key or payload is read.
+
+
+def _gap(now, then) -> Optional[float]:
+    try:
+        if now is None or then is None:
+            return None
+        return round(max(0.0, float(now) - float(then)), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def _close_frame(frame) -> dict:
@@ -181,16 +206,25 @@ def _close_frame(frame) -> dict:
     return {"code": code, "reason": reason}
 
 
-def close_of(exc) -> dict:
-    """WHO CLOSED THE SOCKET, from the exception `recv()` raised. Pure;
-    never raises. {"initiator", "code", "reason", "error"}: initiator is
-    SERVER, CLIENT, NO_CLOSE_FRAME or UNKNOWN (see R_CLIENT_CLOSED)."""
-    out = {"error": type(exc).__name__}
+def close_of(exc, *, now: Optional[float] = None,
+             last_rx: Optional[float] = None,
+             opened: Optional[float] = None) -> dict:
+    """WHO CLOSED THE SOCKET, from the exception `recv()` raised, and the
+    close's own facts. Pure; never raises. {"initiator", "code", "reason",
+    "error", "rx_gap_s", "socket_age_s"}: initiator is SERVER, CLIENT,
+    NO_CLOSE_FRAME or UNKNOWN (see R_CLIENT_CLOSED); the two gaps are
+    seconds on the caller's monotonic clock (`now` - `last_rx`, `now` -
+    `opened`), None when not given."""
+    out = {"error": type(exc).__name__,
+           "rx_gap_s": _gap(now, last_rx), "socket_age_s": _gap(now, opened)}
     try:
         if not (hasattr(exc, "rcvd") and hasattr(exc, "sent")):
             return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
         rcvd, sent = exc.rcvd, exc.sent
         then = getattr(exc, "rcvd_then_sent", None)
+        if rcvd is not None and sent is not None and then is None:
+            # both frames, order unknown: never assumed ours
+            return dict(out, initiator=CLOSE_UNKNOWN, **_close_frame(rcvd))
         if rcvd is not None and (sent is None or then is True):
             return dict(out, initiator=CLOSE_SERVER, **_close_frame(rcvd))
         if sent is not None:
@@ -468,6 +502,7 @@ class FeedOwner:
         self.state = "CONNECTING"
         ws = await asyncio.wait_for(self.connect(PP.WS_URL, key),
                                     self.liveness_s)
+        opened = time.monotonic()           # the socket's age, for close_of
         delivered = False
         try:
             # Ownership or the arm row may have changed during connect.
@@ -504,7 +539,9 @@ class FeedOwner:
                 except asyncio.TimeoutError:
                     continue
                 except Exception as exc:                        # noqa: BLE001
-                    info = dict(close_of(exc), epoch=epoch,
+                    t = time.monotonic()
+                    info = dict(close_of(exc, now=t, last_rx=last_rx,
+                                         opened=opened), epoch=epoch,
                                 delivered=delivered)
                     self.last_close = dict(info, at=round(self.clock(), 3))
                     side = info["initiator"]
@@ -519,7 +556,6 @@ class FeedOwner:
                     # a close we did not ask for after a healthy stream may
                     # be another holder of the account key evicting us
                     if delivered:
-                        t = time.monotonic()
                         self.evictions = [x for x in self.evictions
                                           if t - x < EVICTION_WINDOW_S] + [t]
                         self._note("UNREQUESTED_CLOSE",
