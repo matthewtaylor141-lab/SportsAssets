@@ -1439,3 +1439,5 @@ tests/test_rc6_provenance_lane_bounds.py
 tests/test_rc6_provenance_open_defects.py
 # (RC6 provenance-fix) through a session's cached context every change refuses on the next decision (label, void, deleted valuation or observation, vector with or without its identity, gained feature, moved fixture, re-based or re-read settlement, rewritten registry digest) and every bypass of the change counter still reads as a change; the single flight: a waiter's deadline cuts only it, a cut or failed flight caches nothing, a change mid-flight re-verifies, an unreadable stamp serves nothing, bounded table; a stopped lane is a named refusal
 tests/test_rc6_provenance_cache_and_flight.py
+# Signed acceptance requires the checksummed source verdict to agree with its copied packet value.
+tests/test_signed_acceptance_consistency.py
