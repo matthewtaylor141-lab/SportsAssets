@@ -1,0 +1,18 @@
+{
+  "baseline_sha": "b3f1b0cdaa159a08ee8f65d2f6bde83e76112f86",
+  "method": "120 concurrent requests, 24 threads, yield between budget read and charge",
+  "counts": {
+    "client": {
+      "accepted_guesses": 21,
+      "limit": 10
+    },
+    "global": {
+      "accepted_guesses": 83,
+      "limit": 60
+    },
+    "unlock": {
+      "accepted_guesses": 120,
+      "limit": 10
+    }
+  }
+}

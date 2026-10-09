@@ -27,7 +27,6 @@ size, fund or authorize anything.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -55,10 +54,11 @@ def envelope(status, why=None, *, data=None, computed_at=None) -> dict:
 
 
 def _admin(x_admin_token: str = Header(default="")) -> None:
+    from .admin_token_guard import constant_time_text_equal
     from ..config import settings
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if not expected or not constant_time_text_equal(supplied, expected):
         raise HTTPException(status_code=401, detail="admin token required")
 
 

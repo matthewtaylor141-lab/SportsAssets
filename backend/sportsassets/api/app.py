@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ from ..config import settings
 from ..db import close_pool, get_pool
 from . import queries
 from .grading import grade_rows
+from .admin_token_guard import constant_time_text_equal
 
 # THE API'S LOG HANDLER (2026-09-05). The API had none: uvicorn
 # configures its own loggers only, so every INFO record from
@@ -1304,7 +1306,7 @@ def require_admin(x_admin_token: str = Header(default="")) -> None:
     # and env-var values sometimes carry a trailing newline.
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if not expected or not constant_time_text_equal(supplied, expected):
         raise HTTPException(status_code=401, detail="admin token required")
 
 
@@ -1436,7 +1438,7 @@ def control_token_ok(token: str, now: float | None = None) -> bool:
     want = _hmac.new(key, ("%s:%d:%s" % (CONTROL_SCOPE, exp,
                                          _session_epoch())).encode(),
                      hashlib.sha256).hexdigest()
-    return _hmac.compare_digest(parts[2], want)
+    return constant_time_text_equal(parts[2], want)
 
 
 def desk_token_ok(token: str, now: float | None = None) -> bool:
@@ -1461,7 +1463,7 @@ def desk_token_ok(token: str, now: float | None = None) -> bool:
         return False
     want = _hmac.new(key, f"desk:{exp}:{_session_epoch()}".encode(),
                      hashlib.sha256).hexdigest()
-    return _hmac.compare_digest(sig, want)
+    return constant_time_text_equal(sig, want)
 
 
 # ── Wall auth (TV wall, 2026-08-23) ─────────────────────────────────
@@ -1507,7 +1509,7 @@ def wall_token_ok(token: str, now: float | None = None) -> bool:
         return False
     want = _hmac.new(key, f"wall:{exp}:{_session_epoch()}".encode(),
                      hashlib.sha256).hexdigest()
-    return _hmac.compare_digest(sig, want)
+    return constant_time_text_equal(sig, want)
 
 
 def require_desk(x_desk_token: str = Header(default=""),
@@ -1522,7 +1524,7 @@ def require_desk(x_desk_token: str = Header(default=""),
 
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
-    if expected and hmac.compare_digest(supplied, expected):
+    if expected and constant_time_text_equal(supplied, expected):
         return "admin"
     if x_desk_token and desk_token_ok(x_desk_token):
         return "desk"
@@ -1540,7 +1542,7 @@ def check_engine_token(supplied: str | None) -> None:
 
     got = (supplied or "").strip()
     expected = (settings().engine_ingest_token or "").strip()
-    if not expected or not hmac.compare_digest(got, expected):
+    if not expected or not constant_time_text_equal(got, expected):
         raise HTTPException(status_code=401, detail="engine token required")
 
 
@@ -1774,7 +1776,9 @@ async def health_services() -> list[dict]:
 # yes/no oracle for token guesses and the app has no other rate limit.
 # 10 attempts/min/IP is far above any human retyping a token and far
 # below a useful brute force.
-_PING_HITS: dict[str, list[float]] = {}
+from collections import OrderedDict
+
+_PING_HITS: OrderedDict[str, list[float]] = OrderedDict()
 
 
 @app.post("/api/admin/ping")
@@ -1784,21 +1788,11 @@ async def admin_ping(request: Request,
     whether a non-default token is configured on the server and whether this
     attempt matched, so the UI can say 'wrong token' vs 'env not applied'
     instead of one ambiguous failure message."""
-    import hmac
-    import time as _t
-
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
-        or (request.client.host if request.client else "?")
-    now = _t.time()
-    hits = [t for t in _PING_HITS.get(ip, []) if now - t < 60]
-    if len(hits) >= 10:
+    # Headerless requests bypass the wrong-header middleware; the public
+    # diagnostic still needs the bounded, atomic client budget. Preserve
+    # its ten-per-minute limit for every caller, including the right key.
+    if _throttled(_PING_HITS, request):
         raise HTTPException(status_code=429, detail="slow down")
-    hits.append(now)
-    _PING_HITS[ip] = hits
-    if len(_PING_HITS) > 1000:      # bound the map; drop stale IPs
-        for k in [k for k, v in _PING_HITS.items()
-                  if not v or now - v[-1] > 300][:500]:
-            _PING_HITS.pop(k, None)
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
     return {
@@ -1808,34 +1802,51 @@ async def admin_ping(request: Request,
         # declined to CALL it configured. There is no default now, so `bool` is
         # the whole test and the sentinel string no longer appears in the code.
         "configured": bool(expected),
-        "match": bool(expected) and hmac.compare_digest(supplied, expected),
+        "match": bool(expected) and constant_time_text_equal(supplied, expected),
     }
 
 
 # Unlock throttle: same shape and rationale as _PING_HITS — the desk
 # password is short by design, so the guess oracle must be slow.
-_UNLOCK_HITS: dict[str, list[float]] = {}
+_UNLOCK_HITS: OrderedDict[str, list[float]] = OrderedDict()
+_UNLOCK_LOCK = threading.Lock()
 
 
-def _throttled(hits: dict[str, list[float]], request: Request,
+def _throttled(hits: OrderedDict[str, list[float]], request: Request,
                limit: int = 10, window: float = 60.0) -> bool:
-    """True when this IP is over its budget (the _PING_HITS pattern,
-    shared). Records the attempt when allowed; bounds the map."""
-    import time as _t
+    """Bounded LRU storage; preserve release-base proxy client identity.
 
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0] \
-        .strip() or (request.client.host if request.client else "?")
+    COMMAND is proxied through shared Netlify egress. Its existing first-hop
+    client key stays unchanged in this release: applying the admin guard's
+    rightmost-hop identity here would combine unrelated sign-in budgets.
+    Admin wrong-token traffic retains its separate rightmost/global guard.
+    """
+    import time as _t
+    headers = request.headers
+    forwarded = (",".join(headers.getlist("x-forwarded-for"))
+                 if hasattr(headers, "getlist")
+                 else headers.get("x-forwarded-for") or "")
+    ip = forwarded.split(",")[0].strip() or (
+        request.client.host if request.client else "?")
     now = _t.time()
-    recent = [t for t in hits.get(ip, []) if now - t < window]
-    if len(recent) >= limit:
+    with _UNLOCK_LOCK:
+        recent = [t for t in hits.get(ip, []) if now - t < window]
+        if ip not in hits:
+            # Expiry and eviction are O(1) per removed client, not a full-map
+            # scan on every refused request. Storage pressure is not a ban on
+            # a newly arriving owner, operator or monitor.
+            while hits:
+                first = next(iter(hits))
+                if hits[first] and now - hits[first][-1] < window:
+                    break
+                hits.popitem(last=False)
+            if len(hits) >= 1000:
+                hits.popitem(last=False)
         hits[ip] = recent
-        return True
-    recent.append(now)
-    hits[ip] = recent
-    if len(hits) > 1000:      # bound the map; drop stale IPs
-        for k in [k for k, v in hits.items()
-                  if not v or now - v[-1] > 300][:500]:
-            hits.pop(k, None)
+        hits.move_to_end(ip)
+        if len(recent) >= limit:
+            return True
+        recent.append(now)
     return False
 
 
@@ -1854,7 +1865,7 @@ async def desk_unlock(request: Request, body: DeskUnlockBody) -> dict:
         raise HTTPException(status_code=429, detail="slow down")
     supplied = (body.password or "").strip()
     expected = (settings().desk_password or "").strip()
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if not expected or not constant_time_text_equal(supplied, expected):
         return {"ok": False, "error": "wrong password"}
     token, exp = mint_desk_token()
     return {"ok": True, "token": token, "expires_at": exp}
@@ -1882,7 +1893,7 @@ async def wall_unlock(request: Request, body: DeskUnlockBody) -> dict:
         raise HTTPException(status_code=429, detail="slow down")
     supplied = (body.password or "").strip()
     expected = (settings().desk_password or "").strip()
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if not expected or not constant_time_text_equal(supplied, expected):
         return {"ok": False, "error": "wrong password"}
     token, exp = mint_wall_token()
     return {"ok": True, "token": token, "expires_at": exp}
@@ -1926,7 +1937,7 @@ def require_command(bt_command: str = Cookie(default=""),
         return "command"
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
-    if expected and hmac.compare_digest(supplied, expected):
+    if expected and constant_time_text_equal(supplied, expected):
         return "admin"
     if x_desk_token and (desk_token_ok(x_desk_token)
                          or wall_token_ok(x_desk_token)):
@@ -1946,7 +1957,7 @@ async def command_session_open(request: Request, response: Response,
         raise HTTPException(status_code=429, detail="slow down")
     supplied = (body.password or "").strip()
     expected = (settings().desk_password or "").strip()
-    if not expected or not hmac.compare_digest(supplied, expected):
+    if not expected or not constant_time_text_equal(supplied, expected):
         return {"ok": False, "error": "wrong password"}
     token, exp = mint_desk_token()
     response.set_cookie(COMMAND_COOKIE, token, max_age=DESK_TOKEN_TTL_S,
@@ -4457,7 +4468,7 @@ def require_command_control(x_admin_token: str = Header(default=""),
         return "operator"
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
-    if expected and hmac.compare_digest(supplied, expected):
+    if expected and constant_time_text_equal(supplied, expected):
         return "admin"
     if bt_command or x_desk_token:
         raise HTTPException(status_code=403, detail={
@@ -4502,7 +4513,7 @@ async def command_session_control(request: Request, response: Response,
             "controls_remain_available_to_ops_tooling": (
                 "through the operator token, server-side")})
     supplied = (body.password or "").strip()
-    if not hmac.compare_digest(supplied, expected):
+    if not constant_time_text_equal(supplied, expected):
         # 401, NOT a 200 carrying `ok: false`. The read sign-ins on this
         # service answer a wrong password with a 200 body, and a caller that
         # checks only the status then treats a refusal as a session. A
@@ -9301,9 +9312,9 @@ async def api_desk_stream(request: Request, token: str = Query("")) -> Streaming
     supplied = (token or request.headers.get("X-Desk-Token", "") or "").strip()
     admin = (request.headers.get("X-Admin-Token", "") or "").strip()
     expected = (settings().admin_token or "").strip()
-    ok = bool(expected and _hmac.compare_digest(admin, expected)) \
+    ok = bool(expected and constant_time_text_equal(admin, expected)) \
         or desk_token_ok(supplied) \
-        or bool(expected and _hmac.compare_digest(supplied, expected))
+        or bool(expected and constant_time_text_equal(supplied, expected))
     if not ok:
         raise HTTPException(status_code=403, detail="desk token required")
     from .order_stream import sse_events
