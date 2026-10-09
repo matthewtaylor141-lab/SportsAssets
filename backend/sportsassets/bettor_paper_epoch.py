@@ -42,6 +42,14 @@ THE RULES (each is a test in tests/test_paper_management_epoch.py):
      of a pre-epoch settlement, and any ledger cash no position explains are
      each a line. Today's equity is never forced to $500,000 and history is
      never hidden: it is the difference, stated.
+  8. THE EXACT ROLL-FORWARD (`rollforward`, RC6 identity lane): OPENING
+     500,000 + NET CASH FLOWS (0: the ledger has no deposit kind) + REALIZED
+     (gross of fees) + UNREALIZED (on the open marks) - ALL-IN FEES = ENDING
+     CAPITAL, ENDING taken from the ledger cash independently of the legs,
+     every leg a Decimal at the ledger's 6 places (rule 7's floats are for
+     display only), its verdict EXACT only when it balances to the micro-
+     dollar and every open mark is fresh. backend/tools/
+     epoch_rollforward_receipt.py replays a production export through it.
 
 THE EPOCH MARK, FROM RECORDED EVIDENCE AT THE EPOCH INSTANT ONLY. In order:
   a. BOOK_AT_THE_EPOCH: the exit price of the last error-free book observed
@@ -81,7 +89,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from zoneinfo import ZoneInfo
 
 from . import bettor_paper_ledger as L
@@ -135,6 +143,31 @@ I_UNATTRIBUTED = "LEDGER_CASH_NOT_ATTRIBUTED_TO_ANY_POSITION"
 
 ZERO = Decimal(0)
 EPS = Decimal("0.000001")
+Q6 = Decimal("0.000001")
+CENT = Decimal("0.01")
+
+#: THE EXACT ROLL-FORWARD (rollforward in management_book's result)
+RF_VERSION = "MANAGEMENT_EPOCH_ROLLFORWARD_V1"
+RF_RULE = ("OPENING_CAPITAL + NET_CASH_FLOWS + REALIZED_PNL + UNREALIZED_PNL "
+           "- ALL_IN_FEES = ENDING_CAPITAL")
+#: the bridge's own line for an UNMARKED open position: management values it
+#: at its average cost INCLUDING its buy fees, the roll-forward at its gross
+#: cost (its buy fees are in ALL_IN_FEES)
+I_UNMARKED_BUY_FEES = "UNMARKED_OPEN_POSITION_BUY_FEES_CARRIED_AT_COST"
+I_UNATTRIBUTED_PRE = "LEDGER_CASH_NOT_ATTRIBUTED_TO_ANY_POSITION_BEFORE_THE_EPOCH"
+RF_EXACT = "EXACT"
+RF_EXACT_HELD_OUTSIDE = "EXACT_WITH_HELD_OUTSIDE_POSITIONS_ITEMISED"
+RF_UNVERIFIED_MARKS = "OPEN_POSITION_MARKS_UNVERIFIED"
+RF_NOT_BALANCED = "DOES_NOT_BALANCE"
+
+
+def rf_q6(v) -> Decimal:
+    """A Decimal at the ledger's 6 places (half-up, the ledger's own rule)."""
+    return Decimal(v).quantize(Q6, rounding=ROUND_HALF_UP)
+
+
+def rf_cents(v) -> str:
+    return str(Decimal(v).quantize(CENT, rounding=ROUND_HALF_UP))
 
 
 def D(v) -> Decimal:
@@ -287,6 +320,93 @@ def classify_epoch_mark(*, epoch_at: float, holding_side: str,
 
 
 # ═════════════════════════════════════════════════════════════════════
+# PURE: the exact roll-forward (RC6 identity lane)
+# ═════════════════════════════════════════════════════════════════════
+
+def _fx(v) -> str:
+    """An exact Decimal as plain text (never an exponent, never a float)."""
+    return format(Decimal(v), "f")
+
+
+def _rollforward(*, opening, realized, unrealized, fees, open_value,
+                 cash_by_ledger, bridge, ledger_equity, marks, held_outside,
+                 held_outside_open, positions) -> dict:
+    """THE $500,000 EPOCH AS AN EXACT DECIMAL ROLL-FORWARD.
+
+        OPENING_CAPITAL + NET_CASH_FLOWS + REALIZED_PNL + UNREALIZED_PNL
+            - ALL_IN_FEES = ENDING_CAPITAL
+
+    every leg in Decimal at the ledger's own 6 places (no float anywhere):
+      * REALIZED_PNL   gross of fees: each in-scope position's post-epoch sale
+                       proceeds and settlement cash less the gross cost of
+                       what it closed (a carried position's cost is its
+                       verified epoch mark value);
+      * UNREALIZED_PNL each open position's marked value less the gross cost
+                       of its open remainder (an UNMARKED position is carried
+                       at that cost: 0, and the marks are then unverified);
+      * ALL_IN_FEES    every post-epoch fee of every in-scope fill;
+      * NET_CASH_FLOWS 0: the paper ledger has no deposit or withdrawal kind
+                       (migration 171: one INITIAL_FUNDING of exactly
+                       $500,000, before the epoch);
+      * ENDING_CAPITAL from the LEDGER, independently: ledger cash re-based
+                       to the epoch (bettor_paper_epoch cash_by_ledger) plus
+                       the open value. Its gap to the left side is exactly
+                       the post-epoch ledger cash no position explains.
+    And the bridge: ENDING_CAPITAL + every itemised difference = LEDGER
+    EQUITY (ledger cash + every open position at this view's value), the
+    held-outside positions and the pre-management history among them."""
+    flows = ZERO
+    lhs = opening + flows + realized + unrealized - fees
+    gap = lhs - (cash_by_ledger + open_value)
+    ending = cash_by_ledger + open_value
+    bsum = sum((amt for _i, amt, _pk in bridge), ZERO)
+    bridge_gap = ending + bsum - ledger_equity
+    marks_ok = all(m["verified"] for m in marks)
+    balanced = gap == 0 and bridge_gap == 0
+    if not balanced:
+        verdict = RF_NOT_BALANCED
+    elif not marks_ok:
+        verdict = RF_UNVERIFIED_MARKS
+    elif held_outside:
+        verdict = RF_EXACT_HELD_OUTSIDE
+    else:
+        verdict = RF_EXACT
+    legs = {"opening_capital": opening, "net_cash_flows": flows,
+            "realized_pnl": realized, "unrealized_pnl": unrealized,
+            "all_in_fees": fees, "ending_capital": ending}
+    cents = {k: rf_cents(v) for k, v in legs.items()}
+    c = {k: Decimal(v) for k, v in cents.items()}
+    cents_gap = (c["opening_capital"] + c["net_cash_flows"]
+                 + c["realized_pnl"] + c["unrealized_pnl"]
+                 - c["all_in_fees"] - c["ending_capital"])
+    return {
+        "version": RF_VERSION, "rule": RF_RULE,
+        "precision": ("exact Decimal at the ledger's 6 decimal places; the "
+                      "cents view rounds each leg half-up and states its own "
+                      "rounding residual"),
+        **{k: _fx(v) for k, v in legs.items()},
+        "gap": _fx(gap), "balanced": balanced,
+        "cents": dict(cents, rounding_residual=_fx(cents_gap)),
+        "bridge_to_ledger": {
+            "rule": "ENDING_CAPITAL + itemised differences = LEDGER_EQUITY",
+            "items": [{"item": i, "amount": _fx(amt),
+                       **({"position_key": pk} if pk else {})}
+                      for i, amt, pk in bridge],
+            "items_total": _fx(bsum), "ledger_equity": _fx(ledger_equity),
+            "gap": _fx(bridge_gap)},
+        "open_positions": len(marks),
+        "open_position_marks_verified": marks_ok,
+        "open_marks": marks,
+        "held_outside_positions": held_outside,
+        "held_outside_open": held_outside_open,
+        "positions": positions,
+        "verdict": verdict,
+        "what_this_is": ("a read model over the append-only paper ledger; "
+                         "it moves no cash, re-bases nothing and feeds no "
+                         "risk control")}
+
+
+# ═════════════════════════════════════════════════════════════════════
 # PURE: the management book from ledger-timed events
 # ═════════════════════════════════════════════════════════════════════
 
@@ -294,7 +414,8 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
                     settlement_entries: list, settled_qty: dict,
                     epoch_marks: dict, now_marks: dict, ledger_epoch: dict,
                     ledger_now: dict, meta: dict | None = None,
-                    hwm_points: list | None = None) -> dict:
+                    hwm_points: list | None = None,
+                    itemise: bool = False) -> dict:
     """`fills`: [{position_key, direction, qty, gross_usd, fee_usd, at,
     seq?}] with `at` = the ledger commit time of the FILL / SALE entry (and
     `seq` its ledger sequence when read from the ledger).
@@ -308,7 +429,9 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
     (`funding_usd`: the INITIAL_FUNDING sum; absent = migration 171's fixed
     amount).
     `hwm_points`: [(at, ledger_equity_usd[, last_sequence])] equity
-    snapshots after the epoch with every position marked."""
+    snapshots after the epoch with every position marked.
+    `itemise`: the roll-forward carries every position's exact legs (the
+    receipt tool); off, it carries their count (the live API payload)."""
     E = float(epoch_at)
     opening = D(opening_equity)
     meta = meta or {}
@@ -321,7 +444,9 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             "buy_cost_post": ZERO, "proceeds_post": ZERO, "fees_post": ZERO,
             "settle_at": None, "payout_post": ZERO, "post_settle_cash": ZERO,
             "post_cash": ZERO, "pre_cash": ZERO, "flows": [],
-            "last_post_at": None})
+            "last_post_at": None,
+            # the roll-forward's GROSS legs (fees apart), post-epoch
+            "buy_gross_post": ZERO, "sale_gross_post": ZERO})
 
     def flow(p, at, seq, cash):
         p["flows"].append((float(at), seq, D(cash)))
@@ -338,6 +463,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
                 p["bought_post"] += qty
                 p["buy_cost_post"] += gross + fee
                 p["post_cash"] -= gross + fee
+                p["buy_gross_post"] += gross
             else:
                 p["bought_pre"] += qty
                 p["buy_cost_pre"] += gross + fee
@@ -346,6 +472,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
                 p["sold_post"] += qty
                 p["proceeds_post"] += gross - fee
                 p["post_cash"] += gross - fee
+                p["sale_gross_post"] += gross
             else:
                 p["sold_pre"] += qty
         if post:
@@ -359,6 +486,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             P(x["position_key"])["settle_at"] = float(x["at"])
     hist_corrections = ZERO
     hist_items, hist_flows = [], []
+    hist_exact: list = []            # each hist_items amount, exact
     for x in settlement_entries:
         p = P(x["position_key"])
         if float(x["at"]) < E:
@@ -369,6 +497,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             hist_corrections += D(x["cash_usd"])
             hist_flows.append((float(x["at"]), x.get("seq"),
                                D(x["cash_usd"])))
+            hist_exact.append(D(x["cash_usd"]))
             hist_items.append({
                 "item": I_HIST_CORRECTION, "position_key": x["position_key"],
                 "market": (meta.get(x["position_key"]) or {}).get(
@@ -396,6 +525,11 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
     unverified_value = ZERO
     u_value: dict = {}
     held_flows = list(hist_flows)
+    # THE EXACT ROLL-FORWARD (rollforward below): gross realized, unrealized
+    # on the open marks, all-in fees and the open value, in Decimal
+    rf_r = rf_u = rf_f = rf_v = rf_fee_gap = ZERO
+    rf_marks: list = []          # in-scope open positions and their marks
+    rf_rows: dict = {}
     for pk, p in sorted(pos.items()):
         sq = D(settled_qty.get(pk))
         settled_pre = p["settle_at"] is not None and p["settle_at"] < E
@@ -411,6 +545,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             n_pre_flat += 1
             if p["post_cash"] != 0:
                 held_flows.extend(p["flows"])
+                hist_exact.append(p["post_cash"])
                 hist_items.append({
                     "item": I_HIST_POST_CASH, "position_key": pk,
                     "market": m.get("us_market_slug"),
@@ -509,6 +644,38 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
                 unreal += u
                 state = "STALE_MARK" if nm.get("stale") else "MARKED"
                 n_stale += 1 if nm.get("stale") else 0
+        # THE EXACT ROLL-FORWARD LEGS, gross of fees (fees apart). The cost
+        # of the open remainder is the gross basis pro rata, quantized to the
+        # ledger's 6 places; the closed part takes the exact remainder, so
+        # realized + unrealized = proceeds + settlement cash + open value -
+        # gross basis to the micro-dollar.
+        basis_g = carry + p["buy_gross_post"]
+        open_basis_g = (rf_q6(basis_g * open_now / basis_qty)
+                        if open_now > EPS and basis_qty > 0 else ZERO)
+        r_g = (p["sale_gross_post"] + p["post_settle_cash"]
+               - (basis_g - open_basis_g))
+        if open_now > EPS:
+            v_g = mv if mv is not None else open_basis_g
+            u_g = (mv - open_basis_g) if mv is not None else ZERO
+            if mv is None:
+                rf_fee_gap += avg * open_now - open_basis_g
+            rf_marks.append({
+                "position_key": pk, "open_qty": str(open_now),
+                "mark_state": state,
+                "mark_price": None if mv is None else str(D(nm["price"])),
+                "mark_observed_at": nm.get("observed_at"),
+                "mark_source": nm.get("source"),
+                "verified": state == "MARKED"})
+        else:
+            v_g = u_g = ZERO
+        rf_r += r_g
+        rf_u += u_g
+        rf_f += p["fees_post"]
+        rf_v += v_g
+        rf_rows[pk] = {"kind": kind, "realized_gross_usd": str(r_g),
+                       "unrealized_usd": str(u_g),
+                       "all_in_fees_usd": str(p["fees_post"]),
+                       "open_value_usd": str(v_g)}
         rows.append({
             "position_key": pk, "kind": kind,
             "market": m.get("us_market_slug"), "side": m.get("holding_side"),
@@ -643,6 +810,27 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             "reset re-based away, stated, never hidden"),
         "forces_equity_to_opening": False}
 
+    rollforward = _rollforward(
+        opening=opening, realized=rf_r, unrealized=rf_u, fees=rf_f,
+        open_value=rf_v, cash_by_ledger=cash_by_ledger,
+        bridge=([(I_FUNDING, funding - opening, None),
+                 (I_PRE_REALIZED, pre_flat, None),
+                 (I_PRE_CARRIED, pre_carried, None)]
+                + [(I_UNVERIFIED, pos[u["position_key"]]["pre_cash"]
+                    + pos[u["position_key"]]["post_cash"]
+                    + u_value[u["position_key"]], u["position_key"])
+                   for u in unverified]
+                + [(h["item"], amt, h.get("position_key"))
+                   for h, amt in zip(hist_items, hist_exact)]
+                + [(I_UNATTRIBUTED_PRE, pre_unattributed, None)]
+                + ([(I_UNMARKED_BUY_FEES, rf_fee_gap, None)]
+                   if rf_fee_gap != 0 else [])),
+        ledger_equity=cash_now_ledger + in_scope_value + unverified_value,
+        marks=rf_marks, held_outside=len(unverified),
+        held_outside_open=sum(1 for u in unverified if not u["closed"]),
+        positions=(rf_rows if itemise
+                   else {"count": len(rf_rows), "itemised": False}))
+
     # ── HIGH-WATER MARK ────────────────────────────────────────────────
     # A snapshot's equity is the LEDGER's (cash + every open mark). Once no
     # held-outside position is open, management equity at that snapshot is
@@ -772,6 +960,7 @@ def management_book(*, epoch_at: float, opening_equity, fills: list,
             "ledger_cash_now_usd": f2(cash_now_ledger),
             "post_epoch_cash_held_outside_usd": f2(excluded_post_cash)},
         "reconciliation": reconciliation,
+        "rollforward": rollforward,
         "unverified_positions": unverified,
         "historical_positions": len(historical_keys),
         "rows": rows,
@@ -921,7 +1110,8 @@ async def epoch_marks(conn, slugs_sides: dict, *, epoch_at: float,
 
 async def read(conn, account_id: str, *, bal: dict, now: float,
                epoch_at: float = EPOCH_START,
-               opening_equity=OPENING_EQUITY_USD) -> dict:
+               opening_equity=OPENING_EQUITY_USD,
+               itemise: bool = False) -> dict:
     """The management book for `account_id` from the ledger tables, with
     current marks taken from `bal` (bettor_paper_ledger.balances)."""
     if now < epoch_at:
@@ -982,7 +1172,7 @@ async def read(conn, account_id: str, *, bal: dict, now: float,
                       "funding_usd": s["funding"]},
         ledger_now={"cash_usd": s["cash_now"],
                     "reserved_usd": s["reserved_now"]},
-        meta=meta, hwm_points=points)
+        meta=meta, hwm_points=points, itemise=itemise)
     rc = book["reconciliation"]
     ok = (book["identity"]["holds"] and book["opening"]["identity_holds"]
           and book["ledger_reconciliation"]["reconciles"]

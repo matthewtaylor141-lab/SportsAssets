@@ -2283,6 +2283,26 @@ SNAPSHOT_REFRESH_STREAM = {
 for _k, _v in SNAPSHOT_REFRESH_STREAM.items():
     TABLE.setdefault(_k, _v)
 
+#: (RC6 identity lane) ACTIVE POSITION TRUTH. The mirror shadow planned on a
+#: reading that is not the venue's (the venue walk's credential class -- a
+#: funded PMUS retail Ed25519 key -- is not in the slot: an owner credential
+#: gap surfaced as a capability gap, KALSHI_KEY_*'s rows are the precedent);
+#: an ACTIVE position of our own whose market identity is unknown (the
+#: analytics persist's dead-letter census: a mapping gap); and a reconciler
+#: walk that stopped short of the previous run (fills no run swept: the
+#: sweep's own plumbing). SOFTWARE, never EXTERNAL.
+IDENTITY_TRUTH_STREAM = {
+    "MIRROR_SHADOW_POSITIONS_NOT_VENUE_CONFIRMED_CREDENTIAL_CLASS_UNAVAILABLE": (
+        S, CAP, "INGESTION"),
+    "OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY": (S, MAP, "INGESTION"),
+    "RECONCILER_WALK_DID_NOT_REACH_THE_PREVIOUS_RUN": (S, FRESH, "INGESTION"),
+    # a mirror-shadow tick that made no positions reading before ANY reading
+    # in its process (backoff / switched off): no evidence -- like no source
+    "MIRROR_SHADOW_NO_POSITIONS_READING_IN_THIS_PROCESS": (S, DATA, "INGESTION"),
+}
+for _k, _v in IDENTITY_TRUTH_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
 #: although each says the software lacks or could not read something (an
 #: account id not supplied, exposure that could not be measured or was not

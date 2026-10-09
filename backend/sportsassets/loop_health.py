@@ -401,6 +401,8 @@ def _w(name, cadence_s, *sources, note=None, armed=None,
 # walk ran and found misses), 'idle', 'high' (memory: measured, and high),
 # 'off' (retention told not to delete), 'no_universe', 'no_focus_set',
 # 'no_eligible_population', 'already_sealed' are passes that ran.
+# 'coverage_gap' (reconciler, RC6 identity lane) is a pass that ran but
+# left fills that no run swept (a named refusal on the beat): NOT a success.
 WORKERS_LOOPS = (
     _w("poller", None, _hb("poller", "ok", "idle")),
     _w("chain_listener", None, _hb("chain_listener", "ok")),
@@ -821,7 +823,9 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
     lh_rows = lh
     lh = {(r["loop_name"], r["process"]): dict(r) for r in (lh or [])}
     sb_rows = await _try(conn, lambda: conn.fetch(
-        "SELECT service, status, beat_at FROM service_heartbeats"),
+        "SELECT service, status, beat_at, detail ->> 'refusal' AS refusal, "
+        "       detail ->> 'owner_blocker' AS owner_blocker "
+        "  FROM service_heartbeats"),
         missing, "service_heartbeats")
     sb = {r["service"]: dict(r) for r in (sb_rows or [])}
     keys = sorted({s[1] for spec in INVENTORY for s in spec["sources"]
@@ -915,8 +919,18 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
                     else:
                         # A FAILED PASS IS NOT A SUCCESS: the writer said so
                         # in its own status (or used one its vocabulary
-                        # does not name, which is not trusted either)
-                        _error(facts, at, "NON_SUCCESS_BEAT:%s" % status)
+                        # does not name, which is not trusted either). A beat
+                        # that NAMES its refusal (and the owner blocker, when
+                        # only the owner can clear it) carries both into the
+                        # error text, so the loop reads as degraded BY NAME,
+                        # never as a nameless failure (RC6 identity lane:
+                        # mirror_shadow on a ledger-derived reading)
+                        why = "NON_SUCCESS_BEAT:%s" % status
+                        if row.get("refusal"):
+                            why += ":%s" % row["refusal"]
+                        if row.get("owner_blocker"):
+                            why += ":OWNER_BLOCKER=%s" % row["owner_blocker"]
+                        _error(facts, at, why)
                 else:
                     facts["sources_missing"].append(
                         "service_heartbeats:%s:NO_ROW" % src[1])
