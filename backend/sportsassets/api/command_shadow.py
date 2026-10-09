@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 
 from .. import shadow as sh
 from .. import shadow_bettor_accounting as acct
+from .. import shadow_bettor_pipeline as pipe
 from .. import shadow_bettor_sizing as sizing
 from .. import shadow_lanes as lanes
 from .. import shadow_policy as pol
@@ -243,26 +244,8 @@ async def _bettor_counts(pool) -> dict:
                          for b in blockers]}
 
 
-_PIPELINE_SQL = """
-    SELECT
-      (SELECT count(*) FROM bettor_opportunities)             AS opportunities,
-      (SELECT max(observed_at) FROM bettor_opportunities)     AS last_opportunity,
-      (SELECT count(*) FROM shadow_decisions
-        WHERE lane = 'BETTOR_EV_SHADOW')                       AS decisions,
-      (SELECT max(created_at) FROM shadow_decisions
-        WHERE lane = 'BETTOR_EV_SHADOW')                       AS last_decision,
-      (SELECT count(*) FROM bettor_orphan_opportunities)       AS orphans,
-      (SELECT min(observed_at) FROM bettor_orphan_opportunities)
-                                                               AS oldest_orphan,
-      (SELECT count(*) FROM bettor_decision_failures)          AS failures,
-      (SELECT max(failed_at) FROM bettor_decision_failures)    AS last_failure,
-      (SELECT error_text FROM bettor_decision_failures
-        ORDER BY failed_at DESC LIMIT 1)                       AS last_failure_text
-"""
-
-
 async def _pipeline(pool) -> dict:
-    """The decision pipeline's own verdict, from rows.
+    """The decision pipeline's own verdict, from rows -- about NOW.
 
     "Do not show LIVE / HEALTHY merely because opportunity collection
     works." On 2026-09-19 opportunity collection worked perfectly while
@@ -271,9 +254,19 @@ async def _pipeline(pool) -> dict:
     DEGRADED, full stop, and the numbers that produced the verdict
     travel with it so an operator never has to compare two counters by
     eye to discover an outage.
+
+    OVER AN EXPLICIT WINDOW (shadow_bettor_pipeline.PIPELINE_WINDOW_S,
+    24 h, named on the payload as `stateWindow`). This counted every
+    orphan since migration 073 and so could never read anything but
+    DEGRADED again: production 2026-10-08 showed 75,107 orphans, all
+    observed before 05:17:18Z that morning, beside a pipeline deciding
+    217 of 217 new opportunities. The top-level counters below are the
+    WINDOW's -- the ones that set the state -- and every all-time count,
+    the incident labels and their windows travel in `allTime` and
+    `history` in this same payload, labelled as not setting the state.
     """
     try:
-        row = await pool.fetchrow(_PIPELINE_SQL)
+        got = await pipe.read(pool, lane=lanes.BETTOR_EV_SHADOW)
     except Exception as exc:                                   # noqa: BLE001
         return {"state": "STORE_NOT_READY",
                 "detail": "%s — migration 073 may not have applied yet"
@@ -281,42 +274,54 @@ async def _pipeline(pool) -> dict:
                 "orphanOpportunities": None, "decisionWriteFailures": None,
                 "lastSuccessfulDecision": None, "lastFailure": None,
                 "opportunitiesObserved": None, "decisionsRecorded": None,
-                "opportunityToDecisionSuccessRate": None}
-    opportunities = int(row["opportunities"] or 0)
-    decisions = int(row["decisions"] or 0)
-    orphans = int(row["orphans"] or 0)
-    failures = int(row["failures"] or 0)
+                "opportunityToDecisionSuccessRate": None,
+                "stateWindow": None, "allTime": None, "history": None}
+    w = got["window"]
+    decided = w["opportunitiesDecided"]
+    orphans = w["orphanOpportunities"]
+    failures = w["decisionWriteFailures"]
     if orphans or failures:
         state = "DEGRADED"
-    elif decisions:
+    elif decided:
         state = "LIVE"
     else:
-        # Not an outage and not health either: nothing has been asked of
-        # the writer yet, and saying LIVE here would be the same claim
-        # that hid the incident.
+        # Not an outage and not health either: nothing in the window has
+        # been asked of the writer yet, and saying LIVE here would be the
+        # same claim that hid the incident.
         state = "LISTENING"
     return {
         "state": state,
-        "opportunitiesObserved": opportunities,
-        "decisionsRecorded": decisions,
+        # WHICH "NOW" THE STATE MEANS, on the payload, never inferred.
+        "stateWindow": {k: w[k] for k in ("basis", "seconds", "since",
+                                          "until", "rule")},
+        "countsScope": "WINDOW",
+        "opportunitiesObserved": w["opportunitiesObserved"],
+        "decisionsRecorded": w["decisionsRecorded"],
         "orphanOpportunities": orphans,
-        "oldestOrphanAt": _iso(row["oldest_orphan"]),
+        "oldestOrphanAt": w["oldestOrphanAt"],
+        "newestOrphanAt": w["newestOrphanAt"],
         "decisionWriteFailures": failures,
-        "lastSuccessfulDecision": _iso(row["last_decision"]),
-        "lastOpportunityAt": _iso(row["last_opportunity"]),
-        "lastFailure": _iso(row["last_failure"]),
-        "lastFailureText": row["last_failure_text"] or NOT_IDENTIFIED,
-        # A RATE NEEDS A DENOMINATOR THAT MEANS SOMETHING. No target is
-        # declared here: the directive says not to invent one after
-        # seeing the result, so the number is reported and judged by a
-        # human.
-        "opportunityToDecisionSuccessRate": (
-            None if not opportunities
-            else round(decisions / opportunities, 4)),
+        # POINT-IN-TIME FACTS, not window counts: when the last decision,
+        # the last opportunity and the last failure EVER happened. The last
+        # failure keeps its instant, so a 2026-09-19 failure reads as one.
+        "lastSuccessfulDecision": got["lastSuccessfulDecision"],
+        "lastOpportunityAt": got["lastOpportunityAt"],
+        "lastFailure": got["allTime"]["lastFailure"],
+        "lastFailureText": got["lastFailureText"] or NOT_IDENTIFIED,
+        # A RATE NEEDS A DENOMINATOR THAT MEANS SOMETHING: the window's
+        # SETTLED opportunities (decided + orphaned; one still inside its
+        # allowance is neither). No target is declared here: the
+        # directive says not to invent one after seeing the result, so
+        # the number is reported and judged by a human.
+        "opportunityToDecisionSuccessRate": w[
+            "opportunityToDecisionSuccessRate"],
+        # THE HISTORY, KEPT AND LABELLED: every all-time count (the old
+        # state's inputs, unchanged) and each gap by the label it was
+        # given at the time, with its observed window.
+        "allTime": got["allTime"],
+        "history": got["history"],
         "affectsBettor": True,
-        "detail": ("every opportunity must end in a decision or a named "
-                   "failure; an orphan is an opportunity past its "
-                   "180s allowance with neither"),
+        "detail": pipe.detail(got),
     }
 
 

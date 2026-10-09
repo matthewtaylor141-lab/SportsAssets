@@ -30,6 +30,7 @@ import logging
 from datetime import datetime, timezone
 
 from . import shadow_bettor as bettor
+from . import shadow_bettor_pipeline as pipe
 from . import shadow_lanes as lanes
 from . import shadow_store as store
 
@@ -149,7 +150,8 @@ async def pipeline_health(pool) -> dict:
     "Do not show LIVE / HEALTHY merely because opportunity collection
     works." So DEGRADED is the answer whenever an orphan exists or a
     failure has been recorded recently, and the numbers that produced
-    that verdict travel with it.
+    that verdict travel with it. "Recently" is now a stated window
+    (shadow_bettor_pipeline.PIPELINE_WINDOW_S), carried as `window`.
     """
     row = await pool.fetchrow(
         """
@@ -189,15 +191,30 @@ async def pipeline_health(pool) -> dict:
         value = h.get(field)
         if isinstance(value, datetime):
             h[field] = value.astimezone(timezone.utc).isoformat()
-    # A RATE IS ONLY MEANINGFUL AGAINST A SETTLED DENOMINATOR. In-flight
-    # opportunities are excluded, because counting them as misses would
-    # make a healthy pipeline look like a failing one on every tick.
+    # THE FLAT COUNTS ABOVE ARE ALL-TIME, said on the beat itself. They
+    # keep their keys and their meaning so every earlier readback of this
+    # heartbeat still parses; they no longer set the state.
+    h["countsScope"] = "ALL_TIME"
+    # The all-time rate keeps its old formula (in-flight opportunities in
+    # the denominator) so the history stays comparable. The window's rate
+    # below is the one over SETTLED opportunities: counting in-flight ones
+    # as misses would make a healthy pipeline look like a failing one on
+    # every tick.
     settled = (h["opportunities"] or 0)
     h["successRate"] = (None if not settled
                         else round((h["decisions"] or 0) / settled, 4))
-    h["state"] = ("DEGRADED" if (h["orphans"] or h["failures"])
-                  else "LIVE" if h["decisions"]
-                  else "LISTENING")
+    # THE STATE IS THE WINDOW'S (shadow_bettor_pipeline: 24 h rolling),
+    # the same rows and the same rule COMMAND reads. All-time, nothing
+    # could ever turn this LIVE again -- production 2026-10-08 beat
+    # DEGRADED on 75,107 orphans that all predated 05:17:18Z while the
+    # decision loop wrote 10 of 10 every tick.
+    win = await pipe.read_window(pool, lane=lanes.BETTOR_EV_SHADOW)
+    h["window"] = {k: win[k] for k in (
+        "basis", "seconds", "since", "until", "opportunitiesObserved",
+        "opportunitiesDecided", "orphanOpportunities", "newestOrphanAt",
+        "decisionWriteFailures", "lastFailure",
+        "opportunityToDecisionSuccessRate")}
+    h["state"] = pipe.state_of(win)
     return h
 
 
