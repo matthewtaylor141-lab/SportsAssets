@@ -99,6 +99,10 @@ def test_command_renders_without_frames_suite_passes():
     _node_suite("hq-render-without-frames.test.cjs", 3)
 
 
+def test_agent_talk_suite_passes():
+    _node_suite("agent-talk.test.cjs", 6)
+
+
 # --- the matrix covers every page on every device ---------------------------
 
 
@@ -286,3 +290,10 @@ def test_a_phone_on_its_side_gets_the_pocket_command_center():
     # the docked Trader launcher in its phone size there (command-polish.css at 760 px)
     assert "body.hq .bt-trader-launch:not(.bt-trader-launch--nav) span{display:none;}" in lp
     assert ".bt-trader-launch{right:12px;padding:11px 14px;z-index:45}" in read(COMMAND / "command-polish.css")
+
+
+def test_talk_lands_on_the_agents_framed_page_below_the_bars():
+    css = read(COMMAND / "device-fit.css")
+    assert "body.bt-hq2 #page{scroll-margin-top:calc(72px + var(--ops-hdr-h,0px) + var(--sa-t));}" in css
+    hq6 = read(COMMAND / "hq6-complete.js")
+    assert "if(workTab&&!workTab.hidden&&tabs&&!tabs.hidden)setTimeout(()=>workTab.click(),30);" in hq6

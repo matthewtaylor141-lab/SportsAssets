@@ -229,6 +229,10 @@
   body.bt-hq2.pr-body .pr-bar{top:64px;}
   body.bt-hq2.pr-body.ops-hdr-on .pr-bar{top:calc(64px + var(--ops-hdr-h));}
 }
+/* Talk brings the agent's framed page into view below the fixed page bar and
+   strip, not under them (Archer, iPad portrait: the frame's top edge under
+   the bar after Talk) */
+body.bt-hq2 #page{scroll-margin-top:calc(72px + var(--ops-hdr-h,0px) + var(--sa-t));}
 /* the agent layout's own top padding cleared the page bar the navigation now
    clears (76 px; 70 px on a phone) */
 body.bt-hq2>nav[aria-label="AI agents"]~.hq6-agent-layout{padding-top:12px;}

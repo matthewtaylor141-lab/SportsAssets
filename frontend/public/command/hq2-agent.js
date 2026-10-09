@@ -44,15 +44,31 @@
     if(exp)exp.textContent=j.experience&&j.experience.events!=null?j.experience.events+' resolved events':'UNAVAILABLE';
     if(v&&j.voice&&j.voice.display_name)v.textContent=j.voice.display_name;
   }).catch(function(){});
-  document.getElementById('bt-agent2-talk').addEventListener('click',function(){
-    var desk=document.getElementById('tab-desk');if(desk){desk.click();setTimeout(function(){document.getElementById('page')&&document.getElementById('page').scrollIntoView({behavior:'smooth'});},80);}
-    else{var frame=document.getElementById('page');if(frame)frame.scrollIntoView({behavior:'smooth'});}
-  });
+  // Talk opens the agent's conversation: the classic desk tab where the page
+  // has the two tabs (derek, xavier, audrey, karen), or the framed page
+  // (archer, scout: their tabs are never shown, and clicking the hidden desk
+  // tab hid the live floor strip above the page). Allie has no conversation
+  // desk (agent.html CLASSIC): Talk opened one anyway -- a GET of a page no
+  // API serves (404) and "NOT YET RELEASED" -- so her page draws no Talk.
+  (function(){
+    var talk=document.getElementById('bt-agent2-talk'),desk=document.getElementById('tab-desk'),tabs=document.getElementById('ws-tabs'),frame=document.getElementById('page');
+    var tabbed=!!(desk&&!desk.hidden&&tabs&&!tabs.hidden),framed=!!(frame&&(!tabs||tabs.hidden)&&!(desk&&desk.hidden));
+    if(!tabbed&&!framed){talk.hidden=true;return;}
+    talk.addEventListener('click',function(){
+      if(tabbed){desk.click();setTimeout(function(){frame&&frame.scrollIntoView({behavior:'smooth'});},80);}
+      else frame.scrollIntoView({behavior:'smooth'});
+    });
+  })();
   // Same-origin iframe: make legacy/classic desk inherit the dark company shell instead of the cream break in visual language.
   var frame=document.getElementById('page');
   if(frame)frame.addEventListener('load',function(){try{
     var d=frame.contentDocument;if(!d)return;d.documentElement.style.background='#030914';d.body&&Object.assign(d.body.style,{background:'#07111f',color:'#e8eef6'});
-    var style=d.createElement('style');style.textContent='body{background:#07111f!important;color:#e8eef6!important} body *{border-color:rgba(151,180,214,.17)!important}';
+    var style=d.createElement('style');style.textContent='body{background:#07111f!important;color:#e8eef6!important} body *{border-color:rgba(151,180,214,.17)!important}'+
+      // on touch the framed page's controls (the API renders it) reach 44 px
+      // like the shell's own: its header brand (18 px), Trace / Refresh
+      // (31 px), its navigation links and buttons -- only raised, never
+      // shrunk or hidden (device matrix, iPad landscape Archer / Scout)
+      '@media (pointer:coarse){.top .brand,nav a{display:inline-flex;align-items:center;min-height:44px}button,select,summary,input[type=button],input[type=submit]{min-height:44px}}';
     d.head.appendChild(style);
   }catch(e){}});
 })();

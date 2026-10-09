@@ -119,8 +119,12 @@ function installAgent(){
   if(ws)work.appendChild(ws);if(page)work.appendChild(page);if(state)work.appendChild(state);
 
   var kicker=hero.querySelector('.bt-kicker');if(kicker)kicker.textContent='BETTOR · DIGITAL EMPLOYEE · '+(window.BTFloor&&BTFloor.BY_SLUG[slug]?BTFloor.BY_SLUG[slug].short:'');
-  // With the 3D employee always visible, work is the productive default.
-  var workTab=document.getElementById('tab-ws');if(workTab&&!workTab.hidden)setTimeout(()=>workTab.click(),30);
+  // With the 3D employee always visible, work is the productive default --
+  // where the page has the two tabs. Archer's and Scout's pages never show
+  // them (agent.html: their own page framed under the live strip): clicking
+  // their hidden Work tab hid that page (agent.html select('ws') hides the
+  // frame), so their page showed only the strip.
+  var workTab=document.getElementById('tab-ws');if(workTab&&!workTab.hidden&&tabs&&!tabs.hidden)setTimeout(()=>workTab.click(),30);
 
   function render(d){
     var a=d&&d.agent?d.agent:(d&&d.slug?d:null);if(!a)return;
