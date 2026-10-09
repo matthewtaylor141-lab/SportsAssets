@@ -333,19 +333,30 @@ def latency_report(mgr, *, now: float) -> dict:
     return rep
 
 
+#: the venue league code of an event slug, in SQL: populate.league_of's
+#: grammar (a market-kind prefix -> the next segment, else the first)
+_LEAGUE_SQL = ("(CASE WHEN lower(split_part(coalesce(event_slug,''),'-',1)) "
+               "        = ANY($4::text[]) "
+               "      THEN lower(split_part(coalesce(event_slug,''),'-',2)) "
+               "      ELSE lower(split_part(coalesce(event_slug,''),'-',1)) "
+               " END)")
+
+
 async def venue_active_count(conn, *, now: float) -> int:
     """Active SPORTS contracts the venue catalogue lists (non-sports leagues
-    excluded by name)."""
+    excluded by name). (RC6) The league is read by populate.league_of's
+    grammar: the venue's event slug carries its league FIRST, so the second
+    segment this read before was a team code and excluded nothing."""
     try:
         return int(await conn.fetchval(
             "SELECT count(DISTINCT market_slug) FROM us_premap "
             " WHERE market_slug IS NOT NULL "
             "   AND listing_state = ANY($1::text[]) "
             "   AND updated_at > to_timestamp($2) "
-            "   AND NOT (lower(split_part(coalesce(event_slug,''),'-',2)) "
-            "            = ANY($3::text[]))",
+            "   AND NOT (" + _LEAGUE_SQL + " = ANY($3::text[]))",
             list(POP.ACTIVE_LISTING_STATES), now - POP.ACTIVE_HORIZON_S,
-            sorted(POP.O.NON_SPORTS_LEAGUES)) or 0)
+            sorted(POP.O.NON_SPORTS_LEAGUES),
+            sorted(POP.MARKET_KIND_PREFIXES)) or 0)
     except Exception:                                           # noqa: BLE001
         return -1
 

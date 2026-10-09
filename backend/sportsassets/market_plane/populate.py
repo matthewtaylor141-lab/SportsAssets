@@ -221,12 +221,40 @@ def _epoch(v):
         return None
 
 
+#: THE VENUE'S MARKET-KIND PREFIXES (copy_sports._KINDS, pinned equal by
+#: tests/test_rc6_coverage_waterfall.py): a MARKET slug carries one
+#: (`aec-nfl-ind-was-2026-10-04`, `asc-...`, `tsc-...`, `astatc-...`); the
+#: venue's EVENT slug does not (`nfl-ind-was-2026-10-04`).
+MARKET_KIND_PREFIXES = frozenset({"atc", "aec", "asc", "tsc", "astatc", "cpc"})
+
+
 def league_of(event_slug, team_league=None) -> str | None:
-    """The venue's league code: the event slug's second token
-    (`aec-mlb-nyy-bos-...` -> mlb), else the catalogue's team league."""
-    parts = str(event_slug or "").split("-")
-    if len(parts) >= 2 and parts[1]:
-        return parts[1].lower()
+    """The venue's league code, read off the slug by the venue's own grammar:
+    a MARKET slug's segment after its kind prefix (`aec-mlb-nyy-bos-...` ->
+    mlb), an EVENT slug's FIRST segment (`nfl-ind-was-2026-10-04` -> nfl,
+    `bun-2027-05-22-relegation` -> bun, `btc-range-hr-...` -> btc: the rule
+    venue_catalogue.league_of and copy_sports.league_of already state), else
+    the catalogue's team league.
+
+    RC6 (lane D2). This read the SECOND segment of every slug. us_premap's
+    event_slug is the venue's EVENT slug, which carries no kind prefix
+    (research-sql run 37871119335, W8: every one of the top 60 first segments
+    of the 74,288 active PMUS event ids is a league code -- cfb 24,024, nfl
+    15,810, nhl 5,101, ... -- and the second segment is a team code or a
+    futures subject), so the registry's `competition` was a TEAM code for
+    every listed game (pm-acceptance 37836393458 settlement breakdown keys
+    POLYMARKET_US|football|buf|TOTAL, ...|hou|MARGIN, ...), a futures
+    subject for every outright ('2027' 1,347, 'wins' 621, 'deespa' 524, ...:
+    10,846 outrights left SPORT_NOT_NORMALIZED because LEAGUE_SPORT was asked
+    about '2027'), and 'range' / 'above' for 1,343 BTC price markets that
+    NON_SPORTS_LEAGUES names for exclusion by their 'btc' code."""
+    parts = [p for p in str(event_slug or "").strip().lower().split("-") if p]
+    if parts:
+        if parts[0] in MARKET_KIND_PREFIXES:
+            if len(parts) >= 2:
+                return parts[1]
+        else:
+            return parts[0]
     return str(team_league).lower() if team_league else None
 
 
