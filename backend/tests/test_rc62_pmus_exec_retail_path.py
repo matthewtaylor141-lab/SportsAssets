@@ -16,7 +16,9 @@ asserts the FIXED behaviour and fails on the base (rc6/int-62 @ 14170049):
       lock in the claim; a non-terminal order or held contracts refuse by
       name), and the account's open + held notional within
       execmirror_control's aggregate cap (NULL -> max_order_usd, fail closed
-      small) (probe A7 inverted);
+      small), read under an account-wide lock taken after the market's so
+      two markets' claims at once never pass it on one reading (probe A7
+      inverted; review: two dispatches on two markets);
   §3  cancellation: a cancel the venue did not accept is never recorded as
       requested-and-accepted, and a CANCEL_REQUESTED order still working at
       the venue is re-sent with bounded attempts and back-off, each an event
@@ -30,7 +32,10 @@ asserts the FIXED behaviour and fails on the base (rc6/int-62 @ 14170049):
       (the control row share-locked), re-checked immediately before the
       send; emergency_stop is done only when the venue's cancel-all
       succeeded and no SUBMITTING / UNKNOWN / OPEN / PARTIALLY_FILLED row
-      remains, else STOP_INCOMPLETE and retried (probes A2, A3, A5 inverted);
+      remains, nor a CANCEL_REQUESTED one whose venue record, read again after
+      the cancel-all, does not say the order ended (its cancel re-sent on the
+      bounded back-off meanwhile), else STOP_INCOMPLETE and retried (probes
+      A2, A3, A5 inverted; review: a 503 cancel beside a 2xx cancel-all);
   §6  THE WIRE: a SUCCESSFUL order on the activation path -- ActualLane._run
       against the REAL execmirror.Venue built on the pinned polymarket_us
       1.0.2 client over httpx.MockTransport, a test-only LiveAuthorization
@@ -40,7 +45,8 @@ asserts the FIXED behaviour and fails on the base (rc6/int-62 @ 14170049):
       exit SELL admitted under §1, reconciliation against a mocked
       /v1/portfolio/positions -- and the SAME flow in SHADOW refusing every
       write with nothing on the wire;
-  §7  the ~$1 pilot's sizing at scale 1,000 and max_order_usd 1.00.
+  §7  the ~$1 pilot's sizing at scale 1,000 and max_order_usd 1.00 (a size
+      below one whole contract refused, never enlarged -- review: 0.6 -> 1).
 
 THE MODE NEVER CHANGES OUTSIDE A TEST. SMALL_LIVE_MODE stays SHADOW in
 live_authorization and live_parity (pinned below), migration 225's CHECK
@@ -576,6 +582,91 @@ async def test_with_no_aggregate_cap_set_the_cap_is_the_per_order_cap(monkeypatc
         await conn.close()
 
 
+@pg
+async def test_two_dispatches_on_two_markets_at_once_never_exceed_the_aggregate_cap(
+        monkeypatch):
+    """REVIEW (rc6.2 pmus-exec, item 2): the claim took only its market's
+    lock before reading the account's open + held notional, so two decisions
+    on DIFFERENT markets dispatched at once (dispatch(): one task per intent,
+    each on its own pool connection, as in production) both read 0, both
+    passed the cap and both were sent -- $2.20 open against a $2.00 cap
+    (NULL -> max_order_usd 2.00: one order's worth). Both lanes are held at
+    the notional read until the other arrives (or 2 s pass): on the base both
+    arrive and both are sent; now the account-wide claim lock
+    (ACCOUNT_LOCK_CLASS, taken after the market's) makes the second wait,
+    read the first's claim and refuse by name."""
+    import asyncpg
+    conn = await TE._conn()
+    pool = await asyncpg.create_pool(TE.DSN, min_size=2, max_size=4)
+    try:
+        acct, venue, mirror = await TE._setup(conn, monkeypatch, cap=2)
+        assert (await M.control(conn))["max_open_notional_usd"] is None
+        a = await TE._paper_order(conn, acct, qty=2000, tif="GTD", otype="RESTING")
+        b = await TE._paper_order(conn, acct, qty=2000, tif="GTD", otype="RESTING")
+        assert a["slug"] != b["slug"]
+        await mirror.snapshot(conn, await M.control(conn))
+        real = M.open_and_held_notional
+        arrived: list = []
+        both = asyncio.Event()
+
+        async def held_read(c):
+            out = await real(c)
+            arrived.append(c)
+            if len(arrived) >= 2:
+                both.set()
+            try:
+                await asyncio.wait_for(both.wait(), 2.0)
+            except asyncio.TimeoutError:
+                pass                    # the other lane waits on the claim lock
+            return out
+        monkeypatch.setattr(M, "open_and_held_notional", held_read)
+
+        async def get_pool():
+            return pool
+        monkeypatch.setattr(EI, "LANE", EI.ActualLane(get_pool, mirror))
+        monkeypatch.setattr(EI, "_TASKS", set())
+        for po in (a, b):
+            it = dict(await conn.fetchrow(
+                "SELECT * FROM execution_intents WHERE intent_id = $1",
+                po["intent_id"]), created=True)
+            assert EI.dispatch(it) is True
+        got = await asyncio.wait_for(asyncio.gather(*list(EI._TASKS)), 30)
+        outcome = sorted((g["state"], g.get("refusal")) for g in got)
+        assert outcome == [("REFUSED", "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP"),
+                           ("SUBMITTED", None)], got
+        refused = [g for g in got if g["state"] == "REFUSED"][0]
+        assert (Decimal(refused["open_usd"]), Decimal(refused["order_cost_usd"]),
+                Decimal(refused["cap_usd"])) == (
+            Decimal("1.10"), Decimal("1.10"), Decimal("2.00"))
+        assert len(venue.placed) == 1
+        nt = await real(conn)
+        assert nt["open_usd"] + nt["held_usd"] == Decimal("1.10")
+        assert await conn.fetchval("SELECT count(*) FROM execmirror_orders") == 1
+    finally:
+        await pool.close()
+        await conn.close()
+
+
+def test_the_claim_takes_the_market_lock_then_the_account_lock():
+    """The lock order every claimer follows (market, then account), and the
+    account lock's key space: the two-key advisory form, a class of its own
+    (never the market locks' class, never a single-key session lock)."""
+    import inspect
+    import re
+    src = inspect.getsource(EI.ActualLane._run)
+    m_slug = re.search(r'"SELECT pg_advisory_xact_lock\(\$1, hashtext\(\$2\)\)",'
+                       r'\s*SLUG_LOCK_CLASS, slug\)', src)
+    m_acct = re.search(r'"SELECT pg_advisory_xact_lock\(\$1, 0\)",'
+                       r'\s*ACCOUNT_LOCK_CLASS\)', src)
+    assert m_slug and m_acct
+    i_slug, i_acct = m_slug.start(), m_acct.start()
+    i_read = src.index("M.open_and_held_notional(conn)")
+    i_ins = src.index("INSERT INTO execmirror_orders")
+    assert i_slug < i_acct < i_read < i_ins
+    assert EI.ACCOUNT_LOCK_CLASS != EI.SLUG_LOCK_CLASS
+    assert EI.ACCOUNT_LOCK_CLASS != M.LOCK_KEY
+
+
 # ═════════════════════════════════════════════════════════════════════
 # §3 CANCELLATION
 # ═════════════════════════════════════════════════════════════════════
@@ -1030,6 +1121,94 @@ async def test_an_unknown_submission_the_venue_cannot_decide_keeps_the_stop_inco
         await conn.close()
 
 
+@pg
+async def test_a_stop_is_not_done_while_an_unaccepted_cancel_leaves_the_order_working(
+        monkeypatch):
+    """REVIEW (rc6.2 pmus-exec, items 5 and 3): the per-order cancel answered
+    503 and the cancel-all answered 2xx but cancelled nothing. The base moved
+    the row to CANCEL_REQUESTED (outside the blocking states), never re-read
+    it after the cancel-all, wrote stop_done_at while the venue record said
+    ORDER_STATE_NEW, and -- the stop being done -- never re-sent the cancel.
+    Now a CANCEL_REQUESTED row is re-read after the cancel-all and blocks the
+    stop while its record is not terminal (STOP_INCOMPLETE, remaining
+    CANCEL_REQUESTED 1); the incomplete-stop loop re-sends its cancel on the
+    bounded back-off (10 s, then doubling), each a CANCEL_RESENT event, and
+    the stop is done only once the venue's record says the order ended."""
+    conn = await TE._conn()
+    try:
+        venue, mirror, po, r, t = await _resting(conn, monkeypatch)
+        t0 = t[0]
+        sent: list = []
+        real_cancel = venue.cancel
+
+        def down(vid, slug):
+            sent.append(round(t[0] - t0))
+            raise TE._Err(503, "unavailable")
+        venue.cancel = down
+        ids: list = []
+        venue.cancel_all = lambda: (ids.append(1), {"canceledOrderIds": []})[1]
+        await conn.execute("UPDATE execmirror_control SET stopped = true WHERE id = 1")
+        out = await mirror.tick(conn)
+        assert out["state"] == "STOP_INCOMPLETE", out
+        assert out["cancel_all"] == "OK" and out["remaining"] == {"CANCEL_REQUESTED": 1}
+        assert (await M.control(conn))["stop_done_at"] is None
+        assert await _events(conn, "EMERGENCY_STOP_DONE") == []
+        row = await TE._row(conn, po["order_id"])
+        assert (row["state"], row["venue_state"]) == ("CANCEL_REQUESTED", "ORDER_STATE_NEW")
+        assert _j(row["detail"])["cancel"]["accepted"] is False
+        # the incomplete stop is retried every STOP_RETRY_S; the cancel is
+        # re-sent only when its back-off has passed (10 s, then 20 s)
+        for _ in range(3):
+            t[0] += M.STOP_RETRY_S
+            out = await mirror.tick(conn)
+            assert out["state"] == "STOP_INCOMPLETE", out
+        assert sent == [0, 10, 30]
+        assert [e["attempt"] for e in await _events(conn, "CANCEL_RESENT",
+                                                    r["mirror_id"])] == [2, 3]
+        assert (await M.control(conn))["stop_done_at"] is None
+        venue.cancel = real_cancel                      # the venue recovers
+        while venue.orders[r["venue_order_id"]]["state"] == "ORDER_STATE_NEW":
+            t[0] += M.STOP_RETRY_S
+            out = await mirror.tick(conn)
+            assert t[0] - t0 <= 200, out
+        assert round(t[0] - t0) == 70                   # 30 + 40: the 4th send
+        assert out["state"] == "STOPPED", out
+        assert (await TE._row(conn, po["order_id"]))["state"] == "CANCELLED"
+        assert (await M.control(conn))["stop_done_at"] is not None
+        assert len(await _events(conn, "EMERGENCY_STOP_DONE")) == 1
+        assert len(await _events(conn, "EMERGENCY_STOP_INCOMPLETE")) == 1
+        assert len(ids) == 8                            # cancel-all every pass
+    finally:
+        await conn.close()
+
+
+@pg
+async def test_a_stop_with_an_accepted_cancel_still_working_waits_for_the_record(
+        monkeypatch):
+    """An accepted cancel (2xx) whose order the venue still shows working
+    after the cancel-all is not a done stop either: the record is read again
+    on the next pass and the stop completes when it says the order ended."""
+    conn = await TE._conn()
+    try:
+        venue, mirror, po, r, t = await _resting(conn, monkeypatch)
+        vid = r["venue_order_id"]
+        venue.cancel = lambda v, s: venue.cancelled.append(v)   # accepted, pending
+        await conn.execute("UPDATE execmirror_control SET stopped = true WHERE id = 1")
+        out = await mirror.tick(conn)
+        assert out["state"] == "STOP_INCOMPLETE", out
+        assert out["remaining"] == {"CANCEL_REQUESTED": 1}
+        assert _j((await TE._row(conn, po["order_id"]))["detail"])["cancel"][
+            "accepted"] is True
+        venue.orders[vid]["state"] = "ORDER_STATE_CANCELED"     # the venue acts
+        t[0] += M.STOP_RETRY_S
+        out = await mirror.tick(conn)
+        assert out["state"] == "STOPPED", out
+        assert (await TE._row(conn, po["order_id"]))["state"] == "CANCELLED"
+        assert venue.cancelled == [vid]                 # no resend was due
+    finally:
+        await conn.close()
+
+
 # ═════════════════════════════════════════════════════════════════════
 # §6 THE WIRE: A SUCCESSFUL ORDER ON THE ACTIVATION PATH
 # ═════════════════════════════════════════════════════════════════════
@@ -1303,11 +1482,16 @@ async def test_the_same_flow_in_shadow_refuses_every_write_with_nothing_on_the_w
 # a contract, 1.0 = one whole contract)"); most markets trade in steps of
 # 0.01 contract, a few (mostly futures) in whole contracts; POST /v1/orders
 # `quantity` "Supports decimal quantities on markets whose minimumTradeQty is
-# less than 1". THE LANE'S RULE (execmirror.scale_qty, rounding
-# NEAREST_WHOLE_CONTRACT): live = paper qty / 1,000 rounded half-to-even to a
-# WHOLE contract, so its own floor is one contract (stricter than the venue's
-# 0.01); under one -> BELOW_VENUE_MINIMUM, never enlarged; a cost above the
-# per-order cap -> ABOVE_ORDER_CAP, never shrunk.
+# less than 1". THE LANE'S RULE (execmirror.entry_live_qty over scale_qty,
+# rounding NEAREST_WHOLE_CONTRACT): the venue quantity is a WHOLE contract, so
+# the lane's own floor is one contract (stricter than the venue's 0.01 where
+# a market allows it). raw = paper qty / 1,000 EXACTLY:
+#   raw < 1          -> BELOW_VENUE_MINIMUM, live 0: never enlarged (REVIEW:
+#                       nearest half-even rounding sent raw 0.6 .. 0.99 as ONE
+#                       contract -- a size below the minimum, enlarged);
+#   raw >= 1         -> nearest whole contract, half to even (1.5 -> 2,
+#                       2.5 -> 2, 1.818 -> 2);
+#   cost > the cap   -> ABOVE_ORDER_CAP, never shrunk.
 
 def _cg(qty, wire):
     return {"us_market_slug": "s", "intent": "ORDER_INTENT_BUY_LONG",
@@ -1322,6 +1506,9 @@ def _cg(qty, wire):
     (250, "0.50", 0, None, "EXCLUDED", "BELOW_VENUE_MINIMUM"),   # 0.5 -> 0 (half even)
     (200, "0.50", 0, None, "EXCLUDED", "BELOW_VENUE_MINIMUM"),   # 0.4 -> 0, never 1
     (750, "0.50", 2, "1.00", "PLANNED", None),                   # 1.5 -> 2 (half even)
+    (300, "0.50", 0, None, "EXCLUDED", "BELOW_VENUE_MINIMUM"),   # 0.6 -> 0, never 1
+    (495, "0.50", 0, None, "EXCLUDED", "BELOW_VENUE_MINIMUM"),   # 0.99 -> 0, never 1
+    (500, "0.50", 1, "0.50", "PLANNED", None),                   # exactly one contract
 ])
 def test_the_one_dollar_pilot_maps_paper_dollars_to_live_contracts(
         paper_usd, wire, live, cost, state, why):
@@ -1337,15 +1524,17 @@ def test_the_one_dollar_pilot_maps_paper_dollars_to_live_contracts(
 @pg
 async def test_the_one_dollar_pilot_through_the_actual_lane(monkeypatch):
     """The same rules on the lane: a $1,500 decision is refused ABOVE_ORDER_CAP
-    with its 3-contract live intent recorded (never shrunk), a sub-contract
-    one BELOW_VENUE_MINIMUM (never enlarged), and the $1,000 decision goes
-    out as 2 contracts for $1.00."""
+    with its 3-contract live intent recorded (never shrunk), sub-contract
+    ones (0.4 and 0.6 of a contract) BELOW_VENUE_MINIMUM with live 0 recorded
+    (never enlarged), and the $1,000 decision goes out as 2 contracts for
+    $1.00."""
     conn = await TE._conn()
     try:
         acct, venue, mirror = await TE._setup(conn, monkeypatch, cap=1)
         await mirror.snapshot(conn, await M.control(conn))
         big = await TE._paper_order(conn, acct, qty=3000, wire=0.50)
         small = await TE._paper_order(conn, acct, qty=400, wire=0.50)
+        near = await TE._paper_order(conn, acct, qty=600, wire=0.50)
         ok = await TE._paper_order(conn, acct, qty=2000, wire=0.50)
         rb = await mirror.lane._run(conn, big["intent_id"])
         assert (rb["state"], rb["refusal"]) == ("REFUSED", "ABOVE_ORDER_CAP")
@@ -1357,6 +1546,15 @@ async def test_the_one_dollar_pilot_through_the_actual_lane(monkeypatch):
         rs = await mirror.lane._run(conn, small["intent_id"])
         assert (rs["state"], rs["refusal"]) == ("REFUSED", "BELOW_VENUE_MINIMUM")
         assert Decimal(rs["live_raw_qty"]) == Decimal("0.4")
+        # REVIEW: 0.6 of a contract ($300 of paper at 0.50) was rounded UP to
+        # one contract and sent; it is below the minimum and never enlarged
+        rn = await mirror.lane._run(conn, near["intent_id"])
+        assert (rn["state"], rn["refusal"]) == ("REFUSED", "BELOW_VENUE_MINIMUM"), rn
+        assert Decimal(rn["live_raw_qty"]) == Decimal("0.6")
+        it = await conn.fetchrow("SELECT live_qty, live_raw_qty FROM execution_intents"
+                                 " WHERE intent_id = $1", near["intent_id"])
+        assert (it["live_qty"], it["live_raw_qty"]) == (0, Decimal("0.6"))
+        assert venue.placed == []
         ro = await mirror.lane._run(conn, ok["intent_id"])
         assert ro["state"] == "SUBMITTED"
         assert [(p["quantity"], p["price"]["value"]) for p in venue.placed] == [

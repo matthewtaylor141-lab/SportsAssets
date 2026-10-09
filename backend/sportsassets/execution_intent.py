@@ -12,7 +12,9 @@ immutable execution intent (migration 199) and fans out two SIBLINGS:
           the paper order, its persistence, its acknowledgement or its
           simulated fill; a slow venue never delays the paper side.
 
-THE ACTUAL LANE keeps every gate and adds no serialization:
+THE ACTUAL LANE keeps every gate and adds no serialization with the paper
+side (its only waits are the claim's short transaction locks, step 5 -- one
+market, then the account -- never held across a venue call):
   1. the durable control (execmirror_control: enabled, not stopped) and the
      retail account's key fingerprint -- the same switch and identity the
      execution-mirror machinery uses;
@@ -24,9 +26,11 @@ THE ACTUAL LANE keeps every gate and adds no serialization:
      currency is NOT claimed beyond it). The order is an IOC LIMIT at the
      decision's own wire price, so the venue can never fill it worse than
      the decided economics;
-  4. live sizing: target / 1,000 rounded to whole contracts; below the venue
-     minimum -> BELOW_VENUE_MINIMUM (paper proceeds, actual refuses; never
-     enlarged); the per-order cap and the account's buying power;
+  4. live sizing: target / 1,000 rounded to whole contracts; below ONE whole
+     contract (the lane's minimum; execmirror.entry_live_qty) ->
+     BELOW_VENUE_MINIMUM (paper proceeds, actual refuses; never enlarged, so
+     0.6 of a contract is refused, not sent as 1); the per-order cap and the
+     account's buying power;
   5. IDEMPOTENCY: the actual order row is keyed by the intent
      (`execmirror_orders.execution_intent_id` UNIQUE, mirror_id 'ei:<intent>'),
      so one intent can create at most one initial submission; a duplicate
@@ -42,9 +46,11 @@ the newest account snapshot must not name a venue position that disagrees
 with our venue fills (R_VENUE_POSITION_DISAGREES, step 4a); the claim
 (step 5) serializes per market (a transaction advisory lock), refuses a
 second exposure on one market (a non-terminal order or held contracts) and
-the account's open + held notional above execmirror_control's aggregate cap,
-and is written only while the control is enabled and not stopped (in the
-INSERT itself); the control is re-read immediately before the send (5b).
+the account's open + held notional above execmirror_control's aggregate cap
+(read under an account-wide lock taken after the market's, so two markets'
+claims never pass the cap on one reading), and is written only while the
+control is enabled and not stopped (in the INSERT itself); the control is
+re-read immediately before the send (5b).
 
 Every step stamps a high-resolution timeline (UTC epoch nanoseconds plus a
 monotonic perf_counter_ns) on the intent for the latency report.
@@ -136,6 +142,18 @@ R_AGGREGATE_ABOVE_CAP = "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP"
 #: single-key session locks (execmirror.LOCK_KEY, the runner's), so a hash
 #: collision can never wait on the runner
 SLUG_LOCK_CLASS = 0x45584D32          # 'EXM2'
+#: the claim's ACCOUNT-WIDE lock (REVIEW, item 2): pg_advisory_xact_lock(
+#: ACCOUNT_LOCK_CLASS, 0), taken by every claimer AFTER its market's lock and
+#: BEFORE it reads the account's open + held notional, held to the claim's
+#: commit. The market lock alone let two claims on DIFFERENT markets (two
+#: dispatches: one task per intent, each on its own pool connection) both
+#: read the notional before either inserted, both pass the aggregate cap and
+#: both be sent; now the cap read and the INSERT are one critical section for
+#: the whole account. The same two-key form in a class of its own, so it never
+#: meets a market lock or a single-key session lock (execmirror.LOCK_KEY);
+#: one fixed order (market, then account) for every claimer, so no claimer
+#: waits on another in the opposite order.
+ACCOUNT_LOCK_CLASS = 0x45584D33       # 'EXM3'
 
 LANE = None          # the API process's ActualLane (installed by start())
 _TASKS: set = set()
@@ -160,7 +178,8 @@ def intent_id_for(decision_id: str) -> str:
 
 
 def live_sizing(paper_target_qty, scale) -> dict:
-    exact, live, delta = M.scale_qty(paper_target_qty, scale)
+    # a BUY's rule: below one whole contract is 0, never enlarged
+    exact, live, delta = M.entry_live_qty(paper_target_qty, scale)
     return {"live_scale": Decimal(str(scale)), "live_raw_qty": exact,
             "live_qty": live, "rounding_delta": delta}
 
@@ -449,7 +468,9 @@ class ActualLane:
         #   * the account's aggregate cap: open + held actual notional plus
         #     this order's cost within execmirror_control's aggregate cap
         #     (execmirror.aggregate_cap_usd; NULL -> max_order_usd, fail
-        #     closed small);
+        #     closed small) -- read and claimed under the ACCOUNT-WIDE lock
+        #     (ACCOUNT_LOCK_CLASS, after the market's), so claims on two
+        #     markets at once never both pass the cap on the same reading;
         #   * the kill switch IN THE INSERT ITSELF: the row is written only if
         #     execmirror_control is enabled and not stopped at that instant,
         #     the control row share-locked so a stop either commits first (no
@@ -476,6 +497,10 @@ class ActualLane:
                     blocked = {"refusal": R_MARKET_ALREADY_HELD,
                                "net_held": str(ex["net_held"])}
             if dup is None and blocked is None:
+                # one claimer at a time for the whole account, from the cap
+                # read to the commit of its INSERT (market lock first)
+                await conn.execute("SELECT pg_advisory_xact_lock($1, 0)",
+                                   ACCOUNT_LOCK_CLASS)
                 cap, basis = M.aggregate_cap_usd(await M.control(conn))
                 nt = await M.open_and_held_notional(conn)
                 total = nt["open_usd"] + nt["held_usd"] + cost

@@ -9,8 +9,10 @@ order derived from it, the venue's fills and the difference.
 THE RULES (owner: "set the rules to achieve the closest outcome")
   quantity   live = paper qty / scale (1,000), rounded to the NEAREST whole
              contract (the venue's quantity is an integer); the rounding is
-             recorded on the row. A paper order under half a live contract
-             is EXCLUDED as BELOW_VENUE_MINIMUM, never rounded up to one.
+             recorded on the row. A paper BUY under ONE live contract (exact
+             paper qty / scale < 1) is EXCLUDED as BELOW_VENUE_MINIMUM, never
+             rounded up to one (entry_live_qty; rc6.2 pmus-exec review: 0.5 <
+             raw < 1 used to round to one contract -- enlarged).
   intent     copied: same contract (us_market_slug), same venue intent
              (BUY_LONG / BUY_SHORT / SELL_LONG / SELL_SHORT), same wire
              price, limit order, same time in force (IOC / FOK / GTD with
@@ -214,6 +216,19 @@ R_AUDREY_SNAPSHOT_NOT_CURRENT = "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT"
 #: rows that can still be (or become) a working venue order: while any
 #: remains, or the venue's cancel-all failed, the stop is INCOMPLETE
 STOP_BLOCKING_STATES = ("SUBMITTING", "UNKNOWN", "OPEN", "PARTIALLY_FILLED")
+#: REVIEW (items 5 and 3): a row whose cancel was ASKED is not a cancelled
+#: order. `_send_cancel` moves an OPEN / PARTIALLY_FILLED row to
+#: CANCEL_REQUESTED whatever the venue answered (a 503 included), so the check
+#: above could never fail after the stop's own cancels, and a cancel-all
+#: answering 2xx while cancelling nothing completed the stop with the order
+#: still working -- after which nothing re-sent its cancel. Now every
+#: CANCEL_REQUESTED row is read again from the venue AFTER the cancel-all;
+#: one still in this state (its record is not terminal -- a terminal record
+#: moves the row out of it -- or could not be read) blocks the stop as well.
+#: The venue's record, not the cancel-all's `canceledOrderIds`, is the gate:
+#: an order the per-order cancel already ended is rightly absent from that
+#: list (the list is recorded as evidence).
+STOP_BLOCKING_AFTER_REREAD = ("CANCEL_REQUESTED",)
 #: an incomplete stop is re-attempted at most this often
 STOP_RETRY_S = 10.0
 R_STOP_INCOMPLETE = "EMERGENCY_STOP_INCOMPLETE"
@@ -305,6 +320,20 @@ def scale_qty(paper_qty, scale=1000) -> tuple[Decimal, int, Decimal]:
     return exact, live, Decimal(live) - exact
 
 
+def entry_live_qty(paper_qty, scale=1000) -> tuple[Decimal, int, Decimal]:
+    """A BUY's (exact scaled qty, live whole contracts, rounding delta): the
+    nearest whole contract (scale_qty), EXCEPT that a size below one whole
+    contract is 0 -- never enlarged to reach the venue minimum (rc6.2
+    pmus-exec review: raw 0.6 of a contract went out as 1). The exact rule:
+    raw = paper qty / scale exactly; raw < 1 -> 0 (BELOW_VENUE_MINIMUM);
+    raw >= 1 -> nearest whole contract, half to even (1.5 -> 2, 2.5 -> 2).
+    A SELL's quantity is a fraction of held inventory (plan_sell), not this."""
+    exact, live, delta = scale_qty(paper_qty, scale)
+    if exact < 1:
+        return exact, 0, -exact
+    return exact, live, delta
+
+
 def collateral_per_contract(intent: str, wire_price) -> Decimal:
     """What one contract ties up: a long pays the wire price, a short buy
     the complement (live_executor.wire_limit's convention)."""
@@ -342,12 +371,12 @@ def plan_buy(order: dict, *, scale, buying_power, max_order_usd) -> Plan:
     if str(order.get("time_in_force")) not in TIF:
         return Plan("EXCLUDED", exclusion=UNSUPPORTED_ORDER,
                     detail={"time_in_force": order.get("time_in_force")})
-    exact, live, delta = scale_qty(order["qty"], scale)
+    exact, live, delta = entry_live_qty(order["qty"], scale)
     base = dict(scaled_qty=exact, rounding_delta=delta)
     if live < 1:
         return Plan("EXCLUDED", exclusion=BELOW_VENUE_MINIMUM, **base,
-                    detail={"why": "paper qty / %s rounds to 0 whole contracts"
-                            % scale})
+                    detail={"why": "paper qty / %s is %s: below one whole "
+                            "contract, never enlarged" % (scale, exact)})
     cost = collateral_per_contract(order["intent"], order["wire_price"]) * live
     if cost > Decimal(str(max_order_usd)):
         return Plan("EXCLUDED", exclusion=ABOVE_ORDER_CAP, live_qty=live, **base,
@@ -2812,13 +2841,18 @@ class Mirror:
         RUNNING lane) or an order still working were all reported STOPPED.
 
         Now each pass: ambiguous submissions are decided from venue evidence
-        (`recover`: read-only, never a resend), every live mirror order is
-        cancelled, the venue's cancel-all is sent, PLANNED rows are excluded,
-        and (on request) positions are flattened -- each slug once per stop
-        and net. `stop_done_at` is written only when the cancel-all SUCCEEDED
-        and no SUBMITTING / UNKNOWN / OPEN / PARTIALLY_FILLED row remains;
-        otherwise the pass returns STOP_INCOMPLETE (R_STOP_INCOMPLETE, one
-        event per change of reason) and is retried every STOP_RETRY_S."""
+        (`recover`: read-only, never a resend), every working mirror order is
+        cancelled (a row already CANCEL_REQUESTED is read again and its
+        cancel re-sent on the bounded back-off, `_resend_cancel_if_due` --
+        never once per pass), the venue's cancel-all is sent, every
+        CANCEL_REQUESTED row is read again from the venue, PLANNED rows are
+        excluded, and (on request) positions are flattened -- each slug once
+        per stop and net. `stop_done_at` is written only when the cancel-all
+        SUCCEEDED and no SUBMITTING / UNKNOWN / OPEN / PARTIALLY_FILLED row
+        remains and no CANCEL_REQUESTED row does either after that re-read
+        (STOP_BLOCKING_AFTER_REREAD: its record does not say the order
+        ended); otherwise the pass returns STOP_INCOMPLETE (R_STOP_INCOMPLETE,
+        one event per change of reason) and is retried every STOP_RETRY_S."""
         if ctl.get("stop_done_at"):
             return {"state": "STOPPED"}
         now = self._now()
@@ -2828,21 +2862,42 @@ class Mirror:
                     "retry_in_s": round(STOP_RETRY_S
                                         - (now - self._stop_last_attempt), 1)}
         self._stop_last_attempt = now
-        out = {"state": "STOPPING", "cancelled": 0, "closed": [], "recovered": 0}
+        out = {"state": "STOPPING", "cancelled": 0, "cancel_resent": 0,
+               "closed": [], "recovered": 0}
         try:
             out["recovered"] = await self.recover(conn)
         except Exception as exc:                              # noqa: BLE001
             await _event(conn, "STOP_RECOVER_FAILED", error=EP._error(exc))
         for r in await conn.fetch(
                 """SELECT * FROM execmirror_orders WHERE venue_order_id IS NOT NULL
-                      AND state IN ('OPEN','PARTIALLY_FILLED','CANCEL_REQUESTED')"""):
-            out["cancelled"] += await self._cancel(conn, dict(r), "EMERGENCY_STOP")
+                      AND state IN ('OPEN','PARTIALLY_FILLED','CANCEL_REQUESTED')
+                    ORDER BY created_at, mirror_id"""):
+            if r["state"] == "CANCEL_REQUESTED":
+                # asked before (this stop's earlier pass, or the running
+                # lane): read the record, re-send only when the back-off says
+                await self._refresh(conn, dict(r))
+                out["cancel_resent"] += await self._resend_cancel_if_due(
+                    conn, r["mirror_id"])
+            else:
+                out["cancelled"] += await self._cancel(conn, dict(r),
+                                                       "EMERGENCY_STOP")
         cancel_all_ok = True
         try:
-            await self.call(self.venue().cancel_all)
+            got = await self.call(self.venue().cancel_all)
+            if isinstance(got, dict) and "canceledOrderIds" in got:
+                out["cancel_all_canceled_order_ids"] = list(
+                    got.get("canceledOrderIds") or [])
         except Exception as exc:                              # noqa: BLE001
             cancel_all_ok = False
             await _event(conn, "STOP_CANCEL_ALL_FAILED", error=EP._error(exc))
+        # THE VENUE'S RECORD, READ AGAIN AFTER THE CANCEL-ALL: a cancel that
+        # was asked is done only when the record says the order ended
+        for r in await conn.fetch(
+                """SELECT * FROM execmirror_orders WHERE venue_order_id IS NOT NULL
+                      AND state = ANY($1::text[])
+                    ORDER BY created_at, mirror_id""",
+                list(STOP_BLOCKING_AFTER_REREAD)):
+            await self._refresh(conn, dict(r))
         await conn.execute(
             """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = 'EMERGENCY_STOP',
                  updated_at = now() WHERE state = 'PLANNED'""")
@@ -2864,8 +2919,8 @@ class Mirror:
                                  error=EP._error(exc))
         remaining = {r["state"]: int(r["n"]) for r in await conn.fetch(
             """SELECT state, count(*) AS n FROM execmirror_orders
-                WHERE state = ANY($1::text[]) GROUP BY 1""",
-            list(STOP_BLOCKING_STATES))}
+                WHERE state = ANY($1::text[]) GROUP BY 1 ORDER BY 1""",
+            list(STOP_BLOCKING_STATES) + list(STOP_BLOCKING_AFTER_REREAD))}
         if not cancel_all_ok or remaining:
             why = {"code": R_STOP_INCOMPLETE,
                    "cancel_all": "OK" if cancel_all_ok else "FAILED",
