@@ -1441,3 +1441,5 @@ tests/test_rc6_provenance_open_defects.py
 tests/test_rc6_provenance_cache_and_flight.py
 # Signed acceptance requires the checksummed source verdict to agree with its copied packet value.
 tests/test_signed_acceptance_consistency.py
+# (rc6.2 agent-truth) defensive bound, not the production timeout's cause: the capability claim runs in a constant number of round trips (a synthetic 180-task not-ready queue at 30 ms per statement claims inside the tick's 5 s CLAIM budget; the base needs 185 round trips), and bulk rejections plus their events match the per-row decisions
+tests/test_rc62_capability_claim_bounded.py
