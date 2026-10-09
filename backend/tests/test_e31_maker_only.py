@@ -117,8 +117,14 @@ RULES_UNTOUCHED = {
 # lines after execution_gate.authorize, before the client is built
 # (pmus.require_canonical_origination). E31's subject, the maker-rest params
 # and the post-only refusal shapes, is untouched; was "ead830681a5536e5".
+# bbo_read re-pinned by P0-429 (2026-10-09): a 429 on its first feed (the
+# SDK's RateLimitError or an int status_code of 429) or a refusal by our own
+# venue gate now ENDS the read -- production 04:20Z showed bbo-then-book
+# pairs, both 429, the second request sent straight into the limit -- and a
+# gate refusal's `error` is its own code. Its answer shape and its quote
+# reading are untouched (tests/test_pmus_bbo_read.py); was "5f8dd44f222a7c02".
 PMUS_UNTOUCHED = {"_post_only_refusal": "7becc8060b5ec9de", "_post_only_cross": "41341b4b46075c53",
-                  "submit_fok": "b3d61d22a9ba70e3", "bbo_read": "5f8dd44f222a7c02",
+                  "submit_fok": "b3d61d22a9ba70e3", "bbo_read": "af00b03e328b744c",
                   "_amount": "4ae6f1c4e71054d4", "close_position": "a2032fad56ae9d71"}
 
 

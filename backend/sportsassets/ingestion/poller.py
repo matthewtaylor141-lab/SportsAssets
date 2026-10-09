@@ -583,7 +583,20 @@ class Poller:
         non-fatal, nothing more: whether a dead database REACHES the
         'Path B degraded' alert is run()'s failure accounting, which
         counts the roster stage toward the same threshold as the wallet
-        stage (see _alert_degraded)."""
+        stage (see _alert_degraded).
+
+        THE DATA-API HOST'S 429 COOLDOWN RIDES EVERY BEAT (P0-429): the
+        poller is the data-api's main caller in this process, so its beat
+        is where production reads whether the throttle is holding a
+        cooldown, how many consecutive 429s armed it and when the last one
+        was (ratelimit.Throttle.cooldown_state). Read, never raised."""
+        try:
+            from .. import ratelimit as _rl
+            detail = dict(detail or {},
+                          data_api_rate_limit=_rl.data_api_throttle().cooldown_state())
+        except Exception as exc:  # noqa: BLE001 -- the beat is telemetry
+            detail = dict(detail or {},
+                          data_api_rate_limit={"unread": type(exc).__name__})
         try:
             await heartbeat("poller", status, detail)
         except Exception as exc:  # noqa: BLE001 -- the beat is telemetry

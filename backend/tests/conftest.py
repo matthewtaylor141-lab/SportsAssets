@@ -186,6 +186,31 @@ def _clear_module_caches():
 
 
 @pytest.fixture(autouse=True)
+def _venue_429_cooldown_does_not_leak():
+    """THE ESCALATING 429 COOLDOWN (P0-429) is process-wide module state:
+    one test whose mock venue answers 429 arms it for 5-120 s of REAL
+    monotonic time, and every later test that reads through the transport
+    in that window would be refused by name for a reason unrelated to what
+    it asserts. Cleared before and after, like the caches above -- and the
+    data-api throttle's per-host cooldown with it, when that module is
+    already imported."""
+    import sys
+
+    from sportsassets import venue_pace as _vp
+
+    def _clear() -> None:
+        _vp.reset_rate_limit_state()
+        rl = sys.modules.get("sportsassets.ratelimit")
+        thr = getattr(rl, "_throttle", None) if rl is not None else None
+        if thr is not None and hasattr(thr, "reset_cooldown"):
+            thr.reset_cooldown()
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _clear_kalshi_board_cache():
     """The Kalshi board cache (2026-09-05) is module state on the API
     app: 20 s TTL, keyed by series set, holding an asyncio.Lock and

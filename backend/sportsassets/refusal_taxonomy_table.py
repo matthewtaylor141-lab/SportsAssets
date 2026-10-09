@@ -2303,6 +2303,19 @@ IDENTITY_TRUTH_STREAM = {
 for _k, _v in IDENTITY_TRUTH_STREAM.items():
     TABLE.setdefault(_k, _v)
 
+#: (P0-429) THE ESCALATING 429 COOLDOWN (venue_pace /
+#: venue_request_gate.cooldown_check): a normal-lane measurement read not
+#: sent because the venue's 429 cooldown is in force. The venue's 429 is the
+#: venue's word, but walking into it -- and choosing not to send while it
+#: stands -- is ours: SOFTWARE / FRESHNESS_PLUMBING at the venue-book stage,
+#: exactly the row VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP already
+#: has, never ECONOMIC and never EXTERNAL.
+VENUE_429_COOLDOWN_STREAM = {
+    "VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED": (S, FRESH, "VENUE_BOOK"),
+}
+for _k, _v in VENUE_429_COOLDOWN_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
 #: although each says the software lacks or could not read something (an
 #: account id not supplied, exposure that could not be measured or was not

@@ -1441,3 +1441,7 @@ tests/test_rc6_api_stall2_rn1x.py
 tests/test_rc6_api_stall2_pinnapi.py
 # (RC6.1 api-stall2) the ext_pinnacle cycle's PinnAPI reads match by the feed cache's current-generation index, a fresh scan's answer at every instant as frames land; a run of refused events is refused by exactly the scan's reasons while the loop gets a turn between events, on a production-size synced feed cache
 tests/test_rc6_api_stall2_ext_pinnacle.py
+# (RC6 P0-429) the escalating 429 cooldown: nine consecutive 429s escalate strictly to the cap with zero requests inside any cooldown, only a read sent after it resets it, a normal read (and one queued in the pacer) is refused by name, a PRIORITY claim or any non-read request waits at most the bound and is always sent, bbo_read makes one request on a 429, the walkers stop their pass, the readback rides each process's beat, the data-api host (polite_get and the exit worker's direct reads) never retries at zero seconds
+tests/test_venue_429_escalating_cooldown.py
+# (RC6 P0-429 review) the catalogue sweep reads OUR gate's 429-cooldown refusal as rate-limited and never sent: no markets fallback, no further probe rung or detail read, the pass/bucket/slice stops RATE_LIMITED_BY_VENUE with the refusal named, and a withheld read is never counted as a request
+tests/test_premap_429_cooldown_never_sent.py

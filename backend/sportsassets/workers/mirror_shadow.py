@@ -3243,6 +3243,16 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
         _carry_last_confirmation(stats, pmus)
         attach_exit_census(stats, now_ts)
         return stats
+    # THE VENUE'S 429 COOLDOWN SKIPS THE TICK (P0-429): while it stands
+    # every read this tick would make -- the positions walk, one BBO per
+    # mapped market -- would be refused by name at the transport. Nothing
+    # is sent, the skip is counted, and the next tick reads as before.
+    _cd = venue_pace.normal_read_deferral()
+    if _cd is not None:
+        stats.update(skipped_cooldown=True, cooldown=_cd,
+                     status="venue_429_cooldown")
+        attach_exit_census(stats, now_ts)
+        return stats
     if await _db_switch_off(pool):
         stats["switched_off"] = True
         _carry_last_confirmation(stats, pmus)
@@ -3302,6 +3312,17 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             if reads >= MAX_MARKETS_PER_TICK:
                 stats["skipped_markets"] += len(conds) - i
                 stats["capped_tick"] = True
+                break
+            # the 429 cooldown stops the walk mid-tick (P0-429): counted,
+            # never sent, never a venue miss
+            _cd = venue_pace.normal_read_deferral()
+            if _cd is not None:
+                stats["skipped_cooldown_markets"] = (
+                    stats.get("skipped_cooldown_markets", 0) + len(conds) - i)
+                venue_pace.note_walker_skipped(len(conds) - i)
+                stats.update(cooldown=_cd, cooldown_stopped=True)
+                if stats["status"] == "ok":
+                    stats["status"] = "venue_429_cooldown"
                 break
             if _unmapped_until.get((w, cid), 0.0) > now_ts:
                 stats["skipped_unmapped"] += 1
@@ -3392,8 +3413,16 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             # where it stood. Three OPEN empty books never abandon; a
             # halted venue abandons as before, under the state's name.
             quoted = row.get("bid") is not None or row.get("ask") is not None
+            cooled_here = (_d.get("bbo_error")
+                           == venue_pace.R_VENUE_429_COOLDOWN_READ_DEFERRED)
             if not row.get("us_market_slug"):
                 pass
+            elif cooled_here:
+                # our cooldown refused the read (armed after the check
+                # above): no request left, so neither a miss nor a reset;
+                # the row is written with the refusal named, then the walk
+                # stops (P0-429)
+                stats["cooldown_stopped"] = True
             elif quoted and state in (None, _STATE_OPEN):
                 misses = 0
             elif state == _STATE_OPEN or state in STATE_TERMINAL:
@@ -3424,7 +3453,15 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                 log.warning("mirror_shadow: write failed (%s) — abandoning the tick, "
                             "backing off %ss", type(exc).__name__, BACKOFF_S)
                 break
-        if stats.get("abandoned"):
+            if cooled_here:
+                rest = len(conds) - i - 1
+                stats["skipped_cooldown_markets"] = (
+                    stats.get("skipped_cooldown_markets", 0) + rest)
+                venue_pace.note_walker_skipped(rest)
+                if stats["status"] == "ok":
+                    stats["status"] = "venue_429_cooldown"
+                break
+        if stats.get("abandoned") or stats.get("cooldown_stopped"):
             break
     # the 24 h reading, at most once per EXIT_SUMMARY_S and never on a
     # tick that has already abandoned: an abandoned tick has told us the
@@ -3455,9 +3492,14 @@ async def main() -> None:
     pool = await get_pool()
     log.info("mirror_shadow up: whales=%s poll=%ss lookback=%sh (NO ORDERS)",
              mirror_whales(), POLL_S, LOOKBACK_H)
+    # every venue claim this loop makes is attributed to it on the 429
+    # cooldown's readback (P0-429)
+    venue_pace.set_read_source("mirror_shadow")
     while True:
         try:
             stats = await tick_once(pool, pmus)
+            # the process's 429 cooldown on this loop's beat (P0-429)
+            stats["venue_rate_limit"] = venue_pace.rate_limit_state()
             try:
                 await heartbeat("mirror_shadow", str(stats.get("status") or "ok"), stats)
             except Exception:  # noqa: BLE001
