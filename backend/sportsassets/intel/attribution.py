@@ -266,9 +266,53 @@ PAPER_DECISIONS_SQL = """
      ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT $3
 """
 PAPER_WINDOW_DAYS = 60.0
-PAPER_POSITIONS_LIMIT = 5000
 PAPER_POPULATION = ("PAPER ENTER decisions with an ENTRY paper order "
                     "(positions), newest first")
+PAPER_READ_ORDER = "decided_at, decision_id descending (newest first)"
+
+#: THE POPULATION IS READ WHOLE, A PAGE AT A TIME (RC6.2 p-evcontrols,
+#: review rework 2). redteam.controls.attributed_positions reads EVERY
+#: position (days=None): the MULTIPLE_TESTING study's frozen plan declares
+#: no window, and the forward scoreboard's cohort is every position since
+#: the thresholds' frozen_at. Both only grow. Under the earlier 5,000 bound
+#: a cut read fails closed (ATTRIBUTION_READ_TRUNCATED), so from the 5,001st
+#: lifetime position the study would have been RED for good, whatever the
+#: data said, and the scoreboard UNAVAILABLE once 5,000 positions followed
+#: 2026-10-07 -- a software RED that scorecard_14 labels forward evidence.
+#: The read now runs through a server-side cursor PAPER_PAGE_POSITIONS at a
+#: time. Each page's fills, settlements, Xavier review counts and
+#: valuations are fetched for that page alone and attributed on the CPU
+#: lane, so one page's decision payload is in memory at a time.
+#: PAPER_POSITIONS_LIMIT is a SAFETY STOP, not a sample size.
+#: research-sql 37979576920 (2026-10-09T19:20Z, SELECT/EXPLAIN only)
+#: measured production over its whole population (681 positions, every one
+#: within 60 days, 0 since 2026-10-07; 9/40/61/61/508/2 a day 10-01..06):
+#:   - the unwindowed decision scan: 6.5 ms;
+#:   - entry groups 2.8 ms, fills 1.5 ms, settlements 2.7 ms, valuations
+#:     4.1 ms, the fixture read 1.8 ms (each net of its array build);
+#:   - the Xavier review count 172 ms -- 172,313 review rows, 253 per
+#:     position on average (p95 1,116, max 2,693): the dominant cost;
+#:   - about 0.28 ms of server time per position in all;
+#:   - each decision row carries 7,425 bytes on average (max 19,310: the
+#:     economics); fills 233, settlements 78, valuations 187 per position.
+#: LOCAL, 20,000 synthetic positions carrying production's 7.4 KB decision
+#: payload and a fill each (no Xavier reviews; their cost is measured
+#: above): the paged read takes 2.0-2.3 s warm end to end against 2.2 s for
+#: the one-shot read, and peaks at 51 MB of Python allocations against
+#: 220 MB; both retain 35 MB of attributed rows. paper_rows alone costs
+#: 58-86 us per position.
+#: At the stop the read therefore costs about 5.6 s of production database
+#: time spread over 20 pages of about 0.28 s each, plus the decode and
+#: attribution (about 2 s locally, several times that on production's
+#: shared CPU), and holds about 35 MB of rows. The stop is 29 times
+#: production's whole population. A read the stop cuts still fails closed,
+#: by name (`truncated`, and `newest_unread_at`).
+PAPER_PAGE_POSITIONS = 1000
+PAPER_POSITIONS_LIMIT = 20000
+#: the intel shadow cycle's own read (runner.py: a display snapshot that
+#: names a cut read; no control reads it) keeps its earlier bound, so the
+#: cycle's attribution write volume is unchanged by the safety stop above
+INTEL_CYCLE_POSITIONS_LIMIT = 5000
 
 
 def read_complete_since(read: dict | None, since: float | None) -> bool:
@@ -300,47 +344,76 @@ def within(rows: list, since: float | None) -> list:
 async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
                      account_id=C.PAPER_ACCOUNT,
                      limit=PAPER_POSITIONS_LIMIT,
-                     meta: dict | None = None) -> list:
-    """PAPER positions attributed (the population above). `days` None reads
-    every position; `meta`, when given, receives what was read and whether
-    the bound left a position out (`truncated`, and `newest_unread_at`, the
-    decided_at of the newest one it left out), so a caller never takes a
-    subset for the population."""
+                     meta: dict | None = None,
+                     page=PAPER_PAGE_POSITIONS) -> list:
+    """PAPER positions attributed (the population above), newest first: the
+    WHOLE population, a page at a time through a server-side cursor. `days`
+    None reads every position. `limit` is a safety stop: one position past
+    it is asked for, so a cut is known, not guessed. `meta`, when given,
+    receives what was read and whether the stop left a position out
+    (`truncated`, and `newest_unread_at`, the decided_at of the newest one
+    it left out), so a caller never takes a subset for the population."""
     from . import reads as R
 
     since = None if days is None else float(now) - float(days) * 86400.0
-    got = [dict(r) for r in await conn.fetch(
-        PAPER_DECISIONS_SQL, since, account_id, int(limit) + 1)]
-    truncated = len(got) > int(limit)
-    decs = got[:int(limit)]
+    limit, page = int(limit), max(1, int(page))
+    out: list = []
+    read = pages = 0
+    truncated = False
+    newest_unread_at = oldest_read_at = None
+    # a cursor lives in a transaction: inside a readback section (its own
+    # savepoint, statement timeout per statement and per FETCH) this is a
+    # nested savepoint. The cursor reads ONE snapshot of the population.
+    async with conn.transaction():
+        cur = await conn.cursor(PAPER_DECISIONS_SQL, since, account_id,
+                                limit + 1)
+        while True:
+            decs = [dict(r) for r in await cur.fetch(page)]
+            fetched = len(decs)
+            if fetched > limit - read:
+                truncated = True
+                newest_unread_at = C.epoch(decs[limit - read]["decided_at"])
+                decs = decs[:limit - read]
+            if decs:
+                pages += 1
+                read += len(decs)
+                oldest_read_at = C.epoch(decs[-1]["decided_at"])
+                groups = await R.entry_groups(
+                    conn, [d["decision_id"] for d in decs])
+                gids = sorted(set(groups.values()))
+                fills = [dict(r) for r in await conn.fetch(
+                    "SELECT group_id, role, direction, holding_side, "
+                    "       us_market_slug, qty, price, fee_usd, gross_usd "
+                    "  FROM paper_fills WHERE group_id = ANY($1::text[])",
+                    gids)] if gids else []
+                setts = await R.latest_settlements(conn, group_ids=gids)
+                sidx = {(s["group_id"], s["us_market_slug"],
+                         str(s["holding_side"])): s for s in setts.values()}
+                acts = {r["group_id"]: int(r["n"]) for r in await conn.fetch(
+                    "SELECT group_id, count(*) AS n "
+                    "  FROM paper_xavier_reviews "
+                    " WHERE group_id = ANY($1::text[]) "
+                    "   AND action IS NOT NULL GROUP BY group_id",
+                    gids)} if gids else {}
+                vals = await R.valuations_by_id(
+                    conn, [d.get("valuation_id") for d in decs])
+                # OFF THE LOOP (RC6): one page of positions attributed fill
+                # by fill on the CPU lane (see calibration.load_records for
+                # the production stalls). Pure; each position's row depends
+                # only on its own decision, group, fills, settlement and
+                # valuation, so pages concatenate to the one-shot result.
+                out += await C.offload(paper_rows, decs, groups, fills, sidx,
+                                       acts, vals)
+            if truncated or fetched < page:
+                break
     if meta is not None:
         meta.update({
             "population": PAPER_POPULATION, "window_days": days,
-            "since": since, "limit": int(limit), "positions_read": len(decs),
-            "truncated": truncated,
-            "newest_unread_at": (C.epoch(got[int(limit)]["decided_at"])
-                                 if truncated else None),
-            "oldest_read_at": (C.epoch(decs[-1]["decided_at"])
-                               if decs else None)})
-    groups = await R.entry_groups(conn, [d["decision_id"] for d in decs])
-    gids = sorted(set(groups.values()))
-    fills = [dict(r) for r in await conn.fetch(
-        "SELECT group_id, role, direction, holding_side, us_market_slug, "
-        "       qty, price, fee_usd, gross_usd FROM paper_fills "
-        " WHERE group_id = ANY($1::text[])", gids)] if gids else []
-    setts = await R.latest_settlements(conn, group_ids=gids)
-    sidx = {(s["group_id"], s["us_market_slug"], str(s["holding_side"])): s
-            for s in setts.values()}
-    acts = {r["group_id"]: int(r["n"]) for r in await conn.fetch(
-        "SELECT group_id, count(*) AS n FROM paper_xavier_reviews "
-        " WHERE group_id = ANY($1::text[]) AND action IS NOT NULL "
-        " GROUP BY group_id", gids)} if gids else {}
-    vals = await R.valuations_by_id(conn, [d.get("valuation_id")
-                                           for d in decs])
-    # OFF THE LOOP (RC6): up to `limit` positions attributed fill by fill --
-    # the second-longest hold of the intel cycle at its bound (see
-    # calibration.load_records for the production stalls). Pure.
-    return await C.offload(paper_rows, decs, groups, fills, sidx, acts, vals)
+            "since": since, "limit": limit, "positions_read": read,
+            "truncated": truncated, "newest_unread_at": newest_unread_at,
+            "oldest_read_at": oldest_read_at, "order": PAPER_READ_ORDER,
+            "pages": pages, "page_positions": page})
+    return out
 
 
 def paper_rows(decs, groups, fills, sidx, acts, vals) -> list:

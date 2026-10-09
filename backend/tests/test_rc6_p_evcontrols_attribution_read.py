@@ -35,6 +35,11 @@ never a pass on a subset. No threshold, gate or population is narrowed.
       real positions reach ATTRIBUTION / PROFIT_BREAKERS / the study, the
       study reads a position older than 60 days that ATTRIBUTION's window
       does not, and a truncated read turns all three RED by name
+  §5  (review rework 2) the WHOLE population, a page at a time: the study
+      and the forward scoreboard read every member past 5,000 (e4995085:
+      RED / UNAVAILABLE for good from the 5,001st), a paged read equals the
+      one-shot read row for row, and a cut is possible only at the safety
+      stop, still by name wherever it falls on a page
 
 ALL ROWS ARE SYNTHETIC TEST DATA written inside a transaction each test rolls
 back; nothing is committed (the paper_acct_main rows of §4 included).
@@ -360,3 +365,234 @@ def test_the_interlock_reads_every_position_of_each_population(monkeypatch):
             (name, c)
         assert c["evidence"]["read"]["complete"] is False
     assert res["status"] == cut["status"] == "PAPER_SHADOW_ONLY"
+
+
+# ── §5 the whole population, a page at a time (review rework 2) ─────
+#
+# THE CLIFF (review of e4995085). controls.attributed_positions reads EVERY
+# position (days=None) for the MULTIPLE_TESTING study (its frozen plan
+# declares no window) and the forward scoreboard (every position since the
+# thresholds' frozen_at). Both populations only grow, and a cut read fails
+# closed. Under the 5,000 bound the study was RED by ATTRIBUTION_READ_
+# TRUNCATED for good from the 5,001st lifetime position, and the scoreboard
+# UNAVAILABLE once 5,000 positions followed 2026-10-07 -- whatever the data
+# said; scorecard_14 category 8 labels a failing MULTIPLE_TESTING forward
+# evidence. load_paper now pages the whole population through a cursor; a
+# cut is possible only at the safety stop PAPER_POSITIONS_LIMIT (20,000).
+
+BULK_DEC_SQL = """
+INSERT INTO paper_decisions (decision_id, session_id, account_id,
+  decided_at, us_market_slug, holding_side, fixture, label, verdict,
+  refusal, p_pinnacle, internal_model, pinnacle, limit_price, proposed_qty,
+  economics, qualification_gaps, policy_version, simulator_version, strategy)
+SELECT 'paperdec:life-' || $4 || '-' || g, $1, $2,
+       to_timestamp($3 - g), 'life-mkt-' || $4 || '-' || g, 'LONG',
+       'fx-life-' || $4 || '-' || g, '{}'::jsonb, 'ENTER', NULL, 0.5,
+       '{}'::jsonb, '{}'::jsonb, 0.5, 10, '{}'::jsonb, '[]'::jsonb, 'TEST',
+       $5, $6
+  FROM generate_series(1, $7::int) g
+"""
+BULK_ORD_SQL = """
+INSERT INTO paper_orders (order_id, idempotency_key, account_id, session_id,
+  group_id, role, direction, holding_side, intent, us_market_slug, fixture,
+  label, order_type, time_in_force, allow_partial, qty, limit_price,
+  wire_price, filled_qty, state, decision_id, decided_at, eligible_at,
+  expires_at, simulator_version, strategy, terminal_at, terminal_reason)
+SELECT 'paperord:life-' || $1 || '-' || g, 'paperord:life-' || $1 || '-' || g,
+       $2, $3, 'paper_group_life-' || $1 || '-' || g, 'ENTRY', 'BUY', 'LONG',
+       'ORDER_INTENT_BUY_LONG', 'life-mkt-' || $1 || '-' || g,
+       'fx-life-' || $1 || '-' || g, '{}'::jsonb, 'MARKETABLE', 'IOC', true,
+       10, 0.50, 0.50, 0, 'EXPIRED', 'paperdec:life-' || $1 || '-' || g,
+       to_timestamp($4 - g), to_timestamp($4 - g + 1),
+       to_timestamp($4 - g + 90), $5, $6, to_timestamp($4 - g + 90), 'TEST'
+  FROM generate_series(1, $7::int) g
+"""
+
+
+async def bulk_positions(conn, acct, *, newest_at: float, n: int) -> None:
+    """`n` positions (ENTER decision + ENTRY order, never filled), the newest
+    at `newest_at`, one second apart: the population's members, cheaply."""
+    tag = F.uid("")
+    await conn.execute(BULK_DEC_SQL, acct["session_id"], acct["account_id"],
+                       float(newest_at), tag, F.SIM_VERSION, F.STRATEGY,
+                       int(n))
+    await conn.execute(BULK_ORD_SQL, tag, acct["account_id"],
+                       acct["session_id"], float(newest_at), F.SIM_VERSION,
+                       F.STRATEGY, int(n))
+
+
+async def _paper_main(conn, now):
+    from sportsassets import bettor_paper_session as S
+    from sportsassets.intel import common as IC
+    sess = await S.ensure_session(conn, account_id=IC.PAPER_ACCOUNT,
+                                  now=now - 400 * 86400)
+    return {"account_id": IC.PAPER_ACCOUNT, "session_id": sess["session_id"]}
+
+
+_POSITIONS_SQL = (
+    "SELECT count(*) FROM paper_decisions d WHERE d.verdict = 'ENTER' AND "
+    "d.account_id = $1 AND EXISTS (SELECT 1 FROM paper_orders o WHERE "
+    "o.decision_id = d.decision_id AND o.role = 'ENTRY')")
+
+STUDY_REG = {"preregistered": 5, "candidates_tested": 0}
+
+
+@pg
+def test_5001_lifetime_positions_outside_60_days_keep_the_study_whole():
+    """The review's demonstration: 5,001 positions, all 90+ days old.
+    e4995085: the read is cut at 5,000, the 60-day controls are whole, and
+    the study is RED by ATTRIBUTION_READ_TRUNCATED -- for good, since the
+    population only grows. Now: every position is read; nothing is cut."""
+    async def fn(conn):
+        now = time.time()
+        acct = await _paper_main(conn, now)
+        await bulk_positions(conn, acct, newest_at=now - 90 * 86400,
+                             n=5001)
+        before = int(await conn.fetchval(_POSITIONS_SQL,
+                                         acct["account_id"]))
+        aread: dict = {}
+        every, _fx = await C.attributed_positions(conn, now=now,
+                                                  detail=aread)
+        return now, before, aread, every
+    now, population, aread, every = _run(fn)
+    assert population >= 5001
+    assert aread["truncated"] is False, aread
+    assert aread["positions_read"] == len(every) == population
+    assert aread["limit"] == A.PAPER_POSITIONS_LIMIT >= 20000
+    assert aread["pages"] == -(-population // A.PAPER_PAGE_POSITIONS)
+    win, wread = C.attribution_window(every, aread, now=now)
+    assert wread["complete"] is True
+    mt_read = C.population_read(aread, since=None, window_days=None)
+    assert mt_read["complete"] is True
+    mt = C.multiple_testing(STUDY_REG, read=mt_read)
+    assert C.B_READ_TRUNCATED not in mt["blockers"], mt["blockers"]
+    at = C.attribution(win, read=wread)
+    assert C.B_READ_TRUNCATED not in at["blockers"]
+
+
+@pg
+def test_5001_positions_in_the_forward_cohort_still_make_a_scoreboard():
+    """5,001 positions after the thresholds' frozen_at. e4995085: the read
+    is cut, the newest position left out is inside the cohort, and the
+    forward scoreboard is UNAVAILABLE (ATTRIBUTION_READ_TRUNCATED) -- for
+    good, since the cohort only grows. Now: the cohort is read whole."""
+    from sportsassets.pm_bind import scoreboard as SB
+
+    async def fn(conn):
+        now = time.time()
+        since = SB.cohort_start(SB.thresholds())
+        acct = await _paper_main(conn, now)
+        await bulk_positions(conn, acct, newest_at=since + 5001 + 60,
+                             n=5001)
+        aread: dict = {}
+        every, fx = await C.attributed_positions(conn, now=now,
+                                                 detail=aread)
+        sb = await SB.read(conn, now=now, attributed=every, fixtures=fx,
+                           read=aread)
+        return since, aread, every, sb
+    since, aread, every, sb = _run(fn)
+    assert sb.get("status") != "UNAVAILABLE", (sb.get("why"),
+                                               sb.get("positions_read"))
+    assert aread["truncated"] is False, aread
+    cohort = [r for r in every if (r.get("decided_at") or 0) >= since]
+    assert len(cohort) >= 5001
+    assert sb["positions_read"]["complete"] is True
+    assert sb["positions_read"]["population_since"] == since
+
+
+@pg
+def test_a_paged_read_equals_the_one_shot_read_row_for_row():
+    """Pages of 2 against one page holding everything: the same rows in the
+    same order (decided_at, decision_id descending -- ties included), the
+    same fills, settlements, Xavier action counts and valuations per
+    position, whichever page each lands on."""
+    async def fn(conn):
+        now = time.time()
+        acct = await H.new_account(conn, "evcpage", now=now - 20 * 86400)
+        pos = [await settled_position(conn, acct, at=now - 86400 * (k + 1),
+                                      pnl_sign=1 if k % 2 else -1)
+               for k in range(5)]
+        # a tie: two positions decided at the same instant
+        tie = now - 86400 * 2
+        pos.append(await settled_position(conn, acct, at=tie))
+        for k, p in enumerate(pos[:3]):
+            for j in range(k + 1):
+                await conn.execute(
+                    "INSERT INTO paper_xavier_reviews (review_id, session_id,"
+                    " account_id, group_id, reviewed_at, trigger,"
+                    " alternatives, exposure, action, strategy) VALUES"
+                    " ($1, $2, $3, $4, to_timestamp($5),"
+                    " 'SCHEDULED_BACKSTOP', '[]', '{}',"
+                    " '{\"kind\": \"HOLD\"}', $6)",
+                    "paperrev:" + F.uid(""), acct["session_id"],
+                    acct["account_id"], p["group_id"], p["at"] + 60 + j,
+                    F.STRATEGY)
+        one, paged = {}, {}
+        a = await A.load_paper(conn, now=now, account_id=acct["account_id"],
+                               days=None, meta=one)
+        b = await A.load_paper(conn, now=now, account_id=acct["account_id"],
+                               days=None, meta=paged, page=2)
+        return pos, a, one, b, paged
+    pos, a, one, b, paged = _run(fn)
+    assert len(a) == len(pos) == 6
+    assert a == b
+    assert sorted(r["management_actions"] for r in a) == [0, 0, 0, 1, 2, 3]
+    assert one["pages"] == 1 and paged["pages"] == 3
+    assert paged["page_positions"] == 2
+    for k in ("positions_read", "truncated", "newest_unread_at",
+              "oldest_read_at", "order"):
+        assert one[k] == paged[k], k
+    ats = [(r["decided_at"], r["decision_id"]) for r in a]
+    assert ats == sorted(ats, reverse=True)
+
+
+@pg
+def test_the_safety_stop_still_fails_closed_by_name_on_any_page_edge():
+    """A cut is possible only at the stop, and it is exact wherever the stop
+    falls: mid-page (stop 3, pages of 2) or on a page edge (stop 4, pages
+    of 2). The OLDEST positions are the ones left out, and the read names
+    the newest of them."""
+    async def fn(conn):
+        now = time.time()
+        acct = await H.new_account(conn, "evcstop", now=now - 20 * 86400)
+        pos = [await settled_position(conn, acct, at=now - 86400 * (k + 1))
+               for k in range(6)]                    # newest first
+        out = {}
+        for stop in (3, 4, 6):
+            m: dict = {}
+            rows = await A.load_paper(conn, now=now,
+                                      account_id=acct["account_id"],
+                                      days=None, limit=stop, page=2, meta=m)
+            out[stop] = (rows, m)
+        return pos, out
+    pos, out = _run(fn)
+    for stop in (3, 4):
+        rows, m = out[stop]
+        assert sorted(r["group_id"] for r in rows) == sorted(
+            p["group_id"] for p in pos[:stop])
+        assert m["truncated"] is True and m["positions_read"] == stop
+        assert m["newest_unread_at"] == pytest.approx(pos[stop]["at"],
+                                                      abs=1e-3)
+        assert A.read_complete_since(m, None) is False
+        rd = C.population_read(m, since=None, window_days=None)
+        mt = C.multiple_testing(STUDY_REG, read=rd)
+        assert C.B_READ_TRUNCATED in mt["blockers"]
+    rows, m = out[6]                    # the stop equals the population
+    assert len(rows) == 6 and m["truncated"] is False
+    assert m["newest_unread_at"] is None
+
+
+def test_the_read_pages_through_a_cursor_and_the_cycle_keeps_its_bound():
+    import inspect
+    from sportsassets.intel import runner as RUN
+    src = inspect.getsource(A.load_paper)
+    assert "conn.cursor(" in src and "cur.fetch(page)" in src
+    assert "C.offload(paper_rows," in src
+    # the stop is a safety stop far above production's whole population
+    # (681 positions, research-sql 37979576920), not a sample size
+    assert A.PAPER_POSITIONS_LIMIT == 20000
+    assert A.PAPER_PAGE_POSITIONS == 1000
+    # the intel shadow cycle (a display snapshot) keeps its earlier bound
+    assert A.INTEL_CYCLE_POSITIONS_LIMIT == 5000
+    assert "limit=AT.INTEL_CYCLE_POSITIONS_LIMIT" in inspect.getsource(
+        RUN.run_cycle)

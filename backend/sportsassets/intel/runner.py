@@ -130,7 +130,9 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
 
     async def attribution():
         pread: dict = {}
+        # the cycle's own bound (a display snapshot; no control reads it)
         rows = await AT.load_paper(conn, now=now, account_id=account_id,
+                                   limit=AT.INTEL_CYCLE_POSITIONS_LIMIT,
                                    meta=pread)
         if include_actual:
             rows += await AT.load_actual(conn, now=now)

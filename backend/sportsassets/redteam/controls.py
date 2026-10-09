@@ -382,8 +382,9 @@ def by_event(rows: list) -> list:
 
 
 #: the attribution read left out a position of the control's own population
-#: (intel.attribution.load_paper's bound): the control is RED by this name,
-#: never a pass on a subset
+#: (intel.attribution.load_paper reads the whole population in pages; only
+#: its safety stop, PAPER_POSITIONS_LIMIT, can cut it): the control is RED
+#: by this name, never a pass on a subset
 B_READ_TRUNCATED = "ATTRIBUTION_READ_TRUNCATED"
 
 
@@ -499,8 +500,9 @@ ATTRIBUTION_WINDOW_DAYS = 60.0
 
 async def attributed_positions(conn, *, now: float,
                                detail: dict | None = None) -> tuple:
-    """EVERY PAPER position, attributed (no window; bounded, and `detail`
-    receives the read's figures and whether the bound left any out). Each
+    """EVERY PAPER position, attributed (no window; read whole, a page at a
+    time, up to load_paper's safety stop, and `detail` receives the read's
+    figures and whether the stop left any out). Each
     consumer takes ITS declared population from these rows: ATTRIBUTION and
     PROFIT_BREAKERS the last 60 days (`attribution_window`), the research
     study every position (its plan declares no window), the forward
