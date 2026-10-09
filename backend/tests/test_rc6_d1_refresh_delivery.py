@@ -29,7 +29,6 @@ import time
 
 import pytest
 
-from sportsassets import institutional_stream as IS
 from sportsassets.market_plane import active_refresh as AR
 from sportsassets.market_plane import populate as POP
 from sportsassets.workers import universal_market_plane as W

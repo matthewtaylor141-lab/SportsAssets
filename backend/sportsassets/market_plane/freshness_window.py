@@ -70,7 +70,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 
 VERSION = "FROZEN_WINDOW_FRESHNESS_V1"
 KIND_WINDOW = "FRESHNESS_WINDOW"
