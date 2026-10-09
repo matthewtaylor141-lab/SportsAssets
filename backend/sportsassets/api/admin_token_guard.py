@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hmac
 import logging
+import threading
 import time
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ MIN_SIGNING_KEY_CHARS = 32
 
 _FAILS: dict[str, list[float]] = {}
 _GLOBAL: list[float] = []
+_LOCK = threading.Lock()
 
 
 def client_key(headers, client_host: str | None) -> str:
@@ -59,16 +61,34 @@ def _recent(ts: list[float], now: float) -> list[float]:
     return [t for t in ts if now - t < WINDOW_S]
 
 
+def constant_time_text_equal(supplied: str, expected: str) -> bool:
+    """Compare text as bytes: hostile non-ASCII text is a mismatch, not a 500.
+
+    Preserve the caller's whitespace and credential scope rules. Encoding
+    does not normalize text or grant a different credential any authority.
+    """
+    return hmac.compare_digest(supplied.encode("utf-8", "surrogatepass"),
+                               expected.encode("utf-8", "surrogatepass"))
+
+
 def token_ok(supplied: str, expected: str) -> bool:
     supplied, expected = (supplied or "").strip(), (expected or "").strip()
-    return bool(expected) and hmac.compare_digest(supplied, expected)
+    return bool(expected) and constant_time_text_equal(supplied, expected)
 
 
 def blocked(key: str, now: float) -> bool:
-    mine = _recent(_FAILS.get(key, []), now)
-    _FAILS[key] = mine
+    # A globally refused request must not allocate a per-client entry.
+    # Otherwise an attack rotating clients grows this map without ever
+    # reaching record_failure's pruning, including with empty hit lists.
     _GLOBAL[:] = _recent(_GLOBAL, now)
-    return len(mine) >= PER_CLIENT_LIMIT or len(_GLOBAL) >= GLOBAL_LIMIT
+    if len(_GLOBAL) >= GLOBAL_LIMIT:
+        return True
+    mine = _recent(_FAILS.get(key, []), now)
+    if mine:
+        _FAILS[key] = mine
+    else:
+        _FAILS.pop(key, None)
+    return len(mine) >= PER_CLIENT_LIMIT
 
 
 def record_failure(key: str, now: float) -> None:
@@ -90,9 +110,12 @@ def check(headers, client_host: str | None, expected: str,
         return None
     now = time.time() if now is None else now
     key = client_key(headers, client_host)
-    if blocked(key, now):
-        return R_THROTTLED
-    record_failure(key, now)
+    # Check and charge one budget atomically. No I/O or await inside:
+    # concurrent callers cannot all spend the same last available guess.
+    with _LOCK:
+        if blocked(key, now):
+            return R_THROTTLED
+        record_failure(key, now)
     return None
 
 
@@ -110,5 +133,6 @@ def warn_if_weak(expected: str) -> bool:
 
 
 def reset() -> None:
-    _FAILS.clear()
-    _GLOBAL.clear()
+    with _LOCK:
+        _FAILS.clear()
+        _GLOBAL.clear()
