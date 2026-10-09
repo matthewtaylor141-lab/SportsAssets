@@ -372,6 +372,25 @@ def classify(contract: dict) -> dict:
     return out
 
 
+#: NON_SPORTS_EXCLUDED_FROM_REGISTRY: what a full populate pass kept out
+OUTSIDE_LINE = "NON_SPORTS_EXCLUDED_FROM_REGISTRY"
+OUTSIDE_NOT_RECORDED = "NO_FULL_POPULATE_PASS_RECORDED"
+
+
+def _outside(rec: dict | None) -> dict:
+    """PURE. The waterfall's line for the markets kept out of the registry
+    (never summed into the tiers)."""
+    if not rec:
+        return {"line": OUTSIDE_LINE, "status": OUTSIDE_NOT_RECORDED,
+                "in_sums": False}
+    return {"line": OUTSIDE_LINE, "status": "RECORDED", "in_sums": False,
+            "full_pass_at": rec.get("at"), "rule": rec.get("rule"),
+            "listed_active_by_code": rec.get("excluded_listed_active"),
+            "listed_active_total": rec.get("excluded_listed_active_total"),
+            "catalogue_by_code": rec.get("excluded"),
+            "catalogue_total": rec.get("excluded_total")}
+
+
 #: coverage.terminal's states, one stage each -- except CODE_CONTROLLED_GAP,
 #: which terminal() assigns at TWO points of its order (not mapped; mapped
 #: and valued but no fresh canonical book), told apart by the same evidence
@@ -486,7 +505,13 @@ class Waterfall:
         return dict(zip(REACHED, (n, mapped, settled, valued,
                                   valued - row[LOST_FRESH_BOOK])))
 
-    def result(self) -> dict:
+    def result(self, *, outside_registry: dict | None = None) -> dict:
+        """The counters. `outside_registry` is the plane's last FULL
+        populate pass's record (populate.full_pass_record): the catalogue
+        markets kept out of the registry by name. They are in no tier and no
+        sum here -- the registry is the catalogue this waterfall counts --
+        and they are shown beside it so the exclusion stays visible; absent
+        (no full pass recorded yet) it says so."""
         tiers = {}
         exact = True
         for t, row in self.tiers.items():
@@ -535,5 +560,6 @@ class Waterfall:
                 "by_kalshi_rule": dict(sorted(self.k_rules.items())),
                 "kalshi_unrecognised": dict(top_k[:MAX_REASON_KEYS]),
                 "kalshi_unrecognised_keys_total": len(top_k),
+                "outside_registry": _outside(outside_registry),
                 "sums_exact": bool(exact and total == sum(
                     self.tiers[t]["catalogue"] for t in TIERS))}

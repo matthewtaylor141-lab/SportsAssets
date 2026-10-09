@@ -339,6 +339,20 @@ def latency_report(mgr, *, now: float) -> dict:
     return rep
 
 
+def record_populate(state: dict, pop: dict, *, full: bool,
+                    now: float) -> None:
+    """THE POPULATE RESULT INTO THE PLANE'S STATE. `populate` is the last
+    pass of either kind (an incremental pass every POPULATE_EVERY_S replaces
+    it); `populate_full` is the last FULL pass's record of the markets it
+    kept out of the registry by name (populate.full_pass_record), kept
+    under its own key so no incremental pass overwrites it (RC6, lane D2,
+    review finding 2: the non-sports markets the slug grammar retires from
+    the registry stay counted, by code, with the pass time)."""
+    state["populate"] = pop
+    if full:
+        state["populate_full"] = POP.full_pass_record(pop, at=now)
+
+
 def coverage_waterfall_on() -> bool:
     """COVERAGE_WATERFALL (default on): the RC6 coverage readings."""
     return os.environ.get(COVERAGE_WATERFALL_ENV, "on").strip().lower() \
@@ -524,7 +538,8 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         "runtime": os.environ.get("UMP_RUNTIME", "STANDALONE_UNLABELLED"),
         "resources": runtime_resources(),
         "populate": {k: v for k, v in (state.get("populate") or {})
-                     .items() if k != "excluded"},
+                     .items() if k not in ("excluded",
+                                           "excluded_listed_active")},
         "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
             "enabled", "complete", "stopped", "markets", "requests",
             "error")},
@@ -675,9 +690,9 @@ async def run() -> None:
                             seen_receipts.get("full")))
                 if full or now - last["populate"] >= POPULATE_EVERY_S:
                     pop = await POP.populate(c, since=watermark, now=now,
-                                             full=full)
+                                             full=full, excluded_detail=full)
                     watermark = max(watermark, pop.get("watermark") or 0.0)
-                    state["populate"] = pop
+                    record_populate(state, pop, full=full, now=now)
                     last["populate"] = now
                     if full:
                         last["full"] = now
@@ -713,7 +728,8 @@ async def run() -> None:
                         refreshed=(refresher.current(
                             mgr, now=now, bound=FRESH_SLA_S)
                             if refresher is not None else None),
-                        derivative_terms=rc6, waterfall=rc6)
+                        derivative_terms=rc6, waterfall=rc6,
+                        outside_registry=state.get("populate_full"))
                     last["coverage"] = now
                     mem.mark("coverage")
                 if mgr is not None and \
@@ -1166,6 +1182,9 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
             cert, last_pass=state.get("certification")),
         "catalogue": state.get("catalogue"),
         "populate": {k: v for k, v in (state.get("populate") or {}).items()},
+        # (RC6) the last FULL pass's markets kept out of the registry by
+        # name, by code: no incremental pass replaces it
+        "populate_full": state.get("populate_full"),
         "refdata": state.get("refdata"),
         "refdata_universe": state.get("refdata_universe"),
         "runtime": {"label": os.environ.get("UMP_RUNTIME",

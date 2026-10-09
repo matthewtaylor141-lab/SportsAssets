@@ -267,6 +267,15 @@ def _jsonish(v):
     return v
 
 
+def venue_lists_active(r: dict, *, now: float) -> bool:
+    """PURE. The catalogue market is listed in an active state and was seen
+    within ACTIVE_HORIZON_S: what makes its registry row active (besides
+    being held or a candidate)."""
+    seen = _epoch(r.get("updated_at")) or now
+    return (r.get("listing_state") in ACTIVE_LISTING_STATES
+            and now - seen <= ACTIVE_HORIZON_S)
+
+
 def contract_row(r: dict, *, now: float, held=frozenset(),
                  candidates=frozenset()) -> dict | None:
     """PURE. One catalogue market (grouped sides) -> its registry row, or
@@ -305,8 +314,7 @@ def contract_row(r: dict, *, now: float, held=frozenset(),
         "version": O.VERSION}
     start = _epoch(r.get("game_start"))
     seen = _epoch(r.get("updated_at")) or now
-    listed_active = (r.get("listing_state") in ACTIVE_LISTING_STATES
-                     and now - seen <= ACTIVE_HORIZON_S)
+    listed_active = venue_lists_active(r, now=now)
     reason = None
     if slug in held:
         prio, reason = P_HELD, "OPEN_PAPER_POSITION"
@@ -462,7 +470,8 @@ HAVE_SQL = ("SELECT contract_id, content_sha FROM market_plane_registry "
 
 
 async def populate(conn, *, since: float, now: float | None = None,
-                   full: bool = False) -> dict:
+                   full: bool = False, excluded_detail: bool = False
+                   ) -> dict:
     """Upsert every catalogue market changed since `since` (all of them when
     `full`), keep REQUIRED markets active, and (on a full pass) retire
     registry rows the catalogue no longer lists and nothing requires. Returns
@@ -476,12 +485,19 @@ async def populate(conn, *, since: float, now: float | None = None,
     (+444 MB VmHWM on a full pass at production cardinality). Every page's
     markets are distinct (the catalogue is GROUP BY market_slug), so a page
     never reads a row an earlier page wrote; the writes, the events and the
-    counts are those of the single-batch pass."""
+    counts are those of the single-batch pass.
+
+    `excluded_detail` (RC6, lane D2) also counts, by venue code, the
+    excluded markets the venue LISTS as active (`excluded_listed_active`:
+    the rows that would be active registry rows were their code a sports
+    league). Off, the output is the RC5 output exactly."""
     at = float(now if now is not None else time.time())
     held, cands, both_read = await required_sets_read(conn)
     required = held | cands
     out = {"read": 0, "upserted": 0, "changed": 0, "excluded": {},
            "required_added": 0, "retired": 0, "full": bool(full)}
+    if excluded_detail:
+        out["excluded_listed_active"] = {}
     seen_required = set()
     watermark = float(since)
     async with conn.transaction():
@@ -503,6 +519,9 @@ async def populate(conn, *, since: float, now: float | None = None,
                 if c is None:
                     lg = league_of(r.get("event_slug"), r.get("team_league"))
                     out["excluded"][lg] = out["excluded"].get(lg, 0) + 1
+                    if excluded_detail and venue_lists_active(r, now=at):
+                        xa = out["excluded_listed_active"]
+                        xa[lg] = xa.get(lg, 0) + 1
                     continue
                 if c["contract_id"] in required:
                     seen_required.add(c["contract_id"])
@@ -563,6 +582,46 @@ async def populate(conn, *, since: float, now: float | None = None,
     out["watermark"] = watermark
     out["required"] = {"held": len(held), "candidates": len(cands)}
     return out
+
+
+#: what a FULL pass's record says the exclusion rule is
+EXCLUDED_RULE = ("ontology.NON_SPORTS_LEAGUES, by the venue league code of "
+                 "the event slug (populate.league_of)")
+
+
+def full_pass_record(out: dict, *, at: float) -> dict:
+    """PURE. THE MARKETS A FULL POPULATE PASS KEPT OUT OF THE REGISTRY, by
+    name (RC6, lane D2, review finding 2).
+
+    A market whose venue code NON_SPORTS_LEAGUES names never becomes a
+    registry row, so it is in no coverage denominator (coverage.active, the
+    waterfall). Only a FULL pass reads the whole catalogue; an incremental
+    pass (every POPULATE_EVERY_S, since the watermark) counts only the rows
+    it read, and it replaces state["populate"]. The worker keeps this
+    record of the last full pass under its own key (state / snapshot
+    `populate_full`), which no incremental pass overwrites:
+
+      excluded               every catalogue market kept out, by code
+      excluded_listed_active those the venue lists as active (the rows the
+                             registry's active count would hold were the
+                             code a sports league), by code
+      at                     the full pass's time (its own clock; no
+                             source-event time is restated)"""
+    x = {str(k): int(v) for k, v in (out.get("excluded") or {}).items()}
+    xa = {str(k): int(v) for k, v in
+          (out.get("excluded_listed_active") or {}).items()}
+    return {"at": float(at), "full": bool(out.get("full")),
+            "read": out.get("read"), "upserted": out.get("upserted"),
+            "retired": out.get("retired"),
+            "rule": EXCLUDED_RULE,
+            "excluded": dict(sorted(x.items())),
+            "excluded_total": sum(x.values()),
+            "excluded_listed_active": (dict(sorted(xa.items()))
+                                       if "excluded_listed_active" in out
+                                       else None),
+            "excluded_listed_active_total": (sum(xa.values())
+                                             if "excluded_listed_active"
+                                             in out else None)}
 
 
 async def catalogue_completeness(conn) -> dict:
@@ -735,7 +794,8 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                         rest_sla_s: float = 300.0, limit: int | None = None,
                         refreshed: dict | None = None,
                         derivative_terms: bool = False,
-                        waterfall: bool = False) -> dict:
+                        waterfall: bool = False,
+                        outside_registry: dict | None = None) -> dict:
     """Classify every ACTIVE registry contract and write the changed terminal
     states AND settlement states (market_plane.settlement, evidence only).
     Returns the matrix summary (counts by state, sport, family, why), the
@@ -778,8 +838,11 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     is; a captured family withheld for want of fixture scope says so).
     `waterfall` adds
     `waterfall` (market_plane.waterfall): every active contract's target
-    tier and the stage it stopped at, counters only. Both False: the RC5 /
-    RC6-refresh output exactly."""
+    tier and the stage it stopped at, counters only; with it,
+    `outside_registry` (the plane's last full_pass_record) is carried into
+    the waterfall as the markets kept out of the registry by name, beside
+    the sums and never in them. Both False: the RC5 / RC6-refresh output
+    exactly."""
     from .models import TERMINAL_STATES
     from .coverage import VERSION as MATRIX_VERSION
     from . import settlement as S
@@ -999,7 +1062,7 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     if origins is not None:
         m["rest_recovery_by_origin"] = origins
     if wf is not None:
-        m["waterfall"] = wf.result()
+        m["waterfall"] = wf.result(outside_registry=outside_registry)
     top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),
