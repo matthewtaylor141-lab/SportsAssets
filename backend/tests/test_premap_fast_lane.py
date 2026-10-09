@@ -120,6 +120,14 @@ class _Harness:
         monkeypatch.setattr(premap, "_ensure_table",
                             lambda pool: asyncio.sleep(0))
         monkeypatch.setattr(premap, "LIST_PACING_S", 0.0)
+        # the sweep's rules capture asks THIS fake pool whether migration 312
+        # is applied (fetchval -> None: "absent"); market_plane.rules caches
+        # that answer process-wide for 600 s, so it is kept in a cache owned
+        # by this test and never reaches a later test's real database
+        from sportsassets.market_plane import rules
+        monkeypatch.setattr(rules, "_TABLE_STATE",
+                            {"present": None, "at": 0.0})
+        monkeypatch.setattr(rules, "_SEEN", {})
         return self
 
 
