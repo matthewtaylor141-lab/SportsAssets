@@ -57,7 +57,12 @@ async def main() -> None:
         errors: dict = {}
 
         try:
-            markets = await client.fetch_active_sports_markets()
+            # THE WHOLE OPEN CATALOGUE, BY ROTATION (gamma.KEYSET_PATH): this
+            # cycle's share of the venue's documented keyset walk, at most
+            # the offset walk's per-cycle request budget, continuing where
+            # the last cycle stopped -- or the offset walk, its truncation
+            # named, when the keyset is not served as documented
+            markets = await client.fetch_open_markets()
             kept = 0
             for raw in markets:
                 meta = gamma.parse_market(raw)
@@ -79,6 +84,20 @@ async def main() -> None:
                 _truncation_noted.add(stopped)
                 log.warning("gamma open-market catalogue TRUNCATED: %s",
                             client.last_paging)
+            # A TRUNCATED CATALOGUE IS NOT A GREEN CYCLE (P0 2026-10-09).
+            # Production read 'metadata cycle ok' with `gamma_paging:
+            # {'pages': 21, 'markets': 2100, 'stopped': 'OFFSET_CEILING',
+            # 'truncated': True}` on every cycle (render-ops 37933193326):
+            # the loop said ok while every open market past the first 2,100
+            # was never read. A cycle whose walk ended truncated is
+            # DEGRADED, by name; a keyset cycle that reads its share of the
+            # rotation is not truncated (the rotation continues).
+            if client.last_paging.get("truncated"):
+                errors["catalogue"] = ("gamma open-market catalogue "
+                                       "TRUNCATED: %s (%s)" % (
+                                           stopped,
+                                           client.last_paging.get("mode")
+                                           or "OFFSET"))
         except Exception as exc:  # noqa: BLE001
             log.warning("gamma markets refresh failed: %s", exc)
             errors["markets"] = str(exc)[:180]

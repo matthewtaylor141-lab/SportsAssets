@@ -122,13 +122,75 @@ _OPEN_MARKET_PARAM_VARIANTS: list[dict[str, str]] = [
 #: the param variants (the 422 reset `_open_params`). The paginator now
 #: stops at the offset the API itself states it serves; reaching it with a
 #: full page means the catalogue is TRUNCATED, which is recorded by name in
-#: `last_paging` (and rides the metadata heartbeat), never hidden. The
-#: keyset endpoint the error names is NOT used: its contract was not
-#: verifiable from here, and guessing it on a production collector is not
-#: acceptable.
+#: `last_paging` (and rides the metadata heartbeat), never hidden. (The
+#: keyset endpoint the error names was not used then: its contract was not
+#: verified. It is now -- see KEYSET_PATH.)
 GAMMA_MAX_OFFSET = 2000
 #: the API's own words when an offset is past what it serves
 OFFSET_REFUSAL_TEXT = "offset too large"
+
+# ── THE WHOLE OPEN CATALOGUE, BY THE VENUE'S DOCUMENTED CURSOR (P0, 2026-10-09)
+#
+# PRODUCTION (render-ops 37933193326 / 37933204766, sportsassets-workers,
+# 2026-10-09): every metadata cycle reads `{'pages': 21, 'markets': 2100,
+# 'stopped': 'OFFSET_CEILING', 'max_offset': 2000, 'truncated': True}` and
+# keeps 233 sports markets, with the heartbeat status 'ok'. Offset paging
+# reaches the first 2,100 open markets in the listing's order and never the
+# rest -- the same 2,100 every minute -- so a sports market listed after them
+# reached the metadata cache only through a trade's on-miss lookup.
+#
+# THE VENUE DOCUMENTS THE WAY PAST IT. The API's own refusal names it ("use
+# /markets/keyset for deeper pagination"), and the public reference
+# (docs.polymarket.com/api-reference/markets/list-markets-keyset-pagination,
+# read 2026-10-09) specifies it: GET /markets/keyset, `limit` 1..100,
+# `closed` (default false), `after_cursor` = the previous response's
+# `next_cursor`; the response is {"markets": [...], "next_cursor": "..."}
+# where next_cursor is "Present only when the number of returned markets
+# equals the effective limit. Omitted on the last page"; `offset` is
+# rejected with 422, as are an invalid cursor or filter; 503 when keyset
+# pagination is not configured. (The official SDK's own market discovery
+# runs on this endpoint: research/RUN836B1_CURRENT_SURFACE_AUDIT.md row 11.)
+#
+# WITHIN THE SAME REQUEST BUDGET. The offset walk spends
+# GAMMA_MAX_OFFSET // page_size + 1 = 21 requests a cycle. The keyset walk
+# spends AT MOST THE SAME 21 a cycle and keeps its cursor between cycles: a
+# ROTATION through the whole open catalogue, each cycle continuing where the
+# last stopped, every open market read once per rotation, the rotation's
+# length (cycles, pages, seconds) published on the heartbeat. No request is
+# added and the cadence is unchanged. Only documented parameters are sent
+# (closed, limit, after_cursor).
+#
+# AND IF THE VENUE DOES NOT SERVE IT AS DOCUMENTED (a 404 / 405 / 501 / 503,
+# a 422 to the first page, a body that is not the documented envelope), the
+# cycle's remaining budget runs the offset walk exactly as before -- its
+# truncation named -- the refusal is recorded (`keyset_unavailable`), and
+# the keyset is asked again only after KEYSET_RETRY_AFTER_S, so a missing
+# endpoint costs one request per half hour, inside the cycle's budget.
+KEYSET_PATH = "/markets/keyset"
+#: the documented maximum page size
+KEYSET_PAGE_LIMIT = 100
+#: documented filters only: the open catalogue, as the offset walk reads it
+KEYSET_PARAMS = {"closed": "false"}
+KEYSET_RETRY_AFTER_S = 1800.0
+ROTATION_VERSION = "GAMMA_OPEN_MARKETS_KEYSET_ROTATION_V1"
+#: how a keyset cycle ended
+K_ROTATION_COMPLETE = "ROTATION_COMPLETE"
+K_CYCLE_BUDGET_SPENT = "CYCLE_BUDGET_SPENT_ROTATION_CONTINUES"
+K_CURSOR_REFUSED = "CURSOR_REFUSED_ROTATION_RESTARTED"
+K_CURSOR_STUCK = "CURSOR_DID_NOT_ADVANCE_ROTATION_RESTARTED"
+K_ENVELOPE_UNREADABLE = "KEYSET_ENVELOPE_UNREADABLE"
+#: the stops after which the rotation continues normally (anything else is a
+#: cycle that ended on a failure: truncated, named)
+K_CLEAN_STOPS = frozenset({K_ROTATION_COMPLETE, K_CYCLE_BUDGET_SPENT})
+
+
+class _KeysetUnavailable(Exception):
+    """The keyset endpoint is not served as documented: the cycle falls back
+    to the offset walk. `requests` is what the attempt spent."""
+
+    def __init__(self, why: str, *, status=None, requests: int = 1):
+        super().__init__(why)
+        self.why, self.status, self.requests = why, status, int(requests)
 
 
 class GammaClient:
@@ -137,6 +199,18 @@ class GammaClient:
         self._open_params: dict[str, str] | None = None
         #: how the last open-market paging ended (pages, markets, why)
         self.last_paging: dict = {}
+        self._init_rotation()
+
+    def _init_rotation(self) -> None:
+        """The keyset rotation's state (kept between cycles, per process)."""
+        self._rotation: dict = {"cursor": None, "started_at": None,
+                                "pages": 0, "markets": 0, "cycles": 0,
+                                "number": 0}
+        #: the last rotation that reached the documented last page
+        self.last_rotation_complete: dict | None = None
+        self._keyset_retry_at = 0.0
+        #: why the keyset endpoint was last found unavailable, or None
+        self.keyset_unavailable: dict | None = None
 
     async def fetch_markets(self, params: dict[str, Any]) -> list[dict[str, Any]]:
         resp = await self._http.get("/markets", params=params)
@@ -237,6 +311,166 @@ class GammaClient:
         self.last_paging = {"pages": pages, "markets": len(out),
                             "stopped": "PAGE_CAP", "truncated": True}
         return out
+
+    def _rotation_state(self) -> dict:
+        if not hasattr(self, "_rotation"):
+            self._init_rotation()
+        return self._rotation
+
+    async def fetch_open_markets(self, page_size: int = 100,
+                                 max_pages: int = 50) -> list[dict[str, Any]]:
+        """THIS CYCLE'S SHARE OF THE WHOLE OPEN CATALOGUE (see KEYSET_PATH):
+        the keyset rotation, at most the offset walk's per-cycle request
+        budget, continuing from the cursor the previous cycle left; or, when
+        the keyset is not served as documented, the offset walk within what
+        is left of that budget, its truncation named. `last_paging` says
+        which, and how the cycle ended."""
+        import time as _t
+
+        self._rotation_state()
+        full = max(1, min(int(max_pages),
+                          GAMMA_MAX_OFFSET // int(page_size) + 1))
+        budget = full
+        if _t.time() >= self._keyset_retry_at:
+            try:
+                return await self._keyset_cycle(budget,
+                                                 min(int(page_size),
+                                                     KEYSET_PAGE_LIMIT))
+            except _KeysetUnavailable as exc:
+                self._keyset_retry_at = _t.time() + KEYSET_RETRY_AFTER_S
+                self.keyset_unavailable = {
+                    "why": exc.why, "status": exc.status,
+                    "at": _t.time(), "retry_after_s": KEYSET_RETRY_AFTER_S}
+                log.warning("gamma keyset not served as documented (%s); the "
+                            "offset walk runs this cycle, truncation named",
+                            exc.why)
+                budget = max(0, budget - exc.requests)
+        if budget <= 0:
+            self.last_paging = {"mode": "OFFSET_FALLBACK", "pages": 0,
+                                "markets": 0, "stopped": "CYCLE_BUDGET_SPENT",
+                                "truncated": True,
+                                "keyset_unavailable": self.keyset_unavailable}
+            return []
+        # the whole per-cycle budget left: the offset walk exactly as before
+        # (its own ceiling names the cut); a budget shortened by this cycle's
+        # keyset request: that many pages and no more
+        out = await self.fetch_active_sports_markets(
+            page_size=page_size,
+            max_pages=int(max_pages) if budget >= full else budget)
+        self.last_paging = dict(self.last_paging, mode="OFFSET_FALLBACK",
+                                offset_walk_page_budget=budget,
+                                keyset_unavailable=self.keyset_unavailable,
+                                catalogue_complete=not self.last_paging.get(
+                                    "truncated", True))
+        return out
+
+    async def _keyset_cycle(self, budget: int, limit: int) -> list[dict[str, Any]]:
+        """Up to `budget` keyset pages from the rotation's cursor. Raises
+        _KeysetUnavailable when the first page of a rotation shows the
+        endpoint is not served as documented."""
+        import time as _t
+
+        rot = self._rotation
+        if rot["started_at"] is None:
+            rot.update(started_at=_t.time(), pages=0, markets=0, cycles=0,
+                       cursor=None, number=rot["number"] + 1)
+        out: list[dict[str, Any]] = []
+        requests = 0
+        pages = 0
+        stopped = K_CYCLE_BUDGET_SPENT
+        error = None
+        while requests < budget:
+            params = dict(KEYSET_PARAMS, limit=str(limit))
+            sent_cursor = rot["cursor"]
+            if sent_cursor:
+                params["after_cursor"] = sent_cursor
+            requests += 1
+            fresh_rotation = rot["pages"] == 0 and not sent_cursor
+            try:
+                resp = await self._http.get(KEYSET_PATH, params=params)
+            except httpx.HTTPError as exc:
+                # no answer: the cursor stays, the next cycle resumes from it
+                stopped, error = "TRANSPORT_%s" % type(exc).__name__, str(exc)[:160]
+                break
+            status = int(getattr(resp, "status_code", 0) or 0)
+            if status >= 400:
+                text = str(getattr(resp, "text", "") or "")[:200]
+                if fresh_rotation and status in (404, 405, 422, 501, 503):
+                    raise _KeysetUnavailable("HTTP_%d: %s" % (status, text),
+                                             status=status, requests=requests)
+                if sent_cursor and status == 422:
+                    # the documented answer to an invalid cursor: the rotation
+                    # restarts from the beginning next cycle, named
+                    self._restart_rotation()
+                    stopped, error = K_CURSOR_REFUSED, text
+                    break
+                # any other refusal: keep what this cycle read, keep the cursor
+                stopped, error = "HTTP_%d" % status, text
+                break
+            try:
+                body = resp.json()
+            except ValueError:
+                body = None
+            if not (isinstance(body, dict)
+                    and isinstance(body.get("markets"), list)):
+                if fresh_rotation:
+                    raise _KeysetUnavailable(
+                        "%s: %s" % (K_ENVELOPE_UNREADABLE,
+                                    type(body).__name__),
+                        status=status, requests=requests)
+                stopped = K_ENVELOPE_UNREADABLE
+                break
+            batch = [m for m in body["markets"] if isinstance(m, dict)]
+            out.extend(batch)
+            pages += 1
+            rot["pages"] += 1
+            rot["markets"] += len(batch)
+            nxt = body.get("next_cursor")
+            if not nxt:
+                # the documented last page: next_cursor omitted
+                rot["cycles"] += 1
+                self.last_rotation_complete = {
+                    "rotation": rot["number"], "pages": rot["pages"],
+                    "markets": rot["markets"], "cycles": rot["cycles"],
+                    "started_at": rot["started_at"], "completed_at": _t.time(),
+                    "seconds": round(_t.time() - rot["started_at"], 1)}
+                self._restart_rotation()
+                stopped = K_ROTATION_COMPLETE
+                break
+            if nxt == sent_cursor:
+                # a cursor that does not move would read one page forever
+                self._restart_rotation()
+                stopped = K_CURSOR_STUCK
+                break
+            rot["cursor"] = nxt
+        else:
+            stopped = K_CYCLE_BUDGET_SPENT
+        if stopped != K_ROTATION_COMPLETE and rot["started_at"] is not None:
+            rot["cycles"] += 1
+        self.keyset_unavailable = None
+        self.last_paging = {
+            "mode": "KEYSET_ROTATION", "version": ROTATION_VERSION,
+            "pages": pages, "markets": len(out), "requests": requests,
+            "request_budget": budget, "stopped": stopped, "error": error,
+            # a cycle reads part of the catalogue BY DESIGN; it is truncated
+            # only when it ended on a failure
+            "truncated": stopped not in K_CLEAN_STOPS,
+            # the rotation this cycle continues (None when it just ended or
+            # restarted: the next cycle starts a new one from the beginning)
+            "rotation": ({"number": rot["number"], "pages": rot["pages"],
+                          "markets": rot["markets"], "cycles": rot["cycles"],
+                          "started_at": rot["started_at"],
+                          "cursor_held": bool(rot["cursor"])}
+                         if rot["started_at"] is not None else None),
+            "last_complete_rotation": self.last_rotation_complete,
+            # the whole catalogue has been read at least once, by a rotation
+            # that reached the venue's documented last page
+            "catalogue_complete": self.last_rotation_complete is not None}
+        return out
+
+    def _restart_rotation(self) -> None:
+        rot = self._rotation
+        rot.update(cursor=None, started_at=None)
 
     async def fetch_by_condition_ids(self, condition_ids: list[str]) -> list[dict[str, Any]]:
         """Batch metadata lookup. Gamma drift facts (measured, July 2026):
