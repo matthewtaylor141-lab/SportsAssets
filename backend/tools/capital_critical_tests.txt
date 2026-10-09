@@ -1351,3 +1351,5 @@ tests/test_rc6_feed_close_provenance.py
 tests/test_rc6_held_watch_identity.py
 # (RC6 D1) the plane's snapshot-only gRPC refresh sends ONE request shape -- explicit symbols, snapshot_only, aggregated depth 10, never the empty (EVERY-instrument) list, never a continuous subscription -- refused before the wire otherwise; its books never enter the stream's books and count only for the bound from their receipt
 tests/test_rc6_d1_snapshot_refresh.py
+# (RC6 D1) freshness measured over the whole window: an outage of any length crossing a horizon's start is eligible and not fresh, only time before the first window ever written is unmeasured, the frozen membership is never re-chosen
+tests/test_rc6_d1_freshness_window.py
