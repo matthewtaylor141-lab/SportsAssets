@@ -1429,10 +1429,42 @@ def _changed_records(records: list, stored) -> list:
     return changed[:5]
 
 
+def _vectors_off_their_identity(lab: dict) -> list:
+    """PURE: every decision whose stored vector no longer hashes to the
+    identity stored with it, sorted.
+
+    A training record carries the decision's `feature_sha` AS STORED and the
+    vector's key schema -- never the vector's values -- so a vector rewritten
+    while its stored identity was not (a corruption, a restore, a repair made
+    with the research table's append-only trigger off) re-hashes to the same
+    records digest. This is the values' own check: each vector against the
+    identity every writer stores with it (`feature_sha`, this module's). A
+    record stored without an identity (none is written so today) has nothing
+    to be compared with and is left to the digest."""
+    out = []
+    rows = lab.get("rows") or []
+    ids = lab.get("decision_ids") or []
+    for i, sha in enumerate(lab.get("feature_shas") or []):
+        if sha and feature_sha(rows[i] or {}) != str(sha):
+            out.append(str(ids[i]))
+    return sorted(out)
+
+
 def _reproduce(model: dict, prov: dict, lab: dict,
                check_params: bool) -> dict:
-    """PURE (worker thread): rebuild the training records from `lab`,
-    re-hash them against the provenance, and (optionally) refit."""
+    """PURE (worker thread): check each vector against its stored identity,
+    rebuild the training records from `lab`, re-hash them against the
+    provenance, and (optionally) refit."""
+    drifted = _vectors_off_their_identity(lab)
+    if drifted:
+        # D1 (RC6): refused BEFORE the digest, which cannot see it. No
+        # records and no label set travel with a refusal.
+        return {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
+                "changed_records": drifted[:5],
+                "vectors_off_their_identity": len(drifted),
+                "why": ("the named decisions' stored feature vectors no "
+                        "longer hash to the identity (feature_sha) stored "
+                        "with them: a vector changed after it was recorded")}
     records = _training_records(lab)
     if _records_sha(records) != prov.get("records_sha"):
         out = {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,

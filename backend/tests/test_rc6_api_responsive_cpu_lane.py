@@ -179,11 +179,14 @@ def test_the_blocker_census_tallies_on_the_lane(monkeypatch):
 
 
 def _research(n=60):
+    """Research label rows, each vector stored with ITS OWN identity (as
+    every production writer stores it: bettor_funded_model.feature_sha)."""
+    from sportsassets import bettor_funded_model as FM
+    feats = {"acquisition_price": 0.4, "payout_is_complement": 0.0,
+             "pinnacle_p": 0.5}
     return [{"observation_id": "obs:%04d" % i, "fixture": "fx:%d" % (i // 3),
-             "features": json.dumps({"acquisition_price": 0.4,
-                                     "payout_is_complement": 0.0,
-                                     "pinnacle_p": 0.5}),
-             "feature_sha": "%016x" % i, "price": 0.4,
+             "features": json.dumps(feats),
+             "feature_sha": FM.feature_sha(feats), "price": 0.4,
              "price_basis": "DISPLAYED", "cohort": "C0", "pinnacle_p": 0.5,
              "record_purpose": "CALIBRATION_ONLY",
              "evidence_class": "RESEARCH_OBSERVATION",
