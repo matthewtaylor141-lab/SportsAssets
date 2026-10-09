@@ -897,19 +897,14 @@ async def read_management(conn, acct: str, *, now: float, bal: dict,
     from .. import bettor_paper_epoch as EP
     try:
         async with conn.transaction():
-            if acct != 'paper_acct_main':
-                from .. import bettor_paper_day_one as E
-                epoch = await E.read(conn, acct)
-                if epoch.get('day_one'):
-                    return dict(epoch, status='OK', read_model='ACCOUNT_BACKED_EPOCH',
-                                realized_pnl_usd=bal.get('realized_pnl_usd'),
-                                unrealized_pnl_usd=bal.get('unrealized_pnl_usd'))
             m = await EP.read(conn, acct, bal=bal, now=now)
     except Exception as exc:                                    # noqa: BLE001
         return {"status": "UNAVAILABLE", "epoch_id": EP.EPOCH_ID,
                 "label": EP.LABEL,
                 "why": "MANAGEMENT_EPOCH_READ_FAILED: %s: %s"
                        % (type(exc).__name__, str(exc)[:160])}
+    if m.get("day_one"):
+        return m
     hist = m.get("pre_management_history")
     if isinstance(hist, dict):
         hist.update(ledger_equity_usd=paper.get("equity_usd"),
