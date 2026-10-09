@@ -67,3 +67,17 @@ async def loop_health(response: Response) -> dict:
             "detail": type(exc).__name__})
     body["read_only"] = True
     return body
+
+
+# ── EVERY AGENT'S STATUS CONTRACT (owner Mission 4): GET
+# /api/command/agent-status, served through THIS router so it is mounted
+# wherever loop-health is (api/app.py includes this router) without an
+# app.py change. Same auth, same READ ONLY discipline. A module that fails to
+# import is logged and leaves /api/command/loop-health untouched.
+try:
+    from .command_agent_status import router as _agent_status_router
+    router.include_router(_agent_status_router)
+except ImportError:                                             # pragma: no cover
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "agent status: api.command_agent_status not loaded", exc_info=True)

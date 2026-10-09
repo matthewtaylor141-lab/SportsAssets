@@ -749,8 +749,22 @@ def test_the_ext_pinnacle_evidence_carries_structure_and_attest_is_unchanged(
     assert src.count("venue_rules_structured") == 2
 
 
+@pytest.fixture
+def _rules_probe_reads_this_database(monkeypatch):
+    """capture_pmus_markets first asks market_plane.rules.table_present
+    whether migration 312 is applied, and that answer is a PROCESS-wide
+    cache (_TABLE_STATE: "absent" is believed for 600 s). An earlier test in
+    the same process whose fake pool answered "absent" (the premap sweep
+    tests' fetchval -> None) made this capture return {"skipped":
+    "MIGRATION_312_NOT_APPLIED"} against a database that has the table. The
+    probe here starts unasked, so it is answered by THIS test's database;
+    the earlier answer is restored on teardown."""
+    monkeypatch.setattr(RULES, "_TABLE_STATE", {"present": None, "at": 0.0})
+
+
 @pg
-def test_premap_capture_writes_once_and_a_change_appends_rules_changed():
+def test_premap_capture_writes_once_and_a_change_appends_rules_changed(
+        _rules_probe_reads_this_database):
     async def go():
         c = await asyncpg.connect(DSN)
         tr = c.transaction()

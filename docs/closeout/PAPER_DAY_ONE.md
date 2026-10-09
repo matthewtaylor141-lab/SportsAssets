@@ -64,7 +64,11 @@ DDL rollback 317 is permitted only before any epoch/evidence exists. Database
 guards return unchanged before the first activation. The upgrade receipt proves
 this narrowly by matching installed definitions and bodies against migration
 317 and checking empty epoch history; other added/changed triggers remain
-unproven. After activation, old-binary rollback is explicitly not certified;
+unproven. Migration 365's six AFTER triggers have a separate, narrowly
+reviewed proof: exact counter-function and sidecar-schema hashes, exact trigger
+definitions and execution context, with mutation regressions and unchanged
+old model-write/refusal behavior. They only update new metadata; no financial
+write guard or eligibility rule is ignored. After activation, old-binary rollback is explicitly not certified;
 use the logical account rollback and retain the new schema/application.
 
 Tests use synthetic local accounts and acceptance fixtures, including simulated

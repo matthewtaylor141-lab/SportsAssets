@@ -78,11 +78,14 @@ STATEMENT_TIMEOUT_MS = 3000
 #: 216..316 since LIVE GAME STATE V1 (316: the Trader live-game DISPLAY
 #: sidecar -- append-only score bindings / observations, a rebuildable latest
 #: view and the collector heartbeat; display only, no price, order,
-#: settlement or ledger authority).
-#: 216..317 adds account-backed PAPER Day One and immutable epoch receipts.
+#: settlement or ledger authority); 216..365 since the RC6 PROVENANCE FIX
+#: (365: the research training set's change stamp -- a counter and its
+#: triggers; no price, order, settlement or ledger authority; 318..364 are
+#: held by parallel RC6 lanes and absent from this build; 317 is the
+#: account-backed PAPER epoch, with no live authority).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 317
+TRACKED_FROM, TRACKED_TO = 216, 365
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

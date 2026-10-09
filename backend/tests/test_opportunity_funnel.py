@@ -632,6 +632,12 @@ async def test_the_funnel_over_decisions_the_real_writer_recorded(
                 "old": 1, "enter": 1}
         assert {k: recorded[s]["n"] for k, s in slugs.items()} == want, \
             {k: dict(recorded[s]) for k, s in slugs.items()}
+        # ...and on NOTHING ELSE. The pass decides every entry-experiment
+        # valuation in its 30 min lookback, so a valuation another proof left
+        # in a shared database would be decided too and become an eighth
+        # opportunity in the funnel below: named here, by its market.
+        assert set(recorded) == set(slugs.values()), \
+            sorted(set(recorded) - set(slugs.values()))
 
         monkeypatch.setattr(C, "PAPER_ACCOUNT", acct["account_id"])
         dec_at = [r["t"] for r in await conn.fetch(

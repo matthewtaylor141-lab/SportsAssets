@@ -2342,6 +2342,10 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             book=(None if obs is None else {
                 "book_obs_id": obs.get("obs_id"),
                 "observed_at": obs.get("observed_at")}),
+            # THE PROBABILITY'S OBSERVATION INSTANT (the profitability
+            # bind's control 25): its freshness decay and probability-age
+            # bound read it; without it the bind refuses by name
+            p_observed_at=pin.get("at"),
             # THE POLICY'S OWN CONTRACT MATCH resolves the settlement terms:
             # the strict benchmark's needs COMPATIBLE and every rule
             # established; the completed-game policy's proves the ordinary-

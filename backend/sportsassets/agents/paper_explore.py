@@ -677,6 +677,18 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         threshold_edge_pp=PB.CG_MIN_EDGE_PP_V2, basis="EXPLORATION_ENTRY",
         levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
         book_observed_at=None if obs is None else obs.get("observed_at"))
+    # THE DECISION'S CONTROL INPUTS, carried to the ledger's profitability
+    # bind (control 25; this policy has no decision-stage bind): the
+    # probability's and the book's observation instants and the settlement
+    # verdict the capital evaluation resolved. The bind re-checks them under
+    # the account lock and refuses by name when one is missing.
+    from .. import bettor_paper_profitability_bind as PBIND
+    cevidence = PBIND.carry_inputs(
+        cevidence, evaluated_at=at, p_observed_at=pin.get("at"),
+        book_observed_at=None if obs is None else obs.get("observed_at"),
+        settlement={"compatibility": (
+            "COMPATIBLE" if match.get("established") is True
+            else "NOT_ESTABLISHED_BY_THE_MATCH")})
     if verdict != DP.ENTER:
         # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
         await CA.record_refusal(

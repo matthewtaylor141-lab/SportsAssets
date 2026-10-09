@@ -116,6 +116,27 @@ profitability_stack_binding.py), bound in the same `entry_bind` /
  Quarantine, the variants' settlement, the forecast and the scoreboard:
    bettor_paper_profitability_stack.
 
+THE CONTROL INPUTS (rc6 econ-binding; tests/test_economic_controls_
+binding.py), in the same `entry_bind` at the decision AND under the ledger's
+account lock, for every strategy (refuse only):
+
+ 25 Every input an item reads is REQUIRED, and a missing or unproven one
+   refuses by its own name before any EV is computed on it
+   (`control_inputs`): the contract identity (slug, LONG / SHORT, fixture),
+   a probability in [0, 1], the settlement verdict RESOLVED by the capital
+   evaluation's own rule (COMPATIBLE, or the PRICED settlement-difference
+   policy by id / version / priced p), the probability's and the book's
+   observation instants, and the four learned models (CALIBRATION,
+   EXECUTION, RESIDUAL, MANAGEMENT) each fitted within MODEL_MAX_AGE_S --
+   before, a missing stamp aged 0, a missing residual model haircut nothing
+   and a missing execution model read its priors. Every evaluation records
+   its CONTROL PROVENANCE (`control_provenance`: each control PASS /
+   REFUSED / NOT_REACHED; also on the order's SUBMITTED event), is
+   recorded TOGETHER with its counterfactual variants (one savepoint), and
+   the ledger admits no ENTRY whose evaluation and variants were not
+   recorded (`entry_record_refusal`). No threshold, bound, cap or size
+   changes; nothing here can admit what another gate refused.
+
 Fail-closed: an unreadable input refuses (R_BIND_UNREADABLE).
 """
 from __future__ import annotations
@@ -227,6 +248,24 @@ SCENARIO_MAX_EXPOSURE_USD = None
 # ── 17 reprice deadband ──────────────────────────────────────────────
 REPRICE_DEADBAND_S = 900.0
 
+# ── 25 the control inputs (fail-closed; module docstring) ────────────
+#: the learned inputs every item above reads, each REQUIRED present and
+#: CURRENT at the decision: CALIBRATION (item 1), EXECUTION (item 2: the
+#: learned markout and fill probability), RESIDUAL (item 8: the expected-vs-
+#: realized feedback) and MANAGEMENT (items 5 / 8: the exit rate and cost).
+MODEL_KINDS = ("CALIBRATION", "EXECUTION", "RESIDUAL", "MANAGEMENT")
+#: a learned model is CURRENT when it was fitted at most this long before
+#: the decision. NOT A NEW NUMBER: it is the bound the readiness gate
+#: `profitability_bind_active` already holds this bind's models to
+#: (feeds.BIND_MODEL_MAX_AGE_S, "NO_PROFITABILITY_MODEL_FITTED_WITHIN_1H";
+#: tests/test_economic_controls_binding.py pins the two equal). The fit step
+#: refits every FIT_EVERY_S, so a model older than this means the fit has
+#: failed for that kind for an hour: its input is unproven, and the entry is
+#: CASH by name instead of reading the stale fit (or, with none, the priors).
+MODEL_MAX_AGE_S = 3600.0
+#: the holding sides an entry can name (bettor_paper_ledger)
+HOLDING_SIDES = ("LONG", "SHORT")
+
 R_CALIBRATED_EV_NOT_POSITIVE = "CASH_WAIT_CALIBRATED_ALL_IN_EV_NOT_POSITIVE"
 R_ALL_IN_EV_NOT_POSITIVE = "CASH_WAIT_ALL_IN_EXECUTABLE_EV_NOT_POSITIVE"
 R_CAPACITY_NONE = "CASH_WAIT_CAPACITY_FRONTIER_NO_POSITIVE_MARGINAL_CONTRACT"
@@ -252,6 +291,32 @@ R_REGIME_NOT_POSITIVE = "CASH_WAIT_REGIME_FORWARD_ECONOMICS_NOT_POSITIVE"
 R_NOT_ABSOLUTE_CHAMPION = ("CASH_WAIT_FORWARD_PNL_NOT_ABSOLUTELY_POSITIVE_"
                            "CI_LOW_NOT_ABOVE_ZERO")
 R_REGIME_UNREADABLE = "REGIME_FORWARD_ECONOMICS_UNREADABLE"
+# 25 · the control inputs: each missing / unproven input refuses by its OWN
+# name (CASH), before any EV is computed on it
+R_CALIBRATION_NOT_CURRENT = "CASH_WAIT_CALIBRATION_MODEL_NOT_CURRENT"
+R_EXECUTION_MODEL_NOT_CURRENT = "CASH_WAIT_EXECUTION_MODEL_NOT_CURRENT"
+R_RESIDUAL_FEEDBACK_NOT_CURRENT = "CASH_WAIT_RESIDUAL_FEEDBACK_NOT_CURRENT"
+R_MANAGEMENT_MODEL_NOT_CURRENT = "CASH_WAIT_MANAGEMENT_MODEL_NOT_CURRENT"
+R_PROBABILITY_TIME_MISSING = "CASH_WAIT_PROBABILITY_OBSERVATION_TIME_MISSING"
+R_BOOK_TIME_MISSING = "CASH_WAIT_BOOK_OBSERVATION_TIME_MISSING"
+R_SETTLEMENT_NOT_RESOLVED = "CASH_WAIT_SETTLEMENT_TERMS_NOT_RESOLVED_AT_BIND"
+R_IDENTITY_INCOMPLETE = "CASH_WAIT_CONTRACT_IDENTITY_INCOMPLETE_AT_BIND"
+R_PROBABILITY_INVALID = "CASH_WAIT_PROBABILITY_NOT_IN_ZERO_ONE"
+# 25 · the ledger's record requirement (`entry_record_refusal`)
+R_EVALUATION_NOT_RECORDED = ("ENTRY_EVALUATION_OR_COUNTERFACTUAL_VARIANTS_"
+                             "NOT_RECORDED")
+#: the refusal of each learned model kind that is absent or not current
+MODEL_REFUSAL = {"CALIBRATION": R_CALIBRATION_NOT_CURRENT,
+                 "EXECUTION": R_EXECUTION_MODEL_NOT_CURRENT,
+                 "RESIDUAL": R_RESIDUAL_FEEDBACK_NOT_CURRENT,
+                 "MANAGEMENT": R_MANAGEMENT_MODEL_NOT_CURRENT}
+CONTROL_INPUT_REFUSALS = (R_IDENTITY_INCOMPLETE, R_PROBABILITY_INVALID,
+                          R_SETTLEMENT_NOT_RESOLVED,
+                          R_PROBABILITY_TIME_MISSING, R_BOOK_TIME_MISSING,
+                          R_CALIBRATION_NOT_CURRENT,
+                          R_EXECUTION_MODEL_NOT_CURRENT,
+                          R_RESIDUAL_FEEDBACK_NOT_CURRENT,
+                          R_MANAGEMENT_MODEL_NOT_CURRENT)
 
 #: economic refusals of the bind (never a shadow: the decision itself
 #: failed the economics, not merely the capital authority)
@@ -261,7 +326,8 @@ REFUSALS = (R_CALIBRATED_EV_NOT_POSITIVE, R_ALL_IN_EV_NOT_POSITIVE,
             R_CHURN_FIXTURE_EXIT, R_CHURN_RECENT_REFUSAL, R_TURNOVER_CAP,
             R_NO_HOLD_ESTIMATE, R_BIND_UNREADABLE, R_BIND_NO_EVIDENCE,
             R_SCENARIO_CONCENTRATION, R_FRESHNESS_BEYOND_BOUND,
-            R_CHURN_REPRICE_DEADBAND)
+            R_CHURN_REPRICE_DEADBAND) + CONTROL_INPUT_REFUSALS + (
+            R_EVALUATION_NOT_RECORDED,)
 #: no-capital-authority refusals the bind adds to the authority (a shadow
 #: counterfactual is recorded when everything else passed)
 AUTHORITY_REFUSALS = (R_REGIME_UNKNOWN, R_REGIME_NOT_POSITIVE,
@@ -960,6 +1026,162 @@ def churn_verdict(*, ev_per_contract, prior_ev_per_contract,
             "materially_improved": ok}
 
 
+# ═════════════════════════════════════════════════════════════════════
+# 25 · THE CONTROL INPUTS AND THE CONTROL PROVENANCE (pure)
+# ═════════════════════════════════════════════════════════════════════
+
+PASS, REFUSED, NOT_REACHED = "PASS", "REFUSED", "NOT_REACHED"
+
+#: the input controls, in the order a refusal is named (the first REFUSED)
+INPUT_CONTROLS = ("identity", "probability", "settlement", "freshness_inputs",
+                  "calibration_model", "execution_model", "residual_feedback",
+                  "management_model")
+#: the learned model kind behind each model control
+MODEL_CONTROL = {"calibration_model": "CALIBRATION",
+                 "execution_model": "EXECUTION",
+                 "residual_feedback": "RESIDUAL",
+                 "management_model": "MANAGEMENT"}
+#: THE ECONOMIC CONTROLS, in the order the bind evaluates them
+#: (_bind_core, then churn_check): (control, the refusal(s) it owns, the
+#: bind result's key whose presence proves it was evaluated). The capital
+#: authority's controls (stopping rules NOW, forward economics, the
+#: absolute-positive champion, the regime) follow in bettor_capital_
+#: authority.authority and are recorded on its own summary.
+ECONOMIC_CONTROLS = (
+    ("executable_evidence", (R_BIND_NO_EVIDENCE,), "terms"),
+    ("freshness", (R_FRESHNESS_BEYOND_BOUND,), "freshness"),
+    ("calibrated_all_in_ev", (R_CALIBRATED_EV_NOT_POSITIVE,
+                              R_ALL_IN_EV_NOT_POSITIVE),
+     "all_in_at_policy_size"),
+    ("capacity", (R_CAPACITY_NONE,), "capacity"),
+    ("capital_hour", (R_NO_HOLD_ESTIMATE, R_CAPITAL_HOUR_BELOW_FLOOR),
+     "capital_hour"),
+    ("correlation", (R_CORRELATED_EXPOSURE,), "correlation"),
+    ("scenario", (R_SCENARIO_CONCENTRATION,), "scenario"),
+    ("size", (R_SIZE_BELOW_ONE,), "all_in"),
+    ("churn", (R_CHURN_REPRICE_DEADBAND, R_TURNOVER_CAP, R_CHURN_RECENT_EXIT,
+               R_CHURN_FIXTURE_EXIT, R_CHURN_RECENT_REFUSAL), "churn"))
+
+
+def _control(ok: bool, code: str, **detail) -> dict:
+    return dict(detail, status=PASS if ok else REFUSED,
+                code=None if ok else code)
+
+
+def control_inputs(*, evidence, inputs, models, slug, side, fixture,
+                   at: float) -> dict:
+    """25 · THE CONTROL INPUTS OF ONE ENTRY, FAIL-CLOSED. Pure.
+
+    Every item of the bind reads an input; an input that is missing or
+    unproven used to be read as neutral (a missing probability stamp aged 0,
+    a missing residual model haircut nothing, a missing execution model fell
+    back to its priors). Each is now REQUIRED, and each refuses by its OWN
+    name before any EV is computed on it:
+
+      identity          slug, a LONG / SHORT holding side and the fixture
+                        (the correlation and scenario reads key on it)
+      probability       the evidence's p is a number in [0, 1]
+      settlement        the decision's settlement verdict, carried to the
+                        bind, is RESOLVED by the same rule as the capital
+                        evaluation (bettor_capital_eligibility.
+                        settlement_resolved: COMPATIBLE, or admitted by the
+                        PRICED settlement-difference policy, named by its
+                        id and current version, with its priced p)
+      freshness_inputs  the probability's and the book's observation
+                        instants are known (the freshness decay and the
+                        probability-age bound read them)
+      *_model           CALIBRATION, EXECUTION, RESIDUAL and MANAGEMENT are
+                        each present and fitted within MODEL_MAX_AGE_S
+
+    {refusal (the first REFUSED in INPUT_CONTROLS order) or None, controls}.
+    Nothing here raises, sizes or admits: it can only refuse."""
+    from . import bettor_capital_eligibility as CE
+    ev = evidence if isinstance(evidence, dict) else {}
+    inp = inputs if isinstance(inputs, dict) else {}
+    out: dict = {}
+    missing = [k for k, v in (("us_market_slug", slug),
+                              ("holding_side", side), ("fixture", fixture))
+               if not v]
+    out["identity"] = _control(
+        not missing and str(side or "").upper() in HOLDING_SIDES,
+        R_IDENTITY_INCOMPLETE, missing=missing, holding_side=side)
+    p = _num(ev.get("p"))
+    out["probability"] = _control(p is not None and 0.0 <= p <= 1.0,
+                                  R_PROBABILITY_INVALID, p=p)
+    s = inp.get("settlement") if isinstance(inp.get("settlement"),
+                                            dict) else None
+    out["settlement"] = _control(
+        s is not None and CE.settlement_resolved(s),
+        R_SETTLEMENT_NOT_RESOLVED,
+        compatibility=(s or {}).get("compatibility"),
+        policy_id=(s or {}).get("policy_id"),
+        version=(s or {}).get("version"),
+        rule="bettor_capital_eligibility.settlement_resolved")
+    pa, ba = _num(inp.get("p_observed_at")), _num(inp.get("book_observed_at"))
+    out["freshness_inputs"] = _control(
+        pa is not None and ba is not None,
+        R_PROBABILITY_TIME_MISSING if pa is None else R_BOOK_TIME_MISSING,
+        p_observed_at=pa, book_observed_at=ba)
+    for name, kind in MODEL_CONTROL.items():
+        m = (models or {}).get(kind) or {}
+        fa = _num(m.get("fitted_at"))
+        age = None if fa is None else float(at) - fa
+        out[name] = _control(age is not None and age <= MODEL_MAX_AGE_S,
+                             MODEL_REFUSAL[kind], kind=kind,
+                             model_id=m.get("model_id"), fitted_at=fa,
+                             age_s=_r(age, 3), max_age_s=MODEL_MAX_AGE_S)
+    first = next((out[n]["code"] for n in INPUT_CONTROLS
+                  if out[n]["status"] == REFUSED), None)
+    return {"refusal": first, "controls": out}
+
+
+def control_provenance(b: dict | None) -> dict:
+    """25 · WHICH CONTROLS THIS EVALUATION PASSED, WHICH ONE REFUSED IT AND
+    WHICH WERE NOT REACHED: the input controls as `control_inputs` found
+    them, then each economic control (ECONOMIC_CONTROLS) -- REFUSED when the
+    bind's refusal is its own, PASS when its result is on the evaluation,
+    NOT_REACHED otherwise. Pure; recorded on every evaluation and carried on
+    the order's SUBMITTED event, so a decision states the controls it was
+    held to."""
+    b = b or {}
+    ref = b.get("refusal")
+    ci = (b.get("control_inputs") or {}).get("controls") or {}
+    out = {n: {"status": (ci.get(n) or {}).get("status") or NOT_REACHED,
+               "code": (ci.get(n) or {}).get("code")}
+           for n in INPUT_CONTROLS}
+    stop = ref in CONTROL_INPUT_REFUSALS
+    for name, codes, key in ECONOMIC_CONTROLS:
+        if ref in codes:
+            st = REFUSED
+        elif not stop and key in b:
+            st = PASS
+        else:
+            st = NOT_REACHED
+        out[name] = {"status": st, "code": ref if st == REFUSED else None}
+    return out
+
+
+def carry_inputs(evidence: dict | None, *, evaluated_at, p_observed_at,
+                 book_observed_at, settlement: dict | None) -> dict | None:
+    """The decision's control inputs carried on an ENTRY's capital evidence
+    to the ledger's bind (which re-checks them under the account lock), for
+    a policy that has no decision-stage bind (the maker, exploration).
+    Already-carried inputs are never overwritten. Pure."""
+    if not isinstance(evidence, dict):
+        return evidence
+    carried = dict(evidence.get("bind_inputs") or {})
+    for k, v in (("evaluated_at", evaluated_at),
+                 ("p_observed_at", p_observed_at),
+                 ("book_observed_at", book_observed_at),
+                 ("settlement", None if settlement is None else {
+                     k2: settlement.get(k2) for k2 in (
+                         "compatibility", "policy_id", "version", "p",
+                         "q_hi")})):
+        if carried.get(k) is None and v is not None:
+            carried[k] = v
+    return dict(evidence, bind_inputs=carried)
+
+
 def bind_economics(*, evidence: dict, qty_in, fee_fn, desc: dict,
                    calibration: dict | None, execution: dict | None,
                    residuals: dict | None, strategy: str, order_type,
@@ -1427,7 +1649,9 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
     (fees, slippage, learned execution, residual, freshness, spread and
     management cost), the capacity / capital-hour / correlation / scenario
     size, churn and the reprice deadband. Fail-closed: any unreadable input
-    refuses."""
+    refuses -- and (25) any MISSING or UNPROVEN control input refuses by its
+    own name before any EV is computed (`control_inputs`). Every result
+    carries its control provenance (`control_provenance`)."""
     from . import bettor_paper_ledger as L
     if not isinstance(evidence, dict):
         return {"refusal": R_BIND_NO_EVIDENCE, "qty": 0}
@@ -1444,6 +1668,22 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
                      book_observed_at=_num(evidence.get("book_observed_at")))
         fresh.update({k: v for k, v in (inputs or {}).items()
                       if v is not None})
+        model_ids = {k: {"model_id": v.get("model_id"),
+                         "fitted_at": v.get("fitted_at")}
+                     for k, v in models.items()}
+        # 25 · THE CONTROL INPUTS, on the inputs the bind will read (the
+        # decision's carried ones win over the ledger's fresh read, exactly
+        # as in _bind_core)
+        ctl = control_inputs(
+            evidence=evidence,
+            inputs=_merge_inputs(evidence.get("bind_inputs"), fresh),
+            models=models, slug=slug, side=side, fixture=fixture, at=at)
+        if ctl.get("refusal"):
+            out = {"version": VERSION, "descriptor": desc,
+                   "qty_in": _num(qty_in), "refusal": ctl["refusal"],
+                   "qty": 0, "control_inputs": ctl, "models": model_ids}
+            out["controls"] = control_provenance(out)
+            return out
         scn = await scenario_exposure(conn, account_id=account_id,
                                       fixture=fixture)
         econ = bind_economics(
@@ -1455,9 +1695,8 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
             order_type=order_type, n_correlated=n_corr, qty_cap=qty_cap,
             management=models.get("MANAGEMENT"), inputs=fresh, at=at,
             scenario=scn)
-        econ["models"] = {k: {"model_id": v.get("model_id"),
-                              "fitted_at": v.get("fitted_at")}
-                          for k, v in models.items()}
+        econ["models"] = model_ids
+        econ["control_inputs"] = ctl
         if econ.get("refusal") is None:
             ch = await churn_check(conn, account_id=account_id,
                                    strategy=strategy, slug=slug, side=side,
@@ -1468,6 +1707,7 @@ async def entry_bind(conn, *, account_id: str, strategy: str, evidence,
             econ["churn"] = ch or {"refusal": None}
             if ch:
                 econ = dict(econ, refusal=ch["refusal"], qty=0)
+        econ["controls"] = control_provenance(econ)
     except Exception as exc:                                    # noqa: BLE001
         return {"refusal": R_BIND_UNREADABLE, "qty": 0,
                 "why": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
@@ -1513,7 +1753,11 @@ def summary(b: dict | None) -> dict:
                 "cost_per_contract"),
             "scenario_exposure_usd": (b.get("scenario") or {}).get(
                 "exposure_usd"),
-            "scenario_qty_cap": (b.get("scenario") or {}).get("qty_cap")}
+            "scenario_qty_cap": (b.get("scenario") or {}).get("qty_cap"),
+            # 25 · the control provenance: each control's PASS / REFUSED /
+            # NOT_REACHED (the refusing code is `refusal` above)
+            "controls": {k: v.get("status") for k, v in (
+                b.get("controls") or {}).items()}}
 
 
 def bound_evidence(evidence: dict | None, b: dict | None) -> dict | None:
@@ -1605,13 +1849,20 @@ async def record_evaluation(conn, *, account_id: str, strategy: str,
                                 management=(b or {}).get("management"),
                                 settlement=(b or {}).get("settlement"),
                                 scenario=(b or {}).get("scenario"),
-                                bind_refusal=(b or {}).get("refusal")),
+                                bind_refusal=(b or {}).get("refusal"),
+                                controls=(b or {}).get("controls")),
                            default=str), _ts(at))
+            # 25 · THE EVALUATION AND ITS COUNTERFACTUAL VARIANTS IN ONE
+            # SAVEPOINT: recorded together or not at all, so a recorded
+            # evaluation never hides a missing counterfactual (the ledger's
+            # `entry_record_refusal` then refuses the ENTRY by name)
+            await _insert_variants(conn, account_id=account_id,
+                                   strategy=strategy, eval_id=eid,
+                                   stage=stage, refusal=refusal, b=b,
+                                   slug=slug, side=side, fixture=fixture,
+                                   at=at)
     except Exception:                                           # noqa: BLE001
         return None
-    await record_variants(conn, account_id=account_id, strategy=strategy,
-                          eval_id=eid, stage=stage, refusal=refusal, b=b,
-                          slug=slug, side=side, fixture=fixture, at=at)
     return eid
 
 
@@ -1620,39 +1871,97 @@ async def record_variants(conn, *, account_id: str, strategy: str, eval_id,
                           fixture, at: float) -> int:
     """22 / 23 · THE COUNTERFACTUAL VARIANT LEDGER (migration 311): every
     variant of an evaluation with executable evidence -- refused trades
-    included -- appended under its own savepoint; never raises."""
+    included -- appended under its own savepoint; never raises.
+    (`record_evaluation` records them inside the evaluation's own savepoint
+    through `_insert_variants`.)"""
+    try:
+        async with conn.transaction():
+            return await _insert_variants(
+                conn, account_id=account_id, strategy=strategy,
+                eval_id=eval_id, stage=stage, refusal=refusal, b=b,
+                slug=slug, side=side, fixture=fixture, at=at)
+    except Exception:                                           # noqa: BLE001
+        return 0
+
+
+async def _insert_variants(conn, *, account_id: str, strategy: str, eval_id,
+                           stage: str, refusal, b: dict | None, slug, side,
+                           fixture, at: float) -> int:
+    """The variant rows of one evaluation; RAISES on a failed insert (the
+    caller's savepoint decides). 0 when there is nothing to record or the
+    311 table is absent."""
     vs = (b or {}).get("variants") or []
     if not vs or eval_id is None:
         return 0
-    n = 0
-    try:
-        if not await conn.fetchval(
-                "SELECT to_regclass('paper_counterfactual_variants') "
-                "IS NOT NULL"):
-            return 0
-        async with conn.transaction():
-            for v in vs:
-                await conn.execute(
-                    "INSERT INTO paper_counterfactual_variants (account_id, "
-                    " strategy, eval_id, stage, verdict, refusal, "
-                    " us_market_slug, holding_side, fixture, variant, style,"
-                    " qty, vwap, p_used, fill_probability, cost_usd, "
-                    " fees_usd, expected_ev_usd, detail, decided_at) VALUES "
-                    " ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,"
-                    " $16,$17,$18,$19::jsonb,$20) ON CONFLICT DO NOTHING",
-                    account_id, strategy, eval_id, stage,
-                    "CASH" if refusal else "ENTER", refusal, slug, side,
-                    fixture, v["variant"], v["style"],
-                    float(v.get("qty") or 0), _num(v.get("vwap")),
-                    _num(v.get("p_used")), _num(v.get("fill_probability")),
-                    _num(v.get("cost_usd")), _num(v.get("fees_usd")),
-                    _num(v.get("expected_ev_usd")),
-                    json.dumps({"ev_given_fill_usd": v.get(
-                        "ev_given_fill_usd")}, default=str), _ts(at))
-                n += 1
-    except Exception:                                           # noqa: BLE001
+    if not await conn.fetchval(
+            "SELECT to_regclass('paper_counterfactual_variants') "
+            "IS NOT NULL"):
         return 0
+    n = 0
+    for v in vs:
+        await conn.execute(
+            "INSERT INTO paper_counterfactual_variants (account_id, "
+            " strategy, eval_id, stage, verdict, refusal, "
+            " us_market_slug, holding_side, fixture, variant, style,"
+            " qty, vwap, p_used, fill_probability, cost_usd, "
+            " fees_usd, expected_ev_usd, detail, decided_at) VALUES "
+            " ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,"
+            " $16,$17,$18,$19::jsonb,$20) ON CONFLICT DO NOTHING",
+            account_id, strategy, eval_id, stage,
+            "CASH" if refusal else "ENTER", refusal, slug, side,
+            fixture, v["variant"], v["style"],
+            float(v.get("qty") or 0), _num(v.get("vwap")),
+            _num(v.get("p_used")), _num(v.get("fill_probability")),
+            _num(v.get("cost_usd")), _num(v.get("fees_usd")),
+            _num(v.get("expected_ev_usd")),
+            json.dumps({"ev_given_fill_usd": v.get(
+                "ev_given_fill_usd")}, default=str), _ts(at))
+        n += 1
     return n
+
+
+RECORDED_SQL = """
+SELECT e.eval_id, e.p_used,
+       (SELECT count(*) FROM paper_counterfactual_variants v
+         WHERE v.eval_id = e.eval_id) AS variants
+  FROM paper_profitability_evaluations e
+ WHERE e.order_key = $1 AND e.account_id = $2 AND e.stage = 'LEDGER'
+   AND e.verdict = 'ENTER' AND e.evaluated_at = $3
+ ORDER BY e.eval_id DESC LIMIT 1
+"""
+
+
+async def entry_record_refusal(conn, o: dict, *, at: float) -> dict | None:
+    """25 · NO ENTRY WITHOUT ITS RECORD (bettor_paper_ledger._submit_order,
+    UNDER THE ACCOUNT LOCK, after the capital authority admitted the ENTRY):
+    the LEDGER evaluation of this order key at this instant must be recorded
+    with verdict ENTER -- and, when the bind priced it (p_used recorded), with
+    its full counterfactual variant set (VARIANTS), which `record_evaluation`
+    writes in the same savepoint. Shadow / counterfactual learning and the
+    expected-vs-realized residuals read exactly these rows: an entry whose
+    evaluation or counterfactuals were not recorded would be capital no
+    learning can ever see. Missing, or unreadable, refuses
+    (R_EVALUATION_NOT_RECORDED). None when the record is complete."""
+    key = o.get("idempotency_key")
+    try:
+        async with conn.transaction():
+            r = await conn.fetchrow(RECORDED_SQL, key, o.get("account_id"),
+                                    _ts(at))
+    except Exception as exc:                                    # noqa: BLE001
+        return {"refusal": R_EVALUATION_NOT_RECORDED,
+                "why": "UNREADABLE: %s: %s" % (type(exc).__name__,
+                                               str(exc)[:160])}
+    if r is None:
+        return {"refusal": R_EVALUATION_NOT_RECORDED,
+                "why": "no LEDGER ENTER evaluation of this order key at the "
+                       "entry instant"}
+    n = int(r["variants"] or 0)
+    if r["p_used"] is not None and n < len(VARIANTS):
+        return {"refusal": R_EVALUATION_NOT_RECORDED,
+                "eval_id": r["eval_id"], "variants": n,
+                "why": "the priced evaluation's counterfactual variants are "
+                       "incomplete (%d of %d)" % (n, len(VARIANTS))}
+    return None
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -2321,5 +2630,11 @@ def describe() -> dict:
                       "scenario_max_exposure_usd": SCENARIO_MAX_EXPOSURE_USD,
                       "reprice_deadband_s": REPRICE_DEADBAND_S,
                       "variants": list(VARIANTS)},
+            "control_inputs": {"controls": list(INPUT_CONTROLS),
+                               "model_kinds": list(MODEL_KINDS),
+                               "model_max_age_s": MODEL_MAX_AGE_S,
+                               "economic_controls": [
+                                   c[0] for c in ECONOMIC_CONTROLS],
+                               "entry_requires_recorded_evaluation": True},
             "refusals": list(ALL_REFUSALS), "paper_only": True,
             "at": time.time()}

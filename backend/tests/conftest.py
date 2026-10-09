@@ -578,6 +578,39 @@ def _profitability_bind_seeded(request, monkeypatch):
     monkeypatch.setattr(PSTACK, "evaluate_quarantine", _no_quarantine)
 
 
+@pytest.fixture(autouse=True)
+def _economic_controls_seeded(request, monkeypatch):
+    """THE PROFITABILITY BIND'S CONTROL INPUTS (control 25, rc6 econ-
+    binding): every input the bind reads is required -- the contract
+    identity, a probability in [0, 1], the resolved settlement verdict, the
+    probability's and the book's observation instants, the four learned
+    models fitted within the hour -- and the ledger admits no ENTRY whose
+    LEDGER evaluation and counterfactual variants were not recorded.
+
+    Same stance as the gates above. Both fail CLOSED, which is right for the
+    paper book and useless here: the proofs written before them build bare
+    evidence with no carried stamps or settlement verdict and fit at most a
+    calibration, and one (the acceptance read) stands in its own capital
+    authority, so every one would refuse at this gate and pass while proving
+    nothing about what it exists to check. Seeded here: `control_inputs`
+    refuses nothing and `entry_record_refusal` finds the record. A module
+    that declares `ECONOMIC_CONTROLS_ENFORCED = True` (tests/test_economic_
+    controls_binding.py) runs the production functions."""
+    if getattr(request.module, "ECONOMIC_CONTROLS_ENFORCED", False):
+        return
+    from sportsassets import bettor_paper_profitability_bind as PBIND
+
+    def _inputs(**kw):
+        return {"refusal": None, "controls": {},
+                "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
+
+    async def _recorded(conn, o, *, at):
+        return None
+
+    monkeypatch.setattr(PBIND, "control_inputs", _inputs)
+    monkeypatch.setattr(PBIND, "entry_record_refusal", _recorded)
+
+
 # BETTOR LIVE GAME STATE V1 (migration 316) ships its four test modules for
 # `python -m unittest discover -s tests`, where the tests directory itself is
 # on sys.path, so they import their shared synthetic fixtures top-level:

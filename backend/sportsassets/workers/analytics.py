@@ -35,8 +35,12 @@ async def main() -> None:
             await heartbeat("analytics", "running", {})
             newly_resolved = await sweep_resolutions(client)
             result = await run_cycle()
-            await heartbeat("analytics", "ok", {**result, "newly_resolved": newly_resolved,
-                                                "drift_alerts": len(result["drift_alerts"])})
+            # AN ACTIVE POSITION OF OUR OWN WITH NO MARKET IDENTITY is a
+            # named refusal (analytics.identity_census), never an 'ok' beat:
+            # the cycle completed, and the heartbeat says what it refused
+            await heartbeat("analytics", "refused" if result.get("refusal") else "ok",
+                            {**result, "newly_resolved": newly_resolved,
+                             "drift_alerts": len(result["drift_alerts"])})
             if result["drift_alerts"] and not alerted_drift:
                 alerted_drift = True
                 lines = [

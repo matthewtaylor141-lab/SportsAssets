@@ -141,6 +141,14 @@ class _Resp:
         return self._page
 
 
+#: a clean one-wallet run's heartbeat detail (RC6 identity lane: the run's
+#: late-fill and coverage-continuity account rides beside missed / failed;
+#: this pool records no previous run, so the wallet is UNMEASURED)
+CLEAN_BEAT = {"missed": 0, "failed": 0, "missed_fills_recorded": 0,
+              "wallets_with_hole": 0, "hole_seconds": 0, "max_hole_s": 0.0,
+              "unmeasured": 1, "refusal": None}
+
+
 class _RecordingPool:
     """Every statement with its args, in order, plus the heartbeat."""
 
@@ -1217,7 +1225,7 @@ def test_a_4xx_writes_the_census_with_wrote_false_and_nothing_else(monkeypatch):
     # the walk itself is untouched by the refusal
     assert out["missed"] == 0 and "failed:" + WALLET not in out["per_wallet"]
     assert pool.details["per_wallet"]["cov:" + WALLET]["dirty"] == 0
-    assert beats[-1] == ("reconciler", "ok", {"missed": 0, "failed": 0})
+    assert beats[-1] == ("reconciler", "ok", CLEAN_BEAT)
 
 
 def test_a_timeout_writes_the_census_with_wrote_false(monkeypatch):
@@ -1302,7 +1310,7 @@ def test_a_census_write_failure_never_fails_the_walk(monkeypatch):
         pool, _, beats = _wire(monkeypatch, feed, taker_page=page, pool=pool)
         out = asyncio.run(rec.reconcile_once(depth=500, taker_census=True))
         assert out["missed"] == 0 and "failed:" + WALLET not in out["per_wallet"]
-        assert beats[-1] == ("reconciler", "ok", {"missed": 0, "failed": 0})
+        assert beats[-1] == ("reconciler", "ok", CLEAN_BEAT)
         assert pool.details["per_wallet"]["cov:" + WALLET]["dirty"] == 0
     # the trades write that failed leaves the census saying wrote=false
     assert pool.census()["wrote"] is False

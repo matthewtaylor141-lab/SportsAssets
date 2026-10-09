@@ -356,20 +356,31 @@ def _pair_rows(n=60000):
 
 
 def _research_rows(n=28303):
+    """Research label rows, each vector stored with ITS OWN identity (as
+    every production writer stores it: bettor_funded_model.feature_sha; the
+    provenance check refuses a vector that does not hash to it). The random
+    draw the stand-in identity used to take is still drawn, so every other
+    value is the one it always was."""
+    from sportsassets import bettor_funded_model as FM
     rng = random.Random(7)
-    return [{"observation_id": "obs:%06d" % i, "fixture": "fx:%d" % (i // 3),
-             "features": json.dumps({"acquisition_price": rng.random(),
-                                     "payout_is_complement": float(i % 2),
-                                     "pinnacle_p": rng.random()}),
-             "feature_sha": "%016x" % rng.getrandbits(64),
-             "price": rng.random(), "price_basis": "DISPLAYED",
-             "cohort": "C%d" % (i % 4), "pinnacle_p": rng.random(),
-             "record_purpose": "CALIBRATION_ONLY",
-             "evidence_class": "RESEARCH_OBSERVATION",
-             "recorded_epoch": 1.79e9 + i, "decided_epoch": 1.79e9 + i,
-             "valuation_id": 1000 + i, "outcome": i % 2,
-             "outcome_basis": "VENUE_SETTLEMENT",
-             "outcome_epoch": 1.79e9 + 7200 + i} for i in range(n)]
+    out = []
+    for i in range(n):
+        feats = {"acquisition_price": rng.random(),
+                 "payout_is_complement": float(i % 2),
+                 "pinnacle_p": rng.random()}
+        rng.getrandbits(64)
+        out.append({
+            "observation_id": "obs:%06d" % i, "fixture": "fx:%d" % (i // 3),
+            "features": json.dumps(feats), "feature_sha": FM.feature_sha(feats),
+            "price": rng.random(), "price_basis": "DISPLAYED",
+            "cohort": "C%d" % (i % 4), "pinnacle_p": rng.random(),
+            "record_purpose": "CALIBRATION_ONLY",
+            "evidence_class": "RESEARCH_OBSERVATION",
+            "recorded_epoch": 1.79e9 + i, "decided_epoch": 1.79e9 + i,
+            "valuation_id": 1000 + i, "outcome": i % 2,
+            "outcome_basis": "VENUE_SETTLEMENT",
+            "outcome_epoch": 1.79e9 + 7200 + i})
+    return out
 
 
 class _ModelConn:
