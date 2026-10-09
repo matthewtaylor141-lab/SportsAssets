@@ -59,9 +59,14 @@ completion.read):
   (two sample intervals); time no sample covers is OUTAGE and counts every
   frozen member eligible and NOT current (an outage is never dropped from
   the denominator). A whole hour without a window event uses the last
-  frozen membership before it, labelled CARRIED. Time before the first
-  frozen window is reported as not measured by this build -- never as
-  fresh, never as an outage of a measure that did not exist yet. The rate
+  frozen membership before it, at any age, labelled CARRIED (the readback
+  reads the newest window at or before each horizon's start however old
+  it is: an outage of any length crossing the start is in the
+  denominator). Time before the FIRST frozen window ever written
+  (`measured_since`) is reported as not measured by this build
+  (`unmeasured_before_s`) -- never as fresh, never as an outage of a
+  measure that did not exist yet; that instant is the first window ever,
+  never merely the first one a read happened to return. The rate
   is fresh member-seconds / eligible member-seconds, per subgroup: tier,
   the management view (HELD_POSITION + WORKING_ORDER), venue, market
   family, period, phase (at the instant), and the alternative-line overlay.
@@ -616,16 +621,26 @@ class _Acc:
 
 
 def integrate(windows: list, samples: list, *, start: float, end: float,
-              carry_s: float = CARRY_S) -> dict:
+              carry_s: float = CARRY_S, measured_since=None) -> dict:
     """PURE. The time-weighted freshness of the frozen memberships over
     [start, end] (module docstring). `windows` are FRESHNESS_WINDOW
     payloads, `samples` FRESHNESS_SAMPLE payloads (any order). A sample
     whose membership hash is not its window's is discarded and named; its
-    time is outage."""
+    time is outage.
+
+    `measured_since` is when this build began measuring: the frozen_at of
+    the FIRST window ever written (`fetch` reads it). Only time before it
+    is "not measured"; every later second no sample covers is OUTAGE, the
+    newest membership frozen before it carried -- whatever window the
+    caller happened to read first (review of 785907f2: an outage longer
+    than the read's lead that crossed a horizon's start was left out of the
+    denominator). Without it (a pure caller handing every window), the
+    first window given stands for it, and the readback says so."""
     wins = sorted((w for w in windows if isinstance(w, dict)
                    and w.get("window_start") is not None),
                   key=lambda w: float(w["window_start"]))
     by_ws = {float(w["window_start"]): w for w in wins}
+    wins = [by_ws[k] for k in sorted(by_ws)]
     mem = {}
     for ws, w in by_ws.items():
         ms = member_dicts(w)
@@ -641,7 +656,11 @@ def integrate(windows: list, samples: list, *, start: float, end: float,
             continue
         smp.append(s)
     smp.sort(key=lambda s: float(s["verified_at"]))
-    first = float(wins[0]["frozen_at"]) if wins else None
+    first = None
+    if wins:
+        first = (float(measured_since) if measured_since is not None
+                 else min(float(w.get("frozen_at") or w["window_start"])
+                          for w in wins))
     t0 = max(float(start), first) if first is not None else None
     acc = _Acc()
     if t0 is None or t0 >= end:
@@ -649,6 +668,7 @@ def integrate(windows: list, samples: list, *, start: float, end: float,
             "NO_FROZEN_WINDOW_IN_THE_HORIZON" if t0 is None
             else "MEASUREMENT_STARTS_AFTER_THE_HORIZON"),
             "groups": {}, "measured_from": t0,
+            "unmeasured_before_s": round(float(end) - float(start), 1),
             "discarded_samples": bad}
     W = float(wins[0].get("window_s") or WINDOW_S)
 
@@ -663,6 +683,7 @@ def integrate(windows: list, samples: list, *, start: float, end: float,
     covered = 0.0
     outages, carried = [], set()
     per_sample = []
+    no_membership = [0.0]
 
     def outage(a: float, b: float):
         # split at window boundaries; every frozen member eligible, not fresh
@@ -672,6 +693,11 @@ def integrate(windows: list, samples: list, *, start: float, end: float,
             ms, ws, car = members_for(x)
             if car:
                 carried.add(ws)
+            if ws is None:
+                # measured time with no membership frozen at or before it:
+                # only a caller that withheld the windows can make it; it
+                # is named, never read as fresh
+                no_membership[0] += nxt - x
             mid = (x + nxt) / 2.0
             cnt: dict = {}
             for keys, st in ms:
@@ -736,8 +762,10 @@ def integrate(windows: list, samples: list, *, start: float, end: float,
     longest = sorted(outages, key=lambda o: -(o[1] - o[0]))[:5]
     return {"status": "MEASURED", "measured_from": t0, "end": float(end),
             "observation_s": round(span_s, 1),
+            "unmeasured_before_s": round(t0 - float(start), 1),
             "covered_s": round(covered, 1),
             "outage_s": round(span_s - covered, 1),
+            "outage_without_membership_s": round(no_membership[0], 1),
             "outage_intervals": len(outages),
             "longest_outages": [{"from": round(a, 1), "to": round(b, 1),
                                  "s": round(b - a, 1)} for a, b in longest],
@@ -768,44 +796,97 @@ DECLARED_GROUPS = (
     + ["family:%s" % f for f in FAMILIES + (ALT_LINE,)])
 
 
+#: THE WINDOWS THE READBACK NEEDS, in one pass over the window events' keys
+#: (the payloads are then read by primary key): every window touching
+#: [start - 2 windows, end]; the NEWEST window at or before `start`, at any
+#: age (the membership an outage crossing the start carries -- however long
+#: the plane was down); and the FIRST window ever written (when this build
+#: began measuring: only time before it is "not measured").
+WINDOW_KEYS_SQL = (
+    "WITH w AS MATERIALIZED ("
+    "  SELECT event_key, at FROM market_plane_events WHERE kind = $1) "
+    "SELECT event_key, 'RANGE' AS why FROM w "
+    " WHERE at > to_timestamp($2) - interval '5 minutes' "
+    "   AND at <= to_timestamp($3) + interval '5 minutes' "
+    "UNION ALL (SELECT event_key, 'PRIOR' FROM w "
+    " WHERE at <= to_timestamp($4) ORDER BY at DESC LIMIT 1) "
+    "UNION ALL (SELECT event_key, 'FIRST' FROM w ORDER BY at LIMIT 1)")
+PAYLOADS_SQL = (
+    "SELECT event_key, payload FROM market_plane_events "
+    " WHERE event_key = ANY($1::text[])")
+
+
 async def fetch(conn, *, start: float, end: float) -> tuple:
-    """(window payload texts, sample payload texts) touching [start, end]
-    (windows from two before it: a membership to carry into an outage at
-    the start). Read only; parsing is left to `readback`, off the loop."""
-    wins = [r["payload"] for r in await conn.fetch(
-        SAMPLES_SQL, KIND_WINDOW, float(start) - 2 * WINDOW_S, float(end))]
+    """(window payload texts, sample payload texts, measured_since) for
+    [start, end]: the windows WINDOW_KEYS_SQL names (the range, the newest
+    at or before the start at any age, the first ever), the samples
+    touching the range, and the first window's frozen_at -- None when no
+    window was ever written. Read only; parsing is left to `readback`, off
+    the loop."""
+    keys = await conn.fetch(WINDOW_KEYS_SQL, KIND_WINDOW,
+                            float(start) - 2 * WINDOW_S, float(end),
+                            float(start))
+    first_key = next((r["event_key"] for r in keys if r["why"] == "FIRST"),
+                     None)
+    pay = {r["event_key"]: r["payload"] for r in await conn.fetch(
+        PAYLOADS_SQL, sorted({r["event_key"] for r in keys}))}
+    measured_since = None
+    if first_key is not None:
+        fw = _j(pay.get(first_key))
+        if isinstance(fw, dict) and fw.get("frozen_at") is not None:
+            measured_since = float(fw["frozen_at"])
     smps = [r["payload"] for r in await conn.fetch(
         SAMPLES_SQL, KIND_SAMPLE, float(start) - CARRY_S, float(end))]
-    return wins, smps
+    return [pay[k] for k in sorted(pay)], smps, measured_since
 
 
-def readback(wins, smps, *, now: float, horizons=HORIZONS) -> dict:
+def readback(wins, smps, measured_since=None, *, now: float,
+             horizons=HORIZONS) -> dict:
     """PURE (CPU: run it off the event loop). The readback of every horizon:
     the window integral, the frozen windows with their hashes, the declared
-    subgroups' status, and the newest sample with its three instants."""
+    subgroups' status, and the newest sample with its three instants.
+    `measured_since` is `fetch`'s third value (the first window ever
+    written); without it the first window given stands for it, labelled."""
     wins = [w for w in (_j(x) for x in wins) if isinstance(w, dict)]
     smps = [x for x in (_j(x) for x in smps) if isinstance(x, dict)]
+    if measured_since is None and wins:
+        basis = "FIRST_WINDOW_GIVEN_TO_THE_READBACK"
+        measured_since = min(float(w.get("frozen_at") or w.get(
+            "window_start") or 0) for w in wins)
+    else:
+        basis = ("FIRST_FRESHNESS_WINDOW_EVER_WRITTEN"
+                 if measured_since is not None else None)
     out = {"version": VERSION, "rule": RULE, "sla_s": None,
            "window_s": WINDOW_S, "sample_every_s": SAMPLE_EVERY_S,
-           "carry_s": CARRY_S, "horizons": {}}
+           "carry_s": CARRY_S,
+           "measured_since": measured_since,
+           "measured_since_basis": basis,
+           "measured_since_note": (
+               "time before the first frozen window is not measured by this "
+               "build (unmeasured_before_s); every later second no sample "
+               "covers is an OUTAGE in the denominator, the newest "
+               "membership frozen before it carried"),
+           "horizons": {}}
+    carried = set()
     for k, h in horizons:
         got = integrate(wins, smps, start=float(now) - float(h),
-                        end=float(now))
+                        end=float(now), measured_since=measured_since)
         got["horizon_s"] = float(h)
         got["declared_groups"] = {
             g: ("MEASURED" if g in (got.get("groups") or {})
                 else "NOT_IN_ELIGIBLE_SET") for g in DECLARED_GROUPS}
+        carried.update(float(x) for x in got.get("carried_windows") or ())
         out["horizons"][k] = got
     longest = max((float(h) for _k, h in horizons), default=0.0)
     start = float(now) - longest
+    by_ws = {float(w.get("window_start") or 0): w for w in wins}
     out["windows"] = [{"window_start": w.get("window_start"),
                        "frozen_at": w.get("frozen_at"), "n": w.get("n"),
                        "membership_hash": w.get("membership_hash"),
-                       "sla_s": w.get("sla_s")}
-                      for w in sorted(wins, key=lambda w: float(
-                          w.get("window_start") or 0))
-                      if float(w.get("window_start") or 0) + WINDOW_S
-                      > start]
+                       "sla_s": w.get("sla_s"),
+                       "carried_into_the_horizon": ws in carried}
+                      for ws, w in sorted(by_ws.items())
+                      if ws + WINDOW_S > start or ws in carried]
     if out["windows"]:
         out["sla_s"] = out["windows"][-1].get("sla_s")
     latest = max(smps, key=lambda s: float(s.get("verified_at") or 0),

@@ -285,15 +285,18 @@ def market_data_block(snap, why, ump_detail) -> dict:
 # second no sample covers an OUTAGE counted eligible and not fresh, per
 # tier (HELD_POSITION / WORKING_ORDER / CANDIDATE and the management view),
 # venue, market family, period and phase, over 1 h / 6 h / 24 h (each from
-# when this build began measuring). Integrated off the event loop.
+# when this build began measuring: the FIRST window ever written, read with
+# the newest window at or before the horizon's start at any age, so an
+# outage crossing a horizon's start is in its denominator). Integrated off
+# the event loop.
 
 async def freshness_window_block(conn, *, now: float) -> dict:
     from ..market_plane import freshness_window as FW
     if not await _has(conn, "market_plane_events"):
         return {"status": "UNREADABLE", "why": "MARKET_PLANE_EVENTS_ABSENT"}
     longest = max(h for _k, h in FW.HORIZONS)
-    wins, smps = await FW.fetch(conn, start=now - longest, end=now)
-    out = await asyncio.to_thread(FW.readback, wins, smps, now=now)
+    wins, smps, since = await FW.fetch(conn, start=now - longest, end=now)
+    out = await asyncio.to_thread(FW.readback, wins, smps, since, now=now)
     del wins, smps
     orders = {"open_orders": 0, "markets": 0, "by_role": {}}
     if await _has(conn, "paper_orders"):

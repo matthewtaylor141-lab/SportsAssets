@@ -443,9 +443,12 @@ def test_the_membership_is_frozen_once_and_never_re_chosen():
         tr = c.transaction()
         await tr.start()
         try:
-            await c.execute("DELETE FROM market_plane_events "
-                            " WHERE kind IN ('FRESHNESS_WINDOW', "
-                            "                'FRESHNESS_SAMPLE')")
+            # a savepoint: the table is append-only, so a committed row
+            # makes this raise -- without aborting the test's transaction
+            async with c.transaction():
+                await c.execute("DELETE FROM market_plane_events "
+                                " WHERE kind IN ('FRESHNESS_WINDOW', "
+                                "                'FRESHNESS_SAMPLE')")
         except Exception:                                       # noqa: BLE001
             pass
         try:
@@ -583,6 +586,155 @@ def test_the_plane_run_loop_samples_beside_the_pass(monkeypatch):
     fw = beats[-1][2]["freshness_window"]
     assert fw["n"] == smp["n"] and fw["membership_hash"] == \
         smp["membership_hash"]
+
+
+# ── an outage crossing a horizon's start (review of 785907f2) ────────────
+#
+# fetch() read only the windows written after (24 h start - 2 h) and
+# integrate() began each horizon at the first window it was handed: a plane
+# down from 27 h ago to 21.5 h ago read 24 h rate 1.0 with no outage, where
+# every window says 0.8542 with 12,600 s of outage. These go through
+# completion.read's own block (fetch + readback) against Postgres.
+
+NOW_O = WS + 1800.0                         # mid-hour
+
+
+def _series(now, down, *, hours=30, n=3):
+    """The plane's events over [now - hours, now): one window an hour,
+    frozen at its first sampled minute, and one sample a minute with every
+    member current ('S') -- except inside the `down` intervals, where the
+    plane writes nothing (down)."""
+    F = FW()
+    ms = [_m("o-%d" % i) for i in range(n)]
+    wins, smps = {}, []
+    t = now - hours * 3600.0
+    while t < now:
+        if not any(a <= t < b for a, b in down):
+            ws = F.window_start_of(t)
+            w = wins.get(ws)
+            if w is None:
+                w = wins[ws] = F.freeze(ms, window_start=ws, now=t,
+                                        sla_s=SLA)
+            smps.append(_smp(w, t, "S" * w["n"]))
+        t += 60.0
+    return list(wins.values()), smps
+
+
+def _block_over(wins, smps, now):
+    """completion.read's market_data.freshness_window over exactly these
+    events (written with their own instants), in a rolled-back
+    transaction."""
+    import asyncpg
+    from sportsassets.completion import read as CR
+    from sportsassets.market_plane.registry import AUTHORITY
+    F = FW()
+    rows = [("fwin:%d" % int(w["window_start"]), F.KIND_WINDOW,
+             json.dumps(w), float(w["frozen_at"]), AUTHORITY) for w in wins]
+    rows += [("fsample:%d" % int(s["verified_at"] // 60), F.KIND_SAMPLE,
+              json.dumps(s), float(s["verified_at"]), AUTHORITY)
+             for s in smps]
+
+    async def go():
+        c = await asyncpg.connect(DSN)
+        tr = c.transaction()
+        await tr.start()
+        try:
+            await c.executemany(
+                "INSERT INTO market_plane_events (event_key, kind, payload, "
+                " at, label, authority) VALUES ($1, $2, $3::jsonb, "
+                " to_timestamp($4), 'RESEARCH', $5)", rows)
+            return await CR.freshness_window_block(c, now=now)
+        finally:
+            await tr.rollback()
+            await c.close()
+    return run(go())
+
+
+@pg
+@pytest.mark.parametrize("horizon,down", [
+    # down 27 h .. 21.5 h ago: crosses the 24 h start, began > 26 h ago
+    ("24h", (NOW_O - 27 * 3600.0, NOW_O - 21.5 * 3600.0)),
+    # down 29 h ago until 30 minutes ago: crosses every horizon's start
+    ("ALL", (NOW_O - 29 * 3600.0, NOW_O - 0.5 * 3600.0)),
+    # shorter outages crossing the 6 h and the 1 h starts
+    ("6h", (NOW_O - 9 * 3600.0, NOW_O - 3 * 3600.0)),
+    ("1h", (NOW_O - 3.5 * 3600.0, NOW_O - 0.5 * 3600.0)),
+])
+def test_an_outage_crossing_a_horizons_start_is_in_its_denominator(
+        horizon, down):
+    F = FW()
+    wins, smps = _series(NOW_O, [down])
+    got = _block_over(wins, smps, NOW_O)
+    checked = 0
+    for k, h in F.HORIZONS:
+        if horizon not in (k, "ALL"):
+            continue
+        # the truth: the integral over EVERY window and sample written
+        truth = F.integrate(wins, smps, start=NOW_O - h, end=NOW_O)
+        r = got["horizons"][k]
+        assert r["status"] == "MEASURED", k
+        assert r["measured_from"] == NOW_O - h, k
+        assert r["observation_s"] == h, k
+        assert r["outage_s"] == truth["outage_s"] > 0, k
+        a, t = r["groups"]["ALL"], truth["groups"]["ALL"]
+        assert a["outage_member_s"] == t["outage_member_s"] > 0, k
+        assert a["eligible_member_s"] == t["eligible_member_s"] == 3 * h, k
+        assert a["rate"] == t["rate"] < 1.0, k
+        # the membership frozen before the outage, carried, and shown
+        assert r["carried_windows"], k
+        assert r["unmeasured_before_s"] == 0.0, k
+        shown = {w["window_start"] for w in got["windows"]
+                 if w["carried_into_the_horizon"]}
+        assert set(r["carried_windows"]) <= shown, k
+        checked += 1
+    assert checked == (3 if horizon == "ALL" else 1)
+    assert got["measured_since"] == NOW_O - 30 * 3600.0
+    assert got["measured_since_basis"] == \
+        "FIRST_FRESHNESS_WINDOW_EVER_WRITTEN"
+
+
+@pg
+def test_before_the_first_window_ever_is_unmeasured_a_later_gap_an_outage():
+    # this build began measuring 10 h ago; the plane was down 7 h .. 4 h ago
+    wins, smps = _series(NOW_O, [(NOW_O - 30 * 3600.0, NOW_O - 10 * 3600.0),
+                                 (NOW_O - 7 * 3600.0, NOW_O - 4 * 3600.0)])
+    got = _block_over(wins, smps, NOW_O)
+    first = min(w["frozen_at"] for w in wins)
+    assert first == NOW_O - 10 * 3600.0
+    d = got["horizons"]["24h"]
+    # before the first window ever: not measured -- not fresh, not outage
+    assert d["measured_from"] == first
+    assert d["observation_s"] == 10 * 3600.0
+    # after it, the plane down: OUTAGE (the sample before it stands 2 min)
+    assert d["outage_s"] == 3 * 3600.0 - 60.0
+    assert d["groups"]["ALL"]["eligible_member_s"] == 3 * 10 * 3600.0
+    six = got["horizons"]["6h"]
+    assert six["measured_from"] == NOW_O - 6 * 3600.0
+    assert six["outage_s"] == 2 * 3600.0
+    assert six["groups"]["ALL"]["rate"] == round(4 / 6, 4)
+    one = got["horizons"]["1h"]
+    assert one["outage_s"] == 0.0 and one["groups"]["ALL"]["rate"] == 1.0
+    # the two apart, by name: the measure's own start and the horizon's part
+    # before it
+    assert got["measured_since"] == first
+    assert d["unmeasured_before_s"] == 14 * 3600.0
+    assert six["unmeasured_before_s"] == 0.0
+
+
+def test_measured_time_with_no_membership_given_is_named_never_fresh():
+    F = FW()
+    w = _win(WS, [_m("a")], frozen_at=WS + 1800)
+    s = [_smp(w, WS + 1800 + 60 * i, "S") for i in range(30)]
+    got = F.integrate([w], s, start=WS - 3600, end=WS + 3600,
+                      measured_since=WS - 7200)
+    assert got["measured_from"] == WS - 3600
+    assert got["unmeasured_before_s"] == 0.0
+    # the hour before WS: measured, but no membership was handed over for
+    # it -- named, never fresh; the half hour before the window's freeze
+    # carries the window's own members
+    assert got["outage_without_membership_s"] == 3600.0
+    assert got["outage_s"] == 5400.0
+    assert got["groups"]["ALL"]["rate"] == 0.5
 
 
 # ═════════════════════════════════════════════════════════════════════
