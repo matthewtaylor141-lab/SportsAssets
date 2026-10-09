@@ -246,14 +246,20 @@ def close_of(exc, *, now: Optional[float] = None,
 #: a new epoch that drops the cache and reloads every subscribed snapshot,
 #: and nothing on the heartbeat said so.
 #:
-#: THE REPAIR: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S.
-#: The first CLIENT_CLOSES_FREE inside it reconnect as before; from the
-#: next one the owner waits client_close_wait_s(level) -- 5 s, doubling, at
-#: most 300 s -- before it contends again. Delivery does NOT reset it: the
-#: level only falls back to 0 when a CLIENT close arrives a full window
-#: after the one before (the waits themselves thin the window, so a close
-#: that comes back within a window of the last one keeps the level). The
-#: wait is the owner's state (CLIENT_CLOSE_BACKOFF), the authority's reason
+#: THE REPAIR: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S
+#: of CONNECTED time (the owner's monotonic clock less the backoff waits it
+#: has itself imposed). The first CLIENT_CLOSES_FREE inside it reconnect as
+#: before; the level is the number of closes in the window beyond those,
+#: and the owner waits client_close_wait_s(level) -- 5 s, doubling, at most
+#: 300 s -- before it contends again. Delivery does NOT reset it. Counting
+#: connected time is what keeps the two cases apart (integration review):
+#: a storm (a close about 1 s after every reconnect) keeps filling the
+#: window however long the waits grow, so it climbs to and holds 300 s; a
+#: close every ~240 s of streaming (the cadence of the 2026-10-08 keepalive
+#: 1011s, three in 491 s) never holds more than 3 in the window, so it
+#: waits a steady 5 s instead of climbing to 300 s and keeping the feed
+#: down most of the time. The window empties after CLIENT_CLOSE_WINDOW_S of
+#: connected time with no CLIENT close. The wait is the owner's state (CLIENT_CLOSE_BACKOFF), the authority's reason
 #: (R_CLIENT_CLOSE_BACKOFF), a transition, and `client_close_backoff` on
 #: status() and so on the heartbeat. It is never a refusal and never counts
 #: toward EVICTIONS_MAX; a stop ends it at once. The lease is released while
@@ -422,6 +428,9 @@ class FeedOwner:
         #: of run() (see CLIENT_CLOSE_BACKOFF). Never reset by delivery,
         #: nor by a stand-down's re-entry: they belong to this owner.
         self.client_closes: list = []
+        #: seconds of CLIENT-close waiting imposed so far: the closes above
+        #: are kept on the connected clock (monotonic less this)
+        self.client_close_paused = 0.0
         self.client_close_level = 0
         self.client_close_last: Optional[float] = None
         self.client_close_wait = 0.0
@@ -441,22 +450,19 @@ class FeedOwner:
 
     def _client_close(self, t: float) -> float:
         """Count one CLIENT close at monotonic `t`; return the seconds to
-        wait before reconnecting (0.0 below the threshold). Escalates from
-        the (CLIENT_CLOSES_FREE + 1)th close inside CLIENT_CLOSE_WINDOW_S,
-        and keeps escalating while each close comes within a window of the
-        one before; resets only after a quiet window."""
-        gap = (None if self.client_close_last is None
-               else t - self.client_close_last)
+        wait before reconnecting (0.0 below the threshold). The level is the
+        number of CLIENT closes beyond CLIENT_CLOSES_FREE inside the last
+        CLIENT_CLOSE_WINDOW_S of CONNECTED time (t less the waits this
+        method has imposed), so a storm holds its level while the waits
+        grow and a sparse cadence stays at the first step."""
+        c = t - self.client_close_paused
         self.client_closes = [x for x in self.client_closes
-                              if t - x < CLIENT_CLOSE_WINDOW_S] + [t]
+                              if c - x < CLIENT_CLOSE_WINDOW_S] + [c]
         self.client_close_last = t
-        if len(self.client_closes) > CLIENT_CLOSES_FREE or (
-                self.client_close_level > 0 and gap is not None
-                and gap < CLIENT_CLOSE_WINDOW_S):
-            self.client_close_level += 1
-        else:
-            self.client_close_level = 0
+        self.client_close_level = max(
+            0, len(self.client_closes) - CLIENT_CLOSES_FREE)
         self.client_close_wait = client_close_wait_s(self.client_close_level)
+        self.client_close_paused += self.client_close_wait
         return self.client_close_wait
 
     def stop(self):

@@ -11,8 +11,11 @@ the provider keeps sending, a loop stall that keeps failing the keepalive
 every subscribed snapshot, with nothing on the heartbeat saying so.
 
 Pinned here: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S
-(600 s); from the 3rd inside it the owner waits 5, 10, 20 ... up to 300 s
-before reconnecting. Delivery does not reset it; only a quiet window does.
+(600 s) of CONNECTED time; from the 3rd inside it the owner waits 5, 10,
+20 ... up to 300 s before reconnecting. Delivery does not reset it; only a
+quiet window does. A storm holds 300 s; a close every ~240 s of streaming
+(2026-10-08's keepalive cadence) waits a steady 5 s and never starves the
+feed (integration review of the first version, which climbed to 300 s).
 The wait is named on the heartbeat (`client_close_backoff`), in the
 transitions (CLIENT_CLOSE_BACKOFF) and by the authority's reason
 (FEED_CLIENT_CLOSE_BACKOFF). It is never a refusal and never counts toward
@@ -70,9 +73,9 @@ def test_the_third_client_close_inside_the_window_starts_the_wait():
 
 
 def test_the_wait_does_not_collapse_while_the_closes_keep_coming():
-    """Each close arriving one second after the reconnect: the waits thin
-    the 600 s window, but the backoff keeps its level for as long as the
-    closes keep coming inside the window of the one before."""
+    """Each close arriving one second after the reconnect: the waits are
+    not connected time, so the 600 s connected window keeps filling and
+    the backoff keeps its level for as long as the closes keep coming."""
     o = _bare_owner()
     t, waits = 0.0, []
     for _ in range(14):
@@ -83,6 +86,42 @@ def test_the_wait_does_not_collapse_while_the_closes_keep_coming():
     assert waits[9:] == [300.0] * 5
 
 
+def test_a_close_every_four_minutes_of_streaming_waits_five_seconds_not_five_minutes():
+    """The integration review's case: a CLIENT close after every 240 s of
+    connected time (2026-10-08: three keepalive 1011s in 491 s). The first
+    version kept escalating while each close came within 600 s of the last
+    and climbed to 300 s, so the feed was down 300 of every 540 s. Counted
+    on the connected clock the window never holds more than 3 such closes:
+    the wait stays at the first step and the feed streams ~98% of the time."""
+    o = _bare_owner()
+    t, waits = 0.0, []
+    for _ in range(30):
+        w = o._client_close(t)
+        waits.append(w)
+        t += w + 240.0
+    assert waits[:2] == [0.0, 0.0]
+    assert set(waits[2:]) == {5.0}
+    assert max(len(o.client_closes), 0) <= 3
+    assert o.evictions == [] and o.refused is None
+
+
+def test_the_storm_still_holds_the_cap_while_a_slow_cadence_does_not_climb():
+    """Both at once on separate owners: 1 s after each reconnect holds 300 s;
+    600 s after each reconnect never waits at all."""
+    storm, slow = _bare_owner(), _bare_owner()
+    t = 0.0
+    for _ in range(20):
+        t += storm._client_close(t) + 1.0
+    assert storm.client_close_wait == 300.0
+    t = 0.0
+    waits = []
+    for _ in range(20):
+        w = slow._client_close(t)
+        waits.append(w)
+        t += w + 600.0
+    assert set(waits) == {0.0}
+
+
 def test_a_quiet_window_resets_the_backoff_and_delivery_does_not():
     o = _bare_owner()
     for t in (0.0, 1.0, 2.0, 3.0):
@@ -91,11 +130,12 @@ def test_a_quiet_window_resets_the_backoff_and_delivery_does_not():
     # just inside one window after the last close: still escalating
     assert o._client_close(3.0 + O.CLIENT_CLOSE_WINDOW_S - 0.5) == 20.0
     assert o.client_close_level == 3
-    # a close a full window after the last one: quiet, so no wait
+    # a close a full window of connected time after the last one: quiet,
+    # so no wait (the window holds only that last close and this one)
     t = 3.0 + 2 * O.CLIENT_CLOSE_WINDOW_S
     assert o._client_close(t) == 0.0
     assert o.client_close_level == 0
-    assert o.client_closes == [t]
+    assert len(o.client_closes) == 2 <= O.CLIENT_CLOSES_FREE
     # (a delivered epoch is not a quiet window: the persistent-close test
     # below closes after delivery every time and the wait still grows)
 
