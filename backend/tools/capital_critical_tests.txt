@@ -1335,3 +1335,7 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (RC6 api-stall) the observation pass's label reads parse off the API event loop; same labelled rows, order and exclusions feed the model planning
+tests/test_rc6_pair_observations_off_loop.py
+# (RC6 api-stall) the intel shadow cycle's pure steps run in worker threads; same SHADOW results
+tests/test_rc6_intel_off_loop.py

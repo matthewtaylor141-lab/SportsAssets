@@ -1074,7 +1074,29 @@ async def labelled(conn, *, after=None, through=None, outcomes_through=None,
         args.append([str(x) for x in ids])
         sql += " AND observation_id = ANY($%d::text[])" % len(args)
     sql += " ORDER BY observed_at, observation_id"
-    for r in await conn.fetch(sql, *args):
+    rows = await conn.fetch(sql, *args)
+    # OFF THE EVENT LOOP (RC6). This read has no LIMIT -- it is every
+    # labelled observation ever recorded, and it grows with the observer's
+    # history -- and the observation pass reads it through the model
+    # planning (`plan_windows` twice per model key, two keys) and the
+    # evaluation of every candidate, once per ext_pinnacle cycle, in the API
+    # process. On 2026-10-08 (RC5, render-ops logs) 13 of the 16 ext_pinnacle
+    # cycles completed within 6 s of a >= 2 s loop stall record (the
+    # watchdog thread saw Python running, overrun 0.0 s), which places the
+    # hold in the cycle's last steps -- this pass's tail, Derek's after-cycle
+    # step, the heartbeat -- and this read is the one of them that grows
+    # without bound; Render restarted the API twice that day for an
+    # unanswered /healthz. INFERRED FROM TIMING, NOT A STACK: the watchdog
+    # now names the holder in the log (loop_watchdog). The rows are parsed
+    # in a worker thread; the result is the same lists in the same order.
+    return await asyncio.to_thread(labelled_rows, out, rows)
+
+
+def labelled_rows(out: dict, rows) -> dict:
+    """`labelled`'s rows -> its record shape, appended to `out`. PURE (only
+    item reads on the rows): it runs in a worker thread, and it is exactly
+    the loop that ran inline before."""
+    for r in rows:
         feats = r["features"]
         feats = json.loads(feats) if isinstance(feats, str) else feats
         out["rows"].append(feats)
@@ -1209,16 +1231,31 @@ async def labelled_conditional(conn, *, after=None, through=None,
     if not lab.get("ok"):
         return dict(out, ok=False, refusal=lab.get("refusal"), n=0,
                     n_events=0)
-    by_id: dict = {}
+    rows = []
     if lab["decision_ids"]:
-        for r in await conn.fetch(
-                "SELECT observation_id, structure, features, primary_won, "
-                "       hedge_won, primary_settlement_price, "
-                "       hedge_settlement_price "
-                "  FROM bettor_pair_observations "
-                " WHERE observation_id = ANY($1::text[])",
-                [str(x) for x in lab["decision_ids"]]):
-            by_id[r["observation_id"]] = dict(r)
+        rows = await conn.fetch(
+            "SELECT observation_id, structure, features, primary_won, "
+            "       hedge_won, primary_settlement_price, "
+            "       hedge_settlement_price "
+            "  FROM bettor_pair_observations "
+            " WHERE observation_id = ANY($1::text[])",
+            [str(x) for x in lab["decision_ids"]])
+    # OFF THE EVENT LOOP (RC6, see `labelled`): one payout-class partition,
+    # one structure parse and one feature sha per labelled observation --
+    # about 70 us a row on a quiet core (LOCAL BENCHMARK ONLY, synthetic
+    # rows: 0.70 s at 10,000), all of it on the API's loop before.
+    return await asyncio.to_thread(conditional_rows, out, lab, rows, keys)
+
+
+def conditional_rows(out: dict, lab: dict, rows, keys) -> dict:
+    """`labelled_conditional`'s rows -> its record shape, appended to `out`.
+    PURE: it runs in a worker thread, and it is exactly the loop that ran
+    inline before."""
+    from . import bettor_funded_model as FMD
+
+    by_id: dict = {}
+    for r in rows:
+        by_id[r["observation_id"]] = dict(r)
     for i, oid in enumerate(lab["decision_ids"]):
         got = conditional_row(by_id.get(oid) or {})
         if not got["include"]:
