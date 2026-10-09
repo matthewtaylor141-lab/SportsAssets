@@ -266,6 +266,11 @@ _STATE_RATIO = "mirror_ratio"
 _STATE_SWITCH = "mirror_shadow"
 _SNAP_RAW_KEY = "whale_positions_raw:%s"
 _backoff_until = 0.0
+#: the last positions reading's confirmation in this process
+#: (MPS.confirmation of its receipt, with the tick's instant as
+#: read_at_epoch); None until the first reading. A tick that makes no reading
+#: (backoff, switched off) claims this and never more (MPS.carried_confirmation)
+_last_confirmation: dict | None = None
 _ratio_cache: dict[str, Any] = {"at": 0.0, "by_whale": {}}
 _exit_cache: dict[str, Any] = {"at": 0.0, "value": None}
 _sleep = asyncio.sleep          # indirection so a test can count the pacing
@@ -3105,6 +3110,45 @@ async def intent_column_present(pool) -> bool:
     return True
 
 
+def _apply_confirmation(stats: dict, conf: dict) -> None:
+    """THE CLAIM ON THE HEARTBEAT (RC6 identity lane). Writes a positions
+    confirmation (MPS.confirmation / MPS.carried_confirmation) onto the
+    tick's stats. A confirmation that is not the venue's word makes the tick
+    'degraded' with its named refusal and owner blocker; a venue-confirmed
+    one leaves the status as it stands -- nothing here upgrades a tick that
+    is already degraded for another reason."""
+    stats["venue_confirmed"] = conf["venue_confirmed"]
+    stats["positions_authority"] = conf["positions_authority"]
+    if "confirmation_basis" in conf:
+        # a tick that made no reading: what its claim rests on, when that
+        # reading was made, and whether it read the account at all (None:
+        # no reading in this process) -- the readiness gate reads the last
+        stats["confirmation_basis"] = conf["confirmation_basis"]
+        stats["confirmation_read_at_epoch"] = conf.get("read_at_epoch")
+        stats["last_reading_readable"] = conf.get("readable")
+    if not conf["venue_confirmed"]:
+        stats.update(status="degraded", refusal=conf["refusal"],
+                     owner_blocker=conf["owner_blocker"],
+                     primary_refusal=conf.get("primary_refusal"),
+                     credential_class=conf.get("credential_class"))
+
+
+def _carry_last_confirmation(stats: dict, pmus) -> None:
+    """A tick that returns before the positions read (backoff, switched off)
+    carries the last reading's claim and no more; before any reading in this
+    process, R_NO_READING_YET with the owner blocker where the slot's own
+    precondition (the credential's FORMAT, no venue call) refuses the walk."""
+    if _last_confirmation is None:
+        try:
+            primary = pmus_secret_unusable_reason(pmus)
+        except Exception:                                       # noqa: BLE001
+            primary = None
+        conf = MPS.carried_confirmation(None, primary_refusal=primary)
+    else:
+        conf = MPS.carried_confirmation(_last_confirmation)
+    _apply_confirmation(stats, conf)
+
+
 async def tick_once(pool, pmus, now_ts: float | None = None,
                     allow_short: bool | None = None) -> dict:
     """One pass over the newest MAX_MARKETS_PER_TICK markets of every
@@ -3132,7 +3176,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
     computed (P2 rung S0 re-review). The parallel short reading
     (`detail.target_short`) is written either way, so the report's
     `.short` block is continuous across the flip."""
-    global _backoff_until
+    global _backoff_until, _last_confirmation
     now_ts = time.time() if now_ts is None else now_ts
     knob_unreadable: str | None = None
     if allow_short is None:
@@ -3188,12 +3232,20 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
     map_budget = MapBudget()
     if knob_unreadable:
         stats.update(status="degraded", intent_guard_unreadable=knob_unreadable)
+    # A TICK THAT MAKES NO READING CLAIMS NO MORE THAN THE LAST ONE (RC6
+    # identity lane, independent review): the backoff and switched-off ticks
+    # return before the positions read, and used to beat the initial 'ok' --
+    # on the ledger topology one or two 'ok' beats after every miss-streak
+    # abandon (production 2026-10-09: 26 abandons in 14 h). They carry the
+    # last reading's confirmation instead (_carry_last_confirmation).
     if now_ts < _backoff_until:
         stats["skipped_backoff"] = True
+        _carry_last_confirmation(stats, pmus)
         attach_exit_census(stats, now_ts)
         return stats
     if await _db_switch_off(pool):
         stats["switched_off"] = True
+        _carry_last_confirmation(stats, pmus)
         attach_exit_census(stats, now_ts)
         return stats
     whales = mirror_whales()
@@ -3209,29 +3261,28 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
     # ledger, named and dated (tick_positions)
     positions, pos_src = await tick_positions(pool, pmus, basis_out=venue_basis)
     stats["positions_source"] = pos_src
+    # THE CLAIM THE READING SUPPORTS (RC6 identity lane). A ledger-derived
+    # reading plans the shadow but is not the venue's word: the tick is
+    # 'degraded' with the named refusal and the owner blocker on the
+    # heartbeat (MPS.confirmation), never 'ok'. An unreadable reading names
+    # its own refusal the same way. Only a status that is already degraded
+    # stays so: nothing here upgrades one. The confirmation is remembered
+    # for the ticks that make no reading (the backoff that follows).
+    conf = MPS.confirmation(pos_src)
+    _last_confirmation = dict(conf, read_at_epoch=now_ts,
+                              readable=positions is not None)
     if positions is None:
         _backoff_until = now_ts + BACKOFF_S
         stats.update(positions_unreadable=True, abandoned=True, status="degraded")
         if pos_src.get("refusal"):
             stats["positions_unreadable_reason"] = pos_src["refusal"]
+        _apply_confirmation(stats, conf)
         log.warning("mirror_shadow: account positions unreadable — abandoning the "
                     "tick, backing off %ss", BACKOFF_S)
         attach_exit_census(stats, now_ts)
         return stats
     stats["venue_positions"] = len(positions)
-    # THE CLAIM THE READING SUPPORTS (RC6 identity lane). A ledger-derived
-    # reading plans the shadow but is not the venue's word: the tick is
-    # 'degraded' with the named refusal and the owner blocker on the
-    # heartbeat (MPS.confirmation), never 'ok'. Only a status that is already
-    # degraded stays so: nothing here upgrades one.
-    conf = MPS.confirmation(pos_src)
-    stats["venue_confirmed"] = conf["venue_confirmed"]
-    stats["positions_authority"] = conf["positions_authority"]
-    if not conf["venue_confirmed"]:
-        stats.update(status="degraded", refusal=conf["refusal"],
-                     owner_blocker=conf["owner_blocker"],
-                     primary_refusal=conf.get("primary_refusal"),
-                     credential_class=conf.get("credential_class"))
+    _apply_confirmation(stats, conf)
     reads = 0
     misses = 0
     venue_states: Counter = Counter()

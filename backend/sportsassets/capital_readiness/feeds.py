@@ -959,8 +959,15 @@ async def gate_mirror_positions_readable(conn, ctx) -> dict:
     # confirmed. The heartbeat's own confirmation fields ride as evidence --
     # a ledger-derived reading names its refusal and the owner blocker here,
     # so this gate can never be read as a venue confirmation. The gate's
-    # value is unchanged (readability).
+    # value is readability.
     d = hb["detail"]
+    # A BEAT FROM A TICK THAT MADE NO READING (backoff, switched off: it
+    # carries a confirmation_basis) is readable only if the last reading in
+    # that process was: a backoff after an unreadable walk, or a process
+    # that has read nothing yet, is not evidence of a readable account --
+    # stricter only; a beat that made its own reading is judged as before
+    if d.get("confirmation_basis") and d.get("last_reading_readable") is not True:
+        bad = True
     return _gate(not bad, "MIRROR_POSITIONS_UNREADABLE",
                  status=hb["status"], age_s=hb["age_s"],
                  abandoned=d.get("abandoned"),
@@ -970,6 +977,10 @@ async def gate_mirror_positions_readable(conn, ctx) -> dict:
                      or (d.get("positions_source") or {}).get("authority")),
                  refusal=d.get("refusal"),
                  owner_blocker=d.get("owner_blocker"),
+                 # a beat from a tick that made no reading (backoff,
+                 # switched off) says what its claim rests on
+                 confirmation_basis=d.get("confirmation_basis"),
+                 last_reading_readable=d.get("last_reading_readable"),
                  source="service_heartbeats mirror_shadow "
                         "(workers/mirror_shadow.tick_once)")
 

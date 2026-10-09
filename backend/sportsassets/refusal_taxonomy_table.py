@@ -2234,6 +2234,9 @@ IDENTITY_TRUTH_STREAM = {
         S, CAP, "INGESTION"),
     "OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY": (S, MAP, "INGESTION"),
     "RECONCILER_WALK_DID_NOT_REACH_THE_PREVIOUS_RUN": (S, FRESH, "INGESTION"),
+    # a mirror-shadow tick that made no positions reading before ANY reading
+    # in its process (backoff / switched off): no evidence -- like no source
+    "MIRROR_SHADOW_NO_POSITIONS_READING_IN_THIS_PROCESS": (S, DATA, "INGESTION"),
 }
 for _k, _v in IDENTITY_TRUTH_STREAM.items():
     TABLE.setdefault(_k, _v)

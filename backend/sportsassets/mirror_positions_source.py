@@ -98,6 +98,13 @@ R_VENUE_UNCONFIRMED = ("MIRROR_SHADOW_POSITIONS_NOT_VENUE_CONFIRMED_"
 #: PMUS_SECRET_KEY. No code path works around it.
 OWNER_BLOCKER = "FUNDED_PMUS_RETAIL_ED25519_KEY"
 AUTHORITY_VENUE = "VENUE_CONFIRMED"
+#: (RC6 identity lane, review) a tick that made no positions reading (a
+#: backoff tick, a switched-off tick) before ANY reading in this process:
+#: there is nothing to rest a claim on, so the tick is a named non-success
+R_NO_READING_YET = "MIRROR_SHADOW_NO_POSITIONS_READING_IN_THIS_PROCESS"
+#: what a no-reading tick's claim rests on (carried_confirmation)
+BASIS_LAST_READING = "LAST_READING_IN_THIS_PROCESS"
+BASIS_NO_READING = "NO_READING_IN_THIS_PROCESS"
 #: the guard: a statement that is not one SELECT / WITH is refused unsent
 R_NOT_A_READ = "MIRROR_POSITIONS_SOURCE_STATEMENT_IS_NOT_A_READ"
 
@@ -241,6 +248,35 @@ def confirmation(receipt: dict | None) -> dict:
         # walk: a walk that failed with a usable key is a venue answer, not
         # a credential gap
         "owner_blocker": OWNER_BLOCKER if r.get("primary_refusal") else None}
+
+
+def carried_confirmation(last: dict | None, *,
+                         primary_refusal: str | None = None) -> dict:
+    """WHAT A TICK THAT MADE NO POSITIONS READING MAY CLAIM. Pure.
+
+    A backoff tick and a switched-off tick return before the positions read
+    (mirror_shadow.tick_once). They claim exactly what the LAST reading in
+    this process supported (`last`, that reading's confirmation()) and never
+    more: 'ok' only if that reading was the venue's word; after a ledger-
+    derived or unreadable reading, 'degraded' with that reading's refusal and
+    owner blocker. Production 2026-10-09 (release 732cc0c6, workers logs
+    00:00-13:59Z): 26 miss-streak abandons on the ledger topology, each
+    followed by one or two backoff ticks that beat 'ok' with no refusal --
+    a degraded loop read as green (independent review of this lane).
+
+    With no reading yet in this process (`last` None) the tick is 'degraded'
+    under R_NO_READING_YET; the owner blocker rides beside it only when the
+    slot's own precondition refuses the venue walk (`primary_refusal`, read
+    from the credential's FORMAT by the caller -- no venue call). The
+    caller's dict is never mutated."""
+    if last is not None:
+        return dict(last, confirmation_basis=BASIS_LAST_READING)
+    out = confirmation({"source": None, "refusal": R_NO_READING_YET,
+                        "primary_refusal": primary_refusal})
+    out["confirmation_basis"] = BASIS_NO_READING
+    out["read_at_epoch"] = None
+    out["readable"] = None           # nothing read: never evidence of readable
+    return out
 
 
 # ── the reading ───────────────────────────────────────────────────────
