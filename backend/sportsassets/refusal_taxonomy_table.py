@@ -2765,6 +2765,11 @@ PMUS_EXEC_STREAM = {
     "ACTUAL_MARKET_HAS_A_NON_TERMINAL_ORDER": (E, RAIL, "RISK_ADMISSION"),
     "ACTUAL_MARKET_ALREADY_HELD": (E, RAIL, "RISK_ADMISSION"),
     "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP": (E, RAIL, "RISK_ADMISSION"),
+    # (rc6.3 pmus-exec, review r2) a risk-reducing SELL on a market with a
+    # close-position requested at or after the newest account snapshot (or
+    # with no snapshot at all): the venue's position there is not currently
+    # evidenced -- a freshness gap of the venue evidence at management
+    "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED": (S, FRESH, "MANAGEMENT"),
 }
 for _k, _v in PMUS_EXEC_STREAM.items():
     TABLE.setdefault(_k, _v)

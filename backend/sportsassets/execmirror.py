@@ -178,6 +178,24 @@ SELL_INTENTS = ("ORDER_INTENT_SELL_LONG", "ORDER_INTENT_SELL_SHORT")
 R_SELL_ABOVE_UNCOMMITTED_INVENTORY = \
     "RISK_REDUCING_SELL_ABOVE_UNCOMMITTED_LIVE_INVENTORY"
 R_SELL_NOT_THE_HELD_SIDE = "RISK_REDUCING_SELL_DOES_NOT_CLOSE_THE_HELD_SIDE"
+# rc6.3 pmus-exec (review r2): THE VENUE'S RECORD BOUNDS THE SELL TOO.
+# execmirror_fills books only our own orders' fills, never a close-position
+# (the stop's flatten): after a stop with flatten and a resume, the group read
+# as held 2 while the venue was flat, and an exit of 2 was admitted -- a
+# SELL_LONG with nothing held opens a short of the same size. Now the claim
+# also reads, under the same row lock, the newest account snapshot: a
+# close-position requested on the market at or after that snapshot (the
+# snapshot no longer evidences the position) EXCLUDES the SELL by name, and so
+# does a snapshot whose reconciliation names the market (the venue's position
+# there is not what our fills say). Nothing is sent; an exit refused this way
+# is planned again by close_orphans once the paper position is closed, and
+# admitted only against a snapshot that agrees.
+R_SELL_VENUE_POSITION_NOT_EVIDENCED = \
+    "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"
+R_SELL_VENUE_POSITION_DISAGREES = "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"
+#: the event every close-position request writes BEFORE it is sent (so a
+#: request whose answer was lost, or whose process died, is still on record)
+FLATTEN_REQUESTED = "FLATTEN_REQUESTED"
 
 # ── CANCELLATION THAT IS ACTUALLY DONE (rc6.2 pmus-exec, audit item 3) ─────
 #
@@ -1248,6 +1266,43 @@ async def live_inventory(conn, group_id) -> dict:
             "opened_intent": opened}
 
 
+async def venue_position_evidence(conn, slug: str) -> dict:
+    """WHAT THE VENUE LAST SAID ABOUT ONE MARKET'S POSITION, for a
+    risk-reducing SELL (rc6.3 pmus-exec, review r2; the rule at
+    R_SELL_VENUE_POSITION_NOT_EVIDENCED). `code` is None when the newest
+    account snapshot evidences the position: it exists, no close-position was
+    requested on the market at or after it (FLATTEN_REQUESTED -- the fills
+    never book one), and its reconciliation does not name the market.
+    Otherwise the refusal code, with the evidence. A difference on ANOTHER
+    market never blocks this market's exit."""
+    snap = await conn.fetchrow(
+        """SELECT snapshot_id, at, reconciliation FROM execmirror_snapshots
+            ORDER BY at DESC, snapshot_id DESC LIMIT 1""")
+    if snap is None:
+        return {"code": R_SELL_VENUE_POSITION_NOT_EVIDENCED,
+                "account_snapshot": None,
+                "why": "no account snapshot evidences the venue position"}
+    ev = {"account_snapshot_id": snap["snapshot_id"],
+          "account_snapshot_at": snap["at"].timestamp()}
+    # bounded by the snapshot instant (execmirror_events_at_idx): only the
+    # requests since the newest snapshot are read
+    closes = await conn.fetchval(
+        """SELECT count(*) FROM execmirror_events
+            WHERE at >= $1 AND kind = $2 AND detail->>'slug' = $3""",
+        snap["at"], FLATTEN_REQUESTED, slug)
+    if closes:
+        return dict(ev, code=R_SELL_VENUE_POSITION_NOT_EVIDENCED,
+                    flatten_requests_since_snapshot=int(closes),
+                    why="a close-position was requested on this market at or "
+                        "after the newest account snapshot")
+    rec = snap["reconciliation"]
+    rec = json.loads(rec) if isinstance(rec, str) else dict(rec or {})
+    diff = (rec.get("differences") or {}).get(slug)
+    if rec.get("reconciled") is not True and diff is not None:
+        return dict(ev, code=R_SELL_VENUE_POSITION_DISAGREES, difference=diff)
+    return dict(ev, code=None)
+
+
 async def market_exposure(conn, slug: str) -> dict:
     """ONE MARKET'S ACTUAL EXPOSURE (rc6.2 pmus-exec, audit item 2): the
     non-terminal execmirror_orders rows on it (any role, any lane) and its net
@@ -1271,7 +1326,12 @@ async def open_and_held_notional(conn) -> dict:
       open  every non-terminal BUY row's unfilled quantity at its wire price
             (a row whose price is unknown counts the contract's full $1);
       held  every holding's net contracts (venue fills, bought - sold) at the
-            average collateral its buys paid."""
+            average collateral its buys paid -- EXCEPT a market whose live side
+            has RESOLVED at the venue (rc6.3 pmus-exec, review r2:
+            resolved_markets). The fills never book a settlement, so a settled
+            holding counted for ever: once the pilot's first $1.00 position
+            resolved, every later BUY was refused against the $1.00 default
+            cap, with no way out but a manual change of the cap."""
     open_usd = await conn.fetchval(
         """SELECT coalesce(sum(greatest(live_qty - cum_qty, 0)
                   * CASE WHEN wire_price IS NULL THEN 1
@@ -1280,19 +1340,73 @@ async def open_and_held_notional(conn) -> dict:
              FROM execmirror_orders
             WHERE intent LIKE 'ORDER_INTENT_BUY%' AND state = ANY($1::text[])""",
         list(OPEN_STATES))
-    held_usd = await conn.fetchval(
-        """SELECT coalesce(sum(held * buy_cost / bought), 0) FROM (
-             SELECT coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS bought,
+    holdings = await conn.fetch(
+        """SELECT us_market_slug, held * buy_cost / bought AS usd, last_fill_at FROM (
+             SELECT us_market_slug,
+                    coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS bought,
                     coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0)
                       - coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_SELL%'), 0) AS held,
                     coalesce(sum(qty * CASE WHEN intent = 'ORDER_INTENT_BUY_SHORT'
                                             THEN 1 - price ELSE price END)
-                             FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS buy_cost
+                             FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS buy_cost,
+                    max(observed_at) AS last_fill_at
                FROM execmirror_fills
               GROUP BY coalesce(group_id, ''), us_market_slug) h
             WHERE held > 0 AND bought > 0""")
-    return {"open_usd": Decimal(str(open_usd or 0)),
-            "held_usd": Decimal(str(held_usd or 0))}
+    last_fill: dict = {}            # observed_at is NOT NULL
+    for h in holdings:
+        s, at = h["us_market_slug"], h["last_fill_at"]
+        last_fill[s] = max(last_fill.get(s, at), at)
+    resolved = await resolved_markets(conn, last_fill)
+    held_usd = sum((Decimal(str(h["usd"])) for h in holdings
+                    if h["us_market_slug"] not in resolved), Decimal(0))
+    return {"open_usd": Decimal(str(open_usd or 0)), "held_usd": held_usd,
+            "held_resolved_excluded": resolved}
+
+
+async def resolved_markets(conn, last_fill_at: dict) -> dict:
+    """{slug: why} for the held markets given ({slug: its newest fill
+    instant}) whose live side has RESOLVED at the venue, by the rule
+    Mirror.snapshot reconciles with, read from the newest account snapshot:
+      VENUE_POSITION_EXPIRED               the venue reports it expired;
+      PAPER_SETTLED_AND_NO_VENUE_POSITION  a paper settlement exists for the
+          market and that snapshot -- taken AFTER the market's newest fill, so
+          the absence is not merely a position bought since -- shows no
+          position there.
+    No snapshot, or anything unreadable: nothing is resolved (the holding
+    keeps counting -- fail closed)."""
+    if not last_fill_at:
+        return {}
+    snap = await conn.fetchrow(
+        """SELECT at, positions FROM execmirror_snapshots
+            ORDER BY at DESC, snapshot_id DESC LIMIT 1""")
+    if snap is None:
+        return {}
+    pos = snap["positions"]
+    pos = json.loads(pos) if isinstance(pos, str) else (pos or [])
+    by_slug = {p["slug"]: p for p in pos if isinstance(p, dict) and p.get("slug")}
+    out: dict = {}
+    absent: list = []
+    for slug, fill_at in last_fill_at.items():
+        p = by_slug.get(slug)
+        if p is not None and (p.get("expired") is True
+                              or str(p.get("expired")).lower() == "true"):
+            out[slug] = "VENUE_POSITION_EXPIRED"
+            continue
+        if fill_at is None or snap["at"] <= fill_at:
+            continue
+        try:
+            net = Decimal(str((p or {}).get("netPosition") or 0))
+        except Exception:                                     # noqa: BLE001
+            continue
+        if net == 0:
+            absent.append(slug)
+    if absent:
+        for r in await conn.fetch(
+                """SELECT DISTINCT us_market_slug FROM paper_settlements
+                    WHERE us_market_slug = ANY($1::text[])""", absent):
+            out[r["us_market_slug"]] = "PAPER_SETTLED_AND_NO_VENUE_POSITION"
+    return out
 
 
 def aggregate_cap_usd(ctl: dict) -> tuple[Decimal, str]:
@@ -1439,6 +1553,8 @@ class Mirror:
         self._stop_last_attempt = 0.0
         self._stop_flattened: dict = {}
         self._stop_incomplete_seen = None
+        # the execmirror_control.revision that memory was built under
+        self._stop_revision = None
 
     def venue(self):
         if self._venue is None:
@@ -1477,6 +1593,9 @@ class Mirror:
                 out["xavier_live_reviews"] = await self._reviews_only(conn)
                 out.update(await self._audrey_lane_off(conn))
             return out
+        # running, not stopped: any emergency stop's memory is over (a later
+        # stop flattens what it is asked to, whatever an earlier one sent)
+        self._reset_stop_memory()
         out = {"state": "RUNNING"}
         if self._buying_power is None:
             out["snapshot"] = await self.snapshot(conn, ctl)
@@ -1887,6 +2006,11 @@ class Mirror:
                   "live_qty": int(cur["live_qty"] or 0),
                   "opened_intent": inv["opened_intent"],
                   "basis": "execmirror_fills under the row lock"}
+            if code is None:
+                # rc6.3 review r2: the venue's own record of the position
+                venue = await venue_position_evidence(conn, cur["us_market_slug"])
+                code = venue.pop("code")
+                ev["venue_position"] = venue
             if code is not None:
                 await conn.execute(
                     """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = $2,
@@ -2855,6 +2979,16 @@ class Mirror:
         one event per change of reason) and is retried every STOP_RETRY_S."""
         if ctl.get("stop_done_at"):
             return {"state": "STOPPED"}
+        # rc6.3 review r2: the memory belongs to ONE stop. The owner may
+        # resume while a stop is incomplete and stop again; the admin route
+        # moves execmirror_control.revision on every action, so a stop met
+        # under another revision than the memory's starts clean (tick also
+        # forgets it whenever it sees the lane running). Otherwise the second
+        # stop skipped the close of a holding the first had asked to flatten
+        # (its fills unchanged: a close is never booked) and was reported done.
+        if ctl.get("revision") != self._stop_revision:
+            self._reset_stop_memory()
+            self._stop_revision = ctl.get("revision")
         now = self._now()
         if self._stop_last_attempt and \
                 0 <= now - self._stop_last_attempt < STOP_RETRY_S:
@@ -2910,6 +3044,10 @@ class Mirror:
                 slug, net = s["us_market_slug"], str(s["net"])
                 if self._stop_flattened.get(slug) == net:
                     continue          # this stop already flattened this holding
+                # on record BEFORE it is sent: the fills never book a close,
+                # so a risk-reducing SELL on this market waits for a snapshot
+                # taken after it (venue_position_evidence)
+                await _event(conn, FLATTEN_REQUESTED, slug=slug, net=net)
                 try:
                     await self.call(self.venue().close, slug)
                     out["closed"].append(slug)
@@ -2934,11 +3072,16 @@ class Mirror:
         await conn.execute("UPDATE execmirror_control SET stop_done_at = now(),"
                            " updated_at = now() WHERE id = 1 AND stopped")
         await _event(conn, "EMERGENCY_STOP_DONE", **out)
+        self._reset_stop_memory()
+        out["state"] = "STOPPED"
+        return out
+
+    def _reset_stop_memory(self) -> None:
+        """Forget an emergency stop's in-process memory (its retry instant,
+        the holdings it flattened, the last incomplete reason)."""
         self._stop_last_attempt = 0.0
         self._stop_flattened = {}
         self._stop_incomplete_seen = None
-        out["state"] = "STOPPED"
-        return out
 
 
 async def run(get_pool, *, probability_reader=None, management_assessor=None) -> None:

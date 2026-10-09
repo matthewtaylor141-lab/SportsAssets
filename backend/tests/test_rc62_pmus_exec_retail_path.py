@@ -1478,14 +1478,16 @@ async def test_the_same_flow_in_shadow_refuses_every_write_with_nothing_on_the_w
 # ═════════════════════════════════════════════════════════════════════
 #
 # THE VENUE'S RULE (docs.polymarket.us, read 2026-10-09): each market states
-# `minimumTradeQty` ("Minimum order quantity in contracts (e.g. 0.01 = 1% of
-# a contract, 1.0 = one whole contract)"); most markets trade in steps of
-# 0.01 contract, a few (mostly futures) in whole contracts; POST /v1/orders
-# `quantity` "Supports decimal quantities on markets whose minimumTradeQty is
-# less than 1". THE LANE'S RULE (execmirror.entry_live_qty over scale_qty,
-# rounding NEAREST_WHOLE_CONTRACT): the venue quantity is a WHOLE contract, so
-# the lane's own floor is one contract (stricter than the venue's 0.01 where
-# a market allows it). raw = paper qty / 1,000 EXACTLY:
+# its own `minimumTradeQty` ("Minimum order quantity in contracts (e.g. 0.01 =
+# 1% of a contract, 1.0 = one whole contract)"), to be read from the market
+# response, never inferred from the product type; POST /v1/orders `quantity`
+# "Supports decimal quantities on markets whose minimumTradeQty is less than
+# 1". THE LANE'S RULE (execmirror.entry_live_qty over scale_qty, rounding
+# NEAREST_WHOLE_CONTRACT): the venue quantity is a WHOLE contract, so the
+# lane's own floor is one contract -- stricter than a market whose minimum is
+# below one; BELOW_VENUE_MINIMUM names that floor (the lane reads no market's
+# minimumTradeQty: on a market whose minimum is above one the venue refuses
+# the order, which is never enlarged). raw = paper qty / 1,000 EXACTLY:
 #   raw < 1          -> BELOW_VENUE_MINIMUM, live 0: never enlarged (REVIEW:
 #                       nearest half-even rounding sent raw 0.6 .. 0.99 as ONE
 #                       contract -- a size below the minimum, enlarged);
