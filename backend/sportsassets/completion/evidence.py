@@ -108,6 +108,18 @@ SELECT d.*, l.y_long, pm.event_slug,""" + BOOK_TOP + """
   LEFT JOIN pm ON pm.market_slug = d.slug
  LIMIT $2"""
 
+#: THE DECLARED WINDOW IS PRICED WHOLE (RC6.2 p-evcontrols). The bound was
+#: 2,000 decisions: production completion.json (pm-acceptance 37888018192)
+#: priced 1,992 + 8 dropped = 2,000 exactly, against about 4,300 ENTER
+#: decisions in its 7-day window (research-sql 37943749921 §6), so
+#: `window_days: 7` described the newest ~2.4 days -- one strategy. The bound
+#: is now a safety stop well above the window's volume (production's busiest
+#: day, 2026-10-05: 1,251 ENTER decisions), the pricing runs on the CPU lane,
+#: and a read the bound cuts is CASH by name (EV_READ_TRUNCATED), never a
+#: verdict over a subset.
+EV_MAX_DECISIONS = 20000
+EV_READ_TRUNCATED = "READ_TRUNCATED_WINDOW_NOT_PRICED_WHOLE"
+
 #: one hashed us_premap read for the event slugs (was a sequential probe
 #: per decision row)
 EV_SQL = """
@@ -117,7 +129,7 @@ WITH d0 AS (
     FROM paper_decisions d
    WHERE d.verdict = 'ENTER' AND d.book_obs_id IS NOT NULL
      AND d.decided_at > now() - make_interval(days => $1)
-   ORDER BY d.decided_at DESC
+   ORDER BY d.decided_at DESC, d.decision_id DESC
    LIMIT $2),
 pm AS (SELECT DISTINCT ON (market_slug) market_slug, event_slug
          FROM us_premap
@@ -129,7 +141,7 @@ SELECT d.decision_id, extract(epoch FROM d.decided_at) at, d.strategy,
   LEFT JOIN paper_book_observations o ON o.obs_id = d.book_obs_id
                                      AND o.error IS NULL
   LEFT JOIN pm ON pm.market_slug = d.us_market_slug
- ORDER BY d.decided_at DESC"""
+ ORDER BY d.decided_at DESC, d.decision_id DESC"""
 
 TWIN_SQL = """
 SELECT json_build_object(
@@ -351,18 +363,50 @@ def ev_block(rows: list, *, authority: str, fee_fn) -> dict:
             "authority_granted": False}
 
 
-def twin_block(orders: list) -> dict:
+def ev_population(out: dict, *, read: int, limit: int,
+                  truncated: bool) -> dict:
+    """`ev_block`'s verdict with WHAT IT COVERS of the declared window: the
+    decisions read, and whether the bound left any out. A cut read can
+    never pass: its verdict is CASH by name (EV_READ_TRUNCATED), the subset's
+    own verdict kept beside it as evidence only."""
+    out = dict(out, population={
+        "decisions_read": int(read), "limit": int(limit),
+        "truncated": bool(truncated),
+        "population_in_window": None if truncated else int(read),
+        "population_at_least": int(read) + (1 if truncated else 0),
+        "covers_the_declared_window": not truncated})
+    if truncated:
+        out.update(subset_verdict=out.get("verdict"),
+                   subset_reason=out.get("reason"), verdict="CASH",
+                   reason=EV_READ_TRUNCATED)
+    return out
+
+
+#: the twin read the OLDEST `limit` fresh orders (TWIN_SQL orders by
+#: eligible_at): past the bound, every newer order -- the ones that say
+#: whether the twin still agrees -- would be left out of a certification
+#: (RC6.2). A cut population certifies nothing, by this name.
+TWIN_READ_TRUNCATED = "READ_TRUNCATED_NEWER_ORDERS_NOT_REPLAYED"
+
+
+def twin_block(orders: list, *, truncated: bool = False,
+               limit: int | None = None) -> dict:
     fresh = [o for o in orders
              if float(o.get("eligible") or 0) > TWIN_DIAGNOSIS_WINDOW_END]
     rep = TW.agreement(fresh)
     rate = rep.get("fill_agreement_rate")
     enough = rep["replayed"] >= TWIN_MIN_FRESH_ORDERS
-    certified = bool(enough and rate is not None and rate >= TW.TARGET)
+    certified = bool(enough and rate is not None and rate >= TW.TARGET
+                     and not truncated)
     return dict(rep, fresh_since=TWIN_DIAGNOSIS_WINDOW_END,
                 min_fresh_orders=TWIN_MIN_FRESH_ORDERS,
-                status=("CERTIFIED" if certified else
+                status=(TWIN_READ_TRUNCATED if truncated else
+                        "CERTIFIED" if certified else
                         "ACCUMULATING" if not enough else "BELOW_TARGET"),
                 certified=certified,
+                read={"orders_read": len(orders), "limit": limit,
+                      "truncated": bool(truncated),
+                      "order": "eligible_at ascending (oldest first)"},
                 diagnosis_receipt={
                     "source": "Profitability Stack V1 twin run 37643890985",
                     "optimistic_fill_agreement": 0.700508,
@@ -383,8 +427,9 @@ async def read_probability(conn, *, days: int = 30, limit: int = 5000) -> dict:
 
 
 async def read_ev(conn, *, authority: str, days: int = 7,
-                  limit: int = 2000) -> dict:
+                  limit: int = EV_MAX_DECISIONS) -> dict:
     from .. import calibration_fees as CF
+    from .. import cpu_lane as _cpu
 
     def fee_fn(price, at):
         iso = datetime.fromtimestamp(float(at), timezone.utc).strftime(
@@ -394,8 +439,17 @@ async def read_ev(conn, *, authority: str, days: int = 7,
         if got.get("BLOCKER") or got.get("FEE") is None:
             return None
         return float(got["FEE"]) / 100.0
-    rows = [dict(r) for r in await conn.fetch(EV_SQL, int(days), int(limit))]
-    out = ev_block(rows, authority=authority, fee_fn=fee_fn)
+    # one past the bound is read, so a cut window is known, not guessed
+    rows = [dict(r) for r in await conn.fetch(EV_SQL, int(days),
+                                              int(limit) + 1)]
+    truncated = len(rows) > int(limit)
+    rows = rows[:int(limit)]
+    # the pricing is pure: on the API's CPU lane (one worker thread for
+    # every such job: cpu_lane), never on the event loop, at the window's
+    # whole size
+    out = await _cpu.run(ev_block, rows, authority=authority, fee_fn=fee_fn)
+    out = ev_population(out, read=len(rows), limit=int(limit),
+                        truncated=truncated)
     out["window_days"] = days
     return out
 
@@ -403,6 +457,7 @@ async def read_ev(conn, *, authority: str, days: int = 7,
 async def read_twin(conn, *, limit: int = 800) -> dict:
     import json
     rows = await conn.fetch(TWIN_SQL, float(TWIN_DIAGNOSIS_WINDOW_END),
-                            int(limit))
-    orders = [json.loads(r["j"]) for r in rows]
-    return twin_block(orders)
+                            int(limit) + 1)
+    truncated = len(rows) > int(limit)
+    orders = [json.loads(r["j"]) for r in rows[:int(limit)]]
+    return twin_block(orders, truncated=truncated, limit=int(limit))

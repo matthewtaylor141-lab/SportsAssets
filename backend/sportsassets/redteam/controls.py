@@ -548,6 +548,9 @@ def twin(rep: dict) -> dict:
                                                            e.compared))
     if "optimistic_false_fills" not in rep:
         blockers.append("OPTIMISTIC_FALSE_FILLS_NOT_MEASURED")
+    if (rep.get("read") or {}).get("truncated"):
+        # the read left newer fresh orders out: no agreement over a subset
+        blockers.append("TWIN_READ_TRUNCATED")
     return result("DIGITAL_TWIN", GREEN if not blockers else RED, blockers,
                   {"compared": e.compared, "matched": e.matched,
                    "agreement": g.get("agreement"),
@@ -561,6 +564,7 @@ def twin(rep: dict) -> dict:
                                   "lookahead": 0,
                                   "frozen": "package defaults, unchanged"},
                    "historical_baseline": rep.get("diagnosis_receipt"),
+                   "read": rep.get("read"),
                    "twin_pnl_used_for_capital": False})
 
 
