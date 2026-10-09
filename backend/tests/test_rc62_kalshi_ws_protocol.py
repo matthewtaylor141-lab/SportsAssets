@@ -795,3 +795,59 @@ class _Scripted:
 
     async def close(self):
         pass
+
+
+# ── an error answering our own update command ────────────────────────────
+
+class _Refusing(LossyVenue):
+    """Answers the first `refuse` commands of `action` with a scoped error
+    27 (the sid's next seq) instead of executing them."""
+
+    def __init__(self, action, refuse, **k):
+        super().__init__(**k)
+        self.action, self.refuse = action, refuse
+
+    async def send(self, raw):
+        m = json.loads(raw)
+        if m.get("cmd") == "update_subscription" and \
+                m["params"].get("action") == self.action and self.refuse:
+            self.refuse -= 1
+            self.sent.append(m)
+            self.out.append({"type": "error", "id": m["id"],
+                             "sid": self.sub["sid"], "seq": self._seq(True),
+                             "msg": {"code": 27, "msg": "Too many requests"}})
+            return
+        await super().send(raw)
+
+
+def test_a_refused_get_snapshot_is_asked_again_and_a_second_refusal_ends():
+    """A get_snapshot answered by error 27 (counted, not fatal) would leave
+    its books waiting for snapshots that never come: they are asked again.
+    Refused twice, the plane-hang bound ends the session (no third ask)."""
+    ts = ["K-A", "K-B", "K-C"]
+    v = _Refusing("get_snapshot", 1, lose={3})
+    sub, books, seen = drive(v, ts, until=_drained(v))
+    assert [c[1] for c in v.commands()] == [None, "get_snapshot",
+                                            "get_snapshot"]
+    assert seen["counts"]["current"] == 3 and books.stats["errors"] == 1
+    v2 = _Refusing("get_snapshot", 2, lose={3})
+    sub2, books2, seen2 = drive(v2, ts)
+    assert isinstance(seen2["ended"], KWS.ResubscribeStorm)
+    assert [c[1] for c in v2.commands()] == [None, "get_snapshot",
+                                             "get_snapshot"]
+
+
+def test_a_refused_add_markets_is_added_again_once(monkeypatch):
+    monkeypatch.setattr(KWS, "SUBSCRIBE_CHUNK", 2)
+    ts = ["K-A", "K-B", "K-C"]
+    v = _Refusing("add_markets", 1)
+    sub, books, seen = drive(v, ts, until=_drained(v))
+    assert [c[1] for c in v.commands()] == [None, "add_markets",
+                                            "add_markets"]
+    assert seen["counts"]["current"] == 3
+    v2 = _Refusing("add_markets", 2)
+    sub2, books2, seen2 = drive(v2, ts, until=_drained(v2))
+    assert [c[1] for c in v2.commands()] == [None, "add_markets",
+                                             "add_markets"]
+    assert seen2["books"]["K-C"]["why"] == KWS.R_NOT_HELD_BY_VENUE
+    assert seen2["counts"]["current"] == 2

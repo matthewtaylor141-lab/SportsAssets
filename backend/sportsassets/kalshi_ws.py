@@ -628,6 +628,11 @@ class WsBooks:
             self.sid_seq.pop(sid, None)
             self.sid_pre.pop(sid, None)
             self.sid_markets.pop(sid, None)
+            # (RC6.2 acceptance model, P1b per subscription) nothing the
+            # old subscription carried is associated with the new one
+            for t, s in list(self.ticker_sid.items()):
+                if s == sid:
+                    self.ticker_sid.pop(t, None)
 
     def _current_elsewhere(self, b, sid) -> bool:
         return b["state"] == CURRENT and b["sid"] is not None \
@@ -710,6 +715,13 @@ class WsBooks:
                 continue
             self._touch(t, b, state=GAP, why=why)
             self.resubscribe.add(t)
+        # nothing is associated with an ended subscription any more: the
+        # number may be reused by another (acceptance model, P1b per
+        # subscription)
+        self.sid_markets.pop(sid, None)
+        for t, s in list(self.ticker_sid.items()):
+            if s == sid:
+                self.ticker_sid.pop(t, None)
         self.sid_seq[sid] = None
         self.dead_sids.add(sid)
         self.fatal = self.fatal or R_SUBSCRIPTION_ENDED
@@ -828,10 +840,6 @@ class WsBooks:
             return "IGNORED_NOT_TRACKED"
         if typ == SNAP:
             self._apply_snapshot(t, b, sid, seq, msg, m, at)
-            a["awaiting"].discard(t)
-            need = self.recover.get(sid)
-            if need is not None:
-                need.discard(t)
             return "SNAPSHOT"
         return self._apply_delta(t, b, sid, seq, msg, m, at)
 
@@ -847,6 +855,11 @@ class WsBooks:
         self.ticker_sid[t] = sid
         self.resubscribe.discard(t)
         self.left_current.discard(t)
+        # CURRENT: no snapshot is to be asked or awaited for it on any sid
+        for a in self.anchors.values():
+            a["awaiting"].discard(t)
+        for need in self.recover.values():
+            need.discard(t)
         self.stats["snapshots"] += 1
 
     def _apply_delta(self, t, b, sid, seq, msg, m, at) -> str:
@@ -913,6 +926,20 @@ class WsBooks:
                 ms.discard(t)
             if self.ticker_sid.get(t) == sid:
                 self.ticker_sid.pop(t, None)
+
+    def unrequest(self, sid, tickers) -> None:
+        """A get_snapshot naming `tickers` on `sid` was refused: nothing is
+        outstanding for them any more; those not CURRENT are named again."""
+        a = self.anchors.get(sid)
+        if a is None or a["ended"]:
+            return
+        need = self.recover.setdefault(sid, set())
+        for t in tickers:
+            a["awaiting"].discard(t)
+            b = self.books.get(t)
+            if b is not None and not (b["state"] == CURRENT and
+                                      b["sid"] == sid):
+                need.add(t)
 
     def awaiting(self, sid) -> set:
         a = self.anchors.get(sid)
@@ -1445,7 +1472,7 @@ class Subscriber:
         if typ == "ok":
             self._reconcile(m)
         elif typ == "error" and type(cid) is int:
-            self.pending.pop(cid, None)
+            self._refused(cid, m)
         elif out == "SNAPSHOT":
             # its book is CURRENT again: its repairs converged
             self.unrecovered.pop((m.get("msg") or {}).get("market_ticker"),
@@ -1481,6 +1508,32 @@ class Subscriber:
         for t in missing:
             self.on_venue.pop(t, None)
             if self.readds.get(t, 0) < 1:
+                self.readds[t] = self.readds.get(t, 0) + 1
+                self._count_requests([t])
+                self.readd.append(t)
+
+    def _refused(self, cid, m: dict) -> None:
+        """An `error` answering one of our update commands (counted; only
+        10 / 25 are fatal, and the books handled those): the markets a
+        refused get_snapshot named will get no snapshot from it -- they are
+        asked again (bounded: the per-market and plane-hang bounds end the
+        session past their limits); those of a refused add_markets are added
+        again ONCE (a second refusal leaves them GAP, not held)."""
+        named = self.pending.pop(cid, None) or []
+        kind = self.cmd_kind.get(cid)
+        code = (m.get("msg") or {}).get("code")
+        if self.sid is None or code in TERMINAL_ERROR_CODES or not named:
+            return
+        live = [t for t in named if t in self.books.books
+                and t not in self.books.forgotten]
+        if kind == "get_snapshot":
+            self.books.unrequest(self.sid, live)
+        elif kind == "add_markets":
+            again = [t for t in live if self.readds.get(t, 0) < 1]
+            self.books.not_held(self.sid, [t for t in live
+                                           if t not in again])
+            for t in again:
+                self.on_venue.pop(t, None)
                 self.readds[t] = self.readds.get(t, 0) + 1
                 self._count_requests([t])
                 self.readd.append(t)
