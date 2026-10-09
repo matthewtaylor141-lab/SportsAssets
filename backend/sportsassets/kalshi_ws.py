@@ -63,6 +63,8 @@ DEFAULT_TOKEN_COST = 10
 #: budget (200 tokens/s) at the default cost, halved; labelled as such
 FALLBACK_REST_RATE_PER_S = 10.0
 SUBSCRIBE_CHUNK = 100
+#: subscribe commands awaiting the venue's `subscribed` ack, kept at most
+MAX_PENDING_SUBSCRIBES = 512
 
 CURRENT = "CURRENT"
 GAP = "GAP"
@@ -369,31 +371,16 @@ class WsBooks:
 # ── commands ─────────────────────────────────────────────────────────────
 
 class Commands:
-    """Command ids are unique within a session; each subscribe's markets are
-    kept until the venue acknowledges it (`subscribed` names the command id
-    and the sid it opened), bounded."""
-
-    MAX_PENDING = 512
-
     def __init__(self):
         self.n = 0
-        self.pending: dict = {}         # subscribe command id -> tickers
 
     def _id(self):
         self.n += 1
         return self.n
 
     def subscribe(self, tickers: list) -> dict:
-        i = self._id()
-        self.pending[i] = list(tickers)
-        while len(self.pending) > self.MAX_PENDING:
-            self.pending.pop(next(iter(self.pending)))
-        return {"id": i, "cmd": "subscribe", "params": {
+        return {"id": self._id(), "cmd": "subscribe", "params": {
             "channels": [CHANNEL], "market_tickers": list(tickers)}}
-
-    def acked(self, cmd_id) -> list:
-        """The markets of the subscribe command `cmd_id` (once)."""
-        return self.pending.pop(cmd_id, None) or []
 
     def unsubscribe(self, sids: list) -> dict:
         return {"id": self._id(), "cmd": "unsubscribe",
@@ -423,13 +410,20 @@ class Subscriber:
         self.cmd = Commands()
         self.subscribed: set = set()
         self.unsubscribed_sids: set = set()
+        # each subscribe's markets until the venue acknowledges it (the
+        # `subscribed` message names the command id and the sid it opened)
+        self.pending: dict = {}
         self.connections = 0
         self.resubscribes = 0
         self.last_error = None
 
     async def _subscribe(self, ws, tickers) -> None:
         for c in chunks(sorted(tickers)):
-            await ws.send(json.dumps(self.cmd.subscribe(c)))
+            cmd = self.cmd.subscribe(c)
+            self.pending[cmd["id"]] = list(c)
+            while len(self.pending) > MAX_PENDING_SUBSCRIBES:
+                self.pending.pop(next(iter(self.pending)))
+            await ws.send(json.dumps(cmd))
             self.subscribed.update(c)
 
     async def _resubscribe_gapped(self, ws) -> None:
@@ -458,7 +452,7 @@ class Subscriber:
             self.books.want(want)
             self.subscribed = set()
             self.unsubscribed_sids = set()
-            self.cmd.pending.clear()
+            self.pending.clear()
             # A NEW CONNECTION HAS NO SUBSCRIPTION: the one subscribe below
             # covers every wanted market. The previous connection's
             # disconnect left every book in the resubscribe set; acting on
@@ -478,7 +472,7 @@ class Subscriber:
                     continue
                 if m.get("type") == "subscribed":
                     self.books.bind((m.get("msg") or {}).get("sid"),
-                                    self.cmd.acked(m.get("id")))
+                                    self.pending.pop(m.get("id"), None) or [])
                 self.books.on_message(m, recv_at=self.clock())
                 if self.books.resubscribe:
                     await self._resubscribe_gapped(ws)
@@ -578,6 +572,12 @@ def mechanism(rest_detail: dict | None, ws_beat: dict | None,
                "subscribed_markets": wd.get("subscribed_markets"),
                "resubscribes": wd.get("resubscribes"),
                "connections": wd.get("connections"),
+               # (RC6) what caused the resubscribes, as the books counted
+               # it: a resubscribe follows a gap, a sid error or a snapshot
+               # on a dead sid -- never a reconnect (that is `connections`)
+               "gaps": ws.get("gaps"), "errors": ws.get("errors"),
+               "disconnects": ws.get("disconnects"),
+               "ignored_dead_sid": ws.get("ignored_dead_sid"),
                "by_state": ws.get("by_state"),
                "current_book_update_age_s": wd.get(
                    "current_book_update_age_s"),

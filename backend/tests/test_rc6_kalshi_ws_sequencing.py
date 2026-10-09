@@ -288,3 +288,25 @@ def test_a_pending_market_of_a_gapped_subscription_is_resubscribed_too():
     assert [m["cmd"] for m in ws.sent] == ["subscribe", "unsubscribe",
                                           "subscribe"], ws.sent
     assert ws.sent[2]["params"]["market_tickers"] == ["K-A", "K-C"]
+
+
+def test_the_readback_names_what_caused_the_resubscribes():
+    """venues.json KALSHI_HEALTH.mechanism.ws carries the books' own gap /
+    error / disconnect / dead-sid counts beside resubscribes and
+    connections, so production can show that resubscribes follow gaps and
+    no longer follow reconnects (RC5: connections 10, resubscribes 18, and
+    no gap count to tell them apart)."""
+    b = KWS.WsBooks(clock=lambda: NOW)
+    b.on_connected()
+    b.on_message(snap(1, 1, "K-A"))
+    b.on_message(delta(1, 3, "K-A"))
+    ws_beat = {"status": "ok", "at": NOW, "detail": {
+        "ws": b.counts(), "resubscribes": 1, "connections": 2,
+        "subscribed_markets": 1}}
+    plane = {"status": "ok", "at": NOW, "detail": {"guard": {}}}
+    m = KWS.mechanism({"freshness": {"current_by_source": {"WS": 1},
+                                     "denominator": 1}}, ws_beat, plane,
+                      now=NOW)["ws"]
+    assert (m["gaps"], m["errors"], m["disconnects"],
+            m["ignored_dead_sid"]) == (1, 0, 0, 0)
+    assert (m["resubscribes"], m["connections"]) == (1, 2)
