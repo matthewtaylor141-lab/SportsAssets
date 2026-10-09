@@ -3,7 +3,8 @@
 // Loads every Command Center page from the preview server at desktop,
 // iPhone and iPad sizes (portrait and landscape) plus reduced-motion runs:
 // Command (/), Floor (/floor), Trader (/trader), the agent pages (/derek,
-// /xavier, /audrey, /karen, /allocator, /archer, /scout), the operations
+// /xavier, /audrey, /karen, /allocator, /archer, /scout, and /eddie, Archer's
+// historical address; Adriana is DESK_ONLY, see below), the operations
 // desk (/ops), the position rooms (/positions) and one position room
 // (/position?g=<the first room the production read returns>). Per view it
 // records: HTTP status, sign-in state, horizontal overflow, WebGL canvases
@@ -58,8 +59,18 @@ const SAFE_AREA = {
 };
 const PAGES = { command: '/', floor: '/floor', trader: '/trader',
   derek: '/derek', xavier: '/xavier', audrey: '/audrey', karen: '/karen', allocator: '/allocator', archer: '/archer', scout: '/scout',
+  eddie: '/eddie',
   ops: '/ops', positions: '/positions', room: '/position' };
 const AGENTS = ['derek', 'xavier', 'audrey', 'karen', 'allocator', 'archer', 'scout'];
+// agent workspace addresses that are another agent's page: netlify.toml
+// rewrites /eddie to agent.html, which serves Archer (migration 266 alias)
+const ALIAS_AGENTS = { eddie: 'archer' };
+// seats with no workspace page, named in preview.json so their absence is
+// stated, never a silent gap: netlify.toml has no /adriana rewrite and the
+// API serves no /api/command/agents/adriana/page (agent_pages.PAGE_PATHS),
+// so /adriana would fall to the catch-all; Adriana is a floor desk only
+// (/floor, GET /api/command/floor/adriana) and is not linked from here
+const DESK_ONLY = { adriana: 'NO_WORKSPACE_PAGE: no /adriana rewrite and no /api/command/agents/adriana/page; floor desk only (/floor, /api/command/floor/adriana)' };
 const DEVICE_ORDER = ['desktop', 'iphone', 'iphone_landscape', 'ipad_portrait', 'ipad_landscape'];
 // the nine approval views first, then the extra states, then Command on the
 // fifth profile (iPhone landscape) and every other page on all five
@@ -71,7 +82,7 @@ const VIEWS = [
   ['iphone_landscape', 'floor'], ['iphone_landscape', 'trader'],
   ['iphone', 'floor', 'reduce'], ['desktop', 'trader', 'reduce'], ['iphone', 'command', 'reduce'],
   ['iphone_landscape', 'command'],
-].concat(AGENTS.concat(['ops', 'positions', 'room']).reduce((a, pg) => a.concat(DEVICE_ORDER.map(dev => [dev, pg])), []));
+].concat(AGENTS.concat(Object.keys(ALIAS_AGENTS), ['ops', 'positions', 'room']).reduce((a, pg) => a.concat(DEVICE_ORDER.map(dev => [dev, pg])), []));
 const SUSPECT = /\b(lorem|ipsum|example data|sample data|demo data|placeholder|mock data|fake)\b/i;
 // a LOCAL subset (HARNESS_PAGES=ops,positions) is named in the output, so a
 // partial matrix can never pass for the full one
@@ -213,6 +224,8 @@ const CONTROLS = {
   ].concat(SHELL),
 };
 AGENTS.forEach(a => { CONTROLS[a] = agentControls(a); });
+// /eddie is Archer's page at his historical address (ALIAS_AGENTS): his controls
+CONTROLS.eddie = agentControls('archer');
 // the verdict on one control from what was observed after the tap: obs holds
 // each DOM question asked (observe), navs the paths of the navigations it
 // started, requests the API paths it read; [] = landed where expected
@@ -825,6 +838,7 @@ async function findRoom(browser) {
   const records = [];
   const writeOut = () => fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(),
     views_planned: VIEWS.length, views_run: records.length, subset: ONLY.length ? ONLY : null, safe_area_insets: SAFE_AREA,
+    alias_pages: ALIAS_AGENTS, desk_only: DESK_ONLY,
     // how many private identifiers the scrub held (a count, never the values)
     redaction: { identifiers_known: room.identifiers.size, reads: room.reads }, records }, null, 1));
   for (const [dev, pg, motion] of views) {

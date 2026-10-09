@@ -69,7 +69,7 @@ test('a state control passes only when every named DOM answer is true', () => {
 
 test('every page of the matrix declares its controls', () => {
   const pages = Object.keys(H.CONTROLS).sort();
-  assert.deepEqual(pages, ['allocator', 'archer', 'audrey', 'command', 'derek', 'floor', 'karen', 'ops', 'positions', 'room', 'scout', 'trader', 'xavier']);
+  assert.deepEqual(pages, ['allocator', 'archer', 'audrey', 'command', 'derek', 'eddie', 'floor', 'karen', 'ops', 'positions', 'room', 'scout', 'trader', 'xavier']);
   for (const p of pages) assert.ok(H.CONTROLS[p].length >= 5, p);
   for (const p of pages) for (const c of H.CONTROLS[p]) { assert.ok(c.name && c.sel && c.expect, p + ' ' + c.name); }
 });
@@ -281,4 +281,20 @@ test('every control starts from a page at rest: a smooth scroll the last one sta
   now = 4000; win.scrollBy({ top: 10, behavior: 'smooth' });
   assert.equal(win.__previewSmoothAt, 4000);
   assert.deepEqual(calls.map(c => c[0]), ['siv', 'to', 'siv', 'by']);
+});
+
+// D1b: every agent workspace address is in the device matrix; /eddie (Archer's
+// historical address) carries Archer's controls; Adriana has no workspace page
+// and is stated DESK_ONLY in preview.json instead of a view that would 404
+test('the matrix loads every agent workspace page on all five profiles; Adriana is stated desk-only', () => {
+  assert.deepEqual(plain(H.CONTROLS.eddie), plain(H.CONTROLS.archer));
+  const views = vm.runInNewContext('(() => {' + SRC.slice(SRC.indexOf('const PAGES = {'), SRC.indexOf('const SUSPECT =')) + '; return { PAGES, VIEWS, ALIAS_AGENTS, DESK_ONLY, DEVICE_ORDER }; })()', { Object, Array });
+  for (const pg of ['derek', 'xavier', 'audrey', 'karen', 'archer', 'eddie', 'scout', 'allocator']) {
+    assert.equal(views.PAGES[pg], '/' + pg, pg);
+    for (const dev of views.DEVICE_ORDER) assert.ok(views.VIEWS.some(([d, p]) => d === dev && p === pg), dev + ' ' + pg);
+  }
+  assert.deepEqual(plain(views.ALIAS_AGENTS), { eddie: 'archer' });
+  assert.ok(!('adriana' in views.PAGES), 'no /adriana view: the address has no rewrite and the API serves no page for it');
+  assert.match(views.DESK_ONLY.adriana, /^NO_WORKSPACE_PAGE/);
+  assert.ok(SRC.includes('alias_pages: ALIAS_AGENTS, desk_only: DESK_ONLY,'), 'preview.json names both');
 });

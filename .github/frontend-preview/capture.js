@@ -43,7 +43,7 @@ const [BASE, OUT, MODE, PLAN] = process.argv.slice(2);
 const TOKEN = process.env.READ_TOKEN || '';
 const PROD = 'https://command.bettortoken.com';
 const VIEW = { width: 1920, height: 1080 };
-const ROUTES = ['/', '/floor', '/scout', '/derek', '/karen', '/allocator', '/archer', '/xavier',
+const ROUTES = ['/', '/floor', '/scout', '/derek', '/karen', '/allocator', '/archer', '/eddie', '/xavier',
   '/audrey', '/positions', '/trader', '/ops', '/readiness', '/red-team', '/venues'];
 
 const CURSOR = `(() => {
