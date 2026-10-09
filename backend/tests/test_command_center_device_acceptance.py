@@ -202,6 +202,7 @@ def test_touch_targets_on_the_shell_pages():
         ".od-t th[data-sort]{height:44px;}",
         ".od-ctl select{min-height:44px;}",
         ".pr-brand,.pr-nav a,#pr-refresh{min-height:44px;}",
+        ".wsx-strip a{display:inline-flex;align-items:center;min-height:44px;}",
     ):
         assert rule in coarse, rule
     # only ever raised, never shrunk or hidden (the RC6 rule for this block)

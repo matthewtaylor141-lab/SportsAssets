@@ -107,6 +107,9 @@
   .hq6-agent-person summary,.bt-agent2-actions button,.bt-agent2-actions a,.ws-tabs button{min-height:44px;}
   .bt-agent2-actions a{display:inline-flex;align-items:center;}
   .wsx-floor{display:inline-flex;align-items:center;min-height:44px;}
+  /* Archer / Scout: the live strip's "Trading floor" link (18 px; iPad
+     landscape, where the strip keeps it on its row) */
+  .wsx-strip a{display:inline-flex;align-items:center;min-height:44px;}
 
   /* OPERATIONS DESK (ops.html) ---------------------------------------------- */
   /* section jumps 23 px; sortable column heads 26 px; row / view selects 24 px */
