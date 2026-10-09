@@ -6,9 +6,12 @@
 -- priced by the held read on its own line market. Here every held-contract
 -- stamp is split by the venue market type (us_premap.sports_type) and by
 -- prematch / in play (the stamp against the venue game start), covered or
--- missed with no review inside 30 s. Every statement is a SELECT.
+-- missed with no review inside 30 s. A settled contract leaves us_premap,
+-- so the family is read from the venue slug's own first token (asc spread,
+-- tsc total, atc / aec winners) and its league from the second. Every
+-- statement is a SELECT.
 
-\echo F1 held-contract PinnAPI stamps (72 h) by venue market type and phase: fresh review inside 30 s, or no review inside 30 s
+\echo F1 held-contract PinnAPI stamps (72 h) by slug family, league and phase: fresh review inside 30 s, or no review inside 30 s
 WITH rv AS (
   SELECT x.group_id, x.reviewed_at AS t,
          x.measure->>'evidence_state' AS ev, o.us_market_slug AS slug
@@ -44,8 +47,9 @@ pm AS (
   SELECT DISTINCT ON (market_slug) market_slug, sports_type, game_start
     FROM us_premap WHERE market_slug IN (SELECT slug FROM held)
    ORDER BY market_slug)
-SELECT coalesce(pm.sports_type, '(not in catalogue)') AS venue_type,
-       CASE WHEN pm.game_start IS NULL THEN '?'
+SELECT split_part(o.slug, '-', 1) AS slug_family,
+       split_part(o.slug, '-', 2) AS league,
+       CASE WHEN pm.game_start IS NULL THEN '(left catalogue)'
             WHEN o.t < pm.game_start THEN 'PREMATCH' ELSE 'IN_PLAY' END
          AS phase,
        count(*) AS stamps, count(DISTINCT o.slug) AS contracts,
@@ -57,5 +61,5 @@ SELECT coalesce(pm.sports_type, '(not in catalogue)') AS venue_type,
          AS no_review_inside_30s
   FROM o LEFT JOIN pm ON pm.market_slug = o.slug
  WHERE o.is_review = 0
- GROUP BY 1, 2 ORDER BY 3 DESC
- LIMIT 40;
+ GROUP BY 1, 2, 3 ORDER BY 4 DESC
+ LIMIT 60;
