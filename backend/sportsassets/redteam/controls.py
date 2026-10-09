@@ -403,21 +403,54 @@ def capacity(points: list, *, requested_usd) -> dict:
     g = RTC.capacity_frontier(pts) if pts else {
         "green": False, "max_positive_qty": 0, "best_qty": None,
         "best_expected_net": None, "blockers": ("NO_CAPACITY_EVIDENCE",)}
-    proven_usd = sum((D(p["capital_usd"]) for p in points
-                      if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
-                      and D(p["lb_ev_per_contract"]) > 0
-                      and D(p["expected_net"]) > 0), Decimal(0))
+    # PROVEN CAPITAL COUNTS ONLY ELIGIBLE POINTS AND EACH OPPORTUNITY ONCE
+    # (RC6 ev-audit). A point is eligible on exactly the frontier's own rule
+    # (lower-bound EV > 0, fill probability >= the frontier's minimum,
+    # expected net > 0) -- the fill-probability leg was missing here, so a
+    # point the frontier refused for fill probability still added capital.
+    # One opportunity (strategy, contract, side) evaluated in several size
+    # buckets is ONE position: its proven capital is its largest eligible
+    # evaluated size, never the sum over buckets.
+    min_fp = Decimal("0.80")
+    eligible = [p for p in points
+                if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
+                and D(p["lb_ev_per_contract"]) > 0
+                and D(p["fill_probability"]) >= min_fp
+                and D(p["expected_net"]) > 0]
+    per_opp: dict = {}
+    legacy = Decimal(0)
+    for p in eligible:
+        opp = p.get("opportunity_capital_usd")
+        if isinstance(opp, dict):
+            for k, usd in opp.items():
+                per_opp[k] = max(per_opp.get(k, Decimal(0)), D(usd))
+        else:
+            legacy += D(p["capital_usd"])
+    proven_usd = sum(per_opp.values(), Decimal(0)) + legacy
     cap = RTC.deployment_cap(requested_turnover=D(requested_usd),
                              proven_positive_capacity=proven_usd)
     return result("CAPACITY", GREEN if g["green"] else RED,
                   list(g["blockers"]),
                   {"points": len(pts), "max_positive_qty":
                    g["max_positive_qty"], "best_qty": g["best_qty"],
+                   "evaluations": sum(int(p.get("evaluations") or 0)
+                                      for p in points),
+                   "opportunities": sum(int(p.get("opportunities") or 0)
+                                        for p in points),
+                   "by_bucket": [{k: p.get(k) for k in (
+                       "bucket", "qty", "events", "opportunities",
+                       "evaluations", "lb_ev_per_contract",
+                       "fill_probability", "expected_net", "capital_usd")}
+                       for p in points],
                    "proven_positive_capacity_usd": str(proven_usd),
                    "requested_usd": str(D(requested_usd)),
                    "maximum_deployment_usd": str(cap),
                    "remainder_cash_usd": str(D(requested_usd) - cap),
-                   "rule": "turnover target never overrides economics"})
+                   "rule": "turnover target never overrides economics",
+                   "opportunity_rule": (
+                       "one opportunity = (strategy, contract, held side); "
+                       "its latest evaluation per size bucket; proven capital "
+                       "= its largest ELIGIBLE evaluated size, counted once")})
 
 
 # ── Karen ────────────────────────────────────────────────────────────────
