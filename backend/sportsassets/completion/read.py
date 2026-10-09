@@ -527,6 +527,35 @@ ARB_SCAN_MAX_AGE_S = 900.0
 #: a recorded void-terms census, or no scan at all)
 ARB_FAIL_CLOSED_UNREAD = ("void terms not established -> every structure "
                           "refused (agents/adriana.ESTABLISHED_VOID_TERMS)")
+#: (RC6) the scan kinds whose fixture read is capped (canonical_claims_db.
+#: MAX_FIXTURES): their terms cover only the fixtures the read reached
+ARB_SCOPED_KINDS = ("cross_venue",)
+
+
+def _unread_scope(kind: str, bc: dict) -> list:
+    """What a capped scan did NOT read although it could have priced it: a
+    readable fixture the cap cut, or a mapped PMUS market whose leg was not
+    read (no premap identity). Their terms are unread, so the scan cannot
+    establish the terms of its scope. A fixture with no readable Kalshi book
+    forms no structure and is not counted here (it stays named in scope).
+    A capped scan that recorded no scope is itself an unread scope."""
+    if kind not in ARB_SCOPED_KINDS:
+        return []
+    sc = bc.get("scope")
+    if not isinstance(sc, dict):
+        return ["the scan recorded no fixture scope"]
+    out = []
+    n = int(sc.get("cut_by_cap_readable") or 0)
+    if n:
+        out.append("%d readable fixture(s) cut by the %s-fixture cap (%s)" % (
+            n, sc.get("max_fixtures"),
+            ", ".join((sc.get("cut_by_cap_named") or [])[:min(n, 3)])))
+    m = int(sc.get("pmus_identity_missing") or 0)
+    if m:
+        out.append("%d mapped PMUS market(s) not read, no premap identity "
+                   "(%s)" % (m, ", ".join(
+                       (sc.get("pmus_identity_missing_named") or [])[:3])))
+    return out
 
 
 def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
@@ -542,7 +571,10 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
     never neutral: a kind with no scan (NO_SCAN), a scan that read no
     contract (READ_NO_CONTRACT, its status and why named), a stale scan or
     one without a census establishes nothing, and the statement then
-    contains the words "void terms not established" with that state."""
+    contains the words "void terms not established" with that state. A
+    capped scan (ARB_SCOPED_KINDS) establishes only if it read everything it
+    could price: a readable fixture its cap cut, or a mapped PMUS market it
+    could not read, leaves those terms unread (_unread_scope, named)."""
     parts, by_kind, all_est = [], {}, True
     for kind, _pat in ARB_SCAN_KINDS:
         row = scans.get(kind)
@@ -604,6 +636,17 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
                              kind, k, n, n_key, ", ".join(
                                  "%s %d" % kv for kv in sorted(
                                      d["rules"].items()))))
+        if d["state"] in ("ESTABLISHED", "NOT_ESTABLISHED"):
+            # what the read reached is not the scope: the rest is unread
+            unread = _unread_scope(kind, bc)
+            d["unread_scope"] = unread
+            if unread:
+                all_est = False
+                if d["state"] == "ESTABLISHED":
+                    d["state"] = "SCOPE_NOT_READ"
+                parts.append("%s: void terms not established for what the "
+                             "scan did not read: %s" % (kind,
+                                                        "; ".join(unread)))
         by_kind[kind] = d
     established = all_est
     if not any(r for r in scans.values()):

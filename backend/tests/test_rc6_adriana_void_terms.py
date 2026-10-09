@@ -454,10 +454,21 @@ def test_partial_fills_on_a_cross_venue_pair_are_exposure_never_profit():
 # 4 · COMPLETION STATES WHAT THE SCANS RECORDED (never a constant)
 # ═════════════════════════════════════════════════════════════════════
 
-def _scan(kind, vt, *, age=60.0, now=1_000_000.0):
+#: a claim scan whose capped fixture read reached every fixture it could
+#: price (canonical_claims_db.new_scope shape)
+FULL_SCOPE = {"max_fixtures": 80, "in_window": 65, "read": 65,
+              "cut_by_cap": 0, "cut_by_cap_readable": 0,
+              "cut_by_cap_cross_venue": 0, "cut_by_cap_named": [],
+              "pmus_identity_missing": 0, "pmus_identity_missing_named": []}
+
+
+def _scan(kind, vt, *, age=60.0, now=1_000_000.0, scope="full"):
+    bc = {"void_terms": vt}
+    if kind == "claims" and scope is not None:
+        bc["scope"] = FULL_SCOPE if scope == "full" else scope
     return {"scan_id": "adr-%s-1" % kind,
             "finished_at": datetime.fromtimestamp(now - age, timezone.utc),
-            "by_code": json.dumps({"void_terms": vt})}
+            "by_code": json.dumps(bc)}
 
 
 def test_the_readback_states_the_void_terms_the_scans_recorded():
@@ -555,6 +566,51 @@ def test_missing_cross_venue_evidence_never_establishes_the_void_terms():
                                 now=now)
     assert v["established"] is True and phrase not in v["statement"]
     assert v["requires"] == ["census", "cross_venue"]
+
+
+def test_terms_the_capped_read_did_not_reach_are_never_established():
+    """The cap must never be how the terms come out established: a readable
+    fixture the claim scan's cap cut (production: up to ~150 ESTABLISHED
+    fixtures in the window against a cap of 80, research-sql 37888668578 C)
+    has unread terms -- e.g. the Kalshi soccer aliases whose postponement
+    window the registry does not read. So does a mapped PMUS market the scan
+    could not read. A claim scan with no recorded scope is unread scope too.
+    A cut fixture with no readable Kalshi book forms no structure and only
+    stays named in the scope."""
+    now = 1_000_000.0
+    phrase = "void terms not established"
+    est = {"contracts": 2, "established": 2, "not_established": {},
+           "rules": {"LAST_FAIR_PRICE/LAST_FAIR_PRICE": 2}}
+    alias_all = {"aliases": 336, "established": 336, "not_established": {},
+                 "rules": {"LAST_FAIR_PRICE/LAST_FAIR_PRICE": 336}}
+    cut = dict(FULL_SCOPE, in_window=150, read=80, cut_by_cap=70,
+               cut_by_cap_readable=70,
+               cut_by_cap_named=["KXEPLGAME-26OCT10ARSCHE", "KXNBAGAME-X"])
+    for scope, why in ((cut, "70 readable fixture(s) cut by the 80-fixture "
+                             "cap (KXEPLGAME-26OCT10ARSCHE, KXNBAGAME-X)"),
+                       (dict(FULL_SCOPE, pmus_identity_missing=1,
+                             pmus_identity_missing_named=["aec-x"]),
+                        "1 mapped PMUS market(s) not read, no premap "
+                        "identity (aec-x)"),
+                       (None, "the scan recorded no fixture scope")):
+        v = CR.arbitrage_void_terms({
+            "census": _scan("scan", est),
+            "cross_venue": _scan("claims", alias_all, scope=scope)}, now=now)
+        assert v["established"] is False and phrase in v["statement"], why
+        cv = v["by_scan"]["cross_venue"]
+        assert cv["state"] == "SCOPE_NOT_READ" and cv["unread_scope"] == [why]
+        assert why in v["statement"]
+    # a cap that cut only fixtures without a readable book reached every
+    # structure the scan could price: the read terms decide
+    dark = dict(FULL_SCOPE, in_window=83, read=80, cut_by_cap=3,
+                cut_by_cap_readable=0, cut_by_cap_named=["A", "B", "C"])
+    v = CR.arbitrage_void_terms({
+        "census": _scan("scan", est),
+        "cross_venue": _scan("claims", alias_all, scope=dark)}, now=now)
+    assert v["established"] is True and phrase not in v["statement"]
+    assert v["by_scan"]["cross_venue"]["unread_scope"] == []
+    # the census reads recorded books (no fixture cap): no scope needed
+    assert v["by_scan"]["census"]["unread_scope"] == []
 
 
 def test_the_claim_scan_is_never_ok_when_the_cap_cut_a_cross_venue_pair():
@@ -937,6 +993,15 @@ def test_the_fixture_cap_reads_cross_venue_first_and_names_every_cut():
             assert cv["scope"]["in_window_cross_venue"] == 2
             assert cv["scope"]["read_cross_venue"] == 2
             assert cv["scope"]["max_fixtures"] == cap
+            # the void terms name what the read did not reach: the mapped
+            # PMUS market it could not read (the 3 cut fixtures had no
+            # readable book, so they form no structure)
+            vt = blk["void_terms"]["by_scan"]["cross_venue"]
+            assert vt["unread_scope"] == [
+                "1 mapped PMUS market(s) not read, no premap identity "
+                "(%s)" % slugs[1]]
+            assert blk["void_terms"]["established"] is False
+            assert "void terms not established" in blk["fail_closed"]
         finally:
             await tr.rollback()
             await c.close()
