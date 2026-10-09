@@ -182,11 +182,27 @@ LEAGUE_SPORT = {
     "uefa": "soccer", "motogp": "motorsport",
     "cdb": "soccer", "lib": "soccer", "fide": "chess", "boxing": "boxing",
     "football": "football",
+    # (RC6.2, p-coverage rework) `gtasc` is the venue's code for GUATEMALAN
+    # league SOCCER, not a non-sports code: every event listed under it is
+    # a soccer game (research-sql run 37945671144 F1: 3 events 2026-10-08
+    # ..11, gtasc-sac-dep-2026-10-07, "Quiche FC vs. Huehuetecos FC"; run
+    # 37946677103 H1: no other sport listed under it in 45 days; run
+    # 37946119133 G1: a PinnAPI-valued soccer money line on gtasc-sac-dep-
+    # 2026-10-07, "CSD Sacachispas vs. Deportivo Fraijanes"; the c28 receipt
+    # of 2026-10-04 files gtasc(8) under soccer). It sat in
+    # NON_SPORTS_LEAGUES, which RC6.1 began to match once the league was
+    # read off the event slug's FIRST segment: every gtasc market -- typed
+    # soccer money lines included -- left the registry and the coverage
+    # denominator.
+    "gtasc": "soccer",
 }
 #: venue league codes that are NOT sports (the catalogue lists them beside
-#: sports: crypto, entertainment, awards, weather, games): excluded from the
-#: sports universe by name, never silently
-NON_SPORTS_LEAGUES = {"btc", "eth", "sol", "ntflx", "nobel", "temp", "gtasc",
+#: sports: crypto, entertainment, awards, weather): excluded from the
+#: sports universe by name, never silently -- and ONLY for a market whose
+#: own market type names no sport (`excluded_as_non_sports`). A row the
+#: venue types as a sport (soccer_..., baseball_...) is a sports market
+#: whatever its code, and is never dropped by the code.
+NON_SPORTS_LEAGUES = {"btc", "eth", "sol", "ntflx", "nobel", "temp",
                       "oscars", "emmys", "grammys", "box", "pol",
                       # (RC6) the venue's macro-economic and central-bank
                       # markets, filed as `futures` beside the sports ones
@@ -290,22 +306,56 @@ def _venue_label_metric(raw: str, sport_head: str | None):
     return "_".join(body).upper(), op
 
 
-def parse_market_type(*, venue: str, contract_id: str, sports_market_type: str | None,
-                      competition: str | None = None, event_id: str | None = None,
-                      line=None, side=None, subject_type=None, subject_id=None,
-                      metadata: dict | None = None) -> dict:
-    raw = str(sports_market_type or "").strip().lower().replace("-", "_")
-    md = metadata or {}
-    sport = None
-    sport_head = None
+def _raw_type(sports_market_type) -> str:
+    return str(sports_market_type or "").strip().lower().replace("-", "_")
+
+
+def market_type_sport(sports_market_type) -> tuple:
+    """PURE. (sport, head) the venue's own market type names by its sport
+    head (SPORT_PREFIXES), or (None, None). Longest head first, so
+    "table_tennis" is never read as "tennis"."""
+    raw = _raw_type(sports_market_type)
     head = raw.split("_", 1)[0] if raw else ""
-    # longest head first, so "table_tennis" is never read as "tennis"
     for p, canonical in sorted(SPORT_PREFIXES.items(),
                                key=lambda kv: -len(kv[0])):
         if raw == p or raw.startswith(p + "_") or (
                 "_" not in p and head.startswith(p)):
-            sport, sport_head = canonical, p
-            break
+            return canonical, p
+    return None, None
+
+
+def excluded_as_non_sports(league, sports_market_type) -> bool:
+    """PURE. (RC6.2, p-coverage rework) THE ONE NON-SPORTS EXCLUSION RULE:
+    a catalogue market leaves the sports universe only when its venue code
+    is in NON_SPORTS_LEAGUES AND its own market type names no sport. A row
+    the venue types as soccer / baseball / ... is never dropped by its
+    code -- the rule `pdc` already follows (a typed soccer row takes its
+    sport from its type) -- so a mislisted code can cost a name, never a
+    sports market's place in the denominator. populate.contract_row, the
+    target-universe waterfall and the venue's own active count all read
+    this rule (the last through NAMES_SPORT_SQL_REGEX)."""
+    lg = str(league or "").strip().lower()
+    if lg not in NON_SPORTS_LEAGUES:
+        return False
+    return market_type_sport(sports_market_type)[0] is None
+
+
+#: market_type_sport's head test as one Postgres regular expression over
+#: replace(lower(btrim(sports_type)), '-', '_'): a head without "_" matches
+#: as a plain prefix (raw == p, raw ~ p_, head starts with p are one test
+#: when p holds no "_"), a head with "_" only whole.
+NAMES_SPORT_SQL_REGEX = "^(?:%s)" % "|".join(
+    (p if "_" not in p else "%s(?:_|$)" % p)
+    for p in sorted(SPORT_PREFIXES, key=lambda k: (-len(k), k)))
+
+
+def parse_market_type(*, venue: str, contract_id: str, sports_market_type: str | None,
+                      competition: str | None = None, event_id: str | None = None,
+                      line=None, side=None, subject_type=None, subject_id=None,
+                      metadata: dict | None = None) -> dict:
+    raw = _raw_type(sports_market_type)
+    md = metadata or {}
+    sport, sport_head = market_type_sport(raw)
     sport_basis = "VENUE_MARKET_TYPE" if sport else None
     ambiguous = False
     if sport is None and competition:

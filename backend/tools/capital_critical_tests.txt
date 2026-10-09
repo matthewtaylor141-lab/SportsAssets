@@ -1427,3 +1427,5 @@ tests/test_rc62_soccer_source_and_quote_context.py
 tests/test_rc62_kalshi_terms_wording.py
 # (RC6.2 p-coverage) the plane reads a never-valued soccer / baseball money line under its event's own fixture row (phase, format) in both quote contexts and records the reading only when the two agree (QUOTE_CONTEXT_DECIDES_THE_TERMS otherwise); never PROVEN without a valuation; no row, no scope
 tests/test_rc62_plane_fixture_scope.py
+# (RC6.2 p-coverage rework) no sports market leaves the registry or the coverage denominator by its venue code: gtasc (Guatemalan soccer, production's 6 listed money lines) reads soccer; a code excludes only a row whose own market type names no sport (ontology.excluded_as_non_sports, read by populate, the waterfall and the venue count alike); a held or candidate market is never excluded and keeps its own catalogue row
+tests/test_rc62_non_sports_population.py

@@ -284,10 +284,23 @@ def venue_lists_active(r: dict, *, now: float) -> bool:
 def contract_row(r: dict, *, now: float, held=frozenset(),
                  candidates=frozenset()) -> dict | None:
     """PURE. One catalogue market (grouped sides) -> its registry row, or
-    None for a non-sports league (named in `excluded`)."""
+    None for a non-sports market (named in `excluded`).
+
+    (RC6.2, p-coverage rework) NON-SPORTS IS DECIDED BY THE ROW, NOT THE
+    CODE ALONE (ontology.excluded_as_non_sports): the code must be in
+    NON_SPORTS_LEAGUES AND the venue's own market type must name no sport.
+    And a market that is HELD or an evaluated CANDIDATE is never excluded
+    -- it is required, so it keeps its own catalogue row (event, type,
+    ontology) instead of the NOT_IN_CURRENT_CATALOGUE stub the required
+    pass would otherwise write for a market the catalogue does list.
+    Before, RC6.1 dropped every market of a listed code before reading its
+    type: all of `gtasc` (Guatemalan soccer, typed soccer money lines and
+    a held PAPER position included) left the registry and the coverage
+    denominator."""
     slug = r["market_slug"]
     league = league_of(r.get("event_slug"), r.get("team_league"))
-    if league in O.NON_SPORTS_LEAGUES:
+    if slug not in held and slug not in candidates and \
+            O.excluded_as_non_sports(league, r.get("sports_type")):
         return None
     sides = _jsonish(r.get("sides")) or []
     longs = [s for s in sides if "LONG" in str(s.get("intent") or "").upper()]
@@ -590,8 +603,10 @@ async def populate(conn, *, since: float, now: float | None = None,
 
 
 #: what a FULL pass's record says the exclusion rule is
-EXCLUDED_RULE = ("ontology.NON_SPORTS_LEAGUES, by the venue league code of "
-                 "the event slug (populate.league_of)")
+EXCLUDED_RULE = ("ontology.excluded_as_non_sports: a venue league code of "
+                 "the event slug (populate.league_of) in "
+                 "ontology.NON_SPORTS_LEAGUES AND a market type naming no "
+                 "sport; never a held or candidate market")
 
 
 def full_pass_record(out: dict, *, at: float) -> dict:

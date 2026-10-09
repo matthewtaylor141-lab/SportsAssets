@@ -29,7 +29,9 @@ It names families, no sport, league or horizon. So:
   EXCLUDED   by NAMED class only: PLAYER_PROP, OTHER_PROP (exact score,
              first scorer, team statistic totals, corners, both teams to
              score, method of victory, ...), OUTRIGHT (futures), NON_SPORTS
-             (a venue code NON_SPORTS_LEAGUES names), and the Kalshi series
+             (a venue code NON_SPORTS_LEAGUES names on a row whose market
+             type names no sport: ontology.excluded_as_non_sports), and the
+             Kalshi series
              classes a series rule names (AWARD, POLL_RANKING, OFF_FIELD,
              MATCHUP_CONFIRMATION, MVE_PARLAY besides the above)
   UNCLASSIFIED  a contract whose venue states no market type (PMUS), or a
@@ -336,13 +338,13 @@ def classify(contract: dict) -> dict:
                                              _series_title(c))
         basis = BASIS_KALSHI
     else:
-        from .ontology import NON_SPORTS_LEAGUES
+        from .ontology import excluded_as_non_sports
         from .populate import league_of
         mt = str(c.get("market_type") or "").strip().lower()
         lg = league_of(c.get("event_id"), c.get("competition"))
         basis = BASIS_PMUS
         seg = PERIOD if (mt and _PMUS_PERIOD.search(mt)) else FULL
-        if lg in NON_SPORTS_LEAGUES:
+        if excluded_as_non_sports(lg, mt):
             fam = X_NON_SPORTS
         elif not mt:
             fam = NO_MARKET_TYPE
