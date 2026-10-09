@@ -184,6 +184,51 @@ def fixture_index(cache) -> dict:
     return out
 
 
+#: (RC6.1 api-stall2) the one memoised index: (cache, its key, index)
+_CURRENT: list = [None]
+
+
+def current_index(cache):
+    """`fixture_index(cache)` for the cache's CURRENT generation, built at
+    most once per generation; None when the cache keeps no generation or
+    the index cannot be built (the caller then scans, as before).
+
+    WHY (RC6.1 api-stall2). Production 2026-10-09 (render-ops logs run
+    37949540216): the API event loop held 1.1 s at 15:00:21Z
+    (pinnapi_feed.participants <- fixture_view <- _candidates <- _match_tier)
+    and 1.9 s at 15:15:21Z (pinnapi_names.absence <- match_event <- select <-
+    ext_pinnacle_loop.primary_pinnacle_h2h): `select` matched each event by
+    scanning the whole cache -- one fixture view per name tier and, on a
+    miss, the absence pass over every record -- and the reactive register
+    scanned again. ~95 ms per refused event on 2,600 cached events on a
+    quiet local core, against 0.05 ms by lookup once the index exists
+    (~30 ms to build; LOCAL BENCHMARK ONLY).
+
+    THE SAME ANSWER, BY CONSTRUCTION. `match_event(index=...)` answers what
+    the scan answers over the cache the index was built from (fixture_index's
+    docstring; test_rc6_api_responsive_reactive pins it), and the index is
+    reused only while `cache.generation` -- bumped by every write of the
+    cache's events (FeedCache) -- is the one it was built at."""
+    gen = getattr(cache, "generation", None)
+    if type(gen) is not int:
+        return None
+    try:
+        # the generation, and what the index copies that a direct write
+        # (a test's, never production's) could change without one
+        key = (gen, id(cache.events), len(cache.events), _evicted(cache))
+    except Exception:                                           # noqa: BLE001
+        return None
+    memo = _CURRENT[0]
+    if memo is not None and memo[0] is cache and memo[1] == key:
+        return memo[2]
+    try:
+        idx = fixture_index(cache)
+    except Exception:                                           # noqa: BLE001
+        return None
+    _CURRENT[0] = (cache, key, idx)
+    return idx
+
+
 def _evicted(cache) -> int:
     try:
         return int((getattr(cache, "counts", None) or {})
@@ -390,7 +435,8 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     if not isinstance(runtime_id, str) or not runtime_id:
         return fail("PINNAPI_PRIMARY_RUNTIME_UNIDENTIFIED")
     name_basis: dict = {}
-    hit, reason = match_event(cache, event, family, explain=name_basis)
+    hit, reason = match_event(cache, event, family, explain=name_basis,
+                              index=current_index(cache))
     if reason:
         return fail(reason, {"fixture_match": name_basis} if name_basis
                     else None)
@@ -511,7 +557,8 @@ def validate(cache, quote, *, at, max_age_s=30.0, runtime_id=None):
     hit, why = match_event(cache, {
         "home_team": p["discovery_home"], "away_team": p["discovery_away"],
         "commence_time": p["discovery_start"],
-        "sport_key": p.get("discovery_sport_key")}, p["family"])
+        "sport_key": p.get("discovery_sport_key")}, p["family"],
+        index=current_index(cache))
     if (why or hit[0] != p["feed_event_id"] or
             any(hit[1][d] != p["outcome_labels"].get(d) for d in ("home", "away"))):
         return {"ok": False, "reason": why or "PINNAPI_PRIMARY_FIXTURE_CHANGED"}

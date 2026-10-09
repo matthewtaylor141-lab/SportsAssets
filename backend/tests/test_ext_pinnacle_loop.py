@@ -239,6 +239,59 @@ def test_basketball_and_hockey_are_not_requested_at_all():
 DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
+
+@pytest.fixture(scope="module")
+def own_cycle_valuations():
+    """THE ROWS THESE CYCLES WRITE LEAVE WITH THIS MODULE.
+
+    The cycle tests below drive the REAL collector against the shared test
+    database, so the row `test_one_cycle_writes_a_complete_refusal_record`
+    persists is a genuine entry-experiment valuation
+    (`aec-soccer-mci-mun-2026-09-24-city`) decided at the wall-clock instant
+    the cycle ran. It used to be left behind, inside every later paper
+    pass's valuation window (`valuation_lookback_s`, 1800 s): a pass run
+    within 30 minutes decided it in that proof's own session -- one more
+    decision per strategy (the benchmark's restart proof counted 4 where it
+    had made 2) and, once the reading was past the 30 s freshness rule, a
+    PROBABILITY_EVIDENCE_STALE refusal in the lifecycle proof's Audrey
+    report -- or did not, by how long the files run between them took.
+
+    So the experiment rows created after this module's first cycle test
+    began are removed when the module ends: those rows and only those (the
+    id high-water mark is read first; `external_valuations.id` is a
+    bigserial and no table references it). Within the module nothing
+    changes: each test sees exactly the database it saw before."""
+    import asyncio
+
+    asyncpg = pytest.importorskip("asyncpg")
+    exists = "SELECT to_regclass('external_valuations') IS NOT NULL"
+
+    async def _high_water() -> int:
+        conn = await asyncpg.connect(DSN)
+        try:
+            if not await conn.fetchval(exists):
+                return 0            # the first cycle test creates the table
+            return int(await conn.fetchval(
+                "SELECT coalesce(max(id), 0) FROM external_valuations"))
+        finally:
+            await conn.close()
+
+    async def _remove_created_after(high_water: int) -> None:
+        conn = await asyncpg.connect(DSN)
+        try:
+            if await conn.fetchval(exists):
+                await conn.execute(
+                    "DELETE FROM external_valuations "
+                    " WHERE experiment_id = $1 AND id > $2",
+                    ext.EXPERIMENT_ID, high_water)
+        finally:
+            await conn.close()
+
+    high_water = asyncio.run(_high_water())
+    yield
+    asyncio.run(_remove_created_after(high_water))
+
+
 def _fresh_iso(offset_s: float = -2.0) -> str:
     """A quote stamped a couple of seconds ago, in the provider's format.
 
@@ -357,18 +410,91 @@ def _event(stamp=None):
     }
 
 
+#: THE ONE VENUE CONTRACT the whole-cycle proof values, and its event.
+CYCLE_SLUG = "aec-soccer-mci-mun-2026-09-24-city"
+CYCLE_EVENT_SLUG = "soccer-mci-mun-2026-09-24"
+
+#: The serial tables the cycle appends to for that contract, with their ids.
+_CYCLE_SERIAL = (("external_valuations", "id"),
+                 ("ext_candidate_outcomes", "id"),
+                 ("bettor_pair_observation_attempts", "attempt_id"))
+
+
+async def _cycle_high_water(conn) -> dict:
+    """Each serial table's highest id BEFORE the cycle runs, so the cleanup
+    removes only the rows this proof's own cycle wrote."""
+    out = {}
+    for table, col in _CYCLE_SERIAL:
+        if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", table):
+            out[table] = await conn.fetchval(
+                f"SELECT coalesce(max({col}), 0) FROM {table}")
+    return out
+
+
+async def _drop_what_the_cycle_wrote(conn, marks: dict) -> None:
+    """THE CYCLE PROOF REMOVES WHAT IT WROTE (a shared test database).
+
+    Its valuation is a real, wall-clock-current ENTRY_DECISION row of the
+    entry experiment. Left behind, every paper pass a later test runs within
+    `valuation_lookback_s` (30 min) takes it as a candidate and records a
+    decision on it under that test's own fresh account: the opportunity
+    funnel's real-writer proof counted eight unique opportunities where its
+    pass was given seven. So the valuation goes, with the in-cycle rows
+    keyed to it (the Derek research observation and entry decision, by
+    valuation id), the cycle's per-candidate records for this contract (only
+    ids above the high-water mark taken before the cycle), and the two venue
+    catalogue rows this proof seeded. The research
+    and attempt records are append-only by trigger, so -- as every proof
+    that purges its own records does -- the deletes run with the triggers
+    off for this one transaction."""
+    async def _has(table):
+        return await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                                   table)
+    async with conn.transaction():
+        await conn.execute("SET LOCAL session_replication_role = replica")
+        vids = []
+        if "external_valuations" in marks:
+            vids = [int(r["id"]) for r in await conn.fetch(
+                "SELECT id FROM external_valuations WHERE experiment_id = $1"
+                "   AND us_market_slug = $2 AND id > $3",
+                ext.EXPERIMENT_ID, CYCLE_SLUG, marks["external_valuations"])]
+        if vids:
+            for table in ("derek_research_observations",
+                          "derek_entry_decisions"):
+                if await _has(table):
+                    await conn.execute(
+                        f"DELETE FROM {table} WHERE valuation_id = "
+                        "ANY($1::bigint[])", vids)
+            await conn.execute(
+                "DELETE FROM external_valuations WHERE id = "
+                "ANY($1::bigint[])", vids)
+        for table, col in _CYCLE_SERIAL[1:]:
+            if table in marks:
+                await conn.execute(
+                    f"DELETE FROM {table} WHERE {col} > $1 "
+                    "AND us_market_slug = $2", marks[table], CYCLE_SLUG)
+        if await _has("us_premap"):
+            await conn.execute(
+                "DELETE FROM us_premap WHERE event_slug = $1",
+                CYCLE_EVENT_SLUG)
+
+
 @pg
 @pytest.mark.asyncio
-async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
+async def test_one_cycle_writes_a_complete_refusal_record(
+        monkeypatch, own_cycle_valuations):
     """The whole point of item 2: fresh odds -> mapping -> venue quote ->
     fees -> gate -> a persisted row. The row here is a REFUSAL, because
     the venue settlement rule is not established -- and it must still
     carry every field management needs to see why."""
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(DSN)
+    marks = None
     try:
         await conn.execute(
             open("migrations/103_external_valuations.sql").read())
+        # (before anything is seeded or written: the cleanup's scope)
+        marks = await _cycle_high_water(conn)
         # THE VENUE'S CATALOGUE, which the period check reads for the
         # kind, the event, the side and the sibling count. `us_premap`
         # is created by the copy lane's bootstrap, not by a migration,
@@ -549,12 +675,17 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         assert row["order_submitted"] is False
         assert int(row["outcome_books"]) == 2
     finally:
-        await conn.close()
+        try:
+            if marks is not None:
+                await _drop_what_the_cycle_wrote(conn, marks)
+        finally:
+            await conn.close()
 
 
 @pg
 @pytest.mark.asyncio
-async def test_a_second_cycle_does_not_double_count(monkeypatch):
+async def test_a_second_cycle_does_not_double_count(
+        monkeypatch, own_cycle_valuations):
     """Item 5 asks for a subsequent cycle processing new data without
     duplicate accounting. Re-evaluating the SAME quote must not create a
     second row for the same observation."""
@@ -608,7 +739,8 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
 
 @pg
 @pytest.mark.asyncio
-async def test_refusals_before_scoring_are_still_counted(monkeypatch):
+async def test_refusals_before_scoring_are_still_counted(
+        monkeypatch, own_cycle_valuations):
     """THE GAP THE FIRST LIVE RUN EXPOSED.
 
     The census showed `evaluated 0` with an empty refusal list while every

@@ -165,10 +165,25 @@ def attempts_for_read(read_id: str):
 
 
 def totals() -> dict:
-    """Process-wide telemetry, labelled as such."""
+    """Process-wide telemetry, labelled as such.
+
+    THE ESCALATING 429 COOLDOWN RIDES IT (P0-429): this process's cooldown
+    -- in force or not, the consecutive 429 count, the deferred and skipped
+    reads per source, the last 429 (venue_pace.rate_limit_state) -- under
+    `escalating_429_cooldown`. In the API process these totals are on the
+    ext_pinnacle heartbeat (venue_rate_controls.process_request_totals), the
+    one readback that process has of its own transport; the workers' walkers
+    carry the same readback on their own beats. Read outside this module's
+    lock (the cooldown has its own); never raises."""
     with _LOCK:
-        return dict(_totals, scope="PROCESS_SINCE_IMPORT",
-                    is_not_a_per_read_count=True)
+        out = dict(_totals, scope="PROCESS_SINCE_IMPORT",
+                   is_not_a_per_read_count=True)
+    try:
+        from . import venue_pace as _vp
+        out["escalating_429_cooldown"] = _vp.rate_limit_state()
+    except Exception as exc:                                   # noqa: BLE001
+        out["escalating_429_cooldown"] = {"unread": type(exc).__name__}
+    return out
 
 
 # ── THE GATE ────────────────────────────────────────────────────────
@@ -213,13 +228,23 @@ def clear_hold() -> None:
 
 
 def check_before_dispatch(*, read_id: str = None, deadline_epoch_s=None,
-                          now: float = None, sleep=None) -> dict:
+                          now: float = None, sleep=None,
+                          undeadlined_cap_s: float = None) -> dict:
     """Enforce the not-before instant. Refuse rather than outlive a deadline.
 
     Returns what it did. Raises `VenueGateRefusal` when the wait cannot be
     honoured inside the caller's deadline -- because the alternative is a
     thread that sends after everyone has stopped listening.
+
+    `undeadlined_cap_s` (P0-429 review round 2): what is LEFT of
+    MAX_UNDEADLINED_WAIT_S for a read that opted into the bounded cooldown
+    wait (venue_pace.wait_out_the_cooldown) and already waited part of it
+    out on the cooldown -- one budget, so the gate never sleeps such a
+    caller longer in all than the cap. None: the cap itself, as always.
     """
+    cap = (MAX_UNDEADLINED_WAIT_S if undeadlined_cap_s is None
+           else max(0.0, min(float(undeadlined_cap_s),
+                             MAX_UNDEADLINED_WAIT_S)))
     wall = time.time() if now is None else float(now)
     st = read_state(read_id) if read_id else None
     dl = deadline_epoch_s
@@ -240,11 +265,12 @@ def check_before_dispatch(*, read_id: str = None, deadline_epoch_s=None,
         return {"waited_s": 0.0, "gated": False}
 
     wait = g["seconds_left"]
-    if dl is None and wait > MAX_UNDEADLINED_WAIT_S:
+    if dl is None and wait > cap:
         detail = {"refusal": R_HOLD_EXCEEDS_UNDEADLINED_CAP,
                   "seconds_left": round(wait, 3),
                   "not_before_epoch_s": g["not_before_epoch_s"],
                   "cap_s": MAX_UNDEADLINED_WAIT_S,
+                  "cap_left_s": round(cap, 3),
                   "reason": g["reason"],
                   "why": ("this caller supplied no deadline, so there is no "
                           "instant at which waiting becomes pointless -- and "
@@ -295,6 +321,160 @@ def check_deadline_after_pacing(*, read_id: str = None, now: float = None
                           "abandoned")}
         _note_gate_refusal(read_id, detail)
         raise VenueGateRefusal(R_DEADLINE_PASSED, detail)
+
+
+#: the sleep the 429 cooldown's bounded waits use (a test substitutes one
+#: that advances its fake clock); None: time.sleep
+_cooldown_sleep = None
+#: the sleep the hard hold's wait uses at the transport (a test substitutes
+#: one that records it); None: time.sleep, as check_before_dispatch always had
+_hold_sleep = None
+#: cooldown_check's default for `wait_budget_s`: read the opt-in from the
+#: caller's context (venue_pace.wait_out_the_cooldown)
+_FROM_CONTEXT = object()
+
+
+def cooldown_check(*, read_id: str = None, stage: str = "BEFORE_THE_PACER",
+                   priority: bool = None, priority_budget_s: float = None,
+                   wait_budget_s=_FROM_CONTEXT,
+                   now: float = None, record: bool = True) -> float:
+    """THE ESCALATING 429 COOLDOWN AT THE TRANSPORT (P0-429). Returns the
+    seconds this request must WAIT before it may go (0.0: go now), or
+    raises VenueGateRefusal -- nothing is sent either way until it returns.
+
+    The rule is venue_pace's (see the block above COOLDOWN_FLOOR_S):
+      * NORMAL lane, no deadline: refused by name,
+        R_VENUE_429_COOLDOWN_READ_DEFERRED, and counted as deferred;
+      * NORMAL lane, read bound with a deadline: the cooldown's remainder
+        when it ends inside the deadline, else R_COOLDOWN_EXCEEDS_DEADLINE;
+      * NORMAL lane, no deadline, opted into the bounded wait
+        (venue_pace.wait_out_the_cooldown(); `wait_budget_s` is what is left
+        of MAX_UNDEADLINED_WAIT_S for this request, by default the whole cap
+        when the context opted in, None when it did not): the remainder
+        when it ends within that budget, else refused at once,
+        R_HOLD_EXCEEDS_UNDEADLINED_CAP -- the undeadlined cap it is;
+      * PRIORITY lane: min(remainder, priority_budget_s) -- the bound
+        PRIORITY_COOLDOWN_MAX_WAIT_S less what this request already waited --
+        and then it proceeds. Never refused here.
+    `record=False` asks without counting (a caller deciding whether to
+    attempt a retry at all records the refusal itself if it acts on it).
+
+    Called BEFORE the pacer's queue (so a walker is refused at once, never
+    after sleeping a hold) and AGAIN after it, immediately before dispatch:
+    the second call is the one that closes the production defect -- a
+    thread already queued for its gap when a 429 arrived used to dispatch
+    into the limit regardless."""
+    from . import venue_pace as _vp
+    left = _vp.cooldown_left(now)
+    if left <= 0:
+        return 0.0
+    prio = _vp.priority_now() if priority is None else bool(priority)
+    if prio:
+        budget = (_vp.PRIORITY_COOLDOWN_MAX_WAIT_S if priority_budget_s is None
+                  else max(0.0, float(priority_budget_s)))
+        return min(left, budget)
+    st = read_state(read_id) if read_id else None
+    dl = (st or {}).get("deadline_epoch_s")
+    wall = time.time()
+    if dl is not None and (wall + left) <= float(dl):
+        return left
+    budget = None
+    if dl is None:
+        if wait_budget_s is _FROM_CONTEXT:
+            budget = (MAX_UNDEADLINED_WAIT_S if _vp.waits_out_the_cooldown()
+                      else None)
+        elif wait_budget_s is not None:
+            budget = max(0.0, min(float(wait_budget_s),
+                                  MAX_UNDEADLINED_WAIT_S))
+        if budget is not None and left <= budget:
+            return left
+    g = _vp.normal_read_deferral(now) or {}
+    refusal = (R_COOLDOWN_EXCEEDS_DEADLINE if dl is not None
+               else R_HOLD_EXCEEDS_UNDEADLINED_CAP if budget is not None
+               else _vp.R_VENUE_429_COOLDOWN_READ_DEFERRED)
+    detail = {"refusal": refusal, "stage": stage,
+              "seconds_left": round(left, 3),
+              "consecutive_429": g.get("consecutive_429"),
+              "level_s": g.get("level_s"),
+              "cooldown_is": g.get("cooldown_is"),
+              "deadline_epoch_s": (float(dl) if dl is not None else None),
+              "source": _vp.current_read_source(),
+              "why": ("the venue answered 429 and its cooldown is in force: a "
+                      "normal-lane read is not sent until a read is allowed "
+                      "again, so a walker stops its pass instead of walking "
+                      "into the limit market after market")}
+    if budget is not None:
+        detail.update(by="ESCALATING_429_COOLDOWN",
+                      cap_s=MAX_UNDEADLINED_WAIT_S,
+                      cap_left_s=round(budget, 3),
+                      why=("the venue answered 429 and its cooldown outlasts "
+                           "what is left of the undeadlined wait cap this "
+                           "caller opted into (one budget with the hard "
+                           "hold): refused at once, nothing sent, rather "
+                           "than sleeping a thread past the cap"))
+    if record:
+        _note_gate_refusal(read_id, detail)
+        _vp.note_deferred()
+    raise VenueGateRefusal(refusal, detail)
+
+
+def normal_read_gate(now: float = None) -> dict:
+    """`gate_state()` widened for a WALKER's pre-read check: blocking while
+    the hard not-before hold OR the escalating 429 cooldown is in force.
+    `gate_state()` itself is unchanged (it reports the hold alone)."""
+    g = gate_state(now=now)
+    if g["blocking"]:
+        return dict(g, by="NOT_BEFORE_HOLD")
+    try:
+        from . import venue_pace as _vp
+        d = _vp.normal_read_deferral()
+    except Exception:                                          # noqa: BLE001
+        d = None
+    if d:
+        return {"blocking": True, "seconds_left": d["seconds_left"],
+                "reason": d["refusal"], "by": "ESCALATING_429_COOLDOWN",
+                "not_before_epoch_s": None}
+    return dict(g, by=None)
+
+
+def _cooldown_wait(seconds: float, *, priority: bool,
+                   bounded: bool = False) -> None:
+    if seconds <= 0:
+        return
+    (_cooldown_sleep or time.sleep)(seconds)
+    try:
+        from . import venue_pace as _vp
+        _vp.note_cooldown_wait(seconds, priority=priority, bounded=bounded)
+    except Exception:                                          # noqa: BLE001
+        pass
+    with _LOCK:
+        _totals["waited_s"] += seconds
+
+
+def observe_response(method, path, response, *, dispatched_mono=None) -> None:
+    """Every response's status, read at the transport: a 429 arms (or
+    escalates) the cooldown with the venue's own Retry-After; a 2xx READ
+    may reset it (venue_pace.note_read_ok). Never raises."""
+    try:
+        from . import venue_pace as _vp
+        status = getattr(response, "status_code", None)
+        if status == 429:
+            ra = None
+            try:
+                from .venue_http_error import _retry_after_seconds
+                hdrs = getattr(response, "headers", None) or {}
+                ra = _retry_after_seconds(hdrs.get("retry-after"))
+            except Exception:                                  # noqa: BLE001
+                ra = None
+            _vp.note_rate_limited(retry_after_s=ra,
+                                  dispatched_mono=dispatched_mono,
+                                  method=str(method or "").upper() or None,
+                                  path=str(path or "") or None)
+        elif (isinstance(status, int) and 200 <= status < 300
+              and str(method or "").upper() in READ_ONLY_METHODS):
+            _vp.note_read_ok(dispatched_mono=dispatched_mono)
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 def _note_gate_refusal(read_id, detail) -> None:
@@ -401,35 +581,98 @@ if httpx is not None:
 
         def handle_request(self, request):
             rid = current_read()
+            method = getattr(request, "method", "")
+            path = getattr(getattr(request, "url", None), "path", "")
             # 0 · THE PROCESS WRITE LOCK (cand21): in a locked process no
             #     request that is not a read leaves, whatever called it.
-            check_write_lock(getattr(request, "method", ""),
-                             getattr(getattr(request, "url", None), "path", ""))
+            check_write_lock(method, path)
+            # 0b · THE ESCALATING 429 COOLDOWN, BEFORE ANY WAIT (P0-429): a
+            #      normal-lane read is refused here at once, never after
+            #      sleeping out a hold; a deadlined read or a priority claim
+            #      waits its bounded share.
+            #      A REQUEST THAT IS NOT A READ (an order, a cancel, a close)
+            #      is never refused by the cooldown, whatever lane it is on:
+            #      it waits the priority bound and goes. The refusal is for
+            #      measurement READS; a risk-reducing cancel must never be
+            #      the thing a measurement cooldown withholds.
+            #      AN UNDEADLINED NORMAL READ THAT OPTED INTO THE BOUNDED
+            #      WAIT (venue_pace.wait_out_the_cooldown: the catalogue
+            #      sweep) waits the cooldown out within what is left of
+            #      MAX_UNDEADLINED_WAIT_S -- ONE budget with step 1's hold,
+            #      so in all it never sleeps longer than the cap it always
+            #      had -- and is refused at once when the cooldown outlasts
+            #      it (P0-429 review round 2).
+            from . import venue_pace as _vp
+            prio = (_vp.priority_now()
+                    or str(method or "").upper() not in READ_ONLY_METHODS)
+            prio_budget = float(_vp.PRIORITY_COOLDOWN_MAX_WAIT_S)
+            undeadlined = ((read_state(rid) or {}).get("deadline_epoch_s")
+                           is None) if rid else True
+            wait_budget = (float(MAX_UNDEADLINED_WAIT_S)
+                           if (not prio and undeadlined
+                               and _vp.waits_out_the_cooldown())
+                           else None)
+            w = cooldown_check(read_id=rid, stage="BEFORE_THE_PACER",
+                               priority=prio, priority_budget_s=prio_budget,
+                               wait_budget_s=wait_budget)
+            if w > 0:
+                _cooldown_wait(w, priority=prio,
+                               bounded=wait_budget is not None)
+                if prio:
+                    prio_budget = max(0.0, prio_budget - w)
+                elif wait_budget is not None:
+                    wait_budget = max(0.0, wait_budget - w)
             # 1 · THE HARD GATE, immediately before dispatch. This is the
             #     recheck: nothing happens between it and the send.
-            check_before_dispatch(read_id=rid)
-            # 2 · THE ORDINARY RATE GAP, after the gate and not instead
-            #     of it. These are two different controls.
-            if self._pace is not None:
-                try:
-                    self._pace()
-                except Exception:                              # noqa: BLE001
-                    pass
-            # 2b · THE DEADLINE, AGAIN, AFTER THE PACER'S QUEUE (P1): the
-            #      wait for the gap can outlast the caller's deadline, and a
-            #      request sent after it is the failure step 1 exists to
-            #      prevent, merely reached through the queue. Only a read
-            #      that carries a deadline is affected.
-            check_deadline_after_pacing(read_id=rid)
+            held = check_before_dispatch(read_id=rid, sleep=_hold_sleep,
+                                         undeadlined_cap_s=wait_budget)
+            if wait_budget is not None:
+                wait_budget = max(0.0, wait_budget
+                                  - float((held or {}).get("waited_s") or 0.0))
+            while True:
+                # 2 · THE ORDINARY RATE GAP, after the gate and not instead
+                #     of it. These are two different controls.
+                if self._pace is not None:
+                    try:
+                        self._pace()
+                    except Exception:                          # noqa: BLE001
+                        pass
+                # 2b · THE DEADLINE, AGAIN, AFTER THE PACER'S QUEUE (P1):
+                #      the wait for the gap can outlast the caller's
+                #      deadline, and a request sent after it is the failure
+                #      step 1 exists to prevent, merely reached through the
+                #      queue. Only a read that carries a deadline is affected.
+                check_deadline_after_pacing(read_id=rid)
+                # 2c · THE 429 COOLDOWN, AGAIN, AFTER THE PACER'S QUEUE
+                #      (P0-429). THE PRODUCTION DEFECT: a thread queued for
+                #      its gap when a 429 arrived dispatched into the limit
+                #      anyway -- the run of 429s at 0.7 s. A normal read is
+                #      refused here (an opted-in one waits what is left of
+                #      its budget, else is refused); a request that must
+                #      wait does so and then claims a FRESH gap (never sends
+                #      on a stale one).
+                w = cooldown_check(read_id=rid, stage="AFTER_THE_PACER_QUEUE",
+                                   priority=prio, priority_budget_s=prio_budget,
+                                   wait_budget_s=wait_budget)
+                if w <= 0:
+                    break
+                _cooldown_wait(w, priority=prio,
+                               bounded=wait_budget is not None)
+                if prio:
+                    prio_budget = max(0.0, prio_budget - w)
+                elif wait_budget is not None:
+                    wait_budget = max(0.0, wait_budget - w)
             # 3 · COUNTED BEFORE THE SEND.
             note_dispatch(rid)
+            t0 = _vp._clock()
             resp = self._inner.handle_request(request)
             note_response(rid, getattr(resp, "status_code", None))
-            # 4 · AN ORDER REQUEST'S 429 TRIPS THE SHARED CIRCUIT
+            # 4 · EVERY 429 ARMS THE ESCALATING COOLDOWN; A 2xx READ THAT
+            #     LEFT AFTER IT WAS ARMED RESETS IT (P0-429)
+            observe_response(method, path, resp, dispatched_mono=t0)
+            # 4b · AN ORDER REQUEST'S 429 TRIPS THE SHARED CIRCUIT
             if getattr(resp, "status_code", None) == 429:
-                trip_circuit_on_order_429(
-                    getattr(request, "method", ""),
-                    getattr(getattr(request, "url", None), "path", ""))
+                trip_circuit_on_order_429(method, path)
             return resp
 
         def close(self):
@@ -445,7 +688,8 @@ else:                                                          # pragma: no cove
 __all__ = ["PacedTransport", "begin_read", "end_read", "read_state",
            "attempts_for_read", "totals", "hold_until", "gate_state",
            "clear_hold", "check_before_dispatch", "check_write_lock",
-           "check_deadline_after_pacing",
+           "check_deadline_after_pacing", "cooldown_check",
+           "normal_read_gate", "observe_response",
            "READ_ONLY_METHODS", "note_dispatch",
            "note_response", "bind_read", "current_read",
            "VenueGateRefusal", "R_COOLDOWN_EXCEEDS_DEADLINE",

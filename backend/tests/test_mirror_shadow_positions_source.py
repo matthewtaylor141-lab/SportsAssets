@@ -150,7 +150,14 @@ def test_production_topology_pmx_rsa_in_the_pmus_slot_reads_positions_from_the_f
 
     assert not stats.get("positions_unreadable")
     assert not stats.get("abandoned")
-    assert stats["status"] == "ok"
+    # READABLE IS NOT VENUE-CONFIRMED (RC6 identity lane): a ledger-derived
+    # tick is 'degraded' with the named refusal and the owner blocker, never
+    # 'ok' (it was 'ok' on every production tick of release 732cc0c6)
+    assert stats["status"] == "degraded"
+    assert stats["venue_confirmed"] is False
+    assert stats["refusal"] == MPS.R_VENUE_UNCONFIRMED
+    assert stats["owner_blocker"] == MPS.OWNER_BLOCKER
+    assert stats["positions_authority"] == MPS.AUTHORITY_LEDGER
     assert stats["exit_leg"] != {"state": "suppressed"}
     assert "error" not in stats["exit_leg"]
     assert stats["venue_positions"] == 2 and stats["markets"] == 1 and stats["rows"] == 1

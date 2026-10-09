@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import contextvars
 import logging
 import asyncpg
@@ -6769,7 +6770,7 @@ def _released_body(client, call, *args):
         _RELEASE_BODY.reset(token)
 
 
-def _paced_events_list(client, q: dict):
+def _paced_events_list(client, q: dict, read=None):
     """ONE events.list request, behind the process-wide venue gate.
 
     THE PACING WAS ITS OWN (R30A). The sweep slept LIST_PACING_S between pages
@@ -6782,11 +6783,321 @@ def _paced_events_list(client, q: dict):
     a catalogue read must never queue ahead of the live mirror's tick), so the
     venue sees one request per gap from this process whatever runs beside the
     sweep, and the 429 circuit (`venue_pace.penalize_observed`) slows the sweep
-    with everything else. Runs in a worker thread (pace() sleeps)."""
+    with everything else. Runs in a worker thread (pace() sleeps).
+
+    AND IT NEVER SENDS AFTER ITS CALLER HAS GIVEN UP (P0, 2026-10-09). With
+    `read` (every page and probe the sweep reads goes through
+    `_read_events_page`, which passes one), the request is a logical read on
+    venue_request_gate carrying the read's DISPATCH DEADLINE: a request still
+    waiting for this gap when the deadline passes is refused here before the
+    SDK is called (_ReadNotSent), and one still waiting on the transport's
+    not-before hold or its own gap is refused there by name
+    (R_DEADLINE_PASSED / R_COOLDOWN_EXCEEDS_DEADLINE). Either way nothing is
+    sent, and the read's dispatch count tells the sweep so (_PageRead).
+
+    THE 429 COOLDOWN IS WAITED OUT, BOUNDED (P0-429 review round 2): every
+    sweep read is made inside venue_pace.wait_out_the_cooldown() (see
+    `_sweep_read`)."""
     from .. import venue_pace as _vp
 
-    _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.events.list, q)
+    if read is None:
+        _vp.pace(LIST_PACING_S)
+        return _sweep_read(client, client.events.list, q)
+    with read.bound(client):
+        _vp.pace(LIST_PACING_S)
+        read.before_send()
+        return _sweep_read(client, client.events.list, q)
+
+
+# ── A PAGE THAT WAS NEVER SENT IS NOT A FAILED PAGE (P0, 2026-10-09) ─────
+#
+# PRODUCTION, 2026-10-09 (render-ops 37932260211 / 37932278119 / 37932505159 /
+# 37932513838 / 37932934394 / 37932945299, sportsassets-workers). The full
+# sweep that started with the 03:26:46Z boot read its window (startTimeMin
+# 2026-10-08T15:26:46Z) at offsets 0, 95 (03:33:54Z), 190, 285 and 380
+# (03:35:55.459Z), then logged at 03:36:35.277Z "premap events path failed
+# mid-sweep after 55060 rows (RuntimeError: TimeoutError: ); keeping them, no
+# fallback" -- 5 pages and 476 of the window's ~2,200 events (the next two
+# complete sweeps walked 24 pages / 2,224 and 2,209 events). WHAT IT WAS
+# WAITING ON: the awaited call is
+#     asyncio.wait_for(asyncio.to_thread(_paced_events_list, client,
+#                      {limit 100, offset 475, window}), LIST_CALL_TIMEOUT_S)
+# and that 30 s bound covers the worker thread's WHOLE job, not the HTTP
+# request: a slot on the default executor, premap's claim on venue_pace's
+# normal lane (FIFO behind every other measurement reader, at twice the gap
+# while the 429 circuit held -- the gateway 429'd the book / bbo readers
+# from 03:24Z through 03:35:55.696Z), then inside the SDK the transport's
+# hard not-before hold (venue_request_gate.check_before_dispatch, armed for
+# EVERY reader by a 429 ANY reader collects -- the last one at 03:35:55.696Z,
+# a /book read, and the next gateway request of the process went out at
+# 03:36:14.856Z) and a second venue_pace claim (pmus._install_request_gate's
+# PacedTransport), and only then the request. No response for offset 475 of
+# that window was ever logged (03:36:00-03:45:00Z), while six other gateway
+# reads completed inside the same 30 s: the page read timed out WAITING FOR
+# ITS TURN, it was most likely never sent, and the sweep reported it as a
+# venue failure with an empty message (`str(asyncio.TimeoutError())` is
+# ''), counted it as a request it had not made, ended the pass, and waited
+# 30 minutes for the next cycle -- ten minutes after a deploy, when every
+# loop's opening reads crowd the same gate.
+#
+# THE REPAIR, WITHIN THE SAME BOUNDS. Each page read is bound to a dispatch
+# deadline (DISPATCH_MARGIN_S inside its wait_for bound), so a read that is
+# still queued when its caller gives up is refused before any byte is sent
+# -- no request goes out unattributed after the sweep stopped listening --
+# and its dispatch count says whether the venue ever saw it. A read that
+# was NEVER SENT is read again AT THE SAME OFFSET (after the gate's hold
+# lifts, when one is in force) up to PAGE_READ_UNSENT_RETRIES times; it is
+# not a request, so it costs no request budget and adds nothing to the
+# venue's rate (every attempt still claims venue_pace's gap and the gate's
+# hold). A read that WAS sent and got no answer (a timeout after dispatch,
+# a connection failure with no status) is re-sent at most PAGE_READ_RESENDS
+# times, each one counted in the walk's request budget. A 429, an offset
+# refusal and any other answered failure stop the pass exactly as before.
+# Every retry is on the receipt (reads_unsent, reads_resent, resumed_reads,
+# read_failures) and the pass's wall-time bound (WINDOW_MAX_SECONDS, the
+# partition's, the calendar lane's) bounds the waiting: a retry that does
+# not fit stops the pass as WALL_TIME_BUDGET_EXHAUSTED (truncated, named).
+PAGE_READ_UNSENT_RETRIES = int(os.environ.get("PREMAP_PAGE_UNSENT_RETRIES",
+                                              "3"))
+PAGE_READ_RESENDS = int(os.environ.get("PREMAP_PAGE_RESENDS", "1"))
+#: a page read's dispatch deadline sits this far inside its wait_for bound,
+#: so a dispatch is always counted before the caller reads the count
+DISPATCH_MARGIN_S = 1.0
+#: the pause before re-queueing a read that was never sent, when no venue
+#: hold is in force (a hold in force is waited out instead)
+UNSENT_RETRY_PAUSE_S = 1.0
+#: the pause before re-sending a read that was sent and not answered
+RESEND_PAUSE_S = 5.0
+
+#: how a page read that did not answer is named (receipt `read_failures`,
+#: the pass's `error`) -- never an anonymous "TimeoutError: "
+READ_QUEUED_PAST_BOUND = "PAGE_READ_QUEUED_PAST_ITS_BOUND_NEVER_SENT"
+READ_REFUSED_BY_OUR_GATE = "PAGE_READ_REFUSED_BY_OUR_GATE_NEVER_SENT"
+READ_SENT_NO_ANSWER = "PAGE_READ_SENT_NO_ANSWER_IN_ITS_BOUND"
+READ_FAILURE_KINDS = (READ_QUEUED_PAST_BOUND, READ_REFUSED_BY_OUR_GATE,
+                      READ_SENT_NO_ANSWER)
+
+
+class _ReadNotSent(Exception):
+    """The read's dispatch deadline passed while it waited for its turn on
+    venue_pace: raised in the worker thread BEFORE the SDK is called."""
+
+
+class _PageRead:
+    """ONE PAGE READ'S BOOKKEEPING, SHARED BY THE EVENT LOOP AND ITS THREAD.
+
+    The worker thread binds a venue_request_gate logical read carrying the
+    dispatch deadline (`bound`), so the transport refuses a request that
+    would leave after it, and counts the request when it does leave
+    (note_dispatch, before the send). The event loop, when its wait_for
+    bound fires, asks `dispatched()`: 0 means the venue never saw this read.
+    A client whose transport is not the gate's PacedTransport (a test
+    double, or a client the gate could not wrap) cannot be counted at the
+    transport: there, reaching the SDK call counts as sent -- the
+    conservative reading, which can only cost a request, never hide one."""
+
+    def __init__(self, timeout_s: float):
+        self.started_at = time.time()
+        self.deadline_epoch = self.started_at + max(
+            0.05, float(timeout_s) - DISPATCH_MARGIN_S)
+        self.rid = None
+        self.gated = False
+        self.started = False
+        self.reached_sdk = False
+        self.final_dispatched = None
+
+    @contextlib.contextmanager
+    def bound(self, client):
+        from .. import venue_request_gate as _grt
+
+        self.started = True
+        tr = getattr(getattr(client, "_http", None), "_transport", None)
+        self.gated = bool(_grt.PacedTransport is not None
+                          and isinstance(tr, _grt.PacedTransport))
+        prior = _grt.current_read()
+        self.rid = _grt.begin_read(slug="premap:events.list",
+                                   deadline_epoch_s=self.deadline_epoch)
+        _grt.bind_read(self.rid)
+        try:
+            yield self
+        finally:
+            _grt.bind_read(prior)
+            st = _grt.end_read(self.rid)
+            self.final_dispatched = (int(st.get("dispatched") or 0)
+                                     if st else None)
+
+    def before_send(self) -> None:
+        if time.time() >= self.deadline_epoch:
+            raise _ReadNotSent(
+                "%s: the read waited past its dispatch deadline for its turn "
+                "on the venue gap" % READ_QUEUED_PAST_BOUND)
+        self.reached_sdk = True
+
+    def dispatched(self):
+        """Requests this read sent to the venue: an int, or None when the
+        count is unavailable (read as sent)."""
+        if not self.started:
+            return 0                  # never left the executor's queue
+        if not self.gated:
+            return 1 if self.reached_sdk else 0
+        if self.final_dispatched is not None:
+            return self.final_dispatched
+        from .. import venue_request_gate as _grt
+        return _grt.attempts_for_read(self.rid) if self.rid else None
+
+
+class _PageReadFailed(Exception):
+    """A page read that did not answer after its retries. `sent` says
+    whether the LAST attempt reached the venue (a request to count); `stop`
+    is the pass's stop (REQUEST_FAILED, or WALL_TIME_BUDGET_EXHAUSTED when
+    the pass's time bound left no room for another attempt)."""
+
+    def __init__(self, kind: str, *, sent: bool, why: str, stop: str):
+        super().__init__("%s: %s" % (kind, why))
+        self.kind, self.sent, self.why, self.stop = kind, sent, why, stop
+
+
+def _read_failure_kind(exc, read: _PageRead):
+    """(kind, sent) for a page read that may be read again at the same
+    offset, or None for a failure that ends the pass as before (a 429, an
+    offset refusal, any answered failure)."""
+    from .. import venue_request_gate as _grt
+
+    if isinstance(exc, _ReadNotSent):
+        return READ_QUEUED_PAST_BOUND, False
+    if isinstance(exc, _grt.VenueGateRefusal):
+        # our own gate refused BEFORE the send: the venue saw nothing
+        return READ_REFUSED_BY_OUR_GATE, False
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return ((READ_QUEUED_PAST_BOUND, False) if read.dispatched() == 0
+                else (READ_SENT_NO_ANSWER, True))
+    try:
+        from .. import venue_http_error as _vhe
+        d = _vhe.describe(exc, endpoint="events.list")
+    except Exception:  # noqa: BLE001
+        return None
+    if d.get("http_status") is None and d.get("is_transport_failure"):
+        # sent (or at least handed to the transport) and no answer at all
+        return READ_SENT_NO_ANSWER, True
+    return None
+
+
+def _gate_hold_left() -> float:
+    """Seconds left on the process's venue not-before hold (0.0 when none)."""
+    try:
+        from .. import venue_request_gate as _grt
+        g = _grt.gate_state()
+        return float(g["seconds_left"]) if g.get("blocking") else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+async def _read_events_page(client, q: dict, walk) -> dict:
+    """ONE events.list page read for `walk`, read again AT THE SAME OFFSET
+    when it did not answer (see PAGE_READ_UNSENT_RETRIES). Returns the
+    response. Raises _PageReadFailed when it still did not answer (the
+    retries already counted on the walk; the caller counts the last attempt
+    as a request only when `sent`), or the original exception for a failure
+    that is not retried (a 429, an offset refusal, an answered failure),
+    which the caller names exactly as before.
+
+    A READ OUR GATE REFUSED DURING THE VENUE'S 429 COOLDOWN (P0-429
+    integration) is never sent: it is read again at the same offset only
+    after the cooldown (and any hold) has run out, and when the retries or
+    the pass's time bound run out the pass stops RATE_LIMITED_BY_VENUE --
+    the 429's stop, so no fallback follows it -- not REQUEST_FAILED."""
+    from .. import venue_pace
+
+    unsent_left = max(0, int(PAGE_READ_UNSENT_RETRIES))
+    resends_left = max(0, int(PAGE_READ_RESENDS))
+    retried = False
+    attempts = 0
+    while True:
+        attempts += 1
+        read = _PageRead(LIST_CALL_TIMEOUT_S)
+        try:
+            resp = await asyncio.wait_for(asyncio.to_thread(
+                _paced_events_list, client, q, read),
+                timeout=LIST_CALL_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 — classified below
+            got = _read_failure_kind(exc, read)
+            if got is None:
+                raise
+            kind, sent = got
+            # (P0-429 integration) OUR gate refused this read while the
+            # venue's 429 cooldown stands: rate-limited, never sent -- the
+            # pass stops RATE_LIMITED_BY_VENUE when the retries run out
+            cooled = (_our_gate_refused(exc) is not None
+                      and venue_pace.cooldown_left() > 0)
+            last = type(exc).__name__
+            if not isinstance(exc, _ReadNotSent):
+                refusal = getattr(exc, "refusal", None)
+                last += ": %s" % (refusal or str(exc)[:60] or "no message")
+            why = "offset %s, attempt %d (%s)" % (q.get("offset", 0),
+                                                  attempts, last)
+            if sent:
+                can = resends_left > 0 and walk.requests + 1 < walk.max_requests
+                pause = RESEND_PAUSE_S
+            else:
+                can = unsent_left > 0
+                pause = max(UNSENT_RETRY_PAUSE_S, _gate_hold_left(),
+                            venue_pace.cooldown_left())
+            if not can:
+                walk.read_failures[kind] = walk.read_failures.get(kind, 0) + 1
+                if not sent:
+                    walk.reads_unsent += 1
+                raise _PageReadFailed(kind, sent=sent, why="retries exhausted"
+                                      " at " + why,
+                                      stop=(vc.STOP_RATE_LIMITED if cooled
+                                            else vc.STOP_ERROR)) from exc
+            if walk.deadline is not None and (
+                    walk._clock() + pause >= walk.deadline):
+                walk.read_failures[kind] = walk.read_failures.get(kind, 0) + 1
+                if not sent:
+                    walk.reads_unsent += 1
+                raise _PageReadFailed(kind, sent=sent, why="no room left in "
+                                      "the pass's wall-time bound at " + why,
+                                      stop=(vc.STOP_RATE_LIMITED if cooled
+                                            else vc.STOP_WALL_TIME)) from exc
+            walk.read_retried(kind, sent=sent)
+            if sent:
+                resends_left -= 1
+            else:
+                unsent_left -= 1
+            retried = True
+            log.warning("premap: page read did not answer (%s: %s); reading "
+                        "the same offset again in %.1fs", kind, why, pause)
+            await asyncio.sleep(pause)
+            continue
+        if retried:
+            walk.read_resumed()
+        return resp
+
+
+def _sweep_read(client, call, *args):
+    """ONE catalogue sweep read through the transport, inside
+    venue_pace.wait_out_the_cooldown().
+
+    P0-429, REVIEW ROUND 2. The escalating 429 cooldown refuses an
+    undeadlined normal-lane read at once, and a WALKER stops its pass on it
+    and resumes on its own cadence. This sweep's pass is one indivisible
+    proof: one refused page and the receipt is PARTIAL, which
+    catalogue_completeness (market_plane/populate.py) reads and radar turns
+    into CATALOGUE_NOT_PROVEN_COMPLETE -- a code-controlled RED made by a
+    cooldown another walker's book 429 armed for 5 s. Before the cooldown
+    existed the same read met that 429's hard hold and WAITED it out (within
+    venue_request_gate.MAX_UNDEADLINED_WAIT_S) before it sent; the review
+    reproduced it: 0e331f05 COMPLETE after the wait, the lane's 6f47d4a4
+    PARTIAL. So the sweep's reads WAIT a cooldown that ends within the cap
+    (one budget with the hold) -- nothing is sent while it stands; the
+    transport re-checks it after the pacer's queue -- and only a cooldown
+    that outlasts the cap stops the pass: R_HOLD_EXCEEDS_UNDEADLINED_CAP,
+    read by `_our_gate_refused` as rate-limited and never sent, no fallback.
+    Runs in the worker thread (the context is the thread's own copy)."""
+    from .. import venue_pace as _vp
+
+    with _vp.wait_out_the_cooldown():
+        return _released_body(client, call, *args)
 
 
 def _paced_event_by_slug(client, slug: str):
@@ -6796,7 +7107,7 @@ def _paced_event_by_slug(client, slug: str):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.events.retrieve_by_slug, slug)
+    return _sweep_read(client, client.events.retrieve_by_slug, slug)
 
 
 def _paced_markets_list(client, q: dict):
@@ -6804,16 +7115,105 @@ def _paced_markets_list(client, q: dict):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.markets.list, q)
+    return _sweep_read(client, client.markets.list, q)
+
+
+#: the receipt note (CompletenessTally.notes, "<this>:<refusal>") counting
+#: every read OUR venue gate withheld from the sweep -- never a request
+NOTE_NOT_SENT_BY_OUR_GATE = "REQUEST_NOT_SENT_BY_OUR_VENUE_GATE"
+
+
+def _our_gate_refused(exc) -> dict | None:
+    """OUR venue gate's refusal (venue_request_gate.VenueGateRefusal),
+    described as rate-limited and NEVER SENT; None for anything else.
+
+    P0-429 (independent review). The escalating 429 cooldown refuses a
+    normal-lane read at the transport -- VENUE_429_COOLDOWN_NORMAL_READ_
+    DEFERRED -- and this sweep's reads are normal-lane reads through
+    pmus._get_client()'s PacedTransport. venue_http_error.describe() knows
+    only the venue's own 429, so the refusal used to read as a GENERIC
+    failure: the probe ladder asked every rung (each refused), stopped
+    NO_PARAMETER_VARIANT_ANSWERED -- blaming the venue's board for our own
+    deferral -- and fell into the markets.list fallback R30A forbids after
+    a 429 (degraded, title-keyed rows over good ones; real requests when
+    the cooldown ran out mid-ladder). A page, bucket or slice was labelled
+    REQUEST_FAILED and counted as a request it never sent.
+
+    Every refusal of that gate is the same kind of answer: the gate held the
+    request because the venue's limit (the cooldown, a not-before hold past
+    its cap) or the caller's deadline left no room to send it. Another rung
+    or another endpoint would meet the same gate, or be sent the instant it
+    opens. So: read like a 429 (the pass stops, RATE_LIMITED_BY_VENUE, no
+    fallback, no further detail read), but not sent -- never a request on
+    the receipt, and no circuit applied again (the 429 that armed the
+    cooldown already applied it; ours is not new evidence)."""
+    try:
+        from .. import venue_request_gate as _grt
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(exc, _grt.VenueGateRefusal):
+        return None
+    detail = getattr(exc, "detail", None)
+    detail = detail if isinstance(detail, dict) else {}
+    return {"is_rate_limited": True, "never_sent": True, "http_status": None,
+            "gate_refusal": str(getattr(exc, "refusal", None) or exc),
+            "seconds_left": detail.get("seconds_left"),
+            "retry_after_s": None, "source": "OUR_VENUE_GATE"}
+
+
+#: the receipt notes (CompletenessTally.notes) carrying what this sweep WAITED
+#: of the escalating 429 cooldown (P0-429 review round 2): the waits, and
+#: their total in whole milliseconds. Absent when it waited nothing.
+NOTE_COOLDOWN_WAITS = "VENUE_429_COOLDOWN_WAITS"
+NOTE_COOLDOWN_WAITED_MS = "VENUE_429_COOLDOWN_WAITED_MS"
+
+
+def _cooldown_counts(source: str) -> dict:
+    """This process's cooldown counts for one read source
+    (venue_pace.rate_limit_state()["by_source"][source]); {} when unread."""
+    try:
+        from .. import venue_pace as _vp
+
+        return dict((_vp.rate_limit_state().get("by_source") or {})
+                    .get(source) or {})
+    except Exception:  # noqa: BLE001 — a readback never costs the sweep
+        return {}
+
+
+def _note_cooldown_on_receipt(tally, source: str, before: dict) -> None:
+    """THE SWEEP'S OWN WAITS, ON ITS RECEIPT (P0-429 review round 2). Each
+    lane is one task with its own read source, so the difference of its
+    counts across the sweep is the sweep's: the cooldown waits its reads
+    made (NOTE_COOLDOWN_WAITS, NOTE_COOLDOWN_WAITED_MS) -- the wall time a
+    WINDOW_MAX_SECONDS / CALENDAR_MAX_SECONDS reading must be judged with --
+    beside the reads our gate withheld (NOTE_NOT_SENT_BY_OUR_GATE). A
+    production readback of venue_catalogue_receipts then shows a sweep that
+    WAITED apart from one that was refused. Never raises."""
+    try:
+        after = _cooldown_counts(source)
+        waits = int(after.get("cooldown_waits") or 0) - int(
+            (before or {}).get("cooldown_waits") or 0)
+        waited = float(after.get("cooldown_waited_s") or 0.0) - float(
+            (before or {}).get("cooldown_waited_s") or 0.0)
+        if waits > 0:
+            tally.note(NOTE_COOLDOWN_WAITS, waits)
+            tally.note(NOTE_COOLDOWN_WAITED_MS, int(round(waited * 1000.0)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _rate_limited(exc) -> dict | None:
     """The venue's 429, described (venue_http_error), or None for any other
     failure. A 429 applies the process-wide circuit with the venue's own
-    Retry-After when it sends one."""
+    Retry-After when it sends one. OUR gate's refusal is read as a 429 that
+    was never sent (`never_sent`, see _our_gate_refused): the caller stops
+    the same way and counts no request."""
     from .. import venue_http_error as _vhe
     from .. import venue_pace as _vp
 
+    ours = _our_gate_refused(exc)
+    if ours is not None:
+        return ours
     try:
         d = _vhe.describe(exc, endpoint="events.list")
     except Exception:  # noqa: BLE001
@@ -6866,6 +7266,111 @@ async def _latest_calendar_complete(pool):
     return str(rows[0]["cc"] or "").lower() == "true"
 
 
+# ── THE SWEEP'S COMPLETENESS, ON ITS OWN HEARTBEAT (P0, 2026-10-09) ──────
+#
+# premap_last carried `events`, `rows`, `pages_walked` and `truncated`, and a
+# partial sweep (03:36:35Z: mode events/partial, 476 events, 5 pages) read
+# as a number with no reference: nothing said how much of the window that
+# was, or when the window was last read whole. Every record of every lane
+# (`premap_last`, `premap_last_fast`, `premap_last_calendar`; the start,
+# every page, the summary) now carries `sweep_completeness`:
+#   status / complete     COMPLETE only for a refresh whose receipt is
+#                         catalogue_complete, on the events board (not the
+#                         degraded markets fallback), with no error. A
+#                         partial, truncated, failed or in-flight sweep is
+#                         never complete.
+#   events_walked         listings this refresh read (receipt events.seen)
+#   events_expected       the last COMPLETE refresh of the same lane's
+#                         events, with its time: the venue publishes no
+#                         total (fixtures_events_block3: TOTAL_COUNT_FIELD_
+#                         PRESENT false), so the basis is named, and with no
+#                         complete refresh on record it is None, UNMEASURED.
+#   pages, rows, requests, truncated
+#   resumed_reads / reads_unsent / reads_resent   page reads read again at
+#                         the same offset (see _read_events_page)
+#   last_complete_sweep(_at)  carried forward on every record, from the
+#                         previous record or -- the first time -- the
+#                         append-only receipts (outcome COMPLETE).
+COMPLETENESS_BASIS = ("the last COMPLETE refresh of this lane (the venue "
+                      "publishes no total count on events.list)")
+
+
+async def _prior_state(pool, key: str):
+    """The lane's previous state record, or None. Never raises."""
+    import json as _json
+
+    try:
+        val = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1 "
+            "/* premap-prior-state */", key)
+    except Exception:  # noqa: BLE001 — unreadable is absent
+        return None
+    if isinstance(val, str):
+        try:
+            val = _json.loads(val)
+        except ValueError:
+            return None
+    return val if isinstance(val, dict) else None
+
+
+async def _last_complete_sweep(pool, lane: str, key: str):
+    """The lane's last COMPLETE refresh {at, events, rows, pages, ...}, or
+    None when none is on record. Never raises."""
+    prior = await _prior_state(pool, key)
+    lc = ((prior or {}).get("sweep_completeness") or {}).get(
+        "last_complete_sweep")
+    if isinstance(lc, dict) and lc.get("at"):
+        return dict(lc)
+    try:
+        if not await _receipts_table_present(pool):
+            return None
+        rows = await pool.fetch(
+            "SELECT id, finished_at, events_seen, pages_read, requests, "
+            "sides_written FROM venue_catalogue_receipts WHERE lane = $1 "
+            "AND outcome = 'COMPLETE' ORDER BY recorded_at DESC LIMIT 1 "
+            "/* premap-last-complete */", lane)
+    except Exception:  # noqa: BLE001 — unknown is not complete
+        return None
+    if not rows:
+        return None
+    r = rows[0]
+    at = r["finished_at"]
+    return {"at": at.isoformat() if hasattr(at, "isoformat") else str(at),
+            "events": int(r["events_seen"] or 0),
+            "rows": int(r["sides_written"] or 0),
+            "pages": int(r["pages_read"] or 0),
+            "requests": int(r["requests"] or 0),
+            "receipt_id": int(r["id"]),
+            "source": "venue_catalogue_receipts"}
+
+
+def sweep_completeness(*, lane: str, status: str, complete: bool,
+                       events_walked: int, rows: int, pages: int,
+                       requests=None, truncated: bool = False,
+                       resumed_reads: int = 0, reads_unsent: int = 0,
+                       reads_resent: int = 0, stopped=None, error=None,
+                       last_complete=None) -> dict:
+    """The block every premap state record carries. Pure."""
+    exp = (last_complete or {}).get("events") if last_complete else None
+    return {
+        "lane": lane, "status": status, "complete": bool(complete),
+        "events_walked": int(events_walked or 0),
+        "events_expected": (int(exp) if exp is not None else None),
+        "events_expected_basis": (
+            "%s, finished %s" % (COMPLETENESS_BASIS, last_complete.get("at"))
+            if exp is not None else
+            "UNMEASURED: no complete refresh of this lane on record"),
+        "pages": int(pages or 0), "rows": int(rows or 0),
+        "requests": requests, "truncated": bool(truncated),
+        "resumed_reads": int(resumed_reads or 0),
+        "reads_unsent": int(reads_unsent or 0),
+        "reads_resent": int(reads_resent or 0),
+        "stopped": stopped, "error": error,
+        "last_complete_sweep": last_complete,
+        "last_complete_sweep_at": (last_complete or {}).get("at"),
+    }
+
+
 async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                   max_pages: int = MAX_EVENT_PAGES,
                   prune: bool = True,
@@ -6910,6 +7415,15 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     calendar = lane == "calendar"
     if calendar:
         windowed_only, prune = False, False
+    # P0-429: every venue claim this sweep makes (asyncio.to_thread copies
+    # the context into each read's thread) is attributed to it on the 429
+    # cooldown's readback, `venue_pace.rate_limit_state()["by_source"]` --
+    # its deferrals are premap's, never "unattributed"
+    from .. import venue_pace as _vp_src
+    _vp_src.set_read_source("premap_%s" % lane)
+    # ... and what it WAITED of the cooldown (or was refused) is on its own
+    # receipt (`_note_cooldown_on_receipt`): the counts before this sweep
+    cooldown_before = _cooldown_counts("premap_%s" % lane)
     pool = await get_pool()
     if not calendar:
         # the calendar lane runs right after a full sweep that ensured the
@@ -6929,15 +7443,35 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     walks: dict = {}
     window_variant_bounded = False
     probe_rate_limited = False
+    window_not_sent = False
+    pages_read = [0]
     read_events: set = set()
     detail_left = [max(0, int(FAST_DETAIL_READS_PER_REFRESH if lane == "fast"
                               else DETAIL_READS_PER_REFRESH))]
+    # the lane's last complete refresh: the reference this one is measured
+    # against, carried on every record it writes (see sweep_completeness)
+    last_complete = await _last_complete_sweep(pool, lane, state_key)
+
+    def _progress_completeness() -> dict:
+        """The sweep in flight: never complete."""
+        walks_now = list(walks.values())
+        return sweep_completeness(
+            lane=lane, status="IN_PROGRESS", complete=False,
+            events_walked=tally.events_seen, rows=seen_rows,
+            pages=pages_read[0],
+            resumed_reads=sum(w.resumed_reads for w in walks_now),
+            reads_unsent=sum(w.reads_unsent for w in walks_now),
+            reads_resent=sum(w.reads_resent for w in walks_now),
+            last_complete=last_complete)
+
     # A sweep that never records is indistinguishable from one that
     # never STARTED (2026-08-24: rows=0 last=none read three probes in a
     # row) — record the start, then progress every page, so a hang shows
     # exactly where it hangs.
     await _record_last(pool, {"mode": "starting", "events": 0, "rows": 0,
-                              "lane": lane}, state_key)
+                              "lane": lane,
+                              "sweep_completeness": _progress_completeness()},
+                       state_key)
     from datetime import datetime as _dt, timedelta as _td
     from datetime import timezone as _tz
 
@@ -6953,6 +7487,21 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     class _EventFailed(Exception):
         """One event's rows could not be built or written; its tally is
         already finished when this is raised."""
+
+    #: whether the window probe's ladder ended on a read OUR venue gate
+    #: withheld (P0-429 review); every such read is counted on the receipt
+    #: note NOTE_NOT_SENT_BY_OUR_GATE
+    gate_withheld = {"probe": False}
+
+    def _withheld(rl) -> bool:
+        """True when `rl` (from _rate_limited) is OUR venue gate's refusal:
+        nothing was sent, so no request is counted; the read is noted by its
+        refusal's name on the receipt (NOTE_NOT_SENT_BY_OUR_GATE)."""
+        if not (rl or {}).get("never_sent"):
+            return False
+        tally.note("%s:%s" % (NOTE_NOT_SENT_BY_OUR_GATE,
+                              rl.get("gate_refusal")))
+        return True
 
     async def _detail_markets(ev, ev_slug, inline):
         """THE PER-EVENT CAP, REPAIRED. When the venue counts more markets
@@ -6972,8 +7521,16 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 _paced_event_by_slug, client, ev_slug),
                 timeout=LIST_CALL_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 — counted, the inline list stands
-            tally.detail_read("failed")
-            if _rate_limited(exc):
+            rl = _rate_limited(exc)
+            if _withheld(rl):
+                # OUR gate withheld it (the 429 cooldown): never sent, so
+                # not a request and not a failed read -- skipped, the reason
+                # on the receipt's note
+                tally.extra_request("event_detail", -1)
+                tally.detail_read("skipped_not_sent")
+            else:
+                tally.detail_read("failed")
+            if rl:
                 detail_left[0] = 0       # the limiter said no: no more detail reads
             return inline, None
         tally.detail_read("read")
@@ -7194,6 +7751,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         nonlocal seen_rows
         walks[pass_name] = walk
         fresh = walk.first(first_page.pop()) if first_page else None
+        pages_read[0] += walk.pages
         page_no = 0
         consecutive_failures = 0
         while True:
@@ -7226,26 +7784,38 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 await _record_last(pool, {"mode": "events/%s/page%d"
                                           % (pass_name.lower(), page_no),
                                           "events": events, "rows": seen_rows,
-                                          "lane": lane},
+                                          "lane": lane,
+                                          "sweep_completeness":
+                                              _progress_completeness()},
                                    state_key)
             off = walk.next_offset()
             if off is None:
                 break
             page_no += 1
             try:
-                resp = await asyncio.wait_for(asyncio.to_thread(
-                    _paced_events_list, client,
-                    {"limit": PAGE_LIMIT, "offset": off, **variant}),
-                    timeout=LIST_CALL_TIMEOUT_S)
+                # a read never sent, or sent and not answered, is read
+                # again AT THIS OFFSET (_read_events_page) -- the walk
+                # resumes where it stopped instead of ending the pass
+                resp = await _read_events_page(
+                    client, {"limit": PAGE_LIMIT, "offset": off, **variant},
+                    walk)
+            except _PageReadFailed as exc:
+                if exc.sent:
+                    walk.requests += 1    # the last attempt was sent: counted
+                walk.fail(exc.stop, str(exc))
+                break
             except Exception as exc:  # noqa: BLE001 — named on the walk
                 rl = _rate_limited(exc)
-                walk.requests += 1        # it was sent (and paced): counted
+                if not _withheld(rl):
+                    walk.requests += 1    # it was sent (and paced): counted
                 walk.fail(vc.STOP_RATE_LIMITED if rl else
                           vc.STOP_OFFSET_CEILING if _offset_refused(exc)
                           else vc.STOP_ERROR,
                           "%s: %s" % (type(exc).__name__, str(exc)[:160]))
                 break
+            p_before = walk.pages
             fresh = walk.accept(_items(resp, "events"))
+            pages_read[0] += walk.pages - p_before
             resp = None           # only the fresh events are read from here on
         return walk
 
@@ -7314,16 +7884,39 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
             variant, first = None, None
             for v in variants:
                 try:
-                    probe = await asyncio.wait_for(asyncio.to_thread(
-                        _paced_events_list, client, {"limit": PAGE_LIMIT, **v}),
-                        timeout=LIST_CALL_TIMEOUT_S)
+                    # the same read as every page: re-read when it was never
+                    # sent or sent and not answered (_read_events_page)
+                    probe = await _read_events_page(
+                        client, {"limit": PAGE_LIMIT, **v}, wwalk)
+                except _PageReadFailed as exc:
+                    if exc.sent:
+                        # sent and never answered, retries spent: a failed
+                        # rung like any other (counted), the next rung asked
+                        wwalk.probe_failed()
+                        continue
+                    # NEVER SENT: the venue did not reject this rung -- the
+                    # process's own gate never let it out. Another rung is
+                    # not an answer to that (and the unbounded rungs lead
+                    # with the stale catalogue); the ladder stops, named,
+                    # and the sweep takes no fallback.
+                    window_not_sent = True
+                    wwalk.fail(exc.stop, str(exc))
+                    break
                 except Exception as exc:  # noqa: BLE001 — next variant
                     # every rung that was sent is a request the receipt
-                    # counts (it claimed a venue_pace gap)
-                    wwalk.probe_failed()
-                    if _rate_limited(exc):
+                    # counts (it claimed a venue_pace gap); a rung OUR gate
+                    # withheld (the 429 cooldown) was never sent: not one
+                    rl = _rate_limited(exc)
+                    if _withheld(rl):
+                        gate_withheld["probe"] = True
+                    else:
+                        wwalk.probe_failed()
+                    if rl:
                         # a 429 on the probe ends the ladder: the next rung is
-                        # another request into a limiter that just said no
+                        # another request into a limiter that just said no --
+                        # and so does OUR gate's refusal: the next rung meets
+                        # the same gate, and the markets fallback is not an
+                        # answer to it (P0-429 review)
                         probe_rate_limited = True
                         wwalk.fail(vc.STOP_RATE_LIMITED,
                                    "%s: %s" % (type(exc).__name__,
@@ -7350,6 +7943,8 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 raise RuntimeError(
                     "the venue rate-limited the events.list probe (429)"
                     if probe_rate_limited else
+                    (wwalk.error or READ_QUEUED_PAST_BOUND)
+                    if window_not_sent else
                     "no events.list variant returned live inline markets")
             window_variant_bounded = variant is _window
             # the probe page goes to the walk in a holder it empties: nothing
@@ -7393,6 +7988,12 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 # answered "too many requests" gets no further request from
                 # this sweep -- the venue_pace circuit is already applied and
                 # the next cycle retries on the gated rate.
+                #
+                # NOR IS OUR OWN GATE'S 429 COOLDOWN (P0-429 review): the
+                # venue was never asked, so the error names the refusal --
+                # never "the venue rate-limited the probe"
+                if gate_withheld["probe"] and wwalk.error:
+                    err = "NOT_SENT: %s" % wwalk.error
                 log.warning("premap: the venue rate-limited the sweep (%s); "
                             "no fallback, next cycle", err)
                 mode, events_err = "events/rate_limited", err
@@ -7403,6 +8004,14 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                 log.warning("premap: catalogue writes failing (%s); no "
                             "fallback, next cycle", err)
                 mode, events_err = "events/write_failed", err
+            elif window_not_sent:
+                # Nor is a read the process's own venue gate never let out
+                # (P0 2026-10-09): the board did not fail to answer, it was
+                # never asked. The markets fallback would be one more request
+                # into the same congested gate, writing worse rows.
+                log.warning("premap: the window probe was never sent (%s); "
+                            "no fallback, next cycle", err)
+                mode, events_err = "events/not_sent", err
             elif windowed_only:
                 # The fast lane never runs the markets fallback either. Its
                 # rows are keyed off each market's own question — a
@@ -7434,7 +8043,10 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                              "active": True}),
                             timeout=LIST_CALL_TIMEOUT_S)
                     except Exception as exc_page:  # noqa: BLE001 — named on the pass
-                        fb.fail(vc.STOP_RATE_LIMITED if _rate_limited(exc_page)
+                        rl_page = _rate_limited(exc_page)
+                        if _withheld(rl_page):
+                            fb.requests -= 1  # OUR gate withheld it: never sent
+                        fb.fail(vc.STOP_RATE_LIMITED if rl_page
                                 else vc.STOP_ERROR,
                                 "%s: %s" % (type(exc_page).__name__,
                                             str(exc_page)[:160]))
@@ -7717,6 +8329,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     # named per pass. Each lane has its own record, so `premap_last.truncated`
     # stays about the window (the calendar lane's truncation is on
     # `premap_last_calendar`, never mixed into it).
+    _note_cooldown_on_receipt(tally, "premap_%s" % lane, cooldown_before)
     rec = tally.receipt()
     truncated_passes = sorted(p for p, r in rec["passes"].items()
                               if r.get("truncated"))
@@ -7729,6 +8342,44 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
         lane == "full" and wwalk is not None and window_variant_bounded
         and wwalk.stopped in (vc.NATURAL_ENDS | {vc.STOP_BUDGET,
                                                  vc.STOP_OFFSET_CEILING}))
+    # THE SWEEP'S COMPLETENESS (P0 2026-10-09): complete only for a refresh
+    # whose receipt is catalogue_complete, read off the events board (never
+    # the degraded markets fallback), with no error -- a partial sweep is
+    # never reported complete. The reference is the previous complete one.
+    def _passes_sum(k):
+        return sum(int((p or {}).get(k) or 0) for p in rec["passes"].values())
+
+    complete_now = bool(rec["catalogue_complete"] and err is None
+                        and mode in ("events", "calendar"))
+    if complete_now:
+        new_last = {"at": _dt.now(_tz.utc).isoformat(timespec="seconds"),
+                    "events": int(rec["events"]["seen"]),
+                    "rows": int(seen_rows), "pages": int(rec["pages_read"]),
+                    "requests": int(rec["requests"]),
+                    "source": "this refresh"}
+    else:
+        new_last = last_complete
+    stops = {p: (r or {}).get("stopped") for p, r in rec["passes"].items()}
+    completeness = sweep_completeness(
+        lane=lane,
+        status=("COMPLETE" if complete_now else
+                rec["outcome"] if rec["outcome"] != "COMPLETE" else "PARTIAL"),
+        complete=complete_now, events_walked=rec["events"]["seen"],
+        rows=seen_rows, pages=rec["pages_read"], requests=rec["requests"],
+        truncated=_truncated, resumed_reads=_passes_sum("resumed_reads"),
+        reads_unsent=_passes_sum("reads_unsent"),
+        reads_resent=_passes_sum("reads_resent"),
+        stopped=(stops.get(window_pass) if not calendar else stops),
+        error=err, last_complete=new_last)
+    # the reference this refresh was measured against is the PREVIOUS
+    # complete one, not itself
+    completeness["events_expected"] = (
+        int(last_complete["events"]) if last_complete
+        and last_complete.get("events") is not None else None)
+    completeness["events_expected_basis"] = (
+        "%s, finished %s" % (COMPLETENESS_BASIS, last_complete.get("at"))
+        if completeness["events_expected"] is not None else
+        "UNMEASURED: no complete refresh of this lane on record")
     summary = {"mode": mode, "events": events, "rows": seen_rows,
                "err": err, "events_err": events_err,
                "lane": lane,
@@ -7750,12 +8401,26 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                "calendar_eligible": calendar_eligible,
                "duration_s": round(time.monotonic() - t0, 3),
                "side_keys": guard.receipt(),
+               "sweep_completeness": completeness,
                "completeness": (rec if lane != "fast" else tally.compact())}
     summary["receipt_history"] = await _append_receipt(
         pool, lane=lane, started_at=started_at, tally=tally, summary=summary)
     await _record_last(pool, summary, state_key)
     log.info("premap refresh: %s", {k: v for k, v in summary.items()
-                                    if k not in ("completeness",)})
+                                    if k not in ("completeness",
+                                                 "sweep_completeness")})
+    # one short line a log search can read whole (the summary line above is
+    # cut by the log viewer long before its end)
+    log.info("premap sweep completeness: lane=%s status=%s complete=%s "
+             "events_walked=%s events_expected=%s pages=%s rows=%s "
+             "truncated=%s resumed_reads=%s reads_unsent=%s reads_resent=%s "
+             "last_complete_sweep_at=%s", lane, completeness["status"],
+             completeness["complete"], completeness["events_walked"],
+             completeness["events_expected"], completeness["pages"],
+             completeness["rows"], completeness["truncated"],
+             completeness["resumed_reads"], completeness["reads_unsent"],
+             completeness["reads_resent"],
+             completeness["last_complete_sweep_at"])
     return summary
 
 

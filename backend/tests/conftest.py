@@ -186,6 +186,31 @@ def _clear_module_caches():
 
 
 @pytest.fixture(autouse=True)
+def _venue_429_cooldown_does_not_leak():
+    """THE ESCALATING 429 COOLDOWN (P0-429) is process-wide module state:
+    one test whose mock venue answers 429 arms it for 5-120 s of REAL
+    monotonic time, and every later test that reads through the transport
+    in that window would be refused by name for a reason unrelated to what
+    it asserts. Cleared before and after, like the caches above -- and the
+    data-api throttle's per-host cooldown with it, when that module is
+    already imported."""
+    import sys
+
+    from sportsassets import venue_pace as _vp
+
+    def _clear() -> None:
+        _vp.reset_rate_limit_state()
+        rl = sys.modules.get("sportsassets.ratelimit")
+        thr = getattr(rl, "_throttle", None) if rl is not None else None
+        if thr is not None and hasattr(thr, "reset_cooldown"):
+            thr.reset_cooldown()
+
+    _clear()
+    yield
+    _clear()
+
+
+@pytest.fixture(autouse=True)
 def _clear_kalshi_board_cache():
     """The Kalshi board cache (2026-09-05) is module state on the API
     app: 20 s TTL, keyed by series set, holding an asyncio.Lock and
@@ -576,6 +601,39 @@ def _profitability_bind_seeded(request, monkeypatch):
         return {"account_id": account_id, "at": now, "quarantined": [],
                 "strategies": {}, "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
     monkeypatch.setattr(PSTACK, "evaluate_quarantine", _no_quarantine)
+
+
+@pytest.fixture(autouse=True)
+def _economic_controls_seeded(request, monkeypatch):
+    """THE PROFITABILITY BIND'S CONTROL INPUTS (control 25, rc6 econ-
+    binding): every input the bind reads is required -- the contract
+    identity, a probability in [0, 1], the resolved settlement verdict, the
+    probability's and the book's observation instants, the four learned
+    models fitted within the hour -- and the ledger admits no ENTRY whose
+    LEDGER evaluation and counterfactual variants were not recorded.
+
+    Same stance as the gates above. Both fail CLOSED, which is right for the
+    paper book and useless here: the proofs written before them build bare
+    evidence with no carried stamps or settlement verdict and fit at most a
+    calibration, and one (the acceptance read) stands in its own capital
+    authority, so every one would refuse at this gate and pass while proving
+    nothing about what it exists to check. Seeded here: `control_inputs`
+    refuses nothing and `entry_record_refusal` finds the record. A module
+    that declares `ECONOMIC_CONTROLS_ENFORCED = True` (tests/test_economic_
+    controls_binding.py) runs the production functions."""
+    if getattr(request.module, "ECONOMIC_CONTROLS_ENFORCED", False):
+        return
+    from sportsassets import bettor_paper_profitability_bind as PBIND
+
+    def _inputs(**kw):
+        return {"refusal": None, "controls": {},
+                "seeded": "TEST_SUITE_SEEDED_PASSTHROUGH"}
+
+    async def _recorded(conn, o, *, at):
+        return None
+
+    monkeypatch.setattr(PBIND, "control_inputs", _inputs)
+    monkeypatch.setattr(PBIND, "entry_record_refusal", _recorded)
 
 
 # BETTOR LIVE GAME STATE V1 (migration 316) ships its four test modules for

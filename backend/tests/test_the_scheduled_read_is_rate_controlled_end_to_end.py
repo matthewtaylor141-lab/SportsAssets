@@ -599,10 +599,13 @@ def test_a_restart_restores_the_hold_from_storage_and_still_refuses(
     assert VCS.pending() is None, "a successful write must clear the queue"
     assert stored, "nothing reached storage"
 
-    # 3 · the process dies. These globals are the whole of the old state.
+    # 3 · the process dies. These globals are the whole of the old state
+    #     -- the escalating 429 cooldown (P0-429) is process state too, and
+    #     dies with the process like the other two.
     GRT.clear_hold()
     VP._penalty_until = 0.0
     VP._penalty_until_epoch = 0.0
+    VP.reset_rate_limit_state()
     assert GRT.gate_state()["blocking"] is False
     assert VP.penalty_left() == 0.0
 

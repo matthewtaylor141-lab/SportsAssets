@@ -247,7 +247,24 @@ def evaluate(seeds, *, scenarios=None, fee_fn=None) -> dict:
 
     ONE EVIDENCE SET, ONE ASSIGNED INVENTORY, MANY POLICIES. Nothing here
     re-selects which positions a policy gets; that is the whole design.
+
+    The work is `evaluate_steps`, run here to its end in one call.
     """
+    steps = evaluate_steps(seeds, scenarios=scenarios, fee_fn=fee_fn)
+    while True:
+        try:
+            next(steps)
+        except StopIteration as done:
+            return done.value
+
+
+def evaluate_steps(seeds, *, scenarios=None, fee_fn=None):
+    """`evaluate` as a generator: it yields after each replay of a seed and
+    returns what `evaluate` returns. (RC6.1 api-stall2) The learn loop runs
+    it through the API's CPU lane in slices (cpu_lane.run_steps), so the
+    whole replay -- seeds x arms x scenarios, several seconds -- never holds
+    the lane, or anything queued behind it, in one job. A yield computes
+    nothing: it only marks where a slice may end."""
     scen = tuple(scenarios or gate_mod.SCENARIOS)
     arms = [{"name": "CHAMPION", "params": {}}] + [dict(c) for c in
                                                    CHALLENGERS]
@@ -260,6 +277,7 @@ def evaluate(seeds, *, scenarios=None, fee_fn=None) -> dict:
                 out = runner.run(queue_share=qs, fee_fn=fee_fn,
                                  policy_params=arm["params"] or None,
                                  **seed)
+                yield
                 if not (out.get("steps", {}).get("SEED", {}) or {}).get("ok"):
                     # A refused seed is refused for EVERY arm identically
                     # (the refusal is about our inventory record, not the

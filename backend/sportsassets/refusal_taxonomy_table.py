@@ -2251,6 +2251,9 @@ ACTIVE_REFRESH_STREAM = {
     "ACTIVE_REFRESH_WAITING_TO_RETRY_A_FAILED_READ": (S, FRESH, "INGESTION"),
     "ACTIVE_REFRESH_OFF_BY_SWITCH": (S, FRESH, "INGESTION"),
     "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED": (S, FRESH, "INGESTION"),
+    # (RC6.2) not re-read: the member's newest book read stated a TERMINAL
+    # market state -- ACTIVE_REFRESH_MARKET_NOT_OPEN's row is the precedent
+    "ACTIVE_REFRESH_HELD_MARKET_STATE_TERMINAL": (S, DATA, "INGESTION"),
 }
 for _k, _v in ACTIVE_REFRESH_STREAM.items():
     TABLE.setdefault(_k, _v)
@@ -2281,6 +2284,39 @@ SNAPSHOT_REFRESH_STREAM = {
         S, DATA, "INGESTION"),
 }
 for _k, _v in SNAPSHOT_REFRESH_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
+#: (RC6 identity lane) ACTIVE POSITION TRUTH. The mirror shadow planned on a
+#: reading that is not the venue's (the venue walk's credential class -- a
+#: funded PMUS retail Ed25519 key -- is not in the slot: an owner credential
+#: gap surfaced as a capability gap, KALSHI_KEY_*'s rows are the precedent);
+#: an ACTIVE position of our own whose market identity is unknown (the
+#: analytics persist's dead-letter census: a mapping gap); and a reconciler
+#: walk that stopped short of the previous run (fills no run swept: the
+#: sweep's own plumbing). SOFTWARE, never EXTERNAL.
+IDENTITY_TRUTH_STREAM = {
+    "MIRROR_SHADOW_POSITIONS_NOT_VENUE_CONFIRMED_CREDENTIAL_CLASS_UNAVAILABLE": (
+        S, CAP, "INGESTION"),
+    "OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY": (S, MAP, "INGESTION"),
+    "RECONCILER_WALK_DID_NOT_REACH_THE_PREVIOUS_RUN": (S, FRESH, "INGESTION"),
+    # a mirror-shadow tick that made no positions reading before ANY reading
+    # in its process (backoff / switched off): no evidence -- like no source
+    "MIRROR_SHADOW_NO_POSITIONS_READING_IN_THIS_PROCESS": (S, DATA, "INGESTION"),
+}
+for _k, _v in IDENTITY_TRUTH_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
+#: (P0-429) THE ESCALATING 429 COOLDOWN (venue_pace /
+#: venue_request_gate.cooldown_check): a normal-lane measurement read not
+#: sent because the venue's 429 cooldown is in force. The venue's 429 is the
+#: venue's word, but walking into it -- and choosing not to send while it
+#: stands -- is ours: SOFTWARE / FRESHNESS_PLUMBING at the venue-book stage,
+#: exactly the row VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP already
+#: has, never ECONOMIC and never EXTERNAL.
+VENUE_429_COOLDOWN_STREAM = {
+    "VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED": (S, FRESH, "VENUE_BOOK"),
+}
+for _k, _v in VENUE_429_COOLDOWN_STREAM.items():
     TABLE.setdefault(_k, _v)
 
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
@@ -2691,3 +2727,31 @@ NOT_REFUSAL = {
         "not read a held position's record (counted as incomplete, never "
         "complete) -- a readback state, never a trading refusal",
 }
+
+#: (rc6 econ-binding) THE PROFITABILITY BIND'S CONTROL INPUTS (bettor_paper_
+#: profitability_bind control 25, at the decision and under the ledger's
+#: account lock): a learned model absent or fitted longer ago than its bound,
+#: a missing probability / book observation instant, a settlement verdict not
+#: resolved at the bind, an incomplete contract identity or a probability
+#: outside [0, 1] is a MISSING / UNPROVEN INPUT the decision chain failed to
+#: supply (SOFTWARE), never an economic verdict; an ENTRY whose evaluation and
+#: counterfactual variants were not recorded is an integrity failure of the
+#: record (SOFTWARE / INTEGRITY, at the order).
+ECON_BINDING_STREAM = {
+    "CASH_WAIT_CALIBRATION_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_EXECUTION_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_RESIDUAL_FEEDBACK_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_MANAGEMENT_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_OBSERVATION_TIME_MISSING":
+        (S, FRESH, "RISK_ADMISSION"),
+    "CASH_WAIT_BOOK_OBSERVATION_TIME_MISSING": (S, FRESH, "RISK_ADMISSION"),
+    "CASH_WAIT_SETTLEMENT_TERMS_NOT_RESOLVED_AT_BIND":
+        (S, SET, "RISK_ADMISSION"),
+    "CASH_WAIT_CONTRACT_IDENTITY_INCOMPLETE_AT_BIND":
+        (S, MAP, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_NOT_IN_ZERO_ONE": (S, INT, "RISK_ADMISSION"),
+    "ENTRY_EVALUATION_OR_COUNTERFACTUAL_VARIANTS_NOT_RECORDED":
+        (S, INT, "ORDER"),
+}
+for _k, _v in ECON_BINDING_STREAM.items():
+    TABLE.setdefault(_k, _v)

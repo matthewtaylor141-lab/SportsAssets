@@ -372,24 +372,67 @@ def new_fills(fill_rows: list, *, known_trade_ids: set, order_ids: set) -> list:
     return out
 
 
-# ── cancel (kalshi.py:995-1013) ──────────────────────────────────────
+# ── cancel (docs.kalshi.com api-reference/orders/cancel-order-v2) ───
+#
+# Quoted from the current page (fetched 2026-10-09): the operation is
+# "delete /portfolio/events/orders/{order_id}" on base
+# https://external-api.kalshi.com/trade-api/v2; 200 "Order cancelled
+# successfully"; the CancelOrderV2Response returns "order_id,
+# client_order_id, reduced_by" "rather than a full order object", where
+# reduced_by is a fixed-point contract count string: "Number of contracts
+# that were canceled (i.e. the remaining count at time of cancellation)";
+# required fields order_id, reduced_by and ts_ms. The legacy
+# DELETE /portfolio/orders/{order_id} (kalshi.py:995-1013) is not on it.
+
+CANCEL_PATH = KV.CANCEL_PATH
+
 
 def cancel_request(order_id: str) -> dict:
     if not order_id:
         raise ValueError("order_id required")
     return {"method": "DELETE",
-            "path": KV.API_PREFIX + "/portfolio/orders/%s" % order_id}
+            "path": KV.API_PREFIX + CANCEL_PATH % order_id}
 
 
-def parse_cancel(resp) -> dict:
+def _reduced_by(v):
+    """The documented fixed-point count string -> Decimal >= 0, or None."""
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        d = Decimal(str(v).strip())
+    except Exception:                                           # noqa: BLE001
+        return None
+    return d if d.is_finite() and d >= 0 else None
+
+
+def parse_cancel(resp, order_id: str | None = None) -> dict:
     """CANCELLED (confirmed dead, safe to re-plan), GONE (404: already
     filled or expired -- do NOT repost until the fills read has spoken),
     ERROR (ambiguous: treat as possibly live, never repost on top), REFUSED
-    (nothing sent)."""
+    (nothing sent).
+
+    A 200 carries the V2 body: `reduced_by` (the contracts the cancel
+    removed, i.e. the remaining count at cancellation) is parsed as a
+    Decimal and returned with the venue's order_id / client_order_id /
+    ts_ms. A 200 whose reduced_by is missing or unreadable is still a
+    confirmed cancel but is flagged `reduced_by_unreadable` (never read as
+    zero); a body naming a DIFFERENT order than the one cancelled is
+    ERROR (never treated as our cancel)."""
     if isinstance(resp, KV.Refusal):
         return {"outcome": "REFUSED", "code": resp.code, "repost_safe": False}
     if resp.status in (200, 204):
-        return {"outcome": "CANCELLED", "repost_safe": True}
+        body = resp.body if isinstance(resp.body, dict) else {}
+        got_id = body.get("order_id")
+        if order_id and got_id and str(got_id) != str(order_id):
+            return {"outcome": "ERROR", "repost_safe": False,
+                    "status": resp.status, "why": "CANCEL_ACK_FOR_ANOTHER_ORDER",
+                    "order_id": got_id}
+        rb = _reduced_by(body.get("reduced_by"))
+        return {"outcome": "CANCELLED", "repost_safe": True,
+                "reduced_by": rb, "reduced_by_unreadable": rb is None,
+                "order_id": got_id or order_id,
+                "client_order_id": body.get("client_order_id"),
+                "ts_ms": body.get("ts_ms")}
     if resp.status == 404:
         return {"outcome": "GONE", "repost_safe": False}
     return {"outcome": "ERROR", "repost_safe": False, "status": resp.status}

@@ -70,6 +70,7 @@ from .. import shadow_experiments as xp
 from .. import shadow_identity as ident
 from .. import shadow_identity_resolver as xident
 from .. import shadow_l2 as l2
+from .. import venue_pace as VP
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
 from .loop_contract import LOOP_DISABLED
@@ -279,7 +280,7 @@ def _read_quote(slug: str) -> dict:
         return pmus.bbo_read(pmus._get_client(), slug)
     except Exception as exc:                                   # noqa: BLE001
         return {"bid": None, "ask": None, "state": None,
-                "error": type(exc).__name__}
+                "error": getattr(exc, "refusal", None) or type(exc).__name__}
 
 
 def observation_of(subject, quote, at, *, cadence_s=int(TICK_S)) -> dict:
@@ -334,13 +335,25 @@ async def sample_focus(pool, *, now=None, size=FOCUS_SIZE) -> dict:
         return stats
 
     misses = 0
-    for subject in subjects:
+    for i, subject in enumerate(subjects):
+        # THE VENUE'S 429 COOLDOWN STOPS THE PASS (P0-429): no read is
+        # sent while it stands; the focus markets not read are counted and
+        # are read on a later tick
+        _cd = VP.normal_read_deferral()
+        if _cd is not None:
+            stats["skippedCooldown"] = len(subjects) - i
+            stats["status"] = "venue_429_cooldown"
+            stats["cooldown"] = _cd
+            VP.note_walker_skipped(len(subjects) - i)
+            break
         stats["focus"] += 1
         stats["held"] += 1 if subject.get("held") else 0
         quote = await asyncio.to_thread(_read_quote, subject["symbol"])
         obs = observation_of(subject, quote, _now())
         if not obs["readable"]:
-            misses += 1
+            # our cooldown's deferral is not a venue miss (P0-429)
+            if quote.get("error") != VP.R_VENUE_429_COOLDOWN_READ_DEFERRED:
+                misses += 1
             stats["unreadable"] += 1
         if await xstore.record_observation(pool, obs):
             stats["written"] += 1
@@ -990,6 +1003,9 @@ async def run() -> None:
                             dict(boot, mismatched=mismatched))
             await asyncio.sleep(BACKOFF_S)
 
+    # every venue claim this loop makes is attributed to it on the 429
+    # cooldown's readback (P0-429)
+    VP.set_read_source("shadow_experimental")
     while True:
         started = time.monotonic()
         try:
@@ -1000,6 +1016,8 @@ async def run() -> None:
                      "tickError": "%s: %s" % (type(exc).__name__, exc)}
         stats.update(boot)
         stats["tickS"] = round(time.monotonic() - started, 3)
+        # the process's 429 cooldown on this loop's beat (P0-429)
+        stats["venueRateLimit"] = VP.rate_limit_state()
         try:
             await heartbeat("shadow_experimental",
                             str(stats.get("status") or "ok"), stats)

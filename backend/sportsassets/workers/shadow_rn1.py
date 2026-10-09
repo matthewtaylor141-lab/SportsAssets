@@ -44,6 +44,7 @@ from .. import pmus
 from .. import shadow_policy as pol
 from .. import shadow_rn1
 from .. import shadow_store as store
+from .. import venue_pace as VP
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
 from .loop_contract import LOOP_DISABLED
@@ -111,7 +112,7 @@ def _read_quote(slug: str) -> dict:
         return pmus.bbo_read(pmus._get_client(), slug)
     except Exception as exc:                                   # noqa: BLE001
         return {"bid": None, "ask": None, "state": None,
-                "error": type(exc).__name__}
+                "error": getattr(exc, "refusal", None) or type(exc).__name__}
 
 
 def _market_state(observation: dict, slug, quote, captured_at) -> dict:
@@ -163,12 +164,30 @@ async def tick(pool) -> dict:
         pool, within_s=DECISION_WINDOW_S, limit=MAX_READS_PER_TICK)
     stats["pending"] = len(pending)
     misses = 0
-    for observation in pending:
+    for i, observation in enumerate(pending):
+        # THE VENUE'S 429 COOLDOWN STOPS THE PASS (P0-429): the pending
+        # observations not read stay pending -- they are decided on a later
+        # tick inside DECISION_WINDOW_S -- and are counted, never decided
+        # against a read we chose not to send
+        _cd = VP.normal_read_deferral()
+        if _cd is not None:
+            stats["skippedCooldown"] = len(pending) - i
+            stats["status"] = "venue_429_cooldown"
+            stats["cooldown"] = _cd
+            VP.note_walker_skipped(len(pending) - i)
+            break
         slug, _long_asset = await _us_slug(pool, observation.get("marketId"))
         quote = {"bid": None, "ask": None, "state": None, "error": None}
         if slug is not None:
             quote = await asyncio.to_thread(_read_quote, slug)
             stats["reads"] += 1
+            if quote.get("error") == VP.R_VENUE_429_COOLDOWN_READ_DEFERRED:
+                # armed between the check above and the send: nothing was
+                # sent, so nothing is decided on it -- it stays pending
+                stats["skippedCooldown"] = len(pending) - i
+                stats["status"] = "venue_429_cooldown"
+                VP.note_walker_skipped(len(pending) - i)
+                break
         captured_at = datetime.now(tz=timezone.utc)
         state = _market_state(observation, slug, quote, captured_at)
         if not state["readable"]:
@@ -215,6 +234,9 @@ async def run() -> None:
             await heartbeat("shadow_rn1", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
+    # every venue claim this loop makes is attributed to it on the 429
+    # cooldown's readback (P0-429)
+    VP.set_read_source("shadow_rn1")
     while True:
         started = time.monotonic()
         try:
@@ -224,6 +246,8 @@ async def run() -> None:
             stats = {"status": "tick_failed"}
         stats.update(boot)
         stats["tickS"] = round(time.monotonic() - started, 3)
+        # the process's 429 cooldown on this loop's beat (P0-429)
+        stats["venueRateLimit"] = VP.rate_limit_state()
         try:
             await heartbeat("shadow_rn1", str(stats.get("status") or "ok"),
                             stats)
