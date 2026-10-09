@@ -1263,6 +1263,11 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
         max_per_stream=max_per))
     rad["freshness"] = {k: (v.get("rate") if isinstance(v, dict) else None)
                         for k, v in freshness.items()}
+    # (RC6 D1) the frozen-window sampler's newest sample (counts, the
+    # window's membership hash); the window itself is read by
+    # completion.read (market_data.freshness_window)
+    freshness["window_last_sample"] = dict(
+        (state.get("freshness_window") or {}).get("last") or {})
     return {
         "computed_at": now, "version": "UNIVERSAL_MARKET_PLANE_SNAPSHOT_V1",
         "authority": R.AUTHORITY,

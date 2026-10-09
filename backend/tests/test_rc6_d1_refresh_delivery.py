@@ -303,6 +303,12 @@ def test_the_freshness_task_keeps_reading_while_a_slow_pass_runs(
         monkeypatch.setenv("UMP_SNAPSHOT_REFRESH", "off")
         try:
             await c.execute("UPDATE market_plane_registry SET active=false")
+            # no other test's working PAPER order (each is an eligible
+            # WORKING_ORDER member of the freshness window)
+            await c.execute(
+                "UPDATE paper_orders SET state = 'CANCELED', terminal_at = "
+                " now(), terminal_reason = 'TEST_ISOLATION' "
+                " WHERE state = ANY($1::text[])", list(AR.OPEN_ORDER_STATES))
             await c.execute("DELETE FROM us_premap")
             for s in QUIET:
                 await c.execute(
@@ -333,6 +339,11 @@ def test_the_freshness_task_keeps_reading_while_a_slow_pass_runs(
     pu = snaps[0]["freshness"]["priority_universe"]
     assert snaps[0]["computed_at"] - pu["verified_at"] >= 1.2
     assert pu["verified_age_s"] >= 1.2
+    # the frozen-window sampler's newest sample rides the snapshot too
+    wl = snaps[0]["freshness"]["window_last_sample"]
+    assert isinstance(wl, dict)
+    if wl:
+        assert wl["n"] == 6 and len(wl["membership_hash"]) == 64
     assert sorted(s for _n, s in H._Client.reads) == sorted(QUIET)
     assert all(n == "book" for n, _s in H._Client.reads)
     # the task said what it did
