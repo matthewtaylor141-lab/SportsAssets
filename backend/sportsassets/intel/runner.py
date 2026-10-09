@@ -129,12 +129,16 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
                               "records_read": r["records_read"]})
 
     async def attribution():
-        rows = await AT.load_paper(conn, now=now, account_id=account_id)
+        pread: dict = {}
+        rows = await AT.load_paper(conn, now=now, account_id=account_id,
+                                   meta=pread)
         if include_actual:
             rows += await AT.load_actual(conn, now=now)
         await ST.upsert_attribution(conn, run_id=run_id, now=now, rows=rows)
+        # the PAPER read's figures: a summary the bound cut says so
         summ = C.envelope(version=AT.VERSION, computed_at=now,
-                          summary=AT.summarize(rows), rows=len(rows))
+                          summary=AT.summarize(rows), rows=len(rows),
+                          paper_read=pread)
         await ST.save_snapshot(conn, run_id=run_id, component="ATTRIBUTION",
                                payload=summ, now=now, version=AT.VERSION)
         return rows

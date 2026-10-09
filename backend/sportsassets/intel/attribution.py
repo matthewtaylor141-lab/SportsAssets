@@ -244,24 +244,84 @@ def summarize(rows: list) -> dict:
 # THE READ
 # ═════════════════════════════════════════════════════════════════════
 
+#: THE POPULATION `load_paper` attributes: ENTER decisions that became a
+#: position (an ENTRY paper order), newest first. RC6.2 (p-evcontrols): the
+#: bound used to count EVERY ENTER decision, and a quarantined strategy's
+#: ENTER verdicts the ledger refuses (production 2026-10-07..09: 961, 542
+#: and 636 a day, 0 orders) crowded the actual positions out of the newest
+#: 5,000 -- `paper_rows` discards an orderless decision anyway, so the bound
+#: now counts positions only (paper_orders_decision_role_idx serves the
+#: probe). `$1` NULL = no window (a population no window declares).
 PAPER_DECISIONS_SQL = """
-    SELECT decision_id, decided_at, valuation_id, us_market_slug,
-           holding_side, p_pinnacle, p_blended, p_internal, limit_price,
-           economics, strategy
-      FROM paper_decisions
-     WHERE verdict = 'ENTER' AND decided_at >= to_timestamp($1)
-       AND ($2::text IS NULL OR account_id = $2)
-     ORDER BY decided_at DESC LIMIT $3
+    SELECT d.decision_id, d.decided_at, d.valuation_id, d.us_market_slug,
+           d.holding_side, d.p_pinnacle, d.p_blended, d.p_internal,
+           d.limit_price, d.economics, d.strategy
+      FROM paper_decisions d
+     WHERE d.verdict = 'ENTER'
+       AND ($1::float8 IS NULL OR d.decided_at >= to_timestamp($1))
+       AND ($2::text IS NULL OR d.account_id = $2)
+       AND EXISTS (SELECT 1 FROM paper_orders o
+                    WHERE o.decision_id = d.decision_id
+                      AND o.role = 'ENTRY')
+     ORDER BY d.decided_at DESC, d.decision_id DESC LIMIT $3
 """
+PAPER_WINDOW_DAYS = 60.0
+PAPER_POSITIONS_LIMIT = 5000
+PAPER_POPULATION = ("PAPER ENTER decisions with an ENTRY paper order "
+                    "(positions), newest first")
 
 
-async def load_paper(conn, *, now, days=60.0, account_id=C.PAPER_ACCOUNT,
-                     limit=5000) -> list:
+def read_complete_since(read: dict | None, since: float | None) -> bool:
+    """Whether a `load_paper` read (its `meta`) holds EVERY position decided
+    at or after `since` (None = every position). The first position past
+    the bound is read too, so the answer is exact: complete when the read
+    was not truncated, or the newest position it left out is older than
+    `since`."""
+    if not read or not read.get("truncated"):
+        return True
+    cut = read.get("newest_unread_at")
+    return since is not None and cut is not None and float(cut) < float(
+        since)
+
+
+def within(rows: list, since: float | None) -> list:
+    """The rows decided at or after `since` -- the window `load_paper`'s SQL
+    applies, in pure code (None = all)."""
+    if since is None:
+        return list(rows)
+    out = []
+    for r in rows:
+        at = C.epoch(r.get("decided_at"))
+        if at is not None and at >= since:
+            out.append(r)
+    return out
+
+
+async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
+                     account_id=C.PAPER_ACCOUNT,
+                     limit=PAPER_POSITIONS_LIMIT,
+                     meta: dict | None = None) -> list:
+    """PAPER positions attributed (the population above). `days` None reads
+    every position; `meta`, when given, receives what was read and whether
+    the bound left a position out (`truncated`, and `newest_unread_at`, the
+    decided_at of the newest one it left out), so a caller never takes a
+    subset for the population."""
     from . import reads as R
 
-    decs = [dict(r) for r in await conn.fetch(
-        PAPER_DECISIONS_SQL, float(now) - days * 86400.0, account_id,
-        int(limit))]
+    since = None if days is None else float(now) - float(days) * 86400.0
+    got = [dict(r) for r in await conn.fetch(
+        PAPER_DECISIONS_SQL, since, account_id, int(limit) + 1)]
+    truncated = len(got) > int(limit)
+    decs = got[:int(limit)]
+    if meta is not None:
+        meta.update({
+            "population": PAPER_POPULATION, "window_days": days,
+            "since": since, "limit": int(limit), "positions_read": len(decs),
+            "truncated": truncated,
+            "newest_unread_at": (C.epoch(got[int(limit)]["decided_at"])
+                                 if truncated else None),
+            "oldest_read_at": (C.epoch(decs[-1]["decided_at"])
+                               if decs else None)})
     groups = await R.entry_groups(conn, [d["decision_id"] for d in decs])
     gids = sorted(set(groups.values()))
     fills = [dict(r) for r in await conn.fetch(
@@ -277,7 +337,7 @@ async def load_paper(conn, *, now, days=60.0, account_id=C.PAPER_ACCOUNT,
         " GROUP BY group_id", gids)} if gids else {}
     vals = await R.valuations_by_id(conn, [d.get("valuation_id")
                                            for d in decs])
-    # OFF THE LOOP (RC6): up to `limit` decisions attributed fill by fill --
+    # OFF THE LOOP (RC6): up to `limit` positions attributed fill by fill --
     # the second-longest hold of the intel cycle at its bound (see
     # calibration.load_records for the production stalls). Pure.
     return await C.offload(paper_rows, decs, groups, fills, sidx, acts, vals)

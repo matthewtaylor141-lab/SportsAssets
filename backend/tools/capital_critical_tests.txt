@@ -1419,3 +1419,5 @@ tests/test_rc6_coverage_outside_registry.py
 tests/test_rc6_adriana_void_terms.py
 # (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
 tests/test_rc6_kalshi_ws_merge_integration.py
+# (RC6.2 p-evcontrols) the attribution read's bound counts POSITIONS, never orderless ENTER decisions; a read that left out a member of a control's own population turns ATTRIBUTION / PROFIT_BREAKERS / MULTIPLE_TESTING RED by name (ATTRIBUTION_READ_TRUNCATED) and the forward scoreboard UNAVAILABLE; the study reads every position (its plan declares no window)
+tests/test_rc6_p_evcontrols_attribution_read.py

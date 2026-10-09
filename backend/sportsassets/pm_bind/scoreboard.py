@@ -210,11 +210,26 @@ def ledger_reconciliation(claimed: list, positions: list, *,
 
 
 async def read(conn, *, now: float, account_id: str = "paper_acct_main",
-               attributed=None, fixtures=None) -> dict:
+               attributed=None, fixtures=None, read=None) -> dict:
+    """`attributed` / `fixtures` / `read`: controls.attributed_positions'
+    rows (EVERY PAPER position) and its read figures. A read that left out
+    a position of the forward cohort is no scoreboard: UNAVAILABLE by name
+    (ATTRIBUTION_READ_TRUNCATED), never one over a subset."""
     th = thresholds()
     since = cohort_start(th)
     if attributed is None:
-        attributed, fixtures = await C.attributed_positions(conn, now=now)
+        read = {}
+        attributed, fixtures = await C.attributed_positions(conn, now=now,
+                                                            detail=read)
+    cohort_read = C.population_read(read, since=since, window_days=None)
+    if cohort_read is not None:
+        # the cohort's rule: every position since the frozen_at date (a
+        # constant, never the clock)
+        cohort_read["population_since"] = since
+    if cohort_read is not None and not cohort_read["complete"]:
+        return {"status": "UNAVAILABLE", "why": C.B_READ_TRUNCATED,
+                "version": VERSION, "forward_cohort_start": since,
+                "as_of": now, "positions_read": cohort_read}
     ev = event_rows(attributed, fixtures or {}, since=since)
     ro, pairs = await routing_rows(conn, since=since)
     ar = await arb_rows(conn, since=since)
@@ -247,6 +262,7 @@ async def read(conn, *, now: float, account_id: str = "paper_acct_main",
     return {"version": VERSION, "thresholds_version": th["version"],
             "forward_cohort_start": since, "as_of": now,
             "decision_rows": decision_rows,
+            "positions_read": cohort_read,
             "independent_events": {k: v.get("independent_events")
                                    for k, v in mechs.items()},
             "mechanisms": _s(mechs),
