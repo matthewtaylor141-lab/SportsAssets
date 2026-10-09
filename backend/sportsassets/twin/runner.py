@@ -180,10 +180,13 @@ def _summary(sc: dict, body: dict) -> dict:
 # THE CYCLE
 # ═════════════════════════════════════════════════════════════════════
 
-async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
+async def run_cycle(conn, *, now=None, account_id=None,
                     include_actual=True, window_days=WINDOW_DAYS) -> dict:
     if not await ST.tables_ready(conn):
         return {"ran": False, "why": "MIGRATION_219_NOT_APPLIED"}
+    if account_id is None:
+        from ..simulated_account_context import selected_account
+        account_id = await selected_account(conn)
     now = float(time.time() if now is None else now)
     since = now - float(window_days) * 86400.0
     run_id = ST.new_run_id()

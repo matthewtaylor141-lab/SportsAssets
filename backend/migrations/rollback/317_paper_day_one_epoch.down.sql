@@ -11,7 +11,6 @@ DO $$ BEGIN
    RAISE EXCEPTION 'Refusing rollback 317: epoch events must be preserved';
   END IF;
  END IF;
-END $$;
 DROP TRIGGER IF EXISTS paper_epoch_order_owner_trg ON paper_orders;
 DROP TRIGGER IF EXISTS paper_epoch_fill_owner_trg ON paper_fills;
 DROP TRIGGER IF EXISTS paper_epoch_ledger_owner_trg ON paper_ledger;
@@ -27,3 +26,5 @@ DROP FUNCTION IF EXISTS paper_epoch_fill_owner();
 DROP FUNCTION IF EXISTS paper_epoch_ledger_owner();
 DROP FUNCTION IF EXISTS paper_epoch_session_owner();
 DROP FUNCTION IF EXISTS paper_epoch_immutable();
+
+END $$;

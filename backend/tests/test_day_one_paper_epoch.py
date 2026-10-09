@@ -235,14 +235,16 @@ async def test_runtime_pass_uses_selected_account_and_keeps_shadow(conn):
 
 
 async def test_public_activation_requires_deployed_identity_before_any_write(conn, monkeypatch):
-    monkeypatch.delenv('RENDER_GIT_COMMIT',raising=False)
-    with pytest.raises(E.EpochRefused,match='DEPLOYED_RELEASE_IDENTITY'):
-        await E.activate(conn,epoch_id='x',request_id='x',evidence_dir='unused',release_sha=SHA,bundle='unused',trusted_root='unused')
+    monkeypatch.setenv('RENDER_GIT_COMMIT',SHA)
+    monkeypatch.delenv('RENDER_API_KEY',raising=False)
+    monkeypatch.setattr(A,'verify_acceptance',lambda *a,**kw:dict(PROOF))
+    with pytest.raises(E.EpochRefused,match='DEPLOYMENT_IDENTITY_READER'):
+        await E.activate(conn,epoch_id='x',request_id='x',evidence_dir='unused',release_sha=SHA,bundle='unused')
     assert not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM paper_accounts WHERE account_id LIKE 'paper_day_one_%')")
 
 
 def green_files(now=1000):
-    data={'evidence_packet.json':{'built_at':now,'acceptance':{'independent_pm_state':{'source':'acceptance.json','path':'independent_pm_state','value':'GREEN'}}},
+    data={'evidence_packet.json':{'built_at':now,'identity':{'judge_sha':A.JUDGE_SHA},'acceptance':{'independent_pm_state':{'source':'acceptance.json','path':'independent_pm_state','value':'GREEN'}}},
           'acceptance.json':{'independent_pm_state':'GREEN','critical_failures':[],'unproven':{}},
           'scorecard_14.json':{'release_sha':SHA,'target':.95,'categories':[{'category':n,'readiness':1.,'passes':True,'unreadable_units':[], 'units':[{'class':'PASS'}], 'components':[{'numerator':100,'denominator':100}]} for n in sorted(A.CATEGORIES)]},
           'gates.json':{'runs':{n:{'head_sha':SHA,'status':'completed','conclusion':'success'} for n in ['backend_tests','capital_critical','commit_guard','engine_diagnostic']}}}
@@ -282,9 +284,11 @@ def test_actual_bytes_not_verified_boolean_gate_activation(tmp_path,monkeypatch,
     def verify(command,**kw):
         commands.append(command)
         assert '--deny-self-hosted-runners' in command and A.WORKFLOW in command
+        assert command[0] == A.GH_PATH and command[command.index('--signer-digest')+1] == A.JUDGE_SHA
         return subprocess.CompletedProcess(command,signature_rc)
     monkeypatch.setattr(A.subprocess,'run',verify)
-    kw=dict(release_sha=SHA,bundle='synthetic-bundle',trusted_root='synthetic-root',now=1000)
+    monkeypatch.setattr(A,'_trust_anchors',lambda:A.ROOT_PATH.read_bytes())
+    kw=dict(release_sha=SHA,bundle='synthetic-bundle',now=1000)
     if signature_rc:
         with pytest.raises(E.EpochRefused,match='SIGNATURE_VERIFICATION_FAILED'): A.verify_acceptance(tmp_path,**kw)
     else:

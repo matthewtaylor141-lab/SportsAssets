@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import pathlib
 import re
 import subprocess
@@ -20,6 +21,16 @@ from .bettor_paper_day_one import EpochRefused
 
 REPO = 'matthewtaylor141-lab/SportsAssets'
 WORKFLOW = REPO + '/.github/workflows/pm-acceptance.yml'
+# Updating the judge, verifier or roots is a reviewed code change, never an
+# activation CLI override. This is the independently approved PR #3 judge.
+JUDGE_SHA = '42616dcdb3c80effaa6406faeda100ae995872cb'
+GH_PATH = '/usr/local/bin/gh'
+GH_SHA256 = '7469124f706944133d6a169691dd1c6c3511b12e85878d255e044e2948df4c9b'
+ROOT_PATH = pathlib.Path(__file__).with_name('paper_epoch_sigstore_root.jsonl')
+ROOT_SHA256 = '65ca537f6ed8a47fd0e560c421baa1f6c1efb8b25fc200d8c5c02c0e92eb2b9c'
+SERVICES = {'sportsassets-api':'srv-d9gcv6urnols73ce6er0',
+            'sportsassets-workers':'srv-d9gcv6urnols73ce6erg',
+            'sportsassets-market-plane':'srv-db3idqvavr4c739udecg'}
 CATEGORIES = frozenset({'Core trading engine', 'GitHub CI and regression tests',
  'Red-team safeguards', 'Deployment infrastructure', 'Market-plane stability',
  'Data freshness and latency', 'Sports and market coverage', 'EV and pricing methodology',
@@ -43,6 +54,8 @@ def validate_contents(files, *, release_sha, now):
         except (KeyError, ValueError, TypeError) as exc:
             raise EpochRefused('ACCEPTANCE_SOURCE_MALFORMED:' + name) from exc
     packet = load('evidence_packet.json')
+    if packet.get('identity', {}).get('judge_sha') != JUDGE_SHA:
+        raise EpochRefused('ACCEPTANCE_JUDGE_NOT_REVIEWED')
     acceptance = load('acceptance.json')
     score = load('scorecard_14.json')
     gates = load('gates.json')
@@ -76,7 +89,59 @@ def validate_contents(files, *, release_sha, now):
             'verified_at': now, 'valid_until': built + 900, 'signer_workflow': WORKFLOW}
 
 
-def verify_acceptance(evidence_dir, *, release_sha, bundle, trusted_root, gh='gh', now=None):
+def _trust_anchors():
+    root_bytes = None
+    for path, digest in ((pathlib.Path(GH_PATH), GH_SHA256), (ROOT_PATH, ROOT_SHA256)):
+        try:
+            content = path.read_bytes()
+            if path.is_symlink() or not path.is_file() or hashlib.sha256(content).hexdigest() != digest:
+                raise EpochRefused('ACTIVATION_TRUST_ANCHOR_NOT_PINNED')
+            if path == ROOT_PATH:
+                root_bytes = content
+        except OSError as exc:
+            raise EpochRefused('ACTIVATION_TRUST_ANCHOR_UNAVAILABLE') from exc
+    st = pathlib.Path(GH_PATH).stat()
+    if st.st_uid != 0 or st.st_mode & 0o022:
+        raise EpochRefused('ACTIVATION_VERIFIER_NOT_ROOT_OWNED')
+    for directory in pathlib.Path(GH_PATH).parents:
+        st = directory.stat()
+        if st.st_uid != 0 or st.st_mode & 0o022:
+            raise EpochRefused('ACTIVATION_VERIFIER_DIRECTORY_NOT_ROOT_OWNED')
+    return root_bytes
+
+
+async def verify_deployed_release(release_sha):
+    """Read live identities from Render, never the invoking shell's SHA."""
+    import httpx
+    key = os.environ.get('RENDER_API_KEY')
+    if not key:
+        raise EpochRefused('DEPLOYMENT_IDENTITY_READER_CREDENTIAL_UNAVAILABLE')
+    out = {}
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False, trust_env=False) as client:
+            for name, sid in SERVICES.items():
+                response = await client.get('https://api.render.com/v1/services/'+sid+'/deploys?limit=20',
+                    headers={'Authorization':'Bearer '+key, 'Accept':'application/json'})
+                response.raise_for_status()
+                rows = response.json()
+                if not isinstance(rows, list):
+                    raise EpochRefused('DEPLOYMENT_IDENTITY_UNREADABLE:'+name)
+                live = [r['deploy'] for r in rows if isinstance(r,dict) and isinstance(r.get('deploy'),dict) and r['deploy'].get('status') == 'live']
+                if len(live) != 1 or live[0].get('commit',{}).get('id') != release_sha or not live[0].get('finishedAt'):
+                    raise EpochRefused('DEPLOYED_RELEASE_IDENTITY_MISMATCH_OR_UNAVAILABLE:'+name)
+                if any(r.get('deploy',{}).get('status') in ('created','build_in_progress','update_in_progress','pre_deploy_in_progress') for r in rows):
+                    raise EpochRefused('DEPLOYMENT_IN_PROGRESS:'+name)
+                out[name] = {'service_id':sid,'deploy_id':live[0]['id'], 'live_commit':release_sha,
+                             'live_since':live[0]['finishedAt']}
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        if isinstance(exc, EpochRefused):
+            raise
+        raise EpochRefused('DEPLOYMENT_IDENTITY_READ_FAILED') from exc
+    return out
+
+
+def verify_acceptance(evidence_dir, *, release_sha, bundle, now=None):
+    root_bytes = _trust_anchors()
     if not re.fullmatch('[0-9a-f]{40}', release_sha):
         raise EpochRefused('NOT_A_FULL_RELEASE_SHA')
     root = pathlib.Path(evidence_dir).resolve()
@@ -99,15 +164,18 @@ def verify_acceptance(evidence_dir, *, release_sha, bundle, trusted_root, gh='gh
         files[normalized] = content
     files['SHA256SUMS'] = manifest
     with tempfile.TemporaryDirectory(prefix='bettor-epoch-proof-') as tmp:
+        root_snapshot = pathlib.Path(tmp)/'trusted-root.jsonl'
+        root_snapshot.write_bytes(root_bytes)
         for name in ('evidence_packet.json', 'SHA256SUMS'):
             if name not in files:
                 raise EpochRefused('SIGNED_SUBJECT_MISSING')
             path = pathlib.Path(tmp)/name
             path.write_bytes(files[name])
             try:
-                result = subprocess.run([gh, 'attestation', 'verify', str(path), '--bundle', str(bundle),
+                result = subprocess.run([GH_PATH, 'attestation', 'verify', str(path), '--bundle', str(bundle),
                     '--repo', REPO, '--signer-workflow', WORKFLOW, '--deny-self-hosted-runners',
-                    '--custom-trusted-root', str(trusted_root)], stdout=subprocess.DEVNULL,
+                    '--signer-digest', JUDGE_SHA,
+                    '--custom-trusted-root', str(root_snapshot)], stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL, timeout=60, check=False)
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise EpochRefused('SIGNATURE_VERIFICATION_UNAVAILABLE') from exc

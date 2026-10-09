@@ -572,7 +572,7 @@ def forward_since(state_since) -> float:
 async def _positions(conn, account_id: str, strategy: str | None = None
                      ) -> list:
     from . import bettor_paper_ledger as L
-    rows = await L.positions(conn, account_id, include_closed=True)
+    rows = await L.lineage_positions(conn, account_id)
     if strategy is None:
         return rows
     return [p for p in rows if strategy_of(p, L.DEFAULT_STRATEGY) == strategy]
@@ -646,7 +646,7 @@ async def evaluate_and_record(conn, *, account_id: str, now: float,
     if not await schema(conn):
         return dict(out, refusal="MIGRATION_290_NOT_APPLIED")
     from . import bettor_paper_ledger as L
-    allpos = await L.positions(conn, account_id, include_closed=True)
+    allpos = await L.lineage_positions(conn, account_id)
     names = set(strategies or KNOWN_STRATEGIES) | {
         strategy_of(p, L.DEFAULT_STRATEGY) for p in allpos}
     for s in sorted(names):
@@ -781,7 +781,7 @@ async def turnaround_view(conn, *, account_id: str, now: float) -> dict:
         return {"status": "UNAVAILABLE", "why": "MIGRATION_290_NOT_APPLIED"}
     from . import bettor_paper_ledger as L
     from . import bettor_stale_management as SM
-    allpos = await L.positions(conn, account_id, include_closed=True)
+    allpos = await L.lineage_positions(conn, account_id)
     names = set(KNOWN_STRATEGIES) | {strategy_of(p, L.DEFAULT_STRATEGY)
                                      for p in allpos}
     events = [dict(r) for r in await conn.fetch(

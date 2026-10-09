@@ -1061,6 +1061,24 @@ async def positions(conn, account_id: str, *,
                                         if is_open(p["open_qty"])]
 
 
+async def lineage_positions(conn, account_id: str, *, supplied=None) -> list:
+    """Risk/learning population across immutable epochs; balances stay local.
+
+    A caller's own-account snapshot is retained. Ancestor reads are mandatory
+    even when the caller supplies an empty snapshot. Marked inherited rows
+    make nested authority calls idempotent without collapsing account keys.
+    """
+    from .simulated_account_context import account_lineage
+    lineage = await account_lineage(conn, account_id)
+    out = []
+    for aid in lineage:
+        cached = None if supplied is None else [p for p in supplied
+            if p.get('_history_account_id', account_id) == aid]
+        rows = cached if cached is not None and (aid == account_id or cached) else await positions(conn, aid, include_closed=True)
+        out.extend(dict(p, _history_account_id=aid) for p in rows)
+    return out
+
+
 async def held_uncommitted(conn, account_id: str, *, group_id: str,
                            slug: str, holding_side: str) -> Decimal:
     """Held inventory minus what open SELL orders already commit."""

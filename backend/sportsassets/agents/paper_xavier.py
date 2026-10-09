@@ -1812,6 +1812,24 @@ def outcome_for(rows: list, *, holding_side: str) -> dict:
 
 
 async def step_settle(conn, ctx: dict) -> dict:
+    """Reconcile selected and archived epochs without moving their cash."""
+    from ..simulated_account_context import account_lineage
+    from .. import bettor_paper_session as S
+    out = {"settled": 0, "corrected": 0, "conflicts": 0, "waiting": 0}
+    accounts = {}
+    for aid in await account_lineage(conn, ctx["account_id"]):
+        session = ctx if aid == ctx['account_id'] else await S.active_session(conn, aid)
+        if not session:
+            raise ValueError("PAPER_ARCHIVE_SESSION_UNAVAILABLE:" + aid)
+        got = await _step_settle_account(conn, dict(ctx, account_id=aid,
+                                                   session_id=session["session_id"]))
+        accounts[aid] = got
+        for key in out:
+            out[key] += got.get(key, 0)
+    return dict(out, accounts=accounts)
+
+
+async def _step_settle_account(conn, ctx: dict) -> dict:
     acct = ctx["account_id"]
     at = _clock(ctx)
     out = {"settled": 0, "corrected": 0, "conflicts": 0, "waiting": 0}

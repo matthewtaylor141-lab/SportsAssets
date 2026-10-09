@@ -207,7 +207,7 @@ CAL_ROWS_SQL = """
 SELECT DISTINCT ON (us_market_slug, holding_side)
        us_market_slug, holding_side, p_used, market_price
   FROM paper_profitability_evaluations
- WHERE account_id = $1 AND strategy = $2 AND p_used IS NOT NULL
+ WHERE account_id = ANY($1::text[]) AND strategy = $2 AND p_used IS NOT NULL
    AND us_market_slug IS NOT NULL AND holding_side IS NOT NULL
    AND evaluated_at >= $3
  ORDER BY us_market_slug, holding_side, evaluated_at DESC, eval_id DESC
@@ -218,7 +218,9 @@ async def calibration_rows(conn, account_id: str, strategy: str, *,
                            since: float) -> list:
     """The strategy's settled, distinct contract-sides it evaluated: the
     probability it used, the market price and the outcome."""
-    rows = [dict(r) for r in await conn.fetch(CAL_ROWS_SQL, account_id,
+    from .simulated_account_context import account_lineage
+    accounts = await account_lineage(conn, account_id)
+    rows = [dict(r) for r in await conn.fetch(CAL_ROWS_SQL, accounts,
                                               strategy, _ts(since))]
     ys = await PBIND.outcomes(conn, [r["us_market_slug"] for r in rows])
     out = []
@@ -242,9 +244,11 @@ async def evaluate_quarantine(conn, *, account_id: str, now: float,
     if not await PBIND.schema(conn) or not await LC.schema(conn):
         return dict(out, why="MIGRATION_309_OR_290_NOT_APPLIED")
     models = await PBIND.latest_models(conn, account_id)
+    from .simulated_account_context import account_lineage
+    accounts = await account_lineage(conn, account_id)
     names = set(strategies or ()) | {r["strategy"] for r in await conn.fetch(
         "SELECT DISTINCT strategy FROM paper_profitability_evaluations "
-        " WHERE account_id = $1", account_id)}
+        " WHERE account_id = ANY($1::text[])", accounts)}
     since = now - PBIND.FIT_WINDOW_DAYS * 86400.0
     for s in sorted(names):
         cur = await LC.current_state(conn, account_id, s)

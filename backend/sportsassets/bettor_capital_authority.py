@@ -392,19 +392,21 @@ async def schema(conn) -> bool:
 
 async def _positions(conn, account_id: str) -> list:
     from . import bettor_paper_ledger as L
-    return await L.positions(conn, account_id, include_closed=True)
+    return await L.lineage_positions(conn, account_id)
 
 
 async def shadow_pnls(conn, account_id: str, strategy: str, *,
                       since: float = FORWARD_SINCE) -> list:
     """Counterfactual P&L of every SETTLED, FILLED shadow of the strategy
     decided at or after `since` (NO_FILL / VOID excluded)."""
+    from .simulated_account_context import account_lineage
+    accounts = await account_lineage(conn, account_id)
     rows = await conn.fetch(
         "SELECT o.counterfactual_pnl_usd FROM paper_shadow_counterfactuals s "
         "  JOIN paper_shadow_counterfactual_outcomes o USING (shadow_id) "
-        " WHERE s.account_id = $1 AND s.strategy = $2 AND s.decided_at >= $3 "
+        " WHERE s.account_id = ANY($1::text[]) AND s.strategy = $2 AND s.decided_at >= $3 "
         "   AND o.outcome NOT IN ('NO_FILL', 'VOID_REFUND') "
-        "   AND o.filled_qty > 0", account_id, strategy, _ts(since))
+        "   AND o.filled_qty > 0", accounts, strategy, _ts(since))
     return [float(r["counterfactual_pnl_usd"]) for r in rows]
 
 
@@ -417,8 +419,7 @@ async def forward_economics(conn, account_id: str, strategy: str, *,
     try:
         if not await schema(conn):
             return {"ok": False, "why": "MIGRATION_305_NOT_APPLIED"}
-        pos = positions if positions is not None else await _positions(
-            conn, account_id)
+        pos = await L.lineage_positions(conn, account_id, supplied=positions)
         pp = forward_paper_pnls(pos, strategy,
                                 default_strategy=L.DEFAULT_STRATEGY)
         async with conn.transaction():
@@ -439,8 +440,7 @@ async def stopping_rules_now(conn, account_id: str, strategy: str, *,
         cur = await LC.current_state(conn, account_id, strategy)
         if not cur.get("ok"):
             return {"ok": False, "why": cur.get("why")}
-        pos = positions if positions is not None else await _positions(
-            conn, account_id)
+        pos = await L.lineage_positions(conn, account_id, supplied=positions)
         mine = [p for p in pos
                 if LC.strategy_of(p, L.DEFAULT_STRATEGY) == strategy]
         m = LC.metrics(mine, now=now)

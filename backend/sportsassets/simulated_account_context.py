@@ -12,3 +12,23 @@ async def selected_account(conn):
     if account != LEGACY_ACCOUNT and not await conn.fetchval('SELECT EXISTS(SELECT 1 FROM paper_account_epochs WHERE account_id=$1)', account):
         raise ValueError('PAPER_EPOCH_SELECTOR_NOT_REGISTERED')
     return account
+
+
+async def account_lineage(conn, account):
+    """Nearest account first; only registered epoch edges carry history.
+
+    Cycles, malformed edges and excessive depth refuse rather than discard
+    losses. An unregistered legacy account has no inherited history.
+    """
+    if not await conn.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL"):
+        return [account]
+    out = []
+    for _ in range(64):
+        if not isinstance(account, str) or not account or account in out:
+            raise ValueError('PAPER_EPOCH_LINEAGE_INVALID')
+        out = out + [account]
+        parent = await conn.fetchval('SELECT previous_account_id FROM paper_account_epochs WHERE account_id=$1', account)
+        if parent is None:
+            return out
+        account = parent
+    raise ValueError('PAPER_EPOCH_LINEAGE_TOO_DEEP')

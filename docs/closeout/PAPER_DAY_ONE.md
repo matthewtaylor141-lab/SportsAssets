@@ -15,6 +15,10 @@ successive epochs. Losses are never erased or relabelled as profits. Strategy li
 inherit the nearest recorded state through registered epoch ancestry; opening
 a new account cannot release quarantine, retirement or reduced sizing. Existing
 named-person recovery rules and forward-evidence requirements remain unchanged.
+Stopping rules and realized PAPER/shadow forward economics read the registered
+ancestry using their original windows. Learned models retain their source account,
+model ID and fit timestamp; refits use lineage observations and an empty refit
+cannot replace a measured inherited model. Accounting remains account-local.
 
 Read-only inspection: `python -m sportsassets.tools.paper_day_one read`.
 The authenticated `GET /api/command/paper/day-one` reports the selected account;
@@ -29,15 +33,26 @@ After Claude integrates the PRs, all four gates must be repeated on the resultin
 full SHA. Obtain a new independently signed acceptance packet for that deployed
 SHA, verified GitHub/Sigstore bundles, and official trusted roots. The operator
 command requires `activate`, `--epoch-id`, `--request-id`, `--evidence-dir`,
-`--release-sha`, `--bundle`, `--trusted-root`, and optionally `--gh`.
+`--release-sha` and `--bundle`. Verifier and root overrides are rejected.
 Do not invoke activation while the acceptance verdict is RED.
 
 The command verifies signatures over the actual packet and checksum manifest,
 checks every listed checksum, requires copied/source GREEN agreement, all 14
 categories at >=95% with valid denominators and no RED or unreadable units,
 completed successful exact-SHA backend-tests/capital-critical/commit-guard/
-engine-diagnostic runs, a <=15-minute acceptance window, and matching
-RENDER_GIT_COMMIT. Expiry is rechecked after acquiring the switch lock.
+engine-diagnostic runs and a <=15-minute acceptance window. The reviewed judge
+is pinned to `42616dcdb3c80effaa6406faeda100ae995872cb` in both the packet and
+Sigstore `--signer-digest` verification. GitHub CLI 2.102.0 at
+`/usr/local/bin/gh` is pinned by binary SHA256 and must be root-owned beneath
+root-owned directories; the bundled official roots are pinned and snapshotted
+before verification. Updating these anchors requires reviewed code.
+
+Under the activation lock the command reads the three fixed production services
+directly from Render with `RENDER_API_KEY`, requires a single live deployment per
+service on the accepted release SHA, and refuses an in-progress rollout. Missing
+read credentials, verifier provisioning or deployment identity fail closed.
+An invoking shell's `RENDER_GIT_COMMIT` cannot attest deployment identity.
+Expiry is rechecked after acquiring the lock and checking the services.
 There is no `verified=true` input or HTTP write endpoint.
 
 Activation acquires the existing PAPER runtime advisory lock and the selector
@@ -45,7 +60,10 @@ row lock. It locks/reconciles the source account and refuses open orders,
 reserves or held positions. Account funding, session, opening snapshot, epoch
 receipt, selector switch and event commit together. Failure rolls everything
 back; retries cannot fund twice. Historical later settlement corrections stay
-in their original account. Database guards reject stale order/session/fill/
+in their original account: Xavier's production settlement pass walks every
+registered ancestor with its own session and the ledger's own account lock.
+Audrey and both default shadow runners resolve the selected account.
+Database guards reject stale order/session/fill/
 ledger ownership and pre-epoch valuation attribution. Streams terminate on an
 account switch and request a new cursor. Management/equity caches resolve the
 durable selector before serving a hit, pin the account for each read and evict
@@ -60,7 +78,9 @@ orders, reserves and positions. It cannot abandon Xavier management or delete
 an epoch, ledger entry, loss, fill, or receipt. A rolled-back identity cannot be
 reactivated; a later epoch needs a new identity and acceptance proof.
 
-DDL rollback 317 is permitted only before any epoch/evidence exists. Database
+DDL rollback 317 is permitted only before any epoch/evidence exists. Every DROP
+is inside the same refusing DO statement, so plain psql's continue-on-error
+behavior cannot destroy evidence. Database
 guards return unchanged before the first activation. The upgrade receipt proves
 this narrowly by matching installed definitions and bodies against migration
 317 and checking empty epoch history; other added/changed triggers remain

@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import time
 from decimal import Decimal
@@ -53,12 +52,14 @@ async def flat_receipt(conn, account):
             'ledger_entries': cs['entries'], 'balances': bal}
 
 
-async def _activate_verified(conn, *, epoch_id, request_id, proof):
+async def _activate_verified(conn, *, epoch_id, request_id, proof, deployment_check=None):
     """Internal only; public activate() obtains proof from signature verification."""
     account = epoch_account(epoch_id)
     async with conn.transaction():
         await conn.execute('SELECT pg_advisory_xact_lock($1)', LOCK)
         control = await conn.fetchrow('SELECT * FROM paper_epoch_control WHERE singleton FOR UPDATE')
+        if deployment_check is not None:
+            proof = dict(proof, deployed_services=await deployment_check(proof['release_sha']))
         if 'valid_until' in proof:
             at = await conn.fetchval('SELECT extract(epoch FROM clock_timestamp())::float8')
             if at > proof['valid_until']:
@@ -86,7 +87,8 @@ async def _activate_verified(conn, *, epoch_id, request_id, proof):
         cfg['epoch_id'] = epoch_id
         cfg['epoch_opened_at'] = at
         cfg['historical_account_id'] = old
-        cfg['model_provenance'] = {'history_preserved': True, 'new_account_metrics_only': True,
+        cfg['model_provenance'] = {'history_preserved': True, 'accounting_metrics_account_local': True,
+                                   'risk_and_learning_inherit_epoch_lineage': True,
                                    'opening_acceptance_digest': proof['packet_digest']}
         sess = await S.ensure_session(conn, account_id=account, config=cfg, now=at)
         if not sess.get('ok'):
@@ -105,12 +107,11 @@ async def _activate_verified(conn, *, epoch_id, request_id, proof):
         return await read(conn, account)
 
 
-async def activate(conn, *, epoch_id, request_id, evidence_dir, release_sha, bundle, trusted_root, gh='gh'):
-    if os.environ.get('RENDER_GIT_COMMIT') != release_sha:
-        raise EpochRefused('DEPLOYED_RELEASE_IDENTITY_MISMATCH_OR_UNAVAILABLE')
-    from .paper_epoch_acceptance import verify_acceptance
-    proof = verify_acceptance(evidence_dir, release_sha=release_sha, bundle=bundle, trusted_root=trusted_root, gh=gh)
-    return await _activate_verified(conn, epoch_id=epoch_id, request_id=request_id, proof=proof)
+async def activate(conn, *, epoch_id, request_id, evidence_dir, release_sha, bundle):
+    from .paper_epoch_acceptance import verify_acceptance, verify_deployed_release
+    proof = verify_acceptance(evidence_dir, release_sha=release_sha, bundle=bundle)
+    return await _activate_verified(conn, epoch_id=epoch_id, request_id=request_id,
+        proof=proof, deployment_check=verify_deployed_release)
 
 
 async def rollback(conn, *, epoch_id, request_id):
