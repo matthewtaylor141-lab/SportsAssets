@@ -1421,3 +1421,5 @@ tests/test_rc6_adriana_void_terms.py
 tests/test_rc6_kalshi_ws_merge_integration.py
 # (RC6 P0 premap) a catalogue page read never sent (queued past its bound, our gate's hold) is read again at the same offset and never sent late; sent-unanswered re-sent once, counted; a partial sweep is never complete on the premap heartbeat
 tests/test_premap_page_read_resumes.py
+# (RC6 P0-AGENTS) every agent's / loop's status contract (latest action, status, input freshness, next cycle, refusals, failures): never GREEN with a stale input, a recent failure, a SOFTWARE / UNCLASSIFIED refusal or any missing field; no heartbeat is UNKNOWN, down or erroring is FAILED; GET only, read only
+tests/test_agent_status_contract.py
