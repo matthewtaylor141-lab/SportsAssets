@@ -1349,3 +1349,7 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 archer-lifecycle) the economic-duplicate rule on the canonical identity of observed liquidity, the READ: a fill on a copy row of one read, or above what the previous examined row showed (the seen-crossing memory), is a duplicate; production's 18 P0 groups re-verified (12 duplicates, 6 not; all historical)
+tests/test_rc6_archer_canonical_duplicates.py
+# (RC6 archer-lifecycle) PAPER order lifecycle through every state with its quantity accounting and position linkage; only filled quantity is protection in every reader, an expired or cancelled remainder is named as contributing none; Xavier's review records its own position's filled protection; the venue-confirmed book read apart
+tests/test_rc6_order_lifecycle_and_protection.py

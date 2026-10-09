@@ -1171,9 +1171,17 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         open_qty=pos["open_qty"])
                 except Exception as exc:                        # noqa: BLE001
                     action["live_parity"] = {"error": type(exc).__name__}
+        # THE REVIEWED POSITION'S OWN FILLED PROTECTION (RC6 archer-
+        # lifecycle): the simulated fills of the standing sales of THIS
+        # (account, group, market, holding side) -- the same key the standing
+        # orders above are read by. It was summed over the whole group, so a
+        # group holding two positions (a hedge leg, a second market) would
+        # credit one position with the other's protective sales.
         confirmed = await conn.fetchval(
-            "SELECT coalesce(sum(qty), 0) FROM paper_fills WHERE group_id=$1"
-            "   AND role='STANDING_PROTECTION'", group_id)
+            "SELECT coalesce(sum(qty), 0) FROM paper_fills WHERE account_id=$1"
+            "   AND group_id=$2 AND us_market_slug=$3 AND holding_side=$4"
+            "   AND role='STANDING_PROTECTION'", acct, group_id,
+            pos["us_market_slug"], pos["holding_side"])
         live = [dict(s) for s in standing]
         resting_qty = sum(float(s["qty"]) - float(s["filled_qty"])
                           for s in live)
@@ -1211,7 +1219,13 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         "invariant": SPO.WHY_ONE_LIVE_ORDER},
                        default=str),
             json.dumps({"filled_protection_qty": float(confirmed),
-                        "basis": "simulated fills of the standing sale"},
+                        "basis": "simulated fills of the standing sale",
+                        # the column's name predates the lanes: this is
+                        # PAPER (SIMULATOR) fills of THIS position, never a
+                        # venue confirmation
+                        "scope": "POSITION",
+                        "position_key": pos.get("position_key"),
+                        "execution_environment": "PAPER_SIMULATED"},
                        default=str),
             json.dumps(alts["incomplete_search"], default=str),
             json.dumps(exceptional), json.dumps(measure, default=str),
