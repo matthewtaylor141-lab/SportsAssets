@@ -2525,43 +2525,54 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         alternatives=alts, optimistic=optimistic,
         simulator_version=cfg["simulator_version"],
         decided_via=pin.get("decided_via"), at=at)
-    inserted = await conn.fetchval(
-        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
-        " decided_at, valuation_id, us_market_slug, holding_side, intent, "
-        " fixture, label, verdict, refusal, refusals, p_internal, "
-        " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
-        " book, proposed_qty, limit_price, economics, qualification_gaps, "
-        " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
-        " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
-        " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
-        " $25::jsonb,$26::jsonb,$27,$28,$29::jsonb) ON CONFLICT DO NOTHING "
-        " RETURNING decision_id",
-        did, ctx["session_id"], ctx["account_id"], L._ts(at),
-        cand["valuation_id"], cand.get("us_market_slug"), side,
-        cand.get("side"), cand.get("fixture"),
-        json.dumps(label, default=str), verdict, rec["refusal"], refusals,
-        json.dumps(internal_rec, default=str), p,
-        json.dumps(pin, default=str),
-        None if obs is None else obs["obs_id"],
-        None if book is None else json.dumps(book, default=str),
-        (None if not sized.get("qty") else L.D(sized["qty"])),
-        (None if sized.get("limit") is None else L.D(sized["limit"])),
-        json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
-        VERSION, json.dumps(policy_decision, default=str),
-        json.dumps(alts, default=str),
-        None if optimistic is None else json.dumps(optimistic, default=str),
-        cfg["simulator_version"], STRATEGY,
-        json.dumps(provenance, default=str))
-    if inserted is None:
-        return dict(rec, duplicate=True)
+
+    async def insert_row():
+        # THE DECISION ROW. For an ENTER it is the FIRST step of the owed
+        # order sequence (PD.owed_order(record=...), RC6.2 enter-integrity
+        # rework): a deadline that falls while it waits on the account row
+        # lock can no longer leave a committed ENTER that nothing owes.
+        return await conn.fetchval(
+            "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+            " decided_at, valuation_id, us_market_slug, holding_side, intent, "
+            " fixture, label, verdict, refusal, refusals, p_internal, "
+            " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
+            " book, proposed_qty, limit_price, economics, qualification_gaps, "
+            " policy_version, policy_decision, alternatives, optimistic, "
+            " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
+            " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
+            " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
+            " $25::jsonb,$26::jsonb,$27,$28,$29::jsonb) ON CONFLICT DO NOTHING "
+            " RETURNING decision_id",
+            did, ctx["session_id"], ctx["account_id"], L._ts(at),
+            cand["valuation_id"], cand.get("us_market_slug"), side,
+            cand.get("side"), cand.get("fixture"),
+            json.dumps(label, default=str), verdict, rec["refusal"], refusals,
+            json.dumps(internal_rec, default=str), p,
+            json.dumps(pin, default=str),
+            None if obs is None else obs["obs_id"],
+            None if book is None else json.dumps(book, default=str),
+            (None if not sized.get("qty") else L.D(sized["qty"])),
+            (None if sized.get("limit") is None else L.D(sized["limit"])),
+            json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
+            VERSION, json.dumps(policy_decision, default=str),
+            json.dumps(alts, default=str),
+            None if optimistic is None else json.dumps(optimistic, default=str),
+            cfg["simulator_version"], STRATEGY,
+            json.dumps(provenance, default=str))
+
     from .. import bettor_capital_authority as CA
-    cevidence = CA.capital_evidence(
-        capital, p=p, limit=sized.get("limit"),
-        threshold_edge_pp=min_edge_pp, basis="BENCHMARK_CAPITAL_GATE",
-        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
-        book_observed_at=None if obs is None else obs.get("observed_at"))
+
+    def capital_evidence():
+        return CA.capital_evidence(
+            capital, p=p, limit=sized.get("limit"),
+            threshold_edge_pp=min_edge_pp, basis="BENCHMARK_CAPITAL_GATE",
+            levels=levels,
+            book_obs_id=None if obs is None else obs.get("obs_id"),
+            book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        if await insert_row() is None:
+            return dict(rec, duplicate=True)
+        cevidence = capital_evidence()
         # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
         await CA.record_refusal(
             conn, account_id=ctx["account_id"], strategy=STRATEGY,
@@ -2575,18 +2586,23 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
             qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
-    # THE ENTER IS RECORDED: from here its paper order is owed. The hook's
-    # decision deadline stops applying (PD.bounded_decision); the order
-    # sequence below keeps its canonical order -- the canonical decision
-    # intent (built before the execution hook since R30A intent), then the
-    # execution intent that names it, then the paper order read from it --
-    # and an ENTER that still ends without an order is named by the backstop
-    # (PD.step_enter_backstop, ENTER_WITHOUT_ORDER).
-    PD.enter_recorded(ctx, did)
+    # AN ENTER: ITS ROW AND ITS PAPER ORDER ARE OWED. The hook's decision
+    # deadline stops applying as its row's INSERT starts (PD.bounded_decision;
+    # PD.owed_order runs `insert_row` as the sequence's first step); the
+    # order sequence below keeps its canonical order -- the canonical
+    # decision intent (built before the execution hook since R30A intent),
+    # then the execution intent that names it, then the paper order read
+    # from it -- and an ENTER that still ends without an order is named at
+    # once (PD.owed_order, ENTER_ORDER_ABANDONED, with its cause); the
+    # backstop (PD.step_enter_backstop, ENTER_WITHOUT_ORDER) keeps what no
+    # code path can name.
+    #
     # ── THE ORDER SEQUENCE: A CANCELLATION OF THE CALLER NO LONGER CUTS IT
     # (PD.owed_order, RC6.2 enter-integrity): it ends in the paper order,
     # the order's named refusal or a named abandonment, never in nothing.
     async def sequence(progress: dict) -> dict:
+        progress["stage"] = "CAPITAL_EVIDENCE"
+        cevidence = capital_evidence()
         progress["stage"] = "CANONICAL_INTENT"
         # ── R30 · THE ONE CANONICAL DECISION INTENT, FIRST ──────────────────
         # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
@@ -2782,7 +2798,9 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return rec
 
     return await PD.owed_order(conn, ctx, decision_id=did,
-                               strategy=STRATEGY, sequence=sequence)
+                               strategy=STRATEGY, record=insert_row,
+                               duplicate=lambda: dict(rec, duplicate=True),
+                               sequence=sequence)
 
 
 #: R30: WHAT THE PAPER ADAPTER READS FROM THE CANONICAL INTENT (order field
@@ -2909,12 +2927,14 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
     strategies deciding this valuation (`books_by_slug`): the deadline is
     reset per strategy, the book read is not repeated while it is current.
 
-    THE DEADLINE BOUNDS THE DECISION, NOT A RECORDED ENTER'S ORDER (P0
-    incident 2026-10-04): `PD.bounded_decision` cancels a decision cut
-    before its row is written, exactly as `wait_for` did, but once an ENTER
-    row is written its order sequence completes (up to
+    THE DEADLINE BOUNDS THE DECISION, NOT AN OWED ENTER'S ROW AND ORDER (P0
+    incident 2026-10-04; RC6.2 enter-integrity): `PD.bounded_decision`
+    cancels a decision cut before its ENTER is owed -- before the ENTER
+    row's INSERT starts (PD.owed_order) -- exactly as `wait_for` did; once
+    it is owed, the INSERT and the order sequence complete (up to
     PD.ENTER_ORDER_GRACE_S more). A grace overrun is a TIMEOUT that names
-    the recorded decision; the backstop turns it into ENTER_WITHOUT_ORDER."""
+    the decision, and PD.owed_order names the ENTER at once
+    (ENTER_ORDER_ABANDONED, with its cause)."""
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
     t0 = time.monotonic()

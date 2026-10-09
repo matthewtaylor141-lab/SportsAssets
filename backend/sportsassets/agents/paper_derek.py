@@ -1104,47 +1104,57 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         qty=sized.get("qty"), alternatives=alts, optimistic=optimistic,
         simulator_version=cfg["simulator_version"],
         decided_via=pin.get("decided_via"), at=at)
-    inserted = await conn.fetchval(
-        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
-        " decided_at, valuation_id, us_market_slug, holding_side, intent, "
-        " fixture, label, verdict, refusal, refusals, p_internal, "
-        " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
-        " book, proposed_qty, limit_price, economics, qualification_gaps, "
-        " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version, provenance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
-        " $10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,"
-        " $20::jsonb,$21,$22,$23::jsonb,$24::jsonb,$25,$26::jsonb,$27::jsonb,"
-        " $28::jsonb,$29,$30::jsonb)"
-        " ON CONFLICT DO NOTHING RETURNING decision_id",
-        did, ctx["session_id"], ctx["account_id"], L._ts(at),
-        cand["valuation_id"], cand.get("us_market_slug"), side,
-        cand.get("side"), cand.get("fixture"),
-        json.dumps(label, default=str), verdict, rec["refusal"], refusals,
-        p_int, json.dumps(internal_rec, default=str), pin.get("p"),
-        json.dumps(pin, default=str), p_blend,
-        None if obs is None else obs["obs_id"],
-        None if book is None else json.dumps(book, default=str),
-        (None if not sized.get("qty") else L.D(sized["qty"])),
-        (None if sized.get("limit") is None else L.D(sized["limit"])),
-        None if econ is None else json.dumps(econ, default=str),
-        json.dumps(gaps, default=str), DP.POLICY_V2,
-        None if pd is None else json.dumps(pd, default=str),
-        json.dumps(alts, default=str),
-        None if optimistic is None else json.dumps(optimistic, default=str),
-        cfg["simulator_version"], json.dumps(provenance, default=str))
-    if inserted is None:
-        # ANOTHER WRITER (the in-cycle hook or a racing pass) RECORDED THIS
-        # VALUATION'S DECISION FIRST. Its record stands; nothing is sent on
-        # this computation.
-        return dict(rec, duplicate=True)
+
+    async def insert_row():
+        # THE DECISION ROW. For an ENTER it is the FIRST step of the owed
+        # order sequence (`owed_order(record=...)`, RC6.2 enter-integrity
+        # rework): a deadline that falls while it waits on the account row
+        # lock can no longer leave a committed ENTER that nothing owes.
+        return await conn.fetchval(
+            "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+            " decided_at, valuation_id, us_market_slug, holding_side, intent, "
+            " fixture, label, verdict, refusal, refusals, p_internal, "
+            " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
+            " book, proposed_qty, limit_price, economics, qualification_gaps, "
+            " policy_version, policy_decision, alternatives, optimistic, "
+            " simulator_version, provenance) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
+            " $10::jsonb,$11,$12,$13,$14,$15::jsonb,$16,$17::jsonb,$18,$19,"
+            " $20::jsonb,$21,$22,$23::jsonb,$24::jsonb,$25,$26::jsonb,$27::jsonb,"
+            " $28::jsonb,$29,$30::jsonb)"
+            " ON CONFLICT DO NOTHING RETURNING decision_id",
+            did, ctx["session_id"], ctx["account_id"], L._ts(at),
+            cand["valuation_id"], cand.get("us_market_slug"), side,
+            cand.get("side"), cand.get("fixture"),
+            json.dumps(label, default=str), verdict, rec["refusal"], refusals,
+            p_int, json.dumps(internal_rec, default=str), pin.get("p"),
+            json.dumps(pin, default=str), p_blend,
+            None if obs is None else obs["obs_id"],
+            None if book is None else json.dumps(book, default=str),
+            (None if not sized.get("qty") else L.D(sized["qty"])),
+            (None if sized.get("limit") is None else L.D(sized["limit"])),
+            None if econ is None else json.dumps(econ, default=str),
+            json.dumps(gaps, default=str), DP.POLICY_V2,
+            None if pd is None else json.dumps(pd, default=str),
+            json.dumps(alts, default=str),
+            None if optimistic is None else json.dumps(optimistic, default=str),
+            cfg["simulator_version"], json.dumps(provenance, default=str))
+
     from .. import bettor_capital_authority as CA
-    cevidence = CA.capital_evidence(
-        ce, p=p_blend, limit=sized.get("limit"),
-        threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
-        basis="DEREK_CAPITAL_GATE", levels=levels,
-        book_obs_id=None if obs is None else obs.get("obs_id"),
-        book_observed_at=None if obs is None else obs.get("observed_at"))
+
+    def capital_evidence():
+        return CA.capital_evidence(
+            ce, p=p_blend, limit=sized.get("limit"),
+            threshold_edge_pp=float(ent["min_gross_edge_pp"]) * 100.0,
+            basis="DEREK_CAPITAL_GATE", levels=levels,
+            book_obs_id=None if obs is None else obs.get("obs_id"),
+            book_observed_at=None if obs is None else obs.get("observed_at"))
     if verdict != DP.ENTER:
+        if await insert_row() is None:
+            # ANOTHER WRITER (the in-cycle hook or a racing pass) RECORDED
+            # THIS VALUATION'S DECISION FIRST. Its record stands; nothing is
+            # sent on this computation.
+            return dict(rec, duplicate=True)
+        cevidence = capital_evidence()
         # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
         await CA.record_refusal(
             conn, account_id=ctx["account_id"], strategy=STRATEGY,
@@ -1159,33 +1169,37 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
             executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
             qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
-    # THE ENTER IS RECORDED: from here its order is owed, whatever the
-    # decision deadline (`bounded_decision`; the backstop names a miss).
-    enter_recorded(ctx, did)
-    # ── ONLY NOW, THE PAPER ORDER ─────────────────────────────────────
+    # AN ENTER: ITS ROW AND ITS ORDER ARE OWED, whatever the decision
+    # deadline (`bounded_decision`) or a cancellation of the caller
+    # (`owed_order`, which runs `insert_row` as the sequence's first step;
+    # the backstop names what no code path can).
     delay = float(sim_cfg["decision_to_execution_delay_s"])
-    order = {"idempotency_key": "%s:ENTRY" % did,
-             "account_id": ctx["account_id"],
-             "session_id": ctx["session_id"],
-             "group_id": group_id_for(did), "role": "ENTRY",
-             "strategy": STRATEGY,
-             "direction": "BUY", "holding_side": side,
-             "intent": cand.get("side"),
-             "us_market_slug": cand["us_market_slug"],
-             "fixture": cand.get("fixture"), "label": label,
-             "order_type": ent["order_type"],
-             "time_in_force": ent["time_in_force"],
-             "allow_partial": bool(ent["allow_partial"]),
-             "qty": sized["qty"], "limit_price": sized["limit"],
-             "wire_price": sized["wire"], "decision_id": did,
-             "decided_at": at, "eligible_at": at + delay,
-             "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
-             "simulator_version": cfg["simulator_version"],
-             # the decision's executable-EV evidence, re-checked by the
-             # ledger's capital authority under the account lock
-             "capital_evidence": cevidence}
 
     async def sequence(progress: dict) -> dict:
+        # ── ONLY NOW, THE PAPER ORDER (built inside the owed sequence: a
+        # raise here is named, never left to the backstop) ──────────────
+        progress["stage"] = "PAPER_ORDER_BUILDING"
+        cevidence = capital_evidence()
+        order = {"idempotency_key": "%s:ENTRY" % did,
+                 "account_id": ctx["account_id"],
+                 "session_id": ctx["session_id"],
+                 "group_id": group_id_for(did), "role": "ENTRY",
+                 "strategy": STRATEGY,
+                 "direction": "BUY", "holding_side": side,
+                 "intent": cand.get("side"),
+                 "us_market_slug": cand["us_market_slug"],
+                 "fixture": cand.get("fixture"), "label": label,
+                 "order_type": ent["order_type"],
+                 "time_in_force": ent["time_in_force"],
+                 "allow_partial": bool(ent["allow_partial"]),
+                 "qty": sized["qty"], "limit_price": sized["limit"],
+                 "wire_price": sized["wire"], "decision_id": did,
+                 "decided_at": at, "eligible_at": at + delay,
+                 "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
+                 "simulator_version": cfg["simulator_version"],
+                 # the decision's executable-EV evidence, re-checked by the
+                 # ledger's capital authority under the account lock
+                 "capital_evidence": cevidence}
         progress["stage"] = "PAPER_ORDER_SUBMITTING"
         got = await L.submit_order(conn, order, caps=cfg["risk"],
                                    fee_fn=fee_fn, now=at)
@@ -1209,6 +1223,8 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
 
     # A CANCELLATION OF THE CALLER NO LONGER CUTS IT (`owed_order`).
     return await owed_order(conn, ctx, decision_id=did, strategy=STRATEGY,
+                            record=insert_row,
+                            duplicate=lambda: dict(rec, duplicate=True),
                             sequence=sequence)
 
 
@@ -1849,10 +1865,11 @@ def book_deadline_refusal(got: dict) -> bool:
 # and left a recorded ENTER with no paper order and no PAPER_RISK_REFUSED
 # finding: about one a day, 4% of the completed-game policy's ENTERs.
 #
-# THE RULE. The decision deadline bounds the DECISION: everything up to and
-# including the INSERT of its row. A decision that wrote an ENTER says so
-# (`enter_recorded`, right after the INSERT); from then on the deadline no
-# longer applies and the order sequence -- execution hook, canonical intent,
+# THE RULE. The decision deadline bounds the DECISION: everything up to the
+# INSERT of its row -- for an ENTER, up to the instant that INSERT starts
+# (`enter_recorded`, called by `owed_order` just before it; RC6.2 rework).
+# From then on the deadline no longer applies and the INSERT and the order
+# sequence -- execution hook, canonical intent,
 # paper order, in that canonical order, the paper order's fields read from
 # the intent -- runs to completion, bounded only by ENTER_ORDER_GRACE_S so a
 # wedged hook cannot hold the cycle for ever. Nothing is left running in the
@@ -1894,7 +1911,7 @@ class EnterOrderGraceExceeded(asyncio.TimeoutError):
 
     def __init__(self, decision_id, *, timeout_s, grace_s):
         super().__init__(
-            "ENTER %s was recorded but its paper order did not complete "
+            "ENTER %s was owed but its row and paper order did not complete "
             "within %.1f s after the %.1f s decision deadline"
             % (decision_id, float(grace_s), float(timeout_s)))
         self.decision_id = decision_id
@@ -1903,9 +1920,13 @@ class EnterOrderGraceExceeded(asyncio.TimeoutError):
 
 
 def enter_recorded(ctx: dict, decision_id: str) -> None:
-    """A decision calls this RIGHT AFTER its ENTER row is written and before
-    its order sequence starts: from here its order is owed. A no-op when the
-    decision does not run under `bounded_decision` (the pass steps)."""
+    """FROM HERE THE ENTER'S ORDER IS OWED: `bounded_decision`'s decision
+    deadline no longer cuts the decision. `owed_order` calls it as the ENTER
+    row's INSERT is about to START (RC6.2 enter-integrity rework: the INSERT
+    is the first step of the owed sequence, so a deadline that falls while
+    it waits -- on the account row lock a concurrent ledger submit holds --
+    cannot leave a committed ENTER that nothing owes an order). A no-op when
+    the decision does not run under `bounded_decision` (the pass steps)."""
     ev = ctx.get(CTX_ENTER_RECORDED)
     if ev is not None:
         ctx["enter_recorded_decision_id"] = decision_id
@@ -1931,12 +1952,12 @@ def enter_recorded(ctx: dict, decision_id: str) -> None:
 # applies to the paper pass's own hard timeout, and to every policy whose
 # ENTER row is written before its order.
 #
-# THE RULE, completed. `owed_order` runs a recorded ENTER's order sequence in
-# its own task on the decision's connection and awaits it SHIELDED: a
-# cancellation of the caller -- any caller, any deadline -- no longer cuts
-# it. The caller waits (on the same connection, so nothing ever uses it
-# twice) until the sequence finishes or ENTER_ORDER_GRACE_S since the ENTER
-# row has passed, and then re-raises the cancellation: the caller is still
+# THE RULE, completed. `owed_order` runs an ENTER's order sequence in its own
+# task on the decision's connection and awaits it SHIELDED: a cancellation
+# of the caller -- any caller, any deadline -- no longer cuts it. The caller
+# waits (on the same connection, so nothing ever uses it twice) until the
+# sequence finishes or ENTER_ORDER_GRACE_S since the ENTER became owed has
+# passed, and then re-raises the cancellation: the caller is still
 # cancelled, the order (or its named refusal) is recorded. A sequence that
 # cannot finish -- the grace ran out, a second cancellation, an exception
 # inside it -- is cancelled, waited for (bounded) and the ENTER is named AT
@@ -1945,36 +1966,182 @@ def enter_recorded(ctx: dict, decision_id: str) -> None:
 # elapsed). The backstop does not name it twice; it still names what no code
 # path can (a process killed between the INSERT and the order). Nothing is
 # placed late beyond the grace; no price, size, threshold or rule moves.
+#
+# THE REWORK (review of 952e9cb7, two defects reproduced on real Postgres):
+#
+#  * THE ENTER ROW'S OWN INSERT WAS OUTSIDE THE PROTECTED REGION. The INSERT
+#    takes FOR KEY SHARE on paper_accounts (the FK), which waits behind the
+#    ledger's `_lock` (SELECT ... FOR UPDATE) that every concurrent submit or
+#    pass step holds. A deadline that fell during that wait cancelled the
+#    client at once while the server went on and COMMITTED the row; the
+#    decision id never reached owed_order, so only the 60 s backstop named
+#    it (12 of 13 runs of the reviewer's lock-wait reproduction). NOW the
+#    policy hands its INSERT to owed_order (`record`): the INSERT is the
+#    FIRST step of the owed sequence, the decision deadline stops cutting as
+#    it STARTS (`enter_recorded`), a duplicate is an outcome, and an INSERT
+#    still cut (grace, second cancellation) is resolved on the same
+#    connection -- whose next statement runs only once the server has
+#    finished the cut one -- before the ENTER is named (an INSERT the server
+#    did not commit owes nothing and is counted, not named).
+#  * A SECOND CANCELLATION LET bounded_decision (and _abandon) RETURN WHILE
+#    THE SEQUENCE STILL RAN ON THE CONNECTION: the caller's completion
+#    audit, then its pool release, ran on a connection in use (InterfaceError
+#    'another operation is in progress'; the pool terminated it mid-order;
+#    the abandonment could not be written). NOW nothing returns while a task
+#    it started still runs on the connection: every wait absorbs the
+#    caller's further cancellations (and re-raises CancelledError once the
+#    connection is free); a repeat cancellation reaching bounded_decision is
+#    forwarded to owed_order, which abandons and names the ENTER, bounded by
+#    ENTER_ABANDON_WAIT_S; a task that outlives even that has its connection
+#    TERMINATED -- never handed back to the caller or its pool mid-statement
+#    -- and the backstop names the ENTER.
 F_ENTER_ORDER_ABANDONED = "ENTER_ORDER_ABANDONED"
 C_GRACE_EXCEEDED = "CANCELLED_AND_THE_ORDER_GRACE_RAN_OUT"
 C_CANCELLED_AGAIN = "CANCELLED_AGAIN_WHILE_THE_ORDER_WAS_OWED"
 C_RAISED = "THE_ORDER_SEQUENCE_RAISED"
 C_SEQUENCE_CANCELLED = "THE_ORDER_SEQUENCE_ITSELF_WAS_CANCELLED"
-#: How long an abandoned sequence is waited for after its cancellation
-#: before the connection is used for the abandonment record (asyncpg
-#: completes a cancelled statement's cancel request; a transaction rolls
-#: back). A sequence still running past it keeps the connection, nothing is
-#: written on it and the backstop names the ENTER.
+#: the owed sequence's first stage when owed_order runs the ENTER's INSERT
+ST_ENTER_ROW_INSERTING = "ENTER_ROW_INSERTING"
+#: How long a cancelled sequence (or the abandonment record) is waited for
+#: before the next step: asyncpg completes a cancelled statement's cancel
+#: request, a transaction rolls back. A task still running past it, and past
+#: a second wait after its own cancellation, has its connection terminated.
 ENTER_ABANDON_WAIT_S = 5.0
-#: process counters: sequences completed after a caller's cancellation, and
-#: abandonments by cause
+#: After a connection is terminated a statement on it fails at once; a task
+#: still running past this is no longer on the connection (nothing can
+#: collide with it) and is left to finish on its own, its result retrieved.
+ENTER_TERMINATED_WAIT_S = 1.0
+#: process counters. abandoned: owed ENTERs stopped before their outcome was
+#: durable (named ENTER_ORDER_ABANDONED, or -- abandoned_unrecorded -- left
+#: to the backstop); cut_before_the_enter_row: the INSERT itself was cut and
+#: the server did not commit the row (nothing owed); outcome_durable_when_
+#: cut: the order or its refusal was already durable (nothing to name).
 OWED_ORDER_COUNTS: dict = {"completed_after_cancellation": 0,
-                           "abandoned": 0, "abandoned_unrecorded": 0}
+                           "abandoned": 0, "abandoned_unrecorded": 0,
+                           "cut_before_the_enter_row": 0,
+                           "outcome_durable_when_cut": 0,
+                           "connections_terminated": 0}
+
+
+def owed_enter_overrun_bound_s() -> float:
+    """THE MOST AN OWED ENTER CAN HOLD ITS CALLER PAST THE CALLER'S OWN
+    CANCELLATION, every bound spent in full: the rest of the grace
+    (ENTER_ORDER_GRACE_S, measured from the instant the ENTER became owed,
+    which precedes the cancellation), the sequence's settle after its
+    cancellation (wait, terminate, wait) and the abandonment record's
+    (wait, cancel and wait, terminate, wait):
+    15 + (5 + 1) + (5 + 5 + 1) = 32 s with the defaults. Measured ends are
+    milliseconds; this is the pathology bound. A caller's own published
+    worst case does not include it -- pinnapi_reactive.worst_case_job_s
+    (24 s) and the paper pass's HARD_TIMEOUT_S can each be exceeded by up
+    to this much while an owed ENTER is in flight."""
+    return (ENTER_ORDER_GRACE_S + 3 * ENTER_ABANDON_WAIT_S
+            + 2 * ENTER_TERMINATED_WAIT_S)
+
+
+def _retrieve(task) -> None:
+    """A finished task's exception is read, so it is never logged unread."""
+    if task.done() and not task.cancelled():
+        task.exception()
+
+
+async def _wait_out(fut, timeout_s: float | None) -> int:
+    """Wait for `fut` to finish -- never cancelling it -- for at most
+    `timeout_s` seconds (None: until it finishes), ABSORBING the caller's
+    cancellations meanwhile. Returns how many were absorbed: the caller
+    re-raises CancelledError once the connection is no longer in use."""
+    end = None if timeout_s is None else time.monotonic() + float(timeout_s)
+    absorbed = 0
+    while not fut.done():
+        left = None if end is None else end - time.monotonic()
+        if left is not None and left <= 0:
+            break
+        try:
+            await asyncio.wait({fut}, timeout=left)
+        except asyncio.CancelledError:
+            absorbed += 1
+    return absorbed
+
+
+def _terminate(conn) -> bool:
+    """Close the connection at once (asyncpg Connection.terminate): a task
+    still running on it fails, and no later user -- the caller, its pool --
+    can collide with it. Never raises."""
+    fn = getattr(conn, "terminate", None)
+    if fn is None:
+        return False
+    try:
+        fn()
+    except Exception:                                           # noqa: BLE001
+        return False
+    OWED_ORDER_COUNTS["connections_terminated"] += 1
+    return True
+
+
+async def _settle(conn, task, *, cancel_first: bool) -> tuple[int, bool]:
+    """LET `task` (a coroutine on `conn`) FINISH BEFORE ANYONE ELSE USES THE
+    CONNECTION, bounded. cancel_first: cancel it, then wait; otherwise wait,
+    then cancel and wait again. Each wait is ENTER_ABANDON_WAIT_S with the
+    caller's cancellations absorbed. A task still running after that has its
+    connection terminated (and is waited for ENTER_TERMINATED_WAIT_S more).
+    Returns (the cancellations absorbed, whether the connection was
+    terminated). Its total is part of `owed_enter_overrun_bound_s`."""
+    absorbed = 0
+    if cancel_first and not task.done():
+        task.cancel()
+    absorbed += await _wait_out(task, ENTER_ABANDON_WAIT_S)
+    if not task.done() and not cancel_first:
+        task.cancel()
+        absorbed += await _wait_out(task, ENTER_ABANDON_WAIT_S)
+    terminated = False
+    if not task.done():
+        terminated = _terminate(conn)
+        absorbed += await _wait_out(task, ENTER_TERMINATED_WAIT_S)
+    if task.done():
+        _retrieve(task)
+    else:
+        task.add_done_callback(_retrieve)
+    return absorbed, terminated
 
 
 async def owed_order(conn, ctx: dict, *, decision_id: str, strategy: str,
-                     sequence, grace_s: float | None = None) -> dict:
-    """RUN A RECORDED ENTER'S ORDER SEQUENCE SO THAT IT ENDS IN AN ORDER, A
-    NAMED REFUSAL OR A NAMED ABANDONMENT -- never in nothing. `sequence` is
-    `async def (progress) -> rec`; it sets progress["stage"] as it goes and
-    progress["outcome"] once the order or its named refusal is durable
-    ("ORDER" / "ORDER_REFUSED"). Returns the sequence's result; re-raises the
-    caller's cancellation (after the sequence finished or was abandoned) and
-    the sequence's own exception (after the abandonment record)."""
+                     sequence, record=None, duplicate=None,
+                     grace_s: float | None = None) -> dict:
+    """RUN AN ENTER'S ORDER SEQUENCE SO THAT IT ENDS IN AN ORDER, A NAMED
+    REFUSAL OR A NAMED ABANDONMENT -- never in nothing.
+
+    `record` (every paper policy passes it): `async def () -> id | None`,
+    the ENTER row's INSERT ... ON CONFLICT DO NOTHING RETURNING. It is the
+    FIRST step of the owed sequence: the ENTER is owed (`enter_recorded`)
+    from the instant its INSERT starts, and None (another writer recorded
+    this decision first) returns `duplicate()` with nothing owed. Without
+    `record` the caller has already written the row.
+
+    `sequence` is `async def (progress) -> rec`; it sets progress["stage"]
+    as it goes and progress["outcome"] once the order or its named refusal
+    is durable ("ORDER" / "ORDER_REFUSED"). Returns the sequence's result;
+    re-raises the caller's cancellation (after the sequence finished or was
+    abandoned) and the sequence's own exception (after the abandonment
+    record). Never returns or raises while the sequence still runs on
+    `conn` (see `_settle`)."""
     grace = ENTER_ORDER_GRACE_S if grace_s is None else float(grace_s)
     t0 = time.monotonic()
-    progress: dict = {"stage": "ENTER_RECORDED", "outcome": None}
-    task = asyncio.ensure_future(sequence(progress))
+    progress: dict = {"stage": ("ENTER_RECORDED" if record is None
+                                else ST_ENTER_ROW_INSERTING),
+                      "outcome": None, "enter_row": record is None}
+    # THE DECISION DEADLINE STOPS CUTTING HERE: before the INSERT starts
+    enter_recorded(ctx, decision_id)
+
+    async def run():
+        if record is not None:
+            if await record() is None:
+                progress.update(stage="DUPLICATE", outcome="DUPLICATE")
+                return (duplicate() if duplicate is not None else
+                        {"decision_id": decision_id, "duplicate": True})
+            progress.update(stage="ENTER_RECORDED", enter_row=True)
+        return await sequence(progress)
+
+    task = asyncio.ensure_future(run())
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
@@ -2003,35 +2170,46 @@ async def owed_order(conn, ctx: dict, *, decision_id: str, strategy: str,
                        cause=cause)
         raise
     except Exception as exc:
-        await _abandon(conn, ctx, task, progress, decision_id=decision_id,
-                       strategy=strategy, t0=t0, grace=grace,
-                       cause=C_RAISED, error=type(exc).__name__)
+        absorbed = await _abandon(
+            conn, ctx, task, progress, decision_id=decision_id,
+            strategy=strategy, t0=t0, grace=grace, cause=C_RAISED,
+            error=type(exc).__name__)
+        if absorbed:
+            # cancelled while the abandonment was written: the caller's
+            # cancellation, now that the connection is free
+            raise asyncio.CancelledError() from exc
         raise
 
 
 async def _abandon(conn, ctx: dict, task, progress: dict, *, decision_id,
                    strategy, t0: float, grace: float, cause: str,
-                   error=None) -> None:
-    """Stop the sequence (bounded wait) and NAME the ENTER: one finding
+                   error=None) -> int:
+    """Stop the sequence and NAME the ENTER: one finding
     ENTER_ORDER_ABANDONED with its cause, unless the sequence already made
-    its outcome durable. Never raises (CancelledError excepted)."""
-    if not task.done():
-        task.cancel()
-        try:
-            await asyncio.wait({task}, timeout=ENTER_ABANDON_WAIT_S)
-        except asyncio.CancelledError:
-            pass
-    if task.done() and not task.cancelled():
-        task.exception()                    # retrieved: never logged unread
-    OWED_ORDER_COUNTS["abandoned"] += 1
-    if not task.done():
-        # the sequence still holds the connection: nothing can be written
-        # on it; the backstop names the ENTER
+    its outcome durable or its INSERT never committed. Returns only once
+    neither the sequence nor the record is running on `conn` (bounded;
+    `_settle`), with the number of the caller's cancellations it absorbed.
+    Never raises."""
+    absorbed, terminated = await _settle(conn, task, cancel_first=True)
+    if not task.done() or terminated:
+        # the sequence outlived its cancellation: its connection is closed,
+        # nothing can be written on it; the backstop names the ENTER
+        OWED_ORDER_COUNTS["abandoned"] += 1
         OWED_ORDER_COUNTS["abandoned_unrecorded"] += 1
-        return
+        return absorbed
     if progress.get("outcome") is not None:
-        return
-    try:
+        OWED_ORDER_COUNTS["outcome_durable_when_cut"] += 1
+        return absorbed
+
+    async def name_it() -> str:
+        # THE ENTER'S INSERT WAS CUT (enter_row unset). On this connection
+        # the next statement runs only once the server has finished the cut
+        # one (asyncpg waits out its cancel request): the row is committed,
+        # or it never will be.
+        if not progress.get("enter_row") and await conn.fetchval(
+                "SELECT verdict FROM paper_decisions WHERE decision_id=$1",
+                decision_id) is None:
+            return "NO_ENTER_ROW"
         await _finding(conn, ctx, kind=F_ENTER_ORDER_ABANDONED,
                        subject=decision_id, severity="WARNING", detail={
                            "decision_id": decision_id, "strategy": strategy,
@@ -2045,26 +2223,44 @@ async def _abandon(conn, ctx: dict, task, progress: dict, *, decision_id,
                                    "not finish: it was cancelled and named "
                                    "at once. No order was placed late."),
                            "named_by": "paper_derek.owed_order"})
-    except asyncio.CancelledError:
-        raise
-    except Exception:                                           # noqa: BLE001
+        return "NAMED"
+
+    write = asyncio.ensure_future(name_it())
+    got, terminated = await _settle(conn, write, cancel_first=False)
+    absorbed += got
+    outcome = (write.result() if write.done() and not write.cancelled()
+               and write.exception() is None else None)
+    if outcome == "NO_ENTER_ROW":
+        OWED_ORDER_COUNTS["cut_before_the_enter_row"] += 1
+        return absorbed
+    OWED_ORDER_COUNTS["abandoned"] += 1
+    if outcome != "NAMED":
         OWED_ORDER_COUNTS["abandoned_unrecorded"] += 1
+    return absorbed
 
 
 async def bounded_decision(make, ctx: dict, *, timeout_s: float,
                            grace_s: float | None = None) -> dict:
     """RUN `make(ctx)` -- one decision -- WITH ITS DEADLINE ON THE DECISION
-    ONLY. Before its ENTER row is recorded the decision is cancelled at
-    `timeout_s` and asyncio.TimeoutError is raised, as before. After it, the
-    order sequence completes, up to `grace_s` more (EnterOrderGraceExceeded
+    ONLY. Before its ENTER is owed (`enter_recorded`, as the ENTER row's
+    INSERT starts) the decision is cancelled at `timeout_s` and
+    asyncio.TimeoutError is raised, as before. After it, the INSERT and the
+    order sequence complete, up to `grace_s` more (EnterOrderGraceExceeded
     beyond that). `make` receives a shallow copy of `ctx` carrying the
-    signal; shared sub-dicts (books_by_slug) stay shared."""
+    signal; shared sub-dicts (books_by_slug) stay shared.
+
+    NEVER RETURNS OR RAISES WHILE THE DECISION STILL RUNS (on the caller's
+    connection): a cancellation of the caller cancels the decision and
+    waits for it; a REPEAT cancellation is absorbed and -- once the ENTER is
+    owed -- forwarded, so owed_order abandons and names it (bounded by
+    ENTER_ABANDON_WAIT_S); CancelledError is re-raised once it is done."""
     grace = ENTER_ORDER_GRACE_S if grace_s is None else float(grace_s)
     ev = asyncio.Event()
     run_ctx = dict(ctx)
     run_ctx[CTX_ENTER_RECORDED] = ev
     t0 = time.monotonic()
     task = asyncio.ensure_future(make(run_ctx))
+    absorbed = 0
     try:
         try:
             return await asyncio.wait_for(asyncio.shield(task),
@@ -2076,7 +2272,7 @@ async def bounded_decision(make, ctx: dict, *, timeout_s: float,
                 return task.result()
             if not ev.is_set():
                 raise                   # cut before its INSERT: nothing owed
-        # THE ENTER IS RECORDED: its order is owed. Same task, same
+        # THE ENTER IS OWED: its INSERT and order complete. Same task, same
         # connection, no second coroutine on it.
         did = run_ctx.get("enter_recorded_decision_id")
         try:
@@ -2084,18 +2280,32 @@ async def bounded_decision(make, ctx: dict, *, timeout_s: float,
         except asyncio.TimeoutError:
             raise EnterOrderGraceExceeded(did, timeout_s=timeout_s,
                                           grace_s=grace) from None
+        if rec.get("duplicate"):
+            return rec
         return dict(rec, order_after_decision_deadline={
             "decision_id": did, "decision_deadline_s": float(timeout_s),
             "grace_s": grace,
             "elapsed_s": round(time.monotonic() - t0, 3),
-            "why": ("the ENTER was recorded before the decision deadline; "
-                    "its order sequence was allowed to complete")})
+            "why": ("the ENTER was owed before the decision deadline; its "
+                    "row and order sequence were allowed to complete")})
     finally:
         if not task.done():
             task.cancel()
-            await asyncio.wait({task})
-        if task.done() and not task.cancelled():
-            task.exception()                # retrieved: never logged unread
+            while not task.done():
+                try:
+                    await asyncio.wait({task})
+                except asyncio.CancelledError:
+                    absorbed += 1
+                    if ev.is_set():
+                        # forwarded: owed_order stops waiting out its grace,
+                        # abandons and names the ENTER on the connection it
+                        # still owns (bounded). Before the ENTER is owed the
+                        # decision is only waited for: its own cleanup (a
+                        # savepoint's rollback) is never cut.
+                        task.cancel()
+        _retrieve(task)
+        if absorbed:
+            raise asyncio.CancelledError()
 
 
 ENTER_BACKSTOP_SQL = """

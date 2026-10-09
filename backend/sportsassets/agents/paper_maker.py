@@ -447,81 +447,93 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
            "book_source": ctx.get("last_book_source"),
            "book_age_s": ctx.get("last_book_age_s"),
            "cooldown_s": ctx.get("last_book_cooldown_s")}
-    inserted = await conn.fetchval(
-        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
-        " decided_at, valuation_id, us_market_slug, holding_side, intent, "
-        " fixture, label, verdict, refusal, refusals, p_internal, "
-        " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
-        " book, proposed_qty, limit_price, economics, qualification_gaps, "
-        " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
-        " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
-        " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
-        " $25::jsonb,NULL,$26,$27,$28::jsonb) ON CONFLICT DO NOTHING "
-        " RETURNING decision_id",
-        did, ctx["session_id"], ctx["account_id"], L._ts(at),
-        cand["valuation_id"], cand.get("us_market_slug"), side,
-        cand.get("side"), cand.get("fixture"),
-        json.dumps(label, default=str), verdict, rec["refusal"], refusals,
-        json.dumps(internal_rec, default=str), p,
-        json.dumps(pin, default=str),
-        None if obs is None else obs["obs_id"],
-        None if book is None else json.dumps(book, default=str),
-        None if not qty else L.D(qty),
-        (None if price.get("limit") is None else L.D(price["limit"])),
-        json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
-        VERSION, json.dumps(policy_decision, default=str),
-        json.dumps(alts, default=str), cfg["simulator_version"], STRATEGY,
-        json.dumps(provenance, default=str))
-    if inserted is None:
-        return dict(rec, duplicate=True)
-    cevidence = CA.capital_evidence(
-        capital, p=p, limit=price.get("limit"), threshold_edge_pp=min_edge_pp,
-        basis="MAKER_RESTING_FILL_AT_OWN_LIMIT",
-        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
-        book_observed_at=None if obs is None else obs.get("observed_at"))
-    # THE DECISION'S CONTROL INPUTS, carried to the ledger's profitability
-    # bind (control 25; this policy has no decision-stage bind): the
-    # probability's and the book's observation instants and the settlement
-    # verdict the capital evaluation resolved. The bind re-checks them under
-    # the account lock and refuses by name when one is missing.
-    from .. import bettor_paper_profitability_bind as PBIND
-    cevidence = PBIND.carry_inputs(
-        cevidence, evaluated_at=at, p_observed_at=pin.get("at"),
-        book_observed_at=None if obs is None else obs.get("observed_at"),
-        settlement={"compatibility": (
-            "COMPATIBLE" if match.get("established") is True
-            else "NOT_ESTABLISHED_BY_THE_MATCH")})
-    # ── THE RESTING ORDER THIS DECISION DEFINES (persisted only for an
-    # ENTER; not a fill), and the shape a no-entry lifecycle refusal's census
-    # row and shadow are recorded from.
-    lim = None if price.get("limit") is None else float(price["limit"])
-    wire = (None if lim is None else lim if side == "LONG"
-            else round(1.0 - lim, 6))
-    order = {"idempotency_key": "%s:ENTRY" % did,
-             "account_id": ctx["account_id"],
-             "session_id": ctx["session_id"],
-             "group_id": PB.group_id_for(did), "role": "ENTRY",
-             "direction": "BUY", "holding_side": side,
-             "intent": cand.get("side"),
-             "us_market_slug": cand.get("us_market_slug"),
-             "fixture": cand.get("fixture"),
-             "label": dict(label, rationale=rationale,
-                           cancel_conditions=CANCEL_CONDITIONS,
-                           post_only=True, expiry_s=MAKER_TTL_S,
-                           threshold_edge_pp=min_edge_pp,
-                           p_pinnacle_at_placement=p),
-             "order_type": "RESTING", "time_in_force": "GTD",
-             "allow_partial": True, "qty": qty, "limit_price": lim,
-             "wire_price": wire, "decision_id": did, "decided_at": at,
-             "eligible_at": at, "expires_at": at + MAKER_TTL_S,
-             "queue_ahead_qty": (queue or {}).get("queue_ahead_qty", 0.0),
-             "queue_basis": dict(queue or {},
-                                 placement_obs_id=(None if obs is None
-                                                   else obs["obs_id"])),
-             "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY, "capital_evidence": cevidence}
+
+    async def insert_row():
+        # THE DECISION ROW. For an ENTER it is the FIRST step of the owed
+        # order sequence (PD.owed_order(record=...), RC6.2 enter-integrity
+        # rework): a deadline that falls while it waits on the account row
+        # lock can no longer leave a committed ENTER that nothing owes.
+        return await conn.fetchval(
+            "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+            " decided_at, valuation_id, us_market_slug, holding_side, intent, "
+            " fixture, label, verdict, refusal, refusals, p_internal, "
+            " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
+            " book, proposed_qty, limit_price, economics, qualification_gaps, "
+            " policy_version, policy_decision, alternatives, optimistic, "
+            " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
+            " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
+            " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
+            " $25::jsonb,NULL,$26,$27,$28::jsonb) ON CONFLICT DO NOTHING "
+            " RETURNING decision_id",
+            did, ctx["session_id"], ctx["account_id"], L._ts(at),
+            cand["valuation_id"], cand.get("us_market_slug"), side,
+            cand.get("side"), cand.get("fixture"),
+            json.dumps(label, default=str), verdict, rec["refusal"], refusals,
+            json.dumps(internal_rec, default=str), p,
+            json.dumps(pin, default=str),
+            None if obs is None else obs["obs_id"],
+            None if book is None else json.dumps(book, default=str),
+            None if not qty else L.D(qty),
+            (None if price.get("limit") is None else L.D(price["limit"])),
+            json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
+            VERSION, json.dumps(policy_decision, default=str),
+            json.dumps(alts, default=str), cfg["simulator_version"], STRATEGY,
+            json.dumps(provenance, default=str))
+
+    def build_order() -> dict:
+        cevidence = CA.capital_evidence(
+            capital, p=p, limit=price.get("limit"),
+            threshold_edge_pp=min_edge_pp,
+            basis="MAKER_RESTING_FILL_AT_OWN_LIMIT", levels=levels,
+            book_obs_id=None if obs is None else obs.get("obs_id"),
+            book_observed_at=None if obs is None else obs.get("observed_at"))
+        # THE DECISION'S CONTROL INPUTS, carried to the ledger's
+        # profitability bind (control 25; this policy has no decision-stage
+        # bind): the probability's and the book's observation instants and
+        # the settlement verdict the capital evaluation resolved. The bind
+        # re-checks them under the account lock and refuses by name when one
+        # is missing.
+        from .. import bettor_paper_profitability_bind as PBIND
+        cevidence = PBIND.carry_inputs(
+            cevidence, evaluated_at=at, p_observed_at=pin.get("at"),
+            book_observed_at=None if obs is None else obs.get("observed_at"),
+            settlement={"compatibility": (
+                "COMPATIBLE" if match.get("established") is True
+                else "NOT_ESTABLISHED_BY_THE_MATCH")})
+        # ── THE RESTING ORDER THIS DECISION DEFINES (persisted only for an
+        # ENTER; not a fill), and the shape a no-entry lifecycle refusal's
+        # census row and shadow are recorded from.
+        lim = None if price.get("limit") is None else float(price["limit"])
+        wire = (None if lim is None else lim if side == "LONG"
+                else round(1.0 - lim, 6))
+        return {"idempotency_key": "%s:ENTRY" % did,
+                "account_id": ctx["account_id"],
+                "session_id": ctx["session_id"],
+                "group_id": PB.group_id_for(did), "role": "ENTRY",
+                "direction": "BUY", "holding_side": side,
+                "intent": cand.get("side"),
+                "us_market_slug": cand.get("us_market_slug"),
+                "fixture": cand.get("fixture"),
+                "label": dict(label, rationale=rationale,
+                              cancel_conditions=CANCEL_CONDITIONS,
+                              post_only=True, expiry_s=MAKER_TTL_S,
+                              threshold_edge_pp=min_edge_pp,
+                              p_pinnacle_at_placement=p),
+                "order_type": "RESTING", "time_in_force": "GTD",
+                "allow_partial": True, "qty": qty, "limit_price": lim,
+                "wire_price": wire, "decision_id": did, "decided_at": at,
+                "eligible_at": at, "expires_at": at + MAKER_TTL_S,
+                "queue_ahead_qty": (queue or {}).get("queue_ahead_qty", 0.0),
+                "queue_basis": dict(queue or {},
+                                    placement_obs_id=(None if obs is None
+                                                      else obs["obs_id"])),
+                "simulator_version": cfg["simulator_version"],
+                "strategy": STRATEGY, "capital_evidence": cevidence}
     if verdict != DP.ENTER:
+        if await insert_row() is None:
+            return dict(rec, duplicate=True)
+        order = build_order()
+        cevidence = order["capital_evidence"]
         if lifecycle is not None and lifecycle.get("refusal") and \
                 refusals == [lifecycle["refusal"]]:
             # A NO-ENTRY LIFECYCLE STATE, REFUSED AT DECISION: the census
@@ -553,11 +565,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 "expected_net_profit_if_filled_usd"),
             qty=qty or None, limit_price=price.get("limit"), at=at)
         return rec
-    # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision),
-    # and a cancellation of the caller no longer cuts it (PD.owed_order).
-    PD.enter_recorded(ctx, did)
+    # AN ENTER: ITS ROW AND ITS RESTING ORDER ARE OWED (PD.bounded_decision
+    # stops cutting as the row's INSERT starts), and a cancellation of the
+    # caller no longer cuts them (PD.owed_order runs `insert_row` as the
+    # sequence's first step).
 
     async def sequence(progress: dict) -> dict:
+        progress["stage"] = "PAPER_ORDER_BUILDING"
+        order = build_order()
         progress["stage"] = "PAPER_ORDER_SUBMITTING"
         got = await L.submit_order(conn, order, caps=cfg["risk"],
                                    fee_fn=fee_fn, now=at,
@@ -585,6 +600,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         return rec
 
     return await PD.owed_order(conn, ctx, decision_id=did, strategy=STRATEGY,
+                               record=insert_row,
+                               duplicate=lambda: dict(rec, duplicate=True),
                                sequence=sequence)
 
 
