@@ -177,17 +177,17 @@ jobs:
           set -o pipefail
           gh api "repos/$REPO/actions/runs?head_sha=$SHA&per_page=100" > acc/runs_raw.json
           jq '[.workflow_runs[] | {name, id, event, status, conclusion, created_at, head_sha, html_url}]' acc/runs_raw.json > acc/runs.json
-          jq -n --slurpfile r acc/runs.json '
-            def latest(n): ([$r[0][] | select(.name == n)] | sort_by(.created_at) | last);
-            def green(n): (latest(n) // {} | (.status == "completed" and .conclusion == "success"));
-            {backend_tests_green: green("backend-tests"),
-             capital_critical_green: green("capital-critical"),
-             commit_guard_green: green("commit-guard"),
-             engine_diagnostic_green: green("engine-diagnostic"),
-             runs: {backend_tests: latest("backend-tests"),
-                    capital_critical: latest("capital-critical"),
-                    commit_guard: latest("commit-guard"),
-                    engine_diagnostic: latest("engine-diagnostic")}}' > acc/gates.json
+          # A RUN CANCELLED (or skipped) BEFORE IT CONCLUDED CARRIES NO VERDICT.
+          # pm-acceptance 37884042844 (release 732cc0c6) read capital-critical
+          # run 37875940138 -- a duplicate dispatch cancelled by the operator
+          # at once -- instead of the push-triggered run 37875926135 on the
+          # same SHA that concluded success with CI_VERDICT ACCEPT, because
+          # the newest run of a name was taken whatever its conclusion. The
+          # gate now reads the newest run that CONCLUDED (success, failure,
+          # timed_out, action_required ...): a failed run still fails it, an
+          # in-progress one still is not green, and every cancelled/skipped
+          # run of the SHA is listed beside it, never hidden.
+          jq -n --slurpfile r acc/runs.json -f "$GITHUB_WORKSPACE/judge/.github/pm-acceptance/gate_runs.jq" > acc/gates.json
           jq -c '{backend_tests_green, capital_critical_green, commit_guard_green, engine_diagnostic_green}' acc/gates.json
           jq -r '.runs | to_entries[] | "  \(.key): \(.value.id // "-") \(.value.status // "absent")/\(.value.conclusion // "-") \(.value.html_url // "")"' acc/gates.json
 
