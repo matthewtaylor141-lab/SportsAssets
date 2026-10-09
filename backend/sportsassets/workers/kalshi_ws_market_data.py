@@ -117,6 +117,27 @@ async def write_book(conn, ticker: str, books: KWS.WsBooks, *,
             ticker, "%s:%s" % (cur["state"], cur.get("why")), KWS.BOOK_BASIS)
 
 
+def prune_untracked(sub, written: dict, want) -> int:
+    """(RC6) The books, the written-key map and the tracked subscription of
+    every market no longer in the wanted set are dropped (KWS.Subscriber.
+    forget; the venue-side subscription ends with the session); returns
+    how many. Without it all three grew with every market the
+    runtime ever tracked (production 2026-10-09: 235 books held, 185
+    wanted; research-sql rc6_api-responsive_kalshi_ws_growth.sql), and the
+    heartbeat's freshness counted the 50 untracked ones. The book rows
+    already written stay as they are: no longer re-asserted, they age past
+    every reader's freshness bound."""
+    keep = set(want)
+    gone = [t for t in list(sub.books.books) if t not in keep]
+    gone += [t for t in list(written) if t not in keep and t not in gone]
+    if not gone:
+        return 0
+    n = sub.forget(gone)
+    for t in gone:
+        written.pop(t, None)
+    return n
+
+
 def _lv(levels) -> str:
     return json.dumps([[str(p), int(q)] for p, q in (levels or ())])
 
@@ -183,6 +204,11 @@ def health(books: KWS.WsBooks, sub, *, now: float, limits, pace,
             "version": KWS.VERSION, "ws": c,
             "connections": getattr(sub, "connections", 0),
             "resubscribes": getattr(sub, "resubscribes", 0),
+            "untracked_dropped": {
+                "books": books.stats.get("forgotten", 0),
+                "messages_ignored": books.stats.get("ignored_not_tracked", 0),
+                "still_subscribed_until_session_end": len(
+                    getattr(books, "forgotten", ()) or ())},
             "last_error": getattr(sub, "last_error", None),
             "subscribed_markets": len(getattr(sub, "subscribed", ()) or ()),
             "current_book_update_age_s": {
@@ -270,6 +296,7 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
                 if now - last["want"] >= WANTED_EVERY_S:
                     want[:] = await wanted_tickers(conn, now=now)
                     last["want"] = now
+                    prune_untracked(sub, written, want)
                 if now - state["limits_at"] >= LIMITS_EVERY_S:
                     try:
                         state["limits"] = await read_limits(key_id, pk,

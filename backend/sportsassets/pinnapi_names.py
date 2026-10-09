@@ -67,6 +67,7 @@ keeps the naming refusal. Pure.
 """
 from __future__ import annotations
 
+import functools
 import re
 import unicodedata
 
@@ -215,9 +216,33 @@ ABSENCE_WINDOW_S = 36 * 3600
 R_NOT_IN_FEED = "PINNAPI_PRIMARY_FEED_HOLDS_NO_FIXTURE_FOR_EITHER_TEAM"
 
 
+#: (RC6) THE TOKENS OF A NAME ARE COMPUTED ONCE PER NAME, NOT PER COMPARISON.
+#: `absence` compares every participant of every feed record of the sport
+#: with both teams of a seed it could not match: ~10,400 `shares_a_token`
+#: calls per miss on a 2,600-event cache, and each re-folded, re-canonicalised
+#: and re-tokenised BOTH names. Production 2026-10-09 (the API loop watchdog
+#: ring, research-sql rc6_api-responsive_loop_stalls.sql): an ext_pinnacle
+#: cycle held the API loop 2.5 s inside absence -> shares_a_token -> _tokens.
+#: Both helpers are pure functions of (name, family) over this module's
+#: closed tables, so a bounded memo answers exactly what the computation
+#: answers (an immutable frozenset: the callers only intersect and test
+#: membership). The fold (`_fold`) and the canonical rendering (`canonical`)
+#: under them are memoised the same way, by the name's text: the registration
+#: batch's `pinnapi_primary.fixture_index` folds and canonicalises both names
+#: of every cached fixture, on the loop, every batch. Bounded: at most
+#: MEMO_NAMES names per helper.
+MEMO_NAMES = 65_536
+
+
 def _fold(value) -> str:
-    """`pinnapi_primary.name`, restated so this module imports nothing."""
-    text = unicodedata.normalize("NFKD", str(value or "")).casefold()
+    """`pinnapi_primary.name`, restated so this module imports nothing.
+    (RC6) Memoised by its text, as `pinnapi_primary.name` (see MEMO_NAMES)."""
+    return _fold_text(str(value or ""))
+
+
+@functools.lru_cache(maxsize=MEMO_NAMES)
+def _fold_text(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text).casefold()
     text = "".join(c for c in text if not unicodedata.combining(c))
     return " ".join(t for t in re.findall(r"[^\W_]+", text.replace("&", " "))
                     if t != "and")
@@ -245,7 +270,28 @@ def canonical(value, family=None, sport_key=None, *, side="provider") -> dict:
     """{"name": canonical string, "rules": [rules that fired]} for one
     rendering. `side` "provider" also applies the competition-scoped
     renderings of `sport_key`; "feed" does not (the feed's name is their
-    target). Pure."""
+    target). Pure.
+
+    (RC6) Memoised by (the folded text, family, sport_key, side) when the
+    three are plain strings (or None) -- `pinnapi_primary.fixture_index`
+    canonicalises both names of every cached fixture for every registration
+    batch, on the API's event loop (see MEMO_NAMES). Every call still gets
+    its own dict and its own rules list."""
+    text = str(value or "")
+    if all(v is None or type(v) is str for v in (family, sport_key, side)):
+        nm, rules = _canonical_memo(text, family, sport_key, side)
+        return {"name": nm, "rules": list(rules)}
+    got = _canonical(text, family, sport_key, side)
+    return {"name": got[0], "rules": list(got[1])}
+
+
+@functools.lru_cache(maxsize=MEMO_NAMES)
+def _canonical_memo(text, family, sport_key, side) -> tuple:
+    return _canonical(text, family, sport_key, side)
+
+
+def _canonical(value, family, sport_key, side) -> tuple:
+    """`canonical`'s computation: (name, (rules...)). Pure."""
     rules = []
     toks = _fold(value).split()
     j = _join_letters(toks)
@@ -277,19 +323,21 @@ def canonical(value, family=None, sport_key=None, *, side="provider") -> dict:
         if name in NCAAF_SCHOOL_RENDERINGS:
             rules.append("NCAAF_SCHOOL_RENDERING:%s" % name)
             name = NCAAF_SCHOOL_RENDERINGS[name]
-    return {"name": name, "rules": rules}
+    return name, tuple(rules)
 
 
-def _tokens(value, family) -> set:
+@functools.lru_cache(maxsize=MEMO_NAMES)
+def _tokens(value, family) -> frozenset:
     c = canonical(value, family, side="feed")["name"]
     raw = set(_join_letters(_fold(value).split())) | set(c.split())
-    return {t for t in raw if len(t) > 1 and t not in ABSENCE_STOP}
+    return frozenset(t for t in raw if len(t) > 1 and t not in ABSENCE_STOP)
 
 
 #: the grammatical words an acronym skips ("Clube de Regatas Brasil" is CRB)
 _ACRONYM_SKIP = frozenset(("de", "do", "da", "the", "of", "y", "e"))
 
 
+@functools.lru_cache(maxsize=MEMO_NAMES)
 def _acronym(value) -> str:
     toks = [t for t in _fold(value).split()
             if len(t) > 1 and t not in _ACRONYM_SKIP]
@@ -333,20 +381,81 @@ def shares_a_token(a, b, family) -> bool:
 NEAR_START_SAMPLE = 4
 
 
+class AbsenceIndex:
+    """(RC6) ONE PASS OVER THE FEED'S RECORDS FOR A BATCH OF MISSES.
+
+    `absence` asks, for every record of the sport, whether a participant
+    shares a token or an acronym with either team -- a scan of the whole
+    feed per seed the matcher could not place. For a batch of registrations
+    (pinnapi_primary.fixture_index, built with no await between it and the
+    last registration) this inverts that scan once: token -> the records
+    whose participants carry it, and acronym -> the records whose
+    participants abbreviate to it. A seed's candidates are the records that
+    carry one of its tokens, whose acronym is one of its tokens, or that
+    carry its acronym -- exactly the records `shares_a_token` can answer True
+    for -- and `absence` then runs its own unchanged test on those records,
+    in their order. Every other record of the sport names neither team, so
+    it only counts toward `sport_records`, which is counted here. The answer
+    is the scan's, verbatim (test_rc6_api_responsive_offloop pins it).
+    Built for ONE (records, sport, family): the tokens depend on the family."""
+
+    def __init__(self, records, sport_id, family):
+        self.records, self.sport_id, self.family = records, sport_id, family
+        self.rows: list = []
+        self.postings: dict = {}
+        self.acronyms: dict = {}
+        for pos, ev in enumerate(records or ()):
+            if not isinstance(ev, dict) or ev.get("sport_id") != sport_id:
+                continue
+            self.rows.append(pos)
+            for p in ev.get("participants") or []:
+                if not (isinstance(p, dict) and p.get("name")):
+                    continue
+                n = str(p.get("name"))
+                for t in _tokens(n, family):
+                    self.postings.setdefault(t, set()).add(pos)
+                a = _acronym(n)
+                if a:
+                    self.acronyms.setdefault(a, set()).add(pos)
+
+    def candidates(self, home, away) -> list:
+        """The records (in their order) `shares_a_token` might name a team
+        in -- a superset of those it does."""
+        keys = _tokens(home, self.family) | _tokens(away, self.family)
+        got: set = set()
+        for t in keys:
+            got |= self.postings.get(t, set())
+            got |= self.acronyms.get(t, set())
+        for a in (_acronym(home), _acronym(away)):
+            if a:
+                got |= self.postings.get(a, set())
+        return [self.records[pos] for pos in sorted(got)]
+
+
 def absence(records, *, sport_id, start, home, away, family,
-            evicted=0, tolerance_s=None) -> dict:
+            evicted=0, tolerance_s=None, prepared=None) -> dict:
     """Is the fixture ABSENT from the feed (see the module docstring)? Over
     the feed's raw records (`cache.events` values). {"absent": bool,
     "why": ..., "sport_records": n, "sharing": [up to 4 names]}, plus, when
     `tolerance_s` is given, the near-start scan (NEAR_START_SAMPLE above).
-    Pure."""
+    Pure. `prepared` (an AbsenceIndex of these same records, this sport and
+    family) answers the same, scanning only the records that can name a
+    team."""
     sport_records, sharing = 0, []
     near, elsewhere = [], []
     tol = None if tolerance_s is None else float(tolerance_s)
-    for ev in records or ():
+    if (prepared is not None and prepared.records is records
+            and prepared.sport_id == sport_id and prepared.family == family):
+        scan, sport_records = prepared.candidates(home, away), \
+            len(prepared.rows)
+        counted = True
+    else:
+        scan, counted = records or (), False
+    for ev in scan:
         if not isinstance(ev, dict) or ev.get("sport_id") != sport_id:
             continue
-        sport_records += 1
+        if not counted:
+            sport_records += 1
         st = _epoch(ev.get("startTime"))
         names = [str(p.get("name")) for p in (ev.get("participants") or [])
                  if isinstance(p, dict) and p.get("name")]

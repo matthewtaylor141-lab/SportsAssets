@@ -511,28 +511,10 @@ def _amount(price: float) -> dict:
     return {"value": f"{price:.2f}", "currency": "USD"}
 
 
-def _clean_title(t: str | None) -> str | None:
-    """A searchable matchup from a global market title.
-
-    The whales' titles carry market decorations the US venue's search
-    chokes on ("Spread: Atlanta Dream (-2.5)", "Halmstads BK vs. IK
-    Sirius: O/U 3.5", "Celtic FC vs. Dundee FC - More Markets"). All 305
-    of the first live copy attempts died in search with these — strip to
-    the matchup itself.
-    """
-    if not t:
-        return None
-    t = t.split(" - More Markets")[0]
-    t = re.sub(r"^(Spread|Total|Moneyline|O/U)\s*:\s*", "", t)
-    if ":" in t:
-        # Keep the side holding the matchup: "Canadian Open: A vs B" wants
-        # the right side; "A vs. B: O/U 3.5" wants the left.
-        parts = t.split(":")
-        vs = [p for p in parts if " vs" in p.lower()]
-        t = vs[-1] if vs else max(parts, key=len)
-    t = re.sub(r"\([^)]*\)", " ", t)
-    t = re.sub(r"\s+", " ", t).strip(" -")
-    return t or None
+# The matchup cleaner lives in desk_board_parse (RC6): the desk's page parse
+# runs in a child process that imports that module alone, and the title it
+# writes must be the one every other caller of `_clean_title` computes.
+from .desk_board_parse import clean_title as _clean_title  # noqa: E402
 
 
 def _surname_matchup(t: str | None) -> str | None:
@@ -703,21 +685,188 @@ _DESK_MAX_PAGES = int(os.environ.get("PMUS_DESK_MAX_PAGES", "14"))
 _DESK_PARTIAL_KEEP_S = 600.0
 
 
-def _ev_volume_usd(ev: dict) -> float | None:
-    """Traded volume in dollars from the venue's own event row (desk v8
-    feed cards sort on it). The listing payloads have carried the figure
-    under several spellings across venue revisions — probe them
-    defensively, TOTAL volume preferred, liquidity as the last resort.
-    None when the venue doesn't say: volume is never invented."""
-    for k in ("volume", "volumeNum", "volume24hr", "liquidity"):
-        v = ev.get(k)
-        if v is None or (isinstance(v, str) and not v.strip()):
-            continue
+# kept as pmus._ev_volume_usd for its readers (test_desk_feed among them)
+from .desk_board_parse import ev_volume_usd as _ev_volume_usd  # noqa: E402,F401
+
+
+# ── THE DESK PAGE PARSE RUNS IN A CHILD PROCESS (RC6, 2026-10-09) ──────────
+#
+# WHAT PRODUCTION SHOWED. The sweep below ran in an API worker thread, and a
+# thread shares the interpreter lock with the event loop: each page's
+# json.loads held it in C for the whole page, and the slim build (~5,000
+# markets a page, a regex per title) competed for it in Python. The loop
+# watchdog's persisted ring (research-sql rc6_api-responsive_loop_stalls.sql,
+# 2026-10-09 00:52-01:29Z) has six of twenty API loop stalls (2.3-3.3 s in
+# full) inside sweeps, the sweep thread in `_slim` / `re.sub` / the response
+# decode and the watchdog itself locked out for up to 0.81 s; on 2026-10-08,
+# 9 of the 10 high-overrun stalls between 18:40Z and 20:34Z fell inside
+# sweeps (pages=15 events=1430 markets~79,000 in 28-73 s each).
+#
+# WHAT CHANGES. The request is the SDK's own (same URL, query encoding,
+# headers, the same httpx client and therefore the same transport gate:
+# pacing, attempt counting, the 429 circuit) but the body comes back raw and
+# is parsed and slimmed by desk_board_parse in ONE long-lived child process,
+# so this process only reads bytes off the socket and receives the slim rows.
+# Nothing about the board changes: the same pages, the same budget, the same
+# cadence and TTL, the same rows (desk_board_parse is the code `_slim` ran),
+# the same receipt -- plus `parse`, which says where each page was parsed.
+#
+# FALLBACK, NAMED. A client that is not the SDK shape mirrored here (or that
+# retries inside the SDK) is read through the SDK as before; a child that
+# cannot start, dies or times out is replaced by the same parse in this
+# process for DESK_PARSE_RETRY_S, and the receipt says IN_PROCESS and why.
+# PMUS_DESK_PARSE_CHILD=off forces the in-process parse.
+DESK_PARSE_CHILD = "CHILD_PROCESS"
+DESK_PARSE_IN_PROCESS = "IN_PROCESS"
+DESK_PARSE_TIMEOUT_S = 60.0
+DESK_PARSE_RETRY_S = 600.0
+DESK_PARSE_TASKS_PER_CHILD = 64
+_DESK_PARSE: dict = {"pool": None, "broken_until": 0.0, "why": None,
+                     "started": 0, "failures": 0}
+_desk_parse_lock = threading.Lock()
+
+
+def _desk_parse_pool():
+    """The child-process pool, built on first use; None when it is off or
+    failed recently (the in-process parse then runs, named)."""
+    import time as _t
+    with _desk_parse_lock:
+        if _DESK_PARSE["pool"] is not None:
+            return _DESK_PARSE["pool"]
+        if str(os.environ.get("PMUS_DESK_PARSE_CHILD", "on")).strip() \
+                .lower() in ("off", "0", "false", "no"):
+            _DESK_PARSE["why"] = "DISABLED_BY_CONFIGURATION"
+            return None
+        if _t.time() < _DESK_PARSE["broken_until"]:
+            return None
         try:
-            return float(v)
-        except (TypeError, ValueError):
-            continue
-    return None
+            import multiprocessing as _mp
+            from concurrent.futures import ProcessPoolExecutor
+            _DESK_PARSE["pool"] = ProcessPoolExecutor(
+                max_workers=1, mp_context=_mp.get_context("spawn"),
+                max_tasks_per_child=DESK_PARSE_TASKS_PER_CHILD)
+            _DESK_PARSE["started"] += 1
+            _DESK_PARSE["why"] = None
+        except Exception as exc:                               # noqa: BLE001
+            _desk_parse_failed_locked("START:%s" % type(exc).__name__)
+        return _DESK_PARSE["pool"]
+
+
+def _desk_parse_failed_locked(why: str) -> None:
+    import time as _t
+    pool, _DESK_PARSE["pool"] = _DESK_PARSE["pool"], None
+    _DESK_PARSE.update(broken_until=_t.time() + DESK_PARSE_RETRY_S, why=why,
+                       failures=_DESK_PARSE["failures"] + 1)
+    if pool is not None:
+        try:
+            procs = list((getattr(pool, "_processes", None) or {}).values())
+            pool.shutdown(wait=False, cancel_futures=True)
+            for pr in procs:
+                pr.terminate()
+        except Exception:                                      # noqa: BLE001
+            pass
+
+
+def shutdown_desk_parse() -> None:
+    """Stop the child (API shutdown); the next sweep would start a new one."""
+    with _desk_parse_lock:
+        pool, _DESK_PARSE["pool"] = _DESK_PARSE["pool"], None
+    if pool is not None:
+        try:
+            pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:                                      # noqa: BLE001
+            pass
+
+
+def desk_parse_status() -> dict:
+    """Where desk pages are parsed now (receipts and tests)."""
+    return {"child_running": _DESK_PARSE["pool"] is not None,
+            "children_started": _DESK_PARSE["started"],
+            "child_failures": _DESK_PARSE["failures"],
+            "last_fallback_why": _DESK_PARSE["why"]}
+
+
+def _desk_parse_body(body: bytes) -> tuple:
+    """(page_rows, where) for one raw events.list body. The parse's OWN
+    errors (a malformed body) propagate exactly as the SDK's response.json()
+    raised them; a pool that fails is replaced by the in-process parse."""
+    from . import desk_board_parse as _dbp
+    pool = _desk_parse_pool()
+    if pool is not None:
+        try:
+            return (pool.submit(_dbp.parse_page, body).result(
+                timeout=DESK_PARSE_TIMEOUT_S), DESK_PARSE_CHILD)
+        except ValueError:
+            raise                      # the body's own error, as the SDK's
+        except Exception as exc:                               # noqa: BLE001
+            with _desk_parse_lock:
+                _desk_parse_failed_locked(type(exc).__name__)
+            log.warning("desk sweep US: page parse child failed (%s); "
+                        "parsing in this process for %gs",
+                        type(exc).__name__, DESK_PARSE_RETRY_S)
+    return (_dbp.parse_page(body),
+            "%s:%s" % (DESK_PARSE_IN_PROCESS, _DESK_PARSE["why"] or "?"))
+
+
+def _desk_raw_events_page(client, query: dict):
+    """GET /v1/events exactly as the SDK sends it (PolymarketUS._request,
+    unauthenticated, polymarket-us 1.0.2): the gateway URL, the SDK's own
+    query encoding and headers, through the client's own httpx client --
+    so the transport gate (_install_request_gate) paces and counts it like
+    every other read -- and the SDK's own typed errors on failure. Returns
+    the raw body, or None when `client` is not that shape or retries inside
+    the SDK (the caller then reads through the SDK, as before RC6)."""
+    http = getattr(client, "_http", None)
+    base = getattr(client, "gateway_base_url", None)
+    build = getattr(client, "_build_query_params", None)
+    handle = getattr(client, "_handle_error_response", None)
+    try:
+        retries = int(getattr(client, "max_retries", 1))
+    except (TypeError, ValueError):
+        retries = 1
+    if http is None or not base or not callable(build) or \
+            not callable(handle) or retries != 0:
+        return None
+    try:
+        import uuid as _uuid
+
+        import httpx as _httpx
+        from polymarket_us import client as _sdk
+        from polymarket_us.errors import (APIConnectionError,
+                                          APITimeoutError)
+    except Exception:                                          # noqa: BLE001
+        return None
+    path = "/v1/events"
+    url = "%s%s" % (base, path)
+    cid = str(_uuid.uuid4())
+    headers = {"Content-Type": "application/json",
+               "User-Agent": getattr(client, "_user_agent", None)
+               or _sdk.default_user_agent(),
+               _sdk.CORRELATION_ID_HEADER: cid}
+    try:
+        response = http.request("GET", url, params=build(query) or None,
+                                json=None, headers=headers)
+    except _httpx.TimeoutException as e:
+        raise APITimeoutError(request=getattr(e, "_request", None),
+                              request_id=cid)
+    except _httpx.TransportError as e:
+        raise APIConnectionError(message=str(e),
+                                 request=getattr(e, "_request", None),
+                                 request_id=cid)
+    if response.is_success:
+        return response.content or b""
+    handle(response, cid)
+    return None                                     # pragma: no cover
+
+
+def _desk_events_page(client, query: dict) -> tuple:
+    """(page_rows, where): one events.list page as desk_board_parse rows."""
+    from . import desk_board_parse as _dbp
+    body = _desk_raw_events_page(client, query)
+    if body is None:
+        doc = client.events.list(query) or {}
+        return _dbp.page_rows(doc), "%s:SDK_READ" % DESK_PARSE_IN_PROCESS
+    return _desk_parse_body(body)
 
 
 def list_desk_events() -> list[dict]:
@@ -848,13 +997,6 @@ def _desk_sweep() -> list[dict]:
     rss0 = _procmem.rss_label()
     client = _get_client()
 
-    def _px(v) -> float | None:
-        try:
-            f = float(v)
-            return f if 0 < f < 1 else None
-        except (TypeError, ValueError):
-            return None
-
     # The venue's event listing answers EMPTY without the right param
     # variant (the edge adapter's census proved this in production —
     # its _list_variants probe exists for exactly this reason). Probe
@@ -877,10 +1019,21 @@ def _desk_sweep() -> list[dict]:
     walk = _vc.PageWalk(limit=100, max_requests=max(1, _DESK_MAX_PAGES) + 1)
     variant = None
     first = None
+    parse = {DESK_PARSE_CHILD: 0, DESK_PARSE_IN_PROCESS: 0, "fallback": None}
+
+    def _page(query) -> dict:
+        page, where = _desk_events_page(client, query)
+        if where == DESK_PARSE_CHILD:
+            parse[DESK_PARSE_CHILD] += 1
+        else:
+            parse[DESK_PARSE_IN_PROCESS] += 1
+            parse["fallback"] = where
+        return page
+
     for v in variants:
         try:
             _vp.pace(_DESK_PACE_S)
-            probe = client.events.list({"limit": 100, **v}) or {}
+            probe = _page({"limit": 100, **v})
         except Exception as exc:  # noqa: BLE001
             walk.probe_failed()
             walk.max_requests += 1       # a failed rung is a request, not a page
@@ -889,8 +1042,8 @@ def _desk_sweep() -> list[dict]:
                           "%s: %s" % (type(exc).__name__, str(exc)[:160]))
                 break
             continue
-        if probe.get("events"):
-            variant, first = v, probe.get("events")
+        if probe["has_events"]:
+            variant, first = v, probe
             break
         walk.probe_rejected()
         walk.max_requests += 1
@@ -913,73 +1066,16 @@ def _desk_sweep() -> list[dict]:
                         "the %gs TTL a cold caller waits on it",
                         took, _DESK_TTL_S)
 
-    def _slim(got) -> None:
-        for ev in got:
-            eslug = ev.get("slug") or ev.get("eventSlug") or ""
-            if not eslug:
+    def _slim(page, fresh) -> None:
+        """Merge the slim rows (desk_board_parse.slim_event, built where the
+        page was parsed) of the events the walk returned as fresh."""
+        slims = page["slims"]
+        for st in fresh:
+            row = slims[st["_i"]]
+            if row is None:
                 continue
-            e = events.setdefault(eslug, {
-                "slug": eslug,
-                "title": _clean_title(ev.get("title")) or eslug,
-                "league": (eslug.split("-", 1)[0] or "").lower(),
-                "start": ev.get("startTime") or ev.get("startDate"),
-                "volume_usd": _ev_volume_usd(ev),
-                "close_time": (ev.get("endTime") or ev.get("endDate")
-                               or None),
-                "markets": []})
-            for m in ev.get("markets") or []:
-                if m.get("closed"):
-                    continue
-                title = (_clean_title(m.get("question")
-                                      or m.get("title"))
-                         or m.get("slug") or "")
-                sides = [x for x in (m.get("marketSides") or [])
-                         if isinstance(x, dict)]
-                if sides:
-                    for x in sides:
-                        ident = x.get("identifier")
-                        desc = x.get("description")
-                        if not ident or not desc:
-                            continue
-                        e["markets"].append({
-                            "us_slug": ident,
-                            "kind": (ident.split("-", 1)[0]
-                                     or "").lower(),
-                            "label": f"{title} — {desc}",
-                            "price": _px(x.get("price")),
-                            # THE VENUE'S OWN MARKET TYPE, RETAINED.
-                            # `kind` above is OUR reading of the slug
-                            # prefix, and the venue's Sports Schema directs
-                            # consumers away from parsing identifiers. The
-                            # documented field was being dropped here, so
-                            # every consumer downstream had nothing but the
-                            # slug to go on. None when the venue omits it
-                            # -- absence is a fact and must not read as a
-                            # value.
-                            "sports_market_type_v2":
-                                m.get("sportsMarketTypeV2"),
-                            "sports_market_type":
-                                m.get("sportsMarketType"),
-                            # participant identity, likewise the venue's
-                            "team": (x.get("team") or {}).get("name")
-                                    if isinstance(x.get("team"), dict)
-                                    else x.get("team"),
-                            "team_id": x.get("teamId")})
-                elif m.get("slug"):
-                    px = next((p for p in (_px(m.get(k)) for k in
-                               ("bestAsk", "best_ask", "price"))
-                               if p is not None), None)
-                    e["markets"].append({
-                        "us_slug": m["slug"],
-                        "kind": (m["slug"].split("-", 1)[0]
-                                 or "").lower(),
-                        "label": (f"{title} — {m['outcome']}"
-                                  if m.get("outcome") else title),
-                        "price": px,
-                        "sports_market_type_v2":
-                            m.get("sportsMarketTypeV2"),
-                        "sports_market_type": m.get("sportsMarketType"),
-                        "team": None, "team_id": None})
+            e = events.setdefault(row["slug"], dict(row, markets=[]))
+            e["markets"].extend(row["markets"])
 
     def _receipt() -> dict:
         r = walk.receipt()
@@ -990,7 +1086,11 @@ def _desk_sweep() -> list[dict]:
                  max_pages_after_probe=_DESK_MAX_PAGES,
                  partial=walk.stopped in (_vc.STOP_ERROR,
                                           _vc.STOP_RATE_LIMITED),
-                 at=_t.time())
+                 at=_t.time(),
+                 parse={"pages_in_child_process": parse[DESK_PARSE_CHILD],
+                        "pages_in_this_process":
+                            parse[DESK_PARSE_IN_PROCESS],
+                        "fallback": parse["fallback"]})
         return r
 
     def _not_before(seconds: float) -> None:
@@ -1007,33 +1107,27 @@ def _desk_sweep() -> list[dict]:
             _not_before(_DESK_TTL_S)
         _report()
         return _desk_cache["events"]
-    fresh = walk.first(first)
-    first = None
-    _slim(fresh)
-    fresh = None
+    fresh = walk.first(first["stubs"])
+    _slim(first, fresh)
+    first = fresh = None
     while (off := walk.next_offset()) is not None:
         try:
             # one claim on the process-wide venue gate per request (R30A):
             # the desk's pages were unpaced, on top of every gated read
             _vp.pace(_DESK_PACE_S)
-            resp = client.events.list(
-                {"limit": 100, "offset": off, **variant}) or {}
+            page = _page({"limit": 100, "offset": off, **variant})
         except Exception as exc:  # noqa: BLE001 — stale cache beats a 500
             walk.requests += 1           # it was sent: counted
             rl = _desk_rate_limited(exc)
             walk.fail(_vc.STOP_RATE_LIMITED if rl else _vc.STOP_ERROR,
                       "%s: %s" % (type(exc).__name__, str(exc)[:160]))
             break
-        got = resp.get("events") or []
-        # Its slim rows are built from the fresh events: drop the raw page
-        # before the next one arrives. Rebinding `resp` on the next call
-        # would have kept this page alive across that call — two raw pages
-        # resident at every fetch, on top of the probe page (2026-09-05).
-        del resp
-        fresh = walk.accept(got)
-        del got
-        _slim(fresh)
-        fresh = None
+        # The raw page never exists in this process (desk_board_parse, RC6):
+        # the walk counts and dedupes on the page's key stubs, and only the
+        # fresh events' slim rows are merged. Dropped before the next fetch.
+        fresh = walk.accept(page["stubs"])
+        _slim(page, fresh)
+        page = fresh = None
     _report()
     out = [e for e in events.values() if e["markets"]]
     receipt = _receipt()

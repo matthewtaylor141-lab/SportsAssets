@@ -102,8 +102,100 @@ def _cap_malloc_arenas(limit: int = 2) -> str:
 _ARENA_STATUS = _cap_malloc_arenas()
 
 
+def _freeze_boot_heap() -> int:
+    """Move every object alive at the end of boot out of the garbage
+    collector's reach (gc.freeze), once; returns how many it moved.
+
+    WHY (RC6 api-responsive). A full collection stops every thread -- the
+    event loop with them -- for as long as it takes to walk every tracked
+    object, and the boot heap (modules, classes, functions, the app's routes
+    and pydantic models: ~125,000 tracked objects) is walked by every one of
+    them, forever, though none of it can ever become garbage. Measured
+    locally: a full collection of the booted app alone takes ~30 ms on a
+    quiet core (LOCAL BENCHMARK ONLY); the responsiveness harness, at its
+    production-sized load, saw 17-21 full collections in 30 s (0.15-0.3 s
+    each under load), every one a loop hold. The loop watchdog
+    (loop_watchdog, RC6) names the collector's share of every production
+    stall; this takes the boot heap out of all of them.
+
+    Nothing is disabled: the collector keeps running on everything built
+    after boot, and a frozen object is still freed by reference counting
+    when its last reference goes -- only a cycle among boot objects that
+    later became garbage would stay (bounded: boot runs once). A collection
+    first, so boot's own garbage is collected rather than frozen."""
+    import gc
+    gc.collect()
+    gc.freeze()
+    return gc.get_freeze_count()
+
+
+def _install_cpu_lane() -> list:
+    """Route the pure computations of modules that may not import an
+    executor themselves through this process's CPU lane (cpu_lane.run);
+    returns what was installed. Today: the intel cycle (intel.common.offload,
+    asyncio.to_thread by default -- intel's import closure is pinned shadow-
+    only, tests/test_intel_is_shadow_only). Every other moved job calls the
+    lane itself (cpu_lane's docstring has the production evidence)."""
+    from .. import cpu_lane as _CPU_LANE
+    from ..intel import common as _INTEL_COMMON
+    _INTEL_COMMON.offload = _CPU_LANE.run
+    return ["intel.common.offload"]
+
+
+#: (RC6 api-responsive) how long a thread may hold the GIL while another --
+#: the event loop -- waits for it. CPython's default is 5 ms.
+GIL_SWITCH_INTERVAL_S = 0.001
+
+
+def _share_the_gil() -> float:
+    """Set this process's GIL switch interval to GIL_SWITCH_INTERVAL_S (or
+    API_GIL_SWITCH_INTERVAL_S, 0.0001-0.1 s, the operator's override:
+    0.005 is CPython's default); returns the interval in force.
+
+    WHY. Every thread of the API process -- the desk sweep, the CPU lane
+    (cpu_lane), the PinnAPI snapshot build, the venue reads in
+    asyncio.to_thread, the loop watchdog -- shares one GIL with the event
+    loop, and a thread that wants the GIL back waits at least one switch
+    interval per runnable holder, more when the handover goes to another
+    worker instead of the loop. Measured (LOCAL BENCHMARK, uvloop ticking
+    every 2 ms beside pure-Python threads, this 4-core machine at load 3-5):
+    the 99th-percentile tick gap with two such threads is 45 ms at 5 ms and
+    15 ms at 1 ms, with four 85 ms and 34 ms. In the responsiveness harness
+    (tools/api_responsiveness_harness.py, the production-sized workload) the
+    same tree answered /healthz in at most 2.2 s and held the loop 0.26 s at
+    5 ms, and in 0.18 s and 0.23 s at 1 ms. The price is paid by the
+    background threads, never the loop: their CPU-bound jobs ran ~20-40%
+    longer there (they hand the GIL over five times as often).
+
+    Production evidence it answers: 39 of the 132 RC5 stalls >= 2 s carried
+    a watchdog overrun >= 0.1 s -- the watchdog thread itself could not get
+    the GIL (render-ops logs 2026-10-08, see loop_watchdog)."""
+    import sys
+    raw = os.environ.get("API_GIL_SWITCH_INTERVAL_S", "").strip()
+    want = GIL_SWITCH_INTERVAL_S
+    if raw:
+        try:
+            got = float(raw)
+            if 0.0001 <= got <= 0.1:
+                want = got
+        except ValueError:
+            pass
+    sys.setswitchinterval(want)
+    return sys.getswitchinterval()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # THE LOOP GETS THE GIL BACK SOONER (RC6 api-responsive): first, before
+    # any thread of this process starts (_share_the_gil)
+    try:
+        log.info("gil switch interval %.4f s", _share_the_gil())
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("gil switch interval not set")
+    try:
+        log.info("cpu lane installed for %s", _install_cpu_lane())
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("cpu lane not installed")
     # Boot must not require a healthy database. get_pool() retries lazily
     # on first use; dying here just turns a DB hiccup into a full outage.
     try:
@@ -633,6 +725,13 @@ async def lifespan(_: FastAPI):
             readiness_task = asyncio.create_task(_CRL.run(_cap_pool))
     except Exception:  # noqa: BLE001 -- the API must serve regardless
         log.exception("capital readiness observer failed to arm")
+    # THE BOOT HEAP LEAVES THE COLLECTOR'S WALK (RC6 api-responsive): last,
+    # so every module the boot imported is in it (_freeze_boot_heap)
+    try:
+        log.info("gc: %d boot objects frozen out of every later collection",
+                 _freeze_boot_heap())
+    except Exception:  # noqa: BLE001 -- the API must serve regardless
+        log.exception("gc boot freeze failed")
     try:
         yield
     finally:
@@ -656,6 +755,15 @@ async def lifespan(_: FastAPI):
         # Release it before waiting for pool.close(), including on deploy.
         await asyncio.gather(*tasks, return_exceptions=True)
         await close_pool()
+        # the CPU lane's worker and the desk sweep's parse child (RC6
+        # api-responsive) end with the process that started them
+        try:
+            from .. import cpu_lane as _CPU_LANE
+            from .. import pmus as _PMUS_PARSE
+            _CPU_LANE.shutdown()
+            _PMUS_PARSE.shutdown_desk_parse()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 app = FastAPI(title="SportsAssets Hub API", lifespan=lifespan)
@@ -1486,46 +1594,49 @@ async def healthz() -> dict:
     # left it, and it can never do what the SELECT 1 once did and hang
     # the one check the platform restarts on.
     pool_stats = _db.pool_stats()
-    if pool is not None:
-        try:
-            # 2 s ceiling (2026-09-03): with the ten pool connections held
-            # by stacked ledger fetches this await hung, and a hanging
-            # health check reads as a dead process to the platform's
-            # checker (render.yaml healthCheckPath) -- the one field meant
-            # to be informational was able to take the process down. A
-            # saturated pool now reports db_ok false; the check itself
-            # always answers.
-            # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
-            # was read in anger (2026-09-05, 01:06Z). The payload was
-            # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
-            # 5874.9} on a single boot_id -- a healthy process, no crash
-            # loop, and LESS memory than the same check reported while
-            # the platform was working fine three hours earlier (1,085
-            # MB, and 1,665 MB moments before a restart). So this field
-            # going false is not a memory verdict and not a dead
-            # database: it is THIS `SELECT 1` losing a 2-second race for
-            # a pooled connection, i.e. the pool is saturated by queries
-            # that are still running.
-            #
-            # The symptom at the edge is total: every DB-backed endpoint
-            # hangs with ZERO BYTES RECEIVED while venue reads (which
-            # need no pool) answer normally, and the diagnostic probe
-            # dies at its 32-minute job ceiling instead of reporting
-            # anything. Read `db_ok` FIRST when that pattern appears --
-            # four probes were spent on the wrong causes (a workflow
-            # fail-open, then memory) before this one field settled it.
-            #
-            # What saturated it that night: a fail-open guard in
-            # engine-diagnostic.yml fired up to six concurrent
-            # /api/admin/rescore-copies passes, each a full restatement
-            # over live_orders. A curl timeout does not stop the server
-            # side, so they went on holding connections long after the
-            # probe gave up. That guard now fails closed (9244ece); the
-            # passes already in flight had to be cleared by a restart.
-            await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2.0)
-            db_ok = True
-        except Exception:  # noqa: BLE001
-            pass
+    # 2 s ceiling (2026-09-03): with the ten pool connections held
+    # by stacked ledger fetches this await hung, and a hanging
+    # health check reads as a dead process to the platform's
+    # checker (render.yaml healthCheckPath) -- the one field meant
+    # to be informational was able to take the process down. A
+    # saturated pool now reports db_ok false; the check itself
+    # always answers.
+    # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
+    # was read in anger (2026-09-05, 01:06Z). The payload was
+    # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
+    # 5874.9} on a single boot_id -- a healthy process, no crash
+    # loop, and LESS memory than the same check reported while
+    # the platform was working fine three hours earlier (1,085
+    # MB, and 1,665 MB moments before a restart). So this field
+    # going false is not a memory verdict and not a dead
+    # database: it is THIS `SELECT 1` losing a 2-second race for
+    # a pooled connection, i.e. the pool is saturated by queries
+    # that are still running.
+    #
+    # The symptom at the edge is total: every DB-backed endpoint
+    # hangs with ZERO BYTES RECEIVED while venue reads (which
+    # need no pool) answer normally, and the diagnostic probe
+    # dies at its 32-minute job ceiling instead of reporting
+    # anything. Read `db_ok` FIRST when that pattern appears --
+    # four probes were spent on the wrong causes (a workflow
+    # fail-open, then memory) before this one field settled it.
+    #
+    # What saturated it that night: a fail-open guard in
+    # engine-diagnostic.yml fired up to six concurrent
+    # /api/admin/rescore-copies passes, each a full restatement
+    # over live_orders. A curl timeout does not stop the server
+    # side, so they went on holding connections long after the
+    # probe gave up. That guard now fails closed (9244ece); the
+    # passes already in flight had to be cleared by a restart.
+    # NEVER QUEUED ON A SATURATED POOL (RC6, 2026-10-09; db.health_probe):
+    # every connection out and none idle is `db_ok` false at once, named
+    # POOL_SATURATED_NOT_QUEUED -- what the 2 s race used to conclude, two
+    # seconds sooner, so a saturated pool can no longer add 2 s to a loop
+    # stall and push this answer past the platform's 5 s. A free
+    # connection still runs the SELECT 1 under the same 2 s ceiling, and
+    # concurrent checks share one probe.
+    probe = await _db.health_probe(pool, pool_stats)
+    db_ok = bool(probe.get("ok"))
     # Current RSS from /proc: after a night of OOM archaeology-by-email,
     # memory is a number the probes can track, not a timeline to argue.
     rss_mb = None
@@ -1553,6 +1664,7 @@ async def healthz() -> dict:
 
     _posture = credential_posture()
     return {"ok": True, "db_ok": db_ok,
+            "db_probe": probe.get("why"), "db_probe_s": probe.get("s"),
             "pool": pool_stats,
             "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
             "rss_mb": rss_mb,

@@ -82,9 +82,23 @@ def test_the_adapter_still_retains_the_field_for_inspection():
     read it -- those are two different facts and both are true."""
     import inspect
 
+    from sportsassets import desk_board_parse as DBP
     from sportsassets import pmus
     src = inspect.getsource(pmus.list_desk_events)
     assert "sports_market_type_v2" in src
-    mod = inspect.getsource(pmus)
+    # RC6: the board's rows are built by desk_board_parse -- the desk page
+    # parse runs in a child process that imports that module alone -- so the
+    # pins follow the rows there, pmus must build its board from it, and the
+    # retention is also asserted on the rows themselves.
+    assert "desk_board_parse" in inspect.getsource(pmus)
+    mod = inspect.getsource(DBP)
     assert mod.count('"sports_market_type_v2":') >= 2
     assert 'm.get("sportsMarketTypeV2")' in mod
+    rows = DBP.slim_event({"slug": "mlb-a-b", "markets": [
+        {"question": "A vs B", "sportsMarketTypeV2": "MONEYLINE",
+         "marketSides": [{"identifier": "aec-mlb-a-b", "description": "A"}]},
+        {"question": "A vs B", "slug": "tsc-mlb-a-b",
+         "sportsMarketTypeV2": "TOTAL"},
+        {"question": "A vs B", "slug": "asc-mlb-a-b"}]})["markets"]
+    assert [r["sports_market_type_v2"] for r in rows] == \
+        ["MONEYLINE", "TOTAL", None]

@@ -10,7 +10,7 @@ it from starting at all. Without migration 208 it idles.
 BOUNDED. Every read has a lookback window and a row LIMIT; every component
 runs inside its own savepoint with `SET LOCAL statement_timeout` and an
 asyncio timeout; the pure computation of the heavier components runs off
-the event loop (asyncio.to_thread); history in the intel_* tables is pruned
+the event loop (common.offload: the API's CPU lane); history in the intel_* tables is pruned
 after store.RETENTION_DAYS.
 
 FAILURE-ISOLATED. A component that raises or times out rolls back its own
@@ -106,14 +106,14 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
         # OFF THE LOOP (RC6): `independent` walks every record and
         # `overlay_plan` can fit a Newton-Raphson overlay over thousands of
         # pairs; both are pure (see load_records for the production stalls)
-        ind = await asyncio.to_thread(CAL.independent, recs)
+        ind = await C.offload(CAL.independent, recs)
         ovs = await ST.overlays(conn)
-        acts = await asyncio.to_thread(CAL.overlay_plan, ind, ovs, now=now)
+        acts = await C.offload(CAL.overlay_plan, ind, ovs, now=now)
         await ST.apply_overlay_actions(conn, acts, now=now,
                                        protocol=CAL.PROTOCOL,
                                        method=CAL.OVERLAY_METHOD)
         ovs = await ST.overlays(conn)
-        rep = await asyncio.to_thread(CAL.report, ind, now=now, overlays=ovs)
+        rep = await C.offload(CAL.report, ind, now=now, overlays=ovs)
         rep["records_read"] = len(recs)
         rep["overlay_actions"] = [{k: v for k, v in a.items()
                                    if k != "result"} for a in acts]

@@ -1946,9 +1946,18 @@ async def refresh_unmetered_discovery(plan: dict, selection: dict, *,
                 r["discovery"] = "DISCOVERY_REFRESH_REFUSED:%s" % (
                     conf.get("refusal"),)
                 continue
+        # ONE fixture index for the whole batch (RC6, pinnapi_reactive.
+        # batch_index): no await between here and the last register, so the
+        # cache cannot change under it and every answer is the scan's. Its
+        # cold names are folded on the CPU lane first (warm_names), before
+        # the batch, never inside it.
+        if events:
+            await reactive.warm_names()
+        _idx = reactive.batch_index() if events else None
         for e in events:
             reactive.register(e, sport_key=r["key"], family=r["family"],
-                              received_at=got.get("received_at") or now)
+                              received_at=got.get("received_at") or now,
+                              index=_idx)
         r["discovery"] = "DISCOVERY_SEEDS_REFRESHED"
         r["discovery_events"] = len(events)
         out["competitions"][r["key"]] = len(events)
@@ -11052,6 +11061,15 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 _row = _cov_rows.get(sport_key) or {}
                 _share = max(1, int(_eval_shares.get(sport_key) or 1))
                 _t_def = time.time()
+                # ONE fixture index for every deferred seed of this fetch
+                # (RC6, pinnapi_reactive.batch_index): the loop below has no
+                # await, so the cache cannot change under it and every
+                # registration answers exactly what its own scan would
+                _def_idx = None
+                if stream_seed is None and _i < len(events):
+                    from .. import pinnapi_reactive as reactive
+                    await reactive.warm_names()
+                    _def_idx = reactive.batch_index()
                 for _n, _k in enumerate(range(_i, len(events))):
                     _e = events[_k] if isinstance(events[_k], dict) else {}
                     _eid = _e.get("id")
@@ -11062,7 +11080,8 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                         from .. import pinnapi_reactive as reactive
                         reactive.register(_e, sport_key=sport_key,
                                           family=family,
-                                          received_at=received_at)
+                                          received_at=received_at,
+                                          index=_def_idx)
                     candidate_deferrals.append({
                         "sport_key": sport_key, "family": family,
                         "token": _row.get("token"), "event_id": _eid,

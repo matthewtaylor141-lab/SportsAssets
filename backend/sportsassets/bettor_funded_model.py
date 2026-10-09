@@ -1077,9 +1077,24 @@ def _training_records(lab: dict) -> list:
 
 
 def _records_sha(records: list) -> str:
-    """The identity of a training set, over everything a label depends on."""
-    return hashlib.sha256(json.dumps(records, sort_keys=True,
-                                     default=str).encode()).hexdigest()
+    """The identity of a training set, over everything a label depends on.
+
+    THE SAME DIGEST, FED ONE RECORD AT A TIME (RC6). It is the sha256 of
+    json.dumps(records, sort_keys=True, default=str) -- that string is '['
+    + each record's own json.dumps joined by ', ' + ']', because the encoder
+    serialises a list's items independently with the default separators --
+    built and hashed record by record instead of as one string. One C-level
+    dumps of the whole set held the interpreter lock for 0.2-0.36 s at a time
+    in production (watchdog overrun on the four paper-session stalls of
+    2026-10-09); per record, the lock can change hands between records.
+    test_rc6_api_responsive_offloop pins equality with the one-shot form."""
+    h = hashlib.sha256(b"[")
+    for i, r in enumerate(records):
+        if i:
+            h.update(b", ")
+        h.update(json.dumps(r, sort_keys=True, default=str).encode())
+    h.update(b"]")
+    return h.hexdigest()
 
 
 def _subset(lab: dict, keep: list) -> dict:
@@ -1372,15 +1387,64 @@ async def verify_provenance(conn, model: dict, *,
         return {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
                 "why": "%d decision(s) named, %d still labelled"
                        % (len(ids), (lab or {}).get("n", 0))}
+    # THE RE-HASH RUNS IN A WORKER THREAD, OFF THE API EVENT LOOP (RC6).
+    # Production 2026-10-09 (loop watchdog ring, research-sql
+    # rc6_api-responsive_loop_stalls.sql): 4 of 20 API loop stalls (2.3-2.5 s
+    # each) were the paper session's Derek context re-hashing the research
+    # model's training set here, on the loop. The read above stays on the
+    # loop; the record build, the hash, the comparison and the parameter
+    # refit are the same pure code, in `_reproduce`, on the API's CPU lane
+    # (one worker thread for every such job: cpu_lane).
+    from . import cpu_lane as _cpu
+    got = await _cpu.run(_reproduce, model, prov, lab, check_params)
+    pending = got.pop("_records_for_diagnosis", None)
+    if pending is not None:
+        # THE REGISTRY'S OWN RECORDS, READ ONLY TO NAME WHAT CHANGED (RC6).
+        # A model read without its stored training records (paper_derek.
+        # research_model leaves the up-to-16 MB member in the registry) still
+        # names the changed decisions on a mismatch: they are read here, on
+        # that rare path alone, and compared in the worker thread.
+        try:
+            raw = await conn.fetchval(
+                "SELECT training_provenance->'records' FROM "
+                " bettor_funded_models WHERE model_id = $1",
+                str(model.get("model_id")))
+        except Exception:                                       # noqa: BLE001
+            raw = None
+        got["changed_records"] = await _cpu.run(_changed_records,
+                                                 pending, raw)
+    return got
+
+
+def _changed_records(records: list, stored) -> list:
+    """PURE: the first five decisions whose record differs from the stored
+    training record at the same position (the mismatch diagnostic)."""
+    if isinstance(stored, str):
+        try:
+            stored = json.loads(stored)
+        except ValueError:
+            stored = None
+    changed = [a["decision_id"] for a, b in zip(records, stored or [])
+               if a != b]
+    return changed[:5]
+
+
+def _reproduce(model: dict, prov: dict, lab: dict,
+               check_params: bool) -> dict:
+    """PURE (worker thread): rebuild the training records from `lab`,
+    re-hash them against the provenance, and (optionally) refit."""
     records = _training_records(lab)
     if _records_sha(records) != prov.get("records_sha"):
-        changed = [a["decision_id"] for a, b in
-                   zip(records, prov.get("records") or []) if a != b]
-        return {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
-                "changed_records": changed[:5],
-                "why": ("the named decisions no longer carry the labels, "
-                        "readings or vectors the fit was made from -- a "
-                        "corrected settlement is one way that happens")}
+        out = {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
+               "why": ("the named decisions no longer carry the labels, "
+                       "readings or vectors the fit was made from -- a "
+                       "corrected settlement is one way that happens")}
+        if "records" in prov or not model.get("model_id"):
+            out["changed_records"] = _changed_records(records,
+                                                      prov.get("records"))
+        else:
+            out["_records_for_diagnosis"] = records
+        return out
     if check_params:
         pr = params_reproduce(model, lab)
         if not pr.get("ok"):
