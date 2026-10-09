@@ -267,3 +267,50 @@ async def test_plain_psql_cannot_destroy_activated_epoch_evidence(epoch_database
         await c.close()
         await admin.execute(f'DROP DATABASE "{scratch}"')
         await admin.close()
+
+
+async def test_rollback_ddl_serializes_with_concurrent_activation(epoch_database):
+    """A natural DDL lock wait must not invalidate the evidence precheck."""
+    import asyncio
+    parts = urlsplit(epoch_database)
+    scratch = 'epoch_down_race_' + uuid.uuid4().hex
+    admin = await asyncpg.connect(urlunsplit(parts._replace(path='/postgres')))
+    await admin.execute(f'CREATE DATABASE "{scratch}" TEMPLATE "{parts.path[1:]}"')
+    dsn = urlunsplit(parts._replace(path='/'+scratch))
+    owner, blocker, ddl = [await asyncpg.connect(dsn) for _ in range(3)]
+    hold = blocker.transaction()
+    activation = owner.transaction()
+    task = None
+    try:
+        from sportsassets import bettor_paper_session as S
+        await S.ensure_session(owner, account_id=L.ACCOUNT_ID, now=H.T0)
+        await hold.start()
+        await blocker.execute('LOCK TABLE paper_orders IN ROW EXCLUSIVE MODE')
+        await activation.start()
+        await owner.execute('SELECT pg_advisory_xact_lock($1)', E.LOCK)
+        await owner.execute('LOCK TABLE paper_orders IN ACCESS SHARE MODE')
+        script = pathlib.Path(__file__).resolve().parents[1]/'migrations/rollback/317_paper_day_one_epoch.down.sql'
+        task = asyncio.create_task(ddl.execute(script.read_text()))
+        for _ in range(200):
+            if await owner.fetchval("SELECT wait_event_type='Lock' FROM pg_stat_activity WHERE pid=$1", ddl.get_server_pid()):
+                break
+            await asyncio.sleep(.01)
+        else:
+            pytest.fail('DDL did not reach the controlled lock wait')
+        created = await activate(owner, 'down-activation-race')
+        await activation.commit()
+        await hold.commit()
+        outcome = (await asyncio.gather(task, return_exceptions=True))[0]
+        assert isinstance(outcome, asyncpg.RaiseError), 'DDL erased evidence committed after its precheck'
+        assert 'Refusing rollback 317' in str(outcome)
+        assert await owner.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL")
+        assert await owner.fetchval('SELECT count(*) FROM paper_account_epochs') == 1
+        assert await owner.fetchval('SELECT account_id FROM paper_epoch_control WHERE singleton') == created['account_id']
+    finally:
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        for c in (owner, blocker, ddl):
+            await c.close()
+        await admin.execute(f'DROP DATABASE "{scratch}"')
+        await admin.close()

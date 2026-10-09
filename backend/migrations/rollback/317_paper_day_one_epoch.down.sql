@@ -1,6 +1,9 @@
 -- Logical rollback preserves every account and financial row. This DDL
 -- reversal is allowed only before activation has recorded any evidence.
 DO $$ BEGIN
+ -- Serialize the evidence precheck and every DROP with activation and
+ -- the scheduled PAPER pass; a DDL wait must not invalidate the precheck.
+ PERFORM pg_advisory_xact_lock(1346457682);
  IF to_regclass('paper_account_epochs') IS NOT NULL THEN
   IF EXISTS(SELECT 1 FROM paper_account_epochs) THEN
    RAISE EXCEPTION 'Refusing rollback 317: epoch evidence must be preserved';
