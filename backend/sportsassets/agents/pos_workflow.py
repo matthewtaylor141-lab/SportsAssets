@@ -455,14 +455,30 @@ async def attach_results(conn, *, now: float, limit: int = 20) -> dict:
                     "realized_execution_loss_pp":
                         r["realized_execution_loss_pp"]}), float(now))
             n += 1
+        # XAVIER'S FIRST REVIEW, ONE INDEX PROBE PER ORDER GROUP. The first
+        # review of each of the decision's order groups (paper_xavier_
+        # reviews_group_idx), then the earliest of those -- the same row as
+        # "the earliest review joined to any of its orders". Written as one
+        # join ORDER BY reviewed_at LIMIT 1, the planner walked the whole
+        # reviewed_at index (163k reviews, 1.6 GB in production) for EVERY
+        # step-7 row whose decision has no order and therefore no match:
+        # research-sql 37936489884 shows that plan, and the phase's 25 s
+        # bound (archer_runner.PHASE_TIMEOUT_S) was hit on 265 of 265 Archer
+        # passes in 24 h (run 37936367236; TimeoutError since 2026-10-05
+        # 22:25), so no step-4 / step-7 result was attached since.
         for r in await conn.fetch(
                 "SELECT s.review_id, x.review_id AS xr, x.recommendation "
                 "  FROM pos_candidate_review_steps s "
                 "  JOIN pos_candidate_reviews v USING (review_id) "
-                "  JOIN LATERAL (SELECT xr.review_id, xr.recommendation FROM "
-                "       paper_orders o JOIN paper_xavier_reviews xr ON "
-                "       xr.group_id = o.group_id WHERE o.decision_id = "
-                "       v.decision_id ORDER BY xr.reviewed_at LIMIT 1) x "
+                "  JOIN LATERAL (SELECT f.review_id, f.recommendation "
+                "                  FROM paper_orders o "
+                "                  CROSS JOIN LATERAL (SELECT xr.review_id, "
+                "                         xr.recommendation, xr.reviewed_at "
+                "                    FROM paper_xavier_reviews xr "
+                "                   WHERE xr.group_id = o.group_id "
+                "                   ORDER BY xr.reviewed_at LIMIT 1) f "
+                "                 WHERE o.decision_id = v.decision_id "
+                "                 ORDER BY f.reviewed_at LIMIT 1) x "
                 "       ON true WHERE s.seq = 7 AND s.result IS NULL "
                 "   AND s.status <> 'ANSWERED' LIMIT $1", limit):
             await conn.execute(
