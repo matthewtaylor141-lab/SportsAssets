@@ -194,6 +194,11 @@ NOT_DECISION_LOGIC = {
                                   "already recorded, in its own append-only "
                                   "table under a savepoint; decides nothing "
                                   "and nothing reads it to decide"),
+    "agents/xavier_management_record.py": (
+        "(RC6 xavier-records) the management READBACK's per-position record "
+        "(GET /api/command/xavier/management): it reads what the review "
+        "recorded and the book as it stands; no review, order or decision "
+        "reads it"),
 }
 
 

@@ -2411,4 +2411,16 @@ NOT_REFUSAL = {
         "bettor_live_control: reason key",
     "socket_subscribe":
         "bettor_live_control: reason key",
+    # RC6 xavier-records: the management record's own blocker labels
+    # (agents/xavier_management_record) -- readback states of a record,
+    # never a trading, decision, order or collector refusal
+    "NO_REVIEW_RECORDED":
+        "agents/xavier_management_record: a held position's management "
+        "record names that no Xavier review exists yet (the same word as "
+        "bettor_paper_freshness.PK_NO_REVIEW, a packet-currency reason) -- "
+        "a readback blocker label, never a trading refusal",
+    "MANAGEMENT_RECORD_UNREAD":
+        "agents/xavier_management_record: the management readback could "
+        "not read a held position's record (counted as incomplete, never "
+        "complete) -- a readback state, never a trading refusal",
 }
