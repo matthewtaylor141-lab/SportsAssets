@@ -247,8 +247,14 @@ def close_of(exc, *, now: Optional[float] = None,
 #: and nothing on the heartbeat said so.
 #:
 #: THE REPAIR: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S
-#: of CONNECTED time (the owner's monotonic clock less the backoff waits it
-#: has itself imposed). The first CLIENT_CLOSES_FREE inside it reconnect as
+#: of CONNECTED time: the seconds this owner's sockets were actually open
+#: (from the completed handshake to the socket's end), summed over epochs.
+#: Nothing else is on that clock -- not a slow connect, not lease, standby
+#: or arm-row time, not a backoff wait whether it ran its scheduled length,
+#: longer, or was cut short -- so none of them can thin or pad the window
+#: (integration review of 0a40533b, which subtracted the SCHEDULED waits
+#: from the monotonic clock and so counted all of those as connected).
+#: The first CLIENT_CLOSES_FREE inside it reconnect as
 #: before; the level is the number of closes in the window beyond those,
 #: and the owner waits client_close_wait_s(level) -- 5 s, doubling, at most
 #: 300 s -- before it contends again. Delivery does NOT reset it. Counting
@@ -428,11 +434,11 @@ class FeedOwner:
         #: of run() (see CLIENT_CLOSE_BACKOFF). Never reset by delivery,
         #: nor by a stand-down's re-entry: they belong to this owner.
         self.client_closes: list = []
-        #: seconds of CLIENT-close waiting imposed so far: the closes above
-        #: are kept on the connected clock (monotonic less this)
-        self.client_close_paused = 0.0
+        #: THE CONNECTED CLOCK: seconds this owner's sockets were open
+        #: (handshake complete to socket end), summed over every epoch; the
+        #: CLIENT closes above are kept on it
+        self.connected_s = 0.0
         self.client_close_level = 0
-        self.client_close_last: Optional[float] = None
         self.client_close_wait = 0.0
         #: the last CLIENT-close backoff, for the heartbeat (wall clock:
         #: display only)
@@ -448,21 +454,19 @@ class FeedOwner:
     def subscriptions(self):
         return [(s, sp) for s in self.streams for sp in self.sport_ids]
 
-    def _client_close(self, t: float) -> float:
-        """Count one CLIENT close at monotonic `t`; return the seconds to
-        wait before reconnecting (0.0 below the threshold). The level is the
-        number of CLIENT closes beyond CLIENT_CLOSES_FREE inside the last
-        CLIENT_CLOSE_WINDOW_S of CONNECTED time (t less the waits this
-        method has imposed), so a storm holds its level while the waits
-        grow and a sparse cadence stays at the first step."""
-        c = t - self.client_close_paused
+    def _client_close(self, c: float) -> float:
+        """Count one CLIENT close at `c` on the CONNECTED clock (seconds
+        this owner's sockets have been open, see connected_s); return the
+        seconds to wait before reconnecting (0.0 below the threshold). The
+        level is the number of CLIENT closes beyond CLIENT_CLOSES_FREE inside
+        the last CLIENT_CLOSE_WINDOW_S of connected time, so a storm holds
+        its level however long the waits grow and a sparse cadence stays at
+        the first step. Pure in its inputs: no wall or monotonic read."""
         self.client_closes = [x for x in self.client_closes
                               if c - x < CLIENT_CLOSE_WINDOW_S] + [c]
-        self.client_close_last = t
         self.client_close_level = max(
             0, len(self.client_closes) - CLIENT_CLOSES_FREE)
         self.client_close_wait = client_close_wait_s(self.client_close_level)
-        self.client_close_paused += self.client_close_wait
         return self.client_close_wait
 
     def stop(self):
@@ -544,12 +548,14 @@ class FeedOwner:
             "waiting": True, "wait_s": wait, "level": self.client_close_level,
             "closes_in_window": len(self.client_closes),
             "window_s": CLIENT_CLOSE_WINDOW_S,
+            "window_clock": "CONNECTED_SOCKET_SECONDS",
+            "connected_s": round(self.connected_s, 3),
             "since_at": round(now, 3), "until_at": round(now + wait, 3)}
         self._note(CLIENT_CLOSE_BACKOFF, wait_s=wait,
                    level=self.client_close_level,
                    closes_in_window=len(self.client_closes))
-        log.warning("pinnapi feed: %d closes of our own inside %.0fs; "
-                    "waiting %.0fs before reconnecting",
+        log.warning("pinnapi feed: %d closes of our own inside %.0fs of "
+                    "connected time; waiting %.0fs before reconnecting",
                     len(self.client_closes), CLIENT_CLOSE_WINDOW_S, wait)
 
     async def _arm_state(self):
@@ -609,6 +615,7 @@ class FeedOwner:
         ws = await asyncio.wait_for(self.connect(PP.WS_URL, key),
                                     self.liveness_s)
         opened = time.monotonic()           # the socket's age, for close_of
+        closed_at = None                    # when recv reported the close
         delivered = False
         try:
             # Ownership or the arm row may have changed during connect.
@@ -645,7 +652,7 @@ class FeedOwner:
                 except asyncio.TimeoutError:
                     continue
                 except Exception as exc:                        # noqa: BLE001
-                    t = time.monotonic()
+                    t = closed_at = time.monotonic()
                     info = dict(close_of(exc, now=t, last_rx=last_rx,
                                          opened=opened), epoch=epoch,
                                 delivered=delivered)
@@ -658,7 +665,8 @@ class FeedOwner:
                         # holder of the key; reconnect like any lost socket
                         # -- after a growing wait when it keeps coming
                         self.cache.lost(R_CLIENT_CLOSED)
-                        wait = self._client_close(t)
+                        wait = self._client_close(
+                            self.connected_s + max(0.0, t - opened))
                         self._note(R_CLIENT_CLOSED, close=info,
                                    closes_in_window=len(self.client_closes),
                                    backoff_s=wait)
@@ -698,6 +706,10 @@ class FeedOwner:
                     self.state = "OWNER_SYNCED"
             return attempt
         finally:
+            # the connected clock: this socket's open time, and nothing after
+            # its end (the close handshake, the backoff that follows)
+            self.connected_s += max(0.0, (closed_at if closed_at is not None
+                                          else time.monotonic()) - opened)
             self.cache.lost(R_SOCKET_CLOSED)
             try:
                 await asyncio.wait_for(ws.close(), CLOSE_TIMEOUT_S)
@@ -728,7 +740,8 @@ class FeedOwner:
                     self.closes_by_initiator),
                 "last_unrequested_close": self.last_close,
                 # the last CLIENT-close wait as it was recorded, and the
-                # level the next CLIENT close would build on
+                # level of the last CLIENT close (the next one recounts the
+                # connected window)
                 "client_close_backoff": (
                     dict(self.client_close_backoff,
                          current_level=self.client_close_level)

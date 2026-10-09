@@ -11,11 +11,15 @@ the provider keeps sending, a loop stall that keeps failing the keepalive
 every subscribed snapshot, with nothing on the heartbeat saying so.
 
 Pinned here: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S
-(600 s) of CONNECTED time; from the 3rd inside it the owner waits 5, 10,
-20 ... up to 300 s before reconnecting. Delivery does not reset it; only a
-quiet window does. A storm holds 300 s; a close every ~240 s of streaming
-(2026-10-08's keepalive cadence) waits a steady 5 s and never starves the
-feed (integration review of the first version, which climbed to 300 s).
+(600 s) of CONNECTED time -- the seconds the owner's sockets were actually
+open, summed over epochs, so a slow connect, lease or standby time and any
+backoff wait (scheduled, overlong or cut short) are never on that clock;
+from the 3rd close inside it the owner waits 5, 10, 20 ... up to 300 s
+before reconnecting. Delivery does not reset it; only a quiet window does. A
+storm holds 300 s; a close every ~240 s of streaming (2026-10-08's keepalive
+cadence) waits a steady 5 s and never starves the feed (integration review
+of the first version, which climbed to 300 s, and of the second, which
+subtracted the scheduled waits from the monotonic clock).
 The wait is named on the heartbeat (`client_close_backoff`), in the
 transitions (CLIENT_CLOSE_BACKOFF) and by the authority's reason
 (FEED_CLIENT_CLOSE_BACKOFF). It is never a refusal and never counts toward
@@ -73,15 +77,14 @@ def test_the_third_client_close_inside_the_window_starts_the_wait():
 
 
 def test_the_wait_does_not_collapse_while_the_closes_keep_coming():
-    """Each close arriving one second after the reconnect: the waits are
-    not connected time, so the 600 s connected window keeps filling and
-    the backoff keeps its level for as long as the closes keep coming."""
+    """Each socket closing one second after it opened: the 600 s connected
+    window keeps filling, so the backoff keeps its level for as long as the
+    closes keep coming (the waits are not on the connected clock)."""
     o = _bare_owner()
-    t, waits = 0.0, []
+    c, waits = 0.0, []
     for _ in range(14):
-        w = o._client_close(t)
-        waits.append(w)
-        t += w + 1.0
+        waits.append(o._client_close(c))
+        c += 1.0
     assert waits[:9] == [0.0, 0.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 300.0]
     assert waits[9:] == [300.0] * 5
 
@@ -94,14 +97,13 @@ def test_a_close_every_four_minutes_of_streaming_waits_five_seconds_not_five_min
     on the connected clock the window never holds more than 3 such closes:
     the wait stays at the first step and the feed streams ~98% of the time."""
     o = _bare_owner()
-    t, waits = 0.0, []
+    c, waits = 0.0, []
     for _ in range(30):
-        w = o._client_close(t)
-        waits.append(w)
-        t += w + 240.0
+        waits.append(o._client_close(c))
+        c += 240.0
     assert waits[:2] == [0.0, 0.0]
     assert set(waits[2:]) == {5.0}
-    assert max(len(o.client_closes), 0) <= 3
+    assert len(o.client_closes) <= 3
     assert o.evictions == [] and o.refused is None
 
 
@@ -109,33 +111,28 @@ def test_the_storm_still_holds_the_cap_while_a_slow_cadence_does_not_climb():
     """Both at once on separate owners: 1 s after each reconnect holds 300 s;
     600 s after each reconnect never waits at all."""
     storm, slow = _bare_owner(), _bare_owner()
-    t = 0.0
-    for _ in range(20):
-        t += storm._client_close(t) + 1.0
+    for i in range(20):
+        storm._client_close(float(i))
     assert storm.client_close_wait == 300.0
-    t = 0.0
-    waits = []
-    for _ in range(20):
-        w = slow._client_close(t)
-        waits.append(w)
-        t += w + 600.0
+    waits = [slow._client_close(600.0 * i) for i in range(20)]
     assert set(waits) == {0.0}
 
 
 def test_a_quiet_window_resets_the_backoff_and_delivery_does_not():
     o = _bare_owner()
-    for t in (0.0, 1.0, 2.0, 3.0):
-        o._client_close(t)
+    for c in (0.0, 1.0, 2.0, 3.0):
+        o._client_close(c)
     assert o.client_close_level == 2
-    # just inside one window after the last close: still escalating
-    assert o._client_close(3.0 + O.CLIENT_CLOSE_WINDOW_S - 0.5) == 20.0
+    # still inside one connected window of the first close: escalating
+    c = O.CLIENT_CLOSE_WINDOW_S - 0.5
+    assert o._client_close(c) == 20.0
     assert o.client_close_level == 3
-    # a close a full window of connected time after the last one: quiet,
-    # so no wait (the window holds only that last close and this one)
-    t = 3.0 + 2 * O.CLIENT_CLOSE_WINDOW_S
-    assert o._client_close(t) == 0.0
+    # a full connected window after the last close: quiet, so no wait, and
+    # the window holds this close alone
+    c = c + O.CLIENT_CLOSE_WINDOW_S
+    assert o._client_close(c) == 0.0
     assert o.client_close_level == 0
-    assert len(o.client_closes) == 2 <= O.CLIENT_CLOSES_FREE
+    assert o.client_closes == [c]
     # (a delivered epoch is not a quiet window: the persistent-close test
     # below closes after delivery every time and the wait still grows)
 
@@ -216,6 +213,117 @@ async def test_a_stop_ends_the_client_close_wait_at_once(monkeypatch):
         if not t.done():
             o.stop()
             await asyncio.wait_for(t, 10)
+
+
+# ── the connected clock, through the real owner loop ─────────────────
+
+
+class _MonoClock:
+    """pinnapi_owner's monotonic clock, advanced only by the test (every
+    other attribute is the real `time` module)."""
+
+    def __init__(self):
+        self.v = 10_000.0
+
+    def monotonic(self):
+        return self.v
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
+class _TimedClosingWS(ClosingWS):
+    """Delivers its frames, then stays open `life_s` on the owner's clock
+    and closes with `exc` (our own frame-cap close)."""
+
+    def __init__(self, frames, exc, clock, life_s):
+        super().__init__(frames, exc)
+        self.clock, self.life_s = clock, life_s
+
+    async def recv(self):
+        if self.frames:
+            return json.dumps(self.frames.pop(0))
+        self.clock.v += self.life_s
+        raise self.exc
+
+
+def _distorted_owner(monkeypatch, clock, life_s, waits):
+    """A real owner whose every non-streaming period is distorted on its
+    own clock: the handshake takes 1,000 s, taking the lease 500 s, and the
+    backoff waits alternately run three times their scheduled length and
+    are cut short to nothing. None of that is connected time."""
+    monkeypatch.setattr(O, "time", clock)
+    monkeypatch.setenv("pinnapi_key", "k-test")
+
+    async def lease_factory():
+        clock.v += 500.0
+        return await O.Lease.open(H.DSN)
+
+    async def connect(url, key):
+        clock.v += 1_000.0
+        return _TimedClosingWS(frames_for(),
+                               ConnectionClosedError(None, FRAME_CAP, None),
+                               clock, life_s)
+    o = O.FeedOwner(F.FeedCache(), sport_ids=[6],
+                    lease_factory=lease_factory, connect=connect,
+                    liveness_s=0.2, standby_s=0.2)
+
+    async def distorted_wait(s):
+        waits.append(s)
+        clock.v += 3 * s if len(waits) % 2 else 0.0
+        await asyncio.sleep(0.005)
+    monkeypatch.setattr(o, "_wait", distorted_wait)
+    return o
+
+
+@pg
+async def test_slow_connects_lease_time_and_wrong_length_waits_do_not_thin_a_storm(
+        monkeypatch):
+    """Sockets that close 1 s after they open, with 1,500 s of handshake and
+    lease time around each and waits that never run their scheduled
+    length. 0a40533b subtracted only the SCHEDULED waits from the monotonic
+    clock, so those 1,500 s put every close in a window of its own and the
+    storm never backed off: [1.0, 1.0, 1.0, ...]."""
+    clock, waits = _MonoClock(), []
+    o = _distorted_owner(monkeypatch, clock, 1.0, waits)
+    t = asyncio.create_task(o.run())
+    try:
+        assert await until(lambda: len(waits) >= 9, timeout=20), waits
+        assert waits[:9] == [1.0, 1.0, 5.0, 10.0, 20.0, 40.0, 80.0, 160.0,
+                             300.0]
+        # the connected clock holds the sockets' open time and nothing else
+        n = o.closes_by_initiator[O.CLOSE_CLIENT]
+        assert o.connected_s == pytest.approx(1.0 * n, abs=1e-6)
+        # each close sits 1 s of connected time after the one before
+        assert o.client_closes == pytest.approx([float(i) for i in range(1, n + 1)])
+        assert o.refused is None and o.evictions == []
+        bo = o.status()["client_close_backoff"]
+        assert bo["window_clock"] == "CONNECTED_SOCKET_SECONDS"
+    finally:
+        o.stop()
+        await asyncio.wait_for(t, 10)
+
+
+@pg
+async def test_a_four_minute_cadence_stays_at_five_seconds_whatever_the_gaps_between_sockets(
+        monkeypatch):
+    """Sockets open 240 s each, with the same distorted gaps between them:
+    the connected window holds at most 3 closes, so the wait is 5 s from the
+    3rd on, exactly as without the gaps. 0a40533b put each close ~1,740 s
+    apart and never waited at all: [1.0, 1.0, 1.0, ...]."""
+    clock, waits = _MonoClock(), []
+    o = _distorted_owner(monkeypatch, clock, 240.0, waits)
+    t = asyncio.create_task(o.run())
+    try:
+        assert await until(lambda: len(waits) >= 8, timeout=20), waits
+        assert waits[:8] == [1.0, 1.0, 5.0, 5.0, 5.0, 5.0, 5.0, 5.0]
+        n = o.closes_by_initiator[O.CLOSE_CLIENT]
+        assert o.connected_s == pytest.approx(240.0 * n, abs=1e-6)
+        assert len(o.client_closes) <= 3
+        assert o.refused is None and o.evictions == []
+    finally:
+        o.stop()
+        await asyncio.wait_for(t, 10)
 
 
 # ── the REAL websockets client: a frame over the cap, every time ──────
