@@ -458,12 +458,19 @@ def effective_gap(min_gap_s: float = MIN_GAP_S) -> float:
 #   NORMAL lane, no deadline (every measurement walker)
 #       refused by name, nothing sent: R_VENUE_429_COOLDOWN_READ_DEFERRED.
 #       The walkers check `normal_read_deferral()` before each market and
-#       stop their pass, counting what they skipped. The premap catalogue
-#       sweep reads the refusal itself (premap._our_gate_refused): its
-#       pass stops RATE_LIMITED_BY_VENUE with the refusal named, the read
-#       is never counted as a request, and it never takes the markets
-#       fallback. Any caller that reads a failure as "the venue did not
-#       answer" and tries another endpoint must do the same.
+#       stop their pass, counting what they skipped.
+#   NORMAL lane, no deadline, inside wait_out_the_cooldown() (a caller
+#       whose pass is one indivisible proof: the premap catalogue sweep)
+#       waits the cooldown out when it ends within what is left of
+#       venue_request_gate.MAX_UNDEADLINED_WAIT_S -- one budget with the
+#       hard hold, the wait such a read always had -- nothing sent while it
+#       stands; a longer cooldown is refused at once by name,
+#       R_HOLD_EXCEEDS_UNDEADLINED_CAP. The sweep reads that refusal itself
+#       (premap._our_gate_refused): its pass stops RATE_LIMITED_BY_VENUE
+#       with the refusal named, the read is never counted as a request,
+#       and it never takes the markets fallback. Any caller that reads a
+#       failure as "the venue did not answer" and tries another endpoint
+#       must do the same.
 #   NORMAL lane, with a deadline (a scheduled read bound by begin_read)
 #       waits the cooldown out when it ends inside the deadline -- the
 #       contract venue_request_gate already gives a caller that "can
@@ -546,6 +553,7 @@ def _rl_reset_state() -> None:
                 "in_flight_429s": 0, "deferred_total": 0,
                 "deadline_waits": 0, "deadline_waited_s": 0.0,
                 "priority_waits": 0, "priority_waited_s": 0.0,
+                "bounded_waits": 0, "bounded_waited_s": 0.0,
                 "resets": 0, "last_429": None, "last_ok_epoch": None,
                 "last_deferred_epoch": None})
     _rl_sources.clear()
@@ -586,13 +594,62 @@ def current_read_source() -> str | None:
     return _source_ctx.get()
 
 
+#: THE BOUNDED COOLDOWN WAIT (P0-429, review round 2) -- the opt-in for an
+#: undeadlined NORMAL-lane caller that is not a market walker.
+#:
+#: WHY. The refusal above is right for a WALKER: it stops its pass and the
+#: next pass starts on its own cadence. It is wrong for a caller whose pass
+#: is ONE indivisible proof -- the premap catalogue sweep: one refused page
+#: and the whole receipt is PARTIAL, catalogue_completeness reads it, and
+#: radar raises CATALOGUE_NOT_PROVEN_COMPLETE. Before the cooldown existed
+#: such a read met the hard hold (`penalize_observed` -> hold_until, 5 s at
+#: the floor) and WAITED it out within venue_request_gate's
+#: MAX_UNDEADLINED_WAIT_S (20 s) before it sent; the cooldown's immediate
+#: refusal took that away from every caller, catalogue included (review
+#: reproduction: a 150-event board, another walker's 429 after page 1 --
+#: 0e331f05 COMPLETE after a 5 s wait, 6f47d4a4 PARTIAL, RATE_LIMITED).
+#:
+#: WHAT IT DOES. A read made inside `wait_out_the_cooldown()` (and in every
+#: thread asyncio.to_thread starts from it -- the context is copied) with no
+#: deadline WAITS the cooldown out when it ends within what is left of
+#: MAX_UNDEADLINED_WAIT_S -- ONE budget with the hard hold's wait, so the gate
+#: never sleeps such a caller longer than it did before the cooldown existed
+#: -- and is re-checked after the pacer's queue like every request, so
+#: NOTHING is sent while the cooldown stands. A cooldown that outlasts what is
+#: left is refused by name, at once, never after sleeping part of it:
+#: venue_request_gate.R_HOLD_EXCEEDS_UNDEADLINED_CAP (the cap it is, already
+#: SOFTWARE / FRESHNESS_PLUMBING / VENUE_BOOK, the deferral's row). Outside it
+#: nothing changes: walkers are still refused at once.
+_cooldown_wait_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "venue_pace_wait_out_the_cooldown", default=False)
+
+
+@contextlib.contextmanager
+def wait_out_the_cooldown():
+    """Inside: an undeadlined normal-lane read waits out the 429 cooldown
+    within venue_request_gate.MAX_UNDEADLINED_WAIT_S (one budget with the
+    hard hold) instead of being refused at once. See the block above."""
+    tok = _cooldown_wait_ctx.set(True)
+    try:
+        yield
+    finally:
+        _cooldown_wait_ctx.reset(tok)
+
+
+def waits_out_the_cooldown() -> bool:
+    """Whether a read made here opted into the bounded cooldown wait."""
+    return bool(_cooldown_wait_ctx.get())
+
+
 def _src(source: str | None) -> dict:
     name = source or "unattributed"
     s = _rl_sources.get(name)
     if s is None:
         s = _rl_sources[name] = {"rate_limited": 0, "deferred": 0,
                                  "skipped_by_walker": 0, "last_429": None,
-                                 "last_deferred_epoch": None}
+                                 "last_deferred_epoch": None,
+                                 "cooldown_waits": 0,
+                                 "cooldown_waited_s": 0.0}
     return s
 
 
@@ -764,12 +821,24 @@ def note_walker_skipped(n: int, source: str | None = None) -> None:
         _src(src)["skipped_by_walker"] += int(n)
 
 
-def note_cooldown_wait(seconds: float, *, priority: bool) -> None:
+def note_cooldown_wait(seconds: float, *, priority: bool,
+                       bounded: bool = False,
+                       source: str | None = None) -> None:
+    """A request waited `seconds` of the cooldown out before it went:
+    a PRIORITY claim (its bound), a DEADLINED read (inside its deadline),
+    or a BOUNDED undeadlined read (wait_out_the_cooldown(), within
+    MAX_UNDEADLINED_WAIT_S) -- each counted apart, and per source, so the
+    readback shows a sweep that WAITED apart from one that was refused."""
+    secs = max(0.0, float(seconds))
+    src = source if source is not None else _source_ctx.get()
     with _rl_lock:
-        k = "priority" if priority else "deadline"
+        k = ("priority" if priority else "bounded" if bounded
+             else "deadline")
         _rl[k + "_waits"] += 1
-        _rl[k + "_waited_s"] = round(_rl[k + "_waited_s"]
-                                     + max(0.0, float(seconds)), 3)
+        _rl[k + "_waited_s"] = round(_rl[k + "_waited_s"] + secs, 3)
+        s = _src(src)
+        s["cooldown_waits"] += 1
+        s["cooldown_waited_s"] = round(s["cooldown_waited_s"] + secs, 3)
 
 
 def rate_limit_state(now: float | None = None) -> dict:
@@ -797,6 +866,8 @@ def rate_limit_state(now: float | None = None) -> dict:
                 "deadline_waited_s": _rl["deadline_waited_s"],
                 "priority_waits": _rl["priority_waits"],
                 "priority_waited_s": _rl["priority_waited_s"],
+                "bounded_waits": _rl["bounded_waits"],
+                "bounded_waited_s": _rl["bounded_waited_s"],
                 "last_429": dict(_rl["last_429"]) if _rl["last_429"] else None,
                 "last_ok_read_epoch": _rl["last_ok_epoch"],
                 "last_deferred_epoch": _rl["last_deferred_epoch"],
@@ -808,7 +879,9 @@ def rate_limit_state(now: float | None = None) -> dict:
                          "priority_max_wait_s": PRIORITY_COOLDOWN_MAX_WAIT_S,
                          "reset": "A_2XX_READ_DISPATCHED_AFTER_THE_COOLDOWN_WAS_ARMED",
                          "normal_lane": R_VENUE_429_COOLDOWN_READ_DEFERRED,
-                         "priority_lane": "BOUNDED_WAIT_THEN_PROCEED"}}
+                         "priority_lane": "BOUNDED_WAIT_THEN_PROCEED",
+                         "normal_lane_opted_in":
+                             "WAIT_WITHIN_THE_UNDEADLINED_CAP_ELSE_REFUSED"}}
 
 
 __all__ = ["pace", "priority_claims", "waiting", "lane_stats", "penalize", "penalty_left",
@@ -822,4 +895,5 @@ __all__ = ["pace", "priority_claims", "waiting", "lane_stats", "penalize", "pena
            "note_cooldown_wait", "rate_limit_state", "reset_rate_limit_state",
            "priority_now", "set_read_source", "read_source",
            "current_read_source", "escalate", "clean_retry_after",
-           "RETRY_AFTER_SANITY_MAX_S"]
+           "RETRY_AFTER_SANITY_MAX_S", "wait_out_the_cooldown",
+           "waits_out_the_cooldown"]

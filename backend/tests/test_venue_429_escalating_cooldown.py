@@ -413,6 +413,155 @@ def test_a_deadlined_normal_read_waits_inside_its_deadline_else_is_refused(clock
 
 
 # ════════════════════════════════════════════════════════════════════
+# 5b · THE BOUNDED WAIT (review round 2): an undeadlined read that OPTED IN
+#      (venue_pace.wait_out_the_cooldown -- the catalogue sweep) waits a
+#      cooldown that ends within MAX_UNDEADLINED_WAIT_S, one budget with
+#      the hard hold, and NOTHING reaches the venue inside it; a cooldown
+#      past what is left is refused at once by the cap's name. Outside the
+#      opt-in a walker is refused at once, as before.
+# ════════════════════════════════════════════════════════════════════
+
+def _client_timed(venue: Venue, clock, at: list, pace=None):
+    """_client, with the fake-clock instant of every request that reached
+    the socket recorded in `at`."""
+    inner = venue.handler
+
+    def handler(request):
+        at.append(clock.t)
+        return inner(request)
+    venue.handler = handler
+    return _client(venue, pace=pace)
+
+
+def test_an_opted_in_read_waits_a_floor_cooldown_out_and_nothing_reaches_the_venue_inside_it(clock):
+    venue = Venue()
+    at: list = []
+    client = _client_timed(venue, clock, at)
+    with pytest.raises(_rate_limit_error()):
+        client.markets.book(SLUG)                   # the floor: 5.5 s
+    until = clock.t + VP.cooldown_left()
+    venue.script = [("ok", 200, GOOD_BOOK)]
+    # a walker, the same instant: refused at once, nothing sent, no sleep
+    with pytest.raises(GRT.VenueGateRefusal) as e:
+        client.markets.book(SLUG)
+    assert e.value.refusal == R and venue.count == 1 and clock.sleeps == []
+    # the catalogue sweep's read: waits the cooldown out, THEN sends
+    with VP.read_source("premap_full"), VP.wait_out_the_cooldown():
+        client.markets.book(SLUG)
+    assert clock.sleeps == [pytest.approx(5.5)]
+    assert venue.count == 2 and at[1] >= until - 1e-9, "sent inside the cooldown"
+    st = VP.rate_limit_state()
+    assert st["bounded_waits"] == 1 and st["bounded_waited_s"] == pytest.approx(5.5)
+    assert st["deadline_waits"] == 0 and st["priority_waits"] == 0
+    assert st["cooldown_active"] is False, "the 2xx sent after it lifted it"
+    src = st["by_source"]["premap_full"]
+    assert src["cooldown_waits"] == 1 and src["cooldown_waited_s"] == pytest.approx(5.5)
+    assert src["deferred"] == 0
+    assert st["rule"]["normal_lane_opted_in"] == \
+        "WAIT_WITHIN_THE_UNDEADLINED_CAP_ELSE_REFUSED"
+
+
+def test_an_opted_in_read_queued_in_the_pacer_when_a_429_arrives_waits_then_claims_a_fresh_gap(clock):
+    """The production defect's shape (a read already queued for its gap when
+    another thread's 429 arrives), for an opted-in read: it is not sent on
+    its stale gap -- it waits the cooldown out and claims a fresh one."""
+    venue = Venue(("ok", 200, GOOD_BOOK))
+    gaps: list = []
+
+    def pace():
+        gaps.append(clock.t)
+        if len(gaps) == 1:
+            VP.note_rate_limited(path="/v1/markets/other/book")
+    at: list = []
+    client = _client_timed(venue, clock, at, pace=pace)
+    with VP.wait_out_the_cooldown():
+        client.markets.book(SLUG)
+    assert venue.count == 1 and clock.sleeps == [pytest.approx(5.5)]
+    assert len(gaps) == 2, "a fresh gap after the wait, never the stale one"
+    assert at[0] >= gaps[0] + 5.5 - 1e-9
+
+
+def test_opted_in_reads_escalate_through_bounded_waits_and_a_cooldown_past_the_cap_is_refused_at_once(clock):
+    venue = Venue()                       # 429 to everything
+    at: list = []
+    client = _client_timed(venue, clock, at)
+    with pytest.raises(_rate_limit_error()):
+        client.markets.book(SLUG)                   # rung 1: 5.5 s
+    waits = []
+    with VP.wait_out_the_cooldown():
+        for _ in range(2):                          # rungs 1 and 2 are waited
+            clock.sleeps.clear()
+            until = clock.t + VP.cooldown_left()
+            with pytest.raises(_rate_limit_error()):
+                client.markets.book(SLUG)
+            waits.append(sum(clock.sleeps))
+            assert at[-1] >= until - 1e-9, "a request went inside the cooldown"
+        # rung 3: level 20 s, 22 s with the jitter -- past the 20 s cap
+        assert VP.cooldown_left() > GRT.MAX_UNDEADLINED_WAIT_S
+        clock.sleeps.clear()
+        sent = venue.count
+        with pytest.raises(GRT.VenueGateRefusal) as e:
+            client.markets.book(SLUG)
+    assert waits == [pytest.approx(5.5), pytest.approx(11.0)]
+    assert e.value.refusal == GRT.R_HOLD_EXCEEDS_UNDEADLINED_CAP
+    assert e.value.detail["by"] == "ESCALATING_429_COOLDOWN"
+    assert e.value.detail["stage"] == "BEFORE_THE_PACER"
+    assert e.value.detail["cap_left_s"] == GRT.MAX_UNDEADLINED_WAIT_S
+    assert clock.sleeps == [], "refused at once, never after sleeping part of it"
+    assert venue.count == sent == 3
+    st = VP.rate_limit_state()
+    assert st["deferred_total"] == 1 and st["consecutive_429"] == 3
+
+
+def test_an_opted_in_read_waits_the_hold_and_the_cooldown_on_one_budget_never_past_the_cap(clock, monkeypatch):
+    """MAX_UNDEADLINED_WAIT_S is the longest the gate sleeps an undeadlined
+    caller IN ALL: a read that waited 11 s of the cooldown has 9 s left for
+    the hard hold, and a 12 s hold is then refused by name, nothing sent.
+    The same 12 s hold with no cooldown is waited, as it always was."""
+    holds: list = []
+    monkeypatch.setattr(GRT, "_hold_sleep",
+                        lambda s: holds.append(round(float(s), 1)))
+    venue = Venue(("ok", 200, GOOD_BOOK))
+    client = _client(venue)
+    VP.note_rate_limited(path="/v1/markets/x/book")
+    VP.note_rate_limited(path="/v1/markets/x/book")     # rung 2: 11 s
+    assert VP.cooldown_left() == pytest.approx(11.0)
+    GRT.hold_until(until_epoch_s=time.time() + 12.0, reason="TEST_HOLD")
+    with VP.wait_out_the_cooldown():
+        with pytest.raises(GRT.VenueGateRefusal) as e:
+            client.markets.book(SLUG)
+    assert clock.sleeps == [pytest.approx(11.0)] and holds == []
+    assert e.value.refusal == GRT.R_HOLD_EXCEEDS_UNDEADLINED_CAP
+    assert e.value.detail["cap_left_s"] == pytest.approx(9.0)
+    assert venue.count == 0
+    # no cooldown, the same hold: waited within the cap and sent (unchanged)
+    VP.reset_rate_limit_state()
+    with VP.wait_out_the_cooldown():
+        client.markets.book(SLUG)
+    assert len(holds) == 1 and 10.0 <= holds[0] <= 12.0 and venue.count == 1
+
+
+def test_a_deadlined_read_inside_the_opt_in_keeps_its_deadline_rule(clock):
+    """The opt-in never widens a deadline: a deadline the cooldown outlasts
+    is still refused R_COOLDOWN_EXCEEDS_DEADLINE, nothing slept or sent."""
+    venue = Venue()
+    client = _client(venue)
+    with pytest.raises(_rate_limit_error()):
+        client.markets.book(SLUG)                   # 5.5 s
+    rid = GRT.begin_read(slug=SLUG, deadline_epoch_s=time.time() + 2)
+    GRT.bind_read(rid)
+    try:
+        with VP.wait_out_the_cooldown():
+            with pytest.raises(GRT.VenueGateRefusal) as e:
+                client.markets.book(SLUG)
+    finally:
+        GRT.bind_read(None)
+        GRT.end_read(rid)
+    assert e.value.refusal == GRT.R_COOLDOWN_EXCEEDS_DEADLINE
+    assert venue.count == 1 and clock.sleeps == []
+
+
+# ════════════════════════════════════════════════════════════════════
 # 6 · bbo_read / _bbo_quotes / book_read: ONE REQUEST ON A 429
 # ════════════════════════════════════════════════════════════════════
 
@@ -474,9 +623,12 @@ def test_the_readback_names_the_cooldown_the_count_the_deferred_reads_and_the_la
     assert st["cooldown_active"] is True and st["consecutive_429"] == 1
     assert st["deferred_total"] == 1 and st["last_429"]["path"].endswith("/book")
     src = st["by_source"]["bettor_state"]
+    # (review round 2) the source's cooldown WAITS ride beside its
+    # deferrals: a walker that is refused waits nothing
     assert src == {"rate_limited": 1, "deferred": 1, "skipped_by_walker": 4,
                    "last_429": src["last_429"],
-                   "last_deferred_epoch": src["last_deferred_epoch"]}
+                   "last_deferred_epoch": src["last_deferred_epoch"],
+                   "cooldown_waits": 0, "cooldown_waited_s": 0.0}
     assert src["last_429"]["source"] == "bettor_state"
     assert st["rule"]["priority_lane"] == "BOUNDED_WAIT_THEN_PROCEED"
     # the walker's pre-read gate reads it too (institutional_md's probe)

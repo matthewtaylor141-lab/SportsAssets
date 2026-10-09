@@ -6782,11 +6782,41 @@ def _paced_events_list(client, q: dict):
     a catalogue read must never queue ahead of the live mirror's tick), so the
     venue sees one request per gap from this process whatever runs beside the
     sweep, and the 429 circuit (`venue_pace.penalize_observed`) slows the sweep
-    with everything else. Runs in a worker thread (pace() sleeps)."""
+    with everything else. Runs in a worker thread (pace() sleeps).
+
+    THE 429 COOLDOWN IS WAITED OUT, BOUNDED (P0-429 review round 2): every
+    sweep read is made inside venue_pace.wait_out_the_cooldown() (see
+    `_sweep_read`)."""
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.events.list, q)
+    return _sweep_read(client, client.events.list, q)
+
+
+def _sweep_read(client, call, *args):
+    """ONE catalogue sweep read through the transport, inside
+    venue_pace.wait_out_the_cooldown().
+
+    P0-429, REVIEW ROUND 2. The escalating 429 cooldown refuses an
+    undeadlined normal-lane read at once, and a WALKER stops its pass on it
+    and resumes on its own cadence. This sweep's pass is one indivisible
+    proof: one refused page and the receipt is PARTIAL, which
+    catalogue_completeness (market_plane/populate.py) reads and radar turns
+    into CATALOGUE_NOT_PROVEN_COMPLETE -- a code-controlled RED made by a
+    cooldown another walker's book 429 armed for 5 s. Before the cooldown
+    existed the same read met that 429's hard hold and WAITED it out (within
+    venue_request_gate.MAX_UNDEADLINED_WAIT_S) before it sent; the review
+    reproduced it: 0e331f05 COMPLETE after the wait, the lane's 6f47d4a4
+    PARTIAL. So the sweep's reads WAIT a cooldown that ends within the cap
+    (one budget with the hold) -- nothing is sent while it stands; the
+    transport re-checks it after the pacer's queue -- and only a cooldown
+    that outlasts the cap stops the pass: R_HOLD_EXCEEDS_UNDEADLINED_CAP,
+    read by `_our_gate_refused` as rate-limited and never sent, no fallback.
+    Runs in the worker thread (the context is the thread's own copy)."""
+    from .. import venue_pace as _vp
+
+    with _vp.wait_out_the_cooldown():
+        return _released_body(client, call, *args)
 
 
 def _paced_event_by_slug(client, slug: str):
@@ -6796,7 +6826,7 @@ def _paced_event_by_slug(client, slug: str):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.events.retrieve_by_slug, slug)
+    return _sweep_read(client, client.events.retrieve_by_slug, slug)
 
 
 def _paced_markets_list(client, q: dict):
@@ -6804,7 +6834,7 @@ def _paced_markets_list(client, q: dict):
     from .. import venue_pace as _vp
 
     _vp.pace(LIST_PACING_S)
-    return _released_body(client, client.markets.list, q)
+    return _sweep_read(client, client.markets.list, q)
 
 
 #: the receipt note (CompletenessTally.notes, "<this>:<refusal>") counting
@@ -6848,6 +6878,47 @@ def _our_gate_refused(exc) -> dict | None:
             "gate_refusal": str(getattr(exc, "refusal", None) or exc),
             "seconds_left": detail.get("seconds_left"),
             "retry_after_s": None, "source": "OUR_VENUE_GATE"}
+
+
+#: the receipt notes (CompletenessTally.notes) carrying what this sweep WAITED
+#: of the escalating 429 cooldown (P0-429 review round 2): the waits, and
+#: their total in whole milliseconds. Absent when it waited nothing.
+NOTE_COOLDOWN_WAITS = "VENUE_429_COOLDOWN_WAITS"
+NOTE_COOLDOWN_WAITED_MS = "VENUE_429_COOLDOWN_WAITED_MS"
+
+
+def _cooldown_counts(source: str) -> dict:
+    """This process's cooldown counts for one read source
+    (venue_pace.rate_limit_state()["by_source"][source]); {} when unread."""
+    try:
+        from .. import venue_pace as _vp
+
+        return dict((_vp.rate_limit_state().get("by_source") or {})
+                    .get(source) or {})
+    except Exception:  # noqa: BLE001 — a readback never costs the sweep
+        return {}
+
+
+def _note_cooldown_on_receipt(tally, source: str, before: dict) -> None:
+    """THE SWEEP'S OWN WAITS, ON ITS RECEIPT (P0-429 review round 2). Each
+    lane is one task with its own read source, so the difference of its
+    counts across the sweep is the sweep's: the cooldown waits its reads
+    made (NOTE_COOLDOWN_WAITS, NOTE_COOLDOWN_WAITED_MS) -- the wall time a
+    WINDOW_MAX_SECONDS / CALENDAR_MAX_SECONDS reading must be judged with --
+    beside the reads our gate withheld (NOTE_NOT_SENT_BY_OUR_GATE). A
+    production readback of venue_catalogue_receipts then shows a sweep that
+    WAITED apart from one that was refused. Never raises."""
+    try:
+        after = _cooldown_counts(source)
+        waits = int(after.get("cooldown_waits") or 0) - int(
+            (before or {}).get("cooldown_waits") or 0)
+        waited = float(after.get("cooldown_waited_s") or 0.0) - float(
+            (before or {}).get("cooldown_waited_s") or 0.0)
+        if waits > 0:
+            tally.note(NOTE_COOLDOWN_WAITS, waits)
+            tally.note(NOTE_COOLDOWN_WAITED_MS, int(round(waited * 1000.0)))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _rate_limited(exc) -> dict | None:
@@ -6964,6 +7035,9 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     # its deferrals are premap's, never "unattributed"
     from .. import venue_pace as _vp_src
     _vp_src.set_read_source("premap_%s" % lane)
+    # ... and what it WAITED of the cooldown (or was refused) is on its own
+    # receipt (`_note_cooldown_on_receipt`): the counts before this sweep
+    cooldown_before = _cooldown_counts("premap_%s" % lane)
     pool = await get_pool()
     if not calendar:
         # the calendar lane runs right after a full sweep that ensured the
@@ -7812,6 +7886,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
     # named per pass. Each lane has its own record, so `premap_last.truncated`
     # stays about the window (the calendar lane's truncation is on
     # `premap_last_calendar`, never mixed into it).
+    _note_cooldown_on_receipt(tally, "premap_%s" % lane, cooldown_before)
     rec = tally.receipt()
     truncated_passes = sorted(p for p, r in rec["passes"].items()
                               if r.get("truncated"))
