@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import itertools
 import json
 import math
 import time
@@ -65,11 +64,6 @@ MODEL_LABEL = "EXPERIMENTAL_RESEARCH_MODEL"
 
 R_NO_RESEARCH_MODEL = "NO_RESEARCH_MODEL_CANDIDATE_EXISTS"
 R_MODEL_UNVERIFIED = "RESEARCH_MODEL_PROVENANCE_NOT_VERIFIED"
-#: (RC6) why a model is unverified when the API's CPU lane cancelled the
-#: provenance check's job before it ran (the lane was shut down): the check
-#: never ran, so the model is refused, by name, and research_model keeps its
-#: never-raises contract (a CancelledError is not an Exception).
-R_PROVENANCE_CHECK_NOT_RUN = "THE_PROVENANCE_CHECK_DID_NOT_RUN_THE_CPU_LANE_STOPPED"
 R_MODEL_CANNOT_SCORE = "RESEARCH_MODEL_CANNOT_SCORE_THIS_CANDIDATE"
 R_NO_BOOK = "THE_OBSERVED_BOOK_WAS_UNREADABLE_OR_EMPTY"
 R_NOT_PMUS = "NOT_A_SUPPORTED_POLYMARKET_US_CONTRACT"
@@ -241,15 +235,6 @@ async def research_model(conn, *, at: float, verify: bool = True) -> dict:
         if verify:
             try:
                 chk = await FM.verify_provenance(conn, m)
-            except asyncio.CancelledError:
-                # THIS DECISION CANCELLED (its deadline): never swallowed.
-                # OTHERWISE the CPU lane cancelled the check's job -- it was
-                # shut down with the job queued (cpu_lane.shutdown) -- and
-                # the check did not run: refused by name, never verified.
-                me = asyncio.current_task()
-                if me is None or me.cancelling():
-                    raise
-                chk = {"ok": False, "refusal": R_PROVENANCE_CHECK_NOT_RUN}
             except Exception as exc:                            # noqa: BLE001
                 chk = {"ok": False, "refusal": type(exc).__name__}
             out["provenance_verified"] = bool(chk.get("ok"))
@@ -478,124 +463,9 @@ def _alternatives(md: dict | None, *, side: str, p_blended) -> dict:
 # ═════════════════════════════════════════════════════════════════════
 
 #: The per-valuation hook reuses one context for this long (the model read
-#: verifies provenance, which re-reads its training records) -- but a
-#: verification is served from it only while the training set's change stamp
-#: is the one read before that verification (below).
+#: verifies provenance, which re-reads its training records).
 CONTEXT_TTL_S = 300.0
 _CONTEXT_CACHE: dict = {}
-
-# ── (RC6 provenance D2) NO VERIFICATION OUTLIVES A CHANGE TO WHAT IT READ ──
-#
-# THE DEFECT. A session's cached context served its research model, with
-# `provenance_verified`, for up to CONTEXT_TTL_S after a training label was
-# corrected: every PAPER decision of that session used a model whose
-# training set no longer reproduced (test_rc6_provenance_open_defects, D2).
-#
-# THE RULE. A context is computed after reading the training set's CHANGE
-# STAMP (migration 365: a counter every UPDATE / DELETE / TRUNCATE that can
-# alter a verified training record, a label, a settlement or the stored
-# digest moves, in the writer's own transaction, plus the catalog identity
-# of the triggers that move it and of the tables they watch). The stamp is
-# read BEFORE the verification reads the registry and the ledger. A
-# decision is served a context it did not compute only when
-#   (a) that context's reads began after the decision arrived (it joined a
-#       verification in flight that had not yet read anything), or
-#   (b) the stamp, read on the decision's own connection after it arrived,
-#       equals the stamp read before that context's verification.
-# Anything else -- a different stamp, an unreadable stamp (migration 365
-# absent, a trigger disabled or dropped, the read failing) -- recomputes:
-# the verification runs again. A stamp proves a change happened, never that
-# none did, by its own content: the proof that an equal stamp means no
-# change is the trigger coverage (migration 365's header), and every way to
-# write the tables without those triggers firing changes the stamp too.
-#
-# WHY NOT A CONTENT FINGERPRINT. An md5 over the named records (the
-# prototype, joined in SQL from the registry's ids) cost ~257 ms of
-# Postgres per cache hit at production's 28,303 records -- 2.3 s of
-# database time per second at production's 9 decisions in one second, and
-# growing with every record -- and it hashed fewer columns than a training
-# record is built from (fixture and decided_at were not in it). The stamp
-# is one primary-key row and two catalog reads (LOCAL: well under 1 ms).
-#: (table, trigger) pairs migration 365 arms; the counter row lists them
-#: (watched_tables / watched_triggers), so the stamp names no table here.
-TRAINING_SET_TRIGGERS = 6
-TRAINING_SET_STAMP_SQL = """
-    SELECT CASE WHEN a.n = %d
-                THEN concat_ws('|', c.changes, c.xmin, c.ctid, a.triggers,
-                               a.heaps)
-           END
-      FROM research_training_set_changes c
-     CROSS JOIN LATERAL (
-            SELECT count(*) FILTER (
-                       WHERE t.tgenabled = 'A'
-                         AND p.proname = 'research_training_set_changed')
-                       AS n,
-                   string_agg(concat_ws('/', w.rel::oid, w.name, t.oid,
-                                        t.tgenabled, t.xmin, t.ctid, p.oid,
-                                        p.xmin, p.ctid),
-                              ',' ORDER BY w.name, w.rel::oid) AS triggers,
-                   (SELECT string_agg(concat_ws('/', r.oid, r.relfilenode),
-                                      ',' ORDER BY r.oid)
-                      FROM pg_class r
-                     WHERE r.oid = ANY(c.watched_tables::oid[])) AS heaps
-              FROM unnest(c.watched_tables, c.watched_triggers)
-                   AS w(rel, name)
-              LEFT JOIN pg_trigger t ON t.tgrelid = w.rel
-                                    AND t.tgname = w.name
-              LEFT JOIN pg_proc p ON p.oid = t.tgfoid) a
-     WHERE c.scope = 'DEREK_RESEARCH_TRAINING_SET'
-""" % TRAINING_SET_TRIGGERS
-
-
-async def _training_set_stamp(conn) -> str | None:
-    """The research training set's change stamp, or None when it cannot be
-    read or a trigger that moves it is missing or not ENABLE ALWAYS (then
-    nothing is served from the cache). Never raises."""
-    try:
-        got = await conn.fetchval(TRAINING_SET_STAMP_SQL)
-    except Exception:                                           # noqa: BLE001
-        return None
-    return got if isinstance(got, str) and got else None
-
-
-# ── (RC6 provenance D3) ONE VERIFICATION IN FLIGHT PER CONTEXT KEY ──────
-#
-# THE DEFECT. Off the loop (the RC6.1 offload), every decision of a session
-# that arrived while its cold context was being verified missed the cache
-# too and queued ITS OWN full verification on the one CPU lane (8 of 8 in
-# test_rc6_provenance_open_defects D3; 5-6 per expiry in the LOCAL arrivals
-# bench, against 2 when the blocking loop made the first one an accidental
-# single flight), so decisions queued toward the 8 s deadline.
-#
-# THE FLIGHT. The first decision of a key that misses leads: it registers a
-# flight, computes on ITS OWN connection, stores the context in the cache
-# and resolves the flight. A decision that misses while a flight of its key
-# is running waits for it (shielded) and is then served under the rule
-# above. A flight that fails or is cancelled (its leader's deadline)
-# resolves to nothing: nothing is cached, and each waiter tries again -- the
-# cache, a newer flight, or leading one itself -- so a failure is never
-# served as a success. A waiter whose own deadline passes stops waiting
-# (its CancelledError propagates: no model reaches it) and the flight runs
-# on for the others. At most MAX_CONTEXT_FLIGHTS keys hold a flight at once
-# (one entry per key, removed by its leader whatever happens); a key beyond
-# that computes without one.
-MAX_CONTEXT_FLIGHTS = 16
-#: rounds a decision waits for flights before it computes on its own
-#: (each round is one flight completing; normally one round is enough)
-MAX_FLIGHT_ROUNDS = 3
-_CONTEXT_FLIGHTS: dict = {}
-_SEQ = itertools.count(1)
-
-
-class _Flight:
-    """One context computation in flight: its loop, its decision instant and
-    the future its leader resolves (the cache entry, or None on failure)."""
-    __slots__ = ("future", "loop", "at")
-
-    def __init__(self, loop, at: float):
-        self.loop = loop
-        self.at = float(at)
-        self.future = loop.create_future()
 
 
 async def _a_model_appeared(conn, cached: dict, *, at: float) -> bool:
@@ -610,59 +480,23 @@ async def _a_model_appeared(conn, cached: dict, *, at: float) -> bool:
     return bool(probe.get("ok"))
 
 
-def _model_fits_an_earlier_instant(derek: dict, now: float) -> bool:
-    """A context computed for a LATER instant than `now` names the model a
-    context at `now` would name when that model was registered by `now`:
-    it is the newest research candidate registered by the later instant, so
-    none was registered between. Only a model the context named (verified,
-    or refused for its provenance) qualifies."""
-    m = derek.get("model") or {}
-    created = m.get("created_at")
-    if not m.get("model_id") or created is None or float(created) > now:
-        return False
-    return bool(m.get("ok") and m.get("provenance_verified")) or \
-        m.get("refusal") == R_MODEL_UNVERIFIED
-
-
-async def _serve(conn, entry: dict, *, now: float, arrived: int):
-    """`entry` (a cached or just-flown context) for a decision at `now` that
-    arrived at sequence point `arrived`, or None when it cannot be served.
-
-    THE INSTANT. A context of an instant at or before `now`, within
-    CONTEXT_TTL_S, is served whole (the cache's rule, unchanged). One of a
-    LATER instant (one session's decisions reach their context out of
-    order) lends only its model, and only when that model was registered by
-    `now`; the void measure is read at `now` itself, never after it.
-    THE VERIFICATION. Served only under the rule above: its reads began
-    after this decision arrived, or the change stamp is unchanged."""
-    at, derek = float(entry["at"]), entry["derek"]
-    if 0.0 <= now - at < CONTEXT_TTL_S:
-        whole = True
-    elif 0.0 < at - now < CONTEXT_TTL_S and \
-            _model_fits_an_earlier_instant(derek, now):
-        whole = False
-    else:
-        return None
-    if entry["read_seq"] < arrived:
-        # read before this decision arrived: provably unchanged, or nothing
-        if entry["stamp"] is None or \
-                await _training_set_stamp(conn) != entry["stamp"]:
-            return None
-        if whole and await _a_model_appeared(conn, derek, at=now):
-            return None
-    if whole:
-        return derek
-    return {"model": derek["model"], "model_attempt": derek["model_attempt"],
-            "void": await DP.void_measure(conn, through=now),
-            "calibration": {}}
-
-
-async def _compute(conn, ctx: dict, key) -> dict:
-    """THE CONTEXT, computed on this decision's connection; with a key, the
-    change stamp is read FIRST and the context is cached with it."""
+async def _context(conn, ctx: dict) -> dict:
+    """Once per pass (or per CONTEXT_TTL_S for the per-valuation hook): the
+    research model, its daily attempt, the void measure and the source
+    calibration. A cached context without a model is recomputed as soon as
+    a candidate is registered."""
+    if "derek" in ctx:
+        return ctx["derek"]
+    key = ctx.get("context_cache_key")
+    if key is not None:
+        hit = _CONTEXT_CACHE.get(key)
+        if hit is not None and float(ctx["now"]) - hit["at"] < \
+                CONTEXT_TTL_S and float(ctx["now"]) >= hit["at"] \
+                and not await _a_model_appeared(conn, hit["derek"],
+                                                at=float(ctx["now"])):
+            ctx["derek"] = hit["derek"]
+            return ctx["derek"]
     at = ctx["now"]
-    read_seq = next(_SEQ)
-    stamp = await _training_set_stamp(conn) if key is not None else None
     model = await research_model(conn, at=at)
     attempt = None
     if not model.get("ok") and model.get("refusal") == R_NO_RESEARCH_MODEL:
@@ -671,75 +505,10 @@ async def _compute(conn, ctx: dict, key) -> dict:
     void = await DP.void_measure(conn, through=at)
     ctx["derek"] = {"model": model, "model_attempt": attempt, "void": void,
                     "calibration": {}}
-    entry = {"at": float(at), "derek": ctx["derek"], "stamp": stamp,
-             "read_seq": read_seq}
     if key is not None:
         _CONTEXT_CACHE.clear()
-        _CONTEXT_CACHE[key] = entry
-    return entry
-
-
-async def _lead(conn, ctx: dict, key) -> dict:
-    """Compute as the key's flight (when the flight table has room), and
-    resolve the flight however the computation ends."""
-    loop = asyncio.get_running_loop()
-    flight = None
-    if key in _CONTEXT_FLIGHTS or len(_CONTEXT_FLIGHTS) < MAX_CONTEXT_FLIGHTS:
-        flight = _Flight(loop, float(ctx["now"]))
-        _CONTEXT_FLIGHTS[key] = flight
-    entry = None
-    try:
-        entry = await _compute(conn, ctx, key)
-        return entry["derek"]
-    finally:
-        if flight is not None:
-            if _CONTEXT_FLIGHTS.get(key) is flight:
-                del _CONTEXT_FLIGHTS[key]
-            if not flight.future.done():
-                # None when the computation raised or was cancelled: never
-                # cached, never served
-                flight.future.set_result(entry)
-
-
-async def _context(conn, ctx: dict) -> dict:
-    """Once per pass (or per CONTEXT_TTL_S for the per-valuation hook): the
-    research model, its daily attempt, the void measure and the source
-    calibration. A cached context without a model is recomputed as soon as
-    a candidate is registered; a cached verification only while the
-    training set's change stamp proves it unchanged (D2); one session's
-    concurrent decisions share one computation (D3)."""
-    if "derek" in ctx:
-        return ctx["derek"]
-    key = ctx.get("context_cache_key")
-    if key is None:
-        return (await _compute(conn, ctx, None))["derek"]
-    now = float(ctx["now"])
-    arrived = next(_SEQ)
-    loop = asyncio.get_running_loop()
-    refused = None
-    for _round in range(MAX_FLIGHT_ROUNDS):
-        hit = _CONTEXT_CACHE.get(key)
-        if hit is not None and hit is not refused:
-            got = await _serve(conn, hit, now=now, arrived=arrived)
-            if got is not None:
-                ctx["derek"] = got
-                return got
-            refused = hit
-        flight = _CONTEXT_FLIGHTS.get(key)
-        if flight is None or flight.loop is not loop or flight.future.done():
-            return await _lead(conn, ctx, key)
-        # this decision's own cancellation (its deadline) propagates here;
-        # the flight is shielded from it and runs on for the others
-        flown = await asyncio.shield(flight.future)
-        if flown is None:
-            continue            # failed or cut: nothing to serve; try again
-        got = await _serve(conn, flown, now=now, arrived=arrived)
-        if got is not None:
-            ctx["derek"] = got
-            return got
-        refused = flown
-    # flights kept failing or could not serve this decision: its own context
-    return (await _compute(conn, ctx, key))["derek"]
+        _CONTEXT_CACHE[key] = {"at": float(at), "derek": ctx["derek"]}
+    return ctx["derek"]
 
 
 async def _calibration(conn, dctx: dict, version) -> dict:

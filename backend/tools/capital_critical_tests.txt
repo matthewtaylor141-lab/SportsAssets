@@ -1431,13 +1431,5 @@ tests/test_epoch_rollforward_receipt.py
 tests/test_mirror_shadow_venue_confirmation.py
 # (RC6 identity lane) active position truth: every ACTUAL book and the PAPER books read each cycle, an ACTIVE row of ours without market identity refused by name (OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY), unreadable books UNMEASURED never clean, the dead-letter counted by owner and activity and logged on change
 tests/test_positions_identity_census.py
-# (RC6 provenance-proof) on a real Postgres, a research model that verified refuses on its next check once a training label is corrected, a decision voided or gone, a vector rewritten with its identity, or a settlement re-read on another basis or instant -- on the same model object, re-hashed on the CPU lane every call, never on the loop
-tests/test_rc6_provenance_refuses_after_change.py
-# (RC6 provenance-proof) 16/32/64 parallel PAPER decisions: each verified or refused by name, every re-hash on the one lane thread exactly once, queue drained, loop gap < 0.25 s; a saturated or shut-down lane fails closed (no decision sees a verified model, withdrawn jobs never run)
-tests/test_rc6_provenance_lane_bounds.py
-# (RC6 provenance-fix) the three defects closed: a vector rewritten under its stored identity refuses (checked against its own feature_sha before the digest); a session's cached context does not outlive a corrected label (served only while the training set's change stamp is the one read before its verification); one session's concurrent decisions on a cold context run ONE verification
-tests/test_rc6_provenance_open_defects.py
-# (RC6 provenance-fix) through a session's cached context every change refuses on the next decision (label, void, deleted valuation or observation, vector with or without its identity, gained feature, moved fixture, re-based or re-read settlement, rewritten registry digest) and every bypass of the change counter still reads as a change; the single flight: a waiter's deadline cuts only it, a cut or failed flight caches nothing, a change mid-flight re-verifies, an unreadable stamp serves nothing, bounded table; a stopped lane is a named refusal
-tests/test_rc6_provenance_cache_and_flight.py
 # Signed acceptance requires the checksummed source verdict to agree with its copied packet value.
 tests/test_signed_acceptance_consistency.py
