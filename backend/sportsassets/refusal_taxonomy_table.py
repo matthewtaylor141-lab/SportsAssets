@@ -2197,6 +2197,13 @@ SNAPSHOT_REFRESH_STREAM = {
     "SNAPSHOT_REFRESH_NO_BEARER_TOKEN": (S, FRESH, "INGESTION"),
     "SNAPSHOT_REFRESH_OFF_BY_SWITCH": (S, FRESH, "INGESTION"),
     "SNAPSHOT_REFRESH_TRANSPORT_UNAVAILABLE": (S, FRESH, "INGESTION"),
+    # (review of 785907f2) a stateless snapshot book whose fallback state
+    # (a refdata record or an old stream state) is not open: the software
+    # cannot show the market open NOW, and that fallback is not the venue's
+    # word about it either -- SOFTWARE / DATA (ACTIVE_REFRESH_BOOK_STATE_
+    # UNKNOWN's row is the precedent), never EXTERNAL
+    "SNAPSHOT_REFRESH_STATELESS_BOOK_FALLBACK_STATE_NOT_PROVEN": (
+        S, DATA, "INGESTION"),
 }
 for _k, _v in SNAPSHOT_REFRESH_STREAM.items():
     TABLE.setdefault(_k, _v)

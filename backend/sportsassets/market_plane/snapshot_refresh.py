@@ -42,13 +42,31 @@ skip-to-head; `outbound` refuses anything else before the wire.
 
 WHAT COUNTS (`judge_update`): exactly the stream's and the REST refresh's
 checks -- a symbol we asked for, the venue's transact_time, the book not
-hidden, the state the update states (else the plane's refdata record's, the
-stream's own rule) OPEN, not crossed. A CURRENT book counts for the plane's
+hidden, the state the update states (else the state the stream itself
+falls back to: its own last stated state, else the plane's refdata
+record's) OPEN, not crossed. A CURRENT book counts for the plane's
 bound from OUR RECEIPT, recorded into the refresher with origin SNAPSHOT
 (G in the freshness window); it never enters the stream's books, is never
 a PRIORITY_PMX_BOOKS parity book, never a decision input. A symbol not
 returned before the call ended is counted (SNAPSHOT_REFRESH_SYMBOL_NOT_
 RETURNED) and left to the REST refresh. Switch: UMP_SNAPSHOT_REFRESH=off.
+
+WHOSE WORD A NOT-OPEN STATE IS (review of 785907f2). A snapshot book
+usually carries no state: the vendored proto sends it "when the exchange
+provides a non-default state" (marketdatasubscription.proto, MarketData
+Update.state). The fallback the stream would use -- a refdata record or an
+old stream state, of any age -- is not the venue's word about the market
+NOW. So a not-open state makes the market NOT OPEN (ACTIVE_REFRESH_MARKET_
+NOT_OPEN: EXTERNAL_UNAVAILABLE in the freshness window, the 900 s market
+wait) only when it is (a) carried on the snapshot update itself, (b) a
+TERMINAL state (the held-position rule: any age), or (c) the stream's own
+state with the stream's newest update received inside the bound. Any other
+not-open fallback is SNAPSHOT_REFRESH_STATELESS_BOOK_FALLBACK_STATE_NOT_
+PROVEN: not current (the conservative judgement stands), SOFTWARE, counted
+NOT_CURRENT in the window, retried after the 60 s of a failed read, and
+it does not end an earlier current read. Every judgement records where its
+state came from (state_from UPDATE / FALLBACK, with the fallback's source
+and receipt instant).
 """
 from __future__ import annotations
 
@@ -59,6 +77,7 @@ import time
 
 from .. import institutional_stream as IS
 from . import active_refresh as AR
+from . import freshness_window as FW
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +109,12 @@ R_SNAPSHOT_HELD = "SNAPSHOT_REFRESH_HELD_AFTER_A_FAILED_CALL"
 R_SNAPSHOT_NO_TOKEN = "SNAPSHOT_REFRESH_NO_BEARER_TOKEN"
 R_SNAPSHOT_OFF = "SNAPSHOT_REFRESH_OFF_BY_SWITCH"
 R_SNAPSHOT_UNAVAILABLE = "SNAPSHOT_REFRESH_TRANSPORT_UNAVAILABLE"
+#: (review of 785907f2) a stateless snapshot book whose fallback state is
+#: not open, the fallback neither terminal nor the stream's own state read
+#: inside the bound: not current, and not the venue's word about the market
+R_SNAPSHOT_FALLBACK_NOT_PROVEN = (
+    "SNAPSHOT_REFRESH_STATELESS_BOOK_FALLBACK_STATE_NOT_PROVEN")
+STATE_FROM_UPDATE, STATE_FROM_FALLBACK = "UPDATE", "FALLBACK"
 
 
 def enabled(env=None) -> bool:
@@ -189,10 +214,38 @@ def call(token: str, symbols, *, target=None, deadline_s=CALL_DEADLINE_S,
             "ms": round((clock() - t0) * 1000.0, 1)}
 
 
-def judge_update(u: dict, *, asked: set, refdata_state=None) -> dict:
-    """PURE. One decoded snapshot update -> {outcome, venue_ts, levels}.
-    CURRENT only for a symbol asked for, with the venue's clock, not hidden,
-    OPEN (its own state, else the refdata record's), not crossed."""
+def fallback_is_the_venues_word(fallback, *, at=None, bound=None) -> bool:
+    """PURE. Whether a not-open FALLBACK state is the venue's own word about
+    the market at `at` (module docstring): a TERMINAL state at any age (the
+    held-position rule), or the stream's own state (state_source STREAM)
+    with the stream's newest update received inside `bound` of `at`. A
+    refdata record's transient state, or an old stream state, is not."""
+    fb = fallback or {}
+    st = str(fb.get("state") or "").upper()
+    if not st:
+        return False
+    if st in FW.TERMINAL_STATES:
+        return True
+    rcv = fb.get("received_at")
+    if fb.get("state_source") != "STREAM" or rcv is None or at is None \
+            or bound is None:
+        return False
+    try:
+        return 0.0 <= float(at) - float(rcv) <= float(bound)
+    except (TypeError, ValueError):
+        return False
+
+
+def judge_update(u: dict, *, asked: set, fallback=None, refdata_state=None,
+                 at=None, bound=None) -> dict:
+    """PURE. One decoded snapshot update -> {outcome, venue_ts, levels,
+    state_from, ...}. CURRENT only for a symbol asked for, with the venue's
+    clock, not hidden, OPEN (its own state, else the stream's fallback
+    `fallback` {state, state_source, received_at}; `refdata_state` alone is
+    a REFDATA fallback), not crossed. A not-open state is the market's
+    (R_REFRESH_NOT_OPEN) only when it is on the update or
+    `fallback_is_the_venues_word` at the receipt instant `at`; any other
+    not-open fallback is R_SNAPSHOT_FALLBACK_NOT_PROVEN."""
     sym = str((u or {}).get("symbol") or "")
     out = {"symbol": sym, "outcome": None, "venue_ts": None,
            "levels": None, "status": "SNAPSHOT"}
@@ -207,11 +260,26 @@ def judge_update(u: dict, *, asked: set, refdata_state=None) -> dict:
     out["venue_ts"] = vts
     if u.get("book_hidden"):
         return dict(out, outcome=R_SNAPSHOT_BOOK_HIDDEN)
-    state = u.get("state") or refdata_state
+    fb = dict(fallback or {})
+    if not fb.get("state") and refdata_state:
+        fb = {"state": refdata_state, "state_source": "REFDATA",
+              "received_at": None}
+    own = u.get("state")
+    state = own or fb.get("state")
+    if own:
+        out["state_from"] = STATE_FROM_UPDATE
+    elif state:
+        out["state_from"] = STATE_FROM_FALLBACK
+        out["fallback"] = {"state": str(state)[:40],
+                           "state_source": fb.get("state_source"),
+                           "received_at": fb.get("received_at")}
     if not state:
         return dict(out, outcome=AR.R_REFRESH_STATE_UNKNOWN)
     if str(state) not in IS.OPEN_STATES:
-        return dict(out, outcome=AR.R_REFRESH_NOT_OPEN,
+        if own or fallback_is_the_venues_word(fb, at=at, bound=bound):
+            return dict(out, outcome=AR.R_REFRESH_NOT_OPEN,
+                        state=str(state)[:40])
+        return dict(out, outcome=R_SNAPSHOT_FALLBACK_NOT_PROVEN,
                     state=str(state)[:40])
     if bids and offers and max(int(p) for p, _q in bids) >= min(
             int(p) for p, _q in offers):
@@ -219,16 +287,23 @@ def judge_update(u: dict, *, asked: set, refdata_state=None) -> dict:
     return dict(out, outcome=CURRENT)
 
 
-def _refdata_state(mgr, s, *, now: float, bound: float):
-    """The state the stream itself would fall back to for `s` -- its last
-    update's, else the plane's refdata record's (institutional_stream
-    current(): evidence.market.state) -- or None when the books do not hold
-    it. Read through the books' public read, never their internals."""
+def _fallback(mgr, s, *, now: float, bound: float) -> dict:
+    """The state the stream itself would fall back to for `s`, with where
+    it came from: {state, state_source (STREAM: its own last stated state;
+    REFDATA: the plane's refdata record), received_at (the stream's newest
+    update's receipt)} -- {} when the books do not hold it. Read through
+    the books' public read (institutional_stream current(): evidence.market
+    and evidence.snapshot), never their internals."""
     try:
         r = mgr.current(s, now=now, max_snapshot_age_s=bound) or {}
-        return ((r.get("evidence") or {}).get("market") or {}).get("state")
     except Exception:                                           # noqa: BLE001
-        return None
+        return {}
+    ev = r.get("evidence") or {}
+    mk, sn = ev.get("market") or {}, ev.get("snapshot") or {}
+    if not mk.get("state"):
+        return {}
+    return {"state": mk.get("state"), "state_source": mk.get("state_source"),
+            "received_at": sn.get("received_at")}
 
 
 class SnapshotRefresh:
@@ -311,8 +386,9 @@ class SnapshotRefresh:
         current = 0
         for u, at in res.get("updates") or ():
             j = judge_update(u, asked=asked,
-                             refdata_state=_refdata_state(
-                                 mgr, u.get("symbol"), now=at, bound=bound))
+                             fallback=_fallback(mgr, u.get("symbol"), now=at,
+                                                bound=bound),
+                             at=at, bound=bound)
             o = j["outcome"]
             t["by_outcome"][o] = t["by_outcome"].get(o, 0) + 1
             if o == R_SNAPSHOT_NOT_ASKED:

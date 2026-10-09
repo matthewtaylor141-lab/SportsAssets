@@ -383,6 +383,167 @@ def test_the_markets_own_word_ends_a_snapshot_read_and_waits():
     assert due == [] and counts[AR.R_REFRESH_RETRY_WAIT] == 1
 
 
+# ── whose word a not-open state is (review of 785907f2) ────────────────
+#
+# A snapshot book usually carries no state (the proto sends it only when
+# non-default); judge_update fell back to the books' state -- a refdata
+# record or an old stream state, of any age -- and a not-open fallback was
+# recorded ACTIVE_REFRESH_MARKET_NOT_OPEN: the freshness window then called
+# the member EXTERNAL_UNAVAILABLE (out of the eligible count) and it waited
+# 900 s for any re-read, on one stale source.
+
+def test_a_not_open_fallback_is_the_markets_only_when_the_venue_said_it():
+    S = SR()
+    asked, at = {"a"}, T0
+    bare = _dec(upd("a", with_state=False))
+    # (a) the state on the update itself is the venue's word
+    j = S.judge_update(_dec(upd("a", state=pb2.INSTRUMENT_STATE_SUSPENDED)),
+                       asked=asked, fallback={
+                           "state": "INSTRUMENT_STATE_OPEN",
+                           "state_source": "REFDATA"}, at=at, bound=BOUND)
+    assert j["outcome"] == AR.R_REFRESH_NOT_OPEN
+    assert j["state_from"] == S.STATE_FROM_UPDATE
+    # a refdata record's transient state, or an old stream state: not the
+    # venue's word now -- not current, SOFTWARE, never NOT_OPEN
+    for fb in ({"state": "INSTRUMENT_STATE_SUSPENDED",
+                "state_source": "REFDATA", "received_at": at - 400.0},
+               {"state": "INSTRUMENT_STATE_SUSPENDED",
+                "state_source": "REFDATA", "received_at": at - 10.0},
+               {"state": "INSTRUMENT_STATE_HALTED", "state_source": "STREAM",
+                "received_at": at - 400.0},
+               {"state": "INSTRUMENT_STATE_PREOPEN", "state_source": "STREAM",
+                "received_at": None}):
+        j = S.judge_update(bare, asked=asked, fallback=fb, at=at,
+                           bound=BOUND)
+        assert j["outcome"] == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN, fb
+        assert j["state_from"] == S.STATE_FROM_FALLBACK
+        assert j["fallback"]["state_source"] == fb["state_source"]
+        assert j["fallback"]["received_at"] == fb["received_at"]
+    assert S.judge_update(bare, asked=asked,
+                          refdata_state="INSTRUMENT_STATE_SUSPENDED")[
+        "outcome"] == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
+    # (c) the stream's own state, its newest update inside the bound
+    j = S.judge_update(bare, asked=asked, fallback={
+        "state": "INSTRUMENT_STATE_HALTED", "state_source": "STREAM",
+        "received_at": at - 100.0}, at=at, bound=BOUND)
+    assert j["outcome"] == AR.R_REFRESH_NOT_OPEN
+    # ... not without the receipt instant and the bound to show it
+    assert S.judge_update(bare, asked=asked, fallback={
+        "state": "INSTRUMENT_STATE_HALTED", "state_source": "STREAM",
+        "received_at": at - 100.0})["outcome"] == \
+        S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
+    # (b) a terminal state, any age, any source (the held-position rule)
+    for src in ("REFDATA", "STREAM"):
+        j = S.judge_update(bare, asked=asked, fallback={
+            "state": "INSTRUMENT_STATE_EXPIRED", "state_source": src,
+            "received_at": at - 9e5}, at=at, bound=BOUND)
+        assert j["outcome"] == AR.R_REFRESH_NOT_OPEN, src
+    # an OPEN fallback is the stream's own rule, unchanged
+    assert S.judge_update(bare, asked=asked, fallback={
+        "state": "INSTRUMENT_STATE_OPEN", "state_source": "REFDATA"},
+        at=at, bound=BOUND)["outcome"] == "CURRENT"
+    from sportsassets import refusal_taxonomy_table as TT
+    assert TT.TABLE[S.R_SNAPSHOT_FALLBACK_NOT_PROVEN][0] == "SOFTWARE"
+
+
+def _one(refdata_state, *, age=400.0):
+    """A REAL subscribe-all Manager holding ONE quiet member, q-00, whose
+    refdata record says `refdata_state` and whose last stream update
+    (stating no state) is `age` s old; and its refresher."""
+    from sportsassets.market_plane.sharded_stream import Manager
+    clock = H.Clock(T0)
+    s = "q-00"
+    m = Manager(token_fn=lambda: "x", max_per_stream=1000, max_streams=1,
+                subscribe_all=True, clock=clock,
+                transport_factory=lambda b, tok, **kw: H._T(b, tok, **kw))
+    m.sync({s: 0}, {s: {"symbol": s, "priceScale": "1000",
+                        "fractionalQtyScale": "100",
+                        "state": refdata_state}})
+    books = m.shards[0]["books"]
+    books.on_connected("conn-1")
+    books.on_update({"symbol": s, "bids": [(400, 100)],
+                     "offers": [(410, 100)], "state": None,
+                     "transact_time": H.dt(T0)}, received_at=T0)
+    clock.t = T0 + age
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh()
+    ref.set_members([H.member(s, 10, T0 + 3600)], now=clock.t)
+    return clock, m, ref, s
+
+
+def _snapshot_of(clock, state=None):
+    """A stand-in for `call`: each book asked for, stating `state` (a
+    proto enum) or -- as the venue usually sends it -- no state at all."""
+    def caller(token, syms):
+        return {"status": "ENDED", "updates": [
+            (IS.decode_update(upd(s, at=clock.t, with_state=state is not None,
+                                  state=state or 0).update, pb2), clock.t)
+            for s in syms]}
+    return caller
+
+
+def _window_code(m, ref, s, now):
+    from sportsassets.market_plane import freshness_window as FW
+    mem = {"contract_id": s, "venue": "POLYMARKET_US", "tier": "CANDIDATE"}
+    return FW.classify(mem, mgr=m, refreshed=FW.refreshed_codes(
+        ref, m, now=now, sla_s=BOUND), entries=ref.entries, paper={},
+        kalshi={}, now=now, sla_s=BOUND)[:2]
+
+
+def test_a_stateless_book_on_a_stale_not_open_fallback_stays_counted():
+    S = SR()
+    clock, m, ref, s = _one("INSTRUMENT_STATE_SUSPENDED")
+    assert m.current(s, now=clock.t, max_snapshot_age_s=BOUND)["evidence"][
+        "market"]["state_source"] == "REFDATA"
+    assert _window_code(m, ref, s, clock.t) == (
+        "N", "STREAM:SNAPSHOT_OLDER_THAN_THE_BOUND")
+    snap = S.SnapshotRefresh()
+    got = run(snap.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
+                        clock=clock, caller=_snapshot_of(clock)))
+    assert got["returned"] == 1 and got["current"] == 0
+    # still eligible and NOT current in the window -- never EXTERNAL
+    assert _window_code(m, ref, s, clock.t)[0] == "N"
+    assert ref.current(m, now=clock.t, bound=BOUND) == {}
+    # the 60 s retry of a read that proved nothing, not the 900 s market wait
+    due, counts = ref.plan(m, now=clock.t + 30, bound=BOUND)
+    assert due == [] and counts[AR.R_REFRESH_RETRY_WAIT] == 1
+    assert ref.plan(m, now=clock.t + 61, bound=BOUND)[0] == [s]
+    # named: a SOFTWARE outcome, counted
+    assert ref.outcome_of(s) == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
+    assert snap.totals["by_outcome"][S.R_SNAPSHOT_FALLBACK_NOT_PROVEN] == 1
+    assert _window_code(m, ref, s, clock.t) == (
+        "N", "STREAM:SNAPSHOT_OLDER_THAN_THE_BOUND|REFRESH:"
+        + S.R_SNAPSHOT_FALLBACK_NOT_PROVEN)
+    # the REST book states the venue's own OPEN: current through it
+    clock.t += 61
+    ref.start(clock.t, s)
+    assert ref.record(s, H.rest_book(s, at=clock.t), at=clock.t)[
+        "outcome"] == AR.CURRENT
+    assert _window_code(m, ref, s, clock.t) == ("R", None)
+
+
+@pytest.mark.parametrize("refdata,on_update", [
+    # (b) a terminal refdata state: the held-position rule, any age
+    ("INSTRUMENT_STATE_EXPIRED", None),
+    # (a) the venue's state on the snapshot update itself
+    ("INSTRUMENT_STATE_OPEN", pb2.INSTRUMENT_STATE_SUSPENDED),
+])
+def test_the_venues_own_not_open_word_is_still_external_and_waits(
+        refdata, on_update):
+    S = SR()
+    clock, m, ref, s = _one(refdata)
+    run(S.SnapshotRefresh().step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
+                                 clock=clock,
+                                 caller=_snapshot_of(clock, on_update)))
+    assert ref.outcome_of(s) == AR.R_REFRESH_NOT_OPEN
+    assert _window_code(m, ref, s, clock.t) == (
+        "X", "REFRESH:MARKET_NOT_OPEN")
+    due, counts = ref.plan(m, now=clock.t + 61, bound=BOUND)
+    assert due == [] and counts[AR.R_REFRESH_RETRY_WAIT] == 1
+    assert ref.plan(m, now=clock.t + AR.RETRY_NOT_OPEN_S + 1,
+                    bound=BOUND)[0] == [s]
+
+
 def test_the_snapshot_codes_are_classified():
     from sportsassets import refusal_taxonomy_table as TT
     S = SR()
