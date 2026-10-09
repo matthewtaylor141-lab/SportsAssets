@@ -1632,6 +1632,37 @@ TABLE = {
         S, SET, "SETTLEMENT_COMPATIBILITY"),
     "SETTLEMENT_PAIR_PRICED_FLOOR_BELOW_THE_COMPLEMENT_PAYOUT": (
         S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6 Adriana) the void / postponement terms of ONE contract, read from
+    # its own captured rules (agents/adriana.contract_void_terms, the claim
+    # scan's alias_void_terms): every reason a term is NOT established is
+    # SOFTWARE (settlement not proven from cited terms; a rules row absent
+    # is data we do not have; a text that no longer hashes to its record is
+    # integrity). On ESTABLISHED terms, a structure across two markets whose
+    # cancelled / postponed floor (each market's own fair price at its lower
+    # bound, never summed) is below its ordinary-completion floor is refused
+    # exactly as the pair policy's priced floor is: SOFTWARE / SETTLEMENT,
+    # never reclassified economic. A near complement with no evaluable alias
+    # combination is named like a claim leg with none.
+    "VOID_TERMS_RULES_NOT_CAPTURED": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_RULES_NOT_PUBLISHED_BY_THE_VENUE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_RULES_TEXT_DIFFERS_FROM_ITS_FINGERPRINT": (
+        S, INT, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_RULES_IN_CONFLICT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_MANUAL_REVIEW_IS_NOT_A_PAYOUT": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_CANCELLATION_PAYOUT_NOT_STATED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_POSTPONEMENT_PAYOUT_NOT_STATED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_POSTPONEMENT_WINDOW_NOT_STATED": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_TERMS_PAYOUT_RULE_IS_NOT_A_FIXED_OR_BOUNDED_PAYOUT": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "VOID_STATE_FLOOR_ON_ESTABLISHED_TERMS_BELOW_THE_STRUCTURE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "NEAR_COMPLEMENT_HAS_NO_EVALUABLE_ALIAS_COMBINATION": (
+        S, MAP, "VENUE_MAPPING"),
     # (315) Red Team Closeout V1: the package's stream-currency gate as the
     # institutional stream's last word; the canonical exposure lock's
     # refusals (an ENTRY carrying its canonical claim / event past the

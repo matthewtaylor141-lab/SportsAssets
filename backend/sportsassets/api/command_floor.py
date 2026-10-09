@@ -686,8 +686,13 @@ async def _adriana(rd: _Reads, now: float) -> dict:
     """Her latest census pass, a day of passes and the newest proven
     opportunity -- as recorded (265)."""
     async def fn(conn):
+        # (RC6) a PASS is one recorded-books census row; the claim-first
+        # scan is recorded beside it on every pass (adr-claims-*), so it is
+        # summed into the day's opportunities / refusals but never counted
+        # as a second pass, and the "last pass" is the census row
         agg = await conn.fetchrow(
-            "SELECT count(*) AS n, coalesce(sum(opportunities), 0) AS opp, "
+            "SELECT count(*) FILTER (WHERE scan_id NOT LIKE 'adr-claims-%') "
+            "           AS n, coalesce(sum(opportunities), 0) AS opp, "
             "       coalesce(sum(refusals_total), 0) AS ref "
             "  FROM adriana_arb_scans WHERE finished_at >= to_timestamp($1)",
             now - DETAIL_WINDOW_S)
@@ -696,6 +701,7 @@ async def _adriana(rd: _Reads, now: float) -> dict:
             "       markets_read, books_fresh, structures_considered, "
             "       opportunities, refusals_total, refusals_recorded, "
             "       by_code, by_kind FROM adriana_arb_scans "
+            " WHERE scan_id NOT LIKE 'adr-claims-%' "
             " ORDER BY finished_at DESC LIMIT 1")
         opp = await conn.fetchrow(
             "SELECT opportunity_id, scan_id, structure_kind, event_key, "

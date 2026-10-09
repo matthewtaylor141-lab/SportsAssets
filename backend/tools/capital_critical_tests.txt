@@ -1415,3 +1415,5 @@ tests/test_rc6_coverage_waterfall.py
 tests/test_rc6_coverage_kalshi_series.py
 # (RC6 coverage) the markets kept out of the registry by name stay counted by code with the full pass's time: no incremental pass overwrites populate_full; the snapshot and the waterfall carry it, never in the sums
 tests/test_rc6_coverage_outside_registry.py
+# (RC6 Adriana) void terms read per contract from its own captured, sha-cited rules (never defaulted); on established fair-price terms a two-market structure is refused at its void-state floor (never summed to $1, never an opportunity); near complements recorded REFUSED; completion states the terms the scans recorded
+tests/test_rc6_adriana_void_terms.py

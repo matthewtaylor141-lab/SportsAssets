@@ -20,8 +20,10 @@ and every unknown named (never a green it did not measure):
   twin           the repaired IOC twin's agreement on FRESH orders
   revenue        Revenue Reliability V1: agent licences, CASH-incumbent
                  tournament, regimes, demonstrated capacity, daily readiness
-  arbitrage      Adriana's latest scan: NO_ELIGIBLE_ARB unless a structure is
-                 GUARANTEED_AFTER_COSTS (void terms not established -> none)
+  arbitrage      Adriana's latest scans (census and cross-venue claim scan,
+                 each with its counts and age): NO_ELIGIBLE_ARB unless a
+                 structure is GUARANTEED_AFTER_COSTS; fail_closed states what
+                 the scans recorded about every contract's void terms
   venue_positions PMUS retail position confirmation: venue-confirmed, or the
                  exact owner credential it waits on
   readiness      readiness_gate.evaluate_readiness -> PAPER_SHADOW_ONLY until
@@ -694,16 +696,195 @@ def venue_positions_block(hb, *, now: float,
                 **({"credential_proof": proof} if proof else {}))
 
 
+#: (RC6) the two scans Adriana records on every pass (agents/adriana_runner)
+ARB_SCAN_KINDS = (("census", "adr-scan-%"), ("cross_venue", "adr-claims-%"))
+#: a scan older than three runner intervals (3 x 300 s) is not evidence of
+#: the terms the scan reads NOW
+ARB_SCAN_MAX_AGE_S = 900.0
+#: the base statement, kept verbatim while it is the truth (old rows without
+#: a recorded void-terms census, or no scan at all)
+ARB_FAIL_CLOSED_UNREAD = ("void terms not established -> every structure "
+                          "refused (agents/adriana.ESTABLISHED_VOID_TERMS)")
+#: (RC6) the scan kinds whose fixture read is capped (canonical_claims_db.
+#: MAX_FIXTURES): their terms cover only the fixtures the read reached
+ARB_SCOPED_KINDS = ("cross_venue",)
+
+
+def _unread_scope(kind: str, bc: dict) -> list:
+    """What a capped scan did NOT read although it could have priced it: a
+    readable fixture the cap cut, or a mapped PMUS market whose leg was not
+    read (no premap identity). Their terms are unread, so the scan cannot
+    establish the terms of its scope. A fixture with no readable Kalshi book
+    forms no structure and is not counted here (it stays named in scope).
+    A capped scan that recorded no scope is itself an unread scope."""
+    if kind not in ARB_SCOPED_KINDS:
+        return []
+    sc = bc.get("scope")
+    if not isinstance(sc, dict):
+        return ["the scan recorded no fixture scope"]
+    out = []
+    n = int(sc.get("cut_by_cap_readable") or 0)
+    if n:
+        out.append("%d readable fixture(s) cut by the %s-fixture cap (%s)" % (
+            n, sc.get("max_fixtures"),
+            ", ".join((sc.get("cut_by_cap_named") or [])[:min(n, 3)])))
+    m = int(sc.get("pmus_identity_missing") or 0)
+    if m:
+        out.append("%d mapped PMUS market(s) not read, no premap identity "
+                   "(%s)" % (m, ", ".join(
+                       (sc.get("pmus_identity_missing_named") or [])[:3])))
+    return out
+
+
+def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
+    """WHAT THE LATEST SCANS RECORDED ABOUT THE VOID / POSTPONEMENT TERMS OF
+    EVERY CONTRACT THEY READ, and the one-line statement of it. Pure.
+
+    `scans` {kind: row with by_code (its `void_terms` census), finished_at,
+    status, why}, one per ARB_SCAN_KINDS. ESTABLISHED only when EVERY kind
+    -- the recorded-books census AND the cross-venue claim scan -- has a
+    current scan (<= ARB_SCAN_MAX_AGE_S) with a recorded void-terms census
+    that read at least one contract, and every contract every scan read has
+    its terms established from its own captured rules. Missing evidence is
+    never neutral: a kind with no scan (NO_SCAN), a scan that read no
+    contract (READ_NO_CONTRACT, its status and why named), a stale scan or
+    one without a census establishes nothing, and the statement then
+    contains the words "void terms not established" with that state. A
+    capped scan (ARB_SCOPED_KINDS) establishes only if it read everything it
+    could price: a readable fixture its cap cut, or a mapped PMUS market it
+    could not read, leaves those terms unread (_unread_scope, named)."""
+    parts, by_kind, all_est = [], {}, True
+    for kind, _pat in ARB_SCAN_KINDS:
+        row = scans.get(kind)
+        if not row:
+            by_kind[kind] = {"state": "NO_SCAN"}
+            all_est = False
+            parts.append("%s: void terms not established (no scan of this "
+                         "kind recorded)" % kind)
+            continue
+        bc = _j(row.get("by_code")) or {}
+        vt = bc.get("void_terms")
+        age = (None if row.get("finished_at") is None
+               else round(now - _epoch(row["finished_at"]), 1))
+        n_key = "aliases" if "aliases" in (vt or {}) else "contracts"
+        n = int((vt or {}).get(n_key) or 0)
+        k = int((vt or {}).get("established") or 0)
+        d = {"scan_id": row.get("scan_id"), "age_s": age, "read": n,
+             "unit": n_key, "established": k,
+             "scan_status": row.get("status"), "scan_why": row.get("why"),
+             "not_established": (vt or {}).get("not_established") or {},
+             "rules": (vt or {}).get("rules") or {},
+             "source": (vt or {}).get("source")}
+        if vt is None:
+            d["state"] = "VOID_TERMS_CENSUS_NOT_RECORDED"
+            all_est = False
+            parts.append("%s: void terms not established (the scan recorded "
+                         "no void-terms census)" % kind)
+        elif age is None or age > ARB_SCAN_MAX_AGE_S:
+            d["state"] = "STALE_SCAN"
+            all_est = False
+            parts.append("%s: void terms not established (latest scan %s s "
+                         "old > %d s)" % (kind, age, ARB_SCAN_MAX_AGE_S))
+        elif n == 0:
+            # a scan that read nothing is no evidence of any term: never
+            # neutral (a census with one established contract and a
+            # cross-venue scan that read none is not "established")
+            d["state"] = "READ_NO_CONTRACT"
+            all_est = False
+            parts.append("%s: void terms not established (the scan read no "
+                         "contract; status %s%s)" % (
+                             kind, row.get("status") or "?",
+                             (", " + str(row["why"])) if row.get("why")
+                             else ""))
+        elif k < n:
+            all_est = False
+            d["state"] = "NOT_ESTABLISHED"
+            parts.append("%s: void terms not established for %d of %d %s (%s)"
+                         " -> those structures refused" % (
+                             kind, n - k, n, n_key, ", ".join(
+                                 "%s %d" % kv for kv in sorted(
+                                     d["not_established"].items()))))
+        else:
+            d["state"] = "ESTABLISHED"
+            parts.append("%s: void terms established for %d of %d %s from "
+                         "each one's own published rules (%s); separate "
+                         "markets' fair prices are never summed to $1, so "
+                         "structures across markets are refused at their "
+                         "priced void-state floor" % (
+                             kind, k, n, n_key, ", ".join(
+                                 "%s %d" % kv for kv in sorted(
+                                     d["rules"].items()))))
+        if d["state"] in ("ESTABLISHED", "NOT_ESTABLISHED"):
+            # what the read reached is not the scope: the rest is unread
+            unread = _unread_scope(kind, bc)
+            d["unread_scope"] = unread
+            if unread:
+                all_est = False
+                if d["state"] == "ESTABLISHED":
+                    d["state"] = "SCOPE_NOT_READ"
+                parts.append("%s: void terms not established for what the "
+                             "scan did not read: %s" % (kind,
+                                                        "; ".join(unread)))
+        by_kind[kind] = d
+    established = all_est
+    if not any(r for r in scans.values()):
+        statement = ARB_FAIL_CLOSED_UNREAD
+    else:
+        statement = "; ".join(parts)
+    # the invariant the evaluator reads: short of established, the words
+    # are always there (each non-established part above carries them;
+    # this keeps it true whatever a later edit of the parts does)
+    if not established and "void terms not established" not in statement:
+        statement = "void terms not established: " + statement
+    return {"established": established, "by_scan": by_kind,
+            "statement": statement,
+            "requires": [k for k, _ in ARB_SCAN_KINDS],
+            "max_scan_age_s": ARB_SCAN_MAX_AGE_S}
+
+
 async def arbitrage_block(conn) -> dict:
     if not await _has(conn, "adriana_arb_scans"):
         return {"verdict": "NO_ELIGIBLE_ARB", "why": "ADRIANA_TABLES_ABSENT",
                 "authority": "SHADOW_ONLY"}
+    # (RC6) the census and the claim-first scan share one started_at per
+    # pass; "latest" is the later-FINISHED row (the claim scan records
+    # second), named deterministically instead of whichever row sorts first
     r = await conn.fetchrow(
         "SELECT scan_id, started_at, finished_at, status, markets_read, "
         "       books_fresh, structures_considered, opportunities, "
         "       refusals_total FROM adriana_arb_scans "
-        " ORDER BY started_at DESC LIMIT 1")
+        " ORDER BY started_at DESC, finished_at DESC, scan_id DESC LIMIT 1")
     scan = dict(r) if r else {}
+    now = time.time()
+    by_kind = {}
+    for kind, pat in ARB_SCAN_KINDS:
+        k = await conn.fetchrow(
+            "SELECT scan_id, started_at, finished_at, status, why, "
+            "       markets_read, books_fresh, structures_considered, "
+            "       opportunities, refusals_total, by_code, venues "
+            "  FROM adriana_arb_scans WHERE scan_id LIKE $1 "
+            " ORDER BY started_at DESC, finished_at DESC LIMIT 1", pat)
+        by_kind[kind] = dict(k) if k else None
+    vt = arbitrage_void_terms(by_kind, now=now)
+
+    def brief(row):
+        if not row:
+            return None
+        bc = _j(row.get("by_code")) or {}
+        return {"scan_id": row["scan_id"], "status": row["status"],
+                "why": row["why"],
+                "age_s": round(now - _epoch(row["finished_at"]), 1),
+                "markets_read": row["markets_read"],
+                "books_fresh": row["books_fresh"],
+                "structures_considered": row["structures_considered"],
+                "opportunities": row["opportunities"],
+                "refusals_total": row["refusals_total"],
+                "near_complement_pairs": bc.get("near_complement_pairs"),
+                "book_sources": bc.get("book_sources"),
+                # (RC6) what the claim scan's fixture read covered and cut
+                # (cap, unreadable, unmodelled, PMUS identity), by name
+                "scope": bc.get("scope"),
+                "venues": _j(row.get("venues"))}
     n_ok = 0
     if await _has(conn, "adriana_arb_opportunities"):
         n_ok = int(await conn.fetchval(
@@ -721,12 +902,16 @@ async def arbitrage_block(conn) -> dict:
                         else "NO_ELIGIBLE_ARB"),
             "guaranteed_after_costs": n_ok,
             "refusals_by_reason": refusals,
-            "fail_closed": "void terms not established -> every structure "
-                           "refused (agents/adriana.ESTABLISHED_VOID_TERMS)",
+            # (RC6) computed from what the latest scans recorded about every
+            # contract they read (it was this constant whatever the terms)
+            "fail_closed": vt["statement"],
+            "void_terms": {k: v for k, v in vt.items() if k != "statement"},
             "latest_scan": {k: (str(v) if not isinstance(v, (int, float,
                                                               type(None)))
                                 else v) for k, v in scan.items()
                             },
+            # (RC6) each scan of the pass, with its own counts and age
+            "scans": {k: brief(v) for k, v in by_kind.items()},
             "authority": "SHADOW_ONLY"}
 
 
