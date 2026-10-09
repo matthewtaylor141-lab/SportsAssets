@@ -86,27 +86,199 @@ async def _has(conn, t: str) -> bool:
 
 # ── truth-source quorum ──────────────────────────────────────────────────
 
+#: EVERY QUORUM SOURCE BY NAME (RC6 archer-lifecycle): CURRENT (a row
+#: within max_age_s), STALE (rows, every one older), MISSING (no row at all).
+#: The imported quorum (red_team.truth_quorum, byte-for-byte the closeout
+#: package) skips a stale row before its presence check, so a STALE source
+#: is named MISSING_SOURCE as well; its blockers are kept verbatim and the
+#: evidence names each source exactly beside them.
+SRC_CURRENT, SRC_STALE, SRC_MISSING = "CURRENT", "STALE", "MISSING"
+#: an ACTUAL position (net venue fills, or an open hand-off to Xavier) whose
+#: group Audrey has not reconciled within max_age_s: her source is not
+#: current FOR IT, whatever else she reconciled
+B_UNRECONCILED_POSITION = "AUDREY_UNRECONCILED_POSITION"
+OWNER_RETAIL_KEY = ("OWNER: the funded account's Polymarket US retail "
+                    "Ed25519 API key in PMUS_KEY_ID / PMUS_SECRET_KEY "
+                    "(completion.venue_positions.owner_action)")
+#: THE ACCOUNT SNAPSHOT (execmirror_snapshots: balances, positions) is
+#: written by Mirror.snapshot on the RUNNING lane only. With the lane
+#: STOPPED (SMALL LIVE = SHADOW) it stays as old as the stop even once the
+#: key is in place: a current VENUE_BALANCE / VENUE_POSITIONS also needs an
+#: owner decision that a read-only account snapshot (balances, positions,
+#: open orders; no order path) may run while the lane is stopped
+OWNER_SNAPSHOT_WHILE_STOPPED = (
+    "OWNER: a decision that a read-only account snapshot (Mirror.snapshot: "
+    "balances, positions, open orders -- no order path) may run while the "
+    "lane is stopped; today only the RUNNING lane writes it")
+
+
+def _iso_ts(epoch) -> str | None:
+    import datetime as _dt
+    if epoch is None:
+        return None
+    return _dt.datetime.fromtimestamp(float(epoch), _dt.timezone.utc) \
+        .isoformat().replace("+00:00", "Z")
+
+
+def source_states(rows: list, *, now: float, max_age_s: float,
+                  source_detail: dict | None = None,
+                  venue: dict | None = None) -> dict:
+    """Pure. {source: {state, rows, newest_at (None when CURRENT), why,
+    dependency}} for every REQUIRED source, from the rows the quorum was
+    given, what the reader learned while reading them (`source_detail`)
+    and the completion's venue-position verdict (`venue`)."""
+    det = source_detail or {}
+    venue = venue or {}
+    out = {}
+    for src in RTQ.REQUIRED_SOURCES:
+        rs = [r for r in rows if r.source == src]
+        newest = max((float(r.as_of) for r in rs), default=None)
+        if not rs:
+            st = SRC_MISSING
+        elif any(now - float(r.as_of) <= max_age_s for r in rs):
+            st = SRC_CURRENT
+        else:
+            st = SRC_STALE
+        # STABLE EVIDENCE (the runner appends a control receipt only when
+        # its evidence changes): no age, and no instant for a CURRENT
+        # source -- a stale source's newest instant does not move
+        e = {"state": st, "rows": len(rs),
+             "newest_at": None if st == SRC_CURRENT else _iso_ts(newest),
+             "why": None, "dependency": None}
+        snap = det.get("snapshot") or {}
+        lane = det.get("lane_state") or "UNREAD"
+        snap_dep = ("the account snapshot is read through the funded retail "
+                    "client by the RUNNING execution-mirror lane only "
+                    "(Mirror.snapshot); the lane is %s and the venue "
+                    "position verdict is %s -- %s%s" % (
+                        lane, venue.get("primary_refusal")
+                        or venue.get("status") or "UNREAD",
+                        OWNER_RETAIL_KEY,
+                        "; " + OWNER_SNAPSHOT_WHILE_STOPPED
+                        if lane != "RUNNING" else ""))
+        if src == "VENUE_POSITIONS" and st != SRC_CURRENT:
+            if not venue.get("venue_confirmed"):
+                e["why"] = "NOT_VENUE_CONFIRMED:%s" % (
+                    venue.get("primary_refusal") or venue.get("status")
+                    or "VENUE_POSITIONS_UNREAD")
+            else:
+                e["why"] = ("NO_ACCOUNT_SNAPSHOT" if not snap.get("at")
+                            else "NEWEST_ACCOUNT_SNAPSHOT_AT:%s"
+                            % _iso_ts(snap["at"]))
+            e["dependency"] = snap_dep
+        elif src == "VENUE_BALANCE" and st != SRC_CURRENT:
+            e["why"] = ("NO_ACCOUNT_SNAPSHOT" if not snap.get("at") else
+                        "NEWEST_ACCOUNT_SNAPSHOT_AT:%s" % _iso_ts(snap["at"])
+                        if snap.get("has_balances") else
+                        "NEWEST_ACCOUNT_SNAPSHOT_HOLDS_NO_BALANCE")
+            e["dependency"] = snap_dep
+        elif src == "AUDREY_RECONCILIATION" and st != SRC_CURRENT:
+            e["why"] = ("NO_RECONCILIATION_ROW" if st == SRC_MISSING else
+                        "NEWEST_RECONCILIATION_AT:%s" % _iso_ts(newest))
+            e["dependency"] = ("execmirror.Mirror.tick: audrey_reconcile on "
+                               "the RUNNING lane, _audrey_lane_off while it "
+                               "is STOPPED or DISABLED (records only)")
+        elif src == "MARKET_DATA" and st == SRC_MISSING:
+            e["why"] = "POLYMARKET_US_VENUE_HEALTH_NOT_GREEN"
+        elif src == "INTERNAL_LEDGER" and st == SRC_MISSING:
+            e["why"] = "EXECUTION_MIRROR_FILLS_UNREAD"
+        out[src] = e
+    return out
+
+
+def audrey_linkage(positions: list, *, now: float,
+                   max_age_s: float) -> dict:
+    """Pure. Every ACTUAL position (`positions`: slug, group, held,
+    reconciled_at, status) against Audrey's reconciliation of its group:
+    current within max_age_s, or a named blocker."""
+    rows, blockers = [], []
+    for p in positions or []:
+        at = p.get("reconciled_at")
+        cur = at is not None and now - float(at) <= max_age_s
+        rows.append({"us_market_slug": p.get("us_market_slug"),
+                     "group_id": p.get("group_id"),
+                     "held": None if p.get("held") is None
+                     else float(p["held"]),
+                     "source": p.get("source"),
+                     "reconciliation_status": p.get("status"),
+                     "reconciled": at is not None, "current": cur})
+        if not cur:
+            blockers.append("%s:%s" % (B_UNRECONCILED_POSITION,
+                                       p.get("us_market_slug")
+                                       or p.get("group_id")))
+    return {"actual_positions": len(rows),
+            "reconciled_within_max_age": sum(1 for r in rows if r["current"]),
+            "positions": rows[:200], "blockers": sorted(set(blockers))}
+
+
 def quorum(rows: list, *, now: float, audrey_open_discrepancies: int | None,
-           max_age_s: float = QUORUM_MAX_AGE_S) -> dict:
+           max_age_s: float = QUORUM_MAX_AGE_S,
+           source_detail: dict | None = None,
+           venue: dict | None = None) -> dict:
     q = RTQ.truth_quorum(rows, max_age_s=max_age_s, now=now)
     blockers = list(q["blockers"])
     if audrey_open_discrepancies:
         blockers.append("AUDREY_OPEN_DISCREPANCIES:%d"
                         % audrey_open_discrepancies)
+    det = source_detail or {}
+    link = audrey_linkage(det.get("audrey_positions") or [], now=now,
+                          max_age_s=max_age_s)
+    blockers.extend(link["blockers"])
     claims = {k: sorted(v) for k, v in q["claims"].items()}
+    states = source_states(rows, now=now, max_age_s=max_age_s,
+                           source_detail=det, venue=venue)
     return result("TRUTH_QUORUM", GREEN if not blockers else RED, blockers,
                   {"sources_current": list(q["sources"]),
                    "required": list(RTQ.REQUIRED_SOURCES),
+                   # EXACTLY which sources are missing and which are only
+                   # stale (the blockers above are the imported quorum's,
+                   # verbatim: it names a stale source MISSING too)
+                   "sources": states,
+                   "missing_sources": sorted(
+                       k for k, v in states.items()
+                       if v["state"] == SRC_MISSING),
+                   "stale_sources": sorted(
+                       k for k, v in states.items()
+                       if v["state"] == SRC_STALE),
+                   # every ACTUAL position against Audrey's reconciliation
+                   # of its group (current or not; no clock in the record)
+                   "audrey": {k: v for k, v in link.items()
+                              if k != "blockers"},
                    "claims_by_source": claims, "max_age_s": max_age_s,
                    "effect": ("RED blocks NEW capital entry; exits, "
                               "reductions and protection stay available")})
 
 
+#: ACTUAL positions, each with Audrey's reconciliation of its group: net
+#: venue fills per (market, group), and every OPEN hand-off to Xavier
+AUDREY_POSITIONS_SQL = """
+    SELECT f.us_market_slug, f.group_id, f.held,
+           extract(epoch FROM r.reconciled_at) AS reconciled_at, r.status,
+           'execmirror_fills' AS source
+      FROM (SELECT us_market_slug, group_id,
+                   sum(CASE WHEN intent ILIKE '%SELL%' THEN -qty ELSE qty END)
+                       AS held
+              FROM execmirror_fills GROUP BY 1, 2) f
+      LEFT JOIN smalllive_reconciliations r ON r.group_id = f.group_id
+     WHERE f.held <> 0
+    UNION ALL
+    SELECT h.us_market_slug, h.group_id, h.live_held,
+           extract(epoch FROM r.reconciled_at), r.status,
+           'smalllive_handoffs (OPEN)'
+      FROM smalllive_handoffs h
+      LEFT JOIN smalllive_reconciliations r ON r.group_id = h.group_id
+     WHERE h.state = 'OPEN'
+"""
 async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
-                      market_data_green: bool) -> tuple:
+                      market_data_green: bool,
+                      detail: dict | None = None) -> tuple:
     """(PositionTruth rows, Audrey open discrepancies). Missing = absent
-    row (MISSING_SOURCE), never a zero row."""
+    row (MISSING_SOURCE), never a zero row. `detail`, when given, receives
+    what the read learned for the quorum's evidence: the newest account
+    snapshot, the lane state and every ACTUAL position with Audrey's
+    reconciliation of its group."""
     rows = []
+    det = detail if detail is not None else {}
     if await _has(conn, "execmirror_fills"):
         for r in await conn.fetch(
                 "SELECT us_market_slug k, sum(CASE WHEN intent ILIKE "
@@ -124,6 +296,18 @@ async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
         snap = await conn.fetchrow(
             "SELECT positions, balances, extract(epoch FROM at) AS at FROM "
             "execmirror_snapshots ORDER BY at DESC LIMIT 1")
+    det["snapshot"] = None if snap is None else {
+        "at": float(snap["at"]), "has_balances": bool(_j(snap["balances"])),
+        "positions_n": len(_j(snap["positions"]) or [])
+        if isinstance(_j(snap["positions"]), list) else None}
+    if await _has(conn, "execmirror_control"):
+        c = await conn.fetchrow(
+            "SELECT enabled, stopped, stop_done_at IS NOT NULL AS done "
+            "  FROM execmirror_control WHERE id = 1")
+        det["lane_state"] = (None if c is None else
+                             "DISABLED" if not c["enabled"] else
+                             "STOPPED" if c["stopped"] and c["done"] else
+                             "STOPPING" if c["stopped"] else "RUNNING")
     if snap is not None and venue_confirmed:
         pos = _j(snap["positions"]) or []
         n = 0
@@ -152,6 +336,10 @@ async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
             open_disc = int(r["d"] or 0)
             rows.append(PositionTruth("AUDREY_RECONCILIATION", "RECONCILED",
                                       Decimal(0), None, float(r["at"])))
+        if await _has(conn, "execmirror_fills") and \
+                await _has(conn, "smalllive_handoffs"):
+            det["audrey_positions"] = [
+                dict(x) for x in await conn.fetch(AUDREY_POSITIONS_SQL)]
     return rows, open_disc
 
 

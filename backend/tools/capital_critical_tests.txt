@@ -1353,3 +1353,5 @@ tests/test_rc6_held_watch_identity.py
 tests/test_rc6_archer_canonical_duplicates.py
 # (RC6 archer-lifecycle) PAPER order lifecycle through every state with its quantity accounting and position linkage; only filled quantity is protection in every reader, an expired or cancelled remainder is named as contributing none; Xavier's review records its own position's filled protection; the venue-confirmed book read apart
 tests/test_rc6_order_lifecycle_and_protection.py
+# (RC6 archer-lifecycle) the truth quorum names each source exactly (CURRENT / STALE / MISSING, why, on whom it depends); Audrey's reconciliation is linked to the actual positions she reconciled and names the paper and actual positions it covers
+tests/test_rc6_audrey_quorum_traceability.py
