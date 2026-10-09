@@ -1417,6 +1417,26 @@ async def read_facts(conn, *, now: float | None = None) -> dict:
     return {"now": now, "facts": facts, "sections": s.status}
 
 
+async def read_inputs(conn, *, now: float | None = None) -> dict:
+    """THE AGENT STATUS CONTRACT'S SHARE OF THESE FACTS
+    (sportsassets/agent_status_contract.py, GET /api/command/agent-status):
+    the recorded market data (feed telemetry, venue book reads), Xavier's
+    open positions with their ONE current review and latest book, every
+    agent's newest durable output and the allocator's run in progress -- the
+    same readers `read_facts` runs, without the hand-off and queue reads the
+    contract does not use. Read only; a missing table or a failed read is
+    named in `sections`, never raised and never a zero."""
+    now = float(now if now is not None else time.time())
+    s = _Sections(conn)
+    market = await _read_market(s)
+    pos = await _read_positions(s, now)
+    outs = await _read_outputs(s)
+    alloc_run = await _read_allocator_run(s, now)
+    return {"now": now, "market": market, "positions": pos,
+            "outputs": outs, "allocator_run": alloc_run,
+            "sections": s.status}
+
+
 async def read_work_states(conn, *, now: float | None = None) -> dict:
     """{"states": {agent: derive(...)}, "sections": {...}}."""
     got = await read_facts(conn, now=now)
