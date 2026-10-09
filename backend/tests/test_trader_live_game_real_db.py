@@ -26,7 +26,12 @@ run in backend-tests and capital-critical on the migrated database
     37738089957: the held population was an NFL spread with a us_premap row
     and no venue_fixture_metadata row, and soccer whose fixture metadata, if
     any, is organiser-sourced UEFA 'UNL' with orientation SAME/SWAPPED --
-    both CANONICAL_SCORE_FIXTURE_FIELDS_MISSING)
+    both CANONICAL_SCORE_FIXTURE_FIELDS_MISSING). The NFL row seeded here
+    carries team_league and NO venue team object, so it stays refused; a
+    production row carries the team object of its side (team_id, names,
+    team_league) on every row of the event, and that shape, which the RC6
+    lane-G2 adapter establishes, is proven in
+    tests/test_rc6_lgs_venue_fixture_adapter.py
 
 A skip here is not a pass: this file is on the capital-critical list.
 """
@@ -510,7 +515,9 @@ async def test_the_census_reaches_the_collectors_own_verdict():
             return slug
         # no catalogue row at all
         shapes[await held("none")] = "CANONICAL_VENUE_EVENT_MISSING"
-        # PRODUCTION SHAPE 1: an NFL market, premap row, no fixture row
+        # PRODUCTION SHAPE 1: an NFL market, premap row, no fixture row (the
+        # row seeded without the venue team object; with it, see
+        # test_rc6_lgs_venue_fixture_adapter.py)
         s = await held("nfl")
         await _premap(conn, s, ev("nfl"), start=start, team_league="nfl")
         shapes[s] = "CANONICAL_SCORE_FIXTURE_FIELDS_MISSING"

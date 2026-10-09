@@ -1391,3 +1391,5 @@ tests/test_scorecard_14.py
 tests/test_rc6e_deploy_lineage.py
 # (RC6 lane E) the upgrade path on real PostgreSQL: the previous release's schema with representative rows, this release's migrations by production's runner, nothing applied changed, nothing seeded lost, the previous release on the new schema
 tests/test_rc6e_upgrade_path.py
+# (RC6 lane G2) the Live Game State fixture adapter reads the venue's own two team objects of the held event (us_premap team_id / names / team_league, one start); only league codes production shows per sport; unordered pairs bind a provider game only by full-name equality with a unique assignment; census SQL = collector verdict; display only
+tests/test_rc6_lgs_venue_fixture_adapter.py
