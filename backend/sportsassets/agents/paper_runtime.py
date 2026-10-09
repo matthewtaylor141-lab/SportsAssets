@@ -494,9 +494,15 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
                                else None)}
     out.update(ran=True, session_id=sess["session_id"],
                resumed=sess.get("resumed"))
+    # EACH STEP'S WALL TIME, on the pass record (SW-2): the pass holds the
+    # paper lock for its whole run, and which step holds it was not
+    # recorded anywhere -- 27.7 s / 36.4 s passes with nothing held could
+    # not be attributed. Record only.
+    out["step_elapsed_s"] = {}
     for item in (steps if steps is not None else default_steps()):
         name, fn = (item if isinstance(item, tuple)
                     else (getattr(item, "__name__", "step"), item))
+        t_step = time.monotonic()
         try:
             out["steps"][name] = await fn(conn, ctx)
         except asyncio.CancelledError:
@@ -507,6 +513,10 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
         except Exception as exc:                               # noqa: BLE001
             out["errors"][name] = "%s: %s" % (type(exc).__name__,
                                               str(exc)[:200])
+        out["step_elapsed_s"][name] = round(time.monotonic() - t_step, 3)
+        # A HELD MARKET THAT MOVED WHILE THIS PASS RUNS is reviewed now,
+        # between steps, not after the pass (SW-2; see HELD_IN_PASS_MAX_S)
+        await _held_checkpoint(conn, ctx, out)
     out["budget_exhausted"] = not _budget_left(ctx)
     out["books_read"] = ctx["books_read"]
     out["fills"] = ctx["fills"]
@@ -533,7 +543,8 @@ def _digest(out: dict) -> dict:
         "version", "at", "trigger", "ran", "session_id", "resumed",
         "errors", "budget_exhausted", "books_read", "fills",
         "decisions_recorded", "orders_submitted", "reviews",
-        "mutation_attempts", "elapsed_s")} | {
+        "mutation_attempts", "elapsed_s", "step_elapsed_s",
+        "held_in_pass")} | {
         "steps": {k: (v if not isinstance(v, dict) else
                       {kk: vv for kk, vv in v.items()
                        if not isinstance(vv, (list, dict))})
@@ -1410,9 +1421,96 @@ HELD_REVIEW_TIMEOUT_S = 20.0
 #: itself still judges freshness by the unchanged rule; this only stops the
 #: chance from being thrown away.
 HELD_REVIEW_RETRY_WINDOW_S = 30.0
+#: A HELD CHANGE NOTIFIED WHILE A PAPER PASS RUNS IS REVIEWED BY THAT PASS
+#: (RC6.2 p-xavier SW-2). The retry above could only succeed once the pass
+#: released the lock, and a pass holds it for most of its run: production
+#: 2026-10-09 14:37-14:39Z (research-sql 37945613145 / 37945859108) the
+#: SERVICING pass took 27.7 s and 36.4 s with nothing held, its budget
+#: exhausted; its Xavier step builds its due list part-way through. So a
+#: change that arrived after that list was built waited for the end of the
+#: pass, and past the 30 s window it was dropped: 557 of 6,255 PAPER
+#: MARKET_EVENT assessments in 72 h were made 30 s or more after their
+#: change (377 at 30-60 s, 118 at 60-120 s, 62 later; 22 of the 557 fresh).
+#: The pass now services the pending held slugs between its own steps,
+#: under the locks it already holds, through the same Xavier step a held
+#: review runs (paper_xavier.step on the holding groups, its own budget),
+#: so the latency of a change is bounded by the step it arrived in, not by
+#: the whole pass. A slug past its window is dropped (counted), exactly as
+#: requeue_busy drops it; the probability is still judged by the unchanged
+#: 30 s rule on the provider's stamp, never on our notification clock.
+#: Bounded: at most HELD_IN_PASS_MAX_S of held reviews per pass; past that
+#: the slugs stay with the scheduler (retried, then dropped and counted).
+HELD_IN_PASS_MAX_S = 20.0
+#: the newest notify-to-review outcomes kept in memory for the heartbeat
+HELD_LATENCY_KEPT = 50
 _HELD: dict = {"task": None, "pending": set(), "runs": 0, "coalesced": 0,
                "last": None, "queued_at": {}, "busy_retries": 0,
-               "busy_dropped": 0}
+               "busy_dropped": 0, "serviced_in_pass": 0,
+               "in_pass_slugs": 0, "in_pass_dropped": 0, "latency": []}
+
+V_HELD_REVIEW = "HELD_REVIEW"
+V_IN_PASS = "PAPER_PASS_CHECKPOINT"
+V_DROPPED = "DROPPED_PAST_RETRY_WINDOW"
+
+HELD_GROUPS_SQL = (
+    "SELECT DISTINCT o.group_id, o.us_market_slug FROM paper_orders o "
+    "  JOIN paper_handoffs h ON h.group_id = o.group_id "
+    " WHERE o.account_id = $1 AND o.role = 'ENTRY' "
+    "   AND o.us_market_slug = ANY($2::text[])")
+
+
+def _note_outcome(slug, *, queued_at, at, via) -> None:
+    """One change notification's outcome on the bounded in-memory ring:
+    reviewed (by the held review or inside a pass) or dropped, with the
+    scheduler latency -- our notification clock to the review start, never
+    a probability age."""
+    ring = _HELD.setdefault("latency", [])
+    try:
+        ring.append({"slug": slug, "via": via,
+                     "queued_at": round(float(queued_at), 3),
+                     "at": round(float(at), 3),
+                     "latency_s": round(float(at) - float(queued_at), 3)})
+    except (TypeError, ValueError):
+        return
+    del ring[:-HELD_LATENCY_KEPT]
+
+
+def held_review_status() -> dict:
+    """THE HELD-REVIEW SCHEDULER, for the feed heartbeat (persisted every
+    beat): cumulative counters of this process and the newest outcomes.
+    Pure apart from reading _HELD."""
+    ring = list(_HELD.get("latency") or [])
+    reviewed = sorted(x["latency_s"] for x in ring
+                      if x.get("via") != V_DROPPED)
+
+    def pct(q):
+        if not reviewed:
+            return None
+        return reviewed[min(len(reviewed) - 1, int(q * len(reviewed)))]
+    return {
+        "runs": int(_HELD.get("runs") or 0),
+        "coalesced": int(_HELD.get("coalesced") or 0),
+        "busy_retries": int(_HELD.get("busy_retries") or 0),
+        "busy_dropped": int(_HELD.get("busy_dropped") or 0),
+        "serviced_in_pass": int(_HELD.get("serviced_in_pass") or 0),
+        "in_pass_slugs": int(_HELD.get("in_pass_slugs") or 0),
+        "in_pass_dropped": int(_HELD.get("in_pass_dropped") or 0),
+        "pending": len(_HELD.get("pending") or ()),
+        "retry_window_s": HELD_REVIEW_RETRY_WINDOW_S,
+        "recent_outcomes": {
+            "kept": len(ring),
+            "by_via": {v: sum(1 for x in ring if x.get("via") == v)
+                       for v in (V_HELD_REVIEW, V_IN_PASS, V_DROPPED)},
+            "reviewed_latency_p50_s": pct(0.5),
+            "reviewed_latency_p90_s": pct(0.9),
+            "reviewed_latency_max_s": reviewed[-1] if reviewed else None,
+            "reviewed_after_window": sum(
+                1 for x in reviewed if x > HELD_REVIEW_RETRY_WINDOW_S)},
+        "recent": ring[-10:],
+        "clock": ("latency_s is our receipt of the change notification to "
+                  "the start of its review (the scheduler's delay); the "
+                  "probability's age is judged by the review on the "
+                  "provider's own stamp under the unchanged 30 s rule")}
 
 
 async def held_review(conn, *, slugs, now: float | None = None,
@@ -1485,10 +1583,127 @@ def requeue_busy(batch, *, now: float) -> dict:
         else:
             dropped.append(s)
             qa.pop(s, None)
+            _note_outcome(s, queued_at=first, at=now, via=V_DROPPED)
     _HELD["pending"].update(kept)
     _HELD["busy_retries"] = _HELD.get("busy_retries", 0) + len(kept)
     _HELD["busy_dropped"] = _HELD.get("busy_dropped", 0) + len(dropped)
     return {"requeued": kept, "dropped": dropped}
+
+
+async def service_held_in_pass(conn, ctx: dict) -> dict | None:
+    """XAVIER'S HELD REVIEW FROM INSIDE A RUNNING PAPER PASS (SW-2): the
+    pending held slugs inside their retry window whose groups this pass's
+    account holds are reviewed now -- paper_xavier.step on those groups,
+    the held review's own budget and context -- under the locks the pass
+    already holds. Slugs past their window are dropped (counted); slugs no
+    group of this account holds go back to the scheduler. None when nothing
+    is pending. Never raises (CancelledError excepted)."""
+    pend = _HELD.get("pending")
+    if not pend:
+        return None
+    from . import paper_xavier as PX
+    clock = _HELD.get("clock") or time.time
+    now = float(clock())
+    qa = _HELD.setdefault("queued_at", {})
+    # TAKEN BEFORE ANY AWAIT: the background scheduler, sharing this loop,
+    # then finds them gone and does not run them a second time
+    batch = sorted(pend)
+    pend.difference_update(batch)
+    taken, dropped = {}, []
+    for s in batch:
+        q = float(qa.get(s, now))
+        if now - q <= HELD_REVIEW_RETRY_WINDOW_S:
+            taken[s] = q
+        else:
+            dropped.append(s)
+            qa.pop(s, None)
+            _note_outcome(s, queued_at=q, at=now, via=V_DROPPED)
+    _HELD["in_pass_dropped"] = int(_HELD.get("in_pass_dropped") or 0) + \
+        len(dropped)
+    out: dict[str, Any] = {"slugs": 0, "groups": 0, "reviews": 0,
+                           "dropped": len(dropped), "left_for_scheduler": 0}
+    if not taken:
+        return out
+    acct = ctx["account_id"]
+    try:
+        rows = await conn.fetch(HELD_GROUPS_SQL, acct, sorted(taken))
+    except asyncio.CancelledError:
+        pend.update(taken)
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        pend.update(taken)
+        return dict(out, left_for_scheduler=len(taken),
+                    error="%s: %s" % (type(exc).__name__, str(exc)[:160]))
+    matched = sorted({r["us_market_slug"] for r in rows})
+    back = [s for s in taken if s not in set(matched)]
+    # not this account's: the scheduler's, as before (it reviews the main
+    # account's groups once the lock is free, or drops it past the window)
+    pend.update(back)
+    out["left_for_scheduler"] = len(back)
+    groups = sorted({r["group_id"] for r in rows})
+    if not groups:
+        return out
+    t_review = float(clock())
+    sub: dict[str, Any] = {
+        "session": ctx["session"], "session_id": ctx["session_id"],
+        "account_id": acct, "config": ctx["config"],
+        "now": float(ctx["clock"]()) if ctx.get("clock") else time.time(),
+        "fee_fn": ctx.get("fee_fn"),
+        "deadline": time.monotonic() + HELD_REVIEW_BUDGET_S,
+        "clock": ctx.get("clock") or time.time,
+        "schedule_review_at": ctx.get("schedule_review_at")}
+    try:
+        got = await PX.step(conn, sub, only_groups=groups)
+    except asyncio.CancelledError:
+        pend.update(matched)
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        # nothing is assumed reviewed: the scheduler keeps them
+        pend.update(matched)
+        return dict(out, left_for_scheduler=len(back) + len(matched),
+                    error="%s: %s" % (type(exc).__name__, str(exc)[:160]))
+    for s in matched:
+        _note_outcome(s, queued_at=taken[s], at=t_review, via=V_IN_PASS)
+        if s not in pend and qa.get(s) == taken[s]:
+            qa.pop(s, None)
+    _HELD["serviced_in_pass"] = int(_HELD.get("serviced_in_pass") or 0) + 1
+    _HELD["in_pass_slugs"] = int(_HELD.get("in_pass_slugs") or 0) + \
+        len(matched)
+    return dict(out, slugs=len(matched), groups=len(groups),
+                reviews=int(got.get("reviews") or 0),
+                by_trigger=dict(got.get("by_trigger") or {}),
+                deferred=len(got.get("deferred") or []),
+                review_errors=len(got.get("review_errors") or []))
+
+
+async def _held_checkpoint(conn, ctx: dict, out: dict) -> None:
+    """Between two steps of a pass: the pending held changes, bounded by
+    HELD_IN_PASS_MAX_S per pass (recorded on the pass as held_in_pass).
+    Free when nothing is pending. Never raises (CancelledError excepted)."""
+    if not _HELD.get("pending"):
+        return
+    rec = out.setdefault("held_in_pass", {
+        "checkpoints": 0, "slugs": 0, "groups": 0, "reviews": 0,
+        "dropped": 0, "left_for_scheduler": 0, "elapsed_s": 0.0,
+        "capped": False, "errors": []})
+    if rec["elapsed_s"] >= HELD_IN_PASS_MAX_S:
+        rec["capped"] = True
+        return
+    t0 = time.monotonic()
+    try:
+        got = await service_held_in_pass(conn, ctx)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        got = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
+    rec["elapsed_s"] = round(rec["elapsed_s"] + time.monotonic() - t0, 3)
+    if got is None:
+        return
+    rec["checkpoints"] += 1
+    for k in ("slugs", "groups", "reviews", "dropped", "left_for_scheduler"):
+        rec[k] += int(got.get(k) or 0)
+    if got.get("error"):
+        rec["errors"] = (rec["errors"] + [got["error"]])[-5:]
 
 
 def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:
@@ -1499,6 +1714,9 @@ def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:
     except RuntimeError:
         return {"scheduled": False, "why": "NO_RUNNING_LOOP"}
     qa = _HELD.setdefault("queued_at", {})
+    # the clock that stamps `queued_at` is the one every window is judged on
+    # (requeue_busy here, service_held_in_pass inside a pass)
+    _HELD["clock"] = clock
     t_now = float(clock())
     for s in (slugs or []):
         # the window runs from the LATEST request for the slug: a newer
@@ -1517,6 +1735,7 @@ def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:
             batch = set(_HELD["pending"])
             _HELD["pending"].clear()
             res = None
+            t_review = float(clock())
             try:
                 pool = await get_pool()
                 async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as c:
@@ -1532,7 +1751,12 @@ def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:
                 # a paper pass holds the lock: retry inside the window
                 requeue_busy(batch, now=float(clock()))
             else:
+                ran = isinstance(res, dict) and res.get("ran") and \
+                    res.get("groups")
                 for s in batch:
+                    if ran and s in qa:
+                        _note_outcome(s, queued_at=qa[s], at=t_review,
+                                      via=V_HELD_REVIEW)
                     if s not in _HELD["pending"]:
                         qa.pop(s, None)
             await asyncio.sleep(HELD_REVIEW_MIN_GAP_S)

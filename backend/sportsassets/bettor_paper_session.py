@@ -280,21 +280,38 @@ async def record_pass(conn, session_id: str, *, result: dict, now: float,
                       error: str | None = None) -> None:
     """THE HEARTBEAT: pass count, the last pass digest, recent heartbeats,
     and venue mutation attempts from the paper path (expected 0)."""
+    steps_t = result.get("step_elapsed_s") or {}
+    slow = (max(steps_t.items(), key=lambda kv: kv[1] or 0.0)
+            if isinstance(steps_t, dict) and steps_t else (None, None))
+    held = result.get("held_in_pass") or {}
     beat = {"at": float(now), "ok": error is None,
             "elapsed_s": result.get("elapsed_s"),
+            "slowest_step": slow[0], "slowest_step_s": slow[1],
+            "held_in_pass_reviews": held.get("reviews"),
             "summary": {k: result.get(k) for k in (
                 "decisions_recorded", "orders_submitted", "fills",
                 "books_read", "reviews", "budget_exhausted")}}
+    # THE RING KEEPS THE NEWEST RECENT_HEARTBEATS_KEPT, OLDEST FIRST (SW-2).
+    # Before this the newest-first subquery was aggregated without an order
+    # and the next append re-numbered it, so every pass dropped the PREVIOUS
+    # newest beat: production 2026-10-09 (research-sql 37945613145) kept 19
+    # beats of 2026-10-01 01:47Z-02:03Z beside only the latest one, and no
+    # pass duration of the last week was readable. Ordered by each beat's own
+    # instant (`at`), so that scrambled ring heals on its next pass.
     await conn.execute(
         "UPDATE paper_session_health SET heartbeat_at = $2, "
         " passes = passes + 1, errors = errors + $3, "
         " mutation_attempts = mutation_attempts + $4, "
         " last_mutation_attempt = coalesce($5::jsonb, last_mutation_attempt),"
         " last_pass = $6::jsonb, last_error = coalesce($7, last_error), "
-        " recent_heartbeats = (SELECT coalesce(jsonb_agg(x), '[]'::jsonb) "
-        "   FROM (SELECT x FROM jsonb_array_elements("
-        "           recent_heartbeats || jsonb_build_array($8::jsonb)) "
-        "         WITH ORDINALITY AS t(x, n) ORDER BY n DESC LIMIT $9) s) "
+        " recent_heartbeats = (SELECT coalesce(jsonb_agg(x ORDER BY t_at, n),"
+        "                                      '[]'::jsonb) "
+        "   FROM (SELECT x, n, CASE WHEN jsonb_typeof(x->'at') = 'number' "
+        "                      THEN (x->>'at')::float8 END AS t_at "
+        "           FROM jsonb_array_elements("
+        "                recent_heartbeats || jsonb_build_array($8::jsonb)) "
+        "                WITH ORDINALITY AS t(x, n) "
+        "          ORDER BY t_at DESC NULLS LAST, n DESC LIMIT $9) s) "
         " WHERE session_id = $1",
         session_id, L._ts(now), 1 if error else 0, int(mutation_attempts),
         (None if last_mutation_attempt is None
