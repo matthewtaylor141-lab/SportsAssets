@@ -369,6 +369,22 @@ def derive_state(agent: str, *, now: float, deployed: bool,
                 basis=[{"kind": "heartbeat", "at": hb}])
 
 
+def adriana_pass_read_books(scan: dict | None) -> bool:
+    """(RC6.2) True only when her census pass actually read markets and
+    fresh books. A NO_EVIDENCE pass (0 markets read / 0 fresh books) is a
+    finished pass, not work: it raises no WORKING_ON signal, so the desk
+    falls through to her recorded agent_status (WAITING_FOR_EVIDENCE with
+    its reason). Pure."""
+    s = scan or {}
+    if s.get("status") == "NO_EVIDENCE":
+        return False
+    try:
+        return (int(s.get("markets_read") or 0) > 0
+                and int(s.get("books_fresh") or 0) > 0)
+    except (TypeError, ValueError):
+        return False
+
+
 def merge_edges(raw: list, *, max_evidence: int = 5) -> list:
     """Collapse raw edge rows to one per (from, to, kind): count, latest
     instant, up to `max_evidence` evidence refs. Pure; newest first."""
@@ -1264,8 +1280,12 @@ async def build_floor(conn, *, now: float | None = None,
                 if last_output is None or (_ep(sc["finished_at"]) or 0) > \
                         (_ep(last_output.get("at")) or 0):
                     focus = last_output = scan_ref
-                signals.append({"at": sc["finished_at"], "hint":
-                                "WORKING_ON", "label": summ, "ref": scan_ref})
+                # (RC6.2) only a pass that read markets/books is work; a
+                # NO_EVIDENCE pass leaves her WAITING_FOR_EVIDENCE showing
+                if adriana_pass_read_books(sc):
+                    signals.append({"at": sc["finished_at"], "hint":
+                                    "WORKING_ON", "label": summ,
+                                    "ref": scan_ref})
             monitor = [
                 _m("Census passes (24h)", adriana.get("scans24"),
                    "adriana_arb_scans", (sc or {}).get("finished_at"),
