@@ -3219,6 +3219,19 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
         attach_exit_census(stats, now_ts)
         return stats
     stats["venue_positions"] = len(positions)
+    # THE CLAIM THE READING SUPPORTS (RC6 identity lane). A ledger-derived
+    # reading plans the shadow but is not the venue's word: the tick is
+    # 'degraded' with the named refusal and the owner blocker on the
+    # heartbeat (MPS.confirmation), never 'ok'. Only a status that is already
+    # degraded stays so: nothing here upgrades one.
+    conf = MPS.confirmation(pos_src)
+    stats["venue_confirmed"] = conf["venue_confirmed"]
+    stats["positions_authority"] = conf["positions_authority"]
+    if not conf["venue_confirmed"]:
+        stats.update(status="degraded", refusal=conf["refusal"],
+                     owner_blocker=conf["owner_blocker"],
+                     primary_refusal=conf.get("primary_refusal"),
+                     credential_class=conf.get("credential_class"))
     reads = 0
     misses = 0
     venue_states: Counter = Counter()

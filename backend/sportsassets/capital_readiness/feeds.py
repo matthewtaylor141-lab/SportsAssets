@@ -955,9 +955,21 @@ async def gate_mirror_positions_readable(conn, ctx) -> dict:
     if hb is None:
         return _gate(False, why)
     bad = bool(hb["detail"].get("positions_unreadable"))
+    # WHAT THE READING IS (RC6 identity lane): readable is not venue-
+    # confirmed. The heartbeat's own confirmation fields ride as evidence --
+    # a ledger-derived reading names its refusal and the owner blocker here,
+    # so this gate can never be read as a venue confirmation. The gate's
+    # value is unchanged (readability).
+    d = hb["detail"]
     return _gate(not bad, "MIRROR_POSITIONS_UNREADABLE",
                  status=hb["status"], age_s=hb["age_s"],
-                 abandoned=hb["detail"].get("abandoned"),
+                 abandoned=d.get("abandoned"),
+                 venue_confirmed=bool(d.get("venue_confirmed")),
+                 positions_authority=(
+                     d.get("positions_authority")
+                     or (d.get("positions_source") or {}).get("authority")),
+                 refusal=d.get("refusal"),
+                 owner_blocker=d.get("owner_blocker"),
                  source="service_heartbeats mirror_shadow "
                         "(workers/mirror_shadow.tick_once)")
 

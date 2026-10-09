@@ -87,6 +87,17 @@ R_SLOT_NOT_PMX_RSA = "PMUS_SLOT_CREDENTIAL_IS_NOT_THE_PMX_RSA_CLIENT"
 R_LEDGER_POSITIONS_UNREADABLE = "MIRROR_SHADOW_LEDGER_POSITIONS_UNREADABLE"
 #: neither the venue walk nor the ledger fallback produced a reading
 R_NO_POSITIONS_SOURCE = "MIRROR_SHADOW_NO_POSITIONS_SOURCE_READABLE"
+#: (RC6 identity lane) the shadow planned on a reading that is not the
+#: venue's: venue confirmation is refused because the credential class the
+#: venue walk needs (a funded PMUS retail Ed25519 key) is not in the slot. A
+#: safe, named refusal -- never a venue-confirmed claim
+R_VENUE_UNCONFIRMED = ("MIRROR_SHADOW_POSITIONS_NOT_VENUE_CONFIRMED_"
+                       "CREDENTIAL_CLASS_UNAVAILABLE")
+#: who clears R_VENUE_UNCONFIRMED: the owner, by provisioning the FUNDED
+#: account's Polymarket US retail Ed25519 API key in PMUS_KEY_ID /
+#: PMUS_SECRET_KEY. No code path works around it.
+OWNER_BLOCKER = "FUNDED_PMUS_RETAIL_ED25519_KEY"
+AUTHORITY_VENUE = "VENUE_CONFIRMED"
 #: the guard: a statement that is not one SELECT / WITH is refused unsent
 R_NOT_A_READ = "MIRROR_POSITIONS_SOURCE_STATEMENT_IS_NOT_A_READ"
 
@@ -195,6 +206,41 @@ def fallback_allowed(topology: dict) -> bool:
     the PMUS slot positively holds an RSA PEM private key (the PMX client).
     Any other unusable credential fails closed by name."""
     return bool((topology or {}).get("pmus_slot_is_pmx_rsa_client"))
+
+
+def confirmation(receipt: dict | None) -> dict:
+    """WHAT A POSITIONS READING LETS THE SHADOW CLAIM, from its receipt
+    (mirror_shadow.tick_positions). Pure.
+
+    Only a venue walk that produced a reading is VENUE_CONFIRMED, and only it
+    may report the tick 'ok'. A ledger-derived reading is usable for the
+    shadow's PLAN (it orders nothing) but it is not the venue's word: the
+    tick is 'degraded' and carries R_VENUE_UNCONFIRMED with the owner blocker
+    beside it, so no heartbeat, readiness gate or loop-health row can read a
+    ledger figure as venue truth (production 2026-10-09, release 732cc0c6:
+    the heartbeat said 'ok' on every tick while every position was
+    LEDGER_DERIVED_NOT_VENUE_CONFIRMED). The slot's own precondition refusal
+    (primary_refusal) and its credential SHAPE (an enum, never a value) ride
+    beside it."""
+    r = dict(receipt or {})
+    src = r.get("source")
+    if src == SRC_VENUE and not r.get("unreadable") and not r.get("refusal"):
+        return {"venue_confirmed": True, "positions_authority":
+                AUTHORITY_VENUE, "status": "ok", "refusal": None,
+                "owner_blocker": None}
+    ledger = src == SRC_LEDGER and not r.get("refusal")
+    return {
+        "venue_confirmed": False, "status": "degraded",
+        "refusal": (R_VENUE_UNCONFIRMED if ledger
+                    else r.get("refusal") or R_NO_POSITIONS_SOURCE),
+        "positions_authority": ((r.get("authority") or AUTHORITY_LEDGER)
+                                if ledger else None),
+        "primary_refusal": r.get("primary_refusal"),
+        "credential_class": r.get("pmus_slot_shape"),
+        # named only where the slot's own precondition refused the venue
+        # walk: a walk that failed with a usable key is a venue answer, not
+        # a credential gap
+        "owner_blocker": OWNER_BLOCKER if r.get("primary_refusal") else None}
 
 
 # ── the reading ───────────────────────────────────────────────────────
