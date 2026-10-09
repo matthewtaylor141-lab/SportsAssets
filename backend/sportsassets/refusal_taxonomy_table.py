@@ -1551,6 +1551,30 @@ TABLE = {
         S, SET, "SETTLEMENT_COMPATIBILITY"),
     "KALSHI_CONTRACT_NOT_MAPPED_TO_A_BETTOR_FAMILY": (S, MAP,
                                                       "VENUE_MAPPING"),
+    # (RC6 lane K) the Kalshi ontology's named gaps (kalshi_ontology): a
+    # contract the mapper does not map stays CODE_CONTROLLED_GAP with one of
+    # these -- every one OURS (software), none economic or external; the
+    # families outside the mapper (player props: no agreed universe states
+    # them in scope; team-stat and other game props; outrights; non-binary
+    # payouts) are capability gaps of the mapper, named, not hidden
+    "KALSHI_ONTOLOGY_TICKER_MISSING": (S, DATA, "NORMALIZATION"),
+    "KALSHI_ONTOLOGY_TICKER_NOT_UNDER_ITS_EVENT": (S, MAP, "EVENT_IDENTITY"),
+    "KALSHI_ONTOLOGY_RULES_PRIMARY_NOT_CAPTURED": (S, DATA, "NORMALIZATION"),
+    "KALSHI_ONTOLOGY_SERIES_HAS_NO_SINGLE_SPORT_TAG": (S, MAP,
+                                                       "NORMALIZATION"),
+    "KALSHI_ONTOLOGY_SPORT_TAG_CONTRADICTS_RULES": (S, MAP, "NORMALIZATION"),
+    "KALSHI_ONTOLOGY_NON_BINARY_PAYOUT": (S, CAP, "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_OUTRIGHT_OR_SEASON_CONTRACT_NOT_IN_MAPPER": (
+        S, CAP, "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_PLAYER_PROP_NOT_IN_AGREED_UNIVERSE": (S, CAP,
+                                                           "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_TEAM_STAT_PROP_NOT_IN_MAPPER": (S, CAP, "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_GAME_PROP_NOT_IN_MAPPER": (S, CAP, "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_RULES_TEMPLATE_NOT_RECOGNISED": (S, MAP,
+                                                      "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_SUBJECT_NOT_A_PARTICIPANT": (S, MAP, "EVENT_IDENTITY"),
+    "KALSHI_ONTOLOGY_PERIOD_NOT_RECOGNISED": (S, MAP, "MARKET_FAMILY"),
+    "KALSHI_ONTOLOGY_LINE_NOT_A_NUMBER": (S, DATA, "MARKET_FAMILY"),
     "RULE_EVIDENCE_CONFLICT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VENUE_RULES_SELF_CONTRADICTORY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # ... and the GET-only Kalshi sports catalogue's named truncations and
