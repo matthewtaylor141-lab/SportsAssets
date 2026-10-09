@@ -9,8 +9,9 @@ sales are never double counted. The report states each reconciliation check
 with both sides and `reconciles` is true only when all pass.
 
 THE DAY is the America/New_York calendar day. A report is versioned: a new
-version is written only when its content changes; the day's last version
-after midnight is `final`.
+version is written only when its content changes; the day's closing version,
+written once the day has turned (its content as of just before midnight,
+recorded again if unchanged), is `final`. Final never implies `reconciles`.
 
 DEFINITIONS, ENFORCED IN CODE:
   acquisition volume   sum(qty x price + fee) over BUY fills of the day,
@@ -461,9 +462,25 @@ async def build_report(conn, *, session: dict, account_id: str, day,
 
 
 async def write_report(conn, *, session: dict, account_id: str,
-                       now: float) -> dict:
+                       now: float, closed_at: float | None = None) -> dict:
+    """THE REPORT OF THE DAY OF `now`, AS FAR AS `now`, versioned.
+
+    FINAL IS JUDGED AGAINST THE DAY THE REPORT COVERS. `closed_at` is the
+    instant the caller observed after that day (step() passes its report
+    clock when the day has turned and it writes the previous day's closing
+    version with `now` just before midnight); the version is final only when
+    `closed_at` is at or after the end of the covered day. An intra-day
+    version (no `closed_at`, or one inside the day) is never final. `final`
+    says the day is closed, never that it reconciles: `reconciles` is the
+    report's own reconciliation either way.
+
+    THE TABLE IS APPEND-ONLY, so a stored version cannot be marked final
+    afterwards: a closing write whose content is unchanged since the day's
+    last version records that same content again as the final version, and
+    a day that already has its final version is not closed twice."""
     day, start, end = day_bounds(now, session.get("reporting_tz")
                                  or "America/New_York")
+    final = closed_at is not None and float(closed_at) >= end
     rep = await build_report(conn, session=session, account_id=account_id,
                              day=day, start=start, end=end, now=now)
     body = dict(rep)
@@ -471,13 +488,17 @@ async def write_report(conn, *, session: dict, account_id: str,
         {k: v for k, v in body.items() if k != "window"}, sort_keys=True,
         default=str).encode()).hexdigest()
     last = await conn.fetchrow(
-        "SELECT version, digest FROM paper_audrey_reports WHERE "
+        "SELECT version, digest, final FROM paper_audrey_reports WHERE "
         " session_id=$1 AND report_day=$2 ORDER BY version DESC LIMIT 1",
         session["session_id"], day)
-    if last is not None and last["digest"] == digest:
+    if last is not None and final and last["final"]:
+        return {"written": False, "report_day": str(day),
+                "version": last["version"], "why": "ALREADY_FINAL",
+                "final": True, "report": rep}
+    if last is not None and not final and last["digest"] == digest:
         return {"written": False, "report_day": str(day),
                 "version": last["version"], "why": "NO_CHANGE",
-                "report": rep}
+                "final": bool(last["final"]), "report": rep}
     ver = 1 if last is None else int(last["version"]) + 1
     rid = "paperrep:" + _h(session["session_id"], day, ver)
     await conn.execute(
@@ -485,11 +506,11 @@ async def write_report(conn, *, session: dict, account_id: str,
         " report_day, reporting_tz, version, generated_at, final, reconciles,"
         " report, digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)"
         " ON CONFLICT DO NOTHING", rid, session["session_id"], account_id,
-        day, rep["reporting_tz"], ver, L._ts(now), float(now) >= end,
+        day, rep["reporting_tz"], ver, L._ts(now), final,
         rep["reconciliation"]["reconciles"], json.dumps(rep, default=str),
         digest)
     return {"written": True, "report_id": rid, "report_day": str(day),
-            "version": ver, "report": rep}
+            "version": ver, "final": final, "report": rep}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -638,11 +659,13 @@ async def step(conn, ctx: dict) -> dict:
     due = (last is None or rep_now - L._epoch(
         last["generated_at"]) >= REPORT_EVERY_S or last["report_day"] != day)
     if due:
-        # The previous day's final version first, when the day turned.
+        # The previous day's final version first, when the day turned: its
+        # content as of just before midnight, closed at the report clock
+        # (which is in the new day, so at or after the covered day's end).
         if last is not None and last["report_day"] != day:
             await write_report(conn, session=sess,
                                account_id=ctx["account_id"],
-                               now=start - 0.001)
+                               now=start - 0.001, closed_at=rep_now)
         rep = await write_report(conn, session=sess,
                                  account_id=ctx["account_id"], now=rep_now)
         r = rep["report"]
