@@ -1355,3 +1355,5 @@ tests/test_rc6_pinnapi_close_record.py
 tests/test_rc6_pinnapi_client_close_backoff.py
 # (RC6) a PinnAPI EVICTION_LOOP refusal is a stand-down (30 min, 1 h, 2 h, then 4 h; monotonic; escalation per process) after which the same owner re-enters once and serves only after its new epoch resyncs; a record belongs to its runtime (another runtime's retired, a hold change cuts it short, kept on the heartbeat); PINNAPI_EVICTION_STANDDOWN=off is the pre-RC6 permanent refusal; writer-lock-lost, provider and key refusals stay permanent
 tests/test_rc6_pinnapi_eviction_standdown.py
+# (RC6 CI) every database a test suite reads without a default (RN1X_TEST_DSN, BETTOR_TEST_PG_DSN) is given to it by BOTH required gates; the 44 bettor live-store / canary / incentive / socket-allowance tests skipped in every gate through 732cc0c6
+tests/test_ci_sets_every_test_database.py

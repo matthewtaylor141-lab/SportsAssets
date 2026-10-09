@@ -200,6 +200,9 @@ jobs:
         id: suite
         env:
           RN1X_TEST_DSN: ${{ env.CC_DSN }}
+          # the live-store / canary / incentive / socket-allowance suites read
+          # this one: unset, they skipped in every run through 732cc0c6
+          BETTOR_TEST_PG_DSN: ${{ env.CC_DSN }}
           # a held capacity slot is an ENVIRONMENT failure here, never a skip
           RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
         run: |

@@ -121,6 +121,10 @@ jobs:
         # ERROR id is printed. pytest's own exit status is still the step's.
         env:
           RN1X_TEST_DSN: ${{ env.BT_DSN }}
+          # the live-store / canary / incentive / socket-allowance suites read
+          # this one (44 tests): unset, they skipped "names no server" in every
+          # run through 732cc0c6 (backend-tests 37875925931: 49 skipped)
+          BETTOR_TEST_PG_DSN: ${{ env.BT_DSN }}
           RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
         run: |
           cd backend
