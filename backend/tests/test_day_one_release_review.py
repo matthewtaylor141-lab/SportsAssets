@@ -70,6 +70,42 @@ async def test_loss_budget_and_forward_economics_survive_cutover(conn):
     assert (await CA.stopping_rules_now(conn, newer['account_id'], strategy, now=now))['rolling'] == before['rolling']
 
 
+async def test_rollback_cannot_hide_losses_from_a_rolled_back_child(conn):
+    new=await activate(conn,'rollback-loss')
+    ctx=await account(conn,new['account_id'])
+    now=time.time()+1000
+    o=H.order(ctx,key='rollback-real-loss',qty=40000,limit=.5,at=now-900,slug='test-rollback-loss')
+    r=await L.submit_order(conn,o,now=now-900,fee_fn=H.zero_fee)
+    assert r['ok'],r
+    from sportsassets import bettor_paper_simulator as SIM
+    await H.observe(conn,o['us_market_slug'],now-897,offers=[(.5,40000)],bids=[(.49,40000)])
+    assert (await SIM.simulate_order(conn,r['order']['order_id'],now=now-896,fee_fn=H.zero_fee))['fills']
+    await L.settle(conn,account_id=new['account_id'],group_id=o['group_id'],slug=o['us_market_slug'],holding_side='LONG',
+        settlement_event_key='rollback-final',outcome='LOST',evidence={'fixture':True},evidence_source='SYNTHETIC_REVIEW',at=now-800)
+    before=await CA.stopping_rules_now(conn,new['account_id'],L.DEFAULT_STRATEGY,now=now)
+    assert any(x['rule_id']=='LOSS_BUDGET_QUARANTINE' for x in before['firing'])
+    await E.rollback(conn,epoch_id='rollback-loss',request_id='rollback-loss-request')
+    after=await CA.stopping_rules_now(conn,L.ACCOUNT_ID,L.DEFAULT_STRATEGY,now=now)
+    assert after['firing']==before['firing'] and after['rolling']==before['rolling']
+    later=await activate(conn,'after-rollback')
+    assert (await CA.stopping_rules_now(conn,later['account_id'],L.DEFAULT_STRATEGY,now=now))['rolling']==before['rolling']
+    assert (await L.balances(conn,new['account_id']))['realized_pnl_usd']==-20000
+    assert (await L.cash_state(conn,later['account_id']))['cash']==500000
+
+
+async def test_rollback_refuses_to_release_a_new_epoch_quarantine(conn):
+    from sportsassets import bettor_strategy_lifecycle as LC
+    new=await activate(conn,'rollback-quarantine')
+    result=await LC.transition(conn,account_id=new['account_id'],strategy=L.DEFAULT_STRATEGY,
+        to_state=LC.QUARANTINED,actor='person:Independent Synthetic Reviewer',why='synthetic rollback restriction',now=time.time())
+    assert result['ok'],result
+    with pytest.raises(E.EpochRefused,match='ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION'):
+        await E.rollback(conn,epoch_id='rollback-quarantine',request_id='rollback-quarantine-request')
+    assert await E.selected_account(conn)==new['account_id']
+    assert (await LC.current_state(conn,new['account_id'],L.DEFAULT_STRATEGY))['state']==LC.QUARANTINED
+    assert not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM paper_epoch_events WHERE kind='ROLLBACK')")
+
+
 async def test_models_inherit_provenance_and_empty_refit_does_not_replace_them(conn):
     mid = await B.record_model(conn, account_id=L.ACCOUNT_ID, kind='RESIDUAL',
         payload={'observations':20, 'sentinel_haircut':.35}, at=time.time())

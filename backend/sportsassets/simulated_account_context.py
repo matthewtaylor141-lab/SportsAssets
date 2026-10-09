@@ -32,3 +32,23 @@ async def account_lineage(conn, account):
             return out
         account = parent
     raise ValueError('PAPER_EPOCH_LINEAGE_TOO_DEEP')
+
+
+async def risk_history_accounts(conn, account):
+    """Every registered epoch of the same root, including rolled-back ones.
+
+    Logical rollback cannot erase a child's losses from the risk population.
+    Unrelated legacy accounts stay isolated; malformed/deep ancestry refuses.
+    """
+    lineage = await account_lineage(conn, account)
+    if not await conn.fetchval("SELECT to_regclass('paper_account_epochs') IS NOT NULL"):
+        return lineage
+    rows = await conn.fetch('SELECT account_id, previous_account_id FROM paper_account_epochs')
+    family = [lineage[-1]]
+    for _ in range(64):
+        children = [r['account_id'] for r in rows
+                    if r['previous_account_id'] in family and r['account_id'] not in family]
+        if not children:
+            return [account] + [aid for aid in family if aid != account]
+        family = family + children
+    raise ValueError('PAPER_EPOCH_RISK_HISTORY_TOO_DEEP')

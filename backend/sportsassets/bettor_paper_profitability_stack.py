@@ -218,8 +218,8 @@ async def calibration_rows(conn, account_id: str, strategy: str, *,
                            since: float) -> list:
     """The strategy's settled, distinct contract-sides it evaluated: the
     probability it used, the market price and the outcome."""
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     rows = [dict(r) for r in await conn.fetch(CAL_ROWS_SQL, accounts,
                                               strategy, _ts(since))]
     ys = await PBIND.outcomes(conn, [r["us_market_slug"] for r in rows])
@@ -244,8 +244,8 @@ async def evaluate_quarantine(conn, *, account_id: str, now: float,
     if not await PBIND.schema(conn) or not await LC.schema(conn):
         return dict(out, why="MIGRATION_309_OR_290_NOT_APPLIED")
     models = await PBIND.latest_models(conn, account_id)
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     names = set(strategies or ()) | {r["strategy"] for r in await conn.fetch(
         "SELECT DISTINCT strategy FROM paper_profitability_evaluations "
         " WHERE account_id = ANY($1::text[])", accounts)}

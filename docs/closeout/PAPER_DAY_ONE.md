@@ -15,9 +15,10 @@ successive epochs. Losses are never erased or relabelled as profits. Strategy li
 inherit the nearest recorded state through registered epoch ancestry; opening
 a new account cannot release quarantine, retirement or reduced sizing. Existing
 named-person recovery rules and forward-evidence requirements remain unchanged.
-Stopping rules and realized PAPER/shadow forward economics read the registered
-ancestry using their original windows. Learned models retain their source account,
-model ID and fit timestamp; refits use lineage observations and an empty refit
+Stopping rules and realized PAPER/shadow forward economics read every registered
+epoch of the same root, including rolled-back children, using their original
+windows. Unrelated legacy accounts remain isolated. Learned models retain their source account,
+model ID and fit timestamp; refits use historical observations and an empty refit
 cannot replace a measured inherited model. Accounting remains account-local.
 
 Read-only inspection: `python -m sportsassets.tools.paper_day_one read`.
@@ -77,6 +78,11 @@ previous selector only when both accounts reconcile and are free of open
 orders, reserves and positions. It cannot abandon Xavier management or delete
 an epoch, ledger entry, loss, fill, or receipt. A rolled-back identity cannot be
 reactivated; a later epoch needs a new identity and acceptance proof.
+Rollback also refuses when the previous account's strategy state would be less
+restrictive than the selected epoch's state. It cannot silently undo quarantine
+or retirement; the existing named-person recovery workflow still governs any
+upward transition. Losses from rolled-back accounts remain in subsequent risk
+and learning populations without moving cash or changing accounting receipts.
 
 DDL rollback 317 is permitted only before any epoch/evidence exists. Every DROP
 is inside the same refusing DO statement, so plain psql's continue-on-error

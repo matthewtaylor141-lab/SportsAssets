@@ -399,8 +399,8 @@ async def shadow_pnls(conn, account_id: str, strategy: str, *,
                       since: float = FORWARD_SINCE) -> list:
     """Counterfactual P&L of every SETTLED, FILLED shadow of the strategy
     decided at or after `since` (NO_FILL / VOID excluded)."""
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     rows = await conn.fetch(
         "SELECT o.counterfactual_pnl_usd FROM paper_shadow_counterfactuals s "
         "  JOIN paper_shadow_counterfactual_outcomes o USING (shadow_id) "

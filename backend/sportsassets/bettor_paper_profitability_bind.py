@@ -1461,13 +1461,13 @@ async def schema(conn) -> bool:
 
 
 async def latest_models(conn, account_id: str) -> dict:
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     rows = await conn.fetch(
         "SELECT DISTINCT ON (kind) kind, model_id, payload, fitted_at, account_id, "
         "       observations FROM paper_profitability_models "
         " WHERE account_id = ANY($1::text[]) AND ($2 OR observations > 0) "
-        " ORDER BY kind, array_position($1::text[],account_id), fitted_at DESC, model_id DESC",
+        " ORDER BY kind, fitted_at DESC, model_id DESC",
         accounts, len(accounts) == 1)
     out = {}
     for r in rows:
@@ -1995,8 +1995,8 @@ async def regime_observations(conn, account_id: str, strategy: str, *,
     from . import bettor_paper_ledger as L
     from . import bettor_strategy_lifecycle as LC
     pos = await L.lineage_positions(conn, account_id, supplied=positions)
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     mine = [p for p in pos if LC.strategy_of(p, L.DEFAULT_STRATEGY)
             == strategy and (_num(p.get("first_fill_at")) or 0) >= since
             and LC.closed_at(p) is not None]
@@ -2408,8 +2408,8 @@ async def fit_all(conn, *, account_id: str, now: float) -> dict:
     """Fit and record CALIBRATION, EXECUTION and RESIDUAL. Each fit fails
     alone (recorded as an error); the gate then keeps reading the previous
     fit or, with none, the conservative defaults."""
-    from .simulated_account_context import account_lineage
-    accounts = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     async def history(fn, *, paired=False):
         values = [await fn(aid) for aid in accounts]
         if paired:

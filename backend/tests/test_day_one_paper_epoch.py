@@ -415,9 +415,9 @@ def test_simulated_selector_has_no_writer_dependencies_or_calls():
     tree = ast.parse(pathlib.Path(C.__file__).read_text())
     assert not any(isinstance(n, (ast.Import, ast.ImportFrom)) for n in ast.walk(tree))
     calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
-    assert all(n.func.attr in ('fetchval', 'startswith') for n in calls)
+    assert all(n.func.attr in ('fetchval', 'fetch', 'startswith') for n in calls)
     for call in calls:
-        if call.func.attr == 'fetchval':
+        if call.func.attr in ('fetchval', 'fetch'):
             assert isinstance(call.args[0], ast.Constant) and call.args[0].value.startswith('SELECT ')
 
 

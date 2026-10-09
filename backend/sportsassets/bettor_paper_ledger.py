@@ -1068,8 +1068,8 @@ async def lineage_positions(conn, account_id: str, *, supplied=None) -> list:
     even when the caller supplies an empty snapshot. Marked inherited rows
     make nested authority calls idempotent without collapsing account keys.
     """
-    from .simulated_account_context import account_lineage
-    lineage = await account_lineage(conn, account_id)
+    from .simulated_account_context import risk_history_accounts
+    lineage = await risk_history_accounts(conn, account_id)
     out = []
     for aid in lineage:
         cached = None if supplied is None else [p for p in supplied

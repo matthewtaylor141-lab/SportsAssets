@@ -89,6 +89,7 @@ async def _activate_verified(conn, *, epoch_id, request_id, proof, deployment_ch
         cfg['historical_account_id'] = old
         cfg['model_provenance'] = {'history_preserved': True, 'accounting_metrics_account_local': True,
                                    'risk_and_learning_inherit_epoch_lineage': True,
+                                   'risk_includes_rolled_back_accounts': True,
                                    'opening_acceptance_digest': proof['packet_digest']}
         sess = await S.ensure_session(conn, account_id=account, config=cfg, now=at)
         if not sess.get('ok'):
@@ -130,6 +131,17 @@ async def rollback(conn, *, epoch_id, request_id):
             raise EpochRefused('EPOCH_IS_NOT_SELECTED')
         receipt = await flat_receipt(conn, epoch['account_id'])
         await flat_receipt(conn, epoch['previous_account_id'])
+        from . import bettor_strategy_lifecycle as LC
+        names = set(LC.KNOWN_STRATEGIES) | {r['strategy'] for r in await conn.fetch(
+            'SELECT DISTINCT strategy FROM paper_strategy_lifecycle_events WHERE account_id=ANY($1::text[])',
+            [epoch['account_id'],epoch['previous_account_id']])}
+        for strategy in sorted(names):
+            current = await LC.current_state(conn, epoch['account_id'], strategy)
+            restored = await LC.current_state(conn, epoch['previous_account_id'], strategy)
+            if not current.get('ok') or not restored.get('ok'):
+                raise EpochRefused('ROLLBACK_STRATEGY_STATE_UNREADABLE:'+strategy)
+            if LC.RANK[current['state']] > LC.RANK[restored['state']]:
+                raise EpochRefused('ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION:'+strategy)
         await conn.execute('UPDATE paper_epoch_control SET account_id=$1,generation=generation+1 WHERE singleton', epoch['previous_account_id'])
         await conn.execute("INSERT INTO paper_epoch_events(request_id,kind,epoch_id,from_account_id,to_account_id,detail) VALUES($1,'ROLLBACK',$2,$3,$4,$5::jsonb)", request_id, epoch_id, epoch['account_id'], epoch['previous_account_id'], json.dumps(receipt, default=str))
         return {'rolled_back': True, 'account_id': epoch['previous_account_id'], 'idempotent': False}
