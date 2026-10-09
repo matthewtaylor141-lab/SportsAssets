@@ -8,7 +8,9 @@ name: frontend-preview
 # (npm ci + npm run build in frontend/), served on the runner with the target
 # ref's own netlify.toml redirects (.github/frontend-preview/serve.js), and
 # loaded in Chromium at the agreed desktop / iPhone / iPad views plus
-# landscape and reduced-motion runs (.github/frontend-preview/shots.js),
+# landscape and reduced-motion runs, every Command Center page on all five
+# device profiles with the device's safe-area insets, every declared control
+# tapped (.github/frontend-preview/shots.js),
 # then the Trader device acceptance (.github/frontend-preview/trader_accept.js:
 # every position, order, quote and recorded Xavier action on the page equals
 # the API snapshot; nothing moves while the data is held still).
@@ -42,7 +44,10 @@ concurrency:
 jobs:
   preview:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # 17 views took ~14 min; the matrix is now every page on all five devices
+    # (68 views, each with its controls tapped) plus the Trader acceptance
+    # with its outage phase: ~75-90 min on a hosted runner (software WebGL)
+    timeout-minutes: 120
     steps:
       - name: Harness (this ref)
         uses: actions/checkout@v4
