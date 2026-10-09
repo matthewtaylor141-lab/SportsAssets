@@ -236,11 +236,16 @@ async def evaluate(conn, *, now: float | None = None,
          # which mechanism serves the Kalshi books (reported, not a gate)
          "kalshi_mechanism": vh.get("kalshi_mechanism",
                                     "VENUE_HEALTH_UNREAD")})
+    # what the quorum's reader learned (snapshot, lane state, Audrey's
+    # coverage and the ACTUAL positions she must have reconciled), so the
+    # control names every source exactly and why it is not current
+    qdetail: dict = {}
     rows, open_disc = await sec.run("truth_quorum", lambda: C.quorum_rows(
         conn, now=now, venue_confirmed=bool(venue.get("venue_confirmed")),
-        market_data_green=pm_green), ([], None))
+        market_data_green=pm_green, detail=qdetail), ([], None))
     controls["TRUTH_QUORUM"] = C.quorum(rows, now=now,
-                                        audrey_open_discrepancies=open_disc)
+                                        audrey_open_discrepancies=open_disc,
+                                        source_detail=qdetail, venue=venue)
     attributed, fixtures = await sec.run(
         "attribution", lambda: C.attributed_positions(conn, now=now),
         ([], {}))
