@@ -366,15 +366,26 @@ async def _persist_positions(states: list[PositionState]) -> None:
     unknown = [st for st in states if not st.condition_id]
     as_of = next((st.as_of for st in states if st.as_of is not None),
                  None) or datetime.now(tz=timezone.utc)
-    own_ids, own_n = (await _own_whale_ids(pool)) if unknown else (set(), 0)
-    # OUR OWN BOOKS, every cycle (bounded, read only): our positions are
-    # never in the tracked wallets' replay above, so this is where an
-    # ACTIVE row of ours without identity is found and refused
-    own_books = await IC.read_own_books(pool, now=as_of)
-    census = IC.census(unknown, now=as_of, own_whale_ids=own_ids,
-                       own_wallets_configured=own_n, own_books=own_books)
-    LAST_IDENTITY_CENSUS["census"] = census
-    IC.log_on_change(census, log)
+    # THE CENSUS IS MEASUREMENT: nothing in it may stop the persist below
+    # (one bad row must never freeze the snapshot -- the 2026-08-11 rule).
+    # A census that fails is named UNMEASURED, never clean, never silent.
+    try:
+        own_ids, own_n = ((await _own_whale_ids(pool)) if unknown
+                          else (set(), 0))
+        # OUR OWN BOOKS, every cycle (bounded, read only): our positions
+        # are never in the tracked wallets' replay above, so this is where
+        # an ACTIVE row of ours without identity is found and refused
+        own_books = await IC.read_own_books(pool, now=as_of)
+        census = IC.census(unknown, now=as_of, own_whale_ids=own_ids,
+                           own_wallets_configured=own_n, own_books=own_books)
+        LAST_IDENTITY_CENSUS["census"] = census
+        IC.log_on_change(census, log)
+    except Exception as exc:  # noqa: BLE001 — the snapshot persists anyway
+        LAST_IDENTITY_CENSUS["census"] = IC.failed_census(
+            len(unknown), now=as_of, error=type(exc).__name__)
+        log.exception("positions identity-debt census failed (%s): %d "
+                      "dead-lettered, census %s; the snapshot persists",
+                      type(exc).__name__, len(unknown), IC.ST_CENSUS_FAILED)
     rows = [
         (st.whale_id, st.condition_id, st.token_id, st.outcome, st.outcome_index,
          round(st.position.shares, 6), round(st.position.avg_cost, 6),

@@ -560,3 +560,47 @@ def test_the_research_file_runs_the_exact_statements_the_census_runs():
     assert IC.OWN_ACTIVE_SQL.strip().replace("$1", w) + ";" in sql
     assert IC.OWN_HISTORICAL_SQL.strip().replace("$1", w) + ";" in sql
     assert IC.ACTIVE_WINDOW.days == 30
+
+
+# ── the census can never freeze the snapshot (the 2026-08-11 rule) ──────
+
+class _GenericPool(_Pool):
+    """A pool that answers EVERY fetch with the catalog-rescue shape -- the
+    fake test_positions.py's incident test uses: the own-books reads get rows
+    that are not (book, rows_n, unknown_n)."""
+
+    async def fetch(self, sql, arg):
+        self.sql.append(sql)
+        return [{"token_id": "tok-b", "condition_id": "0xrescued"}]
+
+
+def test_malformed_own_book_rows_are_unmeasured_and_the_snapshot_persists(
+        monkeypatch):
+    pool = _GenericPool()
+    _wire(monkeypatch, pool)
+    asyncio.run(eng._persist_positions(_book()))
+    assert {r[1] for r in pool.sink["rows"]} == {"0xok", "0xrescued"}
+    c = eng.LAST_IDENTITY_CENSUS["census"]
+    assert c["status"] == IC.ST_OWN_UNMEASURED
+    assert c["own_books"]["error"] == "MALFORMED_ROWS"
+    assert c["own_books"]["malformed_rows"] >= 1
+    assert c["own_books"]["historical_status"] == IC.OWN_UNMEASURED
+
+
+def test_a_census_that_raises_never_stops_the_persist(monkeypatch, caplog):
+    pool = _Pool()
+    _wire(monkeypatch, pool)
+
+    def boom(*a, **k):
+        raise ZeroDivisionError("census bug")
+
+    monkeypatch.setattr(IC, "census", boom)
+    with caplog.at_level(logging.WARNING, logger=eng.__name__):
+        asyncio.run(eng._persist_positions(_book()))
+    assert {r[1] for r in pool.sink["rows"]} == {"0xok", "0xrescued"}
+    c = eng.LAST_IDENTITY_CENSUS["census"]
+    assert c["status"] == IC.ST_CENSUS_FAILED and c["error"] == "ZeroDivisionError"
+    assert c["dead_lettered"] == 2 and c["refusal"] is None
+    assert IC.summary(c)["status"] == IC.ST_CENSUS_FAILED
+    assert any(IC.ST_CENSUS_FAILED in r.getMessage() for r in caplog.records
+               if r.levelno >= logging.ERROR)

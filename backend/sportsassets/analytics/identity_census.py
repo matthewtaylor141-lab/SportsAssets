@@ -79,6 +79,8 @@ ST_REFUSED = "REFUSED"
 #: our own books could not be read this cycle: missing evidence is never a
 #: clean census
 ST_OWN_UNMEASURED = "OWN_BOOKS_UNMEASURED"
+#: the census itself failed (engine._persist_positions persists anyway)
+ST_CENSUS_FAILED = "CENSUS_FAILED_UNMEASURED"
 
 MAX_WHALES = 20
 MAX_EXAMPLES = 5
@@ -258,26 +260,45 @@ def own_books_census(active_rows: list | None, *,
     OWN_HISTORICAL_SQL rows (None: not read yet, or failed). Pure."""
     books = {b: {"kind": kind, "unit": unit, ACTIVE: None, HISTORICAL: None}
              for b, (kind, unit) in OWN_BOOKS.items()}
+    malformed = 0
+
+    def counts(r) -> tuple | None:
+        # a row that is not (book, rows_n, unknown_n) is never a zero: its
+        # book stays unread, so the census is UNMEASURED (and never raises
+        # into the persist it rides on)
+        try:
+            return (books.get(r["book"]), int(r["rows_n"] or 0),
+                    int(r["unknown_n"] or 0))
+        except (KeyError, TypeError, ValueError):
+            return None
+
     for r in active_rows or ():
-        b = books.get(r["book"])
-        if b is not None:
-            b[ACTIVE] = {"rows": int(r["rows_n"] or 0),
-                         "unknown_identity": int(r["unknown_n"] or 0)}
+        got = counts(r)
+        if got is None:
+            malformed += 1
+        elif got[0] is not None:
+            got[0][ACTIVE] = {"rows": got[1], "unknown_identity": got[2]}
+    hist_ok = hist_rows is not None
     for r in hist_rows or ():
-        b = books.get(r["book"])
-        if b is not None and b["kind"] == "PAPER":
-            b[HISTORICAL] = {"rows": int(r["rows_n"] or 0),
-                             "unknown_identity": int(r["unknown_n"] or 0),
-                             "newest_at": _iso(r.get("newest_at"))}
+        got = counts(r)
+        if got is None:
+            malformed += 1
+            hist_ok = False
+        elif got[0] is not None and got[0]["kind"] == "PAPER":
+            got[0][HISTORICAL] = {"rows": got[1], "unknown_identity": got[2],
+                                  "newest_at": _iso(r.get("newest_at"))}
     unread = sorted(b for b, v in books.items() if v[ACTIVE] is None)
-    measured = active_rows is not None and not unread
+    measured = active_rows is not None and not unread and not malformed
+    if hist_rows is not None and not hist_ok:
+        hist_rows, hist_error = None, hist_error or "MALFORMED_ROWS"
     hist_status = (OWN_MEASURED if hist_rows is not None
                    else OWN_UNMEASURED if hist_error else OWN_NOT_YET)
     active_unknown = sum(v[ACTIVE]["unknown_identity"]
                          for v in books.values() if v[ACTIVE])
     return {
         "status": OWN_MEASURED if measured else OWN_UNMEASURED,
-        "error": error, "books_unread": unread,
+        "error": error or ("MALFORMED_ROWS" if malformed else None),
+        "books_unread": unread, "malformed_rows": malformed,
         "active_rows": sum(v[ACTIVE]["rows"] for v in books.values()
                            if v[ACTIVE]),
         "active_unknown": active_unknown if measured else None,
@@ -322,8 +343,11 @@ async def read_own_books(pool, *, now: datetime, clock=None,
                      error=None)
         except Exception as exc:  # noqa: BLE001 — retried after every_s
             h.update(at=t, rows=None, as_of=None, error=type(exc).__name__)
-    return own_books_census(active, hist_rows=h["rows"],
-                            hist_as_of=h["as_of"], hist_error=h["error"])
+    try:
+        return own_books_census(active, hist_rows=h["rows"],
+                                hist_as_of=h["as_of"], hist_error=h["error"])
+    except Exception as exc:  # noqa: BLE001 — never into the persist
+        return own_books_census(None, error=type(exc).__name__)
 
 
 def census(missing: list, *, now: datetime,
@@ -416,6 +440,15 @@ def _own_signature(ob: dict | None) -> tuple:
                 for scope in (ACTIVE, HISTORICAL))))
 
 
+def failed_census(dead_lettered: int, *, now: datetime, error: str) -> dict:
+    """What the heartbeat carries when the census itself failed: the count
+    the persist saw, UNMEASURED by name, no refusal claimed either way."""
+    return {"version": VERSION, "as_of": _aware(now).isoformat(),
+            "dead_lettered": int(dead_lettered), "status": ST_CENSUS_FAILED,
+            "error": error, "refusal": None, "own_active": None,
+            "own_books": None}
+
+
 def signature(c: dict) -> tuple:
     """What a change is: the counts by owner and class, the refusal and our
     own books' unknown counts -- never the clock (as_of) or the examples."""
@@ -495,7 +528,7 @@ def summary(c: dict | None) -> dict | None:
         return None
     return {k: c.get(k) for k in (
         "version", "as_of", "dead_lettered", "historical_debt", "active",
-        "own_active", "own_active_by_source", "status", "refusal",
+        "own_active", "own_active_by_source", "status", "refusal", "error",
         "own_books", "by_owner", "own_wallets_configured",
         "active_window_days")} | {
         "by_whale": (c.get("by_whale") or [])[:MAX_WHALES]}
