@@ -1399,3 +1399,5 @@ tests/test_pm_acceptance_gate_runs.py
 tests/test_rc6_d1_snapshot_refresh.py
 # (RC6 D1) freshness measured over the whole window: an outage of any length crossing a horizon's start is eligible and not fresh, only time before the first window ever written is unmeasured, the frozen membership is never re-chosen
 tests/test_rc6_d1_freshness_window.py
+# (RC6 P0-429) the escalating 429 cooldown: nine consecutive 429s escalate strictly to the cap with zero requests inside any cooldown, only a read sent after it resets it, a normal read (and one queued in the pacer) is refused by name, a PRIORITY claim or any non-read request waits at most the bound and is always sent, bbo_read makes one request on a 429, the walkers stop their pass, the readback rides each process's beat, the data-api host (polite_get and the exit worker's direct reads) never retries at zero seconds
+tests/test_venue_429_escalating_cooldown.py

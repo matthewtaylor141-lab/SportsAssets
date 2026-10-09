@@ -55,6 +55,7 @@ from .. import shadow_bettor_policy as bpol
 from .. import shadow_bettor_sizing as szpol
 from .. import shadow_l2 as l2
 from .. import shadow_store as store
+from .. import venue_pace as VP
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
 from .loop_contract import LOOP_DISABLED
@@ -120,8 +121,10 @@ def _read_quote(slug: str) -> dict:
     try:
         book = pmus.book_read(client, slug)
     except Exception as exc:                                   # noqa: BLE001
+        # our own gate's refusal is named by its code (P0-429): the 429
+        # cooldown's deferral is ours, not the venue's answer
         book = {"marketData": None, "feed": None,
-                "error": type(exc).__name__}
+                "error": getattr(exc, "refusal", None) or type(exc).__name__}
     md = book.get("marketData")
     if isinstance(md, dict):
         b = pmus._quote_px(md, "bestBid", "best_bid", "bid")
@@ -131,6 +134,19 @@ def _read_quote(slug: str) -> dict:
             return {"bid": b, "ask": a,
                     "state": str(st) if st is not None else None,
                     "error": None, "book": book}
+    # A 429 OR OUR COOLDOWN'S REFUSAL IS NOT "THE BOOK FEED IS
+    # UNREACHABLE" (P0-429). The fallback below made two MORE requests
+    # (bbo, then book) straight into the limit the book read had just been
+    # refused by -- the bbo-then-book pairs in production's 04:20Z run of
+    # 429s. The read ends here, named; nothing further is sent.
+    _detail = book.get("error_detail") or {}
+    if (_detail.get("is_rate_limited")
+            or "RateLimit" in str(book.get("error") or "")
+            or book.get("error") == VP.R_VENUE_429_COOLDOWN_READ_DEFERRED
+            or book.get("why_no_further_attempt")
+            == VP.R_VENUE_429_COOLDOWN_READ_DEFERRED):
+        return {"bid": None, "ask": None, "state": None,
+                "error": book.get("error") or "RateLimitError", "book": book}
     # No quote from the book feed. Fall back to the reader the mirror
     # uses, unchanged, and carry the book attempt's outcome alongside.
     try:
@@ -274,13 +290,26 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
         return stats
 
     misses = 0
-    for subject in subjects:
+    for i, subject in enumerate(subjects):
+        # THE VENUE'S 429 COOLDOWN STOPS THE PASS (P0-429): while it
+        # stands every read would be refused by name at the transport; the
+        # pass stops here and counts the subjects it did not look at
+        # (they are the universe's again next cycle).
+        _cd = VP.normal_read_deferral()
+        if _cd is not None:
+            stats["skippedCooldown"] = len(subjects) - i
+            stats["status"] = "venue_429_cooldown"
+            stats["cooldown"] = _cd
+            VP.note_walker_skipped(len(subjects) - i)
+            break
         stats["looked"] += 1
         quote = await asyncio.to_thread(_read_quote, subject["symbol"])
         captured_at = datetime.now(tz=timezone.utc)
         state = _market_state(subject, quote, captured_at)
         if not state["readable"]:
-            misses += 1
+            # our cooldown's deferral is not a venue miss (P0-429)
+            if quote.get("error") != VP.R_VENUE_429_COOLDOWN_READ_DEFERRED:
+                misses += 1
             stats["unreadable"] += 1
 
         # THE LEG BINDING (owner directive 2026-09-19 22:4xZ §2). The
@@ -581,6 +610,9 @@ async def run() -> None:
             await heartbeat("shadow_bettor", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
+    # every venue claim this loop makes is attributed to it on the 429
+    # cooldown's readback (P0-429)
+    VP.set_read_source("shadow_bettor")
     beat_failures = 0
     while True:
         started = time.monotonic()
@@ -621,6 +653,8 @@ async def run() -> None:
         # so this catches, but it catches LOUDLY, names the exception,
         # and records the failure in the database the same way a
         # decision failure is recorded.
+        # the process's 429 cooldown on this loop's beat (P0-429)
+        stats["venueRateLimit"] = VP.rate_limit_state()
         try:
             await heartbeat("shadow_bettor",
                             str(stats.get("status") or "ok"), stats)

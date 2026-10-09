@@ -42,6 +42,7 @@ from .. import bettor_sport_mapping as sportmap
 from .. import bettor_state_capture as sc
 from .. import bettor_state_store as sstore
 from .. import pmus
+from .. import venue_pace as VP
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
 from .loop_contract import LOOP_DISABLED
@@ -141,7 +142,11 @@ def _off(name: str, default: str = "on") -> bool:
 
 
 def _read_book(slug: str, pacing: float = READ_PACING_BASE_S) -> dict:
-    """One paced public book read, off the event loop. Never raises."""
+    """One paced public book read, off the event loop. Never raises.
+
+    A REFUSAL BY OUR OWN VENUE GATE IS NAMED BY ITS CODE (P0-429): the 429
+    cooldown's VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED is our deferral, not
+    the venue's answer, and the tick tells the two apart by this name."""
     pace(pacing)
     try:
         client = pmus._get_client()
@@ -152,7 +157,7 @@ def _read_book(slug: str, pacing: float = READ_PACING_BASE_S) -> dict:
         return pmus.book_read(client, slug)
     except Exception as exc:                                   # noqa: BLE001
         return {"marketData": None, "feed": None,
-                "error": type(exc).__name__}
+                "error": getattr(exc, "refusal", None) or type(exc).__name__}
 
 
 def _mid_of(book: dict):
@@ -462,7 +467,23 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     # is counted apart from obs_skipped_budget, which IS a loss.
     stats["scheduled"] = len(sel["SELECTED"])
     abandoned = False
+    cooled = False
     for idx, subject in enumerate(sel["SELECTED"]):
+        # THE VENUE'S 429 COOLDOWN STOPS THE PASS (P0-429). Production
+        # 2026-10-09: this loop's reads were among the runs of 429s at
+        # 0.7 s. While the process-wide cooldown stands a read would be
+        # refused by name at the transport anyway; the pass stops here,
+        # spends no budget, and counts what it skipped. The markets stay in
+        # the rotation (OBS_NEVER_ATTEMPTED carries them).
+        _cd = VP.normal_read_deferral()
+        if _cd is not None:
+            remaining = len(sel["SELECTED"]) - idx
+            stats["obsSkippedCooldown"] = remaining
+            stats["status"] = "venue_429_cooldown"
+            stats["cooldown"] = _cd
+            VP.note_walker_skipped(remaining)
+            cooled = True
+            break
         # ADMISSION FIRST, AND COUNTED SEPARATELY. Declined work is
         # deferred; exhausted budget is lost. Two counters, two causes.
         if admitted_budget <= 0:
@@ -502,16 +523,24 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
             request_at=request_at, feed=book.get("feed"),
             read_error=book.get("error"), history=hist, selection=sel)
 
+        deferred_here = (book.get("error")
+                         == VP.R_VENUE_429_COOLDOWN_READ_DEFERRED)
         if row["BOOK_READABILITY_STATUS"] != "READABLE":
-            misses += 1
             stats["unreadable"] += 1
             # RATE LIMITING IS ABOUT US, NOT THE MARKET. It is counted
             # apart from a venue that published no book, because the
             # two call for opposite responses: one means slow down, the
             # other is a fact about the market and means carry on.
-            if "RateLimit" in str(book.get("error") or ""):
+            if deferred_here:
+                # our cooldown refused the read (it was armed between the
+                # check above and the send): no request left, nothing the
+                # venue said -- neither a miss nor a rate limit (P0-429)
+                stats["cooldownDeferred"] = stats.get("cooldownDeferred", 0) + 1
+            elif "RateLimit" in str(book.get("error") or ""):
+                misses += 1
                 stats["rateLimited"] += 1
             else:
+                misses += 1
                 stats["unreadableOther"] += 1
         else:
             stats["readable"] = stats.get("readable", 0) + 1
@@ -530,6 +559,14 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
             stats["written"] += 1
         else:
             stats["duplicateBucket"] += 1
+
+        if deferred_here:
+            remaining = len(sel["SELECTED"]) - idx - 1
+            stats["obsSkippedCooldown"] = remaining
+            stats["status"] = "venue_429_cooldown"
+            VP.note_walker_skipped(remaining)
+            cooled = True
+            break
 
         if misses >= MISS_ABANDON:
             stats["status"] = "venue_unreadable"
@@ -597,6 +634,8 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     for horizon in order:
         if follow_budget <= 0:
             break
+        if cooled and VP.normal_read_deferral() is not None:
+            break
         taken_this_horizon = 0
         try:
             # DEMAND IS COUNTED BEFORE THE LIMIT. Previously fu_due was
@@ -616,6 +655,17 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
         for j, d in enumerate(due):
             if follow_budget <= 0 or taken_this_horizon >= per_horizon_cap:
                 stats["fuSkippedBudget"] += len(due) - j
+                break
+            # the 429 cooldown stops the follow-ups too (P0-429): counted,
+            # never sent; the budget is not spent on a refused read
+            _cd = VP.normal_read_deferral()
+            if _cd is not None:
+                stats["fuSkippedCooldown"] = (stats.get("fuSkippedCooldown", 0)
+                                              + len(due) - j)
+                VP.note_walker_skipped(len(due) - j)
+                cooled = True
+                if stats["status"] in ("ok", "slice_truncated"):
+                    stats["status"] = "venue_429_cooldown"
                 break
             follow_budget -= 1
             taken_this_horizon += 1
@@ -722,6 +772,9 @@ async def run() -> None:
             await heartbeat("bettor_state", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
+    # every venue claim this loop makes is attributed to it on the 429
+    # cooldown's readback (P0-429)
+    VP.set_read_source("bettor_state")
     pacing = READ_PACING_BASE_S
     while True:
         started = time.monotonic()
@@ -749,6 +802,10 @@ async def run() -> None:
                      "tickError": "%s: %s" % (type(exc).__name__, exc)}
         stats.update(boot)
         stats["tickS"] = round(time.monotonic() - started, 3)
+        # THE PROCESS'S 429 COOLDOWN ON THIS LOOP'S BEAT (P0-429): in force
+        # or not, the consecutive count, the deferred and skipped reads per
+        # source, and the last 429 -- what production reads to prove it
+        stats["venueRateLimit"] = VP.rate_limit_state()
         try:
             await heartbeat("bettor_state",
                             str(stats.get("status") or "ok"), stats)
