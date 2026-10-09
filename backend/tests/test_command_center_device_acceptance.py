@@ -29,6 +29,9 @@ backend's own trader_mode.build_snapshot):
   trader         a RESTING order past its recorded expiry drawn as the
                  standing limit; Xavier's review time nowhere on the page; a
                  fixed "DEREK -> XAVIER" instead of the recorded agents
+Neither artifact names what the paper book holds (public-artifact.js): no
+room key, position / order / review id, slug or page text reaches
+preview.json or trader_accept.json, which are uploaded in the clear.
 These tests pin the fixes and run the harness's node suites (CI has node).
 """
 from __future__ import annotations
@@ -118,10 +121,50 @@ def test_every_page_runs_on_all_five_devices():
     assert src.index("['desktop', 'command'], ['desktop', 'floor'], ['desktop', 'trader'],") < src.index("['iphone_landscape', 'command'],")
     # a partial local run is named as such; a missing room is UNMEASURED, never a pass
     assert "views_planned: VIEWS.length, views_run: records.length, subset: ONLY.length ? ONLY : null," in src
-    assert "records.push({ view: name, device: dev, page: pg, viewport: d.viewport, status: null, signed_in: null, unmeasured: (room && room.why) || 'NO_ROOM_KEY' });" in src
+    assert "records.push(PA.scrubDeep({ view: name, device: dev, page: pg, viewport: d.viewport, status: null, signed_in: null, unmeasured: (room && room.why) || 'NO_ROOM_KEY' }, SECRETS));" in src
     # the room key is a production identifier: only a short hash is written out
     assert "key_sha256_12: got.key ? crypto.createHash('sha256').update(got.key).digest('hex').slice(0, 12) : null" in src
     assert "room_key_sha256_12: room.key_sha256_12" in src and "room_key: room.key" not in src
+
+
+def test_nothing_the_paper_book_holds_reaches_the_public_artifact():
+    """Review finding: the room view reads /api/command/positions/room/<key>
+    and shots.js counted every API response by its path with only hex
+    segments masked, so preview.json -- uploaded in the clear from this public
+    repository and copied into the evidence packet -- carried the room key
+    (<BOOK_CODE>:EVT|MKT:<event slug>) as an api_by_path_status key, and a
+    control that landed elsewhere printed /position?g=<key>. The RC5
+    production device run (pm-acceptance 37836393458) also wrote a focused
+    Trader card's market slug as current_workspace text, and trader_accept.js
+    named a failing position by its id (paperpos:<account>:<group>:<slug>:
+    <side>). The node suite feeds synthetic keys through the writing code."""
+    pa = read(PREVIEW / "public-artifact.js")
+    src = read(PREVIEW / "shots.js")
+    ta = read(PREVIEW / "trader_accept.js")
+    # layer 1: the room key masked where an API path is counted, a page path
+    # named with its private search values hashed, a box named by structure
+    assert "String(p).replace(/\\/positions\\/room\\/[^/?#]*/g, '/positions/room/:key')" in pa
+    assert "const k = PA.apiPathKey(u.pathname) + ' ' + r.status();" in src
+    assert "why = verdict(expect, obs, PA.navPaths(capture.navs), capture.requests);" in src
+    assert "why: ['PAGE_LEFT_TO ' + PA.publicPath(here)]" in src
+    assert "const PUBLIC_PARAMS = ['book'];" in pa
+    assert "// >>> PUBLIC LABEL" in src and "// <<< PUBLIC LABEL" in src
+    assert "map(labelOf);" in src and "small.push({ el: labelOf(el)," in src and "unreachable.push({ el: labelOf(el)," in src
+    assert "'.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';" in src
+    assert not re.search(r"(small|unreachable)\.push\(\{ t:", src)
+    # layers 2 and 3: every record written through the scrub, with the
+    # identifiers of every read the harness made
+    assert src.count("records.push(PA.scrubDeep(") == 2 and src.count("records.push(") == 2
+    assert "const room = await findRoom(browser);" in src and "views.some(([, pg]) => pg === 'room') ? await findRoom(browser) : null" not in src
+    assert "const published = results.map(r => PA.publicTraderResult(r, SECRETS));" in ta
+    assert "c.id.slice(-12)" not in ta and ta.count("writeFileSync(") == 1
+    # the scorecard's inputs are untouched: counts, verdicts, failure classes
+    assert "touch_targets_under_44: small.length," in src
+    assert "rec.failures = [...new Set(fails)]; rec.verdict = fails.length ? 'FAIL' : 'PASS';" in ta
+
+
+def test_public_artifact_suite_passes():
+    _node_suite("frontend-preview-public-artifact.test.cjs", 7)
 
 
 def test_measurements_made_stricter_never_looser():

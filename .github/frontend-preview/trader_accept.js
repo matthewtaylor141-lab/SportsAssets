@@ -46,6 +46,10 @@
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
+// trader_accept.json is uploaded in the clear (public repository): a position,
+// order or tape event is named there by a sha256 prefix, and every identifier
+// of every snapshot read is scrubbed from it (public-artifact.js)
+const PA = require('./public-artifact');
 
 const BASE = process.argv[2];
 const OUT = process.argv[3];
@@ -300,6 +304,8 @@ const nowsOf = t => [t, t - 1, t - 2, t - 3];
   fs.mkdirSync(path.join(OUT, 'trader'), { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM || undefined, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const results = [];
+  // every private identifier any snapshot of this run carried (never written)
+  const identifiers = new Set();
   for (const [dev, d] of Object.entries(DEVICES)) {
     const ctx = await browser.newContext(Object.assign({}, d));
     let frozenBody = null, outage = false, live = 0, frozenServed = 0, refused = 0, aborted = 0; let S = null; const errors = [];
@@ -320,7 +326,7 @@ const nowsOf = t => [t, t - 1, t - 2, t - 3];
     page.on('console', m => { if (m.type() === 'error' && !outage) errors.push(m.text().slice(0, 200)); });
     page.on('response', async r => {
       if (frozenBody || outage || new URL(r.url()).pathname !== API || r.status() !== 200) return;
-      try { const txt = await r.text(); const j = JSON.parse(txt); if (j && Array.isArray(j.positions)) { S = j; live++;
+      try { const txt = await r.text(); const j = JSON.parse(txt); if (j && Array.isArray(j.positions)) { S = j; live++; PA.collectIdentifiers(j, identifiers);
         for (const p of j.positions) { const q = p.quote || {}; observed.push({ ref: String(q.observation_id || 'quote'), bid: cents(q.bid) }); } } } catch (e) {}
     });
     const rec = { device: dev, viewport: d.viewport };
@@ -413,9 +419,9 @@ const nowsOf = t => [t, t - 1, t - 2, t - 3];
     rec.outage = { polls_refused: refused, connection: dx && dx.connection, error_shown: dx && dx.error_shown,
       claims: dx ? [
         ...(/Readback connected/.test(dx.connection || '') ? ['CONNECTED_WHILE_REFUSED'] : []),
-        ...dx.cards.filter(c => c.bid_label === 'Current bid').map(c => 'CURRENT_BID:' + c.id.slice(-12)),
-        ...dx.cards.filter(c => c.pnl && c.pnl !== '—').map(c => 'MARKED_PNL:' + c.id.slice(-12)),
-        ...dx.cards.filter(c => c.pill === 'Packet complete').map(c => 'PACKET_COMPLETE:' + c.id.slice(-12)),
+        ...dx.cards.filter(c => c.bid_label === 'Current bid').map(c => 'CURRENT_BID:' + PA.ref(c.id)),
+        ...dx.cards.filter(c => c.pnl && c.pnl !== '—').map(c => 'MARKED_PNL:' + PA.ref(c.id)),
+        ...dx.cards.filter(c => c.pill === 'Packet complete').map(c => 'PACKET_COMPLETE:' + PA.ref(c.id)),
         ...(dx.cards.length && fx.action && fx.action !== 'Waiting for evidence' ? ['RECOMMENDATION:' + fx.action] : []),
         ...dx.brain.filter(n => ['VENUE BOOK', 'XAVIER / MANAGEMENT'].includes(n.label) && n.state === 'current').map(n => 'LIT:' + n.label),
       ] : ['NO_READ'] };
@@ -472,8 +478,13 @@ const nowsOf = t => [t, t - 1, t - 2, t - 3];
     await ctx.close();
   }
   await browser.close();
-  fs.writeFileSync(path.join(OUT, 'trader_accept.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(), results }, null, 1));
-  for (const r of results) {
+  // written only as the public artifact may hold it: verdicts, failure classes
+  // and counts as measured, every position / order / event by its hash
+  const SECRETS = PA.compile(identifiers);
+  const published = results.map(r => PA.publicTraderResult(r, SECRETS));
+  fs.writeFileSync(path.join(OUT, 'trader_accept.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(),
+    redaction: { identifiers_known: identifiers.size }, results: published }, null, 1));
+  for (const r of published) {
     const a = r.api || {}, p = r.page || {}, F = r.fidelity || {};
     console.log(`TRADER ${r.device.padEnd(17)} ${r.verdict} api=${a.total_position_count}/${a.returned} orders=${a.standing_orders}/${a.orders_all_states} games=${a.with_current_game} reviews=${a.with_review} | page cards=${p.cards} wall=${p.wall_count} orders=${p.order_count} | missing=${(F.missing_cards || []).length} bid!=${(F.bid_mismatch || []).length} ask!=${(F.ask_mismatch || []).length} side!=${(F.held_side_mismatch || []).length} tgt!=${(F.target_mismatch || []).length} pnl!=${(F.pnl_mismatch || []).length} strip!=${(F.strip_mismatch || []).length} pill!=${(F.evidence_state_mismatch || []).length} expired=${(F.expired_shown_as_protection || []).length} game!=${(F.game_fallback_wrong || []).length} ask=${F.ask_shown}/${F.ask_in_api} moved=${(r.moved_while_frozen || []).length} tape=${r.tape ? r.tape.reviews_shown + '/' + r.tape.reviews_in_api + ' unrec=' + r.tape.unrecorded.length : '-'} focus=${r.focus ? r.focus.checked : 0} ov=${r.orders_view ? r.orders_view.rows + '/' + r.orders_view.api_standing : 'none'} outage=${r.outage ? r.outage.claims.length : '-'} imgs=${JSON.stringify((r.images || {}).hosts)} | ${JSON.stringify(r.failures || [])}`);
   }

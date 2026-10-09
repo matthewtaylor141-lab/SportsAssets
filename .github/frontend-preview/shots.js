@@ -23,11 +23,15 @@
 // (the destination is measured by its own view), and every overlay opened
 // is measured and closed again (CONTROLS). Every non-GET is aborted in the
 // browser as well as refused by the server. Screenshots go to <out>/shots/.
+// preview.json is uploaded in the clear (public repository): nothing in it
+// names what the paper book holds -- no room key, position id, slug or page
+// text (public-artifact.js; PUBLIC LABEL).
 'use strict';
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const PA = require('./public-artifact');
 
 const BASE = process.argv[2];
 const OUT = process.argv[3];
@@ -300,6 +304,26 @@ async function measure(page, touch, insets) {
       return { gl, w: Math.round(r.width), h: Math.round(r.height), viewport_share: +(shown / (vw * vh)).toFixed(3) };
     });
     const idOf = (el) => (el.id ? '#' + el.id : el.tagName.toLowerCase()) + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '');
+    // >>> PUBLIC LABEL (pinned by backend/tests/js/frontend-preview-public-artifact.test.cjs)
+    // A control or a text box is named in preview.json by its STRUCTURE -- tag,
+    // id, two classes, the page's UI enum attributes, a link's path (a room
+    // path's key masked) -- never by its text or its aria-label: what a page
+    // draws can come from the paper book, and preview.json is public. The RC5
+    // production device run (pm-acceptance 37836393458) wrote a focused Trader
+    // card's market slug as current_workspace text: the ribbon item's
+    // aria-current="true" button reads the card's market title
+    // (experience-v4.js); its position id sits in data-v4-ribbon, which is no
+    // UI enum and is never read here.
+    const UI_ATTRS = ['data-go', 'data-v', 'data-view', 'data-filter', 'data-book', 'data-agent', 'data-desk', 'data-nav', 'data-sort', 'role'];
+    const labelOf = (el) => {
+      const cls = typeof el.className === 'string' && el.className.trim() ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
+      const attrs = UI_ATTRS.filter(a => el.hasAttribute(a)).map(a => '[' + a + '=' + String(el.getAttribute(a)).replace(/[^\w-]/g, '').slice(0, 24) + ']').join('');
+      const href = el.tagName === 'A' ? el.getAttribute('href') : null;
+      let at = '';
+      if (href) { try { at = '[path=' + new URL(href, location.href).pathname.replace(/\/positions\/room\/[^/]*/g, '/positions/room/:key') + ']'; } catch (e) { at = '[path=?]'; } }
+      return (el.id ? '#' + el.id : el.tagName.toLowerCase()) + cls + attrs + at;
+    };
+    // <<< PUBLIC LABEL
     // the outermost fixed / sticky box holding el (el itself included), or null
     const fixedOf = (el) => { let top = null; for (let a = el; a && a !== document.body && a !== document.documentElement; a = a.parentElement) { const q = getComputedStyle(a).position; if (q === 'fixed' || q === 'sticky') top = a; } return top; };
     const fixed = [...document.querySelectorAll('body *')].filter(el => {
@@ -399,7 +423,7 @@ async function measure(page, touch, insets) {
         if (!vis(el)) continue; const q = el.getBoundingClientRect();
         const r = { left: q.left + dx, top: q.top + dy, right: q.right + dx, bottom: q.bottom + dy, width: q.width, height: q.height };
         if (r.bottom < 0 || r.top > vh || r.right < 0 || r.left > vw) continue;
-        if (r.width < 44 || r.height < 44) small.push({ t: (el.getAttribute('aria-label') || el.textContent || el.tagName).trim().slice(0, 40), w: Math.round(r.width), h: Math.round(r.height), where });
+        if (r.width < 44 || r.height < 44) small.push({ el: labelOf(el), w: Math.round(r.width), h: Math.round(r.height), where });
       }
     };
     // a framed page (the agent desks) is part of the screen a finger uses
@@ -462,7 +486,7 @@ async function measure(page, touch, insets) {
       if (!self && h) { const bar = fixedOf(h); const br = bar && bar.getBoundingClientRect(); cover = bar ? { fixed: true, top: br.top, bottom: br.bottom, id: idOf(bar) } : { fixed: false, top: -1, bottom: -1, id: idOf(h) }; }
       const v = reachVerdict(r, part, self ? 'self' : 'cover', cover, room, vh);
       if (v === 'REACHED') reached++;
-      if (v === 'COVERED') unreachable.push({ t: (el.getAttribute('aria-label') || el.textContent || el.tagName).replace(/\s+/g, ' ').trim().slice(0, 40), by: h ? idOf(h) : null, bar: cover && cover.fixed ? cover.id : null, at: [Math.round(x), Math.round(y)] });
+      if (v === 'COVERED') unreachable.push({ el: labelOf(el), by: h ? idOf(h) : null, bar: cover && cover.fixed ? cover.id : null, at: [Math.round(x), Math.round(y)] });
     }
     // >>> SAFE AREA (pinned by backend/tests/js/frontend-preview-safe-area.test.cjs)
     // insets: {top, right, bottom, left}; boxes: [{id, r, fixed}]. Text and
@@ -514,7 +538,7 @@ async function measure(page, touch, insets) {
         if (!bar) { // in-flow content covered at rest is REACHABILITY's finding, not this one
           const h = document.elementFromPoint((part.v.left + part.v.right) / 2, (part.v.top + part.v.bottom) / 2);
           if (h && !(h === el || el.contains(h) || h.contains(el))) continue; }
-        boxes.push({ id: (bar ? idOf(bar) + ' > ' : '') + idOf(el) + ' "' + (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 24) + '"', r: part.v, fixed: !!bar });
+        boxes.push({ id: (bar ? idOf(bar) + ' > ' : '') + labelOf(el), r: part.v, fixed: !!bar });
       }
       const v = safeAreaViolations(boxes, insets, vw, vh);
       // what the page itself reads for env(safe-area-inset-*): proof the insets were applied
@@ -524,7 +548,7 @@ async function measure(page, touch, insets) {
       safeArea = { insets, env_read: { top: Math.round(pr.top), left: Math.round(pr.left) }, checked: boxes.length, violations: v.length, first: v.slice(0, 12) };
     }
     const text = (document.body && document.body.innerText) || '';
-    const cur = [...document.querySelectorAll('[aria-current]')].filter(vis).map(e => (e.textContent || '').trim().slice(0, 30));
+    const cur = [...document.querySelectorAll('[aria-current]')].filter(vis).map(labelOf);
     const suspect = text.match(new RegExp(suspectSrc, 'ig')) || [];
     return {
       title: document.title,
@@ -649,7 +673,7 @@ async function runControls(page, capture, pg, d, cdp) {
     if (home && here !== home) {
       // the last control left the page outside a tap (a delayed navigation):
       // recorded against it, and the page is loaded again for the next one
-      res.failed.push({ name: 'page left before: ' + c.name, why: ['PAGE_LEFT_TO ' + here] });
+      res.failed.push({ name: 'page left before: ' + c.name, why: ['PAGE_LEFT_TO ' + PA.publicPath(here)] });
       await page.goto(new URL(home, page.url()).href, { waitUntil: 'load', timeout: 60000 }).catch(() => {});
       await page.waitForTimeout(5000);
     }
@@ -719,7 +743,8 @@ async function runControls(page, capture, pg, d, cdp) {
       while (Date.now() - t0 < 3000) {
         await page.waitForTimeout(150);
         const obs = handle ? await handle.evaluate(observe, expect).catch(() => ({})) : {};
-        why = verdict(expect, obs, capture.navs.map(u => { const x = new URL(u); return x.pathname + x.search; }), capture.requests);
+        // a navigation is compared and named with its private search values hashed (/position?g=<room key>)
+        why = verdict(expect, obs, PA.navPaths(capture.navs), capture.requests);
         if (!why.length) break;
       }
     }
@@ -756,7 +781,11 @@ async function runControls(page, capture, pg, d, cdp) {
 }
 
 // the first position room the production read returns (its key is a
-// production identifier: only a short hash of it is written out)
+// production identifier: only a short hash of it is written out), and every
+// private identifier the harness can know of -- the room keys of both books,
+// the room's own read, the Trader snapshot's positions, orders and reviews --
+// so that none of them reaches preview.json wherever a page, a URL or an
+// error message would carry it (public-artifact.js, layer 3)
 async function findRoom(browser) {
   const ctx = await browser.newContext();
   await ctx.route('**/*', route => { const m = route.request().method(); return (m === 'GET' || m === 'HEAD') ? route.continue() : route.abort(); });
@@ -765,17 +794,24 @@ async function findRoom(browser) {
   try {
     await page.goto(BASE + '/positions', { waitUntil: 'load', timeout: 60000 });
     got = await page.evaluate(async () => {
+      const out = { key: null, book: null, why: null, reads: [] };
+      const read = async (u) => { try { const r = await fetch(u, { credentials: 'same-origin', cache: 'no-store' }); return { ok: r.ok, status: r.status, j: r.ok ? await r.json() : null }; } catch (e) { return { ok: false, status: 'FETCH_FAILED', j: null }; } };
       for (const book of ['PAPER', 'ACTUAL']) {
-        const r = await fetch('/api/command/positions/rooms?book=' + book, { credentials: 'same-origin', cache: 'no-store' });
-        if (!r.ok) return { why: 'ROOMS_READ_HTTP_' + r.status };
-        const j = await r.json();
-        for (const v of Object.values(j.venues || {})) for (const room of (v.rooms || [])) if (room && room.group_key) return { key: room.group_key, book };
+        const r = await read('/api/command/positions/rooms?book=' + book);
+        if (!r.ok) { if (!out.key) out.why = 'ROOMS_READ_HTTP_' + r.status; break; }
+        out.reads.push(r.j);
+        if (!out.key) for (const v of Object.values(r.j.venues || {})) { const room = (v.rooms || []).find(x => x && x.group_key); if (room) { out.key = room.group_key; out.book = book; break; } }
       }
-      return { why: 'NO_OPEN_POSITION_ROOM_IN_THE_PRODUCTION_READ' };
+      if (!out.key && !out.why) out.why = 'NO_OPEN_POSITION_ROOM_IN_THE_PRODUCTION_READ';
+      if (out.key) { const r = await read('/api/command/positions/room/' + encodeURIComponent(out.key)); if (r.ok) out.reads.push(r.j); }
+      const t = await read('/api/command/paper/trader-mode'); if (t.ok) out.reads.push(t.j);
+      return out;
     });
   } catch (e) { got = { why: 'ROOMS_READ_FAILED' }; }
   await ctx.close();
-  return { key: got.key || null, book: got.book || null, why: got.why || null,
+  const identifiers = PA.collectIdentifiers(got.reads || []);
+  if (got.key) PA.roomIdentifiers(got.key, identifiers);
+  return { key: got.key || null, book: got.book || null, why: got.key ? null : (got.why || null), identifiers, reads: (got.reads || []).length,
     key_sha256_12: got.key ? crypto.createHash('sha256').update(got.key).digest('hex').slice(0, 12) : null };
 }
 
@@ -783,16 +819,20 @@ async function findRoom(browser) {
   fs.mkdirSync(path.join(OUT, 'shots'), { recursive: true });
   const browser = await chromium.launch({ executablePath: process.env.PW_CHROMIUM || undefined, args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'] });
   const views = VIEWS.filter(([, pg]) => !ONLY.length || ONLY.includes(pg));
-  const room = views.some(([, pg]) => pg === 'room') ? await findRoom(browser) : null;
+  // read for every run (not only one with the room view): the identifiers protect every view
+  const room = await findRoom(browser);
+  const SECRETS = PA.compile(room.identifiers);
   const records = [];
   const writeOut = () => fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(),
-    views_planned: VIEWS.length, views_run: records.length, subset: ONLY.length ? ONLY : null, safe_area_insets: SAFE_AREA, records }, null, 1));
+    views_planned: VIEWS.length, views_run: records.length, subset: ONLY.length ? ONLY : null, safe_area_insets: SAFE_AREA,
+    // how many private identifiers the scrub held (a count, never the values)
+    redaction: { identifiers_known: room.identifiers.size, reads: room.reads }, records }, null, 1));
   for (const [dev, pg, motion] of views) {
     const d = DEVICES[dev];
     const name = `${dev}_${pg}${motion ? '_reduced_motion' : ''}`;
     if (pg === 'room' && !(room && room.key)) {
       // no room to open: the view is UNMEASURED and says why (never a pass)
-      records.push({ view: name, device: dev, page: pg, viewport: d.viewport, status: null, signed_in: null, unmeasured: (room && room.why) || 'NO_ROOM_KEY' });
+      records.push(PA.scrubDeep({ view: name, device: dev, page: pg, viewport: d.viewport, status: null, signed_in: null, unmeasured: (room && room.why) || 'NO_ROOM_KEY' }, SECRETS));
       continue;
     }
     const insets = d.hasTouch ? SAFE_AREA[dev] : null;
@@ -815,7 +855,8 @@ async function findRoom(browser) {
     if (insets && cdp) { try { await cdp.send('Emulation.setSafeAreaInsetsOverride', { insets }); } catch (e) { errors.push('safe-area override: ' + String(e).slice(0, 120)); } }
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
     page.on('pageerror', e => errors.push('pageerror: ' + String(e).slice(0, 200)));
-    page.on('response', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = u.pathname.replace(/\/[0-9a-f-]{8,}/g, '/:id') + ' ' + r.status(); api[k] = (api[k] || 0) + 1;
+    // counted by path with the room key masked (a room read is /api/command/positions/room/<key>)
+    page.on('response', r => { const u = new URL(r.url()); if (u.pathname.startsWith('/api/')) { const k = PA.apiPathKey(u.pathname) + ' ' + r.status(); api[k] = (api[k] || 0) + 1;
       if (u.pathname.startsWith('/api/command/') && (r.status() === 401 || r.status() === 403)) authRefusals++; } });
     let status = null;
     const target = pg === 'room' ? PAGES.room + '?g=' + encodeURIComponent(room.key) : PAGES[pg];
@@ -857,9 +898,10 @@ async function findRoom(browser) {
     const controls = !(ready.main_thread_responsive && !motion) ? null
       : !touchOk ? { error: 'TOUCH_EMULATION_NOT_RESTORED', declared: (CONTROLS[pg] || []).length, checked: 0, passed: 0, failed: [{ name: 'all', why: ['TOUCH_EMULATION_NOT_RESTORED'] }], unmeasured: [] }
       : await runControls(page, capture, pg, d, cdp).catch(e => ({ error: String(e).slice(0, 200) }));
-    records.push(Object.assign({ view: name, device: dev, page: pg, viewport: d.viewport, status, non_get_aborted: aborted,
+    // written only as the public artifact may hold it (public-artifact.js)
+    records.push(PA.scrubDeep(Object.assign({ view: name, device: dev, page: pg, viewport: d.viewport, status, non_get_aborted: aborted,
       console_errors: errors.length, first_errors: errors.slice(0, 6), api_by_path_status: api },
-      pg === 'room' ? { room_key_sha256_12: room.key_sha256_12, room_book: room.book } : {}, ready, perf, m, { controls }));
+      pg === 'room' ? { room_key_sha256_12: room.key_sha256_12, room_book: room.book } : {}, ready, perf, m, { controls }), SECRETS));
     await ctx.close();
     // written after every view: a run cut short still leaves what it measured,
     // and says how much of the matrix that is (views_run < views_planned)
