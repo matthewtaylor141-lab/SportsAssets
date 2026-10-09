@@ -109,6 +109,23 @@ def _rules_evidence(rules: dict | None) -> dict:
             "conflicts": dict(ev.get("conflicts") or {})}
 
 
+def kalshi_mapped(contract: dict) -> bool:
+    """A Kalshi registry row the Kalshi ontology mapped: its ontology names
+    no gap, and it has a sport and a family (market_plane.populate.
+    kalshi_contract_row). Before RC6 no Kalshi row was mapped."""
+    c = dict(contract or {})
+    ont = c.get("ontology")
+    if isinstance(ont, str):
+        import json
+        try:
+            ont = json.loads(ont)
+        except ValueError:
+            ont = None
+    if not isinstance(ont, dict) or "gaps" not in ont or ont.get("gaps"):
+        return False
+    return bool(c.get("sport")) and bool(c.get("family"))
+
+
 def h2h_family(contract: dict) -> str | None:
     """The bookmaker-terms family of a full-event WINNER contract, else None
     (a line, period or prop market has no captured money-line terms)."""
@@ -232,7 +249,11 @@ def state_for(contract: dict, *, valuation: dict | None = None,
     if not rules.get("rules_published"):
         return _out(EXTERNAL, R_VENUE_PUBLISHES_NO_RULES, BASIS_RULE_EVIDENCE,
                     ev)
-    if str(rules.get("venue") or c.get("venue") or "") == "KALSHI":
+    if str(rules.get("venue") or c.get("venue") or "") == "KALSHI" and \
+            not kalshi_mapped(c):
+        # (RC6) only an UNMAPPED Kalshi contract stops here; a contract the
+        # Kalshi ontology mapped (kalshi_ontology: sport, family, period,
+        # no gap) is judged below exactly like any other, on its own rules
         return _out(NOT_PROVEN, R_KALSHI_NOT_MAPPED, BASIS_RULE_EVIDENCE, ev)
     fam = h2h_family(c)
     if fam is None:

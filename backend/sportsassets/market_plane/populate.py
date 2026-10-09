@@ -42,9 +42,13 @@ delta: contracts that moved from MAPPED_BUT_SETTLEMENT_NOT_PROVEN to a
 PROVEN state (and back). Decision-time attest remains the trading authority.
 
 KALSHI. `populate_kalshi` writes the GET-only sports catalogue's markets as
-registry rows (venue KALSHI, contract_id 'kalshi:'+ticker, venue ids only,
-desired_subscription false, a named KALSHI_ONTOLOGY_NOT_MAPPED gap: no sport,
-family or mapping is guessed) and their rules into market_plane_rules.
+registry rows (venue KALSHI, contract_id 'kalshi:'+ticker, desired_subscription
+false) and their rules into market_plane_rules. Each row's ontology is
+kalshi_ontology.classify's (RC6): game winners, spreads, game totals and team
+totals are mapped from the series' sports tag and the contract's own
+rules_primary sentence; every other contract stays a gap named by the
+classifier (nothing is guessed). A mapped Kalshi contract's settlement state
+is then evidence-based like any other (market_plane.settlement).
 
 MEMORY: ONE PAGE AT A TIME (RC5, 2026-10-08). sportsassets-market-plane was
 OOM-killed at 2 GiB from 06:10:01Z (~14 kills by 12:50Z). The three passes
@@ -71,6 +75,7 @@ the same rules texts loaded, one write transaction per pass as before.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -674,6 +679,8 @@ async def _fetch_chunked(conn, sql, ids, *args, key="slug"):
 BREAKDOWN_MAX_KEYS = 200
 #: active contracts classified (and their changes written) per page
 COVERAGE_PAGE = 5000
+#: the coverage pass yields to the event loop every this many contracts
+YIELD_EVERY_ROWS = 250
 
 COVERAGE_KEYS_SQL = ("SELECT contract_id FROM market_plane_registry "
                      " WHERE active ORDER BY priority, contract_id")
@@ -684,6 +691,15 @@ COVERAGE_ROWS_SQL = """
            settlement_evidence->>'rules_sha256' AS settlement_rules_sha
       FROM market_plane_registry WHERE contract_id = ANY($1::text[])
 """
+#: the rule text a terms comparison reads (Polymarket US: its one captured
+#: field; Kalshi: rules_primary) and, for a mapped Kalshi contract only, its
+#: rules_secondary -- where its postponement / cancellation terms are --
+#: appended (RC6): the comparison reads the contract's whole rule block
+RULES_TEXT_SQL = ("SELECT contract_id, rules_text FROM market_plane_rules "
+                  " WHERE contract_id = ANY($1::text[])")
+RULES_SECONDARY_SQL = ("SELECT contract_id, rules_secondary "
+                       "  FROM market_plane_rules "
+                       " WHERE contract_id = ANY($1::text[])")
 COVERAGE_WRITE_SQL = (
     "UPDATE market_plane_registry SET coverage_state = $2, "
     "       coverage_why = $3, coverage_at = to_timestamp($4) "
@@ -816,8 +832,12 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     str(x).startswith("SETTLEMENT")
                     for x in (v.get("refusals") or []))
                 fam = S.h2h_family(r)
+                # (RC6) a MAPPED Kalshi full-event winner is compared like a
+                # Polymarket US one, on its own rule block (an unmapped
+                # Kalshi row has no family, so fam is None)
                 if rr is None or attested or not rr.get("rules_published") \
-                        or rr.get("venue") != VENUE or fam is None:
+                        or rr.get("venue") not in (VENUE, KALSHI) \
+                        or fam is None:
                     continue
                 tk = (rr.get("rules_sha256"), fam, r.get("competition"))
                 if tk in S._TERMS_CACHE and tk not in loaded_keys:
@@ -826,14 +846,28 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     need.append(s)
                     loaded_keys.add(tk)
             texts = await _fetch_chunked(
-                conn, "SELECT contract_id, rules_text FROM market_plane_rules "
-                      " WHERE contract_id = ANY($1::text[])", need,
-                key="contract_id") if need else {}
+                conn, RULES_TEXT_SQL, need, key="contract_id") if need else {}
+            kneed = [s for s in need
+                     if (rules.get(s) or {}).get("venue") == KALSHI]
+            seconds = await _fetch_chunked(
+                conn, RULES_SECONDARY_SQL, kneed,
+                key="contract_id") if kneed else {}
             for s, t in texts.items():
-                rules[s]["rules_text"] = t.get("rules_text")
+                txt = t.get("rules_text")
+                sec = (seconds.get(s) or {}).get("rules_secondary")
+                if txt is not None and sec:
+                    txt = "%s\n\n%s" % (txt, sec)
+                rules[s]["rules_text"] = txt
             n_texts += len(texts)
             changed, schanged = [], []
             for r in rows:
+                if n_rows and n_rows % YIELD_EVERY_ROWS == 0:
+                    # (RC6) a terms comparison is ~1 ms: the mapped Kalshi
+                    # full-event winners (4,052 of the 2026-10-09 catalogue)
+                    # add up to ~1 s of comparisons to a page, so the pass
+                    # hands the event loop back between rows (no output
+                    # changes: nothing here reads shared state)
+                    await asyncio.sleep(0)
                 s = r["contract_id"]
                 origin = None
                 if s in fresh_symbols:
@@ -976,15 +1010,53 @@ KALSHI = "KALSHI"
 
 
 def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
-    """PURE. One Kalshi catalogue market -> its registry row. Venue ids
-    only; NO sport / family / period is assigned (no guessed mapping), so
-    the row stays a named ontology gap; never subscribed on the PMUS
-    streams (desired_subscription false)."""
+    """PURE. One Kalshi catalogue market -> its registry row; never
+    subscribed on the PMUS streams (desired_subscription false).
+
+    THE KALSHI ONTOLOGY (RC6, kalshi_ontology). Until RC6 every Kalshi row
+    was the one gap KALSHI_ONTOLOGY_NOT_MAPPED (no sport, family or period:
+    "no guessed mapping"; 76,467 active rows at RC5). kalshi_ontology.
+    classify now reads the series' own sports tag and the contract's own
+    rules_primary sentence -- anchored venue templates, a subject that is a
+    participant the sentence names (or the market's code in the event
+    ticker), the stated line, period and overtime clause -- and maps game
+    winners, spreads, game totals and team totals; the row then carries its
+    sport, family and period, and its settlement terms bound by the rule
+    block's own fingerprint (kalshi_ontology.bind_terms). Everything else
+    stays a gap NAMED by the classifier (player props, team-stat props,
+    other game props, outrights / season contracts, non-binary payouts,
+    unrecognised sentences, a ticker not under its event), never guessed.
+    It reads only fields the plane's walk keeps (KALSHI_PERSIST_KEYS +
+    _series), so both walks (the plane's and kalshi_market_data's) write
+    the same row."""
+    from .. import kalshi_ontology as KONT
     t = (market or {}).get("ticker")
     if not t:
         return None
     ser = dict(market.get("_series") or {})
-    ontology = {"gaps": ["KALSHI_ONTOLOGY_NOT_MAPPED"],
+    v = KONT.classify(market)
+    mapped = v["status"] == KONT.MAPPED
+    subj = v.get("subject") or {}
+    meaning = {"venue": KALSHI, "venue_contract_id": t,
+               "sport": v["sport"], "competition": ser.get("ticker"),
+               "event_id": market.get("event_ticker"),
+               "subject_type": subj.get("type") if mapped else None,
+               "subject_id": (subj.get("ticker_code") or
+                              subj.get("as_stated")) if mapped else None,
+               "period": v["period"] if mapped else None,
+               "metric": v["family"] if mapped else None,
+               "operator": v["operator"] if mapped else None,
+               "line": (float(v["line"]) if mapped and v["line"] is not None
+                        else None),
+               "side": None, "settlement_schema": None,
+               "raw_market_type": ser.get("ticker"),
+               "ontology_version": KONT.VERSION}
+    # (the row is rewritten on every walk: empty fields are not stored)
+    meaning = {k: x for k, x in meaning.items() if x is not None}
+    ontology = {"gaps": [] if mapped else [v["refusal"]],
+                "meaning": meaning,
+                "kalshi": KONT.stored(v),
+                "terms": KONT.bind_terms(market, v) if mapped else None,
                 "venue_ids": {"ticker": t,
                               "event_ticker": market.get("event_ticker"),
                               "series_ticker": ser.get("ticker")},
@@ -996,16 +1068,22 @@ def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
                 "close_time": market.get("close_time"),
                 "display_only": {"title": market.get("title"),
                                  "yes_sub_title": market.get("yes_sub_title")},
-                "basis": "VENUE_IDS", "version": O.VERSION}
+                "basis": ("VENUE_IDS+SERIES_SPORT_TAG+RULES_PRIMARY_TEMPLATE"
+                          if mapped else "VENUE_IDS"),
+                "version": O.VERSION}
+    sport = v["sport"]
+    family = v["family"] if mapped else None
+    period = v["period"] if mapped else None
     content = {"ontology": ontology, "event_id": market.get("event_ticker"),
-               "competition": ser.get("ticker")}
-    return {"contract_id": "kalshi:%s" % t, "venue": KALSHI, "sport": None,
+               "competition": ser.get("ticker"), "sport": sport,
+               "family": family, "period": period}
+    return {"contract_id": "kalshi:%s" % t, "venue": KALSHI, "sport": sport,
             "competition": ser.get("ticker"),
             "event_id": market.get("event_ticker"),
             "market_type": market.get("market_type"), "ontology": ontology,
             "active": True, "desired_subscription": False,
             "priority": P_REST, "required_reason": "VENUE_ACTIVE",
-            "family": None, "period": None, "event_start": None,
+            "family": family, "period": period, "event_start": None,
             "last_seen_at": now, "content_sha": _sha(content)}
 
 

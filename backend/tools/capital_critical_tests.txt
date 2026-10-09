@@ -1401,3 +1401,9 @@ tests/test_rc6_d1_snapshot_refresh.py
 tests/test_rc6_d1_freshness_window.py
 # (RC6 api-responsive) Derek's research-model provenance check (28,303 records) and the capital authority's blocker census (83,477 refusals) answer exactly as before, computed off the API event loop; the registry read leaves the 16 MB stored records behind and names changed records from the registry on a mismatch
 tests/test_rc6_api_responsive_offloop.py
+# (RC6 lane K) Kalshi WS books: every message of a sid (snapshots too) is sequence-checked, a gapped sid is dead, one gap resubscribes each market exactly once (ack-bound, in-flight snapshots before/after the resubscribe ack), only dead sids are unsubscribed (no book current on a dropped sid), a reconnect subscribes each market once and books return CURRENT only on a fresh snapshot
+tests/test_rc6_kalshi_ws_sequencing.py
+# (RC6 lane K) Kalshi ontology: real catalogue rows mapped (winner / spread / total / team total) from the series tag and the contract's own rules sentence, or refused by name; mapped rows leave the code-controlled gap and are settlement-judged on their own rules
+tests/test_rc6_kalshi_ontology.py
+# (RC6 lane K) Kalshi credentials are Kalshi's own: the control's verdict per venue slot is independent, no signer reads another venue's env names
+tests/test_rc6_kalshi_credential_isolation.py

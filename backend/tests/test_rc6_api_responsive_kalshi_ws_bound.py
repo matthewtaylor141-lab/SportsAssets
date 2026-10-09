@@ -207,7 +207,7 @@ def test_a_dropped_markets_message_on_a_gapped_sid_re_arms_nothing():
     assert b.on_message(delta(1, 4, "A")) == "GAP"        # seq 3 lost
     assert b.current("A")["ok"] is False and "A" in b.resubscribe
     # the dropped market's late snapshot on the broken sid
-    assert b.on_message(snap(1, 5, "B")) == "IGNORED_GAPPED_SID"
+    assert b.on_message(snap(1, 5, "B")) == "IGNORED_DEAD_SID"
     assert b.sid_seq.get(1) is None
     assert b.on_message(delta(1, 6, "A")) == "IGNORED_NOT_CURRENT"
     assert b.current("A")["ok"] is False
@@ -216,3 +216,19 @@ def test_a_dropped_markets_message_on_a_gapped_sid_re_arms_nothing():
                          "msg": {"sid": 1}}) == "SUBSCRIBED"
     assert b.on_message(snap(1, 1, "A")) == "SNAPSHOT"
     assert b.current("A")["ok"] is True
+
+
+def test_a_dropped_market_bound_on_another_sid_never_comes_back_by_its_gap():
+    """With the kalshi lane's bind(): a market CURRENT on sid 7 and also
+    acknowledged on sid 9 is dropped; a later gap of sid 9 must not bring
+    its book back or resubscribe it (it is no longer wanted)."""
+    b = KWS.WsBooks(clock=lambda: NOW)
+    b.on_connected()
+    b.want(["A", "B"])
+    assert b.on_message(snap(7, 1, "A")) == "SNAPSHOT"
+    b.bind(9, ["A", "B"])
+    assert b.on_message(snap(9, 1, "B")) == "SNAPSHOT"
+    b.forget(["A"])
+    assert b.on_message(delta(9, 3, "B")) == "GAP"        # seq 2 lost
+    assert "A" not in b.books and "A" not in b.resubscribe
+    assert "B" in b.resubscribe

@@ -29,10 +29,11 @@ snapshot (seq <= last) used to roll its book back to the older state while
 it stayed CURRENT, and a snapshot that SKIPPED a seq (a lost message for
 another market of the sid) used to advance the sid past the gap, so the
 other market served a book missing that update as CURRENT. Either now gaps
-the sid (R_SNAPSHOT_OUT_OF_SEQUENCE) and is not applied. A gapped sid stays
-untrusted -- a later snapshot on it is ignored -- until the venue
-announces it again (`subscribed`) or the connection ends; the resubscribe
-(a new subscription) restores CURRENT.
+the sid and is not applied (a replay: R_SNAPSHOT_OUT_OF_SEQUENCE; a lost
+message: R_SEQ_GAP). A gapped sid is DEAD -- a later snapshot on it is
+ignored (IGNORED_DEAD_SID) -- until the venue announces it again
+(`subscribed`) or the connection ends; the resubscribe (a new
+subscription) restores CURRENT.
 
 Account limits: GET /trade-api/v2/account/limits is the authoritative
 usage tier and read / write token buckets; REST recovery pacing derives
@@ -75,6 +76,8 @@ DEFAULT_TOKEN_COST = 10
 #: budget (200 tokens/s) at the default cost, halved; labelled as such
 FALLBACK_REST_RATE_PER_S = 10.0
 SUBSCRIBE_CHUNK = 100
+#: subscribe commands awaiting the venue's `subscribed` ack, kept at most
+MAX_PENDING_SUBSCRIBES = 512
 
 CURRENT = "CURRENT"
 GAP = "GAP"
@@ -173,7 +176,35 @@ def _d(x) -> Decimal:
 
 
 class WsBooks:
-    """Per-market books under per-sid sequence discipline."""
+    """Per-market books under per-sid sequence discipline.
+
+    THE SEQUENCE IS THE SUBSCRIPTION'S, NOT THE BOOK'S (RC6, 2026-10-09).
+    The venue numbers every message of a sid -- each market's
+    `orderbook_snapshot` as well as every `orderbook_delta` -- with one
+    sequence ("Used for snapshot/delta consistency", websockets/orderbook-
+    updates). So:
+      * a snapshot whose seq skips on a sid that is already sequenced means
+        messages of that sid were lost: every book of the sid goes GAP (the
+        snapshot used to be applied and the sid's sequence re-based, so a
+        lost delta of another market on the sid stayed CURRENT);
+      * every in-sequence message advances the sid, including a delta for a
+        market whose book is not CURRENT on that sid (it used to be skipped
+        without advancing, so the sid's next message looked like a gap);
+      * a sid that has gapped is DEAD until the connection ends, or until
+        the venue acknowledges a new subscription under the same number
+        (it is being unsubscribed): nothing on it is applied, and a snapshot
+        still in flight on it never makes a book CURRENT -- its market is
+        resubscribed if, and only if, the gap did not already do so (the
+        market was not bound to the sid) and no live sid serves or awaits
+        it: one gap, one resubscribe per market;
+      * a gap or an error on a sid gaps only the books that live on that sid
+        (or were subscribed on it and still wait for a snapshot); a book
+        already CURRENT on, or acknowledged on, a live sid is left alone;
+      * only a dead sid is ever unsubscribed (Subscriber), so no book is
+        current on a subscription the venue no longer feeds.
+    `bind(sid, tickers)` (the subscriber, on the venue's `subscribed` ack)
+    records which markets a sid carries before any snapshot arrives, so a
+    market whose snapshot never came is resubscribed with its sid."""
 
     def __init__(self, clock=time.time):
         self.clock = clock
@@ -181,15 +212,13 @@ class WsBooks:
         self.sid_seq: dict = {}     # sid -> last seq
         self.sid_markets: dict = {}  # sid -> set(tickers)
         self.ticker_sid: dict = {}
+        self.dead_sids: set = set()
         self.stats = {"snapshots": 0, "deltas": 0, "gaps": 0,
                       "disconnects": 0, "ignored_after_gap": 0,
-                      "errors": 0, "snapshots_out_of_sequence": 0,
-                      "ignored_gapped_sid": 0, "forgotten": 0,
+                      "errors": 0, "ignored_dead_sid": 0,
+                      "snapshots_out_of_sequence": 0, "forgotten": 0,
                       "ignored_not_tracked": 0}
         self.resubscribe: set = set()
-        #: sids whose sequence broke on this connection: nothing on them is
-        #: trusted again until the venue announces the sid anew
-        self.gapped_sids: set = set()
         self.connected = False
         #: (RC6) markets the runtime stopped tracking in THIS session (see
         #: `forget`); cleared with the session
@@ -227,8 +256,11 @@ class WsBooks:
             self.books.pop(t, None)
             sid = self.ticker_sid.pop(t, None)
             if sid is not None:
-                self.sid_markets.get(sid, set()).discard(t)
                 out.setdefault(sid, []).append(t)
+            # bound (acknowledged) on any sid, live or dead: a later gap of
+            # that sid must not bring the book back
+            for ms in self.sid_markets.values():
+                ms.discard(t)
             self.resubscribe.discard(t)
             self.forgotten.add(t)
             self.stats["forgotten"] += 1
@@ -237,13 +269,14 @@ class WsBooks:
     def _not_tracked(self, typ, sid, seq) -> str:
         """A message for a forgotten market: no book, but its sid's
         sequence is kept exactly as a tracked market's message keeps it.
-        On a sid whose sequence already broke nothing is re-armed: its
-        place in the sequence cannot be known until the venue announces
-        the sid anew (the red-team rule for a gapped sid's snapshot)."""
+        On a DEAD sid (its sequence already broke) nothing is re-armed and
+        nothing is resubscribed: its place in the sequence cannot be known
+        until the venue announces the sid anew, and the market is no longer
+        wanted."""
         self.stats["ignored_not_tracked"] += 1
-        if sid in self.gapped_sids:
-            self.stats["ignored_gapped_sid"] += 1
-            return "IGNORED_GAPPED_SID"
+        if sid in self.dead_sids:
+            self.stats["ignored_dead_sid"] += 1
+            return "IGNORED_DEAD_SID"
         if typ == "orderbook_snapshot":
             self.sid_seq[sid] = seq
             return "IGNORED_NOT_TRACKED"
@@ -260,7 +293,9 @@ class WsBooks:
         self.connected = True
 
     def on_disconnected(self) -> None:
-        """Every book GAP: a book held across a reconnect is never reused."""
+        """Every book GAP: a book held across a reconnect is never reused.
+        (The next connection subscribes every wanted market afresh; the
+        resubscribe set is the subscriber's to reset then.)"""
         self.connected = False
         self.stats["disconnects"] += 1
         for t, b in self.books.items():
@@ -270,19 +305,62 @@ class WsBooks:
         self.sid_seq.clear()
         self.sid_markets.clear()
         self.ticker_sid.clear()
-        # sids are the connection's: a new connection starts clean
-        self.gapped_sids.clear()
+        self.dead_sids.clear()
         # a new session subscribes only what is wanted
         self.forgotten.clear()
 
+    def bind(self, sid, tickers) -> None:
+        """The venue acknowledged a subscribe as `sid`: the markets it
+        carries are known before their snapshots arrive. A market CURRENT
+        on another sid keeps that sid."""
+        if sid is None:
+            return
+        self._revive(sid)
+        self.sid_markets.setdefault(sid, set()).update(tickers)
+        for t in tickers:
+            b = self._book(t)
+            if b["state"] != CURRENT or b["sid"] is None:
+                self.ticker_sid[t] = sid
+
+    def _revive(self, sid) -> None:
+        """The venue announced (`subscribed`) a sid number this connection
+        already saw die -- the docs promise no unique sid: a NEW
+        subscription under a reused number. One connection delivers in
+        order, so every message of the old subscription preceded the
+        announcement: its sequence and markets start afresh (left dead, the
+        new subscription's snapshots were ignored until a reconnect). A
+        live sid is never reset by an announcement."""
+        if sid in self.dead_sids:
+            self.dead_sids.discard(sid)
+            self.sid_seq.pop(sid, None)
+            self.sid_markets.pop(sid, None)
+
+    def _current_elsewhere(self, b, sid) -> bool:
+        return b["state"] == CURRENT and b["sid"] is not None \
+            and b["sid"] != sid
+
+    def _held_elsewhere(self, t, b, sid) -> bool:
+        """The market is served -- CURRENT -- or awaited -- acknowledged,
+        its snapshot still to come -- on a LIVE sid other than `sid`: that
+        subscription delivers its book, so nothing on `sid` resubscribes
+        it (a resubscribe would open a second live sid for it)."""
+        if self._current_elsewhere(b, sid):
+            return True
+        s = self.ticker_sid.get(t)
+        return s is not None and s != sid and s not in self.dead_sids
+
     def _gap_sid(self, sid, why) -> None:
+        if sid in self.dead_sids:
+            return
         self.stats["gaps"] += 1
         for t in self.sid_markets.get(sid, set()):
             b = self._book(t)
+            if self._held_elsewhere(t, b, sid):
+                continue
             b.update(state=GAP, why=why)
             self.resubscribe.add(t)
         self.sid_seq[sid] = None
-        self.gapped_sids.add(sid)
+        self.dead_sids.add(sid)
 
     def on_message(self, m: dict, *, recv_at: float | None = None) -> str:
         """Apply one decoded WS message; returns what happened."""
@@ -290,14 +368,9 @@ class WsBooks:
         typ = m.get("type")
         sid = m.get("sid")
         if typ == "subscribed":
-            # the venue announcing a sid starts that subscription afresh: a
-            # sid number it reuses after a gap is a NEW subscription (its own
-            # snapshot follows); an in-sequence sid is never reset here
-            new = (m.get("msg") or {}).get("sid", sid)
-            if new in self.gapped_sids:
-                self.gapped_sids.discard(new)
-                self.sid_seq.pop(new, None)
-                self.sid_markets.pop(new, None)
+            # (the subscriber binds the ack first, which revives the sid with
+            # its markets; standalone, the announcement alone revives it)
+            self._revive((m.get("msg") or {}).get("sid", sid))
             return "SUBSCRIBED"
         if typ == "error":
             self.stats["errors"] += 1
@@ -313,23 +386,40 @@ class WsBooks:
             return "MALFORMED"
         if t in self.forgotten:
             return self._not_tracked(typ, sid, seq)
+        if sid in self.dead_sids:
+            # gapped and being unsubscribed: nothing on it is applied. A
+            # snapshot still in flight on it resubscribes its market ONLY
+            # when the gap could not: the market was not known on the sid
+            # (no `subscribed` ack bound it). A market the ack bound was
+            # resubscribed at the gap, and one served or awaited on a live
+            # sid has its subscription; resubscribing either opened a
+            # second live sid for it, and the unsubscribe that followed
+            # named the LIVE sid its new ack had bound (review of 5f8b2de5).
+            # Each market is handled once per dead sid.
+            if typ != "orderbook_snapshot":
+                self.stats["ignored_after_gap"] += 1
+                return "IGNORED_NOT_CURRENT"
+            self.stats["ignored_dead_sid"] += 1
+            b = self._book(t)
+            on_dead = self.sid_markets.setdefault(sid, set())
+            if t not in on_dead and not self._held_elsewhere(t, b, sid):
+                b.update(state=GAP, why=R_SEQ_GAP)
+                self.resubscribe.add(t)
+            on_dead.add(t)
+            return "IGNORED_DEAD_SID"
+        last = self.sid_seq.get(sid)
         if typ == "orderbook_snapshot":
-            if sid in self.gapped_sids:
-                # a broken subscription's in-flight (or replayed) snapshot:
-                # its place in the sequence cannot be known; the resubscribe
-                # delivers the fresh one
-                self.stats["ignored_gapped_sid"] += 1
-                return "IGNORED_GAPPED_SID"
-            last = self.sid_seq.get(sid)
             if last is not None and seq != last + 1:
-                # replayed / out of order (seq <= last) or past a lost
-                # message (seq > last + 1): never applied, the sid is GAP
+                # messages of this sid were lost before this snapshot (seq
+                # past last + 1), or it is a replayed / out-of-order snapshot
+                # (seq <= last, red-team scenario 4: applying it rolled a
+                # CURRENT book back): never applied, every book of the sid
+                # goes GAP, this market's too (its sid is about to be torn
+                # down)
                 self.stats["snapshots_out_of_sequence"] += 1
-                self._gap_sid(sid, R_SNAPSHOT_OUT_OF_SEQUENCE)
-                b = self._book(t)
-                if b["sid"] == sid or b["state"] != CURRENT:
-                    b.update(state=GAP, why=R_SNAPSHOT_OUT_OF_SEQUENCE)
-                    self.resubscribe.add(t)
+                self.sid_markets.setdefault(sid, set()).add(t)
+                self._gap_sid(sid, R_SNAPSHOT_OUT_OF_SEQUENCE
+                              if seq <= last else R_SEQ_GAP)
                 return "GAP"
             b = self._book(t)
             yes = {_d(p): _d(q) for p, q in msg.get("yes_dollars_fp") or []}
@@ -344,16 +434,18 @@ class WsBooks:
             self.resubscribe.discard(t)
             self.stats["snapshots"] += 1
             return "SNAPSHOT"
-        # delta
-        last = self.sid_seq.get(sid)
-        b = self._book(t)
-        if last is None or b["sid"] != sid or b["state"] != CURRENT:
+        # delta: the sid's sequence first, then this market's book
+        if last is None:
             self.stats["ignored_after_gap"] += 1
             return "IGNORED_NOT_CURRENT"
         if seq != last + 1:
             self._gap_sid(sid, R_SEQ_GAP)
             return "GAP"
         self.sid_seq[sid] = seq
+        b = self._book(t)
+        if b["sid"] != sid or b["state"] != CURRENT:
+            self.stats["ignored_after_gap"] += 1
+            return "IGNORED_NOT_CURRENT"
         side = str(msg.get("side") or "").lower()
         if side not in ("yes", "no"):
             self._gap_sid(sid, R_SUB_ERROR)
@@ -443,6 +535,10 @@ class Subscriber:
         self.backoff = backoff
         self.cmd = Commands()
         self.subscribed: set = set()
+        self.unsubscribed_sids: set = set()
+        # each subscribe's markets until the venue acknowledges it (the
+        # `subscribed` message names the command id and the sid it opened)
+        self.pending: dict = {}
         self.connections = 0
         self.resubscribes = 0
         self.last_error = None
@@ -462,17 +558,33 @@ class Subscriber:
 
     async def _subscribe(self, ws, tickers) -> None:
         for c in chunks(sorted(tickers)):
-            await ws.send(json.dumps(self.cmd.subscribe(c)))
+            cmd = self.cmd.subscribe(c)
+            self.pending[cmd["id"]] = list(c)
+            while len(self.pending) > MAX_PENDING_SUBSCRIBES:
+                self.pending.pop(next(iter(self.pending)))
+            await ws.send(json.dumps(cmd))
             self.subscribed.update(c)
 
+    def _needs_repair(self) -> bool:
+        return bool(self.books.resubscribe
+                    or self.books.dead_sids - self.unsubscribed_sids)
+
     async def _resubscribe_gapped(self, ws) -> None:
+        """Unsubscribe each DEAD sid once, then resubscribe the markets the
+        books named. Only a sid the books have gapped is ever unsubscribed:
+        it used to be the sid each resubscribed market's ticker_sid pointed
+        to, which after a `subscribed` ack is the market's NEW live sid --
+        that unsubscribe left the market's siblings CURRENT on a sid the
+        venue no longer feeds, re-stamped fresh every reassert (review of
+        5f8b2de5). A dead sid's books are already GAP and its sequence is
+        void, so no book is ever current on a sid this runtime dropped."""
+        sids = sorted(self.books.dead_sids - self.unsubscribed_sids)
+        if sids:
+            await ws.send(json.dumps(self.cmd.unsubscribe(sids)))
+            self.unsubscribed_sids.update(sids)
         todo = sorted(self.books.resubscribe)
         if not todo:
             return
-        sids = sorted({self.books.ticker_sid.get(t) for t in todo
-                       if self.books.ticker_sid.get(t) is not None})
-        if sids:
-            await ws.send(json.dumps(self.cmd.unsubscribe(sids)))
         for t in todo:
             self.books.ticker_sid.pop(t, None)
         self.resubscribes += 1
@@ -488,6 +600,16 @@ class Subscriber:
             want = list(self.wanted())
             self.books.want(want)
             self.subscribed = set()
+            self.unsubscribed_sids = set()
+            self.pending.clear()
+            # A NEW CONNECTION HAS NO SUBSCRIPTION: the one subscribe below
+            # covers every wanted market. The previous connection's
+            # disconnect left every book in the resubscribe set; acting on
+            # it here re-sent a subscribe for every market on top of this
+            # one (a second sid each, and a resubscribe counted that no gap
+            # caused; the RC5 production readback shows 10 connections and
+            # 18 resubscribes). Each book stays GAP until its fresh snapshot.
+            self.books.resubscribe.clear()
             await self._subscribe(ws, want)
             n = 0
             while max_messages is None or n < max_messages:
@@ -497,8 +619,15 @@ class Subscriber:
                     m = json.loads(raw)
                 except ValueError:
                     continue
+                if m.get("type") == "subscribed":
+                    sid = (m.get("msg") or {}).get("sid")
+                    self.books.bind(sid,
+                                    self.pending.pop(m.get("id"), None) or [])
+                    # a reused sid number is a new subscription: if it gaps
+                    # it is unsubscribed again
+                    self.unsubscribed_sids.discard(sid)
                 self.books.on_message(m, recv_at=self.clock())
-                if self.books.resubscribe:
+                if self._needs_repair():
                     await self._resubscribe_gapped(ws)
                 add = [t for t in self.wanted() if t not in self.subscribed]
                 if add:
@@ -596,6 +725,12 @@ def mechanism(rest_detail: dict | None, ws_beat: dict | None,
                "subscribed_markets": wd.get("subscribed_markets"),
                "resubscribes": wd.get("resubscribes"),
                "connections": wd.get("connections"),
+               # (RC6) what caused the resubscribes, as the books counted
+               # it: a resubscribe follows a gap, a sid error or a snapshot
+               # on a dead sid -- never a reconnect (that is `connections`)
+               "gaps": ws.get("gaps"), "errors": ws.get("errors"),
+               "disconnects": ws.get("disconnects"),
+               "ignored_dead_sid": ws.get("ignored_dead_sid"),
                "by_state": ws.get("by_state"),
                "current_book_update_age_s": wd.get(
                    "current_book_update_age_s"),

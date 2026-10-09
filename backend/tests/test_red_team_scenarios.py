@@ -424,7 +424,7 @@ def test_replay_a_replayed_snapshot_never_rolls_a_current_book_back():
     assert b.on_message(_delta(1, 3, "K-NYY", "0.44", "-50")) == \
         "IGNORED_NOT_CURRENT"
     assert b.on_message(_snap(1, 4, "K-NYY", [("0.40", "1")])) == \
-        "IGNORED_GAPPED_SID"
+        "IGNORED_DEAD_SID"
     assert not b.current("K-NYY")["ok"]
     # the resubscription (a new sid) restores CURRENT on ITS snapshot
     b.on_message(_snap(2, 1, "K-NYY", [("0.46", "20")]))
@@ -465,7 +465,7 @@ def test_replay_a_reannounced_sid_is_a_new_subscription():
     b.on_message(_snap(3, 1, "K-NYY", [("0.43", "100")]))
     b.on_message(_delta(3, 3, "K-NYY", "0.44", "1"))         # gap
     assert b.on_message(_snap(3, 4, "K-NYY", [("0.40", "1")])) == \
-        "IGNORED_GAPPED_SID"
+        "IGNORED_DEAD_SID"
     # the venue announces sid 3 again (a reused number): its own snapshot
     # starts it afresh; an in-sequence sid is never reset by an announcement
     b.on_message({"type": "subscribed", "msg": {"channel": "orderbook_delta",
