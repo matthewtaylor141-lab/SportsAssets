@@ -531,7 +531,22 @@ def samples(prob: dict, registry: dict) -> dict:
                                  MIN_INDEPENDENT_EVENTS,
                              "source": "completion probability evidence "
                                        "(first ENTER per strategy x market x "
-                                       "side, event-clustered)"})
+                                       "side, event-clustered)",
+                             # WHICH partition, registered WHEN, over WHAT
+                             # (research_registry); absent = none registered
+                             "partition": ({
+                                 "study": registry.get("study"),
+                                 "plan_sha": registry.get("plan_sha"),
+                                 "registered_at": registry.get(
+                                     "registered_at"),
+                                 "counts": {k: len(v or ()) for k, v in
+                                            parts.items()},
+                                 "scope": ("the PAPER strategy-selection "
+                                           "study's events (paper_fills "
+                                           "fixtures), keyed-hash slices; "
+                                           "the probability evidence above "
+                                           "fits no parameter and reads no "
+                                           "holdout")} if parts else None)})
 
 
 def multiple_testing(registry: dict) -> dict:
@@ -546,12 +561,35 @@ def multiple_testing(registry: dict) -> dict:
     blockers = list(g["blockers"])
     if not pre:
         blockers.append("NO_PREREGISTERED_CANDIDATE_SET")
+    m = registry.get("measurement") or {}
+    if m.get("unregistered_tested"):
+        # a strategy in the measured data that the registration does not
+        # name is an unregistered candidate however the counts compare
+        blockers.append("UNREGISTERED_CANDIDATES_TESTED")
     return result("MULTIPLE_TESTING", GREEN if not blockers else RED,
                   blockers, {"candidates_tested": tested,
                              "preregistered": pre,
                              "selected_after_holdout": selected_after,
                              "pbo": "UNMEASURED" if pbo is None else pbo,
                              "dsr": "UNMEASURED" if dsr is None else dsr,
+                             # THE MEASURED VALUES and why one is missing
+                             # (research_registry.measure): a bool alone
+                             # could not say how far from acceptable
+                             "pbo_value": m.get("pbo"),
+                             "pbo_why": m.get("pbo_why"),
+                             "pbo_detail": m.get("pbo_detail"),
+                             "dsr_value": m.get("dsr"),
+                             "dsr_why": m.get("dsr_why"),
+                             "dsr_detail": m.get("dsr_detail"),
+                             "acceptance": m.get("acceptance"),
+                             "tested": m.get("tested"),
+                             "unregistered_tested": m.get(
+                                 "unregistered_tested"),
+                             "days": m.get("days"),
+                             "events": m.get("events"),
+                             "excluded": m.get("excluded"),
+                             "study": registry.get("study"),
+                             "plan_sha": registry.get("plan_sha"),
                              "champion": "CASH (no candidate beats it "
                                          "absolutely)"})
 
@@ -571,6 +609,15 @@ async def holdout_registry(conn) -> dict:
             out["preregistered"] = max(out["preregistered"],
                                        int(r["candidate_count"] or 0))
             out["partitions"] = d.get("partitions") or out["partitions"]
+            # the LATEST registration names the study the measurement runs
+            plan = d.get("plan") or {}
+            out["study"] = plan.get("study") or out.get("study")
+            out["plan_sha"] = d.get("plan_sha") or out.get("plan_sha")
+            out["registered_candidates"] = list(
+                plan.get("candidates") or out.get("registered_candidates")
+                or [])
+            out["registered_at"] = (r["at"].timestamp() if hasattr(
+                r["at"], "timestamp") else r["at"])
         elif r["kind"] == "HOLDOUT_OPEN":
             out["holdout_opens"] += 1
             opened_at = opened_at or r["at"]
@@ -591,21 +638,54 @@ def capacity(points: list, *, requested_usd) -> dict:
     g = RTC.capacity_frontier(pts) if pts else {
         "green": False, "max_positive_qty": 0, "best_qty": None,
         "best_expected_net": None, "blockers": ("NO_CAPACITY_EVIDENCE",)}
-    proven_usd = sum((D(p["capital_usd"]) for p in points
-                      if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
-                      and D(p["lb_ev_per_contract"]) > 0
-                      and D(p["expected_net"]) > 0), Decimal(0))
+    # PROVEN CAPITAL COUNTS ONLY ELIGIBLE POINTS AND EACH OPPORTUNITY ONCE
+    # (RC6 ev-audit). A point is eligible on exactly the frontier's own rule
+    # (lower-bound EV > 0, fill probability >= the frontier's minimum,
+    # expected net > 0) -- the fill-probability leg was missing here, so a
+    # point the frontier refused for fill probability still added capital.
+    # One opportunity (strategy, contract, side) evaluated in several size
+    # buckets is ONE position: its proven capital is its largest eligible
+    # evaluated size, never the sum over buckets.
+    min_fp = Decimal("0.80")
+    eligible = [p for p in points
+                if int(p["qty"]) <= int(g["max_positive_qty"] or 0)
+                and D(p["lb_ev_per_contract"]) > 0
+                and D(p["fill_probability"]) >= min_fp
+                and D(p["expected_net"]) > 0]
+    per_opp: dict = {}
+    legacy = Decimal(0)
+    for p in eligible:
+        opp = p.get("opportunity_capital_usd")
+        if isinstance(opp, dict):
+            for k, usd in opp.items():
+                per_opp[k] = max(per_opp.get(k, Decimal(0)), D(usd))
+        else:
+            legacy += D(p["capital_usd"])
+    proven_usd = sum(per_opp.values(), Decimal(0)) + legacy
     cap = RTC.deployment_cap(requested_turnover=D(requested_usd),
                              proven_positive_capacity=proven_usd)
     return result("CAPACITY", GREEN if g["green"] else RED,
                   list(g["blockers"]),
                   {"points": len(pts), "max_positive_qty":
                    g["max_positive_qty"], "best_qty": g["best_qty"],
+                   "evaluations": sum(int(p.get("evaluations") or 0)
+                                      for p in points),
+                   "opportunities": sum(int(p.get("opportunities") or 0)
+                                        for p in points),
+                   "by_bucket": [{k: p.get(k) for k in (
+                       "bucket", "qty", "events", "opportunities",
+                       "evaluations", "lb_ev_per_contract",
+                       "fill_probability", "expected_net", "capital_usd")}
+                       for p in points],
                    "proven_positive_capacity_usd": str(proven_usd),
                    "requested_usd": str(D(requested_usd)),
                    "maximum_deployment_usd": str(cap),
                    "remainder_cash_usd": str(D(requested_usd) - cap),
-                   "rule": "turnover target never overrides economics"})
+                   "rule": "turnover target never overrides economics",
+                   "opportunity_rule": (
+                       "one opportunity = (strategy, contract, held side); "
+                       "its latest evaluation per size bucket; proven capital "
+                       "= its largest ELIGIBLE evaluated size, counted once")})
 
 
 # ── Karen ────────────────────────────────────────────────────────────────

@@ -37,46 +37,127 @@ def implementation_sha() -> str:
 
 # ── readers ──────────────────────────────────────────────────────────────
 
-async def capacity_points(conn) -> list:
+#: ONE OPPORTUNITY IS ONE (strategy, contract, held side). The bind evaluates
+#: the same contract again on every decision cycle; those re-evaluations are
+#: one opportunity, never N units of capacity (RC6 ev-audit).
+CAPACITY_OPPORTUNITY_KEY = ("strategy", "us_market_slug", "holding_side")
+
+CAPACITY_SQL = """
+SELECT strategy, us_market_slug, holding_side, fixture, qty_in,
+       ev_per_contract_usd ev, fill_probability fp, all_in_ev_usd net,
+       market_price px, expected_hold_hours h,
+       extract(epoch FROM evaluated_at) at
+  FROM paper_profitability_evaluations
+ WHERE evaluated_at > now() - make_interval(days => $1)
+   AND qty_in IS NOT NULL AND ev_per_contract_usd IS NOT NULL"""
+
+
+def _f0(v) -> float:
+    try:
+        return float(v) if v is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def qty_bucket(q: float):
+    """The QTY_GRID bucket of a quantity: (previous edge, edge], so every
+    positive quantity has exactly one bucket; None for q <= 0."""
+    prev = 0
+    for lo, hi in QTY_GRID:
+        if prev < q <= hi:
+            return (lo, hi)
+        prev = hi
+    return None
+
+
+def capacity_points_from_rows(rows: list) -> list:
     """The positive-capacity frontier by size bucket from the bind's own
-    per-entry evaluations (one value per fixture first, then the bucket's
-    event-clustered lower bound)."""
-    if not await C._has(conn, "paper_profitability_evaluations"):
-        return []
-    rows = await conn.fetch(
-        "SELECT fixture, qty_in, ev_per_contract_usd ev, fill_probability fp,"
-        "       all_in_ev_usd net, market_price px, expected_hold_hours h "
-        "  FROM paper_profitability_evaluations WHERE evaluated_at > now() "
-        "   - make_interval(days => $1) AND qty_in IS NOT NULL "
-        "   AND ev_per_contract_usd IS NOT NULL", CAPACITY_WINDOW_DAYS)
+    per-entry evaluations. PURE.
+
+    WHAT WAS WRONG (RC6 ev-audit), each a capacity OVERSTATEMENT that the
+    all-negative production evidence hid (RC5 research read 2026-10-09:
+    1,720 evaluations in 14 days, every one CASH, the best EV per contract
+    -0.0006):
+
+      * every re-evaluation of one contract was summed as more capital and
+        more expected net -- the same contract evaluated 50 times at 100
+        contracts was "5,000 contracts of capacity". In production the 1,720
+        evaluations are 453 opportunities, and the capital summed over
+        evaluations was $839,121 against $129,570 at one (latest) evaluation
+        per opportunity: 6.5x. Each bucket now keeps
+        the LATEST evaluation per opportunity (CAPACITY_OPPORTUNITY_KEY), and
+        each opportunity carries its own capital so the deployment cap never
+        counts one contract twice across buckets either (controls.capacity);
+      * a bucket reported its UPPER bound as its quantity (1-10 -> 10,
+        11-50 -> 50): evidence at 1 contract claimed capacity at 10. That is
+        the linear extrapolation of a tiny PAPER trade the red-team directive
+        forbids. A point's quantity is now the largest quantity actually
+        evaluated in it;
+      * the grid was closed on both ends with integer edges, so a fractional
+        size between buckets (10.5 from a REDUCED_SIZE factor) fell in no
+        bucket and was silently dropped. Buckets are now (previous edge,
+        edge], covering every positive quantity.
+
+    The bucket's lower bound is unchanged: one value per fixture (the mean of
+    its opportunities' EV per contract), then the event-clustered one-sided
+    95% bound over fixtures.
+    """
+    latest: dict = {}
+    evaluations: dict = {}
+    for r in rows:
+        b = qty_bucket(_f0(r.get("qty_in")))
+        if b is None:
+            continue
+        evaluations[b] = evaluations.get(b, 0) + 1
+        key = (b,) + tuple(str(r.get(k) or "?")
+                           for k in CAPACITY_OPPORTUNITY_KEY)
+        cur = latest.get(key)
+        if cur is None or _f0(r.get("at")) >= _f0(cur.get("at")):
+            latest[key] = r
     out = []
     for lo, hi in QTY_GRID:
-        rs = [r for r in rows if lo <= float(r["qty_in"] or 0) <= hi]
+        rs = [(k, r) for k, r in latest.items() if k[0] == (lo, hi)]
         if not rs:
             continue
         by_fx: dict = {}
-        for r in rs:
-            by_fx.setdefault(r["fixture"] or "?", []).append(float(r["ev"]))
+        for _k, r in rs:
+            by_fx.setdefault(r.get("fixture") or "?", []).append(
+                _f0(r.get("ev")))
         per = [sum(v) / len(v) for v in by_fx.values()]
         n = len(per)
         mean = sum(per) / n
         sd = (sum((x - mean) ** 2 for x in per) / (n - 1)) ** 0.5 \
             if n > 1 else None
         lb = (mean - 1.645 * sd / n ** 0.5) if sd is not None else -1.0
-        fps = [float(r["fp"]) for r in rs if r["fp"] is not None]
-        cap_h = sum(float(r["qty_in"]) * float(r["px"] or 0) * float(
-            r["h"] or 0) for r in rs)
-        out.append({"qty": hi if hi < 10 ** 9 else lo,
+        fps = [_f0(r.get("fp")) for _k, r in rs if r.get("fp") is not None]
+        cap_h = sum(_f0(r.get("qty_in")) * _f0(r.get("px")) * _f0(r.get("h"))
+                    for _k, r in rs)
+        opp_cap = {"|".join(k[1:]): round(_f0(r.get("qty_in"))
+                                          * _f0(r.get("px")), 2)
+                   for k, r in rs}
+        out.append({"qty": max(_f0(r.get("qty_in")) for _k, r in rs),
                     "bucket": [lo, hi], "events": n,
+                    "opportunities": len(rs),
+                    "evaluations": evaluations.get((lo, hi), 0),
                     "lb_ev_per_contract": round(lb, 6),
                     "fill_probability": round(sum(fps) / len(fps), 4)
                     if fps else 0,
                     "capital_hours": round(cap_h, 2),
-                    "expected_net": round(sum(float(r["net"] or 0)
-                                              for r in rs), 4),
-                    "capital_usd": round(sum(float(r["qty_in"]) * float(
-                        r["px"] or 0) for r in rs), 2)})
+                    "expected_net": round(sum(_f0(r.get("net"))
+                                              for _k, r in rs), 4),
+                    "capital_usd": round(sum(opp_cap.values()), 2),
+                    "opportunity_capital_usd": opp_cap})
     return out
+
+
+async def capacity_points(conn) -> list:
+    """capacity_points_from_rows over the last CAPACITY_WINDOW_DAYS of the
+    bind's evaluations (READ ONLY)."""
+    if not await C._has(conn, "paper_profitability_evaluations"):
+        return []
+    rows = [dict(r) for r in await conn.fetch(CAPACITY_SQL,
+                                              CAPACITY_WINDOW_DAYS)]
+    return capacity_points_from_rows(rows)
 
 
 async def karen_counterfactuals(conn) -> tuple:
@@ -281,7 +362,8 @@ def ui_truth(metrics: dict, *, now: float) -> dict:
 SECTION_CONTROLS = {
     "venue_health": ("VENUE_HEALTH",),
     "truth_quorum": ("TRUTH_QUORUM",),
-    "attribution": ("PROFIT_BREAKERS", "ATTRIBUTION"),
+    # the attribution rows are also MULTIPLE_TESTING's PBO / DSR input
+    "attribution": ("PROFIT_BREAKERS", "ATTRIBUTION", "MULTIPLE_TESTING"),
     "holdout_registry": ("SAMPLE_INTEGRITY", "MULTIPLE_TESTING"),
     "capacity": ("CAPACITY",),
     "karen": ("KAREN_VALUE",),
@@ -363,6 +445,16 @@ async def evaluate(conn, *, now: float | None = None,
     controls["DIGITAL_TWIN"] = C.twin(comp.get("digital_twin") or {})
     reg = await sec.run("holdout_registry",
                         lambda: C.holdout_registry(conn), {})
+    # THE REGISTERED STUDY'S PBO / DSR over the attribution rows read above
+    # (pure; train + test events only, the holdout slice never read)
+    # (a worker thread: up to 12,870 CSCV splits must not hold the API loop)
+    import asyncio
+    from . import research_registry as RREG
+    mt = await asyncio.to_thread(RREG.measure, reg, attributed, fixtures)
+    reg = dict(reg, measurement=mt, pbo_ok=mt.get("pbo_ok"),
+               dsr_ok=mt.get("dsr_ok"),
+               candidates_tested=max(int(reg.get("candidates_tested") or 0),
+                                     int(mt.get("candidates_tested") or 0)))
     controls["SAMPLE_INTEGRITY"] = C.samples(comp.get("probability") or {},
                                              reg)
     controls["MULTIPLE_TESTING"] = C.multiple_testing(reg)

@@ -300,14 +300,14 @@ LATEST_CALLERS_ARE_A_DEFECT = (
 
 #: PER-SPORT THETA LIVES IN `calibration_fees` AND NOT HERE.
 #:
-#: The page schedules Table Tennis to 0.10 at 11:59 PM ET 2026-09-30. A single
+#: The page schedules Table Tennis to 0.10 at 12:00 AM ET 2026-10-07. A single
 #: `theta_taker` on a Schedule cannot represent that, and adding a second
 #: mechanism here would give this repository TWO per-sport tables to keep in
 #: step. So this module's coefficient is the exchange-wide default and a caller
 #: needing a sport must use `calibration_fees.taker_coefficient(sport, at)`.
 PER_SPORT_THETA_IS_NOT_HERE = (
     "use calibration_fees.taker_coefficient(sport, at). This module carries the "
-    "exchange-wide default only, so Table Tennis from 2026-10-01T03:59Z is "
+    "exchange-wide default only, so Table Tennis from 2026-10-07T04:00Z is "
     "understated by 31% if priced here")
 
 

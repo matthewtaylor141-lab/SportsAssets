@@ -115,7 +115,7 @@ CONSUMERS = (
             "registry -- is bypassed and a fill is priced on today's "
             "schedule whatever its own date",
             "no per-sport theta, so Table Tennis is understated from "
-            "2026-10-01T03:59Z",
+            "2026-10-07T04:00Z",
             "effective_from 2026-09-17 against the published 2026-09-25",
         ),
         "money_consequence": (
@@ -356,7 +356,7 @@ SCHEDULE_DISAGREEMENTS = (
     },
     {
         "field": "theta_taker_is_per_sport",
-        "calibration_fees": "yes, with TABLE_TENNIS -> 0.10 at 2026-10-01T03:59Z",
+        "calibration_fees": "yes, with TABLE_TENNIS -> 0.10 at 2026-10-07T04:00Z",
         "bettor_fee_schedule": "no, one theta for every sport",
         "published": ("The Table Tennis taker fee coefficient becomes 0.10, "
                       "effective 11:59 PM ET, Wednesday September 30, 2026"),

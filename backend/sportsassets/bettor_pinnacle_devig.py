@@ -68,6 +68,8 @@ would have been the easy lie.
 
 from __future__ import annotations
 
+import math
+
 VERSION = "PINNACLE_DEVIG_V1"
 SOURCE_CLASS = "EXTERNAL_BOOKMAKER_VALUATION"
 PROVIDER = "the-odds-api.com/v4"
@@ -736,12 +738,19 @@ def valuation(*, contract: dict, quote: dict, now: float,
                       % (len(outcomes), expected))
         return _stamp_source_instant(out, quote)
 
+    # A PRICE IS A FINITE NUMBER ABOVE 1.0 (ev-audit, RC6). `float(o) <= 1.0`
+    # alone admitted NaN (every comparison with NaN is False), so a NaN odds
+    # value reached the de-vig and came back as probability NaN with NO
+    # refusal; and +inf (implied probability 0) priced its outcome at exactly
+    # 0. Python's json reader accepts both tokens, so a provider payload can
+    # carry them. Booleans are not prices either (bool is an int subclass).
     bad = [n for n, o in outcomes.items()
-           if not isinstance(o, (int, float)) or float(o) <= 1.0]
+           if isinstance(o, bool) or not isinstance(o, (int, float))
+           or not math.isfinite(float(o)) or float(o) <= 1.0]
     if bad:
         refusals.append(R_BAD_ODDS)
-        out["why"] = ("decimal odds must exceed 1.0; offending outcomes %r"
-                      % sorted(bad))
+        out["why"] = ("decimal odds must be finite and exceed 1.0; offending "
+                      "outcomes %r" % sorted(bad))
         return _stamp_source_instant(out, quote)
 
     observed_at = quote.get("observed_at")

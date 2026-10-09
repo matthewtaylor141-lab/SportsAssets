@@ -348,15 +348,41 @@ def rounding_discriminators() -> dict:
 #:
 #: Table Tennis is outside the proposed operating scope. It is represented anyway,
 #: because the defect being closed is the SHAPE of the declaration, not one sport.
+#:
+#: THE INSTANT MOVED ON THE PUBLISHED PAGE (ev-audit, RC6). Re-read on
+#: 2026-10-09 (https://docs.polymarket.us/fees), the page no longer says
+#: 11:59 PM ET September 30. It says, under its "Update to fees" notice:
+#:
+#:   "Both of the following take effect at 12:00 AM ET on Wednesday, October
+#:    7, 2026."  ...  "The Table Tennis taker fee coefficient becomes 0.10."
+#:
+#: So between 2026-10-01T03:59Z and 2026-10-07T04:00Z this table priced Table
+#: Tennis at 0.10 while the venue's published coefficient was the exchange-wide
+#: 0.0695 (a 44% overstatement). 12:00 AM ET (EDT, UTC-4) on Wed 2026-10-07 is
+#: 04:00Z. The superseded Sep-30 instant is kept below, labelled, not deleted.
+TABLE_TENNIS_SUPERSEDED_INSTANT = {
+    "instant": "2026-10-01T03:59:00Z",
+    "published_as": "11:59 PM ET, Wednesday September 30, 2026",
+    "retrieved": "2026-09-27T15:59:54Z (research/evidence/"
+                 "VENUE_FEE_POLICY_2026-09-27.md)",
+    "superseded_by": "12:00 AM ET on Wednesday, October 7, 2026",
+    "superseded_retrieved": "2026-10-09 (https://docs.polymarket.us/fees)",
+}
 TAKER_BY_SPORT = {
     "DEFAULT": (("2026-09-25T04:00:00Z", Decimal("0.0695")),),
     "TABLE_TENNIS": (("2026-09-25T04:00:00Z", Decimal("0.0695")),
-                     # 11:59 PM ET Wed 2026-09-30 = 03:59Z Thu 2026-10-01
-                     ("2026-10-01T03:59:00Z", Decimal("0.10"))),
+                     # 12:00 AM ET Wed 2026-10-07 = 04:00Z Wed 2026-10-07
+                     ("2026-10-07T04:00:00Z", Decimal("0.10"))),
 }
 SCHEDULE_EFFECTIVE_EXCHANGE_WIDE = "2026-09-25T04:00:00Z"   # 12 AM ET Fri
 R_COMBO_CURVE_NOT_IMPLEMENTED = "COMBO_TAKER_CURVE_IS_NOT_IMPLEMENTED"
-COMBO_CURVE_PUBLISHED = "Fee = C x p x [0.0695 x (1 - p) + 0.04 x (1 - p)^4]"
+#: the combo curve as published on 2026-10-09: the (1 - p)^4 coefficient is
+#: 0.06 (it read 0.04 on 2026-09-27). The page's own example pins it: "At the
+#: midpoint, the combo taker fee is $19.25" for 1,000 contracts at $0.50 --
+#: 1000 x 0.5 x (0.0695 x 0.5 + 0.06 x 0.0625) = 19.25 (0.04 gives 18.625).
+#: Still NOT implemented: combos refuse by name.
+COMBO_CURVE_PUBLISHED = "Fee = C x p x [0.0695 x (1 - p) + 0.06 x (1 - p)^4]"
+COMBO_CURVE_SUPERSEDED = "Fee = C x p x [0.0695 x (1 - p) + 0.04 x (1 - p)^4]"
 
 #: Execution reports do not carry dollars.
 EXECUTION_REPORT_UNITS = {
@@ -525,7 +551,8 @@ def combo_fee(*_a, **_k) -> dict:
     """COMBOS USE A DIFFERENT CURVE AND THIS DOES NOT IMPLEMENT IT.
 
         "The taker side of a combo trade uses a separate fee curve:
-         Fee = C x p x [0.0695 x (1 - p) + 0.04 x (1 - p)^4]"
+         Fee = C x p x [0.0695 x (1 - p) + 0.06 x (1 - p)^4]"
+        (0.06 as published on 2026-10-09; it read 0.04 on 2026-09-27)
 
     Pricing a combo with the standard curve would UNDERSTATE the charge, so this
     refuses by name instead. Combos are outside the proposed operating scope.

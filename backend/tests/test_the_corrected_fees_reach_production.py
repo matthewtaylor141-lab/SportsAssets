@@ -590,11 +590,14 @@ def test_LATEST_is_labelled_as_a_defect_where_someone_will_read_it():
 def test_per_sport_theta_has_ONE_home_and_this_module_says_where():
     """Adding a second per-sport table here would give this repository two to
     keep in step. Table Tennis is understated 31% if priced on the exchange-wide
-    default from 2026-10-01T03:59Z."""
+    default from 2026-10-07T04:00Z (12:00 AM ET Oct 7, as published on
+    2026-10-09; the page read 11:59 PM ET Sep 30 on 2026-09-27)."""
     from sportsassets import bettor_fee_schedule as FS
 
     assert "calibration_fees.taker_coefficient" in FS.PER_SPORT_THETA_IS_NOT_HERE
     assert "31%" in FS.PER_SPORT_THETA_IS_NOT_HERE
+    assert "2026-10-07T04:00Z" in FS.PER_SPORT_THETA_IS_NOT_HERE
     # THE ONE HOME REALLY CARRIES IT.
-    assert CF.taker_coefficient("TABLE_TENNIS", "2026-10-02") == CF.Decimal("0.10")
+    assert CF.taker_coefficient("TABLE_TENNIS", "2026-10-08") == CF.Decimal("0.10")
+    assert CF.taker_coefficient("TABLE_TENNIS", "2026-10-02") == CF.Decimal("0.0695")
     assert CF.taker_coefficient(None, "2026-10-02") == CF.Decimal("0.0695")
