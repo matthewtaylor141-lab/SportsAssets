@@ -578,6 +578,19 @@ async def _submit_order(conn, order: dict, *, caps: dict | None = None,
                 return dict(authority, ok=False, under_lock=True,
                             lifecycle=lifecycle,
                             available_usd=f(cs["available"]))
+            # NO ENTRY WITHOUT ITS RECORD (the profitability bind's control
+            # 25, under the same lock): the admitted ENTRY's LEDGER
+            # evaluation and its counterfactual variants must be recorded
+            # -- the evidence shadow learning and the residual feedback
+            # read. Missing or unreadable = refused. Refuse-only.
+            from . import bettor_paper_profitability_bind as PBIND
+            chk = await PBIND.entry_record_refusal(conn, o, at=at)
+            if chk:
+                return dict(chk, ok=False, under_lock=True,
+                            lifecycle=lifecycle,
+                            capital_authority=authority.get(
+                                "capital_authority"),
+                            available_usd=f(cs["available"]))
             bq = authority.get("qty")
             if bq is not None and D(bq) < qty:
                 qty = D(bq)

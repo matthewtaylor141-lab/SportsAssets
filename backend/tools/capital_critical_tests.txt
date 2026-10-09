@@ -1423,3 +1423,5 @@ tests/test_rc6_kalshi_ws_merge_integration.py
 tests/test_premap_page_read_resumes.py
 # (RC6 P0-AGENTS) every agent's / loop's status contract (latest action, status, input freshness, next cycle, refusals, failures): never GREEN with a stale input, a recent failure, a SOFTWARE / UNCLASSIFIED refusal or any missing field; no heartbeat is UNKNOWN, down or erroring is FAILED; GET only, read only
 tests/test_agent_status_contract.py
+# (rc6 econ-binding) every paper ENTRY path binds its profitability controls fail-closed: each missing / unproven control input (identity, probability, settlement verdict, probability / book instants, the four learned models within the readiness bound) refuses by its own code, the evaluation and its counterfactual variants are recorded together and the ledger admits no ENTRY without them, CASH wins on a non-positive all-in EV or when every candidate is refused, no non-positive forward return is a champion
+tests/test_economic_controls_binding.py
