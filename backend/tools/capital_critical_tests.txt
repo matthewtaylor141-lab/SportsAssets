@@ -1445,3 +1445,5 @@ tests/test_signed_acceptance_consistency.py
 tests/test_rc62_capability_claim_bounded.py
 # (rc6.2 agent-truth) Derek's heartbeat is derived from his recorded paper_decisions (count in the hour (now-1h, now], bounded above so a later-dated row is never counted or named latest, and latest decision); a funded-path 'nothing recorded' is labelled FUNDED_PATH_; FAILED/BLOCKED/funded decisions untouched; unreadable record never raises
 tests/test_rc62_derek_heartbeat_truth.py
+# (rc6.2 agent-truth) the Kalshi worker's claims pass evaluates at the read-time clock: a WebSocket book persisted while the pass reads is not BOOK_TIME_IN_FUTURE (production 2,124 in 24 h); explicit clocks stay fixed; receipts stay SHADOW/NONE
+tests/test_rc62_kalshi_claims_read_clock.py
