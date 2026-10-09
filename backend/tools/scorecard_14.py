@@ -18,12 +18,28 @@ Economic-evidence REDs (a control that is RED because forward evidence has
 not accrued) are still FAILED units here: they are annotated FORWARD so the
 reader can tell them from software defects, but they are not dropped.
 
+TWO RED-TEAM CONTROLS ARE BOUND WITH THE HALF THE API CANNOT HOLD (RC6).
+MIGRATION_INTEGRITY and RELEASE each read UNKNOWN in production for one
+named absence, not for a finding: FRESH_DB_RESULT_NOT_IN_THIS_PROCESS (the
+serving API cannot build an empty database) and
+NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA (receipts are POSTed only on
+post_receipt == "on"). The judge holds both halves as attested files of
+this packet -- fresh_db.json (capital-critical's own fresh PostgreSQL build
+of the release SHA) and release_verdict.json (the receipt the sender would
+POST, judged by the API's own release gate) -- and _bound() combines them
+with the API's control: any RED from either side is RED, an API control
+GREEN stays GREEN, and an UNKNOWN is lifted ONLY when that one named
+absence is its sole blocker AND the judge's half is PROVEN / GREEN for the
+release SHA. Absent or unverified is UNPROVEN (failed); every detail keeps
+the API's own status and blockers beside the binding.
+
 Usage:  python backend/tools/scorecard_14.py ACC_DIR [--frontend-preview preview.json]
         writes ACC_DIR/scorecard_14.json and prints the table.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -45,6 +61,34 @@ FORWARD_MARKERS = ("FEWER_THAN_", "INSUFFICIENT_", "NO_POSITIVE_", "NO_PREREGIST
                    "DSR_NOT_ACCEPTABLE", "PBO_NOT_ACCEPTABLE",
                    "NO_EVENT_CLUSTERED_PARTITION", "MECHANISM_DISABLED:",
                    "KAREN_COUNTERFACTUALS_UNMEASURED")
+
+# ── the judge's halves of MIGRATION_INTEGRITY and RELEASE (RC6) ───────────
+GREEN, RED, UNKNOWN = "GREEN", "RED", "UNKNOWN"
+PROVEN, UNPROVEN = "PROVEN", "UNPROVEN"
+#: the ONE blocker each API control carries when only the judge's half is
+#: missing (redteam.controls.migrations / redteam.readiness RELEASE)
+API_FRESH_DB_ABSENT = "FRESH_DB_RESULT_NOT_IN_THIS_PROCESS"
+API_RELEASE_ABSENT = "NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA"
+#: tools/fresh_db_receipt.py and tools/release_verdict.py
+CAPITAL_CRITICAL_WORKFLOW = ".github/workflows/capital-critical.yml"
+FRESH_DB_RECEIPT_VERSION = "FRESH_DB_RECEIPT_V1"
+RELEASE_VERDICT_VERSION = "RELEASE_VERDICT_V1"
+R_FRESH_DB_READBACK_ABSENT = "FRESH_DB_READBACK_ABSENT"
+R_FRESH_DB_RECEIPT_ABSENT = "FRESH_DB_RECEIPT_ABSENT"
+R_FRESH_DB_NOT_ATTESTED = "FRESH_DB_RECEIPT_ATTESTATION_NOT_VERIFIED"
+R_FRESH_DB_NOT_CAPITAL_CRITICAL = "FRESH_DB_RECEIPT_NOT_FROM_CAPITAL_CRITICAL"
+R_FRESH_DB_NOT_THE_RELEASE = "FRESH_DB_RECEIPT_NOT_FOR_THE_RELEASE_SHA"
+R_FRESH_DB_NOT_THE_GATE_RUN = "FRESH_DB_RECEIPT_NOT_FROM_THE_GATE_RUN"
+R_FRESH_DB_MALFORMED = "FRESH_DB_RECEIPT_MALFORMED"
+R_FRESH_DB_BUILD_FAILED = "FRESH_DB_BUILD_FAILED"
+R_FRESH_DB_FINGERPRINT_DIFFERS = "FRESH_DB_FINGERPRINT_DIFFERS_FROM_RUNNING"
+R_FRESH_DB_COUNT_DIFFERS = "FRESH_DB_COUNT_DIFFERS_FROM_RUNNING"
+R_RUNNING_FINGERPRINT_UNREADABLE = "RUNNING_MIGRATION_FINGERPRINT_UNREADABLE"
+R_RUNNING_NOT_THE_RELEASE = "RUNNING_API_NOT_ON_THE_RELEASE_SHA"
+R_RELEASE_VERDICT_ABSENT = "RELEASE_VERDICT_ABSENT"
+R_RELEASE_VERDICT_NOT_THE_RELEASE = "RELEASE_VERDICT_NOT_FOR_THE_RELEASE_SHA"
+R_RELEASE_VERDICT_REFUSED = "RELEASE_VERDICT_REFUSED"
+R_RELEASE_VERDICT_INCONSISTENT = "RELEASE_VERDICT_INCONSISTENT"
 
 
 class Unavailable(Exception):
@@ -209,6 +253,10 @@ def score(acc: str, *, release_sha: str | None = None,
         c.units.append({"unit": "controls", "passed": False, "detail": str(exc),
                         "class": "READ_UNAVAILABLE"})
     for name, ctl in sorted((controls or {}).items()):
+        if name in BOUND:
+            # the API's own status AND the judge's attested half (RC6)
+            c.unit(name, lambda name=name: BOUND[name](acc, release_sha))
+            continue
         blockers = ctl.get("blockers") or []
         fwd = bool(blockers) and all(any(m in str(b) for m in FORWARD_MARKERS)
                                      for b in blockers)
@@ -228,9 +276,9 @@ def score(acc: str, *, release_sha: str | None = None,
         _at(_load(acc, "canary.json"), "boots.workers_boot.commit_sha", "canary.json") == release_sha,
         _at(_load(acc, "canary.json"), "boots.workers_boot.commit_sha", "canary.json")))
     c.unit("market_plane_heartbeat_on_release", lambda: _plane_beat(acc, release_sha))
-    c.unit("migration_integrity", lambda: (
-        _env(acc, "red_team.json", "readiness.controls.MIGRATION_INTEGRITY.status") == "GREEN",
-        _env(acc, "red_team.json", "readiness.controls.MIGRATION_INTEGRITY.evidence")))
+    # applied == build AND an empty database builds to the same fingerprint
+    # (the capital-critical fresh build of this SHA; RC6)
+    c.unit("migration_integrity", lambda: migration_integrity(acc, release_sha))
     cards.append(c)
 
     # 5 MARKET-PLANE STABILITY: OOM-free complete window with headroom
@@ -428,6 +476,221 @@ def _plane_beat(acc, release_sha):
             and (pl.get("age_s") or 1e9) <= 120), pl
 
 
+# ── MIGRATION_INTEGRITY and RELEASE: the API's control + the judge's half ──
+
+def _opt(acc, name):
+    """A judge-written file of this packet, or None when absent / not JSON
+    (the caller names why: UNPROVEN, never a pass and never a crash)."""
+    try:
+        return _load(acc, name)
+    except Unavailable:
+        return None
+
+
+def _fingerprint(applied: dict) -> str:
+    """redteam.controls.migrations' applied fingerprint byte for byte (and
+    tools/fresh_db_receipt.fingerprint): sha256 of the sorted
+    {version: content_sha} items as JSON. Pinned against both by test."""
+    return hashlib.sha256(json.dumps(sorted(applied.items()), sort_keys=True,
+                                     default=str).encode()).hexdigest()
+
+
+def _gate_run_id(acc):
+    """The capital-critical run the CI row reads for the release SHA."""
+    try:
+        return _at(_load(acc, "gates.json"), "runs.capital_critical.id",
+                   "gates.json")
+    except Unavailable:
+        return None
+
+
+def _bound(ctl: dict, absence: str, judge_status: str, judge_reasons: list):
+    """(status, blockers) of an API control bound with the judge's half.
+
+    RED from either side is RED. The API's GREEN stays GREEN. An UNKNOWN is
+    lifted to GREEN only when `absence` is its SOLE blocker and the judge's
+    half is PROVEN / GREEN; with that half missing it is UNPROVEN. Any other
+    blocker keeps the API's own status and blockers: the judge can supply a
+    missing fact, never overrule a finding."""
+    api = ctl.get("status")
+    blk = sorted(str(b) for b in (ctl.get("blockers") or []))
+    if judge_status == RED:
+        return RED, [b for b in blk if b != absence] + list(judge_reasons)
+    if api == RED:
+        return RED, blk
+    if api == GREEN:
+        return GREEN, []
+    if blk != [absence]:
+        return api or UNKNOWN, blk
+    if judge_status in (PROVEN, GREEN):
+        return GREEN, []
+    return UNPROVEN, list(judge_reasons)
+
+
+def fresh_db(acc, release_sha, running: dict, running_sha=None) -> dict:
+    """THE FRESH-DATABASE HALF (acc/fresh_db.json, tools/fresh_db_receipt.py
+    readback): PROVEN, UNPROVEN or RED with named reasons.
+
+    UNPROVEN: no readback, no receipt (a release whose capital-critical
+    predates the receipt -- RC5 69a8a07e is one), an attestation that did
+    not verify, a run that is not capital-critical, not the release SHA or
+    not the run the CI row reads, a receipt whose fingerprint is not its own
+    map's, or a running API on another SHA. RED: the fresh build FAILED, or
+    its fingerprint / count differs from the running API's applied history
+    (`running`: the API control's evidence)."""
+    doc = _opt(acc, "fresh_db.json")
+    if not isinstance(doc, dict):
+        return {"status": UNPROVEN, "reasons": [R_FRESH_DB_READBACK_ABSENT]}
+    prov = doc.get("provenance") if isinstance(doc.get("provenance"),
+                                               dict) else {}
+    rec = doc.get("receipt")
+    out = {"run_id": prov.get("run_id"),
+           "workflow_path": prov.get("workflow_path"),
+           "head_sha": prov.get("head_sha"),
+           "conclusion": prov.get("conclusion"),
+           "attestation_verified": prov.get("attestation_verified") is True}
+    if not isinstance(rec, dict):
+        return dict(out, status=UNPROVEN, reasons=[
+            R_FRESH_DB_RECEIPT_ABSENT + (":%s" % doc["reason"]
+                                         if doc.get("reason") else "")])
+    out.update({k: rec.get(k) for k in (
+        "sha", "result", "migrations_applied", "migrations_in_tree",
+        "fingerprint", "server_version", "build_outcome")})
+    out["receipt_reasons"] = list(rec.get("reasons") or [])[:10]
+    why = []
+    if prov.get("attestation_verified") is not True:
+        why.append(R_FRESH_DB_NOT_ATTESTED)
+    if prov.get("workflow_path") != CAPITAL_CRITICAL_WORKFLOW:
+        why.append(R_FRESH_DB_NOT_CAPITAL_CRITICAL)
+    if release_sha is None or prov.get("head_sha") != release_sha \
+            or rec.get("sha") != release_sha:
+        why.append(R_FRESH_DB_NOT_THE_RELEASE)
+    gate = _gate_run_id(acc)
+    if gate is None or str(prov.get("run_id")) != str(gate) \
+            or str(rec.get("run_id")) != str(gate):
+        why.append(R_FRESH_DB_NOT_THE_GATE_RUN)
+    applied = rec.get("applied")
+    if rec.get("version") != FRESH_DB_RECEIPT_VERSION \
+            or not isinstance(applied, dict) \
+            or _fingerprint(applied) != rec.get("fingerprint") \
+            or len(applied) != rec.get("migrations_applied"):
+        why.append(R_FRESH_DB_MALFORMED)
+    if running_sha is not None and running_sha != release_sha:
+        why.append(R_RUNNING_NOT_THE_RELEASE)
+    if why:
+        return dict(out, status=UNPROVEN, reasons=why)
+    red = [] if rec.get("result") == "PASSED" else [R_FRESH_DB_BUILD_FAILED]
+    af, rf = running.get("applied_fingerprint"), running.get(
+        "repo_fingerprint")
+    if not af or not rf:
+        return dict(out, status=RED if red else UNPROVEN,
+                    reasons=red + [R_RUNNING_FINGERPRINT_UNREADABLE])
+    if rec.get("fingerprint") != af or rec.get("fingerprint") != rf:
+        red.append(R_FRESH_DB_FINGERPRINT_DIFFERS)
+    if rec.get("migrations_applied") != running.get("applied"):
+        red.append(R_FRESH_DB_COUNT_DIFFERS)
+    return dict(out, status=RED if red else PROVEN, reasons=red)
+
+
+def migration_integrity(acc, release_sha):
+    """MIGRATION_INTEGRITY, bound: the API's control (its applied history
+    == this build's files, nothing edited in place) AND capital-critical's
+    fresh PostgreSQL build of the release SHA reaching the SAME fingerprint.
+    The Deployment unit and the Red-team unit read this one function."""
+    ctl = _env(acc, "red_team.json", "readiness.controls.MIGRATION_INTEGRITY")
+    ev = ctl.get("evidence") if isinstance(ctl.get("evidence"), dict) else {}
+    try:
+        running_sha = _env(acc, "red_team.json", "readiness.implementation_sha")
+    except Unavailable:
+        running_sha = None
+    fd = fresh_db(acc, release_sha, ev, running_sha)
+    status, blockers = _bound(ctl, API_FRESH_DB_ABSENT, fd["status"],
+                              fd["reasons"])
+    return status == GREEN, {
+        "status": status, "blockers": blockers[:6],
+        "api_status": ctl.get("status"),
+        "api_blockers": list(ctl.get("blockers") or []),
+        "api_evidence": ev, "fresh_db": fd}
+
+
+_VERDICT_TRUE = ("descendant_of_base", "backend_tests_green",
+                 "capital_critical_green", "commit_guard_green",
+                 "engine_diagnostic_green", "migration_fingerprint_match")
+
+
+def release_verdict(acc, release_sha) -> dict:
+    """THE JUDGE'S RELEASE RECEIPT (acc/release_verdict.json,
+    tools/release_verdict.py): GREEN, RED or UNPROVEN.
+
+    GREEN only when the file is for the release SHA, recorded GREEN by the
+    API's own release gate, AND says so consistently: every gate field
+    true, tested == release == deployed == the serving API == the workers.
+    A REFUSED body (the API would have recorded nothing) is UNPROVEN; a RED
+    verdict is RED with its blockers."""
+    doc = _opt(acc, "release_verdict.json")
+    if not isinstance(doc, dict):
+        return {"status": UNPROVEN, "reasons": [R_RELEASE_VERDICT_ABSENT]}
+    body = doc.get("body") if isinstance(doc.get("body"), dict) else {}
+    gate = doc.get("release_gate") if isinstance(doc.get("release_gate"),
+                                                 dict) else {}
+    out = {"recorded": doc.get("status"), "sha": doc.get("sha"),
+           "running_api_sha": doc.get("running_api_sha"),
+           "release_gate": gate, "refused": doc.get("refused"),
+           "posted": doc.get("posted")}
+    if doc.get("version") != RELEASE_VERDICT_VERSION:
+        return dict(out, status=UNPROVEN,
+                    reasons=[R_RELEASE_VERDICT_INCONSISTENT])
+    if release_sha is None or doc.get("sha") != release_sha:
+        return dict(out, status=UNPROVEN,
+                    reasons=[R_RELEASE_VERDICT_NOT_THE_RELEASE])
+    if doc.get("status") == "REFUSED":
+        return dict(out, status=UNPROVEN, reasons=[
+            "%s:%s" % (R_RELEASE_VERDICT_REFUSED, r)
+            for r in (doc.get("refused") or ["?"])])
+    blockers = [str(b) for b in (gate.get("blockers") or [])]
+    if doc.get("status") == RED:
+        return dict(out, status=RED,
+                    reasons=blockers or [R_RELEASE_VERDICT_INCONSISTENT])
+    consistent = (
+        doc.get("status") == GREEN and gate.get("green") is True
+        and not blockers
+        and all(body.get(k) is True for k in _VERDICT_TRUE)
+        and body.get("tested_sha") == body.get("release_sha")
+        == body.get("deployed_sha") == doc.get("running_api_sha")
+        == body.get("workers_deployed_sha") == release_sha)
+    if not consistent:
+        return dict(out, status=UNPROVEN,
+                    reasons=[R_RELEASE_VERDICT_INCONSISTENT])
+    return dict(out, status=GREEN, reasons=[])
+
+
+def release_control(acc, release_sha):
+    """RELEASE, bound: the API's control (a receipt for its running SHA) AND
+    the judge's attested receipt for the release SHA. A receipt's presence
+    is not the release passing: only a GREEN verdict lifts the API's
+    NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA, and a RED one -- here or in the
+    API -- is RED."""
+    ctl = _env(acc, "red_team.json", "readiness.controls.RELEASE")
+    rv = release_verdict(acc, release_sha)
+    status, blockers = _bound(ctl, API_RELEASE_ABSENT, rv["status"],
+                              rv["reasons"])
+    ev = ctl.get("evidence") if isinstance(ctl.get("evidence"), dict) else {}
+    running = ev.get("running_sha")
+    if status == GREEN and running is not None and running != release_sha:
+        # a receipt about another build is not this release's
+        status, blockers = UNPROVEN, [R_RUNNING_NOT_THE_RELEASE]
+    return status == GREEN, {
+        "status": status, "blockers": blockers[:6],
+        "api_status": ctl.get("status"),
+        "api_blockers": list(ctl.get("blockers") or []),
+        "api_running_sha": running, "release_verdict": rv}
+
+
+#: the red-team controls bound with the judge's half (Red-team row)
+BOUND = {"MIGRATION_INTEGRITY": migration_integrity,
+         "RELEASE": release_control}
+
+
 def _frontend_gate(path):
     if not path or not os.path.isfile(path):
         raise Unavailable("READ_UNAVAILABLE:frontend_preview:NOT_SUPPLIED")
@@ -469,6 +732,46 @@ def _device_units(card, path):
         for k, v in _view_checks(r).items():
             card.units.append({"unit": "%s:%s" % (r.get("view"), k), "passed": bool(v),
                                "detail": None, "class": "PASS" if v else "FAIL"})
+    _trader_units(card, os.path.join(os.path.dirname(path), "trader_accept.json"))
+
+
+#: every device the Trader acceptance must cover (frontend-preview trader_accept.js)
+TRADER_DEVICES = ("desktop", "iphone", "iphone_landscape", "ipad_portrait", "ipad_landscape")
+
+
+def _trader_units(card, path):
+    """TRADER DEVICE ACCEPTANCE (PM 2026-10-08): the rendered Trader page
+    against the production API's own snapshot on each device -- every open
+    position, standing orders, bid / ask, Xavier's recorded action, game
+    state, logos, no motion while the data is frozen. It is its OWN
+    component (devices passing / devices required), so the view checks can
+    never outvote a failed device: one failing device of five is 0.8. A
+    device passes only when it ran against a real snapshot and named no
+    failure; the failure classes are the detail. A missing file or device
+    is READ_UNAVAILABLE, never a pass."""
+    unit = "trader_device_acceptance"
+    if not os.path.isfile(path):
+        card.units.append({"unit": unit, "passed": False, "members": None,
+                           "detail": "READ_UNAVAILABLE:trader_accept.json:NOT_SUPPLIED",
+                           "class": "READ_UNAVAILABLE"})
+        return
+    got = {r.get("device"): r for r in (json.load(open(path)).get("results") or [])}
+    absent = [d for d in TRADER_DEVICES if d not in got]
+    if absent:
+        card.units.append({"unit": unit, "passed": False, "members": None,
+                           "detail": "READ_UNAVAILABLE:trader_accept.json:" + ",".join(absent),
+                           "class": "READ_UNAVAILABLE"})
+        return
+    per = {}
+    for dev in TRADER_DEVICES:
+        r = got[dev]
+        ok = (r.get("verdict") == "PASS" and not r.get("failures")
+              and (r.get("api") or {}).get("returned") is not None)
+        per[dev] = "PASS" if ok else (r.get("failures") or r.get("verdict"))
+    n = sum(1 for v in per.values() if v == "PASS")
+    card.units.append({"unit": unit, "passed": n == len(TRADER_DEVICES),
+                       "members": (n, len(TRADER_DEVICES)), "detail": per,
+                       "class": "PASS" if n == len(TRADER_DEVICES) else "FAIL"})
 
 
 def main(argv=None):

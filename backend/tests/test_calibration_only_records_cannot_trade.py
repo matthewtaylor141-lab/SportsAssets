@@ -756,7 +756,43 @@ READERS = {
     # placed; the read runs in a READ ONLY transaction.
     "completion/evidence.py": (
         "SETTLED_OUTCOME_LABELS_FOR_SCORING_NEVER_CANDIDATES", 1),
+    # (RC6) THE HELD WATCH's entry-proven fixture (HELD_ENTRY_FIXTURES_SQL):
+    # for a paper position that is ALREADY canonically open, reads the event
+    # key of the valuation its ENTRY decision was taken on, BY ID
+    # (v.id = d.valuation_id) -- the same shape as intel/reads.py and
+    # bettor_paper_freshness.py above -- only to name the PinnAPI fixture the
+    # held read already prices, so a price change there schedules Xavier's
+    # review sooner. Both purposes, because the paper entry was decided on
+    # that row whatever its purpose (every production row is CALIBRATION_ONLY
+    # under P5; a filter would resolve no held fixture at all). It selects no
+    # candidate, sizes and places nothing, and writes nothing
+    # (test_the_held_watch_reads_only_its_entry_valuations_event_key_by_id).
+    "pinnapi_held.py": (
+        "BY_ID_FROM_A_HELD_ENTRY_DECISION_FIXTURE_IDENTITY_NEVER_SELECTS", 1),
 }
+
+
+def test_the_held_watch_reads_only_its_entry_valuations_event_key_by_id():
+    """The classification of pinnapi_held.py above, pinned: its one read of
+    the table starts from the canonically OPEN paper positions, follows each
+    one's own ENTRY order to its decision, joins that decision's valuation BY
+    ID, and takes nothing from the row but its event key. The module writes
+    no table, so the answer can only name a watch target."""
+    from sportsassets import bettor_paper_ledger as PL
+    from sportsassets import pinnapi_held as PH
+
+    sql = PH.HELD_ENTRY_FIXTURES_SQL
+    assert PL.CANONICAL_OPEN_POSITIONS_SQL in sql      # held positions only
+    outer = " ".join(sql.replace(PL.CANONICAL_OPEN_POSITIONS_SQL, "").split())
+    assert "o.role = 'ENTRY'" in outer
+    assert "JOIN paper_decisions d ON d.decision_id = o.decision_id" in outer
+    assert "JOIN external_valuations v ON v.id = d.valuation_id" in outer
+    assert set(re.findall(r"\bv\.(\w+)", outer)) == {"id", "event_key"}
+    assert "LIMIT %d" % PH.MAX_HELD in outer           # bounded like the rest
+    src = inspect.getsource(PH)
+    assert src.count("external_valuations") == 1
+    for verb in ("INSERT ", "UPDATE ", "DELETE ", "TRUNCATE ", "execute("):
+        assert verb not in src, verb
 
 
 def test_no_reader_of_the_table_is_unaccounted_for():

@@ -34,6 +34,16 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 | Frontend (Netlify production) | `f16c5ce8a101294ce33bb356b929e5832d6d4545`, deploy 6ac6b59dea05d000071c61c2 | https://command.bettortoken.com/build.json |
 | Historical PAPER | unchanged across the RC4 deploy | research/rt_historical_paper_fingerprint.sql pre/post (cutoff 2026-10-08 02:00Z) |
 
+## RC5 (2026-10-08)
+
+| Item | Value | Evidence |
+|---|---|---|
+| RC5 implementation | `2f72a2c1` (claude/red-team-closeout-v1) | backend-tests 37803578870, capital-critical 37803628792 (ACCEPT, 0 unexpected), commit-guard 37803578861, engine-diagnostic 37803578857 |
+| RC5 release | `69a8a07e5335864bd3d70f7160494aed13305fcc` (claude/release-api; tree = 2f72a2c1; interim 93dc6f41 gated, never deployed) | backend-tests 37803641044, capital-critical 37803641023 (ACCEPT), commit-guard 37803641037, engine-diagnostic 37803641160 |
+| Deployed | API live 16:30:10Z (dep-db3s9f6g), workers 16:30:05Z (dep-db3s9fss), plane 16:31:23Z (dep-db3s9hnav) | render_events in pm-acceptance 37818476513; /healthz commit 69a8a07 |
+| Runtime window (17:42Z) | FAILED overall: API one `server_failed` (unhealthy, not OOM) 16:34:42Z; workers CLEAN 72.0 min; **plane CLEAN 70.7 min, RSS 252-306 MB** (RC4 instance 1.8-2.03 GB just before replacement) | runtime_window.json, mem_sportsassets-market-plane.json |
+| 14-category scorecard (17:42Z) | 1/14 pass (Risk 1.0); every other category a measured FAIL, none unreadable | scorecard_14.json in pm-acceptance 37818476513 |
+
 ## Register
 
 ### A. Policy integrity and lifecycle
@@ -50,7 +60,7 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 |---|---|---|---|---|---|---|
 | B1 | Workers OOM root cause (analytics settle pass read the whole archive) | RC4 9b94ef5c | test_analytics_archive_bounded | no workers OOM since 05:16:03Z (7.5+ h at 12:50Z) | DEPLOYED | 60-min window inside RC5 acceptance |
 | B2 | Premap sweep holds one page | RC4 f4c758e6 | test_premap_memory_bound | same | DEPLOYED | same |
-| B3 | Market plane OOM at 2 GiB: attribute and bound (no larger instance) | RC5 merge 109c3e10 (rc5/plane-memory c3aacd6c): coverage pass, populate(full), Kalshi walk/persist and assignment refdata page instead of holding the universe; heartbeat detail bounded (16k); memory block in the heartbeat; tools/market_plane_memory.py attribution harness | full-mode boot test under the orderless guard; harness at production cardinality: highest step peak 1,956.5 -> 448.9 MB, steady 471-477 MB over ten passes | 39 oomKilled on 7fd4574e (2 GiB) before RC5 | PUBLISHED (814f76c2; interim release 93dc6f41) | gates; deploy plane; >= 60 min clean window then 2-3 h across Kalshi walks; heartbeat memory block readback |
+| B3 | Market plane OOM at 2 GiB: attribute and bound (no larger instance) | RC5 merge 109c3e10 (rc5/plane-memory c3aacd6c): coverage pass, populate(full), Kalshi walk/persist and assignment refdata page instead of holding the universe; heartbeat detail bounded (16k); memory block in the heartbeat; tools/market_plane_memory.py attribution harness | full-mode boot test under the orderless guard; harness at production cardinality: highest step peak 1,956.5 -> 448.9 MB, steady 471-477 MB over ten passes | 39 oomKilled on 7fd4574e (2 GiB) before RC5; RC5 heartbeat rss 280.7 MB peak 310.8 MB | DEPLOYED (69a8a07e) + plane window CLEAN 70.7 min at 252-306 MB | continue observation to 2-3 h across Kalshi walks; no OOM since deploy |
 | B4 | SizedBooks.unwant releases instrument records (review patch) | RC5 263a7ad7 (patch was malformed; applied by hand) | test_market_plane_unwant_releases_instruments (3, fail on base) | ~23 MB per catalogue rotation; not the main driver | PUBLISHED (814f76c2) | ships with B3 |
 | B5 | Audrey "paper pass not completed" alert reads the last completed pass | RC5 eab1bdbc | test_audrey_pass_alert_reads_completion (4, fail on base) | false "unknown time" alerts 05:20Z / 06:20Z | PUBLISHED (814f76c2) | confirm no false alert after deploy |
 
@@ -69,11 +79,11 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
 | D1 | PMX gRPC primary: subscribe-all semantics, acks, L2, identity, same-book arbitration, gaps, recovery, bounded storage | RC4 (accounting, plane-only harness input, majority rule) | test_p1_pmx_grpc_primary_accounting | plane snapshot stale whenever the plane is OOM-restarting | DEPLOYED (source); consumer use PUBLISHED (D2) | see D2 |
-| D2 | Consumer use of PMX books (QUOTE_STALE / PROBABILITY_DEADLINE first losses capped by REST budget) | RC5 merge 74fa9b38 (rc5/pmx-consumer-books 49aaee89): paper_pmx_books serves paper owner + collector calibration reads only when proven (exact identity, acknowledged on this connection, current under the decision bound, received <= 6 s, per-symbol same-book SUPPORTED), REST otherwise, counted by source; requested-symbol set no longer frozen at 32; gRPC transport connected flag fixed; stale / restarted plane certifies nothing; PMX_CONSUMER_BOOKS=off kill switch | test_rc5_pmx_consumer_books (29), test_rc5_plane_certification (10), test_rc5_feed_ownership_authority (6), all fail on base | RC4: held marks REST 4 / stream 0; paper owner 847 reads, 243 REST, 19 HTTP 429 | PUBLISHED | gate; paper_mark_refresh_runs.market_data.book_sources pmx_share after deploy |
+| D2 | Consumer use of PMX books (QUOTE_STALE / PROBABILITY_DEADLINE first losses capped by REST budget) | RC5 merge 74fa9b38 (rc5/pmx-consumer-books 49aaee89): paper_pmx_books serves paper owner + collector calibration reads only when proven (exact identity, acknowledged on this connection, current under the decision bound, received <= 6 s, per-symbol same-book SUPPORTED), REST otherwise, counted by source; requested-symbol set no longer frozen at 32; gRPC transport connected flag fixed; stale / restarted plane certifies nothing; PMX_CONSUMER_BOOKS=off kill switch | test_rc5_pmx_consumer_books (29), test_rc5_plane_certification (10), test_rc5_feed_ownership_authority (6), all fail on base | RC4: held marks REST 4 / stream 0; paper owner 847 reads, 243 REST, 19 HTTP 429 | DEPLOYED (69a8a07e) | paper_mark_refresh_runs.market_data.book_sources pmx_share readback |
 | D3 | Dedicated plane in approved full mode, orderless guard, full-mode boot test with mocked transports | guard RC4; boot test RC5 109c3e10 | test_market_plane_orderless_guard (22); full-mode boot test | plane provisioned 05:15Z; 6 values copied byte-exact from workers (disclosed to owner) | DEPLOYED (guard); boot test PUBLISHED (814f76c2) | gate |
 | D4 | Kalshi key classes (RSA-PSS + Ed25519) everywhere a signer exists; PEM bytes preserved | RC5 merge 9c123a22 (rc5/kalshi-keyclass-pmus-signer a5b5d2c1): kalshi_key.py; four loader refusals classified | lane suites | plane GET account/limits 200 with Ed25519 | PUBLISHED (814f76c2) | gate; deploy |
 | D5 | PMUS funded readers refuse the wrong key class before network; never substitute institutional positions | RC5 merge 9c123a22: PMUS credential gate | test_pmus_credential_census + lane suites | PMUS_KEY_ID/SECRET hold the PMX RSA client | EXTERNAL (funded retail Ed25519 key absent) + code PUBLISHED (814f76c2) | owner provides the funded retail key |
-| D6 | Priority freshness >= 95% on full denominator | plane memory (B3) keeps the plane up; transport connected flag (D2) makes the census name the real per-symbol refusal | | 116/139 (83%) RC4; radar priority_universe 0.9753 with the plane up vs 0.0588 just after an OOM (14:27Z) | OPEN | measure after deploy on the unchanged denominator; finished games (STARTED_GT_4H) counted as misses are a denominator question for the PM, not changed here |
+| D6 | Priority freshness >= 95% on full denominator | plane memory (B3) keeps the plane up; transport connected flag (D2) makes the census name the real per-symbol refusal | | RC5: held positions 3/3 fresh; priority members 174/246 (scorecard) / 0.6402 (snapshot); misses dominated by STREAM:SNAPSHOT_OLDER_THAN_THE_BOUND on quiet pregame candidates | OPEN (FAIL) | measure after deploy on the unchanged denominator; finished games (STARTED_GT_4H) counted as misses are a denominator question for the PM, not changed here |
 
 ### E. Management, settlement, accounting
 
@@ -89,7 +99,7 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
 | F1 | Experience V3 applied exactly (superseded by V4) | 18bc48ea + freeze fix e01a7d4d (claude/uiux-experience-v3) | verifier 30/30; 19 files 242 passed | CI preview 37783164445: occlusion, header clipping, touch < 44 px, phone Command blank band | PUBLISHED (not for production) | fixes carried into V4 |
-| F2 | Experience V4 applied exactly + necessary fixes; device acceptance; publish | in progress: claude/experience-v4-live-game-state | verifier 33/33 required | | OPEN | finish, CI preview with production data, reviewer, publish |
+| F2 | Experience V4 applied exactly + necessary fixes; device acceptance; publish | claude/experience-v4-live-game-state ecec0e05 (applied exactly ba5c61fb + disclosed fixes, venue ask f23b8996, review fixes 0b764347 / ecec0e05); published as 0a2e7822 on claude/session-njaewf | verifier 33/33; static 244 passed; trader-core 24/24; LGS node 20/20; independent review PUBLISHABLE | production build.json 0a2e7822 at 19:44:23Z; device acceptance on the live tree (frontend-preview 37834226533): Trader PASS on 5/5 devices | DEPLOYED | pre-existing HQ overlap and touch-target findings (identical before V4) remain open |
 | F3 | Live Game State backend (migration 316, flags OFF, real-PG tests, isolation) | RC5 merge 5da59304 (claude/live-game-state-v1 4fc7b0e9): migration 316 + rollback, TRACKED_TO 316, display-only proofs | real-PG tests | census expected to show 0 established fixtures: the adapter reads premap keys us_premap does not carry; no score provider is authorized, flags stay OFF | PUBLISHED (814f76c2) | gate; 316 applies on deploy; census research/lgs_held_fixture_census.sql |
 | F4 | Live Game State frontend (in V4 branch) | in progress | 20 Node tests | | OPEN | finish |
 | F5 | Collector hosting within existing resources, minimal DB permissions | | | no dedicated service exists; a new paid service is not authorized | OPEN | propose hosting; owner decision if new spend needed |
@@ -100,7 +110,8 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 | ID | Requirement | Implementation | Tests | Production evidence | Status | Next action |
 |---|---|---|---|---|---|---|
 | G1 | ADMIN_TOKEN strength (production accepts a 2-character admin credential; it is the HMAC signing key) | throttle 7ad4b746 (RC5) | test_admin_token_guard (8) | frontend-preview 37781022031 printed token length 2; owner notified 2026-10-08 13:16Z | EXTERNAL (rotation is the owner's) + mitigation PUBLISHED (814f76c2) | owner rotates ADMIN_TOKEN (Render API/workers + GitHub secret) |
-| G2 | No secrets in messages, artifacts, bundles or logs | frontend-preview guard; plane.sh masking | | | ongoing | audit pass |
+| G2 | No secrets in messages, artifacts, bundles or logs | frontend-preview guard; plane.sh masking; platform-capture and frontend-preview screenshots age-encrypted (repository is public) | | earlier frontend-preview runs 37781022031, 37783159982, 37783164445, 37803925884 uploaded plaintext production screenshots to public artifacts | ongoing | owner decision: delete those four artifacts |
+| G3 | API post-deploy event-loop stall: /healthz unanswered 16:33:51-16:34:22Z, Render restart; DB-pool TimeoutErrors in the first minutes after boot (same signature on RC4 2026-10-07) | | | runtime_window FAILED on this event | OPEN | root-cause the startup stall (heartbeat writes, execmirror lock, capability runtime all time out together) |
 
 ### H. Economics
 
@@ -111,6 +122,7 @@ authority added; historical PAPER unchanged; no thresholds relaxed.
 
 ## Change log
 
-- 2026-10-08 16:10Z: PMX consumer books merged (74fa9b38); taxonomy + touched suites 204 passed, completion / plane / packet readers 761 passed (38 files).
+- 2026-10-08 18:15Z: RC5 gated (8/8 green), released 69a8a07e, deployed 16:30Z; pm-acceptance 37818476513: plane CLEAN 70.7 min at 252-306 MB, API one unhealthy restart, scorecard 1/14. V4 published 19:44Z (0a2e7822), Trader device acceptance 5/5 on the live tree. Platform capture delivered (BETTOR_Prime_Platform_Capture.mp4, SHA-256 bd19cf6f...d3d7).
+- 2026-10-08 15:57Z: PMX consumer books merged (74fa9b38); taxonomy + touched suites 204 passed, completion / plane / packet readers 761 passed (38 files).
 - 2026-10-08 15:35Z: six RC5 lanes merged (6b67ce41, 207c3efe, bc294e05, 9c123a22, 5da59304, 109c3e10) and published at 814f76c2; interim release 93dc6f41 (tree equal) pushed so the plane fix can deploy once gated. PMX consumer lane (D2/D6) and the V4 frontend (F2/F4) still in flight.
 - 2026-10-08 13:55Z: register created on the RC5 branch (claude/red-team-closeout-v1) with RC4 baseline, RC5 local commits 7ad4b746 / eab1bdbc / 263a7ad7 and the in-flight lanes.

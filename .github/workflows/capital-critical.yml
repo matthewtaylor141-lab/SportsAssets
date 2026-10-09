@@ -19,6 +19,15 @@
 #     proofs at it, so they run instead of failing "RN1X_TEST_DSN is not set"
 #   * the WHOLE suite with a junit report; then tools/ci_verdict.py (stdlib
 #     only) decides, and its verdict JSON is printed and kept as an artifact
+#   * THE FRESH-DATABASE RECEIPT (RC6): what production's runner applied to
+#     that empty PostgreSQL 16, fingerprinted exactly as the API's
+#     MIGRATION_INTEGRITY control fingerprints production
+#     (tools/fresh_db_receipt.py), written PASSED or FAILED before the suite
+#     runs, attested (Sigstore) and kept in the artifact. The serving API
+#     cannot build an empty database, so production read UNKNOWN /
+#     FRESH_DB_RESULT_NOT_IN_THIS_PROCESS on 69a8a07e (pm-acceptance
+#     37836393458) while applied 224 = repo 224 and the fingerprints were
+#     equal; pm-acceptance reads this receipt for the release SHA.
 #
 # It deploys nothing, needs no secret and reaches no production system.
 name: capital-critical
@@ -39,6 +48,10 @@ on:
 
 permissions:
   contents: read
+  # the fresh-database receipt's Sigstore attestation, evidence only: no
+  # write to the repository, no deploy, no secret
+  id-token: write
+  attestations: write
 
 concurrency:
   group: capital-critical-${{ github.ref }}-${{ github.sha }}
@@ -104,6 +117,7 @@ jobs:
           PY
 
       - name: Build the database with production's migration runner
+        id: freshdb
         env:
           DATABASE_URL: ${{ env.CC_DSN }}
         run: |
@@ -147,6 +161,40 @@ jobs:
           got=$(psql -h 127.0.0.1 -U postgres -d capital_critical -tAc "SELECT count(*) FROM schema_migrations")
           echo "migrations applied: $got of $want"
           [ "$got" = "$want" ] || { echo "::error::only $got of $want migrations applied"; exit 1; }
+
+      - name: The fresh-database receipt (what production's runner built, fingerprinted as the API fingerprints production)
+        id: receipt
+        # a FAILED build is a FAILED receipt, never no receipt; read before
+        # the suite touches the database
+        if: always() && steps.freshdb.outcome != 'skipped'
+        env:
+          BUILD_OUTCOME: ${{ steps.freshdb.outcome }}
+        run: |
+          set +e
+          cd backend
+          psql -h 127.0.0.1 -U postgres -d capital_critical -X -tAc \
+            "SELECT coalesce(json_object_agg(version, content_sha ORDER BY version), '{}'::json) FROM schema_migrations" \
+            > "$RUNNER_TEMP/fresh-db-applied.json" 2>/dev/null
+          sv=$(psql -h 127.0.0.1 -U postgres -d capital_critical -X -tAc "SHOW server_version" 2>/dev/null)
+          python tools/fresh_db_receipt.py build \
+            --applied "$RUNNER_TEMP/fresh-db-applied.json" --migrations migrations \
+            --sha "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --build-outcome "$BUILD_OUTCOME" --server-version "$sv" \
+            --out "$RUNNER_TEMP/fresh-db-receipt.json"
+          if [ -s "$RUNNER_TEMP/fresh-db-receipt.json" ]; then
+            echo "receipt=$RUNNER_TEMP/fresh-db-receipt.json" >> "$GITHUB_OUTPUT"
+          fi
+          exit 0
+
+      - name: Attest the fresh-database receipt (Sigstore, evidence only)
+        if: always() && steps.receipt.outputs.receipt != ''
+        # an attestation outage must not turn the suite's verdict; an
+        # unattested receipt is UNPROVEN where it is read (pm-acceptance
+        # verifies it with --signer-workflow), never a pass
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.receipt.outputs.receipt }}
 
       - name: Run the whole suite
         id: suite
@@ -219,5 +267,6 @@ jobs:
             ${{ runner.temp }}/capital-critical-junit.xml
             ${{ runner.temp }}/capital-critical-console.txt
             ${{ runner.temp }}/capital-critical-verdict.json
+            ${{ runner.temp }}/fresh-db-receipt.json
           if-no-files-found: warn
           retention-days: 30

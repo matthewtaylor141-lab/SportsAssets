@@ -41,6 +41,7 @@ strictly AFTER the overlay was frozen.
 """
 from __future__ import annotations
 
+import asyncio
 import math
 
 from .. import bettor_source_calibration as SC
@@ -601,6 +602,24 @@ async def load_records(conn, *, now, days=180.0, account_id=C.PAPER_ACCOUNT,
     groups = await R.entry_groups(conn, [d["decision_id"] for d in decs
                                          if d.get("verdict") == "ENTER"])
     setts = await R.latest_settlements(conn, group_ids=groups.values())
+    # THE NORMALISATION RUNS IN A WORKER THREAD (RC6). Up to 2 x MAX_ROWS
+    # rows (20,000 valuations + 20,000 decisions) are normalised here, and on
+    # the event loop that was the longest hold of the whole intel cycle:
+    # 0.36-0.42 s at the bound on a quiet local core (LOCAL BENCHMARK ONLY,
+    # synthetic rows at the LIMITs), several times that on the API's one
+    # shared production CPU -- where 19 of the 24 intel cycles of
+    # 2026-10-08 completed 0-12 s after a >= 2 s loop stall record
+    # (render-ops logs, 'loop stall' / 'intel shadow cycle'), and Render
+    # restarted the API twice for unanswered /healthz. Pure over what was
+    # read above, so the loop keeps serving while it runs.
+    return await asyncio.to_thread(build_records, vals, decs, pm, joined,
+                                   groups, setts)
+
+
+def build_records(vals, decs, pm, joined, groups, setts) -> list:
+    """`load_records`' reads -> calibration records. PURE (no connection, no
+    clock): it runs in a worker thread, and it is exactly the loop that ran
+    inline before."""
     sidx = {(s["group_id"], s["us_market_slug"], str(s["holding_side"])): s
             for s in setts.values()}
     recs = [normalize_valuation(v, pm.get(v.get("us_market_slug")))

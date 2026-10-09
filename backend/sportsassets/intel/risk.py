@@ -32,6 +32,8 @@ contract has no paper settlement.
 """
 from __future__ import annotations
 
+import asyncio
+
 from . import common as C
 
 VERSION = "INTEL_RISK_V1"
@@ -368,52 +370,42 @@ async def _enrich(conn, positions: list, *, now) -> None:
             if r["valuation_id"] is not None:
                 vids[r["group_id"]] = int(r["valuation_id"])
     vals = await R.valuations_by_id(conn, vids.values())
+    # OFF THE LOOP (RC6): one classification per position, pure
+    await asyncio.to_thread(classify_all, positions, now=now, pm=pm,
+                            vids=vids, vals=vals)
+
+
+def classify_all(positions: list, *, now, pm: dict, vids: dict,
+                 vals: dict) -> list:
+    """`_enrich`'s classification of every position, from its reads. PURE
+    (it mutates only the positions it is given, as `classify` always did)."""
     for p in positions:
         classify(p, now=now, pm=pm.get(p["us_market_slug"]),
                  val=vals.get(vids.get(p.get("group_id"))))
+    return positions
 
 
-async def paper_report(conn, *, now, account_id=C.PAPER_ACCOUNT,
-                       days=LOOKBACK_DAYS) -> dict:
-    from . import reads as R
+# ── THE REPORTS' PYTHON RUNS IN A WORKER THREAD (RC6) ──────────────────
+#
+# Each book's report aggregated up to MAX_ROWS (20,000) fills, walked up to
+# MAX_ROWS equity snapshots (the mirror's each a JSON balance document,
+# parsed one by one) and built the exposure / cluster report -- all on the
+# API's event loop, inside the intel cycle that 19 of 24 times on
+# 2026-10-08 ended 0-12 s after a >= 2 s loop stall record (see
+# calibration.load_records). The reads stay on the loop; everything after
+# them is pure and runs in asyncio.to_thread, exactly as before.
 
-    fills = [dict(r) for r in await conn.fetch(
-        PAPER_FILLS_SQL, account_id, float(now) - days * 86400.0,
-        R.MAX_ROWS)]
-    setts = await R.latest_settlements(conn, account_id=account_id)
-    pos = aggregate_paper(fills, setts, account_id=account_id)
-    await _enrich(conn, pos, now=now)
-    books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
-                                        if p["open_qty"] > OPEN_EPS])
-    snaps = await conn.fetch(
-        "SELECT extract(epoch FROM at)::float8 AS at, equity_usd "
-        "  FROM paper_equity_snapshots WHERE account_id = $1 "
-        "   AND at >= to_timestamp($2) ORDER BY at LIMIT $3",
-        account_id, float(now) - 60 * 86400.0, R.MAX_ROWS)
+def paper_equity(snaps, *, now) -> dict:
+    """The paper book's equity risk from its snapshot rows. PURE."""
     eq = equity_risk([(float(s["at"]), C.num(s["equity_usd"]))
                       for s in snaps], now=now, start_peak=500000.0)
     eq["basis"] = "paper_equity_snapshots (fictional $500,000 account)"
-    return report(pos, book="PAPER", now=now, books=books, equity=eq)
+    return eq
 
 
-async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
-    from . import reads as R
-
-    fills = [dict(r) for r in await conn.fetch(
-        ACTUAL_FILLS_SQL, float(now) - days * 86400.0, R.MAX_ROWS)]
-    slugs = sorted({f["us_market_slug"] for f in fills
-                    if f.get("us_market_slug")})
-    settled = {r["us_market_slug"] for r in await conn.fetch(
-        "SELECT DISTINCT us_market_slug FROM paper_settlements "
-        " WHERE us_market_slug = ANY($1::text[])", slugs)} if slugs else set()
-    pos = aggregate_actual(fills, settled)
-    await _enrich(conn, pos, now=now)
-    books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
-                                        if p["open_qty"] > OPEN_EPS])
-    snaps = await conn.fetch(
-        "SELECT extract(epoch FROM at)::float8 AS at, balances "
-        "  FROM execmirror_snapshots WHERE at >= to_timestamp($1) "
-        " ORDER BY at LIMIT $2", float(now) - 60 * 86400.0, R.MAX_ROWS)
+def mirror_equity(snaps, *, now) -> dict:
+    """The execution mirror's equity risk from its snapshot rows (each a
+    JSON balance document). PURE."""
     series = []
     for s in snaps:
         bal = C.jload(s["balances"]) or []
@@ -427,4 +419,50 @@ async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
     eq["basis"] = ("execmirror_snapshots: venue currentBalance + "
                    "assetNotional of the Polymarket US mirror account; the "
                    "Kalshi lane has no equity series in these records")
-    return report(pos, book="ACTUAL", now=now, books=books, equity=eq)
+    return eq
+
+
+async def paper_report(conn, *, now, account_id=C.PAPER_ACCOUNT,
+                       days=LOOKBACK_DAYS) -> dict:
+    from . import reads as R
+
+    fills = [dict(r) for r in await conn.fetch(
+        PAPER_FILLS_SQL, account_id, float(now) - days * 86400.0,
+        R.MAX_ROWS)]
+    setts = await R.latest_settlements(conn, account_id=account_id)
+    pos = await asyncio.to_thread(aggregate_paper, fills, setts,
+                                  account_id=account_id)
+    await _enrich(conn, pos, now=now)
+    books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
+                                        if p["open_qty"] > OPEN_EPS])
+    snaps = await conn.fetch(
+        "SELECT extract(epoch FROM at)::float8 AS at, equity_usd "
+        "  FROM paper_equity_snapshots WHERE account_id = $1 "
+        "   AND at >= to_timestamp($2) ORDER BY at LIMIT $3",
+        account_id, float(now) - 60 * 86400.0, R.MAX_ROWS)
+    eq = await asyncio.to_thread(paper_equity, snaps, now=now)
+    return await asyncio.to_thread(report, pos, book="PAPER", now=now,
+                                   books=books, equity=eq)
+
+
+async def actual_report(conn, *, now, days=LOOKBACK_DAYS) -> dict:
+    from . import reads as R
+
+    fills = [dict(r) for r in await conn.fetch(
+        ACTUAL_FILLS_SQL, float(now) - days * 86400.0, R.MAX_ROWS)]
+    slugs = sorted({f["us_market_slug"] for f in fills
+                    if f.get("us_market_slug")})
+    settled = {r["us_market_slug"] for r in await conn.fetch(
+        "SELECT DISTINCT us_market_slug FROM paper_settlements "
+        " WHERE us_market_slug = ANY($1::text[])", slugs)} if slugs else set()
+    pos = await asyncio.to_thread(aggregate_actual, fills, settled)
+    await _enrich(conn, pos, now=now)
+    books = await R.latest_books(conn, [p["us_market_slug"] for p in pos
+                                        if p["open_qty"] > OPEN_EPS])
+    snaps = await conn.fetch(
+        "SELECT extract(epoch FROM at)::float8 AS at, balances "
+        "  FROM execmirror_snapshots WHERE at >= to_timestamp($1) "
+        " ORDER BY at LIMIT $2", float(now) - 60 * 86400.0, R.MAX_ROWS)
+    eq = await asyncio.to_thread(mirror_equity, snaps, now=now)
+    return await asyncio.to_thread(report, pos, book="ACTUAL", now=now,
+                                   books=books, equity=eq)

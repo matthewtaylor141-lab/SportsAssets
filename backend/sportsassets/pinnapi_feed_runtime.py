@@ -119,7 +119,13 @@ R_SCOPE_NOT_AN_ID = "SPORT_ID_NOT_AN_INTEGER"
 _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None, "held": None,
                 "scope": None, "discovery": None, "restarts": 0,
-                "last_restart": None}
+                "last_restart": None,
+                # the eviction stand-down (RC6, see EVICTION_STANDDOWN_S):
+                # this runtime's record, the last record of an earlier one,
+                # and the process's counts (stand-downs opened drive the
+                # escalation; re-entries made at a stand-down's end)
+                "standdown": None, "standdown_prior": None,
+                "eviction_standdowns": 0, "eviction_reentries": 0}
 CENSUS_S = 60.0
 #: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
 #: one bounded catalogue read per CENSUS_S, under its own timeout
@@ -219,6 +225,17 @@ def digest() -> dict:
     # task that ended can never update (P0 first-loss, 2026-10-06)
     d["owner_task"] = owner_task_state()
     d["last_owner_restart"] = _STATE.get("last_restart")
+    # THE STAND-DOWN, on the heartbeat (RC6): only THIS runtime's record is
+    # its stand-down; the last record of an earlier runtime in this process
+    # (a hold change cut it short, see _retire_standdown) stays visible
+    # beside it under its own name, with the process's counts
+    d["eviction_standdown"] = _own_standdown()
+    d["eviction_standdown_prior_runtime"] = (
+        dict(_STATE["standdown_prior"]) if _STATE.get("standdown_prior")
+        else None)
+    d["eviction_standdowns"] = int(_STATE.get("eviction_standdowns") or 0)
+    d["eviction_reentries"] = int(_STATE.get("eviction_reentries") or 0)
+    d["eviction_standdown_enabled"] = standdown_enabled()
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
@@ -456,12 +473,185 @@ def families_with_a_priced_market() -> set:
 #: and nothing noticed -- the heartbeat kept writing its last state
 #: (STARTING) for 2.5 h while every candidate read FEED_OWNERSHIP_NOT_HELD.
 #: A task that ends while the owner was neither stopped nor refused (a
-#: refusal -- writer lock lost, eviction loop, provider refusal -- is a
-#: deliberate, permanent stop and stays one) is restarted here, once per
-#: heartbeat pass, after its leaked lease session (if any) is discarded so
-#: the new attempt can take the lease. Authority is revoked first; the new
-#: run contends, resynchronizes and is fenced exactly like the first.
+#: refusal -- writer lock lost, provider refusal, no key -- is a deliberate,
+#: permanent stop and stays one; an eviction loop is a stand-down since RC6,
+#: see EVICTION_STANDDOWN_S below) is restarted here, once per heartbeat
+#: pass, after its leaked lease session (if any) is discarded so the new
+#: attempt can take the lease. Authority is revoked first; the new run
+#: contends, resynchronizes and is fenced exactly like the first.
 R_OWNER_TASK_ENDED = "FEED_OWNER_TASK_ENDED_UNEXPECTEDLY"
+
+
+#: ── AN EVICTION LOOP STANDS DOWN; IT NO LONGER ENDS THE FEED FOR GOOD (RC6) ─
+#:
+#: PRODUCTION (the deployed RC5 API, 2026-10-08). The owner set refused =
+#: FEED_EVICTION_LOOP_SUSPECTED at 19:00:51Z after three unrequested closes
+#: inside EVICTION_WINDOW_S (~18:52:40Z, 18:55:40Z, 19:00:51Z) and, being a
+#: refusal, was never restarted here: five hours and more later no backend
+#: held the feed lease, every 15-minute cycle carried 85-104
+#: FEED_OWNERSHIP_NOT_HELD rows (SOFTWARE: "every one of those states is ours
+#: to keep short", 49aaee89), and Xavier's held reads and the collector's WS
+#: reference were absent. Only a process restart could bring it back.
+#:
+#: THE RULE IS KEPT AND BOUNDED, NOT RELAXED (ported from rc6/pipeline-reds
+#: 9c0c1fe6 + c9db8ccf onto this owner). The owner still stops at
+#: EVICTIONS_MAX unrequested closes inside EVICTION_WINDOW_S, revokes its
+#: authority first and never fights inside a run. What changes is that an
+#: EVICTION_LOOP refusal is a STAND-DOWN of a stated length, not the end of
+#: the feed for the life of the process: after EVICTION_STANDDOWN_S[n]
+#: (30 min, then 1 h, 2 h, and 4 h for every later one) this supervisor
+#: re-enters the SAME owner once -- refusal and eviction history cleared, a
+#: leaked lease session discarded, authority still revoked -- and that run
+#: contends for the lease, passes the writer fence and the arm row, and
+#: serves nothing until the provider's snapshots arrive on its new epoch. A
+#: real second holder of the key therefore sees at most EVICTIONS_MAX
+#: connections per stand-down, the stand-downs doubling. Every other refusal
+#: -- the decider's writer lock lost, the provider refusing the key or the
+#: plan, no key in this service -- stays permanent; a stopped owner is never
+#: re-entered.
+#:
+#: TIMED ON THE MONOTONIC CLOCK (review of 9c0c1fe6): `*_mono` fields time
+#: the stand-down, so a wall-clock step can neither end it early nor
+#: stretch it; `since_at` / `until_at` / `ended_at` are wall-clock labels
+#: for the heartbeat only.
+#:
+#: A STAND-DOWN BELONGS TO THE RUNTIME THAT OPENED IT; THE ESCALATION
+#: BELONGS TO THE PROCESS (review of 9c0c1fe6). ext_pinnacle_loop runs
+#: shutdown_default and then start_default in the same process every time a
+#: writer hold ends. An open record left in _STATE across that change let
+#: the NEXT owner's first eviction loop re-enter at once (or after the old
+#: record's remainder): 2 x EVICTIONS_MAX connections back to back against
+#: a possible real holder, and the new runtime's heartbeat showing the old
+#: owner's stand-down. So:
+#:   - every record carries the runtime_id it was opened for; another
+#:     runtime's is retired (STANDDOWN_OF_ANOTHER_RUNTIME), never re-entered;
+#:   - shutdown_default closes an open record (STANDDOWN_CUT_SHORT_BY_
+#:     SHUTDOWN) and keeps it, labelled, as `eviction_standdown_prior_
+#:     runtime` on the heartbeat (and `eviction_standdown_at_shutdown` on the
+#:     terminal one);
+#:   - the length is chosen by how many stand-downs THIS PROCESS has opened
+#:     (`eviction_standdowns`), not by completed re-entries, so a hold change
+#:     does not reset the escalation: the next hold's owner connects at once
+#:     -- as a new hold's owner always has -- and its next loop stands down
+#:     for the NEXT length. Only a process restart clears it, as it cleared
+#:     the permanent refusal before RC6.
+#:
+#: KILL SWITCH: env PINNAPI_EVICTION_STANDDOWN in {off,0,false,no} restores
+#: the exact pre-RC6 behaviour -- an EVICTION_LOOP refusal is permanent, no
+#: record is opened, nothing is re-entered. Default on.
+EVICTION_STANDDOWN_S = (1800.0, 3600.0, 7200.0, 14400.0)
+STANDDOWN_ENV = "PINNAPI_EVICTION_STANDDOWN"
+#: how a stand-down record ended (`ended_by`); records, not refusals
+STANDDOWN_ENDED_BY_REENTRY = "REENTERED_AFTER_STANDDOWN"
+STANDDOWN_CUT_SHORT_BY_SHUTDOWN = "CUT_SHORT_BY_OWNER_SHUTDOWN"
+STANDDOWN_OF_ANOTHER_RUNTIME = "RETIRED_RECORD_OF_ANOTHER_RUNTIME"
+
+
+def standdown_enabled() -> bool:
+    """False only for an explicit kill switch (PINNAPI_EVICTION_STANDDOWN in
+    off/0/false/no): then an eviction loop is a permanent refusal, exactly
+    as before RC6."""
+    return (os.environ.get(STANDDOWN_ENV) or "").strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+def _standdown_s(n: int) -> float:
+    return EVICTION_STANDDOWN_S[min(max(0, n), len(EVICTION_STANDDOWN_S) - 1)]
+
+
+def _own_standdown() -> Optional[dict]:
+    """This runtime's stand-down record (a copy, with the seconds left while
+    it is open), else None."""
+    sd = _STATE.get("standdown")
+    if sd is None or sd.get("runtime_id") != _STATE.get("runtime_id"):
+        return None
+    out = dict(sd)
+    if out.get("ended_mono") is None:
+        try:
+            out["remaining_s"] = round(max(
+                0.0, float(out["until_mono"]) - time.monotonic()), 3)
+        except (TypeError, ValueError, KeyError):
+            out["remaining_s"] = None
+    return out
+
+
+def _retire_standdown(now: float, why: str) -> Optional[dict]:
+    """Move the current record, whatever its runtime, to `standdown_prior`.
+    An open one is closed at monotonic `now` with `why`; one that already
+    ended keeps its own ending. Returns the retired record, else None."""
+    sd = _STATE.get("standdown")
+    if sd is None:
+        return None
+    sd = dict(sd)
+    if sd.get("ended_mono") is None:
+        sd["ended_mono"], sd["ended_at"] = now, round(time.time(), 3)
+        sd["ended_by"] = why
+        try:
+            left = max(0.0, float(sd.get("until_mono")) - now)
+        except (TypeError, ValueError):
+            left = 0.0
+        log.warning("pinnapi feed: stand-down of runtime %s ended early "
+                    "(%s) %.0fs before its stated end", sd.get("runtime_id"),
+                    why, left)
+    _STATE["standdown_prior"] = sd
+    _STATE["standdown"] = None
+    return sd
+
+
+def _eviction_standdown(o, now: float) -> Optional[str]:
+    """Hold an EVICTION_LOOP refusal for its stand-down (monotonic `now`),
+    then re-enter the owner once. Returns "EVICTION_STANDDOWN_ENDED" when
+    it re-entered, else None. Must run on the event loop."""
+    rid = _STATE.get("runtime_id")
+    sd = _STATE.get("standdown")
+    if sd is not None and sd.get("runtime_id") != rid:
+        # another runtime's record neither holds this owner to its clock
+        # nor lets it re-enter at that record's end
+        _retire_standdown(now, STANDDOWN_OF_ANOTHER_RUNTIME)
+        sd = None
+    if sd is None or sd.get("ended_mono") is not None:
+        n = int(_STATE.get("eviction_standdowns") or 0)
+        secs = _standdown_s(n)
+        wall = round(time.time(), 3)
+        sd = {"refused": O.R_EVICTION_LOOP, "runtime_id": rid,
+              "ordinal": n + 1, "seconds": secs,
+              "since_mono": now, "until_mono": now + secs,
+              "since_at": wall, "until_at": round(wall + secs, 3),
+              "ended_mono": None, "ended_at": None, "ended_by": None}
+        _STATE["standdown"] = sd
+        _STATE["eviction_standdowns"] = n + 1
+        o._note("EVICTION_STANDDOWN", seconds=secs, ordinal=n + 1,
+                until_at=sd["until_at"])
+        log.warning("pinnapi feed: eviction loop suspected; standing down "
+                    "%.0fs (stand-down %d in this process) before one "
+                    "re-entry", secs, n + 1)
+        return None
+    if now < sd["until_mono"]:
+        return None
+    # THE RE-ENTRY: the same owner, clean, contending from scratch. Authority
+    # stays revoked until the new epoch resynchronizes.
+    o.cache.lost(O.R_EVICTION_LOOP)
+    lease = getattr(o, "lease", None)
+    if lease is not None:
+        try:
+            lease.discard()
+        except Exception:                                       # noqa: BLE001
+            pass
+        o.lease = None
+    o.refused = None
+    o.evictions = []
+    o.state = "STARTING"
+    sd["ended_mono"], sd["ended_at"] = now, round(time.time(), 3)
+    sd["ended_by"] = STANDDOWN_ENDED_BY_REENTRY
+    _STATE["eviction_reentries"] = int(
+        _STATE.get("eviction_reentries") or 0) + 1
+    o._note("EVICTION_STANDDOWN_ENDED", ordinal=sd["ordinal"],
+            stood_down_s=round(now - sd["since_mono"], 3),
+            reentries=_STATE["eviction_reentries"])
+    log.warning("pinnapi feed: stand-down %d over after %.0fs; re-entering",
+                sd["ordinal"], now - sd["since_mono"])
+    _STATE["task"] = asyncio.get_running_loop().create_task(o.run())
+    return "EVICTION_STANDDOWN_ENDED"
 
 
 def owner_task_state() -> dict:
@@ -480,15 +670,22 @@ def owner_task_state() -> dict:
             "restarts": _STATE.get("restarts", 0)}
 
 
-def supervise() -> Optional[str]:
-    """Restart the owner task if it ended without being stopped or refused.
-    Returns how it had ended when it restarted it, else None. Never
-    raises; must run on the event loop."""
+def supervise(now: Optional[float] = None) -> Optional[str]:
+    """Restart the owner task if it ended without being stopped or refused,
+    and re-enter an EVICTION_LOOP refusal after its stand-down (`now`: a
+    time.monotonic() reading; the current one when None). Returns how it
+    had ended when it restarted it, "EVICTION_STANDDOWN_ENDED" when it
+    re-entered, else None. Never raises; must run on the event loop."""
     try:
         o, t = _STATE.get("owner"), _STATE.get("task")
         if o is None or t is None or not t.done():
             return None
-        if o.stop_event.is_set() or o.refused:
+        if o.stop_event.is_set():
+            return None
+        if o.refused == O.R_EVICTION_LOOP and standdown_enabled():
+            return _eviction_standdown(
+                o, time.monotonic() if now is None else float(now))
+        if o.refused:
             return None
         how = owner_task_state().get("how")
         o.cache.lost(R_OWNER_TASK_ENDED)
@@ -668,16 +865,24 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
             pass
         o.lease = None
     o.cache.lost(O.R_STOPPED)
+    # THE STAND-DOWN DOES NOT OUTLIVE ITS RUNTIME (review of 9c0c1fe6): an
+    # open one is closed here as cut short and kept, labelled, as the prior
+    # runtime's; the next hold's owner opens its own (the escalation carries)
+    retired = _retire_standdown(time.monotonic(),
+                                STANDDOWN_CUT_SHORT_BY_SHUTDOWN)
     final_status = "WRITTEN_OR_SUPERSEDED"
     try:
         await _write_heartbeat(_STATE["pool"], {
             "state": "RELEASED" if verdict == "CLOSED" else "STOPPING_UNCONFIRMED",
             "runtime_id": _STATE.get("runtime_id"), "beat_at": time.time(),
             "shutdown_verdict": verdict, "authority_proven": False,
+            "eviction_standdown_at_shutdown": retired,
             "c1_decision_effect": DECISION_EFFECT}, final=True)
     except Exception as exc:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
+    # `standdown` was retired above; `standdown_prior`, `eviction_standdowns`
+    # and `eviction_reentries` are the process's and are kept on purpose
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
                   census=None, held=None, scope=None, discovery=None,
                   restarts=0, last_restart=None)
@@ -788,6 +993,96 @@ def entry_fixture(entry_event_key, view: dict, sid):
     return hits[0] if len(hits) == 1 else None
 
 
+#: ── ONE FIXTURE IDENTITY FOR THE HELD READS AND THE HELD WATCH (RC6) ────
+#:
+#: The held READ learned two things in the closeout (d075e12f): held LINE
+#: contracts (spreads / totals / team totals, `held_line_quote`) and the
+#: ENTRY-PROVEN provider fixture (`entry_fixture`). The held WATCH -- which
+#: provider fixtures are Xavier's priority targets, whose changes and
+#: provider-stamped confirmations trigger an immediate review
+#: (pinnapi_held.refresh -> held_event_id) -- learned neither: it refused
+#: every non-moneyline contract HELD_VENUE_TYPE_NOT_PROVED_FULL_GAME_MONEYLINE
+#: and matched exact names only.
+#:
+#: MEASURED. research-sql run 37840684877 (complete-packet reviews since
+#: 2026-10-07 04:37Z): the held NFL spread asc-nfl-tb-dal-2026-10-08-pos-9pt5
+#: (papergrp:bfaade40...) was read current from this cache 267 times
+#: (CURRENT_BLEND_HELD_CACHE, EXACT_STRUCTURED_NAMES), yet as a non-target it
+#: was reviewed only on the 60 s backstop: 2-7 complete reviews an hour on
+#: 2026-10-08 13:00-18:59Z. Its provider confirmations come only when
+#: Pinnacle bumps the matchup (PinnAPI forwards prematch_matchups for
+#: CHANGED matchups only -- 13 single-matchup frames in 15 s for ~1,300
+#: events, ws_sample run 36940200143; production confirmations
+#: PREMATCH_MATCHUPS_VERSION_UNCHANGED 0 against PREMATCH_MARKETS_
+#: AUTHORITATIVE_LIST 140,424, research-sql run 37841015429), so a backstop
+#: review lands inside the 30 s after a bump only by chance. Four groups were
+#: read current ONLY through the entry-proven fixture (75a2dd90, f8cac471,
+#: c077f868, c3da878f: identity ENTRY_PROVEN_PROVIDER_FIXTURE) and so were
+#: never targets either.
+#:
+#: THE REPAIR: `held_fixture` is the identity, used by both reads and by
+#: `held_event_id`. A held line contract whose venue family is proven
+#: resolves to its fixture by the line read's own event identity; the
+#: entry-proven fixture applies where exact names find nothing. The watch
+#: still listens on the fixture's full-game money line (a matchup bump
+#: re-delivers every market of it); a review it triggers reads the HELD
+#: contract's own quote under the unchanged 30 s rule -- nothing is made
+#: fresh by the trigger, and nothing is read that the review would not.
+def held_line_type_refusal(sports_type) -> Optional[str]:
+    """None when the venue type is a line family whose payoff equivalence
+    is proven (the held line read prices it), else the named refusal --
+    the line read's own first two checks. Pure."""
+    from . import bettor_market_family as MF
+    fam = MF.venue_line_family(sports_type)
+    if fam.get("refusal"):
+        return R_HELD_TYPE_UNPROVED
+    st = MF.family_status(fam["sport"], fam["family"])
+    if not st.get("proven"):
+        return st.get("refusal") or R_HELD_TYPE_UNPROVED
+    return None
+
+
+def held_fixture(row: dict, *, event_rows, view: dict, sport_ids,
+                 synced: bool, entry_event_key=None, line: bool = False,
+                 start=None) -> tuple:
+    """(state, feed fixture id, sport id, identity basis) for ONE held
+    contract -- THE identity of the held reads and the held watch. A
+    moneyline contract: the census's contract_match. A line contract
+    (`line`, `start` its finite game start): the same event identity
+    without the moneyline family check. Either: the entry-proven provider
+    fixture when exact names find nothing. Pure."""
+    from . import pinnapi_census as C
+    if not line:
+        state, eid, sid = C.contract_match(
+            row, event_rows or [row], view,
+            subscribed_sports=set(sport_ids), synced=synced)
+    else:
+        sid = C.sport_id_of(row.get("sports_type"))
+        if sid is None:
+            return C.S_UNMAPPED_SPORT, None, None, None
+        if sid not in set(sport_ids):
+            return C.S_OUT_OF_SCOPE, None, sid, None
+        if not synced:
+            return C.S_FEED_NOT_SYNCED, None, sid, None
+        same = [r for r in (event_rows or [])
+                if C.sport_id_of(r.get("sports_type")) == sid
+                and r.get("event_slug") == row.get("event_slug")] or [row]
+        teams, leagues, starts = C.group_event(same)
+        state, eid = C.event_identity(teams, leagues, starts,
+                                      row.get("event_slug"), start,
+                                      view.get(sid, []))
+        if state == C.S_NO_FEED_EVENT:
+            state, eid = C.split_name_identity(same, sid, start,
+                                               view.get(sid, []))
+    identity = IDENTITY_EXACT
+    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
+        fx = entry_fixture(entry_event_key, view, sid)
+        if fx is not None:
+            state, eid, identity = C.S_SUPPORTED, fx["id"], \
+                IDENTITY_ENTRY_FIXTURE
+    return state, eid, sid, identity
+
+
 def held_quote(row: dict, *, event_rows=None, payout_event,
                payout_is_complement: bool,
                at: float, max_age_s: float, sport_ids, synced: bool,
@@ -816,14 +1111,9 @@ def held_quote(row: dict, *, event_rows=None, payout_event,
         if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
             return {"ok": False, "reason": R_BAD_COMPLEMENT}
         sel = pay[4:-1]
-    state, eid, sid = C.contract_match(row, event_rows or [row], view, subscribed_sports=set(
-        sport_ids), synced=synced)
-    identity = IDENTITY_EXACT
-    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
-        fx = entry_fixture(entry_event_key, view, sid)
-        if fx is not None:
-            state, eid, identity = C.S_SUPPORTED, fx["id"], \
-                IDENTITY_ENTRY_FIXTURE
+    state, eid, sid, identity = held_fixture(
+        row, event_rows=event_rows, view=view, sport_ids=sport_ids,
+        synced=synced, entry_event_key=entry_event_key)
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
@@ -923,13 +1213,10 @@ def held_line_quote(row: dict, *, event_rows=None, payout_event,
     from . import bettor_market_family as MF
     from . import bettor_pinnacle_devig as devig
     from . import pinnapi_census as C
+    why = held_line_type_refusal(row.get("sports_type"))
+    if why is not None:
+        return {"ok": False, "reason": why}
     fam = MF.venue_line_family(row.get("sports_type"))
-    if fam.get("refusal"):
-        return {"ok": False, "reason": R_HELD_TYPE_UNPROVED}
-    st = MF.family_status(fam["sport"], fam["family"])
-    if not st.get("proven"):
-        return {"ok": False, "reason": st.get("refusal")
-                or R_HELD_TYPE_UNPROVED}
     try:
         line = float(entry_line)
         start = float(row["game_start"])
@@ -948,29 +1235,12 @@ def held_line_quote(row: dict, *, event_rows=None, payout_event,
         if not (pay.startswith("NOT(") and pay.endswith(")") and pay[4:-1]):
             return {"ok": False, "reason": R_BAD_COMPLEMENT}
         name = pay[4:-1]
-    sid = C.sport_id_of(row.get("sports_type"))
-    if sid is None:
-        return {"ok": False, "reason": C.S_UNMAPPED_SPORT}
-    if sid not in set(sport_ids):
-        return {"ok": False, "reason": C.S_OUT_OF_SCOPE, "sport_id": sid}
-    if not synced:
-        return {"ok": False, "reason": C.S_FEED_NOT_SYNCED, "sport_id": sid}
-    same = [r for r in (event_rows or [])
-            if C.sport_id_of(r.get("sports_type")) == sid
-            and r.get("event_slug") == row.get("event_slug")] or [row]
-    teams, leagues, starts = C.group_event(same)
-    state, eid = C.event_identity(teams, leagues, starts,
-                                  row.get("event_slug"), start,
-                                  view.get(sid, []))
-    if state == C.S_NO_FEED_EVENT:
-        state, eid = C.split_name_identity(same, sid, start,
-                                           view.get(sid, []))
-    identity = IDENTITY_EXACT
-    if state in (C.S_NO_FEED_EVENT, "STRUCTURED_PARTICIPANTS_NOT_TWO"):
-        fx = entry_fixture(entry_event_key, view, sid)
-        if fx is not None:
-            state, eid, identity = C.S_SUPPORTED, fx["id"], \
-                IDENTITY_ENTRY_FIXTURE
+    state, eid, sid, identity = held_fixture(
+        row, event_rows=event_rows, view=view, sport_ids=sport_ids,
+        synced=synced, entry_event_key=entry_event_key, line=True,
+        start=start)
+    if state == C.S_UNMAPPED_SPORT:
+        return {"ok": False, "reason": state}
     if state != C.S_SUPPORTED:
         return {"ok": False, "reason": state, "sport_id": sid}
     ev = next((e for e in view.get(sid, []) if e["id"] == eid), None) or {}
@@ -1096,11 +1366,14 @@ async def held_moneyline(conn, *, us_market_slug, payout_event,
                       view=view, entry_event_key=entry_event_key)
 
 
-async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:
-    """(feed event id, None) for a held contract matched to ONE provider
-    event of this process's cache under the census's own identity (same
-    teams, start within tolerance, full-game moneyline family), else
-    (None, named reason). Read only; no network.
+async def held_event_id(conn, us_market_slug, *, view=None,
+                        entry_event_key=None) -> tuple:
+    """(feed fixture id, None) for a held contract matched to ONE provider
+    fixture of this process's cache under THE held reads' own identity
+    (`held_fixture`: same teams, start within tolerance; a full-game
+    moneyline, or a line contract whose family is proven; the entry-proven
+    fixture `entry_event_key` where exact names find nothing), else (None,
+    named reason). Read only; no network.
 
     `view` (R30A): the feed event view (pinnapi_census.feed_event_view) the
     caller already built for this pass. pinnapi_held.refresh resolves EVERY
@@ -1119,19 +1392,31 @@ async def held_event_id(conn, us_market_slug, *, view=None) -> tuple:
         row = await conn.fetchrow(HELD_CATALOGUE_SQL, us_market_slug)
         if row is None:
             return None, R_NOT_IN_CATALOGUE
-        if row["sports_type"] not in HELD_FULL_GAME_TYPES:
-            return None, R_HELD_TYPE_UNPROVED
+        # RC6: a held LINE contract the held read prices is a target too
+        line = row["sports_type"] not in HELD_FULL_GAME_TYPES
+        if line:
+            why = held_line_type_refusal(row["sports_type"])
+            if why is not None:
+                return None, why
         event_rows = ([dict(r) for r in await conn.fetch(
             held_event_sql(), row["event_slug"])] if row["event_slug"]
             else [])
     except Exception as exc:                                    # noqa: BLE001
         return None, "%s:%s" % (R_CATALOGUE_UNREADABLE, type(exc).__name__)
+    start = None
+    if line:
+        try:
+            start = float(row["game_start"])
+            if not math.isfinite(start):
+                raise ValueError("invalid time")
+        except (TypeError, ValueError, KeyError, OverflowError):
+            return None, R_HELD_TIME_UNPROVED
     if view is None:
         view = C.feed_event_view(o.cache)
-    state, eid, _sid = C.contract_match(
-        dict(row), event_rows or [dict(row)], view,
-        subscribed_sports=set(o.sport_ids),
-        synced=bool(o.cache.authority.synced))
+    state, eid, _sid, _basis = held_fixture(
+        dict(row), event_rows=event_rows or [dict(row)], view=view,
+        sport_ids=o.sport_ids, synced=bool(o.cache.authority.synced),
+        entry_event_key=entry_event_key, line=line, start=start)
     if state != C.S_SUPPORTED or eid is None:
         return None, state
     return eid, None

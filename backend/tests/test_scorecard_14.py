@@ -97,3 +97,52 @@ def test_device_views_count_every_check(tmp_path):
     comp = cc["components"][0]
     assert (comp["numerator"], comp["denominator"]) == (16, 18)
     assert cc["passes"] is False
+    # the Trader device acceptance is not supplied here: READ_UNAVAILABLE
+    assert "trader_device_acceptance" in cc["unreadable_units"]
+
+
+def _trader(tmp_path, results):
+    good = {"view": "desktop_trader", "device": "desktop", "status": 200, "signed_in": True,
+            "main_thread_responsive": True, "overflow_px": 0, "fixed_overlaps": [],
+            "touch_targets_under_44": 0, "paper_mentions": 2, "shadow_mentions": 1,
+            "console_errors": 0, "suspect_words": []}
+    p = tmp_path / "preview.json"
+    p.write_text(json.dumps({"records": [good]}))
+    if results is not None:
+        (tmp_path / "trader_accept.json").write_text(json.dumps({"results": results}))
+    return _cat(SC.score(str(tmp_path), frontend_preview=str(p)), "Command Center desktop and mobile")
+
+
+def _tr(dev, failures=()):
+    return {"device": dev, "verdict": "FAIL" if failures else "PASS", "failures": list(failures),
+            "api": {"returned": 517, "total_position_count": 517}}
+
+
+def test_trader_acceptance_passes_only_with_every_device_clean(tmp_path):
+    cc = _trader(tmp_path, [_tr(d) for d in SC.TRADER_DEVICES])
+    assert cc["passes"] is True
+
+
+def test_one_trader_device_failure_fails_the_row(tmp_path):
+    rs = [_tr(d) for d in SC.TRADER_DEVICES]
+    rs[1] = _tr("iphone", ["ASK_NOT_SHOWN"])
+    cc = _trader(tmp_path, rs)
+    assert cc["passes"] is False
+    assert "ASK_NOT_SHOWN" in json.dumps(cc)
+    tr = next(c for c in cc["components"] if c["component"] == "trader_device_acceptance")
+    assert (tr["numerator"], tr["denominator"], tr["rate"]) == (4, 5, 0.8)
+
+
+def test_a_missing_trader_device_or_file_is_unavailable_not_green(tmp_path):
+    cc = _trader(tmp_path, [_tr(d) for d in SC.TRADER_DEVICES if d != "ipad_landscape"])
+    assert cc["passes"] is False and "READ_UNAVAILABLE:trader_accept.json:ipad_landscape" in json.dumps(cc)
+    d2 = tmp_path / "absent"
+    d2.mkdir()
+    cc3 = _trader(d2, None)
+    assert cc3["passes"] is False and "READ_UNAVAILABLE:trader_accept.json:NOT_SUPPLIED" in json.dumps(cc3)
+
+
+def test_a_trader_run_without_a_snapshot_is_not_a_pass(tmp_path):
+    rs = [_tr(d) for d in SC.TRADER_DEVICES]
+    rs[0] = {"device": "desktop", "verdict": "NO_API_SNAPSHOT", "live_snapshots": 0}
+    assert _trader(tmp_path, rs)["passes"] is False

@@ -71,6 +71,26 @@ WS_URL = "wss://pinnapi.com/ws/feed"
 WS_MAX_SECONDS = 20
 WS_MAX_SPORTS = 4
 WS_MAX_FRAME_BYTES = 32 * 1024 * 1024
+#: ── THE CLIENT KEEPALIVE MATCHES THE PROVIDER'S OWN LIVENESS RULE (RC6) ──
+#: The connector passed no keepalive settings, so the websockets library's
+#: defaults applied: a ping every 20 s, the connection FAILED BY THIS CLIENT
+#: (1011 "keepalive ping timeout") when the pong is not processed within
+#: 20 s. The pong is processed by the same event loop that runs the API; a
+#: loop that cannot run for 20 s (the API's loop watchdog logged stalls at
+#: 18:52:21Z and 18:55:04-18:56:07Z on 2026-10-08, before two of the three
+#: closes that stopped the feed -- pinnapi_owner.R_CLIENT_CLOSED) kills a
+#: socket the provider is serving perfectly well, and every reconnect is a
+#: new epoch that reloads every subscribed snapshot. The provider's own
+#: contract is an application ping every 30 s and a close "after ~75s of
+#: silence" (docs, tests/fixtures/pinnapi_ws_subscription_docs_2026_10_04
+#: .json); the owner already reconnects after SILENCE_S (75 s) without a
+#: frame. So the client's pong deadline is that same 75 s: a dead socket is
+#: still found within SILENCE_S (unchanged), a healthy one is not failed by
+#: our own stall. Prices are unaffected: every quote is aged from its
+#: provider stamp under the unchanged 30 s rule, so a late-processed frame
+#: is never fresher than it is.
+WS_PING_INTERVAL_S = 20.0
+WS_PING_TIMEOUT_S = 75.0
 WS_SAMPLES_PER_KIND = 2
 # frames come from Pinnacle, not from an account: keep market `key`s (the
 # merge key) visible and redact only credential/personal-looking names
@@ -343,7 +363,8 @@ def _ws_connect(url: str, key: str):
             return exc
     return _NoRedirect(url, additional_headers={"x-api-key": key},
                        open_timeout=15, max_size=WS_MAX_FRAME_BYTES,
-                       proxy=None)
+                       ping_interval=WS_PING_INTERVAL_S,
+                       ping_timeout=WS_PING_TIMEOUT_S, proxy=None)
 
 
 async def ws_sample(sport_ids, streams=("live", "prematch"),

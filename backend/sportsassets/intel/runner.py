@@ -103,9 +103,12 @@ async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
     async def calibration():
         recs = await CAL.load_records(conn, now=now, account_id=account_id,
                                       experiment_id=experiment_id)
-        ind = CAL.independent(recs)
+        # OFF THE LOOP (RC6): `independent` walks every record and
+        # `overlay_plan` can fit a Newton-Raphson overlay over thousands of
+        # pairs; both are pure (see load_records for the production stalls)
+        ind = await asyncio.to_thread(CAL.independent, recs)
         ovs = await ST.overlays(conn)
-        acts = CAL.overlay_plan(ind, ovs, now=now)
+        acts = await asyncio.to_thread(CAL.overlay_plan, ind, ovs, now=now)
         await ST.apply_overlay_actions(conn, acts, now=now,
                                        protocol=CAL.PROTOCOL,
                                        method=CAL.OVERLAY_METHOD)

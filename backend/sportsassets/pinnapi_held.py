@@ -18,10 +18,12 @@ the latest stored row (paper_benchmark.xavier_measure): 106 s, 173 s.
 
 WHAT THIS DOES.
   targets    every OPEN paper and actual position's contract, resolved to
-             its provider event in THIS process's feed cache with the
-             census's own identity rules (pinnapi_feed_runtime.
-             held_event_id: same event, full-game moneyline). Refreshed
-             every HELD_REFRESH_S by the feed runtime's own task.
+             its provider event in THIS process's feed cache with the held
+             reads' own identity rules (pinnapi_feed_runtime.held_event_id
+             -> held_fixture: same event; a full-game moneyline or, RC6, a
+             line contract whose family is proven; the entry-proven fixture
+             where exact names find nothing). Refreshed every
+             HELD_REFRESH_S by the feed runtime's own task.
   priority   pinnapi_reactive.Scheduler serves held events FIRST (a held
              queue ahead of discovery, never evicted by discovery, held
              seeds pinned while held), on the SAME single worker and
@@ -205,6 +207,44 @@ async def held_slugs(conn) -> list:
                    if r["slug"]})
 
 
+#: THE ENTRY-PROVEN PROVIDER FIXTURE OF EACH HELD PAPER CONTRACT (RC6): the
+#: event key of the valuation the entry was decided on, when it names a
+#: PinnAPI fixture (pinnapi_feed_runtime.ENTRY_FIXTURE_PREFIX), the newest
+#: entry per contract. The held READ already resolves a fixture this way
+#: where exact names find nothing (closeout: venue "Vila Nova" vs provider
+#: "Vila Nova FC"); the watch now resolves the same fixture, so its changes
+#: trigger the review (pinnapi_feed_runtime.held_fixture). Bounded like
+#: HELD_SLUGS_SQL; read only.
+HELD_ENTRY_FIXTURES_SQL = """
+    SELECT DISTINCT ON (c.us_market_slug) c.us_market_slug AS slug,
+           v.event_key AS entry_event_key
+      FROM (%s) c
+      JOIN paper_orders o ON o.group_id = c.group_id AND o.role = 'ENTRY'
+                         AND o.us_market_slug = c.us_market_slug
+      JOIN paper_decisions d ON d.decision_id = o.decision_id
+      JOIN external_valuations v ON v.id = d.valuation_id
+     WHERE v.event_key LIKE 'pinnapi:%%'
+     ORDER BY c.us_market_slug, o.created_at DESC
+     LIMIT %d""" % (L.CANONICAL_OPEN_POSITIONS_SQL, MAX_HELD)
+
+
+async def held_entry_fixtures(conn, w: "HeldWatch | None" = None) -> dict:
+    """{held slug: entry valuation event key 'pinnapi:<fixture id>'}. Never
+    raises: an unreadable answer is counted and resolves nothing by it
+    (exact names still apply, as before)."""
+    try:
+        rows = await conn.fetch(HELD_ENTRY_FIXTURES_SQL)
+        return {r["slug"]: r["entry_event_key"] for r in rows
+                if r.get("slug") and str(r.get("entry_event_key") or "")
+                .startswith("pinnapi:")}
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                           # noqa: BLE001
+        if w is not None:
+            w.counts["ENTRY_FIXTURES_UNREAD"] += 1
+        return {}
+
+
 async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
     """Resolve every held slug to its feed event (bounded). Never raises."""
     from . import pinnapi_feed_runtime as FR
@@ -219,11 +259,17 @@ async def refresh(conn, *, watch: HeldWatch | None = None) -> dict:
             # old matches the same events; the next pass re-reads.
             view = None
             o = FR._STATE.get("owner")
+            entry = {}
             if slugs and o is not None and o.cache.authority.synced:
                 from . import pinnapi_census as C
                 view = C.feed_event_view(o.cache)
+                entry = await held_entry_fixtures(conn, w)
             for s in slugs:
-                resolved[s] = await FR.held_event_id(conn, s, view=view)
+                # the entry-proven fixture, only where the entry named one
+                k = entry.get(s)
+                resolved[s] = await FR.held_event_id(
+                    conn, s, view=view,
+                    **({"entry_event_key": k} if k else {}))
     except Exception as exc:                                    # noqa: BLE001
         w.counts["REFRESH_FAILED"] += 1
         return {"ok": False, "why": type(exc).__name__}

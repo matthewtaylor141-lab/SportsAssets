@@ -38,6 +38,8 @@ side), because it is the same contract's outcome.
 """
 from __future__ import annotations
 
+import asyncio
+
 from . import common as C
 
 VERSION = "INTEL_ATTRIBUTION_V1"
@@ -277,6 +279,16 @@ async def load_paper(conn, *, now, days=60.0, account_id=C.PAPER_ACCOUNT,
         " GROUP BY group_id", gids)} if gids else {}
     vals = await R.valuations_by_id(conn, [d.get("valuation_id")
                                            for d in decs])
+    # OFF THE LOOP (RC6): up to `limit` decisions attributed fill by fill --
+    # the second-longest hold of the intel cycle at its bound (see
+    # calibration.load_records for the production stalls). Pure.
+    return await asyncio.to_thread(paper_rows, decs, groups, fills, sidx,
+                                   acts, vals)
+
+
+def paper_rows(decs, groups, fills, sidx, acts, vals) -> list:
+    """`load_paper`'s reads -> attribution rows. PURE: it runs in a worker
+    thread, and it is exactly the loop that ran inline before."""
     by_group: dict = {}
     for f in fills:
         by_group.setdefault(f["group_id"], []).append(f)
@@ -364,6 +376,20 @@ async def load_actual(conn, *, now, days=60.0, limit=5000) -> list:
             for s in setts.values()}
     vals = await R.valuations_by_id(conn, [r.get("valuation_id")
                                            for r in rows])
+    # OFF THE LOOP (RC6), as load_paper. Pure.
+    return await asyncio.to_thread(actual_rows, rows, fills, decs, sidx,
+                                   vals)
+
+
+def actual_rows(rows, fills, decs, sidx, vals) -> list:
+    """`load_actual`'s reads -> attribution rows. PURE: it runs in a worker
+    thread. A group's fills come from ONE index built here, in the fills'
+    own order -- the same list the per-intent scan of every fill built
+    (`[f for f in fills if f["group_id"] == g]`), which was intents x fills
+    work at the 5,000-intent bound."""
+    by_group: dict = {}
+    for f in fills:
+        by_group.setdefault(f["group_id"], []).append(f)
     out = []
     seen = set()
     for it in rows:
@@ -374,7 +400,7 @@ async def load_actual(conn, *, now, days=60.0, limit=5000) -> list:
         side = C.side_of_intent(it.get("order_intent")) if it.get(
             "order_intent") else str(it.get("holding_side") or "LONG")
         slug = it.get("us_market_slug")
-        gall = [f for f in fills if f["group_id"] == g]
+        gall = by_group.get(g, [])
         gf = [f for f in gall if f["us_market_slug"] == slug]
         entry = [{"qty": f["qty"], "price": C.cost_space(f["price"], side),
                   "fee_usd": f["fee_usd"]} for f in gf
