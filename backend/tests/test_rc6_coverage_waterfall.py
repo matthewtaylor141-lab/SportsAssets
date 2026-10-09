@@ -475,9 +475,13 @@ def test_non_sports_and_untyped_rows_are_named():
     ("KXNCAAF1HSPREAD", WF.TARGET_B, WF.SPREAD),
     ("KXNFL4QTOTAL", WF.TARGET_B, WF.TOTAL),
     ("KXNFL1HTEAMTOTAL", WF.TARGET_B, WF.TEAM_TOTAL),
-    ("KXNFLRECYDS", WF.EXCLUDED, WF.X_KALSHI_SERIES),
-    ("KXNCAAFAWARD", WF.EXCLUDED, WF.X_KALSHI_SERIES)))
-def test_a_kalshi_series_is_tiered_by_its_ticker_only(series, tier, fam):
+    # (review finding 1) an exclusion names its class; the full set of
+    # production series is tests/test_rc6_coverage_kalshi_series.py
+    ("KXNFLRECYDS", WF.EXCLUDED, WF.X_PLAYER_PROP),
+    ("KXNCAAFAWARD", WF.EXCLUDED, WF.X_AWARD),
+    ("KXSOMETHINGNEW", WF.UNCLASSIFIED, WF.K_NOT_RECOGNISED)))
+def test_a_kalshi_series_is_tiered_by_its_ticker_and_title(series, tier,
+                                                           fam):
     k = WF.classify({"venue": "KALSHI", "competition": series,
                      "market_type": "binary"})
     assert (k["tier"], k["family"], k["basis"]) == (tier, fam,
