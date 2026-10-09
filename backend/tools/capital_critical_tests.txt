@@ -1423,3 +1423,5 @@ tests/test_rc6_kalshi_ws_merge_integration.py
 tests/test_rc6_api_stall2_profitability.py
 # (RC6.1 api-stall2) rn1x model prepare answers exactly what b3f1b0cd's prepare answered on 40,000 fills (its digest fed row by row), and learn.evaluate exactly what b3f1b0cd's evaluate answered, with the dataset build and every learn replay on the CPU lane (the evaluation in slices, cpu_lane.run_steps); production-size runs keep the loop's longest gap under 1.0 s and a small fraction of the work; a Command read's lane job submitted during a production-size model fit (on its own asyncio.to_thread, as on b3f1b0cd) or learn evaluation waits under 1.0 s, inside the paper hook's 8 s deadline
 tests/test_rc6_api_stall2_rn1x.py
+# (RC6.1 api-stall2) the PinnAPI owner: decode_frame is json.loads (production-shaped frames, a fuzzed corpus, the same exception for what json.loads refuses) without one GIL hold for a whole frame; a queued burst is applied one frame per loop turn and leaves the cache exactly as inline application does
+tests/test_rc6_api_stall2_pinnapi.py
