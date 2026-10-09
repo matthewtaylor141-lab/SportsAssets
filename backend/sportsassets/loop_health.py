@@ -83,6 +83,10 @@ MAX_ERROR_CHARS = 500
 HEALTHY, UNHEALTHY, DISABLED = "HEALTHY", "UNHEALTHY", "DISABLED"
 UNAVAILABLE, EVENT_DRIVEN = "UNAVAILABLE", "EVENT_DRIVEN"
 STARTING = "STARTING"
+#: (RC6.2 D6g) a loop whose newest success beat itself records phase errors
+#: (e.g. archer_runner 'ok' with phase_errors {results: TimeoutError} on
+#: every run) is DEGRADED by name, never HEALTHY
+DEGRADED = "DEGRADED"
 #: the bound on a record's JSON detail; content beyond it is summarised
 #: (keys kept, values dropped) BEFORE serialising, so the row is always valid
 #: JSON -- cutting the serialised string made the jsonb cast fail and lost
@@ -488,6 +492,20 @@ ON CONFLICT (loop_name, process) DO UPDATE SET
 """
 
 
+def beat_phase_errors(raw) -> dict:
+    """(RC6.2) The non-empty phase_errors object of a heartbeat detail
+    (jsonb text or a dict), else {}. Pure."""
+    v = raw
+    if isinstance(v, (str, bytes)):
+        try:
+            v = json.loads(v)
+        except ValueError:
+            return {}
+    if not isinstance(v, dict):
+        return {}
+    return {str(k): str(e)[:120] for k, e in v.items() if e}
+
+
 def _error_text(error) -> str | None:
     if error is None:
         return None
@@ -744,7 +762,14 @@ def classify(spec: dict, facts: dict, *, now: float, is_armed=True,
         return out
     limit = HEALTH_FACTOR * cad
     if last_success is not None:
-        if now - last_success <= limit:
+        pe = facts.get("phase_errors")
+        if now - last_success <= limit and pe and \
+                facts.get("phase_errors_source") == success_source:
+            # the newest success is a beat whose run recorded phase errors
+            out.update(status=DEGRADED, phase_errors=dict(pe),
+                       why="LATEST_RUN_PHASE_ERRORS:%s" % ",".join(
+                           "%s:%s" % kv for kv in sorted(pe.items())))
+        elif now - last_success <= limit:
             out.update(status=HEALTHY, why=None)
         else:
             out.update(status=UNHEALTHY,
@@ -824,7 +849,8 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
     lh = {(r["loop_name"], r["process"]): dict(r) for r in (lh or [])}
     sb_rows = await _try(conn, lambda: conn.fetch(
         "SELECT service, status, beat_at, detail ->> 'refusal' AS refusal, "
-        "       detail ->> 'owner_blocker' AS owner_blocker "
+        "       detail ->> 'owner_blocker' AS owner_blocker, "
+        "       detail -> 'phase_errors' AS phase_errors "
         "  FROM service_heartbeats"),
         missing, "service_heartbeats")
     sb = {r["service"]: dict(r) for r in (sb_rows or [])}
@@ -916,6 +942,10 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
                     facts["beat_status"] = status
                     if status in src[2]:
                         facts["success_at"].append((at, label))
+                        pe = beat_phase_errors(row.get("phase_errors"))
+                        if pe:
+                            facts["phase_errors"] = pe
+                            facts["phase_errors_source"] = label
                     else:
                         # A FAILED PASS IS NOT A SUCCESS: the writer said so
                         # in its own status (or used one its vocabulary
@@ -979,7 +1009,8 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
     for lp in loops:
         summary[lp["status"]] = summary.get(lp["status"], 0) + 1
     critical_bad = [lp["name"] for lp in loops if lp["capital_critical"]
-                    and lp["status"] in (UNHEALTHY, UNAVAILABLE, STARTING)]
+                    and lp["status"] in (UNHEALTHY, UNAVAILABLE, STARTING,
+                                         DEGRADED)]
     return {"version": VERSION, "now": now,
             "rule": "UNHEALTHY when the newest recorded success is older "
                     "than %g x the loop's cadence, or when there is none "

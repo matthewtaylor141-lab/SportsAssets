@@ -892,6 +892,9 @@ def _loop_parts(spec: dict, v: dict | None, f: dict, *, now: float,
         bs = v.get("beat_status")
         if base == OK and isinstance(bs, str) and bs in DEGRADED_BEATS:
             soft.append("SELF_REPORTED_DEGRADED:%s" % bs)
+        if base == OK and st == LH.DEGRADED:
+            # (RC6.2 D6g) the newest success beat recorded phase errors
+            soft.append("LOOP_DEGRADED:%s" % v.get("why"))
 
     # ── latest action: the loop's newest recorded pass ────────────────
     succ_at, err_at = v.get("last_success_at"), v.get("last_error_at")

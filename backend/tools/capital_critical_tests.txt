@@ -1445,3 +1445,5 @@ tests/test_signed_acceptance_consistency.py
 tests/test_rc62_floor_adriana_waiting.py
 # (rc6.2 be-truth) Audrey's closing write for a turned day marks the prior day's last report version final (it ran at start-1ms inside the day, so 811 reports were never final); an identical non-final last version still gets one final version; in-day versions stay non-final
 tests/test_rc62_audrey_report_final.py
+# (rc6.2 be-truth) a desk whose every recorded run errored (runs > 0, errors >= runs) is WAITING with degraded, never IDLE/WORKING_ON; a loop whose newest success beat records phase_errors is DEGRADED (named), not HEALTHY, and the agent status contract never reads it GREEN
+tests/test_rc62_archer_degraded.py

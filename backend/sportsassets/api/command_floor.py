@@ -310,6 +310,27 @@ def run_in_progress(status: dict | None, now: float,
     return 0 <= now - started <= max(window_s, RUN_WINDOW_FLOOR_S)
 
 
+def run_errors_degraded(status: dict | None) -> dict | None:
+    """(RC6.2 D6g) DEGRADED when every recorded run carried an error.
+
+    agent_status counts `runs` (finished runs) and `errors` (runs whose
+    phase_errors were non-empty, or an explicit error); a run that raised a
+    phase error -- e.g. Archer's results:TimeoutError on 1,017 of 1,017 runs
+    -- still finishes as IDLE / NO_NEW_CANDIDATE, so the desk read healthy.
+    Returns {"why", "runs", "errors", "last_error"} from those recorded
+    fields when runs > 0 and errors >= runs, else None. Pure."""
+    s = status or {}
+    try:
+        runs, errors = int(s.get("runs") or 0), int(s.get("errors") or 0)
+    except (TypeError, ValueError):
+        return None
+    if runs <= 0 or errors < runs:
+        return None
+    return {"why": "EVERY_RECORDED_RUN_ERRORED", "runs": runs,
+            "errors": errors,
+            "last_error": str(s.get("last_error") or "UNRECORDED")[:160]}
+
+
 def derive_state(agent: str, *, now: float, deployed: bool,
                  deploy_why: str | None, heartbeat_at, stale_s: float,
                  status: dict | None, signals: list) -> dict:
@@ -338,6 +359,14 @@ def derive_state(agent: str, *, now: float, deployed: bool,
                     % (int(age), int(stale_s)), since=hb,
                     basis=[{"kind": "heartbeat", "at": hb}])
     st = status or {}
+    deg = run_errors_degraded(st)
+    if deg is not None:
+        # (RC6.2 D6g) every recorded run errored: never IDLE / WORKING_ON
+        return dict(out, state="WAITING", degraded=deg,
+                    detail="DEGRADED: %d of %d runs errored (last error %s)"
+                    % (deg["errors"], deg["runs"], deg["last_error"]),
+                    since=hb, basis=[{"kind": "agent_status", "id": agent,
+                                      "why": deg["why"], "at": hb}])
     if run_in_progress(st, now, stale_s):
         return dict(out, state=BUSY_STATE.get(agent, "WORKING_ON"),
                     detail=str(st.get("activity") or "Run in progress"),
