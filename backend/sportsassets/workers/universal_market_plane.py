@@ -1014,7 +1014,15 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
     `quiet_valid_counterfactual` counts the members a QUIET_VALID rule
     (connection live, symbol acknowledged on the current connection, no gap
     since the snapshot) would make current: REPORTED FOR THE PM'S DECISION,
-    NEVER COUNTED -- the numerator does not read it."""
+    NEVER COUNTED -- the numerator does not read it.
+
+    (RC6.2) A paper REST read makes a member current here exactly as in the
+    coverage pass (populate.REST_BOOK_SQL / paper_book_counts): the newest
+    error-free read, inside the bound, whose own state does not say the
+    market is not open (REST_MARKET_NOT_OPEN names one that does), and
+    `refresh_held_market_terminal` counts the members the refresh no longer
+    re-reads because the venue said the market has ended -- each still a
+    member, still not current."""
     rows = await conn.fetch(
         "SELECT contract_id, priority, required_reason, event_start, "
         "       CASE WHEN refdata IS NULL THEN 'REFDATA_PENDING' "
@@ -1023,12 +1031,23 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
         "  FROM market_plane_registry WHERE active AND priority <= $1",
         POP.P_CANDIDATE)
     slugs = [r["contract_id"] for r in rows]
-    rest = {r["slug"]: float(r["age"]) for r in await conn.fetch(
-        "SELECT us_market_slug AS slug, "
-        "       extract(epoch FROM now() - max(observed_at)) AS age "
-        "  FROM paper_book_observations WHERE us_market_slug = "
-        "   ANY($1::text[]) AND observed_at > now() - interval '6 hours' "
-        " GROUP BY 1", slugs)} if slugs else {}
+    # (RC6.2) the paper runtime's NEWEST ERROR-FREE book read (6 h) and the
+    # state it stated: current only inside the bound and only when that
+    # state does not say the market is not open -- the coverage pass's own
+    # rule (populate.REST_BOOK_SQL / paper_book_counts). Before, the age of
+    # ANY row (an error row, a read never made, included) made it current.
+    rest, rest_open = {}, {}
+    for r in (await conn.fetch(
+            "SELECT DISTINCT ON (us_market_slug) us_market_slug AS slug, "
+            "       extract(epoch FROM now() - observed_at) AS age, "
+            "       market_state "
+            "  FROM paper_book_observations WHERE us_market_slug = "
+            "   ANY($1::text[]) AND observed_at > now() - interval '6 hours' "
+            "   AND error IS NULL "
+            " ORDER BY us_market_slug, observed_at DESC", slugs)
+            if slugs else ()):
+        rest[r["slug"]] = float(r["age"])
+        rest_open[r["slug"]] = POP.paper_book_counts(r.get("market_state"))
     shard_of = dict(getattr(mgr, "symbol_to_shard", {}) or {}) \
         if mgr is not None else {}
     connected = {}
@@ -1040,6 +1059,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
             connected = {}
     by, sample, pmx = {}, [], {}
     via_refresh, by_refresh, via_origin = 0, {}, {}
+    held_terminal = 0
     quiet = {"stream_quiet_on_the_live_connection": 0,
              "of_which_symbol_acked_on_this_connection": 0,
              "snapshot_age_s": []}
@@ -1061,7 +1081,8 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
                           "best_offer": bk.get("best_offer"),
                           "venue_ts": sn.get("venue_ts"),
                           "received_at": sn.get("received_at")}
-        if s in fresh or (age is not None and age <= FRESH_SLA_S):
+        if s in fresh or (age is not None and age <= FRESH_SLA_S
+                          and rest_open.get(s, True)):
             continue
         if s in refreshed:
             # a REST book the plane read within the bound (RC6), or its
@@ -1092,13 +1113,23 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
                  "STARTED_GT_4H" if (now - start.timestamp()) > 4 * 3600 else
                  "IN_PLAY_OR_RECENT" if start.timestamp() <= now else
                  "PREGAME")
-        rest_k = ("NO_REST_BOOK_6H" if age is None else "REST_OLDER_THAN_300S")
+        rest_k = ("NO_REST_BOOK_6H" if age is None else
+                  "REST_MARKET_NOT_OPEN" if not rest_open.get(s, True) else
+                  "REST_OLDER_THAN_300S")
         k = "%s|%s|%s|%s" % (tier, why, rest_k, phase)
         by[k] = by.get(k, 0) + 1
         ro = None
         if refresher is not None:
             ro = refresher.outcome_of(s) or "NOT_YET_READ"
             by_refresh[ro] = by_refresh.get(ro, 0) + 1
+            # (RC6.2) a member the refresh holds out of its reads because
+            # the venue said the market has ended: still a member, still
+            # not current, counted here by name of the rule
+            if hasattr(refresher, "held_terminal") and \
+                    refresher.held_terminal(s, stream_received_at=((
+                        (cur or {}).get("evidence") or {}).get(
+                            "snapshot") or {}).get("received_at")):
+                held_terminal += 1
         if why == QUIET_COUNTERFACTUAL_REFUSAL and isinstance(cur, dict):
             # every check current() makes before the snapshot age passed:
             # running, scaled, connected, this connection's snapshot, no
@@ -1129,6 +1160,7 @@ async def priority_census(conn, mgr, *, fresh: set, now: float,
                 by.items(), key=lambda kv: -kv[1])),
             "by_refresh_outcome": dict(sorted(
                 by_refresh.items(), key=lambda kv: -kv[1])),
+            "refresh_held_market_terminal": held_terminal,
             "quiet_valid_counterfactual": quiet, "sample": sample,
             "pmx_books": pmx}
 

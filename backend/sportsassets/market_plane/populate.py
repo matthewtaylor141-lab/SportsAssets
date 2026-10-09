@@ -80,6 +80,7 @@ import hashlib
 import json
 import time
 
+from . import freshness_window as _FW
 from . import ontology as O
 from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 
@@ -170,13 +171,41 @@ CANDIDATE_REFUSAL_SQL = """
      ORDER BY us_market_slug, cycle_at DESC
 """
 
+#: THE PAPER RUNTIME'S BOOK READ THAT COUNTS (RC6.2, lane p-freshness): the
+#: NEWEST ERROR-FREE read inside the window, with the market state it
+#: stated; `paper_book_counts` then refuses one whose own state says the
+#: market is not open. Before, ANY row inside the window counted (max
+#: observed_at over every row): an error row -- PAPER_DISCOVERY_READ_
+#: DEFERRED_DURING_VENUE_HOLD is a read that was never made -- and a read of
+#: an EXPIRED market were REST_RECOVERY (research-sql 37951157946 Q3b: 42
+#: error-only and 10 MARKET_STATE_EXPIRED member-snapshot credits in 24 h).
+#: The held-position rule (bettor_paper_freshness.classify) and the frozen
+#: window (freshness_window.PAPER_SQL / classify) already read it this way.
 REST_BOOK_SQL = """
-    SELECT us_market_slug AS slug, max(observed_at) AS observed_at
+    SELECT DISTINCT ON (us_market_slug) us_market_slug AS slug,
+           observed_at, market_state
       FROM paper_book_observations
      WHERE observed_at > now() - make_interval(secs => $1)
        AND us_market_slug = ANY($2::text[])
-     GROUP BY 1
+       AND error IS NULL
+     ORDER BY us_market_slug, observed_at DESC
 """
+
+
+def paper_book_counts(market_state) -> bool:
+    """PURE. Whether an error-free paper book read inside the bound counts
+    as a current book, exactly as the frozen window classes it
+    (freshness_window.external_from: X, never P): a read whose own state is
+    TERMINAL or not open (freshness_window.TERMINAL_STATES / TRANSIENT_
+    STATES -- bettor_paper_freshness's sets, a test pins them, plus the
+    institutional enum's names) is the venue saying the market is not open,
+    never a current book; any other read is (no state word included, as the
+    held rule's FRESH; production's error-free reads all state one:
+    research-sql 37951157946 Q1, MARKET_STATE_OPEN / INSTRUMENT_STATE_OPEN /
+    MARKET_STATE_EXPIRED)."""
+    st = str(market_state or "").upper()
+    return not (st and (st in _FW.TERMINAL_STATES
+                        or st in _FW.TRANSIENT_STATES))
 
 #: the latest paper decision's PRICED settlement difference (the recorded
 #: bettor_settlement_difference_policy.eligibility verdict and the policy's
@@ -922,9 +951,12 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                                         float(VALUATION_WINDOW_S))
             cands = await _fetch_chunked(conn, CANDIDATE_REFUSAL_SQL, slugs,
                                          float(VALUATION_WINDOW_S))
+            # (RC6.2) the newest error-free paper read, unless its own state
+            # says the market is not open (REST_BOOK_SQL, paper_book_counts)
             rest = {k: _epoch(v["observed_at"]) for k, v in (
                 await _fetch_chunked(conn, REST_BOOK_SQL, slugs,
-                                     float(rest_sla_s))).items()}
+                                     float(rest_sla_s))).items()
+                    if paper_book_counts(v.get("market_state"))}
             priced = {k: {"eligibility": _jsonish(v.get("eligibility")) or {},
                           "policy": _jsonish(v.get("policy")) or {}}
                       for k, v in (await _fetch_chunked(

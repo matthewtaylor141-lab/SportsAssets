@@ -90,6 +90,32 @@ returns no Retry-After) and is counted; a failed read is retried after
 RETRY_FAILED_S, a market the REST book shows not open after
 RETRY_NOT_OPEN_S (its budget goes to members that can be current).
 
+A MARKET THE VENUE SAYS IS NOT OPEN (RC6.2, lane p-freshness). Production
+(pm-acceptance 37888018192, release 732cc0c6): at the scorecard instant
+(coverage pass 2026-10-09 05:18:59Z, 174 / 192) 8 of the 18 members not
+current were candidates whose market the venue had closed (events 3.3-6.8 h
+old, the plane's own REST read NOT_OPEN; 7 of 8 read INSTRUMENT_STATE_
+EXPIRED in the venue's reference data since), and all 8 were DUE again (the
+read pass then: due 18; research-sql 37943847206 P1). Six had never had a
+stream book, so earliest-lapse-first put them FIRST: replayed through the
+RC6.1 freshness task, 8 of the first 12 reads go to markets that cannot be
+current and 4 of the 10 quiet OPEN members are current a minute later
+(tests/test_rc62_p_freshness.py). Two rules, the budget unchanged:
+  * a member whose newest read -- the REST book's own `state`, or a
+    snapshot update's own state -- is TERMINAL (freshness_window.
+    TERMINAL_STATES, the held-position rule's: the market has ended) is
+    HELD OUT of the read plan while it stays a member
+    (R_REFRESH_HELD_TERMINAL, counted by name, named in the digest and the
+    census). It stays NOT current and stays in every denominator: nothing
+    is excluded, it is only not re-read. Newer stream evidence (a stream
+    book received after that read) releases the hold.
+  * any other not-open market keeps its RETRY_NOT_OPEN_S retry and, when
+    due, is read AFTER every member of its tier that may be current
+    (unless the stream has newer evidence than that read).
+The record keeps the state the read stated (`state`, only while its newest
+read said not open), and the totals count not-open reads by state, so the
+states the venue answers with are read back in production.
+
 THE BOUND IS NOT CHANGED. The plane's FRESH_SLA_S (300 s, the held-mark SLA)
 is passed in by the caller and is the only age used; REFRESH_LEAD_S only
 decides when a refresh still inside it is re-read, never how long one counts.
@@ -108,6 +134,7 @@ import time
 from datetime import datetime
 
 from .. import institutional_stream as IS
+from .freshness_window import TERMINAL_STATES
 
 log = logging.getLogger(__name__)
 
@@ -161,6 +188,13 @@ R_REFRESH_HOLD_429 = "ACTIVE_REFRESH_HELD_AFTER_A_VENUE_429"
 R_REFRESH_RETRY_WAIT = "ACTIVE_REFRESH_WAITING_TO_RETRY_A_FAILED_READ"
 R_REFRESH_OFF = "ACTIVE_REFRESH_OFF_BY_SWITCH"
 R_REFRESH_NO_STREAM = "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED"
+#: (RC6.2) the member's newest read stated a TERMINAL market state: not
+#: re-read while it stays a member (it stays NOT current, in the denominator)
+R_REFRESH_HELD_TERMINAL = "ACTIVE_REFRESH_HELD_MARKET_STATE_TERMINAL"
+#: the snapshot result's own-state marker (snapshot_refresh.STATE_FROM_UPDATE)
+_STATE_FROM_UPDATE = "UPDATE"
+#: how many held members the digest names (it counts them all)
+HELD_NAMED_MAX = 20
 
 #: an outcome after which the member waits RETRY_NOT_OPEN_S, not
 #: RETRY_FAILED_S: the venue said what the market is
@@ -321,7 +355,9 @@ class ActiveRefresh:
         self.hold_until = 0.0
         self.last_pass: dict = {}
         self.totals = {"reads": 0, "current": 0, "not_current": 0,
-                       "by_outcome": {}}
+                       "by_outcome": {},
+                       #: (RC6.2) the state each not-open read stated
+                       "not_open_by_state": {}}
         #: (RC6 D1) the origin of each member's newest CURRENT read: REST
         #: (this module's `book` read) or SNAPSHOT (snapshot_refresh's
         #: snapshot-only gRPC call); kept apart from the entries' shape
@@ -404,6 +440,37 @@ class ActiveRefresh:
         at = (e or {}).get("ok_at")
         return at is not None and 0.0 <= now - at <= bound
 
+    @staticmethod
+    def _newer_stream(e, stream_received_at) -> bool:
+        """Whether the stream holds a book received AFTER the member's
+        newest read: its word about the market is the newer one."""
+        t = (e or {}).get("tried_at")
+        if stream_received_at is None or t is None:
+            return False
+        try:
+            return float(stream_received_at) > float(t)
+        except (TypeError, ValueError):
+            return False
+
+    def held_terminal(self, s, *, stream_received_at=None) -> bool:
+        """(RC6.2) The member's newest read (the REST book's own state, or a
+        snapshot update's own state) said the market has ENDED (TERMINAL_
+        STATES) and the stream holds nothing newer: it is not re-read while
+        it stays a member. It stays NOT current and in every denominator."""
+        e = self.entries.get(s) or {}
+        if e.get("outcome") != R_REFRESH_NOT_OPEN:
+            return False
+        if str(e.get("state") or "").upper() not in TERMINAL_STATES:
+            return False
+        return not self._newer_stream(e, stream_received_at)
+
+    def _not_open_rank(self, e, stream_received_at) -> int:
+        """1 when the member's newest read said the market is not open and
+        the stream has nothing newer (read after every member that may be
+        current), else 0."""
+        return int((e or {}).get("outcome") == R_REFRESH_NOT_OPEN
+                   and not self._newer_stream(e, stream_received_at))
+
     def current(self, mgr, *, now: float, bound: float) -> dict:
         """{symbol: receipt instant} of the members CURRENT VIA THE REFRESH
         at `now`: a CURRENT read received within `bound`, the stream not
@@ -437,8 +504,10 @@ class ActiveRefresh:
         """([symbol, ...] due now in refresh order, {reason: count}) over the
         members. Due: held by the plane's books, the stream refusing for
         snapshot currency, no current refresh that is not yet within
-        `lead_s` (REFRESH_LEAD_S) of the bound, not waiting to retry, no
-        read of it in flight. Order: HELD first, then earliest lapse, then
+        `lead_s` (REFRESH_LEAD_S) of the bound, not waiting to retry, not
+        held for a TERMINAL market state (RC6.2), no read of it in flight.
+        Order: HELD first, then (RC6.2) a market the venue last said is not
+        open after every one that may be current, then earliest lapse, then
         event start (module docstring)."""
         counts: dict = {}
         due = []
@@ -465,6 +534,11 @@ class ActiveRefresh:
             if self._refresh_current(e, now=now, bound=bound - lead):
                 n("REFRESH_CURRENT")
                 continue
+            if self.held_terminal(s, stream_received_at=stream_rcv):
+                # (RC6.2) the venue said the market has ended: no read can
+                # make it current; named, not current, still a member
+                n(R_REFRESH_HELD_TERMINAL)
+                continue
             tried = e.get("tried_at")
             wait = (RETRY_NOT_OPEN_S if e.get("outcome") in _MARKET_OUTCOMES
                     else RETRY_FAILED_S)
@@ -477,6 +551,7 @@ class ActiveRefresh:
             lapse = self.lapse_at(s, stream_received_at=stream_rcv,
                                   bound=bound)
             due.append(((0 if tier in (TIER_HELD, TIER_ORDER) else 1),
+                        self._not_open_rank(e, stream_rcv),
                         float("-inf") if lapse is None else lapse,
                         PHASE_RANK.get(phase, 3),
                         start if start is not None else float("inf"),
@@ -502,6 +577,16 @@ class ActiveRefresh:
         e = self.entries.setdefault(symbol, {"ok_at": None, "tries": 0})
         e.update(tried_at=at, outcome=o, tries=e["tries"] + 1,
                  status=j.get("status"))
+        # (RC6.2) the state the book itself stated, kept only while the
+        # newest read said the market is not open (a short word, never a
+        # level); any other outcome clears it, so a failed read is retried
+        # on its own wait, never held on an older word
+        if o == R_REFRESH_NOT_OPEN and j.get("state"):
+            e["state"] = str(j["state"])[:40]
+            by = t["not_open_by_state"]
+            by[e["state"]] = by.get(e["state"], 0) + 1
+        else:
+            e.pop("state", None)
         if o == CURRENT:
             t["current"] += 1
             e.update(ok_at=at, venue_ts=j["venue_ts"], levels=j["levels"])
@@ -544,6 +629,14 @@ class ActiveRefresh:
         e.update(tried_at=at, outcome=o, tries=e["tries"] + 1,
                  status=j.get("status"), snapshot_outcome=o,
                  snapshot_tried_at=at)
+        # (RC6.2) a not-open state is kept (and so can hold a TERMINAL
+        # market out of the plan) only when it is the update's OWN state;
+        # a fallback state is not the book's word
+        if o == R_REFRESH_NOT_OPEN and j.get("state") and \
+                j.get("state_from") == _STATE_FROM_UPDATE:
+            e["state"] = str(j["state"])[:40]
+        else:
+            e.pop("state", None)
         if o == CURRENT:
             e.update(ok_at=at, venue_ts=j.get("venue_ts"),
                      levels=j.get("levels"))
@@ -569,9 +662,30 @@ class ActiveRefresh:
 
     # -- the evidence ------------------------------------------------------
 
+    def held_terminal_members(self, mgr=None, *, now: float,
+                              bound: float) -> dict:
+        """{symbol: state} of the members held out of the plan for a
+        TERMINAL state now (the stream's newest receipt checked when the
+        books are given). Read-only."""
+        out = {}
+        for s, _t, _p, _st in self.members:
+            e = self.entries.get(s) or {}
+            if e.get("outcome") != R_REFRESH_NOT_OPEN:
+                continue
+            got = self._stream(mgr, s, now=now, bound=bound) \
+                if mgr is not None else None
+            if self.held_terminal(s, stream_received_at=(
+                    got[2] if got is not None else None)):
+                out[s] = e.get("state")
+        return out
+
     def digest(self, *, now: float, bound: float, mgr=None) -> dict:
         cur = self.current(mgr, now=now, bound=bound) if mgr is not None \
             else {}
+        held = self.held_terminal_members(mgr, now=now, bound=bound)
+        held_by: dict = {}
+        for st in held.values():
+            held_by[st] = held_by.get(st, 0) + 1
         by_tier: dict = {}
         by_origin: dict = {}
         tiers = {m[0]: m[1] for m in self.members}
@@ -598,6 +712,11 @@ class ActiveRefresh:
                 "current_via_refresh": len(cur),
                 "current_via_refresh_by_tier": by_tier,
                 "current_via_refresh_by_origin": by_origin,
+                # (RC6.2) the members not re-read because the venue said
+                # the market has ended: counted, named, still members
+                "held_market_terminal": {
+                    "n": len(held), "by_state": held_by,
+                    "members": sorted(held)[:HELD_NAMED_MAX]},
                 "last_pass": dict(self.last_pass),
                 "totals": {k: (dict(v) if isinstance(v, dict) else v)
                            for k, v in self.totals.items()},

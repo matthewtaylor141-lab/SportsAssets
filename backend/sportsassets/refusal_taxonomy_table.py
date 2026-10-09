@@ -2251,6 +2251,9 @@ ACTIVE_REFRESH_STREAM = {
     "ACTIVE_REFRESH_WAITING_TO_RETRY_A_FAILED_READ": (S, FRESH, "INGESTION"),
     "ACTIVE_REFRESH_OFF_BY_SWITCH": (S, FRESH, "INGESTION"),
     "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED": (S, FRESH, "INGESTION"),
+    # (RC6.2) not re-read: the member's newest book read stated a TERMINAL
+    # market state -- ACTIVE_REFRESH_MARKET_NOT_OPEN's row is the precedent
+    "ACTIVE_REFRESH_HELD_MARKET_STATE_TERMINAL": (S, DATA, "INGESTION"),
 }
 for _k, _v in ACTIVE_REFRESH_STREAM.items():
     TABLE.setdefault(_k, _v)
