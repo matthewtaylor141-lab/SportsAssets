@@ -557,3 +557,21 @@ def test_a_sid_number_the_venue_reuses_is_a_new_subscription():
         "subscribe"], ws2.sent
     assert ws2.sent[3]["params"] == {"sids": [3]}
     assert sub2.resubscribes == 2 and not seen2["K-A"]["ok"]
+
+
+def test_the_books_alone_treat_a_reannounced_dead_sid_as_new():
+    """WsBooks without the subscriber: the `subscribed` announcement of a
+    dead sid number revives it; an announcement never resets a live sid."""
+    b = books()
+    b.on_message(snap(3, 1, "K-A"))
+    assert b.on_message(delta(3, 3, "K-A")) == "GAP"
+    assert b.on_message(snap(3, 4, "K-A")) == "IGNORED_DEAD_SID"
+    b.on_message({"type": "subscribed", "id": 3,
+                  "msg": {"channel": "orderbook_delta", "sid": 3}})
+    assert b.on_message(snap(3, 1, "K-A", yes=(("0.41", "5"),))) == \
+        "SNAPSHOT"
+    assert b.current("K-A")["ok"]
+    b.on_message({"type": "subscribed", "id": 4,
+                  "msg": {"channel": "orderbook_delta", "sid": 3}})
+    assert b.on_message(delta(3, 2, "K-A")) == "DELTA"
+    assert b.current("K-A")["ok"]

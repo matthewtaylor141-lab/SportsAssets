@@ -237,21 +237,25 @@ class WsBooks:
         on another sid keeps that sid."""
         if sid is None:
             return
-        if sid in self.dead_sids:
-            # the venue announced a sid number this connection already saw
-            # die (the docs promise no unique sid): a NEW subscription under
-            # a reused number. One connection delivers in order, so every
-            # message of the old subscription preceded this ack: its
-            # sequence and markets start afresh (left dead, the new
-            # subscription's snapshots would be ignored until a reconnect)
-            self.dead_sids.discard(sid)
-            self.sid_seq.pop(sid, None)
-            self.sid_markets.pop(sid, None)
+        self._revive(sid)
         self.sid_markets.setdefault(sid, set()).update(tickers)
         for t in tickers:
             b = self._book(t)
             if b["state"] != CURRENT or b["sid"] is None:
                 self.ticker_sid[t] = sid
+
+    def _revive(self, sid) -> None:
+        """The venue announced (`subscribed`) a sid number this connection
+        already saw die -- the docs promise no unique sid: a NEW
+        subscription under a reused number. One connection delivers in
+        order, so every message of the old subscription preceded the
+        announcement: its sequence and markets start afresh (left dead, the
+        new subscription's snapshots were ignored until a reconnect). A
+        live sid is never reset by an announcement."""
+        if sid in self.dead_sids:
+            self.dead_sids.discard(sid)
+            self.sid_seq.pop(sid, None)
+            self.sid_markets.pop(sid, None)
 
     def _current_elsewhere(self, b, sid) -> bool:
         return b["state"] == CURRENT and b["sid"] is not None \
@@ -286,6 +290,9 @@ class WsBooks:
         typ = m.get("type")
         sid = m.get("sid")
         if typ == "subscribed":
+            # (the subscriber binds the ack first, which revives the sid with
+            # its markets; standalone, the announcement alone revives it)
+            self._revive((m.get("msg") or {}).get("sid", sid))
             return "SUBSCRIBED"
         if typ == "error":
             self.stats["errors"] += 1
