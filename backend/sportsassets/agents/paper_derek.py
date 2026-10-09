@@ -77,6 +77,19 @@ R_ORDER_REFUSED = "PAPER_RISK_REFUSED_THE_ORDER"
 R_ENTRIES_DISABLED = "STRATEGY_ENTRIES_DISABLED"
 STRATEGY = "DEREK_ENTRY_POLICY_V2"
 ENTRIES_CONTROL_KEY = "PAPER_ENTRIES:%s" % STRATEGY
+#: SW-1b: no protective price exists for the entry (paper_xavier.
+#: protective_price). The same name exploration refuses with; pinned equal to
+#: paper_explore.R_XAVIER_CANNOT_PROTECT by a test, stated here because
+#: paper_explore imports this module.
+R_XAVIER_CANNOT_PROTECT = "XAVIER_CANNOT_PROTECT_THIS_ENTRY_NO_PROTECTIVE_PRICE"
+
+
+def _xavier_protect(**kw) -> dict:
+    """paper_explore.xavier_can_protect_fills: the one protectability check
+    every paper entry strategy runs (imported at call time, because
+    paper_explore imports this module)."""
+    from . import paper_explore as PEX
+    return PEX.xavier_can_protect_fills(**kw)
 
 #: WHERE A DECISION WAS FORMED. In the cycle, at the instant the valuation
 #: was written (the lane's own inputs and instant): the primary path. By the
@@ -785,6 +798,18 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         refusals.extend(r for r in pd["refusals"] if r not in refusals)
         if not pd["refusals"] and sized["qty"] < 1:
             refusals.append(DP.R_NO_QTY)
+        elif not refusals and econ.get("fills"):
+            # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED (SW-1b,
+            # paper_explore.xavier_can_protect_fills): the walked quantity at
+            # the cost basis the ledger books, before the capital gate, so
+            # an entry no protection can exist for is never a shadow either.
+            mgmt_protect = _xavier_protect(
+                fills=econ["fills"], qty=econ["qty"], limit=sized["limit"],
+                fee_fn=fee_fn, at=at)
+            econ["xavier_protection"] = mgmt_protect
+            pd["xavier_protection"] = mgmt_protect
+            if not mgmt_protect["protectable"]:
+                refusals.append(R_XAVIER_CANNOT_PROTECT)
     recheck_primary_reference(cand, pin, ctx, refusals)
     ce = None
     if not refusals:
@@ -818,6 +843,18 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
                 "total_executable_ev_usd", "refusals")}
         if ce.get("capital_eligible"):
             sized = dict(sized, qty=int(ce["qty"]))
+            # THE GATE MAY SHRINK THE SIZE; fees are rounded to the cent per
+            # fill, so the protection is asked again at the size entered.
+            if econ is not None and econ.get("fills") and abs(float(
+                    sized["qty"]) - float(econ.get("qty") or 0.0)) > 1e-9:
+                bound_protect = _xavier_protect(
+                    fills=econ["fills"], qty=sized["qty"],
+                    limit=sized["limit"], fee_fn=fee_fn, at=at)
+                econ["xavier_protection_at_bound_qty"] = bound_protect
+                if pd is not None:
+                    pd["xavier_protection_at_bound_qty"] = bound_protect
+                if not bound_protect["protectable"]:
+                    refusals.append(R_XAVIER_CANNOT_PROTECT)
         else:
             refusals.extend(r for r in ce["refusals"] if r not in refusals)
     verdict = DP.ENTER if not refusals else DP.REFUSE

@@ -223,6 +223,50 @@ def xavier_can_protect(*, econ: dict, fee_fn, at) -> dict:
             "rule": "paper_xavier.protective_price (unchanged)"}
 
 
+# ── EVERY PAPER ENTRY STRATEGY ASKS THE SAME QUESTION (SW-1b) ───────────
+#
+# Exploration was the only entry that asked it. COMPLETED_GAME V3 (an edge of
+# 0.5 pp and a positive net EV, with no upper price bound), the maker, the
+# strict benchmark and Derek could still admit an entry that
+# paper_xavier.protective_price can never protect. The 0.98 case: 350 bought
+# at 0.98 cost 343.48 with fees, so the protection needs 343.48 + 3.50 =
+# 346.98, while selling all 350 at 0.99 returns 346.50 - 0.24 = 346.26. Such
+# a position is NO_VALID_ACTIVE_PROTECTION for its whole life, which is the
+# cause behind the production member's incomplete packet. Each of those
+# strategies now runs this check on the quantity it would enter, at the cost
+# basis the ledger would book, and refuses R_XAVIER_CANNOT_PROTECT by name.
+# It only refuses. No price, edge, fee, size or risk threshold is read or
+# moved, and the protective price rule itself is unchanged.
+def xavier_can_protect_fills(*, fills, qty, limit, fee_fn, at) -> dict:
+    """xavier_can_protect for an entry of `qty` contracts bought along
+    `fills`, which are (price, qty) pairs in the order the walk takes them,
+    best first. The first `qty` contracts of the walk are used, each fill
+    paying its own buy fee as the ledger books a fill. Any quantity beyond
+    the walk is costed at `limit`, the most the order can pay. Pure but for
+    the fee function."""
+    from .. import bettor_paper_ledger as LDG
+    take, left = [], float(qty or 0.0)
+    for px, q in fills or []:
+        if left <= 1e-9:
+            break
+        t = min(float(q), left)
+        if t > 0:
+            take.append((float(px), t))
+            left -= t
+    if left > 1e-9:
+        take.append((float(limit), left))
+    cost = sum(px * t for px, t in take)
+    fees = sum(float(LDG._fee(fee_fn, t, px, at)) for px, t in take)
+    got = xavier_can_protect(
+        econ={"qty": sum(t for _, t in take), "acquisition_cost_usd": cost,
+              "fees_usd": fees}, fee_fn=fee_fn, at=at)
+    got.update(acquisition_cost_usd=round(cost, 9), fees_usd=round(fees, 9),
+               basis=("the entry's walk up to its quantity, each fill with "
+                      "its own buy fee; any quantity beyond the walk at the "
+                      "order's limit"))
+    return got
+
+
 # ═════════════════════════════════════════════════════════════════════
 # THE LIMITS (read on the caller's connection; re-checked under the lock)
 # ═════════════════════════════════════════════════════════════════════
