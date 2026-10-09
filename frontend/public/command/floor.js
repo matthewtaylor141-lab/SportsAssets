@@ -225,6 +225,11 @@ function renderMap() {
   }
   B.SEATS.forEach((s) => {
     const a = agentOf(s.slug), p = pos[s.agent], m = B.STATES[B.stateOf(a)], dim = ['STALE', 'NOT_DEPLOYED', 'UNKNOWN'].includes(B.stateOf(a));
+    // the transparent disc (last, so the seat stays circle:first-child for
+    // floor.css) is the desk's touch target: the map is 1000 units wide, so on
+    // a 304-374 px phone map the 92-unit seat circle was a 28-34 px target; a
+    // 150-unit disc is >= 45 px there, and neighbouring desks sit 154-164
+    // units apart, so two discs never overlap. Nothing is drawn.
     svg += '<g class="m-desk' + (state.selected === s.slug ? ' sel' : '') + (dim ? ' dim' : '') + '" data-slug="' + s.slug + '" tabindex="0" role="button" aria-label="' + esc(s.name + ', ' + m.label + (a ? ': ' + (a.state_detail || '') : '')) + '" transform="translate(' + p.x.toFixed(1) + ' ' + p.y.toFixed(1) + ')">' +
       '<circle r="46" fill="' + m.color + '" fill-opacity=".08" stroke="' + m.color + '" stroke-width="2"' + (a && a.state === 'NOT_DEPLOYED' ? ' stroke-dasharray="4 5"' : '') + '/>' +
       (!REDUCED && m.motion === 'work' ? '<circle r="46" class="m-pulse" stroke="' + m.color + '"/>' : '') +
@@ -232,7 +237,8 @@ function renderMap() {
       '<circle cy="16" r="15" fill="#0d1620" stroke="' + s.accent + '" stroke-width="2"/><image href="team-demo/assets/models/portraits/' + s.slug + '.jpg" x="-14" y="2" width="28" height="28" clip-path="url(#m-face)" preserveAspectRatio="xMidYMin slice"/>' +
       '<text y="-58" text-anchor="middle" class="m-name">' + esc(s.name) + '</text>' +
       '<text y="64" text-anchor="middle" class="m-state" fill="' + m.color + '">' + esc(m.label.toUpperCase()) + '</text>' +
-      '<text y="80" text-anchor="middle" class="m-hb">♥ ' + esc(hb(a)) + '</text></g>';
+      '<text y="80" text-anchor="middle" class="m-hb">♥ ' + esc(hb(a)) + '</text>' +
+      '<circle class="m-hit" r="75" fill="transparent"/></g>';
   });
   svg += '</svg>';
   host.innerHTML = svg + '<p class="fl-map-note">' + (state.sceneFailed ? '3D unavailable on this device (' + esc(state.sceneFailed) + ') — the floor map shows the same recorded states.' : 'Floor map · the same recorded states as the 3D floor.') + '</p>';

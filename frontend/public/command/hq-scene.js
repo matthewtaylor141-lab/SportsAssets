@@ -1081,7 +1081,9 @@ export async function createHQ(host, opts) {
     if (o.onPick) o.onPick(slug, {again: !!slug && slug === focused});
   });
   canvas.addEventListener('wheel', (e) => { camState.zoom = clamp(camState.zoom + e.deltaY * 0.0008, 0.72, 1.3); requestRender(); }, {passive: true});
-  function hideHint() { const h = document.getElementById('hq-hint'); if (h) h.classList.add('gone'); }
+  // fade, then out of the layout on a timer (hq.js: a transition alone stalls
+  // at full opacity while the page paints no frames)
+  function hideHint() { const h = document.getElementById('hq-hint'); if (!h || h.classList.contains('gone')) return; h.classList.add('gone'); setTimeout(() => { h.hidden = true; }, 700); }
 
   /* ── data subscriptions ────────────────────────────────────────── */
   let paused = false;

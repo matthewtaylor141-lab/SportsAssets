@@ -274,6 +274,7 @@ body.watching #hq-caption { display: block; }
 /* the hint */
 #hq-hint { position: fixed; z-index: 9; left: 50%; top: calc(var(--top) + 12px); transform: translateX(-50%); font: 500 10.5px/1 var(--mono); color: var(--ink-3); padding: 7px 12px; background: rgba(6,12,24,.6); border: 1px solid var(--hair); transition: opacity .6s; pointer-events: none; }
 #hq-hint.gone { opacity: 0; }
+#hq-hint[hidden] { display: none; } /* set 700 ms after .gone (hq.js): out of the layout even when no frame ran the fade */
 #hq-tabbar { display: none; }
 .hq-foot { position: fixed; z-index: 9; right: 22px; bottom: 2px; font: 400 9.5px/1 var(--mono); color: var(--ink-3); pointer-events: none; }
 body[data-view="command"] .hq-foot { display: none; }

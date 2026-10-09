@@ -1,0 +1,159 @@
+/* BETTOR · DEVICE FIT (RC6): touch targets and fixed bars on phones / tablets.
+
+   Production device run (frontend-preview 37834226533, release 69a8a07e,
+   frontend 0a2e7822; pm-acceptance 37836393458 frontend_preview.json) found
+   controls under 44 x 44 px on every touch view and one fixed-bar overlap on
+   the Floor. Trader device acceptance already passed 5/5; nothing here
+   changes what the pages show, only how big a finger target is and where a
+   bar sits.
+
+     Floor   the view bar (Overview / Capital Wall / Opportunities / Risk &
+             Health / Active Desk / Map / Watch BETTOR Work) 27-28 px tall,
+             the Company Live pulse 27-37 px, the header's INCIDENTS / DESK
+             links 24 px; at 820 px (iPad portrait) and 844 px (iPhone
+             landscape) the view bar ran under the right-hand floor summary
+             (#hq5-floorbar x #hq5-floor-summary, 5,927 / 5,243 px2: the
+             summary was painted beneath the bar, so it was hidden).
+     Trader  'Back to BETTOR Command' 20-27 px, full screen / sound 37-38 px,
+             Follow Xavier / Reduce motion / Wall mode 37-38 px, the Position
+             wall / Standing orders tabs 43 px, the filters 31 px, the search
+             field 17 px tall (21 px wide at 820 px), the per-card evidence
+             button 27 px.
+     Command 'BETTOR Command home' 18-24 px, Briefing 30 px, Watch BETTOR
+             work 24 px.
+
+   WHERE TOUCH IS EXPECTED: (pointer:coarse) -- phones and tablets, and the
+   harness's touch devices (Chromium reports coarse when touch is emulated).
+   A mouse keeps the dense desktop sizes. The touch block raises min-height /
+   min-width, so a label never shrinks and PAPER / SHADOW badges keep their
+   own size; where a taller control would collide with something positioned
+   beneath it, that thing moves down by the same amount, and a scrolling bar
+   keeps its buttons whole (the comments name the arithmetic). Two sections
+   apply to every pointer: the Floor view bar / summary geometry and the
+   Command top bar on tablets. Loaded last on Command, Floor and Trader. */
+
+@media (pointer:coarse){
+  /* COMMAND ---------------------------------------------------------------- */
+  body.hq .hq-brand{min-height:44px;}
+  body.hq #hq-nav button{min-height:44px;}
+  /* .alert-bar .btn (Briefing) is height:30px and .lbl [data-watch] 24px: a
+     min-height above the height wins, so the declared heights stay as the
+     desktop design and touch gets 44 */
+  body.hq .btn,body.hq [data-watch]{min-height:44px;}
+  body.hq .desk-x{min-width:44px;min-height:44px;}
+  body.hq .rep-pick [role=tab]{min-height:44px;}
+  /* signed out: the sign-in card's password field was 42 px (unlock.js inline padding) */
+  #command-unlock input,#command-unlock button{min-height:44px;}
+
+  /* FLOOR ------------------------------------------------------------------ */
+  body.fl .hq5-pulse-btn{min-height:44px;}
+  /* flex:none -- an explicit min-width replaces the flex item's automatic
+     minimum (its label), so without it the scrolling bar squeezed the
+     buttons to 44 px and their labels ran into each other (iPhone, measured) */
+  body.fl .hq5-view{min-height:44px;min-width:44px;flex:none;}
+  /* 44 + 2 x 4 + 2 = 54 px tall (was 27 + 2 x 6 + 2 = 41) */
+  body.fl .hq5-floorbar{padding:4px;}
+  /* experience-v4 sets body.fl.bt-exp-v4 .fl-btn{min-height:38px}: matched here at the same
+     specificity, later in the cascade. The agent panel's close / evidence / foot buttons and
+     the Company Pulse list are reached by touch once a desk or the pulse is opened */
+  body.fl .fl-btn,body.fl.bt-exp-v4 .fl-btn,body.fl .fl-skip{min-height:44px;}
+  body.fl .fl-x{min-width:44px;min-height:44px;}
+  body.fl .fl-p-sec summary{min-height:44px;}
+  body.fl .hq5-pulse-agent{min-height:44px;}
+  /* signed out: the equity wall's inline Sign in button was 28-31 x 12-13 px */
+  body.fl [data-ew-signin]{min-height:44px;min-width:44px;}
+  /* the executive header's links; every cell centres so a 44 px row reads as
+     one row (command-ops.js measures the strip and moves the page by
+     --ops-hdr-h, so the bars beneath follow its new height) */
+  .ops-hdr .ops-h-cell{align-items:center;}
+  .ops-hdr a.ops-h-cell{min-height:44px;}
+  /* the floor HUD (command-final.css, absolute in the stage at 61 px; 55 px
+     on phones) sits under the fixed view bar, which is now 54 - 41 = 13 px
+     taller: the HUD moves down the same 13 px, so the gap under the bar is
+     what it was (measured, synthetic reads: iPad portrait 34 px, iPhone 43 px,
+     iPad landscape 33-34 px, before and after) */
+  body.fl .cf-floor-hud{top:74px;}
+
+  /* TRADER ----------------------------------------------------------------- */
+  .topbar .wordmark{min-height:44px;}
+  .icon-button{min-width:44px;min-height:44px;}
+  .heading-controls .button,.workspace-toolbar>.button{min-height:44px;}
+  .view-tabs button{min-height:44px;}
+  .filters button{min-height:44px;min-width:44px;flex-shrink:0;}
+  /* the search field is the input itself: 44 px tall, and the box wraps to
+     its own row instead of being squeezed to 21 px beside the filters */
+  .workspace-toolbar .search{height:auto;min-height:44px;flex:1 1 220px;}
+  .workspace-toolbar .search input{min-height:44px;min-width:44px;width:100%;}
+  .card-actions .tiny-button{min-width:44px;min-height:44px;}
+  .orders-view .table-focus{min-height:44px;}
+}
+@media (pointer:coarse) and (max-width:780px){
+  body.fl .cf-floor-hud{top:68px;}
+}
+
+/* FLOOR VIEW BAR x FLOOR SUMMARY (every pointer) -------------------------- */
+/* Above the phone layout (<= 780 px, where the summary is hidden and the bar
+   already scrolls) the view bar (left 102-112 px, 620-750 px of buttons) ran
+   under the summary pinned at right:20px ("2 active . 13 collaborations",
+   212 px): 820 px and 844 px overlapped. The summary is bounded at 240 px
+   (longer counts ellipsize) and, up to 1180 px, the bar is at most the
+   viewport less 380 px (left 102-112 + 8 px gap + 240 + 20; a percentage of
+   the fixed box's containing block, so a desktop scrollbar cannot eat the
+   gap the way 100vw would), scrolling
+   sideways like the phone bar when its buttons do not fit, so neither
+   covers the other and every view stays one swipe away; at 1180 px all
+   751 px of buttons still fit. Above 1180 px the bar ends at <= 863 px and
+   the bounded summary starts at >= 921 px. */
+.hq5-floor-summary{max-width:240px;}
+.hq5-floor-summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+@media (min-width:781px) and (max-width:1180px){
+  .hq5-floorbar{max-width:calc(100% - 380px);overflow-x:auto;scrollbar-width:thin;scrollbar-color:rgba(151,180,214,.35) transparent;}
+  .hq5-floorbar::-webkit-scrollbar{height:4px;}
+  .hq5-floorbar::-webkit-scrollbar-thumb{background:rgba(151,180,214,.35);border-radius:2px;}
+  .hq5-floorbar>*{flex:none;}
+}
+/* A bounded bar must show that it scrolls. With a mouse (800-1180 px windows
+   clip Active Desk / Map / Watch BETTOR Work) the thin scrollbar above is the
+   cue. On touch the scrollbar is an overlay that only shows mid-swipe, so the
+   bar's right end fades instead, over a 28 px end padding: when every button
+   fits (iPad landscape, 751 + 28 px inside an 800 px bar) the fade lies on
+   the padding and no label is dimmed. */
+@media (min-width:781px) and (max-width:1180px) and (pointer:coarse){
+  body.fl .hq5-floorbar,.hq5-floorbar{padding-right:28px;scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent);
+    mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent);}
+  .hq5-floorbar::-webkit-scrollbar{display:none;}
+}
+
+/* COMMAND ON TABLETS (761-1180 px, every pointer) ------------------------- */
+/* Found while measuring the touch fix (synthetic reads, 0a2e7822 too): on
+   iPad landscape the status pills ran past the top bar's right edge (PAPER
+   at x 1177, SMALL LIVE SHADOW at 1253-1380 on a 1180 px screen) and on iPad
+   portrait all four (FEEDS, API / WRK, PAPER, SMALL LIVE SHADOW) started at
+   x 830 on an 820 px screen: the brand and the workspace bar (150 + 624 px)
+   fill the row. The pills get their own row, right-aligned, so SMALL LIVE
+   SHADOW and PAPER are on screen; the HUD hangs from var(--top), so every
+   panel moves down with the taller bar (row 1 is the 54 px workspace bar,
+   row 2 the 26 px pills: 92 px). */
+@media (min-width:761px) and (max-width:1180px){
+  body.hq{--top:92px;}
+  body.hq #hq-top{flex-wrap:wrap;align-content:center;row-gap:4px;}
+  /* basis 0 keeps the workspace bar on row 1 beside the brand (its 624 px
+     would otherwise wrap at 820 px); max-content keeps it from stretching */
+  body.hq #hq-top>#hq-nav{flex:1 1 0;min-width:0;max-width:max-content;}
+  body.hq #hq-status{flex:0 0 100%;justify-content:flex-end;margin-left:0;}
+}
+/* iPad portrait: between the 270 / 286 px HUD columns the CRITICAL bar and
+   the freshness strip were 168 px wide -- the alert title 0 px, Briefing
+   (92 px) spilling 87 px over the Management Attention panel, the freshness
+   cells cut to "N f." -- so on the Command view they span the width above
+   the columns (alert: 6 px under the bar, 64 px tall with a 44 px Briefing;
+   freshness 76 px under the bar when an alert shows, 8 px otherwise, 77 px
+   tall), and the columns start 10 px below the strip. With a desk open the
+   original right edge (418 px, beside the desk) still applies. */
+@media (min-width:761px) and (max-width:1000px){
+  body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:18px;right:18px;}
+  body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:18px;right:18px;}
+  body.hq[data-view="command"] .hud-col{top:calc(var(--top) + 95px);}
+  body.hq.has-critical[data-view="command"] .hud-col{top:calc(var(--top) + 163px);}
+}

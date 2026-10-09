@@ -4,8 +4,10 @@
 // server at desktop, iPhone and iPad sizes (portrait and landscape) plus
 // reduced-motion runs, and records per view: HTTP status, sign-in state,
 // horizontal overflow, WebGL canvases (is the 3D scene genuinely there and
-// how much of the screen it holds), overlapping fixed/sticky bars, touch
-// targets under 44 px on touch devices, PAPER/SHADOW label counts, words
+// how much of the screen it holds), overlapping fixed/sticky bars (a
+// full-viewport background layer painted beneath a bar is listed apart, see
+// pairBars), touch targets under 44 px on touch devices, PAPER/SHADOW label
+// counts, words
 // that would betray example/demo data, the current-workspace marker,
 // console errors and API statuses. Every non-GET is aborted in the browser
 // as well as refused by the server. Screenshots go to <out>/shots/.
@@ -52,16 +54,64 @@ async function measure(page, touch) {
       const p = getComputedStyle(el).position; if (p !== 'fixed' && p !== 'sticky') return false;
       if (!vis(el)) return false;
       let a = el.parentElement; while (a && a !== document.body) { const q = getComputedStyle(a).position; if (q === 'fixed' || q === 'sticky') return false; a = a.parentElement; }
-      return true; }).map(el => ({ el, r: el.getBoundingClientRect(),
-        id: (el.id ? '#' + el.id : el.tagName.toLowerCase()) + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '') }));
-    const overlaps = [];
-    for (let i = 0; i < fixed.length; i++) for (let j = i + 1; j < fixed.length; j++) {
-      const a = fixed[i], b = fixed[j];
-      if (a.el.contains(b.el) || b.el.contains(a.el)) continue;
-      const w = Math.min(a.r.right, b.r.right) - Math.max(a.r.left, b.r.left);
-      const h = Math.min(a.r.bottom, b.r.bottom) - Math.max(a.r.top, b.r.top);
-      if (w > 2 && h > 2) overlaps.push({ a: a.id, b: b.id, area_px: Math.round(w * h) });
-    }
+      return true; }).map(el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+        const shown = Math.max(0, Math.min(r.right, vw) - Math.max(r.left, 0)) * Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
+        return { el, r, share: +(shown / (vw * vh)).toFixed(3), z: s.zIndex, pe: s.pointerEvents,
+          id: (el.id ? '#' + el.id : el.tagName.toLowerCase()) + (el.className && typeof el.className === 'string' ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '') }; });
+    // >>> BAR PAIRING (pinned by backend/tests/js/frontend-preview-bars.test.cjs)
+    // Two fixed / sticky bars that overlap hide each other's content. A
+    // FULL-VIEWPORT BACKGROUND LAYER is not a bar: a box showing on >= 90 %
+    // of the viewport that paints BENEATH the other box of a pair is the
+    // scene the bars float over and cannot cover them. Production device run
+    // 37834226533: every Command overlap on desktop / iPad paired #hq-stage
+    // (the WebGL headquarters canvas, 100 % of the viewport, z-index 0) or
+    // #hq-tags (its desk-label overlay, 100 %, z-index 8, pointer-events
+    // none) with a HUD bar at z-index 9-22 above it. Such a pair is not an
+    // overlap; the layer is listed in background_layers with every box it
+    // sits beneath, so nothing excluded goes unrecorded. A full-viewport box
+    // painted ABOVE another box, and any two boxes under 90 %, still overlap.
+    const BG_SHARE = 0.9;
+    // stacking order: walk each box's chain of stacking contexts from the
+    // root; where the chains part, the lower z-index paints beneath (auto =
+    // 0) and on a tie the earlier in the document (CSS 2.1 appendix E)
+    const formsContext = (el) => { const s = getComputedStyle(el);
+      if (s.position === 'fixed' || s.position === 'sticky') return true;
+      if (s.zIndex !== 'auto' && (s.position !== 'static' || (el.parentElement && /flex|grid/.test(getComputedStyle(el.parentElement).display)))) return true;
+      return Number(s.opacity) < 1 || s.transform !== 'none' || s.filter !== 'none' || (s.backdropFilter || 'none') !== 'none'
+        || (s.perspective || 'none') !== 'none' || (s.clipPath || 'none') !== 'none' || (s.maskImage || 'none') !== 'none'
+        || s.isolation === 'isolate' || (s.mixBlendMode || 'normal') !== 'normal'
+        || /transform|opacity|filter|perspective/.test(s.willChange || '') || /paint|layout|strict|content/.test(s.contain || ''); };
+    const contexts = (el) => { const c = []; for (let n = el; n && n !== document.documentElement; n = n.parentElement) if (n === el || formsContext(n)) c.unshift(n); return c; };
+    const zOf = (el) => { const z = parseInt(getComputedStyle(el).zIndex, 10); return Number.isFinite(z) ? z : 0; };
+    const paintsBeneath = (x, y) => { const cx = contexts(x), cy = contexts(y); let k = 0;
+      while (k < cx.length && k < cy.length && cx[k] === cy[k]) k++;
+      if (k === cx.length || k === cy.length) return k === cx.length;
+      const zx = zOf(cx[k]), zy = zOf(cy[k]); if (zx !== zy) return zx < zy;
+      return !!(cx[k].compareDocumentPosition(cy[k]) & Node.DOCUMENT_POSITION_FOLLOWING); };
+    // bars: [{id, r, share, z, pe}]; nested(i, j): one box holds the other;
+    // beneath(i, j): box i paints beneath box j
+    const pairBars = (bars, nested, beneath) => {
+      const overlaps = [], layers = {};
+      for (let i = 0; i < bars.length; i++) for (let j = i + 1; j < bars.length; j++) {
+        if (nested(i, j)) continue;
+        const a = bars[i].r, b = bars[j].r;
+        const w = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+        const h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+        if (!(w > 2 && h > 2)) continue;
+        const lo = beneath(i, j) ? i : j, hi = lo === i ? j : i;
+        if (bars[lo].share >= BG_SHARE) {
+          const L = layers[lo] || (layers[lo] = { id: bars[lo].id, viewport_share: bars[lo].share, z_index: bars[lo].z, pointer_events: bars[lo].pe, beneath: [] });
+          L.beneath.push(bars[hi].id);
+          continue;
+        }
+        overlaps.push({ a: bars[i].id, b: bars[j].id, area_px: Math.round(w * h) });
+      }
+      return { overlaps, background_layers: Object.keys(layers).map(k => layers[k]) };
+    };
+    // <<< BAR PAIRING
+    const paired = pairBars(fixed, (i, j) => fixed[i].el.contains(fixed[j].el) || fixed[j].el.contains(fixed[i].el),
+      (i, j) => paintsBeneath(fixed[i].el, fixed[j].el));
+    const overlaps = paired.overlaps;
     const small = [];
     if (touch) for (const el of document.querySelectorAll('a[href],button,[role=button],[role=tab],input,select,summary,[tabindex]:not([tabindex="-1"])')) {
       if (!vis(el)) continue; const r = el.getBoundingClientRect();
@@ -77,7 +127,7 @@ async function measure(page, touch) {
       reduced_motion: matchMedia('(prefers-reduced-motion: reduce)').matches,
       canvases, webgl_canvases: canvases.filter(c => c.gl).length,
       largest_webgl_share: Math.max(0, ...canvases.filter(c => c.gl).map(c => c.viewport_share)),
-      fixed_bars: fixed.length, fixed_overlaps: overlaps.slice(0, 12),
+      fixed_bars: fixed.length, fixed_overlaps: overlaps.slice(0, 12), background_layers: paired.background_layers,
       touch_targets_under_44: small.length, touch_targets_under_44_first: small.slice(0, 12),
       paper_mentions: (text.match(/\bPAPER\b/g) || []).length, shadow_mentions: (text.match(/\bSHADOW\b/g) || []).length,
       current_workspace: cur.slice(0, 4), suspect_words: [...new Set(suspect.map(s => s.toLowerCase()))],
@@ -137,5 +187,5 @@ async function measure(page, touch) {
   }
   await browser.close();
   fs.writeFileSync(path.join(OUT, 'preview.json'), JSON.stringify({ base: BASE, at: new Date().toISOString(), records }, null, 1));
-  for (const r of records) console.log(`${r.view.padEnd(34)} HTTP ${r.status} dcl=${r.dom_content_loaded_ms} fps=${r.fps_4s} lt=${r.long_tasks_4s}/${r.longest_task_ms}ms in=${r.signed_in} ovf=${r.overflow_px} gl=${r.webgl_canvases}/${r.largest_webgl_share} bars=${r.fixed_bars} ovl=${(r.fixed_overlaps || []).length} t<44=${r.touch_targets_under_44} PAPER=${r.paper_mentions} SHADOW=${r.shadow_mentions} cur=${JSON.stringify(r.current_workspace)} err=${r.console_errors} sus=${JSON.stringify(r.suspect_words)}`);
+  for (const r of records) console.log(`${r.view.padEnd(34)} HTTP ${r.status} dcl=${r.dom_content_loaded_ms} fps=${r.fps_4s} lt=${r.long_tasks_4s}/${r.longest_task_ms}ms in=${r.signed_in} ovf=${r.overflow_px} gl=${r.webgl_canvases}/${r.largest_webgl_share} bars=${r.fixed_bars} ovl=${(r.fixed_overlaps || []).length} bg=${(r.background_layers || []).map(l => l.id + ':' + l.beneath.length).join(',') || 0} t<44=${r.touch_targets_under_44} PAPER=${r.paper_mentions} SHADOW=${r.shadow_mentions} cur=${JSON.stringify(r.current_workspace)} err=${r.console_errors} sus=${JSON.stringify(r.suspect_words)}`);
 })();
