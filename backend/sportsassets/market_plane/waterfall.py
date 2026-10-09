@@ -555,8 +555,9 @@ class Waterfall:
                 "reasons": dict(top_r[:MAX_REASON_KEYS]),
                 "reasons_keys_total": len(top_r),
                 # (Kalshi) contracts by the series rule that tiered them, and
-                # every series no rule recognises, by name (UNCLASSIFIED,
-                # never EXCLUDED)
+                # the series no rule recognises, by name (UNCLASSIFIED, never
+                # EXCLUDED): the MAX_REASON_KEYS largest, with the count of
+                # all of them (30 series on 2026-10-09)
                 "by_kalshi_rule": dict(sorted(self.k_rules.items())),
                 "kalshi_unrecognised": dict(top_k[:MAX_REASON_KEYS]),
                 "kalshi_unrecognised_keys_total": len(top_k),
