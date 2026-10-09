@@ -1486,46 +1486,49 @@ async def healthz() -> dict:
     # left it, and it can never do what the SELECT 1 once did and hang
     # the one check the platform restarts on.
     pool_stats = _db.pool_stats()
-    if pool is not None:
-        try:
-            # 2 s ceiling (2026-09-03): with the ten pool connections held
-            # by stacked ledger fetches this await hung, and a hanging
-            # health check reads as a dead process to the platform's
-            # checker (render.yaml healthCheckPath) -- the one field meant
-            # to be informational was able to take the process down. A
-            # saturated pool now reports db_ok false; the check itself
-            # always answers.
-            # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
-            # was read in anger (2026-09-05, 01:06Z). The payload was
-            # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
-            # 5874.9} on a single boot_id -- a healthy process, no crash
-            # loop, and LESS memory than the same check reported while
-            # the platform was working fine three hours earlier (1,085
-            # MB, and 1,665 MB moments before a restart). So this field
-            # going false is not a memory verdict and not a dead
-            # database: it is THIS `SELECT 1` losing a 2-second race for
-            # a pooled connection, i.e. the pool is saturated by queries
-            # that are still running.
-            #
-            # The symptom at the edge is total: every DB-backed endpoint
-            # hangs with ZERO BYTES RECEIVED while venue reads (which
-            # need no pool) answer normally, and the diagnostic probe
-            # dies at its 32-minute job ceiling instead of reporting
-            # anything. Read `db_ok` FIRST when that pattern appears --
-            # four probes were spent on the wrong causes (a workflow
-            # fail-open, then memory) before this one field settled it.
-            #
-            # What saturated it that night: a fail-open guard in
-            # engine-diagnostic.yml fired up to six concurrent
-            # /api/admin/rescore-copies passes, each a full restatement
-            # over live_orders. A curl timeout does not stop the server
-            # side, so they went on holding connections long after the
-            # probe gave up. That guard now fails closed (9244ece); the
-            # passes already in flight had to be cleared by a restart.
-            await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2.0)
-            db_ok = True
-        except Exception:  # noqa: BLE001
-            pass
+    # 2 s ceiling (2026-09-03): with the ten pool connections held
+    # by stacked ledger fetches this await hung, and a hanging
+    # health check reads as a dead process to the platform's
+    # checker (render.yaml healthCheckPath) -- the one field meant
+    # to be informational was able to take the process down. A
+    # saturated pool now reports db_ok false; the check itself
+    # always answers.
+    # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
+    # was read in anger (2026-09-05, 01:06Z). The payload was
+    # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
+    # 5874.9} on a single boot_id -- a healthy process, no crash
+    # loop, and LESS memory than the same check reported while
+    # the platform was working fine three hours earlier (1,085
+    # MB, and 1,665 MB moments before a restart). So this field
+    # going false is not a memory verdict and not a dead
+    # database: it is THIS `SELECT 1` losing a 2-second race for
+    # a pooled connection, i.e. the pool is saturated by queries
+    # that are still running.
+    #
+    # The symptom at the edge is total: every DB-backed endpoint
+    # hangs with ZERO BYTES RECEIVED while venue reads (which
+    # need no pool) answer normally, and the diagnostic probe
+    # dies at its 32-minute job ceiling instead of reporting
+    # anything. Read `db_ok` FIRST when that pattern appears --
+    # four probes were spent on the wrong causes (a workflow
+    # fail-open, then memory) before this one field settled it.
+    #
+    # What saturated it that night: a fail-open guard in
+    # engine-diagnostic.yml fired up to six concurrent
+    # /api/admin/rescore-copies passes, each a full restatement
+    # over live_orders. A curl timeout does not stop the server
+    # side, so they went on holding connections long after the
+    # probe gave up. That guard now fails closed (9244ece); the
+    # passes already in flight had to be cleared by a restart.
+    # NEVER QUEUED ON A SATURATED POOL (RC6, 2026-10-09; db.health_probe):
+    # every connection out and none idle is `db_ok` false at once, named
+    # POOL_SATURATED_NOT_QUEUED -- what the 2 s race used to conclude, two
+    # seconds sooner, so a saturated pool can no longer add 2 s to a loop
+    # stall and push this answer past the platform's 5 s. A free
+    # connection still runs the SELECT 1 under the same 2 s ceiling, and
+    # concurrent checks share one probe.
+    probe = await _db.health_probe(pool, pool_stats)
+    db_ok = bool(probe.get("ok"))
     # Current RSS from /proc: after a night of OOM archaeology-by-email,
     # memory is a number the probes can track, not a timeline to argue.
     rss_mb = None
@@ -1553,6 +1556,7 @@ async def healthz() -> dict:
 
     _posture = credential_posture()
     return {"ok": True, "db_ok": db_ok,
+            "db_probe": probe.get("why"), "db_probe_s": probe.get("s"),
             "pool": pool_stats,
             "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
             "rss_mb": rss_mb,
