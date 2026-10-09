@@ -583,6 +583,9 @@ jobs:
             gh run download "$FRONTEND_PREVIEW_RUN_ID" -R "$REPO" -D "$RUNNER_TEMP/fp" >/dev/null 2>&1 \
               && FP=$(find "$RUNNER_TEMP/fp" -name preview.json | head -1)
             [ -n "$FP" ] && cp "$FP" acc/frontend_preview.json && FP=acc/frontend_preview.json
+            # the Trader device acceptance from the same run sits beside it
+            TA=$(find "$RUNNER_TEMP/fp" -name trader_accept.json | head -1)
+            [ -n "$TA" ] && cp "$TA" acc/trader_accept.json
           fi
           # THE RELEASE RECEIPT FOR THE RUNNING SHA, judged as the API judges
           # a posted one and kept in the attested packet; never POSTed here

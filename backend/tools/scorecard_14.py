@@ -732,6 +732,46 @@ def _device_units(card, path):
         for k, v in _view_checks(r).items():
             card.units.append({"unit": "%s:%s" % (r.get("view"), k), "passed": bool(v),
                                "detail": None, "class": "PASS" if v else "FAIL"})
+    _trader_units(card, os.path.join(os.path.dirname(path), "trader_accept.json"))
+
+
+#: every device the Trader acceptance must cover (frontend-preview trader_accept.js)
+TRADER_DEVICES = ("desktop", "iphone", "iphone_landscape", "ipad_portrait", "ipad_landscape")
+
+
+def _trader_units(card, path):
+    """TRADER DEVICE ACCEPTANCE (PM 2026-10-08): the rendered Trader page
+    against the production API's own snapshot on each device -- every open
+    position, standing orders, bid / ask, Xavier's recorded action, game
+    state, logos, no motion while the data is frozen. It is its OWN
+    component (devices passing / devices required), so the view checks can
+    never outvote a failed device: one failing device of five is 0.8. A
+    device passes only when it ran against a real snapshot and named no
+    failure; the failure classes are the detail. A missing file or device
+    is READ_UNAVAILABLE, never a pass."""
+    unit = "trader_device_acceptance"
+    if not os.path.isfile(path):
+        card.units.append({"unit": unit, "passed": False, "members": None,
+                           "detail": "READ_UNAVAILABLE:trader_accept.json:NOT_SUPPLIED",
+                           "class": "READ_UNAVAILABLE"})
+        return
+    got = {r.get("device"): r for r in (json.load(open(path)).get("results") or [])}
+    absent = [d for d in TRADER_DEVICES if d not in got]
+    if absent:
+        card.units.append({"unit": unit, "passed": False, "members": None,
+                           "detail": "READ_UNAVAILABLE:trader_accept.json:" + ",".join(absent),
+                           "class": "READ_UNAVAILABLE"})
+        return
+    per = {}
+    for dev in TRADER_DEVICES:
+        r = got[dev]
+        ok = (r.get("verdict") == "PASS" and not r.get("failures")
+              and (r.get("api") or {}).get("returned") is not None)
+        per[dev] = "PASS" if ok else (r.get("failures") or r.get("verdict"))
+    n = sum(1 for v in per.values() if v == "PASS")
+    card.units.append({"unit": unit, "passed": n == len(TRADER_DEVICES),
+                       "members": (n, len(TRADER_DEVICES)), "detail": per,
+                       "class": "PASS" if n == len(TRADER_DEVICES) else "FAIL"})
 
 
 def main(argv=None):
