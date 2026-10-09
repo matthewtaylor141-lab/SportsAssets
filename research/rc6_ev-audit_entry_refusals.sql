@@ -13,7 +13,7 @@ SELECT date_trunc('day', d.decided_at)::date d, coalesce(d.strategy, '-') strate
  WHERE d.verdict = 'ENTER' AND d.decided_at >= '2026-10-06 05:37:00+00'
  GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo == 2 the ledger's refusal of those orders (findings), by refusal
+\echo == 2 the ledger refusal of those orders (findings), by refusal
 SELECT date_trunc('day', f.found_at)::date d,
        coalesce(f.detail->>'strategy', '-') strategy,
        coalesce(f.detail->>'refusal', '-') refusal, count(*) n
