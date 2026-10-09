@@ -19,7 +19,9 @@ book in one call: 0.978-0.9997 in every scenario.
   §4  the refresh against a REAL subscribe-all Manager: one call a minute,
       every quiet member current (origin SNAPSHOT, G in the window), the
       REST plan left only what it did not prove; a symbol not returned
-      stays REST's; a refused call holds; the market's own word wins
+      stays REST's; a refused call holds; the market's own word wins; the
+      token is minted off the loop (a slow mint or the keeper's held lock
+      never stalls the plane's loop)
   §5  the coverage pass counts a snapshot refresh PMX_GRPC, labelled; the
       denominators and the completion numerator carry it
   §6  the REAL run loop with the snapshot call against the in-process
@@ -33,6 +35,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import threading
 import time
 from concurrent import futures
 
@@ -360,6 +363,132 @@ def test_a_refused_call_holds_and_rest_carries_on():
     got = run(snap3.step(ref, m, token_fn=lambda: None, bound=BOUND,
                          clock=clock, caller=None))
     assert got["why"] == S.R_SNAPSHOT_NO_TOKEN
+
+
+# -- the mint never stops the plane's loop (review of 9d4b920d) ----------
+# The production token_fn is TokenKeeper.token: a threading lock the keeper
+# thread holds through its own mint, then PMX.Institutional.token(), which
+# on an expired cache (a token is reused only 60 s) mints with a
+# synchronous HTTP POST. The step is awaited on the plane's loop, beside
+# the pass, the heartbeats, the window sampler and the Kalshi runtime.
+
+MINT_S = 0.6        # a slow mint (the worst case is the 35 s POST timeout)
+MAX_LAG_S = 0.2     # a blocked loop lags ~MINT_S; a free one about a tick
+
+
+def _lag_during(make_coro, *, tick=0.02):
+    """Run make_coro() on a fresh loop in its own thread beside a ticker:
+    (result, the ticker's worst lag in s, the loop thread's ident)."""
+    async def main():
+        lags = []
+
+        async def ticker():
+            while True:
+                t = time.monotonic()
+                await asyncio.sleep(tick)
+                lags.append(time.monotonic() - t - tick)
+        tk = asyncio.ensure_future(ticker())
+        await asyncio.sleep(0.05)
+        got = await make_coro()
+        await asyncio.sleep(0.05)
+        tk.cancel()
+        try:
+            await tk
+        except asyncio.CancelledError:
+            pass
+        return got, max(lags)
+    out = {}
+
+    def on_thread():
+        out["loop_thread"] = threading.get_ident()
+        out["got"], out["lag"] = asyncio.run(main())
+    th = threading.Thread(target=on_thread)
+    th.start()
+    th.join()
+    return out["got"], out["lag"], out["loop_thread"]
+
+
+def test_a_slow_mint_runs_off_the_loop_and_the_call_still_goes():
+    S = SR()
+    clock, m, books, ref, syms = _quiet(3)
+    snap = S.SnapshotRefresh()
+    minted_on, seen = [], []
+
+    def slow_token():
+        minted_on.append(threading.get_ident())
+        time.sleep(MINT_S)
+        return TOKEN
+    got, lag, loop_thread = _lag_during(lambda: snap.step(
+        ref, m, token_fn=slow_token, bound=BOUND, clock=clock,
+        caller=_caller(clock, seen=seen)))
+    assert minted_on and minted_on[0] != loop_thread
+    assert lag < MAX_LAG_S, "the loop stalled %.2f s on the mint" % lag
+    # the call itself is unchanged: the minted token, every member current
+    assert seen[0][0] == TOKEN and got["current"] == 3
+    assert set(ref.current(m, now=clock.t + 1, bound=BOUND)) == set(syms)
+    assert ref.inflight == set()
+
+
+def test_the_keepers_lock_held_through_its_mint_does_not_stall_the_loop():
+    """The keeper's own 30 s refresh holds its lock through a mint; a
+    snapshot call landing then waits for it in a worker thread, not on
+    the loop. The real TokenKeeper; a client whose mint is slow."""
+    from sportsassets.market_plane.token_keeper import TokenKeeper
+    S = SR()
+
+    class SlowClient:
+        def __init__(self):
+            self.minted_on = []
+
+        def token(self):
+            self.minted_on.append(threading.get_ident())
+            time.sleep(MINT_S)
+            return TOKEN
+
+        def invalidate_token(self):
+            pass
+    client = SlowClient()
+    keeper = TokenKeeper(client)
+    clock, m, books, ref, syms = _quiet(2)
+    snap = S.SnapshotRefresh()
+    seen = []
+    keeper_thread = threading.Thread(target=keeper.refresh_once)
+
+    async def go():
+        keeper_thread.start()           # the keeper's thread takes the lock
+        await asyncio.sleep(0.05)
+        return await snap.step(ref, m, token_fn=keeper.token, bound=BOUND,
+                               clock=clock, caller=_caller(clock, seen=seen))
+    got, lag, loop_thread = _lag_during(go)
+    keeper_thread.join()
+    assert lag < MAX_LAG_S, "the loop stalled %.2f s on the keeper" % lag
+    assert loop_thread not in client.minted_on
+    assert keeper.refreshes == 1 and len(client.minted_on) == 2
+    assert seen[0][0] == TOKEN and got["current"] == 2
+
+
+def test_a_slow_failed_mint_is_no_token_held_and_off_the_loop():
+    S = SR()
+    clock, m, books, ref, syms = _quiet(2)
+    snap = S.SnapshotRefresh()
+
+    def failing_token():
+        time.sleep(MINT_S)
+        raise RuntimeError("mint failed")
+
+    def no_call(tok, ss):
+        raise AssertionError("no call without a token")
+    got, lag, _lt = _lag_during(lambda: snap.step(
+        ref, m, token_fn=failing_token, bound=BOUND, clock=clock,
+        caller=no_call))
+    assert lag < MAX_LAG_S, "the loop stalled %.2f s on the mint" % lag
+    assert got["why"] == S.R_SNAPSHOT_NO_TOKEN and got["asked"] == 0
+    assert snap.hold_until == clock.t + S.CALL_EVERY_S
+    assert snap.hold_why == S.R_SNAPSHOT_NO_TOKEN
+    assert ref.inflight == set()
+    # REST still plans both
+    due, _c = ref.plan(m, now=clock.t, bound=BOUND)
+    assert due == syms
 
 
 def test_the_markets_own_word_ends_a_snapshot_read_and_waits():

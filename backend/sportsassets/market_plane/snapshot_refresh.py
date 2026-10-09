@@ -342,7 +342,10 @@ class SnapshotRefresh:
         SNAPSHOT_LEAD_S of the bound (the refresher's own plan: snapshot
         currency refusals only, never a market refusal, none in flight), in
         its order, up to MAX_SYMBOLS_PER_CALL; in flight while the call
-        runs; each result recorded into the refresher. None when not due."""
+        runs; each result recorded into the refresher. None when not due.
+        Never blocks the loop it is awaited on: the token is minted and the
+        call made in worker threads (a mint may wait on the keeper's lock
+        and an HTTP POST)."""
         now = clock()
         ok, why = self.due(now)
         if not ok or ref is None or mgr is None:
@@ -354,8 +357,13 @@ class SnapshotRefresh:
             # nothing due: no call, and the minute is not spent
             return None
         self.last_call_at = now
+        # the token is minted OFF the loop: token_fn is the keeper's token(),
+        # which takes a threading lock (held by the keeper thread during its
+        # own mint) and, on an expired cache, mints with a synchronous HTTP
+        # POST (connect 5 s + read 30 s); on the loop it would stop the pass,
+        # the heartbeats, the window sampler and the Kalshi runtime with it
         try:
-            token = token_fn()
+            token = await asyncio.to_thread(token_fn)
         except Exception:                                       # noqa: BLE001
             token = None
         if not token:
