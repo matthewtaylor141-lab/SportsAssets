@@ -196,11 +196,14 @@ def test_an_unknown_sport_falls_back_to_the_exchange_wide_coefficient():
 
 def test_a_combo_refuses_rather_than_being_priced_with_the_standard_curve():
     """"The taker side of a combo trade uses a separate fee curve." Pricing one
-    with the standard curve would UNDERSTATE the charge."""
+    with the standard curve would UNDERSTATE the charge. The curve's
+    (1 - p)^4 coefficient is 0.06 as published on 2026-10-09 (0.04 on
+    2026-09-27, kept as COMBO_CURVE_SUPERSEDED)."""
     got = CF.combo_fee()
     assert got["FEE"] is None
     assert got["BLOCKER"] == CF.R_COMBO_CURVE_NOT_IMPLEMENTED
-    assert "0.04" in got["published_curve"]
+    assert "0.06 x (1 - p)^4" in got["published_curve"]
+    assert "0.04 x (1 - p)^4" in CF.COMBO_CURVE_SUPERSEDED
     assert "understate" in got["why"]
 
 
