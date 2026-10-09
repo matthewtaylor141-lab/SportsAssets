@@ -1417,3 +1417,5 @@ tests/test_rc6_coverage_kalshi_series.py
 tests/test_rc6_coverage_outside_registry.py
 # (RC6 Adriana) void terms read per contract from its own captured, sha-cited rules (never defaulted); on established fair-price terms a two-market structure is refused at its void-state floor (never summed to $1, never an opportunity); near complements recorded REFUSED; completion states the terms the scans recorded
 tests/test_rc6_adriana_void_terms.py
+# (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
+tests/test_rc6_kalshi_ws_merge_integration.py

@@ -268,25 +268,30 @@ class WsBooks:
 
     def _not_tracked(self, typ, sid, seq) -> str:
         """A message for a forgotten market: no book, but its sid's
-        sequence is kept exactly as a tracked market's message keeps it.
-        On a DEAD sid (its sequence already broke) nothing is re-armed and
-        nothing is resubscribed: its place in the sequence cannot be known
-        until the venue announces the sid anew, and the market is no longer
-        wanted."""
-        self.stats["ignored_not_tracked"] += 1
+        sequence is kept exactly as a tracked market's message keeps it --
+        a snapshot too: one past a lost message, or a replay (seq <= last),
+        gaps the sid like any snapshot out of sequence (review of the
+        three-lane merge b4506ed9: re-basing the sid on it served a tracked
+        book missing the lost update as CURRENT, and a replay re-applied a
+        delta). On a DEAD sid (its sequence already broke) nothing is
+        re-armed and nothing is resubscribed: its place in the sequence
+        cannot be known until the venue announces the sid anew, and the
+        market is no longer wanted."""
         if sid in self.dead_sids:
-            self.stats["ignored_dead_sid"] += 1
+            self.stats["ignored_not_tracked"] += 1
             return "IGNORED_DEAD_SID"
-        if typ == "orderbook_snapshot":
-            self.sid_seq[sid] = seq
-            return "IGNORED_NOT_TRACKED"
         last = self.sid_seq.get(sid)
-        if last is None:
-            return "IGNORED_NOT_TRACKED"
-        if seq != last + 1:
-            self._gap_sid(sid, R_SEQ_GAP)
+        if last is not None and seq != last + 1:
+            if typ == "orderbook_snapshot":
+                self.stats["snapshots_out_of_sequence"] += 1
+                self._gap_sid(sid, R_SNAPSHOT_OUT_OF_SEQUENCE
+                              if seq <= last else R_SEQ_GAP)
+            else:
+                self._gap_sid(sid, R_SEQ_GAP)
             return "GAP"
-        self.sid_seq[sid] = seq
+        self.stats["ignored_not_tracked"] += 1
+        if typ == "orderbook_snapshot" or last is not None:
+            self.sid_seq[sid] = seq
         return "IGNORED_NOT_TRACKED"
 
     def on_connected(self) -> None:
@@ -316,6 +321,9 @@ class WsBooks:
         if sid is None:
             return
         self._revive(sid)
+        # a market dropped while this subscribe awaited its ack is not
+        # brought back by the ack (review of b4506ed9)
+        tickers = [t for t in tickers if t not in self.forgotten]
         self.sid_markets.setdefault(sid, set()).update(tickers)
         for t in tickers:
             b = self._book(t)
@@ -554,6 +562,9 @@ class Subscriber:
         held = sum(1 for t in gone if t in self.books.books)
         self.books.forget(gone)
         self.subscribed.difference_update(gone)
+        # an unacknowledged subscribe no longer names them
+        for k, ts in list(self.pending.items()):
+            self.pending[k] = [t for t in ts if t not in gone]
         return held
 
     async def _subscribe(self, ws, tickers) -> None:
