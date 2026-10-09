@@ -64,6 +64,29 @@ async def _claims_census(conn, at: float | None) -> dict:
     return await KCDB.claims_census(conn, now=at)
 
 
+def claims_scan_status(census: dict) -> tuple:
+    """(status, why) of the claim-first scan's record. Pure.
+
+    NO_EVIDENCE when it read no alias. PARTIAL when the fixture cap
+    (canonical_claims_db.MAX_FIXTURES) cut a matched cross-venue fixture:
+    the scan then did not cover every cross-venue pair in the window, and
+    is never OK. OK otherwise -- with the why naming a cap that cut only
+    Kalshi-only fixtures (cross-venue fixtures are read first), each one
+    counted and named in by_code.scope."""
+    scope = census.get("scope") or {}
+    if not census.get("markets_read"):
+        return ("NO_EVIDENCE", "NO_ESTABLISHED_KALSHI_FIXTURE_WITH_A_READABLE"
+                "_BOOK_IN_THE_CLAIM_WINDOW")
+    if scope.get("cut_by_cap_cross_venue"):
+        return ("PARTIAL", "FIXTURE_CAP_CUT_%d_CROSS_VENUE_OF_%d_IN_WINDOW"
+                % (scope["cut_by_cap_cross_venue"],
+                   scope.get("in_window_cross_venue") or 0))
+    if scope.get("cut_by_cap"):
+        return ("OK", "FIXTURE_CAP_CUT_%d_KALSHI_ONLY_OF_%d_IN_WINDOW"
+                % (scope["cut_by_cap"], scope.get("in_window") or 0))
+    return "OK", None
+
+
 async def _sentinel(conn, result: dict, scan_id: str, at: float) -> dict:
     """THE TWO-LEG SENTINEL (red team), SHADOW: every opportunity
     revalidated immediately -- books, rules fingerprint, economics, venue
@@ -157,11 +180,8 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
         # fixture says so (NO_EVIDENCE, why); one that read fixtures but
         # found no structure is OK with zero structures and its counts.
         cscan = "adr-claims-%d" % int(at * 1000)
-        cstatus, cwhy = "OK", None
-        if not claims["census"].get("markets_read"):
-            cstatus = "NO_EVIDENCE"
-            cwhy = ("NO_ESTABLISHED_KALSHI_FIXTURE_WITH_A_READABLE_BOOK_IN_"
-                    "THE_CLAIM_WINDOW")
+        cstatus, cwhy = claims_scan_status(claims["census"])
+        scope = claims["census"].get("scope") or {}
         crec = await _phase(summary, "claims_record", AD.record(
             conn, claims, started=at, finished=at + (time.monotonic() - t0),
             scan_id=cscan, status=cstatus, why=cwhy))
@@ -172,6 +192,9 @@ async def pass_once(conn, *, now: float | None = None) -> dict:
         cc = claims["census"]
         summary["claims"] = {
             "scan": (crec or {}).get("scan_id"), "status": cstatus,
+            "why": cwhy,
+            "scope": {k: v for k, v in scope.items()
+                      if isinstance(v, int)},
             "structures": cn, "opportunities": len(claims["opportunities"]),
             "refusals": len(claims["refusals"]),
             "near_complement_pairs": cc.get("near_complement_pairs"),

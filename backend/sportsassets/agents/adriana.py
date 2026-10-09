@@ -94,7 +94,7 @@ SCAN_SUMMARY_KEYS = ("pairs_not_complementary", "near_complement_pairs",
                      "same_market_pairs_excluded", "same_market_only_pairs",
                      "settlement_pair_policy", "by_topology", "book_sources",
                      "exceptional_state_refusals_proven_under_hypothesis",
-                     "claim_engine")
+                     "claim_engine", "scope")
 
 R_NO_SCHEMA = "MIGRATION_265_NOT_APPLIED"
 VOID_TERMS_NOT_ESTABLISHED = "VOID_TERMS_NOT_ESTABLISHED"

@@ -533,18 +533,24 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
     """WHAT THE LATEST SCANS RECORDED ABOUT THE VOID / POSTPONEMENT TERMS OF
     EVERY CONTRACT THEY READ, and the one-line statement of it. Pure.
 
-    `scans` {kind: row with by_code (its `void_terms` census), finished_at}.
-    ESTABLISHED only when at least one current scan read a contract and
-    every contract every current scan read has its terms established from
-    its own captured rules. A scan older than ARB_SCAN_MAX_AGE_S, or one
-    without a recorded census, establishes nothing; a scan that read no
-    contract states only that. The statement contains the words "void
-    terms not established" whenever any of that is short of established."""
-    parts, by_kind, any_read, all_est = [], {}, False, True
+    `scans` {kind: row with by_code (its `void_terms` census), finished_at,
+    status, why}, one per ARB_SCAN_KINDS. ESTABLISHED only when EVERY kind
+    -- the recorded-books census AND the cross-venue claim scan -- has a
+    current scan (<= ARB_SCAN_MAX_AGE_S) with a recorded void-terms census
+    that read at least one contract, and every contract every scan read has
+    its terms established from its own captured rules. Missing evidence is
+    never neutral: a kind with no scan (NO_SCAN), a scan that read no
+    contract (READ_NO_CONTRACT, its status and why named), a stale scan or
+    one without a census establishes nothing, and the statement then
+    contains the words "void terms not established" with that state."""
+    parts, by_kind, all_est = [], {}, True
     for kind, _pat in ARB_SCAN_KINDS:
         row = scans.get(kind)
         if not row:
             by_kind[kind] = {"state": "NO_SCAN"}
+            all_est = False
+            parts.append("%s: void terms not established (no scan of this "
+                         "kind recorded)" % kind)
             continue
         bc = _j(row.get("by_code")) or {}
         vt = bc.get("void_terms")
@@ -555,6 +561,7 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
         k = int((vt or {}).get("established") or 0)
         d = {"scan_id": row.get("scan_id"), "age_s": age, "read": n,
              "unit": n_key, "established": k,
+             "scan_status": row.get("status"), "scan_why": row.get("why"),
              "not_established": (vt or {}).get("not_established") or {},
              "rules": (vt or {}).get("rules") or {},
              "source": (vt or {}).get("source")}
@@ -569,10 +576,17 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
             parts.append("%s: void terms not established (latest scan %s s "
                          "old > %d s)" % (kind, age, ARB_SCAN_MAX_AGE_S))
         elif n == 0:
+            # a scan that read nothing is no evidence of any term: never
+            # neutral (a census with one established contract and a
+            # cross-venue scan that read none is not "established")
             d["state"] = "READ_NO_CONTRACT"
-            parts.append("%s: read no contract" % kind)
+            all_est = False
+            parts.append("%s: void terms not established (the scan read no "
+                         "contract; status %s%s)" % (
+                             kind, row.get("status") or "?",
+                             (", " + str(row["why"])) if row.get("why")
+                             else ""))
         elif k < n:
-            any_read = True
             all_est = False
             d["state"] = "NOT_ESTABLISHED"
             parts.append("%s: void terms not established for %d of %d %s (%s)"
@@ -581,7 +595,6 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
                                  "%s %d" % kv for kv in sorted(
                                      d["not_established"].items()))))
         else:
-            any_read = True
             d["state"] = "ESTABLISHED"
             parts.append("%s: void terms established for %d of %d %s from "
                          "each one's own published rules (%s); separate "
@@ -592,16 +605,19 @@ def arbitrage_void_terms(scans: dict, *, now: float) -> dict:
                                  "%s %d" % kv for kv in sorted(
                                      d["rules"].items()))))
         by_kind[kind] = d
-    established = any_read and all_est
+    established = all_est
     if not any(r for r in scans.values()):
         statement = ARB_FAIL_CLOSED_UNREAD
-    elif not any_read and all_est:
-        statement = ("void terms not established: no current scan read a "
-                     "contract; " + "; ".join(parts))
     else:
         statement = "; ".join(parts)
+    # the invariant the evaluator reads: short of established, the words
+    # are always there (each non-established part above carries them;
+    # this keeps it true whatever a later edit of the parts does)
+    if not established and "void terms not established" not in statement:
+        statement = "void terms not established: " + statement
     return {"established": established, "by_scan": by_kind,
             "statement": statement,
+            "requires": [k for k, _ in ARB_SCAN_KINDS],
             "max_scan_age_s": ARB_SCAN_MAX_AGE_S}
 
 
@@ -644,6 +660,9 @@ async def arbitrage_block(conn) -> dict:
                 "refusals_total": row["refusals_total"],
                 "near_complement_pairs": bc.get("near_complement_pairs"),
                 "book_sources": bc.get("book_sources"),
+                # (RC6) what the claim scan's fixture read covered and cut
+                # (cap, unreadable, unmodelled, PMUS identity), by name
+                "scope": bc.get("scope"),
                 "venues": _j(row.get("venues"))}
     n_ok = 0
     if await _has(conn, "adriana_arb_opportunities"):

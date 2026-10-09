@@ -390,7 +390,7 @@ def test_the_claim_scan_runs_its_engine_passes_off_the_event_loop(
     built = CC.build_claims(FX, [y, t])
     seen = []
 
-    async def fake_assemble(conn, *, now=None):
+    async def fake_assemble(conn, *, now=None, scope=None):
         return [(FX, built, [y, t])]
 
     async def fake_apply(conn, b):
@@ -497,6 +497,89 @@ def test_the_readback_states_the_void_terms_the_scans_recorded():
     # a row recorded before this census existed (no void_terms) is not read
     v = CR.arbitrage_void_terms({"census": _scan("scan", None)}, now=now)
     assert not v["established"] and phrase in v["statement"]
+
+
+def test_missing_cross_venue_evidence_never_establishes_the_void_terms():
+    """Review finding (completion/read.py): a census with ONE established
+    PMUS contract, beside a cross-venue claim scan that read no contract,
+    was never recorded, or is absent, made `established` True and dropped
+    "void terms not established" -- so the evaluator's void_terms_established
+    unit (scorecard_14: the phrase absent) passed on zero cross-venue
+    evidence. Missing evidence is never neutral: every scan kind must be
+    current, carry a census and have read a contract, and each gap is named
+    with its state."""
+    now = 1_000_000.0
+    phrase = "void terms not established"
+    est = {"contracts": 1, "established": 1, "not_established": {},
+           "rules": {"LAST_FAIR_PRICE/LAST_FAIR_PRICE": 1}}
+    alias_all = {"aliases": 6, "established": 6, "not_established": {},
+                 "rules": {"LAST_FAIR_PRICE/LAST_FAIR_PRICE": 6}}
+    read_none = {"aliases": 0, "established": 0, "not_established": {},
+                 "rules": {}}
+    census = _scan("scan", est)
+    empty = dict(_scan("claims", read_none), status="NO_EVIDENCE",
+                 why="NO_ESTABLISHED_KALSHI_FIXTURE_WITH_A_READABLE_BOOK_IN_"
+                     "THE_CLAIM_WINDOW")
+    for cross, state in ((None, "NO_SCAN"), ("absent", "NO_SCAN"),
+                         (empty, "READ_NO_CONTRACT"),
+                         (_scan("claims", None),
+                          "VOID_TERMS_CENSUS_NOT_RECORDED"),
+                         (_scan("claims", alias_all, age=901.0),
+                          "STALE_SCAN")):
+        scans = {"census": census}
+        if cross != "absent":
+            scans["cross_venue"] = cross
+        v = CR.arbitrage_void_terms(scans, now=now)
+        assert v["established"] is False, state
+        assert phrase in v["statement"], state
+        assert v["by_scan"]["cross_venue"]["state"] == state
+        assert "cross_venue: void terms not established" in v["statement"]
+        # the census's own established terms stay visible beside the gap
+        assert v["by_scan"]["census"]["state"] == "ESTABLISHED"
+    # the read-nothing state names the scan's own status and why
+    v = CR.arbitrage_void_terms({"census": census, "cross_venue": empty},
+                                now=now)
+    assert "status NO_EVIDENCE, NO_ESTABLISHED_KALSHI_FIXTURE" in \
+        v["statement"]
+    # and the mirror image: the cross-venue scan established, the census
+    # read nothing -> not established either (no kind is ever neutral)
+    v = CR.arbitrage_void_terms({
+        "census": _scan("scan", {"contracts": 0, "established": 0,
+                                 "not_established": {}, "rules": {}}),
+        "cross_venue": _scan("claims", alias_all)}, now=now)
+    assert v["established"] is False and phrase in v["statement"]
+    assert v["by_scan"]["census"]["state"] == "READ_NO_CONTRACT"
+    # only both kinds current, read and established make it established
+    v = CR.arbitrage_void_terms({"census": census,
+                                 "cross_venue": _scan("claims", alias_all)},
+                                now=now)
+    assert v["established"] is True and phrase not in v["statement"]
+    assert v["requires"] == ["census", "cross_venue"]
+
+
+def test_the_claim_scan_is_never_ok_when_the_cap_cut_a_cross_venue_pair():
+    """Review finding (canonical_claims_db.MAX_FIXTURES): what the fixture
+    cap cuts is named on the scan record. A cut cross-venue fixture means
+    the scan did not cover every matched pair: PARTIAL, never OK. A cut of
+    Kalshi-only fixtures (cross-venue ones are read first) stays OK with the
+    cut named in its why."""
+    from sportsassets.agents import adriana_runner as RUN
+    assert RUN.claims_scan_status({"markets_read": 0}) == (
+        "NO_EVIDENCE", "NO_ESTABLISHED_KALSHI_FIXTURE_WITH_A_READABLE_BOOK_"
+                       "IN_THE_CLAIM_WINDOW")
+    base = {"markets_read": 40, "scope": {
+        "in_window": 101, "in_window_cross_venue": 90, "cut_by_cap": 21,
+        "cut_by_cap_cross_venue": 10}}
+    assert RUN.claims_scan_status(base) == (
+        "PARTIAL", "FIXTURE_CAP_CUT_10_CROSS_VENUE_OF_90_IN_WINDOW")
+    kalshi_only = {"markets_read": 40, "scope": {
+        "in_window": 101, "in_window_cross_venue": 19, "cut_by_cap": 21,
+        "cut_by_cap_cross_venue": 0}}
+    assert RUN.claims_scan_status(kalshi_only) == (
+        "OK", "FIXTURE_CAP_CUT_21_KALSHI_ONLY_OF_101_IN_WINDOW")
+    assert RUN.claims_scan_status({"markets_read": 40, "scope": {
+        "in_window": 65, "cut_by_cap": 0, "cut_by_cap_cross_venue": 0}}) \
+        == ("OK", None)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -708,8 +791,15 @@ def test_a_real_pass_reads_captured_terms_records_both_scans_and_reads_back():
                 "ESTABLISHED"
             assert blk["void_terms"]["by_scan"]["cross_venue"]["state"] == \
                 "READ_NO_CONTRACT"
-            assert blk["void_terms"]["established"] is True
-            assert "void terms not established" not in blk["fail_closed"]
+            # the census's contracts are established, but the cross-venue
+            # scan read none: missing evidence is never neutral, so the
+            # category's terms are NOT established and the words stay
+            assert blk["void_terms"]["established"] is False
+            assert "void terms not established" in blk["fail_closed"]
+            assert ("cross_venue: void terms not established (the scan read "
+                    "no contract; status NO_EVIDENCE") in blk["fail_closed"]
+            assert "census: void terms established for 2 of 2" in \
+                blk["fail_closed"]
             assert blk["verdict"] == "NO_ELIGIBLE_ARB"
             assert blk["authority"] == "SHADOW_ONLY"
             # the floor counts ONE pass, not one per recorded scan
@@ -722,4 +812,132 @@ def test_a_real_pass_reads_captured_terms_records_both_scans_and_reads_back():
             await conn.close()
             for line in ("210pt5", "211pt5"):
                 RULES._SEEN.pop(base % line, None)
+    asyncio.run(go())
+
+
+@pg
+def test_the_fixture_cap_reads_cross_venue_first_and_names_every_cut():
+    """Review finding (canonical_claims_db.fixtures): the claim scan read at
+    most MAX_FIXTURES ESTABLISHED Kalshi fixtures ordered by start time,
+    BEFORE dropping unreadable ones, and nothing counted what the cap cut
+    (production research-sql 37876834482 B, 02:55Z: 101 readable fixtures
+    in the window, 19 mapped to PMUS; about 21 cut silently, from both the
+    numerator and the denominator of the scan's fresh-book count).
+
+    Here MAX_FIXTURES + 3 fixtures are in the window: MAX - 1 Kalshi-only
+    with no readable book start first, then 2 Kalshi-only readable, then 2
+    mapped to PMUS (one without a premap identity) start LAST -- the
+    deployed order cut both cross-venue fixtures. Now the cap is spent
+    cross-venue first, then readable, and every fixture not priced is
+    counted and named by why, on the record and in the completion readback.
+    No bound changes: the cap, the window and the book bounds are the
+    same."""
+    import asyncpg
+
+    from sportsassets import canonical_claims_db as CDB
+    from sportsassets import kalshi_market_data as KMD
+    from sportsassets.agents import adriana_runner as RUN
+    from sportsassets.workers import kalshi_market_data as W
+
+    cap = CDB.MAX_FIXTURES
+    n_dark = cap - 1
+
+    def fixture(ev, start):
+        return KMD.KalshiFixture(
+            event_ticker=ev, series_ticker="KXMLBGAME", sport="BASEBALL",
+            league="MLB", start_epoch=start, home_id="H", away_id="A",
+            home_code="NYY", away_code="TB", tie_ticker=None,
+            team_tickers=(ev + "-NYY", ev + "-TB"), outcome_kind="TWO_WAY",
+            status="ESTABLISHED", reasons=(), milestone_id="m-" + ev)
+
+    async def go():
+        c = await asyncpg.connect(DSN)
+        tr = c.transaction()
+        await tr.start()
+        try:
+            for t in ("kalshi_books_current", "kalshi_fixtures_current"):
+                await c.execute("DELETE FROM %s" % t)
+            now = time.time()
+            t0 = now + 3600
+            dark = ["KXMLBGAME-99CAP%03dDARK" % i for i in range(n_dark)]
+            lit = ["KXMLBGAME-99CAP%03dLIT" % i for i in range(2)]
+            cross = ["KXMLBGAME-99CAP%03dXV" % i for i in range(2)]
+            slugs = ["aec-mlb-tb-nyy-2099-11-%02d" % (i + 1)
+                     for i in range(2)]
+            i = 0
+            for ev in dark + lit:
+                await W.persist_fixture(c, fixture(ev, t0 + 60 * i), None)
+                i += 1
+            for ev, slug in zip(cross, slugs):
+                await W.persist_fixture(
+                    c, fixture(ev, t0 + 60 * i),
+                    {"status": "ESTABLISHED", "pmus": {"slug": slug},
+                     "reasons": []})
+                i += 1
+            ob = {"orderbook_fp": {"no_dollars": [["0.70", "100.00"]],
+                                   "yes_dollars": [["0.30", "100.00"]]}}
+            for ev in lit + cross:
+                for t in (ev + "-NYY", ev + "-TB"):
+                    await W.persist_book(c, t, ev, KMD.book_from_orderbook(
+                        ob, observed_at=now), {})
+            # the first mapped slug has its premap identity, the second not
+            for side, abbr in (("ORDER_INTENT_BUY_LONG", "tb"),
+                               ("ORDER_INTENT_BUY_SHORT", "nyy")):
+                await c.execute(
+                    "INSERT INTO us_premap (identifier, market_slug, "
+                    " side_norm, intent, team_abbr, team_league, "
+                    " game_start) VALUES ($1, $2, $3, $4, $5, 'mlb', "
+                    " to_timestamp($6))", "%s:%s" % (slugs[0], side),
+                    slugs[0], side, side, abbr, t0 + 60 * (n_dark + 2))
+            later = now + 1.0
+            scope = CDB.new_scope()
+            got = await CDB.assemble(c, now=later, scope=scope)
+            # every cross-venue fixture is read; the cap cuts the last 3
+            # Kalshi-only fixtures without a readable book, by name
+            assert scope["in_window"] == cap + 3
+            assert scope["in_window_cross_venue"] == 2
+            assert scope["read"] == cap and scope["read_cross_venue"] == 2
+            assert scope["cut_by_cap"] == 3
+            assert scope["cut_by_cap_cross_venue"] == 0
+            assert scope["cut_by_cap_readable"] == 0
+            assert scope["cut_by_cap_named"] == dark[-3:]
+            assert scope["no_readable_kalshi_book"] == cap - 4
+            assert scope["no_readable_kalshi_book_named"] == \
+                dark[:CDB.SCOPE_NAMED_MAX]
+            # the mapped slug without an identity: its PMUS leg is not read,
+            # and that is named, never silent
+            assert scope["pmus_identity_missing"] == 1
+            assert scope["pmus_identity_missing_named"] == [slugs[1]]
+            assert scope["scanned"] == len(got) == 4
+            assert scope["scanned_cross_venue"] == 1
+            venues = {i.venue for _fx, _b, insts in got for i in insts}
+            assert venues == {"KALSHI", "POLYMARKET_US"}
+            # the claim scan carries it: on the record and in completion
+            cen = await CDB.claims_census(c, now=later)
+            sc = cen["census"]["scope"]
+            assert (sc["cut_by_cap"], sc["cut_by_cap_named"]) == (
+                3, dark[-3:])
+            status, why = RUN.claims_scan_status(cen["census"])
+            assert (status, why) == (
+                "OK", "FIXTURE_CAP_CUT_3_KALSHI_ONLY_OF_%d_IN_WINDOW"
+                % (cap + 3))
+            sid = "adr-claims-rc6cap-%d" % int(now * 1000)
+            rec = await AD.record(c, cen, started=now, finished=later,
+                                  scan_id=sid, status=status, why=why)
+            assert rec["created"]
+            bc = json.loads(await c.fetchval(
+                "SELECT by_code FROM adriana_arb_scans WHERE scan_id = $1",
+                sid))
+            assert bc["scope"]["cut_by_cap"] == 3
+            assert bc["scope"]["cut_by_cap_named"] == dark[-3:]
+            blk = await CR.arbitrage_block(c)
+            cv = blk["scans"]["cross_venue"]
+            assert cv["scan_id"] == sid and cv["why"] == why
+            assert cv["scope"]["cut_by_cap"] == 3
+            assert cv["scope"]["in_window_cross_venue"] == 2
+            assert cv["scope"]["read_cross_venue"] == 2
+            assert cv["scope"]["max_fixtures"] == cap
+        finally:
+            await tr.rollback()
+            await c.close()
     asyncio.run(go())

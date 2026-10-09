@@ -553,12 +553,15 @@ def near_record(fx: CC.Fixture, fa: str, fb: str, ma: list, mb: list, *,
 def census_result(scans: list, *, markets_read: int, books_fresh: int,
                   skipped: dict, void_terms: dict | None = None,
                   book_sources: dict | None = None,
-                  venues: dict | None = None) -> dict:
+                  venues: dict | None = None,
+                  scope: dict | None = None) -> dict:
     """Shape the claim scans as an adriana.census result, so adriana.record
     writes them into the 265 tables unchanged (opportunities only for a
     GUARANTEED_AFTER_COSTS engine verdict). (RC6) The near complements are
     refusals beside the complementary pairs; `void_terms` (alias_void_terms
-    merged), `book_sources` and `venues` describe what the scan read."""
+    merged), `book_sources` and `venues` describe what the scan read, and
+    `scope` (canonical_claims_db.new_scope) what its fixture read covered
+    and cut."""
     opps, refs = [], []
     for s in scans:
         for rec in s["records"]:
@@ -591,6 +594,8 @@ def census_result(scans: list, *, markets_read: int, books_fresh: int,
                        bool(vt.get("aliases")) and vt.get("established")
                        == vt.get("aliases")),
                    book_sources=book_sources)
+    if scope is not None:
+        summary["scope"] = scope
     out = {"opportunities": opps, "refusals": refs, "census": summary,
            "books_fresh": books_fresh}
     if venues is not None:

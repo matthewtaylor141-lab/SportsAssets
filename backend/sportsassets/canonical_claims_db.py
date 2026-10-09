@@ -29,7 +29,19 @@ VERSION = "CANONICAL_CLAIMS_DB_V1"
 WINDOW_BEHIND_S = 4 * 3600.0
 WINDOW_AHEAD_S = 36 * 3600.0
 PMUS_BOOK_WINDOW_S = 900.0
+#: the claim scan reads at most this many ESTABLISHED Kalshi fixtures per
+#: pass (Adriana's runner is in the API process: a 45 s phase bound inside a
+#: 120 s pass bound; production 2026-10-09, 284 passes in 24 h: p50 3.0 s,
+#: p95 9.9 s, max 72.9 s -- research-sql 37888029447 C). UNCHANGED. Since
+#: RC6 the cap is spent cross-venue (PMUS-mapped) fixtures first, then those
+#: with a readable Kalshi book, then by start time, and what it cuts is
+#: counted and named in the scan's `scope`, never dropped silently.
 MAX_FIXTURES = 80
+#: how many identifiers each scope gap names (all are counted)
+SCOPE_NAMED_MAX = 12
+#: the order the cap is spent in, stated in every scope record
+FIXTURE_ORDER = ("cross-venue (PMUS-mapped) first, then a readable Kalshi "
+                 "book, then start time")
 
 
 def _j(v):
@@ -67,17 +79,65 @@ async def _has(conn, t: str) -> bool:
     return bool(await conn.fetchval("SELECT to_regclass($1) IS NOT NULL", t))
 
 
-async def fixtures(conn, *, now: float) -> list:
+def new_scope() -> dict:
+    """(RC6) What the claim scan's fixture read covered: every ESTABLISHED
+    Kalshi fixture in the window, how many the MAX_FIXTURES cap read and
+    cut (cross-venue among them), and every later skip, counted and named.
+    Filled by fixtures() and assemble()."""
+    return {"max_fixtures": MAX_FIXTURES, "order": FIXTURE_ORDER,
+            "window_s": [-WINDOW_BEHIND_S, WINDOW_AHEAD_S],
+            "in_window": 0, "in_window_cross_venue": 0,
+            "read": 0, "read_cross_venue": 0,
+            "cut_by_cap": 0, "cut_by_cap_cross_venue": 0,
+            "cut_by_cap_readable": 0, "cut_by_cap_named": [],
+            "no_readable_kalshi_book": 0, "no_readable_kalshi_book_named": [],
+            "not_a_fixture": 0, "not_a_fixture_named": [],
+            "pmus_identity_missing": 0, "pmus_identity_missing_named": [],
+            "scanned": 0, "scanned_cross_venue": 0}
+
+
+def _name(scope: dict, key: str, ident) -> None:
+    scope[key] += 1
+    named = scope[key + "_named"]
+    if len(named) < SCOPE_NAMED_MAX:
+        named.append(ident)
+
+
+async def fixtures(conn, *, now: float, scope: dict | None = None) -> list:
+    """[(KalshiFixture, mapped PMUS slug | None)] for at most MAX_FIXTURES
+    ESTABLISHED fixtures in the window, cross-venue first (FIXTURE_ORDER).
+    Every fixture in the window is read for the count; the ones past the cap
+    are counted and named in `scope` (cut_by_cap*)."""
+    scope = scope if scope is not None else new_scope()
     if not await _has(conn, "kalshi_fixtures_current"):
+        scope["source"] = "kalshi_fixtures_current ABSENT"
         return []
+    readable = ("EXISTS (SELECT 1 FROM kalshi_books_current b "
+                "         WHERE b.readable AND (b.ticker = ANY(f.team_tickers)"
+                "               OR b.ticker = f.tie_ticker))"
+                if await _has(conn, "kalshi_books_current") else "false")
     rows = await conn.fetch(
-        "SELECT * FROM kalshi_fixtures_current "
-        " WHERE mapping_status = 'ESTABLISHED' AND start_at BETWEEN "
+        "SELECT f.*, coalesce(f.pmus_mapping_status = 'ESTABLISHED' "
+        "       AND f.pmus_slug IS NOT NULL, false) AS _cross_venue, "
+        "       coalesce(" + readable + ", false) AS _readable "
+        "  FROM kalshi_fixtures_current f "
+        " WHERE f.mapping_status = 'ESTABLISHED' AND f.start_at BETWEEN "
         "       to_timestamp($1) AND to_timestamp($2) "
-        " ORDER BY start_at LIMIT $3",
-        now - WINDOW_BEHIND_S, now + WINDOW_AHEAD_S, MAX_FIXTURES)
+        " ORDER BY _cross_venue DESC, _readable DESC, f.start_at, "
+        "          f.event_ticker",
+        now - WINDOW_BEHIND_S, now + WINDOW_AHEAD_S)
+    kept, cut = rows[:MAX_FIXTURES], rows[MAX_FIXTURES:]
+    scope.update(
+        source="kalshi_fixtures_current", in_window=len(rows),
+        in_window_cross_venue=sum(1 for r in rows if r["_cross_venue"]),
+        read=len(kept),
+        read_cross_venue=sum(1 for r in kept if r["_cross_venue"]),
+        cut_by_cap=len(cut),
+        cut_by_cap_cross_venue=sum(1 for r in cut if r["_cross_venue"]),
+        cut_by_cap_readable=sum(1 for r in cut if r["_readable"]),
+        cut_by_cap_named=[r["event_ticker"] for r in cut][:SCOPE_NAMED_MAX])
     out = []
-    for r in rows:
+    for r in kept:
         k = KMD.KalshiFixture(
             event_ticker=r["event_ticker"], series_ticker=r["series_ticker"],
             sport=r["sport"], league=r["league"],
@@ -231,17 +291,24 @@ async def kalshi_fee_terms(conn, series_ticker: str, event_ticker: str, *,
             "first_observed_at": seen["seen"]})
 
 
-async def assemble(conn, *, now: float | None = None) -> list:
+async def assemble(conn, *, now: float | None = None,
+                   scope: dict | None = None) -> list:
     """[(Fixture, built, instruments)] for every ESTABLISHED Kalshi fixture
-    in the window that has at least one readable Kalshi book."""
+    the read covers (fixtures(): at most MAX_FIXTURES, cross-venue first)
+    that has at least one readable Kalshi book. (RC6) Every fixture it does
+    not price is counted and named in `scope` by why: cut by the cap, no
+    readable Kalshi book, not a fixture the claim layer models, or a mapped
+    PMUS slug with no premap identity (the PMUS leg then is not read)."""
     now = float(now if now is not None else time.time())
+    scope = scope if scope is not None else new_scope()
     out = []
     cterms = await contract_terms_state(conn, now=now)
-    for k, slug in await fixtures(conn, now=now):
+    for k, slug in await fixtures(conn, now=now, scope=scope):
         tickers = list(k.team_tickers) + ([k.tie_ticker] if k.tie_ticker
                                           else [])
         books = await kalshi_books(conn, tickers)
         if not any(b.get("readable") for b in books.values()):
+            _name(scope, "no_readable_kalshi_book", k.event_ticker)
             continue
         ev = await rules_evidence(conn, ["kalshi:%s" % t for t in tickers]
                                   + ([slug] if slug else []))
@@ -251,15 +318,22 @@ async def assemble(conn, *, now: float | None = None) -> list:
             k, {}, books, bind_contract_terms(
                 k, {t: ev.get("kalshi:%s" % t) for t in tickers}, cterms),
             fee_terms=terms)
+        cross = False
         if slug:
             ident = await pmus_identity(conn, slug)
             if ident is not None:
+                cross = True
                 insts += KCL.pmus_instruments(
                     k, ident, evidence=_strip(ev.get(slug)),
                     book=await pmus_book(conn, slug, now=now))
+            else:
+                _name(scope, "pmus_identity_missing", slug)
         fx = KCL.fixture_of(k)
         if fx is None:
+            _name(scope, "not_a_fixture", k.event_ticker)
             continue
+        scope["scanned"] += 1
+        scope["scanned_cross_venue"] += int(cross)
         out.append((fx, CC.build_claims(fx, insts), insts))
     return out
 
@@ -338,7 +412,8 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
     scans, aliases, fresh = [], 0, 0
     vts, bks = [], []
     from .redteam import settlement as RTS
-    assembled = await assemble(conn, now=now)
+    scope = new_scope()
+    assembled = await assemble(conn, now=now, scope=scope)
     if live:
         # evaluate as of the moment the books were READ: a book the workers
         # persisted while this pass was reading is not "in the future"
@@ -368,4 +443,5 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
     books = merge_book_census(bks)
     return AC.census_result(scans, markets_read=aliases, books_fresh=fresh,
                             skipped={}, void_terms=AC.merge_void_terms(vts),
-                            book_sources=books, venues=venue_support(books))
+                            book_sources=books, venues=venue_support(books),
+                            scope=scope)

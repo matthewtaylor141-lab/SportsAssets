@@ -28,7 +28,8 @@ def _fixture(book_at: float):
 
 
 def _run(monkeypatch, *, book_lead_s: float, now=None):
-    async def assemble(conn, *, now):
+    async def assemble(conn, *, now, scope=None):
+        # (RC6) the real assemble fills the fixture-read scope it is given
         fx, insts = _fixture(time.time() + book_lead_s)
         await asyncio.sleep(max(0.0, book_lead_s) + 0.2)   # the read takes time
         return [(fx, CC.build_claims(fx, insts), insts)]

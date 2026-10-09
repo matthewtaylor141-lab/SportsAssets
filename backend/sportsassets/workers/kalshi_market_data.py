@@ -386,7 +386,9 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
         from .. import kalshi_fees as KF
         from ..redteam import fees as RTF
         from ..redteam import settlement as RTS
-        assembled = await KCDB.assemble(c, now=now)
+        # (RC6) what the fixture read covered and cut, for the digest
+        scope = KCDB.new_scope()
+        assembled = await KCDB.assemble(c, now=now, scope=scope)
         for fx, built, insts in assembled:
             aliases_n += len(insts)
             # settlement certificates: decide, append, strip (red team)
@@ -424,6 +426,7 @@ async def claims_pass(pool, *, now: float, record: bool = True) -> dict:
     census = AC.census_result(scans, markets_read=aliases_n, books_fresh=0,
                               skipped={})["census"]
     return {"fixtures_priced": len(scans), "aliases": aliases_n,
+            "fixture_scope": scope,
             "routes": routes_n, "structures": census,
             "settlement_certificates": certs,
             "equivalence_receipts": equivalences[:6],
