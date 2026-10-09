@@ -521,10 +521,13 @@ class ActiveRefresh:
         """(RC6 D1) Account one snapshot-only gRPC result (judged by
         snapshot_refresh.judge_update, received at `at`) exactly like a REST
         book: CURRENT stands for the bound from its receipt (origin
-        SNAPSHOT); the venue's word about the market (not open, no state,
-        crossed) ends an earlier current read and waits RETRY_NOT_OPEN_S. A
-        symbol the call did not return is NOT recorded here, so the REST
-        read stays free to try it. The REST totals are not touched."""
+        SNAPSHOT); the venue's word about the market (not open, crossed)
+        ends an earlier current read and waits RETRY_NOT_OPEN_S. Any other
+        result (a stateless book, no state at all, an unproven fallback) is
+        the snapshot's alone: it never touches the REST read's retry state
+        or an earlier current read. A symbol the call did not return is NOT
+        recorded here, so the REST read stays free to try it. The REST
+        totals are not touched."""
         o = j.get("outcome")
         e = self.entries.setdefault(symbol, {"ok_at": None, "tries": 0})
         if o not in SNAPSHOT_SHARED_OUTCOMES:

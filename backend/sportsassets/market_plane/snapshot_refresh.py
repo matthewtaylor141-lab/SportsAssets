@@ -52,7 +52,8 @@ bound from OUR RECEIPT, recorded into the refresher with origin SNAPSHOT
 (G in the freshness window); it never enters the stream's books, is never
 a PRIORITY_PMX_BOOKS parity book, never a decision input. A symbol not
 returned before the call ended is counted (SNAPSHOT_REFRESH_SYMBOL_NOT_
-RETURNED) and left to the REST refresh. Switch: UMP_SNAPSHOT_REFRESH=off.
+RETURNED) and left to the REST refresh. Switch: OFF unless
+UMP_SNAPSHOT_REFRESH=on (the owner's decision; see enabled()).
 
 WHOSE WORD A NOT-OPEN STATE IS (review of 785907f2). A snapshot book
 usually carries no state: the vendored proto sends it "when the exchange
@@ -66,8 +67,9 @@ TERMINAL state (the held-position rule: any age), or (c) the stream's own
 state with the stream's newest update received inside the bound. Any other
 not-open fallback is SNAPSHOT_REFRESH_STATELESS_BOOK_FALLBACK_STATE_NOT_
 PROVEN: not current (the conservative judgement stands), SOFTWARE, counted
-NOT_CURRENT in the window, retried after the 60 s of a failed read, and
-it does not end an earlier current read. Every judgement records where its
+NOT_CURRENT in the window, left to the REST read (whose body states the
+market's own state) for RETRY_NOT_OPEN_S, and it does not end an earlier
+current read. Every judgement records where its
 state came from (state_from UPDATE / FALLBACK, with the fallback's source
 and receipt instant).
 """

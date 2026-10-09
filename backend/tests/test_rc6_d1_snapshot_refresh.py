@@ -953,31 +953,110 @@ def test_a_newer_paper_read_stating_not_open_beats_an_older_refresh():
     assert code({s: {"at": clock.t + 20, "market_state": "open"}}, now) == "R"
 
 
-def test_the_rest_read_comes_in_the_loops_own_order_when_snapshots_prove_nothing():
-    """Final review of 1dff0d5f, reproduced through the loop's real order
-    (snapshot step, then the REST step, every 1 s tick) with a venue whose
-    snapshot books carry no state and a REST book stating OPEN: with the
-    shared retry state the REST read never happened in 15 minutes and the
-    member was fresh 0 % of the time. Now the REST read lands on the first
-    tick and the member is current through it (R)."""
+class _LoopConn:
+    def __init__(self, rows):
+        self.rows = rows
+
+    async def fetchval(self, *a):
+        return False
+
+    async def fetch(self, *a):
+        return self.rows
+
+
+class _LoopPool:
+    def __init__(self, rows):
+        self.c = _LoopConn(rows)
+
+    def acquire(self):
+        c = self.c
+
+        class A:
+            async def __aenter__(self_):
+                return c
+
+            async def __aexit__(self_, *a):
+                return False
+        return A()
+
+
+def _drive_freshness_loop(monkeypatch, *, seconds, snap_caller, rest_row,
+                          snapper=True):
+    """THE REAL W.freshness_loop (snapshot step, then the REST step, then
+    the window step, every tick) for `seconds` simulated seconds, one tick a
+    second, on a quiet held member. Returns (window code per tick, REST read
+    instants, snapshot calls, start)."""
+    from sportsassets.market_plane import freshness_window as FW
     S = SR()
     clock, m, ref, s = _one("INSTRUMENT_STATE_OPEN")
-    snap = S.SnapshotRefresh()
-    rest_reads = []
+    start = clock.t
+    codes, reads, calls = [], [], []
 
-    def rest_reader(sym, *, at):
-        rest_reads.append(at)
-        return H.rest_book(sym, at=at)
-    ticks = 0
-    while ticks < 120 and not rest_reads:
-        run(snap.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
-                      clock=clock, caller=_snapshot_of(clock)))
-        due, _ = ref.plan(m, now=clock.t, bound=BOUND)
-        for sym in due[:1]:
-            ref.start(clock.t, sym)
-            ref.record(sym, rest_reader(sym, at=clock.t), at=clock.t)
+    class Client:
+        def read(self, kind, sym):
+            assert kind == "book"
+            reads.append(clock.t)
+            return rest_row(sym, clock.t)
+    pool = _LoopPool([H.member(s, 10, T0 + 3600)])
+
+    async def get_pool():
+        return pool
+
+    async def fw_step(pool_, mgr, refresher, fw, *, now, sla_s):
+        codes.append(_window_code(mgr, refresher, s, now)[0])
         clock.t += 1.0
-        ticks += 1
-    assert rest_reads, "the REST read never came"
-    assert rest_reads[0] - T0 <= 400 + 61
-    assert _window_code(m, ref, s, clock.t)[0] == "R"
+        m.shards[0]["books"].on_heartbeat()    # alive, quiet
+        if clock.t - start >= seconds:
+            raise asyncio.CancelledError()
+
+    def call(token, syms, **kw):
+        calls.append((clock.t, list(syms)))
+        return snap_caller(clock, syms)
+    monkeypatch.setattr(W, "get_pool", get_pool)
+    monkeypatch.setattr(FW, "step", fw_step)
+    monkeypatch.setattr(S, "call", call)
+    st: dict = {}
+
+    async def go():
+        with pytest.raises(asyncio.CancelledError):
+            await W.freshness_loop(ref, m, Client(), state=st,
+                                   client_lock=asyncio.Lock(), tick_s=0.0,
+                                   clock=clock,
+                                   snapper=S.SnapshotRefresh() if snapper
+                                   else None,
+                                   token_fn=lambda: TOKEN)
+    asyncio.run(go())
+    assert st["freshness_task"]["errors"] == 0, st["freshness_task"]
+    return codes, reads, calls, start
+
+
+def _stateless_snapshots(clock, syms):
+    return {"status": "ENDED", "updates": [
+        (IS.decode_update(upd(x, at=clock.t, with_state=False).update, pb2),
+         clock.t) for x in syms]}
+
+
+def test_the_rest_read_comes_through_the_real_loop_when_snapshots_prove_nothing(
+        monkeypatch):
+    """Final review of 1dff0d5f (B1), through the plane's REAL freshness
+    loop (driver from the independent review of f2fadb65): a venue whose
+    snapshot books carry no state and whose REST book states OPEN. With the
+    shared retry state the REST read never happened in 15 minutes and the
+    member was fresh 0 % of the time (REST reads=0, snapshot calls=15, R=0).
+    Now the REST read lands on the first tick, the snapshot asks once and
+    leaves the member to it, and the member is current (R) throughout."""
+    codes, reads, calls, start = _drive_freshness_loop(
+        monkeypatch, seconds=900, snap_caller=_stateless_snapshots,
+        rest_row=lambda sym, at: H.rest_book(sym, at=at))
+    assert reads, "the REST read never came"
+    assert reads[0] - start <= 1.0
+    assert sum(1 for c in codes if c == "R") / len(codes) >= 0.99, codes[:20]
+    assert len(calls) == 1, calls
+
+
+def test_with_the_snapshot_off_the_real_loop_reads_rest_alone(monkeypatch):
+    codes, reads, calls, start = _drive_freshness_loop(
+        monkeypatch, seconds=300, snap_caller=_stateless_snapshots,
+        rest_row=lambda sym, at: H.rest_book(sym, at=at), snapper=False)
+    assert reads and reads[0] - start <= 1.0 and calls == []
+    assert sum(1 for c in codes if c == "R") / len(codes) >= 0.99
