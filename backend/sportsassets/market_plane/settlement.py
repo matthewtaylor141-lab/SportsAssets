@@ -162,6 +162,19 @@ SCOPED_H2H_FAMILIES = ("soccer", "baseball")
 #: quote contexts read the terms differently: a never-valued contract has
 #: no quote, so no context can be chosen for it
 R_CONTEXT_DECIDES = "QUOTE_CONTEXT_DECIDES_THE_TERMS"
+#: (RC6.2, p-coverage rework) THE FIXTURE-SCOPED READING IS NEVER A PROOF.
+#: It is read only for a contract with no settlement decision on record
+#: (state_for step 3: no attested verdict, so no quote whose context was
+#: proved), in both quote contexts. It may NAME what the terms say (a stated
+#: conflict, a silent clause, a scope the capture excludes) but it is capped
+#: at MAPPED_BUT_SETTLEMENT_NOT_PROVEN: when both contexts read COMPATIBLE
+#: the reason is this code, never SETTLEMENT_PROVEN_COMPATIBLE. A proof
+#: under a fixture scope comes only from a decision that attested its own
+#: quote's context (step 2). Unreachable with today's captures (soccer:
+#: BOOK_STATES_NO_RULE on SUSPENDED_TO_RESUME_BEYOND_THE_PUBLISHED_WINDOW;
+#: baseball: the two contexts differ) -- the cap keeps a future capture from
+#: silently turning this relabel into a proof path.
+R_SCOPED_NOT_A_PROOF = "FIXTURE_SCOPED_READING_IS_NOT_A_PROOF"
 
 
 def fixture_key(contract: dict) -> str | None:
@@ -629,7 +642,9 @@ def state_for(contract: dict, *, valuation: dict | None = None,
     metadata: phase, game_format), for a soccer / baseball money line whose
     captured terms are scoped by them. With both held the terms are read in
     both quote contexts and recorded only when the two agree
-    (`terms_comparison`); without it the RC6 reading is unchanged."""
+    (`terms_comparison`); without it the RC6 reading is unchanged. The
+    scoped reading NAMES, it never PROVES (rework): both contexts
+    COMPATIBLE reads R_SCOPED_NOT_A_PROOF, capped at NOT_PROVEN."""
     c = dict(contract or {})
     ev = _rules_evidence(rules)
     v = dict(valuation or {})
@@ -727,6 +742,11 @@ def state_for(contract: dict, *, valuation: dict | None = None,
             _short(cmp_.get("book_side_absent_refusals")) or "NO_CAPTURE"),
             BASIS_RULES_TERMS, ev)
     vd = cmp_.get("verdict")
+    if vd == "COMPATIBLE" and ph is not None:
+        # (RC6.2, p-coverage rework) a fixture-scoped reading names, it
+        # never proves (R_SCOPED_NOT_A_PROOF)
+        return _out(NOT_PROVEN, "%s:COMPATIBLE_IN_BOTH_CONTEXTS"
+                    % R_SCOPED_NOT_A_PROOF, BASIS_RULES_TERMS, ev)
     if vd == "COMPATIBLE":
         from .. import bettor_venue_settlement as V
         ties = [s for s in ev["special_conditions"]

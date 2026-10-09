@@ -10,7 +10,12 @@ the contracts of an event whose organiser row IS held (36 UNL rows,
 research-sql run 37945671144 F2). With the row the terms are read in BOTH
 quote contexts (a never-valued contract has no quote to place) and recorded
 only when the two readings agree; otherwise QUOTE_CONTEXT_DECIDES_THE_TERMS.
-Never PROVEN here: the priced difference needs a valuation.
+Never PROVEN here, and ENFORCED (rework): the scoped reading is capped at
+MAPPED_BUT_SETTLEMENT_NOT_PROVEN -- both contexts COMPATIBLE reads
+FIXTURE_SCOPED_READING_IS_NOT_A_PROOF:COMPATIBLE_IN_BOTH_CONTEXTS (no capture
+held today reads COMPATIBLE in both contexts; a simulated future capture is
+tested below). A proof under a scope comes only from a decision that attested
+its own quote's context; a priced difference needs a valuation.
 
 Texts: the venue's own (tests/fixtures/pmus_market_types_and_segment_rules_
 2026_10_09.json, research-sql run 37939739782 T1): a UEFA Conference League
@@ -180,3 +185,105 @@ def test_the_coverage_pass_reads_the_events_fixture_row():
             S._TERMS_CACHE.clear()
             await c.close()
     asyncio.run(go())
+
+
+# ═════════════════════════════════════════════════════════════════════
+# (RC6.2, p-coverage rework) THE FIXTURE-SCOPED READING IS NEVER A PROOF
+# ═════════════════════════════════════════════════════════════════════
+#
+# Review finding: "never PROVEN without a valuation" was stated (the
+# capital-critical manifest, this file's docstring, commit 70244ae1) but not
+# enforced -- with a scope held and both contexts reading COMPATIBLE,
+# state_for returned SETTLEMENT_PROVEN_COMPATIBLE (BASIS_RULES_TERMS) for a
+# never-valued soccer / baseball money line. Unreachable only because no
+# capture yet reads COMPATIBLE in both contexts; a future capture would
+# have made it a proof path silently. The reading is now capped.
+
+def _compatible_everywhere(monkeypatch):
+    """A FUTURE CAPTURE, simulated: the book's terms state every condition
+    the venue states, the same way, in every context. The comparison
+    machinery (both contexts, the cache) is the real one."""
+    def fake(*, sport_family, market, venue_prose, extra_book_terms=None,
+             context=None, phase=None, game_format=None, **kw):
+        return {"verdict": "COMPATIBLE", "book_terms_held": True,
+                "per_condition": {ST.C_NOT_PLAYED: {
+                    "verdict": "MATCH", "book_payout": "VOID",
+                    "venue_payout": "VOID"}},
+                "mismatched_conditions": [], "unstated_conditions": [],
+                "venue_self_contradictory": [],
+                "book_side_absent_refusals": [], "refusal": None}
+    monkeypatch.setattr(ST, "compare_prose", fake)
+    S._TERMS_CACHE.clear()
+
+
+@pytest.mark.parametrize("r,scope", (
+    (UECL, LEAGUE), (SPL, LEAGUE),
+    (NPB, {"phase": ST.PHASE_REGULAR, "game_format": ST.FMT_NINE})),
+    ids=("uecl", "spl", "npb"))
+def test_both_contexts_compatible_under_a_scope_is_named_never_proven(
+        monkeypatch, r, scope):
+    _compatible_everywhere(monkeypatch)
+    try:
+        st = _state(r, scope)
+        assert st["state"] == S.NOT_PROVEN and not st["proven"]
+        assert st["state"] not in S.PROVEN_STATES
+        assert st["why"] == ("%s:COMPATIBLE_IN_BOTH_CONTEXTS"
+                             % S.R_SCOPED_NOT_A_PROOF)
+        assert st["evidence"]["terms"]["scope"]["contexts"] == "BOTH_AGREE"
+        assert st["evidence"]["fixture_scope"]["phase"] == scope["phase"]
+    finally:
+        S._TERMS_CACHE.clear()
+
+
+def test_the_cap_touches_only_the_scoped_reading(monkeypatch):
+    """The same simulated capture: an unscoped, phase-independent money line
+    (NHL) reads exactly as RC6 did, and a DECISION that attested its own
+    quote's context stays the authority for a scoped one."""
+    _compatible_everywhere(monkeypatch)
+    try:
+        nhl = _state(NHL, LEAGUE)
+        assert nhl["state"] == S.COMPATIBLE and \
+            nhl["basis"] == S.BASIS_RULES_TERMS
+        assert nhl == _state(NHL, None)
+        dec = S.state_for(_c(UECL), rules=_rules(UECL), rules_looked_up=True,
+                          derivative_terms=True, fixture_scope=LEAGUE,
+                          valuation={"settlement_verdict": "COMPATIBLE",
+                                     "refusals": [],
+                                     "decision_rules_fingerprint":
+                                         UECL["rules_sha256"]})
+        assert (dec["state"], dec["basis"]) == (S.COMPATIBLE,
+                                                S.BASIS_DECISION_ATTEST)
+    finally:
+        S._TERMS_CACHE.clear()
+
+
+#: every phase / format the readers record, for the real captures below
+SOCCER_SCOPES = [{"phase": p, "game_format": f}
+                 for p in (ST.PHASE_LEAGUE, ST.PHASE_KNOCKOUT)
+                 for f in (ST.FMT_NINETY, ST.FMT_KNOCKOUT)]
+BASEBALL_SCOPES = [{"phase": p, "game_format": f}
+                   for p in (ST.PHASE_REGULAR, ST.PHASE_PLAYOFF)
+                   for f in (ST.FMT_NINE, ST.FMT_SEVEN)]
+
+
+def test_with_todays_captures_no_scoped_reading_reads_compatible():
+    """The true statement the manifest now makes: PROVEN under a scope would
+    need both contexts COMPATIBLE, and no capture held today allows it --
+    every production soccer / baseball money-line text, every phase and
+    format, is something other than COMPATIBLE in both contexts."""
+    S._TERMS_CACHE.clear()
+    seen = 0
+    for r in ROWS.values():
+        c = _c(r)
+        fam = S.h2h_family(c)
+        if fam not in S.SCOPED_H2H_FAMILIES:
+            continue
+        for scope in (SOCCER_SCOPES if fam == "soccer" else BASEBALL_SCOPES):
+            st = _state(r, scope)
+            seen += 1
+            assert st["state"] not in S.PROVEN_STATES, (r["contract_id"],
+                                                         scope)
+            assert not st["why"].startswith(S.R_SCOPED_NOT_A_PROOF), (
+                r["contract_id"], scope)
+    assert seen >= 8
+    S._TERMS_CACHE.clear()
