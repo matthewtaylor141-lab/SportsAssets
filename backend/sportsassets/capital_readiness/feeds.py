@@ -63,6 +63,8 @@ FRESHNESS_TARGET = 0.95
 MIRROR_HEARTBEAT_MAX_AGE_S = 900.0
 BIND_MODEL_MAX_AGE_S = 3600.0
 FIRST_LOSS_WINDOW_S = 3600.0
+#: how many SOFTWARE codes the software-reds gate names (evidence only)
+SOFTWARE_BY_CODE_MAX = 12
 
 UNAVAILABLE_AGENTS = {
     "ARCHER": ("NO_RECORDED_EXPECTED_FILL_COST_PER_ORDER: paper fills are "
@@ -985,8 +987,18 @@ async def gate_software_reds_zero(conn, ctx) -> dict:
                      why=got.get("why"))
     by = (got.get("totals") or {}).get("by_class") or {}
     sw = by.get("SOFTWARE")
+    # WHICH CODES THE SOFTWARE COUNT IS (RC6 lane C): the census's own
+    # by-code rows of class SOFTWARE, so the readback names what to fix
+    # without a second read. Evidence only: the gate's value is still
+    # `sw == 0`, read exactly as before.
+    by_code = [{"stage": r.get("stage"), "code": r.get("code"),
+                "events": r.get("events")}
+               for r in ((got.get("totals") or {}).get("by_code") or [])
+               if isinstance(r, dict) and r.get("class") == "SOFTWARE"]
     return _gate(sw == 0, "SOFTWARE_RED_FIRST_LOSSES_IN_LAST_HOUR",
                  software=sw, by_class=by, window_s=FIRST_LOSS_WINDOW_S,
+                 software_by_code=by_code[:SOFTWARE_BY_CODE_MAX],
+                 software_codes_truncated=len(by_code) > SOFTWARE_BY_CODE_MAX,
                  source="coverage_first_loss.read (1 h)")
 
 

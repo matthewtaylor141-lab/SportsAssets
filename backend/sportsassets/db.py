@@ -55,6 +55,54 @@ _connect_lock: asyncio.Lock | None = None
 _connect_lock_loop: asyncio.AbstractEventLoop | None = None
 _walk_gen = 0
 
+# THE POOL REMEMBERS ITS LOOP, AND A DEAD LOOP'S POOL IS NEVER HANDED OUT
+# (RC6, the full-suite-only failure of test_three_agents_form_one_linked_
+# trace). The connect lock above is per loop for exactly the reason the
+# pool was not: asyncio.run() -- one per test, one per restart of a worker
+# through asyncio.run, one per sync caller that runs a coroutine to
+# completion -- makes a fresh loop and CLOSES it at the end. get_pool()
+# returned `_pool` whatever loop had built it, so the first caller on a
+# later loop was handed a pool whose every connection and timer belongs to
+# a loop that no longer runs: `pool.acquire()` raised RuntimeError('Event
+# loop is closed') inside the request handler (a 500 at the API) and
+# close_pool() raised the same out of its caller's cleanup. Reproduced on
+# 412c4962 by one earlier test that calls get_pool() and leaves the pool,
+# then the three-agents trace: it failed at its first API read.
+#
+# The rule: a pool whose OWN loop is CLOSED is dead. asyncpg's Pool keeps
+# the loop it was built on (`Pool._loop`, pinned by
+# tests/test_rc6_db_pool_dead_loop.py so an asyncpg upgrade that moves it
+# fails loudly there). Such a pool is dropped -- its connections terminated
+# best effort, since no loop is left to await their goodbye on -- and the
+# caller's own loop builds the replacement through the same single-flight
+# connect. A pool whose loop is still OPEN, even if it is not the caller's,
+# is left exactly as before (never closed from another loop, never replaced
+# underneath its owner), and so is any pool that names no loop (a stand-in a
+# caller or a test put there): this rule only ever removes a pool nobody can
+# use.
+
+
+def _drop_pool_of_a_closed_loop() -> bool:
+    """Forget `_pool` when the event loop it was built on is closed (see
+    above). True when one was dropped. Never raises."""
+    global _pool
+    pool = _pool
+    loop = getattr(pool, "_loop", None) if pool is not None else None
+    if not isinstance(loop, asyncio.AbstractEventLoop) or not loop.is_closed():
+        return False
+    _pool = None
+    try:
+        # synchronous: closes every connection's transport without awaiting
+        # the (dead) loop. On a closed loop the transport cannot schedule
+        # its own close callback and raises; the sockets then go with the
+        # dropped objects.
+        pool.terminate()
+    except Exception:  # noqa: BLE001 -- best effort on a dead loop
+        log.info("db: dropped a pool whose event loop is closed "
+                 "(its connections could not be terminated on that loop)")
+    return True
+
+
 # The heartbeat write's ceiling (2026-09-05), on BOTH legs of the
 # write: the acquire and the statement. Poller.run()'s beat is
 # "logged when it cannot be written, never a raise" -- but a raise is
@@ -106,6 +154,7 @@ def _lock() -> asyncio.Lock:
 
 async def get_pool() -> asyncpg.Pool:
     global _pool, _walk_gen
+    _drop_pool_of_a_closed_loop()
     if _pool is not None:
         return _pool
     # the walk we may end up queued behind (see _walk_gen above)
@@ -173,6 +222,9 @@ def pool_stats() -> dict | None:
 
 async def close_pool() -> None:
     global _pool
+    if _drop_pool_of_a_closed_loop():
+        # nothing is left to close gracefully: its loop is gone
+        return
     if _pool is not None:
         await _pool.close()
         _pool = None
