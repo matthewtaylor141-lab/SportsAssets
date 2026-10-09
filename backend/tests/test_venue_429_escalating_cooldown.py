@@ -745,10 +745,13 @@ def test_bettor_state_stops_its_pass_without_spending_budget(clock, monkeypatch)
         return subjects
 
     def _select(cands, at=None, tick=None, **kw):
+        # the whole selection record, the sampling rule's window fields
+        # included (an unbound cap: every subject in one window)
         return {"CANDIDATES_ELIGIBLE": 5, "CANDIDATES_IN_SLICE": 5,
                 "BUCKET_SHARE": 5, "SLICE_TRUNCATED": False,
                 "SLICE_TRUNCATED_BY": 0, "SELECTED": list(subjects),
-                "CYCLE": 1}
+                "CYCLE": 1, "CAP_BINDING": False, "SLICE_VISIT": 0,
+                "VISITS_TO_COVER_SLICE": 1, "WINDOW_START": 0}
 
     async def _zero(*a, **k):
         return 0

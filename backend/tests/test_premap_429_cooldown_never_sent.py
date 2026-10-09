@@ -79,6 +79,27 @@ R = "VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED"
 #: the sweep's refusal when the cooldown outlasts the undeadlined wait cap it
 #: opted into, by its literal name (review round 2)
 R_CAP = "VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP"
+#: the same refusal for a sweep read that carries a dispatch DEADLINE (the
+#: page reads rc6/premap-catalogue binds): the cooldown outlasts the
+#: deadline. Either name means one thing here -- our gate held the read
+#: because the cooldown outlasts what the read may wait -- and both are
+#: SOFTWARE / FRESHNESS_PLUMBING / VENUE_BOOK in the taxonomy
+R_DEADLINE = "VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE"
+R_PAST = (R_CAP, R_DEADLINE)
+
+
+def _past(text) -> bool:
+    """`text` names the cooldown-past-the-read's-bound refusal."""
+    return any(r in (text or "") for r in R_PAST)
+
+
+def _not_sent_past(rec) -> int:
+    """How many reads the receipt notes as withheld by our gate for the
+    cooldown past their bound (every such note, by either name)."""
+    return sum(v for k, v in _not_sent_notes(rec).items()
+               if k in {"%s:%s" % (NOTE, r) for r in R_PAST})
+
+
 #: a cooldown past the cap: the venue's own Retry-After of 60 s
 LONG_RETRY_AFTER_S = 60.0
 #: the receipt notes carrying the sweep's cooldown waits, by literal name
@@ -355,7 +376,10 @@ async def test_a_floor_cooldown_another_walker_arms_mid_walk_is_waited_out_and_t
         st = VP.rate_limit_state()
         src = st["by_source"]["premap_full"]
         assert src["cooldown_waits"] == 1 and src["deferred"] == 0
-        assert st["bounded_waits"] == 1
+        # ONE wait: the bounded wait of an undeadlined sweep read (a page
+        # read that carries a dispatch deadline waits on the deadline rule,
+        # the same wait counted there)
+        assert st["bounded_waits"] + st["deadline_waits"] == 1
         # the 2xx sent after the cooldown was armed lifted it
         assert st["cooldown_active"] is False and st["resets"] == 1
         assert await conn.fetchval("SELECT count(*) FROM us_premap") > 0
@@ -468,7 +492,7 @@ async def test_a_cooldown_past_the_cap_at_the_full_sweep_sends_nothing_and_never
         # refusal), named rate-limited -- never "no variant answered"
         assert len(claims) == 1
         assert w["stopped"] == vc.STOP_RATE_LIMITED
-        assert R_CAP in (w["error"] or "") and R_CAP in (summary["err"] or "")
+        assert _past(w["error"]) and _past(summary["err"])
         # refused at once: the transport slept nothing of it
         assert clock.sleeps == [] and clock.hold_sleeps == []
         # the venue was never asked: the record never says it answered 429
@@ -477,8 +501,7 @@ async def test_a_cooldown_past_the_cap_at_the_full_sweep_sends_nothing_and_never
         # a read our gate withheld is not a request
         assert rec["requests"] == 0 and w["requests"] == 0
         assert w["probe_requests_failed"] == 0
-        assert _not_sent_notes(rec) == {
-            "%s:%s" % (NOTE, R_CAP): 1}
+        assert _not_sent_past(rec) == sum(_not_sent_notes(rec).values()) == 1
         assert NOTE_WAITS not in rec["notes"]
         assert rec["outcome"] == "FAILED"
         assert summary["receipt_history"]["appended"] is True
@@ -523,13 +546,12 @@ async def test_a_cooldown_past_the_cap_armed_mid_walk_stops_the_pass_rate_limite
         # ONE request reached the venue: the probe page
         assert socket.sent() == ["/v1/events"]
         assert w["stopped"] == vc.STOP_RATE_LIMITED
-        assert R_CAP in (w["error"] or "")
+        assert _past(w["error"])
         assert clock.sleeps == []
         # the receipt counts what was SENT, nothing our gate withheld
         assert rec["requests"] == w["requests"] == 1
         assert rec["requests_outside_page_walks"].get("event_detail", 0) == 0
-        assert _not_sent_notes(rec) == {
-            "%s:%s" % (NOTE, R_CAP): 2}
+        assert _not_sent_past(rec) == sum(_not_sent_notes(rec).values()) == 2
         # rows read before the cooldown are kept; no fallback
         assert summary["mode"] == "events/partial"
         assert vc.PASS_MARKETS_FALLBACK not in rec["passes"]
@@ -591,7 +613,7 @@ async def test_a_cooldown_in_force_stops_the_calendar_lane_named_and_sends_nothi
         assert rec["passes"][vc.PASS_STARTED_EARLIER]["stopped"] == \
             vc.STOP_NOT_RUN
         assert rec["requests"] == 0
-        assert cal["mode"] == "calendar/partial" and R_CAP in (cal["err"] or "")
+        assert cal["mode"] == "calendar/partial" and _past(cal["err"])
         assert rec["outcome"] == "FAILED"
     finally:
         await tx.rollback()
@@ -615,7 +637,7 @@ async def test_the_markets_fallback_never_counts_a_page_our_gate_withheld(
         assert summary["mode"] == "markets"
         assert [c for c in venue.calls if c[0] == "markets"] == []
         assert fb["stopped"] == vc.STOP_RATE_LIMITED
-        assert R_CAP in (fb["error"] or "")
+        assert _past(fb["error"])
         assert fb["requests"] == 0
         # the three dead rungs WERE sent: still counted
         assert rec["requests"] == 3
