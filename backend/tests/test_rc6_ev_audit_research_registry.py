@@ -251,14 +251,15 @@ def test_the_runner_preregisters_once_before_the_interlock_reads():
     from sportsassets.redteam import runner as RN
 
     async def fn(conn):
+        eid = "prereg:%s:%s" % (RR.STUDY, RR.PLAN_SHA[:16])
         n0 = await conn.fetchval(
             "SELECT count(*) FROM red_team_holdout_registry WHERE "
-            " kind = 'PREREGISTER' AND study = $1", RR.STUDY)
+            " kind = 'PREREGISTER' AND entry_id = $1", eid)
         a = await RN.pass_once(conn, now=time.time())
         b = await RN.pass_once(conn, now=time.time() + 1)
         n2 = await conn.fetchval(
             "SELECT count(*) FROM red_team_holdout_registry WHERE "
-            " kind = 'PREREGISTER' AND study = $1", RR.STUDY)
+            " kind = 'PREREGISTER' AND entry_id = $1", eid)
         row = await conn.fetchrow(
             "SELECT candidate_count, detail FROM red_team_holdout_registry "
             " WHERE entry_id = $1", "prereg:%s:%s" % (RR.STUDY,
@@ -274,7 +275,7 @@ def test_the_runner_preregisters_once_before_the_interlock_reads():
                 refused.append(type(exc).__name__)
         return n0, n2, a, b, row, res, refused
     n0, n2, a, b, row, res, refused = _run(fn)
-    assert n2 == max(n0, 1)                         # once per plan sha
+    assert n0 in (0, 1) and n2 == 1                 # once per plan sha
     assert a["preregistration"]["status"] == "OK"
     assert b["preregistration"]["inserted"] is False
     assert row["candidate_count"] == len(RR.PLAN["candidates"])

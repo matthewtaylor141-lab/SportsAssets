@@ -107,6 +107,8 @@ PLAN = {
     "pbo": {"method": "CSCV", "metric": "Sharpe of daily P&L",
             "blocks": "largest even <= min(days, %d), >= %d"
                       % (CSCV_MAX_BLOCKS, CSCV_MIN_BLOCKS),
+            "sharpe_compared_at_decimals": 10,
+            "in_sample_tie": "first in candidate order",
             "acceptable": "pbo <= %s" % PBO_MAX},
     "dsr": {"method": "Bailey & Lopez de Prado 2014",
             "trials": "tested candidates", "acceptable": "dsr >= %s"
@@ -202,8 +204,8 @@ def blocks_for(days: int) -> int:
 
 #: Sharpe ratios are COMPARED at this many decimals: two candidates whose
 #: ratios are mathematically equal (a common shape on sparse daily P&L) tie,
-#: whatever the float rounding of the route that computed them.
-SHARPE_TIE_DECIMALS = 10
+#: whatever the float rounding of the route that computed them (in PLAN).
+SHARPE_TIE_DECIMALS = PLAN["pbo"]["sharpe_compared_at_decimals"]
 
 
 def _tie(x: float) -> float:
