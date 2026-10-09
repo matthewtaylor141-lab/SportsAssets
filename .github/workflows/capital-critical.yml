@@ -28,6 +28,19 @@
 #     FRESH_DB_RESULT_NOT_IN_THIS_PROCESS on 69a8a07e (pm-acceptance
 #     37836393458) while applied 224 = repo 224 and the fingerprints were
 #     equal; pm-acceptance reads this receipt for the release SHA.
+#   * THE UPGRADE-PATH RECEIPT (RC6 lane E): a second empty database built
+#     by the PREVIOUS release's own runner over its own migrations
+#     (default: the parent of a release commit on claude/release-api, else
+#     that branch's tip; dispatch input upgrade_base_sha overrides),
+#     REPRESENTATIVE ROWS synthesized into every table that takes one,
+#     THIS tree's migrations applied by this tree's runner, then checked:
+#     no applied migration changed (runner, content hashes, the
+#     immutability manifest), nothing seeded lost, the fingerprint the
+#     fresh build reaches, and the previous release's runner and schema
+#     expectations on the new schema (rollback compatibility, every
+#     blocking item named) (tools/upgrade_path_receipt.py). Written PASSED
+#     or FAILED, attested, kept; pm-acceptance binds it to the rollback
+#     target Render actually ran.
 #
 # It deploys nothing, needs no secret and reaches no production system.
 name: capital-critical
@@ -44,7 +57,12 @@ on:
       - "backend/**"
       - "tools/**"
       - ".github/workflows/capital-critical.yml"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      upgrade_base_sha:
+        description: "optional 40-hex commit whose schema the upgrade path starts from (the release production runs); blank = the parent of a release commit, else the tip of claude/release-api"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -196,6 +214,57 @@ jobs:
         with:
           subject-path: ${{ steps.receipt.outputs.receipt }}
 
+      - name: The upgrade-path receipt (the previous release's database with representative rows, this release's migrations, the previous release on the new schema)
+        id: upgrade
+        # evidence, like the fresh-database receipt: a FAILED upgrade is a
+        # FAILED receipt (the judge reads it RED), never no receipt; it runs
+        # on its own scratch database and leaves the suite's untouched
+        if: always() && steps.freshdb.outcome != 'skipped'
+        env:
+          UPGRADE_BASE: ${{ inputs.upgrade_base_sha }}
+        run: |
+          set +e
+          cd backend
+          base="${UPGRADE_BASE:-}"
+          rel=$(git rev-parse -q --verify refs/remotes/origin/claude/release-api 2>/dev/null)
+          if ! echo "$base" | grep -Eq '^[0-9a-f]{40}$'; then
+            if [ -z "$rel" ] || [ "$rel" = "$GITHUB_SHA" ]; then
+              base=$(git rev-parse -q --verify "$GITHUB_SHA^1" 2>/dev/null)
+            else
+              base="$rel"
+            fi
+          fi
+          echo "upgrade path: base ${base:-NONE} (claude/release-api ${rel:-unread}) -> $GITHUB_SHA"
+          B="$RUNNER_TEMP/upgrade_base"; rm -rf "$B"; mkdir -p "$B"
+          # the base tree's backend (its own runner and migrations), from the
+          # repository root: git archive paths are relative to the cwd
+          [ -n "$base" ] && git -C .. archive "$base" backend | tar -x -C "$B"
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS upgrade_path" -c "CREATE DATABASE upgrade_path"
+          python tools/upgrade_path_receipt.py run \
+            --dsn postgresql://postgres:postgres@127.0.0.1:5432/upgrade_path \
+            --sha "$GITHUB_SHA" --base-sha "${base:-NONE}" --base-backend "$B/backend" \
+            --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --out "$RUNNER_TEMP/upgrade-path-receipt.json"
+          psql -h 127.0.0.1 -U postgres -d postgres -c "DROP DATABASE IF EXISTS upgrade_path WITH (FORCE)" >/dev/null 2>&1
+          rm -rf "$B"
+          if [ -s "$RUNNER_TEMP/upgrade-path-receipt.json" ]; then
+            echo "receipt=$RUNNER_TEMP/upgrade-path-receipt.json" >> "$GITHUB_OUTPUT"
+            r=$(jq -r '.result' "$RUNNER_TEMP/upgrade-path-receipt.json")
+            echo "upgrade path **$r** (rollback $(jq -r '.rollback_compatibility.verdict // "-"' "$RUNNER_TEMP/upgrade-path-receipt.json"), rows $(jq -r '.seeded.with_rows // "-"' "$RUNNER_TEMP/upgrade-path-receipt.json")/$(jq -r '.seeded.tables // "-"' "$RUNNER_TEMP/upgrade-path-receipt.json") tables)" >> "$GITHUB_STEP_SUMMARY"
+            [ "$r" = PASSED ] || echo "::error title=upgrade path FAILED::$(jq -c '.reasons[:6]' "$RUNNER_TEMP/upgrade-path-receipt.json")"
+          fi
+          exit 0
+
+      - name: Attest the upgrade-path receipt (Sigstore, evidence only)
+        if: always() && steps.upgrade.outputs.receipt != ''
+        # as the fresh-database receipt: an outage never turns the verdict;
+        # an unattested receipt is UNPROVEN where it is read
+        continue-on-error: true
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.upgrade.outputs.receipt }}
+
       - name: Run the whole suite
         id: suite
         env:
@@ -271,5 +340,6 @@ jobs:
             ${{ runner.temp }}/capital-critical-console.txt
             ${{ runner.temp }}/capital-critical-verdict.json
             ${{ runner.temp }}/fresh-db-receipt.json
+            ${{ runner.temp }}/upgrade-path-receipt.json
           if-no-files-found: warn
           retention-days: 30

@@ -33,8 +33,40 @@ absence is its sole blocker AND the judge's half is PROVEN / GREEN for the
 release SHA. Absent or unverified is UNPROVEN (failed); every detail keeps
 the API's own status and blockers beside the binding.
 
-Usage:  python backend/tools/scorecard_14.py ACC_DIR [--frontend-preview preview.json]
+V2 (RC6 lane E, owner directive 2E): THE EVALUATOR AND ITS INPUTS ARE PINNED.
+
+  * scorecard_14.json records the evaluator (the judge commit, this file's
+    own sha256 and VERSION), the implementation, release and production
+    frontend SHAs, and the sha256 of EVERY input file it read (the bytes it
+    parsed, read once). A unit whose input NAMES ANOTHER RELEASE than the
+    one being graded (the serving API's own RENDER_GIT_COMMIT, a readback's
+    own serving build, the Trader acceptance's API, the previewed frontend
+    against production's build.json) is UNMEASURED with the input named:
+    a scorecard of release X is never computed from release Y's readbacks.
+    An input that names no release is graded and listed UNATTRIBUTED.
+  * GRADING_CHANGES declares every unit whose grading differs from the
+    pinned prior evaluator (2fadc8dc, the RC5 judge) and why;
+    tools/grading_diff.py runs both evaluators on the same packet and lists
+    every unit whose verdict differs -- declared or not, never hidden.
+  * Kalshi integration's credential unit reads KALSHI's own verdict and
+    provisioning in CREDENTIAL_CLASSES (production 37836393458: aggregate
+    RED from PMUS alone, evidence.verdicts.KALSHI = MATCHES); the Red-team
+    row keeps the aggregate control unchanged.
+  * Deployment infrastructure adds release_lineage (implementation tree ==
+    release tree, single-parent release commit, gates green on both SHAs),
+    upgrade_path (the release's migrations onto the previous release's
+    schema with representative rows, nothing applied changed) and
+    rollback_ready (the previous release per service, its gates, and its
+    compatibility with the new schema): three requirements added, none
+    removed; absent evidence is a failed unit, never a pass.
+
+Usage:  python backend/tools/scorecard_14.py ACC_DIR [--release-sha SHA]
+            [--frontend-preview preview.json] [--evaluator-sha SHA]
+            [--implementation-sha SHA]
         writes ACC_DIR/scorecard_14.json and prints the table.
+
+STANDARD LIBRARY ONLY, ONE FILE: a later judge runs this exact file (by
+commit) as its pinned prior evaluator.
 """
 from __future__ import annotations
 
@@ -42,9 +74,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
-VERSION = "SCORECARD_14_V1"
+VERSION = "SCORECARD_14_V2"
 TARGET = 0.95
 CATEGORIES = (
     "Core trading engine", "GitHub CI and regression tests",
@@ -90,20 +123,160 @@ R_RELEASE_VERDICT_NOT_THE_RELEASE = "RELEASE_VERDICT_NOT_FOR_THE_RELEASE_SHA"
 R_RELEASE_VERDICT_REFUSED = "RELEASE_VERDICT_REFUSED"
 R_RELEASE_VERDICT_INCONSISTENT = "RELEASE_VERDICT_INCONSISTENT"
 
+# ── V2: inputs pinned to the release they name ───────────────────────────
+R_INPUT_NAMES_ANOTHER_RELEASE = "INPUT_NAMES_ANOTHER_RELEASE"
+R_API_IDENTITY_CONFLICT = "API_SERVING_IDENTITY_CONFLICT"
+R_FRONTEND_NOT_DEPLOYED = "FRONTEND_PREVIEW_IS_NOT_THE_DEPLOYED_FRONTEND"
+MATCHES, FOREIGN, UNATTRIBUTED = ("MATCHES", "NAMES_ANOTHER_RELEASE",
+                                  "UNATTRIBUTED")
+NO_REFERENCE = "NO_RELEASE_SHA_GIVEN"
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
+#: readbacks served by sportsassets-api in the run (their release is the
+#: serving API's unless they name their own serving build)
+API_SERVED = ("red_team.json", "release.json", "completion.json",
+              "venues.json", "shadow_health.json", "loop_health.json",
+              "market_plane.json", "paper_freshness.json",
+              "paper_reconciliation.json", "xavier_management.json",
+              "small_live.json", "canary.json", "capital_readiness.json",
+              "pm_before.json", "pm_after.json",
+              "profitability_scoreboard.json", "revenue_readiness.json")
+#: an input's OWN statement of the build that produced it, at a declared
+#: path (pm-acceptance 37836393458 carries each of these)
+OWN_IDENTITY = {
+    "red_team.json": "data.readiness.implementation_sha",
+    "release.json": "api.sha",
+    "small_live.json": "launch.serving_build",
+    "canary.json": "boots.api.commit_sha",
+    "capital_readiness.json": "data.source_sha",
+    "pm_after.json": "data.pm_acceptance.evidence_input.deployed_sha",
+    "pm_before.json": "data.pm_acceptance.evidence_input.deployed_sha",
+    # the judge's own receipts, written for one SHA
+    "acceptance.json": "sha",
+    "runtime_window.json": "expected_commit",
+}
+#: where the serving API names itself (the RENDER_GIT_COMMIT it reports);
+#: two that disagree mean the API changed during the run
+API_IDENTITY = (("red_team.json", "data.readiness.implementation_sha"),
+                ("release.json", "api.sha"))
+#: the production frontend's own build record (frontend/scripts/
+#: write-build-info.mjs, https://command.bettortoken.com/build.json) and the
+#: frontend-preview run's target (its out/target_sha.txt)
+FRONTEND_BUILD = "frontend_build.json"
+FRONTEND_PREVIEW_IDENTITY = "frontend_preview_identity.json"
+
+# ── V2: Kalshi's own credential verdict (CREDENTIAL_CLASSES, scoped) ──────
+R_KALSHI_CREDENTIAL_CONTROL_NOT_COMPUTED = "KALSHI_CREDENTIAL_CONTROL_NOT_COMPUTED"
+R_KALSHI_CREDENTIAL_EVIDENCE_ABSENT = "KALSHI_CREDENTIAL_EVIDENCE_ABSENT"
+R_KALSHI_CREDENTIAL_VERDICT = "KALSHI_CREDENTIAL_VERDICT_NOT_MATCHES"
+R_KALSHI_CREDENTIAL_NOT_PROVISIONED = "KALSHI_CREDENTIAL_NOT_PROVISIONED"
+R_KALSHI_CREDENTIAL_CLASS = "KALSHI_CREDENTIAL_CLASS_NOT_APPROVED"
+R_KALSHI_CREDENTIAL_BLOCKER = "KALSHI_CREDENTIAL_BLOCKER"
+R_CREDENTIAL_BLOCKER_UNATTRIBUTED = "CREDENTIAL_BLOCKER_NOT_ATTRIBUTABLE_TO_A_SLOT"
+_CRED_BLOCKER = re.compile(r"^(CREDENTIAL_CLASS_MISMATCH|MISSING_CREDENTIAL_CLASS)"
+                           r":([A-Z0-9_]+)(:|$)")
+
+# ── V2: release lineage, upgrade path, rollback readiness (Deployment) ────
+R_LINEAGE_IMPLEMENTATION_ABSENT = "LINEAGE_IMPLEMENTATION_SHA_ABSENT"
+R_LINEAGE_TREES_DIFFER = "LINEAGE_IMPLEMENTATION_TREE_DIFFERS_FROM_RELEASE_TREE"
+R_LINEAGE_NOT_SINGLE_PARENT = "LINEAGE_RELEASE_COMMIT_NOT_SINGLE_PARENT"
+R_LINEAGE_NOT_THE_RELEASE = "LINEAGE_NOT_FOR_THE_RELEASE_SHA"
+R_LINEAGE_BRANCH_ELSEWHERE = "LINEAGE_RELEASE_BRANCH_NOT_AT_THE_RELEASE_SHA"
+R_LINEAGE_NOT_DESCENDANT = "LINEAGE_NOT_DESCENDANT_OF_ACCEPTED_BASE"
+R_LINEAGE_RELEASE_GATE = "LINEAGE_RELEASE_GATE_NOT_GREEN"
+R_LINEAGE_IMPLEMENTATION_GATE = "LINEAGE_IMPLEMENTATION_GATE_NOT_GREEN"
+R_LINEAGE_IMPLEMENTATION_GATES_UNREAD = "LINEAGE_IMPLEMENTATION_GATES_UNREAD"
+GATES = ("backend_tests", "capital_critical", "commit_guard",
+         "engine_diagnostic")
+UPGRADE_PATH_RECEIPT_VERSION = "UPGRADE_PATH_RECEIPT_V1"
+ROLLBACK_VERSION = "ROLLBACK_READINESS_V1"
+R_UPGRADE_READBACK_ABSENT = "UPGRADE_PATH_READBACK_ABSENT"
+R_UPGRADE_RECEIPT_ABSENT = "UPGRADE_PATH_RECEIPT_ABSENT"
+R_UPGRADE_NOT_ATTESTED = "UPGRADE_PATH_RECEIPT_ATTESTATION_NOT_VERIFIED"
+R_UPGRADE_NOT_CAPITAL_CRITICAL = "UPGRADE_PATH_RECEIPT_NOT_FROM_CAPITAL_CRITICAL"
+R_UPGRADE_NOT_THE_RELEASE = "UPGRADE_PATH_RECEIPT_NOT_FOR_THE_RELEASE_SHA"
+R_UPGRADE_NOT_THE_GATE_RUN = "UPGRADE_PATH_RECEIPT_NOT_FROM_THE_GATE_RUN"
+R_UPGRADE_MALFORMED = "UPGRADE_PATH_RECEIPT_MALFORMED"
+R_UPGRADE_FAILED = "UPGRADE_PATH_FAILED"
+R_UPGRADE_BASE_NOT_TARGET = "UPGRADE_PATH_BASE_IS_NOT_THE_ROLLBACK_TARGET"
+R_UPGRADE_NOT_REPRESENTATIVE = "UPGRADE_PATH_ROWS_NOT_REPRESENTATIVE"
+R_UPGRADE_BASE_UNBUILT = "UPGRADE_PATH_BASE_NOT_BUILT"
+#: tools/upgrade_path_receipt reasons about the BASE alone (no previous
+#: release found / built): never a finding about the release's migrations
+UPGRADE_BASE_SIDE = ("UPGRADE_NOT_A_FULL_SHA", "UPGRADE_BASE_TREE_UNREADABLE",
+                     "UPGRADE_BASE_BUILD_FAILED", "UPGRADE_RUN_CRASHED")
+R_ROLLBACK_NOT_THE_RELEASE = "ROLLBACK_READINESS_NOT_FOR_THE_RELEASE_SHA"
+R_ROLLBACK_MALFORMED = "ROLLBACK_READINESS_MALFORMED"
+R_ROLLBACK_TARGET_UNKNOWN = "ROLLBACK_TARGET_UNKNOWN"
+R_ROLLBACK_SERVICE_NOT_ON_RELEASE = "ROLLBACK_SERVICE_NOT_ON_THE_RELEASE"
+R_ROLLBACK_TARGET_NOT_ON_RELEASE_LINE = "ROLLBACK_TARGET_NOT_AN_ANCESTOR_OF_THE_RELEASE"
+R_ROLLBACK_TARGET_GATE = "ROLLBACK_TARGET_GATE_NOT_GREEN"
+R_ROLLBACK_COMMANDS_INCOMPLETE = "ROLLBACK_COMMANDS_INCOMPLETE"
+R_ROLLBACK_SCHEMA_BLOCKED = "ROLLBACK_SCHEMA_BLOCKED"
+R_ROLLBACK_SCHEMA_UNPROVEN = "ROLLBACK_SCHEMA_COMPATIBILITY_UNPROVEN"
+IDENTICAL = "IDENTICAL_MIGRATION_SET"
+COMPATIBLE = "COMPATIBLE"
+
 
 class Unavailable(Exception):
     pass
 
 
-def _load(acc: str, name: str):
-    p = os.path.join(acc, name)
-    if not os.path.isfile(p):
-        raise Unavailable("READ_UNAVAILABLE:%s:MISSING" % name)
-    try:
-        with open(p) as f:
-            return json.load(f)
-    except ValueError:
-        raise Unavailable("READ_UNAVAILABLE:%s:NOT_JSON" % name)
+class Foreign(Unavailable):
+    """The input names another release than the one graded: UNMEASURED."""
+
+
+class Acc(str):
+    """The packet directory, carrying what this scoring read: every input
+    file parsed once ({name: (doc, sha256)}) and each input's identity."""
+
+    def __new__(cls, path):
+        o = str.__new__(cls, path)
+        o.cache, o.read, o.absent, o.identity = {}, {}, {}, {}
+        return o
+
+
+def _parse_file(acc, key: str, path: str):
+    """(doc) of one file, read and hashed ONCE per scoring; Unavailable
+    when absent or not JSON (named)."""
+    cache = getattr(acc, "cache", None)
+    if cache is not None and key in cache:
+        doc, why = cache[key]
+        if why:
+            raise Unavailable(why)
+        return doc
+    doc, why = None, None
+    if not os.path.isfile(path):
+        why = "READ_UNAVAILABLE:%s:MISSING" % key
+    else:
+        with open(path, "rb") as f:
+            raw = f.read()
+        if cache is not None:
+            acc.read[key] = hashlib.sha256(raw).hexdigest()
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            why = "READ_UNAVAILABLE:%s:NOT_JSON" % key
+    if cache is not None:
+        cache[key] = (doc, why)
+        if why and key not in acc.read:
+            acc.absent[key] = why
+    if why:
+        raise Unavailable(why)
+    return doc
+
+
+def _load(acc: str, name: str, *, pinned: bool = True):
+    """An input of the packet. pinned: refused (UNMEASURED) when the input
+    names another release than the one graded; the identity checks
+    themselves read unpinned."""
+    doc = _parse_file(acc, name, os.path.join(acc, name))
+    if pinned:
+        ident = (getattr(acc, "identity", None) or {}).get("files", {}).get(
+            name)
+        if ident and ident.get("verdict") == FOREIGN:
+            raise Foreign("UNMEASURED:%s:%s:%s" % (
+                R_INPUT_NAMES_ANOTHER_RELEASE, name, ident.get("reason")))
+    return doc
 
 
 def _at(doc, path: str, name: str):
@@ -117,15 +290,22 @@ def _at(doc, path: str, name: str):
     return cur
 
 
-def _env(acc, name, path, *, envelope=True):
+def _env(acc, name, path, *, envelope=True, pinned=True):
     """Read through the Command readback envelope (status OK required)."""
-    doc = _load(acc, name)
+    doc = _load(acc, name, pinned=pinned)
     if envelope and isinstance(doc, dict) and "status" in doc and "data" in doc:
         if doc.get("status") != "OK":
             raise Unavailable("READ_UNAVAILABLE:%s:ENVELOPE_%s" % (
                 name, doc.get("status")))
         doc = doc["data"]
     return _at(doc, path, name)
+
+
+def _failed_read(exc) -> str:
+    """The class of a unit that could not be graded: an input naming
+    another release is UNMEASURED; anything else unread is
+    READ_UNAVAILABLE. Both are failures."""
+    return "UNMEASURED" if isinstance(exc, Foreign) else "READ_UNAVAILABLE"
 
 
 class Card:
@@ -141,14 +321,15 @@ class Card:
                                          ("FORWARD" if forward else "FAIL"))})
         except Unavailable as exc:
             self.units.append({"unit": uid, "passed": False,
-                               "detail": str(exc), "class": "READ_UNAVAILABLE"})
+                               "detail": str(exc), "class": _failed_read(exc)})
 
-    def counted(self, uid, num, den, *, detail=None):
-        """A counted member set: each member is a unit. den 0 = UNMEASURED."""
+    def counted(self, uid, num, den, *, detail=None, exc=None):
+        """A counted member set: each member is a unit. den 0 = UNMEASURED.
+        A member set whose input names another release is UNMEASURED."""
         if den is None or num is None:
             self.units.append({"unit": uid, "passed": False, "members": None,
                                "detail": detail or "READ_UNAVAILABLE",
-                               "class": "READ_UNAVAILABLE"})
+                               "class": _failed_read(exc)})
             return
         self.units.append({"unit": uid, "members": [int(num), int(den)],
                            "passed": den > 0 and num / den >= TARGET,
@@ -201,7 +382,11 @@ def _gate(acc, key):
 
 
 def score(acc: str, *, release_sha: str | None = None,
-          frontend_preview: str | None = None) -> dict:
+          frontend_preview: str | None = None,
+          evaluator_sha: str | None = None,
+          implementation_sha: str | None = None) -> dict:
+    acc = Acc(acc)
+    acc.identity = identities(acc, release_sha, frontend_preview)
     cards = []
 
     # 1 CORE TRADING ENGINE: the engine's required production controls
@@ -241,7 +426,7 @@ def score(acc: str, *, release_sha: str | None = None,
             _at(_load(acc, "gates.json"), "runs.%s.head_sha" % k, "gates.json") == release_sha
             for k in ("backend_tests", "capital_critical", "commit_guard", "engine_diagnostic")),
         release_sha))
-    c.unit("frontend_device_gate", lambda: _frontend_gate(frontend_preview))
+    c.unit("frontend_device_gate", lambda: _frontend_gate(frontend_preview, acc))
     cards.append(c)
 
     # 3 RED-TEAM SAFEGUARDS: every red-team control GREEN (forward REDs annotated)
@@ -251,7 +436,7 @@ def score(acc: str, *, release_sha: str | None = None,
     except Unavailable as exc:
         controls = None
         c.units.append({"unit": "controls", "passed": False, "detail": str(exc),
-                        "class": "READ_UNAVAILABLE"})
+                        "class": _failed_read(exc)})
     for name, ctl in sorted((controls or {}).items()):
         if name in BOUND:
             # the API's own status AND the judge's attested half (RC6)
@@ -267,18 +452,30 @@ def score(acc: str, *, release_sha: str | None = None,
 
     # 4 DEPLOYMENT INFRASTRUCTURE: every service on the release, migrations intact
     c = Card(CATEGORIES[3])
+    # (the identity checks themselves: read unpinned, a different commit is
+    # the FAIL they exist to report)
     for svc in SERVICES:
         c.unit("%s_on_release" % svc, lambda svc=svc: (
             release_sha is not None and
-            _at(_load(acc, "render.json"), "%s.live_commit" % svc, "render.json") == release_sha,
-            _at(_load(acc, "render.json"), "%s.live_commit" % svc, "render.json")))
+            _at(_load(acc, "render.json", pinned=False), "%s.live_commit" % svc,
+                "render.json") == release_sha,
+            _at(_load(acc, "render.json", pinned=False), "%s.live_commit" % svc,
+                "render.json")))
     c.unit("workers_boot_on_release", lambda: (
-        _at(_load(acc, "canary.json"), "boots.workers_boot.commit_sha", "canary.json") == release_sha,
-        _at(_load(acc, "canary.json"), "boots.workers_boot.commit_sha", "canary.json")))
+        _at(_load(acc, "canary.json", pinned=False), "boots.workers_boot.commit_sha",
+            "canary.json") == release_sha,
+        _at(_load(acc, "canary.json", pinned=False), "boots.workers_boot.commit_sha",
+            "canary.json")))
     c.unit("market_plane_heartbeat_on_release", lambda: _plane_beat(acc, release_sha))
     # applied == build AND an empty database builds to the same fingerprint
     # (the capital-critical fresh build of this SHA; RC6)
     c.unit("migration_integrity", lambda: migration_integrity(acc, release_sha))
+    # V2 (owner directive 2E): the release IS the tested implementation, the
+    # migrations upgrade the previous release's database, and the previous
+    # release can be put back on the new schema
+    c.unit("release_lineage", lambda: release_lineage(acc, release_sha))
+    c.unit("upgrade_path", lambda: upgrade_path(acc, release_sha))
+    c.unit("rollback_ready", lambda: rollback_ready(acc, release_sha))
     cards.append(c)
 
     # 5 MARKET-PLANE STABILITY: OOM-free complete window with headroom
@@ -310,13 +507,13 @@ def score(acc: str, *, release_sha: str | None = None,
         c.counted("held_positions_fresh", fresh, fr.get("markable"),
                   detail="(FRESH + QUIET_VALID) / markable, SLA %ss" % fr.get("sla_s"))
     except Unavailable as exc:
-        c.counted("held_positions_fresh", None, None, detail=str(exc))
+        c.counted("held_positions_fresh", None, None, detail=str(exc), exc=exc)
     try:
         pf = _env(acc, "completion.json", "market_data.priority_freshness")
         c.counted("priority_members_fresh", pf.get("numerator"), pf.get("denominator"),
                   detail="priority freshness (dedicated plane snapshot)")
     except Unavailable as exc:
-        c.counted("priority_members_fresh", None, None, detail=str(exc))
+        c.counted("priority_members_fresh", None, None, detail=str(exc), exc=exc)
     c.unit("latency_slo_green", lambda: (
         _at(_load(acc, "market_plane.json"), "snapshot.latency.green", "market_plane.json") is True,
         _at(_load(acc, "market_plane.json"), "snapshot.latency.transport_ms", "market_plane.json")))
@@ -331,7 +528,7 @@ def score(acc: str, *, release_sha: str | None = None,
         c.counted("active_contracts_priceable", int(bs.get("PRICEABLE") or 0), int(total) - ext,
                   detail={"by_state": bs, "external_excluded_and_reported": ext})
     except Unavailable as exc:
-        c.counted("active_contracts_priceable", None, None, detail=str(exc))
+        c.counted("active_contracts_priceable", None, None, detail=str(exc), exc=exc)
     cards.append(c)
 
     # 8 EV AND PRICING METHODOLOGY: methodology controls evidenced in production
@@ -362,7 +559,7 @@ def score(acc: str, *, release_sha: str | None = None,
                   None if rate is None else round(rate * held), held,
                   detail="xavier_packet_complete_rate x open positions")
     except Unavailable as exc:
-        c.counted("held_positions_with_complete_current_packet", None, None, detail=str(exc))
+        c.counted("held_positions_with_complete_current_packet", None, None, detail=str(exc), exc=exc)
     c.unit("no_open_position_without_review", lambda: (
         _at(_load(acc, "xavier_management.json"), "summary.open_without_review", "xavier_management.json") == 0
         and _at(_load(acc, "xavier_management.json"), "summary.reviews_overdue", "xavier_management.json") == 0,
@@ -397,7 +594,7 @@ def score(acc: str, *, release_sha: str | None = None,
         c.counted("scanned_markets_with_fresh_books", arb.get("books_fresh"), arb.get("markets_read"),
                   detail="books_fresh / markets_read")
     except Unavailable as exc:
-        c.counted("scanned_markets_with_fresh_books", None, None, detail=str(exc))
+        c.counted("scanned_markets_with_fresh_books", None, None, detail=str(exc), exc=exc)
     c.unit("void_terms_established", lambda: (
         "void terms not established" not in str(_env(acc, "completion.json", "arbitrage.fail_closed")),
         _env(acc, "completion.json", "arbitrage.fail_closed")))
@@ -435,17 +632,17 @@ def score(acc: str, *, release_sha: str | None = None,
         c.counted("tracked_books_fresh", f.get("numerator"), f.get("denominator"),
                   detail={"by_source": f.get("current_by_source"), "sla_s": f.get("sla_s")})
     except Unavailable as exc:
-        c.counted("tracked_books_fresh", None, None, detail=str(exc))
+        c.counted("tracked_books_fresh", None, None, detail=str(exc), exc=exc)
     c.unit("catalogue_complete", lambda: (kh("catalogue.complete") is True, kh("catalogue.stopped")))
     c.unit("health_state_ok", lambda: (kh("state") == "OK", kh("state")))
-    c.unit("credential_class_control", lambda: (
-        _env(acc, "red_team.json", "readiness.controls.CREDENTIAL_CLASSES.status") == "GREEN",
-        _env(acc, "red_team.json", "readiness.controls.CREDENTIAL_CLASSES.blockers")))
+    # Kalshi's OWN credential verdict and provisioning (V2): the aggregate
+    # CREDENTIAL_CLASSES status stays the Red-team row's unit
+    c.unit("credential_class_control", lambda: kalshi_credentials(acc))
     cards.append(c)
 
     # 14 COMMAND CENTER DESKTOP AND MOBILE: device-view checks
     c = Card(CATEGORIES[13])
-    _device_units(c, frontend_preview)
+    _device_units(c, frontend_preview, acc)
     cards.append(c)
 
     out = [x.result() for x in cards]
@@ -454,7 +651,11 @@ def score(acc: str, *, release_sha: str | None = None,
             "all_categories_pass": all(x["passes"] for x in out),
             "passing": sum(1 for x in out if x["passes"]),
             "not_averaged": True,
-            "profitability": "classified separately (PROVEN / UNPROVEN); not a category here"}
+            "profitability": "classified separately (PROVEN / UNPROVEN); not a category here",
+            "pinning": pinning(acc, release_sha=release_sha,
+                               evaluator_sha=evaluator_sha,
+                               implementation_sha=implementation_sha),
+            "grading_changes": [dict(g) for g in GRADING_CHANGES]}
 
 
 def _runtime_window(acc):
@@ -471,7 +672,9 @@ def _runtime_window(acc):
 
 
 def _plane_beat(acc, release_sha):
-    pl = _env(acc, "venues.json", "health.KALSHI_HEALTH.mechanism.plane")
+    # the plane's OWN heartbeat commit: an identity check, read unpinned
+    pl = _env(acc, "venues.json", "health.KALSHI_HEALTH.mechanism.plane",
+              pinned=False)
     return (pl.get("present") is True and pl.get("commit") == release_sha
             and (pl.get("age_s") or 1e9) <= 120), pl
 
@@ -691,10 +894,589 @@ BOUND = {"MIGRATION_INTEGRITY": migration_integrity,
          "RELEASE": release_control}
 
 
-def _frontend_gate(path):
+# ── V2: Kalshi's own credential verdict ───────────────────────────────────
+
+def kalshi_credentials(acc):
+    """CREDENTIAL_CLASSES SCOPED TO KALSHI (Kalshi integration row).
+
+    Production (pm-acceptance 37836393458, 69a8a07e): the control was RED
+    with ONE blocker, CREDENTIAL_CLASS_MISMATCH:PMUS:POLYMARKET_EXCHANGE_
+    RSA_M2M (the PMUS funded slot holds the PMX RSA key -- an owner action),
+    while evidence.verdicts.KALSHI = MATCHES and api and workers both hold
+    KALSHI_ED25519_API_KEY, a documented Kalshi type. The Kalshi row read
+    the aggregate status and so failed on PMUS. Passes only when the
+    control was computed (GREEN or RED), Kalshi's own verdict is MATCHES,
+    Kalshi is provisioned, EVERY process the control classified holds an
+    approved Kalshi class, no blocker names Kalshi, and no blocker is
+    unattributable to a slot. The aggregate status and the other slots'
+    blockers stay in the detail; the Red-team row still reads the
+    aggregate and still fails on PMUS."""
+    ctl = _env(acc, "red_team.json", "readiness.controls.CREDENTIAL_CLASSES")
+    ctl = ctl if isinstance(ctl, dict) else {}
+    ev = ctl.get("evidence") if isinstance(ctl.get("evidence"), dict) else {}
+    blockers = [str(b) for b in (ctl.get("blockers") or [])]
+    slots = set((ev.get("expected") or {}).keys()) if isinstance(
+        ev.get("expected"), dict) else set()
+    approved = list(((ev.get("approved") or {}).get("KALSHI") or [])
+                    if isinstance(ev.get("approved"), dict) else [])
+    verdict = (ev.get("verdicts") or {}).get("KALSHI") if isinstance(
+        ev.get("verdicts"), dict) else None
+    by_proc = ev.get("by_process") if isinstance(ev.get("by_process"),
+                                                 dict) else {}
+    per = {p: (s or {}).get("KALSHI") if isinstance(s, dict) else None
+           for p, s in sorted(by_proc.items())}
+    reasons, kal_blk, other_blk = [], [], []
+    for b in blockers:
+        m = _CRED_BLOCKER.match(b)
+        if m and m.group(2) == "KALSHI":
+            kal_blk.append(b)
+        elif m and m.group(2) in slots:
+            other_blk.append(b)
+        else:
+            reasons.append("%s:%s" % (R_CREDENTIAL_BLOCKER_UNATTRIBUTED, b))
+    if ctl.get("status") not in (GREEN, RED):
+        reasons.append("%s:%s" % (R_KALSHI_CREDENTIAL_CONTROL_NOT_COMPUTED,
+                                  ctl.get("status")))
+    if not ev or not per or verdict is None or not approved:
+        reasons.append(R_KALSHI_CREDENTIAL_EVIDENCE_ABSENT)
+    if verdict is not None and verdict != "MATCHES":
+        reasons.append("%s:%s" % (R_KALSHI_CREDENTIAL_VERDICT, verdict))
+    if "KALSHI" in (ev.get("not_provisioned") or []):
+        reasons.append(R_KALSHI_CREDENTIAL_NOT_PROVISIONED)
+    for p, cls in per.items():
+        if cls is None:
+            reasons.append("%s:%s" % (R_KALSHI_CREDENTIAL_NOT_PROVISIONED, p))
+        elif cls not in approved:
+            reasons.append("%s:%s:%s" % (R_KALSHI_CREDENTIAL_CLASS, p, cls))
+    reasons += ["%s:%s" % (R_KALSHI_CREDENTIAL_BLOCKER, b) for b in kal_blk]
+    return not reasons, {
+        "scope": "KALSHI", "kalshi_verdict": verdict,
+        "kalshi_by_process": per, "approved": approved,
+        "kalshi_blockers": kal_blk, "reasons": reasons[:10],
+        # the aggregate, unchanged and visible (the Red-team row's unit)
+        "aggregate_status": ctl.get("status"),
+        "aggregate_blockers_outside_kalshi": other_blk[:6]}
+
+
+# ── V2: release lineage, upgrade path and rollback readiness ─────────────
+
+def _is_sha(v) -> bool:
+    return isinstance(v, str) and bool(_SHA40.match(v))
+
+
+def _gates_green(doc, sha) -> list:
+    """The gates NOT green on `sha` in a gates.json-shaped file: the newest
+    run of each must be completed / success on exactly that SHA."""
+    runs = (doc or {}).get("runs") if isinstance(doc, dict) else None
+    runs = runs if isinstance(runs, dict) else {}
+    bad = []
+    for k in GATES:
+        r = runs.get(k) if isinstance(runs.get(k), dict) else {}
+        if not (r.get("conclusion") == "success" and
+                r.get("status") == "completed" and
+                _is_sha(sha) and r.get("head_sha") == sha):
+            bad.append("%s=%s" % (k, r.get("conclusion")))
+    return bad
+
+
+def release_lineage(acc, release_sha):
+    """THE RELEASE IS THE TESTED IMPLEMENTATION (acc/lineage.json, read by
+    the judge from git and GitHub): the implementation SHA given, its tree
+    == the release commit's tree, the release commit has exactly one parent
+    (a release commit on claude/release-api, never a merge), the branch
+    both Render services track is AT the release, it descends from the
+    accepted base, and the four gates are green on BOTH SHAs."""
+    lin = _load(acc, "lineage.json", pinned=False)
+    lin = lin if isinstance(lin, dict) else {}
+    reasons = []
+    impl = lin.get("implementation_sha")
+    if not _is_sha(impl):
+        reasons.append(R_LINEAGE_IMPLEMENTATION_ABSENT)
+    elif not (lin.get("trees_equal") is True
+              and _is_sha(lin.get("implementation_tree"))
+              and lin.get("implementation_tree") == lin.get("release_tree")):
+        reasons.append(R_LINEAGE_TREES_DIFFER)
+    parents = lin.get("release_parents")
+    if not (isinstance(parents, list) and len(parents) == 1):
+        reasons.append("%s:%s" % (R_LINEAGE_NOT_SINGLE_PARENT,
+                                  len(parents) if isinstance(parents, list)
+                                  else "UNREAD"))
+    if not _is_sha(release_sha) or lin.get("sha") != release_sha:
+        reasons.append(R_LINEAGE_NOT_THE_RELEASE)
+    if lin.get("release_sha") != release_sha:
+        reasons.append(R_LINEAGE_BRANCH_ELSEWHERE)
+    if lin.get("descendant_of_base") is not True:
+        reasons.append(R_LINEAGE_NOT_DESCENDANT)
+    rel_bad = _gates_green(_opt(acc, "gates.json"), release_sha)
+    reasons += ["%s:%s" % (R_LINEAGE_RELEASE_GATE, b) for b in rel_bad]
+    if _is_sha(impl):
+        ig = _opt(acc, "gates_implementation.json")
+        if not isinstance(ig, dict):
+            reasons.append(R_LINEAGE_IMPLEMENTATION_GATES_UNREAD)
+        else:
+            reasons += ["%s:%s" % (R_LINEAGE_IMPLEMENTATION_GATE, b)
+                        for b in _gates_green(ig, impl)]
+    return not reasons, {
+        "implementation_sha": impl, "release_sha": lin.get("release_sha"),
+        "tested_sha": lin.get("sha"),
+        "implementation_tree": lin.get("implementation_tree"),
+        "release_tree": lin.get("release_tree"),
+        "release_parents": parents, "reasons": reasons[:10]}
+
+
+def _rollback_doc(acc, release_sha):
+    """acc/rollback.json (tools/rollback_readiness.py) when it is a
+    well-formed record for the release SHA, else (None, reason)."""
+    rb = _opt(acc, "rollback.json")
+    if not isinstance(rb, dict):
+        return None, "READ_UNAVAILABLE:rollback.json"
+    if rb.get("version") != ROLLBACK_VERSION:
+        return None, R_ROLLBACK_MALFORMED
+    if not _is_sha(release_sha) or rb.get("sha") != release_sha:
+        return None, R_ROLLBACK_NOT_THE_RELEASE
+    return rb, None
+
+
+def _migration_delta(rb) -> dict:
+    """The rollback target's migration set against the release's, as the
+    judge read both trees: identical only when nothing was added, removed
+    or changed AND both fingerprints are present and equal."""
+    m = rb.get("migrations") if isinstance(rb.get("migrations"), dict) else {}
+    t = m.get("target") if isinstance(m.get("target"), dict) else {}
+    r = m.get("release") if isinstance(m.get("release"), dict) else {}
+    added, removed, changed = (list(m.get(k) or []) for k in (
+        "added", "removed", "changed"))
+    identical = (bool(t.get("fingerprint")) and t.get("fingerprint") ==
+                 r.get("fingerprint") and not added and not removed and
+                 not changed)
+    return {"identical": identical, "target_fingerprint": t.get("fingerprint"),
+            "release_fingerprint": r.get("fingerprint"),
+            "target_count": t.get("count"), "release_count": r.get("count"),
+            "added": added[:20], "removed": removed[:20],
+            "changed": changed[:20]}
+
+
+def upgrade_receipt(acc, release_sha, target_fingerprint) -> dict:
+    """THE UPGRADE-PATH RECEIPT (acc/upgrade_path.json, tools/
+    upgrade_path_receipt.py readback of capital-critical's attested
+    receipt): PROVEN, UNPROVEN or RED. UNPROVEN: absent, unattested, not
+    capital-critical / the gate run / the release SHA, self-inconsistent,
+    or its base is not the rollback target's migration set (another
+    schema than production ran). RED: the upgrade FAILED."""
+    doc = _opt(acc, "upgrade_path.json")
+    if not isinstance(doc, dict):
+        return {"status": UNPROVEN, "reasons": [R_UPGRADE_READBACK_ABSENT]}
+    prov = doc.get("provenance") if isinstance(doc.get("provenance"),
+                                               dict) else {}
+    rec = doc.get("receipt")
+    if not isinstance(rec, dict):
+        return {"status": UNPROVEN, "reasons": [
+            R_UPGRADE_RECEIPT_ABSENT + (":%s" % doc["reason"]
+                                        if doc.get("reason") else "")]}
+    base = rec.get("base") if isinstance(rec.get("base"), dict) else {}
+    out = {"run_id": prov.get("run_id"), "result": rec.get("result"),
+           "base_sha": base.get("sha"),
+           "base_fingerprint": base.get("migrations_fingerprint"),
+           "new_migrations": list(rec.get("new_migrations") or [])[:20],
+           "seeded": rec.get("seeded"),
+           "rollback_compatibility": rec.get("rollback_compatibility"),
+           "representative": rec.get("representative"),
+           "receipt_reasons": list(rec.get("reasons") or [])[:10]}
+    why = []
+    if prov.get("attestation_verified") is not True:
+        why.append(R_UPGRADE_NOT_ATTESTED)
+    if prov.get("workflow_path") != CAPITAL_CRITICAL_WORKFLOW:
+        why.append(R_UPGRADE_NOT_CAPITAL_CRITICAL)
+    if not _is_sha(release_sha) or prov.get("head_sha") != release_sha \
+            or rec.get("sha") != release_sha:
+        why.append(R_UPGRADE_NOT_THE_RELEASE)
+    gate = _gate_run_id(acc)
+    if gate is None or str(prov.get("run_id")) != str(gate) \
+            or str(rec.get("run_id")) != str(gate):
+        why.append(R_UPGRADE_NOT_THE_GATE_RUN)
+    if rec.get("version") != UPGRADE_PATH_RECEIPT_VERSION or \
+            rec.get("result") not in ("PASSED", "FAILED") or \
+            (rec.get("result") == "PASSED" and rec.get("reasons")):
+        why.append(R_UPGRADE_MALFORMED)
+    if why:
+        return dict(out, status=UNPROVEN, reasons=why)
+    if rec.get("result") != "PASSED":
+        rs = [str(r) for r in rec.get("reasons") or []]
+        if rs and all(r.split(":")[0] in UPGRADE_BASE_SIDE for r in rs):
+            # the BASE could not be found or built: nothing was learned
+            # about this release's migrations -- unproven, not a finding
+            return dict(out, status=UNPROVEN, reasons=[R_UPGRADE_BASE_UNBUILT]
+                        + rs[:6])
+        return dict(out, status=RED, reasons=[R_UPGRADE_FAILED] + rs[:10])
+    if not target_fingerprint or base.get("migrations_fingerprint") != \
+            target_fingerprint:
+        return dict(out, status=UNPROVEN, reasons=[R_UPGRADE_BASE_NOT_TARGET])
+    if rec.get("representative") != "COMPLETE":
+        # a table a new migration acts on held no row when it ran: the
+        # upgrade was not tested where it matters
+        return dict(out, status=UNPROVEN, reasons=[
+            R_UPGRADE_NOT_REPRESENTATIVE] + ["%s:%s" % (
+                R_UPGRADE_NOT_REPRESENTATIVE, t) for t in (
+                    rec.get("unseeded_touched_tables") or [])[:8]])
+    return dict(out, status=PROVEN, reasons=[])
+
+
+def upgrade_path(acc, release_sha):
+    """THE RELEASE'S MIGRATIONS UPGRADE THE PREVIOUS RELEASE'S DATABASE.
+
+    Either the release adds, removes and changes NO migration against the
+    rollback target (the release's previous running build, per Render): the
+    upgrade applies nothing and nothing applied can change -- proven from
+    the two trees' content hashes, recorded as IDENTICAL_MIGRATION_SET, no
+    database run claimed. Or capital-critical's attested upgrade receipt
+    for the release SHA is PASSED from a base with exactly the rollback
+    target's migration set. A FAILED receipt is RED even when the sets are
+    identical (a finding is never overruled)."""
+    rb, why = _rollback_doc(acc, release_sha)
+    delta = _migration_delta(rb) if rb else None
+    rec = upgrade_receipt(acc, release_sha, (delta or {}).get(
+        "target_fingerprint"))
+    if rec["status"] == RED:
+        return False, {"status": RED, "reasons": rec["reasons"],
+                       "receipt": rec, "migration_delta": delta}
+    if rb is None:
+        if why.startswith("READ_UNAVAILABLE"):
+            # the rollback target (production's previous schema) was not
+            # read: nothing to upgrade FROM is known
+            raise Unavailable(why)
+        return False, {"status": UNPROVEN, "reasons": [why],
+                       "receipt": rec}
+    if delta["identical"]:
+        return True, {"status": PROVEN, "evidence": IDENTICAL,
+                      "reasons": [], "migration_delta": delta,
+                      "receipt": rec}
+    return rec["status"] == PROVEN, {
+        "status": rec["status"], "evidence": "UPGRADE_PATH_RECEIPT",
+        "reasons": rec["reasons"], "migration_delta": delta, "receipt": rec}
+
+
+def rollback_ready(acc, release_sha):
+    """THE PREVIOUS RELEASE CAN BE PUT BACK (acc/rollback.json, tools/
+    rollback_readiness.py; facts re-judged here, its own status is not
+    trusted): every service is on the release and names ONE previous
+    commit in its Render deploy history (the rollback target), the target
+    is an ancestor of the release on the release line, its four gates are
+    green on its own SHA, the deploy command for every service is written
+    down, and the target runs on the release's schema -- identical
+    migration sets, or the attested upgrade receipt's compatibility check
+    (no table / column the target uses dropped, retyped or tightened) from
+    a base that IS the target. Nothing here deploys anything."""
+    rb, why = _rollback_doc(acc, release_sha)
+    if rb is None:
+        if why.startswith("READ_UNAVAILABLE"):
+            raise Unavailable(why)
+        return False, {"status": UNPROVEN, "reasons": [why]}
+    reasons = []
+    target = rb.get("target_sha")
+    svcs = rb.get("services") if isinstance(rb.get("services"), dict) else {}
+    for svc in SERVICES:
+        s = svcs.get(svc) if isinstance(svcs.get(svc), dict) else {}
+        if s.get("live_commit") != release_sha:
+            reasons.append("%s:%s" % (R_ROLLBACK_SERVICE_NOT_ON_RELEASE, svc))
+        if not _is_sha(target) or s.get("previous_commit") != target:
+            reasons.append("%s:%s:%s" % (R_ROLLBACK_TARGET_UNKNOWN, svc,
+                                         s.get("previous_commit")))
+    if _is_sha(target):
+        if rb.get("target_is_ancestor_of_release") is not True:
+            reasons.append(R_ROLLBACK_TARGET_NOT_ON_RELEASE_LINE)
+        reasons += ["%s:%s" % (R_ROLLBACK_TARGET_GATE, b)
+                    for b in _gates_green(rb.get("target_gates"), target)]
+        cmds = rb.get("commands") if isinstance(rb.get("commands"),
+                                                dict) else {}
+        if any(target not in str(cmds.get(svc) or "") for svc in SERVICES):
+            reasons.append(R_ROLLBACK_COMMANDS_INCOMPLETE)
+    delta = _migration_delta(rb)
+    rec = upgrade_receipt(acc, release_sha, delta["target_fingerprint"])
+    compat = rec.get("rollback_compatibility") if isinstance(
+        rec.get("rollback_compatibility"), dict) else {}
+    if delta["identical"] and rec["status"] != RED:
+        schema = "COMPATIBLE_IDENTICAL_SCHEMA"
+    elif rec["status"] == PROVEN and compat.get("verdict") == COMPATIBLE:
+        schema = "COMPATIBLE_BY_UPGRADE_RECEIPT"
+    elif rec["status"] == PROVEN:
+        schema = "BLOCKED"
+        reasons.append(R_ROLLBACK_SCHEMA_BLOCKED)
+        reasons += ["%s:%s" % (R_ROLLBACK_SCHEMA_BLOCKED, b)
+                    for b in (compat.get("blocking") or [])[:8]]
+    else:
+        schema = "UNPROVEN"
+        reasons.append(R_ROLLBACK_SCHEMA_UNPROVEN)
+        reasons += ["%s:%s" % (R_ROLLBACK_SCHEMA_UNPROVEN, r)
+                    for r in rec["reasons"][:4]]
+    return not reasons, {
+        "status": "READY" if not reasons else "NOT_READY",
+        "target_sha": target, "schema": schema,
+        "previous_by_service": {s: (svcs.get(s) or {}).get("previous_commit")
+                                for s in SERVICES},
+        "commands": rb.get("commands"), "procedure": rb.get("procedure"),
+        "migration_delta": delta, "reasons": reasons[:12]}
+
+
+# ── V2: the inputs' identities, and the pinning record ───────────────────
+
+def _dig(doc, path):
+    cur = doc
+    for part in path.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
+def _raw(acc, name):
+    try:
+        return _load(acc, name, pinned=False)
+    except Unavailable:
+        return None
+
+
+def _sha_or_none(v):
+    v = v.strip().lower() if isinstance(v, str) else None
+    return v if v and _SHA40.match(v) else None
+
+
+def identities(acc, release_sha, frontend_preview=None) -> dict:
+    """Which release each input names, at declared paths.
+
+    API-served readbacks name their own serving build where they carry one
+    (OWN_IDENTITY), otherwise the serving API's (red_team.json
+    implementation_sha / release.json api.sha; two that disagree mean the
+    API changed during the run: every API-served input without its own
+    identity is then refused). The device views and the Trader acceptance
+    are the production frontend's only when the previewed SHA is production
+    build.json's; the Trader acceptance's API is the release's only when
+    every device's api.source_sha is it."""
+    ref = _sha_or_none(release_sha)
+    api_vals = {}
+    for name, path in API_IDENTITY:
+        d = _raw(acc, name)
+        if name == "red_team.json" and not (isinstance(d, dict) and
+                                            d.get("status") == "OK"):
+            continue
+        v = _sha_or_none(_dig(d, path))
+        if v:
+            api_vals["%s:%s" % (name, path)] = v
+    distinct = sorted(set(api_vals.values()))
+    api = {"sources": api_vals, "conflict": len(distinct) > 1,
+           "sha": distinct[0] if len(distinct) == 1 else None}
+
+    def verdict(named):
+        if ref is None:
+            return {"verdict": NO_REFERENCE, "named": named, "reason": None}
+        if named is None:
+            return {"verdict": UNATTRIBUTED, "named": None, "reason": None}
+        if named == ref:
+            return {"verdict": MATCHES, "named": named, "reason": None}
+        return {"verdict": FOREIGN, "named": named,
+                "reason": "names=%s:release=%s" % (named[:12], ref[:12])}
+
+    files = {}
+    for name in sorted(set(API_SERVED) | set(OWN_IDENTITY)):
+        if not os.path.isfile(os.path.join(acc, name)):
+            continue
+        own_path = OWN_IDENTITY.get(name)
+        own = _sha_or_none(_dig(_raw(acc, name), own_path)) if own_path \
+            else None
+        if own:
+            files[name] = dict(verdict(own), source="own:%s" % own_path)
+        elif name in API_SERVED and api["conflict"]:
+            files[name] = {"verdict": FOREIGN if ref else NO_REFERENCE,
+                           "named": distinct, "source": "api",
+                           "reason": "%s:%s" % (R_API_IDENTITY_CONFLICT,
+                                                ",".join(d[:12] for d in
+                                                         distinct))}
+        elif name in API_SERVED:
+            files[name] = dict(verdict(api["sha"]), source="api")
+        else:
+            files[name] = dict(verdict(None), source="own:%s" % own_path)
+
+    # the frontend: production's build.json against the previewed SHA
+    fb = _raw(acc, FRONTEND_BUILD)
+    prod = _sha_or_none(_dig(fb, "sha")) if isinstance(fb, dict) and \
+        fb.get("schema") == "bt.frontend.build.v1" else None
+    prev_id, trader = None, None
+    if frontend_preview:
+        d = os.path.dirname(frontend_preview)
+        pid = os.path.join(d, FRONTEND_PREVIEW_IDENTITY)
+        if os.path.isfile(pid):
+            try:
+                prev_id = _sha_or_none(_dig(_parse_file(
+                    acc, _key(acc, pid), pid), "target_sha"))
+            except Unavailable:
+                prev_id = None
+        tp = os.path.join(d, "trader_accept.json")
+        if os.path.isfile(tp):
+            try:
+                t = _parse_file(acc, _key(acc, tp), tp)
+                trader = sorted({_sha_or_none(((r or {}).get("api") or {})
+                                              .get("source_sha")) or "UNNAMED"
+                                 for r in (t.get("results") or [])
+                                 if isinstance(r, dict)}) \
+                    if isinstance(t, dict) else None
+            except Unavailable:
+                trader = None
+    if prod and prev_id:
+        fe = {"verdict": MATCHES if prod == prev_id else FOREIGN,
+              "named": prev_id, "reason": None if prod == prev_id else
+              "%s:previewed=%s:production=%s" % (
+                  R_FRONTEND_NOT_DEPLOYED, prev_id[:12], prod[:12])}
+    else:
+        fe = {"verdict": UNATTRIBUTED, "named": prev_id, "reason": None}
+    fe.update(production_sha=prod, preview_sha=prev_id)
+    if not trader:
+        tr = {"verdict": UNATTRIBUTED, "named": None, "reason": None}
+    elif ref is None:
+        tr = {"verdict": NO_REFERENCE, "named": trader, "reason": None}
+    elif trader == [ref]:
+        tr = {"verdict": MATCHES, "named": trader, "reason": None}
+    elif any(x not in (ref, "UNNAMED") for x in trader):
+        tr = {"verdict": FOREIGN, "named": trader,
+              "reason": "trader_api_source_sha=%s:release=%s" % (
+                  ",".join(x[:12] for x in trader), ref[:12])}
+    else:
+        tr = {"verdict": UNATTRIBUTED, "named": trader, "reason": None}
+    return {"reference": ref, "api": api, "files": files, "frontend": fe,
+            "trader_api": tr}
+
+
+def _self_sha256() -> str:
+    try:
+        with open(os.path.abspath(__file__), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()
+    except OSError:
+        return "UNREADABLE"
+
+
+def pinning(acc, *, release_sha, evaluator_sha, implementation_sha) -> dict:
+    """WHAT JUDGED WHAT: the evaluator (judge commit, this file's sha256,
+    VERSION), the implementation / release / production-frontend SHAs, the
+    sha256 of every input file this scoring parsed (the bytes it graded)
+    and each input's identity verdict."""
+    ident = getattr(acc, "identity", None) or {}
+    lin = _raw(acc, "lineage.json")
+    lin_impl = _sha_or_none(_dig(lin, "implementation_sha"))
+    given = _sha_or_none(implementation_sha)
+    files = ident.get("files") or {}
+    refused = sorted(n for n, v in files.items() if v["verdict"] == FOREIGN)
+    unattributed = sorted(n for n, v in files.items()
+                          if v["verdict"] == UNATTRIBUTED)
+    for k, label in (("frontend", "frontend_preview"),
+                     ("trader_api", "trader_accept")):
+        v = (ident.get(k) or {}).get("verdict")
+        if v == FOREIGN:
+            refused.append(label)
+        elif v == UNATTRIBUTED:
+            unattributed.append(label)
+    fe = ident.get("frontend") or {}
+    verdict = (NO_REFERENCE if ident.get("reference") is None else
+               "INPUTS_REFUSED" if refused else
+               "UNATTRIBUTED_INPUTS" if unattributed else "PINNED")
+    return {
+        "evaluator": {"sha": _sha_or_none(evaluator_sha),
+                      "version": VERSION,
+                      "source": "backend/tools/scorecard_14.py",
+                      "source_sha256": _self_sha256()},
+        "release_sha": ident.get("reference"),
+        "implementation_sha": given or lin_impl,
+        "implementation_sha_sources": {"argument": given,
+                                       "lineage.json": lin_impl},
+        "frontend_sha": fe.get("production_sha"),
+        "frontend_preview_sha": fe.get("preview_sha"),
+        "api_serving_sha": (ident.get("api") or {}).get("sha"),
+        "inputs_sha256": dict(sorted(getattr(acc, "read", {}).items())),
+        "inputs_unreadable": dict(sorted(getattr(acc, "absent", {}).items())),
+        "identity": ident, "refused_inputs": refused,
+        "unattributed_inputs": unattributed, "verdict": verdict}
+
+
+# ── V2: every grading difference from the pinned prior evaluator ─────────
+
+#: the RC5 judge (pm-acceptance 37836393458 ran with it)
+PRIOR_EVALUATOR_SHA = "2fadc8dc7e17f403bcdfd449581d070eff2981c4"
+#: each unit whose grading differs from PRIOR_EVALUATOR_SHA's, and why.
+#: tools/grading_diff.py attaches these to the verdict differences it finds
+#: on the same packet; a difference matching none is UNDECLARED, and every
+#: difference is listed either way.
+GRADING_CHANGES = (
+    {"id": "RC6_BOUND_MIGRATION_INTEGRITY", "since": "7ea9a61a",
+     "units": [["Red-team safeguards", "MIGRATION_INTEGRITY"],
+               ["Deployment infrastructure", "migration_integrity"]],
+     "reason": "the API's MIGRATION_INTEGRITY read UNKNOWN for the sole "
+               "absence FRESH_DB_RESULT_NOT_IN_THIS_PROCESS (applied 224 = "
+               "repo 224, fingerprints equal, 37836393458); bound with "
+               "capital-critical's attested fresh-database receipt of the "
+               "release SHA: lifted only when PROVEN, RED from either side "
+               "is RED, absent is UNPROVEN"},
+    {"id": "RC6_BOUND_RELEASE", "since": "7ea9a61a",
+     "units": [["Red-team safeguards", "RELEASE"]],
+     "reason": "the API's RELEASE read UNKNOWN for the sole absence "
+               "NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA (post_receipt off); "
+               "bound with the judge's release verdict for the release SHA "
+               "(the API's own release gate): only GREEN lifts it"},
+    {"id": "RC6E_KALSHI_CREDENTIAL_SCOPE", "since": VERSION,
+     "units": [["Kalshi integration", "credential_class_control"]],
+     "reason": "read the AGGREGATE CREDENTIAL_CLASSES status, RED only from "
+               "CREDENTIAL_CLASS_MISMATCH:PMUS:POLYMARKET_EXCHANGE_RSA_M2M "
+               "while evidence.verdicts.KALSHI = MATCHES (37836393458); now "
+               "Kalshi's own verdict, provisioning in every process and "
+               "Kalshi blockers. The Red-team CREDENTIAL_CLASSES unit stays "
+               "the aggregate"},
+    {"id": "RC6E_RELEASE_LINEAGE", "since": VERSION,
+     "units": [["Deployment infrastructure", "release_lineage"]],
+     "reason": "ADDED (owner directive 2E): implementation tree == release "
+               "tree, single-parent release commit, the release branch at "
+               "the release, gates green on both SHAs"},
+    {"id": "RC6E_UPGRADE_PATH", "since": VERSION,
+     "units": [["Deployment infrastructure", "upgrade_path"]],
+     "reason": "ADDED (owner directive 2E): the release's migrations onto "
+               "the previous release's schema with representative rows, "
+               "no applied migration changed"},
+    {"id": "RC6E_ROLLBACK_READY", "since": VERSION,
+     "units": [["Deployment infrastructure", "rollback_ready"]],
+     "reason": "ADDED (owner directive 2E): previous release per service, "
+               "its gates, its deploy commands, and its compatibility with "
+               "the new schema"},
+    {"id": "RC6E_INPUT_PINNING", "since": VERSION, "units": [["*", "*"]],
+     "when_current_detail_contains": R_INPUT_NAMES_ANOTHER_RELEASE,
+     "reason": "an input that names another release than the one graded "
+               "is UNMEASURED (never graded as this release's evidence)"},
+)
+
+
+def _key(acc, path) -> str:
+    """An input's name in the pinning record: its path inside the packet,
+    or as given when it lies elsewhere."""
+    rel = os.path.relpath(os.path.abspath(path), os.path.abspath(acc))
+    return path if rel.startswith("..") else rel
+
+
+def _frontend_doc(acc, path, kind):
+    """The device-view file ('preview') or the Trader acceptance
+    ('trader'), read once and hashed; UNMEASURED when it names another
+    frontend than production's build.json, or (Trader) another API
+    release than the one graded."""
+    doc = _parse_file(acc, _key(acc, path), path)
+    ident = getattr(acc, "identity", None) or {}
+    fe = ident.get("frontend") or {}
+    if fe.get("verdict") == FOREIGN:
+        raise Foreign("UNMEASURED:%s:%s:%s" % (
+            R_INPUT_NAMES_ANOTHER_RELEASE, _key(acc, path), fe.get("reason")))
+    tr = ident.get("trader_api") or {}
+    if kind == "trader" and tr.get("verdict") == FOREIGN:
+        raise Foreign("UNMEASURED:%s:%s:%s" % (
+            R_INPUT_NAMES_ANOTHER_RELEASE, _key(acc, path), tr.get("reason")))
+    return doc if isinstance(doc, dict) else {}
+
+
+def _frontend_gate(path, acc=None):
     if not path or not os.path.isfile(path):
         raise Unavailable("READ_UNAVAILABLE:frontend_preview:NOT_SUPPLIED")
-    recs = json.load(open(path)).get("records") or []
+    recs = _frontend_doc(acc, path, "preview").get("records") or []
     ok = bool(recs) and all(_view_ok(r) for r in recs)
     return ok, {"views": len(recs), "views_ok": sum(1 for r in recs if _view_ok(r))}
 
@@ -721,25 +1503,30 @@ def _view_ok(r):
     return all(_view_checks(r).values())
 
 
-def _device_units(card, path):
+def _device_units(card, path, acc=None):
     if not path or not os.path.isfile(path):
         card.units.append({"unit": "device_views", "passed": False, "members": None,
                            "detail": "READ_UNAVAILABLE:frontend_preview:NOT_SUPPLIED",
                            "class": "READ_UNAVAILABLE"})
         return
-    recs = json.load(open(path)).get("records") or []
-    for r in recs:
+    try:
+        recs = _frontend_doc(acc, path, "preview").get("records") or []
+    except Unavailable as exc:
+        card.units.append({"unit": "device_views", "passed": False, "members": None,
+                           "detail": str(exc), "class": _failed_read(exc)})
+        recs = None
+    for r in recs or []:
         for k, v in _view_checks(r).items():
             card.units.append({"unit": "%s:%s" % (r.get("view"), k), "passed": bool(v),
                                "detail": None, "class": "PASS" if v else "FAIL"})
-    _trader_units(card, os.path.join(os.path.dirname(path), "trader_accept.json"))
+    _trader_units(card, os.path.join(os.path.dirname(path), "trader_accept.json"), acc)
 
 
 #: every device the Trader acceptance must cover (frontend-preview trader_accept.js)
 TRADER_DEVICES = ("desktop", "iphone", "iphone_landscape", "ipad_portrait", "ipad_landscape")
 
 
-def _trader_units(card, path):
+def _trader_units(card, path, acc=None):
     """TRADER DEVICE ACCEPTANCE (PM 2026-10-08): the rendered Trader page
     against the production API's own snapshot on each device -- every open
     position, standing orders, bid / ask, Xavier's recorded action, game
@@ -755,7 +1542,13 @@ def _trader_units(card, path):
                            "detail": "READ_UNAVAILABLE:trader_accept.json:NOT_SUPPLIED",
                            "class": "READ_UNAVAILABLE"})
         return
-    got = {r.get("device"): r for r in (json.load(open(path)).get("results") or [])}
+    try:
+        doc = _frontend_doc(acc, path, "trader")
+    except Unavailable as exc:
+        card.units.append({"unit": unit, "passed": False, "members": None,
+                           "detail": str(exc), "class": _failed_read(exc)})
+        return
+    got = {r.get("device"): r for r in (doc.get("results") or [])}
     absent = [d for d in TRADER_DEVICES if d not in got]
     if absent:
         card.units.append({"unit": unit, "passed": False, "members": None,
@@ -779,8 +1572,12 @@ def main(argv=None):
     ap.add_argument("acc")
     ap.add_argument("--release-sha")
     ap.add_argument("--frontend-preview")
+    ap.add_argument("--evaluator-sha")
+    ap.add_argument("--implementation-sha")
     a = ap.parse_args(argv)
-    out = score(a.acc, release_sha=a.release_sha, frontend_preview=a.frontend_preview)
+    out = score(a.acc, release_sha=a.release_sha, frontend_preview=a.frontend_preview,
+                evaluator_sha=a.evaluator_sha or None,
+                implementation_sha=a.implementation_sha or None)
     with open(os.path.join(a.acc, "scorecard_14.json"), "w") as f:
         json.dump(out, f, indent=1, default=str)
     for i, cat in enumerate(out["categories"], 1):
@@ -792,6 +1589,13 @@ def main(argv=None):
             "-" if r is None else "%.1f%%" % (100 * r), comps,
             ("  unreadable: " + ",".join(cat["unreadable_units"])) if cat["unreadable_units"] else ""))
     print("categories passing: %d/14 (not averaged)" % out["passing"])
+    pin = out["pinning"]
+    print("pinned: evaluator %s (%s, source %s) release %s implementation %s "
+          "frontend %s; %d inputs hashed; refused %s; unattributed %s" % (
+              pin["evaluator"]["sha"], VERSION, pin["evaluator"]["source_sha256"][:12],
+              pin["release_sha"], pin["implementation_sha"], pin["frontend_sha"],
+              len(pin["inputs_sha256"]), ",".join(pin["refused_inputs"]) or "none",
+              ",".join(pin["unattributed_inputs"]) or "none"))
     return 0
 
 

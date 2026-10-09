@@ -68,12 +68,20 @@ FD = _tool("fresh_db_receipt")
 RV = _tool("release_verdict")
 SC = _tool("scorecard_14")
 EP = _tool("evidence_packet")
+RB = _tool("rollback_readiness")
 
 #: release 69a8a07e and its capital-critical gate run (pm-acceptance
 #: 37836393458 gates.json)
 REL = "69a8a07e5335864bd3d70f7160494aed13305fcc"
 BASE = "a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd"
 OTHER = "08828d04766017e520ffd4a34740162a2c792d36"
+#: RC5's implementation (tree a88f876f == 69a8a07e's) and the release that
+#: ran before it on every service (Render deploy history)
+IMPL = "2f72a2c1e7f237d5fb0849d971b2a38c680bb58c"
+PREV = "7fd4574e9ac8b95c355035a5bd4a9927d01c29ea"
+TREE = "a88f876f71370c7296d8eb92556d5ede42a90d34"
+GATES = ("backend_tests", "capital_critical", "commit_guard",
+         "engine_diagnostic")
 GATE_RUN = 37803641023
 REPO = "matthewtaylor141-lab/SportsAssets"
 MAP = {"001_init.sql": "a" * 64, "002_more.sql": "b" * 64,
@@ -134,11 +142,37 @@ def _acc(tmp_path, *, mig=None, release=None, running=REL, receipt="OK",
     _w(acc, "lineage.json", {"accepted_base_sha": BASE, "sha": REL,
                              "descendant_of_base": descendant,
                              "release_branch": "claude/release-api",
-                             "release_sha": release_branch})
-    _w(acc, "render.json", {
-        "sportsassets-api": {"live_commit": running},
-        "sportsassets-workers": {"live_commit": workers},
-        "sportsassets-market-plane": {"live_commit": REL}})
+                             "release_sha": release_branch,
+                             # V2 (RC6 lane E) lineage facts
+                             "implementation_sha": IMPL,
+                             "implementation_tree": TREE,
+                             "release_tree": TREE, "trees_equal": True,
+                             "release_parents": [PREV]})
+    # the same four gates on the implementation SHA, and the V2 rollback
+    # record: Render's previous deploy on every service, its gates, and
+    # migration sets identical to the release's (RC6 against RC5)
+    _w(acc, "gates_implementation.json", {"runs": {
+        k: {"id": i + 1, "status": "completed", "conclusion": "success",
+            "head_sha": IMPL} for i, k in enumerate(GATES)}})
+    _w(acc, "gates_rollback_target.json", {"runs": {
+        k: {"id": i + 11, "status": "completed", "conclusion": "success",
+            "head_sha": PREV} for i, k in enumerate(GATES)}})
+    live = {"sportsassets-api": running, "sportsassets-workers": workers,
+            "sportsassets-market-plane": REL}
+    for svc in SC.SERVICES:
+        _w(acc, "deploys_%s.json" % svc, [
+            {"deploy": {"id": "d1", "status": "live",
+                        "commit": {"id": live[svc]}}},
+            {"deploy": {"id": "d0", "status": "deactivated",
+                        "commit": {"id": PREV}}}])
+    _w(acc, "render.json", {s: {"live_commit": live[s]}
+                            for s in SC.SERVICES})
+    mig = tmp_path / "mig"
+    mig.mkdir(exist_ok=True)
+    (mig / "001_init.sql").write_text("select 1;\n")
+    _w(acc, "rollback.json", RB.build(acc, sha=REL, target_migrations=mig,
+                                      release_migrations=mig,
+                                      target_is_ancestor=True))
     _w(acc, "canary.json", {"boots": {"workers_boot": {"commit_sha": REL}}})
     _w(acc, "venues.json", {"status": "OK", "data": {"health": {
         "KALSHI_HEALTH": {"mechanism": {"plane": {
@@ -514,7 +548,8 @@ def test_the_rc5_packet_without_a_receipt_is_unproven_and_named(tmp_path):
 
 def test_an_attested_passed_receipt_matching_production_proves_it(tmp_path):
     """The RC5 state with capital-critical's receipt of the same SHA: the
-    Deployment row is 6/6."""
+    Deployment row is 9/9 (V2 adds lineage, upgrade path and rollback, all
+    evidenced in the fixture)."""
     out = _score(_acc(tmp_path))
     dep = _cat(out, "Deployment infrastructure")
     assert dep["passes"] is True and dep["readiness"] == 1.0
@@ -567,10 +602,18 @@ def test_an_unverifiable_receipt_is_unproven_never_a_pass(
 
 def test_a_running_api_on_another_sha_is_not_proven_by_this_receipt(
         tmp_path):
-    out = _score(_acc(tmp_path, running=OTHER))
+    acc = _acc(tmp_path, running=OTHER)
+    # the binding itself names the running API on another SHA
+    ok, detail = SC.migration_integrity(str(acc), REL)
+    assert ok is False
+    assert SC.R_RUNNING_NOT_THE_RELEASE in detail["blockers"]
+    # and the scorecard (V2, inputs pinned) does not grade release REL from
+    # an API serving OTHER at all: UNMEASURED, red_team.json named
+    out = _score(acc)
     u = _unit(out, "Deployment infrastructure", "migration_integrity")
-    assert u["passed"] is False
-    assert SC.R_RUNNING_NOT_THE_RELEASE in u["detail"]["blockers"]
+    assert u["passed"] is False and u["class"] == "UNMEASURED"
+    assert "INPUT_NAMES_ANOTHER_RELEASE:red_team.json" in u["detail"]
+    assert "red_team.json" in out["pinning"]["refused_inputs"]
 
 
 @pytest.mark.parametrize("case", ["FINGERPRINT", "COUNT", "BUILD_FAILED"])
@@ -716,7 +759,22 @@ def test_a_body_the_api_would_refuse_is_unproven(tmp_path, case):
     _w(acc, "release_verdict.json", v)
     if case == "red_team_unread":
         return            # the RELEASE unit itself is READ_UNAVAILABLE then
-    u = _unit(_score(acc), "Red-team safeguards", "RELEASE")
+    ok, detail = SC.release_control(str(acc), REL)
+    assert ok is False and detail["status"] == SC.UNPROVEN
+    assert detail["blockers"] == (
+        [SC.R_RELEASE_VERDICT_NOT_THE_RELEASE] if case == "short_sha" else
+        ["%s:%s" % (SC.R_RELEASE_VERDICT_REFUSED, r) for r in want])
+    out = _score(acc)
+    if case == "running_elsewhere":
+        # V2: the red-team readback names OTHER, not the graded release:
+        # its controls are UNMEASURED, none is graded as REL's
+        rt = _cat(out, "Red-team safeguards")
+        assert rt["passes"] is False
+        assert [u["class"] for u in rt["units"]] == ["UNMEASURED"]
+        assert "INPUT_NAMES_ANOTHER_RELEASE:red_team.json" in \
+            rt["units"][0]["detail"]
+        return
+    u = _unit(out, "Red-team safeguards", "RELEASE")
     assert u["passed"] is False and u["detail"]["status"] == SC.UNPROVEN
     assert u["detail"]["blockers"] == (
         [SC.R_RELEASE_VERDICT_NOT_THE_RELEASE] if case == "short_sha" else
@@ -929,3 +987,17 @@ def test_the_receipt_tool_is_stdlib_only():
     assert imports == ["__future__", "argparse", "hashlib", "json",
                        "pathlib", "re", "sys"]
     assert hashlib.sha256(b"").hexdigest()      # (hashlib is the stdlib's)
+
+
+def test_an_api_green_from_another_build_never_passes_for_this_release(
+        tmp_path):
+    """RC6 lane E: the binding keeps an API GREEN as GREEN, so an API on
+    ANOTHER build reporting MIGRATION_INTEGRITY GREEN passed the release's
+    Deployment unit (its fresh-database half said UNPROVEN, ignored under
+    GREEN). With the inputs pinned, that readback is not this release's
+    evidence: UNMEASURED."""
+    fp = SC._fingerprint(MAP)
+    acc = _acc(tmp_path, running=OTHER, mig=_mig(fp, status="GREEN",
+                                                  blockers=()))
+    u = _unit(_score(acc), "Deployment infrastructure", "migration_integrity")
+    assert u["passed"] is False and u["class"] == "UNMEASURED"

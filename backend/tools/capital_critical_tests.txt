@@ -1385,3 +1385,9 @@ tests/test_rc6_ev_audit_pricing.py
 tests/test_rc6_ev_audit_evidence_db.py
 # (RC6 ev-audit) the research registry: one preregistration per plan sha before the interlock reads, keyed-hash event partition, holdout never read, PBO by CSCV and DSR (published example 0.9004), losing selections never accepted, unregistered strategies named
 tests/test_rc6_ev_audit_research_registry.py
+# (RC6 lane E) the 14-category scorecard pins its evaluator and inputs (an input naming another release is UNMEASURED, never graded as this release's), Kalshi's credential unit reads Kalshi's own verdict while the Red-team aggregate stays, and every declared unit is unchanged
+tests/test_scorecard_14.py
+# (RC6 lane E) release lineage (implementation tree == release tree, single parent, gates on both SHAs), rollback readiness (what ran before per Render, its gates, its schema), the upgrade-path binding and the grading-logic diff against the pinned prior evaluator
+tests/test_rc6e_deploy_lineage.py
+# (RC6 lane E) the upgrade path on real PostgreSQL: the previous release's schema with representative rows, this release's migrations by production's runner, nothing applied changed, nothing seeded lost, the previous release on the new schema
+tests/test_rc6e_upgrade_path.py
