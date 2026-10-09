@@ -204,58 +204,104 @@ def diagnose_optimistic(order: dict) -> str | None:
     return M_EARLY_CANCEL
 
 
-def agreement(orders: list) -> dict:
-    """The repaired twin over recorded marketable PAPER orders, in order of
-    eligibility (the consumption ledger is shared, as PAPER's is)."""
-    ledger: dict = {}
-    marketable = [o for o in orders if str(o.get("tif") or "").upper()
-                  in ("IOC", "FOK")]
-    marketable.sort(key=lambda o: float(o.get("eligible") or o.get(
-        "created") or 0))
-    agree, residual, optimistic = 0, Counter(), Counter()
-    events = set()
-    replayed = false_fills = lookahead = 0
-    for o in marketable:
-        r = replay_marketable(o, ledger)
+def _eligibility(o: dict) -> float:
+    return float(o.get("eligible") or o.get("created") or 0)
+
+
+class OutOfEligibilityOrder(ValueError):
+    """A batch handed to `Agreement.add` holds an order eligible BEFORE one
+    an earlier batch already replayed. The shared consumption ledger would
+    then be applied out of PAPER's order, so the stream is refused rather
+    than replayed in a different order."""
+
+
+class Agreement:
+    """`agreement` over a STREAM of batches (RC6.2 lane p-evcontrols).
+
+    The twin's population -- every fresh marketable order -- only grows, so
+    its read is replayed a page at a time as it arrives instead of being held
+    whole in memory. Batches must arrive in eligibility order (the read pages
+    on eligible_at, order_id). Within a batch the orders are sorted exactly
+    as `agreement` sorts them, and the consumption ledger is shared across
+    batches, as PAPER's is. Over the same orders, any split into in-order
+    batches gives the report `agreement` gives on the whole list."""
+
+    def __init__(self):
+        self.ledger: dict = {}
+        self.marketable = self.agree = 0
+        self.replayed = self.false_fills = self.lookahead = 0
+        self.residual: Counter = Counter()
+        self.optimistic: Counter = Counter()
+        self.events: set = set()
+        self.last_eligible: float | None = None
+
+    def add(self, orders: list) -> "Agreement":
+        marketable = [o for o in orders if str(o.get("tif") or "").upper()
+                      in ("IOC", "FOK")]
+        marketable.sort(key=_eligibility)
+        if marketable and self.last_eligible is not None and \
+                _eligibility(marketable[0]) < self.last_eligible:
+            raise OutOfEligibilityOrder(
+                "batch starts at %r, before %r already replayed"
+                % (_eligibility(marketable[0]), self.last_eligible))
+        self.marketable += len(marketable)
+        for o in marketable:
+            self.last_eligible = _eligibility(o)
+            self._one(o)
+        return self
+
+    def _one(self, o: dict) -> None:
+        r = replay_marketable(o, self.ledger)
         if r["state"] == "NOT_REPLAYABLE":
-            continue
-        replayed += 1
-        events.add(str(o.get("slug") or ""))
+            return
+        self.replayed += 1
+        self.events.add(str(o.get("slug") or ""))
         # the red team's certification counters (digital_twin_gate): the
         # twin FILLED where PAPER expired, and any book used from before
         # the order was eligible or after it expired (lookahead / stale)
         tq = float(r.get("qty") or 0)
         if tq > QTY_TOL and _paper_qty(o) <= QTY_TOL:
-            false_fills += 1
+            self.false_fills += 1
         el = o.get("eligible") or o.get("decided") or o.get("created")
         ex = o.get("expires")
         bat = r.get("book_at")
         if bat is not None and ((el is not None and bat < float(el)) or (
                 ex is not None and bat > float(ex))):
-            lookahead += 1
+            self.lookahead += 1
         c = classify(o, r)
         if c is None:
-            agree += 1
+            self.agree += 1
         else:
-            residual[c] += 1
+            self.residual[c] += 1
         d = diagnose_optimistic(o)
         if d is not None:
-            optimistic[d] += 1
-    rate = round(agree / replayed, 6) if replayed else None
-    return {"version": VERSION, "semantics": SEMANTICS,
-            "marketable_orders": len(marketable), "replayed": replayed,
-            "agree": agree, "fill_agreement_rate": rate, "target": TARGET,
-            "certified": bool(rate is not None and rate >= TARGET),
-            "compared": replayed,
-            "optimistic_false_fills": false_fills,
-            "optimistic_false_fill_rate": (round(false_fills / replayed, 6)
-                                           if replayed else None),
-            "lookahead_violations": lookahead,
-            "residual_mismatch_taxonomy": dict(residual),
-            "optimistic_twin_mismatch_taxonomy": dict(optimistic),
-            "markets": len(events),
-            # this module computes no twin P&L at all; none is reported
-            # anywhere until a FRESH receipt certifies (readback decides)
-            "twin_pnl_reported": False,
-            "scope": ("agreement with recorded PAPER_SIM_V1 outcomes on the "
-                      "same recorded books; not venue execution")}
+            self.optimistic[d] += 1
+
+    def report(self) -> dict:
+        replayed, agree = self.replayed, self.agree
+        rate = round(agree / replayed, 6) if replayed else None
+        return {"version": VERSION, "semantics": SEMANTICS,
+                "marketable_orders": self.marketable, "replayed": replayed,
+                "agree": agree, "fill_agreement_rate": rate,
+                "target": TARGET,
+                "certified": bool(rate is not None and rate >= TARGET),
+                "compared": replayed,
+                "optimistic_false_fills": self.false_fills,
+                "optimistic_false_fill_rate": (
+                    round(self.false_fills / replayed, 6)
+                    if replayed else None),
+                "lookahead_violations": self.lookahead,
+                "residual_mismatch_taxonomy": dict(self.residual),
+                "optimistic_twin_mismatch_taxonomy": dict(self.optimistic),
+                "markets": len(self.events),
+                # this module computes no twin P&L at all; none is reported
+                # anywhere until a FRESH receipt certifies (readback decides)
+                "twin_pnl_reported": False,
+                "scope": ("agreement with recorded PAPER_SIM_V1 outcomes on "
+                          "the same recorded books; not venue execution")}
+
+
+def agreement(orders: list) -> dict:
+    """The repaired twin over recorded marketable PAPER orders, in order of
+    eligibility (the consumption ledger is shared, as PAPER's is)."""
+    return Agreement().add(orders).report()
