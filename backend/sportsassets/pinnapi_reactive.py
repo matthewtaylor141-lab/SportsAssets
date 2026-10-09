@@ -235,7 +235,11 @@ class Scheduler:
         replaces a live native one, and a native one replaces it.
         `index` (`pinnapi_primary.fixture_index` of this cache, built once by
         a pass that registers many seeds) spares a full fixture-view rebuild
-        per seed. Returns what happened, by name."""
+        per seed; without one, the cache's current-generation index
+        (`pinnapi_primary.current_index`, RC6.1 api-stall2) answers what the
+        scan would. Returns what happened, by name."""
+        if index is None:
+            index = P.current_index(self.cache)
         hit, why = P.match_event(self.cache, event, family, index=index)
         if why:
             self.counts[why] += 1
@@ -672,11 +676,14 @@ def batch_index():
 WARM_COLD_NAMES_MIN = 200
 
 
-async def warm_names() -> int:
+async def warm_names(cache=None) -> int:
     """Fold the active cache's not-yet-folded participant names on the API's
     CPU lane (cpu_lane), BEFORE a batch builds its `batch_index` on the loop;
     returns how many were folded (0: none cold enough to bother, or no
-    scheduler here). Awaited before the batch, never inside it.
+    scheduler here). Awaited before the batch, never inside it. `cache`
+    (RC6.1 api-stall2): the feed cache to warm when it is not the
+    scheduler's -- the ext_pinnacle cycle warms the owner's cache before its
+    per-event reads build `pinnapi_primary.current_index` on the loop.
 
     WHY (RC6, the responsiveness harness). `fixture_index` folds and
     canonicalises both names of every cached fixture; the memos make every
@@ -686,11 +693,13 @@ async def warm_names() -> int:
     BENCHMARK ONLY), 0.5-0.66 s holds in the harness at its load. Deploys
     are when RC5's health-check restarts came (loop_watchdog). The answers
     are the memos' own whichever thread fills them."""
-    if ACTIVE is None:
-        return 0
+    if cache is None:
+        if ACTIVE is None:
+            return 0
+        cache = ACTIVE.cache
     try:
         from . import pinnapi_primary as P
-        pairs = P.cold_names(ACTIVE.cache)
+        pairs = P.cold_names(cache)
     except Exception:                                           # noqa: BLE001
         return 0
     if len(pairs) < WARM_COLD_NAMES_MIN:

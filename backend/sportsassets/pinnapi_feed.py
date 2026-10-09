@@ -799,6 +799,13 @@ class FeedCache:
         self._pending: Optional[dict] = None
         self._backlog: collections.deque = collections.deque()
         self.snapshot_build_ms = Ring()
+        # (RC6.1 api-stall2) THE CACHE'S GENERATION: +1 whenever its events
+        # or quotes may have changed -- every applied frame (`_apply`, inline
+        # or drained), a new connection, a snapshot swapped in. The only
+        # writers of `events` are those three, all on the event loop. A
+        # reader that derives something from the events (pinnapi_primary.
+        # current_index) may keep it while the generation is unchanged.
+        self.generation = 0
 
     # ── lifecycle ────────────────────────────────────────────────────
     def new_connection(self, subscriptions) -> int:
@@ -806,6 +813,7 @@ class FeedCache:
         reconnect never leaves an old price usable -- nor a snapshot still
         being built for the old socket, nor the frames queued behind it."""
         self._discard_pending("snapshot_builds_discarded_new_connection")
+        self.generation += 1
         self.events.clear()
         self.quotes.clear()
         self.counts["epochs"] += 1
@@ -947,6 +955,7 @@ class FeedCache:
         await self._drain(token)
 
     def _swap_in(self, sh) -> None:
+        self.generation += 1
         self.events, self.quotes = sh.events, sh.quotes
         self.counts.update(sh.counts)
         self.confirmations.update(sh.confirmations)
@@ -1028,6 +1037,7 @@ class FeedCache:
     def _apply(self, msg: dict, *, epoch: int,
                received_ms: Optional[float] = None) -> str:
         """Apply one envelope from connection `epoch`. Returns what it was."""
+        self.generation += 1
         rx = received_ms if received_ms is not None else _now_ms()
         if epoch != self.authority.epoch or not self.authority.granted:
             self.counts["frames_from_revoked_epoch"] += 1

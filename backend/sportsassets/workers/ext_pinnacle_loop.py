@@ -2154,6 +2154,11 @@ CYCLE_S = 900.0
 #: Hard ceiling on contracts evaluated per cycle. A loop that can grow
 #: without bound is the thing the execution-discipline rule forbids.
 MAX_PER_CYCLE = 40
+#: (RC6.1 api-stall2) the longest the cycle's per-event loop runs on the API
+#: event loop before the next event waits for the loop to take a turn (see
+#: the loop in `cycle`). A scheduling bound, not a selection rule: it
+#: changes when an event is judged, never whether or how.
+EVENT_TURN_S = 0.05
 
 #: ── HOW MANY EVENTS MAY SHARE ONE ODDS FETCH ────────────────────────
 #:
@@ -10798,6 +10803,20 @@ async def cycle(conn, *, stream_seed=None) -> dict:
     # competition receipts), and its slot.
     candidate_deferrals: list = []
 
+    # (RC6.1 api-stall2) THE FEED'S NOT-YET-FOLDED NAMES, FOLDED ON THE CPU
+    # LANE before any competition's events are read -- as before every batch
+    # index (pinnapi_reactive.warm_names): the per-event reads build the feed
+    # cache's current-generation index on the loop (pinnapi_primary.
+    # current_index), and the first one after a boot or a snapshot of new
+    # fixtures would otherwise fold every cached name there. Before the
+    # odds fetches, so no quote waits for it.
+    if stream_seed is None and sports_for_cycle:
+        from .. import pinnapi_feed_runtime as _feed_rt
+        from .. import pinnapi_reactive as _reactive
+        _feed_owner = _feed_rt._STATE.get("owner")
+        if _feed_owner is not None:
+            await _reactive.warm_names(cache=_feed_owner.cache)
+
     for sport_key, family in sports_for_cycle:
         _close_event()
         # THIS competition's ceiling: the bound less what later ones are owed.
@@ -11012,7 +11031,29 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         # The cache is per SPORT FETCH, not per cycle, because
         # `received_at` is stamped per fetch.
         vq_cache: dict = {}
+        # (RC6.1 api-stall2) THE EVENT LOOP GETS A TURN BETWEEN EVENTS. An
+        # event the WS read refuses `continue`s with no await (`evaluated`
+        # counts only events that pass, so MAX_PER_CYCLE never bounds a run
+        # of them), and that read matched by scanning the whole feed cache
+        # (pinnapi_primary.select -> match_event -> fixture_view, and on a
+        # miss names.absence over every record) and the reactive register
+        # scanned again: production 2026-10-09 (render-ops logs run
+        # 37949540216) logged the API loop held 1.1 s at 15:00:21Z
+        # (pinnapi_feed.participants <- fixture_view <- _candidates <-
+        # _match_tier) and 1.9 s at 15:15:21Z (pinnapi_names.absence <-
+        # match_event <- select <- primary_pinnacle_h2h), task
+        # ext_pinnacle_loop.run. The reads now match by the cache's
+        # current-generation index (pinnapi_primary.current_index: the same
+        # answer), and once EVENT_TURN_S of this loop has run since its last
+        # turn the next event waits for one. Every event is still judged
+        # whole and in this order; between two of them other tasks may run,
+        # as they already did whenever an event awaited a venue read. (Never
+        # inside the deferred batch below, whose index must see no await.)
+        _turn_at = time.monotonic()
         for _i in range(len(events)):
+            if time.monotonic() - _turn_at >= EVENT_TURN_S:
+                await asyncio.sleep(0)
+                _turn_at = time.monotonic()
             if evaluated >= _eval_cap:
                 # ── WHAT PRIORITISATION DEFERRED, REPORTED BY IDENTITY ──
                 #

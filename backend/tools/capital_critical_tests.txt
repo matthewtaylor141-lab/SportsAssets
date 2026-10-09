@@ -1425,3 +1425,5 @@ tests/test_rc6_api_stall2_profitability.py
 tests/test_rc6_api_stall2_rn1x.py
 # (RC6.1 api-stall2) the PinnAPI owner: decode_frame is json.loads (production-shaped frames, a fuzzed corpus, the same exception for what json.loads refuses) without one GIL hold for a whole frame; a queued burst is applied one frame per loop turn and leaves the cache exactly as inline application does
 tests/test_rc6_api_stall2_pinnapi.py
+# (RC6.1 api-stall2) the ext_pinnacle cycle's PinnAPI reads match by the feed cache's current-generation index, a fresh scan's answer at every instant as frames land; a run of refused events is refused by exactly the scan's reasons while the loop gets a turn between events, on a production-size synced feed cache
+tests/test_rc6_api_stall2_ext_pinnacle.py
