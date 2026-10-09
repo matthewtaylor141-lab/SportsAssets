@@ -158,14 +158,15 @@ def test_a_snapshot_book_is_judged_like_the_stream_and_the_rest_book():
     assert S.judge_update(_dec(upd("a", bids=((410, 1),), offers=((410, 1),))
                                ), asked=asked)["outcome"] == \
         AR.R_REFRESH_CROSSED
-    # no state on the update: the plane's refdata record's (the stream's
-    # own rule) -- none at all is unknown, never assumed open
+    # no state on the update: none at all is unknown, never assumed open;
+    # a refdata record's OPEN is not the venue's word now either (OPEN is
+    # stated on the update by the venue; review of f1496b80)
     bare = _dec(upd("a", with_state=False))
     assert S.judge_update(bare, asked=asked)["outcome"] == \
         AR.R_REFRESH_STATE_UNKNOWN
     assert S.judge_update(bare, asked=asked,
                           refdata_state="INSTRUMENT_STATE_OPEN")[
-        "outcome"] == "CURRENT"
+        "outcome"] == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -567,10 +568,25 @@ def test_a_not_open_fallback_is_the_markets_only_when_the_venue_said_it():
             "state": "INSTRUMENT_STATE_EXPIRED", "state_source": src,
             "received_at": at - 9e5}, at=at, bound=BOUND)
         assert j["outcome"] == AR.R_REFRESH_NOT_OPEN, src
-    # an OPEN fallback is the stream's own rule, unchanged
+    # an OPEN fallback is held to the SAME standard (review of f1496b80):
+    # the stream's own OPEN inside the bound is the venue's word ...
     assert S.judge_update(bare, asked=asked, fallback={
-        "state": "INSTRUMENT_STATE_OPEN", "state_source": "REFDATA"},
-        at=at, bound=BOUND)["outcome"] == "CURRENT"
+        "state": "INSTRUMENT_STATE_OPEN", "state_source": "STREAM",
+        "received_at": at - 100.0}, at=at, bound=BOUND)["outcome"] == "CURRENT"
+    # ... a refdata record's OPEN, or an old stream OPEN, is not
+    for fb in ({"state": "INSTRUMENT_STATE_OPEN", "state_source": "REFDATA"},
+               {"state": "INSTRUMENT_STATE_OPEN", "state_source": "REFDATA",
+                "received_at": at - 10.0},
+               {"state": "INSTRUMENT_STATE_OPEN", "state_source": "STREAM",
+                "received_at": at - BOUND - 1.0},
+               {"state": "INSTRUMENT_STATE_OPEN", "state_source": "STREAM",
+                "received_at": None}):
+        assert S.judge_update(bare, asked=asked, fallback=fb, at=at,
+                              bound=BOUND)["outcome"] == \
+            S.R_SNAPSHOT_FALLBACK_NOT_PROVEN, fb
+    # the update's own OPEN needs nothing else
+    assert S.judge_update(_dec(upd("a")), asked=asked, fallback={},
+                          at=at, bound=BOUND)["outcome"] == "CURRENT"
     from sportsassets import refusal_taxonomy_table as TT
     assert TT.TABLE[S.R_SNAPSHOT_FALLBACK_NOT_PROVEN][0] == "SOFTWARE"
 
@@ -848,10 +864,17 @@ def test_the_run_loop_proves_a_quiet_member_with_one_snapshot_call(
         == 1
 
 
-def test_a_book_without_a_state_takes_the_streams_own_fallback():
+
+
+def test_a_book_without_a_state_on_a_quiet_member_is_not_current():
     """The venue states a market's state on an update only when it is not
-    the default; the stream then falls back to its last known state, else
-    the refdata record's (institutional_stream.current). So does this."""
+    the default (CLOSED, enum 0, is the one left off), so an OPEN market's
+    snapshot states OPEN. A stateless book on a member the stream has been
+    quiet on rests on a fallback older than the bound: not current, kept in
+    the denominator, and the REST read (whose body states the market's own
+    state) stays free to try it. The same book stating OPEN is current.
+    (Replaces test_a_book_without_a_state_takes_the_streams_own_fallback,
+    which pinned the defect the review of f1496b80 found.)"""
     S = SR()
     clock, m, books, ref, syms = _quiet(1)
     snap = S.SnapshotRefresh()
@@ -861,4 +884,61 @@ def test_a_book_without_a_state_takes_the_streams_own_fallback():
             "q-00", with_state=False).update, pb2), clock.t)]}
     got = run(snap.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
                         clock=clock, caller=bare))
+    assert got["current"] == 0 and got["returned"] == 1
+    assert ref.outcome_of("q-00") == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
+    assert ref.origin_of("q-00") is None
+    by = snap.digest(now=clock.t)["by_state_from"]
+    assert by and all(not k.startswith("UPDATE") for k in by), by
+    assert not any(k.endswith("|CURRENT") for k in by), by
+    clock.t += 61
+    snap2 = S.SnapshotRefresh()
+
+    def stated(tok, ss):
+        return {"status": "ENDED", "updates": [(IS.decode_update(upd(
+            "q-00", at=clock.t).update, pb2), clock.t)]}
+    got = run(snap2.step(ref, m, token_fn=lambda: TOKEN, bound=BOUND,
+                         clock=clock, caller=stated))
     assert got["current"] == 1 and ref.origin_of("q-00") == "SNAPSHOT"
+    assert snap2.digest(now=clock.t)["by_state_from"] == {"UPDATE|CURRENT": 1}
+
+
+def test_the_reviewers_case_a_stale_open_and_an_empty_stateless_book():
+    """Review of f1496b80, reproduced: the stream stated OPEN 4 h ago and
+    the snapshot returns an EMPTY book with no state (CLOSED, the default,
+    omitted). It was CURRENT (G), counted in the graded numerator, and it
+    pre-empted the REST read. Now: not current, N in the window, and the
+    REST read is planned once the retry wait passes."""
+    S = SR()
+    clock, m, ref, s = _one("INSTRUMENT_STATE_OPEN", age=4 * 3600.0)
+
+    def empty(tok, ss):
+        return {"status": "ENDED", "updates": [(IS.decode_update(upd(
+            s, at=clock.t, with_state=False, bids=(), offers=()).update,
+            pb2), clock.t)]}
+    got = run(S.SnapshotRefresh().step(ref, m, token_fn=lambda: TOKEN,
+                                       bound=BOUND, clock=clock,
+                                       caller=empty))
+    assert got["current"] == 0
+    assert ref.outcome_of(s) == S.R_SNAPSHOT_FALLBACK_NOT_PROVEN
+    assert _window_code(m, ref, s, clock.t)[0] == "N"
+    assert ref.plan(m, now=clock.t + 61, bound=BOUND)[0] == [s]
+
+
+def test_a_newer_paper_read_stating_not_open_beats_an_older_refresh():
+    """classify applies the held-position rule's order to R/G as well: the
+    venue's latest word about the market, read inside the bound, first."""
+    from sportsassets.market_plane import freshness_window as FW
+    clock, m, ref, s = _one("INSTRUMENT_STATE_OPEN")
+    ref.start(clock.t, s)
+    assert ref.record(s, H.rest_book(s, at=clock.t), at=clock.t)[
+        "outcome"] == AR.CURRENT
+    mem = {"contract_id": s, "venue": "POLYMARKET_US", "tier": "CANDIDATE"}
+
+    def code(paper, now):
+        return FW.classify(mem, mgr=m, refreshed=FW.refreshed_codes(
+            ref, m, now=now, sla_s=BOUND), entries=ref.entries,
+            paper=paper, kalshi={}, now=now, sla_s=BOUND)[0]
+    now = clock.t + 30
+    assert code({s: {"at": clock.t - 60, "market_state": "closed"}}, now) == "R"
+    assert code({s: {"at": clock.t + 20, "market_state": "closed"}}, now) == "X"
+    assert code({s: {"at": clock.t + 20, "market_state": "open"}}, now) == "R"

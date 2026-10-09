@@ -323,11 +323,21 @@ def classify(m: dict, *, mgr, refreshed: dict, entries: dict, paper: dict,
             return (C_STREAM, None, _epoch(sn.get("received_at")),
                     _epoch(sn.get("venue_ts")))
     got = refreshed.get(s)
-    if got is not None:
-        e = entries.get(s) or {}
-        return got[1], None, got[0], _epoch(e.get("venue_ts"))
     p = paper.get(s)
     p_at = None if p is None else _epoch(p.get("at"))
+    if got is not None:
+        # a NEWER paper REST read inside the bound whose own state says the
+        # market is not open is the venue's latest word (integration review
+        # of f1496b80): the held-position rule's order, applied to R/G too
+        if p_at is not None and 0.0 <= now - p_at <= sla_s \
+                and got[0] is not None and p_at >= got[0]:
+            ext, why = external_from(p.get("market_state"), read_at=p_at,
+                                     now=now, sla_s=sla_s,
+                                     source="PAPER_REST")
+            if ext:
+                return C_EXTERNAL, why, None, None
+        e = entries.get(s) or {}
+        return got[1], None, got[0], _epoch(e.get("venue_ts"))
     if p_at is not None and 0.0 <= now - p_at <= sla_s:
         # the held-position rule's order: the read's own not-open state
         # first (a current read of a closed market is not a current book)

@@ -42,9 +42,12 @@ skip-to-head; `outbound` refuses anything else before the wire.
 
 WHAT COUNTS (`judge_update`): exactly the stream's and the REST refresh's
 checks -- a symbol we asked for, the venue's transact_time, the book not
-hidden, the state the update states (else the state the stream itself
-falls back to: its own last stated state, else the plane's refdata
-record's) OPEN, not crossed. A CURRENT book counts for the plane's
+hidden, the state the update states OPEN (a fallback state -- the stream's
+own last stated state, else the plane's refdata record's -- counts only
+when it is the venue's word at the receipt: the stream's own state with
+its newest update inside the bound, see fallback_is_the_venues_word), not
+crossed. The REST judge requires the body's own state; a stateless snapshot
+book is held to the venue's-word standard in BOTH directions. A CURRENT book counts for the plane's
 bound from OUR RECEIPT, recorded into the refresher with origin SNAPSHOT
 (G in the freshness window); it never enters the stream's books, is never
 a PRIORITY_PMX_BOOKS parity book, never a decision input. A symbol not
@@ -281,6 +284,17 @@ def judge_update(u: dict, *, asked: set, fallback=None, refdata_state=None,
                         state=str(state)[:40])
         return dict(out, outcome=R_SNAPSHOT_FALLBACK_NOT_PROVEN,
                     state=str(state)[:40])
+    if not own and not fallback_is_the_venues_word(fb, at=at, bound=bound):
+        # AN OPEN FALLBACK IS HELD TO THE SAME STANDARD (integration review
+        # of f1496b80): the venue states OPEN on the update itself (OPEN is
+        # not the proto's default; CLOSED, enum 0, is the one left off), so
+        # a stateless book is CLOSED or unknown, never proof of OPEN. A
+        # refdata record or a stream state older than the bound is not the
+        # venue's word NOW: not current (N, kept in the denominator), never
+        # an exclusion, and the REST read -- whose body states the market's
+        # own state -- stays free to try it.
+        return dict(out, outcome=R_SNAPSHOT_FALLBACK_NOT_PROVEN,
+                    state=str(state)[:40])
     if bids and offers and max(int(p) for p, _q in bids) >= min(
             int(p) for p, _q in offers):
         return dict(out, outcome=AR.R_REFRESH_CROSSED)
@@ -316,6 +330,10 @@ class SnapshotRefresh:
         self.hold_until = 0.0
         self.hold_why = None
         self.last: dict = {}
+        #: where each judged book's state came from, and whether a
+        #: fallback was the venue's word (UPDATE / FALLBACK:<source>:IN_BOUND
+        #: | OLD / NONE): how much of SNAPSHOT-current rests on what
+        self.state_from: dict = {}
         self.totals = {"calls": 0, "symbols_asked": 0, "returned": 0,
                        "current": 0, "not_current": 0, "not_returned": 0,
                        "by_status": {}, "by_outcome": {}}
@@ -399,6 +417,16 @@ class SnapshotRefresh:
                              at=at, bound=bound)
             o = j["outcome"]
             t["by_outcome"][o] = t["by_outcome"].get(o, 0) + 1
+            fbj = j.get("fallback") or {}
+            sf = ("UPDATE" if j.get("state_from") == STATE_FROM_UPDATE
+                  else "NONE" if j.get("state_from") is None
+                  else "FALLBACK:%s:%s" % (
+                      fbj.get("state_source") or "?",
+                      "IN_BOUND" if fallback_is_the_venues_word(
+                          dict(fbj, state=fbj.get("state") or "x"),
+                          at=at, bound=bound) else "OLD"))
+            key = "%s|%s" % (sf, o)
+            self.state_from[key] = self.state_from.get(key, 0) + 1
             if o == R_SNAPSHOT_NOT_ASKED:
                 continue
             returned.add(j["symbol"])
@@ -437,7 +465,10 @@ class SnapshotRefresh:
                 else None,
                 "last": dict(self.last),
                 "totals": {k: (dict(v) if isinstance(v, dict) else v)
-                           for k, v in self.totals.items()}}
+                           for k, v in self.totals.items()},
+                # 'STATE ORIGIN|OUTCOME' -> books: CURRENT appears only
+                # under UPDATE or FALLBACK:STREAM:IN_BOUND
+                "by_state_from": dict(self.state_from)}
 
 
 def off_digest(why: str = R_SNAPSHOT_OFF) -> dict:
