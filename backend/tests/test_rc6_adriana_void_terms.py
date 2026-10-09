@@ -794,6 +794,21 @@ def test_a_real_pass_reads_captured_terms_records_both_scans_and_reads_back():
         try:
             for t in ("kalshi_fixtures_current", "kalshi_books_current"):
                 await conn.execute("DELETE FROM %s" % t)
+            # THIS test's universe only: the pass reads every recorded book
+            # in its window and the readbacks count every scan and the void
+            # task, so rows other tests committed (CI 37927445675 on
+            # 5d83e0de: a recorded over/under book with no captured rules
+            # made the census "not established") are hidden -- inside this
+            # transaction, which is always rolled back. The book table is
+            # append-only (its trigger), hence the replica role, for these
+            # deletes alone.
+            await conn.execute("SET LOCAL session_replication_role = replica")
+            for t in ("paper_book_observations", "adriana_arb_refusals",
+                      "adriana_arb_opportunities", "adriana_arb_scans"):
+                await conn.execute("DELETE FROM %s" % t)
+            await conn.execute("DELETE FROM agent_tasks WHERE task_id = "
+                               "'adriana-task-void-terms'")
+            await conn.execute("SET LOCAL session_replication_role = origin")
             now = time.time()
             for line, ask, bid, age in (("210pt5", "0.40", "0.38", 3),
                                         ("211pt5", "0.49", "0.47", 2)):
