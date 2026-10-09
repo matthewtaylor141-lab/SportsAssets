@@ -3015,6 +3015,30 @@
    "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:table_tennis/WINNER/FULL_EVENT",
    "rules_sha256": "f79a79ff8c6fafd390cdcb6e869373aea6f55149e3156e508cbf68de33fff062",
    "rules_text": "This market will settle to the winner of Set 2 of the Shcherbak Denys vs Lazebnyi Ruslan Setka Cup Ukraine Men match scheduled for Oct 9, 2026. If the match does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the match is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. If the match begins but ends before Set 2 is completed, the market will settle to the last fair market price. Outcome sourced from Setka Cup Ukraine Men."
+  },
+  {
+   "contract_id": "aec-npb-ygo-ybo-2026-10-10",
+   "event_id": "npb-ygo-ybo-2026-10-10",
+   "market_type": "baseball_team_full_game_winner",
+   "competition": "ygo",
+   "production_sport": "baseball",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "78091ed78edf353156d8dd5c74fdf0c0b98c29ef44ee03f011b5e486d201a1a4",
+   "rules_text": "This market will settle to the winner of the Yomiuri Giants vs Yokohama BayStars NPB game scheduled for Oct 10, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB."
+  },
+  {
+   "contract_id": "atc-spl-fay-riy-2026-10-11-draw",
+   "event_id": "spl-fay-riy-2026-10-11",
+   "market_type": "soccer_team_full_time_winner",
+   "competition": "fay",
+   "production_sport": "soccer",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "23dad6392671394eef203f39676d826422428e7e9a2b35f9dfb92d7d964b9d9a",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Al Fayha Saudi Club vs Al Riyadh Saudi Club Saudi Pro League match scheduled for 2026-10-11 9:40AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SAFF."
   }
  ]
 }

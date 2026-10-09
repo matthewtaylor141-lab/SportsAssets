@@ -1604,6 +1604,10 @@ TABLE = {
     "ORGANISER_PAYLOAD_IS_NOT_THE_DECLARED_COMPETITION": (
         S, MAP, "EVENT_IDENTITY"),
     "QUOTE_CONTEXT_EVIDENCE_DISAGREES": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6.2, p-coverage) a never-valued contract whose two quote contexts
+    # read its terms differently under its event's fixture scope
+    # (market_plane.settlement)
+    "QUOTE_CONTEXT_DECIDES_THE_TERMS": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     # ... and the GET-only Kalshi sports catalogue's named truncations and
     # its transport's non-GET refusal (kalshi_catalogue)
     "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),

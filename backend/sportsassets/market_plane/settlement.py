@@ -153,18 +153,26 @@ def h2h_family(contract: dict) -> str | None:
     return None
 
 
-def terms_comparison(*, sport_family, league, rules_text, rules_sha256):
-    """compare_prose exactly as attest calls it, cached by fingerprint."""
-    key = (rules_sha256, sport_family, league)
-    if rules_sha256 and key in _TERMS_CACHE:
-        return _TERMS_CACHE[key]
-    from .. import bettor_settlement_terms as ST
-    from .. import bettor_venue_settlement as V
-    cmp_ = ST.compare_prose(sport_family=sport_family, market="h2h",
-                            venue_prose=rules_text or "",
-                            extra_book_terms=V._legacy_book_terms(
-                                sport_family))
-    slim = {"verdict": cmp_.get("verdict"),
+#: (RC6.2, p-coverage) the money-line families whose captured book terms
+#: are scoped by the fixture's competition phase and game format (not
+#: phase-independent), for which the plane reads the venue's own fixture
+#: row (venue_fixture_metadata, ('PMUS', 'event:<event slug>'))
+SCOPED_H2H_FAMILIES = ("soccer", "baseball")
+#: the comparison's refusal when the fixture scope is held but the two
+#: quote contexts read the terms differently: a never-valued contract has
+#: no quote, so no context can be chosen for it
+R_CONTEXT_DECIDES = "QUOTE_CONTEXT_DECIDES_THE_TERMS"
+
+
+def fixture_key(contract: dict) -> str | None:
+    """The venue's own namespaced event key of a Polymarket US contract
+    (bettor_soccer_fixture.venue_fixture_key of its registry event id)."""
+    ev = str((contract or {}).get("event_id") or "").strip()
+    return "event:%s" % ev if ev else None
+
+
+def _slim(cmp_: dict) -> dict:
+    return {"verdict": cmp_.get("verdict"),
             "book_terms_held": bool(cmp_.get("book_terms_held")),
             "per_condition": {c: {k: r.get(k) for k in (
                 "verdict", "book_payout", "venue_payout")}
@@ -178,6 +186,68 @@ def terms_comparison(*, sport_family, league, rules_text, rules_sha256):
             "book_side_absent_refusals": list(
                 cmp_.get("book_side_absent_refusals") or []),
             "refusal": cmp_.get("refusal")}
+
+
+def terms_key(rules_sha256, sport_family, league, scope=None) -> tuple:
+    """The comparison cache key: the text, the family, the league -- and,
+    only when a fixture scope is held, the scope it was read under (the
+    unscoped key is the RC4 / RC6 one, unchanged)."""
+    ph, gf = scope_of(scope)
+    if ph is None:
+        return (rules_sha256, sport_family, league)
+    return (rules_sha256, sport_family, league, ph, gf)
+
+
+def scope_of(scope) -> tuple:
+    """(phase, game_format) of a fixture row, only when BOTH are held."""
+    s = dict(scope or {})
+    ph, gf = s.get("phase"), s.get("game_format")
+    return (ph, gf) if (ph and gf) else (None, None)
+
+
+def terms_comparison(*, sport_family, league, rules_text, rules_sha256,
+                     phase=None, game_format=None):
+    """compare_prose exactly as attest calls it, cached by fingerprint.
+
+    (RC6.2, p-coverage) With the fixture's `phase` and `game_format` held
+    (the venue's own fixture row) the comparison is run in BOTH quote
+    contexts, PRE_GAME and IN_PLAY, because a never-valued contract has no
+    quote to place: it is recorded only when the two readings agree, and
+    otherwise names QUOTE_CONTEXT_DECIDES_THE_TERMS with no book side."""
+    key = terms_key(rules_sha256, sport_family, league,
+                    {"phase": phase, "game_format": game_format})
+    if rules_sha256 and key in _TERMS_CACHE:
+        return _TERMS_CACHE[key]
+    from .. import bettor_settlement_terms as ST
+    from .. import bettor_venue_settlement as V
+    if phase is not None and game_format is not None:
+        pair = [_slim(ST.compare_prose(
+            sport_family=sport_family, market="h2h",
+            venue_prose=rules_text or "",
+            extra_book_terms=V._legacy_book_terms(sport_family),
+            context=ctx, phase=phase, game_format=game_format))
+            for ctx in (ST.CTX_PRE_GAME, ST.CTX_LIVE)]
+        if pair[0] == pair[1]:
+            slim = dict(pair[0], scope={"phase": phase,
+                                        "game_format": game_format,
+                                        "contexts": "BOTH_AGREE"})
+        else:
+            slim = dict(pair[0], verdict=ST.UNKNOWN, book_terms_held=False,
+                        mismatched_conditions=[], refusal=None,
+                        book_side_absent_refusals=[R_CONTEXT_DECIDES],
+                        scope={"phase": phase, "game_format": game_format,
+                               "contexts": "DIFFER",
+                               "pre_game_verdict": pair[0]["verdict"],
+                               "in_play_verdict": pair[1]["verdict"]})
+        if len(_TERMS_CACHE) > _TERMS_CACHE_MAX:
+            _TERMS_CACHE.clear()
+        if rules_sha256:
+            _TERMS_CACHE[key] = slim
+        return slim
+    slim = _slim(ST.compare_prose(sport_family=sport_family, market="h2h",
+                                  venue_prose=rules_text or "",
+                                  extra_book_terms=V._legacy_book_terms(
+                                      sport_family)))
     if len(_TERMS_CACHE) > _TERMS_CACHE_MAX:
         _TERMS_CACHE.clear()
     if rules_sha256:
@@ -529,13 +599,15 @@ def _scope_refusals() -> frozenset:
     from .. import bettor_settlement_terms as ST
     return frozenset((ST.R_CONTEXT_UNKNOWN, ST.R_SCHEDULED_ONLY,
                       ST.R_PHASE_UNKNOWN, ST.R_PHASE_EXCLUDED,
-                      ST.R_FORMAT_UNKNOWN, ST.R_FORMAT_EXCLUDED))
+                      ST.R_FORMAT_UNKNOWN, ST.R_FORMAT_EXCLUDED,
+                      R_CONTEXT_DECIDES))
 
 
 def state_for(contract: dict, *, valuation: dict | None = None,
               rules: dict | None = None, priced: dict | None = None,
               rules_looked_up: bool = False,
-              derivative_terms: bool = False) -> dict:
+              derivative_terms: bool = False,
+              fixture_scope: dict | None = None) -> dict:
     """PURE (apart from the cached terms comparison). The settlement state
     of one registry contract. `valuation`: the latest decision valuation
     (settlement_verdict, refusals, decision_rules_fingerprint); `rules`: its
@@ -550,7 +622,14 @@ def state_for(contract: dict, *, valuation: dict | None = None,
     (`_line_state`) instead of being called BOOKMAKER_TERMS_NOT_HELD, and a
     money line whose book terms ARE captured but withheld for want of the
     fixture's context / phase / format says BOOK_TERMS_SCOPE_NOT_ESTABLISHED.
-    Neither ever reaches a PROVEN state."""
+    Neither ever reaches a PROVEN state.
+
+    `fixture_scope` (RC6.2, p-coverage; read only with `derivative_terms`):
+    the venue's own fixture row for the contract's event (venue_fixture_
+    metadata: phase, game_format), for a soccer / baseball money line whose
+    captured terms are scoped by them. With both held the terms are read in
+    both quote contexts and recorded only when the two agree
+    (`terms_comparison`); without it the RC6 reading is unchanged."""
     c = dict(contract or {})
     ev = _rules_evidence(rules)
     v = dict(valuation or {})
@@ -617,9 +696,15 @@ def state_for(contract: dict, *, valuation: dict | None = None,
     if rules.get("rules_text") is None:
         # the row is held but its text was not loaded for this pass
         return _out(NOT_PROVEN, R_VENUE_RULES_NOT_CAPTURED, BASIS_NONE, ev)
+    ph, gf = scope_of(fixture_scope if (
+        derivative_terms and fam in SCOPED_H2H_FAMILIES) else None)
+    if ph is not None:
+        ev["fixture_scope"] = {k: (fixture_scope or {}).get(k) for k in (
+            "venue_fixture_key", "phase", "game_format", "competition",
+            "source", "retrieved_at")}
     cmp_ = terms_comparison(sport_family=fam, league=c.get("competition"),
                             rules_text=rules.get("rules_text"),
-                            rules_sha256=cur_sha)
+                            rules_sha256=cur_sha, phase=ph, game_format=gf)
     ev["terms"] = cmp_
     if cmp_.get("venue_self_contradictory"):
         return _out(CONFLICT, "%s:%s" % (
