@@ -131,6 +131,11 @@ async def test_our_own_keepalive_close_reconnects_instead_of_stopping_for_good(
     socks: list = []
     o = _owner(monkeypatch, socks, lambda: ClosingWS(
         frames_for(), ConnectionClosedError(None, KEEPALIVE, None)))
+    # RC6 integration: from the 3rd CLIENT close inside 600 s the owner now
+    # waits 5, 10, 20 ... s before reconnecting (the waits themselves are
+    # pinned in test_rc6_pinnapi_client_close_backoff.py); accelerated here
+    # exactly as BACKOFF is, so every assertion below stands as it was
+    monkeypatch.setattr(O, "CLIENT_CLOSE_BACKOFF_BASE_S", 0.05)
     t = asyncio.create_task(o.run())
     try:
         # BASE: the third close stopped the owner for good
@@ -152,6 +157,10 @@ async def test_our_own_keepalive_close_reconnects_instead_of_stopping_for_good(
         assert st["last_unrequested_close"]["initiator"] == O.CLOSE_CLIENT
         # the closed epoch's authority is revoked: nothing stale is served
         assert not o.cache.authority.synced or o.state == "OWNER_SYNCED"
+        # and the repeated close of our own waited, by name, before the
+        # later reconnects -- still never a refusal
+        assert o.client_close_level >= 1
+        assert O.CLIENT_CLOSE_BACKOFF in [e["what"] for e in o.events]
     finally:
         o.stop()
         await asyncio.wait_for(t, 10)

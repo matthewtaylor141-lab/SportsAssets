@@ -165,6 +165,31 @@ EVICTION_CONSISTENT = (CLOSE_SERVER, CLOSE_NO_FRAME, CLOSE_UNKNOWN)
 #: RFC 6455 7.1.5: no close frame was received or sent
 ABNORMAL_CLOSURE = 1006
 CLOSE_REASON_MAX = 64
+#:
+#: AN AMBIGUOUS RECORD IS EVICTION-CONSISTENT (RC6 integration review). When
+#: the library recorded BOTH close frames but not which came first
+#: (rcvd_then_sent None), the side cannot be read. The xavier cut called that
+#: CLIENT -- never counted toward EVICTIONS_MAX, so a provider close frame
+#: that may have been an eviction could be fought indefinitely. It is
+#: UNKNOWN now (EVICTION_CONSISTENT), carrying the PROVIDER's frame's code
+#: and reason, which is what an eviction would say.
+#:
+#: THE CLOSE'S OWN FACTS, IN THE SAME RECORD (rc6/pipeline-reds abf4ea43).
+#: Beside the side, code and reason: how long since the socket's last
+#: received frame (`rx_gap_s`: a long gap points at our event loop or the
+#: network, not at a newer holder) and how long the socket had lived
+#: (`socket_age_s`), both on the monotonic clock. One record per close --
+#: the transition's `close`, `last_unrequested_close`, the heartbeat -- never
+#: a second, parallel one. No header, key or payload is read.
+
+
+def _gap(now, then) -> Optional[float]:
+    try:
+        if now is None or then is None:
+            return None
+        return round(max(0.0, float(now) - float(then)), 3)
+    except (TypeError, ValueError):
+        return None
 
 
 def _close_frame(frame) -> dict:
@@ -181,16 +206,25 @@ def _close_frame(frame) -> dict:
     return {"code": code, "reason": reason}
 
 
-def close_of(exc) -> dict:
-    """WHO CLOSED THE SOCKET, from the exception `recv()` raised. Pure;
-    never raises. {"initiator", "code", "reason", "error"}: initiator is
-    SERVER, CLIENT, NO_CLOSE_FRAME or UNKNOWN (see R_CLIENT_CLOSED)."""
-    out = {"error": type(exc).__name__}
+def close_of(exc, *, now: Optional[float] = None,
+             last_rx: Optional[float] = None,
+             opened: Optional[float] = None) -> dict:
+    """WHO CLOSED THE SOCKET, from the exception `recv()` raised, and the
+    close's own facts. Pure; never raises. {"initiator", "code", "reason",
+    "error", "rx_gap_s", "socket_age_s"}: initiator is SERVER, CLIENT,
+    NO_CLOSE_FRAME or UNKNOWN (see R_CLIENT_CLOSED); the two gaps are
+    seconds on the caller's monotonic clock (`now` - `last_rx`, `now` -
+    `opened`), None when not given."""
+    out = {"error": type(exc).__name__,
+           "rx_gap_s": _gap(now, last_rx), "socket_age_s": _gap(now, opened)}
     try:
         if not (hasattr(exc, "rcvd") and hasattr(exc, "sent")):
             return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
         rcvd, sent = exc.rcvd, exc.sent
         then = getattr(exc, "rcvd_then_sent", None)
+        if rcvd is not None and sent is not None and then is None:
+            # both frames, order unknown: never assumed ours
+            return dict(out, initiator=CLOSE_UNKNOWN, **_close_frame(rcvd))
         if rcvd is not None and (sent is None or then is True):
             return dict(out, initiator=CLOSE_SERVER, **_close_frame(rcvd))
         if sent is not None:
@@ -199,6 +233,56 @@ def close_of(exc) -> dict:
                     reason=None)
     except Exception:                                           # noqa: BLE001
         return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
+
+
+#: ── A CLOSE OF OUR OWN THAT KEEPS COMING WAITS LONGER EACH TIME (RC6) ────
+#:
+#: THE DEFECT (integration review of 412c4962). A CLIENT close reconnects
+#: with the ordinary BACKOFF, and that backoff resets on every delivered
+#: epoch (`attempt = 0`, "backoff resets only on delivery"). A CLIENT close
+#: that repeats AFTER delivery -- a provider frame that keeps exceeding our
+#: frame cap (1009), an event loop that keeps stalling past the keepalive
+#: (1011) -- therefore reconnected every BACKOFF[0] (1 s) forever, each time
+#: a new epoch that drops the cache and reloads every subscribed snapshot,
+#: and nothing on the heartbeat said so.
+#:
+#: THE REPAIR: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S
+#: of CONNECTED time (the owner's monotonic clock less the backoff waits it
+#: has itself imposed). The first CLIENT_CLOSES_FREE inside it reconnect as
+#: before; the level is the number of closes in the window beyond those,
+#: and the owner waits client_close_wait_s(level) -- 5 s, doubling, at most
+#: 300 s -- before it contends again. Delivery does NOT reset it. Counting
+#: connected time is what keeps the two cases apart (integration review):
+#: a storm (a close about 1 s after every reconnect) keeps filling the
+#: window however long the waits grow, so it climbs to and holds 300 s; a
+#: close every ~240 s of streaming (the cadence of the 2026-10-08 keepalive
+#: 1011s, three in 491 s) never holds more than 3 in the window, so it
+#: waits a steady 5 s instead of climbing to 300 s and keeping the feed
+#: down most of the time. The window empties after CLIENT_CLOSE_WINDOW_S of
+#: connected time with no CLIENT close. The wait is the owner's state (CLIENT_CLOSE_BACKOFF), the authority's reason
+#: (R_CLIENT_CLOSE_BACKOFF), a transition, and `client_close_backoff` on
+#: status() and so on the heartbeat. It is never a refusal and never counts
+#: toward EVICTIONS_MAX; a stop ends it at once. The lease is released while
+#: it waits, as in every backoff. EVICTIONS_MAX, EVICTION_WINDOW_S,
+#: SILENCE_S and the 30 s rule are unchanged.
+CLIENT_CLOSE_WINDOW_S = 600.0
+CLIENT_CLOSES_FREE = 2
+CLIENT_CLOSE_BACKOFF_BASE_S = 5.0
+CLIENT_CLOSE_BACKOFF_MAX_S = 300.0
+#: the owner's state and the transition while it waits
+CLIENT_CLOSE_BACKOFF = "CLIENT_CLOSE_BACKOFF"
+#: the authority's revocation reason while it waits
+R_CLIENT_CLOSE_BACKOFF = "FEED_CLIENT_CLOSE_BACKOFF"
+
+
+def client_close_wait_s(level: int) -> float:
+    """Seconds to wait before reconnecting at a CLIENT-close backoff level:
+    0 at level 0, then 5, 10, 20 ... capped at 300. Pure."""
+    n = int(level or 0)
+    if n <= 0:
+        return 0.0
+    return float(min(CLIENT_CLOSE_BACKOFF_MAX_S,
+                     CLIENT_CLOSE_BACKOFF_BASE_S * 2 ** min(n - 1, 16)))
 
 
 def _task_is_being_cancelled() -> bool:
@@ -339,6 +423,20 @@ class FeedOwner:
         #: every unrequested close by side (R_CLIENT_CLOSED) and the last one
         self.closes_by_initiator: dict = {}
         self.last_close: Optional[dict] = None
+        #: CLIENT closes (monotonic) inside CLIENT_CLOSE_WINDOW_S, the
+        #: backoff level they reached, the last one, and the wait they ask
+        #: of run() (see CLIENT_CLOSE_BACKOFF). Never reset by delivery,
+        #: nor by a stand-down's re-entry: they belong to this owner.
+        self.client_closes: list = []
+        #: seconds of CLIENT-close waiting imposed so far: the closes above
+        #: are kept on the connected clock (monotonic less this)
+        self.client_close_paused = 0.0
+        self.client_close_level = 0
+        self.client_close_last: Optional[float] = None
+        self.client_close_wait = 0.0
+        #: the last CLIENT-close backoff, for the heartbeat (wall clock:
+        #: display only)
+        self.client_close_backoff: Optional[dict] = None
         #: the lease currently held (or being acquired), so a supervisor can
         #: discard it if this owner's task ever ends without retiring it
         self.lease = None
@@ -349,6 +447,23 @@ class FeedOwner:
 
     def subscriptions(self):
         return [(s, sp) for s in self.streams for sp in self.sport_ids]
+
+    def _client_close(self, t: float) -> float:
+        """Count one CLIENT close at monotonic `t`; return the seconds to
+        wait before reconnecting (0.0 below the threshold). The level is the
+        number of CLIENT closes beyond CLIENT_CLOSES_FREE inside the last
+        CLIENT_CLOSE_WINDOW_S of CONNECTED time (t less the waits this
+        method has imposed), so a storm holds its level while the waits
+        grow and a sparse cadence stays at the first step."""
+        c = t - self.client_close_paused
+        self.client_closes = [x for x in self.client_closes
+                              if c - x < CLIENT_CLOSE_WINDOW_S] + [c]
+        self.client_close_last = t
+        self.client_close_level = max(
+            0, len(self.client_closes) - CLIENT_CLOSES_FREE)
+        self.client_close_wait = client_close_wait_s(self.client_close_level)
+        self.client_close_paused += self.client_close_wait
+        return self.client_close_wait
 
     def stop(self):
         # Revoke synchronously: async cleanup may be waiting on a DB read
@@ -408,9 +523,34 @@ class FeedOwner:
                               else "REFUSED_BY_PROVIDER")
                 return
             if not self.stop_event.is_set():
-                await self._wait(BACKOFF[min(attempt, len(BACKOFF) - 1)])
+                wait = BACKOFF[min(attempt, len(BACKOFF) - 1)]
+                cw, self.client_close_wait = self.client_close_wait, 0.0
+                if cw > wait:
+                    # A CLOSE OF OUR OWN THAT KEEPS COMING: named, never a
+                    # refusal (see CLIENT_CLOSE_BACKOFF)
+                    wait = cw
+                    self._client_close_backoff_begins(cw)
+                await self._wait(wait)
+                if self.client_close_backoff is not None:
+                    self.client_close_backoff["waiting"] = False
                 attempt += 1
         self.state = "STOPPED"
+
+    def _client_close_backoff_begins(self, wait: float) -> None:
+        now = self.clock()
+        self.state = CLIENT_CLOSE_BACKOFF
+        self.cache.lost(R_CLIENT_CLOSE_BACKOFF)
+        self.client_close_backoff = {
+            "waiting": True, "wait_s": wait, "level": self.client_close_level,
+            "closes_in_window": len(self.client_closes),
+            "window_s": CLIENT_CLOSE_WINDOW_S,
+            "since_at": round(now, 3), "until_at": round(now + wait, 3)}
+        self._note(CLIENT_CLOSE_BACKOFF, wait_s=wait,
+                   level=self.client_close_level,
+                   closes_in_window=len(self.client_closes))
+        log.warning("pinnapi feed: %d closes of our own inside %.0fs; "
+                    "waiting %.0fs before reconnecting",
+                    len(self.client_closes), CLIENT_CLOSE_WINDOW_S, wait)
 
     async def _arm_state(self):
         """None when armed, else the reason it is not (all fail closed)."""
@@ -468,6 +608,7 @@ class FeedOwner:
         self.state = "CONNECTING"
         ws = await asyncio.wait_for(self.connect(PP.WS_URL, key),
                                     self.liveness_s)
+        opened = time.monotonic()           # the socket's age, for close_of
         delivered = False
         try:
             # Ownership or the arm row may have changed during connect.
@@ -504,7 +645,9 @@ class FeedOwner:
                 except asyncio.TimeoutError:
                     continue
                 except Exception as exc:                        # noqa: BLE001
-                    info = dict(close_of(exc), epoch=epoch,
+                    t = time.monotonic()
+                    info = dict(close_of(exc, now=t, last_rx=last_rx,
+                                         opened=opened), epoch=epoch,
                                 delivered=delivered)
                     self.last_close = dict(info, at=round(self.clock(), 3))
                     side = info["initiator"]
@@ -513,13 +656,16 @@ class FeedOwner:
                     if side == CLOSE_CLIENT:
                         # OURS (keepalive timeout, frame cap): never another
                         # holder of the key; reconnect like any lost socket
+                        # -- after a growing wait when it keeps coming
                         self.cache.lost(R_CLIENT_CLOSED)
-                        self._note(R_CLIENT_CLOSED, close=info)
+                        wait = self._client_close(t)
+                        self._note(R_CLIENT_CLOSED, close=info,
+                                   closes_in_window=len(self.client_closes),
+                                   backoff_s=wait)
                         return attempt
                     # a close we did not ask for after a healthy stream may
                     # be another holder of the account key evicting us
                     if delivered:
-                        t = time.monotonic()
                         self.evictions = [x for x in self.evictions
                                           if t - x < EVICTION_WINDOW_S] + [t]
                         self._note("UNREQUESTED_CLOSE",
@@ -581,6 +727,12 @@ class FeedOwner:
                 "unrequested_closes_by_initiator": dict(
                     self.closes_by_initiator),
                 "last_unrequested_close": self.last_close,
+                # the last CLIENT-close wait as it was recorded, and the
+                # level the next CLIENT close would build on
+                "client_close_backoff": (
+                    dict(self.client_close_backoff,
+                         current_level=self.client_close_level)
+                    if self.client_close_backoff else None),
                 "lease_key": FEED_LOCK_KEY, "sport_ids": self.sport_ids,
                 "streams": self.streams, "transitions": self.events[-10:],
                 "cache": self.cache.census()}
