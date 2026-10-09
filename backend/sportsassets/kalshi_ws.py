@@ -33,7 +33,10 @@ the sid and is not applied (a replay: R_SNAPSHOT_OUT_OF_SEQUENCE; a lost
 message: R_SEQ_GAP). A gapped sid is DEAD -- a later snapshot on it is
 ignored (IGNORED_DEAD_SID) -- until the venue announces it again
 (`subscribed`) or the connection ends; the resubscribe (a new
-subscription) restores CURRENT.
+subscription) restores CURRENT. A sid's FIRST snapshot is checked too
+(RC6 acceptance model): a delta seen before it is not applied and does not
+start the sequence, but that snapshot must follow it (seq + 1) or start the
+subscription (seq 1); a replayed, duplicate or skipping one gaps the sid.
 
 Account limits: GET /trade-api/v2/account/limits is the authoritative
 usage tier and read / write token buckets; REST recovery pacing derives
@@ -219,6 +222,10 @@ class WsBooks:
                       "snapshots_out_of_sequence": 0, "forgotten": 0,
                       "ignored_not_tracked": 0}
         self.resubscribe: set = set()
+        #: (RC6 acceptance model) sid -> seq of the latest delta seen on it
+        #: before its first snapshot: not its sequence, but that snapshot
+        #: must agree with it (_first_snapshot_after)
+        self.sid_pre: dict = {}
         self.connected = False
         #: (RC6) markets the runtime stopped tracking in THIS session (see
         #: `forget`); cleared with the session
@@ -281,6 +288,12 @@ class WsBooks:
             self.stats["ignored_not_tracked"] += 1
             return "IGNORED_DEAD_SID"
         last = self.sid_seq.get(sid)
+        if last is None:
+            if typ != "orderbook_snapshot":
+                self.sid_pre[sid] = seq
+                self.stats["ignored_not_tracked"] += 1
+                return "IGNORED_NOT_TRACKED"
+            last = self._first_snapshot_after(sid, seq)
         if last is not None and seq != last + 1:
             if typ == "orderbook_snapshot":
                 self.stats["snapshots_out_of_sequence"] += 1
@@ -290,9 +303,24 @@ class WsBooks:
                 self._gap_sid(sid, R_SEQ_GAP)
             return "GAP"
         self.stats["ignored_not_tracked"] += 1
-        if typ == "orderbook_snapshot" or last is not None:
-            self.sid_seq[sid] = seq
+        self.sid_seq[sid] = seq
+        self.sid_pre.pop(sid, None)
         return "IGNORED_NOT_TRACKED"
+
+    def _first_snapshot_after(self, sid, seq):
+        """What a sid's FIRST snapshot is checked against (None: it starts
+        the sequence). A delta before a sid's first snapshot is not applied
+        and does not start the sequence -- a delta numbered from an older
+        subscription is never applied (red-team scenario 5) -- but the
+        first snapshot must agree with it: the venue sends the snapshot
+        first and seq starts at 1, so that snapshot is the subscription's
+        start (seq 1) or follows the delta (its seq + 1). Any other -- a
+        replay or duplicate of what preceded it, or one past a lost message
+        -- is out of sequence like any snapshot (RC6 acceptance model, P2:
+        it used to be applied unchecked as the sid's first message and
+        served CURRENT)."""
+        pre = self.sid_pre.get(sid)
+        return None if pre is None or seq == 1 else pre
 
     def on_connected(self) -> None:
         self.connected = True
@@ -308,6 +336,7 @@ class WsBooks:
                 b.update(state=GAP, why=R_DISCONNECT, sid=None)
                 self.resubscribe.add(t)
         self.sid_seq.clear()
+        self.sid_pre.clear()
         self.sid_markets.clear()
         self.ticker_sid.clear()
         self.dead_sids.clear()
@@ -341,6 +370,7 @@ class WsBooks:
         if sid in self.dead_sids:
             self.dead_sids.discard(sid)
             self.sid_seq.pop(sid, None)
+            self.sid_pre.pop(sid, None)
             self.sid_markets.pop(sid, None)
 
     def _current_elsewhere(self, b, sid) -> bool:
@@ -417,6 +447,8 @@ class WsBooks:
             return "IGNORED_DEAD_SID"
         last = self.sid_seq.get(sid)
         if typ == "orderbook_snapshot":
+            if last is None:
+                last = self._first_snapshot_after(sid, seq)
             if last is not None and seq != last + 1:
                 # messages of this sid were lost before this snapshot (seq
                 # past last + 1), or it is a replayed / out-of-order snapshot
@@ -439,11 +471,15 @@ class WsBooks:
             self.sid_markets.setdefault(sid, set()).add(t)
             self.ticker_sid[t] = sid
             self.sid_seq[sid] = seq
+            self.sid_pre.pop(sid, None)
             self.resubscribe.discard(t)
             self.stats["snapshots"] += 1
             return "SNAPSHOT"
         # delta: the sid's sequence first, then this market's book
         if last is None:
+            # before the sid's first snapshot: never applied, not its
+            # sequence, but remembered (_first_snapshot_after)
+            self.sid_pre[sid] = seq
             self.stats["ignored_after_gap"] += 1
             return "IGNORED_NOT_CURRENT"
         if seq != last + 1:
