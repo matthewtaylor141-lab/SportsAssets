@@ -50,11 +50,10 @@ SELECT loop_name, process, cadence_s,
        starts, successes, errors
   FROM runtime_loop_health ORDER BY process, loop_name;
 
-\echo A6 ingestion_state heartbeat-like keys: the at/beat fields and state names
+\echo A6 ingestion_state heartbeat-like keys: the at/beat fields (as written) and state names
 SELECT key,
        coalesce(value->>'state', value->>'status') AS state,
-       round(extract(epoch FROM now() - to_timestamp(coalesce(
-           (value->>'beat_at')::float, (value->>'at')::float)))) AS age_s,
+       left(coalesce(value->>'beat_at', value->>'at'), 32) AS at_as_written,
        (value->>'next_at') IS NOT NULL AS has_next_at,
        (SELECT string_agg(k, ',' ORDER BY k)
           FROM jsonb_object_keys(value) k) AS keys
