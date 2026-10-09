@@ -62,8 +62,12 @@ reserves or held positions. Account funding, session, opening snapshot, epoch
 receipt, selector switch and event commit together. Failure rolls everything
 back; retries cannot fund twice. Historical later settlement corrections stay
 in their original account: Xavier's production settlement pass walks every
-registered ancestor with its own session and the ledger's own account lock.
-Audrey and both default shadow runners resolve the selected account.
+registered account of the same risk family, including rolled-back children and
+sibling epochs, with its own session and the ledger's own account lock. Pending
+shadow counterfactuals are settled across that same family; counterfactual outcomes
+remain distinct from realized ledger P&L. Audrey's update snapshot and three
+PAPER-pass audit steps, and both default shadow runners, resolve the selected
+account. Archived accounts do not gain selected-account audit authority.
 Database guards reject stale order/session/fill/
 ledger ownership and pre-epoch valuation attribution. Streams terminate on an
 account switch and request a new cursor. Management/equity caches resolve the
@@ -84,7 +88,12 @@ or retirement; the existing named-person recovery workflow still governs any
 upward transition. Losses from rolled-back accounts remain in subsequent risk
 and learning populations without moving cash or changing accounting receipts.
 
-DDL rollback 317 is permitted only before any epoch/evidence exists. Every DROP
+DDL rollback 317 is permitted only before any epoch/evidence exists and only
+in a READ COMMITTED transaction. It takes the PAPER advisory lock before
+checking evidence and holds it through every DROP. REPEATABLE READ and
+SERIALIZABLE are refused because a pre-lock snapshot can hide a concurrent
+activation. Use `psql -v ON_ERROR_STOP=1` so a refusal also produces a nonzero
+operator exit status. Every DROP
 is inside the same refusing DO statement, so plain psql's continue-on-error
 behavior cannot destroy evidence. Database
 guards return unchanged before the first activation. The upgrade receipt proves
