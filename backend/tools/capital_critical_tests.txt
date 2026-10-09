@@ -1419,3 +1419,5 @@ tests/test_rc6_coverage_outside_registry.py
 tests/test_rc6_adriana_void_terms.py
 # (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
 tests/test_rc6_kalshi_ws_merge_integration.py
+# Signed acceptance requires the checksummed source verdict to agree with its copied packet value.
+tests/test_signed_acceptance_consistency.py

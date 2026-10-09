@@ -40,6 +40,9 @@ R_SUMS_MISMATCH = "SHA256SUMS_MISMATCH"
 R_SUMS_MISSING_FILE = "SHA256SUMS_LISTS_A_MISSING_FILE"
 R_SUMS_DOES_NOT_COVER = "SHA256SUMS_DOES_NOT_COVER"
 R_CONTENTS_NOT_GREEN = "CONTENTS_NOT_GREEN"
+R_SOURCE_UNREADABLE = "ACCEPTANCE_SOURCE_UNREADABLE"
+R_SOURCE_REFERENCE = "ACCEPTANCE_SOURCE_REFERENCE_INVALID"
+R_SOURCE_CONTRADICTS = "ACCEPTANCE_SOURCE_CONTRADICTS_PACKET"
 #: files the manifest must cover for the record to mean anything
 REQUIRED = ("evidence_packet.json", "acceptance.json")
 
@@ -68,15 +71,43 @@ def check_sums(acc: pathlib.Path) -> list:
     return bad
 
 
-def contents_state(acc: pathlib.Path):
-    """The independent PM state the packet itself carries, at its declared
-    path (acceptance.independent_pm_state.value), else None."""
+def _state_reference(acc: pathlib.Path):
     try:
         pkt = json.loads((acc / "evidence_packet.json").read_text())
     except (OSError, ValueError):
         return None
-    v = ((pkt.get("acceptance") or {}).get("independent_pm_state") or {})
-    return v.get("value") if isinstance(v, dict) else None
+    if not isinstance(pkt, dict) or not isinstance(pkt.get("acceptance"), dict):
+        return None
+    value = pkt["acceptance"].get("independent_pm_state")
+    return value if isinstance(value, dict) else None
+
+
+def contents_state(acc: pathlib.Path):
+    """The packet's copied independent state, or None for malformed content."""
+    ref = _state_reference(acc)
+    return ref.get("value") if ref is not None else None
+
+
+def source_consistency(acc: pathlib.Path, state) -> list:
+    """A signature authenticates both documents; they must also agree.
+
+    Read only the required, checksummed acceptance file, never an arbitrary
+    path supplied by a packet. Its actual verdict owns the copied value.
+    """
+    ref = _state_reference(acc)
+    if ref is None or ref.get("source") != "acceptance.json" or \
+            ref.get("path") != "independent_pm_state":
+        return [R_SOURCE_REFERENCE]
+    try:
+        source = json.loads((acc / "acceptance.json").read_text())
+    except (OSError, ValueError):
+        return [R_SOURCE_UNREADABLE]
+    if not isinstance(source, dict) or not isinstance(
+            source.get("independent_pm_state"), str):
+        return [R_SOURCE_UNREADABLE]
+    if source["independent_pm_state"] != state:
+        return [R_SOURCE_CONTRADICTS]
+    return []
 
 
 def build(acc: pathlib.Path, *, verify_packet_rc, verify_sums_rc) -> dict:
@@ -87,17 +118,19 @@ def build(acc: pathlib.Path, *, verify_packet_rc, verify_sums_rc) -> dict:
             sig.append("%s:%s:rc=%s" % (R_SIGNATURE_NOT_VERIFIED, what, rc))
     integ = check_sums(acc)
     state = contents_state(acc)
+    inconsistent = source_consistency(acc, state)
     cont = [] if state == "GREEN" else ["%s:%s" % (R_CONTENTS_NOT_GREEN,
                                                   state)]
     pkt = acc / "evidence_packet.json"
     return {
         "signature_verified": not sig,
         "sha256sums_match": not integ,
+        "contents_source_consistent": not inconsistent,
         "contents_pm_state": state,
-        "signed_acceptance": not sig and not integ and not cont,
+        "signed_acceptance": not sig and not integ and not inconsistent and not cont,
         "packet_sha256": (hashlib.sha256(pkt.read_bytes()).hexdigest()
                           if pkt.is_file() else None),
-        "reasons": sig + integ + cont,
+        "reasons": sig + integ + inconsistent + cont,
         "meaning": "signed_acceptance requires a VERIFIED attestation, a "
                    "matching SHA256SUMS AND a GREEN independent PM state; "
                    "a completed collection run or a signature alone is "
@@ -113,7 +146,8 @@ def main(argv, env=None) -> int:
     print(json.dumps(rec))
     # the job fails when the packet is not what was signed; RED / YELLOW
     # contents are the truthful verdict, recorded above
-    return 0 if rec["signature_verified"] and rec["sha256sums_match"] else 1
+    return 0 if rec["signature_verified"] and rec["sha256sums_match"] \
+        and rec["contents_source_consistent"] else 1
 
 
 if __name__ == "__main__":
