@@ -1349,3 +1349,7 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 xavier-records) every held paper position carries an accountable management record (identity, remaining qty, the probability's three clocks and why it is not current, decision and alternatives, next review or price condition, orders with their ACTUAL states, live protection, residual exposure, the packet NOW by the gate's rule, every blocker); the assessment persists the limitation; the xavier_complete gate names every blocker with whole counts, verdict unchanged
+tests/test_rc6_xavier_management_record.py
+# (RC6 xavier-records) a held contract entered on a metered event key is read on the PinnAPI fixture the matcher recorded for the same contract (both measures, the exploration entry check, the held watch); a PinnAPI entry key is never overridden; the read's own checks still refuse a wrong fixture
+tests/test_rc6_xavier_held_fixture.py
