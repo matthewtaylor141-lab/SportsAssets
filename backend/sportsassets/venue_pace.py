@@ -414,7 +414,486 @@ def effective_gap(min_gap_s: float = MIN_GAP_S) -> float:
     return _gap(float(min_gap_s), time.monotonic())
 
 
+# ══════════════════════════════════════════════════════════════════════
+# THE ESCALATING 429 COOLDOWN (P0-429, 2026-10-09)
+# ══════════════════════════════════════════════════════════════════════
+#
+# WHAT PRODUCTION SHOWED. sportsassets-workers, 04:20:08.9-04:20:16.9Z:
+# gateway.polymarket.us answered "429 Too Many Requests" nine times in 8 s
+# on nine different markets at ~0.7 s spacing, and the same burst shape
+# recurred all morning (11:40:00-11:42:00Z: 24 of 64 gateway requests were
+# 429s, in runs of up to seven at 0.7-1 s). 0.7 s is MIN_GAP_S x
+# PENALTY_MULT: the "circuit" above only doubled the gap, so the walk never
+# stopped. And the hard not-before hold (`penalize_observed` ->
+# venue_request_gate.hold_until) was checked BEFORE the pacer's queue,
+# never after it -- so every walker thread already queued for its gap when
+# the 429 arrived (mirror_shadow, shadow_bettor, bettor_state, shadow_rn1,
+# shadow_experimental, institutional_md) dispatched into the limit anyway,
+# one per doubled gap. That is the run of 429s.
+#
+# THE RULE. Every 429 the transport reads arms a process-wide cooldown:
+#
+#   * the FIRST 429 after a successful read arms COOLDOWN_FLOOR_S (5 s,
+#     GATE_FLOOR_S -- the hard floor this module already applies to an
+#     observed 429 with no Retry-After; PENALTY_S is the 600 s REDUCED-RATE
+#     period and was never a prohibition, see `penalize_observed`);
+#   * each further 429 on a request dispatched AFTER the current cooldown
+#     was armed (the probe that followed it was refused again) DOUBLES the
+#     level, capped at COOLDOWN_CAP_S. A 429 on a request already in flight
+#     when the cooldown was armed is counted but does not escalate: it is
+#     the same episode, not new evidence;
+#   * the cooldown is the level plus a jitter of [0, COOLDOWN_JITTER_FRAC)
+#     of it -- three processes share the venue's limit (API, workers,
+#     market plane) and must not all resume on the same instant -- never
+#     more than the cap, and never less than the venue's own Retry-After
+#     when the venue names a longer one;
+#   * only a 2xx READ dispatched after the cooldown was armed resets it
+#     (consecutive count and level to zero, the cooldown lifted). A 2xx
+#     that was in flight before the 429 is not evidence the limit cleared.
+#
+# WHAT A COOLDOWN DOES TO A REQUEST (venue_request_gate.cooldown_check,
+# called at the transport BEFORE the pacer's queue and AGAIN after it,
+# immediately before dispatch):
+#
+#   NORMAL lane, no deadline (every measurement walker)
+#       refused by name, nothing sent: R_VENUE_429_COOLDOWN_READ_DEFERRED.
+#       The walkers check `normal_read_deferral()` before each market and
+#       stop their pass, counting what they skipped.
+#   NORMAL lane, no deadline, inside wait_out_the_cooldown() (a caller
+#       whose pass is one indivisible proof: the premap catalogue sweep)
+#       waits the cooldown out when it ends within what is left of
+#       venue_request_gate.MAX_UNDEADLINED_WAIT_S -- one budget with the
+#       hard hold, the wait such a read always had -- nothing sent while it
+#       stands; a longer cooldown is refused at once by name,
+#       R_HOLD_EXCEEDS_UNDEADLINED_CAP. The sweep reads that refusal itself
+#       (premap._our_gate_refused): its pass stops RATE_LIMITED_BY_VENUE
+#       with the refusal named, the read is never counted as a request,
+#       and it never takes the markets fallback. Any caller that reads a
+#       failure as "the venue did not answer" and tries another endpoint
+#       must do the same.
+#   NORMAL lane, with a deadline (a scheduled read bound by begin_read)
+#       waits the cooldown out when it ends inside the deadline -- the
+#       contract venue_request_gate already gives a caller that "can
+#       genuinely wait" -- else refused R_COOLDOWN_EXCEEDS_DEADLINE.
+#   PRIORITY lane (priority_claims(): the money paths -- the live mirror's
+#       tick, the API's actual-entry submission, its execution mirror and
+#       the WS-triggered evaluation; risk-reducing cancels and closes ride
+#       these) waits at most PRIORITY_COOLDOWN_MAX_WAIT_S of the cooldown,
+#       then proceeds: never refused by this cooldown, never starved by
+#       it. Why bounded rather than full: a cancel or protective close
+#       that waits out a 120 s cooldown while the position moves is a
+#       larger loss than one more 429, and one priority request at the
+#       pacer's (doubled) gap does not raise the venue rate -- the gap is
+#       the rate. The first rung (5 s) is waited in full, so at the floor
+#       a priority claim honours the cooldown exactly. The venue's own
+#       hard hold (Retry-After via hold_until) is unchanged for every lane.
+#
+# NOTHING HERE RAISES A RATE. The gap, the lanes and PENALTY_* are as they
+# were; this only withholds requests.
+#
+# THREE PROCESSES, FOUR PACERS -- STATED, NOT FIXED HERE (P0-429 item 7).
+# This module's state is per PROCESS. sportsassets-api and
+# sportsassets-workers each import it and each hold their own gap, their own
+# hold and their own cooldown; whatever limit the venue counts (credential,
+# account or source IP -- venue_cooldown_store records the scope because it
+# is not established) is shared by both while neither sees the other's 429s.
+# The portable expiry `penalize_observed` produces is persisted and read
+# back ONLY by the API's ext_pinnacle_loop (venue_cooldown_store
+# .drain_pending / .load_and_resume, into the API process at its own
+# startup): the workers queue a save on a book_read 429 that nothing in the
+# workers process drains, and no process reads another's row. The market
+# plane (sportsassets-market-plane) neither imports this module nor builds
+# a retail gateway client: its REST book refresh is the PMX institutional
+# book (another host, GET /v1/orderbook/{symbol}) under its own 12/min
+# budget and its own 60 s hold on a 429 (market_plane.active_refresh), and
+# it reads institutional_same_book for that module's timestamp parser
+# alone. The paper public-gateway lane (paper_market_data.AuthLaneState,
+# held marks only, one request at a time) is a FOURTH pacer, in whichever
+# process runs the paper owner: it replaces this transport with its own
+# (1 s gap, a 5 s / Retry-After hold on every 429, the gap doubled per 429
+# up to x8) and is not touched here. A cross-process cooldown would need a
+# shared store read before every claim -- a database read on the
+# market-data path that venue_cooldown_store deliberately refuses to make
+# -- so it is not attempted here; each process now at least stops ITS OWN
+# walk on the venue's first 429, and each process's cooldown is on its own
+# readback (the workers: every gateway walker's beat; the API: the
+# ext_pinnacle heartbeat's venue_rate_controls, through
+# venue_request_gate.totals()).
+COOLDOWN_FLOOR_S = GATE_FLOOR_S
+COOLDOWN_CAP_S = 120.0
+COOLDOWN_JITTER_FRAC = 0.2
+PRIORITY_COOLDOWN_MAX_WAIT_S = COOLDOWN_FLOOR_S
+#: The named refusal a normal-lane read gets during the cooldown. OURS
+#: (SOFTWARE): the venue's 429 is the venue's word, but choosing not to send
+#: while it stands -- and having walked into it -- is our decision.
+R_VENUE_429_COOLDOWN_READ_DEFERRED = "VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED"
+COOLDOWN_VERSION = "VENUE_429_ESCALATING_COOLDOWN_V1"
+
+# indirections so a test drives the cooldown on a fake clock and a fixed
+# jitter; production reads the real ones
+_clock = time.monotonic
+_wall = time.time
+_rand = None            # None: random.random
+
+_rl_lock = threading.Lock()
+_rl: dict = {}
+_rl_sources: dict = {}
+#: the read source a claim is attributed to (a walker sets it once for its
+#: task; asyncio.to_thread copies it into every thread the task starts)
+_source_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "venue_pace_read_source", default=None)
+
+
+def _rl_reset_state() -> None:
+    _rl.clear()
+    _rl.update({"consecutive": 0, "level_s": 0.0, "cooldown_s": 0.0,
+                "until_mono": 0.0, "until_epoch": 0.0, "armed_mono": None,
+                "cooldown_is": None, "retry_after_s": None,
+                "rate_limited_total": 0, "escalations": 0,
+                "in_flight_429s": 0, "deferred_total": 0,
+                "deadline_waits": 0, "deadline_waited_s": 0.0,
+                "priority_waits": 0, "priority_waited_s": 0.0,
+                "bounded_waits": 0, "bounded_waited_s": 0.0,
+                "resets": 0, "last_429": None, "last_ok_epoch": None,
+                "last_deferred_epoch": None})
+    _rl_sources.clear()
+
+
+_rl_reset_state()
+
+
+def reset_rate_limit_state() -> None:
+    """Tests only: the cooldown, its counters and the per-source tallies."""
+    with _rl_lock:
+        _rl_reset_state()
+
+
+def priority_now() -> bool:
+    """Whether a claim made here, with no keyword, takes the priority lane
+    (inside priority_claims())."""
+    return bool(_priority_ctx.get())
+
+
+def set_read_source(name: str | None):
+    """Attribute every venue claim this task (and the threads it starts)
+    makes to `name` -- a walker calls it once at the top of its loop.
+    Returns the contextvar token."""
+    return _source_ctx.set(str(name) if name else None)
+
+
+@contextlib.contextmanager
+def read_source(name: str | None):
+    tok = _source_ctx.set(str(name) if name else None)
+    try:
+        yield
+    finally:
+        _source_ctx.reset(tok)
+
+
+def current_read_source() -> str | None:
+    return _source_ctx.get()
+
+
+#: THE BOUNDED COOLDOWN WAIT (P0-429, review round 2) -- the opt-in for an
+#: undeadlined NORMAL-lane caller that is not a market walker.
+#:
+#: WHY. The refusal above is right for a WALKER: it stops its pass and the
+#: next pass starts on its own cadence. It is wrong for a caller whose pass
+#: is ONE indivisible proof -- the premap catalogue sweep: one refused page
+#: and the whole receipt is PARTIAL, catalogue_completeness reads it, and
+#: radar raises CATALOGUE_NOT_PROVEN_COMPLETE. Before the cooldown existed
+#: such a read met the hard hold (`penalize_observed` -> hold_until, 5 s at
+#: the floor) and WAITED it out within venue_request_gate's
+#: MAX_UNDEADLINED_WAIT_S (20 s) before it sent; the cooldown's immediate
+#: refusal took that away from every caller, catalogue included (review
+#: reproduction: a 150-event board, another walker's 429 after page 1 --
+#: 0e331f05 COMPLETE after a 5 s wait, 6f47d4a4 PARTIAL, RATE_LIMITED).
+#:
+#: WHAT IT DOES. A read made inside `wait_out_the_cooldown()` (and in every
+#: thread asyncio.to_thread starts from it -- the context is copied) with no
+#: deadline WAITS the cooldown out when it ends within what is left of
+#: MAX_UNDEADLINED_WAIT_S -- ONE budget with the hard hold's wait, so the gate
+#: never sleeps such a caller longer than it did before the cooldown existed
+#: -- and is re-checked after the pacer's queue like every request, so
+#: NOTHING is sent while the cooldown stands. A cooldown that outlasts what is
+#: left is refused by name, at once, never after sleeping part of it:
+#: venue_request_gate.R_HOLD_EXCEEDS_UNDEADLINED_CAP (the cap it is, already
+#: SOFTWARE / FRESHNESS_PLUMBING / VENUE_BOOK, the deferral's row). Outside it
+#: nothing changes: walkers are still refused at once.
+_cooldown_wait_ctx: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "venue_pace_wait_out_the_cooldown", default=False)
+
+
+@contextlib.contextmanager
+def wait_out_the_cooldown():
+    """Inside: an undeadlined normal-lane read waits out the 429 cooldown
+    within venue_request_gate.MAX_UNDEADLINED_WAIT_S (one budget with the
+    hard hold) instead of being refused at once. See the block above."""
+    tok = _cooldown_wait_ctx.set(True)
+    try:
+        yield
+    finally:
+        _cooldown_wait_ctx.reset(tok)
+
+
+def waits_out_the_cooldown() -> bool:
+    """Whether a read made here opted into the bounded cooldown wait."""
+    return bool(_cooldown_wait_ctx.get())
+
+
+def _src(source: str | None) -> dict:
+    name = source or "unattributed"
+    s = _rl_sources.get(name)
+    if s is None:
+        s = _rl_sources[name] = {"rate_limited": 0, "deferred": 0,
+                                 "skipped_by_walker": 0, "last_429": None,
+                                 "last_deferred_epoch": None,
+                                 "cooldown_waits": 0,
+                                 "cooldown_waited_s": 0.0}
+    return s
+
+
+def _jitter() -> float:
+    if _rand is not None:
+        r = float(_rand())
+    else:
+        import random
+        r = random.random()
+    return min(max(r, 0.0), 0.999999)
+
+
+#: A Retry-After longer than our cap is honoured (the venue's word beats our
+#: number) -- up to this sanity bound, so a garbled header cannot park a lane
+#: for a day.
+RETRY_AFTER_SANITY_MAX_S = 3600.0
+
+
+def clean_retry_after(value) -> float | None:
+    """A Retry-After in seconds, or None when absent / not a finite
+    non-negative number; bounded by RETRY_AFTER_SANITY_MAX_S."""
+    try:
+        ra = None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+    if ra is None or ra != ra or ra in (float("inf"), float("-inf")) or ra < 0:
+        return None
+    return min(ra, RETRY_AFTER_SANITY_MAX_S)
+
+
+def escalate(level_s: float, retry_after_s=None, jitter: float = 0.0) -> dict:
+    """PURE: the next rung of the escalating cooldown, shared by the venue
+    gateway's cooldown here and the data-api throttle's (ratelimit).
+    `level_s` is the current level (0: none since the last successful read);
+    `jitter` in [0, 1). Returns {level_s, cooldown_s, cooldown_is}: the level
+    is COOLDOWN_FLOOR_S, else double the previous one, capped at
+    COOLDOWN_CAP_S; the cooldown is the level plus up to COOLDOWN_JITTER_FRAC
+    of it, capped, and never less than a longer Retry-After."""
+    level = (COOLDOWN_FLOOR_S if not level_s or level_s <= 0
+             else min(COOLDOWN_CAP_S, float(level_s) * 2.0))
+    j = min(max(float(jitter or 0.0), 0.0), 0.999999)
+    wait = min(COOLDOWN_CAP_S, level * (1.0 + COOLDOWN_JITTER_FRAC * j))
+    why = "ESCALATION"
+    ra = clean_retry_after(retry_after_s)
+    if ra is not None and ra > wait:
+        wait, why = ra, "RETRY_AFTER"
+    return {"level_s": level, "cooldown_s": wait, "cooldown_is": why}
+
+
+def note_rate_limited(*, retry_after_s=None, dispatched_mono: float | None = None,
+                      method: str | None = None, path: str | None = None,
+                      source: str | None = None, now: float | None = None) -> dict:
+    """A 429 was READ by the transport. Escalates (or, for a request already
+    in flight when the cooldown was armed, only counts) and returns what was
+    applied. Never raises; never takes the gate's lock. Also trips the
+    reduced-rate circuit (`penalize`), as every 429 always should have."""
+    mono = _clock() if now is None else float(now)
+    wall = _wall()
+    ra = clean_retry_after(retry_after_s)
+    src = source if source is not None else _source_ctx.get()
+    with _rl_lock:
+        _rl["consecutive"] += 1
+        _rl["rate_limited_total"] += 1
+        last = {"at_epoch": round(wall, 3), "method": method, "path": path,
+                "source": src or "unattributed", "retry_after_s": ra}
+        _rl["last_429"] = last
+        s = _src(src)
+        s["rate_limited"] += 1
+        s["last_429"] = dict(last)
+        armed = _rl["armed_mono"]
+        in_flight = (dispatched_mono is not None and armed is not None
+                     and float(dispatched_mono) < armed
+                     and mono < _rl["until_mono"])
+        if in_flight:
+            # the same episode: the request left before the cooldown was
+            # armed. Counted, never escalated, never shortened.
+            _rl["in_flight_429s"] += 1
+            if ra is not None and mono + ra > _rl["until_mono"]:
+                _rl["until_mono"] = mono + ra
+                _rl["until_epoch"] = wall + ra
+                _rl["cooldown_is"] = "RETRY_AFTER"
+                _rl["retry_after_s"] = ra
+            out = {"escalated": False, "why": "IN_FLIGHT_BEFORE_THE_COOLDOWN"}
+        else:
+            e = escalate(_rl["level_s"], ra, _jitter())
+            level, wait, why = e["level_s"], e["cooldown_s"], e["cooldown_is"]
+            _rl["level_s"] = level
+            # EXTENDS ONLY: a cooldown already in force is never shortened
+            if mono + wait > _rl["until_mono"]:
+                _rl["until_mono"] = mono + wait
+                _rl["until_epoch"] = wall + wait
+            _rl["cooldown_s"] = round(wait, 3)
+            _rl["armed_mono"] = mono
+            _rl["cooldown_is"] = why
+            _rl["retry_after_s"] = ra
+            _rl["escalations"] += 1
+            out = {"escalated": True, "level_s": level,
+                   "cooldown_s": round(wait, 3), "cooldown_is": why}
+        out.update(consecutive=_rl["consecutive"],
+                   seconds_left=round(max(0.0, _rl["until_mono"] - mono), 3))
+    try:
+        penalize()
+    except Exception:                                          # noqa: BLE001
+        pass
+    return out
+
+
+def note_read_ok(*, dispatched_mono: float | None = None,
+                 now: float | None = None) -> bool:
+    """A 2xx READ came back. Resets the escalation -- consecutive count,
+    level and the cooldown itself -- only when the request was dispatched
+    after the current cooldown was armed (or none was ever armed). Returns
+    whether it reset anything."""
+    mono = _clock() if now is None else float(now)
+    with _rl_lock:
+        _rl["last_ok_epoch"] = round(_wall(), 3)
+        armed = _rl["armed_mono"]
+        if armed is not None and dispatched_mono is not None \
+                and float(dispatched_mono) < armed:
+            return False
+        if _rl["consecutive"] == 0 and _rl["level_s"] == 0.0 \
+                and mono >= _rl["until_mono"]:
+            return False
+        _rl.update(consecutive=0, level_s=0.0, until_mono=0.0,
+                   until_epoch=0.0, armed_mono=None)
+        _rl["resets"] += 1
+        return True
+
+
+def cooldown_left(now: float | None = None) -> float:
+    """Seconds of the 429 cooldown left (0.0: none in force)."""
+    mono = _clock() if now is None else float(now)
+    with _rl_lock:
+        return max(0.0, _rl["until_mono"] - mono)
+
+
+def normal_read_deferral(now: float | None = None) -> dict | None:
+    """None when a NORMAL-lane read may be sent now; else the named
+    deferral a walker records before it stops its pass (nothing is counted
+    here -- the walker counts what it skipped with `note_walker_skipped`)."""
+    left = cooldown_left(now)
+    if left <= 0:
+        return None
+    with _rl_lock:
+        return {"refusal": R_VENUE_429_COOLDOWN_READ_DEFERRED,
+                "seconds_left": round(left, 3),
+                "consecutive_429": _rl["consecutive"],
+                "level_s": _rl["level_s"],
+                "cooldown_is": _rl["cooldown_is"]}
+
+
+def note_deferred(source: str | None = None) -> None:
+    """The transport refused a normal-lane read during the cooldown."""
+    src = source if source is not None else _source_ctx.get()
+    with _rl_lock:
+        _rl["deferred_total"] += 1
+        _rl["last_deferred_epoch"] = round(_wall(), 3)
+        s = _src(src)
+        s["deferred"] += 1
+        s["last_deferred_epoch"] = _rl["last_deferred_epoch"]
+
+
+def note_walker_skipped(n: int, source: str | None = None) -> None:
+    """A walker stopped its pass on the cooldown and skipped `n` reads."""
+    if not n:
+        return
+    src = source if source is not None else _source_ctx.get()
+    with _rl_lock:
+        _src(src)["skipped_by_walker"] += int(n)
+
+
+def note_cooldown_wait(seconds: float, *, priority: bool,
+                       bounded: bool = False,
+                       source: str | None = None) -> None:
+    """A request waited `seconds` of the cooldown out before it went:
+    a PRIORITY claim (its bound), a DEADLINED read (inside its deadline),
+    or a BOUNDED undeadlined read (wait_out_the_cooldown(), within
+    MAX_UNDEADLINED_WAIT_S) -- each counted apart, and per source, so the
+    readback shows a sweep that WAITED apart from one that was refused."""
+    secs = max(0.0, float(seconds))
+    src = source if source is not None else _source_ctx.get()
+    with _rl_lock:
+        k = ("priority" if priority else "bounded" if bounded
+             else "deadline")
+        _rl[k + "_waits"] += 1
+        _rl[k + "_waited_s"] = round(_rl[k + "_waited_s"] + secs, 3)
+        s = _src(src)
+        s["cooldown_waits"] += 1
+        s["cooldown_waited_s"] = round(s["cooldown_waited_s"] + secs, 3)
+
+
+def rate_limit_state(now: float | None = None) -> dict:
+    """THE READBACK: the cooldown, the consecutive 429 count, the deferred
+    and skipped counts and the last 429, process-wide and per source --
+    JSON-safe, for the owning worker's heartbeat."""
+    mono = _clock() if now is None else float(now)
+    with _rl_lock:
+        left = max(0.0, _rl["until_mono"] - mono)
+        return {"version": COOLDOWN_VERSION, "scope": "THIS_PROCESS",
+                "cooldown_active": left > 0,
+                "cooldown_seconds_left": round(left, 3),
+                "cooldown_until_epoch": (round(_rl["until_epoch"], 3)
+                                         if left > 0 else None),
+                "cooldown_s": _rl["cooldown_s"], "level_s": _rl["level_s"],
+                "cooldown_is": _rl["cooldown_is"],
+                "retry_after_s": _rl["retry_after_s"],
+                "consecutive_429": _rl["consecutive"],
+                "rate_limited_total": _rl["rate_limited_total"],
+                "escalations": _rl["escalations"],
+                "in_flight_429s": _rl["in_flight_429s"],
+                "resets": _rl["resets"],
+                "deferred_total": _rl["deferred_total"],
+                "deadline_waits": _rl["deadline_waits"],
+                "deadline_waited_s": _rl["deadline_waited_s"],
+                "priority_waits": _rl["priority_waits"],
+                "priority_waited_s": _rl["priority_waited_s"],
+                "bounded_waits": _rl["bounded_waits"],
+                "bounded_waited_s": _rl["bounded_waited_s"],
+                "last_429": dict(_rl["last_429"]) if _rl["last_429"] else None,
+                "last_ok_read_epoch": _rl["last_ok_epoch"],
+                "last_deferred_epoch": _rl["last_deferred_epoch"],
+                "by_source": {k: {kk: (dict(vv) if isinstance(vv, dict) else vv)
+                                  for kk, vv in v.items()}
+                              for k, v in _rl_sources.items()},
+                "rule": {"floor_s": COOLDOWN_FLOOR_S, "cap_s": COOLDOWN_CAP_S,
+                         "jitter_frac": COOLDOWN_JITTER_FRAC,
+                         "priority_max_wait_s": PRIORITY_COOLDOWN_MAX_WAIT_S,
+                         "reset": "A_2XX_READ_DISPATCHED_AFTER_THE_COOLDOWN_WAS_ARMED",
+                         "normal_lane": R_VENUE_429_COOLDOWN_READ_DEFERRED,
+                         "priority_lane": "BOUNDED_WAIT_THEN_PROCEED",
+                         "normal_lane_opted_in":
+                             "WAIT_WITHIN_THE_UNDEADLINED_CAP_ELSE_REFUSED"}}
+
+
 __all__ = ["pace", "priority_claims", "waiting", "lane_stats", "penalize", "penalty_left",
            "penalize_observed", "cooldown_state", "resume_cooldown",
            "effective_gap", "MIN_GAP_S", "PENALTY_MULT", "PENALTY_S",
-           "GATE_FLOOR_S", "PACE_PRIORITY_BURST"]
+           "GATE_FLOOR_S", "PACE_PRIORITY_BURST",
+           "COOLDOWN_FLOOR_S", "COOLDOWN_CAP_S", "COOLDOWN_JITTER_FRAC",
+           "PRIORITY_COOLDOWN_MAX_WAIT_S", "R_VENUE_429_COOLDOWN_READ_DEFERRED",
+           "note_rate_limited", "note_read_ok", "cooldown_left",
+           "normal_read_deferral", "note_deferred", "note_walker_skipped",
+           "note_cooldown_wait", "rate_limit_state", "reset_rate_limit_state",
+           "priority_now", "set_read_source", "read_source",
+           "current_read_source", "escalate", "clean_retry_after",
+           "RETRY_AFTER_SANITY_MAX_S", "wait_out_the_cooldown",
+           "waits_out_the_cooldown"]

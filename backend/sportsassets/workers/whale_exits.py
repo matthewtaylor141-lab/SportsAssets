@@ -359,20 +359,34 @@ async def _fetch_positions(http: httpx.AsyncClient,
         # per request and the wait precedes the request; the cycle has
         # no deadline of its own (main sleeps INTERVAL_S after it).
         await ratelimit.data_api_throttle().wait()
+        sent_at = ratelimit.clock()
         resp = await http.get("/positions",
                               params={"user": address,
                                       "limit": POSITIONS_PAGE,
                                       "offset": offset})
+        # THE HOST'S 429 COOLDOWN READS EVERY PAGE (P0-429): a 429 here
+        # holds every data-api caller of this process (the poller's /trades
+        # included), not only this walk, and a 2xx sent after it was armed
+        # lifts it. The path alone is recorded, never the query (it names
+        # the wallet).
+        ratelimit.observe_data_api_response(resp, sent_at=sent_at,
+                                            path="/positions")
         if resp.status_code == 429 or resp.status_code >= 500:
             # one polite retry before forfeiting the whole book — a
             # single throttled page was costing the whale's entire
-            # exit coverage for the cycle
+            # exit coverage for the cycle. After a 429 the slot below is
+            # held until the host's cooldown ends (at least
+            # venue_pace.COOLDOWN_FLOOR_S, escalating): the retry never
+            # goes back into the limit 2 s later (P0-429)
             await asyncio.sleep(2.0)
             await ratelimit.data_api_throttle().wait()
+            sent_at = ratelimit.clock()
             resp = await http.get("/positions",
                                   params={"user": address,
                                           "limit": POSITIONS_PAGE,
                                           "offset": offset})
+            ratelimit.observe_data_api_response(resp, sent_at=sent_at,
+                                                path="/positions")
         resp.raise_for_status()
         body = resp.json()
         rows = body if isinstance(body, list) else (
@@ -637,9 +651,15 @@ async def market_positions(http: httpx.AsyncClient, address: str,
         else:
             await data_api_throttle().wait()
         t1 = time.monotonic()
+        sent_at = ratelimit.clock()
         resp = await http.get("/positions", params={
             "user": address, "market": condition_id, "limit": 100,
             "sizeThreshold": 0})
+        # the host's 429 cooldown reads this response too (P0-429): a 429
+        # holds every data-api caller, a 2xx sent after it was armed lifts
+        # it; the read itself answers exactly as before
+        ratelimit.observe_data_api_response(resp, sent_at=sent_at,
+                                            path="/positions")
         if resp.status_code != 200:
             return None
         body = resp.json()

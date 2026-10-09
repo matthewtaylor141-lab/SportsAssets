@@ -307,8 +307,12 @@ def _venue_age(read, now):
 
 
 def _default_gate():
+    """The same-book probe's pre-read gate: blocking while the venue's hard
+    hold OR the escalating 429 cooldown (P0-429) is in force, so the probe
+    defers by name (D_HOLD) instead of sending a read the transport would
+    refuse."""
     from .. import venue_request_gate as grt
-    return grt.gate_state()
+    return grt.normal_read_gate()
 
 
 def evidence_order(symbols, *, focus=None, evidence=None) -> list:
@@ -510,6 +514,10 @@ async def run() -> None:
         log.info("institutional_md: off by switch")
         return LOOP_DISABLED  # off by configuration: not restarted (loop_contract)
 
+    # the same-book probe's retail reads are attributed to this loop on the
+    # 429 cooldown's readback (P0-429)
+    from .. import venue_pace as _vp
+    _vp.set_read_source(SERVICE)
     seen = pmx.presence()
     mech = pmx.market_data_mechanisms(stream_enabled=istream.enabled())
     boot = {"service": SERVICE,
@@ -727,6 +735,8 @@ async def run() -> None:
         # sweep would be thirty writes a minute saying the same thing.
         if beat_due(last_beat, time.monotonic()):
             last_beat = time.monotonic()
+            # the process's 429 cooldown on this loop's beat (P0-429)
+            stats["venueRateLimit"] = _vp.rate_limit_state()
             try:
                 await heartbeat(SERVICE, str(stats.get("status") or "ok"),
                                 stats)

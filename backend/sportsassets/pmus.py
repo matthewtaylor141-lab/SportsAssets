@@ -1287,6 +1287,29 @@ def _quote_px(m: dict, *keys: str) -> float | None:
     return None
 
 
+def _is_our_gate_refusal(exc) -> bool:
+    """A refusal by OUR venue request gate (never a venue answer)."""
+    try:
+        from . import venue_request_gate as _grt
+        return isinstance(exc, _grt.VenueGateRefusal)
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def _limit_ends_the_read(exc) -> bool:
+    """Whether a feed's failure must end a multi-feed read (P0-429): the
+    venue's 429 -- the SDK's RateLimitError, or an int `status_code` of 429
+    (decided by the status the SDK built, never by a '429' inside a text:
+    a RuntimeError('429') is not a rate limit) -- or our own gate's refusal.
+    Either way the next feed's request would be refused the same way."""
+    if "RateLimit" in type(exc).__name__:
+        return True
+    code = getattr(exc, "status_code", None)
+    if isinstance(code, int) and not isinstance(code, bool) and code == 429:
+        return True
+    return _is_our_gate_refusal(exc)
+
+
 def _bbo_quotes(client, us_slug: str) -> tuple[float | None, float | None]:
     """(bestBid, bestAsk) from the venue's BBO feed.
 
@@ -1300,14 +1323,21 @@ def _bbo_quotes(client, us_slug: str) -> tuple[float | None, float | None]:
     Both quotes come from ONE call so bid and ask are the same
     snapshot; mixing two reads could straddle a move and invert the
     spread. `book` is tried second because the endpoint that measured
-    this accepted either."""
+    this accepted either.
+
+    A 429 ON THE FIRST FEED ENDS THE READ (P0-429): the second request
+    would go straight into the limit the first was refused by (production
+    2026-10-09 04:20Z: bbo-then-book pairs, both 429). Our own gate's
+    refusal ends it too -- the second feed would be refused the same way."""
     for meth in ("bbo", "book"):
         fn = getattr(getattr(client, "markets", None), meth, None)
         if fn is None:
             continue
         try:
             d = (fn(us_slug) or {}).get("marketData") or {}
-        except Exception:  # noqa: BLE001 — try the next feed
+        except Exception as exc:  # noqa: BLE001 — try the next feed
+            if _limit_ends_the_read(exc):
+                break
             continue
         if not isinstance(d, dict):
             continue
@@ -1338,8 +1368,18 @@ def bbo_read(client, us_slug: str) -> dict:
     a silent (None, None). A feed that answers with a quote returns at
     once; a feed that answers empty lends its state to the next one's
     try, so `bbo` empty and `book` quoted is the book's quotes with the
-    book's state. `_bbo_quotes` is untouched: slug_bid and every other
-    caller keep its 2-tuple."""
+    book's state. `_bbo_quotes` keeps its 2-tuple: slug_bid and every
+    other caller read it as before.
+
+    ONE REQUEST ON A 429 (P0-429). A 429 from the first feed -- the SDK's
+    RateLimitError, or an int status_code of 429, never a '429' inside a
+    text -- ends the read: production 2026-10-09 04:20Z showed bbo-then-book
+    pairs on the same slug, both 429, because the second feed went straight
+    into the limit the first had just been refused by. `error` names it
+    (RateLimitError). A refusal by our own venue gate ends it too, and
+    `error` is that refusal's own code (e.g. the 429 cooldown's
+    VENUE_429_COOLDOWN_NORMAL_READ_DEFERRED), so a walker can tell our
+    deferral from the venue's answer."""
     out: dict = {"bid": None, "ask": None, "state": None, "error": None}
     error, answered = None, False
     for meth in ("bbo", "book"):
@@ -1349,7 +1389,11 @@ def bbo_read(client, us_slug: str) -> dict:
         try:
             d = (fn(us_slug) or {}).get("marketData") or {}
         except Exception as exc:  # noqa: BLE001 — named, then the next feed
-            error = type(exc).__name__
+            error = (getattr(exc, "refusal", None)
+                     if _is_our_gate_refusal(exc) else None) \
+                or type(exc).__name__
+            if _limit_ends_the_read(exc):
+                break
             continue
         if not isinstance(d, dict):
             # a marketData that is not an object is not an answer: named
@@ -1482,12 +1526,48 @@ def paced_read(call, *, endpoint: str, max_dispatches: int = None):
             _arm_cooldown_from(diag)
             if (attempt + 1) >= budget or not _book_read_worth_retrying(diag):
                 raise
+            # THE 429 COOLDOWN DECIDES WHEN THE NEXT REQUEST GOES (P0-429),
+            # not this read: a normal-lane retry the cooldown would refuse
+            # is not attempted, and the venue's own answer (the 429) is what
+            # the caller gets -- never a sleep through the hold first.
+            if _retry_deferred_by_cooldown():
+                raise
             # THROUGH THE GATE, which holds the venue's own window and knows
             # the caller's deadline -- so a wait that would outlive the
             # decision raises instead of sleeping.
             _grt.check_before_dispatch(read_id=_grt.current_read())
     if last is not None:                                       # pragma: no cover
         raise last
+
+
+def _retry_deferred_by_cooldown() -> dict | None:
+    """The cooldown's refusal detail when a retry made NOW, on this
+    thread's lane and read, would be refused by the escalating 429 cooldown
+    as an UNDEADLINED normal-lane read (venue_request_gate.cooldown_check:
+    R_VENUE_429_COOLDOWN_READ_DEFERRED) -- recorded once, as a deferral.
+    None otherwise: a retry that may go, or would only wait (a priority
+    claim, a deadlined read that fits), or a deadlined read the cooldown
+    outlasts -- that one keeps its existing path, the gate's named
+    R_COOLDOWN_EXCEEDS_DEADLINE raised to the caller. Never raises."""
+    try:
+        from . import venue_pace as _vp
+        from . import venue_request_gate as _grt
+    except Exception:                                          # noqa: BLE001
+        return None
+    rid = _grt.current_read()
+    try:
+        _grt.cooldown_check(read_id=rid, stage="BEFORE_OUR_RETRY",
+                            record=False)
+        return None
+    except Exception as exc:                                   # noqa: BLE001
+        if (not _is_our_gate_refusal(exc)
+                or getattr(exc, "refusal", None)
+                != _vp.R_VENUE_429_COOLDOWN_READ_DEFERRED):
+            return None
+        detail = dict(getattr(exc, "detail", None) or {})
+        _grt._note_gate_refusal(rid, detail)
+        _vp.note_deferred()
+        return dict(detail, refusal=exc.refusal)
 
 
 def _book_read_worth_retrying(diag: dict) -> bool:
@@ -1666,7 +1746,14 @@ def book_read(client, us_slug: str) -> dict:
                     out["cooldown"] = {"applied": False,
                                        "why": type(pexc).__name__}
             last = (_dispatch + 1) >= BOOK_READ_MAX_DISPATCHES
-            if last or not _book_read_worth_retrying(diag):
+            # THE 429 COOLDOWN DEFERS A NORMAL-LANE RETRY (P0-429): a walker's
+            # read does not sleep out the hold to retry into the limit; the
+            # venue's 429 is this read's answer and the cooldown, not this
+            # read, decides when the next request goes. A deadlined read or a
+            # priority claim keeps its retry (the transport waits for it).
+            deferred = (None if (last or not _book_read_worth_retrying(diag))
+                        else _retry_deferred_by_cooldown())
+            if last or deferred or not _book_read_worth_retrying(diag):
                 out["error"] = diag.get("error_type") or type(exc).__name__
                 out["error_detail"] = diag
                 out["http_observer"] = observer
@@ -1675,7 +1762,10 @@ def book_read(client, us_slug: str) -> dict:
                 out["dispatches_we_attempted"] = _dispatch + 1
                 out["why_no_further_attempt"] = (
                     "BOOK_READ_MAX_DISPATCHES_REACHED" if last
-                    else "THE_FAILURE_IS_NOT_RETRYABLE")
+                    else (deferred.get("refusal") or "VENUE_429_COOLDOWN")
+                    if deferred else "THE_FAILURE_IS_NOT_RETRYABLE")
+                if deferred:
+                    out["retry_deferred"] = deferred
                 return out
             # WAIT THROUGH THE GATE, WHICH IS WHERE THE DEADLINE LIVES.
             # Not `time.sleep(backoff)`: the gate holds the venue's own
