@@ -719,6 +719,19 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     sampled every minute whatever the pass is doing, and a minute with no
     sample is an outage the readback counts.
 
+    THE FROZEN MEMBERS ARE SERVED FOR THE WHOLE WINDOW (RC6.2, lane
+    p-freshness, independent review rev1). The refresh read only the LIVE
+    registry list (priority <= P_CANDIDATE, or a working order), re-read
+    every 30 s, while the window measures the membership frozen at its first
+    sample for the whole hour: a member that left the live list mid-hour
+    lost its refresh record and was never read again -- coded N for the
+    rest of the hour with the budget idle (production, window 15:00Z on the
+    RC6.1 plane, research-sql 37959672993: 8 pregame candidates now at
+    priority 20, N in 8-47 of 53 samples, ~3.8 a sample). Each tick hands
+    the window this task holds to the refresher (`set_frozen`); its members
+    join the live list with their frozen tier. Same budget, same gap, same
+    bound, same order; nothing removed from either list.
+
     THE SNAPSHOT-ONLY gRPC REFRESH (RC6 D1, market_plane.snapshot_refresh):
     when `snapper` is given, the tick first offers it its call (at most one
     a minute, every member due within 90 s of its bound, the venue's own
@@ -745,6 +758,10 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
                 if got_s is not None:
                     st["last_snapshot_call"] = got_s
             if refresher is not None:
+                # (RC6.2) the frozen window's members are refreshed for the
+                # whole window, not only while the live registry list holds
+                # them (one shared refresher: the pass's step too)
+                refresher.set_frozen(fw.get("window"), now=clock())
                 # the task's own step digest (the heartbeat's `refresh`
                 # stays the pass's step): due / read / deferred, no reads
                 got = await AR.step(

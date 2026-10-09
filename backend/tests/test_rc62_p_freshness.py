@@ -21,11 +21,12 @@ the coverage pass of 2026-10-09 05:18:59Z. The census taken at that instant
   §1  the instant replayed through the RC6.1 freshness task for 60 s, with
       the venue answering every book read as it did (10 open, 8 not open):
       the 10 become current, the 8 do not, never more than 12 book reads in
-      any 60 s, the denominator stays 192 -> 184 / 192 (all 10 current by
-      +9 s). On b3f1b0cd the 8 closed markets take 8 of the 12 reads first
-      and 4 of the 10 are current at +60 s (178 / 192; all 10 by +65 s).
-      With the owner's snapshot-only read on,
-      also 184 (it adds nothing here: the 8 left are closed markets).
+      any 60 s, the denominator stays 192 -> 184 / 192 (the tenth open
+      member is read at +9 s: 183 at +9 s, 184 at +10 s). On b3f1b0cd the 8
+      closed markets take 8 of the 12 reads first: 178 / 192 at +60 s, 183
+      at +65 s, 184 at +66 s (its tenth open read at +65 s). With the
+      owner's snapshot-only read on, also 184 (it adds nothing here: the 8
+      left are closed markets).
   §2  the read plan: a market whose own book read states a TERMINAL state
       (freshness_window.TERMINAL_STATES, the held-position rule's) is held
       out of the plan while it stays a member -- named, NOT current, in the
@@ -40,6 +41,13 @@ the coverage pass of 2026-10-09 05:18:59Z. The census taken at that instant
       PAPER_DISCOVERY_READ_DEFERRED_DURING_VENUE_HOLD rows -- reads never
       made -- and MARKET_STATE_EXPIRED reads included; research-sql
       37951157946 Q3b: 42 + 10 such member-snapshot credits in 24 h).
+  §4  (independent review rev1) the frozen window's members are refreshed
+      for the whole window: a quiet member that leaves the live registry
+      list mid-hour (priority 10 -> 20) is still read before each read
+      lapses and coded R in every sample, inside the same budget. On
+      b3f1b0cd it is read once, before it leaves, and coded N for the rest
+      of the window (production window 15:00Z on the RC6.1 plane,
+      research-sql 37959672993: 8 such members, ~3.8 a sample).
 
 The replay's 174 already-current members are SYNTHETIC stand-ins with the
 production counts (159 on the stream, 15 through a REST read); the 18 carry
@@ -236,9 +244,10 @@ def test_the_scorecard_instant_reaches_184_of_192_inside_a_minute(
         monkeypatch, closed_state):
     """The 05:18:59Z instant through the RC6.1 freshness task for 60 s.
     The 10 open members are current, the 8 closed markets are not, the
-    denominator is 192: 159 stream + 25 REST reads = 184 (183 needed). On
-    b3f1b0cd the closed markets are read first and 4 of the 10 are current
-    at +60 s; on 732cc0c6 no freshness task exists at all."""
+    denominator is 192: 159 stream + 25 REST reads = 184 (183 needed), the
+    tenth open member read at +9 s. On b3f1b0cd the closed markets are read
+    first and 4 of the 10 are current at +60 s (178; 184 only at +66 s); on
+    732cc0c6 no freshness task exists at all."""
     clock, m, books, ref, rows, stream, read, opn, closed = _instant(
         closed_state)
     fresh0, ref0, cen0 = _census(m, ref, rows, INSTANT)
@@ -580,8 +589,9 @@ def test_against_postgres_only_the_newest_error_free_open_read_counts():
     """Real Postgres, a rolled-back transaction: six priority members with
     the paper runtime's reads as production records them. The coverage pass
     and the census count exactly the two whose newest error-free read inside
-    300 s does not say the market is not open. On b3f1b0cd all five with a
-    row inside 300 s counted (an error row -- a read never made -- included).
+    300 s does not say the market is not open. On b3f1b0cd all six counted
+    (each has a row inside 300 s; an error row -- a read never made --
+    included): REST_RECOVERY 6, where 2 is right.
     """
     import asyncpg
     slugs = {
@@ -633,3 +643,315 @@ def test_against_postgres_only_the_newest_error_free_open_read_counts():
     assert {s["contract_id"] for s in cen["sample"]} == {
         "rc62-pfre-error-only", "rc62-pfre-expired",
         "rc62-pfre-halted-newer", "rc62-pfre-old"}
+
+
+# ═════════════════════════════════════════════════════════════════════
+# §4 the frozen window's members are refreshed for the whole window
+# ═════════════════════════════════════════════════════════════════════
+#
+# Independent review rev1 of 3a86235d (production window 15:00Z on the RC6.1
+# plane, research-sql 37959672993): the refresh read only the LIVE registry
+# list (priority <= 10, or a working order), while the frozen window
+# measures the membership frozen at its first sample for the whole hour. A
+# quiet member that left the live list mid-hour (aec-autbl-obe-kap-2026-10-10
+# went to priority 20, VENUE_ACTIVE) lost its refresh record, was never read
+# again and was coded N in 47 of the hour's 53 samples, with book reads at
+# 6.3-9.0 a minute. On b3f1b0cd the leaver below is read once, before it
+# leaves, and is N from the next member re-read to the end of the window.
+
+#: a window start no other test freezes (the events table is append-only)
+WS4 = FW.window_start_of(1_800_000_000.0)
+LEAVER, STAYS, STREAMED = "fz-leaver-2026-10-10", "fz-stays-2026-10-10", \
+    "fz-streamed-2026-10-10"
+
+
+def _frozen_win(members, ws=WS4, at=None):
+    return dict(FW.freeze(members, window_start=ws,
+                          now=ws + 5.0 if at is None else at, sla_s=BOUND),
+                loaded=False)
+
+
+def _fm(cid, tier="CANDIDATE", start=None):
+    return {"contract_id": cid, "tier": tier, "venue": FW.VENUE_PMUS,
+            "family": FW.F_MONEYLINE, "period": "FULL_EVENT",
+            "event_start": start, "event_id": None, "line": None,
+            "orders": tier == FW.TIER_ORDER}
+
+
+def test_the_frozen_members_join_the_live_list_with_their_frozen_tier():
+    now = WS4 + 600.0
+    ref = AR.ActiveRefresh()
+    ref.set_members([H.member(STAYS, 10, now + 3600)], now=now)
+    win = _frozen_win([_fm(LEAVER, start=now + 7200),
+                       _fm(STAYS, "HELD_POSITION", start=now + 3600),
+                       _fm("fz-order", "WORKING_ORDER", start=None)])
+    assert ref.set_frozen(win, now=now) is True
+    assert ref.set_frozen(win, now=now + 1.0) is False     # same window
+    tiers = {m[0]: m[1] for m in ref.members}
+    # the live member keeps its place and takes the more urgent frozen tier;
+    # the frozen-only members follow, in the window's (contract id) order,
+    # with their frozen tiers
+    assert [m[0] for m in ref.members] == [STAYS, LEAVER, "fz-order"]
+    assert tiers == {STAYS: AR.TIER_HELD, LEAVER: AR.TIER_CANDIDATE,
+                     "fz-order": AR.TIER_ORDER}
+    assert ref.members_frozen_only == 2
+    # a live tier more urgent than the frozen one stands
+    ref.set_members([H.member(LEAVER, 0, now + 7200)], now=now + 30.0)
+    assert {m[0]: m[1] for m in ref.members}[LEAVER] == AR.TIER_HELD
+    # a member re-read off the live list keeps its record while frozen
+    ref.record(LEAVER, H.rest_book(LEAVER, at=now), at=now)
+    ref.set_members([], now=now + 60.0)
+    assert LEAVER in ref.entries and len(ref.members) == 3
+    d = ref.digest(now=now + 60.0, bound=BOUND)
+    assert d["members"] == 3 and d["members_live"] == 0
+    assert d["members_frozen_only"] == 3 and d["frozen_window_start"] == WS4
+    # past the window and the carry of its last sample: the live list alone
+    # (and a record of a member in neither is dropped, as before)
+    late = WS4 + FW.WINDOW_S + FW.CARRY_S
+    assert ref.set_frozen(win, now=late) is True
+    assert ref.members == [] and ref.entries == {}
+    # no window held: the live list alone, exactly as on b3f1b0cd
+    ref2 = AR.ActiveRefresh()
+    assert ref2.set_frozen(None, now=now) is False
+    ref2.set_members([H.member(STAYS, 10, now + 3600)], now=now)
+    assert [m[0] for m in ref2.members] == [STAYS]
+
+
+def test_the_frozen_list_is_bounded_and_never_trimmed_by_the_live_one():
+    now = WS4 + 60.0
+    ref = AR.ActiveRefresh()
+    live = [H.member("live-%05d" % i, 10, None)
+            for i in range(AR.MAX_TRACKED + 10)]
+    ref.set_members(live, now=now)
+    win = _frozen_win([_fm("frozen-%05d" % i) for i in range(30)])
+    ref.set_frozen(win, now=now)
+    assert len(ref._live) == AR.MAX_TRACKED
+    assert len(ref.members) == AR.MAX_TRACKED + 30
+    assert ref.members_frozen_only == 30
+
+
+class _RegistryConn:
+    """The plane's database for one window, in memory: the registry rows the
+    two member lists read (freshness_window.PRIORITY_SQL to freeze,
+    active_refresh.MEMBERS_SQL every 30 s) and the append-only events table
+    (the window, the samples). No PAPER tables: none is read."""
+
+    def __init__(self, rows):
+        self.reg = {r["contract_id"]: dict(r) for r in rows}
+        self.events: dict = {}
+
+    async def fetchval(self, sql, *args):
+        if "to_regclass" in sql:
+            return False
+        assert sql == FW.WINDOW_READ_SQL, sql
+        return self.events.get(args[0])
+
+    async def execute(self, sql, *args):
+        assert sql.lstrip().startswith("INSERT INTO market_plane_events"), sql
+        self.events.setdefault(args[0], args[3])     # ON CONFLICT DO NOTHING
+
+    async def fetch(self, sql, *args):
+        rows = [dict(r) for r in self.reg.values() if r["active"]
+                and r["priority"] <= args[0]]
+        if sql == FW.PRIORITY_SQL:
+            return sorted(rows, key=lambda r: r["contract_id"])
+        assert sql == AR.MEMBERS_SQL, sql
+        return sorted(rows, key=lambda r: (r["priority"], r["event_start"],
+                                           r["contract_id"]))[:args[1]]
+
+
+class _ConnPool:
+    def __init__(self, c):
+        self.c = c
+
+    def acquire(self):
+        c = self.c
+
+        class A:
+            async def __aenter__(self_):
+                return c
+
+            async def __aexit__(self_, *a):
+                return False
+        return A()
+
+
+class _PgPool(_ConnPool):
+    """One connection (the test's transaction); the freshness task is the
+    only user here and never holds it twice at once."""
+
+
+async def _window_run(monkeypatch, pool, *, start, seconds, leave_at, leave):
+    """The plane's REAL freshness task (snapshot read off, as in
+    production) with the REAL frozen-window sampler, one tick a second for
+    `seconds`: the REST book read answers OPEN for every member, the stream
+    sends STREAMED a book every tick and nothing for the two quiet members
+    (LEAVER's last stream book the older, so it lapsed first and is read
+    first). At `leave_at` seconds `leave()` takes LEAVER off the live list.
+    Returns (refresher, book reads [(t, symbol)])."""
+    clock = H.Clock(start)
+    m, books = H.plane(clock, [LEAVER, STAYS, STREAMED])
+    H.update(books, LEAVER, start - BOUND - 200.0)       # quiet: past the bound
+    H.update(books, STAYS, start - BOUND - 100.0)
+    H.update(books, STREAMED, start)
+    books.on_heartbeat()
+    ref = AR.ActiveRefresh()
+    reads: list = []
+
+    class Venue:
+        def read(self, name, symbol=""):
+            assert name == "book"
+            reads.append((clock.t, symbol))
+            return H.rest_book(symbol, at=clock.t)
+    real_step = FW.step
+    ticks = [0]
+
+    async def get_pool():
+        return pool
+
+    async def fw_step(*a, **kw):
+        got = await real_step(*a, **kw)
+        ticks[0] += 1
+        clock.t += 1.0
+        H.update(books, STREAMED, clock.t)
+        books.on_heartbeat()
+        if ticks[0] == leave_at:
+            await leave()
+        if ticks[0] >= seconds:
+            raise asyncio.CancelledError()
+        return got
+    monkeypatch.setattr(W, "get_pool", get_pool)
+    monkeypatch.setattr(W.FW, "step", fw_step)
+    state: dict = {}
+    with pytest.raises(asyncio.CancelledError):
+        await W.freshness_loop(ref, m, Venue(), state=state,
+                               client_lock=asyncio.Lock(), bound=BOUND,
+                               tick_s=0.0, clock=clock)
+    assert state["freshness_task"]["errors"] == 0, state["freshness_task"]
+    return ref, reads
+
+
+def _samples(payloads):
+    import json
+    got = [json.loads(p) if isinstance(p, str) else p for p in payloads]
+    win = [p for p in got if "members" in p]
+    smp = sorted((p for p in got if "codes" in p),
+                 key=lambda p: p["verified_at"])
+    assert len(win) == 1
+    order = [r[0] for r in win[0]["members"]]
+    return order, smp
+
+
+def _assert_served(order, smp, reads, *, start, leave_at, seconds):
+    i = order.index(LEAVER)
+    codes = [p["codes"][i] for p in smp]
+    after = [t for t, s in reads if s == LEAVER and t >= start + leave_at]
+    # the budget is the same: never more than 12 book reads in any 60 s
+    _no_window_over_budget([t for t, _s in reads])
+    assert after, ("the member that left the live list was never read "
+                   "again (b3f1b0cd): %d reads before it left, window codes "
+                   "%s" % (sum(1 for _t, s in reads if s == LEAVER),
+                           "".join(codes)))
+    # read again before each read lapses, for the whole window
+    assert len(after) >= (seconds - leave_at) // (BOUND - AR.REFRESH_LEAD_S)
+    # R in every sample of the window: it never lapses
+    assert set(codes) == {FW.C_REFRESH}, "".join(codes)
+    # the member that stayed is served exactly as before, and the streamed
+    # one needs no read
+    j = order.index(STAYS)
+    assert smp[0]["codes"][j] == FW.C_NOT              # read on the next tick
+    assert {p["codes"][j] for p in smp[1:]} == {FW.C_REFRESH}
+    assert not [s for _t, s in reads if s == STREAMED]
+    # every sample: the whole frozen membership, nothing dropped
+    assert {p["n"] for p in smp} == {3}
+
+
+def test_a_member_that_leaves_the_live_list_mid_window_is_still_refreshed(
+        monkeypatch):
+    """REAL freshness task + REAL frozen-window sampler, 30 minutes inside
+    one window. The quiet LEAVER is frozen into the window at its first
+    sample and leaves the live list (registry priority 10 -> 20) 2 minutes
+    in. b3f1b0cd reads it once (before it leaves) and codes it N from the
+    next member re-read to the end; here it is read before each read
+    lapses and coded R in every sample, inside the same budget."""
+    start, seconds, leave_at = WS4 + 5.0, 1800, 120
+    conn = _RegistryConn([
+        {"contract_id": s, "venue": FW.VENUE_PMUS, "priority": 10,
+         "active": True, "market_type": "soccer_team_full_time_winner",
+         "family": "WINNER", "period": "FULL_EVENT", "event_id": "ev-" + s,
+         "line": None, "event_start": _dt.datetime.fromtimestamp(
+             start + 86400.0, UTC)}
+        for s in (LEAVER, STAYS, STREAMED)])
+
+    async def leave():
+        conn.reg[LEAVER]["priority"] = 20                # VENUE_ACTIVE
+
+    ref, reads = run(_window_run(monkeypatch, _ConnPool(conn), start=start,
+                                 seconds=seconds, leave_at=leave_at,
+                                 leave=leave))
+    order, smp = _samples(conn.events.values())
+    assert len(smp) == seconds // 60 and LEAVER in order
+    _assert_served(order, smp, reads, start=start, leave_at=leave_at,
+                   seconds=seconds)
+    assert {m[0] for m in ref._live} == {STAYS, STREAMED}
+    assert ref.digest(now=start + seconds, bound=BOUND)[
+        "members_frozen_only"] == 1
+
+
+@pg
+def test_against_postgres_a_member_that_leaves_mid_window_is_still_refreshed(
+        monkeypatch):
+    """The same 30 minutes against Postgres (a rolled-back transaction): the
+    window frozen by freshness_window.load_or_freeze's own SQL, the live
+    list read by MEMBERS_WITH_ORDERS_SQL (paper_orders exists), the leaver
+    taken off it by an UPDATE of its registry priority to 20."""
+    import asyncpg
+    start, seconds, leave_at = WS4 + 5.0, 1800, 120
+
+    async def go():
+        c = await asyncpg.connect(DSN)
+        tr = c.transaction()
+        await tr.start()
+        try:
+            await c.execute("UPDATE market_plane_registry SET active=false")
+            await c.execute(
+                "UPDATE paper_orders SET state = 'CANCELED', terminal_at = "
+                " now(), terminal_reason = 'TEST_ISOLATION' "
+                " WHERE state = ANY($1::text[])", list(FW.OPEN_ORDER_STATES))
+            for s in (LEAVER, STAYS, STREAMED):
+                await c.execute(
+                    "INSERT INTO market_plane_registry (contract_id, venue, "
+                    " active, desired_subscription, updated_at, priority, "
+                    " required_reason, market_type, family, period, event_id,"
+                    " event_start, last_seen_at) VALUES ($1, 'POLYMARKET_US',"
+                    " true, true, now(), 10, 'EVALUATED_CANDIDATE', "
+                    " 'soccer_team_full_time_winner', 'WINNER', 'FULL_EVENT',"
+                    " 'ev-1', to_timestamp($2), now()) ON CONFLICT "
+                    " (contract_id) DO UPDATE SET active = true, priority = 10,"
+                    " event_start = excluded.event_start", s,
+                    start + 86400.0)
+
+            async def leave():
+                await c.execute("UPDATE market_plane_registry SET priority ="
+                                " 20, required_reason = 'VENUE_ACTIVE' "
+                                " WHERE contract_id = $1", LEAVER)
+            ref, reads = await _window_run(
+                monkeypatch, _PgPool(c), start=start, seconds=seconds,
+                leave_at=leave_at, leave=leave)
+            rows = [r["payload"] for r in await c.fetch(
+                "SELECT payload FROM market_plane_events WHERE event_key = $1"
+                " OR (kind = 'FRESHNESS_SAMPLE' AND (payload->>"
+                "'window_start')::float8 = $2)", "fwin:%d" % int(WS4), WS4)]
+            return ref, reads, rows
+        finally:
+            await tr.rollback()
+            await c.close()
+    ref, reads, rows = asyncio.run(go())
+    order, smp = _samples(rows)
+    assert order == sorted([LEAVER, STAYS, STREAMED])
+    assert len(smp) == seconds // 60
+    _assert_served(order, smp, reads, start=start, leave_at=leave_at,
+                   seconds=seconds)
+    # the live list (MEMBERS_WITH_ORDERS_SQL) no longer holds it
+    assert {m[0] for m in ref._live} == {STAYS, STREAMED}
+

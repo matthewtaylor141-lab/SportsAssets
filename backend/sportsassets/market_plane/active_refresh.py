@@ -36,7 +36,8 @@ institutional_md sweep already reads on the same credential (8 reads per
 
 WHO IS REFRESHED, IN WHAT ORDER (`ActiveRefresh.plan`). The priority members
 (open paper positions + evaluated candidates: registry priority <=
-P_CANDIDATE, the census's members) that the plane's books hold, whose stream
+P_CANDIDATE, the census's members; and, RC6.2, every member of the frozen
+freshness window for that window) that the plane's books hold, whose stream
 read at the plane bound is refused FOR SNAPSHOT CURRENCY ONLY (REFRESHABLE:
 older than the bound, no snapshot on this connection yet, a connection or
 clock gap awaiting one, the connection silent or closed, no venue clock) and
@@ -116,14 +117,32 @@ The record keeps the state the read stated (`state`, only while its newest
 read said not open), and the totals count not-open reads by state, so the
 states the venue answers with are read back in production.
 
+THE FROZEN WINDOW'S MEMBERS (RC6.2, lane p-freshness, independent review
+rev1). The member list was the LIVE registry list only (MEMBERS_SQL /
+MEMBERS_WITH_ORDERS_SQL, re-read every MEMBERS_EVERY_S), while the frozen
+freshness window (freshness_window) measures the membership frozen at its
+first sample for the whole hour and never re-chooses it. A member that left
+the live list mid-hour (its evaluation aged out of the candidate set:
+registry priority 20) lost its record and was never read again, so the
+window coded it N for the rest of the hour while the budget sat idle --
+production window 15:00Z on the RC6.1 plane (research-sql 37959672993): 8
+pregame candidates now at priority 20, N in 8-47 of the hour's 53 samples,
+about 3.8 a sample, with book reads at 6.3-9.0 a minute. `set_frozen` joins
+the window's members to the live list for the window (and the carry of its
+last sample), each with its frozen tier or its live tier when that is the
+more urgent; `plan` and `current` read the joined list, so a frozen member
+is read and counted current exactly like a live one. The budget, the gap,
+the bound and the order are unchanged; nothing is removed from either list.
+
 THE BOUND IS NOT CHANGED. The plane's FRESH_SLA_S (300 s, the held-mark SLA)
 is passed in by the caller and is the only age used; REFRESH_LEAD_S only
 decides when a refresh still inside it is re-read, never how long one counts.
 
 MEMORY. One small record per priority member (no book levels are kept), the
-member list re-read every MEMBERS_EVERY_S, records of members that left the
-list dropped at that read; MAX_TRACKED bounds both. The plane's working set
-does not grow with the universe.
+member list re-read every MEMBERS_EVERY_S, records of members that left both
+the live list and the frozen window dropped at that read; MAX_TRACKED bounds
+the live list and freshness_window.MAX_MEMBERS the frozen one. The plane's
+working set does not grow with the universe.
 """
 from __future__ import annotations
 
@@ -216,6 +235,11 @@ OPEN_ORDER_STATES = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
                      "CANCEL_PENDING")
 PHASE_RANK = {"IN_PLAY_OR_RECENT": 0, "PREGAME": 1, "STARTED_GT_4H": 2,
               "NO_START": 3}
+#: (RC6.2) the frozen window's tier names (freshness_window.TIER_*) ->
+#: this module's, and the urgency of each (a member keeps the more urgent)
+_FROZEN_TIER = {"HELD_POSITION": TIER_HELD, "WORKING_ORDER": TIER_ORDER,
+                "CANDIDATE": TIER_CANDIDATE}
+_TIER_RANK = {TIER_HELD: 0, TIER_ORDER: 1, TIER_CANDIDATE: 2}
 
 
 def enabled(env=None) -> bool:
@@ -343,6 +367,13 @@ class ActiveRefresh:
         self._clock = clock
         self.members: list = []          # [(symbol, tier, phase, start)]
         self.members_at = None
+        #: (RC6.2) the live registry list [(symbol, tier, event start)] and
+        #: the frozen window's members {symbol: (tier, event start)} the
+        #: member list is composed of; the frozen window's key
+        self._live: list = []
+        self.frozen: dict = {}
+        self.frozen_key = None
+        self.members_frozen_only = 0
         self.entries: dict = {}
         self._starts: collections.deque = collections.deque(
             maxlen=self.per_min)
@@ -366,18 +397,75 @@ class ActiveRefresh:
     # -- the members -------------------------------------------------------
 
     def set_members(self, rows, *, now: float) -> None:
-        """Registry rows {contract_id, priority, event_start} -> the member
-        list (bounded); a record of a member that left is dropped."""
+        """Registry rows {contract_id, priority, event_start} -> the LIVE
+        member list (bounded), joined with the frozen window's members
+        (`set_frozen`, RC6.2); a record of a member in neither is dropped."""
         out = []
         for r in rows or ():
             s = str(r["contract_id"])
             out.append((s, tier_of(r["priority"], bool(_field(r, "orders"))),
-                        phase_of(r["event_start"], now=now),
-                        _epoch(r["event_start"])))
+                        r["event_start"]))
             if len(out) >= MAX_TRACKED:
                 break
-        self.members = out
+        self._live = out
         self.members_at = now
+        self._compose(now)
+
+    def set_frozen(self, win, *, now: float) -> bool:
+        """(RC6.2) THE FROZEN WINDOW'S MEMBERS ARE REFRESHED FOR THE WHOLE
+        WINDOW. `win` is the plane's current frozen freshness window
+        (freshness_window.load_or_freeze, held by the freshness task) or
+        None. Its members join the live list -- each with its FROZEN tier,
+        or its live tier when that is the more urgent -- until the window
+        and the carry of its last sample have passed. Nothing in the live
+        list is removed and nothing in the frozen list is left out. Returns
+        whether the member list changed. Cheap when the window is the same
+        one (called every freshness tick)."""
+        from . import freshness_window as FW
+        ws = (win or {}).get("window_start") if isinstance(win, dict) \
+            else None
+        try:
+            ws = None if ws is None else float(ws)
+            span = float((win or {}).get("window_s") or FW.WINDOW_S)
+        except (TypeError, ValueError):
+            ws, span = None, FW.WINDOW_S
+        if ws is not None and now - (ws + span) >= FW.CARRY_S:
+            ws = None                   # a window no sample stands for now
+        key = None if ws is None else (ws, (win or {}).get("membership_hash"))
+        if key == self.frozen_key:
+            return False
+        frozen = {}
+        if key is not None:
+            for m in FW.member_dicts(win)[:FW.MAX_MEMBERS]:
+                s = m.get("contract_id")
+                if s is None:
+                    continue
+                frozen[str(s)] = (_FROZEN_TIER.get(m.get("tier"),
+                                                   TIER_CANDIDATE),
+                                  m.get("event_start"))
+        self.frozen, self.frozen_key = frozen, key
+        self._compose(now)
+        return True
+
+    def _compose(self, now: float) -> None:
+        """members = the live list (each tier raised to its frozen tier when
+        that is the more urgent), then every frozen member the live list
+        does not hold, in the window's order; records of members in
+        neither are dropped."""
+        out, seen = [], set()
+        frozen = self.frozen
+        for s, tier, start in self._live:
+            f = frozen.get(s)
+            if f is not None and _TIER_RANK[f[0]] < _TIER_RANK[tier]:
+                tier = f[0]
+            out.append((s, tier, phase_of(start, now=now), _epoch(start)))
+            seen.add(s)
+        n_live = len(out)
+        for s, (tier, start) in frozen.items():
+            if s not in seen:
+                out.append((s, tier, phase_of(start, now=now), _epoch(start)))
+        self.members = out
+        self.members_frozen_only = len(out) - n_live
         keep = {m[0] for m in out}
         for s in [s for s in self.entries if s not in keep]:
             del self.entries[s]
@@ -709,6 +797,12 @@ class ActiveRefresh:
                                     "request Q10); refdata budget not "
                                     "shared"},
                 "members": len(self.members),
+                # (RC6.2) the live registry list and the frozen window's
+                # members it does not hold (refreshed for the whole window)
+                "members_live": len(self._live),
+                "members_frozen_only": self.members_frozen_only,
+                "frozen_window_start": (self.frozen_key[0]
+                                        if self.frozen_key else None),
                 "current_via_refresh": len(cur),
                 "current_via_refresh_by_tier": by_tier,
                 "current_via_refresh_by_origin": by_origin,
