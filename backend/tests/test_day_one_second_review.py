@@ -115,3 +115,37 @@ def test_account_context_imported_by_shadow_readers_is_select_only():
             assert isinstance(node.args[0], ast.Constant)
             assert node.args[0].value.lstrip().upper().startswith('SELECT ')
     assert calls
+
+@pytest.mark.parametrize('rolled_back', [False, True])
+async def test_archived_policy_variant_losses_settle_in_production_pass(conn, rolled_back):
+    from sportsassets import bettor_paper_profitability_bind as B
+    from sportsassets import bettor_paper_profitability_stack as P
+    from sportsassets.agents import paper_xavier as X
+    from tests.test_profitability_stack_binding import bind, _ev, CG
+    from tests.test_rc6_provenance_refuses_after_change import _valuation
+    source = await activate(conn, 'variant-source') if rolled_back else {'account_id': L.ACCOUNT_ID}
+    slug = 'test-archived-policy-variant'
+    now = time.time()
+    b = bind(_ev(p=.43), at=now)
+    eid = await B.record_evaluation(conn, account_id=source['account_id'],
+        strategy=CG, stage='DECISION', b=b, refusal='SYNTHETIC_REFUSED_CANDIDATE',
+        slug=slug, side='LONG', fixture='synthetic-variant-fixture', at=now)
+    assert eid is not None
+    variants = await conn.fetch('SELECT * FROM paper_counterfactual_variants WHERE eval_id=$1', eid)
+    assert len(variants) == len(B.VARIANTS)
+    if rolled_back:
+        await E.rollback(conn, epoch_id='variant-source', request_id='variant-rollback')
+    selected = await activate(conn, 'variant-selected')
+    vid = await _valuation(conn, cid=slug, price=.5, decided=H.T0)
+    await conn.execute('UPDATE external_valuations SET outcome=0,outcome_known=true,outcome_basis=$2,outcome_at=now() WHERE id=$1', vid, next(iter(X.LABEL_BASES)))
+    financial_before = [dict(r) for r in await conn.fetch('SELECT * FROM paper_ledger ORDER BY seq')]
+    got = await P.counterfactual_step(conn, dict(await account(conn,selected['account_id']), now=now+10))
+    assert got['settled'] == len(P.SETTLED_VARIANTS), got
+    outcomes = await conn.fetch('SELECT o.* FROM paper_counterfactual_variant_outcomes o JOIN paper_counterfactual_variants v USING(variant_id) WHERE v.eval_id=$1', eid)
+    assert {r['outcome'] for r in outcomes} == {'LOST'}
+    assert sum(float(r['counterfactual_pnl_usd']) for r in outcomes) < 0
+    assert {r['pnl_class'] for r in outcomes} == {'NOT_REALIZED_PNL'}
+    retry = await P.counterfactual_step(conn, dict(await account(conn,selected['account_id']), now=now+20))
+    assert retry['settled'] == 0
+    assert [dict(r) for r in await conn.fetch('SELECT o.* FROM paper_counterfactual_variant_outcomes o JOIN paper_counterfactual_variants v USING(variant_id) WHERE v.eval_id=$1 ORDER BY o.outcome_id', eid)] == sorted([dict(r) for r in outcomes], key=lambda r:r['outcome_id'])
+    assert [dict(r) for r in await conn.fetch('SELECT * FROM paper_ledger ORDER BY seq')] == financial_before

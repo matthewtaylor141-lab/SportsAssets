@@ -350,8 +350,17 @@ async def settle_variants(conn, *, account_id: str, now: float,
 
 async def counterfactual_step(conn, ctx: dict) -> dict:
     try:
-        return await settle_variants(conn, account_id=ctx["account_id"],
-                                     now=float(ctx["now"]))
+        from .simulated_account_context import risk_history_accounts
+        accounts = await risk_history_accounts(conn, ctx["account_id"])
+        out = {"settled": 0, "pending": 0}
+        for account_id in accounts:
+            got = await settle_variants(conn, account_id=account_id,
+                                        now=float(ctx["now"]))
+            for key in ("settled", "pending"):
+                out[key] += got.get(key, 0)
+            if got.get("why"):
+                out.setdefault("why", got["why"])
+        return out
     except Exception as exc:                                    # noqa: BLE001
         return {"settled": 0, "why": "%s: %s" % (type(exc).__name__,
                                                  str(exc)[:160])}

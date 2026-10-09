@@ -64,7 +64,8 @@ back; retries cannot fund twice. Historical later settlement corrections stay
 in their original account: Xavier's production settlement pass walks every
 registered account of the same risk family, including rolled-back children and
 sibling epochs, with its own session and the ledger's own account lock. Pending
-shadow counterfactuals are settled across that same family; counterfactual outcomes
+shadow counterfactuals and policy variants are settled across that same family;
+counterfactual outcomes
 remain distinct from realized ledger P&L. Audrey's update snapshot and three
 PAPER-pass audit steps, and both default shadow runners, resolve the selected
 account. Archived accounts do not gain selected-account audit authority.
