@@ -1351,3 +1351,7 @@ tests/test_rc6_feed_close_provenance.py
 tests/test_rc6_held_watch_identity.py
 # (RC6 api-responsive) Derek's research-model provenance check (28,303 records) and the capital authority's blocker census (83,477 refusals) answer exactly as before, computed off the API event loop; the registry read leaves the 16 MB stored records behind and names changed records from the registry on a mismatch
 tests/test_rc6_api_responsive_offloop.py
+# (RC6 provenance-proof) on a real Postgres, a research model that verified refuses on its next check once a training label is corrected, a decision voided or gone, a vector rewritten with its identity, or a settlement re-read on another basis or instant -- on the same model object, re-hashed on the CPU lane every call, never on the loop
+tests/test_rc6_provenance_refuses_after_change.py
+# (RC6 provenance-proof) 16/32/64 parallel PAPER decisions: each verified or refused by name, every re-hash on the one lane thread exactly once, queue drained, loop gap < 0.25 s; a saturated or shut-down lane fails closed (no decision sees a verified model, withdrawn jobs never run)
+tests/test_rc6_provenance_lane_bounds.py
