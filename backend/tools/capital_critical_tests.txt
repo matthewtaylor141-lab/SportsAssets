@@ -1401,7 +1401,7 @@ tests/test_rc6_d1_snapshot_refresh.py
 tests/test_rc6_d1_freshness_window.py
 # (RC6 api-responsive) Derek's research-model provenance check (28,303 records) and the capital authority's blocker census (83,477 refusals) answer exactly as before, computed off the API event loop; the registry read leaves the 16 MB stored records behind and names changed records from the registry on a mismatch
 tests/test_rc6_api_responsive_offloop.py
-# (RC6 lane K) Kalshi WS books: every message of a sid (snapshots too) is sequence-checked, a gapped sid is dead, one gap resubscribes each market exactly once (ack-bound, in-flight snapshots before/after the resubscribe ack), only dead sids are unsubscribed (no book current on a dropped sid), a reconnect subscribes each market once and books return CURRENT only on a fresh snapshot
+# (RC6 lane K; rc6.2 kalshi-protocol) Kalshi WS books: every message of a sid (snapshots too) is sequence-checked; one gap asks the same sid for each market's snapshot exactly once (get_snapshot; in-flight snapshots before/after its ok), no sid is ever unsubscribed, a reconnect subscribes each market once and books return CURRENT only on a fresh snapshot
 tests/test_rc6_kalshi_ws_sequencing.py
 # (RC6 lane K) Kalshi ontology: real catalogue rows mapped (winner / spread / total / team total) from the series tag and the contract's own rules sentence, or refused by name; mapped rows leave the code-controlled gap and are settlement-judged on their own rules
 tests/test_rc6_kalshi_ontology.py
@@ -1431,3 +1431,11 @@ tests/test_epoch_rollforward_receipt.py
 tests/test_mirror_shadow_venue_confirmation.py
 # (RC6 identity lane) active position truth: every ACTUAL book and the PAPER books read each cycle, an ACTIVE row of ours without market identity refused by name (OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY), unreadable books UNMEASURED never clean, the dead-letter counted by owner and activity and logged on change
 tests/test_positions_identity_census.py
+# (rc6.2 kalshi-protocol) the documented protocol action by action: add_markets bound when sent, one get_snapshot per gap on the same sid, a second gap during it ends the session, the control-frame rule safe under a separate counter, only errors 10 / 25 end a subscription, the venue's unsubscribe GAPs by name, no command for a sid not ours, the ok's list (GAP + one re-add), the storm bounds, a 50,000-frame burst never holds the loop 50 ms, bounded diagnostics, a gapped row unreadable before the next frame
+tests/test_rc62_kalshi_ws_protocol.py
+# (rc6.2 kalshi-protocol) the RC6.1 storm shape against the documented venue (300 markets, chunk acks answered by ok with seq, a shared or a separate control counter): ONE subscribe and two add_markets, no gap, every market CURRENT -- fails on rc6/int-62's client (8,093 commands, 41 gaps in 20,000 frames)
+tests/test_rc62_kalshi_ws_storm_regression.py
+# (rc6.2 kalshi-protocol) the acceptance model on the documented protocol: no late ack revives a dropped market, no book CURRENT without sequence continuity (P2 by sid, P1b per subscription, S0 / S5 named), the pre-gap row never served -- model-checked under a shared counter, a separate control counter and a reused number; liveness and bounded commands under the documented venue
+tests/test_rc6_kalshi_ws_acceptance_model.py
+# (rc6.2 kalshi-protocol) the plane-hang storm bound kept as defence in depth: the RC6.1 venue no longer storms (one subscribe, every market named once, no dead sid) and a session whose commands run away is ended by name and reconnected
+tests/test_rc6_kalshi_ws_resubscribe_storm.py
