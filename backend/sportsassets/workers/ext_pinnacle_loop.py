@@ -6292,18 +6292,32 @@ async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
                        "contract, so there is no venue-native key to bind "
                        "fixture evidence to")}
         return dict(base, refusal=SF.R_NO_EVENT_KEY, acquisition=acq)
-    src = SF.source_for(sport_key)
+    # (RC6.2, p-coverage) THE SOURCE FROM THE VENUE'S OWN LEAGUE CODE FIRST:
+    # PinnAPI quotes carry the generic provider key 'pinnapi_soccer', which
+    # no declared source matched (bettor_soccer_fixture.VENUE_LEAGUE_SOURCES)
+    res = SF.resolve_source(sport_key, event_slug)
+    src = res["source"]
     if src is None:
-        r = "%s:%s" % (SF.R_NO_SOURCE, sport_key)
+        r = "%s:%s" % (res["refusal"], res["refusal_subject"])
         acq = {"attempted": False, "refusal": r,
-               "why": ("no organiser-published schedule source is declared "
-                       "for %r, so the competition phase, the match format "
-                       "and the event state cannot be established from an "
-                       "authoritative source" % (sport_key,))}
+               "venue_league": res["venue_league"], "sport_key": sport_key,
+               "why": (("the provider key %r and the venue league code %r "
+                        "name different declared competitions"
+                        % (sport_key, res["venue_league"]))
+                       if res["refusal"] == SF.R_SOURCES_DISAGREE else
+                       ("no organiser-published schedule source is declared "
+                        "for %r (provider key %r, venue league code %r), so "
+                        "the competition phase, the match format and the "
+                        "event state cannot be established from an "
+                        "authoritative source"
+                        % (res["refusal_subject"], sport_key,
+                           res["venue_league"])))}
         return dict(base, refusal=r, acquisition=acq)
     row = await SF.read(conn, key)
     need = fstore.needs_acquisition(row, now=now)
-    acq = {"attempted": False, "decided": need, "source": src["source"]}
+    acq = {"attempted": False, "decided": need, "source": src["source"],
+           "source_basis": res["basis"], "competition": src["competition"],
+           "venue_league": res["venue_league"]}
     if not need.get("acquire"):
         return dict(row, venue_fixture_key=key, key_kind="VENUE_NATIVE_EVENT",
                     acquisition=acq)
@@ -6356,14 +6370,91 @@ async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
         fresh = await SF.read(conn, key)
         return dict(fresh, venue_fixture_key=key,
                     key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    tried = acq["dates_tried"]
     acq["refusal"] = acq.get("refusal") or (
         SF.R_FETCH if acq.get("fetch_errors") and not any(
-            t.get("matched") is False for t in acq["dates_tried"])
+            t.get("matched") is False for t in tried)
+        # (RC6.2) every schedule read was ANOTHER competition: the declared
+        # source is wrong, and that is named rather than read as no match
+        else SF.R_COMPETITION if tried and all(
+            SF.R_COMPETITION in (t.get("refusals") or []) for t in tried)
         else SF.R_NO_MATCH)
     acq["why"] = acq.get("why") or (
         "the organiser schedule gave no unique match for %r vs %r on %s"
         % (home, away, dates))
     return dict(row, venue_fixture_key=key, acquisition=acq)
+
+
+# ── (RC6.2, p-coverage) THE QUOTE'S OWN PRE-MATCH / IN-PLAY LABEL ──────
+#
+# THE DEFECT. The entry lane established the quote context ONLY from the
+# fixture row (`fmeta_mod.context_for`), and a soccer organiser publishes a
+# SCHEDULED kick-off, never an observed start: a match reported begun gave
+# "no start stamp and no provider label", and one reported not begun gave
+# nothing for a quote observed after that report. Production, 14 days to
+# 2026-10-09 (research-sql run 37946119133 G2): of 32 UNL money lines whose
+# scope WAS established (LEAGUE_OR_GROUP_STAGE, SCHEDULED_NINETY_MINUTES),
+# 27 read verdict UNKNOWN for want of a context -- 24 of them priced from a
+# PinnAPI quote whose stream (live / prematch) the reader had PROVED against
+# the event's own isLive flag (pinnapi_primary refuses
+# PINNAPI_PRIMARY_PHASE_UNPROVED otherwise) and the lane then dropped.
+#
+# THE RULE, unchanged: bettor_settlement_terms.book_context_for already
+# names the provider's own market label the AUTHORITATIVE context ("a
+# statement about the market the price came from rather than an inference
+# from a clock"). The lane now passes it. When the fixture also yields a
+# context, the two must agree; disagreeing evidence establishes NOTHING
+# (QUOTE_CONTEXT_EVIDENCE_DISAGREES) -- neither is preferred.
+R_CONTEXT_EVIDENCE_DISAGREES = "QUOTE_CONTEXT_EVIDENCE_DISAGREES"
+PINNAPI_WS_PROVIDER = "pinnapi.com/raw-websocket"
+
+
+def provider_stream_label(quote):
+    """PURE. True (IN PLAY) / False (PRE-MATCH) for a PinnAPI primary quote
+    whose stream its reader proved; None for any other quote."""
+    ri = (quote or {}).get("reference_input") or {}
+    if ri.get("provider") != PINNAPI_WS_PROVIDER:
+        return None
+    s = ri.get("stream")
+    return True if s == "live" else (False if s == "prematch" else None)
+
+
+def reconcile_quote_context(ctx_ev, label) -> dict:
+    """PURE. The quote context from the fixture's event state (`ctx_ev`, from
+    fmeta_mod.context_for, or None) and the provider's proved label (`label`,
+    provider_stream_label). Returns the attest inputs -- `book_context` (the
+    fixture's established context) or `quote_is_in_play` (the label alone) --
+    and the record's context, basis and why. Disagreement establishes
+    nothing."""
+    from .. import bettor_settlement_terms as _ST
+    fx = (ctx_ev or {}).get("context")
+    lab = None if label is None else (_ST.CTX_LIVE if label
+                                      else _ST.CTX_PRE_GAME)
+    out = {"context": None, "book_context": None, "quote_is_in_play": None,
+           "basis": None, "refusal": None, "fixture_context": fx,
+           "provider_label": lab}
+    if fx and lab and fx != lab:
+        out.update(refusal=R_CONTEXT_EVIDENCE_DISAGREES, why=(
+            "the fixture's reported event state places this quote %s and "
+            "the provider labelled its market %s: two pieces of evidence "
+            "disagree, so neither establishes the context" % (fx, lab)))
+    elif fx:
+        out.update(context=fx, book_context=fx,
+                   basis=("FIXTURE_EVENT_STATE_AND_PROVIDER_LABEL" if lab
+                          else "FIXTURE_EVENT_STATE"),
+                   why=(ctx_ev or {}).get("why"))
+    elif lab:
+        out.update(context=lab, quote_is_in_play=bool(label),
+                   basis="PROVIDER_QUOTE_LABEL",
+                   why=("the provider labelled this quote's market %s (its "
+                        "stream proved against the event's own live flag); "
+                        "the fixture evidence established no context: %s"
+                        % ("IN PLAY" if label else "PRE-MATCH",
+                           (ctx_ev or {}).get("why")
+                           or "no fixture event state was read")))
+    else:
+        out["why"] = (ctx_ev or {}).get("why")
+    return out
 
 
 async def acquire_fixture_scope(conn, *, condition_id, home, away,
@@ -11922,6 +12013,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                      "actual_start_at": fmeta.get("actual_start_at"),
                      "retrieved_at": fmeta.get("retrieved_at")},
                     observed_at=_quote_epoch(quote))
+            # (RC6.2) and the quote's own proved pre-match / in-play label,
+            # which must agree with the fixture's when both exist
+            qctx = reconcile_quote_context(ctx_ev,
+                                           provider_stream_label(quote))
             srule = vset.attest(
                 sport_family=family, market="h2h",
                 venue_evidence=vevid,
@@ -11931,12 +12026,14 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                           == "pinnapi.com/raw-websocket" else
                                           "theoddsapi:h2h:%s" % devig.BOOK)},
                 observed_at=_quote_epoch(quote),
-                book_context=(ctx_ev or {}).get("context"),
+                book_context=qctx["book_context"],
+                quote_is_in_play=qctx["quote_is_in_play"],
                 phase=fmeta.get("phase"),
                 game_format=fmeta.get("game_format"))
             srule["book_rule"] = vset.BOOK_SETTLEMENT.get(family)
             srule["fixture_metadata"] = fmeta
             srule["quote_context_evidence"] = ctx_ev
+            srule["quote_context_reconciliation"] = qctx
 
             # ── THE DECISION INSTANT, TAKEN HERE ────────────────────
             # After the venue book read, the venue rules read and the
@@ -12237,8 +12334,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # game format, and the provenance says which one applied.
             rec["settlement_comparison"] = dict(
                 _settlement_compatibility(srule),
-                quote_context=(ctx_ev or {}).get("context"),
-                quote_context_why=(ctx_ev or {}).get("why"),
+                quote_context=qctx["context"],
+                quote_context_why=qctx.get("why"),
+                quote_context_basis=qctx["basis"],
+                quote_context_refusal=qctx["refusal"],
+                quote_provider_label=qctx["provider_label"],
                 scope_phase=fmeta.get("phase"),
                 scope_game_format=fmeta.get("game_format"),
                 fixture_source=fmeta.get("source"),

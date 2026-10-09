@@ -1419,3 +1419,7 @@ tests/test_rc6_coverage_outside_registry.py
 tests/test_rc6_adriana_void_terms.py
 # (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
 tests/test_rc6_kalshi_ws_merge_integration.py
+# (RC6.2 p-coverage) a regulation, inning, first-five, set, map or game segment is never the whole event and so never compared as the game's money line; team statistic totals, fantasy points, race-to and both-teams-score name their own measure; wbc / pdc / vkl / btla and the residual venue codes read the sport the venue lists under them, from production's own market types and rule texts; no contract leaves the registry
+tests/test_rc62_coverage_ontology.py
+# (RC6.2 p-coverage) the soccer organiser source is resolved from the venue's own league code when the provider key is generic, an organiser payload of any other competition is never read, and the PinnAPI quote's proved pre-match / in-play label is the quote context (reconciled with the fixture's, disagreement establishes nothing) -- the recorded Nations League text then states its one payout conflict instead of UNKNOWN
+tests/test_rc62_soccer_source_and_quote_context.py

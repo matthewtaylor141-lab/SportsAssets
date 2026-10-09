@@ -56,7 +56,54 @@ SOURCES = {
         "source": "UEFA match API (match.uefa.com/v5/matches)"},
 }
 
+#: (RC6.2, p-coverage) THE SAME SOURCES, BY THE VENUE'S OWN LEAGUE CODE.
+#:
+#: THE DEFECT. `SOURCES` is keyed by the odds provider's sport key, and since
+#: PinnAPI became the primary reference the key on most soccer quotes is the
+#: GENERIC 'pinnapi_soccer' (production, 14 days to 2026-10-09: research-sql
+#: run 37946119133 G1 -- PinnAPI-sourced soccer money lines across 75 venue
+#: league codes, none with a source), which no declared source can match.
+#: The competition is not lost: the contract's own venue event slug names it
+#: (`unl-wal-nor-2026-10-01` -> unl, the grammar market_plane.populate.
+#: league_of states), and that is the venue's identity for the event, not a
+#: name match. So the source is resolved from the venue league code first,
+#: and from the provider key only when the venue code names none; the two
+#: naming DIFFERENT declared competitions is a refusal, never a pick.
+#:
+#: UNL is the capture above (36 production rows, LEAGUE_OR_GROUP_STAGE /
+#: SCHEDULED_NINETY_MINUTES, research-sql run 37945671144 F2). UCL / UEL /
+#: UECL are listed on the venue under ucl / uel / uecl (18 events each on
+#: 2026-10-13..15, run 37945671144 F1) and are served by the same organiser
+#: API and parser; their competition ids (UEFA match API competitionId 1 /
+#: 14 / 2019) have NOT yet been read back in this repository, so they carry
+#: `declared_unverified` and every read VERIFIES the payload's own
+#: competition id and code against the declaration (`parse`): a wrong
+#: declaration yields ORGANISER_PAYLOAD_IS_NOT_THE_DECLARED_COMPETITION and
+#: no row, never another competition's evidence. A round the parser does not
+#: recognise is refused by name as before. Domestic leagues have no
+#: organiser source here at all.
+VENUE_LEAGUE_SOURCES = {
+    "unl": SOURCES["soccer_uefa_nations_league"],
+    "ucl": {"kind": "UEFA_MATCH_API", "competition_id": "1",
+            "competition": "UCL",
+            "source": "UEFA match API (match.uefa.com/v5/matches)",
+            "declared_unverified": True},
+    "uel": {"kind": "UEFA_MATCH_API", "competition_id": "14",
+            "competition": "UEL",
+            "source": "UEFA match API (match.uefa.com/v5/matches)",
+            "declared_unverified": True},
+    "uecl": {"kind": "UEFA_MATCH_API", "competition_id": "2019",
+             "competition": "UECL",
+             "source": "UEFA match API (match.uefa.com/v5/matches)",
+             "declared_unverified": True},
+}
+#: provider sport keys that name no competition
+GENERIC_SPORT_KEYS = frozenset({"pinnapi_soccer", "soccer", ""})
+
 R_NO_SOURCE = "NO_AUTHORITATIVE_FIXTURE_SOURCE_FOR_COMPETITION"
+R_SOURCES_DISAGREE = ("PROVIDER_KEY_AND_VENUE_LEAGUE_NAME_DIFFERENT_"
+                      "COMPETITIONS")
+R_COMPETITION = "ORGANISER_PAYLOAD_IS_NOT_THE_DECLARED_COMPETITION"
 R_NO_EVENT_KEY = "VENUE_EVENT_KEY_NOT_ESTABLISHED"
 R_FETCH = "FIXTURE_SCHEDULE_READ_FAILED"
 R_NO_MATCH = "FIXTURE_NOT_FOUND_IN_THE_ORGANISER_SCHEDULE"
@@ -83,6 +130,51 @@ def venue_fixture_key(event_slug) -> str | None:
 
 def source_for(sport_key) -> dict | None:
     return SOURCES.get(str(sport_key or ""))
+
+
+def venue_league_of(event_slug) -> str | None:
+    """The venue's league code of its own event slug (market_plane.populate.
+    league_of: an EVENT slug's first segment, a MARKET slug's segment after
+    its kind prefix). None when there is no slug."""
+    if not str(event_slug or "").strip():
+        return None
+    from .market_plane.populate import league_of
+    return league_of(event_slug)
+
+
+def resolve_source(sport_key, event_slug=None) -> dict:
+    """PURE. The organiser source for one venue soccer event:
+    {"source": dict | None, "basis", "venue_league", "sport_key", "refusal",
+    "refusal_subject"}. The venue league code first, the provider key
+    second; both naming different declared competitions is refused."""
+    key = str(sport_key or "")
+    code = venue_league_of(event_slug)
+    by_code = VENUE_LEAGUE_SOURCES.get(code) if code else None
+    by_key = SOURCES.get(key)
+    out = {"source": None, "basis": None, "venue_league": code,
+           "sport_key": key or None, "refusal": None,
+           # what the refusal names: the provider key, unless it is generic
+           # and the venue's own league code says more
+           "refusal_subject": (code if (key in GENERIC_SPORT_KEYS and code)
+                               else (key or code))}
+    if by_code and by_key and \
+            by_code["competition_id"] != by_key["competition_id"]:
+        out["refusal"] = R_SOURCES_DISAGREE
+        return out
+    if by_code:
+        out.update(source=by_code, basis="VENUE_LEAGUE_CODE")
+    elif by_key:
+        out.update(source=by_key, basis="PROVIDER_SPORT_KEY")
+    else:
+        out["refusal"] = R_NO_SOURCE
+    return out
+
+
+def _competition_of(m: dict) -> tuple:
+    """(id, code) of one organiser match, from the match's own fields."""
+    c = (m or {}).get("competition") or {}
+    cid = str(c.get("id") or (m or {}).get("competitionId") or "")
+    return cid, str(c.get("code") or "")
 
 
 def _norm(name) -> str:
@@ -151,7 +243,16 @@ def parse(payload, *, home, away, date_str, retrieved_at, url,
         list((payload or {}).get("matches") or [])
     h, a = _norm(home), _norm(away)
     hits = []
+    foreign = 0
+    want = (str(src.get("competition_id") or ""),
+            str(src.get("competition") or ""))
     for m in matches:
+        # (RC6.2) THE PAYLOAD MUST BE THE DECLARED COMPETITION, by its own
+        # id and code: a match of any other (or of none stated) is never
+        # read, so a mis-declared source can yield no evidence at all
+        if _competition_of(m) != want:
+            foreign += 1
+            continue
         mh = _norm(((m or {}).get("homeTeam") or {}).get("internationalName"))
         ma = _norm(((m or {}).get("awayTeam") or {}).get("internationalName"))
         day = str(((m or {}).get("kickOffTime") or {}).get("date") or "")
@@ -162,10 +263,19 @@ def parse(payload, *, home, away, date_str, retrieved_at, url,
         elif (mh, ma) == (a, h):
             hits.append((m, "SWAPPED"))
     if not hits:
+        if matches and foreign == len(matches):
+            out["refusals"].append(R_COMPETITION)
+            out["why"] = ("every one of the %d organiser matches read is a "
+                          "competition other than the declared %s (id %s)"
+                          % (len(matches), want[1], want[0]))
+            out["examined"] = len(matches)
+            out["foreign"] = foreign
+            return out
         out["refusals"].append(R_NO_MATCH)
         out["why"] = ("no %s match on %s between %r and %r"
                       % (src.get("competition"), date_str, home, away))
         out["examined"] = len(matches)
+        out["foreign"] = foreign
         return out
     if len(hits) > 1:
         out["refusals"].append(R_AMBIGUOUS)
@@ -305,7 +415,10 @@ async def upsert(conn, key, ev: dict, *, sport_family="soccer") -> dict:
 def describe() -> dict:
     return {"version": VERSION, "table": TABLE, "venue": VENUE,
             "sources": {k: dict(v) for k, v in SOURCES.items()},
+            "venue_league_sources": {k: dict(v) for k, v in
+                                     VENUE_LEAGUE_SOURCES.items()},
             "key": "('PMUS', 'event:<venue event slug>') -- never a global "
                    "condition id",
-            "refusals": [R_NO_SOURCE, R_NO_EVENT_KEY, R_FETCH, R_NO_MATCH,
-                         R_AMBIGUOUS, R_PHASE, R_FORMAT, R_STATE, R_BINDING]}
+            "refusals": [R_NO_SOURCE, R_SOURCES_DISAGREE, R_NO_EVENT_KEY,
+                         R_FETCH, R_NO_MATCH, R_COMPETITION, R_AMBIGUOUS,
+                         R_PHASE, R_FORMAT, R_STATE, R_BINDING]}

@@ -1594,6 +1594,16 @@ TABLE = {
     "BOOK_TERMS_SCOPE_NOT_ESTABLISHED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "LINE_VENUE_TEXT_STATES_NO_EXCEPTIONAL_RULE": (
         S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6.2, p-coverage) the soccer organiser source: the provider key and
+    # the venue's own league code naming different declared competitions,
+    # and an organiser payload that is not the declared competition
+    # (bettor_soccer_fixture) -- fixture identity, like their siblings; and
+    # the quote context's two pieces of evidence disagreeing (the entry lane)
+    "PROVIDER_KEY_AND_VENUE_LEAGUE_NAME_DIFFERENT_COMPETITIONS": (
+        S, MAP, "EVENT_IDENTITY"),
+    "ORGANISER_PAYLOAD_IS_NOT_THE_DECLARED_COMPETITION": (
+        S, MAP, "EVENT_IDENTITY"),
+    "QUOTE_CONTEXT_EVIDENCE_DISAGREES": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
     # ... and the GET-only Kalshi sports catalogue's named truncations and
     # its transport's non-GET refusal (kalshi_catalogue)
     "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),
