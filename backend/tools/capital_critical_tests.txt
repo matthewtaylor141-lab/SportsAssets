@@ -1349,3 +1349,9 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 lane E) the 14-category scorecard pins its evaluator and inputs (an input naming another release is UNMEASURED, never graded as this release's), Kalshi's credential unit reads Kalshi's own verdict while the Red-team aggregate stays, and every declared unit is unchanged
+tests/test_scorecard_14.py
+# (RC6 lane E) release lineage (implementation tree == release tree, single parent, gates on both SHAs), rollback readiness (what ran before per Render, its gates, its schema), the upgrade-path binding and the grading-logic diff against the pinned prior evaluator
+tests/test_rc6e_deploy_lineage.py
+# (RC6 lane E) the upgrade path on real PostgreSQL: the previous release's schema with representative rows, this release's migrations by production's runner, nothing applied changed, nothing seeded lost, the previous release on the new schema
+tests/test_rc6e_upgrade_path.py

@@ -36,6 +36,17 @@ FRESH_DB_RESULT_NOT_IN_THIS_PROCESS on 69a8a07e) and release_verdict.json
 RELEASE read NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA). The scorecard binds
 them; the packet only reports them.
 
+RC6 lane E: the packet also reports, each at declared paths, the
+scorecard's PINNING (evaluator / implementation / release / frontend SHAs,
+input hashes, refused and unattributed inputs), the GRADING-LOGIC DIFF
+against the pinned prior evaluator, the release LINEAGE (implementation
+tree == release tree, single parent), the UPGRADE-PATH receipt readback,
+ROLLBACK readiness, and DEPLOYMENT HEALTH per service: Render's live
+deploy, commit, failure / OOM / restart counts and event-window
+completeness beside the commit each service reports about ITSELF (API:
+red-team implementation_sha and release api.sha; workers: release
+workers.sha and the canary's workers_boot; plane: its heartbeat).
+
     python3 -I backend/tools/evidence_packet.py <acc dir>
 
 Stdlib only; reads files, writes evidence_packet.json and SHA256SUMS.
@@ -91,6 +102,35 @@ FRESH_DB_FIELDS = ("reason", "provenance.run_id", "provenance.workflow_path",
 RELEASE_VERDICT_FIELDS = ("version", "sha", "running_api_sha",
                           "running_api_sha_source", "status", "refused",
                           "release_gate", "body", "posted")
+#: RC6 lane E, each read only at its declared path
+PINNING_FIELDS = ("pinning.evaluator", "pinning.release_sha",
+                  "pinning.implementation_sha",
+                  "pinning.implementation_sha_sources",
+                  "pinning.frontend_sha", "pinning.frontend_preview_sha",
+                  "pinning.api_serving_sha", "pinning.verdict",
+                  "pinning.refused_inputs", "pinning.unattributed_inputs",
+                  "pinning.inputs_sha256", "pinning.inputs_unreadable",
+                  "version", "release_sha", "passing")
+GRADING_DIFF_FIELDS = ("version", "verdict", "prior", "current",
+                       "units_compared", "differences", "undeclared",
+                       "lifted", "lifted_undeclared", "categories_changed",
+                       "detail_only_changes", "passing")
+LINEAGE_FIELDS = ("sha", "release_sha", "implementation_sha",
+                  "implementation_tree", "release_tree", "trees_equal",
+                  "release_parents", "descendant_of_base")
+UPGRADE_FIELDS = ("reason", "provenance.run_id", "provenance.workflow_path",
+                  "provenance.head_sha", "provenance.attestation_verified",
+                  "provenance.receipt_sha256", "receipt.version",
+                  "receipt.sha", "receipt.result", "receipt.reasons",
+                  "receipt.representative", "receipt.base.sha",
+                  "receipt.base.migrations_fingerprint",
+                  "receipt.new_migrations", "receipt.touched_tables",
+                  "receipt.unseeded_touched_tables", "receipt.seeded",
+                  "receipt.rows", "receipt.after",
+                  "receipt.rollback_compatibility")
+ROLLBACK_FIELDS = ("version", "sha", "status", "reasons", "target_sha",
+                   "target_is_ancestor_of_release", "migrations",
+                   "services", "commands", "procedure", "deploys_nothing")
 
 
 def load(acc: pathlib.Path, name: str):
@@ -443,6 +483,58 @@ CONTROLS = ("ATTRIBUTION", "CANONICAL_EXPOSURE", "CAPACITY",
             "VENUE_HEALTH")
 
 
+def deployment_health(acc: pathlib.Path, rb: Readbacks) -> dict:
+    """Per service: what Render says is live and how the window went, and
+    the commit the service reports about ITSELF, each at its declared
+    path; RUNNING_ON_RELEASE only when Render's live commit and every
+    readable self-report are the tested SHA."""
+    lin = load(acc, "lineage") or {}
+    sha = lin.get("sha") if isinstance(lin, dict) else None
+    ren = load(acc, "render")
+    ren = ren if isinstance(ren, dict) else {}
+    own = {"sportsassets-api": (
+               ("red_team", ("data", "readiness", "implementation_sha")),
+               ("release", ("api", "sha"))),
+           "sportsassets-workers": (
+               ("release", ("workers", "sha")),
+               ("canary", ("boots", "workers_boot", "commit_sha"))),
+           "sportsassets-market-plane": (
+               ("venues", ("data", "health", "KALSHI_HEALTH", "mechanism",
+                           "plane", "commit")),)}
+    out = {}
+    for svc in SERVICES:
+        r = ren.get(svc) if isinstance(ren.get(svc), dict) else {}
+        ev = load(acc, "render_events_%s" % svc)
+        reports = {"%s.json:%s" % (n, ".".join(p)): declared(rb, n, p)
+                   for n, p in own[svc]}
+        named = [v["value"] for v in reports.values()
+                 if isinstance(v.get("value"), str) and len(v["value"]) == 40]
+        live = r.get("live_commit")
+        if not named and not live:
+            verdict = UNAVAILABLE
+        elif sha and live == sha and named and all(x == sha for x in named):
+            verdict = "RUNNING_ON_RELEASE"
+        elif sha and live == sha and not named:
+            verdict = "RENDER_ONLY_SELF_REPORT_UNREADABLE"
+        else:
+            verdict = "NOT_ON_RELEASE"
+        out[svc] = {
+            "release_sha": sha, "verdict": verdict,
+            "render": {k: r.get(k) for k in (
+                "status", "service_id", "deploy_id", "live_commit",
+                "live_since", "oom_events_since_live",
+                "server_failed_since_live", "restarts_since_live",
+                "instances", "reasons")} if r else {
+                    "value": UNAVAILABLE,
+                    "reason": "%s:render:%s" % (UNAVAILABLE, svc)},
+            "events_window": {k: (ev or {}).get(k) for k in (
+                "start", "end", "stopped")} if isinstance(ev, dict) else {
+                    "value": UNAVAILABLE,
+                    "reason": "%s:render_events_%s" % (UNAVAILABLE, svc)},
+            "self_reported_commit": reports}
+    return out
+
+
 def build(acc: pathlib.Path, *, now: float | None = None) -> dict:
     now = time.time() if now is None else now
     rb = Readbacks(acc)
@@ -507,6 +599,18 @@ def build(acc: pathlib.Path, *, now: float | None = None) -> dict:
                          for k in FRESH_DB_FIELDS}},
         "release_verdict": {k: declared(rb, "release_verdict", (k,))
                             for k in RELEASE_VERDICT_FIELDS},
+        # RC6 lane E: what judged what, and how the grading moved
+        "pinning": {k: declared(rb, "scorecard_14", tuple(k.split(".")))
+                    for k in PINNING_FIELDS},
+        "grading_diff": {k: declared(rb, "grading_diff", (k,))
+                         for k in GRADING_DIFF_FIELDS},
+        "lineage": {k: declared(rb, "lineage", (k,))
+                    for k in LINEAGE_FIELDS},
+        "upgrade_path": {k: declared(rb, "upgrade_path", tuple(k.split(".")))
+                         for k in UPGRADE_FIELDS},
+        "rollback": {k: declared(rb, "rollback", (k,))
+                     for k in ROLLBACK_FIELDS},
+        "deployment_health": deployment_health(acc, rb),
         # THE BETTOR POLICY'S OWN COMPONENT, keyed by the primary lane it
         # belongs to: never the environment's (benchmark) policyVersion,
         # never a record found by name elsewhere in the body

@@ -2266,6 +2266,170 @@ NOT_REFUSAL = {
         "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
     'RUNNING_MIGRATION_FINGERPRINT_UNREADABLE':
         "tools/scorecard_14: why the judge's half of MIGRATION_INTEGRITY / RELEASE (fresh-database receipt, release verdict) is UNPROVEN or RED -- evidence quality, never a trading, decision, order or collector refusal",
+    # RC6 lane E: evaluator pinning, Kalshi's own credential verdict,
+    # release lineage, upgrade path and rollback readiness (backend/tools
+    # is not scanned by the taxonomy test; classified anyway and pinned by
+    # test_rc6e_deploy_lineage / test_rc6e_upgrade_path)
+    'INPUT_NAMES_ANOTHER_RELEASE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'API_SERVING_IDENTITY_CONFLICT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'FRONTEND_PREVIEW_IS_NOT_THE_DEPLOYED_FRONTEND':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_CONTROL_NOT_COMPUTED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_EVIDENCE_ABSENT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_VERDICT_NOT_MATCHES':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_NOT_PROVISIONED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_CLASS_NOT_APPROVED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'KALSHI_CREDENTIAL_BLOCKER':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'CREDENTIAL_BLOCKER_NOT_ATTRIBUTABLE_TO_A_SLOT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_IMPLEMENTATION_SHA_ABSENT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_IMPLEMENTATION_TREE_DIFFERS_FROM_RELEASE_TREE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_RELEASE_COMMIT_NOT_SINGLE_PARENT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_NOT_FOR_THE_RELEASE_SHA':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_RELEASE_BRANCH_NOT_AT_THE_RELEASE_SHA':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_NOT_DESCENDANT_OF_ACCEPTED_BASE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_RELEASE_GATE_NOT_GREEN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_IMPLEMENTATION_GATE_NOT_GREEN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'LINEAGE_IMPLEMENTATION_GATES_UNREAD':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_READBACK_ABSENT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_ABSENT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_ATTESTATION_NOT_VERIFIED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_NOT_FROM_CAPITAL_CRITICAL':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_NOT_FOR_THE_RELEASE_SHA':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_NOT_FROM_THE_GATE_RUN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_RECEIPT_MALFORMED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_FAILED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_BASE_IS_NOT_THE_ROLLBACK_TARGET':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_ROWS_NOT_REPRESENTATIVE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'UPGRADE_PATH_BASE_NOT_BUILT':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_READINESS_NOT_FOR_THE_RELEASE_SHA':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_READINESS_MALFORMED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TARGET_UNKNOWN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_SERVICE_NOT_ON_THE_RELEASE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TARGET_NOT_AN_ANCESTOR_OF_THE_RELEASE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TARGET_GATE_NOT_GREEN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMANDS_INCOMPLETE':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_SCHEMA_BLOCKED':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_SCHEMA_COMPATIBILITY_UNPROVEN':
+        "tools/scorecard_14 (V2, RC6 lane E): why a scorecard unit is UNMEASURED, UNPROVEN or failed for evaluator pinning, Kalshi's own credential verdict, release lineage, the upgrade path or rollback readiness -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_DEPLOY_HISTORY_UNREADABLE':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_NO_SINGLE_LIVE_DEPLOY':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_LIVE_DEPLOY_DIFFERS_FROM_RENDER_SUMMARY':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_NO_PREVIOUS_DEPLOY':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_TARGET_DIFFERS_BY_SERVICE':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_TARGET_MIGRATIONS_UNREADABLE':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_RELEASE_MIGRATIONS_UNREADABLE':
+        'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'UPGRADE_NOT_A_FULL_SHA':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_BASE_BUILD_FAILED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_BASE_TREE_UNREADABLE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MIGRATION_FAILED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_RUNNER_REPORTED_CHANGED_AFTER_APPLY':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_APPLIED_MIGRATION_CHANGED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_APPLIED_MIGRATION_REMOVED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MIGRATION_NOT_APPLIED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_APPLIED_NOT_IN_TREE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_FINGERPRINT_DIFFERS_FROM_FRESH_BUILD':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MANIFEST_LINE_EDITED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MANIFEST_LINE_REMOVED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MANIFEST_REMOVED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_MANIFEST_LINE_DIFFERS_FROM_FILE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_ROWS_LOST':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_TABLE_DROPPED_WITH_ROWS':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_TOUCHED_TABLE_NOT_SEEDED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TABLE_DROPPED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COLUMN_DROPPED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COLUMN_TYPE_CHANGED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COLUMN_NOT_NULL_WITHOUT_DEFAULT':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_DEFAULT_DROPPED_ON_NOT_NULL_COLUMN':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_NEW_NOT_NULL_COLUMN_WITHOUT_DEFAULT':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_CONSTRAINT_ADDED_ON_EXISTING_TABLE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_CONSTRAINT_CHANGED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_UNIQUE_INDEX_ADDED_ON_EXISTING_TABLE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TRIGGER_ADDED_ON_EXISTING_TABLE':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_TRIGGER_CHANGED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_BASE_RUNNER_FAILED_ON_NEW_SCHEMA':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'ROLLBACK_BASE_RUNNER_REPORTS_CHANGED_AFTER_APPLY':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_NO_CAPITAL_CRITICAL_RUN_FOR_THE_SHA':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_RECEIPT_NOT_IN_THE_RUN_ARTIFACT':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_RECEIPT_NOT_JSON':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
+    'UPGRADE_RUN_CRASHED':
+        "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
     'PAPER_HISTORY_BACKDATED_ROWS':
         'pm_bind/acceptance: a historical-PAPER evidence reason of the PM acceptance judge (receipt-bound pre/post fingerprint) -- evidence quality, never a trading, decision, order or collector refusal',
     'PAPER_HISTORY_BASELINE_ABSENT':
