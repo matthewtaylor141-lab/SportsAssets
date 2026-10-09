@@ -161,3 +161,37 @@ def test_ix_resubscribe_pending_then_forget_in_the_orderings_harness():
     assert ws.violations == []
     assert seen["K-A"]["ok"] and seen["K-B"]["ok"]
     assert seen["_books"] == {"K-A", "K-B"}, seen["_books"]
+
+
+#: every _ORDERINGS script with one market dropped at each of its first
+#: seven positions (only positions the script has: no skipped cases)
+_DROPS = [(o, d, p) for o in sorted(SEQ._ORDERINGS)
+          for d in ("K-A", "K-B", "K-C")
+          for p in range(1, min(7, len(SEQ._ORDERINGS[o])) + 1)]
+
+
+@pytest.mark.parametrize("ordering,drop,pos", _DROPS)
+def test_the_orderings_with_a_drop_anywhere(ordering, drop, pos):
+    """The reviewer's sweep (21 of its cases failed on b4506ed9): no
+    harness violation, the kept markets each CURRENT on the live
+    resubscription, the dropped one has no book and is never resubscribed
+    after its drop."""
+    base = list(SEQ._ORDERINGS[ordering])
+    want = ["K-A", "K-B", "K-C"]
+    keep = [t for t in want if t != drop]
+    ws, sub, b, seen, ctx, go = drive([], want)
+    marker = {"n_sent": None}
+
+    def dropper():
+        marker["n_sent"] = len(ws.sent)
+        prune_to(ctx, keep)()
+    ws.script = base[:pos] + [dropper] + base[pos:]
+    asyncio.run(go())
+    after = ws.sent[marker["n_sent"]:]
+    resub_after = [m["params"]["market_tickers"] for m in after
+                   if m["cmd"] == "subscribe"]
+    assert ws.violations == [], ws.violations
+    assert drop not in seen["_books"], (seen["_books"], ws.sent)
+    assert all(drop not in r for r in resub_after), resub_after
+    for t in keep:
+        assert seen[t]["ok"], (t, seen[t], ws.sent)
