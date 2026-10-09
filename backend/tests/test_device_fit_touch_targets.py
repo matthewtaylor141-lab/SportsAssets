@@ -172,6 +172,14 @@ def test_view_bar_stops_short_of_the_bounded_summary_up_to_1180px():
         assert gap >= 8, (left, gap)
     # a bar that is bounded must scroll (and never squeeze) its buttons
     assert ".hq5-floorbar>*{flex:none;}" in mid
+    # ...and must show that it scrolls: a visible scrollbar for a mouse (the
+    # every-pointer block never hides it), an end fade on touch that lies on
+    # end padding, so a bar whose buttons all fit (1180 px) dims no label
+    assert "scrollbar-width:none" not in mid and "scrollbar-width:thin" in mid
+    touch = _block(sheet, "@media (min-width:781px) and (max-width:1180px) and (pointer:coarse){")
+    fade = _px(touch, r"mask-image:linear-gradient\(90deg,#000 calc\(100% - (\d+)px\),transparent\)")
+    assert _px(touch, r"padding-right:(\d+)px;") >= fade
+    assert 751 + fade <= 1180 - reserve
     # the production summary text ("2 active . 13 collaborations", 212 px) fits
     assert summary_max >= 212
     assert ".hq5-floor-summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" in sheet

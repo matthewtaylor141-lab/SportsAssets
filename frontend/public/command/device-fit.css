@@ -107,9 +107,22 @@
 .hq5-floor-summary{max-width:240px;}
 .hq5-floor-summary span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 @media (min-width:781px) and (max-width:1180px){
-  .hq5-floorbar{max-width:calc(100% - 380px);overflow-x:auto;scrollbar-width:none;}
-  .hq5-floorbar::-webkit-scrollbar{display:none;}
+  .hq5-floorbar{max-width:calc(100% - 380px);overflow-x:auto;scrollbar-width:thin;scrollbar-color:rgba(151,180,214,.35) transparent;}
+  .hq5-floorbar::-webkit-scrollbar{height:4px;}
+  .hq5-floorbar::-webkit-scrollbar-thumb{background:rgba(151,180,214,.35);border-radius:2px;}
   .hq5-floorbar>*{flex:none;}
+}
+/* A bounded bar must show that it scrolls. With a mouse (800-1180 px windows
+   clip Active Desk / Map / Watch BETTOR Work) the thin scrollbar above is the
+   cue. On touch the scrollbar is an overlay that only shows mid-swipe, so the
+   bar's right end fades instead, over a 28 px end padding: when every button
+   fits (iPad landscape, 751 + 28 px inside an 800 px bar) the fade lies on
+   the padding and no label is dimmed. */
+@media (min-width:781px) and (max-width:1180px) and (pointer:coarse){
+  body.fl .hq5-floorbar,.hq5-floorbar{padding-right:28px;scrollbar-width:none;
+    -webkit-mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent);
+    mask-image:linear-gradient(90deg,#000 calc(100% - 28px),transparent);}
+  .hq5-floorbar::-webkit-scrollbar{display:none;}
 }
 
 /* COMMAND ON TABLETS (761-1180 px, every pointer) ------------------------- */
