@@ -1758,11 +1758,14 @@ def test_the_subscriber_against_the_model_venue(variant):
           % (variant, len(seeds), live, total))
     if variant == D:
         assert live == len(seeds)
-    for k in ("lost", "duplicated", "replayed", "ctrl_lost", "drops",
-              "rewants", "disconnects", "refresh_during_send", "rows_written",
+    # every generator counter the RC6 test required is still required
+    # ("venue_errors" is now split into the terminal errors 10 / 25 and the
+    # venue's unsubscribe; "reused_sids" only the R venue produces)
+    for k in ("lost", "duplicated", "replayed", "ctrl_lost", "late_acks",
+              "drops", "rewants", "venue_ends", "venue_unsubscribes",
+              "disconnects", "refresh_during_send", "rows_written",
               "restamped", "reader_checks", "gap_writes"):
         assert total[k] > 0, (variant, k, total)
-    assert total["venue_ends"] + total["venue_unsubscribes"] > 0
     if variant == R:
         assert total["reused_sids"] > 0
 
