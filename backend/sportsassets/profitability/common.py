@@ -156,6 +156,17 @@ def scopes(rows, *, book) -> list:
 
 num = IC.num
 epoch = IC.epoch
+
+
+def offload(fn, *args, **kwargs):
+    """(RC6.1 api-stall2) `await offload(fn, *args, **kwargs)`: a pure
+    computation of this layer, off the event loop, through the intel layer's
+    hook (intel.common.offload) -- the API's CPU lane once its lifespan has
+    installed it (api.app._install_cpu_lane -> cpu_lane.run), asyncio.
+    to_thread in any other process. Looked up per call, so the installed
+    lane is the one used. This layer imports no executor itself: its import
+    closure is pinned (tests/test_profitability_is_research_only)."""
+    return IC.offload(fn, *args, **kwargs)
 jload = IC.jload
 rnd = IC.rnd
 Out = IC.Out

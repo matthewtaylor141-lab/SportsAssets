@@ -1419,3 +1419,5 @@ tests/test_rc6_coverage_outside_registry.py
 tests/test_rc6_adriana_void_terms.py
 # (RC6 integration) the three Kalshi WS lanes together: a market dropped before its subscribe is acknowledged is never brought back by the ack; a dropped market's snapshot is sequence-checked like any other (a lost message or a replay gaps the sid)
 tests/test_rc6_kalshi_ws_merge_integration.py
+# (RC6.1 api-stall2) the profitability warehouse lineage is built off the API event loop (in the API on its CPU lane, through intel.common.offload) over one index of its context per block, in slices of at most warehouse.BUILD_SLICE_S, record for record what the pre-index build (b3f1b0cd, verbatim) built on production-shaped context, the same exceptions where it raised; a production-size block keeps the loop's longest gap under the watchdog's 1.0 s lag threshold (production 14:48Z and 15:49Z: 8.7 s and 13.7 s on the loop), and a Command read's lane job submitted while it is built waits under 1.0 s; the economics compute stays on asyncio.to_thread, off the lane
+tests/test_rc6_api_stall2_profitability.py
