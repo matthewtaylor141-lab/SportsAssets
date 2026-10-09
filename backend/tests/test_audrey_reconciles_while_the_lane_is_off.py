@@ -12,7 +12,9 @@ Proven here against Postgres with a venue factory that REFUSES to be built
 (any venue access fails the test):
 
   * stopped (stop completed) and disabled: Audrey reconciles on her cadence,
-    the paper-only group reads NOT_MIRRORED, nothing is placed or
+    the paper-only group reads STALE -- it would be NOT_MIRRORED, but no
+    account snapshot is current (none is taken while the lane is stopped;
+    rc6.2 pmus-exec, audit item 4) -- nothing is placed or
     cancelled, and the red-team quorum's AUDREY_RECONCILIATION source is
     current (no MISSING / STALE for it) -- the venue sources stay missing,
     so TRUTH_QUORUM stays RED;
@@ -21,6 +23,7 @@ Proven here against Postgres with a venue factory that REFUSES to be built
 """
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -81,7 +84,14 @@ async def test_audrey_reconciles_while_the_lane_is_stopped_or_off(
         assert out["audrey_reconciled"] == 1
         rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations "
                                   " WHERE group_id = $1", po["group_id"])
-        assert rec is not None and rec["status"] == "NOT_MIRRORED", rec
+        # rc6.2 pmus-exec (audit item 4): with no CURRENT account snapshot
+        # (none while the lane is off) she never calls it NOT_MIRRORED: STALE,
+        # with what she would have said kept on the chain
+        assert rec is not None and rec["status"] == M.AUDREY_STALE, rec
+        chain = json.loads(rec["chain"]) if isinstance(rec["chain"], str) \
+            else rec["chain"]
+        assert chain["stale"]["would_be"] == "NOT_MIRRORED"
+        assert chain["stale"]["code"] == M.R_AUDREY_SNAPSHOT_NOT_CURRENT
         assert time.time() - rec["reconciled_at"].timestamp() < 60
         # records only: nothing placed, cancelled or flattened
         assert venue.placed == [] and venue.cancelled == []

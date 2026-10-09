@@ -272,9 +272,12 @@ class FakeVenue:
         return [{"currency": "USD", "currentBalance": self.bp, "buyingPower": self.bp}]
 
     def positions(self):
+        # the venue's ONE signed netPosition per market: long positive, short
+        # negative (BUY_LONG / SELL_SHORT add; SELL_LONG / BUY_SHORT subtract)
         net = {}
         for o in self.orders.values():
-            sgn = 1 if "BUY" in o["intent"] else -1
+            sgn = 1 if o["intent"] in ("ORDER_INTENT_BUY_LONG",
+                                       "ORDER_INTENT_SELL_SHORT") else -1
             net[o["marketSlug"]] = net.get(o["marketSlug"], 0) + sgn * o["cumQuantity"]
         return {s: {"netPosition": str(n), "cashValue": {"value": "%.2f" % (n * 0.5)},
                     "cost": {"value": "0"}, "expired": False}

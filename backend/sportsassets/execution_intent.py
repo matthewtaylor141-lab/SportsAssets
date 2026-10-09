@@ -37,6 +37,15 @@ THE ACTUAL LANE keeps every gate and adds no serialization:
      from it) and a confirmed actual fill is handed straight to Xavier
      (`Mirror.live_handoffs`) -- the paper handoff is never awaited.
 
+RC6.2 PMUS-EXEC (independent audit of this path, before any activation):
+the newest account snapshot must not name a venue position that disagrees
+with our venue fills (R_VENUE_POSITION_DISAGREES, step 4a); the claim
+(step 5) serializes per market (a transaction advisory lock), refuses a
+second exposure on one market (a non-terminal order or held contracts) and
+the account's open + held notional above execmirror_control's aggregate cap,
+and is written only while the control is enabled and not stopped (in the
+INSERT itself); the control is re-read immediately before the send (5b).
+
 Every step stamps a high-resolution timeline (UTC epoch nanoseconds plus a
 monotonic perf_counter_ns) on the intent for the latency report.
 
@@ -110,6 +119,23 @@ R_BOOK_STALE = "EXECUTABLE_BOOK_STALE_AT_ACTUAL_SUBMIT"
 R_BOOK_UNKNOWN = "EXECUTABLE_BOOK_AGE_UNKNOWN"
 R_ACCOUNT_UNKNOWN = "ACCOUNT_STATE_NOT_CURRENT"
 R_DUPLICATE = "INTENT_ALREADY_CLAIMED"
+# rc6.2 pmus-exec (independent audit of the retail path):
+#: item 4 -- the newest account snapshot says the venue's position on some
+#: market is not what our venue fills (plus the baseline) say: nothing new is
+#: originated until it is reconciled
+R_VENUE_POSITION_DISAGREES = "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"
+#: item 2 -- one market, one exposure: a non-terminal actual order on the
+#: market (any lane, any role), or contracts already held there
+R_MARKET_HAS_OPEN_ORDER = "ACTUAL_MARKET_HAS_A_NON_TERMINAL_ORDER"
+R_MARKET_ALREADY_HELD = "ACTUAL_MARKET_ALREADY_HELD"
+#: item 2 -- the account's open + held actual notional plus this order's cost
+#: above execmirror_control's aggregate cap (execmirror.aggregate_cap_usd)
+R_AGGREGATE_ABOVE_CAP = "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP"
+#: the claim's per-market lock: pg_advisory_xact_lock(SLUG_LOCK_CLASS,
+#: hashtext(slug)) -- the two-key form, a key space that never overlaps the
+#: single-key session locks (execmirror.LOCK_KEY, the runner's), so a hash
+#: collision can never wait on the runner
+SLUG_LOCK_CLASS = 0x45584D32          # 'EXM2'
 
 LANE = None          # the API process's ActualLane (installed by start())
 _TASKS: set = set()
@@ -374,6 +400,16 @@ class ActualLane:
         if plan.state != "PLANNED":
             return await self._refuse(conn, it, plan.exclusion, t,
                                       **{k: str(v) for k, v in plan.detail.items()})
+        # 4a · THE VENUE AGREES WITH OUR BOOK (rc6.2 pmus-exec, audit item 4):
+        # the newest account snapshot's reconciliation -- signed venue
+        # positions against our venue fills plus the baseline -- must not
+        # name a difference; one that does stops new exposure until it is
+        # reconciled
+        rec = await self._newest_reconciliation(conn)
+        if rec is not None and rec.get("reconciled") is False:
+            return await self._refuse(
+                conn, it, R_VENUE_POSITION_DISAGREES, t,
+                differences=dict(list((rec.get("differences") or {}).items())[:5]))
         # 4b · R30A CONVERGENCE: NO ORIGINATION OUTSIDE A CANONICAL INTENT.
         # Before anything is claimed: the canonical decision intent of THIS
         # decision must exist, verify, be the one this execution intent
@@ -402,34 +438,118 @@ class ActualLane:
         if not canon.get("ok"):
             return await self._refuse(conn, it, canon["refusal"], t,
                                       canonical=canon.get("detail"))
-        # 5 · THE CLAIM: at most one actual submission per intent
+        # 5 · THE CLAIM: at most one actual submission per intent -- and, in
+        # the SAME transaction (rc6.2 pmus-exec, audit items 2 and 5):
+        #   * one market at a time: a transaction lock per market (the
+        #     two-key advisory form, SLUG_LOCK_CLASS), so two decisions on one
+        #     contract (two loops, two passes) are serialized, and the second
+        #     finds the first;
+        #   * one exposure per market: a non-terminal actual order on it (any
+        #     lane, any role) or contracts already held there refuses by name;
+        #   * the account's aggregate cap: open + held actual notional plus
+        #     this order's cost within execmirror_control's aggregate cap
+        #     (execmirror.aggregate_cap_usd; NULL -> max_order_usd, fail
+        #     closed small);
+        #   * the kill switch IN THE INSERT ITSELF: the row is written only if
+        #     execmirror_control is enabled and not stopped at that instant,
+        #     the control row share-locked so a stop either commits first (no
+        #     claim) or waits for this claim and then sees it (emergency_stop
+        #     is not done while it is SUBMITTING).
         mid = "ei:" + intent_id
-        claimed = await conn.fetchval(
-            """INSERT INTO execmirror_orders (mirror_id, execution_intent_id,
-                 group_id, role, strategy, us_market_slug, intent, order_type,
-                 tif, post_only, wire_price, paper_qty, scaled_qty, live_qty,
-                 rounding_delta, state, paper_decided_at, submit_started_at,
-                 attempts, detail)
-               VALUES ($1,$2,$3,'ENTRY',$4,$5,$6,$7,$8,false,$9,$10,$11,$12,$13,
-                       'SUBMITTING',$14,now(),1,$15::jsonb)
-               ON CONFLICT DO NOTHING RETURNING mirror_id""",
-            mid, intent_id, it["group_id"], it["strategy"], it["us_market_slug"],
-            it["order_intent"], it["order_type"], it["time_in_force"],
-            it["wire_price"], it["paper_target_qty"], size["live_raw_qty"],
-            plan.live_qty, size["rounding_delta"], it["decided_at"],
-            _j({"params": plan.params, "cost_usd": plan.detail.get("cost_usd"),
-                "execution_intent_id": intent_id,
-                "decision_id": it["decision_id"], "source": VERSION}))
-        if not claimed:
+        slug = it["us_market_slug"]
+        cost = Decimal(str(plan.detail.get("cost_usd") or "0"))
+        blocked = None
+        claimed = None
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1, hashtext($2))",
+                               SLUG_LOCK_CLASS, slug)
+            dup = await conn.fetchval(
+                """SELECT mirror_id FROM execmirror_orders
+                    WHERE mirror_id = $1 OR execution_intent_id = $2 LIMIT 1""",
+                mid, intent_id)
+            if dup is None:
+                ex = await M.market_exposure(conn, slug)
+                if ex["non_terminal"]:
+                    blocked = {"refusal": R_MARKET_HAS_OPEN_ORDER,
+                               "non_terminal": ex["non_terminal"]}
+                elif ex["net_held"] > 0:
+                    blocked = {"refusal": R_MARKET_ALREADY_HELD,
+                               "net_held": str(ex["net_held"])}
+            if dup is None and blocked is None:
+                cap, basis = M.aggregate_cap_usd(await M.control(conn))
+                nt = await M.open_and_held_notional(conn)
+                total = nt["open_usd"] + nt["held_usd"] + cost
+                if total > cap:
+                    blocked = {"refusal": R_AGGREGATE_ABOVE_CAP,
+                               "open_usd": str(nt["open_usd"]),
+                               "held_usd": str(nt["held_usd"]),
+                               "order_cost_usd": str(cost),
+                               "total_usd": str(total), "cap_usd": str(cap),
+                               "cap_basis": basis}
+            if dup is None and blocked is None:
+                claimed = await conn.fetchval(
+                    """INSERT INTO execmirror_orders (mirror_id, execution_intent_id,
+                         group_id, role, strategy, us_market_slug, intent, order_type,
+                         tif, post_only, wire_price, paper_qty, scaled_qty, live_qty,
+                         rounding_delta, state, paper_decided_at, submit_started_at,
+                         attempts, detail)
+                       SELECT $1,$2,$3,'ENTRY',$4,$5,$6,$7,$8,false,$9,$10,$11,$12,$13,
+                              'SUBMITTING',$14,now(),1,$15::jsonb
+                        WHERE EXISTS (SELECT 1 FROM execmirror_control
+                                       WHERE id = 1 AND enabled AND NOT stopped
+                                         FOR SHARE)
+                       ON CONFLICT DO NOTHING RETURNING mirror_id""",
+                    mid, intent_id, it["group_id"], it["strategy"], slug,
+                    it["order_intent"], it["order_type"], it["time_in_force"],
+                    it["wire_price"], it["paper_target_qty"], size["live_raw_qty"],
+                    plan.live_qty, size["rounding_delta"], it["decided_at"],
+                    _j({"params": plan.params, "cost_usd": plan.detail.get("cost_usd"),
+                        "execution_intent_id": intent_id,
+                        "decision_id": it["decision_id"], "source": VERSION}))
+        if dup is not None:
             return {"state": "DUPLICATE", "refusal": R_DUPLICATE}
-        if self.mirror._buying_power is not None:
-            self.mirror._buying_power = float(
-                Decimal(str(self.mirror._buying_power))
-                - Decimal(str(plan.detail.get("cost_usd", "0"))))
+        if blocked is not None:
+            return await self._refuse(conn, it, blocked.pop("refusal"), t,
+                                      **blocked)
+        if not claimed:
+            if await conn.fetchval(
+                    """SELECT 1 FROM execmirror_orders
+                        WHERE mirror_id = $1 OR execution_intent_id = $2""",
+                    mid, intent_id):
+                return {"state": "DUPLICATE", "refusal": R_DUPLICATE}
+            now_ctl = await M.control(conn)
+            return await self._refuse(
+                conn, it, (R_LANE_DISABLED if not now_ctl.get("enabled")
+                           else R_LANE_STOPPED), t, at="CLAIM")
         await conn.execute(
             """UPDATE execution_intents SET actual_state = $2, actual_mirror_id = $3,
                  updated_at = now() WHERE intent_id = $1""",
             intent_id, A_SUBMITTING, mid)
+        # 5b · THE SWITCH, AGAIN, IMMEDIATELY BEFORE THE SEND (audit item 5):
+        # a stop or disable that committed after the claim stops the send;
+        # the claimed row is EXCLUDED (nothing was sent) and the intent
+        # refused by name
+        now_ctl = await M.control(conn)
+        if not now_ctl.get("enabled") or now_ctl.get("stopped"):
+            code = R_LANE_DISABLED if not now_ctl.get("enabled") else R_LANE_STOPPED
+            await conn.execute(
+                """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = $2,
+                     detail = detail || $3::jsonb, updated_at = now()
+                   WHERE mirror_id = $1 AND state = 'SUBMITTING'""",
+                mid, code, _j({"refused_before_send": {
+                    "code": code, "at": "IMMEDIATELY_BEFORE_PLACE",
+                    "nothing_sent": True}}))
+            _mark(t, "refused")
+            await self._finish(conn, intent_id, t, A_REFUSED, refusal=code)
+            await M._event(conn, "ACTUAL_REFUSED", mirror_id=mid,
+                           intent_id=intent_id, decision_id=it["decision_id"],
+                           refusal=code, at="IMMEDIATELY_BEFORE_PLACE")
+            return {"state": A_REFUSED, "refusal": code,
+                    "at": "IMMEDIATELY_BEFORE_PLACE"}
+        if self.mirror._buying_power is not None:
+            self.mirror._buying_power = float(
+                Decimal(str(self.mirror._buying_power))
+                - Decimal(str(plan.detail.get("cost_usd", "0"))))
         # 6 · SUBMIT NOW (priority lane of the venue gate in this process)
         _mark(t, "submit_start")
         t0 = time.perf_counter_ns()
@@ -538,6 +658,15 @@ class ActualLane:
             """UPDATE execution_intents SET timeline = timeline || $2::jsonb,
                  updated_at = now() WHERE intent_id = $1""",
             intent_id, _j(dict(t, late_answer=outcome)))
+
+    async def _newest_reconciliation(self, conn) -> dict | None:
+        """The newest account snapshot's reconciliation (Mirror.snapshot), or
+        None when there is no snapshot (its age is gated at step 4)."""
+        rec = await conn.fetchval(
+            "SELECT reconciliation FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
+        if rec is None:
+            return None
+        return json.loads(rec) if isinstance(rec, str) else dict(rec)
 
     async def _buying_power(self, conn) -> tuple[Any, float | None]:
         """The retail account's buying power: the runner's live figure when it

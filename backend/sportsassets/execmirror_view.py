@@ -968,6 +968,10 @@ RECONCILIATION_MEANING = {
     "PENDING": "a live order in the group is still working: not yet final",
     "NOT_MIRRORED": ("paper only: every mirror row was excluded before submission, "
                      "nothing was sent to the venue and no actual leg exists by design"),
+    # rc6.2 pmus-exec (migration 366)
+    "STALE": ("not decided: Audrey would have called it MATCHED or NOT_MIRRORED, but "
+              "the newest account snapshot is missing or older than its 180 s "
+              "admissibility bound, so the venue side is not currently evidenced"),
 }
 PROTECTION_RULE = ("a resting protective order is NOT filled protection: the standing "
                    "(resting) quantity and the filled protection quantity are shown "

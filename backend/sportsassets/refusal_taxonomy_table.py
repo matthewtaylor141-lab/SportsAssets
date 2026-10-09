@@ -2742,3 +2742,29 @@ ECON_BINDING_STREAM = {
 }
 for _k, _v in ECON_BINDING_STREAM.items():
     TABLE.setdefault(_k, _v)
+
+#: (rc6.2 pmus-exec) THE RETAIL ACTUAL PATH'S AUDIT FIXES (ActualLane ->
+#: execmirror.Venue on the PMUS_EXECMIRROR account): a risk-reducing SELL of
+#: an ACTUAL position above its uncommitted venue-confirmed inventory, or on
+#: the side the group does not hold, is an integrity refusal of the plan; a
+#: cancel the venue did not accept (5xx / timeout / 429) and a resend budget
+#: spent are venue-answer data at the order; Audrey's group with no current
+#: account snapshot is a freshness gap at accounting; an emergency stop that
+#: could not be confirmed done is an integrity state of the order book; and
+#: the ACTUAL lane's new admission rails -- a venue position that disagrees
+#: with our fills (integrity), one exposure per market and the aggregate
+#: open + held notional cap (risk rails).
+PMUS_EXEC_STREAM = {
+    "RISK_REDUCING_SELL_ABOVE_UNCOMMITTED_LIVE_INVENTORY": (S, INT, "MANAGEMENT"),
+    "RISK_REDUCING_SELL_DOES_NOT_CLOSE_THE_HELD_SIDE": (S, INT, "MANAGEMENT"),
+    "CANCEL_NOT_ACCEPTED_BY_THE_VENUE": (S, DATA, "ORDER"),
+    "CANCEL_RESEND_EXHAUSTED": (S, DATA, "ORDER"),
+    "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT": (S, FRESH, "ACCOUNTING"),
+    "EMERGENCY_STOP_INCOMPLETE": (S, INT, "ORDER"),
+    "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS": (S, INT, "RISK_ADMISSION"),
+    "ACTUAL_MARKET_HAS_A_NON_TERMINAL_ORDER": (E, RAIL, "RISK_ADMISSION"),
+    "ACTUAL_MARKET_ALREADY_HELD": (E, RAIL, "RISK_ADMISSION"),
+    "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP": (E, RAIL, "RISK_ADMISSION"),
+}
+for _k, _v in PMUS_EXEC_STREAM.items():
+    TABLE.setdefault(_k, _v)

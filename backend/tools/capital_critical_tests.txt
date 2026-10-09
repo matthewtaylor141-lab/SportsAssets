@@ -1335,6 +1335,8 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (rc6.2 pmus-exec) the retail ACTUAL path (ActualLane -> execmirror.Venue on the PMUS_EXECMIRROR account) before any activation: a risk-reducing SELL of an ACTUAL position admitted without a token only outside SHADOW, only for EXIT / REDUCE / STANDING_PROTECTION / ORPHAN_CLOSE on the held side and within the uncommitted venue-confirmed inventory re-read under the row lock (a BUY always needs the canonical authorization; in SHADOW refused exactly as before); one exposure per market (a per-market claim lock; a non-terminal order or held contracts refuse by name) and the open + held notional cap (NULL = max_order_usd); a cancel the venue did not accept named and re-sent with bounded back-off; signed reconciliation, STALE past 180 s, no new exposure while the snapshot disagrees; the claim conditional on the control in the INSERT and re-checked before the send, emergency_stop done only when cancel-all succeeded and no live row remains; a successful order on the wire (pinned SDK, signed and verified, partial fill, cancel, exit, reconciliation) and the same flow in SHADOW with nothing on the wire; the ~$1 sizing
+tests/test_rc62_pmus_exec_retail_path.py
 # (RC6 api-stall) the observation pass's label reads parse off the API event loop; same labelled rows, order and exclusions feed the model planning
 tests/test_rc6_pair_observations_off_loop.py
 # (RC6 api-stall) the intel shadow cycle's pure steps run in worker threads; same SHADOW results

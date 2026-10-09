@@ -81,10 +81,14 @@ STATEMENT_TIMEOUT_MS = 3000
 #: settlement or ledger authority); 216..365 since the RC6 PROVENANCE FIX
 #: (365: the research training set's change stamp -- a counter and its
 #: triggers; no price, order, settlement or ledger authority; 317..364 are
-#: held by parallel RC6 lanes and absent from this build).
+#: held by parallel RC6 lanes and absent from this build); 216..366 since
+#: RC6.2 PMUS-EXEC (366: the ACTUAL lane's aggregate open + held notional
+#: cap column on execmirror_control, NULL = max_order_usd, and Audrey's
+#: STALE reconciliation status; no mode change, no value of any existing
+#: column changed).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 365
+TRACKED_FROM, TRACKED_TO = 216, 366
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"
