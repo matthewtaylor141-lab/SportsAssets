@@ -61,15 +61,18 @@ async def read(conn, *, account_id: str, now: float) -> dict:
 async def paper_turnaround() -> dict:
     from .. import bettor_paper_ledger as L
     now = time.time()
-    hit = _CACHE.get("main")
-    if hit and now - hit[0] < CACHE_S:
-        return hit[1]
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            out = await read(conn, account_id=await L.selected_account(conn), now=now)
+            account_id = await L.selected_account(conn)
+            key = account_id
+            hit = _CACHE.get(key)
+            if hit and now - hit[0] < CACHE_S:
+                return hit[1]
+            out = await read(conn, account_id=account_id, now=now)
     except Exception as exc:                                    # noqa: BLE001
         return envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,
                                                    str(exc)[:160]))
-    _CACHE["main"] = (now, out)
+    _CACHE.clear()
+    _CACHE[key] = (now, out)
     return out

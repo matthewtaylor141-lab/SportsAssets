@@ -44,7 +44,10 @@ receipt, selector switch and event commit together. Failure rolls everything
 back; retries cannot fund twice. Historical later settlement corrections stay
 in their original account. Database guards reject stale order/session/fill/
 ledger ownership and pre-epoch valuation attribution. Streams terminate on an
-account switch and request a new cursor.
+account switch and request a new cursor. Management/equity caches resolve the
+durable selector before serving a hit, pin the account for each read and evict
+obsolete account entries; rollback cannot reuse the new epoch's cached view.
+An unreadable selector fails closed instead of returning cached historical data.
 
 ## Rollback
 

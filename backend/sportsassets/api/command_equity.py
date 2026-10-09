@@ -1016,11 +1016,12 @@ async def read_kalshi(conn, *, now: float) -> dict:
                               "%s: %s" % (type(exc).__name__, str(exc)[:160]))
 
 
-async def live_payload(conn, *, now: float | None = None) -> dict:
+async def live_payload(conn, *, now: float | None = None,
+                       account_id: str | None = None) -> dict:
     now = time.time() if now is None else float(now)
     tr = await _readonly(conn)
     try:
-        paper = await read_paper(conn, now=now)
+        paper = await read_paper(conn, now=now, account_id=account_id)
         pm = await read_pm(conn, now=now)
         kalshi = await read_kalshi(conn, now=now)
         small = await read_small_live(conn, now=now)
@@ -1193,14 +1194,15 @@ async def kalshi_curve(conn, *, since: float, until: float) -> dict:
 
 
 async def curve_payload(conn, *, book: str, venue: str | None, window: str,
-                        now: float | None = None) -> dict:
+                        now: float | None = None, account_id: str | None = None) -> dict:
     now = time.time() if now is None else float(now)
     since, until = now - WINDOWS[window], now
     tr = await _readonly(conn)
     try:
         try:
             if book == "PAPER":
-                got = await paper_curve(conn, since=since, until=until)
+                got = await paper_curve(conn, since=since, until=until,
+                                        account_id=account_id)
                 label = PAPER_LABEL
             elif venue == "kalshi":
                 got = await kalshi_curve(conn, since=since, until=until)
@@ -1249,14 +1251,18 @@ def _headers(response: Response, tag: str) -> None:
 
 
 async def _cached_live() -> dict:
+    from .. import bettor_paper_ledger as L
     async with _LIVE_LOCK:
         mono = time.monotonic()
-        if _LIVE["payload"] is not None and mono - _LIVE["at"] < LIVE_CACHE_S:
-            return _LIVE["payload"]
         pool = await _pool()
         async with pool.acquire() as conn:
-            payload = await live_payload(conn)
-        _LIVE.update(at=mono, payload=payload)
+            account_id = await L.selected_account(conn)
+            if (_LIVE["payload"] is not None
+                    and _LIVE.get("account_id") == account_id
+                    and mono - _LIVE["at"] < LIVE_CACHE_S):
+                return _LIVE["payload"]
+            payload = await live_payload(conn, account_id=account_id)
+        _LIVE.update(at=mono, payload=payload, account_id=account_id)
         return payload
 
 
@@ -1279,19 +1285,26 @@ async def equity_curve(request: Request, response: Response,
                        venue: str | None = Query(
                            None, pattern="^(polymarket_us|kalshi)$"),
                        window: str = Query("1d", pattern="^(1d|7d|30d)$")):
+    from .. import bettor_paper_ledger as L
     if book == "ACTUAL" and venue is None:
         venue = "polymarket_us"
-    key = (book, venue if book == "ACTUAL" else None, window)
-    hit = _CURVES.get(key)
+    pool = await _pool()
     mono = time.monotonic()
-    if hit and mono - hit[0] < CURVE_CACHE_S:
-        out = hit[1]
-    else:
-        pool = await _pool()
-        async with pool.acquire() as conn:
+    async with pool.acquire() as conn:
+        account_id = await L.selected_account(conn) if book == "PAPER" else None
+        key = (book, venue if book == "ACTUAL" else None, window, account_id)
+        hit = _CURVES.get(key)
+        if hit and mono - hit[0] < CURVE_CACHE_S:
+            out = hit[1]
+        else:
             out = await curve_payload(conn, book=book, venue=key[1],
-                                      window=window)
-        _CURVES[key] = (mono, out)
+                                      window=window, account_id=account_id)
+            for cached_key in list(_CURVES):
+                if (mono - _CURVES[cached_key][0] >= CURVE_CACHE_S
+                        or (cached_key[0] == "PAPER"
+                            and cached_key[3] != account_id and book == "PAPER")):
+                    del _CURVES[cached_key]
+            _CURVES[key] = (mono, out)
     if _not_modified(request, out["etag"]):
         return Response(status_code=304, headers={
             "ETag": out["etag"], "Cache-Control": "private, no-cache"})

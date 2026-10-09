@@ -415,3 +415,92 @@ def test_simulated_selector_has_no_writer_dependencies_or_calls():
     for call in calls:
         if call.func.attr == 'fetchval':
             assert isinstance(call.args[0], ast.Constant) and call.args[0].value.startswith('SELECT ')
+
+
+@pytest.mark.parametrize('module_name,endpoint_name', [
+    ('command_capital_authority','paper_capital_authority'),
+    ('command_profitability_scoreboard','paper_profitability_scoreboard'),
+    ('command_turnaround','paper_turnaround'),
+    ('command_confidence_ladder','confidence_ladder'),
+    ('command_sleeves','profitability_sleeves'),
+    ('command_validation','profitability_validation'),
+    ('command_revenue_reliability','revenue_readiness'),
+])
+async def test_hot_management_cache_cannot_cross_epoch(conn,monkeypatch,module_name,endpoint_name):
+    import importlib
+    module = importlib.import_module('sportsassets.api.' + module_name)
+    class Acquire:
+        async def __aenter__(self): return conn
+        async def __aexit__(self,*args): pass
+    class Pool:
+        def acquire(self): return Acquire()
+    async def pool(): return Pool()
+    seen = []
+    async def read(c,*args,account_id,**kwargs):
+        seen.append(account_id)
+        return {'account_id':account_id,'status':'OK','data':{'account_id':account_id}}
+    monkeypatch.setattr(module,'_pool',pool)
+    if module_name == 'command_revenue_reliability':
+        from sportsassets.revenue_reliability import read as RR
+        monkeypatch.setattr(RR,'read',read)
+    else:
+        monkeypatch.setattr(module,'_read' if module_name in {'command_confidence_ladder','command_sleeves','command_validation'} else 'read',read)
+    module._CACHE.clear()
+    try:
+        endpoint = getattr(module,endpoint_name)
+        from fastapi import Response
+        kwargs = {'sleeve':'INVESTMENT'} if module_name == 'command_sleeves' else {'since':None} if module_name == 'command_validation' else {'response':Response()} if module_name == 'command_revenue_reliability' else {}
+        old = await endpoint(**kwargs)
+        r = await activate(conn)
+        new = await endpoint(**kwargs)
+        again = await endpoint(**kwargs)
+        account = lambda out: out.get('account_id') or out['data']['account_id']
+        assert account(old) == L.ACCOUNT_ID
+        assert account(new) == account(again) == r['account_id']
+        assert seen == [L.ACCOUNT_ID,r['account_id']]
+        await E.rollback(conn,epoch_id='day-one',request_id='cache-rollback')
+        assert account(await endpoint(**kwargs)) == L.ACCOUNT_ID
+        async def broken_selector(c):
+            raise ValueError('invalid account pointer')
+        monkeypatch.setattr(L,'selected_account',broken_selector)
+        assert (await endpoint(**kwargs))['status'] == 'UNAVAILABLE'
+    finally:
+        module._CACHE.clear()
+
+
+@pytest.mark.parametrize('view',['live','curve'])
+async def test_equity_cache_cannot_cross_epoch(conn,monkeypatch,view):
+    from sportsassets.api import command_equity as E
+    from sportsassets import bettor_paper_day_one as EPOCH
+    from fastapi import Request,Response
+    class Acquire:
+        async def __aenter__(self): return conn
+        async def __aexit__(self,*args): pass
+    class Pool:
+        def acquire(self): return Acquire()
+    async def pool(): return Pool()
+    seen=[]
+    async def payload(c,*,account_id,**kwargs):
+        seen.append(account_id)
+        return {'account_id':account_id,'etag':account_id,'seq':1}
+    monkeypatch.setattr(E,'_pool',pool)
+    monkeypatch.setattr(E,'live_payload' if view=='live' else 'curve_payload',payload)
+    E._LIVE.update(at=0,payload=None)
+    E._CURVES.clear()
+    async def endpoint():
+        if view=='live': return await E._cached_live()
+        return await E.equity_curve(Request({'type':'http','headers':[]}),Response(),book='PAPER',venue=None,window='1d')
+    try:
+        old=await endpoint()
+        r=await activate(conn)
+        new=await endpoint()
+        again=await endpoint()
+        assert old['account_id']==L.ACCOUNT_ID
+        assert new['account_id']==again['account_id']==r['account_id']
+        assert seen==[L.ACCOUNT_ID,r['account_id']]
+        await EPOCH.rollback(conn,request_id='cache-rollback',epoch_id='day-one')
+        restored=await endpoint()
+        assert restored['account_id']==L.ACCOUNT_ID
+    finally:
+        E._LIVE.update(at=0,payload=None)
+        E._CURVES.clear()

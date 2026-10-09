@@ -121,10 +121,11 @@ def capital_summary(rows: list, *, now: float,
     }
 
 
-async def _read(conn, sleeve: str, now: float) -> dict:
+async def _read(conn, sleeve: str, now: float, *, account_id: str | None = None) -> dict:
     from .. import bettor_paper_ledger as L
     from .. import bettor_paper_sleeves as SL
     from ..profitability import metrics as MT
+    account_id = account_id or await L.selected_account(conn)
     tr = conn.transaction() if conn.is_in_transaction() else \
         conn.transaction(readonly=True)
     await tr.start()
@@ -133,9 +134,9 @@ async def _read(conn, sleeve: str, now: float) -> dict:
                            % STATEMENT_TIMEOUT_MS)
         if not await SL.schema(conn):
             return {"status": "UNAVAILABLE", "why": SL.R_NO_SCHEMA}
-        book = await SL.sleeve_book(conn, await L.selected_account(conn), now=now)
+        book = await SL.sleeve_book(conn, account_id, now=now)
         groups = {g: c["sleeve"] for g, c in
-                  (await SL.classifications(conn, await L.selected_account(conn))).items()}
+                  (await SL.classifications(conn, account_id)).items()}
         has_pos = bool(await conn.fetchval(
             "SELECT to_regclass('pos_economics_latest') IS NOT NULL"))
         econs, research_as_of = [], None
@@ -209,15 +210,18 @@ async def profitability_sleeves(
         sleeve: str = Query(default="INVESTMENT",
                             pattern="^(INVESTMENT|TRAINING|BENCHMARK|"
                                     "UNCLASSIFIED|COMBINED)$")) -> dict:
+    from .. import bettor_paper_ledger as L
     from ..profitability import common as C
     now = time.time()
-    hit = _CACHE.get(sleeve)
-    if hit and now - hit[0] < CACHE_S:
-        return hit[1]
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            got = await _read(conn, sleeve, now)
+            account_id = await L.selected_account(conn)
+            key = (account_id, sleeve)
+            hit = _CACHE.get(key)
+            if hit and now - hit[0] < CACHE_S:
+                return hit[1]
+            got = await _read(conn, sleeve, now, account_id=account_id)
     except Exception as exc:                                    # noqa: BLE001
         return C.envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,
                                                      str(exc)[:160]),
@@ -225,5 +229,10 @@ async def profitability_sleeves(
     out = C.envelope(got["status"], got.get("why"), computed_at=now,
                      data=got.get("data"), sleeve=sleeve,
                      summed_across_books=False)
-    _CACHE[sleeve] = (now, out)
+    for cached_key in list(_CACHE):
+        if cached_key[0] != account_id or now - _CACHE[cached_key][0] >= CACHE_S:
+            del _CACHE[cached_key]
+    if len(_CACHE) >= 64:
+        _CACHE.clear()
+    _CACHE[key] = (now, out)
     return out
