@@ -99,3 +99,36 @@
   .hq5-floorbar::-webkit-scrollbar{display:none;}
   .hq5-floorbar>*{flex:none;}
 }
+
+/* COMMAND ON TABLETS (761-1180 px, every pointer) ------------------------- */
+/* Found while measuring the touch fix (synthetic reads, 0a2e7822 too): on
+   iPad landscape the status pills ran past the top bar's right edge (PAPER
+   at x 1177, SMALL LIVE SHADOW at 1253-1380 on a 1180 px screen) and on iPad
+   portrait all four (FEEDS, API / WRK, PAPER, SMALL LIVE SHADOW) started at
+   x 830 on an 820 px screen: the brand and the workspace bar (150 + 624 px)
+   fill the row. The pills get their own row, right-aligned, so SMALL LIVE
+   SHADOW and PAPER are on screen; the HUD hangs from var(--top), so every
+   panel moves down with the taller bar (row 1 is the 54 px workspace bar,
+   row 2 the 26 px pills: 92 px). */
+@media (min-width:761px) and (max-width:1180px){
+  body.hq{--top:92px;}
+  body.hq #hq-top{flex-wrap:wrap;align-content:center;row-gap:4px;}
+  /* basis 0 keeps the workspace bar on row 1 beside the brand (its 624 px
+     would otherwise wrap at 820 px); max-content keeps it from stretching */
+  body.hq #hq-top>#hq-nav{flex:1 1 0;min-width:0;max-width:max-content;}
+  body.hq #hq-status{flex:0 0 100%;justify-content:flex-end;margin-left:0;}
+}
+/* iPad portrait: between the 270 / 286 px HUD columns the CRITICAL bar and
+   the freshness strip were 168 px wide -- the alert title 0 px, Briefing
+   (92 px) spilling 87 px over the Management Attention panel, the freshness
+   cells cut to "N f." -- so on the Command view they span the width above
+   the columns (alert: 6 px under the bar, 64 px tall with a 44 px Briefing;
+   freshness 76 px under the bar when an alert shows, 8 px otherwise, 77 px
+   tall), and the columns start 10 px below the strip. With a desk open the
+   original right edge (418 px, beside the desk) still applies. */
+@media (min-width:761px) and (max-width:1000px){
+  body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:18px;right:18px;}
+  body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:18px;right:18px;}
+  body.hq[data-view="command"] .hud-col{top:calc(var(--top) + 95px);}
+  body.hq.has-critical[data-view="command"] .hud-col{top:calc(var(--top) + 163px);}
+}
