@@ -2629,3 +2629,31 @@ NOT_REFUSAL = {
         "not read a held position's record (counted as incomplete, never "
         "complete) -- a readback state, never a trading refusal",
 }
+
+#: (rc6 econ-binding) THE PROFITABILITY BIND'S CONTROL INPUTS (bettor_paper_
+#: profitability_bind control 25, at the decision and under the ledger's
+#: account lock): a learned model absent or fitted longer ago than its bound,
+#: a missing probability / book observation instant, a settlement verdict not
+#: resolved at the bind, an incomplete contract identity or a probability
+#: outside [0, 1] is a MISSING / UNPROVEN INPUT the decision chain failed to
+#: supply (SOFTWARE), never an economic verdict; an ENTRY whose evaluation and
+#: counterfactual variants were not recorded is an integrity failure of the
+#: record (SOFTWARE / INTEGRITY, at the order).
+ECON_BINDING_STREAM = {
+    "CASH_WAIT_CALIBRATION_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_EXECUTION_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_RESIDUAL_FEEDBACK_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_MANAGEMENT_MODEL_NOT_CURRENT": (S, DATA, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_OBSERVATION_TIME_MISSING":
+        (S, FRESH, "RISK_ADMISSION"),
+    "CASH_WAIT_BOOK_OBSERVATION_TIME_MISSING": (S, FRESH, "RISK_ADMISSION"),
+    "CASH_WAIT_SETTLEMENT_TERMS_NOT_RESOLVED_AT_BIND":
+        (S, SET, "RISK_ADMISSION"),
+    "CASH_WAIT_CONTRACT_IDENTITY_INCOMPLETE_AT_BIND":
+        (S, MAP, "RISK_ADMISSION"),
+    "CASH_WAIT_PROBABILITY_NOT_IN_ZERO_ONE": (S, INT, "RISK_ADMISSION"),
+    "ENTRY_EVALUATION_OR_COUNTERFACTUAL_VARIANTS_NOT_RECORDED":
+        (S, INT, "ORDER"),
+}
+for _k, _v in ECON_BINDING_STREAM.items():
+    TABLE.setdefault(_k, _v)
