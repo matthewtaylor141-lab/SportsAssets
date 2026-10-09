@@ -1401,3 +1401,7 @@ tests/test_rc6_d1_snapshot_refresh.py
 tests/test_rc6_d1_freshness_window.py
 # (RC6 identity lane) the $500,000 epoch as an exact Decimal roll-forward (OPENING + NET FLOWS + REALIZED + UNREALIZED on verified marks - ALL-IN FEES = ENDING from the ledger), the append-only ledger replayed, every cost reconciled, the research export file run on a real Postgres ledger and equal to the epoch read's own roll-forward
 tests/test_epoch_rollforward_receipt.py
+# (RC6 identity lane) a ledger-derived mirror reading is never venue-confirmed: the heartbeat is 'degraded' with MIRROR_SHADOW_POSITIONS_NOT_VENUE_CONFIRMED_CREDENTIAL_CLASS_UNAVAILABLE and the owner blocker, carried into the readiness gate's evidence and loop health; only a venue walk's reading is 'ok'
+tests/test_mirror_shadow_venue_confirmation.py
+# (RC6 identity lane) active position truth: every ACTUAL book and the PAPER books read each cycle, an ACTIVE row of ours without market identity refused by name (OWN_ACTIVE_POSITION_HAS_NO_MARKET_IDENTITY), unreadable books UNMEASURED never clean, the dead-letter counted by owner and activity and logged on change
+tests/test_positions_identity_census.py
