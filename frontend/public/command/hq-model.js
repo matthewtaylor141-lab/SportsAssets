@@ -258,6 +258,29 @@ export function createModel(B, opts) {
     if (!d) return {status: x ? x.status : 'LOADING', why: x && x.why, rows: []};
     return {status: 'OK', readAt: x.lastOk, rows: (d.outputs || []).filter((r) => r.kind === 'xavier_management_assessments')};
   }
+  /* Xavier's management state over the OPEN book only: floor/xavier outputs
+   * are a 24 h timeline, so a settled position's last assessment would still
+   * read as 'stale'. The denominator is equity/live paper.open_positions.count;
+   * an assessment counts only when its group is one of those open positions
+   * (the newest per group). 0 open positions is 0 -- never a timeline row. */
+  const GROUP_KEYS = ['group_id', 'position_key', 'key'];
+  function managementOpen() {
+    const p = equity().paper, op = p && p.open_positions;
+    if (!op || !fin(op.count)) return {status: 'UNAVAILABLE', why: equity().status === 'LOADING' ? 'reading equity/live' : 'equity/live carried no open-position count', open: null, rows: []};
+    if (op.count === 0) return {status: 'OK', open: 0, rows: []};
+    const xd = xavierDecisions();
+    if (xd.status !== 'OK') return {status: xd.status, why: xd.why, open: op.count, rows: []};
+    const keys = new Set();
+    (op.rows || []).forEach((r) => GROUP_KEYS.forEach((k) => { if (r[k] != null) keys.add(String(r[k])); }));
+    const newest = new Map();
+    xd.rows.filter((r) => !r.superseded_by).forEach((r) => {
+      const k = GROUP_KEYS.map((f) => r[f]).find((v) => v != null && keys.has(String(v)));
+      if (k == null) return;
+      const at = epoch(r.at != null ? r.at : r.assessed_at), cur = newest.get(String(k));
+      if (!cur || (at != null && (cur.at == null || at > cur.at))) newest.set(String(k), {at, row: r});
+    });
+    return {status: 'OK', open: op.count, rows: Array.from(newest.values()).map((x) => x.row), readAt: xd.readAt};
+  }
   /* the PAPER equity history (equity/curve), oldest first; a point is a real recorded equity */
   function curve() {
     const c = R.curve.data;
@@ -288,7 +311,7 @@ export function createModel(B, opts) {
 
   return {SEATS, BY_SLUG, BY_AGENT, STATE, reads: R, start, refresh, readCapital, subscribe: (fn) => subs.push(fn), onSignedOut: (fn) => signedOutCbs.push(fn),
     attention, funnel,
-    desk, desks: () => SEATS.map((s) => desk(s.slug)), edges, collaborators, equity, tickers, decisions, ranking, coverage, xavierDecisions, adrianaWork, curve, fixture,
+    desk, desks: () => SEATS.map((s) => desk(s.slug)), edges, collaborators, equity, tickers, decisions, ranking, coverage, xavierDecisions, managementOpen, adrianaWork, curve, fixture,
     readDetail, firstFloor: () => new Promise((res) => { if (R.floor.status !== 'LOADING') { res(); return; } subs.push((k) => { if (k === 'floor') res(); }); }),
     selected: () => selected, setSelected: (s) => { selected = s; },
     util: {usd, signedUsd, compactUsd, clock, hm, ago, epoch, words, fin, esc: B.esc, age: B.age}};

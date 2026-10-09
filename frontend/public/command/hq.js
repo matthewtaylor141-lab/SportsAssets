@@ -99,12 +99,15 @@ function freshness() {
     const st = op.stale_marks || 0, un = op.unmarked || 0, n = op.count;
     cells.push({k: 'Marks', v: (n - st - un) + '/' + n + ' fresh', s: st + ' stale > ' + (ma.stale_mark_after_s || 300) + 's · ' + un + ' unmarked', tone: st + un === 0 ? 'good' : (st + un) > n * 0.25 ? 'bad' : 'warn'});
   } else cells.push({k: 'Marks', v: null, s: equityWhy() || 'equity/live carried no open positions', tone: 'warn'});
-  const xd = HQ.xavierDecisions();
-  if (xd.status === 'OK') {
-    const cur = xd.rows.filter((r) => !r.superseded_by);
-    const bad = cur.filter((r) => /WAITING_FOR_FRESH_EVIDENCE|UNAVAILABLE/.test(r.management_state || '') || /^(STALE|INVALID)$/.test(r.recommendation_state || ''));
-    cells.push({k: 'Management', v: bad.length + ' of ' + cur.length + ' stale', s: bad.length ? 'Xavier waiting for fresh evidence on ' + bad.length + ' position' + (bad.length > 1 ? 's' : '') : 'every current review on fresh evidence', tone: !bad.length ? 'good' : bad.length > cur.length / 2 ? 'bad' : 'warn'});
-  } else cells.push({k: 'Management', v: null, s: 'floor/xavier ' + (xd.status === 'LOADING' ? 'reading' : (xd.why || xd.status)), tone: 'warn'});
+  // OPEN positions only (HQ.managementOpen): a settled position's last
+  // assessment in the 24 h floor/xavier timeline is not a stale position
+  const mo = HQ.managementOpen(), pl = (n) => n + ' open position' + (n === 1 ? '' : 's');
+  if (mo.status === 'OK' && mo.open === 0) cells.push({k: 'Management', v: '0 open', s: 'no open position for Xavier to manage', tone: 'good'});
+  else if (mo.status === 'OK' && !mo.rows.length) cells.push({k: 'Management', v: null, s: 'no current Xavier review matched to the ' + pl(mo.open), tone: 'warn'});
+  else if (mo.status === 'OK') {
+    const bad = mo.rows.filter((r) => /WAITING_FOR_FRESH_EVIDENCE|UNAVAILABLE/.test(r.management_state || '') || /^(STALE|INVALID)$/.test(r.recommendation_state || ''));
+    cells.push({k: 'Management', v: bad.length + ' of ' + mo.open + ' open stale', s: (bad.length ? 'Xavier waiting for fresh evidence on ' + pl(bad.length) : 'every reviewed open position on fresh evidence') + ' · ' + mo.rows.length + ' of ' + mo.open + ' reviewed', tone: !bad.length ? (mo.rows.length === mo.open ? 'good' : 'warn') : bad.length > mo.open / 2 ? 'bad' : 'warn'});
+  } else cells.push({k: 'Management', v: null, s: mo.status === 'UNAVAILABLE' ? mo.why : 'floor/xavier ' + (mo.status === 'LOADING' ? 'reading' : (mo.why || mo.status)), tone: 'warn'});
   const ds = HQ.desks().filter((d) => !d.planned), blocked = ds.filter((d) => /BLOCKED|STALE/.test(d.code));
   cells.push({k: 'Desks', v: HQ.reads.floor.data ? (blocked.length ? blocked.length + ' blocked / stale' : 'all current') : null, s: HQ.reads.floor.data ? (blocked.length ? blocked.map((d) => d.name + ' ' + U.words(d.code).toLowerCase()).join(' · ') : ds.length + ' desks with a fresh state') : (HQ.reads.floor.why || 'reading the floor'), tone: !HQ.reads.floor.data ? 'warn' : blocked.length ? 'bad' : 'good'});
   const f = feedsRead();
