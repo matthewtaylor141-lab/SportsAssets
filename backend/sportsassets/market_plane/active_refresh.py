@@ -42,9 +42,28 @@ older than the bound, no snapshot on this connection yet, a connection or
 clock gap awaiting one, the connection silent or closed, no venue clock) and
 whose own last refresh is not current. A stream refusal that is evidence
 about the MARKET (not open, hidden, crossed, refused, no scales) is never
-refreshed past. Order: HELD before CANDIDATE; a candidate by its event start
-(in play first, then the soonest pregame start, then started > 4 h ago, then
-no start); inside one rank, never refreshed / longest ago first.
+refreshed past. Order (RC6 D1, FAIR): HELD before CANDIDATE; inside a tier,
+EARLIEST LAPSE FIRST -- the instant the member's last current book (stream
+receipt or refresh receipt, + the bound) stopped counting, never-current
+first; then by event start (in play first, then the soonest pregame start,
+then started > 4 h ago, then no start). RC6 ordered candidates by event
+start before age: when more members are quiet than the budget can hold
+(12 reads x 285 s / 60 = 57 at once) the soonest starts were re-read every
+285 s and the later ones were never read at all; earliest-lapse-first
+spreads the same reads over every quiet member (with enough budget the two
+orders keep the same members current). A member whose read is IN FLIGHT is
+never planned twice.
+
+WHO DRIVES IT (RC6 D1, reliability). Production's plane pass is not 2 s: its
+SNAPSHOT events -- one per pass at most -- arrived p50 92 s, p90 248 s, p99
+739 s apart over 24 h, and every one of the newest 40 more than 197 s apart
+(research-sql run 37870039455, 2026-10-09 01:29Z: coverage and
+certification run every pass). One read per pass made RC6's 12-a-minute
+budget about 0.25 a minute in production. So `step` is also driven by the
+plane's freshness task (workers.universal_market_plane.freshness_loop) every
+second, beside the pass, and the plane's PMX client is shared through one
+lock (`lock`): reads never overlap, the budget is the same object, and a
+slow coverage or certification pass no longer stops the reads.
 
 WHAT COUNTS AS CURRENT (`judge`, then `current`). A 200 whose body is an
 object with bids / offers lists, echoes the member's symbol, carries the
@@ -272,6 +291,10 @@ class ActiveRefresh:
         self.entries: dict = {}
         self._starts: collections.deque = collections.deque(
             maxlen=self.per_min)
+        #: (RC6 D1) symbols whose read has started and is not yet recorded:
+        #: the two drivers (the pass and the freshness task) never read one
+        #: member twice at once
+        self.inflight: set = set()
         self.hold_until = 0.0
         self.last_pass: dict = {}
         self.totals = {"reads": 0, "current": 0, "not_current": 0,
@@ -321,15 +344,32 @@ class ActiveRefresh:
     # -- the plan ----------------------------------------------------------
 
     def _stream(self, mgr, s, *, now: float, bound: float):
-        """(ok, refusal) of the stream's read at the plane bound, or None
-        when the plane's books do not hold the symbol."""
+        """(ok, refusal, received_at) of the stream's read at the plane
+        bound -- received_at the receipt instant of the newest full update
+        the books hold for it, or None -- or None when the plane's books do
+        not hold the symbol."""
         if s not in (getattr(mgr, "symbol_to_shard", None) or {}):
             return None
         try:
             r = mgr.current(s, now=now, max_snapshot_age_s=bound) or {}
         except Exception as exc:                                # noqa: BLE001
-            return False, "READ_RAISED:%s" % type(exc).__name__
-        return bool(r.get("ok")), r.get("refusal")
+            return False, "READ_RAISED:%s" % type(exc).__name__, None
+        rcv = (((r.get("evidence") or {}).get("snapshot") or {})
+               .get("received_at"))
+        try:
+            rcv = None if rcv is None else float(rcv)
+        except (TypeError, ValueError):
+            rcv = None
+        return bool(r.get("ok")), r.get("refusal"), rcv
+
+    def lapse_at(self, s, *, stream_received_at, bound: float):
+        """The instant the member's newest current book stops counting: its
+        stream receipt or its refresh receipt (the later), + the bound;
+        None when it never had one (it lapsed first of all)."""
+        at = [x for x in (stream_received_at,
+                          (self.entries.get(s) or {}).get("ok_at"))
+              if x is not None]
+        return (max(at) + bound) if at else None
 
     def _refresh_current(self, e, *, now: float, bound: float) -> bool:
         at = (e or {}).get("ok_at")
@@ -353,13 +393,17 @@ class ActiveRefresh:
             out[s] = e["ok_at"]
         return out
 
-    def plan(self, mgr, *, now: float, bound: float) -> tuple:
+    def plan(self, mgr, *, now: float, bound: float,
+             lead_s: float | None = None) -> tuple:
         """([symbol, ...] due now in refresh order, {reason: count}) over the
         members. Due: held by the plane's books, the stream refusing for
         snapshot currency, no current refresh that is not yet within
-        REFRESH_LEAD_S of the bound, not waiting to retry."""
+        `lead_s` (REFRESH_LEAD_S) of the bound, not waiting to retry, no
+        read of it in flight. Order: HELD first, then earliest lapse, then
+        event start (module docstring)."""
         counts: dict = {}
         due = []
+        lead = REFRESH_LEAD_S if lead_s is None else float(lead_s)
 
         def n(k):
             counts[k] = counts.get(k, 0) + 1
@@ -368,16 +412,18 @@ class ActiveRefresh:
             if got is None:
                 n("NOT_HELD_BY_THE_PLANE_BOOKS")
                 continue
-            ok, refusal = got
+            ok, refusal, stream_rcv = got
             if ok:
                 n("STREAM_CURRENT")
                 continue
             if refusal not in REFRESHABLE:
                 n("STREAM_REFUSAL_NOT_REFRESHABLE")
                 continue
+            if s in self.inflight:
+                n("READ_IN_FLIGHT")
+                continue
             e = self.entries.get(s) or {}
-            if self._refresh_current(e, now=now,
-                                     bound=bound - REFRESH_LEAD_S):
+            if self._refresh_current(e, now=now, bound=bound - lead):
                 n("REFRESH_CURRENT")
                 continue
             tried = e.get("tried_at")
@@ -389,20 +435,26 @@ class ActiveRefresh:
                 continue
             if self._refresh_current(e, now=now, bound=bound):
                 n("REFRESH_CURRENT_DUE_FOR_RE_READ")
+            lapse = self.lapse_at(s, stream_received_at=stream_rcv,
+                                  bound=bound)
             due.append(((0 if tier == TIER_HELD else 1),
+                        float("-inf") if lapse is None else lapse,
                         PHASE_RANK.get(phase, 3),
                         start if start is not None else float("inf"),
-                        e.get("ok_at") or -1.0, s))
+                        s))
         due.sort()
         return [d[-1] for d in due], counts
 
     # -- one read ----------------------------------------------------------
 
-    def start(self, now: float) -> None:
+    def start(self, now: float, symbol: str | None = None) -> None:
         self._starts.append(now)
+        if symbol is not None:
+            self.inflight.add(str(symbol))
 
     def record(self, symbol: str, row: dict, *, at: float) -> dict:
         """Account one finished read (received at `at`)."""
+        self.inflight.discard(str(symbol))
         j = judge(symbol, row)
         t = self.totals
         t["reads"] += 1
@@ -474,13 +526,25 @@ MEMBERS_SQL = (
     " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2")
 
 
+class _NoLock:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *a):
+        return False
+
+
 async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
-               clock=time.time, read=None) -> dict:
-    """ONE PASS OF THE REFRESH (the plane's run loop, after the refdata
-    slot): re-read the member list when due, plan, and spend at most
-    MAX_READS_PER_PASS reads the budget allows on the members due, in
-    order. Each read is the allow-listed `book` read in a worker thread.
-    Returns this pass's digest. Raises nothing it can name."""
+               clock=time.time, read=None, lock=None) -> dict:
+    """ONE PASS OF THE REFRESH (the plane's run loop after the refdata slot,
+    and the plane's freshness task every second): re-read the member list
+    when due, plan, and spend at most MAX_READS_PER_PASS reads the budget
+    allows on the members due, in order. Each read is the allow-listed
+    `book` read in a worker thread, made holding `lock` (the plane's one PMX
+    client, shared with the refdata slot and the other driver): the budget
+    is checked and the member re-checked UNDER the lock, so two drivers
+    never pass one slot or read one member twice. Returns this pass's
+    digest. Raises nothing it can name."""
     import asyncio
     from .populate import P_CANDIDATE
     now = clock()
@@ -497,21 +561,33 @@ async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
     due, counts = ref.plan(mgr, now=now, bound=bound)
     reads, why_stopped = [], None
     read = read or (lambda s: client.read("book", s))
+    guard = lock if lock is not None else _NoLock()
     for s in due:
         if len(reads) >= MAX_READS_PER_PASS:
             why_stopped = "MAX_READS_PER_PASS"
             break
-        ok, why = ref.slot(clock())
-        if not ok:
-            why_stopped = why
-            break
-        ref.start(clock())
-        try:
-            row = await asyncio.to_thread(read, s)
-        except Exception as exc:                                # noqa: BLE001
-            row = {"status": None, "transportError": "RAISED:%s"
-                   % type(exc).__name__}
-        j = ref.record(s, row, at=clock())
+        async with guard:
+            ok, why = ref.slot(clock())
+            if not ok:
+                why_stopped = why
+                break
+            if s in ref.inflight or ref._refresh_current(
+                    ref.entries.get(s), now=clock(),
+                    bound=bound - REFRESH_LEAD_S):
+                # the other driver read it while this one waited
+                continue
+            ref.start(clock(), s)
+            try:
+                row = await asyncio.to_thread(read, s)
+            except asyncio.CancelledError:
+                # the driver is stopping: nothing was recorded, nothing
+                # stays in flight
+                ref.inflight.discard(s)
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                row = {"status": None, "transportError": "RAISED:%s"
+                       % type(exc).__name__}
+            j = ref.record(s, row, at=clock())
         reads.append({"symbol": s, "outcome": j["outcome"],
                       "status": j.get("status"), "ms": j.get("ms")})
         if j["outcome"] == R_REFRESH_HTTP_429:
