@@ -20,7 +20,10 @@ completed-game policy's ENTERs). Proved here:
   * the backstop: an ENTER with no order and no order refusal older than
     ENTER_WITHOUT_ORDER_AFTER_S becomes ONE finding ENTER_WITHOUT_ORDER;
     an ENTER with an order, with a recorded refusal, or younger than the
-    threshold is never named.
+    threshold is never named. Since RC6.2 enter-integrity a wedged sequence
+    is named at once by PD.owed_order (ENTER_ORDER_ABANDONED, with its
+    cause) and the backstop never names it twice; the backstop keeps what
+    no code path can name (a process that died first).
 SYNTHETIC valuations and books; no venue is contacted.
 """
 from __future__ import annotations
@@ -279,6 +282,13 @@ async def test_a_slow_execution_hook_no_longer_strands_the_enter(
 @pg
 async def test_a_wedged_order_sequence_is_named_by_the_backstop_once(
         cg_on, monkeypatch):
+    """A wedged order sequence (the execution hook outlasts the deadline AND
+    the grace) is named ONCE. RC6.2 enter-integrity: PD.owed_order names it
+    AT THE INSTANT, with its cause (ENTER_ORDER_ABANDONED), and the backstop
+    never names it a second time. The backstop's own naming -- once, past
+    its threshold -- is kept for what no code path can name: a process that
+    died before owed_order could write (simulated below by an abandonment
+    whose write never happens)."""
     conn = await H.connect()
     now = time.time() + 5.0
     calls: list = []
@@ -309,6 +319,43 @@ async def test_a_wedged_order_sequence_is_named_by_the_backstop_once(
             v["valuation_id"], PB.CG_STRATEGY)
         assert (att["outcome"], att["decision_id"], att["verdict"]) == \
             ("TIMEOUT", did, "ENTER")
+        # NAMED AT ONCE, WITH ITS CAUSE (PD.owed_order)
+        f = await conn.fetchrow(
+            "SELECT * FROM paper_audrey_findings WHERE kind=$1 AND "
+            " subject=$2", PD.F_ENTER_ORDER_ABANDONED, did)
+        assert f is not None and f["severity"] == "WARNING"
+        ab = H.j(f["detail"])
+        assert ab["cause"] == PD.C_GRACE_EXCEEDED
+        assert ab["strategy"] == PB.CG_STRATEGY
+        assert ab["stage_reached"] == "EXECUTION_HOOK"
+        # ... AND NEVER A SECOND TIME by the backstop, however often it runs
+        ctx = {"account_id": acct["account_id"], "now": now + 10.0}
+        assert (await PD.step_enter_backstop(conn, ctx))[
+            "enter_without_order"] == 0
+        ctx["now"] = now + PD.ENTER_WITHOUT_ORDER_AFTER_S + 5.0
+        got = await PD.step_enter_backstop(conn, ctx)
+        assert got["enter_without_order"] == 0 and got["examined"] == 0
+
+        # A PROCESS THAT DIED BEFORE IT COULD NAME THE ENTER: the backstop
+        real_finding = PD._finding
+
+        async def died_before_naming(c, x, *, kind, **kw):
+            if kind == PD.F_ENTER_ORDER_ABANDONED:
+                return None
+            return await real_finding(c, x, kind=kind, **kw)
+        monkeypatch.setattr(PD, "_finding", died_before_naming)
+        v2 = await PL.valuation(conn, decided_at=now - 2, p_pin=0.62,
+                                compatibility="INCOMPATIBLE")
+        t.set(v2["slug"], offers=[(0.50, 2000)], bids=[(0.48, 2000)])
+        g2 = await PR.decide_valuation(
+            conn, valuation_id=v2["valuation_id"], now=now,
+            market_data=PL.client(t), account_id=acct["account_id"],
+            fee_fn=FEE, schedule_fill=lambda: {"scheduled": False})
+        did2 = g2["benchmark_completed_game"]["decision_id"]
+        assert did2 and did2 != did
+        assert await conn.fetchval(
+            "SELECT count(*) FROM paper_audrey_findings WHERE subject=$1",
+            did2) == 0
         # YOUNGER THAN THE THRESHOLD: not named yet (an order may still land)
         ctx = {"account_id": acct["account_id"], "now": now + 10.0}
         assert (await PD.step_enter_backstop(conn, ctx))[
@@ -317,20 +364,21 @@ async def test_a_wedged_order_sequence_is_named_by_the_backstop_once(
         ctx["now"] = now + PD.ENTER_WITHOUT_ORDER_AFTER_S + 5.0
         got = await PD.step_enter_backstop(conn, ctx)
         assert got["enter_without_order"] == 1 and got["decision_ids"] == \
-            [did]
+            [did2]
         assert (await PD.step_enter_backstop(conn, ctx))[
             "enter_without_order"] == 0
         f = await conn.fetchrow(
             "SELECT * FROM paper_audrey_findings WHERE kind=$1 AND "
-            " subject=$2", PD.F_ENTER_WITHOUT_ORDER, did)
+            " subject=$2", PD.F_ENTER_WITHOUT_ORDER, did2)
         assert f["severity"] == "WARNING"
         detail = H.j(f["detail"])
         assert detail["strategy"] == PB.CG_STRATEGY
-        assert detail["valuation_id"] == v["valuation_id"]
+        assert detail["valuation_id"] == v2["valuation_id"]
         assert detail["threshold_s"] == PD.ENTER_WITHOUT_ORDER_AFTER_S
-        # nothing was placed late
+        # nothing was placed late, for either
         assert await conn.fetchval("SELECT count(*) FROM paper_orders WHERE "
-                                   " decision_id=$1", did) == 0
+                                   " decision_id = ANY($1::text[])",
+                                   [did, did2]) == 0
     finally:
         await PL.purge_everything(conn)
         await conn.execute("DELETE FROM paper_hook_failures WHERE "

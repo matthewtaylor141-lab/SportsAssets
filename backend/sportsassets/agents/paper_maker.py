@@ -328,6 +328,18 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         holding_side=side, limit=lim, market_data=md,
                         account_id=ctx["account_id"])
     PD.recheck_primary_reference(cand, pin, ctx, refusals)
+    # ── THE STRATEGY LIFECYCLE, THE LAST ENTRY CONDITION (RC6.2 enter-
+    # integrity): the decision-stage read Derek and the completed-game policy
+    # make (PD.lifecycle_gate). A no-entry or unreadable state refuses HERE
+    # by the lifecycle's own code instead of recording an ENTER only the
+    # ledger's entry gate refuses; that gate is unchanged (the final guard).
+    # REDUCED_SIZE does not refuse; its size cap stays the ledger's.
+    lifecycle = None
+    if not refusals:
+        lifecycle = await PD.lifecycle_gate(conn, ctx, strategy=STRATEGY,
+                                            at=at)
+        if lifecycle.get("refusal"):
+            refusals.append(lifecycle["refusal"])
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_gross = (None if not levels or p is None else round(
         DP.gross_edge(p, levels[0]["price"]) * 100.0, 9))
@@ -360,6 +372,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "book_currency": PB.BOOK_CURRENCY,
         "exceptional_terms": match.get("exceptional_terms"),
         "label": PB.ECONOMICS_LABEL, "refusals": refusals,
+        "lifecycle": lifecycle,
         "fee_stop": None, "acquisition": None}
     conditions = [
         {"condition": "contract_outcome_settlement_match",
@@ -389,7 +402,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
              "net_ev_positive_if_filled"],
          "value": (econ or {}).get("expected_net_profit_if_filled_usd"),
          "threshold": 0.0, "units": "USD",
-         "rule": "strictly greater than zero, taker fee charged"}]
+         "rule": "strictly greater than zero, taker fee charged"},
+        PD.lifecycle_condition(lifecycle)]
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
         "threshold_edge_pp": min_edge_pp,
@@ -478,7 +492,52 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         settlement={"compatibility": (
             "COMPATIBLE" if match.get("established") is True
             else "NOT_ESTABLISHED_BY_THE_MATCH")})
+    # ── THE RESTING ORDER THIS DECISION DEFINES (persisted only for an
+    # ENTER; not a fill), and the shape a no-entry lifecycle refusal's census
+    # row and shadow are recorded from.
+    lim = None if price.get("limit") is None else float(price["limit"])
+    wire = (None if lim is None else lim if side == "LONG"
+            else round(1.0 - lim, 6))
+    order = {"idempotency_key": "%s:ENTRY" % did,
+             "account_id": ctx["account_id"],
+             "session_id": ctx["session_id"],
+             "group_id": PB.group_id_for(did), "role": "ENTRY",
+             "direction": "BUY", "holding_side": side,
+             "intent": cand.get("side"),
+             "us_market_slug": cand.get("us_market_slug"),
+             "fixture": cand.get("fixture"),
+             "label": dict(label, rationale=rationale,
+                           cancel_conditions=CANCEL_CONDITIONS,
+                           post_only=True, expiry_s=MAKER_TTL_S,
+                           threshold_edge_pp=min_edge_pp,
+                           p_pinnacle_at_placement=p),
+             "order_type": "RESTING", "time_in_force": "GTD",
+             "allow_partial": True, "qty": qty, "limit_price": lim,
+             "wire_price": wire, "decision_id": did, "decided_at": at,
+             "eligible_at": at, "expires_at": at + MAKER_TTL_S,
+             "queue_ahead_qty": (queue or {}).get("queue_ahead_qty", 0.0),
+             "queue_basis": dict(queue or {},
+                                 placement_obs_id=(None if obs is None
+                                                   else obs["obs_id"])),
+             "simulator_version": cfg["simulator_version"],
+             "strategy": STRATEGY, "capital_evidence": cevidence}
     if verdict != DP.ENTER:
+        if lifecycle is not None and lifecycle.get("refusal") and \
+                refusals == [lifecycle["refusal"]]:
+            # A NO-ENTRY LIFECYCLE STATE, REFUSED AT DECISION: the census
+            # row (stage DECISION, the lifecycle's code, state and event id)
+            # and the shadow under the same bind, exactly as the ledger
+            # recorded them when it refused (CA.after_entry_refusal).
+            try:
+                await CA.after_entry_refusal(
+                    conn, dict(order, idempotency_key=None),
+                    {"refusal": lifecycle["refusal"], "lifecycle": lifecycle,
+                     "state": lifecycle.get("state")}, at=at,
+                    stage="DECISION")
+            except Exception as exc:                            # noqa: BLE001
+                # evidence only, guarded as at the ledger
+                rec["census_error"] = type(exc).__name__
+            return rec
         # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
         await CA.record_refusal(
             conn, account_id=ctx["account_id"], strategy=STRATEGY,
@@ -494,50 +553,39 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                 "expected_net_profit_if_filled_usd"),
             qty=qty or None, limit_price=price.get("limit"), at=at)
         return rec
-    # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision).
+    # THE ENTER IS RECORDED: its resting order is owed (PD.bounded_decision),
+    # and a cancellation of the caller no longer cuts it (PD.owed_order).
     PD.enter_recorded(ctx, did)
-    # ── THE RESTING ORDER (persisted at once; not a fill) ─────────────
-    lim = float(price["limit"])
-    wire = lim if side == "LONG" else round(1.0 - lim, 6)
-    order = {"idempotency_key": "%s:ENTRY" % did,
-             "account_id": ctx["account_id"],
-             "session_id": ctx["session_id"],
-             "group_id": PB.group_id_for(did), "role": "ENTRY",
-             "direction": "BUY", "holding_side": side,
-             "intent": cand.get("side"),
-             "us_market_slug": cand["us_market_slug"],
-             "fixture": cand.get("fixture"),
-             "label": dict(label, rationale=rationale,
-                           cancel_conditions=CANCEL_CONDITIONS,
-                           post_only=True, expiry_s=MAKER_TTL_S,
-                           threshold_edge_pp=min_edge_pp,
-                           p_pinnacle_at_placement=p),
-             "order_type": "RESTING", "time_in_force": "GTD",
-             "allow_partial": True, "qty": qty, "limit_price": lim,
-             "wire_price": wire, "decision_id": did, "decided_at": at,
-             "eligible_at": at, "expires_at": at + MAKER_TTL_S,
-             "queue_ahead_qty": (queue or {}).get("queue_ahead_qty", 0.0),
-             "queue_basis": dict(queue or {},
-                                 placement_obs_id=obs["obs_id"]),
-             "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY, "capital_evidence": cevidence}
-    got = await L.submit_order(conn, order, caps=cfg["risk"], fee_fn=fee_fn,
-                               now=at, exclusive_fixture=True,
-                               one_live_entry_per_fixture=True)
-    rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
-    if got.get("ok"):
-        rec["order_id"] = got["order"]["order_id"]
-        rec["resting"] = True
-    else:
-        rec["order_refusal"] = got.get("refusal")
-        await PD._finding(conn, ctx, kind=PB.R_ORDER_REFUSED, subject=did,
-                          detail={"refusal": got.get("refusal"),
-                                  "decision_id": did, "at": at,
-                                  "strategy": STRATEGY,
-                                  "disclosure": DISCLOSURE,
-                                  **{k: v for k, v in got.items()
-                                     if k not in ("ok",)}})
-    return rec
+
+    async def sequence(progress: dict) -> dict:
+        progress["stage"] = "PAPER_ORDER_SUBMITTING"
+        got = await L.submit_order(conn, order, caps=cfg["risk"],
+                                   fee_fn=fee_fn, now=at,
+                                   exclusive_fixture=True,
+                                   one_live_entry_per_fixture=True)
+        rec["order"] = {k: got.get(k) for k in ("ok", "refusal",
+                                                "duplicate")}
+        if got.get("ok"):
+            progress["outcome"] = "ORDER"
+            rec["order_id"] = got["order"]["order_id"]
+            rec["resting"] = True
+        else:
+            progress.update(stage="ORDER_REFUSED_NOT_YET_NAMED",
+                            order_refusal=got.get("refusal"))
+            rec["order_refusal"] = got.get("refusal")
+            await PD._finding(conn, ctx, kind=PB.R_ORDER_REFUSED,
+                              subject=did,
+                              detail={"refusal": got.get("refusal"),
+                                      "decision_id": did, "at": at,
+                                      "strategy": STRATEGY,
+                                      "disclosure": DISCLOSURE,
+                                      **{k: v for k, v in got.items()
+                                         if k not in ("ok",)}})
+            progress["outcome"] = "ORDER_REFUSED"
+        return rec
+
+    return await PD.owed_order(conn, ctx, decision_id=did, strategy=STRATEGY,
+                               sequence=sequence)
 
 
 # ═════════════════════════════════════════════════════════════════════

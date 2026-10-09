@@ -2583,190 +2583,206 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     # and an ENTER that still ends without an order is named by the backstop
     # (PD.step_enter_backstop, ENTER_WITHOUT_ORDER).
     PD.enter_recorded(ctx, did)
-    # ── R30 · THE ONE CANONICAL DECISION INTENT, FIRST ──────────────────
-    # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
-    # below reads side, quantity, prices and order form FROM IT; the SMALL
-    # LIVE adapter (SHADOW) constructs its venue order from the SAME object.
-    # A failure to build it never stops the paper sibling -- but then no
-    # live proposal exists either (live never acts without an intent).
-    #
-    # R30A: it is built BEFORE the execution hook below, so the ACTUAL
-    # sibling's intent NAMES it (evidence.canonical_intent): the ACTUAL lane
-    # re-verifies that name before its claim and refuses without it -- it
-    # can no longer originate outside a canonical intent.
-    canonical = await canonical_intent(
-        conn, did=did, strategy=STRATEGY, version=VERSION, cand=cand,
-        side=side, sized=sized, ent=ent, obs=obs, md=md, econ=econ, p=p,
-        best_edge=best_edge, verdict=verdict, refusals=refusals,
-        policy_decision=policy_decision, at=at, label=label,
-        book_age=book_age, cfg=cfg, params=params, pin=pin,
-        book_max_age=BOOK_MAX_AGE_S, book_source=ctx.get("last_book_source"))
-    rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
-    # THE LATENCY CHAIN'S ADAPTER-SIDE STAGES (R30A section 6), on the same
-    # decision clock as the intent's own stages
-    stages = {"intent_recorded_at": (None if canonical is None
-                                     else round(float(clock()), 6))}
-    # ── ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL ─────────
-    # The qualified decision, not the paper order, is the authoritative
-    # object. The executing process's hook (decision_hooks; installed by
-    # execution_intent) writes its ONE immutable intent and dispatches the
-    # ACTUAL lane BEFORE the paper order below: neither sibling waits for the
-    # other, and a failure on the actual side never stops the paper side.
-    rec["execution_intent_id"], rec["actual_lane"] = None, None
-    hook = DH.DECISION_HOOK
-    if hook is None:
-        rec["actual_lane"] = "NO_EXECUTION_HOOK_IN_THIS_PROCESS"
-    else:
-        try:
-            # THE ACTUAL LANE'S PRICE SOURCE (P5 C12). With a CURRENT resident
-            # stream book for the exactly mapped contract, the actual lane's
-            # facts (book, IOC limit, depth, fees, EV) are priced from THAT one
-            # observation by the paper lane's own rules, and P5 is evaluated
-            # on the same read; otherwise the REST paper book stands, exactly
-            # as before. The paper order below is never affected.
-            now_lb = float(clock())
-            so = stream_observation(ctx, cand, now=now_lb)
-            ap = None
-            if so is not None and _exact_identity(so) and \
-                    so.get("observation") is not None:
-                o = so["observation"]
-                ap = actual_pricing(
-                    observation=o, p=p, side=side, at=at, fee_fn=fee_fn,
-                    ent=ent, cfg=cfg, cg=cg, bctx=bctx, cand=cand, row=row,
-                    min_edge=min_edge, now=now_lb)
-                facts = admission_facts(
-                    cand=cand, pin=pin, match=match, p=p,
-                    obs={"obs_id": o["obs_id"],
-                         "observed_at": o["observed_at"]},
-                    md=o["market_data"], sized=ap["facts_sized"],
-                    econ=ap["econ"], book_age=ap["book_age"],
-                    book_source=STREAM_BOOK_SOURCE,
-                    live_book=live_book_evidence(
-                        ctx, cand, obs=None, now=now_lb,
-                        priced_from=ap["priced_from"], observed=so))
-            elif so is not None and _exact_identity(so):
-                facts = admission_facts(
-                    cand=cand, pin=pin, match=match, p=p, obs=obs,
-                    md=md, sized=sized, econ=econ, book_age=book_age,
-                    book_source=ctx.get("last_book_source"),
-                    live_book=live_book_evidence(
-                        ctx, cand, obs=obs, now=now_lb, observed=so))
-            else:
-                facts = admission_facts(
-                    cand=cand, pin=pin, match=match, p=p, obs=obs,
-                    md=md, sized=sized, econ=econ, book_age=book_age,
-                    book_source=ctx.get("last_book_source"),
-                    live_book=live_book_evidence(
-                        ctx, cand, obs=obs, now=float(clock())))
-            payload = {
-                "decision_id": did, "valuation_id": cand["valuation_id"],
-                "strategy": STRATEGY, "policy_version": VERSION,
-                "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
-                "holding_side": side, "group_id": group_id_for(did),
-                "order_type": ent["order_type"],
-                "time_in_force": ent["time_in_force"],
-                "paper_target_qty": sized["qty"], "limit_price": sized["limit"],
-                "wire_price": sized["wire"],
-                "book_obs_id": None if obs is None else obs["obs_id"],
-                "book_observed_at": (None if obs is None
-                                     else float(obs["observed_at"])),
-                "decided_at": at,
-                "evidence": {
-                    "valuation_id": cand["valuation_id"], "probability": p,
-                    "pinnacle_provider": (cand.get("pinnacle") or {}).get("provider"),
-                    "probability_authority": match.get("probability_authority"),
-                    "gross_edge_pp": best_edge,
-                    "net_expected_profit_usd": (econ or {}).get(
-                        "expected_net_profit_usd"),
-                    "book_age_at_decision_s": book_age,
-                    # THE DECISION-TIME FACTS THE ACTUAL LANE'S ADMISSION
-                    # READS (facts only; this module decides nothing about
-                    # execution).
-                    "admission_facts": facts,
-                    # R30A: the canonical intent this execution intent
-                    # executes (None: the ACTUAL lane can never submit)
-                    "canonical_intent": (None if canonical is None else {
-                        "intent_id": canonical["intent_id"],
-                        "content_sha": canonical["content_sha"]})},
-                "timeline": {
-                    "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
-                    "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
-                    "valuation_complete": {"utc_s": cand.get("decided_at")},
-                    "decision_complete": {"utc_s": at, "utc_ns": time.time_ns(),
-                                          "mono_ns": time.perf_counter_ns()},
-                    "book_observed": {"utc_s": None if obs is None
-                                      else obs["observed_at"]}}}
-            if ap is not None:
-                payload = actual_payload(payload, ap, sized=sized, obs=obs)
-            got_i = await hook(conn, payload) or {}
-            rec["execution_intent_id"] = got_i.get("intent_id")
-            rec["actual_lane"] = got_i.get("actual_lane")
-        except Exception as exc:                                # noqa: BLE001
-            rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
-    # ── THE PAPER SIBLING ──────────────────────────────────────────────
-    delay = float(sim_cfg["decision_to_execution_delay_s"])
-    order = {"idempotency_key": "%s:ENTRY" % did,
-             "account_id": ctx["account_id"],
-             "session_id": ctx["session_id"],
-             "group_id": group_id_for(did), "role": "ENTRY",
-             "direction": "BUY", "holding_side": side,
-             "intent": cand.get("side"),
-             "us_market_slug": cand["us_market_slug"],
-             "fixture": cand.get("fixture"), "label": label,
-             "order_type": ent["order_type"],
-             "time_in_force": ent["time_in_force"],
-             "allow_partial": bool(ent["allow_partial"]),
-             "qty": sized["qty"], "limit_price": sized["limit"],
-             "wire_price": sized["wire"], "decision_id": did,
-             "decided_at": at, "eligible_at": at + delay,
-             "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
-             "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY,
-             # the decision's executable-EV evidence, re-checked by the
-             # ledger's capital authority under the account lock
-             "capital_evidence": cevidence}
-    expired = None
-    if canonical is not None:
-        # THE PAPER ADAPTER CONSUMES THE INTENT: every order-defining field
-        # comes from the canonical object, not from local variables.
-        order.update({k: canonical[f] for k, f in CANONICAL_ORDER_FIELDS.items()})
-        # R30A: AN EXPIRED INTENT IS NEVER EXECUTED -- by this adapter
-        # either. Checked on the decision clock immediately before the
-        # submit: if the decision's own 30 s probability (or its book's
-        # entry-rule age) has run out while the decision was being built,
-        # the paper order is refused by name, never sent on dead evidence.
-        expired = CI.intent_expiry_refusal(canonical, now=float(clock()))
-    if expired is not None:
-        got = {"ok": False, "refusal": expired,
-               "expires_at": canonical.get("expires_at")}
-        stages["paper_submit_at"] = None
-        stages["paper_submit_why"] = expired
-    else:
-        got = await L.submit_order(conn, order, caps=cfg["risk"],
-                                   fee_fn=fee_fn, now=at,
-                                   exclusive_fixture=True)
-        stages["paper_submit_at"] = round(float(clock()), 6)
-    rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
-    if canonical is not None and DH.CANONICAL_ENTRY_ADAPTERS is not None:
-        try:
-            rec["live_parity"] = await DH.CANONICAL_ENTRY_ADAPTERS(
-                conn, canonical, paper_order=order, paper_result=got,
-                now=float(clock()), stages=stages)
-        except Exception as exc:                                # noqa: BLE001
-            rec["live_parity"] = {"error": type(exc).__name__}
-    if got.get("ok"):
-        rec["order_id"] = got["order"]["order_id"]
-        rec["eligible_at"] = at + delay
-    else:
-        rec["order_refusal"] = got.get("refusal")
-        await PD._finding(conn, ctx, kind=R_ORDER_REFUSED, subject=did,
-                          detail={"refusal": got.get("refusal"),
-                                  "decision_id": did, "at": at,
-                                  "strategy": STRATEGY,
-                                  "disclosure": DISCLOSURE,
-                                  **{k: v for k, v in got.items()
-                                     if k not in ("ok",)}})
-    return rec
+    # ── THE ORDER SEQUENCE: A CANCELLATION OF THE CALLER NO LONGER CUTS IT
+    # (PD.owed_order, RC6.2 enter-integrity): it ends in the paper order,
+    # the order's named refusal or a named abandonment, never in nothing.
+    async def sequence(progress: dict) -> dict:
+        progress["stage"] = "CANONICAL_INTENT"
+        # ── R30 · THE ONE CANONICAL DECISION INTENT, FIRST ──────────────────
+        # Built once, immutable, sha-stamped (live_parity). The PAPER adapter
+        # below reads side, quantity, prices and order form FROM IT; the SMALL
+        # LIVE adapter (SHADOW) constructs its venue order from the SAME object.
+        # A failure to build it never stops the paper sibling -- but then no
+        # live proposal exists either (live never acts without an intent).
+        #
+        # R30A: it is built BEFORE the execution hook below, so the ACTUAL
+        # sibling's intent NAMES it (evidence.canonical_intent): the ACTUAL lane
+        # re-verifies that name before its claim and refuses without it -- it
+        # can no longer originate outside a canonical intent.
+        canonical = await canonical_intent(
+            conn, did=did, strategy=STRATEGY, version=VERSION, cand=cand,
+            side=side, sized=sized, ent=ent, obs=obs, md=md, econ=econ, p=p,
+            best_edge=best_edge, verdict=verdict, refusals=refusals,
+            policy_decision=policy_decision, at=at, label=label,
+            book_age=book_age, cfg=cfg, params=params, pin=pin,
+            book_max_age=BOOK_MAX_AGE_S, book_source=ctx.get("last_book_source"))
+        rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
+        # THE LATENCY CHAIN'S ADAPTER-SIDE STAGES (R30A section 6), on the same
+        # decision clock as the intent's own stages
+        stages = {"intent_recorded_at": (None if canonical is None
+                                         else round(float(clock()), 6))}
+        # ── ONE DECISION -> ONE EXECUTION INTENT -> PAPER + ACTUAL ─────────
+        # The qualified decision, not the paper order, is the authoritative
+        # object. The executing process's hook (decision_hooks; installed by
+        # execution_intent) writes its ONE immutable intent and dispatches the
+        # ACTUAL lane BEFORE the paper order below: neither sibling waits for the
+        # other, and a failure on the actual side never stops the paper side.
+        rec["execution_intent_id"], rec["actual_lane"] = None, None
+        progress["stage"] = "EXECUTION_HOOK"
+        hook = DH.DECISION_HOOK
+        if hook is None:
+            rec["actual_lane"] = "NO_EXECUTION_HOOK_IN_THIS_PROCESS"
+        else:
+            try:
+                # THE ACTUAL LANE'S PRICE SOURCE (P5 C12). With a CURRENT resident
+                # stream book for the exactly mapped contract, the actual lane's
+                # facts (book, IOC limit, depth, fees, EV) are priced from THAT one
+                # observation by the paper lane's own rules, and P5 is evaluated
+                # on the same read; otherwise the REST paper book stands, exactly
+                # as before. The paper order below is never affected.
+                now_lb = float(clock())
+                so = stream_observation(ctx, cand, now=now_lb)
+                ap = None
+                if so is not None and _exact_identity(so) and \
+                        so.get("observation") is not None:
+                    o = so["observation"]
+                    ap = actual_pricing(
+                        observation=o, p=p, side=side, at=at, fee_fn=fee_fn,
+                        ent=ent, cfg=cfg, cg=cg, bctx=bctx, cand=cand, row=row,
+                        min_edge=min_edge, now=now_lb)
+                    facts = admission_facts(
+                        cand=cand, pin=pin, match=match, p=p,
+                        obs={"obs_id": o["obs_id"],
+                             "observed_at": o["observed_at"]},
+                        md=o["market_data"], sized=ap["facts_sized"],
+                        econ=ap["econ"], book_age=ap["book_age"],
+                        book_source=STREAM_BOOK_SOURCE,
+                        live_book=live_book_evidence(
+                            ctx, cand, obs=None, now=now_lb,
+                            priced_from=ap["priced_from"], observed=so))
+                elif so is not None and _exact_identity(so):
+                    facts = admission_facts(
+                        cand=cand, pin=pin, match=match, p=p, obs=obs,
+                        md=md, sized=sized, econ=econ, book_age=book_age,
+                        book_source=ctx.get("last_book_source"),
+                        live_book=live_book_evidence(
+                            ctx, cand, obs=obs, now=now_lb, observed=so))
+                else:
+                    facts = admission_facts(
+                        cand=cand, pin=pin, match=match, p=p, obs=obs,
+                        md=md, sized=sized, econ=econ, book_age=book_age,
+                        book_source=ctx.get("last_book_source"),
+                        live_book=live_book_evidence(
+                            ctx, cand, obs=obs, now=float(clock())))
+                payload = {
+                    "decision_id": did, "valuation_id": cand["valuation_id"],
+                    "strategy": STRATEGY, "policy_version": VERSION,
+                    "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
+                    "holding_side": side, "group_id": group_id_for(did),
+                    "order_type": ent["order_type"],
+                    "time_in_force": ent["time_in_force"],
+                    "paper_target_qty": sized["qty"], "limit_price": sized["limit"],
+                    "wire_price": sized["wire"],
+                    "book_obs_id": None if obs is None else obs["obs_id"],
+                    "book_observed_at": (None if obs is None
+                                         else float(obs["observed_at"])),
+                    "decided_at": at,
+                    "evidence": {
+                        "valuation_id": cand["valuation_id"], "probability": p,
+                        "pinnacle_provider": (cand.get("pinnacle") or {}).get("provider"),
+                        "probability_authority": match.get("probability_authority"),
+                        "gross_edge_pp": best_edge,
+                        "net_expected_profit_usd": (econ or {}).get(
+                            "expected_net_profit_usd"),
+                        "book_age_at_decision_s": book_age,
+                        # THE DECISION-TIME FACTS THE ACTUAL LANE'S ADMISSION
+                        # READS (facts only; this module decides nothing about
+                        # execution).
+                        "admission_facts": facts,
+                        # R30A: the canonical intent this execution intent
+                        # executes (None: the ACTUAL lane can never submit)
+                        "canonical_intent": (None if canonical is None else {
+                            "intent_id": canonical["intent_id"],
+                            "content_sha": canonical["content_sha"]})},
+                    "timeline": {
+                        "pinnapi_provider_ts": {"utc_s": (cand.get("pinnacle") or {}).get("observed_at")},
+                        "pinnapi_receipt": {"utc_s": (cand.get("pinnacle") or {}).get("received_at")},
+                        "valuation_complete": {"utc_s": cand.get("decided_at")},
+                        "decision_complete": {"utc_s": at, "utc_ns": time.time_ns(),
+                                              "mono_ns": time.perf_counter_ns()},
+                        "book_observed": {"utc_s": None if obs is None
+                                          else obs["observed_at"]}}}
+                if ap is not None:
+                    payload = actual_payload(payload, ap, sized=sized, obs=obs)
+                got_i = await hook(conn, payload) or {}
+                rec["execution_intent_id"] = got_i.get("intent_id")
+                rec["actual_lane"] = got_i.get("actual_lane")
+            except Exception as exc:                                # noqa: BLE001
+                rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
+        # ── THE PAPER SIBLING ──────────────────────────────────────────────
+        delay = float(sim_cfg["decision_to_execution_delay_s"])
+        order = {"idempotency_key": "%s:ENTRY" % did,
+                 "account_id": ctx["account_id"],
+                 "session_id": ctx["session_id"],
+                 "group_id": group_id_for(did), "role": "ENTRY",
+                 "direction": "BUY", "holding_side": side,
+                 "intent": cand.get("side"),
+                 "us_market_slug": cand["us_market_slug"],
+                 "fixture": cand.get("fixture"), "label": label,
+                 "order_type": ent["order_type"],
+                 "time_in_force": ent["time_in_force"],
+                 "allow_partial": bool(ent["allow_partial"]),
+                 "qty": sized["qty"], "limit_price": sized["limit"],
+                 "wire_price": sized["wire"], "decision_id": did,
+                 "decided_at": at, "eligible_at": at + delay,
+                 "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
+                 "simulator_version": cfg["simulator_version"],
+                 "strategy": STRATEGY,
+                 # the decision's executable-EV evidence, re-checked by the
+                 # ledger's capital authority under the account lock
+                 "capital_evidence": cevidence}
+        expired = None
+        if canonical is not None:
+            # THE PAPER ADAPTER CONSUMES THE INTENT: every order-defining field
+            # comes from the canonical object, not from local variables.
+            order.update({k: canonical[f] for k, f in CANONICAL_ORDER_FIELDS.items()})
+            # R30A: AN EXPIRED INTENT IS NEVER EXECUTED -- by this adapter
+            # either. Checked on the decision clock immediately before the
+            # submit: if the decision's own 30 s probability (or its book's
+            # entry-rule age) has run out while the decision was being built,
+            # the paper order is refused by name, never sent on dead evidence.
+            expired = CI.intent_expiry_refusal(canonical, now=float(clock()))
+        if expired is not None:
+            got = {"ok": False, "refusal": expired,
+                   "expires_at": canonical.get("expires_at")}
+            stages["paper_submit_at"] = None
+            stages["paper_submit_why"] = expired
+        else:
+            progress["stage"] = "PAPER_ORDER_SUBMITTING"
+            got = await L.submit_order(conn, order, caps=cfg["risk"],
+                                       fee_fn=fee_fn, now=at,
+                                       exclusive_fixture=True)
+            stages["paper_submit_at"] = round(float(clock()), 6)
+        if got.get("ok"):
+            progress["outcome"] = "ORDER"
+        else:
+            progress.update(stage="ORDER_REFUSED_NOT_YET_NAMED",
+                            order_refusal=got.get("refusal"))
+        rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
+        if canonical is not None and DH.CANONICAL_ENTRY_ADAPTERS is not None:
+            try:
+                rec["live_parity"] = await DH.CANONICAL_ENTRY_ADAPTERS(
+                    conn, canonical, paper_order=order, paper_result=got,
+                    now=float(clock()), stages=stages)
+            except Exception as exc:                                # noqa: BLE001
+                rec["live_parity"] = {"error": type(exc).__name__}
+        if got.get("ok"):
+            rec["order_id"] = got["order"]["order_id"]
+            rec["eligible_at"] = at + delay
+        else:
+            rec["order_refusal"] = got.get("refusal")
+            await PD._finding(conn, ctx, kind=R_ORDER_REFUSED, subject=did,
+                              detail={"refusal": got.get("refusal"),
+                                      "decision_id": did, "at": at,
+                                      "strategy": STRATEGY,
+                                      "disclosure": DISCLOSURE,
+                                      **{k: v for k, v in got.items()
+                                         if k not in ("ok",)}})
+            progress["outcome"] = "ORDER_REFUSED"
+        return rec
+
+    return await PD.owed_order(conn, ctx, decision_id=did,
+                               strategy=STRATEGY, sequence=sequence)
 
 
 #: R30: WHAT THE PAPER ADAPTER READS FROM THE CANONICAL INTENT (order field

@@ -1902,6 +1902,12 @@ INCIDENT_STREAMS = {
     "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET":
         (S, FRESH, "FILL"),
     "ENTER_WITHOUT_ORDER": (S, INT, "ORDER"),
+    # RC6.2 enter-integrity: a recorded ENTER whose order sequence could not
+    # finish (the caller's cancellation and the grace ran out, a second
+    # cancellation, or the sequence raised), named at once with its cause by
+    # paper_derek.owed_order -- the backstop's integrity failure, named at
+    # the instant and with the cause
+    "ENTER_ORDER_ABANDONED": (S, INT, "ORDER"),
     # our own venue request gate refused to dispatch (pacing, not the venue)
     "VENUE_GATE_COOLDOWN": (S, CAP, "VENUE_BOOK"),
     "VENUE_RATE_LIMITED": (S, DATA, "VENUE_BOOK"),

@@ -1184,20 +1184,71 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
              # the decision's executable-EV evidence, re-checked by the
              # ledger's capital authority under the account lock
              "capital_evidence": cevidence}
-    got = await L.submit_order(conn, order, caps=cfg["risk"],
-                               fee_fn=fee_fn, now=at)
-    rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
-    if got.get("ok"):
-        rec["order_id"] = got["order"]["order_id"]
-        rec["eligible_at"] = at + delay
-    else:
-        rec["order_refusal"] = got.get("refusal")
-        await _finding(conn, ctx, kind=R_ORDER_REFUSED, subject=did,
-                       detail={"refusal": got.get("refusal"),
-                               "decision_id": did, "at": at,
-                               **{k: v for k, v in got.items()
-                                  if k not in ("ok",)}})
-    return rec
+
+    async def sequence(progress: dict) -> dict:
+        progress["stage"] = "PAPER_ORDER_SUBMITTING"
+        got = await L.submit_order(conn, order, caps=cfg["risk"],
+                                   fee_fn=fee_fn, now=at)
+        rec["order"] = {k: got.get(k) for k in ("ok", "refusal",
+                                                "duplicate")}
+        if got.get("ok"):
+            progress["outcome"] = "ORDER"
+            rec["order_id"] = got["order"]["order_id"]
+            rec["eligible_at"] = at + delay
+        else:
+            progress.update(stage="ORDER_REFUSED_NOT_YET_NAMED",
+                            order_refusal=got.get("refusal"))
+            rec["order_refusal"] = got.get("refusal")
+            await _finding(conn, ctx, kind=R_ORDER_REFUSED, subject=did,
+                           detail={"refusal": got.get("refusal"),
+                                   "decision_id": did, "at": at,
+                                   **{k: v for k, v in got.items()
+                                      if k not in ("ok",)}})
+            progress["outcome"] = "ORDER_REFUSED"
+        return rec
+
+    # A CANCELLATION OF THE CALLER NO LONGER CUTS IT (`owed_order`).
+    return await owed_order(conn, ctx, decision_id=did, strategy=STRATEGY,
+                            sequence=sequence)
+
+
+async def lifecycle_gate(conn, ctx: dict, *, strategy: str, at: float) -> dict:
+    """THE DECISION-STAGE LIFECYCLE READ, shared by every paper policy
+    (bettor_strategy_lifecycle.decision_gate): the strategy's state, its
+    event id, its size factor and -- for a no-entry state (SHADOW_ONLY /
+    QUARANTINED / RETIRED) -- the refusal that state carries. Fail-closed:
+    an unreadable state, or a read that raised, refuses
+    STRATEGY_LIFECYCLE_STATE_UNREADABLE. Never raises.
+
+    `capital_gate` (Derek, the completed-game and strict benchmark policies)
+    reads it first. The exploration and maker policies read it as their LAST
+    entry condition, exactly where their verdict would otherwise be ENTER
+    (enter-integrity, production 2026-10-06 .. 10-09: a QUARANTINED
+    exploration strategy recorded ~2,700 ENTER verdicts that only the
+    ledger's entry gate refused). The ledger's entry gate is unchanged and
+    stays the final guard."""
+    from .. import bettor_strategy_lifecycle as LC
+    try:
+        return await LC.decision_gate(conn, account_id=ctx["account_id"],
+                                      strategy=strategy, at=at)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": LC.R_LIFECYCLE_UNREADABLE,
+                "size_factor": 0.0, "why": type(exc).__name__}
+
+
+def lifecycle_condition(lc: dict | None) -> dict:
+    """The decision record's condition row for the lifecycle read (None:
+    not evaluated -- an earlier condition already refused)."""
+    lc = lc or {}
+    return {"condition": "strategy_lifecycle_allows_a_paper_entry",
+            "passed": None if not lc else not lc.get("refusal"),
+            "value": lc.get("state"),
+            "lifecycle_event_id": lc.get("lifecycle_event_id"),
+            "size_factor": lc.get("size_factor"),
+            "refusal": lc.get("refusal"),
+            "reader": "bettor_strategy_lifecycle.decision_gate"}
 
 
 async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
@@ -1233,13 +1284,7 @@ async def capital_gate(conn, ctx: dict, *, strategy: str, p, levels, sized,
     from .. import bettor_capital_authority as CA
     from .. import bettor_capital_eligibility as CE
     from .. import bettor_paper_profitability_bind as PBIND
-    from .. import bettor_strategy_lifecycle as LC
-    try:
-        lc = await LC.decision_gate(conn, account_id=ctx["account_id"],
-                                    strategy=strategy, at=at)
-    except Exception as exc:                                    # noqa: BLE001
-        lc = {"ok": False, "refusal": LC.R_LIFECYCLE_UNREADABLE,
-              "size_factor": 0.0, "why": type(exc).__name__}
+    lc = await lifecycle_gate(conn, ctx, strategy=strategy, at=at)
     kw = dict(p=p, levels=levels, qty=sized.get("qty"),
               limit=sized.get("limit"),
               fee_fn=lambda q, px: float(L._fee(fee_fn, q, px, at)),
@@ -1819,7 +1864,11 @@ def book_deadline_refusal(got: dict) -> bool:
 # grace exceeded, an outer cancellation (the reactive evaluation's own
 # deadline), a process restart between the INSERT and the order -- becomes a
 # named finding ENTER_WITHOUT_ORDER once the ENTER is ENTER_WITHOUT_ORDER_
-# AFTER_S old (`step_enter_backstop`, every paper pass). An ENTER whose order
+# AFTER_S old (`step_enter_backstop`, every paper pass). SINCE RC6.2
+# enter-integrity (`owed_order`, below) an outer cancellation no longer cuts
+# the order sequence, and a sequence that cannot finish is named at once
+# (ENTER_ORDER_ABANDONED, with its cause); the backstop is left with what no
+# code path can name -- a process killed in that window. An ENTER whose order
 # the paper risk check refused already carries its own finding
 # (PAPER_RISK_REFUSED_THE_ORDER) and is not one of these. The backstop names;
 # it never places a late order on a decision whose book and price are gone.
@@ -1861,6 +1910,145 @@ def enter_recorded(ctx: dict, decision_id: str) -> None:
     if ev is not None:
         ctx["enter_recorded_decision_id"] = decision_id
         ev.set()
+
+
+# ── THE OUTER CANCELLATION (enter-integrity, production 2026-10-06 .. 10-09)
+#
+# THE DEFECT, measured (research-sql rc62_enter_integrity_cut, run
+# 37962750532): 13 PINNACLE_EXPLORATION_PAPER ENTERs (2026-10-06 20:04:21Z ..
+# 2026-10-09 16:11:38Z) with neither a paper order nor a refusal, each named
+# ENTER_WITHOUT_ORDER by the backstop. All 13 were decided in cycle; none has
+# an evaluation attempt or a hook-failure row (the caller's bookkeeping never
+# ran: a CancelledError went past it); 12 of 13 valuations were carried by a
+# pinnapi reactive evaluation that ended TIMEOUT at its 12 s deadline
+# (12.007 .. 12.937 s), 0.2 .. 10.2 s after the exploration decision began;
+# 10 of 13 had written their execution intent (0.010 .. 0.083 s after the
+# ENTER row), 3 had not. The reactive scheduler's `asyncio.timeout(deadline)`
+# cancelled the evaluation; the CancelledError reached `bounded_decision`,
+# whose `finally` cancelled the decision task in the middle of its order
+# sequence -- the residual the backstop note above names ("an outer
+# cancellation (the reactive evaluation's own deadline)"). The same cut
+# applies to the paper pass's own hard timeout, and to every policy whose
+# ENTER row is written before its order.
+#
+# THE RULE, completed. `owed_order` runs a recorded ENTER's order sequence in
+# its own task on the decision's connection and awaits it SHIELDED: a
+# cancellation of the caller -- any caller, any deadline -- no longer cuts
+# it. The caller waits (on the same connection, so nothing ever uses it
+# twice) until the sequence finishes or ENTER_ORDER_GRACE_S since the ENTER
+# row has passed, and then re-raises the cancellation: the caller is still
+# cancelled, the order (or its named refusal) is recorded. A sequence that
+# cannot finish -- the grace ran out, a second cancellation, an exception
+# inside it -- is cancelled, waited for (bounded) and the ENTER is named AT
+# ONCE with its cause: finding ENTER_ORDER_ABANDONED (subject = the decision,
+# detail = cause, the stage the sequence reached, a ledger refusal it saw,
+# elapsed). The backstop does not name it twice; it still names what no code
+# path can (a process killed between the INSERT and the order). Nothing is
+# placed late beyond the grace; no price, size, threshold or rule moves.
+F_ENTER_ORDER_ABANDONED = "ENTER_ORDER_ABANDONED"
+C_GRACE_EXCEEDED = "CANCELLED_AND_THE_ORDER_GRACE_RAN_OUT"
+C_CANCELLED_AGAIN = "CANCELLED_AGAIN_WHILE_THE_ORDER_WAS_OWED"
+C_RAISED = "THE_ORDER_SEQUENCE_RAISED"
+C_SEQUENCE_CANCELLED = "THE_ORDER_SEQUENCE_ITSELF_WAS_CANCELLED"
+#: How long an abandoned sequence is waited for after its cancellation
+#: before the connection is used for the abandonment record (asyncpg
+#: completes a cancelled statement's cancel request; a transaction rolls
+#: back). A sequence still running past it keeps the connection, nothing is
+#: written on it and the backstop names the ENTER.
+ENTER_ABANDON_WAIT_S = 5.0
+#: process counters: sequences completed after a caller's cancellation, and
+#: abandonments by cause
+OWED_ORDER_COUNTS: dict = {"completed_after_cancellation": 0,
+                           "abandoned": 0, "abandoned_unrecorded": 0}
+
+
+async def owed_order(conn, ctx: dict, *, decision_id: str, strategy: str,
+                     sequence, grace_s: float | None = None) -> dict:
+    """RUN A RECORDED ENTER'S ORDER SEQUENCE SO THAT IT ENDS IN AN ORDER, A
+    NAMED REFUSAL OR A NAMED ABANDONMENT -- never in nothing. `sequence` is
+    `async def (progress) -> rec`; it sets progress["stage"] as it goes and
+    progress["outcome"] once the order or its named refusal is durable
+    ("ORDER" / "ORDER_REFUSED"). Returns the sequence's result; re-raises the
+    caller's cancellation (after the sequence finished or was abandoned) and
+    the sequence's own exception (after the abandonment record)."""
+    grace = ENTER_ORDER_GRACE_S if grace_s is None else float(grace_s)
+    t0 = time.monotonic()
+    progress: dict = {"stage": "ENTER_RECORDED", "outcome": None}
+    task = asyncio.ensure_future(sequence(progress))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        cause = None
+        if not task.done():
+            left = grace - (time.monotonic() - t0)
+            if left > 0:
+                try:
+                    await asyncio.wait({task}, timeout=left)
+                except asyncio.CancelledError:
+                    cause = C_CANCELLED_AGAIN
+        if task.done() and not task.cancelled() and \
+                task.exception() is None:
+            # THE ORDER (or its named refusal) IS RECORDED; the caller's
+            # cancellation stands.
+            OWED_ORDER_COUNTS["completed_after_cancellation"] += 1
+            raise
+        err = None
+        if task.done() and not task.cancelled():
+            err = type(task.exception()).__name__
+        if cause is None:
+            cause = (C_GRACE_EXCEEDED if not task.done() else
+                     C_SEQUENCE_CANCELLED if task.cancelled() else C_RAISED)
+        await _abandon(conn, ctx, task, progress, decision_id=decision_id,
+                       strategy=strategy, t0=t0, grace=grace, error=err,
+                       cause=cause)
+        raise
+    except Exception as exc:
+        await _abandon(conn, ctx, task, progress, decision_id=decision_id,
+                       strategy=strategy, t0=t0, grace=grace,
+                       cause=C_RAISED, error=type(exc).__name__)
+        raise
+
+
+async def _abandon(conn, ctx: dict, task, progress: dict, *, decision_id,
+                   strategy, t0: float, grace: float, cause: str,
+                   error=None) -> None:
+    """Stop the sequence (bounded wait) and NAME the ENTER: one finding
+    ENTER_ORDER_ABANDONED with its cause, unless the sequence already made
+    its outcome durable. Never raises (CancelledError excepted)."""
+    if not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait({task}, timeout=ENTER_ABANDON_WAIT_S)
+        except asyncio.CancelledError:
+            pass
+    if task.done() and not task.cancelled():
+        task.exception()                    # retrieved: never logged unread
+    OWED_ORDER_COUNTS["abandoned"] += 1
+    if not task.done():
+        # the sequence still holds the connection: nothing can be written
+        # on it; the backstop names the ENTER
+        OWED_ORDER_COUNTS["abandoned_unrecorded"] += 1
+        return
+    if progress.get("outcome") is not None:
+        return
+    try:
+        await _finding(conn, ctx, kind=F_ENTER_ORDER_ABANDONED,
+                       subject=decision_id, severity="WARNING", detail={
+                           "decision_id": decision_id, "strategy": strategy,
+                           "cause": cause, "error": error,
+                           "stage_reached": progress.get("stage"),
+                           "order_refusal": progress.get("order_refusal"),
+                           "elapsed_since_enter_recorded_s": round(
+                               time.monotonic() - t0, 3),
+                           "grace_s": grace,
+                           "why": ("a recorded ENTER's order sequence could "
+                                   "not finish: it was cancelled and named "
+                                   "at once. No order was placed late."),
+                           "named_by": "paper_derek.owed_order"})
+    except asyncio.CancelledError:
+        raise
+    except Exception:                                           # noqa: BLE001
+        OWED_ORDER_COUNTS["abandoned_unrecorded"] += 1
 
 
 async def bounded_decision(make, ctx: dict, *, timeout_s: float,
@@ -1939,7 +2127,9 @@ async def step_enter_backstop(conn, ctx: dict) -> dict:
     rows = await conn.fetch(
         ENTER_BACKSTOP_SQL, ctx["account_id"],
         at - ENTER_WITHOUT_ORDER_AFTER_S, at - ENTER_BACKSTOP_LOOKBACK_S,
-        [R_ORDER_REFUSED, F_ENTER_WITHOUT_ORDER],
+        # an ENTER owed_order already named (ENTER_ORDER_ABANDONED, with
+        # its cause) is not named twice
+        [R_ORDER_REFUSED, F_ENTER_WITHOUT_ORDER, F_ENTER_ORDER_ABANDONED],
         ENTER_BACKSTOP_MAX_PER_PASS)
     named = []
     for r in rows:
