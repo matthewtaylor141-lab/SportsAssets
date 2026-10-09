@@ -186,3 +186,134 @@ async def test_with_nothing_held_the_gate_counts_nothing_and_the_rate_is_unmeasu
         assert CRF.xavier_complete_rate(gate) is None
     finally:
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# REVIEW FIX 4 · THE MANAGEMENT RECORD AGREES WITH THE GATE (M-2)
+# ═════════════════════════════════════════════════════════════════════
+#
+# On 844db4d7 the gate counted an EXTERNAL_UNAVAILABLE position (not
+# complete) while xavier_management_record still set counted_by_the_gate
+# false and its summary counted 0 of 1 open position -- two artifacts of the
+# same evidence packet disagreeing about the gate's population.
+
+def test_the_record_and_the_gate_name_the_same_blocker():
+    from sportsassets.agents import xavier_management_record as XMR
+    assert XMR.XAVIER_EXTERNAL_UNAVAILABLE == CRF.XAVIER_EXTERNAL_UNAVAILABLE
+
+
+@pg
+async def test_the_management_record_agrees_with_the_gate_on_a_terminal_market():
+    """THE REGRESSION (fails on 844db4d7): the reviewer's terminal-market
+    fixture. Gate and record count the same open position, both not
+    complete, by the same name; the summary's counts equal the gate's."""
+    from sportsassets import bettor_paper_ledger as L
+    from sportsassets.agents import xavier_management_record as XMR
+    conn = await H.connect()
+    slugs = []
+    try:
+        a, g, slug = await XRF._held(conn, "pxm2rec", entry_age_s=3600)
+        slugs.append(slug)
+        await XRF._review(conn, a, g)
+        await SIM.record_book(conn, slug=slug, read={
+            "marketData": {"bids": [], "offers": [],
+                           "state": "MARKET_STATE_EXPIRED"},
+            "observed_at": AT + 1}, source="TEST", read_basis="TEST")
+        acct = a["account_id"]
+        gate = await CRF.gate_xavier_complete(conn, {"account_id": acct,
+                                                     "now": AT + 2})
+        ev = gate["evidence"]
+        assert gate["value"] is False and ev["counted_open_positions"] == 1
+        pos = await L.positions(conn, acct)
+        refs = [{"account_id": acct, "group_id": p["group_id"],
+                 "market": p["us_market_slug"],
+                 "holding_side": p["holding_side"]} for p in pos]
+        recs = await XMR.records_for(conn, refs, now=AT + 2)
+        assert len(recs) == 1
+        rec = next(iter(recs.values()))
+        assert rec["packet"]["mark_class_now"] == PMF.EXTERNAL_UNAVAILABLE
+        assert rec["packet"]["counted_by_the_gate"] is True
+        assert rec["packet"]["counted_not_complete_because"] == \
+            CRF.XAVIER_EXTERNAL_UNAVAILABLE
+        assert rec["complete_current_packet"] is False
+        assert CRF.XAVIER_EXTERNAL_UNAVAILABLE in rec["blockers"]
+        s = XMR.summary(list(recs.values()))
+        assert s["open_positions"] == ev["open_positions"] == 1
+        assert s["counted_by_the_xavier_complete_gate"] == \
+            ev["counted_open_positions"] == 1
+        assert s["complete_current_packet"] == \
+            ev["complete_current_packets"] == 0
+        assert s["complete_current_packet_counted_by_the_gate"] == 0
+        assert s["external_unavailable_counted_not_complete"] == \
+            ev["external_unavailable_counted_not_complete"] == 1
+        assert s["incomplete_count"] == 1
+        assert s["incomplete_by_blocker"][CRF.XAVIER_EXTERNAL_UNAVAILABLE] \
+            == 1
+    finally:
+        await XRF._purge(conn, slugs)
+        await conn.close()
+
+
+def test_the_summary_counts_an_unread_record_in_the_gates_population():
+    from sportsassets.agents import xavier_management_record as XMR
+    ok = {"complete_current_packet": True, "blockers": [],
+          "position": {"position_key": "p1"},
+          "packet": {"counted_by_the_gate": True,
+                     "counted_not_complete_because": None}}
+    s = XMR.summary([ok, {"unread": XMR.R_RECORD_UNREAD, "why": "X"}])
+    assert s["open_positions"] == 2
+    assert s["counted_by_the_xavier_complete_gate"] == 2
+    assert s["complete_current_packet"] == 1
+    assert s["records_unread"] == 1
+
+
+# ═════════════════════════════════════════════════════════════════════
+# REVIEW FIX 3 · WHAT THE UNCHANGED JUDGE READS FROM A NOTHING-HELD PACKET
+# ═════════════════════════════════════════════════════════════════════
+
+def _judge_unit(tmp_path, *, rate, held):
+    """The real tools/scorecard_14.score() on a synthetic packet holding
+    only completion.json and paper_freshness.json (every other unit reads
+    unavailable); the Xavier counted unit. Synthetic, not evidence."""
+    import json
+    import os
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..",
+                                    "tools"))
+    import scorecard_14 as SC
+    d = tmp_path / ("held%s" % held)
+    d.mkdir()
+    (d / "completion.json").write_text(json.dumps({
+        "status": "OK", "data": {"readiness": {"evidence": {
+            "xavier_packet_complete_rate": rate}}}}))
+    (d / "paper_freshness.json").write_text(json.dumps(
+        {"freshness": {"open_positions": held}}))
+    out = SC.score(str(d))
+    cat = next(c for c in out["categories"]
+               if c["category"].startswith("Xavier"))
+    return next(u for u in cat["units"] if u["unit"] ==
+                "held_positions_with_complete_current_packet")
+
+
+def test_the_judge_reads_a_nothing_held_packet_of_this_branch(tmp_path):
+    """PINNED, INTERIM. With nothing held this branch's readiness carries
+    xavier_packet_complete_rate null (M-1). The judge as it stands on
+    b3f1b0cd multiplies rate x held, so it reads that member set as
+    READ_UNAVAILABLE (members None) where b3f1b0cd's vacuous 1.0 read
+    [0, 0] UNMEASURED. Neither passes; the label is wrong. The separately
+    reviewed evaluator change EP-1 (held == 0 -> [0, 0] UNMEASURED whatever
+    the rate) restores it and must land before or with this branch;
+    EP-1 flips this pin. Held positions read exactly as before."""
+    rate = CRF.xavier_complete_rate(_gate(
+        True, open_positions=0, counted_open_positions=0))
+    assert rate is None
+    u = _judge_unit(tmp_path, rate=rate, held=0)
+    assert u["passed"] is False
+    assert u["class"] == "READ_UNAVAILABLE" and u["members"] is None
+    # with counted positions the judge's reading is unchanged by M-1/M-2
+    red = _judge_unit(tmp_path, rate=CRF.xavier_complete_rate(_gate(
+        False, open_positions=1, counted_open_positions=1)), held=1)
+    assert red["members"] == [0, 1] and red["class"] == "FAIL"
+    green = _judge_unit(tmp_path, rate=CRF.xavier_complete_rate(_gate(
+        True, open_positions=2, counted_open_positions=2)), held=2)
+    assert green["members"] == [2, 2] and green["class"] == "PASS"
