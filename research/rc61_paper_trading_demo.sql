@@ -34,7 +34,7 @@ SELECT role, direction, count(*) AS fills, sum(qty) AS contracts,
   FROM paper_fills WHERE filled_at >= now() - interval '24 hours'
  GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo D6 OPEN PAPER POSITIONS (canonical: bought - sold - latest settlement) with Xavier's latest review
+\echo D6 OPEN PAPER POSITIONS (canonical: bought - sold - latest settlement) with Xavier latest review
 WITH open AS (
     SELECT f.account_id, f.group_id, f.us_market_slug, f.holding_side,
            f.bought - f.sold - coalesce(s.qty, 0) AS open_qty
