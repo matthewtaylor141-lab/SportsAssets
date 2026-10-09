@@ -571,9 +571,23 @@ def bind_terms(market: dict, verdict: dict) -> dict:
     from . import settlement_rule_registry as SRR
     v = verdict or {}
     return {"rules_sha256": SRR.kalshi_rules_sha256(market),
-            "parsed_in": "market_plane_rules (same contract_id and "
-                         "rules_sha256; kalshi_rule_evidence)",
-            "scope": dict(v.get("scope") or {}),
-            "rulebook": "NOT_APPLIED_HERE: kalshi_contract_terms.bind on "
-                        "the worker's verified live rulebook hash",
-            "version": VERSION}
+            "parsed_in": TERMS_PARSED_IN,
+            "scope": {k: x for k, x in (v.get("scope") or {}).items()
+                      if x is not None},
+            "rulebook": RULEBOOK_NOT_APPLIED}
+
+
+#: where a bound contract's rule block is parsed, and the rulebook status
+#: (short codes: the registry row is rewritten on every walk)
+TERMS_PARSED_IN = "MARKET_PLANE_RULES_SAME_SHA256"
+RULEBOOK_NOT_APPLIED = "NOT_APPLIED_HERE_VERIFIED_HASH_ONLY"
+
+
+def stored(verdict: dict) -> dict:
+    """The verdict as the registry row keeps it: what the row's meaning
+    does not already carry (sport, family, period, operator, line, event,
+    series are there), without empty fields."""
+    keep = ("status", "refusal", "family_class", "template", "unit",
+            "subject", "scope", "scheduled_as_stated", "version")
+    return {k: verdict[k] for k in keep
+            if verdict.get(k) not in (None, {}, [])}

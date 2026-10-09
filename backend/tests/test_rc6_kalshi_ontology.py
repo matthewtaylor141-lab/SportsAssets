@@ -487,7 +487,9 @@ def test_the_terms_are_bound_by_the_contract_s_own_rule_fingerprint():
     t = KO.bind_terms(m, KO.classify(m))
     assert t["rules_sha256"] == SRR.kalshi_rules_sha256(m)
     assert t["rules_sha256"] == RULES.kalshi_row(m)["rules_sha256"]
-    assert t["scope"] == KO.classify(m)["scope"]
+    assert t["scope"] == {k: x for k, x in KO.classify(m)["scope"].items()
+                          if x is not None}
+    assert t["parsed_in"] == KO.TERMS_PARSED_IN
     assert t["rulebook"].startswith("NOT_APPLIED_HERE")
     m2 = dict(m, rules_secondary=SECONDARY + " Changed.")
     assert KO.bind_terms(m2, KO.classify(m2))["rules_sha256"] != \
@@ -509,6 +511,11 @@ def test_a_mapped_kalshi_registry_row_carries_sport_family_period_and_terms():
     meaning = c["ontology"]["meaning"]
     assert meaning["metric"] == "MARGIN" and meaning["line"] == 3.5
     assert meaning["event_id"] == s[1] and meaning["venue"] == "KALSHI"
+    # the stored verdict carries what the meaning does not, nothing twice
+    k = c["ontology"]["kalshi"]
+    assert k["status"] == KO.MAPPED and k["template"] == "SPREAD_WINS_BY"
+    assert k["unit"] == "POINTS" and k["subject"]["type"] == "TEAM"
+    assert not {"sport", "family", "period", "line", "operator"} & set(k)
     assert c["ontology"]["terms"]["rules_sha256"] == \
         SRR.kalshi_rules_sha256(market(*s[:5]))
     assert c["desired_subscription"] is False      # never on PMUS streams

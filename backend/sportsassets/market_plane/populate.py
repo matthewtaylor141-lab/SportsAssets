@@ -1029,9 +1029,11 @@ def kalshi_contract_row(market: dict, *, now: float) -> dict | None:
                "side": None, "settlement_schema": None,
                "raw_market_type": ser.get("ticker"),
                "ontology_version": KONT.VERSION}
+    # (the row is rewritten on every walk: empty fields are not stored)
+    meaning = {k: x for k, x in meaning.items() if x is not None}
     ontology = {"gaps": [] if mapped else [v["refusal"]],
                 "meaning": meaning,
-                "kalshi": v,
+                "kalshi": KONT.stored(v),
                 "terms": KONT.bind_terms(market, v) if mapped else None,
                 "venue_ids": {"ticker": t,
                               "event_ticker": market.get("event_ticker"),
