@@ -2193,6 +2193,34 @@ ACTIVE_REFRESH_STREAM = {
 for _k, _v in ACTIVE_REFRESH_STREAM.items():
     TABLE.setdefault(_k, _v)
 
+#: (RC6 D1) THE SNAPSHOT-ONLY gRPC REFRESH (market_plane.snapshot_refresh):
+#: why the plane's snapshot-only CreateMarketDataSubscription call did not
+#: make a quiet priority member current, or was not made. Freshness plumbing
+#: (call failed / refused / held / no token / switched off / transport) or a
+#: book the software could not show current (hidden: VENUE_REPORTS_BOOK_
+#: HIDDEN's row is the precedent; not asked: integrity) -- SOFTWARE, never
+#: EXTERNAL.
+SNAPSHOT_REFRESH_STREAM = {
+    "SNAPSHOT_REFRESH_SYMBOL_NOT_RETURNED": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_BOOK_HIDDEN": (S, DATA, "INGESTION"),
+    "SNAPSHOT_REFRESH_SYMBOL_NOT_ASKED": (S, INT, "INGESTION"),
+    "SNAPSHOT_REFRESH_CALL_FAILED": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_REFUSED_BY_THE_VENUE": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_HELD_AFTER_A_FAILED_CALL": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_NO_BEARER_TOKEN": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_OFF_BY_SWITCH": (S, FRESH, "INGESTION"),
+    "SNAPSHOT_REFRESH_TRANSPORT_UNAVAILABLE": (S, FRESH, "INGESTION"),
+    # (review of 785907f2) a stateless snapshot book whose fallback state
+    # (a refdata record or an old stream state) is not open: the software
+    # cannot show the market open NOW, and that fallback is not the venue's
+    # word about it either -- SOFTWARE / DATA (ACTIVE_REFRESH_BOOK_STATE_
+    # UNKNOWN's row is the precedent), never EXTERNAL
+    "SNAPSHOT_REFRESH_STATELESS_BOOK_FALLBACK_STATE_NOT_PROVEN": (
+        S, DATA, "INGESTION"),
+}
+for _k, _v in SNAPSHOT_REFRESH_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
 #: REVIEW OF 7bd084b. Seven rows above were classed ECONOMIC / RISK_RAIL
 #: although each says the software lacks or could not read something (an
 #: account id not supplied, exposure that could not be measured or was not

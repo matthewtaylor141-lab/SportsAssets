@@ -761,9 +761,19 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     origins = None if refreshed is None else {
         t: {"PAPER_BOOK_OBSERVATION": 0, "PLANE_ACTIVE_REFRESH": 0}
         for t in ("PRIORITY", "ALL")}
+    # (RC6 D1) a refreshed value is its receipt instant (a REST book), or
+    # (receipt, "SNAPSHOT") for the plane's snapshot-only gRPC read: a PMX
+    # gRPC book, counted PMX_GRPC and labelled apart from the stream's
+    snap_by = None if refreshed is None else {
+        t: {"STREAM": 0, "PLANE_SNAPSHOT_REFRESH": 0}
+        for t in ("PRIORITY", "ALL")}
+
+    def _rcv(v):
+        return v[0] if isinstance(v, (tuple, list)) else v
     refreshed_ok = {} if refreshed is None else {
         k: v for k, v in refreshed.items()
-        if v is not None and 0.0 <= at - float(v) <= float(rest_sla_s)}
+        if v is not None and _rcv(v) is not None
+        and 0.0 <= at - float(_rcv(v)) <= float(rest_sla_s)}
     by_sport, by_why, by_venue = {}, {}, {}
     s_by_state = {k: 0 for k in S.STATES}
     s_by_basis, s_by_why, s_by_venue, brk = {}, {}, {}, {}
@@ -832,8 +842,14 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     src, fresh = "REST_RECOVERY", True
                     origin = "PAPER_BOOK_OBSERVATION"
                 elif s in refreshed_ok:
-                    src, fresh = "REST_RECOVERY", True
-                    origin = "PLANE_ACTIVE_REFRESH"
+                    v = refreshed_ok[s]
+                    if isinstance(v, (tuple, list)) and len(v) > 1 and \
+                            v[1] == "SNAPSHOT":
+                        src, fresh = "PMX_GRPC", True
+                        origin = "PLANE_SNAPSHOT_REFRESH"
+                    else:
+                        src, fresh = "REST_RECOVERY", True
+                        origin = "PLANE_ACTIVE_REFRESH"
                 else:
                     src, fresh = None, False
                 src_counts[src or "NONE"] += 1
@@ -853,8 +869,13 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     if t["state"] == "EXTERNAL_DATA_UNAVAILABLE":
                         tiers[tier]["EXTERNAL_DATA_UNAVAILABLE"] += 1
                     tiers[tier][src or "NONE"] += 1
-                    if origins is not None and origin is not None:
+                    if origin == "PLANE_SNAPSHOT_REFRESH":
+                        snap_by[tier][origin] += 1
+                    elif origins is not None and origin is not None:
                         origins[tier][origin] += 1
+                    if snap_by is not None and src == "PMX_GRPC" and \
+                            origin is None:
+                        snap_by[tier]["STREAM"] += 1
                 if (t["state"], t["why"]) != (r.get("coverage_state"),
                                              r.get("coverage_why")):
                     changed.append((s, t["state"], t["why"], at))
@@ -926,6 +947,7 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
          "version": MATRIX_VERSION}
     if origins is not None:
         m["rest_recovery_by_origin"] = origins
+        m["pmx_grpc_by_origin"] = snap_by
     top = sorted(brk.items(), key=lambda kv: -sum(kv[1].values()))
     return dict(m, by_sport=by_sport, by_venue=by_venue,
                 top_reasons=dict(sorted(by_why.items(),

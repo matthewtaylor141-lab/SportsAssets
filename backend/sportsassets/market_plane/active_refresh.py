@@ -42,9 +42,28 @@ older than the bound, no snapshot on this connection yet, a connection or
 clock gap awaiting one, the connection silent or closed, no venue clock) and
 whose own last refresh is not current. A stream refusal that is evidence
 about the MARKET (not open, hidden, crossed, refused, no scales) is never
-refreshed past. Order: HELD before CANDIDATE; a candidate by its event start
-(in play first, then the soonest pregame start, then started > 4 h ago, then
-no start); inside one rank, never refreshed / longest ago first.
+refreshed past. Order (RC6 D1, FAIR): HELD before CANDIDATE; inside a tier,
+EARLIEST LAPSE FIRST -- the instant the member's last current book (stream
+receipt or refresh receipt, + the bound) stopped counting, never-current
+first; then by event start (in play first, then the soonest pregame start,
+then started > 4 h ago, then no start). RC6 ordered candidates by event
+start before age: when more members are quiet than the budget can hold
+(12 reads x 285 s / 60 = 57 at once) the soonest starts were re-read every
+285 s and the later ones were never read at all; earliest-lapse-first
+spreads the same reads over every quiet member (with enough budget the two
+orders keep the same members current). A member whose read is IN FLIGHT is
+never planned twice.
+
+WHO DRIVES IT (RC6 D1, reliability). Production's plane pass is not 2 s: its
+SNAPSHOT events -- one per pass at most -- arrived p50 92 s, p90 248 s, p99
+739 s apart over 24 h, and every one of the newest 40 more than 197 s apart
+(research-sql run 37870039455, 2026-10-09 01:29Z: coverage and
+certification run every pass). One read per pass made RC6's 12-a-minute
+budget about 0.25 a minute in production. So `step` is also driven by the
+plane's freshness task (workers.universal_market_plane.freshness_loop) every
+second, beside the pass, and the plane's PMX client is shared through one
+lock (`lock`): reads never overlap, the budget is the same object, and a
+slow coverage or certification pass no longer stops the reads.
 
 WHAT COUNTS AS CURRENT (`judge`, then `current`). A 200 whose body is an
 object with bids / offers lists, echoes the member's symbol, carries the
@@ -147,8 +166,20 @@ R_REFRESH_NO_STREAM = "ACTIVE_REFRESH_NO_PMX_STREAM_ARMED"
 #: RETRY_FAILED_S: the venue said what the market is
 _MARKET_OUTCOMES = frozenset({R_REFRESH_NOT_OPEN, R_REFRESH_STATE_UNKNOWN,
                               R_REFRESH_CROSSED})
+#: the snapshot results that are the venue's word and so share the REST
+#: read's state: a current book, the market not open by its own word, a
+#: crossed book. Every other snapshot result is the snapshot's alone.
+SNAPSHOT_SHARED_OUTCOMES = frozenset({CURRENT, R_REFRESH_NOT_OPEN,
+                                      R_REFRESH_CROSSED})
 
 TIER_HELD, TIER_CANDIDATE = "HELD", "CANDIDATE"
+#: (RC6 D1) a market a PAPER order is still working on (a hedge or an exit
+#: on another market than the position's): refreshed like a held one
+TIER_ORDER = "WORKING_ORDER"
+#: the PAPER ledger's working-order states (bettor_paper_ledger.OPEN_STATES;
+#: freshness_window.OPEN_ORDER_STATES, a test pins both)
+OPEN_ORDER_STATES = ("PENDING_SIMULATION", "RESTING", "PARTIALLY_FILLED",
+                     "CANCEL_PENDING")
 PHASE_RANK = {"IN_PLAY_OR_RECENT": 0, "PREGAME": 1, "STARTED_GT_4H": 2,
               "NO_START": 3}
 
@@ -197,12 +228,21 @@ def phase_of(start, *, now: float) -> str:
     return "PREGAME"
 
 
-def tier_of(priority) -> str:
+def tier_of(priority, orders: bool = False) -> str:
     from .populate import P_HELD
     try:
-        return TIER_HELD if int(priority) <= P_HELD else TIER_CANDIDATE
+        if int(priority) <= P_HELD:
+            return TIER_HELD
     except (TypeError, ValueError):
-        return TIER_CANDIDATE
+        pass
+    return TIER_ORDER if orders else TIER_CANDIDATE
+
+
+def _field(r, k):
+    try:
+        return r[k]
+    except (KeyError, IndexError, TypeError):
+        return None
 
 
 def _px(level):
@@ -272,10 +312,20 @@ class ActiveRefresh:
         self.entries: dict = {}
         self._starts: collections.deque = collections.deque(
             maxlen=self.per_min)
+        #: (RC6 D1) symbols whose read has started and is not yet recorded:
+        #: the two drivers (the pass and the freshness task) never read one
+        #: member twice at once
+        self.inflight: set = set()
+        #: whether this database has the PAPER orders table (read once)
+        self.orders_table = None
         self.hold_until = 0.0
         self.last_pass: dict = {}
         self.totals = {"reads": 0, "current": 0, "not_current": 0,
                        "by_outcome": {}}
+        #: (RC6 D1) the origin of each member's newest CURRENT read: REST
+        #: (this module's `book` read) or SNAPSHOT (snapshot_refresh's
+        #: snapshot-only gRPC call); kept apart from the entries' shape
+        self.origins: dict = {}
 
     # -- the members -------------------------------------------------------
 
@@ -285,7 +335,7 @@ class ActiveRefresh:
         out = []
         for r in rows or ():
             s = str(r["contract_id"])
-            out.append((s, tier_of(r["priority"]),
+            out.append((s, tier_of(r["priority"], bool(_field(r, "orders"))),
                         phase_of(r["event_start"], now=now),
                         _epoch(r["event_start"])))
             if len(out) >= MAX_TRACKED:
@@ -295,6 +345,8 @@ class ActiveRefresh:
         keep = {m[0] for m in out}
         for s in [s for s in self.entries if s not in keep]:
             del self.entries[s]
+        for s in [s for s in self.origins if s not in keep]:
+            del self.origins[s]
 
     def members_due(self, now: float) -> bool:
         return self.members_at is None or \
@@ -321,15 +373,32 @@ class ActiveRefresh:
     # -- the plan ----------------------------------------------------------
 
     def _stream(self, mgr, s, *, now: float, bound: float):
-        """(ok, refusal) of the stream's read at the plane bound, or None
-        when the plane's books do not hold the symbol."""
+        """(ok, refusal, received_at) of the stream's read at the plane
+        bound -- received_at the receipt instant of the newest full update
+        the books hold for it, or None -- or None when the plane's books do
+        not hold the symbol."""
         if s not in (getattr(mgr, "symbol_to_shard", None) or {}):
             return None
         try:
             r = mgr.current(s, now=now, max_snapshot_age_s=bound) or {}
         except Exception as exc:                                # noqa: BLE001
-            return False, "READ_RAISED:%s" % type(exc).__name__
-        return bool(r.get("ok")), r.get("refusal")
+            return False, "READ_RAISED:%s" % type(exc).__name__, None
+        rcv = (((r.get("evidence") or {}).get("snapshot") or {})
+               .get("received_at"))
+        try:
+            rcv = None if rcv is None else float(rcv)
+        except (TypeError, ValueError):
+            rcv = None
+        return bool(r.get("ok")), r.get("refusal"), rcv
+
+    def lapse_at(self, s, *, stream_received_at, bound: float):
+        """The instant the member's newest current book stops counting: its
+        stream receipt or its refresh receipt (the later), + the bound;
+        None when it never had one (it lapsed first of all)."""
+        at = [x for x in (stream_received_at,
+                          (self.entries.get(s) or {}).get("ok_at"))
+              if x is not None]
+        return (max(at) + bound) if at else None
 
     def _refresh_current(self, e, *, now: float, bound: float) -> bool:
         at = (e or {}).get("ok_at")
@@ -353,13 +422,27 @@ class ActiveRefresh:
             out[s] = e["ok_at"]
         return out
 
-    def plan(self, mgr, *, now: float, bound: float) -> tuple:
+    def current_for_coverage(self, mgr, *, now: float,
+                             bound: float) -> dict:
+        """`current` in the coverage pass's shape: a REST read's receipt
+        instant, or (receipt, "SNAPSHOT") for a snapshot-only gRPC read
+        (populate.coverage_pass counts that one PMX_GRPC, labelled)."""
+        return {s: ((at, "SNAPSHOT") if self.origins.get(s) == "SNAPSHOT"
+                    else at)
+                for s, at in self.current(mgr, now=now,
+                                          bound=bound).items()}
+
+    def plan(self, mgr, *, now: float, bound: float,
+             lead_s: float | None = None) -> tuple:
         """([symbol, ...] due now in refresh order, {reason: count}) over the
         members. Due: held by the plane's books, the stream refusing for
         snapshot currency, no current refresh that is not yet within
-        REFRESH_LEAD_S of the bound, not waiting to retry."""
+        `lead_s` (REFRESH_LEAD_S) of the bound, not waiting to retry, no
+        read of it in flight. Order: HELD first, then earliest lapse, then
+        event start (module docstring)."""
         counts: dict = {}
         due = []
+        lead = REFRESH_LEAD_S if lead_s is None else float(lead_s)
 
         def n(k):
             counts[k] = counts.get(k, 0) + 1
@@ -368,16 +451,18 @@ class ActiveRefresh:
             if got is None:
                 n("NOT_HELD_BY_THE_PLANE_BOOKS")
                 continue
-            ok, refusal = got
+            ok, refusal, stream_rcv = got
             if ok:
                 n("STREAM_CURRENT")
                 continue
             if refusal not in REFRESHABLE:
                 n("STREAM_REFUSAL_NOT_REFRESHABLE")
                 continue
+            if s in self.inflight:
+                n("READ_IN_FLIGHT")
+                continue
             e = self.entries.get(s) or {}
-            if self._refresh_current(e, now=now,
-                                     bound=bound - REFRESH_LEAD_S):
+            if self._refresh_current(e, now=now, bound=bound - lead):
                 n("REFRESH_CURRENT")
                 continue
             tried = e.get("tried_at")
@@ -389,20 +474,26 @@ class ActiveRefresh:
                 continue
             if self._refresh_current(e, now=now, bound=bound):
                 n("REFRESH_CURRENT_DUE_FOR_RE_READ")
-            due.append(((0 if tier == TIER_HELD else 1),
+            lapse = self.lapse_at(s, stream_received_at=stream_rcv,
+                                  bound=bound)
+            due.append(((0 if tier in (TIER_HELD, TIER_ORDER) else 1),
+                        float("-inf") if lapse is None else lapse,
                         PHASE_RANK.get(phase, 3),
                         start if start is not None else float("inf"),
-                        e.get("ok_at") or -1.0, s))
+                        s))
         due.sort()
         return [d[-1] for d in due], counts
 
     # -- one read ----------------------------------------------------------
 
-    def start(self, now: float) -> None:
+    def start(self, now: float, symbol: str | None = None) -> None:
         self._starts.append(now)
+        if symbol is not None:
+            self.inflight.add(str(symbol))
 
     def record(self, symbol: str, row: dict, *, at: float) -> dict:
         """Account one finished read (received at `at`)."""
+        self.inflight.discard(str(symbol))
         j = judge(symbol, row)
         t = self.totals
         t["reads"] += 1
@@ -414,6 +505,7 @@ class ActiveRefresh:
         if o == CURRENT:
             t["current"] += 1
             e.update(ok_at=at, venue_ts=j["venue_ts"], levels=j["levels"])
+            self.origins[str(symbol)] = "REST"
         else:
             t["not_current"] += 1
             if o in _MARKET_OUTCOMES:
@@ -425,8 +517,55 @@ class ActiveRefresh:
             self.hold_until = max(self.hold_until, at + BACKOFF_429_S)
         return j
 
+    def record_snapshot(self, symbol: str, j: dict, *, at: float) -> None:
+        """(RC6 D1) Account one snapshot-only gRPC result (judged by
+        snapshot_refresh.judge_update, received at `at`) exactly like a REST
+        book: CURRENT stands for the bound from its receipt (origin
+        SNAPSHOT); the venue's word about the market (not open, crossed)
+        ends an earlier current read and waits RETRY_NOT_OPEN_S. Any other
+        result (a stateless book, no state at all, an unproven fallback) is
+        the snapshot's alone: it never touches the REST read's retry state
+        or an earlier current read. A symbol the call did not return is NOT
+        recorded here, so the REST read stays free to try it. The REST
+        totals are not touched."""
+        o = j.get("outcome")
+        e = self.entries.setdefault(symbol, {"ok_at": None, "tries": 0})
+        if o not in SNAPSHOT_SHARED_OUTCOMES:
+            # A SNAPSHOT RESULT THAT PROVES NOTHING (a stateless book on an
+            # unproven fallback, no state at all, no venue clock ...) is the
+            # snapshot's alone: it never touches the REST read's retry state
+            # (tried_at / outcome) or an earlier current read (ok_at), so the
+            # REST read -- whose body states the market's own state -- stays
+            # free to read the member at once (final review of 1dff0d5f:
+            # with the snapshot step first in every tick, a shared retry
+            # wait meant the REST read never happened).
+            e.update(snapshot_outcome=o, snapshot_tried_at=at)
+            return
+        e.update(tried_at=at, outcome=o, tries=e["tries"] + 1,
+                 status=j.get("status"), snapshot_outcome=o,
+                 snapshot_tried_at=at)
+        if o == CURRENT:
+            e.update(ok_at=at, venue_ts=j.get("venue_ts"),
+                     levels=j.get("levels"))
+            self.origins[str(symbol)] = "SNAPSHOT"
+        elif o in _MARKET_OUTCOMES:
+            e["ok_at"] = None
+
+    def origin_of(self, symbol: str) -> str | None:
+        return self.origins.get(str(symbol))
+
     def outcome_of(self, symbol: str) -> str | None:
-        return (self.entries.get(symbol) or {}).get("outcome")
+        e = self.entries.get(symbol) or {}
+        return e.get("outcome") or e.get("snapshot_outcome")
+
+    def snapshot_unprovable(self, symbol: str, *, now: float) -> bool:
+        """A member the snapshot could not prove within RETRY_NOT_OPEN_S:
+        the snapshot planner leaves it to the REST read."""
+        e = self.entries.get(symbol) or {}
+        t = e.get("snapshot_tried_at")
+        return (t is not None and e.get("snapshot_outcome")
+                not in SNAPSHOT_SHARED_OUTCOMES
+                and now - float(t) < RETRY_NOT_OPEN_S)
 
     # -- the evidence ------------------------------------------------------
 
@@ -434,10 +573,13 @@ class ActiveRefresh:
         cur = self.current(mgr, now=now, bound=bound) if mgr is not None \
             else {}
         by_tier: dict = {}
+        by_origin: dict = {}
         tiers = {m[0]: m[1] for m in self.members}
         for s in cur:
             by_tier[tiers.get(s, TIER_CANDIDATE)] = by_tier.get(
                 tiers.get(s, TIER_CANDIDATE), 0) + 1
+            o = self.origins.get(s) or "REST"
+            by_origin[o] = by_origin.get(o, 0) + 1
         return {"version": VERSION, "enabled": True,
                 "endpoint": "GET /v1/orderbook/{symbol} (pmx_institutional "
                             "`book`, allow-listed)",
@@ -455,6 +597,7 @@ class ActiveRefresh:
                 "members": len(self.members),
                 "current_via_refresh": len(cur),
                 "current_via_refresh_by_tier": by_tier,
+                "current_via_refresh_by_origin": by_origin,
                 "last_pass": dict(self.last_pass),
                 "totals": {k: (dict(v) if isinstance(v, dict) else v)
                            for k, v in self.totals.items()},
@@ -472,15 +615,39 @@ MEMBERS_SQL = (
     "SELECT contract_id, priority, event_start FROM market_plane_registry "
     " WHERE active AND priority <= $1 "
     " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2")
+#: (RC6 D1) the priority members AND every market a PAPER order is working
+#: on (its working order needs a current book as much as the position does;
+#: freshness_window measures it as WORKING_ORDER)
+MEMBERS_WITH_ORDERS_SQL = (
+    "SELECT r.contract_id, r.priority, r.event_start, "
+    "       (o.slug IS NOT NULL) AS orders "
+    "  FROM market_plane_registry r LEFT JOIN ("
+    "       SELECT DISTINCT us_market_slug AS slug FROM paper_orders "
+    "        WHERE state = ANY($3::text[])) o ON o.slug = r.contract_id "
+    " WHERE r.active AND (r.priority <= $1 OR o.slug IS NOT NULL) "
+    " ORDER BY (o.slug IS NULL), r.priority, r.event_start NULLS LAST, "
+    "          r.contract_id LIMIT $2")
+
+
+class _NoLock:
+    async def __aenter__(self):
+        return None
+
+    async def __aexit__(self, *a):
+        return False
 
 
 async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
-               clock=time.time, read=None) -> dict:
-    """ONE PASS OF THE REFRESH (the plane's run loop, after the refdata
-    slot): re-read the member list when due, plan, and spend at most
-    MAX_READS_PER_PASS reads the budget allows on the members due, in
-    order. Each read is the allow-listed `book` read in a worker thread.
-    Returns this pass's digest. Raises nothing it can name."""
+               clock=time.time, read=None, lock=None) -> dict:
+    """ONE PASS OF THE REFRESH (the plane's run loop after the refdata slot,
+    and the plane's freshness task every second): re-read the member list
+    when due, plan, and spend at most MAX_READS_PER_PASS reads the budget
+    allows on the members due, in order. Each read is the allow-listed
+    `book` read in a worker thread, made holding `lock` (the plane's one PMX
+    client, shared with the refdata slot and the other driver): the budget
+    is checked and the member re-checked UNDER the lock, so two drivers
+    never pass one slot or read one member twice. Returns this pass's
+    digest. Raises nothing it can name."""
     import asyncio
     from .populate import P_CANDIDATE
     now = clock()
@@ -488,7 +655,18 @@ async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
     if ref.members_due(now):
         try:
             async with pool.acquire() as c:
-                rows = await c.fetch(MEMBERS_SQL, P_CANDIDATE, MAX_TRACKED)
+                has_orders = ref.orders_table
+                if has_orders is None:
+                    try:
+                        has_orders = ref.orders_table = bool(
+                            await c.fetchval("SELECT to_regclass("
+                                             "'paper_orders') IS NOT NULL"))
+                    except Exception:                           # noqa: BLE001
+                        has_orders = False      # not cached: probed again
+                rows = (await c.fetch(MEMBERS_WITH_ORDERS_SQL, P_CANDIDATE,
+                                      MAX_TRACKED, list(OPEN_ORDER_STATES))
+                        if has_orders else
+                        await c.fetch(MEMBERS_SQL, P_CANDIDATE, MAX_TRACKED))
             ref.set_members(rows, now=now)
             del rows
         except Exception as exc:                                # noqa: BLE001
@@ -497,21 +675,33 @@ async def step(pool, client, ref: ActiveRefresh, mgr, *, bound: float,
     due, counts = ref.plan(mgr, now=now, bound=bound)
     reads, why_stopped = [], None
     read = read or (lambda s: client.read("book", s))
+    guard = lock if lock is not None else _NoLock()
     for s in due:
         if len(reads) >= MAX_READS_PER_PASS:
             why_stopped = "MAX_READS_PER_PASS"
             break
-        ok, why = ref.slot(clock())
-        if not ok:
-            why_stopped = why
-            break
-        ref.start(clock())
-        try:
-            row = await asyncio.to_thread(read, s)
-        except Exception as exc:                                # noqa: BLE001
-            row = {"status": None, "transportError": "RAISED:%s"
-                   % type(exc).__name__}
-        j = ref.record(s, row, at=clock())
+        async with guard:
+            ok, why = ref.slot(clock())
+            if not ok:
+                why_stopped = why
+                break
+            if s in ref.inflight or ref._refresh_current(
+                    ref.entries.get(s), now=clock(),
+                    bound=bound - REFRESH_LEAD_S):
+                # the other driver read it while this one waited
+                continue
+            ref.start(clock(), s)
+            try:
+                row = await asyncio.to_thread(read, s)
+            except asyncio.CancelledError:
+                # the driver is stopping: nothing was recorded, nothing
+                # stays in flight
+                ref.inflight.discard(s)
+                raise
+            except Exception as exc:                            # noqa: BLE001
+                row = {"status": None, "transportError": "RAISED:%s"
+                       % type(exc).__name__}
+            j = ref.record(s, row, at=clock())
         reads.append({"symbol": s, "outcome": j["outcome"],
                       "status": j.get("status"), "ms": j.get("ms")})
         if j["outcome"] == R_REFRESH_HTTP_429:

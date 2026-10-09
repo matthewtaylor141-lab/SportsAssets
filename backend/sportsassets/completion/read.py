@@ -33,6 +33,7 @@ It changes nothing: no authority, no limit, no credential, no order path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -233,7 +234,8 @@ def market_data_block(snap, why, ump_detail) -> dict:
     num = None
     if pri:
         num = int(pri.get("current_pmx_stream") or 0) + int(
-            pri.get("current_rest_fallback") or 0)
+            pri.get("current_rest_fallback") or 0) + int(
+            pri.get("current_pmx_snapshot_refresh") or 0)
     den = None
     if pri:
         den = int(pri.get("denominator") or 0) - int(
@@ -252,7 +254,13 @@ def market_data_block(snap, why, ump_detail) -> dict:
             "numerator": num, "denominator": den,
             "rate": (round(num / den, 4) if num is not None and den else None),
             "target": 0.95,
-            "members": pri.get("members")},
+            "members": pri.get("members"),
+            # (RC6 D1) ONE INSTANT, named: the coverage pass's verification
+            # instant and the snapshot's (absent before RC6 D1). The whole
+            # window is market_data.freshness_window.
+            "measure": "ONE_INSTANT",
+            "verified_at": pri.get("verified_at"),
+            "snapshot_computed_at": snap.get("computed_at")},
         "refdata": {
             "active_contracts": active or None,
             "pmx_listed": reg.get("pmx_listed"),
@@ -263,6 +271,176 @@ def market_data_block(snap, why, ump_detail) -> dict:
                 if active else None),
             "universe_pull": snap.get("refdata_universe")},
         "token": sub.get("token")}
+
+
+# ── the whole observation window (RC6 lane D1) ──────────────────────────
+#
+# market_data.priority_freshness is ONE instant. Production (research-sql
+# run 37870039455, RC5): over 24 h that instant ranged 0.01-1.00 with a
+# denominator of 77-306 re-chosen every pass, and the plane's snapshots
+# arrived p50 92 s / p90 248 s apart (gaps to 1,854 s no sample covered).
+# market_data.freshness_window is the plane's frozen-window measure
+# (market_plane.freshness_window): the hour's eligible membership frozen
+# with its sha256, one sample a minute at one verification instant, every
+# second no sample covers an OUTAGE counted eligible and not fresh, per
+# tier (HELD_POSITION / WORKING_ORDER / CANDIDATE and the management view),
+# venue, market family, period and phase, over 1 h / 6 h / 24 h (each from
+# when this build began measuring: the FIRST window ever written, read with
+# the newest window at or before the horizon's start at any age, so an
+# outage crossing a horizon's start is in its denominator). Integrated off
+# the event loop.
+
+async def freshness_window_block(conn, *, now: float) -> dict:
+    from ..market_plane import freshness_window as FW
+    if not await _has(conn, "market_plane_events"):
+        return {"status": "UNREADABLE", "why": "MARKET_PLANE_EVENTS_ABSENT"}
+    longest = max(h for _k, h in FW.HORIZONS)
+    wins, smps, since = await FW.fetch(conn, start=now - longest, end=now)
+    out = await asyncio.to_thread(FW.readback, wins, smps, since, now=now)
+    del wins, smps
+    orders = {"open_orders": 0, "markets": 0, "by_role": {}}
+    if await _has(conn, "paper_orders"):
+        for r in await conn.fetch(
+                "SELECT role, count(*) AS n, "
+                "       count(DISTINCT us_market_slug) AS m "
+                "  FROM paper_orders WHERE state = ANY($1::text[]) "
+                " GROUP BY 1 ORDER BY 1", list(FW.OPEN_ORDER_STATES)):
+            orders["by_role"][r["role"]] = int(r["n"])
+            orders["open_orders"] += int(r["n"])
+        orders["markets"] = int(await conn.fetchval(
+            "SELECT count(DISTINCT us_market_slug) FROM paper_orders "
+            " WHERE state = ANY($1::text[])", list(FW.OPEN_ORDER_STATES))
+            or 0)
+    out["working_orders_now"] = orders
+    out["status"] = ("MEASURED" if any(
+        (h or {}).get("status") == "MEASURED"
+        for h in out["horizons"].values()) else "UNMEASURED")
+    return out
+
+
+# ── the held positions' PinnAPI probability inputs (RC6 lane D1) ─────────
+#
+# Xavier reviews every open PAPER position (paper_xavier_reviews, about
+# every 100 s: research-sql run 37870039455, 627 reviews of 3 groups in
+# 6 h) and records the evidence state of the probability the review stood
+# on (measure.evidence_state): FRESH_CURRENT_PROBABILITY only when its own
+# source stamp is inside the Pinnacle freshness limit (30 s,
+# ext_pinnacle_loop.PINNACLE_MAX_AGE_S) at the review instant. That is the
+# per-sample series of the held positions' PinnAPI input freshness: in those
+# 6 h, 1 of 627 reviews stood on a fresh probability. Reported here with
+# the review instant, the probability's source stamp and its receipt kept
+# apart; an open position not reviewed for REVIEW_EXPECTED_S is a missed
+# sample, counted not fresh.
+
+PINNAPI_FRESH_STATE = "FRESH_CURRENT_PROBABILITY"
+REVIEW_EXPECTED_S = 300.0
+PINNAPI_HORIZONS = (("6h", 21600.0), ("24h", 86400.0))
+REVIEWS_SQL = (
+    "SELECT group_id, extract(epoch FROM reviewed_at)::float8 AS at, "
+    "       measure->>'evidence_state' AS state, "
+    "       measure->>'source' AS source, "
+    "       measure->>'pinnacle_at' AS p_at, "
+    "       measure->>'pinnacle_received_at' AS p_rcv, "
+    "       measure->>'pinnacle_limit_s' AS p_limit "
+    "  FROM paper_xavier_reviews "
+    " WHERE account_id = $1 AND reviewed_at > to_timestamp($2) "
+    " ORDER BY group_id, reviewed_at")
+
+
+def _f(v):
+    try:
+        return None if v is None else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def pinnapi_inputs_summary(rows, open_groups: dict, *, now: float,
+                           horizon_s: float,
+                           expected_s: float = REVIEW_EXPECTED_S) -> dict:
+    """PURE. Xavier's reviews over [now - horizon_s, now] -> the held
+    positions' PinnAPI input freshness per review sample, with the missed
+    samples of every group (open now or reviewed in the horizon): a group's
+    span runs from its first review in the horizon (or the horizon's start
+    when it is open now and was open then) to now when open, else to its
+    last review; it owes floor(span / expected_s) + 1 reviews."""
+    start = float(now) - float(horizon_s)
+    by: dict = {}
+    for r in rows:
+        at = _f(r.get("at"))
+        if at is None or at <= start or at > now:
+            continue
+        by.setdefault(r["group_id"], []).append(dict(r, at=at))
+    groups = set(by) | set(open_groups)
+    reviews = fresh = missing = 0
+    per, by_state = [], {}
+    for g in sorted(groups):
+        rs = by.get(g) or []
+        n_f = sum(1 for r in rs if r.get("state") == PINNAPI_FRESH_STATE)
+        for r in rs:
+            k = str(r.get("state") or "NO_STATE_RECORDED")
+            by_state[k] = by_state.get(k, 0) + 1
+        is_open = g in open_groups
+        first = rs[0]["at"] if rs else None
+        a = start if (is_open and (first is None or first - start
+                                   > expected_s)) else (first or start)
+        b = float(now) if is_open else (rs[-1]["at"] if rs else a)
+        owed = int(max(0.0, b - a) // expected_s) + 1
+        miss = max(0, owed - len(rs))
+        reviews += len(rs)
+        fresh += n_f
+        missing += miss
+        last = rs[-1] if rs else None
+        per.append({
+            "group_id": g, "open_now": is_open,
+            "us_market_slug": (open_groups.get(g) or {}).get("slug"),
+            "reviews": len(rs), "fresh": n_f, "missed": miss,
+            "last": None if last is None else {
+                "verified_at": last["at"],
+                "evidence_state": last.get("state"),
+                "source": last.get("source"),
+                "probability_source_at": _f(last.get("p_at")),
+                "probability_received_at": _f(last.get("p_rcv")),
+                "limit_s": _f(last.get("p_limit")),
+                "review_age_s": round(float(now) - last["at"], 1)}})
+    den = reviews + missing
+    return {"horizon_s": float(horizon_s), "groups": len(groups),
+            "reviews": reviews, "fresh_reviews": fresh,
+            "missed_reviews": missing,
+            "numerator": fresh, "denominator": den,
+            "rate": round(fresh / den, 4) if den else None,
+            "rate_reviews_only": (round(fresh / reviews, 4) if reviews
+                                  else None),
+            "by_evidence_state": dict(sorted(by_state.items(),
+                                             key=lambda kv: -kv[1])),
+            "per_group": per[:50]}
+
+
+async def pinnapi_held_inputs_block(conn, account_id: str, *,
+                                    now: float) -> dict:
+    from .. import bettor_paper_ledger as L
+    if not await _has(conn, "paper_xavier_reviews"):
+        return {"status": "UNREADABLE", "why": "XAVIER_REVIEWS_ABSENT"}
+    pos = await L.positions(conn, account_id)
+    open_groups = {p["group_id"]: {"slug": p.get("us_market_slug")}
+                   for p in pos}
+    longest = max(h for _k, h in PINNAPI_HORIZONS)
+    rows = [dict(r) for r in await conn.fetch(
+        REVIEWS_SQL, account_id, float(now) - longest)]
+    out = {"version": "PINNAPI_HELD_INPUT_FRESHNESS_V1",
+           "source": "paper_xavier_reviews.measure.evidence_state",
+           "rule": ("a review sample is fresh when Xavier's probability "
+                    "stood on FRESH_CURRENT_PROBABILITY (its own source stamp "
+                    "inside the Pinnacle limit at the review instant); an "
+                    "open position owes a review every %.0f s and a missed "
+                    "one counts not fresh" % REVIEW_EXPECTED_S),
+           "open_positions_now": len(open_groups), "horizons": {}}
+    for k, h in PINNAPI_HORIZONS:
+        out["horizons"][k] = pinnapi_inputs_summary(
+            rows, open_groups, now=now, horizon_s=h)
+    out["status"] = ("MEASURED" if any(
+        v["denominator"] for v in out["horizons"].values())
+        else "NO_HELD_POSITION_IN_THE_HORIZON")
+    return out
 
 
 async def latest_mark_refresh(conn, account_id: str):
@@ -793,6 +971,18 @@ async def read(conn, *, account_id: str = ACCOUNT_ID,
     pmx_run = await sec.run("pmx_primary", _pmx, None)
     market["pmx_primary"] = pmx_primary_block(
         pmx_run, fr.get("feeds"), markable=fr.get("markable"), now=now)
+
+    # (RC6 D1) the whole observation window, and the held positions'
+    # PinnAPI probability inputs, each its own section
+    async def _fwin():
+        return await freshness_window_block(conn, now=now)
+    market["freshness_window"] = await sec.run("freshness_window", _fwin,
+                                               dict(down_))
+
+    async def _pin():
+        return await pinnapi_held_inputs_block(conn, account_id, now=now)
+    market["pinnapi_held_inputs"] = await sec.run(
+        "pinnapi_held_inputs", _pin, dict(down_))
 
     async def _gates():
         return await F.gates(conn, account_id=account_id, now=now,
