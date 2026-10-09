@@ -109,3 +109,22 @@ SELECT v.sport_family, (p.slug IS NOT NULL) AS has_paper_decision,
        left(coalesce(p.el ->> 'refusal', '-'), 90) AS refusal, count(*) AS n
   FROM v LEFT JOIN p ON p.slug = v.slug
  GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 6 DESC LIMIT 60;
+\echo === M7. h2h valuations with p (24 h, latest per active slug) by sport x venue league code x verdict x scope acquisition refusal ===
+WITH v AS MATERIALIZED (
+  SELECT DISTINCT ON (e.us_market_slug) e.us_market_slug AS slug,
+         e.sport_family, e.settlement_comparison AS s
+    FROM external_valuations e
+   WHERE e.decided_at > now() - interval '24 hours'
+     AND e.us_market_slug IS NOT NULL AND e.market = 'h2h'
+     AND e.probability IS NOT NULL
+   ORDER BY e.us_market_slug, e.decided_at DESC, e.id DESC)
+SELECT v.sport_family,
+       lower(split_part(coalesce(g.event_id, ''), '-', 1)) AS league_code,
+       coalesce(v.s ->> 'verdict', v.s ->> 'status', v.s ->> 'compatibility')
+         AS verdict,
+       left(coalesce(v.s -> 'fixture_acquisition' ->> 'refusal',
+                     v.s ->> 'fixture_read', '-'), 70) AS acq_refusal,
+       coalesce(g.coverage_state, '<not active>') AS state, count(*) AS n
+  FROM v LEFT JOIN market_plane_registry g
+         ON g.contract_id = v.slug AND g.active
+ GROUP BY 1, 2, 3, 4, 5 ORDER BY 1, 6 DESC LIMIT 80;
