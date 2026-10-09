@@ -40,6 +40,8 @@
   body.hq .btn,body.hq [data-watch]{min-height:44px;}
   body.hq .desk-x{min-width:44px;min-height:44px;}
   body.hq .rep-pick [role=tab]{min-height:44px;}
+  /* signed out: the sign-in card's password field was 42 px (unlock.js inline padding) */
+  #command-unlock input,#command-unlock button{min-height:44px;}
 
   /* FLOOR ------------------------------------------------------------------ */
   body.fl .hq5-pulse-btn{min-height:44px;}
@@ -49,7 +51,15 @@
   body.fl .hq5-view{min-height:44px;min-width:44px;flex:none;}
   /* 44 + 2 x 4 + 2 = 54 px tall (was 27 + 2 x 6 + 2 = 41) */
   body.fl .hq5-floorbar{padding:4px;}
-  body.fl .fl-btn,body.fl .fl-skip{min-height:44px;}
+  /* experience-v4 sets body.fl.bt-exp-v4 .fl-btn{min-height:38px}: matched here at the same
+     specificity, later in the cascade. The agent panel's close / evidence / foot buttons and
+     the Company Pulse list are reached by touch once a desk or the pulse is opened */
+  body.fl .fl-btn,body.fl.bt-exp-v4 .fl-btn,body.fl .fl-skip{min-height:44px;}
+  body.fl .fl-x{min-width:44px;min-height:44px;}
+  body.fl .fl-p-sec summary{min-height:44px;}
+  body.fl .hq5-pulse-agent{min-height:44px;}
+  /* signed out: the equity wall's inline Sign in button was 28-31 x 12-13 px */
+  body.fl [data-ew-signin]{min-height:44px;min-width:44px;}
   /* the executive header's links; every cell centres so a 44 px row reads as
      one row (command-ops.js measures the strip and moves the page by
      --ops-hdr-h, so the bars beneath follow its new height) */

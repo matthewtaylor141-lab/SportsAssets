@@ -80,7 +80,7 @@ def test_coarse_pointer_block_raises_every_measured_control_to_44px():
         # Floor
         "body.fl .hq5-pulse-btn{min-height:44px;}",
         "body.fl .hq5-view{min-height:44px;min-width:44px;flex:none;}",
-        "body.fl .fl-btn,body.fl .fl-skip{min-height:44px;}",
+        "body.fl .fl-btn,body.fl.bt-exp-v4 .fl-btn,body.fl .fl-skip{min-height:44px;}",
         ".ops-hdr a.ops-h-cell{min-height:44px;}",
         # Trader
         ".topbar .wordmark{min-height:44px;}",
