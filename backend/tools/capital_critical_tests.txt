@@ -1341,3 +1341,7 @@ tests/test_rc6_pair_observations_off_loop.py
 tests/test_rc6_intel_off_loop.py
 # (RC6 deploy integrity) capital-critical's attested fresh-database receipt fingerprints exactly as the API's MIGRATION_INTEGRITY control does; the judge binds it (absent / unverified = UNPROVEN, mismatch = RED, never overrules an API finding) and the RELEASE unit passes only on a GREEN verdict for the release SHA, never on a receipt's presence; nothing is posted
 tests/test_rc6_deploy_integrity.py
+# (RC6 Archer) an economic duplicate is ONE level re-filled on distinct observations; refills before the seen-crossing fix are HISTORICAL (listed, never rewritten), at or after it CURRENT; distinct levels of one size are not duplicates (production's 18 groups)
+tests/test_paper_economic_duplicate_rule.py
+# (RC6 Archer) Audrey's reconciliation keeps her cadence while the small-live lane is off or stopped: records only, no venue, bounded (open actual position first, never reconciled, then oldest)
+tests/test_audrey_reconciles_while_the_lane_is_off.py
