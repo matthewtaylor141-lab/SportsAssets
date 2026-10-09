@@ -1074,13 +1074,20 @@ def test_the_run_loop_heartbeat_carries_memory_by_step(monkeypatch):
     async def go():
         c, tr = await _db()
 
+        # a pool of ONE connection: acquire waits for its release, as a
+        # real pool never hands one connection to two users at once
+        # (RC6 D1: the plane's freshness task runs beside the pass)
+        one = asyncio.Lock()
+
         class Pool:
             def acquire(self):
                 class A:
                     async def __aenter__(self_):
+                        await one.acquire()
                         return c
 
                     async def __aexit__(self_, *a):
+                        one.release()
                         return False
                 return A()
 

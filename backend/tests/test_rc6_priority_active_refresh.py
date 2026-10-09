@@ -751,13 +751,20 @@ def test_the_run_loop_makes_a_quiet_priority_member_current(monkeypatch):
         tr = c.transaction()
         await tr.start()
 
+        # a pool of ONE connection: acquire waits for its release, as a
+        # real pool never hands one connection to two users at once
+        # (RC6 D1: the plane's freshness task runs beside the pass)
+        one = asyncio.Lock()
+
         class Pool:
             def acquire(self):
                 class A:
                     async def __aenter__(self_):
+                        await one.acquire()
                         return c
 
                     async def __aexit__(self_, *a):
+                        one.release()
                         return False
                 return A()
 
@@ -827,8 +834,11 @@ def test_the_run_loop_makes_a_quiet_priority_member_current(monkeypatch):
     assert _Client.reads == [("book", QUIET)]
     # the stream's own book stays what the stream sent (never a REST book)
     assert snap["subscription"]["fresh"] == 0
-    # the heartbeat carries this pass of the refresh
-    assert beats[0][2]["refresh"]["read"] == 1
+    # the heartbeat carries this read: made by the pass's step or by the
+    # freshness task's step beside it (RC6 D1) -- exactly one between them
+    hb0 = beats[0][2]
+    assert hb0["refresh"]["read"] + int(
+        hb0["freshness_task"].get("reads") or 0) == 1
 
 
 # ═════════════════════════════════════════════════════════════════════

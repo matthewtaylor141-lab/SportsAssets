@@ -113,6 +113,7 @@ from ..db import get_pool, heartbeat
 from ..market_plane import active_refresh as AR
 from ..market_plane import certification as CERT
 from ..market_plane import freshness as FR
+from ..market_plane import freshness_window as FW
 from ..market_plane import populate as POP
 from ..market_plane import radar as RADAR
 from ..market_plane import registry as R
@@ -509,8 +510,11 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         # deferred and why, counts only
         "refresh": {k: v for k, v in (state.get("refresh") or {}).items()
                     if k != "reads"},
-        # (RC6 D1) the freshness task beside the pass: ticks, errors
+        # (RC6 D1) the freshness task beside the pass: ticks, errors; the
+        # frozen-window sampler's last sample (counts, never the members)
         "freshness_task": dict(state.get("freshness_task") or {}),
+        "freshness_window": dict((state.get("freshness_window") or {})
+                                 .get("last") or {}),
         "fresh": len(fresh)}
     if memory is not None:
         d["memory"] = memory
@@ -621,6 +625,13 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     budget, one in-flight set) and the client lock (one PMX client, never
     two calls at once -- the refdata slot takes it too).
 
+    THE FROZEN-WINDOW SAMPLE (RC6 D1, measurement): every
+    freshness_window.SAMPLE_EVERY_S the same task freezes the hour's
+    eligible membership (once; persisted) and samples it at one instant,
+    persisted as FRESHNESS_SAMPLE -- so the measure is the whole window,
+    sampled every minute whatever the pass is doing, and a minute with no
+    sample is an outage the readback counts.
+
     Never raises but CancelledError: a failed step is counted in
     state["freshness_task"] (logged at most every FRESHNESS_LOG_EVERY_S)
     and the next tick tries again."""
@@ -628,14 +639,23 @@ async def freshness_loop(refresher, mgr, client, *, state: dict,
     st = state.setdefault("freshness_task", {})
     st.update(started_at=clock(), ticks=0, errors=0, last_error=None,
               tick_s=tick)
+    fw = state.setdefault("freshness_window", {})
     logged = 0.0
     while True:
         try:
             pool = await get_pool()
             if refresher is not None:
-                state["refresh"] = await AR.step(
+                # the task's own step digest (the heartbeat's `refresh`
+                # stays the pass's step): due / read / deferred, no reads
+                got = await AR.step(
                     pool, client, refresher, mgr, bound=bound, clock=clock,
                     lock=client_lock)
+                st["last_refresh"] = {k: v for k, v in got.items()
+                                      if k not in ("reads", "by_reason")}
+                st["reads"] = int(st.get("reads") or 0) + int(
+                    got.get("read") or 0)
+            await FW.step(pool, mgr, refresher, fw, now=clock(),
+                          sla_s=bound)
             st["ticks"] += 1
             st["last_tick_at"] = clock()
         except asyncio.CancelledError:
@@ -701,8 +721,7 @@ async def run() -> None:
             pool = await get_pool()
             now = time.time()
             mem.begin()
-            if refresher is not None and (fresh_task is None
-                                          or fresh_task.done()):
+            if fresh_task is None or fresh_task.done():
                 if fresh_task is not None and not fresh_task.cancelled() \
                         and fresh_task.exception() is not None:
                     state.setdefault("freshness_task", {})[
