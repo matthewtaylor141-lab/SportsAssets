@@ -458,7 +458,12 @@ def effective_gap(min_gap_s: float = MIN_GAP_S) -> float:
 #   NORMAL lane, no deadline (every measurement walker)
 #       refused by name, nothing sent: R_VENUE_429_COOLDOWN_READ_DEFERRED.
 #       The walkers check `normal_read_deferral()` before each market and
-#       stop their pass, counting what they skipped.
+#       stop their pass, counting what they skipped. The premap catalogue
+#       sweep reads the refusal itself (premap._our_gate_refused): its
+#       pass stops RATE_LIMITED_BY_VENUE with the refusal named, the read
+#       is never counted as a request, and it never takes the markets
+#       fallback. Any caller that reads a failure as "the venue did not
+#       answer" and tries another endpoint must do the same.
 #   NORMAL lane, with a deadline (a scheduled read bound by begin_read)
 #       waits the cooldown out when it ends inside the deadline -- the
 #       contract venue_request_gate already gives a caller that "can
