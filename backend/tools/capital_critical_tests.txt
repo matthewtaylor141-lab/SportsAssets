@@ -1407,3 +1407,11 @@ tests/test_rc6_kalshi_ws_sequencing.py
 tests/test_rc6_kalshi_ontology.py
 # (RC6 lane K) Kalshi credentials are Kalshi's own: the control's verdict per venue slot is independent, no signer reads another venue's env names
 tests/test_rc6_kalshi_credential_isolation.py
+# (RC6 coverage) the market plane reads the venue's event-slug grammar: the league is the event slug's first segment; non-sports codes are excluded by name; an ambiguous code is a named gap, never a sport
+tests/test_rc6_coverage_slug_grammar.py
+# (RC6 coverage) full-game and period line contracts read against their cited terms and NEVER proven (the priced settlement-difference policy still refuses every non-money-line); the target-universe waterfall sums exactly; COVERAGE_WATERFALL=off is the RC5 pass
+tests/test_rc6_coverage_waterfall.py
+# (RC6 coverage) a Kalshi series leaves the target universe only by a named class (match, fight, period, map and set winners are target families; an unrecognised series is UNCLASSIFIED), checked against all 1,351 active series' own rules texts
+tests/test_rc6_coverage_kalshi_series.py
+# (RC6 coverage) the markets kept out of the registry by name stay counted by code with the full pass's time: no incremental pass overwrites populate_full; the snapshot and the waterfall carry it, never in the sums
+tests/test_rc6_coverage_outside_registry.py

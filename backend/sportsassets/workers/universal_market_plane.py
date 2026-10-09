@@ -134,6 +134,12 @@ POPULATE_EVERY_S = 10.0
 FULL_POPULATE_EVERY_S = 1800.0
 ASSIGN_EVERY_S = 30.0
 COVERAGE_EVERY_S = 120.0
+#: (RC6, lane D2) the coverage pass reads each never-valued full-game or
+#: period line contract against its family's captured terms and reports the
+#: target-universe waterfall (market_plane.waterfall). Evidence only;
+#: neither can make a contract PRICEABLE. COVERAGE_WATERFALL=off restores
+#: the RC5 pass.
+COVERAGE_WATERFALL_ENV = "COVERAGE_WATERFALL"
 CERTIFY_EVERY_S = 300.0
 SNAPSHOT_EVERY_S = 60.0
 #: a by-symbol refdata read that failed (not a proven absence) is not
@@ -335,19 +341,50 @@ def latency_report(mgr, *, now: float) -> dict:
     return rep
 
 
+def record_populate(state: dict, pop: dict, *, full: bool,
+                    now: float) -> None:
+    """THE POPULATE RESULT INTO THE PLANE'S STATE. `populate` is the last
+    pass of either kind (an incremental pass every POPULATE_EVERY_S replaces
+    it); `populate_full` is the last FULL pass's record of the markets it
+    kept out of the registry by name (populate.full_pass_record), kept
+    under its own key so no incremental pass overwrites it (RC6, lane D2,
+    review finding 2: the non-sports markets the slug grammar retires from
+    the registry stay counted, by code, with the pass time)."""
+    state["populate"] = pop
+    if full:
+        state["populate_full"] = POP.full_pass_record(pop, at=now)
+
+
+def coverage_waterfall_on() -> bool:
+    """COVERAGE_WATERFALL (default on): the RC6 coverage readings."""
+    return os.environ.get(COVERAGE_WATERFALL_ENV, "on").strip().lower() \
+        not in ("off", "0", "false", "no")
+
+
+#: the venue league code of an event slug, in SQL: populate.league_of's
+#: grammar (a market-kind prefix -> the next segment, else the first)
+_LEAGUE_SQL = ("(CASE WHEN lower(split_part(coalesce(event_slug,''),'-',1)) "
+               "        = ANY($4::text[]) "
+               "      THEN lower(split_part(coalesce(event_slug,''),'-',2)) "
+               "      ELSE lower(split_part(coalesce(event_slug,''),'-',1)) "
+               " END)")
+
+
 async def venue_active_count(conn, *, now: float) -> int:
     """Active SPORTS contracts the venue catalogue lists (non-sports leagues
-    excluded by name)."""
+    excluded by name). (RC6) The league is read by populate.league_of's
+    grammar: the venue's event slug carries its league FIRST, so the second
+    segment this read before was a team code and excluded nothing."""
     try:
         return int(await conn.fetchval(
             "SELECT count(DISTINCT market_slug) FROM us_premap "
             " WHERE market_slug IS NOT NULL "
             "   AND listing_state = ANY($1::text[]) "
             "   AND updated_at > to_timestamp($2) "
-            "   AND NOT (lower(split_part(coalesce(event_slug,''),'-',2)) "
-            "            = ANY($3::text[]))",
+            "   AND NOT (" + _LEAGUE_SQL + " = ANY($3::text[]))",
             list(POP.ACTIVE_LISTING_STATES), now - POP.ACTIVE_HORIZON_S,
-            sorted(POP.O.NON_SPORTS_LEAGUES)) or 0)
+            sorted(POP.O.NON_SPORTS_LEAGUES),
+            sorted(POP.MARKET_KIND_PREFIXES)) or 0)
     except Exception:                                           # noqa: BLE001
         return -1
 
@@ -550,7 +587,8 @@ def heartbeat_detail(*, arming, state, plan_cfg, mgr, sync, fresh,
         "runtime": os.environ.get("UMP_RUNTIME", "STANDALONE_UNLABELLED"),
         "resources": runtime_resources(),
         "populate": {k: v for k, v in (state.get("populate") or {})
-                     .items() if k != "excluded"},
+                     .items() if k not in ("excluded",
+                                           "excluded_listed_active")},
         "kalshi": {k: (state.get("kalshi") or {}).get(k) for k in (
             "enabled", "complete", "stopped", "markets", "requests",
             "error")},
@@ -822,9 +860,9 @@ async def run() -> None:
                             seen_receipts.get("full")))
                 if full or now - last["populate"] >= POPULATE_EVERY_S:
                     pop = await POP.populate(c, since=watermark, now=now,
-                                             full=full)
+                                             full=full, excluded_detail=full)
                     watermark = max(watermark, pop.get("watermark") or 0.0)
-                    state["populate"] = pop
+                    record_populate(state, pop, full=full, now=now)
                     last["populate"] = now
                     if full:
                         last["full"] = now
@@ -860,11 +898,14 @@ async def run() -> None:
             fresh = fresh_symbols(mgr, now=now)
             async with pool.acquire() as c:
                 if now - last["coverage"] >= COVERAGE_EVERY_S:
+                    rc6 = coverage_waterfall_on()
                     state["coverage"] = await POP.coverage_pass(
                         c, fresh_symbols=fresh, now=now,
                         refreshed=(refresher.current_for_coverage(
                             mgr, now=now, bound=FRESH_SLA_S)
-                            if refresher is not None else None))
+                            if refresher is not None else None),
+                        derivative_terms=rc6, waterfall=rc6,
+                        outside_registry=state.get("populate_full"))
                     last["coverage"] = now
                     mem.mark("coverage")
                 if mgr is not None and \
@@ -1362,6 +1403,9 @@ async def snapshot(conn, mgr, state: dict, *, now: float, arming: dict,
             cert, last_pass=state.get("certification")),
         "catalogue": state.get("catalogue"),
         "populate": {k: v for k, v in (state.get("populate") or {}).items()},
+        # (RC6) the last FULL pass's markets kept out of the registry by
+        # name, by code: no incremental pass replaces it
+        "populate_full": state.get("populate_full"),
         "refdata": state.get("refdata"),
         "refdata_universe": state.get("refdata_universe"),
         "runtime": {"label": os.environ.get("UMP_RUNTIME",

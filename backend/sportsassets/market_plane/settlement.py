@@ -42,6 +42,8 @@ Exactly one of five states:
 """
 from __future__ import annotations
 
+import re
+
 COMPATIBLE = "SETTLEMENT_PROVEN_COMPATIBLE"
 DIFFERENT_BUT_PRICED = "SETTLEMENT_PROVEN_DIFFERENT_BUT_PRICED"
 NOT_PROVEN = "MAPPED_BUT_SETTLEMENT_NOT_PROVEN"
@@ -67,6 +69,21 @@ R_TIE_RULE_NOT_COMPARED = "TIE_RULE_NOT_COVERED_BY_THE_TERMS_COMPARISON"
 R_KALSHI_NOT_MAPPED = "KALSHI_CONTRACT_NOT_MAPPED_TO_A_BETTOR_FAMILY"
 R_RULE_EVIDENCE_CONFLICT = "RULE_EVIDENCE_CONFLICT"
 R_VENUE_SELF_CONTRADICTORY = "VENUE_RULES_SELF_CONTRADICTORY"
+
+#: (RC6, lane D2) a family whose book terms ARE captured
+#: (bettor_settlement_terms.BOOK_TERMS) but are not admissible for THIS
+#: fixture until its quote context / competition phase / game format is
+#: established -- book_terms() withholds them by design. Not "not held".
+R_BOOK_TERMS_SCOPE = "BOOK_TERMS_SCOPE_NOT_ESTABLISHED"
+#: (RC6) a full-game line contract whose venue text grades the ordinarily
+#: completed game exactly as the book's cited terms do, and whose
+#: postponement / suspension / short-game terms differ: the difference the
+#: priced settlement-difference policy refuses for a non-money-line
+#: (bettor_settlement_difference_policy.R_LINE). Same code the line lane
+#: refuses with (bettor_market_family.R_EXCEPTIONAL_DIFFER).
+R_LINE_EXCEPTIONAL_DIFFER = "LINE_EXCEPTIONAL_SETTLEMENT_TERMS_DIFFER"
+#: (RC6) ... and one whose venue text states no rule for those states at all
+R_LINE_VENUE_EXCEPTIONAL_SILENT = "LINE_VENUE_TEXT_STATES_NO_EXCEPTIONAL_RULE"
 
 AUTHORITY_NOTE = ("coverage evidence only: decision-time bettor_venue_"
                   "settlement.attest remains the authority for trading")
@@ -168,6 +185,313 @@ def terms_comparison(*, sport_family, league, rules_text, rules_sha256):
     return slim
 
 
+# ── RC6 (lane D2): FULL-GAME LINE FAMILIES, READ AS THE LINE LANE READS THEM
+#
+# THE DEFECT. A never-valued spread / total / team total fell through to
+# `h2h_family() is None` and was reported BOOKMAKER_TERMS_NOT_HELD:<sport>/
+# <family>/<period>. For football, hockey, basketball and baseball that is
+# false: bettor_market_family.EQUIVALENCE holds the book's grading of those
+# families, cited verbatim from the captured rules page (sha256 63d64321...),
+# and the line lane values them on it. Production (research-sql run
+# 37870767576 / 37871119335): 11,700 active full-game line contracts carried
+# the label -- football spread 4,141, total 2,630, team total 2,539, hockey
+# team total 404 / total 271 / spread 193, basketball total 62 / spread 49,
+# baseball 21 -- while 70 VALUED ones of the same types already read
+# SETTLEMENT_VERDICT:INCOMPATIBLE_EXCEPTIONAL_TERMS from the decision record.
+#
+# THE READING. The contract's OWN captured rules text against its family's
+# captured venue wording (the line lane's `prove`, minus the team binding,
+# which is decision-time identity, not settlement): the family statement,
+# every required phrase, no contradicting phrase, the text's line equal to
+# the slug's, a half-point line (no push). Then the exceptional states -- the
+# postponement / suspension / short-game terms the two sides settle
+# differently, disclosed per family in EQUIVALENCE -- and the venue clause the
+# text itself states for them. The state is NEVER proven here: the priced
+# settlement-difference policy refuses every non-money-line by its own code,
+# so the why names the difference and that refusal. A family the module does
+# not prove (soccer / tennis lines: the book's market rules or sport section
+# not captured; basketball team totals: no venue capture) keeps its precise
+# refusal; only the book-side ones keep the BOOKMAKER_TERMS_NOT_HELD prefix.
+LINE_TERMS_VERSION = "MARKET_PLANE_LINE_TERMS_V1"
+_LINE_CACHE: dict = {}
+_LINE_CACHE_MAX = 250_000
+_VENUE_X_CLAUSES = (
+    ("LAST_FAIR_MARKET_PRICE_FLAGGED_FOR_MANUAL_SETTLEMENT",
+     r"\bflagged for manual last[\s-]+fair[\s-]+market[\s-]+price\b"),
+    ("LAST_FAIR_MARKET_PRICE",
+     r"\blast[\s-]+fair[\s-]+market[\s-]+price\b"),
+)
+
+
+# ── PERIOD LINES: the same reading, one table of cited period terms ──────
+#
+# The book's period rule is a GENERAL rule, captured verbatim on the same
+# page (tests/fixtures/pinnacle_line_rules_2026_10_04.json, general_rules):
+# "Bets on a specific period count only the scoring in that period, and are
+# unaffected by what happens in prior or subsequent periods. ... Any periods
+# that have been completed will have action." -- and the American Football
+# section names the one period that includes overtime: "Bets on the Game and
+# 2nd Half-periods include points scored in overtime." The venue's period
+# wording was read off production rows (research-sql runs 37870767576 T1 /
+# T2 and 37871400151 F1): its football 1st-half / quarter totals and team
+# totals say "Only points recorded in regulation during that period count;
+# overtime is not included", its 2nd-half markets "Overtime is included if
+# played", its hockey 3rd-period markets "Overtime and any shootout are not
+# included if played". So, per period, on the ORDINARILY COMPLETED game:
+#
+#   1st half, Q1-Q3, P1, P2   no overtime can fall inside the period: both
+#                             sides grade the period's own scoring
+#   2nd half (football)       BOTH include overtime -- the venue text must
+#                             say so
+#   Q4 (football), P3         the book's period-only rule EXCLUDES overtime
+#                             -- the venue text must say so; a Q4 spread
+#                             whose text says nothing about overtime is NOT
+#                             read as excluding it (refused, by name)
+#
+# and the period's exceptional state (the period not completed, or the game
+# postponed before it is) is settled differently -- the book: a completed
+# period has action, the full fixture voids; the venue: manual last-fair-
+# market-price settlement -- so the reading is never PROVEN. Soccer halves
+# stay BOOKMAKER_TERMS_NOT_HELD (the book's Soccer Market Rules section,
+# which outranks its sport rules, is outside the capture); period WINNERS
+# are not claimed (the book's tie payout depends on whether its own market
+# offers a draw -- General Rules -- which no rule text establishes).
+_PW = {"FIRST_HALF": "first half", "SECOND_HALF": "second half",
+       "Q1": "first quarter", "Q2": "second quarter", "Q3": "third quarter",
+       "Q4": "fourth quarter", "P1": "first period", "P2": "second period",
+       "P3": "third period"}
+_P_NUM = r"(?P<line>[-+]?\d+(?:\.\d+)?)"
+_P_OT_IN = r"\bovertime is included if played\b"
+_P_OT_OUT = r"\bovertime is not included\b"
+_P_HK_OT_OUT = r"\bovertime and any shootout are not included\b"
+_P_TEMPLATES = {
+    ("football", "spread"): (r"\bwill settle to yes if (?:the )?(?P<team>.+?) "
+                             r"covers? an? " + _P_NUM + r" point spread in "
+                             r"the {pw} of the\b"),
+    # two venue wordings, both read off production rows: the college board's
+    # ("1st Quarter Point Total settles Over if A and B combine for more
+    # than 10.5 points in the first quarter of the ...", 37871400151 F1) and
+    # the NFL board's ("This market will settle to Yes if A and B combine
+    # for over 0.5 points in the first quarter of the ...", 37872672403 W2)
+    ("football", "total"): (r"\b(?:point total settles over if .+? combine "
+                            r"for more than|will settle to yes if .+? "
+                            r"combine for over) " + _P_NUM + r" points in "
+                            r"the {pw} of the\b"),
+    ("football", "team_total"): (r"\bteam (?:1st|2nd) half point total "
+                                 r"settles over if (?:the )?(?P<team>.+?) "
+                                 r"scores? more than " + _P_NUM + r" points "
+                                 r"in the {pw} of the\b"),
+    ("hockey", "spread"): (r"\bwill settle to yes if (?:the )?(?P<team>.+?) "
+                           r"covers? an? " + _P_NUM + r" goal spread in the "
+                           r"{pw} of the\b"),
+    ("hockey", "total"): (r"\bwill settle to yes if .+? combine for over "
+                          + _P_NUM + r" goals during the {pw} in the\b"),
+}
+#: (sport, period) -> the overtime phrase the venue text must state
+_P_OT_REQUIRED = {("football", "SECOND_HALF"): _P_OT_IN,
+                  ("football", "Q4"): _P_OT_OUT,
+                  ("hockey", "P3"): _P_HK_OT_OUT}
+_P_OT_CONFLICT = {("football", "SECOND_HALF"): (_P_OT_OUT,),
+                  ("football", "Q4"): (_P_OT_IN,),
+                  ("hockey", "P3"): (r"\bovertime is included if played\b",)}
+#: the book's cited sentences, by key (each asserted verbatim in the capture)
+PERIOD_BOOK = {
+    "general_period": ("general_rules",
+                       "Bets on a specific period count only the scoring in "
+                       "that period, and are unaffected by what happens in "
+                       "prior or subsequent periods."),
+    "general_period_action": ("general_rules",
+                              "Any periods that have been completed will "
+                              "have action."),
+    "af_overtime": ("american_football",
+                    "Bets on the Game and 2nd Half-periods include points "
+                    "scored in overtime."),
+    "hk_overtime": ("hockey",
+                    "Unless otherwise specified, Game-period bets include "
+                    "overtime and penalty shootouts."),
+}
+#: venue sportsMarketType -> (sport, family, period); every type was read
+#: carrying the wording above in production (37870767576 T1)
+PERIOD_LINE_TYPES = {
+    "football_team_first_half_spread": ("football", "spread", "FIRST_HALF"),
+    "football_team_second_half_spread": ("football", "spread",
+                                         "SECOND_HALF"),
+    "football_team_first_quarter_spread": ("football", "spread", "Q1"),
+    "football_team_second_quarter_spread": ("football", "spread", "Q2"),
+    "football_team_third_quarter_spread": ("football", "spread", "Q3"),
+    "football_team_fourth_quarter_spread": ("football", "spread", "Q4"),
+    "football_game_first_half_total": ("football", "total", "FIRST_HALF"),
+    "football_game_second_half_total": ("football", "total", "SECOND_HALF"),
+    "football_game_first_quarter_total": ("football", "total", "Q1"),
+    "football_game_second_quarter_total": ("football", "total", "Q2"),
+    "football_game_third_quarter_total": ("football", "total", "Q3"),
+    "football_game_fourth_quarter_total": ("football", "total", "Q4"),
+    "football_team_first_half_total": ("football", "team_total",
+                                       "FIRST_HALF"),
+    "football_team_second_half_total": ("football", "team_total",
+                                        "SECOND_HALF"),
+    "hockey_team_first_period_spread": ("hockey", "spread", "P1"),
+    "hockey_team_second_period_spread": ("hockey", "spread", "P2"),
+    "hockey_team_third_period_spread": ("hockey", "spread", "P3"),
+    "hockey_team_first_period_total": ("hockey", "total", "P1"),
+    "hockey_team_second_period_total": ("hockey", "total", "P2"),
+    "hockey_team_third_period_total": ("hockey", "total", "P3"),
+    # the book's Soccer Market Rules section is not captured: named, below
+    "soccer_team_first_half_spread": ("soccer", "spread", "FIRST_HALF"),
+    "soccer_team_second_half_spread": ("soccer", "spread", "SECOND_HALF"),
+    "soccer_team_first_half_total": ("soccer", "total", "FIRST_HALF"),
+    "soccer_team_second_half_total": ("soccer", "total", "SECOND_HALF"),
+}
+PERIOD_EXCEPTIONAL = ("PERIOD_NOT_COMPLETED_OR_POSTPONED_BEFORE_IT_IS",)
+
+
+def line_family(contract: dict) -> dict | None:
+    """{sport, family, sports_type[, segment]} when the contract's venue
+    market type is a full-game line type the line lane reads, or a period
+    line type of PERIOD_LINE_TYPES, else None. Pure."""
+    mt = (contract or {}).get("market_type")
+    if not mt:
+        return None
+    per = PERIOD_LINE_TYPES.get(str(mt).strip().lower())
+    if per is not None:
+        return {"sport": per[0], "family": per[1], "segment": per[2],
+                "sports_type": str(mt).strip().lower()}
+    from .. import bettor_market_family as MF
+    fam = MF.venue_line_family(mt)
+    return None if fam.get("refusal") else fam
+
+
+def _period_spec(fam: dict) -> dict | None:
+    """The period reading's spec, or None when the book side is not held."""
+    sport, family, seg = fam["sport"], fam["family"], fam["segment"]
+    tpl = _P_TEMPLATES.get((sport, family))
+    if tpl is None:
+        return None
+    book = ["general_period", "general_period_action"] + (
+        ["af_overtime"] if sport == "football" else ["hk_overtime"])
+    req = _P_OT_REQUIRED.get((sport, seg))
+    return {"period": "%s_SCORING_ONLY%s" % (seg, (
+                "_INCLUDING_OVERTIME" if req == _P_OT_IN else
+                "_EXCLUDING_OVERTIME" if req else "")),
+            "statement": tpl.format(pw=_PW[seg]),
+            "all_of": (req,) if req else (),
+            "none_of": _P_OT_CONFLICT.get((sport, seg), ()),
+            "book": book, "exceptional": [{"condition": c}
+                                          for c in PERIOD_EXCEPTIONAL]}
+
+
+def line_key(rules_sha256, fam: dict, contract_id) -> tuple:
+    """The cache key of one line reading: the text, the family, the line
+    and (for a period line) the period."""
+    from .. import bettor_market_family as MF
+    return (rules_sha256, fam.get("sport"), fam.get("family"),
+            MF._slug_line(contract_id, fam.get("family")),
+            fam.get("segment"))
+
+
+def line_terms(*, contract_id, fam: dict, rules_text, rules_sha256) -> dict:
+    """The venue text of one full-game or period line contract read
+    against its family's (period's) captured terms. Cached by `line_key`.
+    Pure."""
+    key = line_key(rules_sha256, fam, contract_id)
+    if rules_sha256 and key in _LINE_CACHE:
+        return _LINE_CACHE[key]
+    from .. import bettor_market_family as MF
+    sport, family = fam.get("sport"), fam.get("family")
+    out = {"version": LINE_TERMS_VERSION, "sport": sport, "family": family,
+           "sports_type": fam.get("sports_type"), "established": False,
+           "refusal": None, "line": key[3]}
+    if fam.get("segment"):
+        out["segment"] = fam["segment"]
+        spec = _period_spec(fam)
+        st = ({"proven": True} if spec is not None else
+              {"proven": False, "refusal": (
+                  MF.R_BOOK_MARKET_RULES_NOT_CAPTURED if sport == "soccer"
+                  else MF.R_BOOK_SPORT_NOT_CAPTURED),
+               "why": "no period terms are captured for %s" % sport})
+    else:
+        spec = MF.EQUIVALENCE.get((sport, family))
+        st = MF.family_status(sport, family)
+    if not st.get("proven"):
+        out.update(refusal=st.get("refusal"), why=st.get("why"),
+                   side=("BOOK" if st.get("refusal") in (
+                       MF.R_BOOK_MARKET_RULES_NOT_CAPTURED,
+                       MF.R_BOOK_SPORT_NOT_CAPTURED) else "VENUE"))
+    elif key[3] is None:
+        out["refusal"] = MF.R_CONTRACT_LINE
+    elif not MF.half_point(key[3]):
+        out["refusal"] = MF.R_NOT_HALF_POINT
+    else:
+        flat = MF.flat_text(rules_text)
+        m = re.search(spec["statement"], flat) if flat else None
+        bad = [p for p in spec["none_of"] if re.search(p, flat)]
+        missing = [p for p in spec["all_of"] if not re.search(p, flat)]
+        if not flat:
+            out["refusal"] = MF.R_VENUE_TEXT_ABSENT
+        elif bad:
+            out.update(refusal=MF.R_VENUE_TEXT_CONFLICTS,
+                       matched_conflicts=bad)
+        elif m is None or missing:
+            out.update(refusal=MF.R_VENUE_TEXT_UNRECOGNISED,
+                       missing=([spec["statement"]] if m is None else [])
+                       + missing)
+        else:
+            tl = MF._num(m.group("line"))
+            want = float(key[3])
+            if tl is None or (abs(tl - want) > 1e-9 if family == MF.SPREAD
+                              else abs(abs(tl) - abs(want)) > 1e-9):
+                out.update(refusal=MF.R_VENUE_TEXT_LINE, text_line=tl)
+            else:
+                clause = next((name for name, rx in _VENUE_X_CLAUSES
+                               if re.search(rx, flat)), None)
+                out.update(
+                    established=True, period=spec["period"],
+                    book=list(spec["book"]),
+                    exceptional=[x["condition"]
+                                 for x in spec["exceptional"]],
+                    venue_exceptional_clause=clause)
+    if len(_LINE_CACHE) > _LINE_CACHE_MAX:
+        _LINE_CACHE.clear()
+    if rules_sha256:
+        _LINE_CACHE[key] = out
+    return out
+
+
+def _line_state(c: dict, fam: dict, rules: dict, ev: dict) -> dict:
+    """The settlement state of a never-attested full-game or period line
+    contract."""
+    if rules.get("rules_text") is None:
+        return _out(NOT_PROVEN, R_VENUE_RULES_NOT_CAPTURED, BASIS_NONE, ev)
+    lt = line_terms(contract_id=c.get("contract_id"), fam=fam,
+                    rules_text=rules.get("rules_text"),
+                    rules_sha256=rules.get("rules_sha256"))
+    ev["line_terms"] = lt
+    tag = "%s/%s" % (fam.get("sport"), fam.get("family"))
+    if fam.get("segment"):
+        tag += "@%s" % fam["segment"]
+    if not lt.get("established"):
+        why = "%s:%s" % (lt.get("refusal"), tag)
+        if lt.get("side") == "BOOK":
+            why = "%s:%s" % (R_BOOKMAKER_TERMS_NOT_HELD, why)
+        return _out(NOT_PROVEN, why, BASIS_RULES_TERMS, ev)
+    conds = _short(lt.get("exceptional"))
+    if not lt.get("venue_exceptional_clause"):
+        return _out(NOT_PROVEN, "%s:%s:%s" % (
+            R_LINE_VENUE_EXCEPTIONAL_SILENT, tag, conds), BASIS_RULES_TERMS,
+            ev)
+    from .. import bettor_settlement_difference_policy as SDP
+    el = SDP.eligibility(sport_family=fam.get("sport"),
+                         market=fam.get("family"),
+                         league=c.get("competition"), settlement={},
+                         lane_codes=(), precise_codes=(), match=None)
+    ev["difference_policy"] = {k: el.get(k) for k in (
+        "eligible", "refusal", "why")}
+    return _out(NOT_PROVEN, "%s:%s:%s:%s" % (
+        R_LINE_EXCEPTIONAL_DIFFER, tag,
+        el.get("refusal") or "ELIGIBLE_BUT_NO_BOOK_PROBABILITY_TO_PRICE",
+        conds), BASIS_RULES_TERMS, ev)
+
+
 def priced_resolved(priced: dict | None) -> bool:
     """The recorded paper decision's priced settlement difference, checked
     by the capital gate's own predicate (marker, policy id, CURRENT version,
@@ -192,16 +516,41 @@ def _out(state, why, basis, evidence):
             "evidence": dict(evidence, basis=basis, note=AUTHORITY_NOTE)}
 
 
+def _book_terms_captured(fam) -> bool:
+    """Does bettor_settlement_terms hold CITED money-line terms for this
+    family under some context / phase (so an absent book side is a scope
+    question, not a capture question)?"""
+    from .. import bettor_settlement_terms as ST
+    return any(k[0] == fam and k[1] == "h2h"
+               for k in list(ST.BOOK_TERMS) + list(ST.PHASE_BOOK_TERMS))
+
+
+def _scope_refusals() -> frozenset:
+    from .. import bettor_settlement_terms as ST
+    return frozenset((ST.R_CONTEXT_UNKNOWN, ST.R_SCHEDULED_ONLY,
+                      ST.R_PHASE_UNKNOWN, ST.R_PHASE_EXCLUDED,
+                      ST.R_FORMAT_UNKNOWN, ST.R_FORMAT_EXCLUDED))
+
+
 def state_for(contract: dict, *, valuation: dict | None = None,
               rules: dict | None = None, priced: dict | None = None,
-              rules_looked_up: bool = False) -> dict:
+              rules_looked_up: bool = False,
+              derivative_terms: bool = False) -> dict:
     """PURE (apart from the cached terms comparison). The settlement state
     of one registry contract. `valuation`: the latest decision valuation
     (settlement_verdict, refusals, decision_rules_fingerprint); `rules`: its
     market_plane_rules row (with rules_text when a terms comparison is
     needed); `priced`: {"eligibility": ..., "policy": ...} from the latest
     paper decision; `rules_looked_up`: whether the rules table was read (an
-    absent row then means VENUE_RULES_NOT_CAPTURED)."""
+    absent row then means VENUE_RULES_NOT_CAPTURED).
+
+    `derivative_terms` (RC6, lane D2; False is the RC5 reading exactly): a
+    never-attested FULL-GAME or PERIOD LINE contract (the contract carries
+    its venue `market_type`) is read against its family's captured terms
+    (`_line_state`) instead of being called BOOKMAKER_TERMS_NOT_HELD, and a
+    money line whose book terms ARE captured but withheld for want of the
+    fixture's context / phase / format says BOOK_TERMS_SCOPE_NOT_ESTABLISHED.
+    Neither ever reaches a PROVEN state."""
     c = dict(contract or {})
     ev = _rules_evidence(rules)
     v = dict(valuation or {})
@@ -255,6 +604,10 @@ def state_for(contract: dict, *, valuation: dict | None = None,
         # Kalshi ontology mapped (kalshi_ontology: sport, family, period,
         # no gap) is judged below exactly like any other, on its own rules
         return _out(NOT_PROVEN, R_KALSHI_NOT_MAPPED, BASIS_RULE_EVIDENCE, ev)
+    if derivative_terms:
+        lf = line_family(c)
+        if lf is not None:
+            return _line_state(c, lf, rules, ev)
     fam = h2h_family(c)
     if fam is None:
         return _out(NOT_PROVEN, "%s:%s/%s/%s" % (
@@ -277,6 +630,13 @@ def state_for(contract: dict, *, valuation: dict | None = None,
                                            cmp_["refusal"]),
                     BASIS_RULES_TERMS, ev)
     if not cmp_.get("book_terms_held"):
+        refs = [str(x) for x in (cmp_.get("book_side_absent_refusals")
+                                 or [])]
+        if derivative_terms and refs and set(refs) <= _scope_refusals() \
+                and _book_terms_captured(fam):
+            return _out(NOT_PROVEN, "%s:%s" % (R_BOOK_TERMS_SCOPE,
+                                               _short(refs)),
+                        BASIS_RULES_TERMS, ev)
         return _out(NOT_PROVEN, "%s:%s" % (
             R_BOOKMAKER_TERMS_NOT_HELD,
             _short(cmp_.get("book_side_absent_refusals")) or "NO_CAPTURE"),

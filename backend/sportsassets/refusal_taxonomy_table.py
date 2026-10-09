@@ -1587,6 +1587,13 @@ TABLE = {
     "KALSHI_ONTOLOGY_LINE_NOT_A_NUMBER": (S, DATA, "MARKET_FAMILY"),
     "RULE_EVIDENCE_CONFLICT": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "VENUE_RULES_SELF_CONTRADICTORY": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6, lane D2) a money line whose book terms are captured but withheld
+    # for want of the fixture's context / phase / format, and a full-game
+    # line contract whose venue text states no rule for the postponement /
+    # suspension / short-game states (market_plane.settlement)
+    "BOOK_TERMS_SCOPE_NOT_ESTABLISHED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    "LINE_VENUE_TEXT_STATES_NO_EXCEPTIONAL_RULE": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
     # ... and the GET-only Kalshi sports catalogue's named truncations and
     # its transport's non-GET refusal (kalshi_catalogue)
     "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),
