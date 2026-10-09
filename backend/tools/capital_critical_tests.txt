@@ -1423,3 +1423,5 @@ tests/test_rc6_kalshi_ws_merge_integration.py
 tests/test_rc62_coverage_ontology.py
 # (RC6.2 p-coverage) the soccer organiser source is resolved from the venue's own league code when the provider key is generic, an organiser payload of any other competition is never read, and the PinnAPI quote's proved pre-match / in-play label is the quote context (reconciled with the fixture's, disagreement establishes nothing) -- the recorded Nations League text then states its one payout conflict instead of UNKNOWN
 tests/test_rc62_soccer_source_and_quote_context.py
+# (RC6.2 p-coverage) the terms reader reads Kalshi's "resolve to a fair price" as a venue-set price (never a stake return) and its "not started" wording; a delayed-then-played sentence is not the never-completed rule; every Polymarket US money-line text in the 2,028 read reads exactly as before, and the venue's UFC texts no longer read as contradicting themselves
+tests/test_rc62_kalshi_terms_wording.py
