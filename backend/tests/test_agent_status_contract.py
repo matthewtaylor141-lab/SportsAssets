@@ -529,6 +529,86 @@ def test_the_dedicated_service_rules():
     assert unread["status"] == A.UNKNOWN
 
 
+def test_xaviers_held_positions_are_an_input_judged_per_review():
+    """Fresh only when every open position's ONE current review is CURRENT
+    (agent_work_state.position_class); nothing held -> no such input;
+    positions unreadable -> the input is missing, never fresh."""
+    from sportsassets import xavier_freshness as XF
+    market = {"feed": {"recorded": True, "state": "OWNER_SYNCED",
+                       "beat_at": NOW - 5},
+              "venue": {"recorded": True, "reads": [
+                  {"obs_id": 1, "at": NOW - 10, "error": False}]}}
+
+    def pos(state):
+        return {"position_kind": "PAPER", "group_id": "g", "slug": "s",
+                "current_review": {"management_state": state,
+                                   "recommendation_state": state,
+                                   "reviewed_at": NOW - 40},
+                "book": {"observed_at": NOW - 10, "error": False}}
+
+    cur = A.positions_input({"open": 1, "positions": [pos(XF.S_CURRENT)]},
+                            market, NOW)
+    assert cur["fresh"] is True and cur["age_s"] == 40.0
+    assert cur["bound_rule"] == "PER_REVIEW_FRESHNESS_WINDOW"
+    stale = A.positions_input({"open": 1, "positions": [
+        pos("WAITING_FOR_FRESH_EVIDENCE")]}, market, NOW)
+    assert stale["fresh"] is False
+    assert stale["why"].startswith("0_OF_1_CURRENT")
+    # one held position shown of two open: never fresh
+    cut = A.positions_input({"open": 2, "positions": [pos(XF.S_CURRENT)]},
+                            market, NOW)
+    assert cut["fresh"] is False
+    assert A.positions_input({"open": 0, "positions": []}, market,
+                             NOW) is None
+    gone = A.positions_input({"open": None, "positions": [],
+                              "why": "UndefinedTableError"}, market, NOW)
+    assert gone["fresh"] is False and gone["age_s"] is None
+    # on Xavier's contract: a held position not CURRENT degrades him
+    f = _karen_facts(
+        status=dict(_karen_facts()["status"], agent_id="XAVIER",
+                    cadence={"source": "SERVICING_TASK",
+                             "review_interval_s": 60.0}),
+        verdicts={("ext_pinnacle.servicing", "api"): _verdict(
+            name="ext_pinnacle.servicing", lag=20.0)},
+        market=market, positions={"open": 1, "positions": [
+            pos("WAITING_FOR_FRESH_EVIDENCE")]},
+        refusals=A.refusal_summary({}, window_s=W, source="x"))
+    x = A.agent_contract(SPEC["XAVIER"], f, now=NOW, window_s=W)
+    assert x["status"] == A.DEGRADED
+    assert "INPUT_NOT_FRESH:held positions' current reviews" in \
+        x["status_reasons"]
+    f["positions"] = {"open": 1, "positions": [pos(XF.S_CURRENT)]}
+    assert A.agent_contract(SPEC["XAVIER"], f, now=NOW,
+                            window_s=W)["status"] == A.GREEN
+
+
+def test_the_allocator_lives_by_its_intel_runs():
+    """No agent_status row: the Chief Allocator's heartbeat is his newest
+    ALLOCATOR intel run; its newest run FAILED is FAILED, none is UNKNOWN,
+    one older than 3 x the intel runner's cadence is FAILED."""
+    base = dict(_karen_facts(), status=None, last_run=None,
+                outputs=[{"table": "intel_runs", "id": "ir-1",
+                          "at": NOW - 190, "label": "allocation run ir-1"}],
+                verdicts={("intel.runner", "api"): _verdict(
+                    name="intel.runner", lag=190.0)})
+
+    def alloc(**al):
+        f = dict(base, allocator=dict({"read": True,
+                                       "newest_started_at": NOW - 200,
+                                       "newest_status": "OK",
+                                       "failed": 0}, **al))
+        return A.agent_contract(SPEC["CHIEF_ALLOCATOR"], f, now=NOW,
+                                window_s=W)
+    ok = alloc()
+    assert ok["status"] == A.GREEN, ok["status_reasons"]
+    assert ok["next_cycle_at"] == NOW - 200 + 600
+    assert alloc(newest_status="FAILED", failed=1,
+                 last_failed_at=NOW - 190)["status"] == A.FAILED
+    assert alloc(newest_started_at=None)["status"] == A.UNKNOWN
+    assert alloc(newest_started_at=NOW - 1801)["status"] == A.FAILED
+    assert alloc(read=False)["status"] == A.UNKNOWN
+
+
 def test_the_window_is_bounded():
     assert A.bound_window(10) == A.MIN_WINDOW_S
     assert A.bound_window(10 ** 9) == A.MAX_WINDOW_S
