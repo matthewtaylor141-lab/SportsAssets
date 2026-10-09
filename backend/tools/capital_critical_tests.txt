@@ -1447,3 +1447,5 @@ tests/test_rc62_capability_claim_bounded.py
 tests/test_rc62_derek_heartbeat_truth.py
 # (rc6.2 agent-truth) the Kalshi worker's claims pass evaluates at the read-time clock: a WebSocket book persisted while the pass reads is not BOOK_TIME_IN_FUTURE (production 2,124 in 24 h); explicit clocks stay fixed; receipts stay SHADOW/NONE
 tests/test_rc62_kalshi_claims_read_clock.py
+# (rc6.2 agent-truth) Kalshi cancel goes to the documented V2 path DELETE /portfolio/events/orders/{id} and parses reduced_by as a Decimal (unreadable flagged, never zero; an ack for another order is ERROR); get-order keeps the documented GET /portfolio/orders/{id}
+tests/test_rc62_kalshi_cancel_v2.py

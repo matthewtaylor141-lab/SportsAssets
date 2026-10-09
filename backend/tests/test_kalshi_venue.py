@@ -329,7 +329,7 @@ def test_cancel_needs_the_credential_but_not_the_enable_switch(env):
     got = KV.KalshiClient(t, env=env).cancel("ord-9")
     assert got.status == 204
     assert t.sent[0]["method"] == "DELETE"
-    assert t.sent[0]["url"].endswith("/trade-api/v2/portfolio/orders/ord-9")
+    assert t.sent[0]["url"].endswith("/trade-api/v2/portfolio/events/orders/ord-9")
 
 
 # ───────────────────────────── account reconciliation ─────────────────────────────
@@ -696,7 +696,7 @@ def test_fills_are_parsed_in_both_dialects_and_deduplicated():
 
 def test_cancel_request_and_outcomes():
     assert KO.cancel_request("ord-7") == {
-        "method": "DELETE", "path": "/trade-api/v2/portfolio/orders/ord-7"}
+        "method": "DELETE", "path": "/trade-api/v2/portfolio/events/orders/ord-7"}
     with pytest.raises(ValueError):
         KO.cancel_request("")
     assert KO.parse_cancel(F.ok({}, 200))["outcome"] == "CANCELLED"
