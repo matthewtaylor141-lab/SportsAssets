@@ -399,6 +399,10 @@ TABLE = {
     "EXTERNAL_SOURCE_PRODUCED_NO_PROBABILITY": (S, DATA, "PROBABILITY"),
     "EXTERNAL_VALUATIONS_TABLE_ABSENT": (S, DATA, "AGENT_EVALUATION"),
     "FAIR_VALUE_IS_THE_VENUE_BENCHMARK": (S, CAP, "AGENT_EVALUATION"),
+    # RC6: the growing wait after repeated closes THIS client made -- the
+    # same class as the close it follows (pinnapi_owner.R_CLIENT_CLOSE_
+    # BACKOFF); never a refusal of the feed, never an eviction
+    "FEED_CLIENT_CLOSE_BACKOFF": (S, DATA, "INGESTION"),
     "FEED_CONTROL_READ_TIMED_OUT": (S, DATA, "INGESTION"),
     "FEED_CONTROL_UNREADABLE": (S, DATA, "INGESTION"),
     "FEED_DECIDER_WRITER_LOCK_NOT_HELD": (S, CAP, "INGESTION"),

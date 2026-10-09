@@ -235,6 +235,50 @@ def close_of(exc, *, now: Optional[float] = None,
         return dict(out, initiator=CLOSE_UNKNOWN, code=None, reason=None)
 
 
+#: ── A CLOSE OF OUR OWN THAT KEEPS COMING WAITS LONGER EACH TIME (RC6) ────
+#:
+#: THE DEFECT (integration review of 412c4962). A CLIENT close reconnects
+#: with the ordinary BACKOFF, and that backoff resets on every delivered
+#: epoch (`attempt = 0`, "backoff resets only on delivery"). A CLIENT close
+#: that repeats AFTER delivery -- a provider frame that keeps exceeding our
+#: frame cap (1009), an event loop that keeps stalling past the keepalive
+#: (1011) -- therefore reconnected every BACKOFF[0] (1 s) forever, each time
+#: a new epoch that drops the cache and reloads every subscribed snapshot,
+#: and nothing on the heartbeat said so.
+#:
+#: THE REPAIR: CLIENT closes are counted in a rolling CLIENT_CLOSE_WINDOW_S.
+#: The first CLIENT_CLOSES_FREE inside it reconnect as before; from the
+#: next one the owner waits client_close_wait_s(level) -- 5 s, doubling, at
+#: most 300 s -- before it contends again. Delivery does NOT reset it: the
+#: level only falls back to 0 when a CLIENT close arrives a full window
+#: after the one before (the waits themselves thin the window, so a close
+#: that comes back within a window of the last one keeps the level). The
+#: wait is the owner's state (CLIENT_CLOSE_BACKOFF), the authority's reason
+#: (R_CLIENT_CLOSE_BACKOFF), a transition, and `client_close_backoff` on
+#: status() and so on the heartbeat. It is never a refusal and never counts
+#: toward EVICTIONS_MAX; a stop ends it at once. The lease is released while
+#: it waits, as in every backoff. EVICTIONS_MAX, EVICTION_WINDOW_S,
+#: SILENCE_S and the 30 s rule are unchanged.
+CLIENT_CLOSE_WINDOW_S = 600.0
+CLIENT_CLOSES_FREE = 2
+CLIENT_CLOSE_BACKOFF_BASE_S = 5.0
+CLIENT_CLOSE_BACKOFF_MAX_S = 300.0
+#: the owner's state and the transition while it waits
+CLIENT_CLOSE_BACKOFF = "CLIENT_CLOSE_BACKOFF"
+#: the authority's revocation reason while it waits
+R_CLIENT_CLOSE_BACKOFF = "FEED_CLIENT_CLOSE_BACKOFF"
+
+
+def client_close_wait_s(level: int) -> float:
+    """Seconds to wait before reconnecting at a CLIENT-close backoff level:
+    0 at level 0, then 5, 10, 20 ... capped at 300. Pure."""
+    n = int(level or 0)
+    if n <= 0:
+        return 0.0
+    return float(min(CLIENT_CLOSE_BACKOFF_MAX_S,
+                     CLIENT_CLOSE_BACKOFF_BASE_S * 2 ** min(n - 1, 16)))
+
+
 def _task_is_being_cancelled() -> bool:
     """True when the CURRENT task itself was asked to cancel (shutdown),
     as opposed to a CancelledError raised from a driver future."""
@@ -373,6 +417,17 @@ class FeedOwner:
         #: every unrequested close by side (R_CLIENT_CLOSED) and the last one
         self.closes_by_initiator: dict = {}
         self.last_close: Optional[dict] = None
+        #: CLIENT closes (monotonic) inside CLIENT_CLOSE_WINDOW_S, the
+        #: backoff level they reached, the last one, and the wait they ask
+        #: of run() (see CLIENT_CLOSE_BACKOFF). Never reset by delivery,
+        #: nor by a stand-down's re-entry: they belong to this owner.
+        self.client_closes: list = []
+        self.client_close_level = 0
+        self.client_close_last: Optional[float] = None
+        self.client_close_wait = 0.0
+        #: the last CLIENT-close backoff, for the heartbeat (wall clock:
+        #: display only)
+        self.client_close_backoff: Optional[dict] = None
         #: the lease currently held (or being acquired), so a supervisor can
         #: discard it if this owner's task ever ends without retiring it
         self.lease = None
@@ -383,6 +438,26 @@ class FeedOwner:
 
     def subscriptions(self):
         return [(s, sp) for s in self.streams for sp in self.sport_ids]
+
+    def _client_close(self, t: float) -> float:
+        """Count one CLIENT close at monotonic `t`; return the seconds to
+        wait before reconnecting (0.0 below the threshold). Escalates from
+        the (CLIENT_CLOSES_FREE + 1)th close inside CLIENT_CLOSE_WINDOW_S,
+        and keeps escalating while each close comes within a window of the
+        one before; resets only after a quiet window."""
+        gap = (None if self.client_close_last is None
+               else t - self.client_close_last)
+        self.client_closes = [x for x in self.client_closes
+                              if t - x < CLIENT_CLOSE_WINDOW_S] + [t]
+        self.client_close_last = t
+        if len(self.client_closes) > CLIENT_CLOSES_FREE or (
+                self.client_close_level > 0 and gap is not None
+                and gap < CLIENT_CLOSE_WINDOW_S):
+            self.client_close_level += 1
+        else:
+            self.client_close_level = 0
+        self.client_close_wait = client_close_wait_s(self.client_close_level)
+        return self.client_close_wait
 
     def stop(self):
         # Revoke synchronously: async cleanup may be waiting on a DB read
@@ -442,9 +517,34 @@ class FeedOwner:
                               else "REFUSED_BY_PROVIDER")
                 return
             if not self.stop_event.is_set():
-                await self._wait(BACKOFF[min(attempt, len(BACKOFF) - 1)])
+                wait = BACKOFF[min(attempt, len(BACKOFF) - 1)]
+                cw, self.client_close_wait = self.client_close_wait, 0.0
+                if cw > wait:
+                    # A CLOSE OF OUR OWN THAT KEEPS COMING: named, never a
+                    # refusal (see CLIENT_CLOSE_BACKOFF)
+                    wait = cw
+                    self._client_close_backoff_begins(cw)
+                await self._wait(wait)
+                if self.client_close_backoff is not None:
+                    self.client_close_backoff["waiting"] = False
                 attempt += 1
         self.state = "STOPPED"
+
+    def _client_close_backoff_begins(self, wait: float) -> None:
+        now = self.clock()
+        self.state = CLIENT_CLOSE_BACKOFF
+        self.cache.lost(R_CLIENT_CLOSE_BACKOFF)
+        self.client_close_backoff = {
+            "waiting": True, "wait_s": wait, "level": self.client_close_level,
+            "closes_in_window": len(self.client_closes),
+            "window_s": CLIENT_CLOSE_WINDOW_S,
+            "since_at": round(now, 3), "until_at": round(now + wait, 3)}
+        self._note(CLIENT_CLOSE_BACKOFF, wait_s=wait,
+                   level=self.client_close_level,
+                   closes_in_window=len(self.client_closes))
+        log.warning("pinnapi feed: %d closes of our own inside %.0fs; "
+                    "waiting %.0fs before reconnecting",
+                    len(self.client_closes), CLIENT_CLOSE_WINDOW_S, wait)
 
     async def _arm_state(self):
         """None when armed, else the reason it is not (all fail closed)."""
@@ -550,8 +650,12 @@ class FeedOwner:
                     if side == CLOSE_CLIENT:
                         # OURS (keepalive timeout, frame cap): never another
                         # holder of the key; reconnect like any lost socket
+                        # -- after a growing wait when it keeps coming
                         self.cache.lost(R_CLIENT_CLOSED)
-                        self._note(R_CLIENT_CLOSED, close=info)
+                        wait = self._client_close(t)
+                        self._note(R_CLIENT_CLOSED, close=info,
+                                   closes_in_window=len(self.client_closes),
+                                   backoff_s=wait)
                         return attempt
                     # a close we did not ask for after a healthy stream may
                     # be another holder of the account key evicting us
@@ -617,6 +721,12 @@ class FeedOwner:
                 "unrequested_closes_by_initiator": dict(
                     self.closes_by_initiator),
                 "last_unrequested_close": self.last_close,
+                # the last CLIENT-close wait as it was recorded, and the
+                # level the next CLIENT close would build on
+                "client_close_backoff": (
+                    dict(self.client_close_backoff,
+                         current_level=self.client_close_level)
+                    if self.client_close_backoff else None),
                 "lease_key": FEED_LOCK_KEY, "sport_ids": self.sport_ids,
                 "streams": self.streams, "transitions": self.events[-10:],
                 "cache": self.cache.census()}

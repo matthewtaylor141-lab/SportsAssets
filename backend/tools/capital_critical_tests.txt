@@ -1351,3 +1351,5 @@ tests/test_rc6_feed_close_provenance.py
 tests/test_rc6_held_watch_identity.py
 # (RC6) a PinnAPI close with both close frames and no recorded order is UNKNOWN (eviction-consistent, counts toward EVICTIONS_MAX), never CLIENT; the one close record (transition, last_unrequested_close, heartbeat) also carries the receive gap and socket age
 tests/test_rc6_pinnapi_close_record.py
+# (RC6) a PinnAPI CLIENT close that repeats waits 5, 10, 20 ... 300 s from the 3rd inside 600 s (delivery does not reset it; named on the heartbeat, in the transitions and by the authority reason); never a refusal, never counted toward EVICTIONS_MAX
+tests/test_rc6_pinnapi_client_close_backoff.py
