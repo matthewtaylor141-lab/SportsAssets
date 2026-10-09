@@ -376,6 +376,40 @@ def test_alias_void_terms_count_every_alias_by_name():
     assert cen["void_terms"]["source"].startswith("market_plane_rules")
 
 
+def test_the_claim_scan_runs_its_engine_passes_off_the_event_loop(
+        monkeypatch):
+    """Adriana's runner is in the API process: the claim scan's pure engine
+    passes run in a worker thread, never on the event loop that serves the
+    API (its database reads stay on the loop)."""
+    import threading
+
+    from sportsassets import canonical_claims_db as CDB
+    from sportsassets.redteam import settlement as RTS
+    y = inst("KALSHI", "K-NYY", "YES", "HOME", "0.30")
+    t = inst("KALSHI", "K-TB", "YES", "AWAY", "0.30")
+    built = CC.build_claims(FX, [y, t])
+    seen = []
+
+    async def fake_assemble(conn, *, now=None):
+        return [(FX, built, [y, t])]
+
+    async def fake_apply(conn, b):
+        return b, {}
+
+    real = AC.scan_fixture
+
+    def spy(fx, b, **kw):
+        seen.append(threading.current_thread() is threading.main_thread())
+        return real(fx, b, **kw)
+    monkeypatch.setattr(CDB, "assemble", fake_assemble)
+    monkeypatch.setattr(RTS, "apply", fake_apply)
+    monkeypatch.setattr(AC, "scan_fixture", spy)
+    cen = asyncio.run(CDB.claims_census(object(), now=CNOW))
+    assert seen == [False]
+    assert cen["census"]["near_complement_pairs"] == 1
+    assert cen["census"]["markets_read"] == 2
+
+
 def test_partial_fills_on_a_cross_venue_pair_are_exposure_never_profit():
     """A proven cross-venue complement (fixed terms on both venues, one
     stated source) planned in SHADOW: the venues never fill atomically --
@@ -492,7 +526,10 @@ def test_the_cross_venue_scan_records_its_pairs_and_names_the_missing_pmus_book(
     from sportsassets.api import command_venues as V
     from sportsassets.workers import kalshi_market_data as W
 
-    ev = "KXMLBGAME-26OCT072000TBNYY"
+    # identifiers of this test only: market_plane.rules keeps a process-
+    # local fingerprint cache (_SEEN) that a rolled-back upsert must not
+    # leave behind for another test's identical row (cleared in `finally`)
+    ev = "KXMLBGAME-99OCT072000TBNYY"
     slug = "aec-mlb-tb-nyy-2099-10-07"
     kev = {"status": "ESTABLISHED", "settlement": dict(FAIR),
            "verification_sources": ["MLB"]}
@@ -600,6 +637,8 @@ def test_the_cross_venue_scan_records_its_pairs_and_names_the_missing_pmus_book(
         finally:
             await tr.rollback()
             await c.close()
+            for cid in ("kalshi:%s-NYY" % ev, "kalshi:%s-TB" % ev, slug):
+                RULES._SEEN.pop(cid, None)
     asyncio.run(go())
 
 
@@ -609,13 +648,14 @@ def test_a_real_pass_reads_captured_terms_records_both_scans_and_reads_back():
     from sportsassets.agents import registry as R
     from sportsassets.api import command_floor as F
 
+    base = "tsc-nba-lal-bos-2099-01-01-%s"
+
     async def go():
         conn, tx = await _tx()
         try:
             for t in ("kalshi_fixtures_current", "kalshi_books_current"):
                 await conn.execute("DELETE FROM %s" % t)
             now = time.time()
-            base = "tsc-nba-lal-bos-2099-01-01-%s"
             for line, ask, bid, age in (("210pt5", "0.40", "0.38", 3),
                                         ("211pt5", "0.49", "0.47", 2)):
                 slug = base % line
@@ -680,4 +720,6 @@ def test_a_real_pass_reads_captured_terms_records_both_scans_and_reads_back():
         finally:
             await tx.rollback()
             await conn.close()
+            for line in ("210pt5", "211pt5"):
+                RULES._SEEN.pop(base % line, None)
     asyncio.run(go())

@@ -345,6 +345,7 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
         # (production 088af82: 21 BOOK_TIME_IN_FUTURE of 139). A venue clock
         # ahead of ours still is; staleness only gets stricter.
         now = max(now, time.time())
+    todo = []
     for fx, built, insts in assembled:
         # the void terms of every alias READ (before the certificates strip
         # any: an alias is read whether or not it may be a leg)
@@ -356,7 +357,14 @@ async def claims_census(conn, *, now: float | None = None) -> dict:
         aliases += len(insts)
         fresh += sum(1 for i in insts if i.observed_at is not None
                      and now - float(i.observed_at) <= KMD.BOOK_SLA_S)
-        scans.append(AC.scan_fixture(fx, built, now=now))
+        todo.append((fx, built))
+    # (RC6) the engine runs (complementary pairs and the near complements'
+    # labelled conditional economics) are pure CPU: off the event loop of
+    # the process that reads them (Adriana's runner is in the API process),
+    # in one worker thread, results identical
+    import asyncio
+    scans = await asyncio.to_thread(
+        lambda: [AC.scan_fixture(fx, built, now=now) for fx, built in todo])
     books = merge_book_census(bks)
     return AC.census_result(scans, markets_read=aliases, books_fresh=fresh,
                             skipped={}, void_terms=AC.merge_void_terms(vts),
