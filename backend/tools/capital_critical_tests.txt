@@ -1349,3 +1349,11 @@ tests/test_audrey_reconciles_while_the_lane_is_off.py
 tests/test_rc6_feed_close_provenance.py
 # (RC6) the held watch targets exactly the fixtures the held reads price: proven line families and the entry-proven PinnAPI fixture resolve; unproven families, other types and unscoped sports refuse by name
 tests/test_rc6_held_watch_identity.py
+# (RC6 sw-reds) a module pool whose event loop is closed is never handed out: the next loop (API request, worker cycle) builds its own; open other-loop pools and stand-ins untouched (the full-suite-only three-agents failure)
+tests/test_rc6_db_pool_dead_loop.py
+# (RC6 sw-reds) a BETTOR shadow opportunity and its decision commit together: a worker stopped between them leaves no orphan in its bucket, a same-bucket retry decides once; V6 policy sha unchanged
+tests/test_rc6_opportunity_decision_atomic.py
+# (RC6 sw-reds) venue rules text of events still owed a fresh window is read after the cycle's time-critical work into the same hourly cache (TTL unchanged); refused or failed reads are not cached; bounded
+tests/test_rc6_rules_read_ahead.py
+# (RC6 sw-reds) the software-reds gate names the SOFTWARE codes it counts (bounded); its value is still software == 0
+tests/test_rc6_software_reds_gate_names_codes.py
