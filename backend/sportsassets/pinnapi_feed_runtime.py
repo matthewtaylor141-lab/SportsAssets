@@ -120,6 +120,7 @@ _STATE: dict = {"owner": None, "task": None, "beat": None, "pool": None,
                 "census": None, "runtime_id": None, "held": None,
                 "scope": None, "discovery": None, "restarts": 0,
                 "last_restart": None, "standdown": None,
+                "standdown_prior": None, "eviction_standdowns": 0,
                 "eviction_reentries": 0}
 CENSUS_S = 60.0
 #: PinnAPI-native discovery (pinnapi_discovery) rides the census cadence:
@@ -221,9 +222,15 @@ def digest() -> dict:
     d["owner_task"] = owner_task_state()
     d["last_owner_restart"] = _STATE.get("last_restart")
     # THE STAND-DOWN, on the heartbeat: since when, until when, which
-    # re-entry is next, and how many there have been (RC6)
-    d["eviction_standdown"] = (dict(_STATE["standdown"])
-                               if _STATE.get("standdown") else None)
+    # re-entry is next, and how many there have been (RC6). Only THIS
+    # runtime's record is its stand-down; the last record of an earlier
+    # runtime in this process (a hold change cut it short, see
+    # _retire_standdown) stays visible beside it under its own name.
+    d["eviction_standdown"] = _own_standdown()
+    d["eviction_standdown_prior_runtime"] = (
+        dict(_STATE["standdown_prior"]) if _STATE.get("standdown_prior")
+        else None)
+    d["eviction_standdowns"] = int(_STATE.get("eviction_standdowns") or 0)
     d["eviction_reentries"] = int(_STATE.get("eviction_reentries") or 0)
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
@@ -514,11 +521,66 @@ def owner_task_state() -> dict:
 #: stand-down, the stand-downs doubling. Every other refusal -- the
 #: decider's writer lock lost, the provider refusing the key or the plan,
 #: no key in this service -- stays permanent.
+#:
+#: A STAND-DOWN BELONGS TO THE RUNTIME THAT OPENED IT; THE DOUBLING BELONGS
+#: TO THE PROCESS (review of 9c0c1fe6). ext_pinnacle_loop runs
+#: shutdown_default and then start_default in the same process every time a
+#: writer hold ends (WRITER_LOCK_NOT_HELD, FENCE_UNANSWERED -- the API's
+#: event loop was stalling 2 s and more after the RC5 deploy). The first
+#: cut left an open stand-down in _STATE across that change, so the NEXT
+#: owner's first eviction loop re-entered at once (or after the old
+#: record's remainder): 2 x EVICTIONS_MAX connections back to back against
+#: a possible real holder, and the new runtime's heartbeat showing the old
+#: owner's stand-down. Now:
+#:   - every record carries the runtime_id it was opened for, and a record
+#:     of another runtime is never this owner's stand-down
+#:     (STANDDOWN_OF_ANOTHER_RUNTIME, retired, never re-entered);
+#:   - shutdown_default closes an open record as
+#:     STANDDOWN_CUT_SHORT_BY_SHUTDOWN and keeps it, labelled, as the prior
+#:     runtime's (`eviction_standdown_prior_runtime` on the heartbeat);
+#:   - the length is chosen by how many stand-downs THIS PROCESS has opened
+#:     (`eviction_standdowns`), so a hold change does not reset the
+#:     doubling: the next hold's owner connects at once -- exactly as a new
+#:     hold's owner always has, before RC6 too -- and that connection is a
+#:     return to the provider like any re-entry, so its next loop stands
+#:     down for the NEXT length, not the first again.
+#: Only a process restart clears the doubling, as it cleared the permanent
+#: refusal before RC6.
 EVICTION_STANDDOWN_S = (1800.0, 3600.0, 7200.0, 14400.0)
+#: how a stand-down record ended (`ended_by`); records, not refusals
+STANDDOWN_ENDED_BY_REENTRY = "REENTERED_AFTER_STANDDOWN"
+STANDDOWN_CUT_SHORT_BY_SHUTDOWN = "CUT_SHORT_BY_OWNER_SHUTDOWN"
+STANDDOWN_OF_ANOTHER_RUNTIME = "RETIRED_RECORD_OF_ANOTHER_RUNTIME"
 
 
 def _standdown_s(n: int) -> float:
     return EVICTION_STANDDOWN_S[min(max(0, n), len(EVICTION_STANDDOWN_S) - 1)]
+
+
+def _own_standdown() -> Optional[dict]:
+    """This runtime's stand-down record (a copy), else None."""
+    sd = _STATE.get("standdown")
+    if sd is None or sd.get("runtime_id") != _STATE.get("runtime_id"):
+        return None
+    return dict(sd)
+
+
+def _retire_standdown(now: float, why: str) -> Optional[dict]:
+    """Move the current record, whatever its runtime, to `standdown_prior`.
+    An open one is closed at `now` with `why`; one that already ended keeps
+    its own ending. Returns the retired record, else None."""
+    sd = _STATE.get("standdown")
+    if sd is None:
+        return None
+    sd = dict(sd)
+    if sd.get("ended_at") is None:
+        sd["ended_at"], sd["ended_by"] = now, why
+        log.warning("pinnapi feed: stand-down of runtime %s ended early "
+                    "(%s) %.0fs before its stated end", sd.get("runtime_id"),
+                    why, max(0.0, float(sd.get("until") or now) - now))
+    _STATE["standdown_prior"] = sd
+    _STATE["standdown"] = None
+    return sd
 
 
 def _eviction_standdown(o, now: float) -> Optional[str]:
@@ -526,13 +588,20 @@ def _eviction_standdown(o, now: float) -> Optional[str]:
     owner once. Returns "EVICTION_STANDDOWN_ENDED" when it re-entered, else
     None. Must run on the event loop."""
     from . import pinnapi_owner as O
+    rid = _STATE.get("runtime_id")
     sd = _STATE.get("standdown")
+    if sd is not None and sd.get("runtime_id") != rid:
+        # another runtime's record neither holds this owner to its clock
+        # nor lets it re-enter at that record's end
+        _retire_standdown(now, STANDDOWN_OF_ANOTHER_RUNTIME)
+        sd = None
     if sd is None or sd.get("ended_at") is not None:
-        n = int(_STATE.get("eviction_reentries") or 0)
-        sd = {"refused": O.R_EVICTION_LOOP, "since": now,
+        n = int(_STATE.get("eviction_standdowns") or 0)
+        sd = {"refused": O.R_EVICTION_LOOP, "runtime_id": rid, "since": now,
               "seconds": _standdown_s(n), "until": now + _standdown_s(n),
-              "reentry": n + 1, "ended_at": None}
+              "reentry": n + 1, "ended_at": None, "ended_by": None}
         _STATE["standdown"] = sd
+        _STATE["eviction_standdowns"] = n + 1
         o._note("EVICTION_STANDDOWN", seconds=sd["seconds"],
                 until=round(sd["until"], 3), reentry=sd["reentry"])
         log.warning("pinnapi feed: eviction loop suspected; standing down "
@@ -553,8 +622,9 @@ def _eviction_standdown(o, now: float) -> Optional[str]:
     o.refused = None
     o.evictions = []
     o.state = "STARTING"
-    sd["ended_at"] = now
-    _STATE["eviction_reentries"] = sd["reentry"]
+    sd["ended_at"], sd["ended_by"] = now, STANDDOWN_ENDED_BY_REENTRY
+    _STATE["eviction_reentries"] = int(
+        _STATE.get("eviction_reentries") or 0) + 1
     o._note("EVICTION_STANDDOWN_ENDED", reentry=sd["reentry"],
             stood_down_s=round(now - sd["since"], 3))
     log.warning("pinnapi feed: stand-down over after %.0fs; re-entering "
@@ -758,16 +828,23 @@ async def shutdown_default(wait_s: float = 8.0) -> dict:
             pass
         o.lease = None
     o.cache.lost(O.R_STOPPED)
+    # THE STAND-DOWN DOES NOT OUTLIVE ITS RUNTIME (review of 9c0c1fe6): an
+    # open one is closed here as cut short and kept, labelled, as the prior
+    # runtime's; the next hold's owner opens its own (the doubling carries)
+    retired = _retire_standdown(time.time(), STANDDOWN_CUT_SHORT_BY_SHUTDOWN)
     final_status = "WRITTEN_OR_SUPERSEDED"
     try:
         await _write_heartbeat(_STATE["pool"], {
             "state": "RELEASED" if verdict == "CLOSED" else "STOPPING_UNCONFIRMED",
             "runtime_id": _STATE.get("runtime_id"), "beat_at": time.time(),
             "shutdown_verdict": verdict, "authority_proven": False,
+            "eviction_standdown_at_shutdown": retired,
             "c1_decision_effect": DECISION_EFFECT}, final=True)
     except Exception as exc:
         final_status = "UNAVAILABLE:" + type(exc).__name__
         log.warning("pinnapi terminal heartbeat unavailable: %s", type(exc).__name__)
+    # `standdown` was retired above; `standdown_prior`, `eviction_standdowns`
+    # and `eviction_reentries` are the process's and are kept on purpose
     _STATE.update(owner=None, task=None, beat=None, pool=None, runtime_id=None,
                   census=None, held=None, scope=None, discovery=None,
                   restarts=0, last_restart=None)
