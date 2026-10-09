@@ -459,3 +459,21 @@ body.bt-page-trader,body:has(>header.topbar){padding-top:var(--sa-t);padding-lef
   body.hq .bt-trader-launch:not(.bt-trader-launch--nav){padding:11px 14px;}
   body.hq .bt-trader-launch:not(.bt-trader-launch--nav) span{display:none;}
 }
+
+
+/* TRADER ON A PHONE ON ITS SIDE (every pointer) ---------------------------- */
+/* A landscape phone (844 x 390) took the tablet Trader: the metrics strip,
+   the game ribbon and the view / filter toolbar all sticky, stacked by
+   experience-v4.js stackSticky() at 0 / 111 / 175 px. Scrolling the position
+   wall they held 297 of 390 px (harness, synthetic 5-position snapshot built
+   by the backend's trader_mode.build_snapshot, frontend f97c59f2): a 326 px
+   position card showed through a 93 px slot, and a card's Evidence and Focus
+   buttons brought to the middle of the screen lay under the Standing orders
+   tab (COVERED_BY on both controls, 17/19). The portrait phone already keeps
+   only the compact ribbon sticky (experience-v4.css, max-width 760 px: "two
+   rows of metrics are ~40% of the screen"); a phone on its side gets the
+   same, and stackSticky() then pins the ribbon alone at the top. */
+@media (min-width:761px) and (max-height:500px){
+  body.bt-page-trader.bt-exp-v4 .metrics{position:static;}
+  body.bt-page-trader.bt-exp-v4 .workspace-toolbar{position:static;}
+}

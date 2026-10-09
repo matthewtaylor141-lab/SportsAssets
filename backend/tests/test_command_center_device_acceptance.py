@@ -335,6 +335,31 @@ def test_a_phone_on_its_side_gets_the_pocket_command_center():
     assert ".bt-trader-launch{right:12px;padding:11px 14px;z-index:45}" in read(COMMAND / "command-polish.css")
 
 
+def test_a_phone_on_its_side_keeps_only_the_trader_ribbon_sticky():
+    """With positions on the wall (harness, synthetic 5-position snapshot),
+    the 844 x 390 Trader stacked three sticky bars (metrics 0-111, game
+    ribbon 111-175, toolbar 175-297 px: 297 of 390 px) and a card's Evidence
+    and Focus buttons at the middle of the screen lay under the Standing
+    orders tab. The portrait phone's rule (only the ribbon sticky) now holds
+    on a phone on its side; tablets and desktops keep the full stack."""
+    css = read(COMMAND / "device-fit.css")
+    block = css[css.index("@media (min-width:761px) and (max-height:500px){"):]
+    block = block[:block.index("}\n}") + 3]
+    assert "body.bt-page-trader.bt-exp-v4 .metrics{position:static;}" in block
+    assert "body.bt-page-trader.bt-exp-v4 .workspace-toolbar{position:static;}" in block
+    assert "game-ribbon" not in block   # the compact ribbon stays sticky
+    v4 = read(COMMAND / "experience-v4.css")
+    # the portrait phone's own rule, and the stack tablets / desktops keep
+    assert "body.bt-page-trader.bt-exp-v4 .metrics{position:static;grid-template-columns:repeat(3,1fr);margin-bottom:12px;}" in v4
+    assert "body.bt-page-trader.bt-exp-v4 .metrics{position:sticky;top:76px;" in v4
+    assert "body.bt-page-trader.bt-exp-v4 .workspace-toolbar{position:sticky;top:142px;" in v4
+    # stackSticky() pins only what is sticky, from the top, and clears the rest
+    assert "if(getComputedStyle(el).position!=='sticky'){if(el.style.top)el.style.top='';return}" in read(COMMAND / "experience-v4.js")
+    # loaded after experience-v4.css on the Trader page, so the rule wins
+    html = read(COMMAND / "trader.html")
+    assert html.index('href="device-fit.css"') > html.index('href="experience-v4.css"')
+
+
 def test_talk_lands_on_the_agents_framed_page_below_the_bars():
     css = read(COMMAND / "device-fit.css")
     assert "body.bt-hq2 #page{scroll-margin-top:calc(72px + var(--ops-hdr-h,0px) + var(--sa-t));}" in css
