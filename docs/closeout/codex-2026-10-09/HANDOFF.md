@@ -2,59 +2,68 @@
 
 Base: `claude/red-team-closeout-v1` at
 `b3f1b0cdaa159a08ee8f65d2f6bde83e76112f86`.
-Branch: `codex/bettor-closeout-2026-10-09`.
+Branch: `codex/bettor-closeout-2026-10-09`, PR #1.
+Claude owns independent integration approval and production release.
+No release-branch change, deployment, credential rotation or capital-authority
+change occurs here. SMALL LIVE remains SHADOW.
 
-Codex owns this isolated security increment. Claude owns RC6 integration and
-production release. No release-branch update, deployment, credential rotation,
-capital-authority change, order, or live activation is part of this increment.
-SMALL LIVE remains SHADOW. The selected frontend checkout remains untouched.
+## Corrections required by integration review
 
-## Confirmed defects and remediation
+Rejected head `38e1da046428b4a933cfac16f4833840f4919db9` reproduced both
+introduced lockouts. Five regression cases failed: another client's correct
+COMMAND read/control passwords were refused after ten wrong guesses through
+a shared Netlify egress; a newly arriving valid desk/COMMAND client or admin
+monitor was refused when 1,000 recent clients occupied the map.
 
-| Severity | Subsystem | Reproduction | Remediation | Owner |
-|---|---|---|---|---|
-| P1 | Authentication | Non-ASCII admin headers, passwords and signed-session signatures raise TypeError rather than returning a normal refusal; the header failure also crashes a public health request | Compare credential text as UTF-8 bytes in constant time, without normalization or changing callers' whitespace/scope rules | Codex |
-| P1 | Admin throttle | 4,000 fresh clients after the global limit grows the map to 4,060 entries, exceeding its declared 2,000 bound | Check global budget before allocating client state; discard empty expired budgets | Codex |
-| P1 | Unlock throttle | Caller-controlled leftmost forwarding hop resets the guess budget; 2,000 recent clients exceed the 1,000-key storage bound | Use the edge-appended rightmost hop; refuse new clients at capacity until expired budgets release it | Codex |
-| P1 | Public admin diagnostic | Headerless `/api/admin/ping` bypasses the admin-header guard and can grow its separate map; spoofed forwarding hops reset its budget | Reuse the bounded atomic client budget and preserve ten requests/minute even for valid credentials | Codex |
-| P1 | Concurrent throttle accounting | The original code overspends client/global/unlock budgets when requests interleave between read and charge | Serialize in-memory budget read/charge with a short lock, holding no I/O or await | Codex |
+The successor takes the integrator's release-scoped option: preserve the base
+first-hop proxy client key for unlock/ping, while retaining the admin guard's
+separate rightmost-hop identity and global failure ceiling. It introduces no
+proxy secret or environment requirement. This retains the base forwarding
+trust model; it does not claim cryptographically authenticated proxy identity
+or repair caller-controlled first-hop spoofing. A signed Netlify proxy is a
+separate configuration/workflow change if the owner chooses it later.
 
-`concurrency-baseline.json` records the original b3f1b0cd functions under an
-adversarial scheduler: 120 requests on 24 threads, a 1 ms yield between read and
-charge. Recorded guesses were client 21/10, global 83/60, unlock 120/10. These
-are deterministic interleaving challenges, not production rate measurements.
-The new regression suite also exercises non-ASCII, bidi text, surrogate text,
-long input, distinct Unicode representations, spoofed forwarding hops,
-saturated storage, expiry, valid credentials and all session scopes.
+Unlock/ping maps use bounded OrderedDict LRU eviction, rather than denying all
+new clients at capacity. Current retained clients keep the existing 10/minute
+limit; eviction can remove an older client's budget, a deliberate bounded
+storage/availability tradeoff requested by the integrator. This is not a
+claim of exact unlimited-client tracking. Expiry/eviction avoids full-map scans
+on every refusal. Atomic read/charge remains protected by a short lock.
+Admin wrong-token traffic retains its 10/client and 60/global per 600 seconds,
+with global-first rejection before allocating new client state. Its identity
+joins every X-Forwarded-For header line before selecting the final hop.
 
-Before the auth repair the first regression run had 16 failures / 1 pass.
-After that repair, the added unlock regressions independently failed 2 / 19.
-The complete relevant pinned-environment selection now passes 88 / 88,
-including the existing auth/scope suites, runtime manifest and fresh-database
-migration. This is local validation, not a GitHub gate verdict or production
-acceptance. New hostile-input tests are mandatory in the capital-critical list.
+Non-ASCII credentials compare UTF-8 bytes in constant time without Unicode
+normalization, changing whitespace rules, accepting defaults, or changing
+session scopes. The remaining release-receipt admin and Slack signature
+comparisons now use the same helper. Correct credentials remain required.
 
-## Environment and acceptance boundaries
+## Measured validation
 
-Pinned interpreter: the repository Dockerfile's Python 3.12.3 image by digest.
-Dependencies: requirements.lock and requirements-test.lock; pip check passes;
-runtime_manifest confirms 87/87 distributions and exact interpreter. The cloud
-proxy's public CA bundle is supplied to pip, including its build subprocesses;
-TLS verification stays enabled. PostgreSQL 16 is local and disposable.
+The rejected head fails all five newly added lockout regressions. Corrected
+pinned auth selection: **117/117 passing** (`test_auth_hostile_inputs`,
+`test_admin_token_guard`, `test_desk_auth`, `test_wall`,
+`test_the_operator_session_is_scoped`, `test_no_published_default_credential`).
+It includes valid sign-ins/cookies after saturation, duplicate forwarding
+headers, expiry, Unicode/surrogates, preserved valid-token ping limits and
+concurrent accounting. Runtime/fresh-database and full exact-SHA gates are
+reported separately after source freeze; prior SHA receipts do not substitute.
 
-The selected older frontend checkout's fresh-migration defect is ALREADY FIXED
-in this RC6 candidate by bootstrap_collector_tables. Codex does not duplicate
-that implementation. The candidate's existing fresh-database and repeatability
-regressions pass.
+The recorded 21/83/120 overspending baseline in `concurrency-baseline.json`
+uses OS threads with an injected 1 ms sleep between read and charge. It is a
+thread-interleaving stress test, not a reproduced production async-event-loop
+P1: production's no-await path does not provide that interleaving. The locks
+are retained as bounded defensive accounting, with no I/O under them.
 
-Production's public health read reports commit `732cc0c`, database healthy.
-This does not establish workers/market-plane SHAs, production freshness,
-profitability, stability, or signed acceptance. Exact-SHA GitHub checks and
-production readback remain required after this increment. No subjective
-95% score or profitability claim is made.
+Pinned environment: Python 3.12.3 from production's digest, locked runtime/test
+dependencies, PostgreSQL 16, Node 24.19.0 and jq 1.7.1. TLS verification remains
+enabled. Synthetic credentials and local databases are not production proof.
 
-Next: independent RC6 freshness/Xavier/economics/receipt tests, exact-SHA
-backend-tests/capital-critical/commit-guard/engine-diagnostic, then review by
-Claude. A merge creates a new candidate SHA and requires gates on that SHA.
+Verified production collection 37947064416 is for release
+`3d5af039d42026df16d9dad6ec0d4587b0141101` and implementation
+`b3f1b0cdaa159a08ee8f65d2f6bde83e76112f86`. Its acceptance remains RED.
+Both collected packets and manifests pass independent Sigstore verification;
+this does not establish >=95% production readiness, freshness or profitability.
 
-The public diagnostic follow-up independently reproduced two failures on the first security increment (headerless storage saturation and forwarded-hop rotation). Three additional regression cases pass after the repair, including its unchanged valid-credential request limit. The final candidate supersedes 8a86f614; exact-SHA gates are required again for the changed code.
+The successor must be independently re-reviewed. Approved integration creates
+a new SHA requiring all four gates; creating a release SHA requires them again.

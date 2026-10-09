@@ -1,5 +1,6 @@
 """Malformed credentials refuse normally and throttled traffic stays bounded."""
 from types import SimpleNamespace
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 import time
 import asyncio
@@ -101,27 +102,27 @@ def test_expired_clients_do_not_accumulate_across_attack_windows():
     assert len(G._FAILS) <= G.MAX_CLIENTS
 
 
-def test_unlock_budget_uses_the_edges_hop_not_the_callers_claim():
+def test_unlock_budget_preserves_release_base_clients_across_shared_proxy_hops():
     client = TestClient(A.app)
     for i in range(10):
         response = client.post("/api/desk/unlock", json={"password": "wrong"},
-            headers={"x-forwarded-for": "spoof-%d, 203.0.113.7" % i})
+            headers={"x-forwarded-for": "192.0.2.10, proxy-%d" % i})
         assert response.status_code == 200
         assert response.json()["ok"] is False
     response = client.post("/api/desk/unlock", json={"password": "wrong"},
-        headers={"x-forwarded-for": "different-spoof, 203.0.113.7"})
+        headers={"x-forwarded-for": "192.0.2.10, another-proxy"})
     assert response.status_code == 429
 
 
 def test_unlock_client_map_is_bounded_even_when_every_client_is_recent(monkeypatch):
     monkeypatch.setattr("time.time", lambda: 1000)
-    hits = {}
+    hits = OrderedDict()
     for i in range(2000):
         request = SimpleNamespace(headers={}, client=SimpleNamespace(host=str(i)))
         refused = A._throttled(hits, request)
-        assert refused == (i >= 1000)
+        assert refused is False
         assert len(hits) <= 1000
-    # Existing budgets still work, and expired clients release capacity.
+    # Evicted clients can return; retained clients still have the same budget.
     old = SimpleNamespace(headers={}, client=SimpleNamespace(host="0"))
     assert A._throttled(hits, old) is False
     monkeypatch.setattr("time.time", lambda: 1060)
@@ -168,7 +169,7 @@ def test_text_comparison_does_not_normalize_distinct_credentials():
 
 
 def test_concurrent_unlock_guesses_cannot_overspend_the_client_budget():
-    class CompetingHits(dict):
+    class CompetingHits(OrderedDict):
         def get(self, key, default=None):
             result = super().get(key, default)
             time.sleep(0.001)
@@ -187,25 +188,20 @@ def test_headerless_ping_cannot_allocate_unbounded_client_state():
     async def requests():
         for i in range(1200):
             request = SimpleNamespace(headers={}, client=SimpleNamespace(host=str(i)))
-            if i < 1000:
-                result = await A.admin_ping(request, x_admin_token="")
-                assert result["match"] is False
-            else:
-                with pytest.raises(HTTPException) as exc:
-                    await A.admin_ping(request, x_admin_token="")
-                assert exc.value.status_code == 429
+            result = await A.admin_ping(request, x_admin_token="")
+            assert result["match"] is False
             assert len(A._PING_HITS) <= 1000
     asyncio.run(requests())
 
 
-def test_ping_cannot_reset_its_budget_by_spoofing_the_leftmost_hop():
+def test_ping_keeps_one_budget_for_one_client_across_proxy_hops():
     client = TestClient(A.app)
     for i in range(10):
         response = client.post("/api/admin/ping", headers={
-            "x-forwarded-for": "spoof-%d, 203.0.113.7" % i})
+            "x-forwarded-for": "192.0.2.10, proxy-%d" % i})
         assert response.status_code == 200
     response = client.post("/api/admin/ping", headers={
-        "x-forwarded-for": "another-spoof, 203.0.113.7"})
+        "x-forwarded-for": "192.0.2.10, another-proxy"})
     assert response.status_code == 429
 
 
@@ -216,3 +212,64 @@ def test_ping_preserves_its_existing_limit_even_for_the_correct_credential():
         assert response.status_code == 200 and response.json()["match"] is True
     assert client.post("/api/admin/ping", headers={
         "x-admin-token": GOOD}).status_code == 429
+
+
+@pytest.mark.parametrize('route,password',[
+    ('/api/command/session','test-password'),
+    ('/api/command/session/control','test-operator-password'),
+])
+def test_shared_proxy_bad_guesses_do_not_lock_out_another_client(route,password):
+    client=TestClient(A.app)
+    for _ in range(10):
+        client.post('/api/command/session',json={'password':'wrong'},
+                    headers={'x-forwarded-for':'198.51.100.66, 3.3.3.3'})
+    response=client.post(route,json={'password':password},
+                        headers={'x-forwarded-for':'192.0.2.10, 3.3.3.3'})
+    assert response.status_code==200
+    assert 'set-cookie' in response.headers
+
+
+@pytest.mark.parametrize('route',['/api/desk/unlock','/api/command/session','/api/admin/ping'])
+def test_full_recent_client_map_does_not_lock_out_valid_new_client(route):
+    client=TestClient(A.app)
+    for i in range(1000):
+        headers={'x-forwarded-for':f'198.18.{i//256}.{i%256}'}
+        client.post(route,json={'password':'wrong'},headers=headers)
+    headers={'x-forwarded-for':'192.0.2.10'}
+    if route=='/api/admin/ping': headers['x-admin-token']=GOOD
+    response=client.post(route,json={'password':'test-password'},headers=headers)
+    assert response.status_code==200
+    assert response.json().get('match',response.json().get('ok')) is True
+    if route!='/api/admin/ping': assert 'set-cookie' in response.headers or response.json().get('token')
+    assert len(A._PING_HITS if route=='/api/admin/ping' else A._UNLOCK_HITS)<=1000
+
+
+
+def test_admin_identity_uses_all_forwarded_header_lines():
+    from starlette.datastructures import Headers
+    for i in range(25):
+        headers=Headers(raw=[(b'x-forwarded-for',f'spoof-{i}'.encode()),
+                             (b'x-forwarded-for',b'203.0.113.7')])
+        key=G.client_key(headers,'direct')
+        assert key=='203.0.113.7'
+        refusal=G.check({'x-admin-token':'wrong'},key,GOOD,now=1000)
+        assert (refusal is None)==(i<G.PER_CLIENT_LIMIT)
+
+
+def test_non_ascii_release_receipt_admin_header_refuses(monkeypatch):
+    from sportsassets.api import command_red_team as R
+    monkeypatch.setattr('sportsassets.config.settings',lambda:SimpleNamespace(admin_token=GOOD))
+    with pytest.raises(HTTPException) as exc: R._admin('wrong-é')
+    assert exc.value.status_code==401
+    R._admin(GOOD)
+
+
+def test_non_ascii_slack_signature_refuses_without_changing_signed_bytes():
+    import hashlib,hmac
+    from sportsassets import slack_bridge as B
+    body=b'{"type":"event_callback"}'
+    secret='synthetic-slack-key'
+    valid='v0='+hmac.new(secret.encode(),b'v0:1000:'+body,hashlib.sha256).hexdigest()
+    assert B.verify(body,'1000',valid,secret,now=1001)
+    assert not B.verify(body,'1000','wrong-é',secret,now=1001)
+    assert not B.verify(body+b' ','1000',valid,secret,now=1001)

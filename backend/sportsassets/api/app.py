@@ -1776,7 +1776,9 @@ async def health_services() -> list[dict]:
 # yes/no oracle for token guesses and the app has no other rate limit.
 # 10 attempts/min/IP is far above any human retyping a token and far
 # below a useful brute force.
-_PING_HITS: dict[str, list[float]] = {}
+from collections import OrderedDict
+
+_PING_HITS: OrderedDict[str, list[float]] = OrderedDict()
 
 
 @app.post("/api/admin/ping")
@@ -1806,37 +1808,45 @@ async def admin_ping(request: Request,
 
 # Unlock throttle: same shape and rationale as _PING_HITS — the desk
 # password is short by design, so the guess oracle must be slow.
-_UNLOCK_HITS: dict[str, list[float]] = {}
+_UNLOCK_HITS: OrderedDict[str, list[float]] = OrderedDict()
 _UNLOCK_LOCK = threading.Lock()
 
 
-def _throttled(hits: dict[str, list[float]], request: Request,
+def _throttled(hits: OrderedDict[str, list[float]], request: Request,
                limit: int = 10, window: float = 60.0) -> bool:
-    """True when this client is over its unlock budget or storage is full.
+    """Bounded LRU storage; preserve release-base proxy client identity.
 
-    The edge-appended forwarding hop owns the budget, as in the admin
-    guard. Refuse new clients when all retained budgets are current rather
-    than evicting active budgets (or allocating unbounded client state).
+    COMMAND is proxied through shared Netlify egress. Its existing first-hop
+    client key stays unchanged in this release: applying the admin guard's
+    rightmost-hop identity here would combine unrelated sign-in budgets.
+    Admin wrong-token traffic retains its separate rightmost/global guard.
     """
     import time as _t
-    from .admin_token_guard import client_key
-
-    ip = client_key(request.headers,
-                    request.client.host if request.client else None)
+    headers = request.headers
+    forwarded = (",".join(headers.getlist("x-forwarded-for"))
+                 if hasattr(headers, "getlist")
+                 else headers.get("x-forwarded-for") or "")
+    ip = forwarded.split(",")[0].strip() or (
+        request.client.host if request.client else "?")
     now = _t.time()
     with _UNLOCK_LOCK:
-        if ip not in hits and len(hits) >= 1000:
-            for k in [k for k, v in hits.items()
-                      if not v or now - v[-1] >= window]:
-                hits.pop(k, None)
-            if len(hits) >= 1000:
-                return True
         recent = [t for t in hits.get(ip, []) if now - t < window]
+        if ip not in hits:
+            # Expiry and eviction are O(1) per removed client, not a full-map
+            # scan on every refused request. Storage pressure is not a ban on
+            # a newly arriving owner, operator or monitor.
+            while hits:
+                first = next(iter(hits))
+                if hits[first] and now - hits[first][-1] < window:
+                    break
+                hits.popitem(last=False)
+            if len(hits) >= 1000:
+                hits.popitem(last=False)
+        hits[ip] = recent
+        hits.move_to_end(ip)
         if len(recent) >= limit:
-            hits[ip] = recent
             return True
         recent.append(now)
-        hits[ip] = recent
     return False
 
 

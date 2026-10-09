@@ -129,7 +129,8 @@ def verify(body,timestamp,signature,secret,now=None):
   stamp=int(timestamp);now=time.time() if now is None else now
   if not secret or abs(now-stamp)>300:return False
   expected='v0='+hmac.new(secret.encode(),b'v0:'+str(stamp).encode()+b':'+body,hashlib.sha256).hexdigest()
-  return hmac.compare_digest(expected,signature or '')
+  from .api.admin_token_guard import constant_time_text_equal
+  return constant_time_text_equal(expected,signature or '')
  except (ValueError,TypeError):return False
 
 def classify(payload,cfg):

@@ -52,8 +52,10 @@ _LOCK = threading.Lock()
 
 
 def client_key(headers, client_host: str | None) -> str:
-    hops = [h.strip() for h in (headers.get("x-forwarded-for") or "")
-            .split(",") if h.strip()]
+    forwarded = (",".join(headers.getlist("x-forwarded-for"))
+                 if hasattr(headers, "getlist")
+                 else headers.get("x-forwarded-for") or "")
+    hops = [h.strip() for h in forwarded.split(",") if h.strip()]
     return hops[-1] if hops else (client_host or "?")
 
 
