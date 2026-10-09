@@ -64,7 +64,7 @@ def _node_suite(name: str, count: int) -> None:
 
 
 def test_controls_suite_passes():
-    _node_suite("frontend-preview-controls.test.cjs", 11)
+    _node_suite("frontend-preview-controls.test.cjs", 12)
 
 
 def test_reachability_suite_passes():

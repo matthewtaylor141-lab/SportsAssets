@@ -144,7 +144,10 @@ const agentControls = a => AGENT_NAV.concat(TABBED.includes(a) ? WS_TABS : [], [
 const HQ_VIEWS = ['command', 'floor', 'markets', 'capital', 'reports'];
 const CONTROLS = {
   command: [
-    { name: 'desk panel', sel: '#hq-tags .tag:not([hidden]), [data-render="team"] [data-desk]', optional: true,
+    // a desk opens from the team list's rows; the 3D stage's desk tags are
+    // labels that move with the camera (measured as the stage layer's
+    // children: LAYER CHILDREN), never a fixed place to tap
+    { name: 'desk panel', sel: '[data-render="team"] [data-desk]', optional: true,
       expect: { bodyClass: 'desk-open', visible: '#hq-desk' }, close: { sel: '#hq-desk [data-close-desk]', expect: { notBodyClass: 'desk-open' } } },
     { name: 'Briefing (CRITICAL bar)', sel: '#hq-alert [data-go="reports"]', optional: true, expect: { bodyAttr: ['data-view', 'reports'] } },
   ].concat(HQ_VIEWS.map(v => ({ name: 'view: ' + v, sel: '#hq-nav button[data-go="' + v + '"], #hq-tabbar button[data-go="' + v + '"]',
@@ -612,13 +615,26 @@ async function tapOnce(page, handle, touch, twin) {
 }
 
 // tap each declared control and check where it lands (see CONTROLS)
-async function runControls(page, capture, pg, d) {
+async function runControls(page, capture, pg, d, cdp) {
   const vp = d.viewport, touch = !!d.hasTouch;
   const res = { declared: 0, checked: 0, passed: 0, failed: [], unmeasured: [], not_this_layout: [], overlays: [] };
-  const home = await page.evaluate(() => location.pathname + location.search).catch(() => null);
+  const herePath = async () => { const at = () => page.evaluate(() => location.pathname + location.search).catch(() => null);
+    const p = await at(); if (p !== null) return p; await page.waitForTimeout(500); return at(); };
+  const coarse = () => page.evaluate(() => matchMedia('(pointer:coarse)').matches).catch(() => false);
+  const home = await herePath();
   for (const c of CONTROLS[pg] || []) {
     res.declared++;
-    const here = await page.evaluate(() => location.pathname + location.search).catch(() => null);
+    // a touch device stays a touch device for every control: a screenshot
+    // still finishing in the browser after its timeout resets the touch
+    // emulation (the page then reports pointer:fine and drops every touch
+    // rule); it is switched back on and counted, and a control is never
+    // measured without it
+    if (touch && !(await coarse())) {
+      if (cdp) await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 }).catch(() => {});
+      res.touch_restored = (res.touch_restored || 0) + 1;
+      if (!(await coarse())) { res.failed.push({ name: c.name, why: ['TOUCH_EMULATION_LOST'] }); continue; }
+    }
+    const here = await herePath();
     if (home && here !== home) {
       // the last control left the page outside a tap (a delayed navigation):
       // recorded against it, and the page is loaded again for the next one
@@ -817,7 +833,7 @@ async function findRoom(browser) {
     // (the reduced-motion repeats measure motion, not controls)
     const controls = !(ready.main_thread_responsive && !motion) ? null
       : !touchOk ? { error: 'TOUCH_EMULATION_NOT_RESTORED', declared: (CONTROLS[pg] || []).length, checked: 0, passed: 0, failed: [{ name: 'all', why: ['TOUCH_EMULATION_NOT_RESTORED'] }], unmeasured: [] }
-      : await runControls(page, capture, pg, d).catch(e => ({ error: String(e).slice(0, 200) }));
+      : await runControls(page, capture, pg, d, cdp).catch(e => ({ error: String(e).slice(0, 200) }));
     records.push(Object.assign({ view: name, device: dev, page: pg, viewport: d.viewport, status, non_get_aborted: aborted,
       console_errors: errors.length, first_errors: errors.slice(0, 6), api_by_path_status: api },
       pg === 'room' ? { room_key_sha256_12: room.key_sha256_12, room_book: room.book } : {}, ready, perf, m, { controls }));

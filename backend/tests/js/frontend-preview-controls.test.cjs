@@ -28,7 +28,7 @@ const PHONE = { width: 390, height: 844 }, LAND = { width: 844, height: 390 }, I
 
 test('the block under test is the harness controls code', () => {
   assert.ok(BLOCK.includes('function verdict(expect, obs, navs, requests)'));
-  assert.ok(SRC.includes(": await runControls(page, capture, pg, d).catch(e => ({ error: String(e).slice(0, 200) }));"));
+  assert.ok(SRC.includes(": await runControls(page, capture, pg, d, cdp).catch(e => ({ error: String(e).slice(0, 200) }));"));
   // the controls run only with touch emulation back on after the full-page screenshot
   assert.ok(SRC.includes("await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })"));
   assert.ok(SRC.includes(": !touchOk ? { error: 'TOUCH_EMULATION_NOT_RESTORED'"));
@@ -226,4 +226,21 @@ test('a touch that landed elsewhere is final; a control that vanished before the
   // the retarget happens once: no loop around it
   const i = SRC.indexOf('const again = gone ? await find() : -1;');
   assert.ok(!/while|for \(/.test(SRC.slice(i, SRC.indexOf('// the control was redrawn under the finger', i))));
+});
+
+test('a touch device stays one for every control; the desk opens from the team list', () => {
+  // checked before every control: switched back on and counted if a late
+  // screenshot reset it, and a control is never measured with a fine pointer
+  assert.ok(SRC.includes("if (touch && !(await coarse())) {"));
+  assert.ok(SRC.includes("res.touch_restored = (res.touch_restored || 0) + 1;"));
+  assert.ok(SRC.includes("if (!(await coarse())) { res.failed.push({ name: c.name, why: ['TOUCH_EMULATION_LOST'] }); continue; }"));
+  const i = SRC.indexOf('async function runControls(');
+  assert.ok(SRC.indexOf('if (touch && !(await coarse())) {', i) < SRC.indexOf('const here = await herePath();', i));
+  // a page that does not answer once is asked again before it counts as left
+  assert.ok(SRC.includes('const p = await at(); if (p !== null) return p; await page.waitForTimeout(500); return at(); };'));
+  // the desk control is a team-list row (the stage's tags move with the camera)
+  const desk = H.CONTROLS.command.find(c => c.name === 'desk panel');
+  assert.equal(desk.sel, '[data-render="team"] [data-desk]');
+  assert.deepEqual(plain(desk.expect), { bodyClass: 'desk-open', visible: '#hq-desk' });
+  assert.ok(desk.optional && desk.close.sel === '#hq-desk [data-close-desk]');
 });
