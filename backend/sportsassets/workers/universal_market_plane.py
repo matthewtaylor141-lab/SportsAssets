@@ -420,6 +420,8 @@ async def sync_books(conn, mgr) -> dict:
 
 #: one INFO line with the per-step RSS at most this often
 MEMORY_LOG_EVERY_S = 60.0
+#: (RC6) boundaries of each full cycle the heartbeat keeps (memory.cycles)
+CYCLE_RING = 24
 
 
 class StepMemory:
@@ -432,17 +434,52 @@ class StepMemory:
     correlation (analytics run_cycle's rss_mb_by_step is the precedent). A
     rise includes the stream thread's book updates landing during the step.
     VmHWM is read, never reset: `resources.peak_mb` stays the process's own
-    high-water."""
+    high-water.
 
-    def __init__(self, rss=None):
+    (RC6) ACROSS FULL CYCLES. Each boundary of a full cycle of the plane's
+    universe (market_plane.memory_cycles.CYCLE_STEPS: the full catalogue
+    populate, a finished full refdata pull, a persisted Kalshi walk) is
+    kept with the RSS right after it and the FLOOR since the previous one
+    (the lowest RSS at the start of a pass), the last CYCLE_RING of each;
+    the heartbeat carries them and their trend (`memory.cycles`,
+    `memory.cycle_growth`). A bounded working set has a flat floor from
+    cycle to cycle; a leak's rises (tools/plane_memory_cycles.py reads the
+    same from the logs of a plane that predates this)."""
+
+    def __init__(self, rss=None, clock=None):
+        import collections
+
         from .. import procmem
+        from ..market_plane import memory_cycles as MC
         self._rss = rss or procmem.rss_mb
+        self._clock = clock or time.time
         self.by_step: dict = {}
         self._prev = None
         self.logged_at = 0.0
+        self.cycles = {k: collections.deque(maxlen=CYCLE_RING)
+                       for k in MC.CYCLE_STEPS}
+        self._floor = {k: None for k in MC.CYCLE_STEPS}
 
     def begin(self) -> None:
         self._prev = self._rss()
+        if self._prev is not None:
+            for k, f in self._floor.items():
+                if f is None or self._prev < f:
+                    self._floor[k] = self._prev
+
+    def cycle(self, kind: str, cur=None) -> None:
+        """A full cycle of `kind` just closed: keep the RSS now (`cur`, when
+        the caller has just read it) and the floor since the last one; the
+        next floor starts here."""
+        if kind not in self.cycles:
+            return
+        if cur is None:
+            cur = self._rss()
+        floor = self._floor.get(kind)
+        self.cycles[kind].append({
+            "at": round(self._clock(), 1), "rss_mb": cur,
+            "floor_mb": floor if floor is not None else cur})
+        self._floor[kind] = cur
 
     def mark(self, step: str) -> None:
         cur, prev = self._rss(), self._prev
@@ -457,14 +494,24 @@ class StepMemory:
                               or d > e["max_delta_mb"]):
             e["max_delta_mb"] = d
         self._prev = cur
+        if step in self.cycles:
+            self.cycle(step, cur)
 
     def digest(self) -> dict:
         from .. import procmem
+        from ..market_plane import memory_cycles as MC
+        lim = procmem.limit_mb()
+        cycles = {k: list(v) for k, v in self.cycles.items() if v}
         return {"rss_mb": procmem.rss_mb(), "peak_mb": procmem.peak_mb(),
-                "limit_mb": procmem.limit_mb(),
+                "limit_mb": lim,
                 "by_step": {k: dict(v) for k, v in self.by_step.items()},
+                "cycles": cycles,
+                "cycle_growth": {k: MC.growth(v, limit_mb=lim)
+                                 for k, v in cycles.items()},
                 "basis": "RSS after each step the last time it ran (/proc);"
-                         " max_delta_mb: the largest rise since boot"}
+                         " max_delta_mb: the largest rise since boot;"
+                         " cycles: the RSS after each full-cycle boundary"
+                         " and the floor since the previous one"}
 
     def log_due(self, now: float) -> bool:
         if now - self.logged_at < MEMORY_LOG_EVERY_S:
@@ -674,6 +721,8 @@ async def run() -> None:
                 state["refdata"] = await refdata_step(
                     pool, client, planner, attempted, now=now)
                 mem.mark("refdata")
+                if state["refdata"].get("finished") is not None:
+                    mem.cycle("refdata_full_pull")
             if refresher is not None:
                 # (RC6) a fresh REST book for the priority members the
                 # stream has gone quiet on, inside the book-read budget
