@@ -1,5 +1,10 @@
 """Worker: the unselected prospective PMUS state capture. READ ONLY.
 
+THIS IS THE RESEARCH COLLECTOR, NOT TRADING COVERAGE
+(bettor_state_capture.IS_RESEARCH_COLLECTOR_NOT_TRADING_COVERAGE): which
+markets it samples decides what the pre-registered analysis observes, never
+what BETTOR can trade, map or manage.
+
 Owner directive 2026-09-20: "APPROVED -- START THE READ-ONLY
 PROSPECTIVE PMUS UNSELECTED CAPTURE. ... No orders. No capital. No
 shadow fill fabrication. No mandate activation."
@@ -82,6 +87,10 @@ PACING_VERSION = "BETTOR_CAPTURE_PACING_V4_ALLOWANCE_RESTORED"
 # because WHICH horizon a read went to changed, not how many were sent.
 _FU_SERVICE_OPS = 0
 _TICK_SEQ = 0
+#: (V3, 2026-10-09) the binding state of the per-cycle cap last LOGGED: the
+#: line is written once per change, not every tick (V2 wrote an ERROR every
+#: ~2.5 min); every tick still carries the state on its heartbeat and rows
+_CAP_BINDING_LOGGED: dict = {"binding": None}
 
 # Bumped when WHICH observations enter the sample changes. V4's
 # scheduler decided which follow-ups to serve; this decides how much
@@ -279,16 +288,37 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     stats["bucketShare"] = sel["BUCKET_SHARE"]
     stats["sliceTruncated"] = sel["SLICE_TRUNCATED"]
     stats["sliceTruncatedBy"] = sel["SLICE_TRUNCATED_BY"]
-    # A CAP THAT BINDS EVERY PASS IS NOT A ROTATION. V1's did, on every
-    # row it ever wrote, and the loop said nothing. This is loud.
-    if sel["SLICE_TRUNCATED"]:
-        stats["status"] = "slice_truncated"
-        log.error("bettor_state: slice %d holds %d markets against a cap "
-                  "of %d -- the cap is binding, so the rotation is "
-                  "drawing a fixed panel and %d markets are never "
-                  "sampled. The rule needs a version bump.",
-                  sel["CYCLE"], sel["CANDIDATES_IN_SLICE"],
-                  sc.MAX_MARKETS_PER_CYCLE, sel["SLICE_TRUNCATED_BY"])
+    # THE BINDING CAP, V3 (research collector, not trading coverage). V2's
+    # binding cap drew a fixed panel and this loop said so as an ERROR on
+    # every tick (production 2026-10-09: slices of 46-56 against 40, a line
+    # every ~2.5 min). Under V3 a binding cap draws the NEXT window of the
+    # slice on each visit, every market within VISITS_TO_COVER_SLICE
+    # visits at the same read rate -- a declared rotation, so the tick is
+    # not a failure. The state rides every heartbeat; the LINE is written
+    # once per change of the binding state.
+    stats["capBinding"] = sel["CAP_BINDING"]
+    stats["sliceVisit"] = sel["SLICE_VISIT"]
+    stats["windowStart"] = sel["WINDOW_START"]
+    stats["visitsToCoverSlice"] = sel["VISITS_TO_COVER_SLICE"]
+    stats["capPerCycle"] = sc.MAX_MARKETS_PER_CYCLE
+    if _CAP_BINDING_LOGGED["binding"] != sel["CAP_BINDING"]:
+        _CAP_BINDING_LOGGED["binding"] = sel["CAP_BINDING"]
+        if sel["CAP_BINDING"]:
+            log.warning("bettor_state (research collector, not trading "
+                        "coverage): the per-cycle cap of %d binds -- slice "
+                        "%d holds %d markets. Rule %s draws the next window "
+                        "of the slice each visit, so all %d are drawn within "
+                        "%d visits at the same read rate. Logged once per "
+                        "change; every tick's heartbeat carries capBinding.",
+                        sc.MAX_MARKETS_PER_CYCLE, sel["CYCLE"],
+                        sel["CANDIDATES_IN_SLICE"], sc.UNIVERSE_VERSION,
+                        sel["CANDIDATES_IN_SLICE"],
+                        sel["VISITS_TO_COVER_SLICE"])
+        else:
+            log.info("bettor_state (research collector): the per-cycle cap "
+                     "of %d no longer binds (slice %d holds %d markets)",
+                     sc.MAX_MARKETS_PER_CYCLE, sel["CYCLE"],
+                     sel["CANDIDATES_IN_SLICE"])
 
     misses = 0
     # ── THE TICK'S READ BUDGET, SPLIT BEFORE EITHER PASS RUNS ────────
@@ -698,6 +728,8 @@ async def run() -> None:
 
     boot = {
         "lane": "BETTOR_UNSELECTED_STATE",
+        "researchCollectorNotTradingCoverage":
+            sc.IS_RESEARCH_COLLECTOR_NOT_TRADING_COVERAGE,
         "readOnly": True,
         "orderPathExists": False,
         "capitalAtRisk": 0,

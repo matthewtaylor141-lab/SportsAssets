@@ -434,7 +434,52 @@ MEASUREMENT_WINDOW_W3 = {
 
 # ── §4. THE FROZEN UNIVERSE RULE ─────────────────────────────────────
 
-UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V2"
+UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V3"
+
+# ── THIS IS THE RESEARCH COLLECTOR, NOT TRADING COVERAGE ─────────────
+#
+# Everything in this module decides which markets the READ-ONLY research
+# capture observes. Nothing here decides what can be traded, mapped,
+# managed or refused: the trading lanes' coverage is the premap catalogue
+# (workers/premap) and the market plane. A slice drawn partially here is a
+# property of a research sample, never a market BETTOR cannot trade.
+IS_RESEARCH_COLLECTOR_NOT_TRADING_COVERAGE = (
+    "the unselected prospective state capture is a READ-ONLY research "
+    "collector: its sampling rule decides which markets it observes for "
+    "the pre-registered analysis, never what is tradable, mapped or "
+    "managed. Trading coverage is the premap catalogue and the market "
+    "plane")
+
+# ── WHY THERE IS A V3, AND WHAT V2's ROWS ARE (2026-10-09) ───────────
+#
+# V2 SIZED ITS CAP ON 23,539 ELIGIBLE MARKETS (~30 a slice against a cap
+# of 40) AND THE UNIVERSE OUTGREW IT. Production, sportsassets-workers,
+# 2026-10-09 04:25-05:19Z (render-ops extract, the ERROR lines this loop
+# wrote every ~2.5 min): slices 764-774 held 46, 47, 49, 51, 52, 53, 54,
+# 55 and 56 markets against the cap of 40 (the lane brief cites 45-65 over
+# the day) -- ~52 a slice, ~41,000 eligible markets. V2 drew in_slice[rot:
+# rot+40] with `rot` advancing ONE place per full rotation (65.58 h), so
+# the 6-16 markets past the cap in each slice were the same ones visit
+# after visit: reaching all of a 54-market slice took 15 rotations, ~41
+# days, longer than a game market lives -- in practice a fixed panel, and
+# the loop said so itself ("the rule needs a version bump").
+#
+# V3 CHANGES ONE THING: WHICH WINDOW OF ITS SLICE A VISIT DRAWS. When the
+# slice holds more than the cap, visit v draws the cap-sized window
+# starting at (v x cap) mod n, so consecutive visits draw consecutive
+# windows and EVERY market of the slice is drawn within ceil(n / cap)
+# visits (two, at today's ~52). When the cap does not bind, the start
+# advances one place per visit as in V2. SAME request rate: at most
+# MAX_MARKETS_PER_CYCLE reads a 300 s bucket, spread over the same five
+# ticks; the cap is NOT raised and the venue sees nothing new. SAME
+# partition: slice membership and the within-slice order are V2's
+# (SLICE_HASH_SEED), so every market keeps its slice and its visit time.
+# Still a pure function of (identifier, clock): no book, price or outcome
+# is read before the choice.
+#
+# The rule version is recorded on every row it governs (UNIVERSE_VERSION
+# and RULE_SHA, bettor_state_observations.universe_version / rule_sha and
+# bettor_capture_ticks), so V2 and V3 rows are never pooled by accident.
 
 # ── WHY THERE IS A V2, AND WHAT V1's ROWS ARE ────────────────────────
 #
@@ -477,6 +522,25 @@ UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V2"
 # forced by a coverage defect visible in the first two buckets and not
 # by anything about what the data said.
 SUPERSEDED = {
+    "BETTOR_UNSELECTED_STATE_V2": {
+        "ranFrom": "2026-09-20T19:31Z",
+        "supersededAt": ("the deploy of the release carrying "
+                         "BETTOR_UNSELECTED_STATE_V3 -- the first V3 row's "
+                         "observed_at is the boundary"),
+        "why": ("THE_CAP_BOUND_AT_THE_MEASURED_UNIVERSE: slices held 46-56 "
+                "markets (lane brief: 45-65) against a cap of 40 on "
+                "2026-10-09; the within-slice start advanced one place per "
+                "65.58 h rotation, so the markets past the cap were "
+                "effectively never drawn"),
+        "alsoFixed": ("THE_BINDING_CAP_WAS_LOGGED_AS_ERROR_EVERY_TICK -- now "
+                      "logged once per change of the binding state"),
+        "rowsRetained": True,
+        "rowsAreASampleOfTheUniverse": False,
+        # the change was forced by the loop's own coverage ERROR lines and
+        # the slice sizes in them; no outcome, mid or settlement table was
+        # read to make it
+        "outcomesConsultedForTheChange": False,
+    },
     "BETTOR_UNSELECTED_STATE_V1": {
         "ranFrom": "2026-09-20T19:23:35Z",
         "supersededAt": "2026-09-20T19:31Z",
@@ -516,6 +580,9 @@ SUPERSEDED = {
 ROTATION_SLICES = 787
 SAMPLING_CADENCE_S = 300
 MAX_MARKETS_PER_CYCLE = 40
+#: V3 keeps V2's partition and within-slice order: the hash seed stays the
+#: V2 version string, so no market changes slice or visit time
+SLICE_HASH_SEED = "BETTOR_UNSELECTED_STATE_V2"
 
 # The bucket's reads are spread across the ticks inside it rather than
 # fired as one burst. Same markets, same bucket, a fifth of the
@@ -540,6 +607,20 @@ MEASURED_UNIVERSE = {
              "sized on MARKETS. Events are what the pre-registration's "
              "gate counts, because rows within an event are not "
              "independent"),
+}
+
+#: The measurement that forced V3 (the cap binding), recorded the same way.
+MEASURED_UNIVERSE_V3 = {
+    "measuredAt": "2026-10-09T04:25Z..05:19Z",
+    "SLICES_OBSERVED": list(range(764, 775)),
+    "MARKETS_PER_SLICE_OBSERVED": [46, 47, 49, 51, 52, 53, 54, 55, 56],
+    "MARKETS_PER_SLICE_LANE_BRIEF": [45, 65],
+    "APPROX_ELIGIBLE_MARKETS": 41_000,
+    "source": ("sportsassets-workers ERROR lines 'bettor_state: slice N "
+               "holds M markets against a cap of 40', render-ops logs "
+               "2026-10-09 04:20-05:20Z"),
+    "note": ("the cap binds on every slice observed; V3's window rotation "
+             "draws a 56-market slice whole in 2 visits"),
 }
 
 # Follow-up mid horizons. Declared HERE, before row 1, so the set of
@@ -870,18 +951,21 @@ FROZEN_RULE = {
         "endpoint takes a slug and knows nothing about sides, so the "
         "yes and no legs of one market share one read. Delivered as %d "
         "per 60s tick rather than one burst. When a slice holds more "
-        "than the cap the overflow is recorded as SLICE_TRUNCATED with "
-        "its count. THE CAP MUST NOT BIND ROUTINELY: a binding cap plus "
-        "a stable ordering is a fixed panel, not a rotation"
+        "than the cap, each visit draws the NEXT cap-sized window of the "
+        "slice (ROTATION_METHOD), so the whole slice is drawn within "
+        "ceil(n / cap) visits; that visit's overflow is recorded as "
+        "SLICE_TRUNCATED with its count. A binding cap with a fixed "
+        "window would be a fixed panel, not a rotation -- V2's defect"
         % (MAX_MARKETS_PER_CYCLE, MAX_MARKETS_PER_TICK)),
 
     "MARKET_SELECTION_METHOD": (
         "deterministic. slice(identifier) = "
-        "int(sha256(UNIVERSE_VERSION|identifier)[:8], 16) %% %d. A "
+        "int(sha256(SLICE_HASH_SEED|identifier)[:8], 16) %% %d, "
+        "SLICE_HASH_SEED = %s (V2's partition, kept). A "
         "market's slice depends only on its venue identifier and the "
-        "frozen version string -- not on its book, its activity, its "
+        "frozen seed string -- not on its book, its activity, its "
         "history or its outcome, none of which have been read at the "
-        "moment the choice is made" % ROTATION_SLICES),
+        "moment the choice is made" % (ROTATION_SLICES, SLICE_HASH_SEED)),
 
     "ROTATION_METHOD": (
         "cycle = floor(epoch_seconds / %d) %% %d; that cycle's slice is "
@@ -894,11 +978,17 @@ FROZEN_RULE = {
         "which would confound the market with time of day, and time of "
         "day with kickoff times and liquidity. Ordering within a slice "
         "is by a second stable hash, never by updated_at, which would "
-        "select on recent venue activity; the start of that ordering "
-        "advances one place per rotation so a tick abandoned to rate "
-        "limiting does not drop the same tail every pass"
+        "select on recent venue activity. visit = floor(epoch_seconds / "
+        "%d). V3: when the slice holds n > cap markets, the visit draws "
+        "the cap-sized window starting at (visit x cap) mod n, so "
+        "consecutive visits draw consecutive windows and every market is "
+        "drawn within ceil(n / cap) visits at the SAME read rate; when "
+        "n <= cap the start advances one place per visit, so a tick "
+        "abandoned to rate limiting does not drop the same tail every "
+        "pass"
         % (SAMPLING_CADENCE_S, ROTATION_SLICES, TICKS_PER_BUCKET,
-           FULL_ROTATION_S, FULL_ROTATION_S / 3600.0, ROTATION_SLICES)),
+           FULL_ROTATION_S, FULL_ROTATION_S / 3600.0, ROTATION_SLICES,
+           FULL_ROTATION_S)),
 
     "TIME_TO_EVENT_REQUIREMENTS": (
         "NONE. Time to event is RECORDED on every row and filters "
@@ -968,15 +1058,16 @@ RULE_SHA = rule_sha()
 # ── the rotation itself ──────────────────────────────────────────────
 
 def slice_of(identifier: str) -> int:
-    """Which rotation slice a market belongs to. Stable forever."""
-    raw = "%s|%s" % (UNIVERSE_VERSION, identifier)
+    """Which rotation slice a market belongs to. Stable forever (V3 keeps
+    V2's partition: SLICE_HASH_SEED)."""
+    raw = "%s|%s" % (SLICE_HASH_SEED, identifier)
     return int(hashlib.sha256(raw.encode()).hexdigest()[:8], 16) \
         % ROTATION_SLICES
 
 
 def _order_key(identifier: str) -> str:
     """Within-slice ordering. Stable, and unrelated to activity."""
-    raw = "%s|order|%s" % (UNIVERSE_VERSION, identifier)
+    raw = "%s|order|%s" % (SLICE_HASH_SEED, identifier)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -1016,15 +1107,23 @@ def select(candidates: list, *, at: datetime,
                 if slice_of(c["identifier"]) == cycle]
     in_slice.sort(key=lambda c: _order_key(c["identifier"]))
 
-    # THE ROTATING OFFSET. A read that dies to rate limiting abandons
-    # the rest of its tick, so a FIXED starting point would drop the
-    # same tail of the ordering on every pass -- a small permanent
-    # exclusion, uncorrelated with economics but an exclusion all the
-    # same. Advancing the start by the rotation count spreads which
-    # markets lose out. It depends only on the clock.
-    if in_slice:
-        rot = int(at.timestamp() // FULL_ROTATION_S) % len(in_slice)
-        in_slice = in_slice[rot:] + in_slice[:rot]
+    # THE ROTATING WINDOW (V3). `visit` counts this slice's visits (one
+    # per full rotation). A slice holding more markets than the cap draws
+    # the NEXT cap-sized window on each visit -- start (visit x cap) mod n
+    # -- so the whole slice is drawn within ceil(n / cap) visits at the
+    # same read rate (V2 advanced one place per visit: the tail past the
+    # cap was the same markets for weeks, a fixed panel). A slice within
+    # the cap is read whole and its start advances one place per visit,
+    # as before: a read that dies to rate limiting abandons the rest of
+    # its tick, and a fixed start would drop the same tail every pass. It
+    # depends only on the clock.
+    visit = int(at.timestamp() // FULL_ROTATION_S)
+    n = len(in_slice)
+    start = 0
+    if n:
+        start = ((visit * max_markets) % n if n > max_markets
+                 else visit % n)
+        in_slice = in_slice[start:] + in_slice[:start]
 
     bucket_share = in_slice[:max_markets]
     truncated_by = max(0, len(in_slice) - max_markets)
@@ -1046,6 +1145,12 @@ def select(candidates: list, *, at: datetime,
         "BUCKET_SHARE": len(bucket_share),
         "SLICE_TRUNCATED": truncated_by > 0,
         "SLICE_TRUNCATED_BY": truncated_by,
+        # V3: the binding cap is a declared rotation, not a fixed panel
+        "CAP_BINDING": truncated_by > 0,
+        "SLICE_VISIT": visit,
+        "WINDOW_START": start,
+        "VISITS_TO_COVER_SLICE": (-(-n // max_markets) if n and max_markets
+                                  else 0),
         "selectionIndependence": SELECTION_INDEPENDENCE,
     }
 
@@ -1547,6 +1652,9 @@ def describe() -> dict:
         "universeVersion": UNIVERSE_VERSION,
         "ruleSha": RULE_SHA,
         "frozenRule": FROZEN_RULE,
+        "isResearchCollectorNotTradingCoverage":
+            IS_RESEARCH_COLLECTOR_NOT_TRADING_COVERAGE,
+        "measuredUniverseV3": MEASURED_UNIVERSE_V3,
         "readOnly": True,
         "orderPathExists": False,
         "capitalAtRisk": 0,
