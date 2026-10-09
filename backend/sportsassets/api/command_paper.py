@@ -99,13 +99,18 @@ async def account_payload(conn, *, entries: int = 50,
         out.update(account=_unavailable_schema(),
                    ledger=_unavailable_schema(), last_updated_at=None)
         return out
-    bal = await section(L.balances(conn, L.ACCOUNT_ID, now=at),
+    acct = await L.selected_account(conn)
+    out['account_id'] = acct
+    bal = await section(L.balances(conn, acct, now=at),
                         empty_why="THE_PAPER_ACCOUNT_DOES_NOT_EXIST",
                         is_empty=lambda d: not (d or {}).get("ok"))
-    led = await section(L.latest_entries(conn, L.ACCOUNT_ID, limit=entries),
+    led = await section(L.latest_entries(conn, acct, limit=entries),
                         empty_why="NO_LEDGER_ENTRIES")
     out["account"] = bal
     out["ledger"] = led
+    from .. import bettor_day_one as E
+    if acct != L.ACCOUNT_ID:
+        out['epoch'] = await E.read(conn, acct)
     out["session"] = await session_brief(conn, bal.get("data") or {})
     out["last_updated_at"] = ((bal.get("data") or {}).get("last_updated_at")
                               if bal["status"] == "OK" else None)
@@ -113,13 +118,33 @@ async def account_payload(conn, *, entries: int = 50,
     try:
         from .. import bettor_paper_readmodel as RM
         out["drawdown"] = await section(
-            RM.drawdown(conn, L.ACCOUNT_ID),
+            RM.drawdown(conn, acct),
             empty_why="NO_EQUITY_SNAPSHOTS_YET_THE_SESSION_HAS_NOT_RUN",
             is_empty=lambda d: not (d or {}).get("snapshots"))
     except ImportError:
         out["drawdown"] = {"status": "UNAVAILABLE",
                            "why": "READ_MODEL_NOT_INSTALLED", "data": None}
     return out
+
+
+@router.get('/api/command/paper/day-one', dependencies=[Depends(require_read)])
+async def day_one_epoch():
+    from .. import bettor_day_one as E
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return await E.read(conn)
+
+
+@router.get('/api/command/paper/archive/{account_id}', dependencies=[Depends(require_read)])
+async def historical_account(account_id: str):
+    from .. import bettor_paper_ledger as L
+    if not L.is_paper_id(account_id):
+        raise HTTPException(status_code=400, detail='NOT_A_PAPER_IDENTIFIER')
+    pool = await _pool()
+    async with pool.acquire() as conn:
+        return {'label': 'HISTORICAL PAPER — LOSSES AND OBLIGATIONS PRESERVED',
+                'account_id': account_id, 'balances': await L.balances(conn, account_id),
+                'ledger': await L.latest_entries(conn, account_id, limit=100)}
 
 
 async def session_brief(conn, bal: dict) -> dict:
@@ -134,7 +159,7 @@ async def session_brief(conn, bal: dict) -> dict:
            "last_heartbeat_at": None, "real_money_submission": "DISABLED"}
     try:
         en = await S.enablement(conn)
-        sess = await S.active_session(conn, L.ACCOUNT_ID)
+        sess = await S.active_session(conn, bal.get('account_id') or await L.selected_account(conn))
         if sess is not None:
             h = await S.health(conn, sess["session_id"]) or {}
             out.update(session_id=sess["session_id"],
@@ -181,7 +206,12 @@ async def stream_events(acquire, *, last_event_id: int | None,
     entry is skipped. With `last_event_id` it REPLAYS every entry after it
     (reconnect recovery); without one it opens with a full snapshot."""
     from .. import bettor_paper_ledger as L
-    acct = account_id or L.ACCOUNT_ID
+    async with acquire() as conn:
+        acct = account_id or await L.selected_account(conn)
+    if account_id is None and acct != L.ACCOUNT_ID:
+        # Legacy Last-Event-ID is a bare per-account sequence; it cannot be
+        # carried into another account. Start with a verified full snapshot.
+        last_event_id = None
     sleep = sleep or asyncio.sleep
     cursor = last_event_id
     polls = 0
@@ -194,17 +224,24 @@ async def stream_events(acquire, *, last_event_id: int | None,
                 return
             bal = await L.balances(conn, acct)
             latest = await L.latest_entries(conn, acct, limit=20)
+            epoch = None
+            if acct.startswith('paper_day_one_'):
+                from .. import bettor_day_one as E
+                epoch = await E.read(conn, acct, bal=bal)
         cursor = int(bal.get("last_sequence") or 0)
-        yield sse("snapshot", dict(_labels(), sequence=cursor, balances=bal,
-                                   latest_entries=latest,
-                                   last_updated_at=bal.get(
-                                       "last_updated_at")),
-                  event_id=cursor)
+        snapshot = dict(_labels(), sequence=cursor, balances=bal,
+                        latest_entries=latest, last_updated_at=bal.get('last_updated_at'))
+        if epoch is not None:
+            snapshot['epoch'] = epoch
+        yield sse('snapshot', snapshot, event_id=cursor)
     while max_polls is None or polls < max_polls:
         polls += 1
         if is_disconnected is not None and await is_disconnected():
             return
         async with acquire() as conn:
+            if account_id is None and await L.selected_account(conn) != acct:
+                yield sse('epoch_changed', {'previous_account_id': acct, 'reset_cursor': True})
+                return
             rows = await L.ledger_after(conn, acct, after_seq=int(cursor),
                                         limit=STREAM_BATCH)
             bal = await L.balances(conn, acct) if rows else None
@@ -276,7 +313,7 @@ async def paper_freshness(limit: int = Query(500, ge=0, le=5000)) -> dict:
             return dict(_labels(), freshness=_unavailable_schema())
         async with conn.transaction(readonly=True):
             await conn.execute("SET LOCAL statement_timeout = 8000")
-            got = await PMF.read(conn, L.ACCOUNT_ID, rows_limit=limit)
+            got = await PMF.read(conn, await L.selected_account(conn), rows_limit=limit)
         return dict(_labels(), freshness=got,
                     market_data=_market_data_telemetry(got))
 
@@ -364,7 +401,7 @@ async def paper_reconciliation() -> dict:
             return dict(_labels(), reconciliation=_unavailable_schema())
         async with conn.transaction(readonly=True):
             await conn.execute("SET LOCAL statement_timeout = 12000")
-            got = await REC.receipt(conn, L.ACCOUNT_ID)
+            got = await REC.receipt(conn, await L.selected_account(conn))
         return dict(_labels(), reconciliation=got)
 
 
@@ -438,7 +475,7 @@ async def paper_operations(agent: str = Query(..., pattern="^(derek|xavier|audre
         if not await _schema(conn):
             return dict(_labels(), agent=agent,
                         operations=_unavailable_schema())
-        out = await OPS.OPERATIONS[agent](conn, account_id=L.ACCOUNT_ID,
+        out = await OPS.OPERATIONS[agent](conn, account_id=await L.selected_account(conn),
                                           limit=limit)
         out["agent"] = agent
         return out
@@ -468,7 +505,7 @@ async def paper_overview() -> dict:
     async with pool.acquire() as conn:
         if not await _schema(conn):
             return dict(_labels(), overview=_unavailable_schema())
-        return await OPS.overview(conn, account_id=L.ACCOUNT_ID)
+        return await OPS.overview(conn, account_id=await L.selected_account(conn))
 
 
 @router.get("/api/command/paper/trader-mode", dependencies=[Depends(require_read)])

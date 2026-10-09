@@ -78,7 +78,7 @@ async def paper_profitability_scoreboard(cutover: float | None = None
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            out = await read(conn, account_id=L.ACCOUNT_ID, now=now,
+            out = await read(conn, account_id=await L.selected_account(conn), now=now,
                              cutover=cutover)
     except Exception as exc:                                    # noqa: BLE001
         return envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__,

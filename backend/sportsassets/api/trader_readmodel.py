@@ -12,6 +12,7 @@ import time
 from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 from .. import trader_mode as T
 from ..live_game_state.integration import enrich_snapshot as enrich_live_game_snapshot
+from ..paper_account_context import selected_account
 
 MAX_POSITIONS = 1000
 CACHE_S = 2.0
@@ -175,10 +176,11 @@ def project_rows(raw, *, now, games=None):
     return out
 
 
-async def read(pool, *, account_id="paper_acct_main", now=None):
+async def read(pool, *, account_id=None, now=None):
     at = time.time() if now is None else float(now)
     async with pool.acquire() as conn:
         async with conn.transaction(readonly=True, isolation="repeatable_read"):
+            account_id = account_id or await selected_account(conn)
             await conn.execute("SET LOCAL statement_timeout = 8000")
             rows = await conn.fetch(READ_SQL, account_id, MAX_POSITIONS, at)
             events = sorted({T.object_value(r.get("premap")).get("event_slug") for r in rows
@@ -202,9 +204,12 @@ async def read(pool, *, account_id="paper_acct_main", now=None):
             return snapshot
 
 
-async def cached(pool, *, account_id="paper_acct_main"):
+async def cached(pool, *, account_id=None):
     # Route authentication runs BEFORE this cache. Shared per account, never a
     # cache key supplied in the browser. No credentials are retained here.
+    if account_id is None:
+        async with pool.acquire() as conn:
+            account_id = await selected_account(conn)
     async with _lock:
         at = time.monotonic()
         got = _cache.get(account_id)

@@ -1211,6 +1211,7 @@ PAPER_STREAM_EVENTS = {
                "last_updated_at"),       # + "balances" on a batch's last entry
     "heartbeat": ("sequence", "at"),
     "unavailable": ("why",),
+    "epoch_changed": ("previous_account_id", "reset_cursor"),
 }
 #: The per-agent routes: one GET each, every section {status, why, data}.
 PAPER_SECTIONS = {
@@ -1434,7 +1435,16 @@ PAPER_CORE_JS = r"""
       + (ss && ss.last_heartbeat_at ? ' · session heartbeat ' + AG.ts(ss.last_heartbeat_at) : '')
       + '. ' + (a.reserved_is ? 'Reserved is ' + esc(a.reserved_is) + '. ' : '') + 'LIVE MARKET DATA · SIMULATED EXECUTION · fictional USD, never summed with the funded book'
       + (a.real_money_submission ? ' · real-money submission ' + esc(a.real_money_submission) : '') + '.</p>';
-    return {status: 'OK', html: '<div class="pfig">' + figs + '</div>' + marks + lc + rec + part + upd, changed: changed, values: vals};
+    var e = isObj(j.epoch) ? j.epoch : null, day = '';
+    if (e && e.day_one === true && e.opening_verified === true && e.account_id === a.account_id) {
+      var h = isObj(e.historical_receipt) ? e.historical_receipt : {}, hb = isObj(h.balances) ? h.balances : {};
+      day = '<h3>' + esc(e.label) + '</h3><p class="note">Opening Equity ' + (num(e.opening_equity_usd) ? CC.usd(e.opening_equity_usd) : CC.nr('not sent'))
+        + ' · opened ' + esc(nyTime(e.opened_at) || 'not sent') + ' · New-Epoch Trading Turnover ' + (num(e.trading_turnover_usd) ? CC.usd(e.trading_turnover_usd) : CC.nr('not sent')) + '</p>'
+        + '<p class="note">Historical PAPER — losses preserved · realized P&amp;L ' + (num(hb.realized_pnl_usd) ? CC.usdS(hb.realized_pnl_usd) : CC.nr('not sent'))
+        + ' · cash at cutover ' + (num(hb.cash_usd) ? CC.usd(hb.cash_usd) : CC.nr('not sent'))
+        + ' · <a href="/api/command/paper/archive/' + esc(encodeURIComponent(e.historical_account_id || '')) + '">Historical balances and ledger</a></p>';
+    }
+    return {status: 'OK', html: day + '<div class="pfig">' + figs + '</div>' + marks + lc + rec + part + upd, changed: changed, values: vals};
   }
   function drawdown(s) {
     if (s === null || s === undefined) return '<p class="pmarks">Drawdown ' + SIM + ': not sent by the server.</p>';
@@ -1476,7 +1486,7 @@ PAPER_CORE_JS = r"""
 
   // THE CLIENT STATE: GET /account plus the stream's frames. Figures only move
   // forward in ledger sequence; a replayed sequence is merged, never re-applied.
-  function newState() { return {bal: null, acctSec: null, run: null, seq: null, entries: {}, fresh: {}, ledgerSec: null, last: null, session: null, drawdown: null, beat: null, streamWhy: null}; }
+  function newState() { return {bal: null, acctSec: null, run: null, seq: null, entries: {}, fresh: {}, ledgerSec: null, last: null, session: null, drawdown: null, accountId: null, epoch: null, beat: null, streamWhy: null}; }
   function merge(st, list, fresh) {
     (Array.isArray(list) ? list : []).forEach(function (e) {
       if (!isObj(e) || !num(e.sequence)) return;
@@ -1491,8 +1501,15 @@ PAPER_CORE_JS = r"""
     if (st.bal && num(st.bal.last_sequence) && num(b.last_sequence) && b.last_sequence < st.bal.last_sequence) return false;
     st.bal = b; bump(st, b.last_sequence); return true;
   }
+  function selectAccount(st, aid) {
+    if (!aid) return;
+    if (st.accountId && st.accountId !== aid) { var blank = newState(); Object.keys(blank).forEach(function (k) { st[k] = blank[k]; }); }
+    st.accountId = aid;
+  }
   function fromAccount(st, j) {
     j = isObj(j) ? j : {};
+    selectAccount(st, j.account_id || ((j.account || {}).data || {}).account_id);
+    st.epoch = isObj(j.epoch) ? j.epoch : null;
     st.fresh = {};
     st.session = isObj(j.session) ? j.session : null;
     st.drawdown = j.drawdown === undefined ? null : j.drawdown;
@@ -1505,7 +1522,10 @@ PAPER_CORE_JS = r"""
   function onEvent(st, name, d) {
     d = isObj(d) ? d : {};
     st.fresh = {};
+    if (name === 'epoch_changed') { var blank = newState(); Object.keys(blank).forEach(function (k) { st[k] = blank[k]; }); return 'epoch_changed'; }
     if (name === 'snapshot') {
+      selectAccount(st, (d.balances || {}).account_id);
+      if (isObj(d.epoch)) st.epoch = d.epoch;
       if (isObj(d.balances) && d.balances.ok !== true) { st.bal = null; st.run = null; st.acctSec = {status: 'EMPTY', why: d.balances.refusal || 'the stream snapshot carried no balances', data: d.balances}; }
       else if (takeBal(st, d.balances)) st.acctSec = {status: 'OK', why: null, data: st.bal};
       merge(st, d.latest_entries, false); bump(st, d.sequence);
@@ -1525,7 +1545,7 @@ PAPER_CORE_JS = r"""
   }
   function view(st) {
     return {account: st.bal ? {status: 'OK', why: null, data: st.bal} : (st.acctSec || {status: 'UNAVAILABLE', why: 'no account figures have been read yet', data: null}),
-            running: st.run, last_updated_at: st.last, session: st.session, drawdown: st.drawdown};
+            running: st.run, last_updated_at: st.last, session: st.session, drawdown: st.drawdown, epoch: st.epoch};
   }
   function entries(st) { return Object.keys(st.entries).map(function (k) { return st.entries[k]; }); }
 
@@ -1704,6 +1724,7 @@ PAPER_BOOT_JS = r"""
       var d; try { d = JSON.parse(ev.data); } catch (_) { return; }
       var what = P.onEvent(S, name, d);
       if (what === 'heartbeat') conn('LIVE', 'server heartbeat ' + (P.iso(S.beat) || 'without a time'));
+      else if (what === 'epoch_changed') { src.close(); es = null; opened = false; paint(); stream(); opsSoon(); }
       else if (what === 'unavailable') { src.close(); es = null; conn('UNAVAILABLE', S.streamWhy); schedule(); }
       else if (what === 'figures' || what === 'replay') { paint(); if (what === 'figures') opsSoon(); }
     };
@@ -1717,7 +1738,7 @@ PAPER_BOOT_JS = r"""
     var url = E.paper_stream + (opened && S.seq !== null ? '?last=' + encodeURIComponent(S.seq) : '');
     var src = es = new EventSource(url); opened = true;
     src.onopen = function () { if (src === es) { retry = 0; conn('LIVE'); schedule(); } };
-    ['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach(function (n) { src.addEventListener(n, frame(src, n)); });
+    ['snapshot', 'ledger', 'heartbeat', 'unavailable', 'epoch_changed'].forEach(function (n) { src.addEventListener(n, frame(src, n)); });
     src.onerror = function () {
       if (src !== es) return;
       // AN EventSource CANNOT SEE A 401: ask a plain read whether the session

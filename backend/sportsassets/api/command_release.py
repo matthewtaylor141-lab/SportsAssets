@@ -79,9 +79,10 @@ STATEMENT_TIMEOUT_MS = 3000
 #: sidecar -- append-only score bindings / observations, a rebuildable latest
 #: view and the collector heartbeat; display only, no price, order,
 #: settlement or ledger authority).
+#: 216..317 adds account-backed PAPER Day One and immutable epoch receipts.
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 316
+TRACKED_FROM, TRACKED_TO = 216, 317
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

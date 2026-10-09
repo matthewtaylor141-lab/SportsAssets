@@ -212,10 +212,15 @@ def session_id_for(at: float, account_id: str = L.ACCOUNT_ID) -> str:
 
 async def ensure_session(conn, *, now: float | None = None,
                          config: dict | None = None,
-                         account_id: str = L.ACCOUNT_ID) -> dict:
+                         account_id: str = None) -> dict:
     """THE ACTIVE SESSION, RESUMED; or a new one frozen with `config` (the
     code default) when none is active. Idempotent and restart-safe: the
     unique ACTIVE index means two racing starts produce one session."""
+    account_id = account_id or await L.selected_account(conn)
+    if await conn.fetchval("SELECT to_regclass('paper_epoch_control') IS NOT NULL"):
+        registered = account_id == L.ACCOUNT_ID or await conn.fetchval('SELECT EXISTS(SELECT 1 FROM paper_account_epochs WHERE account_id=$1)', account_id)
+        if registered and account_id != await L.selected_account(conn):
+            return {'ok': False, 'refusal': 'PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED'}
     at = float(now if now is not None else time.time())
     acct = await L.ensure_account(conn, account_id=account_id,
                                   account_key=(L.ACCOUNT_KEY
@@ -257,7 +262,7 @@ def session_view(row) -> dict:
     from . import bettor_paper_limits as LIMITS
     frozen_config = L._j(d["config"])
     return {"effective_config": LIMITS.effective_config(frozen_config, d["account_id"]),
-            "capital_policy": LIMITS.describe(d["account_id"]),
+            "capital_policy": LIMITS.describe(d["account_id"]) or frozen_config.get("capital_policy"),
             "session_id": d["session_id"], "account_id": d["account_id"],
             "started_at": L._epoch(d["started_at"]),
             "config": L._j(d["config"]), "config_sha": d["config_sha"],
@@ -267,7 +272,8 @@ def session_view(row) -> dict:
                        "frozen by migration 171's trigger")}
 
 
-async def active_session(conn, account_id: str = L.ACCOUNT_ID) -> dict | None:
+async def active_session(conn, account_id: str = None) -> dict | None:
+    account_id = account_id or await L.selected_account(conn)
     row = await conn.fetchrow(
         "SELECT * FROM paper_sessions WHERE account_id = $1 "
         "   AND status = 'ACTIVE'", account_id)

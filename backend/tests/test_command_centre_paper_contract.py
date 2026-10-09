@@ -72,6 +72,8 @@ class _PaperConn:
         return r
 
     async def fetchval(self, sql, *a):
+        if "paper_epoch_control" in sql:
+            return None
         if "to_regclass" in sql:
             return self.schema
         if "sum(fee_usd)" in sql:

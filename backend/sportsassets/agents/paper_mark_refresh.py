@@ -281,7 +281,7 @@ def plan(held: list, ev: dict, *, now: float) -> dict:
             "terminal": terminal}
 
 
-async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
+async def refresh(conn, *, account_id: str = None, market_data=None,
                   now: float | None = None, clock=None,
                   run_budget_s: float = RUN_BUDGET_S,
                   max_reads: int = MAX_READS_PER_RUN,
@@ -295,6 +295,7 @@ async def refresh(conn, *, account_id: str = L.ACCOUNT_ID, market_data=None,
     `institutional`: a paper_market_data.InstitutionalBooks-like source
     ({load(conn, slugs), book(slug, now=, sla_s=)}); by default the one the
     process runs (None when the PMX stream is not running here)."""
+    account_id = account_id or await L.selected_account(conn)
     from . import paper_derek as PD
     from .. import bettor_paper_simulator as SIM
     clock = clock or time.time
@@ -633,12 +634,13 @@ _TASK: dict = {"task": None, "last_started": 0.0, "runs": 0,
 
 
 async def run_once(get_pool, *, trigger: str,
-                   account_id: str = L.ACCOUNT_ID) -> dict:
+                   account_id: str = None) -> dict:
     """ONE RUN, only while the paper session is enabled (env flag AND the
     control row). Never raises."""
     try:
         pool = await get_pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
+            account_id = account_id or await L.selected_account(conn)
             en = await S.enablement(conn)
             if not en.get("enabled"):
                 res = {"ran": False, "refusal": en.get("refusal")}

@@ -1508,7 +1508,8 @@ def _frames():
         led.append(f)
     beat = {"data_label": DATA_LABEL, "labels": LABELS, "sequence": 4, "at": T0 + 20}
     unav = {"data_label": DATA_LABEL, "labels": LABELS, "why": "MIGRATION_171_IS_NOT_APPLIED"}
-    return {"snapshot": snap, "ledger": led, "heartbeat": beat, "unavailable": unav}
+    return {"snapshot": snap, "ledger": led, "heartbeat": beat, "unavailable": unav,
+            "epoch_changed": {"previous_account_id": ACCOUNT_ID, "reset_cursor": True}}
 
 
 def _base():
@@ -1591,7 +1592,7 @@ def test_every_page_carries_the_same_paper_account_and_its_own_route_sections(mo
     assert "500,000" not in html and "500000" not in html
     # the stream: the server's four named events, Last-Event-ID, then ?last=<sequence>
     assert "new EventSource(url)" in html and "'?last='" in html and "last_event_id" not in html
-    assert "['snapshot', 'ledger', 'heartbeat', 'unavailable'].forEach" in html
+    assert "['snapshot', 'ledger', 'heartbeat', 'unavailable', 'epoch_changed'].forEach" in html
     assert "'?entries=' + P.KEEP" in html
     for s in ("LIVE", "RECONNECTING", "DISCONNECTED", "UNAVAILABLE"):
         assert "conn('%s'" % s in html
@@ -1801,7 +1802,7 @@ def test_the_written_contract_is_the_servers_routes_and_keys():
     assert k["GET /api/command/paper/xavier"] == ("positions", "standing_orders", "recommendations")
     assert k["GET /api/command/paper/audrey"] == ("daily_reports", "audit_entries")
     assert k["GET /api/command/paper/session"] == ("session", "health", "enablement")
-    assert set(k["GET /api/command/paper/stream"]["events"]) == {"snapshot", "ledger", "heartbeat", "unavailable"}
+    assert set(k["GET /api/command/paper/stream"]["events"]) == {"snapshot", "ledger", "heartbeat", "unavailable", "epoch_changed"}
     for a in KINDS + ("session",):
         assert P.ENDPOINTS["paper_" + a] == "/api/command/paper/" + a
     assert not any(v.startswith("/api/command/paper/") and v.count("/") > 4 for v in P.ENDPOINTS.values())
@@ -1821,3 +1822,36 @@ def test_failed_account_read_does_not_claim_the_runtime_stopped():
         assert row["state"] == "UNAVAILABLE"
         assert "NOT RUNNING" not in row["text"]
         assert "STATUS UNAVAILABLE" in row["text"]
+
+
+def test_day_one_account_cutover_resets_cursor_and_shows_verified_archive():
+    old = _account(BAL_AT_2, [E2, E1])
+    old['account_id'] = ACCOUNT_ID
+    new = copy.deepcopy(old)
+    aid = 'paper_day_one_verified_test'
+    new['account_id'] = aid
+    new['account']['data'].update(account_id=aid, last_sequence=1,
+        cash_usd=500000.0, reserved_usd=0.0, available_usd=500000.0,
+        total_equity_usd=500000.0, realized_pnl_usd=0.0, unrealized_pnl_usd=0.0)
+    new['ledger']['data'] = [dict(E1, account_id=aid)]
+    new['epoch'] = {'account_id': aid, 'day_one': True, 'opening_verified': True,
+        'label': 'BETTOR PAPER — DAY ONE', 'opening_equity_usd': 500000.0,
+        'trading_turnover_usd': 0.0, 'opened_at': T0,
+        'historical_account_id': ACCOUNT_ID,
+        'historical_receipt': {'balances': {'realized_pnl_usd': -50.0, 'cash_usd': 499950.0}}}
+    got = _node('derek', """
+      var P = CC.paper, st = P.newState();
+      P.fromAccount(st, %s); P.onEvent(st, 'ledger', {sequence: 1000, entry: {sequence: 1000}});
+      P.fromAccount(st, %s);
+      var out = {seq: st.seq, entries: P.entries(st).length, html: P.account(P.view(st)).html};
+      out.changed = P.onEvent(st, 'epoch_changed', {reset_cursor: true});
+      out.reset = st.seq; return out;
+    """ % (_j(old), _j(new)))
+    assert got['seq'] == 1 and got['entries'] == 1
+    assert 'BETTOR PAPER — DAY ONE' in got['html'] and '$500,000.00' in got['html']
+    assert 'Historical PAPER' in got['html'] and '50.00' in got['html']
+    assert 'New-Epoch Trading Turnover' in got['html'] and '/archive/paper_acct_main' in got['html']
+    assert got['changed'] == 'epoch_changed' and got['reset'] is None
+    new['epoch']['opening_verified'] = False
+    hidden = _node('derek', 'return CC.paper.account(%s).html;' % _j(new))
+    assert 'BETTOR PAPER — DAY ONE' not in hidden

@@ -1212,7 +1212,7 @@ async def step(conn, ctx: dict) -> dict:
         return dict(out, refusal="EXTERNAL_VALUATIONS_ABSENT")
     rows = [dict(r) for r in await conn.fetch(
         CANDIDATES_SQL, ext.EXPERIMENT_ID,
-        at - float(cfg["entry"]["valuation_lookback_s"]), at + 1.0,
+        max(at - float(cfg["entry"]["valuation_lookback_s"]), float(cfg.get("epoch_opened_at") or 0)), at + 1.0,
         ctx["session_id"], int(cfg["cadence"]["max_decisions_per_pass"]))]
     out["candidates"] = len(rows)
     dctx = await _context(conn, ctx)

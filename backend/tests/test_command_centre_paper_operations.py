@@ -317,7 +317,9 @@ async def test_the_operations_route_serves_the_session_to_a_command_session_only
     monkeypatch.setattr(A, "settings", lambda: _Cfg(), raising=False)
     monkeypatch.setenv("DATABASE_URL", DSN)
     config.settings.cache_clear()
-    monkeypatch.setattr(L, "ACCOUNT_ID", acct["account_id"])
+    async def selected_account(conn):
+        return acct["account_id"]
+    monkeypatch.setattr(L, "selected_account", selected_account)
     app = FastAPI()
     app.include_router(CP.router)
     token, _ = A.mint_desk_token()

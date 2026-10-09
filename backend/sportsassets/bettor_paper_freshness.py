@@ -766,7 +766,7 @@ async def read(conn, account_id: str | None = None, *, now: float | None = None,
     rules, rates, by strategy), the latest refresh run and the per-position
     rows. Never raises: a failed read is UNAVAILABLE with its reason, never
     zero counts."""
-    acct = account_id or L.ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     try:
         async with conn.transaction():

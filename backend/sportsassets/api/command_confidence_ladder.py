@@ -153,7 +153,7 @@ async def _read(conn, now: float) -> dict:
     try:
         await conn.execute("SET LOCAL statement_timeout = %d"
                            % STATEMENT_TIMEOUT_MS)
-        data, why = await CV.gather(conn, L.ACCOUNT_ID, now=now)
+        data, why = await CV.gather(conn, await L.selected_account(conn), now=now)
         cutover = await CV.production_cutover_epoch(conn)
         overall, by, pwhy = await parity_inputs(conn)
         live = await live_state(conn)
@@ -161,7 +161,7 @@ async def _read(conn, now: float) -> dict:
         recent = {r["strategy"]: int(r["n"]) for r in await conn.fetch(
             "SELECT strategy, count(*) AS n FROM paper_decisions "
             " WHERE account_id = $1 AND decided_at >= to_timestamp($2) "
-            " GROUP BY strategy", L.ACCOUNT_ID,
+            " GROUP BY strategy", await L.selected_account(conn),
             now - RECENT_DECISION_DAYS * 86400.0)}
     finally:
         await tr.rollback()

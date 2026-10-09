@@ -133,9 +133,9 @@ async def _read(conn, sleeve: str, now: float) -> dict:
                            % STATEMENT_TIMEOUT_MS)
         if not await SL.schema(conn):
             return {"status": "UNAVAILABLE", "why": SL.R_NO_SCHEMA}
-        book = await SL.sleeve_book(conn, L.ACCOUNT_ID, now=now)
+        book = await SL.sleeve_book(conn, await L.selected_account(conn), now=now)
         groups = {g: c["sleeve"] for g, c in
-                  (await SL.classifications(conn, L.ACCOUNT_ID)).items()}
+                  (await SL.classifications(conn, await L.selected_account(conn))).items()}
         has_pos = bool(await conn.fetchval(
             "SELECT to_regclass('pos_economics_latest') IS NOT NULL"))
         econs, research_as_of = [], None

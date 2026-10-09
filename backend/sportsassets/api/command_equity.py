@@ -815,7 +815,7 @@ async def _exists(conn, table: str) -> bool:
 
 async def read_paper(conn, *, now: float, account_id: str | None = None) -> dict:
     from .. import bettor_paper_ledger as L
-    acct = account_id or L.ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     try:
         if not await _exists(conn, "paper_ledger"):
             return paper_account(None, now=now,
@@ -897,6 +897,13 @@ async def read_management(conn, acct: str, *, now: float, bal: dict,
     from .. import bettor_paper_epoch as EP
     try:
         async with conn.transaction():
+            if acct != 'paper_acct_main':
+                from .. import bettor_day_one as E
+                epoch = await E.read(conn, acct)
+                if epoch.get('day_one'):
+                    return dict(epoch, status='OK', read_model='ACCOUNT_BACKED_EPOCH',
+                                realized_pnl_usd=bal.get('realized_pnl_usd'),
+                                unrealized_pnl_usd=bal.get('unrealized_pnl_usd'))
             m = await EP.read(conn, acct, bal=bal, now=now)
     except Exception as exc:                                    # noqa: BLE001
         return {"status": "UNAVAILABLE", "epoch_id": EP.EPOCH_ID,
@@ -1064,7 +1071,7 @@ def thin(points: list, max_n: int = MAX_POINTS) -> tuple:
 async def paper_curve(conn, *, since: float, until: float,
                       account_id: str | None = None) -> dict:
     from .. import bettor_paper_ledger as L
-    acct = account_id or L.ACCOUNT_ID
+    acct = account_id or await L.selected_account(conn)
     if not await _exists(conn, "paper_equity_snapshots"):
         return {"status": "UNAVAILABLE", "why": "MIGRATION_172_IS_NOT_APPLIED",
                 "points": []}

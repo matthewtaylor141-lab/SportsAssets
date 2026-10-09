@@ -84,12 +84,13 @@ async def snapshot_equity(conn, *, session_id: str, account_id: str,
             "marks_complete": b["marks_complete"]}
 
 
-async def drawdown(conn, account_id: str = L.ACCOUNT_ID, *,
+async def drawdown(conn, account_id: str = None, *,
                    since: float | None = None,
                    until: float | None = None) -> dict:
     """PEAK-TO-TROUGH on the recorded equity snapshots (starting cash is the
     first peak). A snapshot with incomplete marks has no equity and is
     skipped, and counted."""
+    account_id = account_id or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT at, equity_usd FROM paper_equity_snapshots "
         " WHERE account_id=$1 AND ($2::timestamptz IS NULL OR at >= $2) "
@@ -124,8 +125,9 @@ async def drawdown(conn, account_id: str = L.ACCOUNT_ID, *,
 # THE PAYLOADS
 # ═════════════════════════════════════════════════════════════════════
 
-async def session_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+async def session_payload(conn, *, account_id: str = None,
                           now: float | None = None) -> dict:
+    account_id = account_id or await L.selected_account(conn)
     out = _base(now)
     sess = await S.active_session(conn, account_id)
     en = await S.enablement(conn)
@@ -151,8 +153,9 @@ async def session_payload(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-async def derek_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+async def derek_payload(conn, *, account_id: str = None,
                         limit: int = 100, now: float | None = None) -> dict:
+    account_id = account_id or await L.selected_account(conn)
     out = _base(now)
 
     async def decisions():
@@ -214,8 +217,9 @@ async def derek_payload(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-async def xavier_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+async def xavier_payload(conn, *, account_id: str = None,
                          limit: int = 100, now: float | None = None) -> dict:
+    account_id = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     out = _base(at)
 
@@ -253,8 +257,9 @@ async def xavier_payload(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-async def audrey_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+async def audrey_payload(conn, *, account_id: str = None,
                          limit: int = 50, now: float | None = None) -> dict:
+    account_id = account_id or await L.selected_account(conn)
     out = _base(now)
 
     async def reports():
@@ -364,13 +369,14 @@ def _with_explanation(d: dict) -> dict:
     return d
 
 
-async def benchmark_payload(conn, *, account_id: str = L.ACCOUNT_ID,
+async def benchmark_payload(conn, *, account_id: str = None,
                             limit: int = 100, now: float | None = None,
                             strategy: str | None = None) -> dict:
     """THE PINNACLE_ONLY_PAPER_BENCHMARK: its decisions (refusals with their
     shortfalls), orders, fills and handoffs, every row labelled with the
     strategy and the disclosure that it is experimental execution, not
     evidence of qualified or proven profitability."""
+    account_id = account_id or await L.selected_account(conn)
     from .agents import paper_benchmark as _PB
 
     class PB:                                                   # noqa: N801

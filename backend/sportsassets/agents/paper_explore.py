@@ -268,12 +268,12 @@ async def limits_state(conn, account_id: str) -> dict:
                        "max_aggregate_exposure_usd":
                            MAX_AGGREGATE_EXPOSURE_USD,
                        "loss_stop_usd": LOSS_STOP_USD,
-                       "one_position_per_fixture": not LIMITS.uses_owner_policy(account_id)}}
+                       "one_position_per_fixture": not await LIMITS.uses_account_policy(conn, account_id)}}
 
 
 async def fixture_taken(conn, account_id: str, fixture, slug) -> bool:
     """An exploration entry on this fixture that is open or has filled."""
-    if LIMITS.uses_owner_policy(account_id):
+    if await LIMITS.uses_account_policy(conn, account_id):
         return False
     return bool(await conn.fetchval(
         "SELECT EXISTS (SELECT 1 FROM paper_orders WHERE account_id=$1 "
@@ -321,7 +321,7 @@ async def selection(conn, *, cand: dict, at: float, account_id=None) -> dict:
         "   AND coalesce(sport_family, 'UNKNOWN') = $2 "
         "   AND decided_at > to_timestamp($3) AND us_market_slug IS NOT NULL",
         PB.EXPERIMENT_ID, fam, at - SAMPLING_WINDOW_S)
-    owner = LIMITS.uses_owner_policy(account_id)
+    owner = await LIMITS.uses_account_policy(conn, account_id)
     p = 1.0 if owner else inclusion_probability(int(n or 0))
     u = draw(cand.get("fixture"))
     return {"method": "ALL_ELIGIBLE_VALUATIONS_V3" if owner else SELECTION_METHOD, "policy_version": VERSION,
@@ -428,7 +428,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                                  cand.get("fixture"),
                                  cand.get("us_market_slug")):
             refusals.append(R_FIXTURE_TAKEN)
-        elif LIMITS.uses_owner_policy(ctx["account_id"]) and \
+        elif await LIMITS.uses_account_policy(conn, ctx["account_id"]) and \
                 await L.same_contract_held(conn, ctx["account_id"], STRATEGY,
                                            cand.get("us_market_slug"), side):
             refusals.append(L.R_SAME_CONTRACT_HELD)

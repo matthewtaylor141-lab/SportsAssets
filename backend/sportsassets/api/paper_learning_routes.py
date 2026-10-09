@@ -59,9 +59,11 @@ from .agents_core import require_read, require_write
 router = APIRouter()
 
 
-def _acct(account_id: str | None) -> str:
+def _acct(account_id: str | None) -> str | None:
     from .. import bettor_paper_ledger as L
-    a = account_id or L.ACCOUNT_ID
+    if account_id is None:
+        return None  # the connected read resolves the durable epoch selector
+    a = account_id
     if not L.is_paper_id(a):
         raise HTTPException(status_code=400, detail={
             "reason": "NOT_A_PAPER_ACCOUNT_ID"})

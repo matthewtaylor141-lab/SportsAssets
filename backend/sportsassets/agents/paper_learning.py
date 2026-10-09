@@ -871,10 +871,11 @@ async def group_chain(conn, group_id: str, *, fill_id: str | None = None
             "fills_are": "SIMULATED (PAPER_SIM_V1), not verified execution"}
 
 
-async def recent_chains(conn, *, account_id: str = L.ACCOUNT_ID,
+async def recent_chains(conn, *, account_id: str = None,
                         limit: int = 50, strategy: str | None = None
                         ) -> list:
     """The chain summary of the most recently filled groups."""
+    account_id = account_id or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT f.group_id, min(f.filled_at) AS first_at, "
         "       (array_agg(f.fill_id ORDER BY f.filled_at, f.fill_id))[1] "
@@ -2727,9 +2728,10 @@ async def step_learning(conn, ctx: dict) -> dict:
 # 7 · THE MANAGEMENT READS
 # ═════════════════════════════════════════════════════════════════════
 
-async def lessons(conn, *, account_id: str = L.ACCOUNT_ID,
+async def lessons(conn, *, account_id: str = None,
                   agent: str | None = None, latest_only: bool = True,
                   limit: int = 200) -> list:
+    account_id = account_id or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT * FROM paper_agent_lessons WHERE account_id=$1 "
         "   AND ($2::text IS NULL OR agent_id=$2) "
@@ -2745,8 +2747,9 @@ async def lessons(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-async def proposals(conn, *, account_id: str = L.ACCOUNT_ID,
+async def proposals(conn, *, account_id: str = None,
                     agent: str | None = None, limit: int = 100) -> list:
+    account_id = account_id or await L.selected_account(conn)
     rows = await conn.fetch(
         "SELECT * FROM paper_improvement_proposals WHERE account_id=$1 "
         "   AND ($2::text IS NULL OR agent_id=$2) "
@@ -2763,8 +2766,9 @@ async def proposals(conn, *, account_id: str = L.ACCOUNT_ID,
     return out
 
 
-async def event_audits(conn, *, account_id: str = L.ACCOUNT_ID,
+async def event_audits(conn, *, account_id: str = None,
                        kind: str | None = None, limit: int = 100) -> list:
+    account_id = account_id or await L.selected_account(conn)
     return [_rec(r) for r in await conn.fetch(
         "SELECT finding_id, session_id, found_at, kind, severity, subject, "
         "       detail, improvement_task_id FROM paper_audrey_findings "
@@ -2850,11 +2854,12 @@ def _agent_view(agent: str, les: list, props: list) -> dict:
         "proposals_total": len(props)}
 
 
-async def learning_summary(conn, *, account_id: str = L.ACCOUNT_ID,
+async def learning_summary(conn, *, account_id: str = None,
                            now: float | None = None) -> dict:
     """THE MANAGEMENT READ: per agent, what was learned, the proposed
     change, its evaluation, active or not -- each section OK / EMPTY /
     UNAVAILABLE (a failed read is never a zero)."""
+    account_id = account_id or await L.selected_account(conn)
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {
         "version": VERSION, "as_of": at, "account_id": account_id,

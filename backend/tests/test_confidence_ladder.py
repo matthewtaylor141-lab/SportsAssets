@@ -684,7 +684,9 @@ async def test_the_endpoint_over_the_real_ledger(monkeypatch):
         cut = await _cutover(conn, now - 10 * DAY)
         base = cut + 60.0
         assert base < now - 3 * DAY, "the recorded cutover is too recent"
-        monkeypatch.setattr(L, "ACCOUNT_ID", acct["account_id"])
+        async def selected_account(conn):
+            return acct["account_id"]
+        monkeypatch.setattr(L, "selected_account", selected_account)
 
         class _Pool:
             @asynccontextmanager

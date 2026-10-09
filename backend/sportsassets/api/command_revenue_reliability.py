@@ -40,7 +40,7 @@ async def revenue_readiness(response: Response) -> dict:
     try:
         pool = await _pool()
         async with pool.acquire() as conn:
-            got = await RR.read(conn, account_id=L.ACCOUNT_ID, now=now)
+            got = await RR.read(conn, account_id=await L.selected_account(conn), now=now)
     except Exception as exc:                                        # noqa: BLE001
         return envelope("UNAVAILABLE", "%s: %s" % (type(exc).__name__, str(exc)[:160]), computed_at=now)
     if got.get("status") != "OK":

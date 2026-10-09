@@ -1255,8 +1255,8 @@ async def management_reconciliation(conn, account_id: str, *, bal: dict,
         return {"status": "NOT_STARTED", "epoch_id": EP.EPOCH_ID,
                 "epoch_start": EP.EPOCH_START_LOCAL}
     gap = _num((m.get("identity") or {}).get("gap_usd"))
-    out = {"epoch_id": EP.EPOCH_ID, "epoch_start": EP.EPOCH_START_LOCAL,
-           "epoch_start_at": EP.EPOCH_START,
+    out = {"epoch_id": m.get("epoch_id", EP.EPOCH_ID), "epoch_start": m.get("epoch_start", EP.EPOCH_START_LOCAL),
+           "epoch_start_at": m.get("epoch_start_at", EP.EPOCH_START),
            "opening_equity_usd": float(EP.OPENING_EQUITY_USD),
            "realized_pnl_usd": m.get("realized_pnl_usd"),
            "unrealized_pnl_usd": m.get("unrealized_pnl_usd"),

@@ -287,7 +287,7 @@ async def _read(conn, *, since, since_source: str, now: float) -> dict:
     try:
         await conn.execute("SET LOCAL statement_timeout = %d"
                            % STATEMENT_TIMEOUT_MS)
-        data, sources = await gather(conn, L.ACCOUNT_ID, now=now)
+        data, sources = await gather(conn, await L.selected_account(conn), now=now)
         cutover = await production_cutover_epoch(conn)
         cutover_hash = await production_cutover_logic_hash(conn)
     finally:

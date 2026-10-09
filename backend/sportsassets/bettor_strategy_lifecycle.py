@@ -651,7 +651,7 @@ async def step(conn, ctx: dict) -> dict:
     from . import bettor_paper_ledger as L
     acct = ctx.get("account_id")
     now = float(ctx["now"])
-    if acct != L.ACCOUNT_ID:
+    if acct != await L.selected_account(conn):
         return {"ran": False, "why": "MAIN_PAPER_ACCOUNT_ONLY"}
     last = _LAST_RUN.get(acct)
     if last is not None and 0 <= now - last < RUN_EVERY_S:

@@ -234,6 +234,8 @@ def compatibility(before: dict, after: dict) -> dict:
                 ("triggers", R_TRIGGER_ADDED, R_TRIGGER_CHANGED)):
             for name, d in sorted(a[kind].items()):
                 if name not in b[kind]:
+                    if kind == "triggers" and name in a.get("proven_dormant_epoch_triggers", []):
+                        continue
                     unproven.append("%s:%s:%s" % (added, t, name))
                 elif b[kind][name] != d:
                     unproven.append("%s:%s:%s" % (changed, t, name))
@@ -296,6 +298,23 @@ async def snapshot(conn) -> dict:
         out[r["t"]] = {k: json.loads(r[k]) if isinstance(r[k], str) else
                        (r[k] or {}) for k in ("columns", "constraints",
                                               "unique_indexes", "triggers")}
+    # An epoch guard is a no-op only while no epoch has ever been activated.
+    # Prove the installed body exactly matches this reviewed migration and
+    # starts with the unconditional empty-history return. Generic added
+    # triggers (and changed bodies) remain NOT_PROVEN.
+    epoch_table = await conn.fetchval("SELECT to_regclass('public.paper_account_epochs')")
+    if epoch_table and not await conn.fetchval("SELECT EXISTS(SELECT 1 FROM paper_account_epochs)"):
+        migration = pathlib.Path(__file__).resolve().parents[1] / "migrations/317_paper_day_one_epoch.sql"
+        source = migration.read_text() if migration.exists() else ""
+        bodies = dict(re.findall(r"CREATE OR REPLACE FUNCTION (paper_epoch_\w+)\(\) RETURNS trigger LANGUAGE plpgsql AS \$\$(.*?)\$\$;", source, re.S))
+        early_return = "BEGIN\n IF NOT EXISTS(SELECT 1 FROM paper_account_epochs) THEN RETURN NEW; END IF;"
+        guards = await conn.fetch("SELECT c.relname AS t,g.tgname AS name,p.proname,p.prosrc,p.prosecdef,p.proconfig,pg_get_triggerdef(g.oid) AS definition FROM pg_trigger g JOIN pg_class c ON c.oid=g.tgrelid JOIN pg_proc p ON p.oid=g.tgfoid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND NOT g.tgisinternal")
+        for guard in guards:
+            body = bodies.get(guard['proname'])
+            expected = re.search(r"CREATE TRIGGER " + re.escape(guard['name']) + r" BEFORE INSERT ON " + re.escape(guard['t']) + r"\s+FOR EACH ROW EXECUTE FUNCTION " + re.escape(guard['proname']) + r"\(\);", source)
+            exact_definition = "CREATE TRIGGER %s BEFORE INSERT ON public.%s FOR EACH ROW EXECUTE FUNCTION %s()" % (guard['name'], guard['t'], guard['proname'])
+            if expected and body == guard['prosrc'] and early_return in body and guard['definition'] == exact_definition and not guard['prosecdef'] and guard['proconfig'] is None:
+                out[guard['t']].setdefault('proven_dormant_epoch_triggers', []).append(guard['name'])
     return out
 
 

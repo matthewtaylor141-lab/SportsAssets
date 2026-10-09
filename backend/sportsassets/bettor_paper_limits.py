@@ -49,3 +49,15 @@ def effective_config(config, account_id):
 
 def uses_owner_policy(account_id):
     return account_id == ACCOUNT_ID
+
+
+async def uses_account_policy(conn, account_id):
+    """Only registered epochs inherit the immutable source account policy."""
+    if uses_owner_policy(account_id):
+        return True
+    if not await conn.fetchval("SELECT to_regclass('public.paper_account_epochs')"):
+        return False
+    return bool(await conn.fetchval(
+        "WITH RECURSIVE ancestry AS (SELECT account_id,previous_account_id FROM paper_account_epochs WHERE account_id=$1 "
+        "UNION SELECT e.account_id,e.previous_account_id FROM paper_account_epochs e JOIN ancestry a ON e.account_id=a.previous_account_id) "
+        "SELECT EXISTS(SELECT 1 FROM ancestry WHERE previous_account_id=$2)", account_id, ACCOUNT_ID))

@@ -133,7 +133,10 @@ def _with(fn):
 
 def _use_account(monkeypatch, acct):
     from sportsassets.agents import paper_brief as PB
-    monkeypatch.setattr(PB, "ACCOUNT_ID", acct["account_id"])
+    from sportsassets import bettor_paper_ledger as L
+    async def selected_account(conn):
+        return acct["account_id"]
+    monkeypatch.setattr(L, "selected_account", selected_account)
 
 
 def _gather():
