@@ -339,7 +339,7 @@ def test_the_freshness_task_keeps_reading_while_a_slow_pass_runs(
     assert snaps[0]["computed_at"] - pu["verified_at"] >= 1.2
     assert pu["verified_age_s"] >= 1.2
     # the frozen-window sampler's newest sample rides the snapshot too
-    wl = snaps[0]["freshness"]["window_last_sample"]
+    wl = snaps[0]["freshness_window_last_sample"]
     assert isinstance(wl, dict)
     if wl:
         assert wl["n"] == 6 and len(wl["membership_hash"]) == 64
