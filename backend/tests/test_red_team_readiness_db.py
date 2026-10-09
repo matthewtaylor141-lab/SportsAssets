@@ -26,12 +26,39 @@ def run(coro_fn):
     return asyncio.run(go())
 
 
+#: the two control rows the readback's authority is READ from (RC6): the
+#: legacy actual lane (execmirror_control) and Kalshi small live
+#: (kalshi_smalllive_control). Other suites sharing this database enable
+#: them; a test that asserts the shadow readback pins them off for its read
+#: and restores them, and the opposite case is asserted on its own below.
+_CONTROLS = ("execmirror_control", "kalshi_smalllive_control")
+
+
+async def _with_controls(conn, enabled: dict, read):
+    prev = {t: await conn.fetchrow(
+        "SELECT enabled, stopped FROM %s WHERE id = 1" % t)
+        for t in _CONTROLS}
+    try:
+        for t, on in enabled.items():
+            await conn.execute("UPDATE %s SET enabled = $1, stopped = false "
+                               "WHERE id = 1" % t, on)
+        async with conn.transaction(readonly=True):
+            return await read()
+    finally:
+        for t, was in prev.items():
+            if was is not None:
+                await conn.execute(
+                    "UPDATE %s SET enabled = $1, stopped = $2 WHERE id = 1"
+                    % t, was["enabled"], was["stopped"])
+
+
 def test_evaluate_with_nothing_proven_is_paper_shadow_only():
     from sportsassets.redteam import readiness as R
 
     async def fn(conn):
-        async with conn.transaction(readonly=True):
-            return await R.evaluate(conn, now=time.time())
+        return await _with_controls(
+            conn, {t: False for t in _CONTROLS},
+            lambda: R.evaluate(conn, now=time.time()))
     r = run(fn)
     assert r["status"] == "PAPER_SHADOW_ONLY"
     assert r["blockers"]
@@ -47,6 +74,30 @@ def test_evaluate_with_nothing_proven_is_paper_shadow_only():
     # venue health is one entry per venue, never blended
     vh = r["controls"]["VENUE_HEALTH"]["evidence"]
     assert set(vh["venues"]) >= {"KALSHI", "POLYMARKET_US"}
+    # the authority is READ, with its basis (RC6)
+    basis = r["authority_basis"]
+    assert basis["small_live"]["gate"]["value"] is True
+    assert basis["kalshi_live_money"]["control"]["enabled"] is False
+
+
+def test_a_running_actual_lane_is_read_as_such_and_grants_nothing():
+    """RC6: the authority readback used to be four literals, so an enabled,
+    unstopped actual lane still read SHADOW. It is now read as running, the
+    interlock's live-authority check fails, and nothing is granted."""
+    from sportsassets.redteam import readiness as R
+
+    async def fn(conn):
+        return await _with_controls(
+            conn, {"execmirror_control": True,
+                   "kalshi_smalllive_control": False},
+            lambda: R.evaluate(conn, now=time.time()))
+    r = run(fn)
+    assert r["authority"]["small_live"] == "ACTUAL_LANE_ACTIVE"
+    assert r["checks"]["live_authority_shadow"] is False
+    assert "live_authority_shadow" in r["blockers"]
+    assert r["status"] == "PAPER_SHADOW_ONLY"
+    assert r["auto_activation"] is False
+    assert r["authority"]["capital_authority_granted"] is False
 
 
 def test_runner_appends_receipts_once_per_evidence_and_never_edits():

@@ -148,6 +148,9 @@ KALSHI_RECONCILIATION_STALE = "KALSHI_RECONCILIATION_STALE"
 KALSHI_RECONCILIATION_BASELINE_UNACCEPTED = \
     "KALSHI_RECONCILIATION_BASELINE_UNACCEPTED"
 KALSHI_PLAN_NOT_SUBMITTABLE = "KALSHI_PLAN_NOT_SUBMITTABLE"
+#: (RC6 red-team, credential isolation) the configured Kalshi key pair is
+#: also configured in this process for another venue (credential_isolation)
+KALSHI_KEY_REUSED_ACROSS_VENUES = "KALSHI_KEY_REUSED_ACROSS_VENUES"
 
 RECONCILIATION_MAX_AGE_S = 15 * 60
 TIMEOUT_S = 10.0
@@ -309,17 +312,33 @@ def credential_state(env: Mapping[str, str] | None = None) -> dict:
                                   "error": type(exc).__name__}
             if isinstance(exc, KK.KeyRefused):
                 out["private_key"]["refusal"] = exc.code
+    other = []
+    if (out["private_key"] or {}).get("loadable"):
+        try:
+            other = _other_venue_slots(_read_pem(env), env)
+        except Exception:                                     # noqa: BLE001
+            other = []
+    out["also_configured_as"] = other
     out["complete"] = bool(kid and (out["private_key"] or {}).get("loadable")
-                           and out["environment_valid"])
+                           and out["environment_valid"] and not other)
     if not (kid and (has_pem or has_path)):
         out["state"] = KALSHI_CREDENTIAL_ABSENT
     elif not (out["private_key"] or {}).get("loadable"):
         out["state"] = KALSHI_CREDENTIAL_UNREADABLE
+    elif other:
+        out["state"] = KALSHI_KEY_REUSED_ACROSS_VENUES
     elif not out["environment_valid"]:
         out["state"] = KALSHI_ENV_UNSET
     else:
         out["state"] = "PRESENT"
     return out
+
+
+def _other_venue_slots(pem, env) -> list:
+    """Other venues' slots in `env` holding the same key pair as the Kalshi
+    key about to be used (credential_isolation; names only)."""
+    from . import credential_isolation as CI
+    return CI.other_venue_slots_holding(pem, venue="KALSHI", env=env)
 
 
 def smalllive_env_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -452,7 +471,12 @@ class KalshiClient:
             return Refusal(KALSHI_ENV_UNSET)
         if self._key is None:
             try:
-                self._key = load_private_key(_read_pem(self._env))
+                pem = _read_pem(self._env)
+                other = _other_venue_slots(pem, self._env)
+                if other:
+                    return Refusal(KALSHI_KEY_REUSED_ACROSS_VENUES,
+                                   {"also_configured_as": other})
+                self._key = load_private_key(pem)
             except Exception as exc:                          # noqa: BLE001
                 return Refusal(KALSHI_CREDENTIAL_UNREADABLE,
                                {"error": type(exc).__name__})

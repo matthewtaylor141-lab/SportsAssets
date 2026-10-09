@@ -42,6 +42,7 @@ import logging
 import os
 import time
 
+from .. import credential_isolation as CI
 from .. import kalshi_key as KK
 from .. import kalshi_market_data as KMD
 from .. import kalshi_ws as KWS
@@ -224,12 +225,23 @@ async def run(get_pool_fn=get_pool, *, env=None) -> None:
             await asyncio.sleep(300)
     key_id = str(env.get(KWS.KEY_ID_ENV)).strip()
     key = key_class(env)
-    try:
-        pk = KWS.load_private_key(env.get(KWS.PRIVATE_KEY_PEM_ENV))
-    except ValueError as exc:
-        # PRESENT BUT NOT A DOCUMENTED KALSHI KEY: named, never a crash loop
-        # (it used to raise out of run()); no connection is attempted
-        why = getattr(exc, "code", None) or str(exc)
+    why, pk = None, None
+    # ANOTHER VENUE'S KEY (RC6 red-team, credential isolation): the same
+    # key pair configured in this process for PMX / PMUS never signs a
+    # Kalshi handshake (names only, never a value)
+    other = CI.reused_by(KWS.PRIVATE_KEY_PEM_ENV, env)
+    if other:
+        why = CI.R_CROSS_VENUE_KEY_REUSE
+        key = dict(key, also_configured_as=other)
+    else:
+        try:
+            pk = KWS.load_private_key(env.get(KWS.PRIVATE_KEY_PEM_ENV))
+        except ValueError as exc:
+            # PRESENT BUT NOT A DOCUMENTED KALSHI KEY: named, never a crash
+            # loop (it used to raise out of run())
+            why = getattr(exc, "code", None) or str(exc)
+    if why is not None:
+        # no connection is attempted
         while True:
             try:
                 await heartbeat(SERVICE, "blocked", {

@@ -422,18 +422,67 @@ def capacity(points: list, *, requested_usd) -> dict:
 
 # ── Karen ────────────────────────────────────────────────────────────────
 
-def karen(saved_loss_usd, false_block_cost_usd, *, source: str) -> dict:
-    v = RTK.karen_incremental_value(saved_loss_usd or 0,
-                                    false_block_cost_usd or 0)
-    measured = saved_loss_usd is not None and false_block_cost_usd is not None
+#: the two twin metrics KAREN_VALUE reads, as twin.scorecards.karen writes
+#: them: book COUNTERFACTUAL (a metric derived from a twin world; its basis
+#: book is named in the metric, `..._paper_basis`), never book PAPER
+KAREN_TWIN_METRICS = ("loss_avoided_paper_basis",
+                      "profit_sacrificed_paper_basis")
+KAREN_TWIN_BOOK = "COUNTERFACTUAL"
+#: the twin's own verdict that a value may be concluded from (twin.common.
+#: metric: INSUFFICIENT_SAMPLE is "shown, nothing concluded")
+KAREN_TWIN_CONCLUSIVE = "MEASURED"
+
+
+def karen_twin_blockers(rows: dict | None) -> list:
+    """Why the twin's Karen rows conclude nothing, per metric, named with the
+    twin's own status and reason (an absent row, UNAVAILABLE / UNPROVEN with
+    its reason, INSUFFICIENT_SAMPLE with its sample). [] when both metrics
+    are MEASURED with a value."""
+    out = []
+    for m in KAREN_TWIN_METRICS:
+        r = (rows or {}).get(m)
+        if r is None:
+            out.append("KAREN_TWIN_ROW_ABSENT:%s" % m)
+        elif r.get("status") == "INSUFFICIENT_SAMPLE":
+            out.append("KAREN_TWIN_INSUFFICIENT_SAMPLE:%s:%s" % (
+                m, r.get("sample_n")))
+        elif r.get("status") != KAREN_TWIN_CONCLUSIVE or r.get(
+                "value") is None:
+            out.append("KAREN_TWIN_%s:%s:%s" % (
+                r.get("status") or "NO_STATUS", m,
+                r.get("reason") or "NO_REASON"))
+    return out
+
+
+def karen(saved_loss_usd, false_block_cost_usd, *, source: str,
+          twin_rows: dict | None = None) -> dict:
+    """KAREN_VALUE: saved loss - false-block cost from the twin's
+    KAREN_BLOCK_ACCEPTED world. GREEN only when both values exist AND, when
+    the twin's rows are supplied, both are MEASURED in one run -- a value
+    the twin itself calls INSUFFICIENT_SAMPLE or UNAVAILABLE concludes
+    nothing. Otherwise UNKNOWN, with the twin's own reason named."""
+    why = [] if twin_rows is None else karen_twin_blockers(twin_rows)
+    measured = (saved_loss_usd is not None
+                and false_block_cost_usd is not None and not why)
+    # an unmeasured value is null, never "0" (it used to read
+    # saved_loss_usd "0" / value_added_usd "0" beside UNKNOWN)
+    ev = {"saved_loss_usd": (str(D(saved_loss_usd))
+                             if saved_loss_usd is not None else None),
+          "false_block_opportunity_cost_usd": (
+              str(abs(D(false_block_cost_usd)))
+              if false_block_cost_usd is not None else None),
+          "value_added_usd": (str(RTK.karen_incremental_value(
+              saved_loss_usd, false_block_cost_usd)) if measured else None),
+          "source": source,
+          "rule": "saved loss - false-block cost; never block count"}
+    if twin_rows is not None:
+        ev["twin"] = {"book": KAREN_TWIN_BOOK,
+                      "metrics": list(KAREN_TWIN_METRICS),
+                      "rows": {m: twin_rows.get(m)
+                               for m in KAREN_TWIN_METRICS}}
     return result("KAREN_VALUE", GREEN if measured else UNKNOWN,
-                  [] if measured else ["KAREN_COUNTERFACTUALS_UNMEASURED"],
-                  {"saved_loss_usd": str(D(saved_loss_usd)),
-                   "false_block_opportunity_cost_usd": str(
-                       abs(D(false_block_cost_usd))),
-                   "value_added_usd": str(v), "source": source,
-                   "rule": "saved loss - false-block cost; never block "
-                           "count"})
+                  [] if measured else
+                  ["KAREN_COUNTERFACTUALS_UNMEASURED"] + why, ev)
 
 
 # ── credentials (shape only) ─────────────────────────────────────────────
@@ -537,8 +586,12 @@ def credential_classes(env=None) -> dict:
     # from the same bytes the signers load
     kal = kalshi_class(env.get("KALSHI_API_KEY_ID", ""),
                        env.get("KALSHI_PRIVATE_KEY_PEM"))
+    # BY KEY (RC6 red-team): one key pair in two venues' slots, which no
+    # shape can tell apart (a Kalshi RSA key vs the PMX RSA key); names only
+    from .. import credential_isolation as CI
     return {"PMX": pm(pmx), "PMUS": pmus, "KALSHI": kal,
-            "PMUS_SLOTS": pmus_slots}
+            "PMUS_SLOTS": pmus_slots,
+            "CROSS_VENUE_KEY_REUSE": CI.reuse(env)}
 
 
 def credentials(by_process: dict) -> dict:
@@ -616,6 +669,19 @@ def credentials(by_process: dict) -> dict:
                         if isinstance((s or {}).get("PMUS_SLOTS"), dict)
                         else ())
         if c is None)
+    # ONE KEY PAIR IN TWO VENUES' SLOTS (credential_isolation, by key): RED
+    # in any process, whatever the shapes say; names only
+    reused = sorted("%s:%s" % (p, pair) for p, s in by_process.items()
+                    for pair in ((s or {}).get("CROSS_VENUE_KEY_REUSE")
+                                 or ()))
+    if reused:
+        mism = mism + ["CREDENTIAL_REUSED_ACROSS_VENUES:%s" % r
+                       for r in reused]
+        actions.append("one key pair is configured for two venues (%s): "
+                       "each venue's slot must hold that venue's own key; "
+                       "remove the other venue's key from the slot it was "
+                       "pasted into. The Kalshi signers refuse such a key."
+                       % "; ".join(reused))
     return result("CREDENTIAL_CLASSES", RED if mism else GREEN, mism,
                   {"expected": dict(RTCRED.EXPECTED),
                    "approved": {k: list(v)
@@ -624,6 +690,7 @@ def credentials(by_process: dict) -> dict:
                    "by_process":
                    {p: dict(s or {}) for p, s in by_process.items()},
                    "pmus_slots_not_provisioned": absent_pmus,
+                   "cross_venue_key_reuse": reused,
                    "verdicts": verdicts, "not_provisioned": missing,
                    "owner_actions": actions,
                    "values_exposed": False})

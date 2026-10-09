@@ -80,17 +80,40 @@ async def capacity_points(conn) -> list:
 
 
 async def karen_counterfactuals(conn) -> tuple:
+    """(saved loss, false-block cost, source, twin rows) from the NEWEST
+    twin run that scored Karen's counterfactual, both metrics from that one
+    run.
+
+    THE BOOK (RC6). twin.scorecards.karen writes loss_avoided_paper_basis /
+    profit_sacrificed_paper_basis in book COUNTERFACTUAL -- a metric derived
+    from a twin world names its basis book in the metric, never in `book`
+    (migration 219 allows ACTUAL / PAPER / COUNTERFACTUAL). This read asked
+    for book = 'PAPER', a row the twin never writes, so KAREN_VALUE read
+    KAREN_COUNTERFACTUALS_UNMEASURED whatever the twin had measured
+    (production RC5, 43 runs 2026-10-04 .. 10-09: every Karen row of these
+    metrics is COUNTERFACTUAL; research/rc6_redteam_controls.sql K1/K2).
+    The two metrics were also read DISTINCT ON metric across runs, so they
+    could come from two different runs. Each row carries the twin's own
+    status and reason (controls.karen decides on them)."""
     if not await C._has(conn, "twin_agent_scorecards"):
-        return None, None, "twin_agent_scorecards absent"
-    rows = {r["metric"]: r["value"] for r in await conn.fetch(
-        "SELECT DISTINCT ON (metric) metric, value FROM "
-        "twin_agent_scorecards WHERE agent = 'KAREN' AND metric = ANY($1) "
-        " AND book = 'PAPER' ORDER BY metric, computed_at DESC",
-        ["loss_avoided_paper_basis", "profit_sacrificed_paper_basis"])}
-    return (rows.get("loss_avoided_paper_basis"),
-            rows.get("profit_sacrificed_paper_basis"),
-            "twin_agent_scorecards (RESEARCH counterfactual; the twin is "
-            "not certified, so this is never capital evidence)")
+        return None, None, "twin_agent_scorecards absent", {}
+    names = list(C.KAREN_TWIN_METRICS)
+    got = await conn.fetch(
+        "SELECT metric, book, value, status, reason, sample_n, run_id, "
+        "       extract(epoch FROM computed_at)::float8 AS computed_at "
+        "  FROM twin_agent_scorecards "
+        " WHERE agent = 'KAREN' AND book = $2 AND metric = ANY($1) "
+        "   AND run_id = (SELECT run_id FROM twin_agent_scorecards "
+        "                  WHERE agent = 'KAREN' AND book = $2 "
+        "                    AND metric = ANY($1) "
+        "                  ORDER BY computed_at DESC LIMIT 1)",
+        names, C.KAREN_TWIN_BOOK)
+    rows = {r["metric"]: dict(r) for r in got}
+    val = {m: (rows.get(m) or {}).get("value") for m in names}
+    return (val[names[0]], val[names[1]],
+            "twin_agent_scorecards book %s (RESEARCH counterfactual; the "
+            "twin is not certified, so this is never capital evidence)"
+            % C.KAREN_TWIN_BOOK, rows)
 
 
 async def workers_boot_credentials(conn) -> tuple[dict | None, dict | None]:
@@ -125,6 +148,91 @@ def api_pmus_census() -> tuple[dict, dict]:
         return ({"error": type(exc).__name__},
                 {"ms": round((time.monotonic() - t0) * 1000.0, 1),
                  "ok": False, "why": type(exc).__name__})
+
+
+# ── authority, READ (RC6 red-team, authority scenario) ───────────────────
+#
+# The `authority` block of this readback was four literals ("SHADOW",
+# "NOT_ACTIVATED", "SHADOW_ONLY", False), and the interlock's
+# live_authority_still_shadow compared completion's own literal
+# small_live = "SHADOW" -- a readback that could not fail, whatever the
+# lanes' real state (the Risk card's small_live_shadow / kalshi_live_money_
+# not_activated / adriana_shadow_only units read it). Each is now READ from
+# the state that actually decides it; an unreadable source is UNREAD (a
+# failure), never the safe-sounding value.
+SHADOW, NOT_ACTIVATED, SHADOW_ONLY = "SHADOW", "NOT_ACTIVATED", "SHADOW_ONLY"
+#: kalshi_venue.ENABLED_ENV (the per-process submission switch)
+KALSHI_ENABLED_ENV = "KALSHI_SMALLLIVE_ENABLED"
+
+
+def small_live_authority(comp: dict) -> dict:
+    """SHADOW only when the completion read's small_live_shadow gate (the
+    execmirror_control row: the actual lane is not enabled-and-running) is
+    True; ACTUAL_LANE_ACTIVE when it read the lane running; UNREAD
+    otherwise (gate absent, table / row missing, section down)."""
+    g = ((comp or {}).get("gates") or {}).get("small_live_shadow")
+    if not isinstance(g, dict):
+        return {"state": "UNREAD:SMALL_LIVE_GATE_ABSENT",
+                "source": "completion gates.small_live_shadow"}
+    if g.get("value") is True:
+        state = SHADOW
+    elif g.get("reason") == "SMALL_LIVE_ACTUAL_LANE_ACTIVE":
+        state = "ACTUAL_LANE_ACTIVE"
+    else:
+        state = "UNREAD:%s" % (g.get("reason") or "NO_REASON")
+    return {"state": state, "gate": {"value": g.get("value"),
+                                     "reason": g.get("reason")},
+            "source": "completion gates.small_live_shadow "
+                      "(execmirror_control enabled / stopped)"}
+
+
+async def kalshi_live_money(conn, *, env=None) -> dict:
+    """NOT_ACTIVATED when the durable Kalshi control row (kalshi_smalllive_
+    control, which kalshi_venue.submission_gate requires enabled and not
+    stopped) is disabled or stopped; CONTROL_ENABLED_NOT_STOPPED when it is
+    not (a real precondition of submission is set); UNREAD when the row
+    cannot be read. THIS process's KALSHI_SMALLLIVE_ENABLED switch is
+    evidence beside it (it is per process)."""
+    # kalshi_venue is never imported outside the Kalshi modules
+    # (test_kalshi_isolation): its switch's name and parsing are read here,
+    # pinned equal to kalshi_venue's by test
+    env = os.environ if env is None else env
+    on = str(env.get(KALSHI_ENABLED_ENV) or "").strip().lower() in (
+        "1", "true", "yes", "on")
+    ev = {"env_switch_on_this_process": on,
+          "source": "kalshi_smalllive_control (kalshi_venue.submission_"
+                    "gate) + this process's %s" % KALSHI_ENABLED_ENV}
+    if not await C._has(conn, "kalshi_smalllive_control"):
+        return dict(ev, state="UNREAD:KALSHI_CONTROL_TABLE_ABSENT",
+                    control=None)
+    r = await conn.fetchrow(
+        "SELECT enabled, stopped, revision FROM kalshi_smalllive_control "
+        " WHERE id = 1")
+    if r is None:
+        return dict(ev, state="UNREAD:KALSHI_CONTROL_ROW_MISSING",
+                    control=None)
+    ctl = {"enabled": bool(r["enabled"]), "stopped": bool(r["stopped"]),
+           "revision": r["revision"]}
+    state = (NOT_ACTIVATED if (not ctl["enabled"] or ctl["stopped"])
+             else "CONTROL_ENABLED_NOT_STOPPED")
+    return dict(ev, state=state, control=ctl)
+
+
+def adriana_authority() -> dict:
+    """SHADOW_ONLY when every Adriana module's own AUTHORITY assertion holds
+    (the agent's code refuses by it); AUTHORITY_GRANTED otherwise."""
+    from ..agents import adriana as AD
+    from ..agents import adriana_arb as AA
+    from ..agents import adriana_claims as ACL
+    try:
+        ok = bool(AA.assert_no_authority() and AD.assert_no_authority()
+                  and ACL.assert_no_authority())
+    except AssertionError as exc:
+        return {"state": "AUTHORITY_GRANTED", "why": str(exc)[:200]}
+    return {"state": SHADOW_ONLY if ok else "AUTHORITY_GRANTED",
+            "mode": AA.AUTHORITY.get("mode"),
+            "source": "agents.adriana_arb / adriana / adriana_claims "
+                      "assert_no_authority"}
 
 
 async def release_receipt(conn, sha: str) -> dict | None:
@@ -257,9 +365,11 @@ async def evaluate(conn, *, now: float | None = None,
     controls["CAPACITY"] = C.capacity(
         await sec.run("capacity", lambda: capacity_points(conn), []),
         requested_usd=ALLIE.BOOK_CAP_USD)
-    saved, false_cost, ksrc = await sec.run(
-        "karen", lambda: karen_counterfactuals(conn), (None, None, None))
-    controls["KAREN_VALUE"] = C.karen(saved, false_cost, source=ksrc)
+    saved, false_cost, ksrc, krows = await sec.run(
+        "karen", lambda: karen_counterfactuals(conn),
+        (None, None, None, {}))
+    controls["KAREN_VALUE"] = C.karen(saved, false_cost, source=ksrc,
+                                      twin_rows=krows)
     wcls, wcensus = await sec.run("credential_classes",
                                   lambda: workers_boot_credentials(conn),
                                   (None, None))
@@ -338,6 +448,14 @@ async def evaluate(conn, *, now: float | None = None,
                                     status=ready.get("status")),
     }
     controls["UI_TRUTH"] = ui_truth(metrics, now=now)
+    # THE AUTHORITY, READ (never four literals)
+    auth_small = small_live_authority(comp)
+    auth_kalshi = await sec.run("authority", lambda: kalshi_live_money(conn),
+                                {"state": "UNREAD:READ_FAILED"})
+    auth_adriana = adriana_authority()
+    authority_shadow = (auth_small["state"] == SHADOW
+                        and auth_kalshi["state"] == NOT_ACTIVATED
+                        and auth_adriana["state"] == SHADOW_ONLY)
     sw = runtime.get("shared_workers") or {}
     gov = ready.get("governors") or {}
     prob = comp.get("probability") or {}
@@ -363,7 +481,7 @@ async def evaluate(conn, *, now: float | None = None,
         claim_exposure_ok=controls["CANONICAL_EXPOSURE"]["status"]
         == C.GREEN,
         profit_breakers_ok=controls["PROFIT_BREAKERS"]["status"] == C.GREEN,
-        live_authority_still_shadow=comp.get("small_live") == "SHADOW",
+        live_authority_still_shadow=authority_shadow,
         historical_paper_immutable=True)
     g = RTR.readiness_gate(inp)
     return {"version": VERSION, "as_of": now, "implementation_sha": sha,
@@ -376,10 +494,15 @@ async def evaluate(conn, *, now: float | None = None,
             "mechanism_rows": len(mech),
             "exposure_receipts": ex["receipts"],
             "auto_activation": False,
-            "authority": {"small_live": "SHADOW",
-                          "kalshi_live_money": "NOT_ACTIVATED",
-                          "adriana": "SHADOW_ONLY",
+            "authority": {"small_live": auth_small["state"],
+                          "kalshi_live_money": auth_kalshi["state"],
+                          "adriana": auth_adriana["state"],
+                          # this read activates nothing: no code path of
+                          # the interlock grants capital (auto_activation)
                           "capital_authority_granted": False},
+            "authority_basis": {"small_live": auth_small,
+                                "kalshi_live_money": auth_kalshi,
+                                "adriana": auth_adriana},
             "historical_paper_immutable_basis": (
                 "this read writes nothing; PAPER history is append-only by "
                 "the ledger's own guards"),
