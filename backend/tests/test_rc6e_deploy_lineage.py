@@ -250,6 +250,8 @@ def _repo(tmp_path):
 def _run_step(prefix, cwd, env):
     st = next(s for s in yaml.safe_load(PM_WF.read_text())["jobs"][
         "accept"]["steps"] if s.get("name", "").startswith(prefix))
+    # GITHUB_WORKSPACE is where the judge/ checkout sits (the step's cwd)
+    env = dict(env, GITHUB_WORKSPACE=str(cwd))
     r = subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail",
                         "-c", st["run"]], cwd=cwd, env=env,
                        capture_output=True, text=True, timeout=120)
@@ -742,6 +744,8 @@ def _work(tmp_path, *, receipt=None, runs=None):
     work = tmp_path / "work"
     (work / "judge").mkdir(parents=True)
     (work / "judge" / "backend").symlink_to(BACKEND)
+    # the judge's own grading files (gate_runs.jq) come from its checkout
+    (work / "judge" / ".github").symlink_to(BACKEND.parent / ".github")
     (work / "acc").mkdir()
     gh = tmp_path / "ghdir"
     gh.mkdir()
