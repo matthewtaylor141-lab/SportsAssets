@@ -107,6 +107,9 @@ const ONLY = (process.env.HARNESS_PAGES || '').split(',').map(s => s.trim()).fil
 // no logo, no DESK link); hq.js switches Command at 760 px
 const shellWide = vp => vp.width > 780;
 const phoneW = vp => vp.width <= 760;
+// hq.js PHONE / hq.css: Command's pocket layout on a phone, and on a phone on
+// its side (<= 500 px tall and <= 1024 px wide)
+const pocket = vp => vp.width <= 760 || (vp.height <= 500 && vp.width <= 1024);
 // trader.css hides the Command link and Reduce motion at <= 900 px, every
 // link but the current one and the full-screen button at <= 600 px
 const traderAbove = (w) => vp => vp.width > w;
@@ -145,8 +148,8 @@ const CONTROLS = {
       expect: { bodyClass: 'desk-open', visible: '#hq-desk' }, close: { sel: '#hq-desk [data-close-desk]', expect: { notBodyClass: 'desk-open' } } },
     { name: 'Briefing (CRITICAL bar)', sel: '#hq-alert [data-go="reports"]', optional: true, expect: { bodyAttr: ['data-view', 'reports'] } },
   ].concat(HQ_VIEWS.map(v => ({ name: 'view: ' + v, sel: '#hq-nav button[data-go="' + v + '"], #hq-tabbar button[data-go="' + v + '"]',
-    // hq.js: on a phone (<= 760 px) Floor opens the /floor room
-    expect: vp => (phoneW(vp) && v === 'floor') ? { nav: '/floor' } : { bodyAttr: ['data-view', v], self: ['aria-current', 'page'] } })),
+    // hq.js: in the pocket layout Floor opens the /floor room
+    expect: vp => (pocket(vp) && v === 'floor') ? { nav: '/floor' } : { bodyAttr: ['data-view', v], self: ['aria-current', 'page'] } })),
   [{ name: 'brand: Command home', sel: '#hq-top .hq-brand', expect: { bodyAttr: ['data-view', 'command'] } },
     nav('Trader launcher', '.bt-trader-launch', '/trader')]),
   // the real floor (meeting-release.js: body.meeting-real-floor) hides the old
@@ -160,12 +163,15 @@ const CONTROLS = {
   trader: [
     { name: 'evidence dialog', sel: '#positions .card-actions [data-evidence]', optional: true, expect: { dialogOpen: '#evidence-dialog' }, close: { sel: '#close-evidence', expect: { dialogClosed: '#evidence-dialog' } } },
     { name: 'focus a position', sel: '#positions .card-focus', optional: true, expect: { visible: '#positions .position-card.focused' } },
-    { name: 'Broadcast', sel: '#bt-v4-trader-rail [data-v4-open-broadcast]', optional: true, expect: { bodyClass: 'bt-v4-broadcast-open' }, close: { sel: '#bt-v4-broadcast [data-v4-close]', expect: { notBodyClass: 'bt-v4-broadcast-open' } } },
+    // the broadcast shows a position: with none on the wall it has nothing to open
+    { name: 'Broadcast', sel: 'body:has(#positions .position-card) #bt-v4-trader-rail [data-v4-open-broadcast]', optional: true, expect: { bodyClass: 'bt-v4-broadcast-open' }, close: { sel: '#bt-v4-broadcast [data-v4-close]', expect: { notBodyClass: 'bt-v4-broadcast-open' } } },
     { name: 'view: Standing orders', sel: '.view-tabs [data-view="orders"]', expect: { self: ['aria-pressed', 'true'], visible: '#positions .orders-view' } },
     { name: 'view: Position wall', sel: '.view-tabs [data-view="positions"]', expect: { self: ['aria-pressed', 'true'], hidden: '#positions .orders-view' } },
   ].concat(['near', 'blocked', 'settlement', 'all'].map(f => ({ name: 'filter: ' + f, sel: '.filters [data-filter="' + f + '"]', expect: { self: ['aria-pressed', 'true'] } })),
-  [{ name: 'rail filter: near', sel: '#bt-v4-trader-rail [data-v4-filter="near"]', expect: { attr: ['.filters [data-filter="near"]', 'aria-pressed', 'true'] } },
-    { name: 'rail filter: all', sel: '#bt-v4-trader-rail [data-v4-filter="all"]', expect: { attr: ['.filters [data-filter="all"]', 'aria-pressed', 'true'] } },
+  // experience-v4.js docks the quick-lane rail into the toolbar above 760 px,
+  // where its filters (the toolbar's own) are not drawn
+  [{ name: 'rail filter: near', sel: '#bt-v4-trader-rail [data-v4-filter="near"]', expect: { attr: ['.filters [data-filter="near"]', 'aria-pressed', 'true'] }, when: phoneW },
+    { name: 'rail filter: all', sel: '#bt-v4-trader-rail [data-v4-filter="all"]', expect: { attr: ['.filters [data-filter="all"]', 'aria-pressed', 'true'] }, when: phoneW },
     { name: 'search', sel: '#search', action: 'fill:no-such-position-zz', expect: { visible: '#positions .empty-state' } },
     { name: 'search cleared', sel: '#search', action: 'fill:', expect: { attr: ['#search', 'value', null] } },
     { name: 'Follow Xavier', sel: '#follow', expect: { self: ['aria-pressed', 'true'] } },
@@ -217,6 +223,23 @@ function verdict(expect, obs, navs, requests) {
     if (obs[k + ':' + JSON.stringify(v)] !== true) fails.push(k.toUpperCase() + '_NOT_MET:' + JSON.stringify(v));
   }
   return fails;
+}
+// where a tap landed (read in the page after the touch). The page records
+// at pointerdown -- the moment the touch lands -- the element it reached and,
+// when that element lies inside a match of the control's selector, that
+// match's index among all matches and its box (__previewTapSeen). On the
+// control: OK. On the same control redrawn between the hit test and the touch
+// (a poll re-rendering the team list or the roster replaces every row): the
+// same selector, the same index, the same box (2 px) -- REDRAWN, the touch
+// reached the control and its state is then read from the replacement.
+// Anything else is the element the touch reached instead (a failure).
+// twin: { sel, idx, box } of the control at the hit test, or null (strict)
+function landing(el, twin) {
+  const t = window.__previewTapTarget, seen = window.__previewTapSeen;
+  if (!t) return 'NONE';
+  if (el === t || el.contains(t) || t.contains(el)) return 'OK';
+  if (twin && seen && seen.idx === twin.idx && [0, 1, 2, 3].every(k => Math.abs(seen.box[k] - twin.box[k]) < 2)) return 'REDRAWN';
+  return t.id ? '#' + t.id : t.tagName.toLowerCase();
 }
 // <<< CONTROLS
 
@@ -536,19 +559,21 @@ async function measure(page, touch, insets) {
 // software-WebGL page painting at 0-1 fps (production device runs: Command at
 // 0 fps) never delivers inside a timeout; the hit test is the part of it that
 // matters here, and it is kept.
-async function tapAt(page, handle, touch) {
+async function tapAt(page, handle, touch, twin) {
   // a page that redraws (a poll re-rendering a panel, a strip growing a row)
-  // can move a box for a moment: the hit test and the landing are retried for
-  // up to ~2 s; a cover that stays is a finding
+  // can move a box for a moment: the hit test is retried for up to ~2 s; a
+  // cover that stays is a finding. A touch that was delivered and landed on
+  // something else is final: it is never sent again (the first touch may
+  // have changed the page)
   let last = null;
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt) await page.waitForTimeout(500);
-    try { return await tapOnce(page, handle, touch); } catch (e) { last = e; if (/CONTROL_DETACHED|Element is not attached/.test(String(e))) break; }
+    try { return await tapOnce(page, handle, touch, twin); } catch (e) { last = e; if (e.delivered || /CONTROL_DETACHED|Element is not attached/.test(String(e))) break; }
   }
   throw last;
 }
-async function tapOnce(page, handle, touch) {
-  const at = await handle.evaluate((el) => {
+async function tapOnce(page, handle, touch, twin) {
+  const at = await handle.evaluate((el, twin) => {
     el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' });
     const r = el.getBoundingClientRect();
     let v = { left: Math.max(0, r.left), top: Math.max(0, r.top), right: Math.min(innerWidth, r.right), bottom: Math.min(innerHeight, r.bottom) };
@@ -564,17 +589,25 @@ async function tapOnce(page, handle, touch) {
       return { error: 'COVERED_BY ' + id };
     }
     // where the pointer actually lands (pointerdown precedes click and any navigation)
-    window.__previewTapTarget = null;
-    document.addEventListener('pointerdown', (e) => { window.__previewTapTarget = e.target; }, { capture: true, once: true });
+    window.__previewTapTarget = null; window.__previewTapSeen = null;
+    document.addEventListener('pointerdown', (e) => {
+      const t = e.target, m = twin && t.closest ? t.closest(twin.sel) : null, q = m && m.getBoundingClientRect();
+      window.__previewTapTarget = t;
+      window.__previewTapSeen = m ? { idx: [...document.querySelectorAll(twin.sel)].indexOf(m), box: [q.left, q.top, q.width, q.height] } : null;
+    }, { capture: true, once: true });
     // input lands in VISUAL viewport coordinates; a mobile layout viewport can
     // be panned against it (vv.offsetLeft / offsetTop), client coordinates not
     const vv = window.visualViewport || { offsetLeft: 0, offsetTop: 0, scale: 1 };
-    return { x, y, vx: (x - vv.offsetLeft) * vv.scale, vy: (y - vv.offsetTop) * vv.scale, w: r.width, h: r.height };
-  });
+    return { x, y, vx: (x - vv.offsetLeft) * vv.scale, vy: (y - vv.offsetTop) * vv.scale, w: r.width, h: r.height,
+      twin: twin ? { sel: twin.sel, idx: twin.idx, box: [r.left, r.top, r.width, r.height] } : null };
+  }, twin || null);
   if (at.error) throw new Error(at.error);
   if (touch) await page.touchscreen.tap(at.vx, at.vy); else await page.mouse.click(at.vx, at.vy);
-  const landed = await handle.evaluate((el) => { const t = window.__previewTapTarget; return !t ? 'NONE' : (el === t || el.contains(t) || t.contains(el)) ? 'OK' : (t.id ? '#' + t.id : t.tagName.toLowerCase()); }).catch(() => 'OK');
-  if (landed !== 'OK') throw new Error('TAP_LANDED_ON ' + landed);
+  const landed = await handle.evaluate(landing, at.twin).catch(() => 'OK');
+  // a tap that reached the control's replacement was delivered: it is never
+  // sent again (a retry would tap whatever the first tap opened)
+  if (landed === 'REDRAWN') at.redrawn = true;
+  else if (landed !== 'OK') throw Object.assign(new Error('TAP_LANDED_ON ' + landed), { delivered: true });
   return at;
 }
 
@@ -609,17 +642,37 @@ async function runControls(page, capture, pg, d) {
     for (let k = 0; idx < 0 && k < 6; k++) { await page.waitForTimeout(500); idx = await find(); }
     if (idx < 0) { if (c.optional) res.unmeasured.push(c.name + ': ABSENT (no data shows it)'); else res.failed.push({ name: c.name, why: ['CONTROL_NOT_SHOWN'] }); continue; }
     res.checked++;
-    const loc = page.locator(c.sel).nth(idx);
-    const handle = await loc.elementHandle({ timeout: 3000 }).catch(() => null);
+    let loc = page.locator(c.sel).nth(idx);
+    let handle = await loc.elementHandle({ timeout: 3000 }).catch(() => null);
     const summary = handle ? await handle.evaluateHandle(e => { const d = e.closest('details:not([open])'); return d ? d.querySelector('summary') : null; }).catch(() => null) : null;
     if (summary && await summary.evaluate(x => !!x).catch(() => false)) { await tapAt(page, summary.asElement(), touch).catch(() => {}); await page.waitForTimeout(200); }
     capture.navs.length = 0; capture.requests.length = 0; capture.on = true;
-    let why = [], box = null;
+    let why = [], box = null, tapErr = null;
     try {
       if (!handle) throw new Error('CONTROL_DETACHED');
       if (c.action && c.action.startsWith('fill:')) await handle.fill(c.action.slice(5), { timeout: 4000 });
-      else box = await tapAt(page, handle, touch);
-    } catch (e) { why.push('NOT_TAPPABLE: ' + String(e.message || e).replace(/\x1b\[[0-9;]*m/g, '').split('\n')[0].slice(0, 200)); }
+      else box = await tapAt(page, handle, touch, { sel: c.sel, idx });
+    } catch (e) { tapErr = e; why.push('NOT_TAPPABLE: ' + String(e.message || e).replace(/\x1b\[[0-9;]*m/g, '').split('\n')[0].slice(0, 200)); }
+    // the control left the page (or was hidden) between being found and the
+    // touch -- a desk tag the moving camera hid, a row a poll removed -- and
+    // no touch was delivered: the first match a finger can get to NOW is
+    // tapped instead, once. A control still shown but out of reach, or a
+    // touch that landed elsewhere, keeps its failure.
+    if (why.length && !box && !(tapErr && tapErr.delivered) && !(c.action && c.action.startsWith('fill:'))) {
+      const gone = handle ? await handle.evaluate(e => !e.isConnected || (e.checkVisibility && !e.checkVisibility()) || !e.getBoundingClientRect().width).catch(() => true) : true;
+      const again = gone ? await find() : -1;
+      if (again >= 0) {
+        loc = page.locator(c.sel).nth(again);
+        const h2 = await loc.elementHandle({ timeout: 3000 }).catch(() => null);
+        if (h2) {
+          if (handle) await handle.dispose().catch(() => {});
+          handle = h2; why = []; res.retargeted = (res.retargeted || 0) + 1;
+          try { box = await tapAt(page, handle, touch, { sel: c.sel, idx: again }); } catch (e) { why.push('NOT_TAPPABLE: ' + String(e.message || e).replace(/\x1b\[[0-9;]*m/g, '').split('\n')[0].slice(0, 200)); }
+        }
+      }
+    }
+    // the control was redrawn under the finger: its state is read from the replacement
+    if (box && box.redrawn) { const fresh = await loc.elementHandle({ timeout: 1000 }).catch(() => null); if (fresh) { await handle.dispose().catch(() => {}); handle = fresh; } }
     // a finger-sized target wherever the control sits, on screen at rest or not
     if (touch && box && (box.w < 44 || box.h < 44)) why.push('UNDER_44_PX:' + Math.round(box.w) + 'x' + Math.round(box.h));
     if (!why.length) {
@@ -647,7 +700,7 @@ async function runControls(page, capture, pg, d) {
       try {
         const ch = await page.$(c.close.sel);
         if (!ch) throw new Error('CLOSE_CONTROL_ABSENT');
-        await tapAt(page, ch, touch);
+        await tapAt(page, ch, touch, { sel: c.close.sel, idx: 0 });
         const t0 = Date.now();
         while (Date.now() - t0 < 3000) { await page.waitForTimeout(150); closed = verdict(c.close.expect, await page.locator('body').evaluate(observe, c.close.expect).catch(() => ({})), [], []); if (!closed.length) break; }
       } catch (e) { closed = ['CLOSE_NOT_TAPPABLE: ' + String(e.message || e).split('\n')[0].slice(0, 200)]; }

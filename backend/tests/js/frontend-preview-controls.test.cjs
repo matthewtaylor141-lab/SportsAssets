@@ -21,8 +21,8 @@ const vm = require('node:vm');
 
 const SRC = fs.readFileSync(path.join(__dirname, '../../../.github/frontend-preview/shots.js'), 'utf8');
 const BLOCK = SRC.slice(SRC.indexOf('// >>> CONTROLS'), SRC.indexOf('// <<< CONTROLS'));
-const H = vm.runInNewContext('(() => {' + BLOCK + '; return { CONTROLS, verdict, RAIL, PULSE, OPS_HDR, AGENT_NAV, AGENTS: typeof AGENTS === "undefined" ? null : AGENTS, shellWide, phoneW, traderAbove }; })()',
-  { AGENTS: ['derek', 'xavier', 'audrey', 'karen', 'allocator', 'archer', 'scout'], Object, JSON, Array, String });
+const CTX = { AGENTS: ['derek', 'xavier', 'audrey', 'karen', 'allocator', 'archer', 'scout'], Object, JSON, Array, String, Math, window: {} };
+const H = vm.runInNewContext('(() => {' + BLOCK + '; return { CONTROLS, verdict, landing, RAIL, PULSE, OPS_HDR, AGENT_NAV, AGENTS: typeof AGENTS === "undefined" ? null : AGENTS, shellWide, phoneW, pocket, traderAbove }; })()', CTX);
 const plain = (x) => JSON.parse(JSON.stringify(x));
 const PHONE = { width: 390, height: 844 }, LAND = { width: 844, height: 390 }, IPAD = { width: 820, height: 1180 }, DESK = { width: 1440, height: 900 };
 
@@ -96,7 +96,10 @@ test('the Command views, the Trader controls and the position bar are declared',
   // hq.js: on a phone Floor opens the /floor room; elsewhere it switches the view
   const floor = H.CONTROLS.command.find(c => c.name === 'view: floor');
   assert.deepEqual(plain(floor.expect(PHONE)), { nav: '/floor' });
+  // a phone on its side is a phone to Command (hq.js PHONE)
+  assert.deepEqual(plain(floor.expect(LAND)), { nav: '/floor' });
   assert.deepEqual(plain(floor.expect(IPAD)), { bodyAttr: ['data-view', 'floor'], self: ['aria-current', 'page'] });
+  assert.deepEqual(plain(floor.expect({ width: 1180, height: 820 })), { bodyAttr: ['data-view', 'floor'], self: ['aria-current', 'page'] });
   const tr = H.CONTROLS.trader.map(c => c.name);
   for (const v of ['evidence dialog', 'view: Standing orders', 'filter: near', 'filter: all', 'search', 'Follow Xavier', 'Wall mode', 'Broadcast', 'nav: Command', 'nav: Floor'])
     assert.ok(tr.includes(v), v);
@@ -118,6 +121,12 @@ test('layout applicability comes from the shell\'s own breakpoints, not from res
   // hq.js PHONE: max-width 760 px
   assert.equal(H.phoneW({ width: 760, height: 900 }), true);
   assert.equal(H.phoneW({ width: 761, height: 900 }), false);
+  // hq.js PHONE (Command's pocket layout): a phone, or a phone on its side
+  const hqjs = fs.readFileSync(path.join(__dirname, '../../../frontend/public/command/hq.js'), 'utf8');
+  assert.ok(hqjs.includes("const PHONE = !!(window.matchMedia && matchMedia('(max-width: 760px), (max-height: 500px) and (max-width: 1024px)').matches);"));
+  assert.equal(H.pocket(PHONE), true); assert.equal(H.pocket(LAND), true);
+  assert.equal(H.pocket({ width: 1024, height: 500 }), true); assert.equal(H.pocket({ width: 1025, height: 500 }), false);
+  assert.equal(H.pocket({ width: 1024, height: 501 }), false); assert.equal(H.pocket(IPAD), false); assert.equal(H.pocket(DESK), false);
   const css = fs.readFileSync(path.join(__dirname, '../../../frontend/public/command/hq2-brand.css'), 'utf8');
   assert.ok(css.includes('@media(max-width:780px){') && css.includes('.bt-hq2 .bt-hq2-logo,.bt-hq2 .bt-hq2-shell-foot{display:none}'));
   const ops = fs.readFileSync(path.join(__dirname, '../../../frontend/public/command/command-ops.css'), 'utf8');
@@ -134,7 +143,11 @@ test('layout applicability comes from the shell\'s own breakpoints, not from res
   assert.equal(tr['full screen'].when({ width: 601 }), true);
   // only these controls carry a layout condition; nothing else is excused by device
   const conditioned = [].concat(...Object.values(H.CONTROLS)).filter(c => c.when).map(c => c.name);
-  assert.deepEqual([...new Set(conditioned)].sort(), ['Reduce motion', 'full screen', 'header: operations desk', 'nav: Command', 'nav: Floor', 'rail: logo']);
+  // experience-v4: the quick-lane rail docks above 760 px and hides its filters there
+  const v4 = fs.readFileSync(path.join(__dirname, '../../../frontend/public/command/experience-v4.css'), 'utf8');
+  const v4js = fs.readFileSync(path.join(__dirname, '../../../frontend/public/command/experience-v4.js'), 'utf8');
+  assert.ok(v4.includes('#bt-v4-trader-rail.bt-v4-rail-docked [data-v4-filter]{display:none}') && v4js.includes("matchMedia('(max-width:760px)')"));
+  assert.deepEqual([...new Set(conditioned)].sort(), ['Reduce motion', 'full screen', 'header: operations desk', 'nav: Command', 'nav: Floor', 'rail filter: all', 'rail filter: near', 'rail: logo']);
 });
 
 test('an absent data-dependent control is UNMEASURED and never counted as passed', () => {
@@ -160,4 +173,57 @@ test('on touch every tapped control is 44 x 44 px, and an overlay is measured op
   assert.ok(SRC.includes("if (closed.length) why.push('OVERLAY_DID_NOT_CLOSE: ' + closed.join(','));"));
   const overlays = [].concat(...Object.values(H.CONTROLS)).filter(c => c.close).map(c => c.name);
   assert.deepEqual([...new Set(overlays)].sort(), ['Broadcast', 'Company Pulse', 'agent panel', 'desk panel', 'evidence dialog']);
+});
+
+test('a tap counts where it landed: the control, or the same control redrawn in place; anywhere else fails', () => {
+  const mk = (tag, parent) => ({ tagName: tag.toUpperCase(), id: '', parentElement: parent || null,
+    contains(x) { for (let a = x; a; a = a.parentElement) if (a === this) return true; return false; } });
+  const roster = mk('div'), btn = mk('button', roster), b = mk('b', btn);
+  // what the page recorded at pointerdown
+  const at = (t, seen) => { CTX.window.__previewTapTarget = t; CTX.window.__previewTapSeen = seen || null; };
+  const twin = { sel: '#roster .fl-agent', idx: 0, box: [9, 577, 152, 48] };
+  // on the control, or inside it
+  at(btn); assert.equal(H.landing(btn, twin), 'OK');
+  at(b); assert.equal(H.landing(btn, twin), 'OK');
+  // nothing received the touch
+  at(null); assert.equal(H.landing(btn, twin), 'NONE');
+  // a poll redrew the roster between the hit test and the touch (Floor, every
+  // touch device): the touch reached the replacement -- the first match of the
+  // same selector, in the same box
+  const btn2 = mk('button', roster), b2 = mk('b', btn2);
+  at(b2, { idx: 0, box: [9, 577, 152, 48] }); assert.equal(H.landing(btn, twin), 'REDRAWN');
+  at(b2, { idx: 0, box: [9.6, 577.4, 152, 48] }); assert.equal(H.landing(btn, twin), 'REDRAWN');
+  // ... never another match, the same match moved, or anything outside the selector
+  at(b2, { idx: 1, box: [9, 577, 152, 48] }); assert.equal(H.landing(btn, twin), 'b');
+  at(b2, { idx: 0, box: [9, 628, 152, 48] }); assert.equal(H.landing(btn, twin), 'b');
+  const bar = mk('nav'); bar.id = 'hq5-floorbar';
+  at(bar, null); assert.equal(H.landing(btn, twin), '#hq5-floorbar');
+  // without a twin (a <details> summary) only the element itself counts
+  at(b2, { idx: 0, box: [9, 577, 152, 48] }); assert.equal(H.landing(btn, null), 'b');
+  // the harness: the record is made at pointerdown, a delivered tap is never
+  // sent again, and the state is read from the replacement
+  assert.ok(SRC.includes("const t = e.target, m = twin && t.closest ? t.closest(twin.sel) : null, q = m && m.getBoundingClientRect();"));
+  assert.ok(SRC.includes("window.__previewTapSeen = m ? { idx: [...document.querySelectorAll(twin.sel)].indexOf(m), box: [q.left, q.top, q.width, q.height] } : null;"));
+  assert.ok(SRC.includes("twin: twin ? { sel: twin.sel, idx: twin.idx, box: [r.left, r.top, r.width, r.height] } : null };"));
+  assert.ok(SRC.includes("const landed = await handle.evaluate(landing, at.twin).catch(() => 'OK');"));
+  assert.ok(SRC.includes("if (landed === 'REDRAWN') at.redrawn = true;\n  else if (landed !== 'OK') throw Object.assign(new Error('TAP_LANDED_ON ' + landed), { delivered: true });"));
+  assert.ok(SRC.includes('else box = await tapAt(page, handle, touch, { sel: c.sel, idx });'));
+  assert.ok(SRC.includes('await tapAt(page, ch, touch, { sel: c.close.sel, idx: 0 });'));
+  assert.ok(SRC.includes('if (box && box.redrawn) { const fresh = await loc.elementHandle({ timeout: 1000 }).catch(() => null); if (fresh) { await handle.dispose().catch(() => {}); handle = fresh; } }'));
+});
+
+test('a touch that landed elsewhere is final; a control that vanished before the touch is found again once', () => {
+  // a delivered touch is never sent again (it may have changed the page)
+  assert.ok(SRC.includes("else if (landed !== 'OK') throw Object.assign(new Error('TAP_LANDED_ON ' + landed), { delivered: true });"));
+  assert.ok(SRC.includes("try { return await tapOnce(page, handle, touch, twin); } catch (e) { last = e; if (e.delivered || /CONTROL_DETACHED|Element is not attached/.test(String(e))) break; }"));
+  // only a control gone from the page (detached, hidden, no box) with no touch
+  // delivered is looked up again -- the first match a finger can reach now --
+  // and tapped once; one still shown but out of reach keeps its failure
+  assert.ok(SRC.includes("if (why.length && !box && !(tapErr && tapErr.delivered) && !(c.action && c.action.startsWith('fill:'))) {"));
+  assert.ok(SRC.includes("const gone = handle ? await handle.evaluate(e => !e.isConnected || (e.checkVisibility && !e.checkVisibility()) || !e.getBoundingClientRect().width).catch(() => true) : true;"));
+  assert.ok(SRC.includes('const again = gone ? await find() : -1;'));
+  assert.ok(SRC.includes('handle = h2; why = []; res.retargeted = (res.retargeted || 0) + 1;'));
+  // the retarget happens once: no loop around it
+  const i = SRC.indexOf('const again = gone ? await find() : -1;');
+  assert.ok(!/while|for \(/.test(SRC.slice(i, SRC.indexOf('// the control was redrawn under the finger', i))));
 });
