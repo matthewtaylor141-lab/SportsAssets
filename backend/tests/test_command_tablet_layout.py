@@ -42,7 +42,8 @@ def fit() -> str:
 
 
 def test_status_pills_get_their_own_row_on_tablets():
-    tab = _block(fit(), "@media (min-width:761px) and (max-width:1180px){")
+    # a phone on its side (<= 500 px tall, <= 1024 px wide) takes the pocket layout instead
+    tab = _block(fit(), "@media (min-width:761px) and (max-width:1180px) and (min-height:501px),(min-width:1025px) and (max-width:1180px){")
     # 92 px, plus the status-bar inset of an installed app (env() is 0 without one)
     assert "body.hq{--top:calc(92px + var(--sa-t));}" in tab
     assert ":root{--sa-t:env(safe-area-inset-top,0px);" in fit()
@@ -64,7 +65,7 @@ def test_status_pills_get_their_own_row_on_tablets():
 
 
 def test_portrait_alert_and_freshness_span_the_view_above_the_columns():
-    por = _block(fit(), "@media (min-width:761px) and (max-width:1000px){")
+    por = _block(fit(), "@media (min-width:761px) and (max-width:1000px) and (min-height:501px){")
     # 18 px from each edge, plus the notch's side inset on a landscape phone (0 elsewhere)
     assert 'body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}' in por
     assert 'body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}' in por

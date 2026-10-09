@@ -19,7 +19,10 @@ import {createModel} from './hq-model.js';
 const B = window.BTFloor;
 const DNA = 'DATA NOT AVAILABLE';
 const doc = document;
-const PHONE = !!(window.matchMedia && matchMedia('(max-width: 760px)').matches);
+// the pocket command center: phones, and phones on their side (hq.css reads
+// the same query: a landscape phone, 390 px tall, has no height for the HUD
+// columns, and its desks were out of reach)
+const PHONE = !!(window.matchMedia && matchMedia('(max-width: 760px), (max-height: 500px) and (max-width: 1024px)').matches);
 const REDUCED = B.reducedMotion();
 const HQ = createModel(B);
 const U = HQ.util;
@@ -319,17 +322,31 @@ function renderTags() {
     el.querySelector('i').textContent = d.planned ? 'Head of Arbitrage · no live activity' : (d.detail || d.zone);
   });
 }
+// the HUD panels a desk tag must stay clear of (placeTags)
+const HUD_PANELS = '#hq-top, #hq-alert, #hq-fresh, #hq-hint, #hq-caption, #hq-tabbar, #hq-hud .hud-col, #hq-hud .hud-bottom, #hq-hud .drawer, #hq-hud .markets-left, #hq-hud .floor-legend';
 function placeTags() {
   const host = $('#hq-tags'); if (!host || !S.scene) return;
   const show = (S.view === 'floor' || S.view === 'command') && !S.desk && !S.watch;
   host.classList.toggle('compact-all', S.view === 'command');
   $$('#hq-tags .tag').forEach((t) => t.classList.toggle('compact', S.view === 'command'));
+  const placed = [];
   HQ.SEATS.forEach((s) => {
     const el = host.querySelector('[data-desk="' + s.slug + '"]'); if (!el) return;
     const a = show ? S.scene.anchorOf(s.slug) : null;
     if (!a || a.behind || (S.view === 'command' && (a.x < 350 || a.x > innerWidth - 370 || a.y > innerHeight - 130 || a.y < (doc.body.classList.contains('has-critical') ? 240 : 170)))) { el.hidden = true; return; }
     el.hidden = false; el.style.left = a.x.toFixed(1) + 'px'; el.style.top = (a.y - 8).toFixed(1) + 'px';
+    placed.push(el);
   });
+  // A desk tag is a label on the 3D stage: it never lies across a HUD panel.
+  // The fixed bounds above assume one layout; the panels move with the
+  // screen (iPad landscape below the status bar: the freshness strip ends at
+  // 201 px and Allie's and Adriana's tags crossed it). Each shown tag is
+  // checked against the panels actually on screen and hidden where it meets
+  // one. All boxes are read before any tag is hidden (one layout per frame).
+  if (!placed.length) return;
+  const panels = $$(HUD_PANELS).filter((e) => getComputedStyle(e).visibility !== 'hidden').map((e) => e.getBoundingClientRect()).filter((r) => r.width > 0 && r.height > 0);
+  placed.filter((el) => { const r = el.getBoundingClientRect(); return panels.some((b) => r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top); })
+    .forEach((el) => { el.hidden = true; });
 }
 function floorCountsHTML() {
   const ds = HQ.desks(), f = HQ.reads.floor.data;
@@ -826,8 +843,20 @@ function render() {
   if (S.view === 'reports') guard('report', renderReports);
   if (S.desk) setHTML('#hq-desk .ins', deskHTML(S.desk));
 }
+// A read reaches the screen on the next frame, or within 250 ms where no
+// frame comes: an animation frame only runs when the page paints, and a
+// frame-starved WebGL page (software GL: 0 fps on desktop and iPad Command)
+// held every read back until a frame came. Measured locally (iPad portrait,
+// synthetic reads): the coverage read raising a CRITICAL item arrived at
+// 7.8 s and the CRITICAL bar appeared at 33.4 s. Whichever comes first renders.
 let pending = false;
-function schedule() { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; render(); }); }
+function schedule() {
+  if (pending) return;
+  pending = true;
+  const run = () => { if (!pending) return; pending = false; render(); };
+  requestAnimationFrame(run);
+  setTimeout(run, 250);
+}
 
 function wire() {
   doc.addEventListener('click', (e) => {

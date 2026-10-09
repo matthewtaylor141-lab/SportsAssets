@@ -91,6 +91,14 @@ def test_trader_game_fallback_suite_passes():
     _node_suite("trader-game-fallback.test.cjs", 3)
 
 
+def test_command_desk_tags_suite_passes():
+    _node_suite("hq-tags-clear-of-hud.test.cjs", 3)
+
+
+def test_command_renders_without_frames_suite_passes():
+    _node_suite("hq-render-without-frames.test.cjs", 3)
+
+
 # --- the matrix covers every page on every device ---------------------------
 
 
@@ -206,3 +214,74 @@ def test_the_agent_hero_fits_beside_the_person_column():
     assert "@media (min-width:981px) and (max-width:1360px){\n  .hq6-agent-layout .wsx-hero{grid-template-columns:1fr 1fr;}" in css
     ws = read(COMMAND / "workspace.css")
     assert ".wsx-hero{display:grid;grid-template-columns:minmax(220px,1.1fr) minmax(260px,1.6fr) minmax(200px,.9fr);" in ws
+
+
+def test_the_floor_panel_bar_dock_and_launcher_clear_each_other_and_the_notch():
+    css = read(COMMAND / "device-fit.css")
+    phone = css[css.index("@media (max-width:780px){\n  /* the bottom tab bar"):]
+    phone = phone[:phone.index("\n}")]
+    # a desk panel opens below the phone view bar, never over its close button
+    assert "body.meeting-real-floor .fl-panel{top:calc(126px + var(--sa-t))!important;}" in phone
+    assert "body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(126px + var(--ops-hdr-h) + var(--sa-t))!important;}" in phone
+    # 126 = the bar's top (66) + its height with 44 px touch buttons (54) + 6
+    assert "body.ops-hdr-on .hq5-floorbar{top:calc(66px + var(--ops-hdr-h) + var(--sa-t));}" in phone
+    wide = css[css.index("@media (min-width:781px){\n  /* the side rail"):]
+    wide = wide[:wide.index("\n}")]
+    assert "body.bt-hq2 .hq5-floorbar{left:calc(112px + var(--sa-l));}" in wide
+    assert "body.meeting-real-floor .fl-roster{left:calc(116px + var(--sa-l))!important;right:calc(24px + var(--sa-r))!important;}" in wide
+    assert "@media (min-width:781px) and (max-width:900px){\n  body.bt-hq2 .hq5-floorbar{left:calc(102px + var(--sa-l));}\n}" in css
+    # bounded, the bar keeps its distance from the summary with both insets applied
+    assert "@media (min-width:781px) and (max-width:1180px){\n  body.bt-hq2 .hq5-floorbar{max-width:calc(100% - 380px - var(--sa-l) - var(--sa-r));}\n}" in css
+    assert ".hq5-floorbar{max-width:calc(100% - 380px);overflow-x:auto;" in css
+    assert "body.ops-hdr-on .hq5-floor-summary{right:calc(20px + var(--sa-r));}" in css
+    assert ".bt-trader-launch:not(.bt-trader-launch--nav){right:calc(20px + var(--sa-r));}" in css
+    assert "@media (max-width:760px){\n  .bt-trader-launch:not(.bt-trader-launch--nav){right:calc(12px + var(--sa-r));}\n}" in css
+    # the rules these extend (their values, without the inset)
+    hq5 = read(COMMAND / "hq5-workspace.css")
+    assert ".hq5-floorbar{\n  position:fixed;z-index:9200;left:112px;top:76px;" in hq5
+    assert ".hq5-floorbar{left:102px}" in hq5
+    assert "left:116px!important;right:24px!important;bottom:12px!important;" in hq5
+    polish = read(COMMAND / "command-polish.css")
+    assert ".bt-trader-launch{position:fixed;right:20px;" in polish and ".bt-trader-launch{right:12px;" in polish
+
+
+def test_command_desk_tags_stay_off_the_hud():
+    js = read(COMMAND / "hq.js")
+    i = js.index("function placeTags() {")
+    body = js[i:js.index("\nfunction floorCountsHTML", i)]
+    # the fixed bounds are kept; the panels on screen are checked after them
+    assert "a.x < 350 || a.x > innerWidth - 370 || a.y > innerHeight - 130" in body
+    assert body.index("placed.push(el);") < body.index("const panels = $$(HUD_PANELS)")
+    assert "panels.some((b) => r.left < b.right && r.right > b.left && r.top < b.bottom && r.bottom > b.top)" in body
+
+
+def test_a_phone_on_its_side_gets_the_pocket_command_center():
+    pocket = "(max-width: 760px), (max-height: 500px) and (max-width: 1024px)"
+    # hq.js, hq.css and the launcher placement read one query
+    assert "const PHONE = !!(window.matchMedia && matchMedia('%s').matches);" % pocket in read(COMMAND / "hq.js")
+    assert "const mobile=!!(window.matchMedia&&matchMedia('%s').matches);" % pocket in read(COMMAND / "command-polish.js")
+    hq = read(COMMAND / "hq.css")
+    assert hq.count("@media %s {" % pocket) == 3
+    assert "@media (max-width: 760px) {" not in hq
+    assert "@media (min-width: 761px) and (min-height: 501px), (min-width: 1025px) { .phone-only { display: none !important; } }" in hq
+    css = read(COMMAND / "device-fit.css")
+    # the edge-hung HUD rules (tablets, desktops) leave a phone on its side alone
+    assert "@media (min-width:761px) and (min-height:501px),(min-width:1025px){\n  body.hq .hud-col.left{left:calc(18px + var(--sa-l));}" in css
+    assert "@media (max-width:760px),(max-height:500px) and (max-width:1024px){\n  body.hq{--top:calc(54px + var(--sa-t));}" in css
+    assert "body.hq #hq-tabbar{padding-left:var(--sa-l);padding-right:var(--sa-r);}" in css
+    # the in-flow pieces of the pocket layout inside the notch sides
+    assert "body.hq #hq-alert,body.hq #hq-fresh{margin-left:calc(14px + var(--sa-l));margin-right:calc(14px + var(--sa-r));}" in css
+    assert "body.hq #hq-desk .ins{padding-left:calc(20px + var(--sa-l));padding-right:calc(20px + var(--sa-r));}" in css
+    assert "#hq-alert, #hq-fresh { position: static; display: none; margin: 10px 14px 0; }" in read(COMMAND / "hq.css")
+    # Experience V4's pocket rules for Command at that size, as written for phones
+    lp = css[css.index("@media (min-width:761px) and (max-height:500px) and (max-width:1024px){"):]
+    v4 = read(COMMAND / "experience-v4.css")
+    for rule in (
+        'body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:absolute;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}',
+        'body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(48svh + 10px);}',
+        "body.hq.bt-exp-v4 .mate{min-width:128px;border-radius:12px;background:rgba(15,31,50,.76);}",
+    ):
+        assert rule in lp and rule in v4, rule
+    # the docked Trader launcher in its phone size there (command-polish.css at 760 px)
+    assert "body.hq .bt-trader-launch:not(.bt-trader-launch--nav) span{display:none;}" in lp
+    assert ".bt-trader-launch{right:12px;padding:11px 14px;z-index:45}" in read(COMMAND / "command-polish.css")

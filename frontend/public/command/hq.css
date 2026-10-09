@@ -283,7 +283,11 @@ body[data-view="command"] .hq-foot { display: none; }
 body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc, body.desk-open .cap-exc { visibility: hidden; }
 
 /* ── POCKET COMMAND CENTER (phones) ────────────────────────────────── */
-@media (max-width: 760px) {
+/* the pocket command center: phones, and phones on their side (a landscape
+   phone is a wide screen only 390 px tall: the HUD columns, the CRITICAL bar
+   and the freshness strip left the columns 0-64 px of height). hq.js PHONE
+   reads the same query. */
+@media (max-width: 760px), (max-height: 500px) and (max-width: 1024px) {
   :root { --top: 54px; }
   body.hq { overflow: auto; overflow-x: hidden; background: radial-gradient(140% 60% at 50% 0%, #0f2140 0%, #060c18 55%, #040912 100%) fixed; }
   #hq-stage, #hq-tags, #hq-hint, .hq-foot, #hq-caption { display: none !important; }
@@ -345,8 +349,8 @@ body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc,
   #hq-tabbar button[aria-current="page"] { color: var(--cyan); }
   .phone-only { display: block; }
 }
-@media (min-width: 761px) { .phone-only { display: none !important; } }
-@media (max-width: 1220px) and (min-width: 761px) { :root { --left: 280px; --right: 300px; } .big { font-size: 34px; } }
+@media (min-width: 761px) and (min-height: 501px), (min-width: 1025px) { .phone-only { display: none !important; } }
+@media (max-width: 1220px) and (min-width: 761px) and (min-height: 501px), (max-width: 1220px) and (min-width: 1025px) { :root { --left: 280px; --right: 300px; } .big { font-size: 34px; } }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 @media print {
   @page { size: A4; margin: 16mm 14mm 20mm; }
@@ -372,7 +376,7 @@ body.desk-open .hud-col.right, body.desk-open .drawer, body.desk-open .cap-conc,
 /* the desk panel takes the right of the floor: the legend steps aside */
 body.desk-open .floor-legend [data-render="legend"] { display: none; }
 .floor-counts [data-watch] { white-space: nowrap; height: 32px; }
-@media (max-width: 760px) { .floor-counts { flex-wrap: wrap; gap: 12px 18px; } .floor-counts > div:last-child { flex-basis: 100%; } }
+@media (max-width: 760px), (max-height: 500px) and (max-width: 1024px) { .floor-counts { flex-wrap: wrap; gap: 12px 18px; } .floor-counts > div:last-child { flex-basis: 100%; } }
 
 /* ── CRITICAL: the alert bar dominates every view ───────────────────── */
 #hq-alert { position: fixed; z-index: 22; top: calc(var(--top) + 6px); left: calc(var(--left) + 36px); right: calc(var(--right) + 36px); display: none; }
@@ -455,7 +459,7 @@ body.desk-open #hq-fresh { right: 418px; }
 .rep-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .sheet-actions { align-items: center; } .sheet-actions .why { margin: 0; }
 
-@media (max-width: 760px) {
+@media (max-width: 760px), (max-height: 500px) and (max-width: 1024px) {
   #hq-alert, #hq-fresh { position: static; display: none; margin: 10px 14px 0; }
   body.has-critical #hq-alert { display: block; }
   body[data-view="command"] #hq-fresh, body[data-view="capital"] #hq-fresh { display: block; }

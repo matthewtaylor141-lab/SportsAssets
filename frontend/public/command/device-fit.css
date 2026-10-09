@@ -166,8 +166,9 @@
    fill the row. The pills get their own row, right-aligned, so SMALL LIVE
    SHADOW and PAPER are on screen; the HUD hangs from var(--top), so every
    panel moves down with the taller bar (row 1 is the 54 px workspace bar,
-   row 2 the 26 px pills: 92 px). */
-@media (min-width:761px) and (max-width:1180px){
+   row 2 the 26 px pills: 92 px). A phone on its side (<= 500 px tall,
+   <= 1024 px wide) is a phone here: the pocket command center (hq.css). */
+@media (min-width:761px) and (max-width:1180px) and (min-height:501px),(min-width:1025px) and (max-width:1180px){
   body.hq{--top:calc(92px + var(--sa-t));}
   body.hq #hq-top{flex-wrap:wrap;align-content:center;row-gap:4px;}
   /* basis 0 keeps the workspace bar on row 1 beside the brand (its 624 px
@@ -183,7 +184,7 @@
    freshness 76 px under the bar when an alert shows, 8 px otherwise, 77 px
    tall), and the columns start 10 px below the strip. With a desk open the
    original right edge (418 px, beside the desk) still applies. */
-@media (min-width:761px) and (max-width:1000px){
+@media (min-width:761px) and (max-width:1000px) and (min-height:501px){
   body.hq.has-critical:not(.desk-open)[data-view="command"] #hq-alert{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}
   body.hq:not(.desk-open)[data-view="command"] #hq-fresh{left:calc(18px + var(--sa-l));right:calc(18px + var(--sa-r));}
   body.hq[data-view="command"] .hud-col{top:calc(var(--top) + 95px);}
@@ -273,6 +274,25 @@ body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(76px + var(--ops-hdr-h) + 
   /* the sticky person column scrolls inside itself: its foot ends above the
      home indicator (iPad landscape: "NOW" / the mission title 8-20 px into it) */
   body.bt-hq2.ops-hdr-on .hq6-agent-person{max-height:calc(100vh - 92px - var(--ops-hdr-h) - var(--sa-t) - var(--sa-b));}
+  /* the Floor's view bar starts beside the rail and its team dock between the
+     notch sides (landscape phone: the bar 37 px under the 139 px rail, 1,998
+     px2; the dock 23 px into the right notch side) */
+  body.bt-hq2 .hq5-floorbar{left:calc(112px + var(--sa-l));}
+  body.meeting-real-floor .fl-roster{left:calc(116px + var(--sa-l))!important;right:calc(24px + var(--sa-r))!important;}
+}
+@media (min-width:781px) and (max-width:900px){
+  body.bt-hq2 .hq5-floorbar{left:calc(102px + var(--sa-l));}
+}
+/* ... and, bounded (781-1180 px), it keeps its 18 px from the summary: the
+   bar moves right by the left inset and the summary left by the right one
+   (landscape phone: 1,189 px2 of overlap without this) */
+@media (min-width:781px) and (max-width:1180px){
+  body.bt-hq2 .hq5-floorbar{max-width:calc(100% - 380px - var(--sa-l) - var(--sa-r));}
+}
+/* the Trader launcher inside the notch side (landscape phone: 27 px into it) */
+.bt-trader-launch:not(.bt-trader-launch--nav){right:calc(20px + var(--sa-r));}
+@media (max-width:760px){
+  .bt-trader-launch:not(.bt-trader-launch--nav){right:calc(12px + var(--sa-r));}
 }
 /* a landscape phone is a wide screen only 390 px tall: the side rail's logo,
    six 61 px links and foot ran past the bottom edge (Company at y 453-514 on
@@ -298,6 +318,13 @@ body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(76px + var(--ops-hdr-h) + 
   body.meeting-real-floor .fl-screen{padding-top:calc(58px + var(--sa-t))!important;}
   body.meeting-real-floor .fl-roster{bottom:calc(72px + var(--sa-b))!important;}
   body.meeting-real-floor .fl-panel{bottom:calc(72px + var(--sa-b))!important;}
+  /* a desk panel opens below the view bar (66 px + its 54 px of 44 px touch
+     buttons + 6 px), never over it: the strip's top rule (76 px + strip)
+     put the panel's first 44 px, its close button with them, under the bar
+     (iPhone: close at 187-231 px, bar 158-212 px; nothing closed the panel) */
+  body.meeting-real-floor .fl-panel{top:calc(126px + var(--sa-t))!important;}
+  body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(126px + var(--ops-hdr-h) + var(--sa-t))!important;}
+  body.meeting-real-floor .fl-roster{left:calc(8px + var(--sa-l))!important;right:calc(8px + var(--sa-r))!important;}
   body.ops-hdr-on .hq5-pulse-pop{top:calc(64px + var(--ops-hdr-h) + var(--sa-t));right:calc(8px + var(--sa-r));}
   body.ops-hdr-on .hq5-floorbar{top:calc(66px + var(--ops-hdr-h) + var(--sa-t));}
   body.ops-hdr-on.meeting-real-floor .fl-stage{height:calc(100dvh - 124px - var(--ops-hdr-h) - var(--sa-t) - var(--sa-b))!important;}
@@ -337,20 +364,28 @@ body.ops-hdr-on.meeting-real-floor .fl-panel{top:calc(76px + var(--ops-hdr-h) + 
    wordmark, current-view link and PAPER / SHADOW badge sat 30-41 px into it
    (15 px into an iPad's 24 px). Command hangs every panel from var(--top), so
    the bar grows by the inset and its content moves below it; Trader's bar is
-   in the page, so the page starts below the inset. On a landscape phone (a
-   wide layout 390 px tall) the HUD columns, the bottom strip and the panels
-   keep clear of the notch sides and the indicator. env() is 0 elsewhere. */
+   in the page, so the page starts below the inset. Wherever the HUD hangs
+   from the screen's edges (tablets, desktops) the columns, the bottom strip
+   and the panels keep clear of the notch sides and the indicator; a phone on
+   its side takes the pocket command center, the tab bar's buttons inside the
+   notch sides. env() is 0 elsewhere. */
 /* (761-1180 px: calc(92px + inset), in COMMAND ON TABLETS above) */
 @media (min-width:1181px){body.hq{--top:calc(60px + var(--sa-t));}}
 body.hq #hq-top{padding-top:var(--sa-t);padding-left:calc(20px + var(--sa-l));padding-right:calc(20px + var(--sa-r));}
-@media (max-width:760px){
+@media (max-width:760px),(max-height:500px) and (max-width:1024px){
   body.hq{--top:calc(54px + var(--sa-t));}
   body.hq #hq-top{padding-left:calc(14px + var(--sa-l));padding-right:calc(14px + var(--sa-r));}
   body.hq main#hq-hud{padding-left:calc(14px + var(--sa-l));padding-right:calc(14px + var(--sa-r));}
   /* the desk sheet rises from the bottom edge: its last lines above the indicator */
   body.hq #hq-desk .ins{padding-bottom:calc(20px + var(--sa-b));}
+  body.hq #hq-tabbar{padding-left:var(--sa-l);padding-right:var(--sa-r);}
+  /* the in-flow CRITICAL bar, freshness strip and desk sheet inside
+     the notch sides (phone on its side: the alert's CRITICAL label 22 px and
+     its title 20 px into them) */
+  body.hq #hq-alert,body.hq #hq-fresh{margin-left:calc(14px + var(--sa-l));margin-right:calc(14px + var(--sa-r));}
+  body.hq #hq-desk .ins{padding-left:calc(20px + var(--sa-l));padding-right:calc(20px + var(--sa-r));}
 }
-@media (min-width:761px){
+@media (min-width:761px) and (min-height:501px),(min-width:1025px){
   body.hq .hud-col.left{left:calc(18px + var(--sa-l));}
   body.hq .hud-col.right{right:calc(18px + var(--sa-r));}
   body.hq .hud-col{bottom:calc(var(--bottom) + 14px + var(--sa-b));}
@@ -386,4 +421,34 @@ body.bt-page-trader,body:has(>header.topbar){padding-top:var(--sa-t);padding-lef
 }
 @media (min-width:761px) and (max-width:1000px){
   body.hq #hq-hint{display:none;}
+}
+
+
+/* COMMAND ON A PHONE ON ITS SIDE (every pointer) --------------------------- */
+/* A landscape phone (844 x 390) took the tablet layout: the 92 px top bar,
+   the CRITICAL bar and the freshness strip left the HUD columns 0-64 px of
+   height (harness, synthetic reads, f90dafdd + the inset fix: the right
+   column at 187-251 px behind the strip, the team list 0 px tall, no desk
+   within reach, Management Equity under the strip). hq.js and hq.css give it
+   the pocket command center of a portrait phone; these are Experience V4's
+   pocket rules for Command (experience-v4.css, max-width 760 px), at that
+   size (its pulse is hidden on Command: experience-v4.js pulse()). */
+@media (min-width:761px) and (max-height:500px) and (max-width:1024px){
+  body.hq .bt-v4-actions--flow{display:flex;flex-wrap:wrap;gap:8px;margin:4px 0 12px;}
+  body.hq.bt-exp-v4{background:radial-gradient(140% 70% at 50% 0,#17365d 0,#0b192b 50%,#07111e 100%) fixed;}
+  body.hq.bt-exp-v4 #hq-stage{display:none!important;}
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage{display:block!important;position:absolute;left:0;right:0;top:54px;height:48svh;z-index:0;overflow:hidden;}
+  body.hq.bt-exp-v4[data-view="command"] #hq-stage::after{background:linear-gradient(180deg,rgba(5,12,22,.16),rgba(5,12,22,0) 50%,rgba(5,12,22,.78) 100%);}
+  body.hq.bt-exp-v4[data-view="command"] #hq-top{margin-bottom:calc(48svh + 10px);}
+  body.hq.bt-exp-v4[data-view="command"] .view-command [data-render="capital"]{background:linear-gradient(180deg,rgba(17,37,61,.90),rgba(8,21,37,.88));}
+  body.hq.bt-exp-v4 #hq-top{background:rgba(7,17,30,.84);}
+  body.hq.bt-exp-v4 .big{font-size:42px;}
+  body.hq.bt-exp-v4 .team{gap:7px;scroll-padding:14px;}
+  body.hq.bt-exp-v4 .mate{min-width:128px;border-radius:12px;background:rgba(15,31,50,.76);}
+  body.hq.bt-exp-v4 #hq-desk .ins{background:linear-gradient(180deg,rgba(16,34,56,.99),rgba(7,18,31,.99));border-top:1px solid var(--v3-line-strong);border-radius:18px 18px 0 0;}
+  body.hq.bt-exp-v4 .hud-col.left,body.hq.bt-exp-v4 .hud-col.right{width:auto;}
+  /* the docked Trader launcher in its phone size (command-polish.css, 760
+     px): full size it covered a third of the CRITICAL bar on a 390 px screen */
+  body.hq .bt-trader-launch:not(.bt-trader-launch--nav){padding:11px 14px;}
+  body.hq .bt-trader-launch:not(.bt-trader-launch--nav) span{display:none;}
 }

@@ -5,7 +5,9 @@ link.href='/trader';link.setAttribute('aria-label','Open read-only Trader Mode')
 link.append(document.createTextNode('↗ Trader Mode '));const note=document.createElement('span');
 note.textContent='Watch Xavier work';link.append(note);
 
-const mobile=!!(window.matchMedia&&matchMedia('(max-width: 760px)').matches);
+// phones, and phones on their side: hq.js / hq.css use the pocket command
+// center (no #hq-nav) for both
+const mobile=!!(window.matchMedia&&matchMedia('(max-width: 760px), (max-height: 500px) and (max-width: 1024px)').matches);
 const tabbar=document.getElementById('hq-tabbar');
 // The root mobile Command hides #hq-nav. Never insert the only Trader Mode
 // launcher into a container that CSS deliberately removes on phones.
