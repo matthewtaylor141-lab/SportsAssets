@@ -35,7 +35,14 @@ function gap(o,q,now=Date.now()/1000){
   reason:current?null:'Book not current',reference:ref,limit:lim,side:dir==='SELL'?'bid':'ask',isFill:false};
 }
 function standing(p){return(p.orders||[]).filter(o=>['RESTING','PARTIALLY_FILLED','CANCEL_PENDING','PENDING_SIMULATION'].includes(o.state));}
-function target(p){const os=standing(p);return os.find(o=>o.direction==='SELL'&&['RESTING','PARTIALLY_FILLED'].includes(o.state))||os.find(o=>o.direction==='SELL')||os[0]||p.proposal||null;}
+// A standing order whose recorded expiry has passed is not protection, even
+// while the ledger still reads RESTING (the expiry sweep lags): the server's
+// packet already refuses it (NO_VALID_ACTIVE_PROTECTION) and the page must not
+// show it as the standing limit. It stays listed, labelled, in the orders view.
+function pastExpiry(o,now=Date.now()/1000){return!!o&&finite(o.expires_at)&&finite(now)&&o.expires_at<=now;}
+function target(p,now=Date.now()/1000){const os=standing(p).filter(o=>!pastExpiry(o,now));return os.find(o=>o.direction==='SELL'&&['RESTING','PARTIALLY_FILLED'].includes(o.state))||os.find(o=>o.direction==='SELL')||os[0]||p.proposal||null;}
+// a recorded instant as UTC wall time (never the viewer's zone, never invented)
+const utc=at=>finite(at)?new Date(at*1000).toISOString().slice(11,19)+'Z':'—';
 function packet(p,now=Date.now()/1000){const k=p.packet||{};const q=p.quote||{};const missing=[...(k.missing||[])];
  if(!fresh(k.probability_at,now,30)||k.probability_current!==true)missing.push('NO_FRESH_PROBABILITY');
  if(!fresh(q.at,now,300)||q.current!==true)missing.push('NO_CURRENT_EXECUTABLE_BOOK');
@@ -71,13 +78,13 @@ function chart(p,limit){
  return svg;
 }
 function matches(p,filter,query,now){
- const t=target(p),g=gap(t,p.quote,now),pk=packet(p,now);
+ const t=target(p,now),g=gap(t,p.quote,now),pk=packet(p,now);
  if(query&&!`${p.title} ${p.market_title} ${p.market_id} ${p.sport} ${p.position_id}`.toLowerCase().includes(query.toLowerCase()))return false;
  if(filter==='near')return p.state==='ACTIVE'&&g.met!==null&&g.distance<=2;
  if(filter==='blocked')return p.state==='ACTIVE'&&!pk.complete;
  if(filter==='settlement')return p.state==='SETTLEMENT_PENDING';
  return true;
 }
-const api={finite,esc,fmt,cents,money,age,fresh,duration,validate,gap,standing,target,packet,clock,series,chart,matches};
+const api={finite,esc,fmt,cents,money,age,fresh,duration,validate,gap,standing,pastExpiry,target,utc,packet,clock,series,chart,matches};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;else root.TraderCore=api;
 })(typeof window==='undefined'?globalThis:window);
