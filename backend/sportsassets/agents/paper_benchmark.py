@@ -2677,7 +2677,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             best_edge=best_edge, verdict=verdict, refusals=refusals,
             policy_decision=policy_decision, at=at, label=label,
             book_age=book_age, cfg=cfg, params=params, pin=pin,
-            book_max_age=BOOK_MAX_AGE_S, book_source=ctx.get("last_book_source"))
+            book_max_age=BOOK_MAX_AGE_S, book_source=ctx.get("last_book_source"),
+            account_id=ctx.get("account_id"))
         rec["canonical_intent_id"] = (canonical or {}).get("intent_id")
         # THE LATENCY CHAIN'S ADAPTER-SIDE STAGES (R30A section 6), on the same
         # decision clock as the intent's own stages

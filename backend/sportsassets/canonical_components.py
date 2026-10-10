@@ -305,12 +305,21 @@ async def karen_at_decision(conn, *, slug: str, strategy: str,
 
 
 async def allie_at_decision(conn, *, decision: dict, eddie: dict,
-                            now: float) -> dict:
+                            now: float, account_id: str | None = None) -> dict:
     """ALLIE'S CAPITAL-EFFICIENCY ALLOCATION (allie_capital.allocate) from the
     decision's own inputs, Archer's executable EV and depth, the recorded
     settlement lags, the paper book's open exposure on the fixture, idle
-    capital, recent INVESTMENT candidates (the hurdle) and the rails."""
+    capital, recent INVESTMENT candidates (the hurdle) and the rails.
+
+    OPEN EXPOSURE (RC6.3 allie-exposure) is computed from the canonical open
+    QUANTITY of each position (open_position_canon: bought - sold - the
+    latest settlement's qty), per account and per fixture, at the ledger's
+    cost basis -- never from "the group has no settlement row", which an
+    exited-to-zero position never gets (settle refuses it), so exited
+    groups were counted open. `account_id` (else the decision's own) names
+    the account whose book it is; with none, every paper account's."""
     from . import allie_capital as AC
+    from . import open_position_canon as OPC
     from .lost_opportunity import reads as R
     from .profitability import economics as EC
 
@@ -337,24 +346,14 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
         cap_snap = await _cached("lol_capital", now, capital)
         hs = await _cached("allie_hurdle", now, hurdle)
         fx = decision.get("fixture")
+        acct = account_id or decision.get("account_id") or None
         # R30C review: with no fixture on the decision the open groups on it
         # cannot be counted -- Allie's arithmetic still sees 0 (her module
         # is unchanged), but the haircut is labelled UNMEASURED below so no
         # reader (V2 included) takes that 0 for a measured "no correlation"
         fixture = await conn.fetchrow(
-            """SELECT count(DISTINCT o.group_id) AS n,
-                      coalesce(sum(o.filled_qty * o.limit_price), 0) AS usd
-                 FROM paper_orders o
-                WHERE o.role = 'ENTRY' AND o.fixture = $1 AND o.filled_qty > 0
-                  AND NOT EXISTS (SELECT 1 FROM paper_settlements s
-                                   WHERE s.group_id = o.group_id)""",
-            fx) if fx else None
-        book = await conn.fetchval(
-            """SELECT coalesce(sum(o.filled_qty * o.limit_price), 0)
-                 FROM paper_orders o
-                WHERE o.role = 'ENTRY' AND o.filled_qty > 0
-                  AND NOT EXISTS (SELECT 1 FROM paper_settlements s
-                                   WHERE s.group_id = o.group_id)""")
+            OPC.OPEN_EXPOSURE_FIXTURE_SQL, acct, fx) if fx else None
+        book = await conn.fetchval(OPC.OPEN_EXPOSURE_BOOK_SQL, acct)
         em = await conn.fetchrow(
             "SELECT scale, max_order_usd FROM execmirror_control LIMIT 1")
         e = eddie if eddie.get("status") == "MEASURED" else {}
@@ -411,6 +410,11 @@ async def allie_at_decision(conn, *, decision: dict, eddie: dict,
             "live_execution_confidence": (
                 "NOT_ESTABLISHED_NO_ACTUAL_CANONICAL_FILL"),
             "actual": {"status": EE.UNMEASURED, "why": EE.R_NO_ACTUAL}}
+        # what "open" meant for the book / fixture exposure above, recorded
+        # beside it so no reader takes it for the old "no settlement row"
+        out["open_exposure_basis"] = {
+            "rule": OPC.OPEN_EXPOSURE_BASIS,
+            "account_scope": acct or "ALL_PAPER_ACCOUNTS"}
         if not fx:
             cc = dict(out.get("correlation_concentration") or {})
             cc.update(haircut_status="UNMEASURED",
@@ -560,11 +564,14 @@ async def opportunity_v2_at_decision(conn, *, decision: dict,
 
 async def at_decision(conn, *, decision: dict, book_row: dict | None,
                       cost_usd, p, wire, now: float | None = None,
-                      contract: dict | None = None) -> dict:
+                      contract: dict | None = None,
+                      account_id: str | None = None) -> dict:
     """All computed components for one decision (derek is built by the
     caller from its own record). `contract` is the valuation row the
     decision was made on (its market type and venue rules text feed the
-    settlement-exception cost). Never raises."""
+    settlement-exception cost). `account_id` is the paper account the
+    decision is made for: Allie's open exposure is that account's book.
+    Never raises."""
     at = float(now if now is not None else time.time())
     if decision.get("event_start_at") is None and decision.get("us_market_slug"):
         # the event start the opportunity score and Allie's time to capital
@@ -587,7 +594,7 @@ async def at_decision(conn, *, decision: dict, book_row: dict | None,
     karen = await karen_at_decision(conn, slug=decision.get("us_market_slug"),
                                     strategy=decision.get("strategy"), now=at)
     allie = await allie_at_decision(conn, decision=decision, eddie=eddie,
-                                    now=at)
+                                    now=at, account_id=account_id)
     exc = await settlement_exception_at_decision(
         conn, decision=decision, contract=contract, p=p, now=at)
     # R30C: Opportunity Score V2 (shadow tournament only -- the caller
