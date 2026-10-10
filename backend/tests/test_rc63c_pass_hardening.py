@@ -54,6 +54,7 @@ import asyncio
 import inspect
 import json
 import pathlib
+import re
 import textwrap
 import time
 import warnings
@@ -517,10 +518,28 @@ async def _real_pass_with_a_hung_allie_read(monkeypatch, *, tag, hard,
         monkeypatch.setattr(CC, "COMPONENT_TIMEOUT_S", 3600.0)
         monkeypatch.setattr(CC, "_bounded", _bounded_with_timeout(
             CC._bounded, 3600.0), raising=True)
-        monkeypatch.setattr(
-            OPC, "OPEN_EXPOSURE_BOOK_SQL",
-            "SELECT 0::numeric AS usd FROM (SELECT pg_sleep(3600)) s "
-            "WHERE $1::text IS NULL OR true /* ph-allie-hang */")
+        # THE HANG COVERS EVERY EXPOSURE STATEMENT ALLIE CAN EXECUTE: since
+        # the test-isolation merge (dd25c588) a decision naming a fixture --
+        # every Derek-built decision does -- reads the book and the fixture
+        # in ONE statement (OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL); the book-only
+        # statement is read only without a fixture. Patching the book-only
+        # statement alone let the completed-game decision finish uncut and
+        # voided this proof on the combined tree; the guard below fails
+        # loudly if allie_at_decision ever executes a statement not hung here
+        hung = {
+            "OPEN_EXPOSURE_BOOK_SQL":
+                "SELECT 0::numeric AS usd FROM (SELECT pg_sleep(3600)) s "
+                "WHERE $1::text IS NULL OR true /* ph-allie-hang */",
+            "OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL":
+                "SELECT 0::numeric AS book_usd, 0::bigint AS fixture_n, "
+                "0::numeric AS fixture_usd FROM (SELECT pg_sleep(3600)) s "
+                "WHERE ($1::text IS NULL OR true) "
+                "AND ($2::text IS NULL OR true) /* ph-allie-hang */"}
+        executed = set(re.findall(r"OPC\.(OPEN_EXPOSURE_\w+_SQL)",
+                                  inspect.getsource(CC.allie_at_decision)))
+        assert executed == set(hung), (executed, set(hung))
+        for name, sql in hung.items():
+            monkeypatch.setattr(OPC, name, sql)
         monkeypatch.setattr(PRT, "HARD_TIMEOUT_S", float(hard))
         monkeypatch.setattr(PRT, "PASS_RECORD_RESERVE_S", float(reserve))
         steps = list(PRT.default_steps())
