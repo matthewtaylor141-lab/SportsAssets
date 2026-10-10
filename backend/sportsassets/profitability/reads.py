@@ -512,24 +512,53 @@ async def event_starts(conn, slugs, gids) -> dict:
     return out
 
 
+#: the first ordinary (WON / LOST) settlement of each market in the lookback
+LAG_SETTLEMENTS_SQL = (
+    "SELECT DISTINCT ON (us_market_slug) us_market_slug, "
+    "       extract(epoch FROM recorded_at)::float8 AS rec, settled_at "
+    "  FROM paper_settlements "
+    " WHERE settled_at >= to_timestamp($1) AND outcome IN ('WON', 'LOST') "
+    " ORDER BY us_market_slug, settled_at")
+#: the latest mapped game start of each of those markets, in ONE read
+LAG_GAME_STARTS_SQL = (
+    "SELECT DISTINCT ON (market_slug) market_slug, game_start "
+    "  FROM us_premap "
+    " WHERE market_slug = ANY($1::text[]) AND game_start IS NOT NULL "
+    " ORDER BY market_slug, updated_at DESC NULLS LAST")
+
+
 async def settlement_lag_samples(conn, *, now, days=LOOKBACK_DAYS * 2) -> list:
     """[(recorded_at, settled_at - game start)] -- the first ordinary
-    settlement of each market against its pre-map game start."""
-    rows = await conn.fetch(
-        "SELECT extract(epoch FROM s.recorded_at)::float8 AS rec, "
-        "       extract(epoch FROM s.settled_at - g.game_start)::float8 "
-        "       AS lag "
-        "  FROM (SELECT DISTINCT ON (us_market_slug) us_market_slug, "
-        "               recorded_at, settled_at FROM paper_settlements "
-        "         WHERE settled_at >= to_timestamp($1) "
-        "           AND outcome IN ('WON', 'LOST') "
-        "         ORDER BY us_market_slug, settled_at) s "
-        "  JOIN LATERAL (SELECT game_start FROM us_premap "
-        "                 WHERE market_slug = s.us_market_slug "
-        "                   AND game_start IS NOT NULL "
-        "                 ORDER BY updated_at DESC NULLS LAST LIMIT 1) g "
-        "    ON true LIMIT $2", float(now) - days * 86400.0, MAX_ROWS)
-    return [(C.num(r["rec"]), C.num(r["lag"])) for r in rows]
+    settlement of each market against its pre-map game start.
+
+    ONE PASS OVER us_premap (RC6.3). us_premap has no market_slug index
+    (192,554 rows in production on 2026-10-10), and the per-market LATERAL
+    probe this replaces scanned the whole table once per settled market:
+    102 markets took 7.8 s in production, past the 2.0 s bound of the
+    canonical components that read these samples (Allie and the Opportunity
+    Score, canonical_components), so both were UNAVAILABLE on every
+    decision from 2026-10-05 21:38Z. The game starts are now read once for
+    all the settled markets (as lost_opportunity.reads.event_starts does);
+    the samples are the same -- the latest-updated pre-map row with a game
+    start per market, the market's earliest WON / LOST settlement in the
+    lookback, markets without a mapped start left out, MAX_ROWS at most in
+    market order."""
+    rows = await conn.fetch(LAG_SETTLEMENTS_SQL,
+                            float(now) - days * 86400.0)
+    if not rows:
+        return []
+    starts = {r["market_slug"]: r["game_start"] for r in await conn.fetch(
+        LAG_GAME_STARTS_SQL, [r["us_market_slug"] for r in rows])}
+    out = []
+    for r in rows:
+        g = starts.get(r["us_market_slug"])
+        if g is None:
+            continue
+        out.append((C.num(r["rec"]),
+                    C.num((r["settled_at"] - g).total_seconds())))
+        if len(out) >= MAX_ROWS:
+            break
+    return out
 
 
 # ═════════════════════════════════════════════════════════════════════
