@@ -553,7 +553,14 @@ def test_a_refused_market_the_venue_may_hold_already_is_re_added_alone():
     venue held and streamed it. D's add may have been taken already (its
     reply was lost), so after a refusal it is re-added ALONE: an add of a
     held market is "no action", answered by `ok` listing it; D ends CURRENT
-    with the venue's book, C (truly refused) GAP by name."""
+    with the venue's book, C (truly refused) GAP by name.
+
+    (Round 5) D's add was replaced at the gap, which marks D UNSURE, and an
+    UNSURE market is re-added alone wherever it was queued from: the gap
+    re-add no longer shares a command with C, so error 26 never refuses D
+    with it (the refusal-then-alone path of this seed is the same repair a
+    step earlier; D's re-add is the second add naming D, alone, and no add
+    names C and D together)."""
     v = VM.MemberVenue(market_limit=3)
     want = [A, B]
     steps = ["process", "deliver", "deliver", "deliver",
@@ -573,13 +580,17 @@ def test_a_refused_market_the_venue_may_hold_already_is_re_added_alone():
     sub, books, seen = VM.run(v, want, steps)
     assert seen["violations"] == [], seen["violations"][:2]
     acts = [(a, ts) for _c, a, ts in v.commands()]
-    assert ("add_markets", ["KXM-D"]) in acts[3:], acts
+    alone = [i for i, (a, ts) in enumerate(acts)
+             if a == "add_markets" and ts == ["KXM-D"]]
+    assert len(alone) >= 2, acts            # its first add, and the re-add
+    assert not [1 for a, ts in acts[alone[0] + 1:]
+                if a == "add_markets" and "KXM-D" in ts and len(ts) > 1], acts
     assert v.markets == [A, B, "KXM-D"]
     fin = seen["final"]
     assert fin["KXM-D"]["ok"]
     assert VM._code_book(fin["KXM-D"]) == v.truth["KXM-D"]
     assert fin[C]["why_raw"] == KWS.R_NOT_HELD_BY_VENUE and not fin[C]["ok"]
-    # bounded: D alone once (the refusal's one re-add), C its own
+    # bounded: D alone once (the re-add), C its own
     assert sum(1 for a, ts in acts if a == "add_markets"
                and "KXM-D" in ts) <= 3
 
