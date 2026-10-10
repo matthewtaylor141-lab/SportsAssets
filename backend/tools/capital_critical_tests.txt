@@ -1567,3 +1567,9 @@ tests/test_rc63_software_reds_replay.py::test_no_rc63b_code_is_a_first_loss_in_t
 tests/test_rc63_software_reds_replay.py::test_the_hourly_readback_has_24_rows_none_unclassified_and_the_packet_hour_is_84
 tests/test_rc63_software_reds_replay.py::test_the_research_file_is_the_generators_and_read_only
 tests/test_rc63_software_reds_replay.py::test_the_tool_parses_a_run_log_and_a_fixture_alike
+# (rc6.3 sw-reds-replay, lane H0, review round 2) THE GATE'S ORDER IS PART OF ITS EVIDENCE: first_loss_of_event breaks a same-stage tie between two decisions of one valuation by record order, the gate's record order is DECISIONS_SQL's ORDER BY decided_at, and the first export lost it (a valuation's decisions in strategy order: the SOFTWARE per-code cells differed from the gate's in 14 of the 24 rows while the totals, by_class and UNCLASSIFIED did not). The export now carries decided_at_epoch and decision_id on every dec row (the one pinned edit to the production statement), the replay sorts by them and REFUSES an export without them, every cell an exact decided_at tie leaves to the gate's own read order is named per row instead of resolved silently, and the packet-hour fixture (captured without the order columns) is proved order-invariant in the gate's evidence (its 9 ties are ECONOMIC at EV, no SOFTWARE cell).
+tests/test_rc63_software_reds_replay.py::test_the_research_file_exports_the_gates_decision_order
+tests/test_rc63_software_reds_replay.py::test_the_replay_takes_the_gates_order_from_the_export_not_the_files
+tests/test_rc63_software_reds_replay.py::test_an_export_without_the_order_columns_is_refused_not_replayed
+tests/test_rc63_software_reds_replay.py::test_a_decided_at_tie_is_named_not_resolved
+tests/test_rc63_software_reds_replay.py::test_the_fixture_windows_gate_evidence_is_invariant_to_decision_order

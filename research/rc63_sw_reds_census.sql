@@ -6,13 +6,23 @@
 -- software_reds_zero reads (capital_readiness.feeds.gate_software_reds_zero:
 -- coverage_first_loss.read(since = now - 3600, until = now + 1)) -- the
 -- production statements of coverage_first_loss (ledger_events_sql(),
--- VALUATIONS_SQL, DECISIONS_SQL) verbatim with their parameters bound, one
--- JSON line per row: kind `hour` (the window), `ev` (one furthest
+-- VALUATIONS_SQL, DECISIONS_SQL) with their parameters bound, one JSON line
+-- per row: kind `hour` (the window), `ev` (one furthest
 -- ext_candidate_outcomes row per provider event), `val` (the linked
 -- external_valuations), `dec` (the paper_decisions on them). The replay
 -- (backend/tools/sw_reds_hourly_census.py --log <run log>) runs
 -- coverage_first_loss.census over each hour with the taxonomy of the
 -- checked-out source and renders the hourly SOFTWARE-by-code table.
+--
+-- THE GATE'S ORDER. coverage_first_loss.first_loss_of_event breaks a tie
+-- between two same-stage decisions of one valuation by record order (the
+-- first decision wins), and the gate's record order is DECISIONS_SQL's
+-- ORDER BY decided_at. The statement does not select decided_at, so the
+-- `dec` rows carry it (decided_at_epoch) and the row's decision_id beside
+-- the statement's own columns: the one edit to the statement beyond
+-- binding its parameters. The replay sorts a valuation's decisions by
+-- (decided_at_epoch, decision_id) and names per hour the cells an exact
+-- decided_at tie leaves to the gate's own read order.
 --
 -- GENERATED: backend/tools/sw_reds_hourly_census.py --sql <now> --hours <n>
 -- (the test pins this file to the generator, so a change to the production
@@ -24,11 +34,13 @@
 -- the packet's completion.json and capital_readiness.json instants, sha256
 -- 5d72395ad2b0f67dc745e256fab130da19c321fb0b6438a770efeb4960c339fb) were
 -- run as research-sql 38055963121 and are tests/fixtures/
--- rc63_sw_reds_104_events.json.
+-- rc63_sw_reds_104_events.json. The 24-hour series without the order
+-- columns (sha256 3e3914a2304cb88238ff92c17a8e78e1b74a21345b407eb5ad8c4379
+-- 521e6910) was research-sql 38069842557 and is superseded by this file.
 --
 -- SELECT only: no mutating keyword, no psql meta-command but \echo.
 
-\echo == RC63_SW_REDS_HOURLY_CENSUS_V1 now=1791651274.8284767 hours=24: one JSON line per row, kinds hour / ev / val / dec ==
+\echo == RC63_SW_REDS_HOURLY_CENSUS_V2 now=1791651274.8284767 hours=24: one JSON line per row, kinds hour / ev / val / dec ==
 WITH p AS (SELECT 1791651274.8284767::float8 AS now, 24::int AS hours),
 h AS (
     SELECT k, p.now - k * 3600 AS now_k,
@@ -81,11 +93,13 @@ vl AS (
              ORDER BY id
              LIMIT 50000
     ) v),
--- coverage_first_loss.DECISIONS_SQL: $1 the hour's valuation ids, $2 since,
+-- coverage_first_loss.DECISIONS_SQL with the order columns appended
+-- (decided_at_epoch, decision_id): $1 the hour's valuation ids, $2 since,
 -- $3 the cap
 dc AS (
     SELECT h.k, d.* FROM h CROSS JOIN LATERAL (
-            SELECT valuation_id, verdict, refusal, refusals, strategy
+            SELECT valuation_id, verdict, refusal, refusals, strategy,
+                   extract(epoch FROM decided_at)::float8 AS decided_at_epoch, decision_id
               FROM paper_decisions
              WHERE valuation_id = ANY((SELECT coalesce(array_agg(v.id::bigint), ARRAY[]::bigint[]) FROM vl v WHERE v.k = h.k)::bigint[])
                AND decided_at >= to_timestamp(h.since) - interval '1 day'
@@ -108,7 +122,10 @@ SELECT j FROM (
                              'row', to_jsonb(vl) - 'k')::text
       FROM vl
     UNION ALL
-    SELECT k, 2, lpad(valuation_id::text, 12, '0'), coalesce(strategy, ''),
+    -- a valuation's decisions in the gate's order (decided_at, then the id)
+    SELECT k, 2, lpad(valuation_id::text, 12, '0'),
+           to_char(to_timestamp(decided_at_epoch) AT TIME ZONE 'UTC',
+                   'YYYY-MM-DD HH24:MI:SS.US') || ' ' || decision_id,
            json_build_object('kind', 'dec', 'k', k,
                              'row', to_jsonb(dc) - 'k')::text
       FROM dc

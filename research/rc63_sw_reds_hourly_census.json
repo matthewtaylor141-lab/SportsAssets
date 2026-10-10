@@ -1,7 +1,13 @@
 {
- "version": "RC63_SW_REDS_HOURLY_CENSUS_V1",
+ "version": "RC63_SW_REDS_HOURLY_CENSUS_V2",
  "census_version": "COVERAGE_FIRST_LOSS_CENSUS_V1",
  "taxonomy_version": "REFUSAL_TAXONOMY_V1",
+ "source": {
+  "kind": "research-sql run log",
+  "file": "run_38074718533.log",
+  "decision_order": "decided_at_epoch, decision_id"
+ },
+ "order_ambiguous_rows": [],
  "rows": [
   {
    "k": 0,
@@ -43,12 +49,12 @@
     {
      "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
-     "events": 32
+     "events": 31
     },
     {
      "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
-     "events": 13
+     "events": 14
     },
     {
      "stage": "FAIR_VALUE",
@@ -58,7 +64,7 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 7
+     "events": 6
     },
     {
      "stage": "FAIR_VALUE",
@@ -77,7 +83,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "PINNAPI_LINE_INPUT_CHANGED",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 1
     }
    ],
@@ -129,14 +135,14 @@
      "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
      "class": "SOFTWARE",
-     "events": 32,
+     "events": 31,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
      "class": "SOFTWARE",
-     "events": 13,
+     "events": 14,
      "source": "paper_decisions"
     },
     {
@@ -150,7 +156,7 @@
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 7,
+     "events": 6,
      "source": "paper_decisions"
     },
     {
@@ -170,6 +176,13 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE",
+     "class": "SOFTWARE",
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -199,7 +212,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 50,
+     "events": 47,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 3,
      "source": "paper_decisions"
     }
    ],
@@ -230,7 +250,10 @@
     "pinnapi_hockey": 6,
     "baseball_mlb": 3,
     "soccer_usa_usl_championship": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 1,
@@ -267,12 +290,12 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 4
+     "events": 3
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "events": 2
+     "code": "NO_QUALIFIED_MODEL",
+     "events": 3
     }
    ],
    "software_codes_truncated": false,
@@ -316,21 +339,28 @@
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 4,
+     "events": 3,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
-     "events": 2,
+     "events": 3,
      "source": "paper_decisions"
     },
     {
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 19,
+     "events": 18,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 1,
      "source": "paper_decisions"
     }
    ],
@@ -357,7 +387,10 @@
     "americanfootball_nfl": 26,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 2,
@@ -457,7 +490,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 21,
+     "events": 17,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 4,
      "source": "paper_decisions"
     }
    ],
@@ -484,7 +524,10 @@
     "americanfootball_nfl": 26,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 3,
@@ -520,7 +563,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 1
     }
    ],
@@ -563,7 +606,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -572,7 +615,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 22,
+     "events": 21,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 1,
      "source": "paper_decisions"
     }
    ],
@@ -598,7 +648,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 4,
@@ -639,12 +692,12 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 2
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "events": 1
     },
     {
@@ -699,14 +752,14 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 2,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -722,7 +775,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 17,
+     "events": 15,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 2,
      "source": "paper_decisions"
     }
    ],
@@ -748,7 +808,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 5,
@@ -836,7 +899,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 17,
+     "events": 15,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 2,
      "source": "paper_decisions"
     }
    ],
@@ -862,7 +932,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 6,
@@ -962,7 +1035,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 13,
+     "events": 10,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 3,
      "source": "paper_decisions"
     }
    ],
@@ -988,7 +1068,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 7,
@@ -1076,7 +1159,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 14,
+     "events": 13,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 1,
      "source": "paper_decisions"
     }
    ],
@@ -1102,7 +1192,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 8,
@@ -1240,7 +1333,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 10,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 9,
@@ -1400,7 +1496,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 89,
+     "events": 79,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 10,
      "source": "paper_decisions"
     }
    ],
@@ -1430,7 +1533,10 @@
     "pinnapi_hockey": 6,
     "pinnapi_baseball": 3,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 10,
@@ -1614,7 +1720,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 92,
+     "events": 82,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 10,
      "source": "paper_decisions"
     }
    ],
@@ -1647,7 +1760,10 @@
     "baseball_mlb": 2,
     "soccer_argentina_primera_nacional": 1,
     "soccer_uruguay_primera_division": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 11,
@@ -1838,7 +1954,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 99,
+     "events": 87,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 12,
      "source": "paper_decisions"
     }
    ],
@@ -1870,7 +1993,10 @@
     "baseball_mlb": 2,
     "americanfootball_nfl": 1,
     "soccer_argentina_primera_nacional": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 12,
@@ -1917,7 +2043,7 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 8
+     "events": 7
     },
     {
      "stage": "FAIR_VALUE",
@@ -1926,13 +2052,13 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 2
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "events": 1
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "events": 2
     },
     {
      "stage": "BOOK",
@@ -1995,7 +2121,7 @@
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 8,
+     "events": 7,
      "source": "paper_decisions"
     },
     {
@@ -2007,16 +2133,16 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 2,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
      "class": "SOFTWARE",
-     "events": 1,
+     "events": 2,
      "source": "paper_decisions"
     },
     {
@@ -2030,7 +2156,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 76,
+     "events": 65,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 11,
      "source": "paper_decisions"
     }
    ],
@@ -2061,7 +2194,10 @@
     "baseball_mlb": 2,
     "pinnapi_hockey": 2,
     "americanfootball_nfl": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 13,
@@ -2102,12 +2238,12 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "events": 1
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 1
     },
     {
@@ -2162,14 +2298,14 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_MARKET_NOT_IN_CURRENT_STATE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -2192,14 +2328,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 22,
+     "events": 19,
      "source": "paper_decisions"
     },
     {
      "stage": "EV",
-     "code": "SETTLEMENT_DIFFERENCE_PRICED_VALUE_IS_ZERO",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
      "class": "ECONOMIC",
-     "events": 1,
+     "events": 4,
      "source": "paper_decisions"
     }
    ],
@@ -2225,7 +2361,10 @@
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 11,
     "baseball_mlb": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 14,
@@ -2272,7 +2411,12 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 2
+     "events": 1
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_MODEL",
+     "events": 1
     },
     {
      "stage": "FAIR_VALUE",
@@ -2345,7 +2489,14 @@
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 2,
+     "events": 1,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_MODEL",
+     "class": "SOFTWARE",
+     "events": 1,
      "source": "paper_decisions"
     },
     {
@@ -2373,7 +2524,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 59,
+     "events": 53,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 6,
      "source": "paper_decisions"
     }
    ],
@@ -2406,7 +2564,10 @@
     "pinnapi_baseball": 1,
     "soccer_colombia_primera_a": 1,
     "soccer_uruguay_primera_division": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 15,
@@ -2452,23 +2613,23 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 3
-    },
-    {
-     "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
      "events": 3
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "events": 2
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "events": 1
+     "code": "NO_QUALIFIED_MODEL",
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 2
     },
     {
      "stage": "BOOK",
@@ -2529,13 +2690,6 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "class": "SOFTWARE",
-     "events": 3,
-     "source": "paper_decisions"
-    },
-    {
-     "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_INPUT_CHANGED",
      "class": "SOFTWARE",
      "events": 3,
@@ -2543,16 +2697,23 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
      "events": 2,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
-     "events": 1,
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 2,
      "source": "paper_decisions"
     },
     {
@@ -2573,7 +2734,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 38,
+     "events": 35,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 3,
      "source": "paper_decisions"
     }
    ],
@@ -2605,7 +2773,10 @@
     "soccer_usa_usl_championship": 2,
     "pinnapi_baseball": 1,
     "soccer_colombia_primera_a": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 16,
@@ -2760,7 +2931,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 50,
+     "events": 43,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 7,
      "source": "paper_decisions"
     }
    ],
@@ -2794,7 +2972,10 @@
     "pinnapi_baseball": 1,
     "soccer_argentina_primera_nacional": 1,
     "soccer_usa_usl_championship": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 17,
@@ -2937,7 +3118,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 64,
+     "events": 58,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 6,
      "source": "paper_decisions"
     }
    ],
@@ -2970,7 +3158,10 @@
     "soccer_colombia_primera_a": 2,
     "pinnapi_baseball": 1,
     "soccer_uruguay_primera_division": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 18,
@@ -3011,7 +3202,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 2
     },
     {
@@ -3081,7 +3272,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 2,
      "source": "paper_decisions"
@@ -3118,7 +3309,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 86,
+     "events": 74,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 12,
      "source": "paper_decisions"
     }
    ],
@@ -3150,7 +3348,10 @@
     "soccer_usa_usl_championship": 2,
     "soccer_colombia_primera_a": 1,
     "soccer_uruguay_primera_division": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 19,
@@ -3187,7 +3388,12 @@
     {
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 3
+     "events": 2
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_MODEL",
+     "events": 1
     },
     {
      "stage": "FAIR_VALUE",
@@ -3241,7 +3447,14 @@
      "stage": "FAIR_VALUE",
      "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 3,
+     "events": 2,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "NO_QUALIFIED_MODEL",
+     "class": "SOFTWARE",
+     "events": 1,
      "source": "paper_decisions"
     },
     {
@@ -3269,7 +3482,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 72,
+     "events": 67,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 5,
      "source": "paper_decisions"
     }
    ],
@@ -3301,7 +3521,10 @@
     "americanfootball_nfl": 1,
     "soccer_colombia_primera_a": 1,
     "soccer_usa_usl_championship": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 20,
@@ -3347,17 +3570,12 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 2
-    },
-    {
-     "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "events": 1
-    },
-    {
-     "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "events": 3
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "events": 1
     },
     {
@@ -3431,21 +3649,14 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "class": "SOFTWARE",
-     "events": 2,
-     "source": "paper_decisions"
-    },
-    {
-     "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "class": "SOFTWARE",
-     "events": 1,
-     "source": "paper_decisions"
-    },
-    {
-     "stage": "FAIR_VALUE",
      "code": "PINNAPI_PRIMARY_NO_EXACT_FIXTURE",
+     "class": "SOFTWARE",
+     "events": 3,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "FAIR_VALUE",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -3496,7 +3707,10 @@
     "soccer_mexico_ligamx": 9,
     "pinnapi_basketball": 6,
     "soccer_uruguay_primera_division": 1
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 21,
@@ -3537,7 +3751,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 1
     },
     {
@@ -3599,7 +3813,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -3615,7 +3829,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 13,
+     "events": 11,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 2,
      "source": "paper_decisions"
     }
    ],
@@ -3640,7 +3861,10 @@
     "americanfootball_ncaaf": 69,
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 9
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 22,
@@ -3681,13 +3905,13 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
-     "events": 2
+     "code": "NO_QUALIFIED_MODEL",
+     "events": 3
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
-     "events": 2
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "events": 1
     },
     {
      "stage": "BOOK",
@@ -3748,16 +3972,16 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
-     "events": 2,
+     "events": 3,
      "source": "paper_decisions"
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "FEED_QUOTE_OLDER_THAN_LIMIT",
      "class": "SOFTWARE",
-     "events": 2,
+     "events": 1,
      "source": "paper_decisions"
     },
     {
@@ -3771,7 +3995,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 9,
+     "events": 8,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 1,
      "source": "paper_decisions"
     }
    ],
@@ -3796,7 +4027,10 @@
     "americanfootball_ncaaf": 69,
     "soccer_usa_mls": 30,
     "soccer_mexico_ligamx": 9
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   },
   {
    "k": 23,
@@ -3857,7 +4091,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "events": 1
     },
     {
@@ -3947,7 +4181,7 @@
     },
     {
      "stage": "FAIR_VALUE",
-     "code": "NO_QUALIFIED_PINNACLE_PROBABILITY",
+     "code": "NO_QUALIFIED_MODEL",
      "class": "SOFTWARE",
      "events": 1,
      "source": "paper_decisions"
@@ -3963,7 +4197,14 @@
      "stage": "EV",
      "code": "BELOW_MIN_GROSS_EDGE",
      "class": "ECONOMIC",
-     "events": 18,
+     "events": 17,
+     "source": "paper_decisions"
+    },
+    {
+     "stage": "EV",
+     "code": "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT",
+     "class": "ECONOMIC",
+     "events": 1,
      "source": "paper_decisions"
     }
    ],
@@ -3992,7 +4233,10 @@
     "pinnapi_hockey": 7,
     "pinnapi_baseball": 2,
     "pinnapi_basketball": 2
-   }
+   },
+   "order_ambiguous_events": 0,
+   "order_ambiguous_cells": [],
+   "order_ambiguity": []
   }
  ]
 }

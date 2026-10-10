@@ -50,6 +50,24 @@ guessed: 13 XAVIER_HELD_READ_CANNOT_PRICE_THIS_CONTRACT decisions sit in
 the hour, every one masked by an earlier-stage code, and none of the 10
 PAPER-1 events falls to one when its stale decision goes.
 
+THE GATE'S ORDER IS PART OF ITS EVIDENCE. first_loss_of_event takes an
+event's earliest-stage decision and, between two decisions at that stage,
+the first in record order -- DECISIONS_SQL's ORDER BY decided_at. The
+statement does not select decided_at, so the export carries it
+(decided_at_epoch) and the row's decision_id beside the statement's own
+columns, the replay sorts a valuation's decisions by them (an export
+without them is refused), and every cell an exact decided_at tie leaves to
+the gate's own read order is named per row, not resolved silently. The
+first export of the hourly series (research-sql 38069842557) ordered a
+valuation's decisions by strategy instead: its SOFTWARE totals, by_class
+and UNCLASSIFIED were order-invariant on every row, its per-code split was
+not on 14 of the 24 (the re-export in the gate's order, research-sql
+38074718533, moved them; one code, NO_QUALIFIED_PINNACLE_PROBABILITY,
+leaves the table and NO_QUALIFIED_MODEL enters it). The packet-hour
+fixture was captured without
+the order columns; it carries no such tie, so its replay is exact in any
+order, which is proved here rather than assumed.
+
 THE PER-LANE EXPECTATIONS are xfail until each lane lands and captures its
 readback hour with research/rc63_sw_reds_census.sql; the capture file's
 presence flips the case (strict: a passing expectation must be unmarked).
@@ -251,6 +269,11 @@ def test_the_replay_reproduces_the_packet_gate_evidence_exactly(
 
 
 def test_the_census_reconciles_and_the_other_classes_are_the_packets():
+    """by_class is the packet's. The gate names no ECONOMIC code; the split
+    of the 14 ECONOMIC by code below is the capture's decision order (9 of
+    the 14 are a tie at EV with another ECONOMIC code, named by
+    order_ambiguity in the invariance test), the EXTERNAL rows are not
+    order-dependent (ledger rows, one code each)."""
     events, vals, decs = _inputs()
     got = FL.census(events, vals, decs)
     t = got["totals"]
@@ -260,6 +283,12 @@ def test_the_census_reconciles_and_the_other_classes_are_the_packets():
     for agg in got["by_competition"].values():
         assert _reconciles(agg)
     assert _by_code(got, "ECONOMIC") == [("EV", "BELOW_MIN_GROSS_EDGE", 14)]
+    assert sum(n for _s, _c, n in _by_code(got, "ECONOMIC")) == 14
+    assert {a["stage"] for a in T.order_ambiguity(events, vals, decs)} == {
+        "EV"}
+    for f, ev, _vs, _ds in _first_losses(events, vals, decs).values():
+        if f["class"] == FL.EXTERNAL:
+            assert f["source"] == "ext_candidate_outcomes"
     assert _by_code(got, "EXTERNAL") == [
         ("NORMALIZED", "PINNAPI_PRIMARY_FIXTURE_LISTS_NO_FULL_GAME_MONEYLINE",
          3),
@@ -663,8 +692,12 @@ def test_no_rc63b_code_is_a_first_loss_in_the_packet_hour():
 
 def _hourly():
     doc = json.loads(HOURLY.read_text())
+    assert doc["version"] == T.VERSION
     assert doc["census_version"] == FL.VERSION
     assert doc["taxonomy_version"] == RT.VERSION
+    # replayed from an export that carries the gate's decision order
+    assert doc["source"]["kind"] == "research-sql run log"
+    assert doc["source"]["decision_order"] == T.DECISION_ORDER
     return doc
 
 
@@ -697,12 +730,28 @@ def test_the_hourly_readback_has_24_rows_none_unclassified_and_the_packet_hour_i
         assert sum(v for v in r["first_loss"].values() if v) + \
             (r["entered"] or 0) + r["unavailable"] == r["events"]
         assert not [c for c in r["by_code"] if _is_rc63b_code(c["code"])]
+        # the cells the gate's tie-break leaves to chance are named per
+        # row, and every named cell is a cell of the row
+        assert r["order_ambiguous_events"] == len(r["order_ambiguity"])
+        named = {(c["stage"], c["code"], c["class"])
+                 for c in r["order_ambiguous_cells"]}
+        assert named == {(c["stage"], c["code"], c["class"])
+                         for a in r["order_ambiguity"] for c in a["cells"]}
+        for a in r["order_ambiguity"]:
+            assert a["decided_at_epoch"] is not None
+            assert len(a["codes"]) >= 2
+        assert (r["k"] in doc["order_ambiguous_rows"]) is \
+            bool(r["order_ambiguous_events"])
     (packet,) = [r for r in rows if abs(r["now"] - PACKET_NOW) < 1e-6]
     assert packet["by_class"] == PACKET_GATE["evidence"]["by_class"]
     assert packet["software_by_code"] == \
         PACKET_GATE["evidence"]["software_by_code"]
     assert packet["software_codes_truncated"] is False
     assert packet["events"] == 104
+    # the packet hour's SOFTWARE cells are the gate's: no SOFTWARE cell of
+    # that row is a tie
+    assert not [c for c in packet["order_ambiguous_cells"]
+                if c["class"] == RT.SOFTWARE]
     # the series is the day the packet hour sits in, not a repeat of it:
     # the cap the gate names its codes under is reached in some hours
     assert any(r["software_codes_truncated"] for r in rows)
@@ -754,31 +803,380 @@ def test_the_research_file_is_the_generators_and_read_only():
     assert "38055963121" in text and "rc63_sw_reds_104_events.json" in text
 
 
+def test_the_research_file_exports_the_gates_decision_order():
+    """The `dec` rows carry DECISIONS_SQL's order (decided_at) and the
+    row's key: the two order columns appended to the production
+    statement's select list are the ONLY edit to it, the statement's head
+    is pinned, and the export's own row order puts a valuation's decisions
+    in the gate's order so the raw research log reads as the gate read."""
+    text = SQL.read_text()
+    exported = T.decisions_export_sql()
+    # the one edit: remove the appended columns and the production
+    # statement is back, byte for byte
+    assert exported.replace(",\n           " + T.DECISION_ORDER_COLUMNS,
+                            "", 1) == FL.DECISIONS_SQL
+    assert FL.DECISIONS_SQL.strip().startswith(T.DECISIONS_SELECT + "\n")
+    assert "decided_at" not in FL.DECISIONS_SQL.split("FROM")[0]
+    assert T.DECISION_ORDER_COLUMNS == (
+        "extract(epoch FROM decided_at)::float8 AS decided_at_epoch, "
+        "decision_id")
+    assert T.DECISION_ORDER == "decided_at_epoch, decision_id"
+    # in the file: once, inside the dc LATERAL, right after the pinned head
+    assert text.count(T.DECISION_ORDER_COLUMNS) == 1
+    dc = text[text.index("dc AS ("):text.index("SELECT j FROM (")]
+    assert T.DECISIONS_SELECT + ",\n" in dc
+    assert T.DECISION_ORDER_COLUMNS in dc
+    assert "ORDER BY decided_at\n" in dc
+    # the statement's ORDER BY still names the table column, not an alias
+    assert "AS decided_at," not in text and "AS decided_at\n" not in text
+    # the export's row order: valuation, then decided_at, then the id
+    tail = text[text.index("SELECT j FROM ("):]
+    assert "lpad(valuation_id::text, 12, '0')" in tail
+    assert ("to_char(to_timestamp(decided_at_epoch) AT TIME ZONE 'UTC',\n"
+            "                   'YYYY-MM-DD HH24:MI:SS.US') || ' ' || "
+            "decision_id") in tail
+    assert "coalesce(strategy, '')" not in tail
+    # and the file says what it carries and what it supersedes
+    assert "38069842557" in text and "superseded" in text
+
+
+def _hour_rows(decs, *, k=0, now=PACKET_NOW, events=None, vals=None):
+    """Export rows of one synthetic hour: one mapped event, one valuation,
+    the decisions given (each carrying the order columns unless stripped)."""
+    events = events if events is not None else [_event()]
+    vals = vals if vals is not None else [_val(1)]
+    rows = [{"kind": "hour", "k": k, "now": now, "since": now - 3600,
+             "until": now + 1}]
+    rows += [{"kind": "ev", "k": k, "row": e} for e in events]
+    rows += [{"kind": "val", "k": k, "row": v} for v in vals]
+    rows += [{"kind": "dec", "k": k, "row": d} for d in decs]
+    return rows
+
+
+def _odec(vid, strategy, decided_at, decision_id, *codes):
+    return dict(_dec(vid, strategy, *codes), decided_at_epoch=decided_at,
+                decision_id=decision_id)
+
+
+def _sw_cells(row):
+    return [(c["stage"], c["code"], c["events"]) for c in row["by_code"]
+            if c["class"] == RT.SOFTWARE]
+
+
+def test_the_replay_takes_the_gates_order_from_the_export_not_the_files():
+    """Two decisions of one valuation at the same stage (FAIR_VALUE) with
+    different SOFTWARE codes: the gate's read returns them ORDER BY
+    decided_at and first_loss_of_event takes the first, so the earlier
+    decision's code is the first loss -- whatever order the export's rows
+    come in, and whatever the strategies' names sort like (the first
+    export's mistake: DEREK_ENTRY_POLICY_V2 sorted before PINNACLE_*)."""
+    t0 = PACKET_NOW - 1800.0
+    # DEREK decided LATER but sorts FIRST by strategy name; the file lists
+    # it first too
+    derek = _odec(1, "DEREK_ENTRY_POLICY_V2", t0 + 2.0, "dec-b", STALE)
+    pinn = _odec(1, "PINNACLE_EXPLORATION_PAPER", t0 + 1.0, "dec-a", OLDER)
+    assert FL.chain_stage(STALE, mapped=True) == "FAIR_VALUE"
+    assert FL.chain_stage(OLDER, mapped=True) == "FAIR_VALUE"
+    for file_order in ([derek, pinn], [pinn, derek]):
+        hours = T.hours_from_rows(_hour_rows(file_order))
+        (h,) = hours.values()
+        assert [d["decision_id"] for d in h["decisions"]] == ["dec-a",
+                                                              "dec-b"]
+        assert [d["decided_at_epoch"] for d in h["decisions"]] == \
+            [t0 + 1.0, t0 + 2.0]
+        (row,) = T.hourly_table(hours)
+        assert _sw_cells(row) == [("FAIR_VALUE", OLDER, 1)], file_order
+        assert row["order_ambiguous_events"] == 0
+        assert row["order_ambiguous_cells"] == []
+    # the gate's own derivation on the same inputs in the gate's order
+    want = T.gate_evidence(FL.census([_event()], [_val(1)], [pinn, derek]))
+    assert want["software_by_code"] == [
+        {"stage": "FAIR_VALUE", "code": OLDER, "events": 1}]
+    # and the OTHER order (the first export's) gives the other split: the
+    # defect the order columns exist to remove
+    other = T.gate_evidence(FL.census([_event()], [_val(1)], [derek, pinn]))
+    assert other["software_by_code"] == [
+        {"stage": "FAIR_VALUE", "code": STALE, "events": 1}]
+    assert other["by_class"] == want["by_class"]
+    # valuations: by id, whatever the file's order
+    vals = [_val(2), _val(1)]
+    hours = T.hours_from_rows(_hour_rows([pinn], vals=vals))
+    assert [v["id"] for v in hours[0]["valuations"]] == [1, 2]
+    # two valuations of one event: the lower id's decision wins a same-stage
+    # tie across valuations, by the gate's valuation order, not by time
+    late_on_1 = _odec(1, "PINNACLE_EXPLORATION_PAPER", t0 + 9.0, "dec-1",
+                      OLDER)
+    early_on_2 = _odec(2, "DEREK_ENTRY_POLICY_V2", t0 + 1.0, "dec-2", STALE)
+    hours = T.hours_from_rows(_hour_rows([early_on_2, late_on_1],
+                                         vals=[_val(2), _val(1)]))
+    (row,) = T.hourly_table(hours)
+    assert _sw_cells(row) == [("FAIR_VALUE", OLDER, 1)]
+    assert row["order_ambiguous_events"] == 0
+
+
+def test_an_export_without_the_order_columns_is_refused_not_replayed():
+    """The first export's rows (no decided_at_epoch / decision_id) raise
+    UnorderedExport: the replay never applies another order in the gate's
+    place. A row missing either column is refused the same."""
+    plain = [_dec(1, "DEREK_ENTRY_POLICY_V2", STALE),
+             _dec(1, "PINNACLE_EXPLORATION_PAPER", OLDER)]
+    with pytest.raises(T.UnorderedExport, match="decided_at_epoch"):
+        T.hours_from_rows(_hour_rows(plain))
+    half = [_odec(1, "DEREK_ENTRY_POLICY_V2", PACKET_NOW, "d1", STALE),
+            dict(_dec(1, "PINNACLE_EXPLORATION_PAPER", OLDER),
+                 decided_at_epoch=PACKET_NOW - 1.0)]
+    with pytest.raises(T.UnorderedExport, match="PINNACLE_EXPLORATION"):
+        T.hours_from_rows(_hour_rows(half))
+    assert issubclass(T.UnorderedExport, ValueError)
+    # the first export's row shape (research-sql 38069842557): exactly the
+    # five statement columns, so that log is refused by this tool
+    with pytest.raises(T.UnorderedExport):
+        T.hours_from_rows([
+            {"kind": "hour", "k": 0, "now": PACKET_NOW,
+             "since": PACKET_NOW - 3600, "until": PACKET_NOW + 1},
+            {"kind": "dec", "k": 0, "row": {
+                "refusal": "BELOW_MIN_GROSS_EDGE", "verdict": "REFUSE",
+                "refusals": ["BELOW_MIN_GROSS_EDGE"],
+                "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+                "valuation_id": 67840}}])
+    # an hour with no decisions at all is not an unordered export
+    hours = T.hours_from_rows(_hour_rows([]))
+    assert hours[0]["decisions"] == []
+
+
+def test_a_decided_at_tie_is_named_not_resolved():
+    """Two decisions of the deciding valuation at the earliest stage, with
+    different codes and the SAME decided_at: the gate's ORDER BY decided_at
+    did not order them, so the replay's cell is one of two and says so
+    (order_ambiguity, the `*` in the table), while SOFTWARE / by_class /
+    UNCLASSIFIED are the same under either. Ties that cannot decide a cell
+    are not named: the same code twice, a tie at a later stage than the
+    deciding one, a tie behind an ENTER, a tie across two valuations (the
+    valuation order decides), two decisions a microsecond apart."""
+    t0 = PACKET_NOW - 1800.0
+    tie = [_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "dec-b", STALE),
+           _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "dec-a", OLDER)]
+    hours = T.hours_from_rows(_hour_rows(tie))
+    (row,) = T.hourly_table(hours)
+    assert row["order_ambiguous_events"] == 1
+    assert row["order_ambiguous_cells"] == [
+        {"stage": "FAIR_VALUE", "code": OLDER, "class": RT.SOFTWARE},
+        {"stage": "FAIR_VALUE", "code": STALE, "class": RT.SOFTWARE}]
+    (a,) = row["order_ambiguity"]
+    assert a["provider_event_id"] == "e1" and a["stage"] == "FAIR_VALUE"
+    assert sorted(a["codes"]) == sorted([STALE, OLDER])
+    assert a["decided_at_epoch"] == t0
+    # the replay shows the decision_id order (dec-a first: OLDER) and marks
+    # the cell; the other order's cell is marked too (both are named)
+    assert _sw_cells(row) == [("FAIR_VALUE", OLDER, 1)]
+    md = T.render_markdown([row])
+    assert "| 1* |" in md and T.AMBIGUOUS_LEGEND in md
+    # invariant under the other resolution: the class totals
+    flipped = FL.census([_event()], [_val(1)], list(reversed(
+        hours[0]["decisions"])))["totals"]
+    assert flipped["by_class"] == row["by_class"] == {
+        "SOFTWARE": 1, "ECONOMIC": 0, "EXTERNAL": 0, "UNCLASSIFIED": 0}
+    assert [(c["stage"], c["code"]) for c in flipped["by_code"]] == [
+        ("FAIR_VALUE", STALE)]
+
+    def ambiguous(decs, vals=None):
+        hours = T.hours_from_rows(_hour_rows(decs, vals=vals))
+        (row,) = T.hourly_table(hours)
+        assert T.AMBIGUOUS_MARK not in T.render_markdown([row]) or \
+            row["order_ambiguous_events"]
+        return row["order_ambiguous_events"]
+
+    # a microsecond apart: ordered, not tied
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0 + 1e-6, "b",
+                            STALE),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            OLDER)]) == 0
+    # the same code twice at the same instant: no cell depends on it
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "b", STALE),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            STALE)]) == 0
+    # a tie at ENTER_PASS behind a FAIR_VALUE decision: the earlier stage
+    # decides, the tie is masked (the second wave, not a cell today)
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0 + 5, "c", STALE),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            XAVIER_CANNOT_PRICE),
+                      _odec(1, "PINNACLE_COMPLETED_GAME_PAPER", t0, "b",
+                            XAVIER_CANNOT_PROTECT)]) == 0
+    # a tie at the earliest stage with an EV decision beside: still a tie
+    # (EV is later than FAIR_VALUE)
+    assert ambiguous(tie + [_odec(1, "PINNACLE_COMPLETED_GAME_PAPER", t0,
+                                  "c", "BELOW_MIN_GROSS_EDGE")]) == 1
+    # an ENTER anywhere: the event is ENTERED, no first loss to tie
+    enter = {"valuation_id": 1, "verdict": "ENTER", "refusal": None,
+             "refusals": [], "strategy": "PINNACLE_COMPLETED_GAME_PAPER",
+             "decided_at_epoch": t0, "decision_id": "c"}
+    assert ambiguous(tie + [enter]) == 0
+    # the same instant on two valuations of the event: the valuation order
+    # (by id) decides, not the clock
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "b", STALE),
+                      _odec(2, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            OLDER)], vals=[_val(1), _val(2)]) == 0
+    # a tie on the SECOND valuation while the first holds the deciding
+    # stage: not named
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "c", STALE),
+                      _odec(2, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            OLDER),
+                      _odec(2, "PINNACLE_COMPLETED_GAME_PAPER", t0, "b",
+                            STALE)], vals=[_val(1), _val(2)]) == 0
+    # ... but a tie on the first valuation at the deciding stage is, even
+    # with an ordered second valuation
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "c", STALE),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            OLDER),
+                      _odec(2, "PINNACLE_COMPLETED_GAME_PAPER", t0 + 1, "b",
+                            STALE)], vals=[_val(1), _val(2)]) == 1
+    # the wrapper is unwrapped before the codes are compared, exactly as the
+    # census unwraps it: the lane wrapper carrying the same lane
+    # probability-stage code as the plain decision is no tie ...
+    assert ext.STAGE_OF.get("NO_QUALIFIED_MODEL") == "1_PROBABILITY"
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "b",
+                            "NO_QUALIFIED_MODEL"),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+                            "NO_QUALIFIED_MODEL")]) == 0
+    # ... one carrying a different one (NO_QUALIFIED_MODEL beside Derek's
+    # NO_QUALIFIED_PINNACLE_PROBABILITY: the row-12 valuation 61944 shape
+    # of the first export) is ...
+    assert ambiguous([_odec(1, "DEREK_ENTRY_POLICY_V2", t0, "b",
+                            "NO_QUALIFIED_PINNACLE_PROBABILITY"),
+                      _odec(1, "PINNACLE_EXPLORATION_PAPER", t0, "a",
+                            "PINNACLE_PROBABILITY_NOT_QUALIFIED_BY_THE_LANE",
+                            "NO_QUALIFIED_MODEL",
+                            "NO_QUALIFIED_PINNACLE_PROBABILITY")]) == 1
+
+
+@pytest.mark.parametrize("window", ["A", "B"])
+def test_the_fixture_windows_gate_evidence_is_invariant_to_decision_order(
+        window):
+    """The packet-hour capture carries no decided_at, so every valuation's
+    decisions count as tied and order_ambiguity is the exact test of which
+    cells depend on the lost order. It names 9 events, every one at EV
+    between ECONOMIC codes (BELOW_MIN_GROSS_EDGE against CASH_WAIT_TOTAL_
+    EXECUTABLE_EV_NOT_POSITIVE on 8, against GROSS_EDGE_CLEARS_THRESHOLD_
+    BUT_FEES_CONSUME_IT on 1) and NO SOFTWARE cell -- so the gate's
+    evidence (by_class, software, software_by_code: 84 / 14 / 6 / 0 and
+    35 / 1 / 38 / 10) is the gate's whatever order the decisions are fed
+    in, while the split of the 14 ECONOMIC by code is the capture's order,
+    not a claim. Shown exactly, then by permutation."""
+    import random
+    events, vals, decs = _inputs(window)
+    assert all(d.get("decided_at_epoch") is None for d in decs)
+    amb = T.order_ambiguity(events, vals, decs)
+    assert len(amb) == 9
+    assert {a["stage"] for a in amb} == {"EV"}
+    assert all(a["decided_at_epoch"] is None for a in amb)
+    assert {c["class"] for a in amb for c in a["cells"]} == {RT.ECONOMIC}
+    import collections
+    assert collections.Counter(tuple(sorted(a["codes"])) for a in amb) == {
+        ("BELOW_MIN_GROSS_EDGE",
+         "CASH_WAIT_TOTAL_EXECUTABLE_EV_NOT_POSITIVE"): 8,
+        ("BELOW_MIN_GROSS_EDGE",
+         "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT"): 1}
+    groups: dict = {}
+    for d in decs:
+        groups.setdefault(d["valuation_id"], []).append(d)
+    assert sum(len(g) > 1 for g in groups.values()) >= 30
+    want = PACKET_GATE["evidence"]
+
+    def fed(order):
+        got = FL.census(events, vals, order)
+        econ = [(r["stage"], r["code"], r["events"]) for r in
+                got["totals"]["by_code"] if r["class"] == RT.ECONOMIC]
+        return T.gate_evidence(got), econ
+
+    ev, econ = fed(decs)
+    assert ev == want
+    assert econ == [("EV", "BELOW_MIN_GROSS_EDGE", 14)]
+    reversed_within = [d for g in groups.values() for d in reversed(g)]
+    ev, econ_rev = fed(reversed_within)
+    assert ev == want
+    # the ECONOMIC split does move with the order (the 9 named events), the
+    # ECONOMIC total never does
+    assert econ_rev != econ
+    assert sum(n for _s, _c, n in econ_rev) == 14
+    assert {c for _s, c, _n in econ_rev} <= {
+        "BELOW_MIN_GROSS_EDGE", "CASH_WAIT_TOTAL_EXECUTABLE_EV_NOT_POSITIVE",
+        "GROSS_EDGE_CLEARS_THRESHOLD_BUT_FEES_CONSUME_IT"}
+    by_strategy_desc = sorted(decs, key=lambda d: (d["valuation_id"],
+                                                   d["strategy"]),
+                              reverse=True)
+    assert fed(by_strategy_desc)[0] == want
+    rng = random.Random(63)
+    for _ in range(25):
+        shuffled = []
+        for g in groups.values():
+            g = list(g)
+            rng.shuffle(g)
+            shuffled.extend(g)
+        rng.shuffle(shuffled)
+        ev, econ_s = fed(shuffled)
+        assert ev == want
+        assert sum(n for _s, _c, n in econ_s) == 14
+    # the fixture path of the tool reports the same: the 9 ECONOMIC ties
+    # named, no SOFTWARE cell among them, nothing marked in the SOFTWARE
+    # table
+    row = T.census_row(events, vals, decs, k=0, now=0, since=0, until=1)
+    assert row["order_ambiguous_events"] == 9
+    assert {c["class"] for c in row["order_ambiguous_cells"]} == {
+        RT.ECONOMIC}
+    assert T.AMBIGUOUS_MARK not in T.render_markdown([row])
+    assert row["software_by_code"] == want["software_by_code"]
+
+
 def test_the_tool_parses_a_run_log_and_a_fixture_alike(tmp_path):
     """A research-sql log line, a bare psql row and a plain JSON line all
-    parse; the fixture window and the log rows give the same census."""
+    parse; the fixture window and the log rows (the fixture's decisions
+    given the order columns an export carries, in the capture's order) give
+    the same census, in whatever order the log lists the rows."""
+    import random
     events, vals, decs = _inputs()
+    since = PACKET_NOW - 3600
+    ordered = [dict(d, decided_at_epoch=since + 1.0 + i,
+                    decision_id="paper-%06d" % i)
+               for i, d in enumerate(decs)]
     lines = ['research\tRun\t2026-10-10T16:00:00.0000000Z == header ==',
              'research\tRun\t2026-10-10T16:00:00.0000001Z  %s' % json.dumps(
                  {"kind": "hour", "k": 0, "now": PACKET_NOW,
-                  "since": PACKET_NOW - 3600, "until": PACKET_NOW + 1}),
+                  "since": since, "until": PACKET_NOW + 1}),
              'research\tRun\t2026-10-10T16:00:00.0000002Z  (1 row)']
+    body = []
     for ev in events:
-        lines.append(" " + json.dumps({"kind": "ev", "k": 0, "row": ev}))
+        body.append(" " + json.dumps({"kind": "ev", "k": 0, "row": ev}))
     for v in vals:
-        lines.append(json.dumps({"kind": "val", "k": 0, "row": v}))
-    for d in decs:
-        lines.append('research\tRun\t2026-10-10T16:00:00.0000003Z %s'
-                     % json.dumps({"kind": "dec", "k": 0, "row": d}))
+        body.append(json.dumps({"kind": "val", "k": 0, "row": v}))
+    for d in ordered:
+        body.append('research\tRun\t2026-10-10T16:00:00.0000003Z %s'
+                    % json.dumps({"kind": "dec", "k": 0, "row": d}))
+    random.Random(7).shuffle(body)
     p = tmp_path / "run.log"
-    p.write_text("\n".join(lines) + "\n")
+    p.write_text("\n".join(lines + body) + "\n")
     hours = T.hours_from_rows(T.parse_log(p))
     assert sorted(hours) == [0]
+    # the replay's inputs are in the gate's order whatever the file's
+    assert [d["decision_id"] for d in hours[0]["decisions"]] == \
+        [d["decision_id"] for d in ordered]
+    assert [v["id"] for v in hours[0]["valuations"]] == \
+        sorted(v["id"] for v in vals)
     table = T.hourly_table(hours)
     assert len(table) == 1
     assert table[0]["by_class"] == PACKET_GATE["evidence"]["by_class"]
     assert table[0]["software_by_code"] == \
         PACKET_GATE["evidence"]["software_by_code"]
+    # distinct instants: nothing is tied any more
+    assert table[0]["order_ambiguous_events"] == 0
     md = T.render_markdown(table)
     assert "| 0 | 2026-10-10T08:54:34Z .. 2026-10-10T09:54:34Z | 104 | 84 " \
            "| 14 | 6 | 0 |" in md
+    assert T.AMBIGUOUS_MARK not in md
+    # the fixture path (no order columns) gives the same gate evidence and
+    # names its ECONOMIC ties
+    fixture = T.census_row(events, vals, decs, k=0, now=PACKET_NOW,
+                           since=since, until=PACKET_NOW + 1)
+    assert fixture["software_by_code"] == table[0]["software_by_code"]
+    assert fixture["by_class"] == table[0]["by_class"]
+    assert fixture["order_ambiguous_events"] == 9
