@@ -28,10 +28,17 @@ the packet's SHA256SUMS) and on synthetic histories:
     target, named, and NOT_READY);
   * a commit the service was not live on before is never in a command, and a
     command never rides to another service;
-  * an unreadable or unusable history is refused by name, with no command.
+  * an unreadable or unusable history is refused by name, with no command --
+    also ONE deploy row of the wrong shape (a commit that is a string, a list
+    or a number; a row, deploy or status that is not what Render writes)
+    where it decides what is live or what ran before: never a crash (the
+    judge's raise would drop all 14 scorecard categories from the packet,
+    the tool's the rollback record), and never read past to an older
+    commit. A bad row older than the previous live commit is not counted.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -305,6 +312,47 @@ def test_a_service_whose_previous_differs_goes_to_its_own(tmp_path):
         u["detail"]["reasons"]
 
 
+def _row(i, status, commit):
+    """A deploy row whose `commit` is written exactly as given (Render
+    writes an object {"id": sha}; the shapes below are what the judge and
+    the tool must refuse by name, never crash on)."""
+    return {"deploy": {"id": "dep-%s" % i, "status": status,
+                       "commit": commit, "finishedAt": "t%s" % i}}
+
+
+def _put(rows, at, row, *, replace=False):
+    rows = copy.deepcopy(rows)
+    if replace:
+        rows[at] = row
+    else:
+        rows.insert(at, row)
+    return rows
+
+
+#: the plane's history [live REL, build_failed OTHER, deactivated REL (a
+#: redeploy), deactivated PREV] with ONE row it cannot read where that row
+#: decides what is live or what ran before: each is refused by name
+#: (ROLLBACK_DEPLOY_HISTORY_UNREADABLE) with no command -- never a crash,
+#: and never skipped over to PREV (an older commit than the one the service
+#: may last have run)
+_GOOD = _hist(REL, ("deactivated", PREV))
+_BAD_ROWS = [
+    ("live_commit_is_a_string",
+     _put(_GOOD, 0, _row(9, "live", REL), replace=True)),
+    ("older_live_commit_is_a_list",
+     _put(_GOOD, 3, _row(5, "deactivated", [HANG]))),
+    ("older_live_commit_is_an_int",
+     _put(_GOOD, 3, _row(5, "deactivated", 7))),
+    ("redeploy_commit_is_a_string",
+     _put(_GOOD, 2, _row(7, "deactivated", REL), replace=True)),
+    ("older_row_is_not_an_object", _put(_GOOD, 3, HANG)),
+    ("older_deploy_is_not_an_object", _put(_GOOD, 3, {"deploy": [HANG]})),
+    ("older_status_is_not_a_string",
+     _put(_GOOD, 3, _row(5, ["deactivated"], {"id": HANG}))),
+    ("newer_row_is_not_readable", _put(_GOOD, 0, {"deploy": "live"})),
+]
+
+
 @pytest.mark.parametrize("hist,render,reason", [
     (None, None, RB.R_DEPLOYS_UNREADABLE),                        # absent
     ("{not json", None, RB.R_DEPLOYS_UNREADABLE),                 # garbage
@@ -317,14 +365,17 @@ def test_a_service_whose_previous_differs_goes_to_its_own(tmp_path):
       _dep(0, "canceled", OLD)], None, RB.R_NO_PREVIOUS_DEPLOY),
     (_hist(REL, ("deactivated", PREV)), {PLANE: OLD},
      RB.R_LIVE_DIFFERS_FROM_RENDER),
-])
+] + [pytest.param(h, None, RB.R_DEPLOYS_UNREADABLE, id=n)
+     for n, h in _BAD_ROWS])
 def test_an_unusable_history_is_refused_by_name_with_no_command(
         tmp_path, hist, render, reason):
     """The plane's history unreadable, without exactly one live deploy,
     with no previous LIVE commit (a failed or cancelled deploy never
-    served), or disagreeing with render.json: REFUSED by name and no
-    command for it -- never another service's commit -- while api and
-    workers keep their own; NOT_READY. The judge passes on nothing for it."""
+    served), disagreeing with render.json, or with one row of the wrong
+    shape where it decides what is live or what ran before (_BAD_ROWS):
+    REFUSED by name and no command for it -- never another service's
+    commit, never a crash -- while api and workers keep their own;
+    NOT_READY. The judge passes on nothing for it."""
     acc = _acc(tmp_path, {API: _hist(REL, ("deactivated", PREV)),
                           WORKERS: _hist(REL, ("deactivated", PREV)),
                           PLANE: hist}, render=render)
@@ -340,6 +391,148 @@ def test_an_unusable_history_is_refused_by_name_with_no_command(
     u = _unit(acc, REL)
     assert u["passed"] is False and u["detail"]["commands"][PLANE] is None
     assert u["detail"]["rollback_by_service"][PLANE]["action"] == "REFUSED"
+    _no_plane_command(u["detail"]["commands"])
+
+
+def _score(acc, release_sha):
+    """score() over the whole packet: it must complete (all 14 categories,
+    nothing raised), and its rollback_ready unit is returned."""
+    out = SC.score(str(acc), release_sha=release_sha)
+    assert len(out["categories"]) == 14
+    cat = next(c for c in out["categories"]
+               if c["category"] == "Deployment infrastructure")
+    return next(u for u in cat["units"] if u["unit"] == "rollback_ready")
+
+
+@pytest.mark.parametrize("hist", [h for _, h in _BAD_ROWS],
+                         ids=[n for n, _ in _BAD_ROWS])
+def test_the_judge_refuses_a_bad_deploy_row_by_name_with_the_record_present(
+        tmp_path, hist):
+    """The judge path on its own, not short-circuited by a missing record:
+    rollback.json written while the plane's history read cleanly (so it
+    carries a market-plane command for PREV), then the plane's deploy list
+    as it now reads, with one row of the wrong shape. score() completes all
+    14 categories (pm-acceptance records a scorecard that raises as absent:
+    one bad field must not drop them all); rollback_ready is FAIL, not
+    READ_UNAVAILABLE; the plane is REFUSED ROLLBACK_DEPLOY_HISTORY_UNREADABLE
+    by name and the record's plane command is not passed on; api and
+    workers keep their own. The tool, rebuilt over the same files, refuses
+    it by name too, with no command."""
+    acc = _acc(tmp_path, {s: _GOOD for s in SERVICES})
+    _gates(acc, PREV)
+    clean = _record(acc, tmp_path)
+    assert clean["commands"][PLANE] == RB.COMMANDS[PLANE] % PREV
+    (acc / ("deploys_%s.json" % PLANE)).write_text(json.dumps(hist))
+    u = _score(acc, REL)
+    d = u["detail"]
+    assert u["class"] == "FAIL" and u["passed"] is False, u
+    assert d["rollback_by_service"][PLANE] == {
+        "action": "REFUSED", "reason": SC.R_ROLLBACK_HISTORY_UNREADABLE}
+    assert "%s:%s" % (SC.R_ROLLBACK_HISTORY_UNREADABLE, PLANE) in \
+        d["reasons"]
+    _no_plane_command(d["commands"])
+    for s in (API, WORKERS):
+        assert d["commands"][s] == RB.COMMANDS[s] % PREV
+    rb = RB.build(acc, sha=REL, target_is_ancestor=True)
+    assert rb["rollback_by_service"][PLANE] == {
+        "action": RB.REFUSED, "reason": RB.R_DEPLOYS_UNREADABLE}
+    _no_plane_command(rb["commands"])
+    assert rb["status"] == RB.NOT_READY
+
+
+@pytest.mark.parametrize("at,commit", [
+    (0, REL_16D), (1, ["x"]), (1, 7)],
+    ids=["live_commit_is_a_string", "previous_commit_is_a_list",
+         "previous_commit_is_an_int"])
+def test_a_bad_row_in_the_signed_packet_is_refused_by_name_not_crashed_on(
+        tmp_path, at, commit):
+    """The packet AS SIGNED (rollback.json present, with its api command for
+    3d5af039) with ONE field of api's deploy list of the wrong shape: [0] is
+    api's live deploy (16d23450), [1] the deploy it ran before (3d5af039),
+    [2] the one before that (732cc0c6). The judge completes all 14
+    categories and refuses api by name with no command (the signed record's
+    api command is not passed on), still keeps the plane on 732cc0c6 with
+    no command, and workers keeps its own. The tool, rebuilt over the same
+    files, refuses api by name -- in particular it never reads past the
+    unreadable [1] to name 732cc0c6 as api's previous."""
+    acc = _packet_acc(tmp_path)
+    p = acc / ("deploys_%s.json" % API)
+    rows = json.loads(p.read_text())
+    assert [rows[i]["deploy"]["commit"]["id"] for i in range(3)] == [
+        REL_16D, HANG_3D5, PLANE_732]
+    rows[at]["deploy"]["commit"] = commit
+    p.write_text(json.dumps(rows))
+    signed = json.loads((acc / "rollback.json").read_text())
+    assert signed["commands"][API] == RB.COMMANDS[API] % HANG_3D5
+    u = _score(acc, REL_16D)
+    d = u["detail"]
+    assert u["class"] == "FAIL" and u["passed"] is False, u
+    assert d["rollback_by_service"][API] == {
+        "action": "REFUSED", "reason": SC.R_ROLLBACK_HISTORY_UNREADABLE}
+    assert "%s:%s" % (SC.R_ROLLBACK_HISTORY_UNREADABLE, API) in d["reasons"]
+    assert d["commands"][API] is None
+    _no_plane_command(d["commands"])
+    assert d["rollback_by_service"][PLANE] == {
+        "action": "NONE", "stay_on": PLANE_732,
+        "reason": SC.R_ROLLBACK_SERVICE_NOT_ON_RELEASE}
+    assert d["commands"][WORKERS] == RB.COMMANDS[WORKERS] % HANG_3D5
+    rb = RB.build(acc, sha=REL_16D, target_is_ancestor=True)
+    assert rb["rollback_by_service"][API] == {
+        "action": RB.REFUSED, "reason": RB.R_DEPLOYS_UNREADABLE}
+    assert rb["commands"][API] is None
+    assert not any(PLANE_732 in str(c or "") for c in rb["commands"].values())
+    _no_plane_command(rb["commands"])
+    assert rb["rollback_by_service"][PLANE]["action"] == RB.NONE
+    assert rb["commands"][WORKERS] == RB.COMMANDS[WORKERS] % HANG_3D5
+    assert rb["status"] == RB.NOT_READY
+
+
+def test_a_bad_row_that_cannot_change_what_ran_before_is_not_counted(
+        tmp_path):
+    """Rows of the wrong shape that cannot change what ran before: a failed
+    build whose commit is a string (it never served) between the live
+    deploy and PREV, and -- older than PREV -- a deploy whose commit is a
+    list and a row that is not an object. Each service still goes back to
+    PREV; the bad rows are never counted as previously live (only PREV and
+    the readable OLD are); READY, and the judge passes the three own
+    commands."""
+    hist = _put(_GOOD, 3, _row(5, "build_failed", OTHER))
+    hist += [_row(1, "deactivated", [HANG]), HANG,
+             _dep(0, "deactivated", OLD)]
+    acc = _acc(tmp_path, {s: hist for s in SERVICES})
+    _gates(acc, PREV)
+    rb = _record(acc, tmp_path)
+    for s in SERVICES:
+        assert rb["services"][s]["previously_live_commits"] == [PREV, OLD]
+        assert rb["rollback_by_service"][s] == {
+            "action": RB.DEPLOY_PREVIOUS, "from": REL, "to": PREV}
+    assert rb["status"] == RB.READY, rb["reasons"]
+    u = _score(acc, REL)
+    assert u["passed"] is True, u["detail"]
+    assert u["detail"]["commands"] == {s: RB.COMMANDS[s] % PREV
+                                       for s in SERVICES}
+
+
+def test_a_render_summary_of_the_wrong_shape_is_refused_by_name(tmp_path):
+    """render.json naming the plane as a bare string instead of
+    {"live_commit": ...}: the tool does not crash; the plane's live deploy
+    cannot be checked against Render's summary, so it is REFUSED by name
+    with no command, in the record and in what the judge passes on."""
+    acc = _acc(tmp_path, {s: _GOOD for s in SERVICES})
+    ren = json.loads((acc / "render.json").read_text())
+    ren[PLANE] = REL
+    (acc / "render.json").write_text(json.dumps(ren))
+    _gates(acc, PREV)
+    rb = _record(acc, tmp_path)
+    assert rb["rollback_by_service"][PLANE] == {
+        "action": RB.REFUSED, "reason": RB.R_LIVE_DIFFERS_FROM_RENDER}
+    _no_plane_command(rb["commands"])
+    assert rb["status"] == RB.NOT_READY
+    u = _score(acc, REL)
+    assert u["passed"] is False
+    assert u["detail"]["rollback_by_service"][PLANE] == {
+        "action": "REFUSED", "reason": SC.R_ROLLBACK_LIVE_NOT_RENDERS}
+    _no_plane_command(u["detail"]["commands"])
 
 
 def test_the_judge_never_passes_a_command_for_a_commit_never_live_there(

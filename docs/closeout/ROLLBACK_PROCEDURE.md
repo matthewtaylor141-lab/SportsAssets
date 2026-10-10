@@ -23,7 +23,7 @@ list only, never from another service's:
 |---|---|---|
 | `DEPLOY_PREVIOUS` (`from`, `to`) | the service is live on the release | its own previous live commit (`to`) only |
 | `NONE` (`stay_on`) | the service is NOT on the release (`ROLLBACK_SERVICE_NOT_ON_THE_RELEASE`) | none: it stays on its current commit |
-| `REFUSED` (`reason`) | its history is unreadable, has no single live deploy, disagrees with `render.json`, or shows no previous live commit | none |
+| `REFUSED` (`reason`) | its history is unreadable (also one row of the wrong shape where it decides what is live or what ran before: `ROLLBACK_DEPLOY_HISTORY_UNREADABLE`, never read past to an older commit), has no single live deploy, disagrees with `render.json`, or shows no previous live commit | none |
 
 No command is ever written for a commit the service's own history does not
 show it was live on before. Production evidence: approved-judge pm-acceptance

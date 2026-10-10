@@ -144,13 +144,39 @@ def _sha(v):
     return v if v and _SHA.match(v) else None
 
 
+def _deploy(row):
+    """One row of Render's deploy list as its `deploy` object, or None when
+    the row cannot be read: not {"deploy": {...}}, or a status that is not
+    a string (whether it ever served cannot be known)."""
+    d = row.get("deploy") if isinstance(row, dict) else None
+    return d if isinstance(d, dict) and isinstance(d.get("status"), str) \
+        else None
+
+
+def _commit(d):
+    """A deploy's commit SHA, or None: a `commit` that is not an object (a
+    string, a list, a number) or names no 40-hex id is unreadable, and is
+    never guessed at."""
+    c = d.get("commit")
+    return _sha(c.get("id")) if isinstance(c, dict) else None
+
+
 def service(acc: pathlib.Path, svc: str) -> dict:
     """The live and the previous commit of one service, from the job's own
-    Render deploy list (newest first) and render.json."""
+    Render deploy list (newest first) and render.json.
+
+    A history it cannot read is refused by name (R_DEPLOYS_UNREADABLE),
+    never crashed on and never read around (rc6.3 rollback-fix review): a
+    row it cannot read newer than the live deploy (it may be what is live),
+    a live deploy whose commit it cannot read, or a row it cannot read
+    between the live deploy and the previous live commit (it may be what
+    ran before -- skipping it would roll back to an OLDER commit than the
+    one the service last ran). A row it cannot read older than the
+    previous live commit is not counted as previously live."""
     raw = _json(acc / ("deploys_%s.json" % svc))
     ren = _json(acc / "render.json")
-    summary = _sha(((ren or {}).get(svc) or {}).get("live_commit")) \
-        if isinstance(ren, dict) else None
+    row = ren.get(svc) if isinstance(ren, dict) else None
+    summary = _sha(row.get("live_commit")) if isinstance(row, dict) else None
     out = {"live_commit": None, "live_deploy_id": None,
            "previous_commit": None, "previous_deploy_id": None,
            "previous_finished_at": None, "render_summary_commit": summary,
@@ -158,16 +184,17 @@ def service(acc: pathlib.Path, svc: str) -> dict:
     if not isinstance(raw, list):
         out["reasons"].append(R_DEPLOYS_UNREADABLE)
         return out
-    deps = [x.get("deploy") for x in raw
-            if isinstance(x, dict) and isinstance(x.get("deploy"), dict)]
-    live = [i for i, d in enumerate(deps) if d.get("status") == "live"]
+    deps = [_deploy(x) for x in raw]        # None = a row it cannot read
+    live = [i for i, d in enumerate(deps)
+            if d is not None and d["status"] == "live"]
     if len(live) != 1:
         out["reasons"].append("%s:%d" % (R_NO_SINGLE_LIVE_DEPLOY, len(live)))
         return out
     i = live[0]
-    lc = _sha((deps[i].get("commit") or {}).get("id"))
-    if lc is None:
-        # a live deploy that names no commit: nothing to go back FROM
+    lc = _commit(deps[i])
+    if lc is None or any(d is None for d in deps[:i]):
+        # a live deploy that names no readable commit (nothing to go back
+        # FROM), or a newer row it cannot read (it may be what is live)
         out["reasons"].append(R_DEPLOYS_UNREADABLE)
         return out
     out.update(live_commit=lc, live_deploy_id=deps[i].get("id"))
@@ -179,8 +206,17 @@ def service(acc: pathlib.Path, svc: str) -> dict:
     # a rollback command may ever name for it
     seen = out["previously_live_commits"]
     for d in deps[i + 1:]:
-        c = _sha((d.get("commit") or {}).get("id"))
-        if d.get("status") == "deactivated" and c and c != lc:
+        if d is not None and d["status"] != "deactivated":
+            continue                    # never served: its commit is moot
+        c = _commit(d) if d is not None else None
+        if c is None:
+            if out["previous_commit"] is None:
+                # what ran before the live deploy cannot be read: refused,
+                # never skipped over to an older commit
+                out["reasons"].append(R_DEPLOYS_UNREADABLE)
+                return out
+            continue                    # older: not counted as live
+        if c != lc:
             if out["previous_commit"] is None:
                 out.update(previous_commit=c, previous_deploy_id=d.get("id"),
                            previous_finished_at=d.get("finishedAt"))

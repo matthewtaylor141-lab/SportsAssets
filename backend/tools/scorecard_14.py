@@ -1188,29 +1188,57 @@ def upgrade_path(acc, release_sha):
 _SHA_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
 
 
+def _deploy_row(row):
+    """A deploy-list row's `deploy` object, or None when the row cannot be
+    read (not {"deploy": {...}}, or a status that is not a string)."""
+    d = row.get("deploy") if isinstance(row, dict) else None
+    return d if isinstance(d, dict) and isinstance(d.get("status"), str) \
+        else None
+
+
+def _deploy_commit(d):
+    """A deploy's commit SHA, or None: a `commit` that is not an object (a
+    string, a list, a number) or names no 40-hex id is unreadable."""
+    c = d.get("commit")
+    cid = c.get("id") if isinstance(c, dict) else None
+    return cid if _is_sha(cid) else None
+
+
 def _deploy_history(acc, svc):
     """(live commit, [every commit previously live on it, newest first])
     from THIS service's own Render deploy list in the packet
     (deploys_<svc>.json, newest first, as pm-acceptance stores it), or None
     when it is unreadable, has not exactly one live deploy, or the live
     deploy names no commit. `deactivated` = was live, then replaced; a
-    failed, cancelled or still-building deploy never served."""
+    failed, cancelled or still-building deploy never served.
+
+    Never raises on a field of the wrong shape (one bad deploy row must
+    not take the whole scorecard out of the packet): a row it cannot read
+    newer than the live deploy, a live commit it cannot read, or a row it
+    cannot read between the live deploy and the previous live commit (it
+    may be what ran before) -> None, refused by name by the caller. A row
+    it cannot read older than that is not counted as previously live."""
     raw = _opt(acc, "deploys_%s.json" % svc)
     if not isinstance(raw, list):
         return None
-    deps = [x.get("deploy") for x in raw
-            if isinstance(x, dict) and isinstance(x.get("deploy"), dict)]
-    live = [i for i, d in enumerate(deps) if d.get("status") == "live"]
+    deps = [_deploy_row(x) for x in raw]    # None = a row it cannot read
+    live = [i for i, d in enumerate(deps)
+            if d is not None and d["status"] == "live"]
     if len(live) != 1:
         return None
-    lc = (deps[live[0]].get("commit") or {}).get("id")
-    if not _is_sha(lc):
+    lc = _deploy_commit(deps[live[0]])
+    if lc is None or any(d is None for d in deps[:live[0]]):
         return None
     before = []
     for d in deps[live[0] + 1:]:
-        c = (d.get("commit") or {}).get("id")
-        if d.get("status") == "deactivated" and _is_sha(c) and c != lc \
-                and c not in before:
+        if d is not None and d["status"] != "deactivated":
+            continue                    # never served: its commit is moot
+        c = _deploy_commit(d) if d is not None else None
+        if c is None:
+            if not before:
+                return None             # what ran before cannot be read
+            continue                    # older: not counted as live
+        if c != lc and c not in before:
             before.append(c)
     return lc, before
 
