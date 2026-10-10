@@ -214,9 +214,9 @@ async def read(conn, *, now: float, account_id: str | None = None,
     """`attributed` / `fixtures` / `read`: controls.attributed_positions'
     rows (EVERY PAPER position) and its read figures. A read that left out
     a position of the forward cohort is no scoreboard: UNAVAILABLE by name
-    (ATTRIBUTION_READ_TRUNCATED), never one over a subset."""
-    from ..simulated_account_context import selected_account
-    account_id = account_id or await selected_account(conn)
+    (ATTRIBUTION_READ_TRUNCATED), never one over a subset. `account_id`
+    None is the durable PAPER selector, resolved where the ledger is read
+    (after the truncation check, which needs no database)."""
     th = thresholds()
     since = cohort_start(th)
     if attributed is None:
@@ -254,6 +254,9 @@ async def read(conn, *, now: float, account_id: str | None = None,
         outcome_variance=s("outcome_variance_usd"),
         reported_total=s("cash_pnl_usd"),
         tolerance=D(str(th["global"]["pnl_reconciliation_tolerance_usd"])))
+    if account_id is None:
+        from ..simulated_account_context import selected_account
+        account_id = await selected_account(conn)
     led = await ledger_positions(conn, account_id)
     total = sum((D(str(p["realized_pnl_usd"])) for p in led), D(0))
     ledrec = ledger_reconciliation(claim, led, tolerance=D(str(
