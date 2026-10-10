@@ -9,8 +9,16 @@ sales are never double counted. The report states each reconciliation check
 with both sides and `reconciles` is true only when all pass.
 
 THE DAY is the America/New_York calendar day. A report is versioned: a new
-version is written only when its content changes; the day's last version
-after midnight is `final`.
+version is written only when its content changes. A reported day is closed
+by ONE `final` version, written at the first pass after the day is over (the
+next day, or days later after a gap in which no pass ran): its window is the
+whole day (through the day's last millisecond, recorded again if its content
+is unchanged), while its balance figures are the ledger's sums when that
+closing version was written (the row's `recorded_at`), as every version's
+are at its writing. Nothing is appended to a day after its final version. A
+day with no report (no pass ran on it) gets none, final or otherwise; the
+days before the session's first closed day are history and are not closed
+retroactively. Final never implies `reconciles`.
 
 DEFINITIONS, ENFORCED IN CODE:
   acquisition volume   sum(qty x price + fee) over BUY fills of the day,
@@ -60,6 +68,11 @@ TWO_MODEL = "DEREK_ENTRY_POLICY_V2"
 TASK_KIND = "PAPER_AUDIT_FINDING"
 EVIDENCE_CATEGORY = "SIMULATED_WITH_DISCLOSED_ASSUMPTIONS"
 REPORT_EVERY_S = 900.0
+#: The class of the transaction-scoped advisory lock that serializes the
+#: report writes of one (session, reporting day): pg_advisory_xact_lock(
+#: REPORT_LOCK_CLASS, hashtext('<session>:<day>')). The two-key space never
+#: meets the paper pass's single-key lock.
+REPORT_LOCK_CLASS = 0x41554452
 
 
 def _h(*parts) -> str:
@@ -74,6 +87,15 @@ def day_bounds(at: float, tz: str = "America/New_York") -> tuple:
     start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     end = start + _dt.timedelta(days=1)
     return start.date(), start.timestamp(), end.timestamp()
+
+
+def day_window(day: _dt.date, tz: str = "America/New_York") -> tuple:
+    """(local date, start epoch, end epoch) of the reporting day `day`."""
+    z = ZoneInfo(tz)
+    start = _dt.datetime.combine(day, _dt.time(0, 0), tzinfo=z)
+    end = _dt.datetime.combine(day + _dt.timedelta(days=1), _dt.time(0, 0),
+                               tzinfo=z)
+    return day, start.timestamp(), end.timestamp()
 
 
 async def _sum(conn, sql, *args) -> float:
@@ -461,35 +483,89 @@ async def build_report(conn, *, session: dict, account_id: str, day,
 
 
 async def write_report(conn, *, session: dict, account_id: str,
-                       now: float) -> dict:
-    day, start, end = day_bounds(now, session.get("reporting_tz")
-                                 or "America/New_York")
-    rep = await build_report(conn, session=session, account_id=account_id,
-                             day=day, start=start, end=end, now=now)
-    body = dict(rep)
-    digest = hashlib.sha256(json.dumps(
-        {k: v for k, v in body.items() if k != "window"}, sort_keys=True,
-        default=str).encode()).hexdigest()
-    last = await conn.fetchrow(
-        "SELECT version, digest FROM paper_audrey_reports WHERE "
-        " session_id=$1 AND report_day=$2 ORDER BY version DESC LIMIT 1",
-        session["session_id"], day)
-    if last is not None and last["digest"] == digest:
-        return {"written": False, "report_day": str(day),
-                "version": last["version"], "why": "NO_CHANGE",
-                "report": rep}
-    ver = 1 if last is None else int(last["version"]) + 1
-    rid = "paperrep:" + _h(session["session_id"], day, ver)
-    await conn.execute(
-        "INSERT INTO paper_audrey_reports (report_id, session_id, account_id,"
-        " report_day, reporting_tz, version, generated_at, final, reconciles,"
-        " report, digest) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11)"
-        " ON CONFLICT DO NOTHING", rid, session["session_id"], account_id,
-        day, rep["reporting_tz"], ver, L._ts(now), float(now) >= end,
-        rep["reconciliation"]["reconciles"], json.dumps(rep, default=str),
-        digest)
-    return {"written": True, "report_id": rid, "report_day": str(day),
-            "version": ver, "report": rep}
+                       now: float, closed_at: float | None = None) -> dict:
+    """THE REPORT OF THE DAY OF `now`, AS FAR AS `now`, versioned.
+
+    FINAL IS JUDGED AGAINST THE DAY THE REPORT COVERS. `closed_at` is the
+    instant the caller observed after that day (step() passes its report
+    clock when it writes a day's closing version with `now` at the day's
+    last millisecond); the version is final only when `closed_at` is at or
+    after the end of the covered day. An intra-day version (no `closed_at`,
+    or one inside the day) is never final. `final` says the day is closed,
+    never that it reconciles: `reconciles` is the report's own
+    reconciliation either way.
+
+    THE TABLE IS APPEND-ONLY, so a stored version cannot be marked final
+    afterwards: a closing write whose content is unchanged since the day's
+    last version records that same content again as the final version.
+
+    ONE FINAL VERSION PER DAY, AND NOTHING AFTER IT. A day with a final
+    version in ANY of its versions is closed: every later write for it,
+    final or not, is refused (ALREADY_FINAL) and nothing is appended. A
+    closing write for a day that has no version is refused
+    (NO_REPORT_TO_CLOSE): a day no pass reported gets no report.
+
+    ATOMIC PER (session, day). The build, the read of the day's versions and
+    the insert run in one transaction under pg_advisory_xact_lock(
+    REPORT_LOCK_CLASS, hashtext('<session>:<day>')), so two writers of one
+    day are serialized (the second sees the first's version), and `written`
+    is true only when the insert stored the row: an insert that stored
+    nothing (a writer outside the lock took the version) returns written =
+    false with what the day now holds (VERSION_TAKEN, or ALREADY_FINAL)."""
+    tz = session.get("reporting_tz") or "America/New_York"
+    sid = session["session_id"]
+    day, start, end = day_bounds(now, tz)
+    final = closed_at is not None and float(closed_at) >= end
+
+    def out(written, why, version, rep, **kw):
+        return dict({"written": written, "report_day": str(day),
+                     "version": version, "why": why, "report": rep}, **kw)
+
+    state_sql = (
+        "SELECT max(version) AS version, "
+        "       coalesce(bool_or(final), false) AS closed, "
+        "       max(version) FILTER (WHERE final) AS final_version, "
+        "       (array_agg(digest ORDER BY version DESC))[1] AS digest "
+        "  FROM paper_audrey_reports WHERE session_id=$1 AND report_day=$2")
+    async with conn.transaction():
+        await conn.execute("SELECT pg_advisory_xact_lock($1, hashtext($2))",
+                           REPORT_LOCK_CLASS, f"{sid}:{day}")
+        # built under the lock, so a closing version is built after every
+        # earlier version of the day is visible
+        rep = await build_report(conn, session=session,
+                                 account_id=account_id, day=day, start=start,
+                                 end=end, now=now)
+        body = dict(rep)
+        digest = hashlib.sha256(json.dumps(
+            {k: v for k, v in body.items() if k != "window"}, sort_keys=True,
+            default=str).encode()).hexdigest()
+        st = await conn.fetchrow(state_sql, sid, day)
+        if st["closed"]:
+            return out(False, "ALREADY_FINAL", st["final_version"], rep,
+                       final=True)
+        if final and st["version"] is None:
+            return out(False, "NO_REPORT_TO_CLOSE", None, rep, final=False)
+        if st["version"] is not None and not final \
+                and st["digest"] == digest:
+            return out(False, "NO_CHANGE", st["version"], rep, final=False)
+        ver = 1 if st["version"] is None else int(st["version"]) + 1
+        rid = "paperrep:" + _h(sid, day, ver)
+        got = await conn.fetchval(
+            "INSERT INTO paper_audrey_reports (report_id, session_id, "
+            " account_id, report_day, reporting_tz, version, generated_at, "
+            " final, reconciles, report, digest) VALUES ($1,$2,$3,$4,$5,$6,"
+            " $7,$8,$9,$10::jsonb,$11) ON CONFLICT DO NOTHING "
+            " RETURNING report_id", rid, sid, account_id, day,
+            rep["reporting_tz"], ver, L._ts(now), final,
+            rep["reconciliation"]["reconciles"],
+            json.dumps(rep, default=str), digest)
+    if got is None:
+        st = await conn.fetchrow(state_sql, sid, day)
+        if st["closed"]:
+            return out(False, "ALREADY_FINAL", st["final_version"], rep,
+                       final=True)
+        return out(False, "VERSION_TAKEN", st["version"], rep, final=False)
+    return out(True, None, ver, rep, report_id=rid, final=final)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -615,8 +691,51 @@ async def monitor(conn, ctx: dict) -> list:
     return out
 
 
+async def days_to_close(conn, *, session: dict, closed_at: float) -> list:
+    """THE REPORTED DAYS THAT ARE OVER AND HAVE NO FINAL VERSION, oldest
+    first: every day after the session's newest closed day that has a
+    version and no final version, and whose end is at or before `closed_at`.
+    A session with no closed day yet closes only its newest reported day:
+    the days before it were reported before any day was closed and are
+    history (no retroactive closing). A day with no version is never a
+    candidate (no pass reported it, so it gets no report)."""
+    tz = session.get("reporting_tz") or "America/New_York"
+    rows = await conn.fetch(
+        "WITH d AS (SELECT report_day, bool_or(final) AS closed "
+        "             FROM paper_audrey_reports WHERE session_id=$1 "
+        "            GROUP BY report_day) "
+        "SELECT report_day FROM d WHERE NOT closed AND report_day > "
+        "       coalesce((SELECT max(report_day) FROM d WHERE closed), "
+        "                (SELECT max(report_day) FROM d) - 1) "
+        " ORDER BY report_day", session["session_id"])
+    return [w for w in (day_window(r["report_day"], tz) for r in rows)
+            if w[2] <= float(closed_at)]
+
+
+async def close_days(conn, *, session: dict, account_id: str,
+                     closed_at: float) -> list:
+    """WRITE THE ONE FINAL VERSION OF EVERY REPORTED DAY THAT IS OVER
+    (days_to_close), oldest first: the day's report through its last
+    millisecond, closed at `closed_at`. Stops at the first day whose closing
+    version was not stored and is not already final (a writer outside the
+    lock took its version), so a later day is never closed past an open
+    one; the next pass retries it."""
+    out = []
+    for day, _start, end in await days_to_close(conn, session=session,
+                                                closed_at=closed_at):
+        got = await write_report(conn, session=session,
+                                 account_id=account_id, now=end - 0.001,
+                                 closed_at=closed_at)
+        out.append({k: got.get(k) for k in ("report_day", "written",
+                                            "version", "why", "final")})
+        if not got.get("final"):
+            break
+    return out
+
+
 async def step(conn, ctx: dict) -> dict:
-    """EVERY PASS: monitor. EVERY REPORT_EVERY_S (and at the day's turn): the
+    """EVERY PASS: monitor, and close every reported day that is over (its
+    one final version). EVERY REPORT_EVERY_S (and at the day's turn): the
     daily report. WARNING/CRITICAL findings and shortfalls open tasks."""
     findings = await monitor(conn, ctx)
     sess = ctx["session"]
@@ -628,21 +747,28 @@ async def step(conn, ctx: dict) -> dict:
         ctx["account_id"]))
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     rep_now = max(float(clock()), last_fill or 0.0)
+    # THE CLOSING VERSIONS FIRST: every reported day that is over by the
+    # report clock -- the day before, or the last reported day after a gap
+    # of whole days in which no pass ran -- gets its one final version.
+    closing = await close_days(conn, session=sess,
+                               account_id=ctx["account_id"],
+                               closed_at=rep_now)
+    held = bool(closing) and not closing[-1].get("final")
     last = await conn.fetchrow(
         "SELECT generated_at, report_day FROM paper_audrey_reports "
         " WHERE session_id=$1 ORDER BY generated_at DESC LIMIT 1",
         sess["session_id"])
-    day, start, _ = day_bounds(rep_now, sess.get("reporting_tz")
-                               or "America/New_York")
+    day, _start, _ = day_bounds(rep_now, sess.get("reporting_tz")
+                                or "America/New_York")
+    # A REPORT CLOCK BEHIND THE NEWEST REPORT'S DAY (a clock stepped back,
+    # or a host behind the one that ran the last pass) writes nothing: the
+    # day it reads is already reported past, or closed.
+    behind = last is not None and last["report_day"] > day
     rep = None
-    due = (last is None or rep_now - L._epoch(
-        last["generated_at"]) >= REPORT_EVERY_S or last["report_day"] != day)
+    due = not held and not behind and (
+        last is None or rep_now - L._epoch(last["generated_at"])
+        >= REPORT_EVERY_S or last["report_day"] != day)
     if due:
-        # The previous day's final version first, when the day turned.
-        if last is not None and last["report_day"] != day:
-            await write_report(conn, session=sess,
-                               account_id=ctx["account_id"],
-                               now=start - 0.001)
         rep = await write_report(conn, session=sess,
                                  account_id=ctx["account_id"], now=rep_now)
         r = rep["report"]
@@ -669,6 +795,14 @@ async def step(conn, ctx: dict) -> dict:
     return {"findings": len(findings),
             "new_findings": sum(1 for f in findings if f["new"]),
             "tasks_opened": sum(1 for t in tasks if t.get("created")),
+            # the closing writes of this pass (each day's outcome), and the
+            # number of days it closed -- a scalar, so the pass digest and
+            # the heartbeat carry it
+            "closing": closing,
+            "days_closed": sum(1 for c in closing if c.get("written")),
+            "report_held": ("CLOSING_VERSION_NOT_STORED" if held else
+                            "REPORT_CLOCK_BEHIND_THE_NEWEST_REPORT"
+                            if behind else None),
             "report": (None if rep is None else {
                 k: rep.get(k) for k in ("written", "report_id", "report_day",
                                         "version", "why")})}
