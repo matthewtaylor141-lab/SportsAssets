@@ -904,6 +904,14 @@ TABLE = {
     # RULE): the quote's 30 s budget ran out before the read could finish
     "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH": (
         S, FRESH, "FRESHNESS"),
+    # (RC6.3c COLL-1 phase a) a collector candidate still inside the 30 s
+    # rule but with less slack left, at the instant before its venue read,
+    # than one read costs at the head of the queue (ext_pinnacle_loop.
+    # COLLECTOR_READ_ORDER_RULE): skipped without a read, by name. The
+    # same class, family and stage as QUOTE_STALE_ON_ARRIVAL -- it names the
+    # loss more precisely, it does not move it
+    "QUOTE_SLACK_BELOW_THE_MEASURED_VENUE_READ_FLOOR": (
+        S, FRESH, "FRESHNESS"),
     "RAIL_HEADROOM_NOT_MEASURED": (S, DATA, "ORDER"),
     "REAL_EVENT_NOT_ESTABLISHED": (S, MAP, "VENUE_MAPPING"),
     "REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE": (E, RAIL, "ORDER"),

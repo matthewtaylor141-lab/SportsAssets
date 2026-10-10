@@ -132,7 +132,14 @@ def begin_read(*, slug: str = None, deadline_epoch_s: float = None) -> str:
                        "opened_at": time.time(),
                        "dispatched": 0, "responses": 0,
                        "rate_limited": 0, "waited_s": 0.0,
-                       "statuses": [], "gate_refusals": []}
+                       "statuses": [], "gate_refusals": [],
+                       # WHERE THIS READ'S TIME WENT, at the transport (RC6.3c
+                       # COLL-1 phase a, READ_TELEMETRY_RULE): the pacer's
+                       # queue and gap, the hard not-before hold, the
+                       # escalating 429 cooldown and the venue's own answer
+                       # time -- summed over the read's requests, seconds.
+                       "queue_wait_s": 0.0, "gate_wait_s": 0.0,
+                       "cooldown_wait_s": 0.0, "http_s": 0.0}
         # BOUNDED. A leaked read id must not grow this dict without limit;
         # the oldest are dropped, and `read_state` says so when one is gone.
         if len(_reads) > 64:
@@ -151,6 +158,80 @@ def read_state(read_id: str) -> dict | None:
     with _LOCK:
         st = _reads.get(read_id)
         return dict(st) if st else None
+
+
+#: ── WHERE A COLLECTOR READ'S TIME WENT, PER READ (RC6.3c COLL-1 phase a) ──
+#:
+#: MEASURED (research-sql runs 38056211192 Q2, 38056927459 G4, 38057231614
+#: H1, 38057645735 I1; packet window 08:54-09:54Z 2026-10-10): the metered
+#: quotes the collector refused QUOTE_STALE_ON_ARRIVAL after the provider had
+#: delivered them INSIDE the 30 s rule carried 13-21 s of OUR processing
+#: (avg 19.9 s NCAAF, 14.0 s MLS, 15.6 s Liga MX over the 83 such cycles of
+#: the 38 first-loss events), and the per-row ledger could not say whether
+#: that time was the pacer's gap, a 429 hold, the cooldown or the venue's own
+#: answer. So the transport, which is the one place every actual request
+#: passes, keeps the four apart PER LOGICAL READ -- summed over the read's
+#: requests, in seconds -- and the collector writes them on the candidate's
+#: ledger row (ext_candidate_outcomes, migration 368) beside its queue
+#: position and the source that served its book. Nothing here waits longer
+#: or shorter: it only names the wait.
+READ_TELEMETRY_RULE = (
+    "every collector venue read carries, per logical read and summed over "
+    "its requests, the seconds it spent in the pacer's queue and gap "
+    "(queue_wait_s), in the hard not-before hold (gate_wait_s), in the "
+    "escalating 429 cooldown (cooldown_wait_s) and awaiting the venue's "
+    "answer (http_s); measured at the transport, never estimated; no wait "
+    "is lengthened or shortened by the measurement")
+READ_TELEMETRY_KEYS = ("queue_wait_s", "gate_wait_s", "cooldown_wait_s",
+                       "http_s")
+_WAIT_KEY = {"queue": "queue_wait_s", "gate": "gate_wait_s",
+             "cooldown": "cooldown_wait_s"}
+
+
+def note_wait(read_id: str = None, kind: str = "queue",
+              seconds: float = 0.0) -> None:
+    """Attribute `seconds` of waiting to THIS read's `kind` ('queue', 'gate'
+    or 'cooldown'; READ_TELEMETRY_RULE). Unknown read or kind: nothing."""
+    key = _WAIT_KEY.get(kind)
+    try:
+        secs = float(seconds)
+    except (TypeError, ValueError):
+        return
+    if key is None or not read_id or secs <= 0 or secs != secs:
+        return
+    with _LOCK:
+        if read_id in _reads:
+            _reads[read_id][key] = round(_reads[read_id][key] + secs, 6)
+
+
+def note_http(read_id: str = None, seconds: float = 0.0) -> None:
+    """Attribute `seconds` from dispatch to the venue's answer (or its
+    failure) to THIS read (READ_TELEMETRY_RULE)."""
+    try:
+        secs = float(seconds)
+    except (TypeError, ValueError):
+        return
+    if not read_id or secs < 0 or secs != secs:
+        return
+    with _LOCK:
+        if read_id in _reads:
+            _reads[read_id]["http_s"] = round(_reads[read_id]["http_s"]
+                                              + secs, 6)
+
+
+def read_telemetry(state) -> dict | None:
+    """The four READ_TELEMETRY_KEYS (plus dispatched / rate_limited /
+    gate_refusals counts) of one read's state, or of a read id; None when
+    the read is unknown. Pure over `state`."""
+    st = read_state(state) if isinstance(state, str) else state
+    if not isinstance(st, dict):
+        return None
+    out = {k: (None if st.get(k) is None else round(float(st[k]), 6))
+           for k in READ_TELEMETRY_KEYS}
+    out["dispatched"] = st.get("dispatched")
+    out["rate_limited"] = st.get("rate_limited")
+    out["gate_refusals"] = len(st.get("gate_refusals") or ())
+    return out
 
 
 def attempts_for_read(read_id: str):
@@ -618,6 +699,9 @@ if httpx is not None:
             if w > 0:
                 _cooldown_wait(w, priority=prio,
                                bounded=wait_budget is not None)
+                # WHERE THE TIME WENT, PER READ (READ_TELEMETRY_RULE): the
+                # cooldown this request waited out, on its read
+                note_wait(rid, "cooldown", w)
                 if prio:
                     prio_budget = max(0.0, prio_budget - w)
                 elif wait_budget is not None:
@@ -626,6 +710,8 @@ if httpx is not None:
             #     recheck: nothing happens between it and the send.
             held = check_before_dispatch(read_id=rid, sleep=_hold_sleep,
                                          undeadlined_cap_s=wait_budget)
+            # ...the hard hold it slept out, on its read
+            note_wait(rid, "gate", float((held or {}).get("waited_s") or 0.0))
             if wait_budget is not None:
                 wait_budget = max(0.0, wait_budget
                                   - float((held or {}).get("waited_s") or 0.0))
@@ -633,10 +719,15 @@ if httpx is not None:
                 # 2 · THE ORDINARY RATE GAP, after the gate and not instead
                 #     of it. These are two different controls.
                 if self._pace is not None:
+                    # ...and the pacer's queue AND gap together, measured
+                    # around the claim (the gap alone is what pace() returns;
+                    # the queue behind other claimants is the rest)
+                    _tq = _vp._clock()
                     try:
                         self._pace()
                     except Exception:                          # noqa: BLE001
                         pass
+                    note_wait(rid, "queue", _vp._clock() - _tq)
                 # 2b · THE DEADLINE, AGAIN, AFTER THE PACER'S QUEUE (P1):
                 #      the wait for the gap can outlast the caller's
                 #      deadline, and a request sent after it is the failure
@@ -658,6 +749,7 @@ if httpx is not None:
                     break
                 _cooldown_wait(w, priority=prio,
                                bounded=wait_budget is not None)
+                note_wait(rid, "cooldown", w)
                 if prio:
                     prio_budget = max(0.0, prio_budget - w)
                 elif wait_budget is not None:
@@ -665,7 +757,12 @@ if httpx is not None:
             # 3 · COUNTED BEFORE THE SEND.
             note_dispatch(rid)
             t0 = _vp._clock()
-            resp = self._inner.handle_request(request)
+            try:
+                resp = self._inner.handle_request(request)
+            finally:
+                # THE VENUE'S OWN ANSWER TIME (or the time to its failure),
+                # on the read (READ_TELEMETRY_RULE)
+                note_http(rid, _vp._clock() - t0)
             note_response(rid, getattr(resp, "status_code", None))
             # 4 · EVERY 429 ARMS THE ESCALATING COOLDOWN; A 2xx READ THAT
             #     LEFT AFTER IT WAS ARMED RESETS IT (P0-429)
@@ -687,6 +784,8 @@ else:                                                          # pragma: no cove
 
 __all__ = ["PacedTransport", "begin_read", "end_read", "read_state",
            "attempts_for_read", "totals", "hold_until", "gate_state",
+           "READ_TELEMETRY_RULE", "READ_TELEMETRY_KEYS", "note_wait",
+           "note_http", "read_telemetry",
            "clear_hold", "check_before_dispatch", "check_write_lock",
            "check_deadline_after_pacing", "cooldown_check",
            "normal_read_gate", "observe_response",

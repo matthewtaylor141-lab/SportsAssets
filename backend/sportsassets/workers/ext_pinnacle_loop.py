@@ -2300,6 +2300,161 @@ def probability_deadline(observed_epoch) -> float | None:
     return t + PINNACLE_MAX_AGE_S if math.isfinite(t) else None
 
 
+#: ── THE READ ORDER IS EARLIEST DEADLINE FIRST, AND A READ THAT CANNOT
+#:    FINISH IS NOT STARTED (RC6.3c COLL-1 phase a) ─────────────────────
+#:
+#: THE MEASURED DEFECT (RC6.3b software-reds audit; production ledger
+#: ext_candidate_outcomes, packet window 08:54-09:54Z 2026-10-10, research-
+#: sql runs 38056211192 Q2, 38056927459 G3/G4, 38057231614 H1, 38057645735
+#: I1, 38078680376 K1/K2/K3). QUOTE_STALE_ON_ARRIVAL was the largest
+#: SOFTWARE first loss of the approved-judge packet (38 of 84 events). 83
+#: of those events' cycles were quotes the metered provider delivered INSIDE
+#: the 30 s rule -- NCAAF 10.1-22.0 s old, MLS 16.9-24.9 s, Liga MX 2.1-
+#: 25.9 s -- that OUR serial, paced venue reads then carried past it: the
+#: candidates at queue positions 6-41 reached the arrival check 10.5-29 s
+#: after receipt, one paced read per position ahead of them. One read at
+#: the head of the queue costs ~6 s (K2b: the step in our processing from
+#: queue position 0 to 1 averages 6.58 s, median 5.17 s, over 305 fetches in
+#: 24 h; our processing at positions 0-2 averages 6.4 s), and every later
+#: position adds ~1.7-3.3 s. Over 6 h, 1,044 rows were refused this way with
+#: the quote delivered inside the limit, 787 of them (75%) with 13 s or
+#: more of slack at receipt (K3) -- enough for two reads, spent on
+#: candidates ahead of them that had less slack or none.
+#:
+#: TWO THINGS WERE WRONG WITH THE ORDER. Lever B spent the EARLY slots on
+#: the quotes with the MOST headroom (freshest first): the quote with 20 s
+#: of slack went first and the one with 8 s waited behind it and died,
+#: when the reverse order would have saved both. And a candidate whose
+#: slack was already shorter than one read was still read -- ~6 s spent on
+#: an answer the 30 s rule refuses whatever the book says, and 6 s taken
+#: from every candidate behind it.
+#:
+#: SO: (1) within each sport's fetch the candidates are judged EARLIEST
+#: DEADLINE FIRST -- least slack first, slack = PINNACLE_MAX_AGE_S less the
+#: provider lag, i.e. the provider's own last_update ascending; with equal
+#: processing per read this is the order that admits the most candidates
+#: inside their own deadlines (the deferral-first and in-play-first classes
+#: of collector_coverage.candidate_order_key stand above it, unchanged);
+#: (2) the deadline is re-tested at the instant before EVERY read, and a
+#: candidate whose remaining slack is then below the measured head-of-queue
+#: read floor is skipped WITHOUT A READ, refused by its own name
+#: (QUOTE_SLACK_BELOW_THE_MEASURED_VENUE_READ_FLOOR) -- the read could not
+#: finish before the deadline and would only have spent the candidates
+#: behind it. THE 30 s RULE, ITS CLOCK AND ITS INSTANT ARE UNCHANGED: lever
+#: A still refuses a quote already past the limit by its own name first, the
+#: decision gate still re-ages every admitted quote, and the floor is a
+#: measurement of OUR read, not a tighter age limit (a quote inside the
+#: limit with a read's worth of slack is read exactly as before). The
+#: skipped candidate keeps a SOFTWARE / FRESHNESS_PLUMBING first loss at
+#: 2_FRESHNESS in the census -- this names the loss more precisely, it does
+#: not move it -- and, when its slack at RECEIPT was at least the floor
+#: (our queue ate it), it is owed its competition's next early slot
+#: (REQUEUE_AFTER_OUR_DELAY_RULE). Phase b (a bounded pipeline) is NOT
+#: built here; MIN_GAP_S and every venue pacing value are unchanged.
+COLLECTOR_READ_ORDER_RULE = (
+    "each sport's candidates are judged earliest-deadline-first (least "
+    "slack first; slack = PINNACLE_MAX_AGE_S less the provider lag, the "
+    "provider's own last_update ascending, an unreadable stamp last, the "
+    "event id the final tiebreak) within the deferral and in-play classes "
+    "of candidate_order_key; the deadline is re-tested before every read; "
+    "a candidate whose remaining slack is below the measured head-of-queue "
+    "read floor is skipped without a read and refused by name; the 30 s "
+    "rule, its clock, its instant and every pacing value are unchanged")
+#: THE MEASURED FLOOR: what ONE venue read costs at the head of the queue
+#: (research-sql run 38078680376 K2/K2b, 24 h to 19:10Z 2026-10-10: the
+#: step in our processing from queue position 0 to 1 averages 6.58 s, median
+#: 5.17 s, p90 16.6 s, over 305 fetches; our processing at positions 0-2
+#: averages 6.4 s). A remaining slack below it cannot hold a read.
+VENUE_READ_HEAD_OF_QUEUE_FLOOR_S = 6.0
+R_SLACK_BELOW_THE_READ_FLOOR = \
+    "QUOTE_SLACK_BELOW_THE_MEASURED_VENUE_READ_FLOOR"
+WHY_SLACK_BELOW_THE_FLOOR = (
+    "THE LIMIT IS UNCHANGED. This candidate's quote was still inside the 30 "
+    "s rule at this instant, but with less slack left than one venue read "
+    "costs at the head of the queue (VENUE_READ_HEAD_OF_QUEUE_FLOOR_S, "
+    "measured), so the read could not have finished before its probability "
+    "deadline and the rule would have refused the decision whatever the "
+    "book said. The read was not spent, and the candidates behind this one "
+    "did not wait for it (COLLECTOR_READ_ORDER_RULE)")
+#: whose slack it was, on the row
+SLACK_BASIS_OUR_QUEUE = "DELIVERED_WITH_A_READS_SLACK_OUR_QUEUE_ATE_IT"
+SLACK_BASIS_AS_DELIVERED = "DELIVERED_WITH_LESS_SLACK_THAN_ONE_READ"
+
+
+def candidate_slack_s(observed_epoch, now) -> float | None:
+    """Seconds left before a quote observed at `observed_epoch` reaches the
+    unchanged 30 s rule at instant `now` (its probability deadline less
+    `now`); None when the instant is unknown. Negative: already past it
+    (lever A's case). Pure."""
+    dl = probability_deadline(observed_epoch)
+    if dl is None:
+        return None
+    try:
+        return float(dl) - float(now)
+    except (TypeError, ValueError):
+        return None
+
+
+def collector_read_order_key(observed_epoch, event_id) -> tuple:
+    """EARLIEST DEADLINE FIRST (COLLECTOR_READ_ORDER_RULE): the provider's
+    own stamp ascending -- the deadline is the stamp plus the unchanged rule,
+    so the earliest deadline is the oldest stamp, the least slack -- with an
+    unreadable stamp LAST (an unknown age is never handed a slot) and the
+    event id the final tiebreak (a total order: the same payload always
+    yields the same order). Reads a stamp and an identity, nothing
+    economic. Pure."""
+    try:
+        t = None if observed_epoch is None else float(observed_epoch)
+    except (TypeError, ValueError):
+        t = None
+    if t is not None and not math.isfinite(t):
+        t = None
+    return (t is None, t if t is not None else 0.0,
+            str(event_id if event_id is not None else ""))
+
+
+def below_the_read_floor(slack_s, floor_s=None) -> bool:
+    """Whether a candidate still INSIDE the rule (slack > 0) has less slack
+    left than one head-of-queue read costs (COLLECTOR_READ_ORDER_RULE (2)).
+    A quote already past the rule (slack <= 0) is lever A's, not this; an
+    unknown slack is nobody's bound. Pure."""
+    floor = VENUE_READ_HEAD_OF_QUEUE_FLOOR_S if floor_s is None else floor_s
+    try:
+        s = None if slack_s is None else float(slack_s)
+    except (TypeError, ValueError):
+        return False
+    return s is not None and 0.0 < s < float(floor)
+
+
+#: the per-read telemetry a candidate's ledger row carries (migration 368):
+#: venue_request_gate.READ_TELEMETRY_KEYS plus the source that served the
+#: book (PMX_BOOK_BEFORE_REST_RULE)
+READ_TELEMETRY_ROW_KEYS = ("queue_wait_s", "gate_wait_s", "cooldown_wait_s",
+                           "http_s", "book_source")
+
+
+def read_telemetry_fields(vq) -> dict:
+    """The READ_TELEMETRY_ROW_KEYS of one `venue_quote` result, for the
+    candidate's ledger row: the transport's per-read waits and answer time
+    (`read_telemetry`, venue_request_gate.READ_TELEMETRY_RULE) and the
+    source that served the book. A read never made leaves them None, never
+    0 -- an unmeasured wait reported as zero would be the best-looking
+    number in the table. Pure."""
+    q = vq if isinstance(vq, dict) else {}
+    rt = q.get("read_telemetry") if isinstance(q.get("read_telemetry"),
+                                               dict) else {}
+    out = {}
+    for k in READ_TELEMETRY_ROW_KEYS[:-1]:
+        v = rt.get(k)
+        try:
+            out[k] = None if v is None else round(float(v), 6)
+        except (TypeError, ValueError):
+            out[k] = None
+    src = q.get("book_source")
+    out["book_source"] = str(src) if src else None
+    return out
+
+
 #: ── AN ABANDONED READ IS NEVER SENT (first-loss census, 2026-10-08) ──────
 #:
 #: THE DEFECT. `venue_quote` awaits a read for min(VENUE_TIMEOUT_S, the time
@@ -4295,6 +4450,10 @@ def _read_book_blocking(slug: str, *,
                     "refused_by": "OUR_REQUEST_GATE",
                     "gate_detail": ref.detail,
                     "attempts": grt.attempts_for_read(read_id),
+                    # WHAT THE READ WAITED BEFORE OUR GATE REFUSED IT (RC6.3c
+                    # COLL-1 phase a, READ_TELEMETRY_RULE): a stall at the
+                    # cooldown or the hold is recorded with its wait
+                    "request_accounting": grt.read_state(read_id),
                     "diagnostic": dict(ref.detail,
                                        slug=slug, stage="REQUEST_GATE",
                                        refusal=ref.refusal)}
@@ -5154,6 +5313,35 @@ def _note_book_source(into: dict, vq) -> None:
     d[src] = d.get(src, 0) + 1
 
 
+def _book_read_telemetry(book, book_source) -> dict | None:
+    """Where ONE venue_quote's read spent its time (venue_request_gate.
+    READ_TELEMETRY_RULE), from the reader's per-read request accounting. A
+    PMX book made no request: every wait and the answer time are 0.0,
+    measured as none. A read that never reached the transport: None. Pure."""
+    from .. import venue_request_gate as grt
+    if book_source == _PMX_SOURCE:
+        out = {k: 0.0 for k in grt.READ_TELEMETRY_KEYS}
+        out.update(dispatched=0, rate_limited=0, gate_refusals=0)
+        return out
+    acc = (book.get("request_accounting") if isinstance(book, dict)
+           else None)
+    return grt.read_telemetry(acc) if isinstance(acc, dict) else None
+
+
+def _read_telemetry_digest(samples) -> dict:
+    """The cycle's per-read waits and answer times, summarised for a
+    heartbeat (READ_TELEMETRY_RULE): per key the median, max and sum in
+    seconds and the sample count; an empty sample is None, never 0."""
+    out = {}
+    for k in READ_TELEMETRY_ROW_KEYS[:-1]:
+        xs = [float(x) for x in ((samples or {}).get(k) or ())]
+        out[k] = {"median_s": _median(xs), "max_s": _maxof(xs),
+                  "sum_s": round(sum(xs), 3) if xs else None,
+                  "samples": len(xs)}
+    out["rule"] = "venue_request_gate.READ_TELEMETRY_RULE"
+    return out
+
+
 def _pmx_book_for_collector(slug, *, now) -> tuple:
     """(book_source, the PMX read or None) for ONE collector book read. A
     None is a REST read, counted here with the reason. Never raises."""
@@ -5327,7 +5515,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
             return dict(_past_deadline(
                 slug, deadline_epoch_s, request_sent_at,
                 "REFUSED_BY_OUR_GATE:%s" % book.get("error")),
-                book_source=book_source)
+                book_source=book_source,
+                read_telemetry=_book_read_telemetry(book, book_source))
         if book.get("error"):
             diag = book.get("diagnostic") or {}
             return {"ok": False, "refusal": R_VENUE_READ_ERROR,
@@ -5336,7 +5525,13 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                     # OUR GATE NAMED AS OURS (`venue_read_refusal`).
                     "refused_by": book.get("refused_by"),
                     "book_source": book_source,
+                    # WHERE THE READ'S TIME WENT before it failed (RC6.3c
+                    # COLL-1 phase a, READ_TELEMETRY_RULE)
+                    "read_telemetry": _book_read_telemetry(book, book_source),
                     "diagnostic": diag}
+    # WHERE THIS READ'S TIME WENT (venue_request_gate.READ_TELEMETRY_RULE),
+    # carried on every result below that holds a book
+    read_telemetry = _book_read_telemetry(book, book_source)
 
     if pmx is not None:
         # OUR RECEIPT of the PMX book is the stream's receipt of its last
@@ -5358,6 +5553,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
         return {"ok": False, "refusal": R_NO_DEPTH,
                 "why": "the book has no ask side",
                 "book_source": book_source,
+                "read_telemetry": read_telemetry,
                 "parse_status": snap.get("PARSE_STATUS")}
     depth_raw = (snap.get("DISPLAYED_DEPTH_AT_T0") or {}).get("ask")
     try:
@@ -5367,6 +5563,7 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
     if depth <= 0:
         return {"ok": False, "refusal": R_NO_DEPTH,
                 "book_source": book_source,
+                "read_telemetry": read_telemetry,
                 "why": "the ask side shows no displayed quantity"}
 
     # THE VENUE'S OWN CLOCK, when it gives one. WHAT IT MEANS IS NOT
@@ -5543,7 +5740,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
             if CV.other_intent(intent) else None),
         "venue_ts": vt, "read_at": read_at, "slug": slug, "intent": intent,
         "http_observation": book.get("http_observation"),
-        "book_source": book_source}
+        "book_source": book_source,
+        "read_telemetry": read_telemetry}
     # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
     if currency["verdict"] == vc.CONTRADICTED:
         return {"ok": False, "refusal": R_BOOK_CURRENCY_CONTRADICTED,
@@ -5598,7 +5796,8 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                 "why": ("the ladder this intent must consume is not "
                         "readable: %s" % (lad.get("book_was")
                                           or lad.get("parse_status"))),
-                "acquisition": lad, "slug": slug, "book_source": book_source}
+                "acquisition": lad, "slug": slug, "book_source": book_source,
+                "read_telemetry": read_telemetry}
     # ── ONLY DEPTH AN ORDER WE CAN SEND IS ABLE TO REACH ─────────────
     #
     # BEFORE anything values, sizes or ranks this ladder: a level whose wire
@@ -5619,13 +5818,18 @@ async def venue_quote(conn, *, us_slug, intent, now=None, size=None,
                     "excluded_unrepresentable_qty"),
                 "acquisition": lad, "slug": slug, "intent": intent,
                 "book_currency": currency, "read_at": read_at,
-                "book_source": book_source}
+                "book_source": book_source,
+                "read_telemetry": read_telemetry}
     sized = (bs.fill_across_levels(lad, float(size))
              if size else None)
 
     return {"ok": True,
             # WHICH SOURCE SERVED THE BOOK (PMX_BOOK_BEFORE_REST_RULE)
             "book_source": book_source,
+            # WHERE THE READ'S TIME WENT (RC6.3c COLL-1 phase a,
+            # venue_request_gate.READ_TELEMETRY_RULE): the pacer's queue and
+            # gap, the hard hold, the 429 cooldown, the venue's answer time
+            "read_telemetry": read_telemetry,
             # `ask` is kept for every existing reader and is now
             # explicitly the YES-denominated API price of the best level
             # ON THE SIDE THIS INTENT CONSUMES.
@@ -9914,6 +10118,10 @@ def _reconcile_event_ledger(rows, funnel) -> dict:
                            and all(v["reconciles"] for v in sports.values()))}
 
 
+#: The columns migration 368 adds (RC6.3c COLL-1 phase a): where the
+#: candidate's venue read spent its time, and the source that served its
+#: book (READ_TELEMETRY_ROW_KEYS); written when all of them are present.
+CANDIDATE_OUTCOME_368_COLUMNS = READ_TELEMETRY_ROW_KEYS
 #: The columns migration 143 adds, written when all of them are present.
 CANDIDATE_OUTCOME_143_COLUMNS = ("provider_lag_s", "our_processing_s",
                                  "quote_age_s", "mapped_by",
@@ -9950,18 +10158,22 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
     # MIGRATION 143'S COLUMNS, WHERE THE DATABASE HAS THEM. The workers can
     # boot before the API has migrated, so an absent column set falls back to
     # the 137 row -- and SAYS SO on the result -- rather than losing every
-    # row to a failed INSERT.
+    # row to a failed INSERT. MIGRATION 368'S COLUMNS (RC6.3c COLL-1 phase a:
+    # the read telemetry, READ_TELEMETRY_ROW_KEYS) the same way, each set on
+    # its own: a database with 143 and not 368 writes the 143 row.
     try:
-        have = int(await conn.fetchval(
-            "SELECT count(*) FROM information_schema.columns "
+        present = {str(r["column_name"]) for r in await conn.fetch(
+            "SELECT column_name FROM information_schema.columns "
             " WHERE table_name = 'ext_candidate_outcomes' "
             "   AND column_name = ANY($1::text[])",
-            list(CANDIDATE_OUTCOME_143_COLUMNS)) or 0)
+            list(CANDIDATE_OUTCOME_143_COLUMNS)
+            + list(CANDIDATE_OUTCOME_368_COLUMNS))}
     except Exception as exc:                                   # noqa: BLE001
         return {"ok": False, "cycle_id": cycle_id, "rows": 0,
                 "refusal": "CANDIDATE_OUTCOMES_READ_FAILED",
                 "error": type(exc).__name__}
-    with_143 = have == len(CANDIDATE_OUTCOME_143_COLUMNS)
+    with_143 = all(c in present for c in CANDIDATE_OUTCOME_143_COLUMNS)
+    with_368 = all(c in present for c in CANDIDATE_OUTCOME_368_COLUMNS)
 
     def _num(v):
         return None if v is None else float(v)
@@ -9975,41 +10187,54 @@ async def _persist_candidate_outcomes(conn, *, cycle_at: float, rows) -> dict:
              r["outcome"], r.get("first_refusal"),
              json.dumps(list(r.get("codes") or [])))
             for r in rows]
-    try:
+    # THE INSERT, BUILT FROM THE COLUMN SETS THE DATABASE HAS: the 137 row,
+    # plus 143's five columns, plus 368's five -- the same statement shapes
+    # as before for a database without 368.
+    cols = ["cycle_id", "cycle_at", "writer", "sport_key", "family",
+            "queue_position", "provider_event_id", "home", "away",
+            "commence_time", "global_slug", "us_market_slug", "stage",
+            "outcome", "first_refusal", "codes"]
+    if with_143:
+        cols += list(CANDIDATE_OUTCOME_143_COLUMNS)
+    if with_368:
+        cols += list(CANDIDATE_OUTCOME_368_COLUMNS)
+    _cast = {"cycle_at": "to_timestamp(%s)", "codes": "%s::jsonb"}
+    values = ", ".join(_cast.get(c, "%s") % ("$%d" % (i + 1))
+                       for i, c in enumerate(cols))
+    sql = ("INSERT INTO ext_candidate_outcomes (%s) VALUES (%s)"
+           % (", ".join(cols), values))
+
+    def _params(b, r):
+        p = tuple(b)
         if with_143:
-            await conn.executemany(
-                "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, "
-                " writer, sport_key, family, queue_position, "
-                " provider_event_id, home, away, commence_time, global_slug, "
-                " us_market_slug, stage, outcome, first_refusal, codes, "
-                " provider_lag_s, our_processing_s, quote_age_s, mapped_by, "
-                " global_refusal_replaced) "
-                "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, "
-                " $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19, "
-                " $20, $21)",
-                [b + (_num(r.get("provider_lag_s")),
-                      _num(r.get("our_processing_s")),
-                      _num(r.get("quote_age_s")),
-                      r.get("mapped_by"), r.get("global_refusal_replaced"))
-                 for b, r in zip(base, rows)])
-        else:
-            await conn.executemany(
-                "INSERT INTO ext_candidate_outcomes (cycle_id, cycle_at, "
-                " writer, sport_key, family, queue_position, "
-                " provider_event_id, home, away, commence_time, global_slug, "
-                " us_market_slug, stage, outcome, first_refusal, codes) "
-                "VALUES ($1, to_timestamp($2), $3, $4, $5, $6, $7, $8, $9, "
-                " $10, $11, $12, $13, $14, $15, $16::jsonb)", base)
+            p += (_num(r.get("provider_lag_s")),
+                  _num(r.get("our_processing_s")),
+                  _num(r.get("quote_age_s")),
+                  r.get("mapped_by"), r.get("global_refusal_replaced"))
+        if with_368:
+            p += (_num(r.get("queue_wait_s")), _num(r.get("gate_wait_s")),
+                  _num(r.get("cooldown_wait_s")), _num(r.get("http_s")),
+                  None if r.get("book_source") is None
+                  else str(r.get("book_source")))
+        return p
+    try:
+        await conn.executemany(sql, [_params(b, r)
+                                     for b, r in zip(base, rows)])
     except Exception as exc:                                   # noqa: BLE001
         return {"ok": False, "cycle_id": cycle_id, "rows": 0,
                 "refusal": "CANDIDATE_OUTCOMES_WRITE_FAILED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:160])}
     out = {"ok": True, "cycle_id": cycle_id, "rows": len(rows),
-           "columns_143": with_143}
+           "columns_143": with_143, "columns_368": with_368}
     if not with_143:
         out["why_no_arrival_columns"] = (
             "migration 143 is not applied here, so the lag split and the "
             "mapping path were not written; the rows are otherwise complete")
+    if not with_368:
+        out["why_no_read_telemetry_columns"] = (
+            "migration 368 is not applied here, so the per-read waits, the "
+            "venue's answer time and the book source were not written; the "
+            "rows are otherwise complete")
     return out
 
 
@@ -10778,6 +11003,12 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "provider_lag_s": None, "our_processing_s": None,
                "quote_age_s": None, "mapped_by": None,
                "global_refusal_replaced": None,
+               # migration 368 (RC6.3c COLL-1 phase a): where this
+               # candidate's venue read spent its time, and the source that
+               # served its book (READ_TELEMETRY_ROW_KEYS). None until a
+               # read was made -- a read never made is not a zero wait.
+               "queue_wait_s": None, "gate_wait_s": None,
+               "cooldown_wait_s": None, "http_s": None, "book_source": None,
                "_codes": []}
         _open_ev["row"] = row
         tally.log = row["_codes"]
@@ -10951,6 +11182,14 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            # reads refused or abandoned at the candidate's own probability
            # deadline (READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE)
            "reads_bounded_by_probability_deadline": 0,
+           # (RC6.3c COLL-1 phase a) candidates skipped WITHOUT a read, by
+           # name, because their remaining slack at the instant before the
+           # read was below the measured head-of-queue read floor
+           # (COLLECTOR_READ_ORDER_RULE), and where every read's time went
+           # (venue_request_gate.READ_TELEMETRY_RULE), seconds per read
+           "skipped_below_the_read_floor": 0,
+           "read_telemetry_samples": {k: [] for k in
+                                      READ_TELEMETRY_ROW_KEYS[:-1]},
            # every event WITH A PINNACLE PRICE, measured when it came up --
            # mapped or not, evaluated or not
            "arrival_lag_every_priced": [], "arrival_ours_every_priced": [],
@@ -11239,11 +11478,24 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         _now_sort = time.time()
         _owed_first = dict(_requeued)
         _owed_first.update(_prev_deferred)
+        # (RC6.3c COLL-1 phase a) THE ORDER THAT DECIDES WITHIN EACH CLASS
+        # IS EARLIEST DEADLINE FIRST (COLLECTOR_READ_ORDER_RULE): the
+        # provider's own stamp ASCENDING -- the least slack first -- not the
+        # freshest-first order above. With one paced read per candidate the
+        # quote with 8 s of slack judged after the one with 20 s dies while
+        # the one with 20 s could have waited for it; least-slack-first is
+        # the order that admits the most candidates inside their own
+        # deadlines, and a quote too close to its deadline for one read is
+        # then skipped without a read (below). This key is total (stamp,
+        # then the event id), so it settles the order inside each class and
+        # the freshest-first pass above is the documented first pass over
+        # the payload; nothing is dropped and no limit moves.
         events.sort(key=lambda e: cov.candidate_order_key(
             (e or {}).get("id"),
             commence_epoch=fmeta_mod._epoch((e or {}).get("commence_time")),
             now=_now_sort, deferred_since=_owed_first,
-            freshness_key=()))
+            freshness_key=collector_read_order_key(_ages[id(e)],
+                                                   (e or {}).get("id"))))
 
         # ── LEVER C · WITHIN-CYCLE DEDUPLICATION ────────────────────
         #
@@ -11902,6 +12154,74 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                          "why": WHY_SKIPPED_ON_ARRIVAL})
                 continue
 
+            # ── THE DEADLINE, RE-TESTED BEFORE THE READ; A READ THAT CANNOT
+            #    FINISH IS NOT STARTED (RC6.3c COLL-1 phase a,
+            #    COLLECTOR_READ_ORDER_RULE (2)) ─────────────────────────────
+            # Lever A refused a quote ALREADY past the rule. This one is
+            # still inside it, but with less slack left at this instant than
+            # one venue read costs at the head of the queue (the measured
+            # VENUE_READ_HEAD_OF_QUEUE_FLOOR_S): the read could not finish
+            # before the candidate's probability deadline, so the rule would
+            # refuse the decision whatever the book said, and the ~6 s it
+            # took would come off every candidate behind it. Not read,
+            # refused by its own name, counted apart from lever A. THE LIMIT,
+            # ITS CLOCK AND ITS INSTANT ARE UNCHANGED: a quote with a read's
+            # worth of slack is read exactly as before. Whose slack it was is
+            # on the row: delivered with at least a read's slack and our queue
+            # ate it (owed the next early slot, REQUEUE_AFTER_OUR_DELAY_RULE),
+            # or delivered with less than one read's slack (no order of ours
+            # could have read it in time).
+            _slack = candidate_slack_s(_pe, _arr)
+            if below_the_read_floor(_slack):
+                code = R_SLACK_BELOW_THE_READ_FLOOR
+                lat["skipped_below_the_read_floor"] += 1
+                tally[code] = tally.get(code, 0) + 1
+                _step_refuse(code)
+                _rx_slack = (None if reference_received_at is None
+                             else PINNACLE_MAX_AGE_S
+                             - (float(reference_received_at) - _pe))
+                _ours = (_rx_slack is not None
+                         and _rx_slack >= VENUE_READ_HEAD_OF_QUEUE_FLOOR_S)
+                if (_ours and stream_seed is None
+                        and (event or {}).get("id") is not None):
+                    _requeued[str(event["id"])] = (
+                        _requeued_since if _requeued_since is not None
+                        else _arr)
+                    lat["requeued_after_our_delay"] += 1
+                # ITS CLOCKS JOIN THE CYCLE'S FIGURES, as lever A's do
+                if reference_received_at is not None:
+                    lat["provider_lag_samples"].append(
+                        float(reference_received_at) - _pe)
+                    lat["our_delay_samples"].append(
+                        _arr - float(reference_received_at))
+                lat["age_samples"].append(_arr - _pe)
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": "2_FRESHNESS",
+                         "first_refusal": code,
+                         "observed_at_epoch_s": round(float(_pe), 6),
+                         "decision_instant_epoch_s": round(_arr, 6),
+                         "age_s": round(_arr - _pe, 3),
+                         "limit_s": PINNACLE_MAX_AGE_S,
+                         "slack_s": round(float(_slack), 3),
+                         "slack_at_receipt_s": (
+                             None if _rx_slack is None
+                             else round(float(_rx_slack), 3)),
+                         "read_floor_s": VENUE_READ_HEAD_OF_QUEUE_FLOOR_S,
+                         "provider_lag_s": (
+                             None if reference_received_at is None
+                             else round(float(reference_received_at) - _pe, 3)),
+                         "our_processing_s": (
+                             None if reference_received_at is None
+                             else round(_arr - float(reference_received_at), 3)),
+                         "age_basis": "PROVIDER_LAST_UPDATE_AT_ARRIVAL",
+                         "attribution": (SLACK_BASIS_OUR_QUEUE if _ours
+                                         else SLACK_BASIS_AS_DELIVERED),
+                         "why": WHY_SLACK_BELOW_THE_FLOOR})
+                continue
+
             # THE READ CLOCK, WHICH IS NOT THE DECISION CLOCK. This
             # instant ages the book at the moment it was read. The
             # DECISION instant is taken after the venue read, the rules
@@ -12020,6 +12340,16 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # REST_RULE): counted per cycle (latency.venue_book_sources, on
             # the heartbeat); the quote's own venue_clock names it too
             _note_book_source(lat, vq)
+            # WHERE THIS READ'S TIME WENT (RC6.3c COLL-1 phase a,
+            # venue_request_gate.READ_TELEMETRY_RULE): the pacer's queue and
+            # gap, the hard hold, the 429 cooldown and the venue's answer
+            # time, on the candidate's own ledger row (migration 368) and in
+            # the cycle's samples; the book source beside them
+            _rtf = read_telemetry_fields(vq)
+            _event_fields(_rtf)
+            for _k in READ_TELEMETRY_ROW_KEYS[:-1]:
+                if _rtf.get(_k) is not None:
+                    lat["read_telemetry_samples"][_k].append(float(_rtf[_k]))
             if vq.get("book_source") != _PMX_SOURCE:
                 # a PMX book is no request to the venue
                 lat["venue_requests"] += 1
@@ -13024,6 +13354,19 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                "reads_bounded_by_probability_deadline":
                    lat["reads_bounded_by_probability_deadline"],
                "read_bound_rule": READ_BOUNDED_BY_THE_PROBABILITY_DEADLINE_RULE,
+               # (RC6.3c COLL-1 phase a) THE READ ORDER AND THE READ FLOOR:
+               # candidates skipped without a read because their remaining
+               # slack was below the measured head-of-queue floor, the floor
+               # itself, the rule, and where every venue read's time went
+               # this cycle (medians, max and sums in seconds per read:
+               # the pacer's queue and gap, the hard hold, the 429 cooldown,
+               # the venue's answer) -- the evidence phase b is decided on
+               "skipped_below_the_read_floor":
+                   lat["skipped_below_the_read_floor"],
+               "read_floor_s": VENUE_READ_HEAD_OF_QUEUE_FLOOR_S,
+               "read_order_rule": COLLECTOR_READ_ORDER_RULE,
+               "venue_read_telemetry": _read_telemetry_digest(
+                   lat["read_telemetry_samples"]),
                # WHAT WAS NOT EXAMINED, so throughput cannot be confused
                # with quietly dropping the difficult cases.
                "deferred_candidates": deferred_total,
@@ -13050,11 +13393,16 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                        "read is refused by name (QUOTE_STALE_ON_ARRIVAL) "
                        "and its read is not spent -- so it stops making its "
                        "successors stale too"),
-                   "B_freshest_first": (
+                   "B_earliest_deadline_first": (
                        "events are ordered by the provider's own "
-                       "last_update, newest first, so the low-delay slots "
-                       "go to the quotes with the most headroom. Nothing is "
-                       "dropped and no limit moves"),
+                       "last_update, EARLIEST DEADLINE FIRST (least slack "
+                       "first; RC6.3c COLL-1 phase a, COLLECTOR_READ_ORDER_"
+                       "RULE) within the deferral and in-play classes, so a "
+                       "quote with little headroom is judged before one "
+                       "that can wait, and a quote whose remaining slack is "
+                       "below the measured head-of-queue read floor is "
+                       "skipped without a read, by name. Nothing is dropped "
+                       "and no limit moves"),
                    "C_dedupe_equivalent_only": (
                        "two provider events resolving to the same "
                        "(us_market_slug, intent) share one venue read. Each "
@@ -13906,6 +14254,22 @@ def _freshness_digest(out: dict) -> dict | None:
             # easier candidates.
             "deferred_candidates": lat.get("deferred_candidates"),
             "deferred_sample": (lat.get("deferred_sample") or [])[:10],
+            # (RC6.3c COLL-1 phase a) THE ON-DEMAND REFRESH BUDGET, FOR THE
+            # OWNER'S C2 DECISION: fired / saved / still_stale / failed /
+            # capped (a refresh the bound would have made) / budget_spent
+            # (no metered call left) per cycle, with the bound in force
+            "adaptive_refetch": fr.get("adaptive_refetch"),
+            "adaptive_refetch_max_per_sport":
+                fr.get("adaptive_refetch_max_per_sport"),
+            "adaptive_refetch_proposed_max_per_sport":
+                fr.get("adaptive_refetch_proposed_max_per_sport"),
+            # ...and the read order's own figures: skips below the measured
+            # head-of-queue read floor, the floor, and where every venue
+            # read's time went (COLLECTOR_READ_ORDER_RULE, READ_TELEMETRY_RULE)
+            "skipped_below_the_read_floor": lat.get(
+                "skipped_below_the_read_floor"),
+            "read_floor_s": lat.get("read_floor_s"),
+            "venue_read_telemetry": lat.get("venue_read_telemetry"),
             "measured_on": "THE_DEPLOYED_PATH_NOT_A_FIXTURE",
         }
     except Exception as exc:                                    # noqa: BLE001

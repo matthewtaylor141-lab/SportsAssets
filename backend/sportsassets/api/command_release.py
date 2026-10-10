@@ -88,10 +88,15 @@ STATEMENT_TIMEOUT_MS = 3000
 #: stale_reason, which with status PENDING is Audrey's STALE; no constraint,
 #: trigger or index added to or changed on any existing table, no mode
 #: change, no value of any existing column changed); 317..365 are held by
-#: parallel RC6 lanes and absent from this build.
+#: parallel RC6 lanes and absent from this build; 216..368 since RC6.3c
+#: COLL-1 phase a (368: five nullable columns on ext_candidate_outcomes --
+#: where each candidate's venue read spent its time at the transport
+#: (queue_wait_s, gate_wait_s, cooldown_wait_s, http_s) and the source that
+#: served its book (book_source); a record only, no constraint, trigger,
+#: index or default on any existing object, no row or value changed).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
-TRACKED_FROM, TRACKED_TO = 216, 367
+TRACKED_FROM, TRACKED_TO = 216, 368
 RECEIPT_SCHEMA = "BETTOR_RELEASE_RECEIPT_V1"
 _PKG = pathlib.Path(__file__).resolve().parents[1]
 RECEIPT_DIR = _PKG / "release_receipts"

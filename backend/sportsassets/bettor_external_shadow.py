@@ -929,6 +929,11 @@ STAGES = (
         "QUOTE_STALE_AS_DELIVERED_BY_THE_PROVIDER",
         # (P1) the read bounded by the candidate's probability deadline
         "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH",
+        # (RC6.3c COLL-1 phase a) a read that could not finish before that
+        # deadline is not started: the candidate's remaining slack was below
+        # the measured head-of-queue read floor (ext_pinnacle_loop.
+        # COLLECTOR_READ_ORDER_RULE)
+        "QUOTE_SLACK_BELOW_THE_MEASURED_VENUE_READ_FLOOR",
         # THE VENUE READ'S OWN FRESHNESS REFUSALS. They used to stop the lane
         # before any row existed, so no row carried them; a calibration-only
         # record now does, and without these the census would attribute it
@@ -1213,6 +1218,10 @@ EVALUABILITY_OF = {
     # (P1) the same measured age, taken at the read's own deadline: the
     # quote's 30 s budget ran out before the venue read could finish
     "PROBABILITY_DEADLINE_PASSED_BEFORE_THE_READ_COULD_FINISH": DECIDED,
+    # (RC6.3c COLL-1 phase a) the same measured age, judged at the instant
+    # before the read: less slack left than one head-of-queue read costs, so
+    # the read is not started (ext_pinnacle_loop.COLLECTOR_READ_ORDER_RULE)
+    "QUOTE_SLACK_BELOW_THE_MEASURED_VENUE_READ_FLOOR": DECIDED,
     # THE GLOBAL MATCH FOUND TWO ROWS AND COULD NOT CHOOSE. Ours: the match
     # ignores dates, which is why the venue-native path exists.
     "VENUE_MAPPING_AMBIGUOUS": COULD_NOT_EVALUATE,
