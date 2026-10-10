@@ -443,17 +443,22 @@ async def _pg_superseded_round_trip():
                 "SELECT count(*) FROM paper_decisions WHERE valuation_id = $1",
                 vid) == 0                           # no decision, no loss
             ids = lambda rows: {r["id"] for r in rows}   # noqa: E731
+            # (PAPER-1) the candidates statements take the reading's age
+            # limit and the selection instant as well; this row has no
+            # observed_at, so its freshness column is true and the
+            # selection is exactly as before
             cg = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                   AT - 60, AT + 60, ctx["session_id"], 50,
-                                  PB.CG_STRATEGY)
+                                  PB.CG_STRATEGY, 30.0, AT + 4)
             ex = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                   AT - 60, AT + 60, ctx["session_id"], 50,
-                                  PB.EXPLORE_STRATEGY)
+                                  PB.EXPLORE_STRATEGY, 30.0, AT + 4)
             other = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                      AT - 60, AT + 60, "another-session", 50,
-                                     PB.CG_STRATEGY)
+                                     PB.CG_STRATEGY, 30.0, AT + 4)
             dk = await conn.fetch(PD.CANDIDATES_SQL, PB.EXPERIMENT_ID,
-                                  AT - 60, AT + 60, ctx["session_id"], 50)
+                                  AT - 60, AT + 60, ctx["session_id"], 50,
+                                  30.0, AT + 4)
             assert vid not in ids(cg)               # the backstop skips it
             assert vid in ids(ex) and vid in ids(other) and vid in ids(dk)
             newer = await conn.fetchval(

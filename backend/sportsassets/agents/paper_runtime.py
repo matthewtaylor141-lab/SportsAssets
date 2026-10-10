@@ -1083,6 +1083,7 @@ async def _record_hook_failure(conn, *, ctx: dict, valuation_id: int,
         return
     try:
         import json as _json
+        from . import paper_derek as PD
         await conn.execute(
             "INSERT INTO paper_hook_failures (session_id, account_id, "
             " valuation_id, strategy, stage, outcome, elapsed_s, error, "
@@ -1090,12 +1091,206 @@ async def _record_hook_failure(conn, *, ctx: dict, valuation_id: int,
             " $8::jsonb)", ctx.get("session_id"), ctx.get("account_id"),
             int(valuation_id), str(strategy), outcome, r.get("elapsed_s"),
             (str(r.get("error"))[:500] if r.get("error") else r.get("why")),
-            _json.dumps({k: r.get(k) for k in ("why", "decision_id",
-                                                "refusal", "deferred")},
-                        default=str))
+            _json.dumps({k: r.get(k) for k in (
+                "why", "decision_id", "refusal", "deferred")
+                # (PAPER-1) a decision not made by name: the reading's age
+                # and limit, its deadline, and whether the read was started
+                + PD.DEFERRAL_DETAIL_KEYS
+                if r.get(k) is not None}, default=str))
     except Exception:                                           # noqa: BLE001
         log.warning("paper hook failure not recorded (valuation %s, %s)",
                     valuation_id, strategy, exc_info=True)
+
+
+# ── ONE CONNECTION, ONE STATEMENT AT A TIME (PAPER-1) ─────────────────────
+#
+# THE DEFECT the concurrency repairs: the strategies deciding one valuation
+# ran in sequence, each with its own 8 s deadline, so a venue-book read that
+# hung in the first pushed the decision instants of the others past the 30 s
+# rule (production: DEREK 8.1-8.3 s after the valuation at 33-38 s, research-
+# sql 38056211192 Q3b). They now run concurrently (asyncio.gather) under one
+# deadline on ONE shared book read (paper_derek.shared_book_read).
+#
+# asyncpg runs one statement at a time per connection (a second coroutine's
+# statement fails with "another operation is in progress"), and the enter-
+# integrity rule is that a decision's connection is never used by two
+# coroutines at once. The hook has only the cycle's connection, and opening
+# three more per valuation from the ten-slot pool would starve the collector
+# and the reactive evaluations under a burst. So the strategies share the
+# one connection through `_OneStatementAtATime`: every statement takes the
+# connection lock; a transaction holds it from BEGIN to COMMIT / ROLLBACK
+# (the statements of the task that opened it pass, so the ledger's account
+# lock and the strategies' savepoints work exactly as before), so no
+# coroutine's statement ever runs inside another's transaction, and the
+# decisions interleave only between statements. Each strategy's ENTER
+# sequence (its row's INSERT, the canonical intent, the paper order --
+# paper_derek.owed_order, shielded) is unchanged and runs in its own order;
+# what is no longer fixed is which of two strategies that both ENTER the
+# same valuation submits first. Every other attribute (is_in_transaction,
+# terminate, close ...) is the connection's own. No new connection is opened.
+
+class _OneStatementAtATime:
+    """The cycle's one connection, shared by the strategies deciding one
+    valuation concurrently (see the note above)."""
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._lock = asyncio.Lock()
+        self._owner = None              # the task holding a transaction
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    @property
+    def wrapped(self):
+        return self._conn
+
+    def _mine(self) -> bool:
+        return (self._owner is not None
+                and self._owner is asyncio.current_task())
+
+    async def _call(self, name, *a, **k):
+        if self._mine():
+            return await getattr(self._conn, name)(*a, **k)
+        async with self._lock:
+            return await getattr(self._conn, name)(*a, **k)
+
+    async def execute(self, *a, **k):
+        return await self._call("execute", *a, **k)
+
+    async def executemany(self, *a, **k):
+        return await self._call("executemany", *a, **k)
+
+    async def fetch(self, *a, **k):
+        return await self._call("fetch", *a, **k)
+
+    async def fetchrow(self, *a, **k):
+        return await self._call("fetchrow", *a, **k)
+
+    async def fetchval(self, *a, **k):
+        return await self._call("fetchval", *a, **k)
+
+    async def fetchmany(self, *a, **k):
+        return await self._call("fetchmany", *a, **k)
+
+    def transaction(self, *a, **k):
+        return _HeldTransaction(self, self._conn.transaction(*a, **k))
+
+
+class _HeldTransaction:
+    """A transaction on `_OneStatementAtATime`: holds the connection lock
+    from its start to its end (a nested one -- a savepoint of the same task
+    -- rides on the outer's hold). Both the context-manager and the manual
+    start / commit / rollback forms asyncpg offers."""
+
+    def __init__(self, owner: _OneStatementAtATime, tx):
+        self._o = owner
+        self._tx = tx
+        self._nested = False
+        self._held = False
+
+    async def _take(self):
+        if self._o._mine():
+            self._nested = True
+            return
+        await self._o._lock.acquire()
+        self._o._owner = asyncio.current_task()
+        self._held = True
+
+    def _give(self):
+        if self._held:
+            self._held = False
+            self._o._owner = None
+            self._o._lock.release()
+
+    async def __aenter__(self):
+        await self._take()
+        try:
+            await self._tx.__aenter__()
+        except BaseException:
+            self._give()
+            raise
+        return self
+
+    async def __aexit__(self, et, ev, tb):
+        try:
+            return await self._tx.__aexit__(et, ev, tb)
+        finally:
+            self._give()
+
+    async def start(self):
+        await self._take()
+        try:
+            return await self._tx.start()
+        except BaseException:
+            self._give()
+            raise
+
+    async def commit(self):
+        try:
+            return await self._tx.commit()
+        finally:
+            self._give()
+
+    async def rollback(self):
+        try:
+            return await self._tx.rollback()
+        finally:
+            self._give()
+
+    def __getattr__(self, name):
+        return getattr(self._tx, name)
+
+
+async def _run_all(coros) -> list:
+    """RUN THE STRATEGIES' DECISIONS CONCURRENTLY and return every result in
+    order (an exception as the value it raised). Never returns while one of
+    them still runs: a cancellation of the caller cancels them all and is
+    re-raised only once each has ended (repeat cancellations absorbed, as
+    paper_derek.bounded_decision does), so nothing is left running on the
+    caller's connection."""
+    tasks = [asyncio.ensure_future(c) for c in coros]
+    if not tasks:
+        return []
+    try:
+        return await asyncio.gather(*tasks, return_exceptions=True)
+    except asyncio.CancelledError:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        while any(not t.done() for t in tasks):
+            try:
+                await asyncio.wait([t for t in tasks if not t.done()])
+            except asyncio.CancelledError:
+                pass                    # absorbed until the connection is free
+        for t in tasks:
+            if t.done() and not t.cancelled():
+                t.exception()           # retrieved, never logged unread
+        raise
+
+
+def _probability_deadline_of(row: dict, cfg: dict) -> float | None:
+    """THE VALUATION'S READING DEADLINE for the hook's book reads: the
+    collector's own rule, ext_pinnacle_loop.probability_deadline (the
+    reading instant + PINNACLE_MAX_AGE_S, the number the session's
+    pinnacle_max_age_s is frozen from), when the session's limit is that
+    constant; else the session's limit on the same instant
+    (paper_derek.reading_deadline). None when the reading instant is unknown
+    (then no bound: `_pinnacle` refuses by its own name)."""
+    obs = row.get("observed_at")
+    if obs is None:
+        return None
+    max_age = float(((cfg.get("entry") or {}).get("pinnacle_max_age_s")
+                     or 30.0))
+    from . import paper_derek as PD
+    try:
+        from ..workers.ext_pinnacle_loop import (PINNACLE_MAX_AGE_S,
+                                                 probability_deadline)
+        if abs(max_age - float(PINNACLE_MAX_AGE_S)) < 1e-9:
+            return probability_deadline(L._epoch(obs))
+    except Exception:                                           # noqa: BLE001
+        pass
+    return PD.reading_deadline(obs, max_age)
 
 
 # ── THE BOOK-READ RETRY: BOUNDED CONCURRENCY, AN EXPLICIT BUDGET ─────────
@@ -1377,6 +1572,64 @@ NEWER_VALUATION_SQL = """
      ORDER BY id DESC LIMIT 1
 """
 
+#: (PAPER-1) THE SUPERSESSION SKIP, EXTENDED TO METERED VALUATIONS: a
+#: valuation priced by the metered provider (pinnapi_primary.LEGACY_PROVIDER,
+#: the-odds-api.com/v4) is superseded when a NEWER metered valuation of the
+#: same contract and side -- a strictly newer reading, written since this
+#: one by the collector's next read of the market or the reactive drain --
+#: exists: that valuation carries the newer price and is itself decided, so
+#: deciding this one would be a decision on a reading the provider has
+#: replaced (its only possible verdict a refusal of the older reading).
+#: Bounded by decided_at (a newer row's decided_at is never earlier than
+#: this one's) so the read is an index range, not a scan of the table
+#: (external_valuations has no index on us_market_slug).
+NEWER_METERED_VALUATION_SQL = """
+    SELECT id, extract(epoch FROM observed_at)::float8 AS observed_at
+      FROM external_valuations
+     WHERE experiment_id = $1 AND us_market_slug = $2
+       AND buy_intent IS NOT DISTINCT FROM $3 AND id > $4
+       AND decided_at >= to_timestamp($5::float8) - interval '1 second'
+     ORDER BY id DESC LIMIT 1
+"""
+
+
+def _is_metered(row: dict, ref: dict) -> bool:
+    from .. import pinnapi_primary as primary
+    return (str(row.get("provider") or "") == primary.LEGACY_PROVIDER
+            and ref.get("provider") != primary.PROVIDER)
+
+
+async def _metered_supersession(conn, ctx: dict, row: dict) -> dict | None:
+    """None, or why this METERED valuation is superseded by a newer metered
+    valuation of the same contract and side (NEWER_METERED_VALUATION_SQL;
+    the newer row must carry a strictly newer reading)."""
+    if not row.get("us_market_slug") or row.get("id") is None \
+            or row.get("decided_at") is None:
+        return None
+    from .. import pinnapi_primary as primary
+    newer = await conn.fetchrow(
+        NEWER_METERED_VALUATION_SQL, row.get("experiment_id"),
+        row.get("us_market_slug"), row.get("buy_intent"), int(row["id"]),
+        float(L._epoch(row["decided_at"])))
+    if newer is None:
+        return None
+    obs = (L._epoch(row["observed_at"]) if row.get("observed_at") is not None
+           else None)
+    n_obs = newer["observed_at"]
+    if obs is not None and n_obs is not None and float(n_obs) <= float(obs):
+        return None                     # not a newer reading
+    at = float(ctx["clock"]()) if ctx.get("clock") else float(ctx["now"])
+    SUPERSEDED_COUNTS["metered"] = SUPERSEDED_COUNTS.get("metered", 0) + 1
+    return {"provider": primary.LEGACY_PROVIDER, "metered": True,
+            "us_market_slug": row.get("us_market_slug"),
+            "buy_intent": row.get("buy_intent"), "observed_at": obs,
+            "newer_observed_at": n_obs, "by": "NEWER_VALUATION", "at": at,
+            "newer_valuation_id": int(newer["id"]),
+            "basis": ("a newer metered valuation of the same contract and "
+                      "side carries a newer reading and is itself decided; "
+                      "this one would be decided on a reading the provider "
+                      "has replaced")}
+
 
 def _row_reference(row: dict) -> dict:
     import json as _json
@@ -1399,6 +1652,10 @@ async def superseded_by(conn, ctx: dict, row: dict) -> dict | None:
         ref = _row_reference(row)
         if ref.get("provider") != primary.PROVIDER or \
                 ref.get("version") != primary.VERSION:
+            if _is_metered(row, ref):
+                # (PAPER-1) a metered valuation: superseded by a newer
+                # metered valuation of the same contract and side
+                return await _metered_supersession(conn, ctx, row)
             return None
         from .. import pinnapi_feed_runtime as feed
         from .. import pinnapi_reactive as reactive
@@ -1463,13 +1720,32 @@ async def _record_superseded(conn, *, ctx: dict, valuation_id: int,
                     valuation_id, strategy, exc_info=True)
 
 
+_UNSET = object()
+
+
+def _as_result(strat: str, res) -> dict:
+    """A strategy's result, or the error it raised as a result."""
+    if isinstance(res, dict):
+        return res
+    return {"decided": False, "strategy": strat,
+            "error": "%s: %s" % (type(res).__name__, str(res)[:200])}
+
+
 async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
                                    strategies, via: str, attempt_no: int,
-                                   schedule_retry) -> dict:
-    """The investment policy first, then the maker-entry and exploration
-    strategies, on ONE shared book read; each attempt recorded. A strategy
-    whose read was cut earns the retry for itself and every strategy after
-    it in this valuation (they would meet the same cooldown)."""
+                                   schedule_retry, superseded=_UNSET) -> dict:
+    """The investment policy, the maker-entry and the exploration strategies
+    deciding ONE valuation -- CONCURRENTLY under one deadline (PAPER-1,
+    asyncio.gather; the plan's order is the order they start in), on ONE
+    shared book read (paper_derek.shared_book_read) and, in the hook, on one
+    connection whose statements are serialized (`_OneStatementAtATime`);
+    each attempt recorded as it ends. The strategies the shared read's venue
+    cooldown cut earn the one bounded retry together (they met the same
+    cooldown). `superseded`: the valuation's supersession (`superseded_by`)
+    when the caller has checked it already; left unset, it is checked here.
+    Before PAPER-1 the three ran in sequence, each with its own 8 s
+    deadline, so one hung read pushed the next strategies' decision instants
+    past the 30 s rule."""
     from . import paper_benchmark as PB
     from . import paper_maker as PMK
     from . import paper_explore as PEX
@@ -1481,41 +1757,44 @@ async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
             conn, c, dict(row), timeout_s=T)),
         (PB.EXPLORE_STRATEGY, lambda c: PEX.decide_for_hook(
             conn, c, dict(row), timeout_s=T))]
+    plan = [(s, fn) for s, fn in plan
+            if strategies is None or s in strategies]
     results: dict = {}
-    retry_for: list = []
-    retry_after = None
-    sup = None
-    for strat, fn in plan:
-        if strategies is not None and strat not in strategies:
-            continue
-        if retry_for:
-            res = {"deferred": True, "why": "BOOK_RETRY",
-                   "retry": {"with": retry_for[0]}}
-            retry_for.append(strat)
-        elif sup is not None or (sup := await superseded_by(
-                conn, ctx, row)) is not None:
-            # A NEWER PRICE REPLACED THIS VALUATION'S (R_SUPERSEDED): this
-            # strategy, and every one after it, leaves it to the newer
-            # valuation -- recorded, never decided on the old price
+    if not plan:
+        return results
+    sup = (await superseded_by(conn, ctx, row) if superseded is _UNSET
+           else superseded)
+    if sup is not None:
+        # A NEWER PRICE REPLACED THIS VALUATION'S (R_SUPERSEDED): every
+        # strategy leaves it to the newer valuation -- recorded, in plan
+        # order, never decided on the old price
+        for strat, _fn in plan:
             res = _superseded_result(sup)
             results[strat] = res
             await _record_superseded(conn, ctx=ctx, valuation_id=vid,
                                      strategy=strat, res=res)
-            continue
-        else:
-            res = await fn(ctx)
-            if res.get("deferred") and res.get("why") == "BOOK_RETRY":
-                retry_for.append(strat)
-                retry_after = res.get("retry_after_s")
-        results[strat] = res
-        await PB.record_attempt(conn, ctx, valuation_id=vid, strategy=strat,
+        return results
+
+    async def one(strat, fn, c):
+        res = await fn(c)
+        await PB.record_attempt(conn, c, valuation_id=vid, strategy=strat,
                                 via=via, res=res, attempt_no=attempt_no)
         if not (res.get("deferred") and res.get("why") == "BOOK_RETRY"):
-            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
+            await _record_hook_failure(conn, ctx=c, valuation_id=vid,
                                        strategy=strat, res=res)
+        return res
+
+    got = await _run_all([one(strat, fn, ctx) for strat, fn in plan])
+    for (strat, _fn), res in zip(plan, got):
+        results[strat] = _as_result(strat, res)
+    retry_for = [s for s, _fn in plan
+                 if results[s].get("deferred")
+                 and results[s].get("why") == "BOOK_RETRY"]
     if retry_for:
+        retry_after = max(float(results[s].get("retry_after_s") or 1.0)
+                          for s in retry_for)
         sched = schedule_retry(valuation_id=vid, strategies=retry_for,
-                               after_s=float(retry_after or 1.0))
+                               after_s=retry_after)
         await PB.record_attempt(
             conn, ctx, valuation_id=vid, strategy=retry_for[0], via=via,
             attempt_no=attempt_no,
@@ -1527,16 +1806,11 @@ async def _decide_paper_strategies(conn, ctx: dict, row: dict, *, vid: int,
             # NO RETRY AVAILABLE: decide now, without one (the refusal is
             # recorded), rather than leave the valuation undecided.
             ctx2 = dict(ctx, book_retry_ok=False)
-            for strat, fn in plan:
-                if strat in retry_for:
-                    res = await fn(ctx2)
-                    results[strat] = res
-                    await PB.record_attempt(
-                        conn, ctx2, valuation_id=vid, strategy=strat,
-                        via=via, res=res, attempt_no=attempt_no)
-                    await _record_hook_failure(conn, ctx=ctx2,
-                                               valuation_id=vid,
-                                               strategy=strat, res=res)
+            again = [(s, fn) for s, fn in plan if s in retry_for]
+            got2 = await _run_all([one(strat, fn, ctx2)
+                                   for strat, fn in again])
+            for (strat, _fn), res in zip(again, got2):
+                results[strat] = _as_result(strat, res)
         results["retry"] = sched
     return results
 
@@ -1609,8 +1883,10 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
             "clock": (time.time if live_clock else (lambda: at)),
             "decided_via": via,
             "context_cache_key": sess["session_id"],
-            # ONE BOOK READ for every strategy deciding this valuation
-            "books_by_slug": {},
+            # ONE BOOK READ for every strategy deciding this valuation --
+            # a cut read too (paper_derek.shared_book_read): the strategies
+            # of one valuation meet the same venue cooldown
+            "books_by_slug": {}, "share_cut_reads": True,
             # the first attempt may earn one bounded retry (when one can be
             # scheduled); a retry may not
             "book_retry_ok": (attempt_no == 1 and book_retry
@@ -1621,16 +1897,111 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
         bench_cg = None
         family: dict = {}
         vid = int(valuation_id)
+        # (PAPER-1) THE READING'S OWN DEADLINE bounds every strategy's book
+        # read for this valuation (paper_derek.read_book_within_deadline) and
+        # names a decision it made impossible
+        ctx["probability_deadline_epoch"] = _probability_deadline_of(
+            dict(row), cfg)
+        # ONE CONNECTION, ONE STATEMENT AT A TIME: the strategies below run
+        # concurrently on the cycle's connection (see _OneStatementAtATime)
+        lconn = _OneStatementAtATime(conn)
+        # THE SUPERSESSION, ONCE for every strategy (R_SUPERSEDED: a newer
+        # price replaced this valuation's and is itself being valued)
+        sup = await superseded_by(conn, ctx, dict(row))
+        t_derek = time.monotonic()
+        started = None
         if bench_on:
-            # THE ACTIVE ENTRY EXPERIMENT FIRST. The completed-game policy is
-            # the investment policy, so it decides closest to the valuation
-            # instant; the maker-entry policy and the bounded exploration
-            # strategy follow on the SAME book read.
             from . import paper_benchmark as PB
-            family = await _decide_paper_strategies(
-                conn, ctx, dict(row), vid=vid, strategies=strategies,
+            # THE INVESTMENT POLICY DECIDES FIRST: the completed-game hook
+            # decision sets this as it starts; Derek and the strict
+            # benchmark start after it (bounded by its start wait)
+            started = asyncio.Event()
+            ctx[PB.INVESTMENT_POLICY_STARTED] = started
+
+        async def after_the_investment_policy_started():
+            if started is None or (strategies is not None
+                                   and PB.CG_STRATEGY not in strategies):
+                return
+            try:
+                await asyncio.wait_for(
+                    started.wait(), PB.INVESTMENT_POLICY_START_WAIT_S)
+            except asyncio.TimeoutError:
+                pass
+
+        async def derek() -> dict:
+            await after_the_investment_policy_started()
+            try:
+                if sup is not None:
+                    # Derek leaves it to the newer valuation
+                    rec = _superseded_result(sup)
+                    await _record_superseded(
+                        lconn, ctx=ctx, valuation_id=vid,
+                        strategy="DEREK_ENTRY_POLICY_V2", res=rec)
+                    return rec
+                dctx = dict(ctx, deadline=time.monotonic()
+                            + VALUATION_HOOK_TIMEOUT_S)
+                # THE DEADLINE BOUNDS THE DECISION; a recorded ENTER's order
+                # completes (PD.bounded_decision, P0 incident 2026-10-04).
+                rec = await PD.bounded_decision(
+                    lambda c: PD.decide_one(lconn, c, dict(row)), dctx,
+                    timeout_s=VALUATION_HOOK_TIMEOUT_S)
+                await _record_hook_failure(
+                    lconn, ctx=ctx, valuation_id=vid,
+                    strategy="DEREK_ENTRY_POLICY_V2",
+                    res=dict(rec, elapsed_s=round(
+                        time.monotonic() - t_derek, 3)))
+                return rec
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:                           # noqa: BLE001
+                await _record_hook_failure(
+                    lconn, ctx=ctx, valuation_id=vid,
+                    strategy="DEREK_ENTRY_POLICY_V2",
+                    res={"error": "%s: %s" % (type(exc).__name__,
+                                              str(exc)[:200]),
+                         "timeout": isinstance(exc, asyncio.TimeoutError),
+                         # set when an ENTER was recorded and its order
+                         # outran the grace (PD.EnterOrderGraceExceeded)
+                         "decision_id": getattr(exc, "decision_id", None),
+                         "elapsed_s": round(time.monotonic() - t_derek, 3)})
+                # WITH THE BENCHMARK ON, a failing two-model decision does
+                # not stop the benchmark's separate decision on the same
+                # valuation; without it the hook reports the error
+                return {"error": "%s: %s" % (type(exc).__name__,
+                                             str(exc)[:200]),
+                        "raised": exc}
+
+        async def strict() -> dict:
+            # THE STRICT PINNACLE_ONLY_PAPER_BENCHMARK, its own record on the
+            # same valuation (new entries off since 184: it returns at once).
+            await after_the_investment_policy_started()
+            b = await PB.decide_for_hook(
+                lconn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S)
+            await _record_hook_failure(lconn, ctx=ctx, valuation_id=vid,
+                                       strategy=PB.STRATEGY, res=b)
+            return b
+
+        # THE PLAN, STARTED TOGETHER (asyncio.gather) under one deadline: the
+        # completed-game policy -- the investment policy -- first in the
+        # order, then the maker-entry and exploration strategies, Derek's
+        # two-model decision, the strict benchmark; one shared book read.
+        runs = []
+        if bench_on:
+            runs.append(_decide_paper_strategies(
+                lconn, ctx, dict(row), vid=vid, strategies=strategies,
                 via=via, attempt_no=attempt_no,
-                schedule_retry=schedule_retry or schedule_book_retry)
+                schedule_retry=schedule_retry or schedule_book_retry,
+                superseded=sup))
+        if via != "BOOK_RETRY":
+            runs.append(derek())
+            if bench_on:
+                runs.append(strict())
+        got = await _run_all(runs)
+        got = list(got)
+        if bench_on:
+            fam = got.pop(0)
+            family = fam if isinstance(fam, dict) else {
+                "error": "%s: %s" % (type(fam).__name__, str(fam)[:200])}
             bench_cg = family.get(PB.CG_STRATEGY)
         if via == "BOOK_RETRY":
             # THE RETRY DECIDES ONLY WHAT ITS FIRST ATTEMPT DEFERRED: the
@@ -1653,54 +2024,14 @@ async def decide_valuation(conn, *, valuation_id, now: float | None = None,
                     "strategies": {k: {kk: (v or {}).get(kk) for kk in (
                         "decision_id", "verdict", "refusal", "order_id",
                         "deferred", "why")} for k, v in family.items()
-                        if k != "retry"}}
-        t_derek = time.monotonic()
-        sup = await superseded_by(conn, ctx, dict(row))
-        try:
-            if sup is not None:
-                # R_SUPERSEDED: a newer price replaced this valuation's and
-                # is itself being valued; Derek leaves it to that valuation
-                rec = _superseded_result(sup)
-                await _record_superseded(
-                    conn, ctx=ctx, valuation_id=vid,
-                    strategy="DEREK_ENTRY_POLICY_V2", res=rec)
-            else:
-                dctx = dict(ctx, deadline=time.monotonic()
-                            + VALUATION_HOOK_TIMEOUT_S)
-                # THE DEADLINE BOUNDS THE DECISION; a recorded ENTER's order
-                # completes (PD.bounded_decision, P0 incident 2026-10-04).
-                rec = await PD.bounded_decision(
-                    lambda c: PD.decide_one(conn, c, dict(row)), dctx,
-                    timeout_s=VALUATION_HOOK_TIMEOUT_S)
-                await _record_hook_failure(
-                    conn, ctx=ctx, valuation_id=vid,
-                    strategy="DEREK_ENTRY_POLICY_V2",
-                    res=dict(rec, elapsed_s=round(
-                        time.monotonic() - t_derek, 3)))
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:                               # noqa: BLE001
-            await _record_hook_failure(
-                conn, ctx=ctx, valuation_id=vid,
-                strategy="DEREK_ENTRY_POLICY_V2",
-                res={"error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
-                     "timeout": isinstance(exc, asyncio.TimeoutError),
-                     # set when an ENTER was recorded and its order outran
-                     # the grace (PD.EnterOrderGraceExceeded)
-                     "decision_id": getattr(exc, "decision_id", None),
-                     "elapsed_s": round(time.monotonic() - t_derek, 3)})
+                        if k != "retry" and isinstance(v, dict)}}
+        rec = _as_result("DEREK_ENTRY_POLICY_V2", got.pop(0))
+        if rec.get("raised") is not None:
+            raised = rec.pop("raised")
             if not bench_on:
-                raise
-            # WITH THE BENCHMARK ON, a failing two-model decision does not
-            # stop the benchmark's separate decision on the same valuation.
-            rec = {"error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+                raise raised
         if bench_on:
-            # THE STRICT PINNACLE_ONLY_PAPER_BENCHMARK, its own record on the
-            # same valuation (new entries off since 184: it returns at once).
-            bench = await PB.decide_for_hook(
-                conn, ctx, dict(row), timeout_s=VALUATION_HOOK_TIMEOUT_S)
-            await _record_hook_failure(conn, ctx=ctx, valuation_id=vid,
-                                       strategy=PB.STRATEGY, res=bench)
+            bench = _as_result(PB.STRATEGY, got.pop(0))
 
         delta = int(getattr(md, "mutation_attempts", 0) or 0) - before
         if delta:

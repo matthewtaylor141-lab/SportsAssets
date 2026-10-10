@@ -642,9 +642,11 @@ async def test_k6_a_pinnapi_valuation_persisted_by_the_collector_is_the_sole_aut
         vid = await EXT.persist(conn, rec)
         assert vid is not None
         # ── the completed-game decision's own read of the persisted row ──
+        # (PAPER-1: the statement takes the reading's age limit and the
+        # selection instant as well)
         rows = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                 at - 3600, at + 3600, "k6-no-session", 50,
-                                PB.CG_STRATEGY)
+                                PB.CG_STRATEGY, 30.0, at + 1)
         row = next(dict(r) for r in rows if r["id"] == vid)
         assert row["provider"] == PP.PROVIDER
         cand = DP.candidate_from_row(row)

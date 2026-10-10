@@ -2452,6 +2452,28 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    # (rc6.3 PAPER-1, agents/paper_derek) THE TWO WAYS A DOOMED PAPER
+    # DECISION IS NOT MADE: hook-failure outcomes (paper_hook_failures.error
+    # on a DEFERRED row, stage PAPER_PASS or IN_CYCLE_VALUATION_HOOK), never a
+    # paper decision and never a refusal code on any record the coverage
+    # census reads; nothing is valued on any price and no threshold moves
+    "EXPIRED_BEFORE_DECISION":
+        "agents/paper_derek: a paper-pass backstop candidate whose Pinnacle "
+        "reading was past the 30 s rule before the pass could decide it, on "
+        "a valuation the in-cycle hook had attempted -- recorded as a "
+        "DEFERRED paper_hook_failures row with the reading's age and limit, "
+        "never as a REFUSE PROBABILITY_EVIDENCE_STALE decision (which said "
+        "nothing about the market and made the event a SOFTWARE first "
+        "loss); an accounting outcome, never a trading, decision, order or "
+        "collector refusal",
+    "DEFERRED_PAST_THE_PROBABILITY_DEADLINE":
+        "agents/paper_derek: an in-cycle paper decision whose venue-book "
+        "read could not finish before the reading's own probability "
+        "deadline (observed_at + the 30 s rule) -- not started, or cut by "
+        "that bound -- or whose reading had passed the deadline when the "
+        "strategy started: not decided, recorded as a DEFERRED "
+        "paper_hook_failures row; never a REFUSE decision; an accounting "
+        "outcome, never a trading, decision, order or collector refusal",
     "HEARTBEAT_SECTION_OVER_BOUND_OMITTED":
         "workers/universal_market_plane: a plane heartbeat section larger "
         "than its 16,000-character bound is replaced by this marker (no "

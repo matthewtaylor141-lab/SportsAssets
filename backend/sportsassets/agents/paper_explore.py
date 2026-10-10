@@ -524,6 +524,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     pin.update(decided_via=ctx.get("decided_via") or PD.DECIDED_VIA_PASS,
                decided_at=at, strategy=STRATEGY, contract_match=match,
                real_event=real, displayed_quote_used_as_price=False)
+    # (PAPER-1) a reading past its deadline at this instant is not decided
+    # in cycle, nor by the backstop on a valuation the hook attempted
+    doomed = PD.doomed_by_expiry(ctx, pin)
+    if doomed is not None:
+        return doomed
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
     # R30A: an NFL line's P(win | no tie) is valued as the venue contract
@@ -584,6 +589,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                          3)
         ctx["last_book_source"] = PB.book_source(bk)
         ctx["last_book_age_s"] = book_age
+        past = PD.deferred_past_probability_deadline(got)
+        if past is not None:
+            # (PAPER-1) the read could not finish before the reading's own
+            # deadline: deferred by name, no REFUSE row, no retry
+            return past
         if PD.book_deadline_refusal(got):
             retry = PB.book_retry_plan(ctx, got, pin)
             ctx["last_book_cooldown_s"] = retry.get("cooldown_s")

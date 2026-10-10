@@ -457,9 +457,26 @@ GAP_NO_MODEL = "NO_INTERNAL_MODEL_BY_DESIGN"
 
 #: A valuation the in-cycle hook SKIPPED AS SUPERSEDED for this strategy
 #: (paper_runtime.R_SUPERSEDED: a newer price replaced its own and is itself
-#: valued) is not re-decided by the pass backstop either.
+#: valued) is not re-decided by the pass backstop either; nor is one whose
+#: reading expired before a decision or whose read could not finish before
+#: the reading's deadline (PAPER-1, paper_derek.BACKSTOP_SKIPS). $7 the
+#: reading's age limit (the session's pinnacle_max_age_s), $8 the selection
+#: instant: the two PAPER-1 columns (paper_derek.CANDIDATE_COLUMNS) say
+#: whether the reading is inside its rule at selection and whether the
+#: in-cycle hook attempted the valuation at all.
 CANDIDATES_SQL = """
-    SELECT v.* FROM external_valuations v
+    SELECT v.*,
+           (v.observed_at IS NULL
+            OR v.observed_at + make_interval(secs => $7::float8)
+               > to_timestamp($8::float8)) AS reading_fresh_at_selection,
+           (EXISTS (SELECT 1 FROM paper_hook_failures h2
+                     WHERE h2.session_id = $4 AND h2.valuation_id = v.id
+                       AND h2.stage = 'IN_CYCLE_VALUATION_HOOK')
+            OR EXISTS (SELECT 1 FROM paper_decisions d2
+                        WHERE d2.session_id = $4 AND d2.valuation_id = v.id
+                          AND coalesce(d2.pinnacle->>'decided_via', '')
+                              <> 'PAPER_PASS_BACKSTOP')) AS attempted_in_cycle
+      FROM external_valuations v
      WHERE v.experiment_id = $1
        AND v.decided_at > to_timestamp($2) AND v.decided_at <= to_timestamp($3)
        AND v.us_market_slug IS NOT NULL
@@ -470,7 +487,9 @@ CANDIDATES_SQL = """
                         WHERE h.session_id = $4 AND h.valuation_id = v.id
                           AND h.strategy = $6
                           AND h.error IN ('PINNAPI_PRIMARY_VALUATION_SUPERSEDED_BY_A_NEWER_QUOTE',
-                                          'PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME'))
+                                          'PINNAPI_VALUATION_PRICED_BY_A_PREVIOUS_FEED_RUNTIME',
+                                          'EXPIRED_BEFORE_DECISION',
+                                          'DEFERRED_PAST_THE_PROBABILITY_DEADLINE'))
      ORDER BY v.decided_at DESC, v.id DESC
      LIMIT $5
 """
@@ -1742,24 +1761,14 @@ async def book_for(conn, ctx: dict, slug: str, *, basis: str) -> dict:
     every caller still applies the same age check to the decision). An
     unreadable or deadline-cut read is NOT reused: the next strategy reads
     again. Fewer venue requests, never a staler price. Returns {got, obs,
-    reused} or {deferred: True} when the pass's read budget is spent."""
-    cache = ctx.setdefault("books_by_slug", {})
-    clock = ctx.get("clock") or (lambda: float(ctx["now"]))
-    hit = cache.get(slug)
-    if hit is not None and not hit["obs"].get("error") and (
-            float(clock()) - float(hit["obs"]["observed_at"])
-            <= BOOK_MAX_AGE_S):
-        return dict(hit, reused=True)
-    cfg = ctx["config"]
-    if ctx["books_read"] >= int(cfg["cadence"]["max_book_reads_per_pass"]):
-        return {"deferred": True}
-    got = await PD.read_book_within_deadline(ctx, slug)
-    ctx["books_read"] += 1
-    obs = await SIM.record_book(conn, slug=slug, read=got,
-                                source="PAPER_MARKET_DATA_CLIENT",
-                                read_basis=basis)
-    cache[slug] = {"got": got, "obs": obs}
-    return {"got": got, "obs": obs, "reused": False}
+    reused} or {deferred: True} when the pass's read budget is spent.
+
+    (PAPER-1) The read itself is `paper_derek.shared_book_read`: in cycle the
+    strategies decide concurrently, so a read IN FLIGHT for this slug is
+    awaited and its one observation shared (Derek's decision shares it too);
+    the read is bounded by the reading's own probability deadline as well as
+    the decision's."""
+    return await PD.shared_book_read(conn, ctx, slug, basis=basis)
 
 
 #: (RC5) the book the paper market-data owner served from the deciding
@@ -1836,6 +1845,13 @@ async def record_attempt(conn, ctx: dict, *, valuation_id, strategy: str,
     valuation, whatever happened. Never raises; an absent table is
     skipped (the attempt is still in the decision or hook-failure record)."""
     r = res or {}
+    if r.get("deferred") and r.get("why") in PD.NOT_DECIDED_BY_NAME:
+        # (PAPER-1) a decision not made because the reading expired, or its
+        # read could not finish before the reading's deadline: recorded as
+        # its own DEFERRED paper_hook_failures row (like the superseded and
+        # previous-runtime deferrals), not as an evaluation attempt -- the
+        # attempts table's CHECK admits no outcome that would name it
+        return
     if r.get("timeout"):
         outcome = "TIMEOUT"
     elif r.get("error"):
@@ -2185,6 +2201,11 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                probability_authority=match.get("probability_authority"),
                valuation_record_purpose=cand.get("record_purpose"),
                displayed_quote_used_as_price=False)
+    # (PAPER-1) a reading past its deadline at this instant is not decided
+    # in cycle, nor by the backstop on a valuation the hook attempted
+    doomed = PD.doomed_by_expiry(ctx, pin)
+    if doomed is not None:
+        return doomed
     if pin.get("refusal"):
         refusals.append(pin["refusal"])
     cross = await cross_strategy_exposure(
@@ -2253,6 +2274,12 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                          3)
         ctx["last_book_source"] = book_source(bk)
         ctx["last_book_age_s"] = book_age
+        past = PD.deferred_past_probability_deadline(got)
+        if past is not None:
+            # (PAPER-1) the read could not finish before the reading's own
+            # deadline (not started, or cut by it): deferred by name, no
+            # REFUSE row and no retry (it would meet a stale reading)
+            return past
         if PD.book_deadline_refusal(got):
             retry = book_retry_plan(ctx, got, pin)
             ctx["last_book_cooldown_s"] = retry.get("cooldown_s")
@@ -2905,12 +2932,24 @@ async def step(conn, ctx: dict, pol=None, decide=None) -> dict:
         return dict(out, refusal=en["refusal"])
     cfg = ctx["config"]
     at = float(ctx["now"])
+    # THE SELECTION INSTANT: the decision clock (the real clock in production,
+    # the pass instant in tests), the same clock `_pinnacle` re-ages on
+    sel_at = float(ctx["clock"]()) if ctx.get("clock") else at
+    max_age = PD.max_age_of(cfg)
     rows = [dict(r) for r in await conn.fetch(
         CANDIDATES_SQL, EXPERIMENT_ID,
         at - float(cfg["entry"]["valuation_lookback_s"]), at + 1.0,
         ctx["session_id"], int(cfg["cadence"]["max_decisions_per_pass"]),
-        pol["strategy"])]
+        pol["strategy"], max_age, sel_at)]
     out["candidates"] = len(rows)
+    # (PAPER-1) A READING THAT EXPIRED BEFORE THIS PASS COULD DECIDE IT, on a
+    # valuation the in-cycle hook attempted: recorded by name, not decided
+    rows, expired = PD.split_expired_candidates(rows)
+    if expired:
+        out["expired_before_decision"] = await PD.record_expired_candidates(
+            conn, ctx=ctx, rows=expired, strategy=pol["strategy"],
+            at=sel_at, max_age_s=max_age)
+        out["deferred"] += len(expired)
     ctx.setdefault("pending_entries", [])
     fn = decide or decide_one
     for row in rows:
@@ -2931,6 +2970,10 @@ async def step(conn, ctx: dict, pol=None, decide=None) -> dict:
             out["deferred"] += 1
             out["previous_runtime"] = out.get("previous_runtime", 0) + 1
             continue
+        # the reading's own deadline bounds this candidate's book read, and
+        # whether the hook attempted it routes an expiry at the decision
+        # instant (PAPER-1, PD.doomed_by_expiry)
+        prev_ctx = PD.candidate_context(ctx, row, max_age_s=max_age)
         try:
             rec = await fn(conn, ctx, row, pol)
         except Exception as exc:                                # noqa: BLE001
@@ -2943,12 +2986,21 @@ async def step(conn, ctx: dict, pol=None, decide=None) -> dict:
                                           str(exc)[:200])},
                 elapsed_s=round(time.monotonic() - t0, 3))
             continue
+        finally:
+            PD.restore_candidate_context(ctx, prev_ctx)
         await record_attempt(conn, ctx, valuation_id=row.get("id"),
                              strategy=pol["strategy"], via="PAPER_PASS",
                              res=rec,
                              elapsed_s=round(time.monotonic() - t0, 3))
         if rec.get("deferred"):
             out["deferred"] += 1
+            if rec.get("why") in PD.NOT_DECIDED_BY_NAME:
+                # recorded as its own DEFERRED row (paper_hook_failures),
+                # never as a decision
+                await PD.record_deferred_by_name(
+                    conn, ctx=ctx, valuation_id=row.get("id"),
+                    strategy=pol["strategy"], res=rec)
+                out[rec["why"]] = out.get(rec["why"], 0) + 1
             continue
         if rec.get("duplicate"):
             out["already_recorded"] = out.get("already_recorded", 0) + 1
@@ -2995,6 +3047,13 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
     pol = _pol(pol)
     STRATEGY = pol["strategy"]                                  # noqa: N806
     t0 = time.monotonic()
+    # (PAPER-1) THE INVESTMENT POLICY STARTS FIRST: with the strategies
+    # deciding concurrently, the completed-game policy's decision begins
+    # before Derek's and the strict benchmark's (they wait on this signal,
+    # bounded), so it still decides closest to the valuation instant; set
+    # on every exit too, so nothing waits on a policy that did not start
+    started = (ctx.get(INVESTMENT_POLICY_STARTED)
+               if pol["kind"] == "COMPLETED_GAME" else None)
     try:
         en = await enablement(conn, pol)
         if not en["enabled"]:
@@ -3003,6 +3062,8 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
         ctx = dict(ctx, deadline=time.monotonic() + float(timeout_s))
         ctx.pop("benchmark", None)
         fn = decide or decide_one
+        if started is not None:
+            started.set()
         rec = await PD.bounded_decision(
             lambda c: fn(conn, c, row, pol), ctx, timeout_s=timeout_s)
         return dict({k: rec.get(k) for k in (
@@ -3010,6 +3071,10 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
             "deferred", "strategy", "book_source", "book_age_s",
             "cooldown_s", "retry_after_s", "retry", "selection",
             "order_after_decision_deadline")},
+            # (PAPER-1) a decision not made by name keeps its detail (the
+            # reading's age and limit, whether the read was started) for
+            # the hook-failure row
+            **PD.deferral_detail(rec),
             decided=not rec.get("deferred"), why=rec.get("why"),
             elapsed_s=round(time.monotonic() - t0, 3))
     except asyncio.CancelledError:
@@ -3030,6 +3095,18 @@ async def decide_for_hook(conn, ctx: dict, row: dict, *,
         return {"decided": False, "strategy": STRATEGY,
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
                 "elapsed_s": round(time.monotonic() - t0, 3)}
+    finally:
+        if started is not None:
+            started.set()
+
+
+#: (PAPER-1) the ctx key of the asyncio.Event the completed-game policy's
+#: hook decision sets as it starts (paper_runtime.decide_valuation creates
+#: it; Derek and the strict benchmark start after it, bounded)
+INVESTMENT_POLICY_STARTED = "investment_policy_started"
+#: the most Derek and the strict benchmark wait for that signal: a policy
+#: whose enablement read hangs this long is not waited for
+INVESTMENT_POLICY_START_WAIT_S = 1.0
 
 
 # ═════════════════════════════════════════════════════════════════════

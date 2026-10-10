@@ -558,14 +558,16 @@ async def _pg_previous_runtime_round_trip():
                 vid) == 0                           # no decision, no loss
             def ids(rows):
                 return {r["id"] for r in rows}
+            # (PAPER-1) the candidates statements take the reading's age
+            # limit and the selection instant as well
             cg = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                   AT - 60, AT + 60, "rt-sess", 50,
-                                  PB.CG_STRATEGY)
+                                  PB.CG_STRATEGY, 30.0, AT)
             ex = await conn.fetch(PB.CANDIDATES_SQL, PB.EXPERIMENT_ID,
                                   AT - 60, AT + 60, "rt-sess", 50,
-                                  PB.EXPLORE_STRATEGY)
+                                  PB.EXPLORE_STRATEGY, 30.0, AT)
             dk = await conn.fetch(PD.CANDIDATES_SQL, PB.EXPERIMENT_ID,
-                                  AT - 60, AT + 60, "rt-sess", 50)
+                                  AT - 60, AT + 60, "rt-sess", 50, 30.0, AT)
             assert vid not in ids(cg)               # not re-selected
             assert vid in ids(ex) and vid in ids(dk)  # per strategy
         finally:
