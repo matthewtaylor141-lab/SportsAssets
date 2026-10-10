@@ -240,3 +240,168 @@ async def test_family_close_touches_no_account_outside_the_family(conn):
     assert L.ACCOUNT_ID in out['family_closing']
     assert [v[1] for v in await _versions(conn, other, day)] == [False]
     assert main['account_id'] == L.ACCOUNT_ID
+
+
+# ═════════════════════════════════════════════════════════════════════
+# (rc6.3 pr5-port, second review) A REVISION AFTER THE SWITCH DAY CLOSED
+# ═════════════════════════════════════════════════════════════════════
+# Xavier's production settlement pass keeps applying settlement revisions to
+# every family account (paper_xavier.step_settle walks
+# risk_history_accounts). Before this fix a deselected account got no
+# version after its switch day closed, so a revision recorded later -- a
+# realized gain or loss on its ledger -- was in no Audrey report (second
+# independent review, accounting lens, test_PA / test_PA2). Now the selected
+# account's step writes the family account's current-day version whenever it
+# recorded activity after its newest report, and the family day close
+# finalizes that day.
+
+async def _all_versions(c, acct):
+    return [(str(r['report_day']), r['version'], r['final'],
+             float(r['realized']))
+            for r in await c.fetch(
+                "SELECT report_day, version, final, "
+                " (report->'pnl'->>'realized_total_usd')::float8 AS realized"
+                "  FROM paper_audrey_reports WHERE account_id=$1 "
+                " ORDER BY report_day, version", acct)]
+
+
+async def _revise(c, slug, decided, *, won):
+    from sportsassets.agents import paper_xavier as X
+    from tests.test_day_one_release_review import _valuation
+    vid = await _valuation(c, cid=slug, price=.5, decided=decided)
+    await c.execute(
+        "UPDATE external_valuations SET outcome=$2, outcome_known=true, "
+        " outcome_basis=$3, outcome_at=to_timestamp($4) WHERE id=$1",
+        vid, 1 if won else 0, next(iter(X.LABEL_BASES)), float(decided) + 100)
+
+
+@pytest.mark.parametrize('activate', [False, True])
+async def test_PA_a_revision_after_the_switch_day_reaches_an_audrey_report(conn, activate):
+    main = await _acct(conn, L.ACCOUNT_ID)
+    day, start, end = _day(main, time.time())
+    slug = 'rc63-pa-' + uuid.uuid4().hex[:6]
+    o = await _buy(conn, main, at=start + 60, key='pa-' + slug, slug=slug)
+    await _pass(conn, start + 120)
+    await _settle_lost(conn, main, o, at=start + 180)
+    if activate:
+        await E._activate_verified(conn, epoch_id='rc63-pa',
+                                   request_id='rc63-pa', proof=PROOF)
+    await _pass(conn, end + 3600)             # the switch day closes
+    before = await _all_versions(conn, L.ACCOUNT_ID)
+    assert [v[3] for v in before if v[0] == str(day) and v[2]] == [-500.0], \
+        before
+    # the venue revises the settlement (LOST -> WON) the next day; the
+    # production pass's Xavier applies it to paper_acct_main
+    await _revise(conn, slug, start + 60, won=True)
+    p = await _pass(conn, end + 7200)
+    assert p['steps']['settle']['corrected'] == 1, p['steps']['settle']
+    led = float((await L.balances(conn, L.ACCOUNT_ID))['realized_pnl_usd'])
+    assert led == 500.0
+    for at in (end + 8200, end + 86400 + 3600, end + 2 * 86400 + 3600):
+        await _pass(conn, at)
+    after = await _all_versions(conn, L.ACCOUNT_ID)
+    # every earlier version is unchanged (append-only)
+    assert after[:len(before)] == before
+    nxt = str(PA_day(end + 7200))
+    finals = [v for v in after if v[0] == nxt and v[2]]
+    # the revision day has exactly one final version carrying the revision
+    assert len(finals) == 1 and finals[0][3] == led, after
+    assert [v for v in after if v[0] == nxt][-1] == finals[0]
+
+
+def PA_day(at):
+    from sportsassets.agents import paper_audrey as PA
+    return PA.day_bounds(at)[0]
+
+
+async def test_PA2_a_late_revision_on_a_rolled_back_epoch_reaches_an_audrey_report(conn):
+    r = await E._activate_verified(conn, epoch_id='rc63-pa2',
+                                   request_id='rc63-pa2', proof=PROOF)
+    e1 = await _acct(conn, r['account_id'])
+    slug = 'rc63-pa2-' + uuid.uuid4().hex[:6]
+    o = await _buy(conn, e1, at=r['opened_at'] + 5, key='pa2', slug=slug)
+    await _pass(conn, r['opened_at'] + 20)
+    await L.settle(conn, account_id=e1['account_id'], group_id=o['group_id'],
+                   slug=slug, holding_side='LONG',
+                   settlement_event_key='venue-final:' + slug, outcome='WON',
+                   evidence={'s': 1}, evidence_source='TEST_FIXTURE',
+                   at=r['opened_at'] + 40, session_id=e1['session_id'])
+    rb = await E.rollback(conn, epoch_id='rc63-pa2', request_id='rc63-pa2-rb')
+    assert rb['rolled_back']
+    _, _, end = _day(e1, r['opened_at'] + 40)
+    await _pass(conn, end + 3600)             # the epoch's last day closes
+    before = await _all_versions(conn, e1['account_id'])
+    assert [v[3] for v in before if v[2]] == [500.0], before
+    await _revise(conn, slug, r['opened_at'] + 5, won=False)
+    p = await _pass(conn, end + 7200)
+    assert p['steps']['settle']['accounts'][e1['account_id']]['corrected'] == 1
+    led = float((await L.balances(conn, e1['account_id']))['realized_pnl_usd'])
+    assert led == -500.0
+    for at in (end + 86400 + 3600, end + 2 * 86400 + 3600):
+        await _pass(conn, at)
+    after = await _all_versions(conn, e1['account_id'])
+    assert after[:len(before)] == before
+    nxt = str(PA_day(end + 7200))
+    finals = [v for v in after if v[0] == nxt and v[2]]
+    assert len(finals) == 1 and finals[0][3] == led, after
+
+
+async def test_a_family_account_with_nothing_new_gets_no_version(conn):
+    """No activity after its newest report: the family close writes nothing
+    beyond the switch day's one final version, however many days pass."""
+    main = await _acct(conn, L.ACCOUNT_ID)
+    day, start, end = _day(main, time.time())
+    slug = 'rc63-pq-' + uuid.uuid4().hex[:6]
+    o = await _buy(conn, main, at=start + 60, key='pq-' + slug, slug=slug)
+    await _pass(conn, start + 120)
+    await _settle_lost(conn, main, o, at=start + 180)
+    await E._activate_verified(conn, epoch_id='rc63-pq',
+                               request_id='rc63-pq', proof=PROOF)
+    for at in (end + 3600, end + 7200, end + 86400 + 3600,
+               end + 2 * 86400 + 3600):
+        await _pass(conn, at)
+    arch = await _all_versions(conn, L.ACCOUNT_ID)
+    assert {v[0] for v in arch} == {str(day)}, arch
+    assert arch[-1] == (str(day), 3, True, -500.0), arch
+
+
+async def test_a_switch_whose_report_clock_ran_ahead_still_reports_up_to_the_switch(conn):
+    """The outgoing account already reported a later day (a pass clock ahead
+    of the database's): its switch version is written on that newest day
+    with everything recorded, instead of being silently refused as
+    ALREADY_FINAL on the switch instant's day."""
+    r = await E._activate_verified(conn, epoch_id='rc63-ahead',
+                                   request_id='rc63-ahead', proof=PROOF)
+    e1 = await _acct(conn, r['account_id'])
+    slug = 'rc63-ahead-' + uuid.uuid4().hex[:6]
+    o = await _buy(conn, e1, at=r['opened_at'] + 5, key='ahead', slug=slug)
+    _, _, end = _day(e1, r['opened_at'] + 5)
+    await _step(conn, e1, r['opened_at'] + 20)
+    await _step(conn, e1, end + 3600)         # today closed, tomorrow v1
+    await _settle_lost(conn, e1, o, at=end + 3700)
+    rb = await E.rollback(conn, epoch_id='rc63-ahead',
+                          request_id='rc63-ahead-rb')
+    assert rb['rolled_back']
+    newest = (await _all_versions(conn, e1['account_id']))[-1]
+    assert newest[0] == str(PA_day(end + 3600)) and not newest[2]
+    assert newest[3] == -500.0, newest
+
+
+async def test_a_switch_version_that_is_not_stored_refuses_the_switch(conn, monkeypatch):
+    """A version a writer outside the per-day lock took (VERSION_TAKEN) is no
+    switch report: the activation is refused by name and nothing moves."""
+    from sportsassets.agents import paper_audrey as PA
+    real = PA.write_report
+
+    async def taken(c, **kw):
+        if kw.get('account_id') == L.ACCOUNT_ID:
+            out = await real(c, **dict(kw, now=kw['now']))
+            return dict(out, written=False, why='VERSION_TAKEN')
+        return await real(c, **kw)
+    monkeypatch.setattr(PA, 'write_report', taken)
+    with pytest.raises(E.EpochRefused,
+                       match=E.R_OUTGOING_AUDREY_REPORT_FAILED):
+        await E._activate_verified(conn, epoch_id='rc63-held',
+                                   request_id='rc63-held', proof=PROOF)
+    assert await E.selected_account(conn) == L.ACCOUNT_ID
+    assert await conn.fetchval("SELECT count(*) FROM paper_account_epochs") == 0
