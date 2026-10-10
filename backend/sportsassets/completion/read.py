@@ -470,25 +470,74 @@ async def latest_mark_refresh(conn, account_id: str):
             "market_data": _j(r["market_data"]) or {}}
 
 
+#: (RC6.3c PMX-1) the readback criterion on the collector's reads: the
+#: share refused for identity (the deciding process held no refdata for the
+#: asked symbol, or the record did not map exactly) stays under this
+PMX_IDENTITY_UNPROVEN_SHARE_MAX = 0.10
+PMX_IDENTITY_REFUSAL = "PMX_IDENTITY_NOT_PROVEN_EXACT"
+PMX_COLLECTOR_CONSUMER = "COLLECTOR_VENUE_QUOTE"
+
+
 def consumer_reads_block(book_sources) -> dict:
     """PURE. The deciding process's consumer book reads by source, from the
     held-mark run's persisted owner telemetry (`book_sources`); UNREAD when
-    the run carried none (a build before RC5, or no run)."""
+    the run carried none (a build before RC5, or no run). (RC6.3c PMX-1)
+    The fallback reasons are ALSO carried BY CONSUMER, never only merged
+    (`fallback_reasons_by_consumer`), with each consumer's PMX share and
+    identity-unproven share (`shares_by_consumer`; the collector's against
+    PMX_IDENTITY_UNPROVEN_SHARE_MAX in `collector_identity_unproven`), and
+    the asked symbols' refdata coverage at ask time with the hand-off to
+    the plane (`asked_refdata`, paper_pmx_books.telemetry) -- UNREAD on a
+    run from a build before this one. Every key the block carried before
+    is carried unchanged."""
     bs = book_sources if isinstance(book_sources, dict) else {}
     if not bs.get("totals"):
         return {"status": "UNREAD", "why": "NO_BOOK_SOURCE_TELEMETRY_ON_RUN"}
     reasons: dict = {}
     by = {}
+    by_reasons: dict = {}
+    shares: dict = {}
     for name, c in (bs.get("by_consumer") or {}).items():
-        by[name] = {"PMX_GRPC": int((c or {}).get("PMX_GRPC") or 0),
-                    "REST": int((c or {}).get("REST") or 0)}
-        for k, v in ((c or {}).get("fallback_reasons") or {}).items():
-            reasons[k] = reasons.get(k, 0) + int(v or 0)
+        pmx = int((c or {}).get("PMX_GRPC") or 0)
+        rest = int((c or {}).get("REST") or 0)
+        by[name] = {"PMX_GRPC": pmx, "REST": rest}
+        mine = {str(k): int(v or 0)
+                for k, v in ((c or {}).get("fallback_reasons") or {}).items()}
+        for k, v in mine.items():
+            reasons[k] = reasons.get(k, 0) + v
+        by_reasons[name] = dict(sorted(mine.items(),
+                                       key=lambda kv: -kv[1])[:10])
+        n = pmx + rest
+        ident = int(mine.get(PMX_IDENTITY_REFUSAL) or 0)
+        shares[name] = {
+            "reads": n,
+            "pmx_share": (round(pmx / n, 4) if n else None),
+            "identity_not_proven": ident,
+            "identity_not_proven_share": (round(ident / n, 4) if n
+                                          else None)}
     top = dict(sorted(reasons.items(), key=lambda kv: -kv[1])[:10])
+    coll = shares.get(PMX_COLLECTOR_CONSUMER) or {}
+    coll_share = coll.get("identity_not_proven_share")
+    asked = bs.get("asked_refdata")
     return {"status": "MEASURED", "scope": bs.get("scope"),
             "totals": dict(bs.get("totals")), "by_consumer": by,
             "pmx_share": bs.get("pmx_share"),
             "fallback_reasons_top": top,
+            "fallback_reasons_by_consumer": by_reasons,
+            "shares_by_consumer": shares,
+            "collector_identity_unproven": {
+                "consumer": PMX_COLLECTOR_CONSUMER,
+                "refusal": PMX_IDENTITY_REFUSAL,
+                "share": coll_share, "reads": coll.get("reads"),
+                "max": PMX_IDENTITY_UNPROVEN_SHARE_MAX,
+                "status": ("UNREAD" if coll_share is None else
+                           "INSIDE" if coll_share
+                           < PMX_IDENTITY_UNPROVEN_SHARE_MAX else "OUTSIDE"),
+                # the telemetry's own scope, never a 24 h window by itself
+                "scope": bs.get("scope")},
+            "asked_refdata": (asked if isinstance(asked, dict) else {
+                "status": "UNREAD",
+                "why": "NO_ASKED_REFDATA_TELEMETRY_ON_RUN"}),
             "enabled": bs.get("enabled"), "rule": bs.get("rule")}
 
 

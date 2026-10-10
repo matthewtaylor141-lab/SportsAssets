@@ -400,7 +400,32 @@ class Counters:
                 tot[s] += int(v.get(s) or 0)
         n = tot[SOURCE_PMX] + tot[SOURCE_REST]
         return {"by_consumer": by, "totals": tot,
-                "pmx_share": (round(tot[SOURCE_PMX] / n, 4) if n else None)}
+                "pmx_share": (round(tot[SOURCE_PMX] / n, 4) if n else None),
+                # (RC6.3c PMX-1) SPLIT BY CONSUMER, never merged: every
+                # fallback reason per consumer, and each consumer's PMX
+                # share and identity-unproven share (the readback criterion:
+                # PMX_IDENTITY_NOT_PROVEN_EXACT / COLLECTOR_VENUE_QUOTE reads)
+                "fallback_reasons_by_consumer": {
+                    k: dict(v["fallback_reasons"]) for k, v in by.items()},
+                "shares_by_consumer": {k: consumer_shares(v)
+                                       for k, v in by.items()}}
+
+
+def consumer_shares(counts: dict) -> dict:
+    """PURE. One consumer's {PMX_GRPC, REST, fallback_reasons} -> its
+    reads, PMX share and the share of its reads refused for identity
+    (PMX_IDENTITY_NOT_PROVEN_EXACT: this process held no refdata for the
+    symbol, or the record did not map exactly). None over no reads."""
+    c = counts if isinstance(counts, dict) else {}
+    pmx = int(c.get(SOURCE_PMX) or 0)
+    rest = int(c.get(SOURCE_REST) or 0)
+    n = pmx + rest
+    reasons = c.get("fallback_reasons") or {}
+    ident = int(reasons.get(R_IDENTITY) or 0)
+    return {"reads": n,
+            "pmx_share": (round(pmx / n, 4) if n else None),
+            "identity_not_proven": ident,
+            "identity_not_proven_share": (round(ident / n, 4) if n else None)}
 
 
 COUNTERS = Counters()
@@ -428,7 +453,8 @@ def consumer_read(slug: str, *, consumer: str, now=None,
                              not_before_epoch=not_before_epoch,
                              identity_fn=identity_fn, current_fn=current_fn,
                              evidence=evidence, running_fn=running_fn,
-                             env=env, request_fn=request_fn)
+                             env=env, request_fn=request_fn,
+                             consumer=consumer)
     except Exception as exc:                                   # noqa: BLE001
         got = {"ok": False, "refusal": "%s:%s" % (R_RAISED,
                                                   type(exc).__name__),
@@ -440,7 +466,7 @@ def consumer_read(slug: str, *, consumer: str, now=None,
 
 def _consumer_read(slug, *, now, max_receipt_age_s, not_before_epoch,
                    identity_fn, current_fn, evidence, running_fn, env,
-                   request_fn=None):
+                   request_fn=None, consumer=None):
     if not enabled(env):
         return {"ok": False, "refusal": R_OFF, "why": "%s=off" % ENV_FLAG}
     s = str(slug or "").strip()
@@ -461,9 +487,11 @@ def _consumer_read(slug, *, now, max_receipt_age_s, not_before_epoch,
     # ASKING IS THE SUBSCRIBE REQUEST: every consumer read refreshes this
     # symbol's ask, so the stream's own task bootstraps / subscribes it and
     # keeps it while consumers keep reading it (institutional_api_stream
-    # MAX_REQUESTED); never a venue call
+    # MAX_REQUESTED); never a venue call. (RC6.3c) The ask names its
+    # consumer, and the stream task hands the asked set to the plane's
+    # refdata priority pull (institutional_api_stream.handoff_asked).
     if request_fn is not None:
-        request_fn(s)
+        request_fn(s, consumer=consumer)
     ident = identity_fn(s, "YES")
     cur = current_fn(s, now=now) if ident else None
     ev = evidence if evidence is not None else EVIDENCE
@@ -473,15 +501,29 @@ def _consumer_read(slug, *, now, max_receipt_age_s, not_before_epoch,
                      not_before_epoch=not_before_epoch)
 
 
+def _asked_refdata(now) -> dict:
+    """The stream task's own account of the asked symbols' refdata at ask
+    time and the hand-off to the plane (institutional_api_stream
+    .asked_refdata_report); named absent when the module cannot answer."""
+    try:
+        from . import institutional_api_stream as IAS
+        return IAS.asked_refdata_report(now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"status": "UNREAD", "why": type(exc).__name__}
+
+
 def telemetry(*, now=None) -> dict:
     """Which source served each consumer read in THIS process (since
-    import), every fallback by its reason, and the same-book evidence the
-    rule reads. Never raises."""
+    import), every fallback by its reason -- in total and BY CONSUMER --
+    the same-book evidence the rule reads, and the asked symbols' refdata
+    coverage at ask time with the hand-off to the plane (RC6.3c). Never
+    raises."""
     try:
         return dict(COUNTERS.snapshot(), version=VERSION,
                     enabled=enabled(), max_receipt_age_s=MAX_RECEIPT_AGE_S,
                     scope="PROCESS_SINCE_IMPORT",
                     evidence=EVIDENCE.digest(now=now),
+                    asked_refdata=_asked_refdata(now),
                     rule=("PMX book serves a consumer read only with exact "
                           "identity, a venue ack on this connection, the "
                           "stream's decision-bound current(), our receipt "

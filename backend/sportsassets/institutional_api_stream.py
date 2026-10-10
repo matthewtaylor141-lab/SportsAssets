@@ -30,6 +30,15 @@ nothing more:
       With the stream off there is never a record, so it is always None and
       the decision path is unchanged.
 
+  H   THE ASKED-SYMBOL HAND-OFF (RC6.3c, PMX-1; the ASKED_HANDOFF_* block
+      below). The symbols consumers ask about are written, bounded, to the
+      plane's own key/value state so the plane's refdata priority pull takes
+      them first; the records the plane persists are taken back here on the
+      same beat, so identity is bootstrapped from the plane's record without
+      a venue call. Rule (a) of paper_pmx_books is not relaxed: identity is
+      still institutional_contract_map over the record, and a symbol with no
+      plane record stays unproven (its consumer reads REST exactly as today).
+
 NO ORDER PATH. The stream client sends subscribe and keepalive only
 (institutional_stream). The refdata read is pmx_institutional's allow-listed
 `instruments` read. Nothing here can reach an order, cancel or position
@@ -143,6 +152,61 @@ PLANE_REFDATA_SQL = """
        AND refdata_at > now() - make_interval(secs => $2)
 """
 
+#: ── THE ASKED-SYMBOL HAND-OFF TO THE PLANE (RC6.3c, PMX-1) ──────────────
+#:
+#: PRODUCTION (RC6.3b approved-judge packet, pm-acceptance ec8b892d,
+#: completion.json market_data.pmx_primary.consumer_reads, scope
+#: PROCESS_SINCE_IMPORT): 14,224 consumer reads in the deciding process, 5
+#: served by the PMX book (pmx_share 0.0004). The second fallback reason,
+#: PMX_IDENTITY_NOT_PROVEN_EXACT 4,752, is THIS PROCESS HOLDING NO REFDATA
+#: for the symbol a consumer asked about. A spare-capacity asked symbol
+#: takes the plane's persisted record only (above), and the plane's
+#: priority pull knew nothing of the ask: it read refdata first for the
+#: registry's held / EVALUATED_CANDIDATE / imminent contracts
+#: (market_plane.populate names a candidate from ext_candidate_outcomes
+#: AFTER the collector's cycle, and only the money line that row records),
+#: so the line contracts the collector asks `venue_quote` about, and every
+#: asked symbol the registry held at venue-activity priority, waited for the
+#: full universe pull -- TRUNCATED at MAX_PULL_S on every attempt in the
+#: packet (refdata_pending 29,352 of 75,415 active contracts, coverage
+#: 0.61). The ask never became a record, the record never became identity,
+#: and the consumer read REST.
+#:
+#: NOW. The asked set is HANDED TO THE PLANE. `handoff_asked` (the stream
+#: task's beat, at most every ASKED_HANDOFF_EVERY_S) writes every asked
+#: symbol -- its ask instant, its asker, whether this process holds its
+#: refdata -- as ONE bounded row, ingestion_state[ASKED_HANDOFF_KEY] (the
+#: key/value table every loop's state lives in; at most MAX_REQUESTED
+#: symbols, upserted, rewritten when it changes and every
+#: ASKED_HANDOFF_REFRESH_S so the plane can bound its age). The plane's
+#: refdata slot puts the asked symbols FIRST in its PRIORITY by-symbol read
+#: (market_plane.registry.refdata_pending_split: asked, then
+#: EVALUATED_CANDIDATE, then held and imminent), still under its 6 calls a
+#: minute cap. On the same beat this process takes, for every asked symbol
+#: it holds no refdata for, the record the plane has since persisted --
+#: within REFDATA_REFRESH_S, the bound a core symbol's pass already honours,
+#: so nothing a pass would refuse is taken -- and the next pass subscribes
+#: it: identity is bootstrapped from the plane's record WITHOUT A VENUE CALL.
+#: What is unchanged: identity is proven only by institutional_contract_map
+#: on the record (paper_pmx_books rule (a)); a symbol with no plane record
+#: stays unproven and its consumer reads REST exactly as before; the pass's
+#: own plane read, REST bootstrap, budgets and bounds. The share of asks
+#: this process could answer with refdata at ask time is published
+#: (`asked_refdata_report`, carried by paper_pmx_books.telemetry into the
+#: held-mark run record and completion.json).
+ASKED_HANDOFF_VERSION = "PMX_ASKED_HANDOFF_V1"
+#: = market_plane.registry.ASKED_HANDOFF_KEY (a test pins it)
+ASKED_HANDOFF_KEY = "pmx_asked_symbols"
+#: the hand-off beat: one row written (when changed), one bounded SELECT of
+#: the plane's records for the asked symbols without refdata
+ASKED_HANDOFF_EVERY_S = 10.0
+#: an unchanged hand-off is rewritten this often (the plane bounds the age)
+ASKED_HANDOFF_REFRESH_S = 60.0
+ASKED_HANDOFF_SQL = """
+    INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb)
+    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+"""
+
 LONG_INTENTS = ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG", "YES",
                 "LONG", "BUY_YES", "BUY_LONG")
 
@@ -158,11 +222,20 @@ _ATTEMPT: dict = {}
 #: apart from _ATTEMPT so a symbol that later fits the core set is never
 #: held back from its REST bootstrap by a plane-only miss.
 _PLANE_TRIED: dict = {}
+#: symbol -> the consumer that last asked (paper_pmx_books names them)
+_ASKED_BY: dict = {}
+#: every identity question answered here since import: with a record held
+#: at ask time, or without (asked_refdata_report)
+_ASKS: dict = {"total": 0, "with_refdata": 0}
+#: the hand-off beat's own record (handoff_asked)
+_HANDOFF: dict = {"at": None, "written_at": None, "digest": None,
+                  "symbols": 0, "without_refdata": 0, "installed": 0,
+                  "writes": 0, "error": None}
 _STATE: dict = {"task": None, "start": None, "last_error": None,
                 "refdata_reads": 0, "refdata_failures": 0, "backlog": 0,
                 "held_wanted": 0, "held_subscribed": 0,
                 "held_preempted": 0, "refdata_from_plane": 0,
-                "asked_spare": 0}
+                "asked_spare": 0, "asked_from_plane": 0}
 #: The last focus universe computed here (members without identity).
 _UNIVERSE: dict = {}
 
@@ -178,11 +251,12 @@ def _leg(order_intent) -> str | None:
     return None
 
 
-def request(symbol, *, now=None) -> None:
+def request(symbol, *, now=None, consumer=None) -> None:
     """The decision path asked about this symbol. Recorded only while the
     stream runs here; never a venue call. Every ask refreshes its instant;
     a full set gives up its LEAST RECENTLY asked symbol, never the new ask
-    (see MAX_REQUESTED)."""
+    (see MAX_REQUESTED). `consumer` (paper_pmx_books names them) is kept
+    beside the symbol for the hand-off and the readback."""
     s = str(symbol or "").strip()
     if not s or not running():
         return
@@ -193,7 +267,10 @@ def request(symbol, *, now=None) -> None:
         elif len(_REQUESTED) >= MAX_REQUESTED:
             oldest = min(_REQUESTED, key=_REQUESTED.get)
             _REQUESTED.pop(oldest, None)
+            _ASKED_BY.pop(oldest, None)
         _REQUESTED[s] = at
+        if consumer:
+            _ASKED_BY[s] = str(consumer)
 
 
 def asked_symbols(*, now=None) -> list:
@@ -204,17 +281,23 @@ def asked_symbols(*, now=None) -> list:
         for s in [s for s, t in _REQUESTED.items()
                   if at - float(t) > REQUEST_IDLE_S]:
             _REQUESTED.pop(s, None)
+            _ASKED_BY.pop(s, None)
         return sorted(_REQUESTED, key=lambda s: -float(_REQUESTED[s]))
 
 
 def identity_mapper(slug, order_intent=None) -> dict | None:
-    """C1: EXACT or None. Pure over the refdata this process holds."""
+    """C1: EXACT or None. Pure over the refdata this process holds. Every
+    answer is counted as an ask with or without a record held at that
+    instant (asked_refdata_report)."""
     s = str(slug or "").strip()
     leg = _leg(order_intent)
     if not s or leg is None:
         return None
     with _LOCK:
         rec = (REFDATA.get(s) or {}).get("record")
+        _ASKS["total"] += 1
+        if rec is not None:
+            _ASKS["with_refdata"] += 1
     if rec is None:
         request(s)
         return None
@@ -271,6 +354,9 @@ def primary_report(*, now=None) -> dict:
         "asked_spare": _STATE.get("asked_spare"),
         "bootstrap_backlog": _STATE.get("backlog"),
         "last_error": _STATE.get("last_error"),
+        # (RC6.3c) the share of asks answered with refdata held, the asked
+        # set's refdata coverage now, and the hand-off to the plane
+        "asked_refdata": asked_refdata_report(now=now),
         "at": d.get("at")}
 
 
@@ -305,7 +391,58 @@ def describe() -> dict:
             "refdata_from_plane": _STATE.get("refdata_from_plane"),
             "asked_spare": _STATE.get("asked_spare"),
             "last_error": _STATE.get("last_error"),
+            "asked_refdata": asked_refdata_report(),
             "focus_universe": FU.summary(universe_snapshot())}
+
+
+def asked_refdata_report(*, now=None) -> dict:
+    """THE SHARE OF ASKED SYMBOLS WITH REFDATA AT ASK TIME (RC6.3c readback;
+    plain data, never raises). Two measures: by ASK -- every identity
+    question this process answered since import, with a record held at that
+    instant or without -- and by SYMBOL -- the asked set now (inside
+    REQUEST_IDLE_S), how many this process holds refdata for, how many of
+    those from the plane's record, by consumer. With the hand-off's own
+    record: when it was last written, what it carried, the records it
+    installed, its last error."""
+    at = float(time.time() if now is None else now)
+    try:
+        with _LOCK:
+            asked = [s for s, t in _REQUESTED.items()
+                     if at - float(t) <= REQUEST_IDLE_S]
+            held = [s for s in asked if s in REFDATA]
+            plane = [s for s in held
+                     if REFDATA[s].get("source") == "MARKET_PLANE_REGISTRY"]
+            total, hit = int(_ASKS["total"]), int(_ASKS["with_refdata"])
+            by_consumer: dict = {}
+            for s in asked:
+                d = by_consumer.setdefault(_ASKED_BY.get(s) or "UNNAMED",
+                                           {"asked": 0, "with_refdata": 0})
+                d["asked"] += 1
+                d["with_refdata"] += int(s in REFDATA)
+            h = dict(_HANDOFF)
+        n = len(asked)
+        written = h.get("written_at")
+        return {
+            "version": ASKED_HANDOFF_VERSION, "scope": "PROCESS_SINCE_IMPORT",
+            "asks": {"total": total, "with_refdata": hit,
+                     "share": (round(hit / total, 4) if total else None)},
+            "symbols": {"asked": n, "with_refdata": len(held),
+                        "from_plane": len(plane),
+                        "share": (round(len(held) / n, 4) if n else None),
+                        "by_consumer": by_consumer},
+            "handoff": {"key": ASKED_HANDOFF_KEY,
+                        "every_s": ASKED_HANDOFF_EVERY_S,
+                        "written_at": written,
+                        "age_s": (None if written is None
+                                  else round(at - float(written), 1)),
+                        "writes": h.get("writes"),
+                        "symbols": h.get("symbols"),
+                        "without_refdata": h.get("without_refdata"),
+                        "installed_last_beat": h.get("installed"),
+                        "installed_total": _STATE.get("asked_from_plane"),
+                        "error": h.get("error")}}
+    except Exception as exc:                                  # noqa: BLE001
+        return {"version": ASKED_HANDOFF_VERSION, "error": type(exc).__name__}
 
 
 # ── lifecycle (API lifespan) ──────────────────────────────────────────
@@ -364,10 +501,14 @@ def reset() -> None:
         _ATTEMPT.clear()
         _PLANE_TRIED.clear()
         _UNIVERSE.clear()
+        _ASKED_BY.clear()
+        _ASKS.update(total=0, with_refdata=0)
+        _HANDOFF.update(at=None, written_at=None, digest=None, symbols=0,
+                        without_refdata=0, installed=0, writes=0, error=None)
     _STATE.update(task=None, start=None, last_error=None, refdata_reads=0,
                   refdata_failures=0, backlog=0, held_wanted=0,
                   held_subscribed=0, held_preempted=0, refdata_from_plane=0,
-                  asked_spare=0)
+                  asked_spare=0, asked_from_plane=0)
 
 
 async def _focus_symbols(get_pool, focus) -> list:
@@ -528,6 +669,135 @@ async def plane_refdata(get_pool, symbols, *,
         return {}
 
 
+def _take_plane_record(symbol, got, at, *, limit, own_age: bool) -> bool:
+    """Install the plane's persisted record for `symbol` -- ONLY one naming
+    exactly this symbol, persisted within `limit` seconds of `at` -- and
+    hand it to the stream (set_instrument). False when nothing is installed.
+    `own_age`: the entry keeps the record's own persist instant (re-asked
+    when THE PLANE's record turns REFDATA_REFRESH_S: a core symbol); else
+    this instant (a spare symbol, re-checked against the plane every
+    REFDATA_REFRESH_S). Identity is still institutional_contract_map over
+    the record: nothing here proves anything."""
+    g = got or {}
+    rec = g.get("record")
+    try:
+        rec_at = float(g.get("at"))
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(rec, dict) or rec.get("symbol") != symbol or \
+            not (0.0 <= at - rec_at < float(limit)):
+        return False
+    with _LOCK:
+        REFDATA[symbol] = {"record": rec, "at": rec_at if own_age else at,
+                           "source": "MARKET_PLANE_REGISTRY",
+                           "plane_refdata_at": rec_at}
+        _PLANE_TRIED.pop(symbol, None)
+    IS.set_instrument(symbol, rec)
+    _STATE["refdata_from_plane"] = int(
+        _STATE.get("refdata_from_plane") or 0) + 1
+    return True
+
+
+def _handoff_payload(at: float) -> dict:
+    """The asked set as the plane reads it (ASKED_HANDOFF_KEY): most
+    recently asked first, at most MAX_REQUESTED, each with its ask instant,
+    its asker and whether THIS process holds its refdata now."""
+    with _LOCK:
+        rows = []
+        for s, t in sorted(_REQUESTED.items(), key=lambda kv: -float(kv[1])):
+            if at - float(t) > REQUEST_IDLE_S:
+                continue
+            have = REFDATA.get(s)
+            rows.append({"symbol": s, "asked_at": round(float(t), 3),
+                         "consumer": _ASKED_BY.get(s),
+                         "refdata": have is not None,
+                         "source": ((have or {}).get("source")
+                                    or ("REST_BOOTSTRAP" if have else None))})
+    rows = rows[:MAX_REQUESTED]
+    return {"version": ASKED_HANDOFF_VERSION,
+            "process": "%s:%s" % (SERVICE, os.getpid()), "at": at,
+            "idle_s": REQUEST_IDLE_S, "symbols": rows, "asked": len(rows),
+            "without_refdata": sum(1 for r in rows if not r["refdata"])}
+
+
+async def handoff_asked(get_pool, *, now=None, plane_records=None,
+                        force: bool = False) -> dict:
+    """THE HAND-OFF BEAT (see ASKED_HANDOFF_KEY). At most every
+    ASKED_HANDOFF_EVERY_S while the stream runs here: (1) the asked set is
+    written to ingestion_state[ASKED_HANDOFF_KEY] when it changed since the
+    last write (or every ASKED_HANDOFF_REFRESH_S), so the plane's refdata
+    slot puts these symbols first; (2) for every asked symbol this process
+    holds NO refdata for, the plane's record persisted within
+    REFDATA_REFRESH_S is taken (`plane_records`, default `plane_refdata` at
+    that bound) -- never a venue call, never a record a pass would refuse.
+    A record installed here is subscribed by the next pass (the caller runs
+    one). With no plane record nothing changes: the symbol stays unproven,
+    its consumer reads REST. NEVER RAISES; a failed write or read is named
+    in the report and tried again on the next beat."""
+    at = float(time.time() if now is None else now)
+    if get_pool is None and plane_records is None:
+        return {"skipped": "NO_POOL"}
+    if not force and not running():
+        return {"skipped": "NOT_RUNNING"}
+    last = _HANDOFF.get("at")
+    if not force and last is not None and \
+            at - float(last) < ASKED_HANDOFF_EVERY_S:
+        return {"skipped": "NOT_DUE"}
+    _HANDOFF["at"] = at
+    payload = _handoff_payload(at)
+    digest = tuple((r["symbol"], r["refdata"]) for r in payload["symbols"])
+    written_at = _HANDOFF.get("written_at")
+    written = False
+    if get_pool is not None and (
+            digest != _HANDOFF.get("digest") or written_at is None
+            or at - float(written_at) >= ASKED_HANDOFF_REFRESH_S):
+        try:
+            import json
+            pool = await get_pool()
+            async with pool.acquire() as c:
+                if await c.fetchval(
+                        "SELECT to_regclass('ingestion_state') IS NOT NULL"):
+                    await c.execute(ASKED_HANDOFF_SQL, ASKED_HANDOFF_KEY,
+                                    json.dumps(payload, default=str))
+                    written = True
+            if written:
+                _HANDOFF.update(written_at=at, digest=digest, error=None,
+                                writes=int(_HANDOFF.get("writes") or 0) + 1,
+                                symbols=payload["asked"],
+                                without_refdata=payload["without_refdata"])
+            else:
+                _HANDOFF["error"] = "write: INGESTION_STATE_ABSENT"
+        except Exception as exc:                              # noqa: BLE001
+            _HANDOFF["error"] = "write: %s" % type(exc).__name__
+    # THE PLANE'S RECORDS FOR THE ASKED SYMBOLS THIS PROCESS HOLDS NONE FOR:
+    # the pass's own bound for a core symbol (REFDATA_REFRESH_S), so the
+    # entry keeps the record's own age and every later pass treats it
+    # exactly as one the pass installed
+    missing = [r["symbol"] for r in payload["symbols"] if not r["refdata"]]
+    installed = 0
+    if missing:
+        try:
+            if plane_records is not None:
+                got = await plane_records(missing)
+            else:
+                got = await plane_refdata(get_pool, missing,
+                                          max_age_s=REFDATA_REFRESH_S)
+            got = got or {}
+        except Exception as exc:                              # noqa: BLE001
+            got = {}
+            _HANDOFF["error"] = "plane: %s" % type(exc).__name__
+        for s in missing:
+            if _take_plane_record(s, got.get(s), at, limit=REFDATA_REFRESH_S,
+                                  own_age=True):
+                installed += 1
+    _HANDOFF["installed"] = installed
+    _STATE["asked_from_plane"] = int(
+        _STATE.get("asked_from_plane") or 0) + installed
+    return {"written": written, "asked": payload["asked"],
+            "without_refdata": len(missing), "installed": installed,
+            "error": _HANDOFF.get("error")}
+
+
 async def refresh_once(get_pool=None, *, client=None, focus=None,
                        bootstrap=None, now=None, symbols=None,
                        held=None, max_bootstraps=None,
@@ -581,32 +851,21 @@ async def refresh_once(get_pool=None, *, client=None, focus=None,
         except Exception:                                     # noqa: BLE001
             got_plane = {}
     for s in due:
-        g = got_plane.get(s) or {}
-        rec = g.get("record")
-        try:
-            rec_at = float(g.get("at"))
-        except (TypeError, ValueError):
-            rec_at = None
         spare_only = s in spare_set
-        limit = PLANE_REFDATA_MAX_AGE_S if spare_only else REFDATA_REFRESH_S
-        if rec_at is None or not isinstance(rec, dict) or \
-                rec.get("symbol") != s or not (0.0 <= at - rec_at < limit):
-            if spare_only:
-                # NEVER a REST read for spare capacity: re-asked of the plane
-                # after the retry interval, like an unlisted symbol
-                with _LOCK:
-                    _PLANE_TRIED[s] = at
+        # a core / held symbol keeps the record's own age (re-asked when the
+        # PLANE's record turns REFDATA_REFRESH_S); a spare symbol is
+        # re-checked against the plane every REFDATA_REFRESH_S
+        if _take_plane_record(
+                s, got_plane.get(s), at, own_age=not spare_only,
+                limit=(PLANE_REFDATA_MAX_AGE_S if spare_only
+                       else REFDATA_REFRESH_S)):
             continue
-        with _LOCK:
-            # a core / held symbol keeps the record's own age (re-asked when
-            # the PLANE's record turns REFDATA_REFRESH_S); a spare symbol is
-            # re-checked against the plane every REFDATA_REFRESH_S
-            REFDATA[s] = {"record": rec, "at": at if spare_only else rec_at,
-                          "source": "MARKET_PLANE_REGISTRY",
-                          "plane_refdata_at": rec_at}
-        IS.set_instrument(s, rec)
-        _STATE["refdata_from_plane"] = int(
-            _STATE.get("refdata_from_plane") or 0) + 1
+        if spare_only:
+            # NEVER a REST read for spare capacity: re-asked of the plane
+            # after the retry interval, like an unlisted symbol (the hand-off
+            # beat takes a record the plane persists meanwhile)
+            with _LOCK:
+                _PLANE_TRIED[s] = at
     cap = BOOTSTRAPS_PER_PASS if max_bootstraps is None else int(
         max_bootstraps)
     boot = 0
@@ -676,6 +935,11 @@ async def _run(get_pool, *, client, focus, bootstrap) -> None:
 
     async def _plane(symbols):
         return await plane_refdata(get_pool, symbols)
+
+    async def _plane_recent(symbols):
+        # the hand-off beat's bound: a core symbol's own (REFDATA_REFRESH_S)
+        return await plane_refdata(get_pool, symbols,
+                                   max_age_s=REFDATA_REFRESH_S)
     while True:
         try:
             if last_log is None or \
@@ -696,6 +960,14 @@ async def _run(get_pool, *, client, focus, bootstrap) -> None:
                                    symbols=focus_cache, plane_records=_plane)
                 await persist_universe(get_pool)
             elif pending() or _STATE.get("backlog"):
+                await refresh_once(client=client, bootstrap=bootstrap,
+                                   symbols=focus_cache, plane_records=_plane)
+            # THE ASKED-SYMBOL HAND-OFF BEAT (ASKED_HANDOFF_EVERY_S): the
+            # asked set to the plane; the plane's fresh records for the asked
+            # symbols this process holds none for; a record installed is
+            # subscribed by a pass now, not at the next focus refresh
+            beat = await handoff_asked(get_pool, plane_records=_plane_recent)
+            if beat.get("installed"):
                 await refresh_once(client=client, bootstrap=bootstrap,
                                    symbols=focus_cache, plane_records=_plane)
             await asyncio.sleep(LOOP_S)

@@ -148,6 +148,11 @@ REFDATA_RETRY_S = 300.0
 UNLISTED_RETRY_S = 6 * 3600.0
 #: "imminent" for refdata priority: starting within this many seconds
 IMMINENT_S = 2 * 3600.0
+#: (RC6.3c PMX-1) the deciding process's asked-symbol hand-off
+#: (registry.ASKED_HANDOFF_KEY) is read as asks only when written within
+#: this, and a symbol only when asked within it: = institutional_api_stream
+#: .REQUEST_IDLE_S, the API's own idle bound on an ask (a test pins it)
+ASKED_HANDOFF_MAX_AGE_S = 1800.0
 #: the held-mark SLA: a canonical book is "fresh" for coverage under the same
 #: 300 s rule the held marks use (never wider)
 FRESH_SLA_S = 300.0
@@ -629,15 +634,26 @@ async def refdata_step(pool, client, planner, attempted: dict, *,
     the contracts that were pending when it started and never appeared.
     Returns this slot's digest. Raises nothing it can name. `lock` (RC6 D1)
     is the plane's one PMX client lock, shared with the freshness task's
-    book reads: the call is made holding it."""
+    book reads: the call is made holding it. (RC6.3c PMX-1) The deciding
+    process's asked symbols (registry.asked_handoff) lead the priority
+    read, then EVALUATED_CANDIDATE, then held and imminent
+    (registry.PRIORITY_ORDER); the slot's digest names the hand-off."""
     out = {"action": None}
     async with pool.acquire() as c:
+        hand = await R.asked_handoff(c, now=now,
+                                     max_age_s=ASKED_HANDOFF_MAX_AGE_S)
         pend = await R.refdata_pending_split(
             c, now=now, unlisted_retry_s=UNLISTED_RETRY_S,
             priority_max=POP.P_CANDIDATE, imminent_s=IMMINENT_S,
             limit=RU.BATCH_MAX,
             excluded=RP.cooling_ids(attempted, now=now,
-                                    retry_s=REFDATA_RETRY_S))
+                                    retry_s=REFDATA_RETRY_S),
+            asked=hand["symbols"])
+        out["asked"] = {"handoff": hand["state"], "age_s": hand["age_s"],
+                        "symbols": len(hand["symbols"]),
+                        "without_refdata_at_api": hand["without_refdata"],
+                        "pending": pend.get("asked_pending"),
+                        "not_in_registry": pend.get("asked_not_in_registry")}
         action = planner.next_action(now=now,
                                      priority_pending=pend["priority"],
                                      other_pending=pend["other"])
@@ -660,6 +676,11 @@ async def refdata_step(pool, client, planner, attempted: dict, *,
                records=len(parsed["records"]), ms=parsed.get("ms"),
                pending_priority=len(pend["priority"]),
                pending_other=len(pend["other"]))
+    if action["kind"] == RU.A_PRIORITY:
+        # the asked symbols this read answered (persisted below)
+        out["asked"]["answered"] = sum(
+            1 for s_ in action["symbols"][:int(pend.get("asked_pending") or 0)]
+            if s_ in parsed["records"])
     async with pool.acquire() as c:
         if action["kind"] == RU.A_PAGE:
             out["stored"] = await R.save_refdata_many(

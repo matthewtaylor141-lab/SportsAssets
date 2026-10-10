@@ -10,10 +10,18 @@ This module is the PLANNER only -- no I/O. Every call slot (one per
 action, in this order, so reference data never competes with what capital
 needs:
 
-  1. PRIORITY  held / candidate / imminent contracts without refdata: ONE
+  1. PRIORITY  contracts without refdata that capital is asking about, ONE
                batched read naming up to 1,000 symbols (refdata by symbols
                answers only the ones that exist; a 200 that omits a symbol
-               is the venue saying it does not list it).
+               is the venue saying it does not list it) -- in this order
+               (RC6.3c PMX-1, registry.PRIORITY_ORDER): the symbols the
+               deciding process's consumers ASKED about (its hand-off,
+               registry.asked_handoff, most recently asked first), then
+               EVALUATED_CANDIDATE, then held and imminent contracts. The
+               deciding process takes the record persisted here without a
+               venue call (institutional_api_stream.handoff_asked). The
+               planner counts the symbols each priority read names
+               (`priority_symbols`); the cap is unchanged.
   2. PAGE      the next page of a full pull in progress (pageToken).
   3. START     a full pull, only when no COMPLETE pull is younger than
                FULL_REFRESH_S -- the durable receipt (market_plane_events
@@ -115,7 +123,7 @@ class Planner:
         self.last_receipt = None
         self.totals = {"calls": 0, "ok": 0, "failed": 0, "http_429": 0,
                        "priority_calls": 0, "page_calls": 0, "new_calls": 0,
-                       "records": 0}
+                       "records": 0, "priority_symbols": 0}
 
     # -- scheduling -------------------------------------------------------
 
@@ -161,6 +169,8 @@ class Planner:
         t["calls"] += 1
         t[{A_PRIORITY: "priority_calls", A_PAGE: "page_calls",
            A_NEW: "new_calls"}[action["kind"]]] += 1
+        if action["kind"] == A_PRIORITY:
+            t["priority_symbols"] += len(action.get("symbols") or ())
         self.next_call_at = now + self.interval_s
         if p["http_429"]:
             t["http_429"] += 1

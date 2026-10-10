@@ -224,12 +224,110 @@ async def save_unlisted_many(conn, contract_ids, *, at: float,
     return len(rows)
 
 
+#: ── (RC6.3c PMX-1) THE DECIDING PROCESS'S ASKED SYMBOLS, FIRST ───────────
+#: The API's stream task hands the symbols its consumers ask about to
+#: ingestion_state[ASKED_HANDOFF_KEY] (institutional_api_stream
+#: .handoff_asked: one bounded row, each symbol with its ask instant and
+#: whether that process holds its refdata). The refdata slot reads it and
+#: puts those symbols FIRST in the PRIORITY by-symbol read, before
+#: EVALUATED_CANDIDATE, held and imminent contracts: the API takes the
+#: record persisted here without a venue call. The plane reads only what the
+#: registry holds (its refdata is a registry row's); an asked symbol outside
+#: the registry is counted, never read.
+#: = institutional_api_stream.ASKED_HANDOFF_KEY (a test pins it)
+ASKED_HANDOFF_KEY = "pmx_asked_symbols"
+#: the required_reason populate gives an evaluated candidate (populate
+#: .contract_row / PROMOTE_SQL); second in the PRIORITY read
+EVALUATED_CANDIDATE = "EVALUATED_CANDIDATE"
+#: the PRIORITY read's order, by name (refdata_pending_split)
+PRIORITY_ORDER = ("ASKED_BY_A_CONSUMER", EVALUATED_CANDIDATE,
+                  "OPEN_PAPER_POSITION", "IMMINENT_BY_EVENT_START")
+
+
+async def asked_handoff(conn, *, now: float, max_age_s: float,
+                        idle_s: float | None = None) -> dict:
+    """The asked symbols the deciding process handed off, most recently
+    asked first: only from a hand-off written within `max_age_s` (a stopped
+    API's row is not read as asks), only symbols asked within `idle_s`
+    (default `max_age_s`). {"symbols": [...], "state": OK | ABSENT | STALE |
+    UNREADABLE, "at", "age_s", "without_refdata": n}. Never raises."""
+    idle = float(max_age_s if idle_s is None else idle_s)
+    out = {"symbols": [], "state": "ABSENT", "at": None, "age_s": None,
+           "without_refdata": 0, "process": None}
+    try:
+        if not await conn.fetchval(
+                "SELECT to_regclass('ingestion_state') IS NOT NULL"):
+            return out
+        v = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            ASKED_HANDOFF_KEY)
+        if v is None:
+            return out
+        if isinstance(v, str):
+            v = json.loads(v)
+        if not isinstance(v, dict):
+            return dict(out, state="UNREADABLE")
+        at = float(v.get("at"))
+        out.update(at=at, age_s=round(float(now) - at, 1),
+                   process=v.get("process"))
+        if not (0.0 <= float(now) - at <= float(max_age_s)):
+            return dict(out, state="STALE")
+        rows = [r for r in (v.get("symbols") or []) if isinstance(r, dict)
+                and r.get("symbol")]
+        rows = [r for r in rows
+                if float(now) - float(r.get("asked_at") or 0.0) <= idle]
+        rows.sort(key=lambda r: -float(r.get("asked_at") or 0.0))
+        seen, syms = set(), []
+        for r in rows:
+            s = str(r["symbol"])
+            if s not in seen:
+                seen.add(s)
+                syms.append(s)
+        return dict(out, symbols=syms, state="OK",
+                    without_refdata=sum(1 for r in rows
+                                        if not r.get("refdata")))
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, state="UNREADABLE", error=type(exc).__name__)
+
+
 async def refdata_pending_split(conn, *, now: float, unlisted_retry_s: float,
                                 priority_max: int, imminent_s: float,
-                                limit: int = 1000, excluded=()) -> dict:
-    """The contracts without usable refdata, split into PRIORITY (held,
-    candidates, or starting within `imminent_s`) and OTHER, each in
-    priority order, cooling ids excluded BEFORE the limit."""
+                                limit: int = 1000, excluded=(),
+                                asked=()) -> dict:
+    """The contracts without usable refdata, split into PRIORITY and OTHER,
+    cooling ids excluded BEFORE the limit. PRIORITY, in this order
+    (PRIORITY_ORDER): the `asked` symbols (the deciding process's hand-off,
+    in its order: most recently asked first; registry members only), then
+    EVALUATED_CANDIDATE, then the rest of held / candidate / imminent
+    (priority <= `priority_max`, or starting within `imminent_s`) in
+    priority order. `asked_pending` counts the asked symbols in the read;
+    `asked_not_in_registry` the asked symbols the registry does not hold
+    (nothing to persist a record into: counted, never read)."""
+    ex = sorted(set(excluded))
+    asked_order = []
+    seen = set()
+    for s in asked or ():
+        s = str(s or "")
+        if s and s not in seen:
+            seen.add(s)
+            asked_order.append(s)
+    asked_order = asked_order[:int(limit)]
+    asked_pri, not_in_registry = [], 0
+    if asked_order:
+        arows = await conn.fetch(
+            "SELECT a.s AS contract_id, r.contract_id IS NOT NULL AS known, "
+            "       (r.refdata IS NULL OR (r.refdata->>'unlisted'='true' "
+            "        AND r.refdata_at < to_timestamp($2))) AS pending "
+            "  FROM unnest($1::text[]) WITH ORDINALITY AS a(s, ord) "
+            "  LEFT JOIN market_plane_registry r "
+            "    ON r.contract_id = a.s AND r.venue = 'POLYMARKET_US' "
+            " WHERE NOT (a.s = ANY($3::text[])) ORDER BY a.ord",
+            asked_order, float(now) - float(unlisted_retry_s), ex)
+        for r in arows:
+            if not r["known"]:
+                not_in_registry += 1
+            elif r["pending"]:
+                asked_pri.append(r["contract_id"])
     rows = await conn.fetch(
         "SELECT contract_id, (priority <= $4 OR (event_start IS NOT NULL AND "
         "        event_start BETWEEN to_timestamp($5) - interval '4 hours' "
@@ -239,13 +337,18 @@ async def refdata_pending_split(conn, *, now: float, unlisted_retry_s: float,
         "   AND NOT (contract_id = ANY($3::text[])) AND ("
         "       refdata IS NULL OR (refdata->>'unlisted'='true' AND "
         "       refdata_at < to_timestamp($1))) "
-        " ORDER BY priority, event_start NULLS LAST, contract_id LIMIT $2",
-        float(now) - float(unlisted_retry_s), int(limit) * 2,
-        sorted(set(excluded)), int(priority_max), float(now),
-        float(imminent_s))
-    pri = [r["contract_id"] for r in rows if r["pri"]][:int(limit)]
-    oth = [r["contract_id"] for r in rows if not r["pri"]][:int(limit)]
-    return {"priority": pri, "other": oth}
+        " ORDER BY (required_reason IS NOT DISTINCT FROM $7) DESC, "
+        "          priority, event_start NULLS LAST, contract_id LIMIT $2",
+        float(now) - float(unlisted_retry_s), int(limit) * 2, ex,
+        int(priority_max), float(now), float(imminent_s), EVALUATED_CANDIDATE)
+    in_asked = set(asked_pri)
+    pri = asked_pri + [r["contract_id"] for r in rows
+                       if r["pri"] and r["contract_id"] not in in_asked]
+    pri = pri[:int(limit)]
+    oth = [r["contract_id"] for r in rows
+           if not r["pri"] and r["contract_id"] not in in_asked][:int(limit)]
+    return {"priority": pri, "other": oth, "asked_pending": len(asked_pri),
+            "asked_not_in_registry": not_in_registry}
 
 
 async def refdata_pending_ids(conn) -> set:
