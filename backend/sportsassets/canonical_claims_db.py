@@ -381,8 +381,34 @@ async def assemble(conn, *, now: float | None = None,
 #      PMUS_ROUTE_BOOK_READ_DEFERRED_VENUE_HOLD). At most ROUTE_BOOK_MAX_READS
 #      reads a recording pass (the worker records receipts every 300 s; a
 #      non-recording pass has no read budget), each under its own
-#      deadline, all inside ROUTE_BOOK_PASS_BUDGET_S; cross-venue classes
-#      first, then the market read longest ago, then the soonest start;
+#      deadline, all inside ROUTE_BOOK_PASS_BUDGET_S. THE READ ORDER
+#      (`read_order_key`; independent review 1 of a9f9f54c: refused reads
+#      were never remembered, so the same refusing markets sorted first on
+#      every pass and spent the whole budget -- open markets later in the
+#      order were never read): cross-venue classes first; then the LEAST
+#      RECENTLY ATTEMPTED -- every read SENT is remembered per market
+#      (`_attempt_put`, bounded), accepted, refused or failed, so a market
+#      just read goes behind every market not yet tried and an accepted
+#      book forgotten after PMUS_BOOK_WINDOW_S keeps its place; a read
+#      deferred with nothing sent keeps its place -- then the soonest
+#      start. A market held as not open (2a) joins that order at the END
+#      of its hold (`read_after`): read again LAST, behind every market
+#      waiting since before then. Every cross-venue market that may be
+#      read therefore gets a read within ceil(N / ROUTE_BOOK_MAX_READS)
+#      recording passes of joining the order (N the cross-venue markets
+#      that may be read; while each pass makes its ROUTE_BOOK_MAX_READS
+#      reads), whatever the others answer; a market of a single-venue
+#      class is read from what the cross-venue ones leave (unchanged);
+#   2a. a market the venue says is NOT OPEN (the newest book of it, ours or
+#      the paper runtime's, states it) is not read again for
+#      ROUTE_BOOK_NOT_OPEN_HOLD_S, or ROUTE_BOOK_ENDED_HOLD_S when that
+#      state says it has ENDED (rc6.2 p-freshness's RETRY_NOT_OPEN_S /
+#      RETRY_ENDED_S over the same ENDED_STATES), and is then read last
+#      (2. above). Inside the route bound it is refused
+#      PMUS_ROUTE_BOOK_MARKET_NOT_OPEN, past it while held
+#      PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN (the read's own age and
+#      the hold left ride on the receipt). A newer book of the market
+#      releases the hold at once;
 #   3. every book used is JUDGED (`judge_route_book`) at the read-time
 #      clock: it is this alias's market (a payload naming another slug is
 #      MISMATCH), it has our receipt instant, its own state does not say
@@ -423,6 +449,17 @@ ROUTE_BOOK_PASS_BUDGET_S = 10.0
 ROUTE_BOOK_LEAD_S = 10.0
 #: the accepted on-demand reads kept (newest per market), bounded
 ROUTE_BOOK_MEMO_MAX = 256
+#: (review 1) the markets whose last on-demand read is remembered (when
+#: it was sent and what it answered), bounded: more than MAX_FIXTURES (80)
+#: routed markets, so no market in the route set is forgotten
+ROUTE_BOOK_ATTEMPTS_MAX = 512
+#: (review 1) a market the venue says is not open is not read again for
+#: this long (active_refresh.RETRY_NOT_OPEN_S; a test pins it): CLOSED,
+#: the match-and-close auction, halted, suspended, pre-open can open again
+ROUTE_BOOK_NOT_OPEN_HOLD_S = 900.0
+#: ... and for this long when its state says it has ENDED (ENDED_STATES;
+#: active_refresh.RETRY_ENDED_S, a test pins it)
+ROUTE_BOOK_ENDED_HOLD_S = 3600.0
 #: how many refused markets the census names (all are counted)
 ROUTE_BOOK_NAMED_MAX = 12
 SRC_PAPER = "PAPER_BOOK_OBSERVATION"
@@ -440,22 +477,49 @@ R_PMUS_ROUTE_BOOK_READ_FAILED = "PMUS_ROUTE_BOOK_READ_FAILED"
 #: dispatch because the cooldown outlasts the read's deadline
 R_PMUS_ROUTE_BOOK_READ_DEFERRED = "PMUS_ROUTE_BOOK_READ_DEFERRED_VENUE_HOLD"
 R_PMUS_ROUTE_BOOK_NOT_READ = "PMUS_ROUTE_BOOK_NOT_READ_PASS_BUDGET_SPENT"
+#: (review 1) the venue's newest word says the market is not open, that word
+#: is older than the route bound and younger than the hold: not read again
+#: yet (ROUTE_BOOK_NOT_OPEN_HOLD_S / ROUTE_BOOK_ENDED_HOLD_S)
+R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN = "PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN"
 #: the reader's error words that mean "deferred, nothing sent": the
 #: worker's pre-read gate (workers.kalshi_market_data.ROUTE_READ_DEFERRED,
 #: a test pins the equality) and the venue gate's refusal before dispatch
-#: (venue_request_gate.VenueGateRefusal, as retail_book_read names it)
-READ_DEFERRED_ERRORS = frozenset({"VENUE_HOLD_IN_FORCE", "VenueGateRefusal"})
+#: (venue_request_gate.VenueGateRefusal, as retail_book_read names it) --
+#: and (review 1: a deferral keeps the market's place in the read order, so
+#: it must never be taken for a read that was sent) that gate's own
+#: refusal reasons, which name a refusal before dispatch wherever a caller
+#: records the reason instead of the type (production 2026-10-10 03:01Z,
+#: research-sql 38019095990 R4: the keyless probe's errors in 6 h include
+#: 289 VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE and 34
+#: DECISION_DEADLINE_PASSED_BEFORE_DISPATCH); restated, a test pins them
+READ_DEFERRED_ERRORS = frozenset({
+    "VENUE_HOLD_IN_FORCE", "VenueGateRefusal",
+    "VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE",
+    "DECISION_DEADLINE_PASSED_BEFORE_DISPATCH",
+    "VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP"})
 #: refusals that are the venue's word about the MARKET: inside the bound
-#: such a book is not re-read (the budget goes to markets that can price)
+#: such a book is not re-read (the budget goes to markets that can price),
+#: whether the paper runtime recorded it or our on-demand read answered it
+#: (review 1: `_attempt_put` keeps such a read as the market's newest book);
+#: a not-open word is also held past the bound (`hold_left_s`)
 _MARKET_REFUSALS = frozenset({R_PMUS_ROUTE_BOOK_NOT_OPEN,
                               R_PMUS_ROUTE_BOOK_CROSSED})
 
 _ROUTE_BOOK_MEMO: dict = {}
+#: (review 1) {slug: the market's last on-demand read attempt}: `sent_at`
+#: (our clock when the last read that was SENT came back; the read
+#: order's least-recently-attempted key), `why` (its refusal, None when
+#: accepted), `state`, `book` (kept only for the venue's word about the
+#: market: not open / crossed), `deferred_at` (the last read deferred with
+#: nothing sent; it moves nothing) and `tried_at` (either; the bound's
+#: eviction key)
+_ROUTE_BOOK_ATTEMPTS: dict = {}
 
 
 def reset_route_book_memo() -> None:
     """Tests only."""
     _ROUTE_BOOK_MEMO.clear()
+    _ROUTE_BOOK_ATTEMPTS.clear()
 
 
 #: THE VENUE'S STATES THAT SAY A MARKET IS NOT OPEN: market_plane.
@@ -474,6 +538,19 @@ NOT_OPEN_STATES = frozenset({
     "MARKET_STATE_PAUSED", "HALTED", "SUSPENDED", "PREOPEN", "PAUSED",
     "INSTRUMENT_STATE_PREOPEN", "INSTRUMENT_STATE_SUSPENDED",
     "INSTRUMENT_STATE_HALTED", "INSTRUMENT_STATE_PENDING"})
+#: (review 1) THE STATES THAT SAY A MARKET HAS ENDED (held the longer
+#: ROUTE_BOOK_ENDED_HOLD_S): market_plane.active_refresh.ENDED_STATES,
+#: restated for the same reason (a test pins the equality). CLOSED and the
+#: match-and-close auction are NOT in it: a market read so can open again.
+ENDED_STATES = frozenset({
+    "INSTRUMENT_STATE_EXPIRED", "INSTRUMENT_STATE_TERMINATED",
+    "MARKET_STATE_EXPIRED", "MARKET_STATE_TERMINATED",
+    "MARKET_STATE_SETTLED", "MARKET_STATE_RESOLVED",
+    "EXPIRED", "SETTLED", "RESOLVED"})
+
+
+def _ended(state) -> bool:
+    return str(state or "").strip().upper() in ENDED_STATES
 
 
 def _not_open(state) -> bool:
@@ -571,17 +648,112 @@ def _memo_put(memo: dict, slug: str, book: dict, *, now: float) -> None:
             memo[s].get("observed_at") or 0.0)), None)
 
 
+def _attempt_put(attempts: dict, slug: str, book: dict, why, *,
+                 at: float) -> None:
+    """(review 1) Remember ONE on-demand read attempt of `slug`, whatever
+    it answered. A read SENT -- accepted, refused or failed -- moves the
+    market behind every market attempted longer ago (`sent_at`, the read
+    order's key); a read deferred with nothing sent moves nothing
+    (`deferred_at` only). The book is kept only when it is the venue's
+    word about the market (not open, crossed): it then competes as the
+    market's newest book. Bounded: the market tried longest ago is
+    forgotten first."""
+    rec = dict(attempts.get(slug) or {})
+    if why == R_PMUS_ROUTE_BOOK_READ_DEFERRED:
+        rec["deferred_at"] = float(at)
+    else:
+        rec.update(sent_at=float(at), why=why, state=book.get("state"),
+                   book=dict(book) if why in _MARKET_REFUSALS else None)
+    rec["tried_at"] = float(at)
+    attempts[slug] = rec
+    while len(attempts) > ROUTE_BOOK_ATTEMPTS_MAX:
+        attempts.pop(min(attempts, key=lambda s: float(
+            attempts[s].get("tried_at") or 0.0)), None)
+
+
+def _newest_book(slug: str, obs, memo: dict, attempts: dict):
+    """The market's newest book by OUR receipt instant: the recorded paper
+    read, this process's last accepted on-demand read, and the last
+    on-demand read that was the venue's word about the market (not open,
+    crossed) -- so a newer word that the market is not open is never
+    passed over for an older open book, and a newer open book releases a
+    not-open hold."""
+    cands = []
+    if obs is not None:
+        cands.append(route_book_from_paper(slug, obs))
+    if memo.get(slug) is not None:
+        cands.append(memo[slug])
+    rec = attempts.get(slug) or {}
+    if rec.get("book") is not None and rec.get("why") in _MARKET_REFUSALS:
+        cands.append(rec["book"])
+    return max(cands, key=lambda b: float(b.get("observed_at") or 0.0)) \
+        if cands else None
+
+
+def hold_left_s(book: dict | None, why: str | None, *, now: float) -> float:
+    """PURE. (review 1) How long a market whose newest book is `book`
+    (judged `why`) stays out of the read plan: the venue says it is not
+    open -- ROUTE_BOOK_NOT_OPEN_HOLD_S from that book's receipt, or
+    ROUTE_BOOK_ENDED_HOLD_S when its state says it has ENDED. 0.0 when it
+    may be read."""
+    if book is None or why != R_PMUS_ROUTE_BOOK_NOT_OPEN or \
+            book.get("observed_at") is None:
+        return 0.0
+    hold = ROUTE_BOOK_ENDED_HOLD_S if _ended(book.get("state")) \
+        else ROUTE_BOOK_NOT_OPEN_HOLD_S
+    return max(0.0, float(book["observed_at"]) + hold - float(now))
+
+
+def read_after(book: dict | None, why: str | None, *, sent_at) -> tuple:
+    """PURE. (review 1) (instant, joined_by_hold): the instant a market
+    joins the least-recently-attempted read order -- its last read that was
+    SENT (None: never sent, it goes first). When the venue's newest word
+    says the market is not open, the END OF THAT WORD'S HOLD
+    (`hold_left_s`) instead, if later, and joined_by_hold is True: the
+    market is read again LAST -- behind every market waiting since before
+    its hold ended (a market read at that very instant goes behind it) --
+    and can never be starved. (Not an absolute last rank: with 300 s
+    recording passes and a 30 s route bound every open market needs a read
+    on every pass, so a last rank is never reached once
+    ROUTE_BOOK_MAX_READS open markets are routed, and a market read
+    SUSPENDED or HALTED once would never be read again.)"""
+    at = None if sent_at is None else float(sent_at)
+    if book is not None and why == R_PMUS_ROUTE_BOOK_NOT_OPEN and \
+            book.get("observed_at") is not None:
+        end = float(book["observed_at"]) + (
+            ROUTE_BOOK_ENDED_HOLD_S if _ended(book.get("state"))
+            else ROUTE_BOOK_NOT_OPEN_HOLD_S)
+        if at is None or end >= at:
+            return end, True
+    return at, False
+
+
+def read_order_key(*, cross: bool, after, start, slug: str,
+                   joined_by_hold: bool = False):
+    """PURE. (review 1) The on-demand read order: cross-venue classes
+    first; then the market that joined the order longest ago
+    (`read_after`; never sent: first; at one instant, a market whose hold
+    ended then before one read then); then the soonest start; the slug."""
+    return (not cross, -1.0 if after is None else float(after),
+            0 if joined_by_hold else 1,
+            9e18 if start is None else float(start), str(slug))
+
+
 async def route_books(conn, assembled, *, now: float, reader=None,
                       reads: int = 0, max_age_s: float = KMD.BOOK_SLA_S,
-                      memo: dict | None = None, clock=time.time) -> dict:
+                      memo: dict | None = None, attempts: dict | None = None,
+                      clock=time.time) -> dict:
     """THE PMUS ROUTE BOOK (the rule above): give every PMUS route
     candidate of `assembled` [(Fixture, built)] -- after the settlement
     certificates -- a judged book or a named refusal, IN PLACE on its
     instruments. `reader(slug, *, deadline_epoch_s, timeout_s)` is the
     bounded on-demand read (None: none is made); `reads` the read budget of
-    this pass. Returns the census (counted by outcome, refused markets
-    named). Reads only: one SELECT per routed market and the reader."""
+    this pass; `memo` the accepted reads and `attempts` every read's last
+    attempt (default: this process's). Returns the census (counted by
+    outcome, refused markets named, this pass's reads listed). Reads only:
+    one SELECT per routed market and the reader."""
     memo = _ROUTE_BOOK_MEMO if memo is None else memo
+    attempts = _ROUTE_BOOK_ATTEMPTS if attempts is None else attempts
     order, by = [], {}
     for fx, built in assembled:
         for _fp, members in (built.get("classes") or {}).items():
@@ -597,29 +769,33 @@ async def route_books(conn, assembled, *, now: float, reader=None,
                     order.append(i.market_id)
                 e["insts"].append(i)
                 e["cross"] = e["cross"] or cross
-    order.sort(key=lambda s: (
-        not by[s]["cross"],
-        float((memo.get(s) or {}).get("observed_at") or -1.0),
-        float(by[s]["start"] if by[s]["start"] is not None else 9e18), s))
+    t0 = clock()
+    # every routed market's recorded read first (the SELECT the loop made
+    # before): the read order needs each market's newest word
+    t_pre = max(float(now), clock())
+    for slug in order:
+        by[slug]["obs"] = await pmus_book(conn, slug, now=t_pre)
+        b = _newest_book(slug, by[slug]["obs"], memo, attempts)
+        by[slug]["after"], by[slug]["by_hold"] = read_after(
+            b, None if b is None else judge_route_book(
+                slug, b, now=t_pre, max_age_s=max_age_s),
+            sent_at=(attempts.get(slug) or {}).get("sent_at"))
+    order.sort(key=lambda s: read_order_key(
+        cross=by[s]["cross"], after=by[s]["after"], start=by[s]["start"],
+        slug=s, joined_by_hold=by[s]["by_hold"]))
     census = {"version": ROUTE_BOOK_VERSION,
               "routed_markets": len(order),
               "cross_venue_markets": sum(1 for s in order if by[s]["cross"]),
               "reads_allowed": int(reads), "reads_made": 0,
               "max_age_s": float(max_age_s), "lead_s": ROUTE_BOOK_LEAD_S,
-              "accepted": {}, "refused": {}, "refused_named": []}
-    t0 = clock()
+              "accepted": {}, "refused": {}, "refused_named": [],
+              "reads": []}
     for slug in order:
         t = max(float(now), clock())
-        cands = []
-        obs = await pmus_book(conn, slug, now=t)
-        if obs is not None:
-            cands.append(route_book_from_paper(slug, obs))
-        if memo.get(slug) is not None:
-            cands.append(memo[slug])
-        best = max(cands, key=lambda b: float(b.get("observed_at") or 0.0)) \
-            if cands else None
+        best = _newest_book(slug, by[slug]["obs"], memo, attempts)
         why_best = None if best is None else judge_route_book(
             slug, best, now=t, max_age_s=max_age_s)
+        held = hold_left_s(best, why_best, now=t)
         chosen, why, tried = None, None, None
         if best is not None and why_best is None and \
                 t - float(best["observed_at"]) <= max_age_s - ROUTE_BOOK_LEAD_S:
@@ -627,17 +803,23 @@ async def route_books(conn, assembled, *, now: float, reader=None,
         elif best is not None and why_best in _MARKET_REFUSALS and \
                 t - float(best["observed_at"]) <= max_age_s:
             why = why_best           # the venue's word, inside the bound
+        elif held > 0.0:
+            why = R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN   # not read again yet
         elif reader is not None and census["reads_made"] < int(reads) and \
                 clock() - t0 < ROUTE_BOOK_PASS_BUDGET_S:
             census["reads_made"] += 1
             tried = route_book_from_read(
                 slug, await _read_once(reader, slug, clock=clock))
-            why_rd = judge_route_book(slug, tried, now=max(float(now),
-                                                           clock()),
+            at = clock()
+            why_rd = judge_route_book(slug, tried, now=max(float(now), at),
                                       max_age_s=max_age_s)
+            # remembered WHATEVER it answered (review 1)
+            _attempt_put(attempts, slug, tried, why_rd, at=at)
+            census["reads"].append({"market": slug,
+                                    "outcome": why_rd or "ACCEPTED"})
             if why_rd is None:
                 chosen = tried
-                _memo_put(memo, slug, tried, now=clock())
+                _memo_put(memo, slug, tried, now=at)
             elif best is not None and why_best is None:
                 chosen = best        # the read failed; the book still holds
             else:
@@ -653,6 +835,8 @@ async def route_books(conn, assembled, *, now: float, reader=None,
                   "state": None if ref is None else ref.get("state"),
                   "venue_ts": None if ref is None else ref.get("venue_ts"),
                   "error": None if ref is None else ref.get("error")}
+        if why == R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN:
+            detail["hold_left_s"] = round(held, 1)
         for i in by[slug]["insts"]:
             if chosen is not None:
                 yes, no = KCL.pmus_asks(chosen)
@@ -673,6 +857,7 @@ async def route_books(conn, assembled, *, now: float, reader=None,
             census["refused"][why] = census["refused"].get(why, 0) + 1
             if len(census["refused_named"]) < ROUTE_BOOK_NAMED_MAX:
                 census["refused_named"].append({"market": slug, "why": why})
+    census["attempts_remembered"] = len(attempts)
     return census
 
 

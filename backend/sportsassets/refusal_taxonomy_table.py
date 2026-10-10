@@ -57,6 +57,10 @@ TABLE = {
     "PMUS_ROUTE_BOOK_READ_FAILED": (S, DATA, "VENUE_BOOK"),
     "PMUS_ROUTE_BOOK_READ_DEFERRED_VENUE_HOLD": (S, FRESH, "VENUE_BOOK"),
     "PMUS_ROUTE_BOOK_NOT_READ_PASS_BUDGET_SPENT": (S, FRESH, "VENUE_BOOK"),
+    # (rc6.3 route-book review 1) the venue's newest word says the market is
+    # not open, older than the route bound and inside the 900 s (ended:
+    # 3600 s) hold: not read again yet (data, as MARKET_NOT_OPEN's row)
+    "PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN": (S, DATA, "VENUE_BOOK"),
     # (RC5 Xavier no-growth) a canonical held position with no Xavier
     # handoff is named in the management census (ours: a handoff gap), and
     # a protection that cannot be priced is recorded instead of raising

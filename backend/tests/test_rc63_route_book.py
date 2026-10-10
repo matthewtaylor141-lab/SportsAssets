@@ -230,6 +230,58 @@ def test_the_not_open_states_are_the_freshness_windows_own():
     assert CDB.NOT_OPEN_STATES == FW.TERMINAL_STATES | FW.TRANSIENT_STATES
 
 
+def test_the_not_open_hold_is_the_plane_refreshs_own():
+    """(review 1) A market the venue says is not open is held as rc6.2
+    p-freshness holds it: 900 s, and 3600 s when it has ENDED, over the
+    same ENDED_STATES (CLOSED and the auction are not ended)."""
+    from sportsassets.market_plane import active_refresh as AR
+    assert CDB.ENDED_STATES == AR.ENDED_STATES
+    assert CDB.ENDED_STATES < CDB.NOT_OPEN_STATES
+    assert CDB.ROUTE_BOOK_NOT_OPEN_HOLD_S == AR.RETRY_NOT_OPEN_S
+    assert CDB.ROUTE_BOOK_ENDED_HOLD_S == AR.RETRY_ENDED_S
+    assert CDB.ROUTE_BOOK_ATTEMPTS_MAX > CDB.MAX_FIXTURES
+
+
+def test_the_read_order_is_least_recently_tried_and_not_open_rejoins_last():
+    """(review 1) PURE: the hold, the instant a market joins the read order
+    and the order itself."""
+    nop, j = CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN, CDB.judge_route_book
+    closed = _book(state="MARKET_STATE_CLOSED", observed_at=1000.0)
+    ended = _book(state="MARKET_STATE_EXPIRED", observed_at=1000.0)
+    assert j(SLUG, closed, now=1500.0, max_age_s=30.0) == nop
+    assert CDB.hold_left_s(closed, nop, now=1300.0) == 600.0
+    assert CDB.hold_left_s(closed, nop, now=1900.0) == 0.0
+    assert CDB.hold_left_s(ended, nop, now=1900.0) == 2700.0
+    assert CDB.hold_left_s(ended, nop, now=4600.0) == 0.0
+    # only the venue's not-open word holds; a failed or open read never does
+    assert CDB.hold_left_s(_book(), None, now=1001.0) == 0.0
+    assert CDB.hold_left_s(_book(error="X"), CDB.R_PMUS_ROUTE_BOOK_READ_FAILED,
+                           now=1001.0) == 0.0
+    # the instant a market joins the least-recently-attempted order: its
+    # last read SENT; a not-open word's market at the END of its hold
+    ra = CDB.read_after
+    assert ra(None, None, sent_at=None) == (None, False)
+    assert ra(_book(), None, sent_at=1000.0) == (1000.0, False)
+    assert ra(_book(error="X"), CDB.R_PMUS_ROUTE_BOOK_READ_FAILED,
+              sent_at=1000.0) == (1000.0, False)
+    assert ra(closed, nop, sent_at=1000.0) == (1900.0, True)
+    assert ra(ended, nop, sent_at=1000.0) == (4600.0, True)
+    assert ra(closed, nop, sent_at=None) == (1900.0, True)  # the paper's
+    assert ra(closed, nop, sent_at=2500.0) == (2500.0, False)  # later read
+    k = CDB.read_order_key
+    keys = {
+        "never-cross-late": k(cross=True, after=None, start=9.0, slug="a"),
+        "tried-cross-early": k(cross=True, after=5.0, start=1.0, slug="b"),
+        "tried-long-ago": k(cross=True, after=1.0, start=8.0, slug="c"),
+        "read-at-7": k(cross=True, after=7.0, start=0.0, slug="f"),
+        "closed-hold-ended-at-7": k(cross=True, after=7.0, start=5.0,
+                                    slug="e", joined_by_hold=True),
+        "never-single": k(cross=False, after=None, start=0.0, slug="d")}
+    assert sorted(keys, key=keys.get) == [
+        "never-cross-late", "tried-long-ago", "tried-cross-early",
+        "closed-hold-ended-at-7", "read-at-7", "never-single"]
+
+
 def test_a_read_keeps_its_own_receipt_and_names_where_it_came_from():
     got = {"marketData": _md(slug=SLUG), "error": None, "observed_at": 1234.5,
            "served_by": "PUBLIC_GATEWAY_KEYLESS"}
@@ -300,7 +352,17 @@ def test_a_read_the_venue_gate_refuses_before_dispatch_is_deferred(
     from sportsassets import venue_request_gate as grt
     monkeypatch.setattr(grt, "normal_read_gate", lambda now=None: {
         "blocking": False})
+    # (review 1) the gate's own refusal reasons are nothing sent as well:
+    # a deferral keeps the market's place in the read order, a failure not
+    gate_reasons = (grt.R_COOLDOWN_EXCEEDS_DEADLINE, grt.R_DEADLINE_PASSED,
+                    grt.R_HOLD_EXCEEDS_UNDEADLINED_CAP)
+    assert CDB.READ_DEFERRED_ERRORS == frozenset(
+        {W.ROUTE_READ_DEFERRED, grt.VenueGateRefusal.__name__}
+        | set(gate_reasons))
     for err, why in (("VenueGateRefusal", CDB.R_PMUS_ROUTE_BOOK_READ_DEFERRED),
+                     *((r, CDB.R_PMUS_ROUTE_BOOK_READ_DEFERRED)
+                       for r in gate_reasons),
+                     ("RateLimitError", CDB.R_PMUS_ROUTE_BOOK_READ_FAILED),
                      ("ConnectError", CDB.R_PMUS_ROUTE_BOOK_READ_FAILED)):
         monkeypatch.setattr(SB, "retail_book_read",
                             lambda slug, client=None, e=err: {
@@ -726,6 +788,299 @@ def test_the_production_shape_rotates_the_bounded_reads_over_every_market(
         flat = [s for p in read_by_pass for s in p]
         assert len(flat) == 24 and len(set(flat[:23])) == 23
         assert set(flat) == set(insts)
+    _run(go, monkeypatch)
+
+
+# ── (review 1 of a9f9f54c) the bounded reads never starve a market ──────
+#
+# The reviewer's reproduction (production 2026-10-10 01:53Z: the 23 mapped
+# slugs still held 10-09 games): a read that came back refused (not open,
+# failed, crossed, deferred) was never remembered, so the same earlier-
+# starting markets sorted as never read on every recording pass and spent
+# the whole budget; the open, upcoming markets were refused
+# PMUS_ROUTE_BOOK_NOT_READ_PASS_BUDGET_SPENT on every pass, never read.
+
+#: what each refusing market's read answers, by mode ("mixed" cycles them)
+DEAD_KINDS = ("closed", "ended", "failed", "raises")
+DEAD_HOLD_PASSES = {"closed": 3, "ended": 12}    # 900 s / 3600 s, 300 s apart
+
+
+def _dead_kind(mode, n):
+    return DEAD_KINDS[n % len(DEAD_KINDS)] if mode == "mixed" else mode
+
+
+def _shape(base, *, dead, live, prefix="aec-nhl-rc63s"):
+    """`dead` cross-venue games that started 3 h ago (inside the claim
+    window's 4 h lookback, so they sort first by start) and `live` ones
+    starting in 2 h; every class is certified cross-venue."""
+    fxs, insts, slugs_dead, slugs_live = [], {}, [], []
+    for n in range(dead + live):
+        is_dead = n < dead
+        slug = "%s-%02d-2026-10-10" % (prefix, n)
+        start = base - 3 * 3600 + 60 * n if is_dead else \
+            base + 7200 + 60 * n
+        fx = CC.Fixture(event_key="NHL:s%d" % n, sport="HOCKEY",
+                        league="NHL", start_epoch=start,
+                        outcome_kind="TWO_WAY", home="H", away="A")
+        p = _inst(PMUS, slug, "YES", [], at=None)
+        k = _inst(KALSHI, "KXS-%d" % n, "YES", [(Decimal("0.5"), 10)],
+                  at=base)
+        insts[slug] = p
+        (slugs_dead if is_dead else slugs_live).append(slug)
+        fxs.append((fx, {"classes": {"fps%d" % n: [p, k]}}))
+    return fxs, insts, slugs_dead, slugs_live
+
+
+@pg
+@pytest.mark.parametrize("mode", ["closed", "ended", "failed", "raises",
+                                  "mixed"])
+def test_refusing_earlier_markets_never_starve_the_open_ones(
+        monkeypatch, mode):
+    """8 earlier-starting cross-venue markets whose every read is refused
+    (the venue says CLOSED, or EXPIRED; the read fails, or raises) and 4
+    open later ones, one recording pass every 300 s for 16 passes: every
+    open market gets its OWN fresh on-demand book within ceil(12 / 6) = 2
+    passes and again inside every 2 consecutive passes after that; no pass
+    makes more than 6 reads; a market the venue says is not open is not
+    read again inside its hold (named PMUS_ROUTE_BOOK_HELD_..., its own
+    read's age on the receipt), is read again within 2 passes of the hold's
+    end, and then behind every open market waiting since before that end;
+    a market whose read fails is read again within 2 passes (behind the
+    others, never starved, never starving)."""
+    async def go(c):
+        base = time.time()
+        clk = {"t": base}
+        n_dead, n_live = CDB.ROUTE_BOOK_MAX_READS + 2, 4
+        fxs, insts, dead, live = _shape(base, dead=n_dead, live=n_live)
+        await c.execute("DELETE FROM paper_book_observations "
+                        " WHERE us_market_slug LIKE 'aec-nhl-rc63s-%'")
+        kind = {s: _dead_kind(mode, n) for n, s in enumerate(dead)}
+
+        def make(slug):
+            k = kind.get(slug)
+            if k in ("closed", "ended"):
+                st = "MARKET_STATE_CLOSED" if k == "closed" \
+                    else "MARKET_STATE_EXPIRED"
+                return {"marketData": _md(offers=(("0.99", 100),),
+                                          bids=(("0.01", 100),), state=st),
+                        "error": None, "observed_at": clk["t"],
+                        "served_by": "TEST"}
+            if k == "failed":
+                return {"marketData": None, "error": "HTTPStatusError",
+                        "observed_at": clk["t"], "served_by": "TEST"}
+            if k == "raises":
+                raise RuntimeError("transport")
+            return {"marketData": _md(), "error": None,
+                    "observed_at": clk["t"], "served_by": "TEST"}
+        memo, attempts = {}, {}
+        n_pass = 16
+        within = -(-(n_dead + n_live) // CDB.ROUTE_BOOK_MAX_READS)   # 2
+        fresh_by = {s: [] for s in live}
+        read_at = {s: [] for s in dead}
+        for k in range(n_pass):
+            clk["t"] = base + 300.0 * k
+            for i in insts.values():
+                i.book_refusal = None
+            prev_live = {o: (fresh_by[o][-1] if fresh_by[o] else None)
+                         for o in live}
+            rd = _Reader(make)
+            cen = await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd,
+                reads=CDB.ROUTE_BOOK_MAX_READS, memo=memo,
+                attempts=attempts, clock=lambda: clk["t"])
+            calls = [x["slug"] for x in rd.calls]
+            assert len(calls) == cen["reads_made"] <= 6, (k, calls)
+            assert [r["market"] for r in cen["reads"]] == calls
+            for s in live:
+                i = insts[s]
+                if s in calls:
+                    # its OWN read this pass, its own measured age
+                    assert i.book_refusal is None and \
+                        i.book_source == "PMUS_ON_DEMAND_READ:TEST"
+                    assert i.observed_at == clk["t"] and i.asks
+                    fresh_by[s].append(k)
+                else:
+                    assert i.book_refusal == CDB.R_PMUS_ROUTE_BOOK_NOT_READ
+            for s in dead:
+                i = insts[s]
+                assert i.asks == () and i.observed_at is None
+                assert i.book_refusal is not None
+                hold = DEAD_HOLD_PASSES.get(kind[s])
+                if s in calls:
+                    if hold is not None and read_at[s]:
+                        # read again LAST: behind every open market that
+                        # has waited since before its hold ended
+                        end = read_at[s][-1] + hold
+                        for o in live:
+                            if o in calls and (prev_live[o] is None
+                                               or prev_live[o] < end):
+                                assert calls.index(o) < calls.index(s), \
+                                    (k, calls)
+                    read_at[s].append(k)
+                elif hold is not None and read_at[s] and \
+                        k - read_at[s][-1] < hold:
+                    last = read_at[s][-1]
+                    assert i.book_refusal == \
+                        CDB.R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN, (k, s)
+                    assert i.book_detail["age_s"] == 300.0 * (k - last)
+                    assert i.book_detail["state"] in (
+                        "MARKET_STATE_CLOSED", "MARKET_STATE_EXPIRED")
+                    assert i.book_detail["hold_left_s"] == \
+                        300.0 * (last + hold - k)
+        for s in live:
+            got = fresh_by[s]
+            assert got and got[0] < within, (s, got)
+            for k in range(n_pass - within + 1):
+                assert any(k <= p < k + within for p in got), (s, k, got)
+        for s in dead:
+            ks = read_at[s]
+            assert ks and ks[0] < within, (s, ks)    # every market read
+            hold = DEAD_HOLD_PASSES.get(kind[s])
+            lo, hi = (hold, hold + within - 1) if hold is not None \
+                else (1, within)
+            gaps = [b - a for a, b in zip(ks, ks[1:])]
+            assert all(lo <= g <= hi for g in gaps), (s, ks)
+            # never starved: due again inside the run => read again
+            assert ks[-1] + hi > n_pass - 1, (s, ks)
+        assert len(attempts) == n_dead + n_live
+    _run(go, monkeypatch)
+
+
+@pg
+def test_a_deferred_read_keeps_its_place_and_a_failed_read_goes_behind(
+        monkeypatch):
+    """(review 1) A read deferred with nothing sent (the venue's hold or
+    429 cooldown) moves nothing: the same markets are read first on the
+    next pass. A read that was SENT and failed goes behind every market not
+    yet tried."""
+    async def go(c):
+        base = time.time()
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=8)
+        answer = {"how": "deferred"}
+
+        def make(slug):
+            if answer["how"] == "deferred":
+                return {"marketData": None, "error": W.ROUTE_READ_DEFERRED,
+                        "observed_at": clk["t"], "served_by": "TEST"}
+            if answer["how"] == "failed":
+                return {"marketData": None, "error": "HTTPStatusError",
+                        "observed_at": clk["t"], "served_by": "TEST"}
+            return {"marketData": _md(), "error": None,
+                    "observed_at": clk["t"], "served_by": "TEST"}
+        memo, attempts, order = {}, {}, []
+        for k, how in enumerate(("deferred", "failed", "ok")):
+            clk["t"] = base + 300.0 * k
+            answer["how"] = how
+            rd = _Reader(make)
+            cen = await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd, reads=6, memo=memo,
+                attempts=attempts, clock=lambda: clk["t"])
+            order.append([x["slug"] for x in rd.calls])
+            if how == "deferred":
+                assert cen["refused"] == {
+                    CDB.R_PMUS_ROUTE_BOOK_READ_DEFERRED: 6,
+                    CDB.R_PMUS_ROUTE_BOOK_NOT_READ: 2}
+        assert order[0] == live[:6]
+        assert order[1] == live[:6]              # deferred: kept its place
+        assert order[2] == live[6:] + live[:4]   # failed: behind the untried
+        assert all(insts[s].book_source == "PMUS_ON_DEMAND_READ:TEST"
+                   for s in order[2])
+    _run(go, monkeypatch)
+
+
+@pg
+def test_an_accepted_read_keeps_its_place_after_its_book_is_forgotten(
+        monkeypatch):
+    """(review 1) The accepted book leaves the memo after 900 s; the market
+    keeps its place in the least-recently-attempted order and does not
+    jump ahead of a market never read (13 markets, 6 reads a pass, passes
+    950 s and 300 s apart: every market read within ceil(13 / 6) = 3)."""
+    async def go(c):
+        base = time.time()
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=13)
+
+        def make(slug):
+            return {"marketData": _md(), "error": None,
+                    "observed_at": clk["t"], "served_by": "TEST"}
+        memo, attempts, order = {}, {}, []
+        for dt in (0.0, 950.0, 1250.0):
+            clk["t"] = base + dt
+            rd = _Reader(make)
+            await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd, reads=6, memo=memo,
+                attempts=attempts, clock=lambda: clk["t"])
+            order.append([x["slug"] for x in rd.calls])
+            if dt == 950.0:
+                # the first pass's books were forgotten (> 900 s old)
+                assert not set(live[:6]) & set(memo)
+                assert set(live[:6]) <= set(attempts)
+        assert order[0] == live[:6] and order[1] == live[6:12]
+        assert order[2] == [live[12]] + live[:5]  # the never-read one first
+        assert set(order[0] + order[1] + order[2]) == set(live)
+    _run(go, monkeypatch)
+
+
+@pg
+def test_a_newer_open_book_releases_a_not_open_hold(monkeypatch):
+    """(review 1) The venue's newest word wins: our read said CLOSED, then
+    the paper runtime recorded the market OPEN -- the hold is released and
+    the market is read again at once (and a not-open word younger than the
+    route bound still refuses an older open book)."""
+    async def go(c):
+        base = time.time()
+        clk = {"t": base}
+        fxs, insts, _d, live = _shape(base, dead=0, live=1)
+        s = live[0]
+        await c.execute("DELETE FROM paper_book_observations "
+                        " WHERE us_market_slug = $1", s)
+        state = {"st": "MARKET_STATE_CLOSED"}
+
+        def make(slug):
+            return {"marketData": _md(state=state["st"]), "error": None,
+                    "observed_at": clk["t"], "served_by": "TEST"}
+        memo, attempts = {}, {}
+
+        async def one(dt, reads=1):
+            clk["t"] = base + dt
+            insts[s].book_refusal = None
+            rd = _Reader(make)
+            cen = await CDB.route_books(
+                c, fxs, now=clk["t"], reader=rd, reads=reads, memo=memo,
+                attempts=attempts, clock=lambda: clk["t"])
+            return rd, cen
+        rd, _ = await one(0.0)
+        assert len(rd.calls) == 1 and insts[s].book_refusal == \
+            CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN
+        # a paper read 5 s OLDER than our CLOSED read, open, 8 s later:
+        # still the not-open word (the newest), no read inside the bound
+        md = _md()
+        await c.execute(
+            "INSERT INTO paper_book_observations (us_market_slug, "
+            " observed_at, source, bids, offers, market_state, read_basis) "
+            " VALUES ($1, to_timestamp($2), 'TEST_PAPER', $3::jsonb, "
+            " $4::jsonb, $5, 'TEST')", s, base - 5.0,
+            json.dumps(md["bids"]), json.dumps(md["offers"]), md["state"])
+        rd, _ = await one(8.0)
+        assert rd.calls == [] and insts[s].book_refusal == \
+            CDB.R_PMUS_ROUTE_BOOK_NOT_OPEN
+        rd, cen = await one(300.0)
+        assert rd.calls == [] and insts[s].book_refusal == \
+            CDB.R_PMUS_ROUTE_BOOK_HELD_NOT_OPEN
+        assert insts[s].book_detail["hold_left_s"] == 600.0
+        # the paper runtime records the market OPEN after our read: released
+        await c.execute(
+            "INSERT INTO paper_book_observations (us_market_slug, "
+            " observed_at, source, bids, offers, market_state, read_basis) "
+            " VALUES ($1, to_timestamp($2), 'TEST_PAPER', $3::jsonb, "
+            " $4::jsonb, $5, 'TEST')", s, base + 400.0,
+            json.dumps(md["bids"]), json.dumps(md["offers"]), md["state"])
+        state["st"] = "MARKET_STATE_OPEN"
+        rd, cen = await one(600.0)
+        assert len(rd.calls) == 1
+        assert insts[s].book_refusal is None and \
+            insts[s].book_source == "PMUS_ON_DEMAND_READ:TEST"
     _run(go, monkeypatch)
 
 
