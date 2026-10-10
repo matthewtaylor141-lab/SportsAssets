@@ -9,10 +9,24 @@ execution mirror's runner:
      KALSHI_SMALLLIVE_ENABLED switch off in this process, and SMALL LIVE in
      SHADOW (migration 225). Any of them on, or a table absent, and it
      records nothing and names why (stand-down, heartbeat only).
-  2. PLAN. Every LINKED PAPER decision not yet seen -- an ENTER decision with
-     its ENTRY BUY paper order -- gets exactly ONE kalshi_shadow_intents row
-     (migration 367), PLANNED or EXCLUDED with the named reason, idempotent
-     (one row per decision, append-only):
+  2. PLAN. Every LINKED PAPER decision of the mirrored paper account
+     (execmirror.PAPER_ACCOUNT, as the 1:1,000 mirror scopes it; a decision
+     of any other paper account gets no row and is counted in the pass) not
+     yet seen -- an ENTER decision with its ENTRY BUY paper order -- gets
+     exactly ONE kalshi_shadow_intents row (migration 367), PLANNED or
+     EXCLUDED with the named reason, idempotent (one row per decision,
+     append-only):
+       eligibility  FIRST, the owner's live-eligibility allowlist, the one
+                    every live-shaped path applies (execmirror.
+                    live_eligibility: execmirror.plan_new, execution_intent,
+                    live_parity): only an allowlisted strategy at an
+                    allowlisted policy version (the decision's own
+                    policy_version) may be planned. Exploration, Derek's
+                    lane, the maker experiment, the benchmark, any unknown
+                    strategy and any unpromoted version are PAPER ONLY:
+                    EXCLUDED as STRATEGY_NOT_LIVE_ELIGIBLE with the class
+                    and the allowlist, and nothing else is evaluated for
+                    them (no counterpart, no plan, no EV).
        counterpart  the decision's held side must be a settlement-certified
                     canonical claim (canonical_claim_aliases: POLYMARKET_US,
                     market = the slug, LONG = YES / SHORT = NO, certificate
@@ -29,10 +43,17 @@ execution mirror's runner:
                     control's per-order cap, the buying power of a fresh
                     complete read-only reconciliation when one exists.
        freshness    the decision must be inside the mirror's own intent age
-                    (execmirror.MAX_INTENT_AGE_S, the Pinnacle 30 s rule) and
-                    the Kalshi book inside its SLA (kalshi_market_data.
-                    BOOK_SLA_S) -- a plan is never made on a stale decision
-                    or a stale book.
+                    (execmirror.MAX_INTENT_AGE_S, the Pinnacle 30 s rule), its
+                    paper order not past its own expires_at (the mirror's
+                    INTENT_STALE), and the Kalshi book inside its SLA
+                    (kalshi_market_data.BOOK_SLA_S) -- a plan is never made on
+                    a stale decision, an expired order or a stale book. The
+                    paper order's STATE is recorded, never decisive: the live
+                    ENTRY path (execution_intent.ActualLane) dispatches before
+                    the paper order exists and never reads its simulated
+                    outcome, and the paper simulator records a partly filled
+                    IOC as CANCELED (real paper exposure), so judging a Kalshi
+                    plan on the PMUS paper fill would be look-ahead.
        execution    the current Kalshi YES asks walked at the plan's limit for
                     the planned contracts (best executable price first);
                     none at or under the limit, or too few, is EXCLUDED.
@@ -45,7 +66,13 @@ execution mirror's runner:
                     price alone cleared and the fee did not.
      A PLANNED row carries the would-be V2 body as EVIDENCE (plan_payload);
      the table has no venue order id, no submit time and no state beyond
-     PLANNED / EXCLUDED, by CHECK.
+     PLANNED / EXCLUDED, by CHECK. PLANNED is not a live admission: no
+     Kalshi live book-currency or settlement-gate approval exists, and the
+     row says so (detail.live_admission).
+     COVERAGE. The first passes after boot read back BACKFILL_S; once a pass
+     has COMMITTED a short page the steady window is LOOKBACK_S, widened to
+     reach back to the last committed short page whenever passes failed or
+     were skipped (an outage up to BACKFILL_S loses no decision).
   3. RECONCILE (once per RECON_EVERY_S window). With a Kalshi credential
      PRESENT in this process, a read-only account reconciliation
      (kalshi_account.snapshot over GET balance / positions / resting orders
@@ -117,8 +144,16 @@ ACCOUNT_LOCK_KEY = 0x4B534832                  # 'KSH2'
 
 PMUS_VENUE = "POLYMARKET_US"
 KALSHI_VENUE = "KALSHI"
+#: the mirrored PAPER account: the 1:1,000 execution mirror's own scope
+PAPER_ACCOUNT = EM.PAPER_ACCOUNT
+#: this planner plans NEW exposure only (the ENTRY BUY of a decision); the
+#: allowlist's version check applies to it (execmirror.BUY_ROLES)
+PLAN_ROLE = "ENTRY"
 
 # ── named exclusions (refusal_taxonomy_table: rc6.3 kalshi-shadow) ────
+R_KSH_STRATEGY_NOT_LIVE_ELIGIBLE = "KALSHI_SHADOW_STRATEGY_NOT_LIVE_ELIGIBLE"
+R_KSH_PAPER_ORDER_EXPIRED_BEFORE_PLAN = \
+    "KALSHI_SHADOW_PAPER_ORDER_EXPIRED_BEFORE_PLAN"
 R_KSH_NO_CERTIFIED_COUNTERPART = "KALSHI_SHADOW_NO_CERTIFIED_COUNTERPART"
 R_KSH_COUNTERPART_ONLY_A_NO_LEG = "KALSHI_SHADOW_COUNTERPART_ONLY_A_NO_LEG"
 R_KSH_COUNTERPART_AMBIGUOUS = "KALSHI_SHADOW_COUNTERPART_AMBIGUOUS"
@@ -172,7 +207,32 @@ W_NO_KALSHI_ALIAS = "NO_CERTIFIED_KALSHI_ALIAS_CARRIES_THE_CLAIM"
 FEE_BASIS_TAKER = "KALSHI_PUBLISHED_TAKER_SCHEDULE"
 FEE_BASIS_MAKER_BOUND = "KALSHI_PUBLISHED_TAKER_SCHEDULE_AS_THE_MAKER_BOUND"
 
-STATE = {"drained": False}
+#: drained: a pass has COMMITTED a short page (the backfill is done);
+#: complete_through: the `now` of the last such pass -- every linked
+#: decision of the mirrored account decided by then has its row
+STATE = {"drained": False, "complete_through": None}
+
+
+def window_s(now: float) -> float:
+    """How far back this pass reads: BACKFILL_S until a pass has committed a
+    short page; then LOOKBACK_S, widened to reach back to the last committed
+    short page (a failed, skipped or full pass never shortens the reach),
+    never beyond BACKFILL_S."""
+    if not STATE["drained"]:
+        return BACKFILL_S
+    since = STATE.get("complete_through")
+    if since is None:
+        return LOOKBACK_S
+    return min(BACKFILL_S, max(LOOKBACK_S, float(now) - float(since)
+                               + LOOKBACK_S))
+
+
+def note_committed(counts: dict, *, now: float) -> None:
+    """Called only AFTER the plan transaction committed: a short page means
+    every decision in the window has its row."""
+    if counts.get("seen", MAX_DECISIONS_PER_PASS) < MAX_DECISIONS_PER_PASS:
+        STATE["drained"] = True
+        STATE["complete_through"] = float(now)
 
 
 def enabled(env=None) -> bool:
@@ -363,11 +423,12 @@ def base_row(decision: dict, order: dict, *, control: dict,
     qty, wire, lim = (_d(order.get("qty")), _d(order.get("wire_price")),
                       _d(order.get("limit_price")))
     scale = _d(control.get("scale")) or Decimal(1000)
+    expires = _epoch(order.get("expires_at"))
     return {
         "shadow_id": shadow_id(did), "paper_decision_id": did,
         "paper_order_id": order["order_id"],
         "account_id": decision.get("account_id") or order.get("account_id"),
-        "strategy": decision.get("strategy") or order.get("strategy"),
+        "strategy": strategy_of(decision, order),
         "us_market_slug": slug, "holding": holding,
         "intent": KO.norm_intent(order.get("intent")),
         "paper_decided_at": decided, "planned_at": now,
@@ -387,10 +448,35 @@ def base_row(decision: dict, order: dict, *, control: dict,
         "detail": {"counterpart_evaluated_at": now,
                    "max_decision_age_s": MAX_DECISION_AGE_S,
                    "book_sla_s": BOOK_SLA_S,
+                   "policy_version": policy_version_of(decision, order),
+                   # recorded, never decisive (module docstring: freshness)
+                   "paper_order_state_at_plan": order.get("state"),
+                   "paper_order_filled_qty_at_plan": (
+                       None if _d(order.get("filled_qty")) is None
+                       else str(_d(order.get("filled_qty")))),
+                   "paper_order_expires_at": expires,
                    "paper_notional_over_scale": (
                        str((qty * lim) / scale) if qty is not None
                        and lim is not None else None)},
         "planner_version": VERSION}
+
+
+def strategy_of(decision: dict, order: dict):
+    return decision.get("strategy") or order.get("strategy")
+
+
+def policy_version_of(decision: dict, order: dict):
+    return decision.get("policy_version") or order.get("policy_version")
+
+
+def eligibility(decision: dict, order: dict) -> tuple:
+    """(eligible, evidence) under the owner's allowlist -- execmirror.
+    live_eligibility itself, never a copy -- for the decision's ENTRY BUY
+    (the version check applies: new exposure)."""
+    return EM.live_eligibility({
+        "strategy": strategy_of(decision, order),
+        "decision_policy_version": policy_version_of(decision, order),
+        "role": PLAN_ROLE})
 
 
 def evaluate(decision: dict, order: dict, *, pmus_aliases: list,
@@ -413,6 +499,16 @@ def evaluate(decision: dict, order: dict, *, pmus_aliases: list,
         row["detail"].update(detail)
         return row
 
+    # 1 · THE OWNER'S LIVE-ELIGIBILITY ALLOWLIST, before anything else: a
+    #     PAPER-ONLY strategy or an unpromoted version is never given a
+    #     counterpart, a plan, a price or an EV
+    eligible, why_not = eligibility(decision, order)
+    row["detail"]["live_eligibility"] = why_not
+    if not eligible:
+        return excluded(R_KSH_STRATEGY_NOT_LIVE_ELIGIBLE,
+                        why="the owner's live-eligibility allowlist "
+                            "(execmirror.live_eligibility): %s" %
+                            why_not.get("class"))
     if holding not in ("LONG", "SHORT") or not slug:
         return excluded(R_KSH_MAPPING_NOT_ESTABLISHED,
                         why="the paper order names no held side or market")
@@ -486,6 +582,15 @@ def evaluate(decision: dict, order: dict, *, pmus_aliases: list,
         return excluded(R_KSH_NO_FAIR_PROBABILITY, plan_live_qty=live)
     if age is None or age > MAX_DECISION_AGE_S:
         return excluded(R_KSH_DECISION_STALE_AT_PLAN, plan_live_qty=live)
+    # the paper order's own expiry (the mirror's INTENT_STALE): judged with
+    # the decision's freshness, after the counterpart and the plan, so the
+    # row still says what the venue side would have been
+    expires = row["detail"].get("paper_order_expires_at")
+    if expires is not None and expires <= now:
+        return excluded(R_KSH_PAPER_ORDER_EXPIRED_BEFORE_PLAN,
+                        plan_live_qty=live,
+                        why="the paper order expired before the plan",
+                        expired_s_before_plan=round(now - expires, 3))
     if not bk or not bk.get("readable") or b_at is None:
         return excluded(R_KSH_BOOK_UNAVAILABLE, plan_live_qty=live)
     if not fresh:
@@ -530,7 +635,17 @@ def evaluate(decision: dict, order: dict, *, pmus_aliases: list,
                         else R_KSH_EV_NOT_POSITIVE, plan_live_qty=live)
     row.update(state="PLANNED", exclusion=None, live_qty=live,
                plan_payload=plan["payload"])
+    row["detail"]["live_admission"] = LIVE_ADMISSION_NOTE
     return row
+
+
+#: a PLANNED SHADOW row is a would-be order, never a live admission
+LIVE_ADMISSION_NOTE = {
+    "evaluated": False,
+    "why": "SHADOW plan only: no Kalshi live book-currency rule or Kalshi "
+           "settlement-gate approval exists (actual_admission governs the "
+           "Polymarket US lane), Kalshi live money is OFF and nothing here "
+           "can submit"}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -585,24 +700,29 @@ def credential(*, env=None, transport=None) -> dict:
             "smalllive_enabled_env": bool(cs.get("smalllive_enabled_env"))}
 
 
+#: the decision's strategy and DECIDING POLICY VERSION, read exactly as
+#: execmirror.plan_new reads them for live_eligibility (the version from the
+#: decision, else the paper order's label), scoped to the mirrored account
 POPULATION_SQL = """
 SELECT d.decision_id, d.account_id, coalesce(d.strategy, o.strategy) AS strategy,
+       coalesce(d.policy_version, o.label->>'policy_version') AS policy_version,
        d.decided_at, d.us_market_slug, d.holding_side, d.p_blended, d.p_pinnacle,
        o.order_id, o.account_id AS order_account_id, o.intent, o.qty,
        o.wire_price, o.limit_price, o.time_in_force, o.order_type,
        o.expires_at, o.role, o.holding_side AS order_holding_side,
-       o.us_market_slug AS order_slug, o.strategy AS order_strategy
+       o.us_market_slug AS order_slug, o.strategy AS order_strategy,
+       o.state AS order_state, o.filled_qty AS order_filled_qty
   FROM paper_decisions d
   JOIN LATERAL (SELECT x.order_id, x.account_id, x.intent, x.qty, x.wire_price,
                        x.limit_price, x.time_in_force, x.order_type,
                        x.expires_at, x.role, x.holding_side, x.us_market_slug,
-                       x.strategy
+                       x.strategy, x.label, x.state, x.filled_qty
                   FROM paper_orders x
                  WHERE x.decision_id = d.decision_id AND x.role = 'ENTRY'
                    AND x.direction = 'BUY'
                  ORDER BY x.created_at, x.order_id LIMIT 1) o ON true
  WHERE d.verdict = 'ENTER' AND d.decided_at > to_timestamp($1)
-   AND d.decided_at <= to_timestamp($3)
+   AND d.decided_at <= to_timestamp($3) AND d.account_id = $4
    AND NOT EXISTS (SELECT 1 FROM kalshi_shadow_intents s
                     WHERE s.paper_decision_id = d.decision_id)
  ORDER BY d.decided_at DESC, d.decision_id
@@ -612,20 +732,29 @@ SELECT d.decision_id, d.account_id, coalesce(d.strategy, o.strategy) AS strategy
 UNLINKED_SQL = """
 SELECT count(*) FROM paper_decisions d
  WHERE d.verdict = 'ENTER' AND d.decided_at > to_timestamp($1)
-   AND d.decided_at <= to_timestamp($2)
+   AND d.decided_at <= to_timestamp($2) AND d.account_id = $3
    AND NOT EXISTS (SELECT 1 FROM paper_orders x
                     WHERE x.decision_id = d.decision_id AND x.role = 'ENTRY'
                       AND x.direction = 'BUY')"""
 
+#: ENTER decisions of any other paper account in the window: not mirrored,
+#: never given a row, counted so the scope is never silent
+OTHER_ACCOUNTS_SQL = """
+SELECT count(*) FROM paper_decisions d
+ WHERE d.verdict = 'ENTER' AND d.decided_at > to_timestamp($1)
+   AND d.decided_at <= to_timestamp($2) AND d.account_id <> $3"""
+
 
 async def population(conn, *, now: float, window_s: float,
+                     paper_account: str = PAPER_ACCOUNT,
                      limit: int = MAX_DECISIONS_PER_PASS) -> list:
     out = []
     for r in await conn.fetch(POPULATION_SQL, now - window_s, limit,
-                              now + CLOCK_SKEW_S):
+                              now + CLOCK_SKEW_S, paper_account):
         r = dict(r)
         decision = {"decision_id": r["decision_id"],
                     "account_id": r["account_id"], "strategy": r["strategy"],
+                    "policy_version": r["policy_version"],
                     "decided_at": r["decided_at"],
                     "us_market_slug": r["us_market_slug"],
                     "holding_side": r["holding_side"],
@@ -638,7 +767,8 @@ async def population(conn, *, now: float, window_s: float,
                  "order_type": r["order_type"], "expires_at": r["expires_at"],
                  "role": r["role"], "holding_side": r["order_holding_side"],
                  "us_market_slug": r["order_slug"],
-                 "strategy": r["order_strategy"]}
+                 "strategy": r["order_strategy"], "state": r["order_state"],
+                 "filled_qty": r["order_filled_qty"]}
         out.append((decision, order))
     return out
 
@@ -747,27 +877,56 @@ async def write_row(conn, row: dict) -> bool:
     return got is not None
 
 
-async def plan_pass(conn, *, now: float, control: dict) -> dict:
-    """Plan every linked decision not yet planned (bounded), inside the
-    caller's transaction. Returns the pass's counts."""
-    window = LOOKBACK_S if STATE["drained"] else BACKFILL_S
-    pop = await population(conn, now=now, window_s=window)
-    if len(pop) < MAX_DECISIONS_PER_PASS:
-        STATE["drained"] = True
+async def _fee_terms(conn, key: tuple, *, now: float, counts: dict):
+    """The fee terms of one (series, event), read in its own savepoint: a
+    read that fails is that market's FEE_TERMS_UNKNOWN (the error named on
+    the row), never the whole pass's transaction."""
+    try:
+        async with conn.transaction():
+            return await CCDB.kalshi_fee_terms(conn, key[0], key[1], now=now)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        counts["read_errors"].append(type(exc).__name__)
+        return {"priced": False, "why": "FEE_TERMS_READ_FAILED",
+                "error": type(exc).__name__, "series_ticker": key[0],
+                "event_ticker": key[1]}
+
+
+async def plan_pass(conn, *, now: float, control: dict,
+                    paper_account: str = PAPER_ACCOUNT) -> dict:
+    """Plan every linked decision of the mirrored paper account not yet
+    planned (bounded), inside the caller's transaction. Returns the pass's
+    counts; the caller records coverage (note_committed) only after its
+    transaction commits."""
+    window = window_s(now)
+    pop = await population(conn, now=now, window_s=window,
+                           paper_account=paper_account)
+    # the allowlist first: a paper-only decision is never given a
+    # counterpart, a book read or a fee read
+    elig = [eligibility(d, o)[0] for d, o in pop]
     pm, ks = await aliases(conn, [o.get("us_market_slug") or d.get(
-        "us_market_slug") for d, o in pop])
+        "us_market_slug") for (d, o), ok in zip(pop, elig) if ok])
     pre = [(d, o, counterpart(o.get("us_market_slug") or d["us_market_slug"],
                               str(o.get("holding_side") or "").upper(),
-                              pm, ks)) for d, o in pop]
+                              pm, ks) if ok else {"ok": False})
+           for (d, o), ok in zip(pop, elig)]
     bks = await books(conn, [cp["ticker"] for _d, _o, cp in pre if cp["ok"]])
     bp = await buying_power(conn, now=now)
     terms_cache: dict = {}
-    counts = {"seen": len(pop), "window_s": window, "written": 0,
-              "planned": 0, "excluded": {}, "errors": [],
+    counts = {"seen": len(pop), "window_s": window,
+              "paper_account": paper_account, "written": 0,
+              "planned": 0, "excluded": {}, "errors": [], "read_errors": [],
+              "not_live_eligible": elig.count(False),
               # ENTER decisions with no ENTRY BUY paper order are not linked
               # (nothing to mirror): counted here, never given a row
               "enter_without_entry_order": await conn.fetchval(
-                  UNLINKED_SQL, now - window, now + CLOCK_SKEW_S)}
+                  UNLINKED_SQL, now - window, now + CLOCK_SKEW_S,
+                  paper_account),
+              # ENTER decisions of other paper accounts: out of scope
+              "enter_other_accounts": await conn.fetchval(
+                  OTHER_ACCOUNTS_SQL, now - window, now + CLOCK_SKEW_S,
+                  paper_account)}
     for d, o, cp in pre:
         bk, terms = None, None
         if cp["ok"]:
@@ -775,8 +934,8 @@ async def plan_pass(conn, *, now: float, control: dict) -> dict:
             if bk is not None:
                 key = (bk.get("series_ticker"), bk.get("event_ticker"))
                 if key not in terms_cache:
-                    terms_cache[key] = await CCDB.kalshi_fee_terms(
-                        conn, key[0], key[1], now=now)
+                    terms_cache[key] = await _fee_terms(conn, key, now=now,
+                                                        counts=counts)
                 terms = terms_cache[key]
         try:
             row = evaluate(d, o, pmus_aliases=pm, kalshi_aliases=ks, book=bk,
@@ -940,9 +1099,10 @@ async def _heartbeat(conn, status: str, detail: dict) -> None:
 
 
 async def pass_once(pool, *, now: float | None = None, env=None,
-                    transport=None) -> dict:
+                    transport=None, paper_account: str = PAPER_ACCOUNT) -> dict:
     """One SHADOW pass: gate, plan (one transaction under the planner's
-    advisory lock), the window's account read, heartbeat."""
+    advisory lock; coverage recorded only once it commits), the window's
+    account read, heartbeat."""
     now = time.time() if now is None else float(now)
     summary = {"version": VERSION, "mode": MODE, "at": now,
                "phase_errors": {}}
@@ -960,9 +1120,13 @@ async def pass_once(pool, *, now: float | None = None, env=None,
                 if await conn.fetchval("SELECT pg_try_advisory_xact_lock($1)",
                                        LOCK_KEY):
                     summary["planner"] = await plan_pass(
-                        conn, now=now, control=g["control"])
+                        conn, now=now, control=g["control"],
+                        paper_account=paper_account)
                 else:
                     summary["planner"] = {"skipped": "LOCK_HELD"}
+            # COMMITTED: only now may the window move forward
+            if "skipped" not in summary["planner"]:
+                note_committed(summary["planner"], now=now)
         except asyncio.CancelledError:
             raise
         except Exception as exc:                                # noqa: BLE001

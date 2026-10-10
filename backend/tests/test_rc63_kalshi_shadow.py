@@ -3,7 +3,15 @@ RECONCILIATION WRITER, on real Postgres (RN1X_TEST_DSN, migrated through
 367). Issue #6 gates 2 / 3 / 6: the Kalshi execution path made verifiable in
 SHADOW only.
 
-  PLANNED      a linked PAPER decision whose held side is a certified claim
+  allowlist    (r2) first, the owner's live-eligibility allowlist
+               (execmirror.live_eligibility): every paper-only strategy and
+               unpromoted version is EXCLUDED with nothing planned, priced or
+               valued; only the mirrored paper account is planned; a paper
+               order past its expiry is never planned; coverage moves only
+               after a committed short page; a failed fee read is that
+               market's exclusion, never the pass's;
+  PLANNED      a LIVE-ELIGIBLE linked PAPER decision whose held side is a
+               certified claim
                a certified Kalshi YES market carries is planned with
                kalshi_orders.plan at 1:1000 of the paper quantity, walked
                against the current Kalshi asks at the plan's limit, priced
@@ -69,9 +77,32 @@ def _now(k: int) -> float:
 @pytest.fixture(autouse=True)
 def _drained():
     """Steady state (LOOKBACK_S) unless a test sets the backfill itself."""
-    KS.STATE["drained"] = True
+    KS.STATE.update(drained=True, complete_through=None)
     yield
-    KS.STATE["drained"] = True
+    KS.STATE.update(drained=True, complete_through=None)
+
+
+#: the owner's allowlisted strategy and version (execmirror.LIVE_ELIGIBLE):
+#: every PLANNED fixture here is a LIVE-ELIGIBLE decision
+LIVE_STRATEGY = "PINNACLE_COMPLETED_GAME_PAPER"
+LIVE_VERSION = "PINNACLE_COMPLETED_GAME_PAPER_V3"
+#: (strategy, policy version, eligibility class) the allowlist keeps PAPER
+#: ONLY: exploration, Derek's lane, the maker experiment, the benchmark, an
+#: unknown strategy and unpromoted completed-game versions
+PAPER_ONLY = (
+    ("PINNACLE_EXPLORATION_PAPER", "PINNACLE_EXPLORATION_PAPER_V3",
+     "EXPLORATION_RESEARCH_COST_PAPER_ONLY"),
+    ("DEREK_ENTRY_POLICY_V2", "DEREK_ENTRY_POLICY_V2", "UNKNOWN_STRATEGY"),
+    ("PINNACLE_COMPLETED_GAME_MAKER_PAPER",
+     "PINNACLE_COMPLETED_GAME_MAKER_PAPER_V1", "EXPERIMENT_NOT_PROMOTED"),
+    ("PINNACLE_ONLY_PAPER_BENCHMARK", "PINNACLE_ONLY_PAPER_BENCHMARK_V1",
+     "BENCHMARK_RESEARCH_ONLY"),
+    ("SOME_UNKNOWN_STRATEGY", "SOME_UNKNOWN_STRATEGY_V1", "UNKNOWN_STRATEGY"),
+    ("PINNACLE_COMPLETED_GAME_PAPER", "PINNACLE_COMPLETED_GAME_PAPER_V1",
+     "POLICY_VERSION_NOT_PROMOTED"),
+    ("PINNACLE_COMPLETED_GAME_PAPER", "PINNACLE_COMPLETED_GAME_PAPER_V4",
+     "POLICY_VERSION_NOT_PROMOTED"),
+)
 
 
 def _ed25519_pem() -> str:
@@ -105,7 +136,9 @@ def names(tag: str) -> dict:
 
 async def seed_decision(conn, acct, n, *, now, holding="LONG", qty=2000,
                         wire="0.45", p_blended=0.55, p_pinnacle=None,
-                        age=5.0, tif="IOC", order_type="MARKETABLE") -> str:
+                        age=5.0, tif="IOC", order_type="MARKETABLE",
+                        strategy=LIVE_STRATEGY, policy_version=LIVE_VERSION,
+                        paper_state="FILLED", ttl=90.0) -> str:
     did = "paper_dec_kshadow_%s" % uuid.uuid4().hex[:12]
     oid = "paper_ord_kshadow_%s" % uuid.uuid4().hex[:12]
     at = now - age
@@ -115,23 +148,24 @@ async def seed_decision(conn, acct, n, *, now, holding="LONG", qty=2000,
         "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
         " decided_at, us_market_slug, holding_side, intent, verdict, "
         " internal_model, pinnacle, p_blended, p_pinnacle, "
-        " qualification_gaps, policy_version, simulator_version) VALUES "
-        " ($1,$2,$3,to_timestamp($4::float8),$5,$6,$7,'ENTER','{}','{}',$8,"
-        " $9,'[]','TEST_POLICY','TEST_SIM')",
+        " qualification_gaps, policy_version, simulator_version, strategy) "
+        " VALUES ($1,$2,$3,to_timestamp($4::float8),$5,$6,$7,'ENTER','{}',"
+        " '{}',$8,$9,'[]',$10,'TEST_SIM',$11)",
         did, acct["session_id"], acct["account_id"], at, n["slug"], holding,
-        intent, p_blended, p_pinnacle)
+        intent, p_blended, p_pinnacle, policy_version, strategy)
     await conn.execute(
         "INSERT INTO paper_orders (order_id, idempotency_key, account_id, "
         " session_id, group_id, role, direction, holding_side, intent, "
         " us_market_slug, order_type, time_in_force, allow_partial, qty, "
         " limit_price, wire_price, state, decision_id, decided_at, "
-        " eligible_at, expires_at, simulator_version) VALUES ($1,$2,$3,$4,"
-        " $5,'ENTRY','BUY',$6,$7,$8,$9,$10,true,$11,$12,$13,'FILLED',$14,"
+        " eligible_at, expires_at, simulator_version, strategy) VALUES ($1,"
+        " $2,$3,$4,$5,'ENTRY','BUY',$6,$7,$8,$9,$10,true,$11,$12,$13,$17,$14,"
         " to_timestamp($15::float8),to_timestamp($15::float8),"
-        " to_timestamp($16::float8),'TEST_SIM')",
+        " to_timestamp($16::float8),'TEST_SIM',$18)",
         oid, "kshadow:" + oid, acct["account_id"], acct["session_id"],
         "paper_group_" + oid, holding, intent, n["slug"], order_type, tif,
-        Decimal(qty), limit, Decimal(wire), did, at, at + 90)
+        Decimal(qty), limit, Decimal(wire), did, at, at + ttl, paper_state,
+        strategy)
     return did
 
 
@@ -222,7 +256,13 @@ def test_bounds_are_the_mirror_and_the_gate_own():
 
 def test_every_named_exclusion_is_classified():
     codes = {v for k, v in vars(KS).items() if k.startswith("R_KSH_")}
-    assert len(codes) == 26
+    assert len(codes) == 28
+    # the allowlist exclusion is the same rail as the mirror's own
+    assert TT.TABLE["KALSHI_SHADOW_STRATEGY_NOT_LIVE_ELIGIBLE"] == \
+        TT.TABLE[EM.STRATEGY_NOT_LIVE_ELIGIBLE] == (
+            "ECONOMIC", "RISK_RAIL", "RISK_ADMISSION")
+    assert TT.TABLE["KALSHI_SHADOW_PAPER_ORDER_EXPIRED_BEFORE_PLAN"] == \
+        TT.TABLE["KALSHI_SHADOW_DECISION_STALE_AT_PLAN"]
     for c in codes:
         assert c in TT.TABLE or c in TT.NOT_REFUSAL, c
     assert TT.TABLE["KALSHI_SHADOW_NO_CERTIFIED_COUNTERPART"][0] == "SOFTWARE"
@@ -276,7 +316,8 @@ def test_the_counterpart_is_fail_closed_and_names_what_is_missing():
 def _decision(**kw):
     d = {"decision_id": "paper_dec_pure", "decided_at": 1000.0 - 5,
          "us_market_slug": "s", "holding_side": "LONG", "p_blended": 0.55,
-         "p_pinnacle": None}
+         "p_pinnacle": None, "strategy": LIVE_STRATEGY,
+         "policy_version": LIVE_VERSION}
     d.update(kw)
     return d
 
@@ -286,7 +327,8 @@ def _order(**kw):
          "qty": Decimal(2000), "wire_price": Decimal("0.45"),
          "limit_price": Decimal("0.45"), "time_in_force": "IOC",
          "order_type": "MARKETABLE", "expires_at": None, "role": "ENTRY",
-         "holding_side": "LONG", "us_market_slug": "s"}
+         "holding_side": "LONG", "us_market_slug": "s", "state": "FILLED",
+         "strategy": LIVE_STRATEGY}
     o.update(kw)
     return o
 
@@ -381,6 +423,133 @@ def test_the_fair_probability_falls_back_to_pinnacle_and_is_rounded_down():
     assert r["state"] == "PLANNED"
 
 
+# ── (r2) the owner's live-eligibility allowlist ──────────────────────
+
+def _assert_not_live_eligible(r, strategy, cls):
+    assert r["state"] == "EXCLUDED", (strategy, r["exclusion"])
+    assert r["exclusion"] == KS.R_KSH_STRATEGY_NOT_LIVE_ELIGIBLE
+    assert r["live_qty"] == 0 and r["plan_payload"] is None
+    # nothing else was evaluated for a paper-only decision: no counterpart,
+    # no ticker, no plan, no price, no fee, no EV
+    assert r["counterpart"] == {} and r["ticker"] is None
+    for k in ("limit_price", "exec_vwap", "fee_usd", "all_in_usd",
+              "fair_p", "ev_per_contract", "ev_usd", "book", "fee_terms"):
+        assert r[k] is None, k
+    assert "plan" not in r["detail"]
+    ev = r["detail"]["live_eligibility"]
+    assert ev["class"] == cls and ev["strategy"] == strategy
+    assert ev["role"] == "ENTRY"
+    assert ev["allowlist"] == {k: list(v) for k, v in EM.LIVE_ELIGIBLE.items()}
+
+
+@pytest.mark.parametrize("strategy,version,cls", PAPER_ONLY)
+def test_a_paper_only_strategy_or_unpromoted_version_is_never_planned(
+        strategy, version, cls):
+    """The planner's own certified-pair fixture PLANS a live-eligible
+    decision (test above); the same decision under a PAPER-ONLY strategy or
+    an unpromoted version is EXCLUDED by the owner's allowlist -- the same
+    verdict execmirror.live_eligibility gives."""
+    ok, ev = EM.live_eligibility({"strategy": strategy, "role": "ENTRY",
+                                  "decision_policy_version": version})
+    assert ok is False and ev["class"] == cls
+    r = _eval(_decision(strategy=strategy, policy_version=version),
+              _order(strategy=strategy))
+    _assert_not_live_eligible(r, strategy, cls)
+    assert r["strategy"] == strategy
+    assert r["detail"]["policy_version"] == version
+
+
+@pytest.mark.parametrize("version", EM.LIVE_ELIGIBLE[LIVE_STRATEGY])
+def test_each_allowlisted_version_is_planned(version):
+    r = _eval(_decision(policy_version=version))
+    assert r["state"] == "PLANNED", r["exclusion"]
+    assert r["detail"]["live_eligibility"]["class"] == "INVESTMENT_POLICY"
+    assert r["detail"]["live_admission"]["evaluated"] is False
+
+
+def test_a_missing_strategy_or_version_is_paper_only():
+    r = _eval(_decision(strategy=None, policy_version=LIVE_VERSION),
+              _order(strategy=None))
+    _assert_not_live_eligible(r, None, "UNKNOWN_STRATEGY")
+    r = _eval(_decision(policy_version=None))
+    _assert_not_live_eligible(r, LIVE_STRATEGY, "POLICY_VERSION_NOT_PROMOTED")
+
+
+def test_the_version_is_always_judged_as_new_exposure():
+    """live_eligibility skips the version check for a SELL role; the planner
+    plans new exposure only, so an order naming another role is still judged
+    as the ENTRY it is planned as (fail closed)."""
+    for role in ("EXIT", "REDUCE", None):
+        r = _eval(_decision(policy_version="PINNACLE_COMPLETED_GAME_PAPER_V1"),
+                  _order(role=role))
+        _assert_not_live_eligible(r, LIVE_STRATEGY,
+                                  "POLICY_VERSION_NOT_PROMOTED")
+
+
+def test_the_allowlist_is_execmirrors_own_never_a_copy(monkeypatch):
+    """Withdraw every promotion from execmirror.LIVE_ELIGIBLE and the planner
+    plans nothing; promote a version there and the planner follows."""
+    monkeypatch.setattr(EM, "LIVE_ELIGIBLE", {})
+    _assert_not_live_eligible(_eval(), LIVE_STRATEGY, "UNKNOWN_STRATEGY")
+    monkeypatch.setattr(EM, "LIVE_ELIGIBLE", {
+        LIVE_STRATEGY: ("PINNACLE_COMPLETED_GAME_PAPER_V2",)})
+    _assert_not_live_eligible(_eval(), LIVE_STRATEGY,
+                              "POLICY_VERSION_NOT_PROMOTED")
+    assert _eval(_decision(
+        policy_version="PINNACLE_COMPLETED_GAME_PAPER_V2"))["state"] == \
+        "PLANNED"
+
+
+def test_a_paper_order_past_its_expiry_is_never_planned():
+    for exp in (999.0, 1000.0):                      # now = 1000.0
+        r = _eval(order=_order(expires_at=exp))
+        assert r["exclusion"] == KS.R_KSH_PAPER_ORDER_EXPIRED_BEFORE_PLAN
+        assert r["live_qty"] == 0 and r["plan_payload"] is None
+        assert r["detail"]["expired_s_before_plan"] == 1000.0 - exp
+    assert _eval(order=_order(expires_at=1000.5))["state"] == "PLANNED"
+
+
+@pytest.mark.parametrize("state", ["FILLED", "CANCELED", "EXPIRED",
+                                   "REJECTED", "PENDING_SIMULATION"])
+def test_the_paper_order_state_is_recorded_never_decisive(state):
+    """The live ENTRY path dispatches before the paper order exists and the
+    simulator records a partly filled IOC as CANCELED (real paper exposure):
+    the PMUS paper fill is never a Kalshi plan input, only evidence."""
+    r = _eval(order=_order(state=state, filled_qty=Decimal(700)))
+    assert r["state"] == "PLANNED", r["exclusion"]
+    assert r["detail"]["paper_order_state_at_plan"] == state
+    assert r["detail"]["paper_order_filled_qty_at_plan"] == "700"
+
+
+def test_the_window_reaches_back_to_the_last_committed_short_page():
+    now = 1_000_000.0
+    KS.STATE.update(drained=False, complete_through=None)
+    assert KS.window_s(now) == KS.BACKFILL_S
+    # a FULL page commits nothing about coverage
+    KS.note_committed({"seen": KS.MAX_DECISIONS_PER_PASS}, now=now)
+    assert KS.STATE == {"drained": False, "complete_through": None}
+    KS.note_committed({"seen": 3}, now=now)
+    assert KS.STATE == {"drained": True, "complete_through": now}
+    assert KS.window_s(now + 15) == KS.LOOKBACK_S + 15
+    assert KS.window_s(now + 3 * 3600) == 4 * 3600.0       # an outage
+    assert KS.window_s(now + 30 * DAY) == KS.BACKFILL_S    # capped
+    assert KS.window_s(now - 60) == KS.LOOKBACK_S          # never shorter
+    KS.note_committed({"seen": KS.MAX_DECISIONS_PER_PASS}, now=now + 900)
+    assert KS.STATE["complete_through"] == now
+
+
+def test_the_account_scope_is_the_mirrors_own():
+    import inspect
+    assert KS.PAPER_ACCOUNT == EM.PAPER_ACCOUNT == "paper_acct_main"
+    for fn in (KS.pass_once, KS.plan_pass, KS.population):
+        assert inspect.signature(fn).parameters["paper_account"].default \
+            == EM.PAPER_ACCOUNT, fn
+    assert "d.account_id = $4" in KS.POPULATION_SQL
+    # the version is read exactly as execmirror.plan_new reads it
+    assert "coalesce(d.policy_version, o.label->>'policy_version')" in \
+        KS.POPULATION_SQL
+
+
 def test_the_account_reader_cannot_submit_or_cancel_and_signs_its_gets():
     """The SHADOW account reader is not a KalshiClient and has no submit,
     cancel or order method. Its GET is signed exactly as the client signs
@@ -447,15 +616,23 @@ async def test_planned_end_to_end_at_one_to_one_thousand():
             before = await live_table_counts(conn)
             nrec = await conn.fetchval(
                 "SELECT count(*) FROM kalshi_account_reconciliations")
-            _acct, n, did = await full_setup(conn, "planned", now=now)
+            acct, n, did = await full_setup(conn, "planned", now=now)
             paper_before = await conn.fetch(
                 "SELECT * FROM paper_orders WHERE decision_id = $1", did)
-        s = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         assert s["status"] == "OK", s
         async with p.acquire() as conn:
             r = await row_of(conn, did)
             assert r["state"] == "PLANNED" and r["exclusion"] is None
             assert r["mode"] == "SHADOW" and r["production_effect"] == "NONE"
+            # the PLANNED evidence is a LIVE-ELIGIBLE decision's: the owner's
+            # allowlisted strategy at an allowlisted version
+            assert r["strategy"] == LIVE_STRATEGY
+            det = j(r["detail"])
+            assert det["policy_version"] == LIVE_VERSION
+            assert det["live_eligibility"]["class"] == "INVESTMENT_POLICY"
+            assert det["live_admission"]["evaluated"] is False
+            assert det["paper_order_state_at_plan"] == "FILLED"
             assert r["ticker"] == n["ticker"] and r["claim_fingerprint"] == \
                 n["fp"]
             assert r["paper_qty"] == Decimal(2000) and r["scale"] == Decimal(
@@ -508,7 +685,7 @@ async def test_excluded_when_no_certified_pair_with_the_missing_part_named():
             d2 = await seed_decision(conn, acct, n2, now=now)
             await seed_pair(conn, n3, kalshi_cert="NOT_CERTIFIED")
             d3 = await seed_decision(conn, acct, n3, now=now)
-        await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         async with p.acquire() as conn:
             for did, why in ((d1, KS.W_PMUS_ALIAS_ABSENT),
                              (d2, KS.W_PMUS_ALIAS_NOT_CERTIFIED),
@@ -529,8 +706,8 @@ async def test_excluded_below_the_venue_minimum_never_rounded_up():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "belowmin", now=now, qty=300)
-        await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+            acct, _n, did = await full_setup(conn, "belowmin", now=now, qty=300)
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         async with p.acquire() as conn:
             r = await row_of(conn, did)
             assert r["exclusion"] == KS.R_KSH_BELOW_VENUE_MINIMUM
@@ -556,7 +733,7 @@ async def test_excluded_when_the_fee_makes_the_ev_negative():
             await seed_fee_terms(conn, n2, now=now)
             d_ev = await seed_decision(conn, acct, n2, now=now,
                                        p_blended=0.44)
-        await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         async with p.acquire() as conn:
             r = await row_of(conn, d_fee)
             assert r["exclusion"] == KS.R_KSH_FEE_MAKES_EV_NEGATIVE
@@ -576,9 +753,9 @@ async def test_one_row_per_decision_idempotent_and_append_only():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "idem", now=now)
-        s1 = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
-        s2 = await KS.pass_once(p, now=now + 1, env=NO_CRED_ENV)
+            acct, _n, did = await full_setup(conn, "idem", now=now)
+        s1 = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
+        s2 = await KS.pass_once(p, paper_account=acct["account_id"], now=now + 1, env=NO_CRED_ENV)
         assert s1["planner"]["written"] >= 1
         assert s2["planner"]["written"] == 0 and s2["planner"]["seen"] == 0
         async with p.acquire() as conn:
@@ -613,7 +790,8 @@ async def test_the_database_refuses_anything_but_a_shadow_plan():
             base = KS.evaluate(
                 {"decision_id": did, "decided_at": now - 5,
                  "us_market_slug": "s", "holding_side": "LONG",
-                 "p_blended": 0.55},
+                 "p_blended": 0.55, "strategy": LIVE_STRATEGY,
+                 "policy_version": LIVE_VERSION},
                 _order(order_id="paper_ord_schema"),
                 pmus_aliases=[_alias("POLYMARKET_US", "s", "YES")],
                 kalshi_aliases=[_alias("KALSHI", "T", "YES")],
@@ -659,7 +837,7 @@ async def test_stands_down_while_the_kalshi_control_is_enabled():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "ctlon", now=now)
+            acct, _n, did = await full_setup(conn, "ctlon", now=now)
             rid = await conn.fetchval(
                 "INSERT INTO kalshi_account_reconciliations (key_fingerprint,"
                 " kalshi_env, verdict, complete, at) VALUES ('fp-test-ctl',"
@@ -670,7 +848,7 @@ async def test_stands_down_while_the_kalshi_control_is_enabled():
                 " key_fingerprint = 'fp-test-ctl', reconciliation_id = $1, "
                 " kalshi_env = 'demo' WHERE id = 1", rid)
         try:
-            s = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+            s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         finally:
             async with p.acquire() as conn:
                 await conn.execute(
@@ -697,8 +875,8 @@ async def test_stands_down_when_the_kalshi_small_live_switch_is_on():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "envon", now=now)
-        s = await KS.pass_once(p, now=now, env={
+            acct, _n, did = await full_setup(conn, "envon", now=now)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env={
             "KALSHI_SMALLLIVE_ENABLED": "1", "KALSHI_ENV": "demo"})
         assert s["status"] == "STOOD_DOWN"
         assert s["stand_down"] == KS.R_KSH_STOOD_DOWN_ENV_SWITCH_ON
@@ -783,7 +961,8 @@ async def test_a_whole_pass_with_every_network_mutation_patched_to_raise(
             acct, _n, d_plan = await full_setup(conn, "nomut", now=now)
             d_excl = await seed_decision(conn, acct, names("nomut2"), now=now)
             before = await live_table_counts(conn)
-        s = await KS.pass_once(p, now=now, env=env, transport=inner)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=env, transport=inner)
         assert s["status"] == "OK", s
         assert called == []
         assert inner.sent and all(x["method"] == "GET" and x["json"] is None
@@ -858,7 +1037,7 @@ async def test_buying_power_from_a_fresh_complete_read_caps_the_plan():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "cash", now=now)
+            acct, _n, did = await full_setup(conn, "cash", now=now)
             await conn.execute(
                 "INSERT INTO kalshi_account_reconciliations (key_fingerprint,"
                 " kalshi_env, verdict, complete, balance_usd, at) VALUES "
@@ -869,7 +1048,7 @@ async def test_buying_power_from_a_fresh_complete_read_caps_the_plan():
             # a read stamped in the future is never used
             assert (await KS.buying_power(conn, now=now - 3600))["status"] \
                 == "UNREAD"
-        await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         async with p.acquire() as conn:
             r = await row_of(conn, did)
             assert r["exclusion"] == KS.R_KSH_INSUFFICIENT_CASH
@@ -890,7 +1069,7 @@ async def test_the_backfill_reads_seven_days_then_the_steady_window():
             mid = await seed_decision(conn, acct, names("bf2"), now=now,
                                       age=8 * DAY)
         KS.STATE["drained"] = False
-        s = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         assert s["planner"]["window_s"] == KS.BACKFILL_S
         assert KS.STATE["drained"] is True
         async with p.acquire() as conn:
@@ -900,10 +1079,14 @@ async def test_the_backfill_reads_seven_days_then_the_steady_window():
             assert await row_of(conn, mid) is None       # older than 7 days
             two_h = await seed_decision(conn, acct, names("bf3"), now=now + 60,
                                         age=7200)
-        s = await KS.pass_once(p, now=now + 60, env=NO_CRED_ENV)
-        assert s["planner"]["window_s"] == KS.LOOKBACK_S
+        s = await KS.pass_once(p, paper_account=acct["account_id"],
+                               now=now + 60, env=NO_CRED_ENV)
+        # the steady window reaches back to the last committed short page
+        # (60 s ago) plus LOOKBACK_S -- here one hour and one minute
+        assert KS.STATE["complete_through"] == now + 60
+        assert s["planner"]["window_s"] == KS.LOOKBACK_S + 60
         async with p.acquire() as conn:
-            assert await row_of(conn, two_h) is None     # outside one hour
+            assert await row_of(conn, two_h) is None     # outside that window
     finally:
         await p.close()
 
@@ -914,8 +1097,8 @@ async def test_a_stale_decision_with_a_certified_pair_is_never_planned():
     p = await pool()
     try:
         async with p.acquire() as conn:
-            _a, _n, did = await full_setup(conn, "stale", now=now, age=45)
-        await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+            acct, _n, did = await full_setup(conn, "stale", now=now, age=45)
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         async with p.acquire() as conn:
             r = await row_of(conn, did)
             assert r["exclusion"] == KS.R_KSH_DECISION_STALE_AT_PLAN
@@ -942,7 +1125,7 @@ async def test_an_enter_decision_without_a_paper_order_is_counted_not_planned():
                 " to_timestamp($4::float8),'test-unlinked','LONG','ENTER',"
                 " '{}','{}','[]','TEST_POLICY','TEST_SIM')",
                 did, acct["session_id"], acct["account_id"], now - 5)
-        s = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         assert s["planner"]["enter_without_entry_order"] == 1
         assert s["planner"]["seen"] == 0
         async with p.acquire() as conn:
@@ -973,7 +1156,7 @@ async def test_one_bad_decision_never_stalls_the_pass(monkeypatch):
                 row = dict(row, state="SUBMITTING")    # the CHECK refuses
             return row
         monkeypatch.setattr(KS, "evaluate", evaluate)
-        s = await KS.pass_once(p, now=now, env=NO_CRED_ENV)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now, env=NO_CRED_ENV)
         assert s["status"] == "OK", s
         assert s["planner"]["errors"] == ["CheckViolationError"]
         async with p.acquire() as conn:
@@ -983,6 +1166,228 @@ async def test_one_bad_decision_never_stalls_the_pass(monkeypatch):
                 r = await row_of(conn, did)
                 assert r["exclusion"] == KS.R_KSH_PLAN_EXCLUDED
                 assert j(r["detail"])["error"] == err
+    finally:
+        await p.close()
+
+
+# ── (r2) real Postgres: the allowlist, the account scope, the expiry, the
+#    coverage window and a failed fee read ─────────────────────────────
+
+async def _certified(conn, tag, *, now) -> dict:
+    n = names(tag)
+    await seed_pair(conn, n)
+    await seed_book(conn, n, now=now)
+    await seed_fee_terms(conn, n, now=now)
+    return n
+
+
+@pg
+async def test_paper_only_decisions_are_excluded_and_live_eligible_planned():
+    """Every decision here has a settlement-certified Kalshi pair, a fresh
+    book with depth at the limit and published fee terms -- the fixture that
+    PLANS. Only the two allowlisted versions are PLANNED; every paper-only
+    strategy and unpromoted version is EXCLUDED by the owner's allowlist
+    with nothing planned, priced or valued. (An unknown strategy cannot be
+    stored -- paper_decisions_strategy_ck refuses it -- so it is proven by
+    the pure test only.)"""
+    now = _now(16)
+    stored = [x for x in PAPER_ONLY if x[0] != "SOME_UNKNOWN_STRATEGY"]
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct = await H.new_account(conn, "allowlist", now=now - 60)
+            paper_only = []
+            for k, (strategy, version, cls) in enumerate(stored):
+                n = await _certified(conn, "po%d" % k, now=now)
+                paper_only.append((await seed_decision(
+                    conn, acct, n, now=now, strategy=strategy,
+                    policy_version=version), strategy, version, cls))
+            live = []
+            for k, version in enumerate(EM.LIVE_ELIGIBLE[LIVE_STRATEGY]):
+                n = await _certified(conn, "live%d" % k, now=now)
+                live.append((await seed_decision(
+                    conn, acct, n, now=now, policy_version=version), version))
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["status"] == "OK", s
+        pl = s["planner"]
+        assert len(stored) == len(PAPER_ONLY) - 1 == 6
+        assert pl["seen"] == len(stored) + len(live)
+        assert pl["not_live_eligible"] == len(stored)
+        assert pl["planned"] == len(live) == 2
+        assert pl["excluded"] == {
+            KS.R_KSH_STRATEGY_NOT_LIVE_ELIGIBLE: len(stored)}
+        async with p.acquire() as conn:
+            for did, strategy, version, cls in paper_only:
+                r = await row_of(conn, did)
+                assert r["state"] == "EXCLUDED", strategy
+                assert r["exclusion"] == KS.R_KSH_STRATEGY_NOT_LIVE_ELIGIBLE
+                assert r["strategy"] == strategy
+                assert r["live_qty"] == 0 and r["plan_payload"] is None
+                assert r["ticker"] is None and j(r["counterpart"]) == {}
+                assert r["fee_usd"] is None and r["ev_per_contract"] is None
+                det = j(r["detail"])
+                assert det["live_eligibility"]["class"] == cls
+                assert det["policy_version"] == version
+            for did, version in live:
+                r = await row_of(conn, did)
+                assert r["state"] == "PLANNED", (version, r["exclusion"])
+                assert r["strategy"] == LIVE_STRATEGY
+                assert j(r["detail"])["policy_version"] == version
+                assert r["live_qty"] == 2
+    finally:
+        await p.close()
+
+
+@pg
+async def test_only_the_mirrored_paper_account_is_planned():
+    """A decision of another paper account (a future Day One epoch account,
+    say) gets no row and is counted; the default scope is the mirror's own
+    account, so a default pass plans neither test account."""
+    now = _now(17)
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct, _n, mine = await full_setup(conn, "scopea", now=now)
+            _b, _n2, other = await full_setup(conn, "scopeb", now=now)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["planner"]["seen"] == 1
+        assert s["planner"]["enter_other_accounts"] == 1
+        async with p.acquire() as conn:
+            assert (await row_of(conn, mine))["state"] == "PLANNED"
+            assert await row_of(conn, other) is None
+        s = await KS.pass_once(p, now=now + 1, env=NO_CRED_ENV)
+        assert s["planner"]["paper_account"] == EM.PAPER_ACCOUNT
+        assert s["planner"]["seen"] == 0
+        async with p.acquire() as conn:
+            assert await row_of(conn, other) is None
+    finally:
+        await p.close()
+
+
+@pg
+async def test_expired_paper_order_excluded_and_paper_state_only_recorded():
+    now = _now(18)
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct = await H.new_account(conn, "expiry", now=now - 60)
+            expired = await seed_decision(
+                conn, acct, await _certified(conn, "exp", now=now), now=now,
+                ttl=3.0)                       # decided now-5, expired now-2
+            partial = await seed_decision(
+                conn, acct, await _certified(conn, "part", now=now), now=now,
+                paper_state="CANCELED")        # an IOC partly filled
+        await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                           env=NO_CRED_ENV)
+        async with p.acquire() as conn:
+            r = await row_of(conn, expired)
+            assert r["exclusion"] == KS.R_KSH_PAPER_ORDER_EXPIRED_BEFORE_PLAN
+            assert r["live_qty"] == 0 and r["plan_payload"] is None
+            # judged with the decision's freshness: the venue side is named
+            assert r["ticker"] is not None
+            assert j(r["detail"])["plan_live_qty"] == 2
+            assert j(r["detail"])["expired_s_before_plan"] == 2.0
+            r = await row_of(conn, partial)
+            assert r["state"] == "PLANNED", r["exclusion"]
+            assert j(r["detail"])["paper_order_state_at_plan"] == "CANCELED"
+    finally:
+        await p.close()
+
+
+@pg
+async def test_a_failed_plan_phase_never_marks_coverage(monkeypatch):
+    """The backfill is done, and the window moves forward, only once a
+    pass's writes have COMMITTED: a plan phase that fails after reading a
+    short page leaves the backfill to the next pass, which writes the row."""
+    now = _now(19)
+    real = KS.books
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct, _n, did = await full_setup(conn, "rollback", now=now)
+
+        async def books(conn, tickers):
+            raise RuntimeError("synthetic failure after the population read")
+        monkeypatch.setattr(KS, "books", books)
+        KS.STATE.update(drained=False, complete_through=None)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["phase_errors"]["plan"] == "RuntimeError"
+        assert KS.STATE == {"drained": False, "complete_through": None}
+        async with p.acquire() as conn:
+            assert await row_of(conn, did) is None
+        monkeypatch.setattr(KS, "books", real)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["planner"]["window_s"] == KS.BACKFILL_S
+        assert KS.STATE == {"drained": True, "complete_through": now}
+        async with p.acquire() as conn:
+            assert (await row_of(conn, did))["state"] == "PLANNED"
+    finally:
+        await p.close()
+
+
+@pg
+async def test_an_outage_longer_than_the_steady_window_loses_no_decision():
+    """The last committed short page was three hours ago; a decision two
+    hours old (outside LOOKBACK_S) still gets its row."""
+    now = _now(20)
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct = await H.new_account(conn, "outage", now=now - DAY)
+            did = await seed_decision(conn, acct, names("outage"), now=now,
+                                      age=2 * 3600)
+        KS.STATE.update(drained=True, complete_through=now - 3 * 3600)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["planner"]["window_s"] == 4 * 3600.0
+        async with p.acquire() as conn:
+            r = await row_of(conn, did)
+            assert r["exclusion"] == KS.R_KSH_NO_CERTIFIED_COUNTERPART
+        assert KS.STATE["complete_through"] == now
+    finally:
+        await p.close()
+
+
+@pg
+async def test_a_failed_fee_read_is_that_markets_exclusion_never_the_pass(
+        monkeypatch):
+    """A fee-terms read that fails in the database (here a division by zero
+    that aborts its statement) is rolled back to its own savepoint: that
+    market's decision is FEE_TERMS_UNKNOWN with the error named, and every
+    other decision in the pass is still written."""
+    from sportsassets import canonical_claims_db as CCDB
+    now = _now(21)
+    real = CCDB.kalshi_fee_terms
+    p = await pool()
+    try:
+        async with p.acquire() as conn:
+            acct, n_bad, d_bad = await full_setup(conn, "feeread", now=now)
+            d_good = await seed_decision(
+                conn, acct, await _certified(conn, "feeok", now=now), now=now)
+            d_none = await seed_decision(conn, acct, names("feenone"),
+                                         now=now)
+
+        async def fee_terms(conn, series, event, *, now):
+            if series == n_bad["series"]:
+                await conn.fetchval("SELECT 1 / 0")
+            return await real(conn, series, event, now=now)
+        monkeypatch.setattr(CCDB, "kalshi_fee_terms", fee_terms)
+        s = await KS.pass_once(p, paper_account=acct["account_id"], now=now,
+                               env=NO_CRED_ENV)
+        assert s["status"] == "OK", s
+        assert s["planner"]["read_errors"] == ["DivisionByZeroError"]
+        assert s["planner"]["written"] == 3
+        async with p.acquire() as conn:
+            r = await row_of(conn, d_bad)
+            assert r["exclusion"] == KS.R_KSH_FEE_TERMS_UNKNOWN
+            assert j(r["fee_terms"])["error"] == "DivisionByZeroError"
+            assert (await row_of(conn, d_good))["state"] == "PLANNED"
+            assert (await row_of(conn, d_none))["exclusion"] == \
+                KS.R_KSH_NO_CERTIFIED_COUNTERPART
     finally:
         await p.close()
 

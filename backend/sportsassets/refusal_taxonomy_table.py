@@ -2766,8 +2766,13 @@ for _k, _v in ECON_BINDING_STREAM.items():
 #: the venue minimum, the per-order cap and the account's cash are RISK
 #: rails at the order; an off-tick-range or crossing price, no ask at the
 #: limit, too little depth at the limit, and a non-positive net EV (with or
-#: without the fee) are ECONOMIC.
+#: without the fee) are ECONOMIC. (r2) A decision of a strategy or policy
+#: version outside the owner's live-eligibility allowlist is the same RISK
+#: rail at admission as STRATEGY_NOT_LIVE_ELIGIBLE; a paper order past its
+#: own expiry at plan time is FRESHNESS, like a stale decision.
 KALSHI_SHADOW_STREAM = {
+    "KALSHI_SHADOW_STRATEGY_NOT_LIVE_ELIGIBLE": (E, RAIL, "RISK_ADMISSION"),
+    "KALSHI_SHADOW_PAPER_ORDER_EXPIRED_BEFORE_PLAN": (S, FRESH, "FRESHNESS"),
     "KALSHI_SHADOW_NO_CERTIFIED_COUNTERPART": (S, MAP, "VENUE_MAPPING"),
     "KALSHI_SHADOW_COUNTERPART_ONLY_A_NO_LEG": (S, CAP, "VENUE_MAPPING"),
     "KALSHI_SHADOW_COUNTERPART_AMBIGUOUS": (S, MAP, "VENUE_MAPPING"),
