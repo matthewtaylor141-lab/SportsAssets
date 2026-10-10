@@ -1489,3 +1489,6 @@ tests/test_rc63_pr5_port.py
 tests/test_rc63_day_one_audrey_switch.py
 # (rc6.3 pr5-port) code that runs for the selected PAPER account resolves the durable selector: after an activation a research flow about a Day One position is created for Day One (reviewer A6; an archived position is SOURCE_CONTEXT_NOT_IN_ACCOUNT on Day One), admission and claims follow, the research control row is inherited from the nearest ancestor (never silently off), the worker heartbeat / loop-health source and Slack review posts are the selected account's, and profitability.runner.run_cycle, revenue_improvements.propose_due and the live-game held-fixture read default to the selected account
 tests/test_rc63_day_one_selected_account_defaults.py
+# (rc6.3 pr5-port) churn and turnover controls survive an account switch: churn_check reads its six histories (reprice deadband, hourly ENTRY count, prior / entered evaluations, contract-exit and fixture-exit fills) across risk_history_accounts at their original timestamps -- activation keeps the re-entry / fixture cooldowns and the 12-per-hour cap (reviewer R4, C1a, C1b), rollback keeps the epoch's exits (C1c), an unrelated account stays isolated; and the same end to end through L.submit_order with the production bind and capital authority (V1-V3)
+tests/test_rc63_day_one_churn_lineage.py
+tests/test_rc63_day_one_churn_lineage_e2e.py

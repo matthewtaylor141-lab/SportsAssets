@@ -15,9 +15,11 @@ successive epochs. Losses are never erased or relabelled as profits. Strategy li
 inherit the nearest recorded state through registered epoch ancestry; opening
 a new account cannot release quarantine, retirement or reduced sizing. Existing
 named-person recovery rules and forward-evidence requirements remain unchanged.
-Stopping rules and realized PAPER/shadow forward economics read every registered
-epoch of the same root, including rolled-back children, using their original
-windows. Unrelated legacy accounts remain isolated. Learned models retain their source account,
+Stopping rules, realized PAPER/shadow forward economics and the churn and
+turnover controls (re-entry and fixture cooldowns, the recent-refusal cooldown,
+the reprice deadband and the hourly entry cap) read every registered epoch of
+the same root, including rolled-back children, using their original windows,
+so neither activation nor rollback clears them. Unrelated legacy accounts remain isolated. Learned models retain their source account,
 model ID and fit timestamp; refits use historical observations and an empty refit
 cannot replace a measured inherited model. Accounting remains account-local.
 

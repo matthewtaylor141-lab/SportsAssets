@@ -1515,15 +1515,25 @@ async def churn_check(conn, *, account_id: str, strategy: str, slug, side,
     the strategy already sent an entry order for within REPRICE_DEADBAND_S
     -- a cancel / replace or a re-price -- needs a MATERIAL EV gain over
     that order's bound EV). None when the entry may proceed; else the
-    refusal dict."""
+    refusal dict.
+
+    THE HISTORY IS THE EPOCH LINEAGE'S (simulated_account_context.
+    risk_history_accounts: the account, its registered ancestors and every
+    epoch of the same root, rolled-back children included), each row at its
+    ORIGINAL timestamp: an activation or a rollback moves order flow to
+    another account_id, and a cooldown, the hourly turnover cap or the
+    reprice deadband earned on the previous account must not be silently
+    cleared by it. An unrelated legacy account has no lineage."""
+    from .simulated_account_context import risk_history_accounts
+    accounts = await risk_history_accounts(conn, account_id)
     rep = await conn.fetchrow(
         "SELECT ev_per_contract_usd, evaluated_at, order_key FROM "
-        " paper_profitability_evaluations WHERE account_id=$1 "
+        " paper_profitability_evaluations WHERE account_id = ANY($1::text[]) "
         "   AND strategy=$2 AND us_market_slug=$3 AND holding_side=$4 "
         "   AND stage='LEDGER' AND verdict='ENTER' AND evaluated_at < $5 "
         "   AND evaluated_at > $6 "
         "   AND ($7::text IS NULL OR order_key IS DISTINCT FROM $7::text) "
-        " ORDER BY evaluated_at DESC, eval_id DESC LIMIT 1", account_id,
+        " ORDER BY evaluated_at DESC, eval_id DESC LIMIT 1", accounts,
         strategy, slug, side, _ts(at), _ts(at - REPRICE_DEADBAND_S),
         order_key)
     if rep is not None:
@@ -1536,32 +1546,32 @@ async def churn_check(conn, *, account_id: str, strategy: str, slug, side,
                         prior_at=_epoch(rep["evaluated_at"]),
                         deadband_s=REPRICE_DEADBAND_S)
     hour = await conn.fetchval(
-        "SELECT count(*) FROM paper_orders WHERE account_id=$1 "
+        "SELECT count(*) FROM paper_orders WHERE account_id = ANY($1::text[]) "
         "   AND strategy=$2 AND role='ENTRY' AND direction='BUY' "
-        "   AND decided_at > $3 AND decided_at <= $4", account_id, strategy,
+        "   AND decided_at > $3 AND decided_at <= $4", accounts, strategy,
         _ts(at - 3600.0), _ts(at))
     if int(hour or 0) >= MAX_ENTRIES_PER_HOUR:
         return {"refusal": R_TURNOVER_CAP, "entries_last_hour": int(hour),
                 "cap": MAX_ENTRIES_PER_HOUR}
     prior = await conn.fetchrow(
         "SELECT verdict, ev_per_contract_usd, evaluated_at FROM "
-        " paper_profitability_evaluations WHERE account_id=$1 "
+        " paper_profitability_evaluations WHERE account_id = ANY($1::text[]) "
         "   AND strategy=$2 AND us_market_slug=$3 AND holding_side=$4 "
         "   AND evaluated_at < $5 ORDER BY evaluated_at DESC, eval_id DESC "
-        " LIMIT 1", account_id, strategy, slug, side, _ts(at))
+        " LIMIT 1", accounts, strategy, slug, side, _ts(at))
     prior_ev = None if prior is None else _num(prior["ev_per_contract_usd"])
     entered = await conn.fetchval(
         "SELECT ev_per_contract_usd FROM paper_profitability_evaluations "
-        " WHERE account_id=$1 AND strategy=$2 AND us_market_slug=$3 "
+        " WHERE account_id = ANY($1::text[]) AND strategy=$2 AND us_market_slug=$3 "
         "   AND holding_side=$4 AND verdict='ENTER' AND evaluated_at < $5 "
-        " ORDER BY evaluated_at DESC, eval_id DESC LIMIT 1", account_id,
+        " ORDER BY evaluated_at DESC, eval_id DESC LIMIT 1", accounts,
         strategy, slug, side, _ts(at))
     entered_ev = _num(entered)
     exit_c = await conn.fetchval(
-        "SELECT max(filled_at) FROM paper_fills WHERE account_id=$1 "
+        "SELECT max(filled_at) FROM paper_fills WHERE account_id = ANY($1::text[]) "
         "   AND strategy=$2 AND us_market_slug=$3 AND holding_side=$4 "
         "   AND direction='SELL' AND filled_at > $5 AND filled_at <= $6",
-        account_id, strategy, slug, side, _ts(at - REENTRY_COOLDOWN_S),
+        accounts, strategy, slug, side, _ts(at - REENTRY_COOLDOWN_S),
         _ts(at))
     if exit_c is not None:
         v = churn_verdict(ev_per_contract=ev_per_contract,
@@ -1573,9 +1583,9 @@ async def churn_check(conn, *, account_id: str, strategy: str, slug, side,
                         cooldown_s=REENTRY_COOLDOWN_S)
     if fixture:
         exit_f = await conn.fetchval(
-            "SELECT max(filled_at) FROM paper_fills WHERE account_id=$1 "
+            "SELECT max(filled_at) FROM paper_fills WHERE account_id = ANY($1::text[]) "
             "   AND strategy=$2 AND fixture=$3 AND direction='SELL' "
-            "   AND filled_at > $4 AND filled_at <= $5", account_id,
+            "   AND filled_at > $4 AND filled_at <= $5", accounts,
             strategy, fixture, _ts(at - FIXTURE_COOLDOWN_S), _ts(at))
         if exit_f is not None:
             v = churn_verdict(ev_per_contract=ev_per_contract,
