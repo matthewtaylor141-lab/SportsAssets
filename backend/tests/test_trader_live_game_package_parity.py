@@ -35,7 +35,8 @@ A FIX TO THE PACKAGE IS A DISCLOSED LANE PATCH (LANE_PATCHES): a unified
 diff kept under tests/fixtures/, pinned by sha256, touching only the files it
 names, reversed hunk by hunk before the two lines above -- so the package
 MANIFEST hash still proves that nothing else moved. RC6 lane G2 (the
-canonical fixture adapter, requirement register F3) is the first.
+canonical fixture adapter, requirement register F3) is the first; the RC6.3
+PR #5 port's selected-account default for the held fixtures is the second.
 """
 from __future__ import annotations
 
@@ -108,6 +109,10 @@ COMPAT_DIFFS = {
 LANE_PATCHES = {
     "tests/fixtures/live_game_state_lane_g2.patch":
         "227eb2a6b8565838504652ab361c344c95c785e532dc8b691ecdd806f84d7456",
+    # (rc6.3 pr5-port) PostgresStore.fixtures' default account is the
+    # durable PAPER selector, not paper_acct_main (display only)
+    "tests/fixtures/live_game_state_lane_pr5_selected_account.patch":
+        "7250d21082dcd72d37591681d8fbf89ede89b969574aba54401f461767c82f65",
 }
 #: the package files a lane patch may touch
 LANE_PATCHED_FILES = {"sportsassets/live_game_state/core.py",

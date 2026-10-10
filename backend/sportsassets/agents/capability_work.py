@@ -9,9 +9,22 @@ import json
 import math
 import uuid
 
-ACCOUNT='paper_acct_main'
+#: The research queue's account before any PAPER epoch exists. The queue
+#: itself FOLLOWS THE DURABLE PAPER SELECTOR (scope(): simulated_account_
+#: context.selected_account), so after an activation or a rollback its task
+#: specs, flow IDs, source-context checks, claims, control row and heartbeat
+#: are the selected account's -- never an archived account's.
+LEGACY_ACCOUNT='paper_acct_main'
+#: None: follow the selector. A string PINS the queue to that account (an
+#: isolated test or tool account); CONTROL, when set, pins its control row.
+ACCOUNT=None
+CONTROL=None
+CONTROL_PREFIX='agent.capabilities.v1:'
+HEARTBEAT_PREFIX='agent.capabilities.heartbeat:'
+#: the part of a key that names the queue's account (loop_health copies the
+#: heartbeat key template and resolves it the same way)
+SELECTED_ACCOUNT='{selected_account}'
 KIND='AGENT_CAPABILITY_REVIEW_V1'
-CONTROL='agent.capabilities.v1:'+ACCOUNT
 AGENTS=('DEREK','XAVIER','AUDREY')
 TERMINAL=('CLOSED_NO_CHANGE','REJECTED','CANCELLED')
 DEFAULT={'enabled':False,'hourly_limit':24,'spent':0,'hour':0,'revision':0}
@@ -43,38 +56,85 @@ def validate_plan(title,agent,priority,due,now):
     if isinstance(due,bool) or not isinstance(due,(int,float)) or not math.isfinite(due) or not now<due<=now+30*86400:raise ValueError('DUE_WITHIN_30_DAYS_REQUIRED')
 
 
+async def scope(conn,account=None):
+    """The account the research queue works for: `account` when the caller
+    supplies one, else the pinned ACCOUNT, else the durable PAPER selector
+    (an unreadable selector raises; it never falls back to an account)."""
+    if account is not None:return account
+    if ACCOUNT is not None:return ACCOUNT
+    from ..simulated_account_context import selected_account
+    return await selected_account(conn)
+
+
+def control_key(account):
+    return CONTROL or CONTROL_PREFIX+account
+
+
+def heartbeat_key(account):
+    return (HEARTBEAT_PREFIX+SELECTED_ACCOUNT).replace(SELECTED_ACCOUNT,account)
+
+
+async def _inherited_control(conn,account):
+    """A newly selected epoch account has no control row of its own: the
+    nearest registered ancestor's row (account_lineage) carries the
+    manager's decision (enabled, hourly limit, this hour's spend) across the
+    switch, so the worker is neither silently switched off nor given a
+    fresh budget. A pinned CONTROL never inherits."""
+    if CONTROL is not None:return None
+    from ..simulated_account_context import account_lineage
+    for parent in (await account_lineage(conn,account))[1:]:
+        v=await conn.fetchval("SELECT value FROM ingestion_state WHERE key=$1",CONTROL_PREFIX+parent)
+        if v is not None:return {**obj(v),'inherited_from_account_id':parent}
+    return None
+
+
 async def schema(conn):
     return bool(await conn.fetchval("SELECT to_regclass('agent_tasks') IS NOT NULL AND to_regclass('paper_handoffs') IS NOT NULL AND to_regclass('paper_recommendations') IS NOT NULL"))
 
 
-async def control(conn,lock=False):
+async def control(conn,lock=False,*,account=None):
+    """The control row of the queue's account (scope()), with `account_id`.
+    Absent for a newly selected epoch account: its nearest ancestor's row is
+    read (and, under the lock, copied as its first row)."""
+    acct=await scope(conn,account)
+    key=control_key(acct)
     if lock:
-        await conn.execute("INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT DO NOTHING",CONTROL,json.dumps(DEFAULT))
-    v=await conn.fetchval("SELECT value FROM ingestion_state WHERE key=$1"+(' FOR UPDATE' if lock else ''),CONTROL)
-    return {**DEFAULT,**obj(v)}
+        first=await conn.fetchval("SELECT value FROM ingestion_state WHERE key=$1",key)
+        if first is None:
+            seed={**DEFAULT,**((await _inherited_control(conn,acct)) or {})}
+            await conn.execute("INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT DO NOTHING",key,json.dumps(seed,allow_nan=False))
+    v=await conn.fetchval("SELECT value FROM ingestion_state WHERE key=$1"+(' FOR UPDATE' if lock else ''),key)
+    if v is None and not lock:
+        v=await _inherited_control(conn,acct)
+    return {**DEFAULT,**obj(v),'account_id':acct}
 
 
 async def save_control(conn,c):
-    await conn.execute("UPDATE ingestion_state SET value=$2::jsonb WHERE key=$1",CONTROL,json.dumps(c,allow_nan=False))
+    acct=c.get('account_id') or await scope(conn)
+    body={k:v for k,v in c.items() if k!='account_id'}
+    await conn.execute("UPDATE ingestion_state SET value=$2::jsonb WHERE key=$1",control_key(acct),json.dumps(body,allow_nan=False))
 
 
-async def configure(conn,*,enabled,hourly_limit,actor,now):
+async def configure(conn,*,enabled,hourly_limit,actor,now,account=None):
     from . import registry as R
     if type(enabled) is not bool or type(hourly_limit) is not int or not 1<=hourly_limit<=120:raise ValueError('INVALID_CONTROL')
     if not actor or actor.upper() in AGENTS or len(actor)>100:raise ValueError('NAMED_MANAGER_REQUIRED')
     async with conn.transaction():
-        c=await control(conn,True)
+        c=await control(conn,True,account=account)
+        acct=c['account_id']
         c.update(enabled=enabled,hourly_limit=hourly_limit,revision=int(c['revision'])+1,updated_at=now,actor=actor)
         await save_control(conn,c)
-        got=await R.create_task(conn,assignee='AUDREY',created_by=actor,kind='CAPABILITY_CONTROL',title='Research worker controls',spec={'account_id':ACCOUNT},task_id='capability-control:'+ACCOUNT,now=now)
+        got=await R.create_task(conn,assignee='AUDREY',created_by=actor,kind='CAPABILITY_CONTROL',title='Research worker controls',spec={'account_id':acct},task_id='capability-control:'+acct,now=now)
         if not got.get('ok'):raise RuntimeError('CONTROL_AUDIT_UNAVAILABLE')
         got=await R.task_event(conn,got['task_id'],kind='CONTROL_CHANGED',actor=actor,detail=c,now=now)
         if not got.get('ok'):raise RuntimeError('CONTROL_AUDIT_UNAVAILABLE')
     return c
 
 
-async def create_flow(conn,*,source_key,title,first='DEREK',priority=3,due,actor,now,context=None):
-    """One immutable, three-agent research plan; duplicate source -> same IDs."""
+async def create_flow(conn,*,source_key,title,first='DEREK',priority=3,due,actor,now,context=None,account=None):
+    """One immutable, three-agent research plan; duplicate source -> same IDs.
+    The plan belongs to the queue's account (scope()): its IDs, its spec and
+    the account its source context must be recorded in."""
     from . import registry as R
     validate_plan(title,first,priority,now+1,now)
     if not isinstance(source_key,str) or not 1<=len(source_key)<=180:raise ValueError('INVALID_SOURCE_KEY')
@@ -82,9 +142,10 @@ async def create_flow(conn,*,source_key,title,first='DEREK',priority=3,due,actor
     if set(context)-{'position_id','decision_id','recommendation_id'} or any(not isinstance(v,str) or len(v)>150 for v in context.values()):raise ValueError('INVALID_SOURCE_CONTEXT')
     order=[first]+[a for a in AGENTS if a!=first and a!='AUDREY']
     if first!='AUDREY':order.append('AUDREY')
-    ids=['capwork:'+stable(ACCOUNT,source_key,a) for a in order]
+    acct=await scope(conn,account)
+    ids=['capwork:'+stable(acct,source_key,a) for a in order]
     async with conn.transaction():
-        await control(conn,True)
+        await control(conn,True,account=acct)
         existing=await conn.fetchrow('SELECT * FROM agent_tasks WHERE task_id=$1',ids[0])
         if existing:
             old=row(existing)
@@ -94,25 +155,26 @@ async def create_flow(conn,*,source_key,title,first='DEREK',priority=3,due,actor
         scoped={'position_id':('paper_orders','group_id'),'decision_id':('paper_decisions','decision_id'),'recommendation_id':('paper_recommendations','recommendation_id')}
         for key,value in context.items():
             table,column=scoped[key]  # fixed identifiers; never supplied by a caller
-            if not await conn.fetchval(f'SELECT 1 FROM {table} WHERE account_id=$1 AND {column}=$2 LIMIT 1',ACCOUNT,value):raise ValueError('SOURCE_CONTEXT_NOT_IN_ACCOUNT')
-        n=await conn.fetchval("SELECT count(*) FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status NOT IN ('CLOSED_NO_CHANGE','REJECTED','CANCELLED')",KIND,ACCOUNT)
+            if not await conn.fetchval(f'SELECT 1 FROM {table} WHERE account_id=$1 AND {column}=$2 LIMIT 1',acct,value):raise ValueError('SOURCE_CONTEXT_NOT_IN_ACCOUNT')
+        n=await conn.fetchval("SELECT count(*) FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status NOT IN ('CLOSED_NO_CHANGE','REJECTED','CANCELLED')",KIND,acct)
         if n+3>MAX_OPEN:raise ValueError('WORK_QUEUE_AT_CAPACITY')
         for i,agent in enumerate(order):
-            spec={'account_id':ACCOUNT,'source_key':source_key,'context':context,'priority':priority,'due_at':due,'dependencies':ids[:i], 'next_action':'Gather scoped evidence, review it, and identify uncertainty and a measurable next step.', 'attempts':0,'lease_until':0,'claim_token':None,'authority':'RESEARCH_ONLY','flow_ids':ids}
+            spec={'account_id':acct,'source_key':source_key,'context':context,'priority':priority,'due_at':due,'dependencies':ids[:i], 'next_action':'Gather scoped evidence, review it, and identify uncertainty and a measurable next step.', 'attempts':0,'lease_until':0,'claim_token':None,'authority':'RESEARCH_ONLY','flow_ids':ids}
             got=await R.create_task(conn,assignee=agent,created_by=actor,kind=KIND,title=title,spec=spec,task_id=ids[i],evidence=[{'source_key':source_key,**context}],now=now)
             if not got.get('ok'):raise RuntimeError('TASK_WRITE_FAILED')
     return {'created':True,'task_ids':ids}
 
 
-async def tasks(conn,agent=None,limit=60,*,include_investigation=False):
+async def tasks(conn,agent=None,limit=60,*,include_investigation=False,account=None):
     if agent is not None and agent not in AGENTS:raise ValueError('UNKNOWN_AGENT')
+    acct=await scope(conn,account)
     projection='*' if include_investigation else "task_id,assignee,created_by,kind,title,spec,status,created_at,updated_at,(outcome - 'investigation') AS outcome"
-    return [row(r) for r in await conn.fetch('SELECT '+projection+" FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND ($3::text IS NULL OR assignee=$3) ORDER BY created_at DESC,task_id LIMIT $4",KIND,ACCOUNT,agent,min(100,max(1,int(limit))))]
+    return [row(r) for r in await conn.fetch('SELECT '+projection+" FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND ($3::text IS NULL OR assignee=$3) ORDER BY created_at DESC,task_id LIMIT $4",KIND,acct,agent,min(100,max(1,int(limit))))]
 
 
-def ready(task,dependencies,now):
+def ready(task,dependencies,now,account=None):
     s=task['spec']
-    return (task['status'] not in TERMINAL and s.get('account_id')==ACCOUNT
+    return (task['status'] not in TERMINAL and s.get('account_id')==(account if account is not None else ACCOUNT)
             and s.get('attempts',0)<MAX_ATTEMPTS and s.get('lease_until',0)<=now
             and all(dependencies.get(x)=='CLOSED_NO_CHANGE' for x in s.get('dependencies',[])))
 
@@ -123,7 +185,7 @@ def ready(task,dependencies,now):
 CLAIM_COLUMNS='task_id,assignee,created_by,kind,title,spec,status,directive_id,evidence,created_at,updated_at'
 
 
-async def claim(conn,now):
+async def claim(conn,now,*,account=None):
     """Claim at most one ready task in a CONSTANT number of round trips.
 
     rc6.2 agent-truth, DEFENSIVE BOUND. The scan used to issue one
@@ -150,14 +212,15 @@ async def claim(conn,now):
     waits (pool acquire, the ingestion_state row lock, event-loop stalls).
     """
     async with conn.transaction():
-        c=await control(conn,True)
+        c=await control(conn,True,account=account)
+        acct=c['account_id']
         if c.get('enabled') is not True:return None
         hour=int(now//3600)
         if c.get('hour')!=hour:c.update(hour=hour,spent=0)
         if c['spent']>=c['hourly_limit']:return None
-        active=await conn.fetchval("SELECT count(*) FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status='IN_PROGRESS' AND (spec->>'lease_until')::double precision>$3",KIND,ACCOUNT,now)
+        active=await conn.fetchval("SELECT count(*) FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status='IN_PROGRESS' AND (spec->>'lease_until')::double precision>$3",KIND,acct,now)
         if active>=2:return None
-        rs=await conn.fetch("SELECT "+CLAIM_COLUMNS+" FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,(spec->>'due_at')::double precision,task_id LIMIT 300 FOR UPDATE SKIP LOCKED",KIND,ACCOUNT)
+        rs=await conn.fetch("SELECT "+CLAIM_COLUMNS+" FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,(spec->>'due_at')::double precision,task_id LIMIT 300 FOR UPDATE SKIP LOCKED",KIND,acct)
         candidates=[row(r) for r in rs]
         wanted=sorted({str(d) for t in candidates for d in (t['spec'].get('dependencies') or [])})
         statuses={}
@@ -175,7 +238,7 @@ async def claim(conn,now):
                 rejected.append((t['task_id'],'DEPENDENCY_FAILED',{'dependencies':deps}))
                 statuses[t['task_id']]='REJECTED'
                 continue
-            if not ready(t,deps,now):continue
+            if not ready(t,deps,now,acct):continue
             chosen=t;break
         if rejected:
             ids=[x[0] for x in rejected]
@@ -231,13 +294,14 @@ async def finish(conn,task,reply,now,*,error=None):
         await event(conn,task['task_id'],'GENUINE_REVIEW' if good else 'REVIEW_INCOMPLETE',task['assignee'] if good else 'SYSTEM',outcome,now)
         rid=s.get('context',{}).get('recommendation_id')
         if good and rid and task['assignee'] in ('DEREK','XAVIER'):
-            await conn.execute("INSERT INTO paper_recommendation_events(recommendation_id,at,actor,kind,body,detail) SELECT recommendation_id,to_timestamp($2),$3,'RESPONSE',$4,$5::jsonb FROM paper_recommendations WHERE recommendation_id=$1 AND account_id=$6 AND owner_agent=$3",rid,now,task['assignee'],outcome['answer'][:3500],json.dumps({'task_id':task['task_id'],'message_id':outcome['message_id']}),ACCOUNT)
+            await conn.execute("INSERT INTO paper_recommendation_events(recommendation_id,at,actor,kind,body,detail) SELECT recommendation_id,to_timestamp($2),$3,'RESPONSE',$4,$5::jsonb FROM paper_recommendations WHERE recommendation_id=$1 AND account_id=$6 AND owner_agent=$3",rid,now,task['assignee'],outcome['answer'][:3500],json.dumps({'task_id':task['task_id'],'message_id':outcome['message_id']}),s.get('account_id'))
     return True
 
 
-async def cancel(conn,tid,actor,now):
+async def cancel(conn,tid,actor,now,*,account=None):
+    acct=await scope(conn,account)
     async with conn.transaction():
-        t=row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND spec->>'account_id'=$3 FOR UPDATE",tid,KIND,ACCOUNT))
+        t=row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND spec->>'account_id'=$3 FOR UPDATE",tid,KIND,acct))
         if not t:raise ValueError('NO_SUCH_WORK')
         if t['status'] in TERMINAL:return {'changed':False,'status':t['status']}
         t['spec'].update(claim_token=None,lease_until=0)

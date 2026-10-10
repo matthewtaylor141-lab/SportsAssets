@@ -27,34 +27,36 @@ def protocol(body,now,classes):
     return cls,train,evaluate,n
 
 
-async def register(conn,body,*,actor,now):
+async def register(conn,body,*,actor,now,account=None):
     from . import paper_learning as P, registry as R
     key=body.get('request_id')
     if not isinstance(key,str) or not 8<=len(key)<=100:raise ValueError('REQUEST_ID_REQUIRED')
     lesson_ids=body.get('lesson_ids',[])
     if not isinstance(lesson_ids,list) or len(lesson_ids)>10 or any(not isinstance(x,str) or len(x)>150 for x in lesson_ids):raise ValueError('INVALID_LESSONS')
-    tid='capexp:'+W.stable(W.ACCOUNT,key)
+    acct=await W.scope(conn,account)
+    tid='capexp:'+W.stable(acct,key)
     digest=W.stable(body)
     async with conn.transaction():
-        await W.control(conn,True)
+        await W.control(conn,True,account=acct)
         existing=W.row(await conn.fetchrow('SELECT * FROM agent_tasks WHERE task_id=$1',tid))
         if existing:
             if existing['spec'].get('request_digest')!=digest:raise ValueError('REQUEST_IDEMPOTENCY_MISMATCH')
             return existing['outcome']
         cls,train,evaluate,n=protocol(body,now,P.CHANGE_CLASSES)
-        valid=await conn.fetchval('SELECT count(*) FROM paper_agent_lessons WHERE account_id=$1 AND agent_id=$2 AND lesson_id=ANY($3::text[])',W.ACCOUNT,cls['agent'],lesson_ids)
+        valid=await conn.fetchval('SELECT count(*) FROM paper_agent_lessons WHERE account_id=$1 AND agent_id=$2 AND lesson_id=ANY($3::text[])',acct,cls['agent'],lesson_ids)
         if valid!=len(set(lesson_ids)):raise ValueError('LESSON_SCOPE_MISMATCH')
-        out=await P.create_proposal(conn,account_id=W.ACCOUNT,agent_id=cls['agent'],strategy=body.get('strategy'),change_class=body['change_class'],proposed_change=body.get('change') or {},rationale=body['rationale'],proposed_by=actor,proposed_at=now,training=tuple(train),evaluation=tuple(evaluate),source_lesson_ids=lesson_ids,min_evaluation_outcomes=n)
+        out=await P.create_proposal(conn,account_id=acct,agent_id=cls['agent'],strategy=body.get('strategy'),change_class=body['change_class'],proposed_change=body.get('change') or {},rationale=body['rationale'],proposed_by=actor,proposed_at=now,training=tuple(train),evaluation=tuple(evaluate),source_lesson_ids=lesson_ids,min_evaluation_outcomes=n)
         if not out.get('ok'):raise ValueError(out.get('refusal','PROPOSAL_REFUSED'))
-        task=await R.create_task(conn,assignee='AUDREY',created_by=actor,kind='CAPABILITY_EXPERIMENT_V1',title=body['rationale'][:150],spec={'account_id':W.ACCOUNT,'request_digest':digest,'proposal_id':out['proposal_id']},task_id=tid,now=now)
+        task=await R.create_task(conn,assignee='AUDREY',created_by=actor,kind='CAPABILITY_EXPERIMENT_V1',title=body['rationale'][:150],spec={'account_id':acct,'request_digest':digest,'proposal_id':out['proposal_id']},task_id=tid,now=now)
         if not task.get('ok'):raise RuntimeError('EXPERIMENT_TASK_WRITE_FAILED')
         await conn.execute("UPDATE agent_tasks SET status='EVALUATING',outcome=$2::jsonb WHERE task_id=$1",tid,json.dumps(out))
         return out
 
 
-async def evaluate_due(conn,now):
+async def evaluate_due(conn,now,*,account=None):
     from . import paper_learning as P
-    r=await conn.fetchrow("SELECT p.proposal_id FROM paper_improvement_proposals p JOIN agent_tasks t ON t.spec->>'proposal_id'=p.proposal_id WHERE t.kind='CAPABILITY_EXPERIMENT_V1' AND t.status='EVALUATING' AND t.spec->>'account_id'=$1 AND p.account_id=$1 AND p.status IN ('AWAITING_FORWARD_DATA','INSUFFICIENT_FORWARD_DATA','EVALUATED') AND p.evaluation_end<=to_timestamp($2) AND coalesce((t.spec->>'last_evaluation_attempt')::double precision,0)<$2-300 ORDER BY coalesce((t.spec->>'last_evaluation_attempt')::double precision,0),p.proposed_at LIMIT 1 FOR UPDATE OF p,t SKIP LOCKED",W.ACCOUNT,now)
+    acct=await W.scope(conn,account)
+    r=await conn.fetchrow("SELECT p.proposal_id FROM paper_improvement_proposals p JOIN agent_tasks t ON t.spec->>'proposal_id'=p.proposal_id WHERE t.kind='CAPABILITY_EXPERIMENT_V1' AND t.status='EVALUATING' AND t.spec->>'account_id'=$1 AND p.account_id=$1 AND p.status IN ('AWAITING_FORWARD_DATA','INSUFFICIENT_FORWARD_DATA','EVALUATED') AND p.evaluation_end<=to_timestamp($2) AND coalesce((t.spec->>'last_evaluation_attempt')::double precision,0)<$2-300 ORDER BY coalesce((t.spec->>'last_evaluation_attempt')::double precision,0),p.proposed_at LIMIT 1 FOR UPDATE OF p,t SKIP LOCKED",acct,now)
     if not r:return {'evaluated':False,'why':'NO_DUE_PROTOCOL'}
     out=await P.evaluate_proposal(conn,r['proposal_id'],now=now)
     await conn.execute("UPDATE agent_tasks SET spec=jsonb_set(spec,'{last_evaluation_attempt}',to_jsonb($2::double precision)) WHERE kind='CAPABILITY_EXPERIMENT_V1' AND spec->>'proposal_id'=$1",r['proposal_id'],now)

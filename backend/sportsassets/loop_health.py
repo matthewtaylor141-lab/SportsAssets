@@ -142,6 +142,11 @@ def _hb(service, *success):
 #: FIELD_NULL -- a success when value[field] is null (the writer stamps its
 #: error there on a failed pass)
 ANY = ("ANY",)
+#: an ingestion_state key part replaced, when the inventory is read, by the
+#: durable PAPER selector's account (simulated_account_context, the account
+#: the research queue works for) -- a row keyed by the selected account,
+#: never a fixed one
+SELECTED_ACCOUNT = "{selected_account}"
 
 
 def _is(key, at_field, rule=ANY):
@@ -333,8 +338,11 @@ API_LOOPS = (
                  "why": "agent_tasks claimed with an expiring lease"},
           # its heartbeat is written only at the end of a whole tick; a
           # failed tick records ERROR (with the failing phase) here
-          sources=(_is("agent.capabilities.heartbeat:paper_acct_main", "at",
-                       _in("status", "OK")),
+          # the heartbeat row of the research queue's account: the
+          # {selected_account} placeholder (SELECTED_ACCOUNT) is the durable
+          # PAPER selector, resolved when the inventory is read
+          sources=(_is("agent.capabilities.heartbeat:{selected_account}",
+                       "at", _in("status", "OK")),
                    _lh("agents.capability_runtime", "api")),
           note="sleeps 15 s between ticks; RESEARCH_ONLY"),
     # ── the rest of the lifespan's recurring tasks (R30A review: the
@@ -828,9 +836,21 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
         "  FROM service_heartbeats"),
         missing, "service_heartbeats")
     sb = {r["service"]: dict(r) for r in (sb_rows or [])}
-    keys = sorted({s[1] for spec in INVENTORY for s in spec["sources"]
-                   if s[0] == "ingestion_state"} | {"pinnapi_feed",
-                                                     "workers_boot"})
+    selected = None
+    try:
+        from .simulated_account_context import selected_account
+        selected = await selected_account(conn)
+    except Exception:                                   # noqa: BLE001
+        selected = None   # a key that needs it is reported missing by name
+
+    def _key(k):
+        if SELECTED_ACCOUNT not in k:
+            return k
+        return None if selected is None else k.replace(SELECTED_ACCOUNT,
+                                                       selected)
+    keys = sorted(({_key(s[1]) for spec in INVENTORY for s in spec["sources"]
+                    if s[0] == "ingestion_state"} - {None})
+                  | {"pinnapi_feed", "workers_boot"})
     ist_rows = await _try(conn, lambda: conn.fetch(
         "SELECT key, value FROM ingestion_state WHERE key = ANY($1::text[])",
         keys), missing, "ingestion_state")
@@ -937,8 +957,14 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
             elif kind == "ingestion_state":
                 if ist_rows is None:
                     continue
-                v = ist.get(src[1])
-                label = "ingestion_state:" + src[1]
+                key = _key(src[1])
+                if key is None:
+                    facts["sources_missing"].append(
+                        "ingestion_state:%s:PAPER_SELECTOR_UNREADABLE"
+                        % src[1])
+                    continue
+                v = ist.get(key)
+                label = "ingestion_state:" + key
                 facts["sources_read"].append(label)
                 if isinstance(v, dict) and v.get(src[2]) is not None:
                     at = _ep(v.get(src[2]))
@@ -950,7 +976,7 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
                         _error(facts, at, "NON_SUCCESS_BEAT:%s" % status)
                 else:
                     facts["sources_missing"].append(
-                        "ingestion_state:%s:NO_ROW" % src[1])
+                        "ingestion_state:%s:NO_ROW" % key)
             elif kind == "run_table":
                 row = runs.get(src[1])
                 if row is not None:

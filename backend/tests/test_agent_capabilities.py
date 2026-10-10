@@ -15,6 +15,16 @@ from sportsassets.agents import capability_work as W, capability_tools as T
 from sportsassets.agents import capability_runtime as R, capability_experiments as E
 from sportsassets.agents import capability_scorecards as S
 
+
+@pytest.fixture(autouse=True)
+def _queue_account_pinned(monkeypatch):
+    """THIS FILE'S CONNECTIONS ARE MOCKS WITH NO PAPER SELECTOR: the research
+    queue is pinned to the legacy account (capability_work.ACCOUNT), exactly
+    as the Postgres capability tests pin theirs to a scratch account. The
+    unpinned default -- the queue follows the durable PAPER selector -- is
+    proven against Postgres in tests/test_rc63_day_one_selected_account_defaults.py."""
+    monkeypatch.setattr(W,'ACCOUNT',W.LEGACY_ACCOUNT)
+
 NOW=1800000000.
 
 

@@ -41,9 +41,14 @@ def feed_coverage_evidence(raw, now):
 
 
 class Toolkit:
-    def __init__(self,agent,now,*,max_calls=5):
+    """`account`: the account the evidence is read from -- a task's own
+    account (capability_runtime.evidence) or, when not given, the research
+    queue's (W.scope: the durable PAPER selector), resolved inside each
+    read's own transaction."""
+    def __init__(self,agent,now,account=None,*,max_calls=5):
         if agent not in W.AGENTS:raise ValueError('UNKNOWN_AGENT')
         self.agent,self.now,self.left=agent,now,min(5,max(1,max_calls))
+        self.account=account
         self.deadline=time.monotonic()+8
 
     async def read(self,conn,name,record_id=None):
@@ -54,46 +59,48 @@ class Toolkit:
         try:
             async with asyncio.timeout(min(2,self.deadline-time.monotonic())):
                 async with conn.transaction(readonly=True,isolation='repeatable_read'):
-                    data=await self._read(conn,name,record_id)
+                    acct=await W.scope(conn,self.account)
+                    data=await self._read(conn,name,record_id,acct)
             if len(json.dumps(data,default=str))>40000:return {'status':'UNAVAILABLE','why':'EVIDENCE_TOO_LARGE','tool':name}
-            return {'status':'EMPTY' if data is None or data==[] else 'OK','tool':name,'read_at':self.now,'account_id':W.ACCOUNT,'data':data,'basis':'PERSISTED_RECORDS; source timestamps determine freshness, not read_at'}
+            return {'status':'EMPTY' if data is None or data==[] else 'OK','tool':name,'read_at':self.now,'account_id':acct,'data':data,'basis':'PERSISTED_RECORDS; source timestamps determine freshness, not read_at'}
         except (TimeoutError,ValueError) as exc:
             return {'status':'UNAVAILABLE','tool':name,'why':str(exc) if isinstance(exc,ValueError) else 'EVIDENCE_READ_TIMEOUT'}
 
-    async def _read(self,c,name,rid):
+    async def _read(self,c,name,rid,acct=None):
+        acct=acct if acct is not None else await W.scope(c,self.account)
         if name in ('missed_opportunities','forecast_evaluation','connector_health'):
             from . import intelligence_reports
             return await intelligence_reports.read(c,name,self.now)
         if name=='cross_venue':
             from . import cross_venue_research
-            return await cross_venue_research.read(c,W.ACCOUNT,rid,self.now)
+            return await cross_venue_research.read(c,acct,rid,self.now)
         if name=='role_brief':
             from . import role_brief
             from . import intelligence_reports
-            brief=await role_brief.read(c,self.agent,self.now,W.ACCOUNT)
+            brief=await role_brief.read(c,self.agent,self.now,acct)
             report={'DEREK':'missed_opportunities','XAVIER':'connector_health','AUDREY':'forecast_evaluation'}[self.agent]
             brief['measured_research']=await intelligence_reports.read(c,report,self.now)
             return brief
         from .. import bettor_paper_ledger as L
         from . import paper_learning as P
-        if name=='account':return await L.cash_state(c,W.ACCOUNT)
-        if name=='work':return await W.tasks(c,self.agent,20)
-        if name=='lessons':return await P.lessons(c,account_id=W.ACCOUNT,agent=self.agent,limit=10)
-        if name=='proposals':return await P.proposals(c,account_id=W.ACCOUNT,agent=self.agent,limit=10)
+        if name=='account':return await L.cash_state(c,acct)
+        if name=='work':return await W.tasks(c,self.agent,20,account=acct)
+        if name=='lessons':return await P.lessons(c,account_id=acct,agent=self.agent,limit=10)
+        if name=='proposals':return await P.proposals(c,account_id=acct,agent=self.agent,limit=10)
         if name=='feed_coverage':
             raw=await c.fetchval("SELECT value FROM ingestion_state WHERE key=$1",'pinnapi_feed_last')
             return feed_coverage_evidence(raw,self.now)
         if not rid:raise ValueError('RECORD_ID_REQUIRED')
         if name=='recommendation':
-            rec=await c.fetchrow('SELECT * FROM paper_recommendations WHERE account_id=$1 AND recommendation_id=$2',W.ACCOUNT,rid)
+            rec=await c.fetchrow('SELECT * FROM paper_recommendations WHERE account_id=$1 AND recommendation_id=$2',acct,rid)
             if not rec:raise ValueError('RECOMMENDATION_NOT_IN_ACCOUNT')
             return dict(rec)
         if name=='position':
-            exists=await c.fetchval('SELECT 1 FROM paper_orders WHERE account_id=$1 AND group_id=$2 LIMIT 1',W.ACCOUNT,rid)
+            exists=await c.fetchval('SELECT 1 FROM paper_orders WHERE account_id=$1 AND group_id=$2 LIMIT 1',acct,rid)
             if not exists:raise ValueError('POSITION_NOT_IN_ACCOUNT')
             # Bounded detail instead of the unlimited historical chain renderer.
-            orders=[dict(x) for x in await c.fetch('SELECT order_id,direction,role,qty,filled_qty,limit_price,state,created_at FROM paper_orders WHERE account_id=$1 AND group_id=$2 ORDER BY created_at DESC LIMIT 30',W.ACCOUNT,rid)]
-            reviews=[dict(x) for x in await c.fetch('SELECT review_id,group_id,reviewed_at,recommendation,refusal,measure,selection,action,alternatives,confirmed_protection,incomplete_search FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',W.ACCOUNT,rid)]
+            orders=[dict(x) for x in await c.fetch('SELECT order_id,direction,role,qty,filled_qty,limit_price,state,created_at FROM paper_orders WHERE account_id=$1 AND group_id=$2 ORDER BY created_at DESC LIMIT 30',acct,rid)]
+            reviews=[dict(x) for x in await c.fetch('SELECT review_id,group_id,reviewed_at,recommendation,refusal,measure,selection,action,alternatives,confirmed_protection,incomplete_search FROM paper_xavier_reviews WHERE account_id=$1 AND group_id=$2 ORDER BY reviewed_at DESC LIMIT 5',acct,rid)]
             # ONE CURRENT XAVIER DECISION (owner P0): the newest review re-judged now; older ones SUPERSEDED with the newer review id
             from .. import xavier_freshness as XF
             from . import xavier_management as XM
@@ -102,11 +109,11 @@ class Toolkit:
             cd=XF.current_decisions(reviews,now=float(self.now),limit_s=XM._config_limit()).get(rid) or {}
             reviews=([cd['current']] if cd.get('current') else [])+list(cd.get('superseded') or [])
             current_decision=(cd.get('current') or {}).get('decision')
-            settlements=[dict(x) for x in await c.fetch('SELECT settlement_id,settled_at,recorded_at,outcome,payout_per_contract,evidence,evidence_source FROM paper_settlements WHERE account_id=$1 AND group_id=$2 ORDER BY recorded_at DESC LIMIT 5',W.ACCOUNT,rid)]
+            settlements=[dict(x) for x in await c.fetch('SELECT settlement_id,settled_at,recorded_at,outcome,payout_per_contract,evidence,evidence_source FROM paper_settlements WHERE account_id=$1 AND group_id=$2 ORDER BY recorded_at DESC LIMIT 5',acct,rid)]
             from . import cross_venue_research
-            comparison=await cross_venue_research.read(c,W.ACCOUNT,rid,self.now)
+            comparison=await cross_venue_research.read(c,acct,rid,self.now)
             return {'group_id':rid,'orders':orders,'current_xavier_decision':current_decision,'reviews':reviews,'settlements':settlements,'cross_venue_comparison':comparison,'bounded_history':True}
-        d=await c.fetchrow('SELECT * FROM paper_decisions WHERE account_id=$1 AND decision_id=$2',W.ACCOUNT,rid)
+        d=await c.fetchrow('SELECT * FROM paper_decisions WHERE account_id=$1 AND decision_id=$2',acct,rid)
         if not d:raise ValueError('DECISION_NOT_IN_ACCOUNT')
         if name=='decision':return dict(d)
         if name=='rules':
@@ -144,14 +151,16 @@ def bounded_evidence(item,limit=EVIDENCE_FACT_CHARS):
         if len(c)<=limit:return fitted,c
     return None,None
 
-async def context_facts(conn,facts,agent,task_id):
-    """A peer's saved review is attributed as opinion, never promoted to fact."""
+async def context_facts(conn,facts,agent,task_id,*,account=None):
+    """A peer's saved review is attributed as opinion, never promoted to fact.
+    Only a task of the research queue's account (W.scope) is read."""
     async with asyncio.timeout(2):
-        t=W.row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND assignee=$3 AND spec->>'account_id'=$4",task_id,W.KIND,agent.upper(),W.ACCOUNT))
+        acct=await W.scope(conn,account)
+        t=W.row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND assignee=$3 AND spec->>'account_id'=$4",task_id,W.KIND,agent.upper(),acct))
         if not t:return {'status':'UNAVAILABLE','why':'NO_SCOPED_CAPABILITY_TASK'}
         facts.add('agent_tasks',task_id,'research_objective',t['title'], 'Research objective: '+t['title']+'. Read-only analysis; this task cannot authorize execution or policy changes.')
         for dep in (t['spec'].get('dependencies') or [])[:2]:
-            d=W.row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND spec->>'account_id'=$3",dep,W.KIND,W.ACCOUNT))
+            d=W.row(await conn.fetchrow("SELECT * FROM agent_tasks WHERE task_id=$1 AND kind=$2 AND spec->>'account_id'=$3",dep,W.KIND,acct))
             if d and d['status']=='CLOSED_NO_CHANGE' and d['outcome'].get('reviewed'):
                 o=d['outcome']
                 facts.add('agent_tasks',dep,'peer_review',o.get('message_id'),'Attributed peer opinion from '+d['assignee']+'; verify independently. Stored message '+str(o.get('message_id'))+': '+str(o.get('answer') or '')[:1800])
@@ -163,10 +172,12 @@ async def context_facts(conn,facts,agent,task_id):
         return {'status':'OK','task_id':task_id,'dependencies':t['spec']['dependencies']}
 
 
-async def active_work_facts(conn,facts,agent):
-    """Bounded work memory for ordinary management chat, not just task buttons."""
+async def active_work_facts(conn,facts,agent,*,account=None):
+    """Bounded work memory for ordinary management chat, not just task buttons.
+    The research queue's account (W.scope) only."""
     async with asyncio.timeout(1):
-        rows=await conn.fetch("SELECT task_id,title,status,spec->>'due_at' AS due_at,spec->>'next_action' AS next_action FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND assignee=$3 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,created_at LIMIT 5",W.KIND,W.ACCOUNT,agent.upper())
+        acct=await W.scope(conn,account)
+        rows=await conn.fetch("SELECT task_id,title,status,spec->>'due_at' AS due_at,spec->>'next_action' AS next_action FROM agent_tasks WHERE kind=$1 AND spec->>'account_id'=$2 AND assignee=$3 AND status IN ('OPEN','IN_PROGRESS','WAITING') ORDER BY (spec->>'priority')::integer DESC,created_at LIMIT 5",W.KIND,acct,agent.upper())
     for r in rows:
         facts.add('agent_tasks',r['task_id'],'assigned_research_work',dict(r),
                   'Assigned research goal (not execution authority): '+r['title']+

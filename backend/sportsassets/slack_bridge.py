@@ -190,12 +190,16 @@ async def admit(conn,agent,cfg,event):
  return 'QUEUED'
 
 async def publish_reviews(conn):
- """Current genuine reviews only, with explicit provenance; no backfill flood."""
+ """Current genuine reviews only, with explicit provenance; no backfill flood.
+ The reviews of the research queue's account (capability_work.scope: the
+ durable PAPER selector), never an archived account's."""
+ from .agents import capability_work as W
+ acct=await W.scope(conn)
  for agent in AGENTS:
   if await conn.fetchval("SELECT count(*) FROM agent_slack_delivery WHERE state IN ('QUEUED','WORKING','READY','SENDING')")>=QUEUE_CAP-3:return
   cfg=settings(agent)
   if not cfg['token'] or not cfg['team'] or cfg['workroom'] not in cfg['channels']:continue
-  rows=await conn.fetch("SELECT e.event_id,e.task_id,t.outcome FROM agent_task_events e JOIN agent_tasks t USING(task_id) WHERE e.kind='GENUINE_REVIEW' AND e.actor=$1 AND e.at>now()-interval '1 hour' AND t.kind='AGENT_CAPABILITY_REVIEW_V1' AND t.spec->>'account_id'='paper_acct_main' ORDER BY e.event_id DESC LIMIT 3",agent.upper())
+  rows=await conn.fetch("SELECT e.event_id,e.task_id,t.outcome FROM agent_task_events e JOIN agent_tasks t USING(task_id) WHERE e.kind='GENUINE_REVIEW' AND e.actor=$1 AND e.at>now()-interval '1 hour' AND t.kind='AGENT_CAPABILITY_REVIEW_V1' AND t.spec->>'account_id'=$2 ORDER BY e.event_id DESC LIMIT 3",agent.upper(),acct)
   for r in rows:
    outcome=decode(r['outcome'])
    if outcome.get('reviewed') is not True or not outcome.get('message_id'):continue

@@ -17,6 +17,19 @@ C=importlib.import_module(PKG+'.agents.cross_venue_research')
 T=importlib.import_module(PKG+'.agents.capability_tools')
 
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _queue_account_pinned(monkeypatch):
+    """THIS FILE'S CONNECTIONS ARE MOCKS WITH NO PAPER SELECTOR: the research
+    queue is pinned to the legacy account (capability_work.ACCOUNT), exactly
+    as the Postgres capability tests pin theirs to a scratch account. The
+    unpinned default -- the queue follows the durable PAPER selector -- is
+    proven against Postgres in tests/test_rc63_day_one_selected_account_defaults.py."""
+    monkeypatch.setattr(T.W,'ACCOUNT',T.W.LEGACY_ACCOUNT)
+
+
 def candidate(i,**kw):
     return dict(id=i,cycle_at=i,sport_key='soccer',family='moneyline',provider_event_id='g',
                 us_market_slug='slug',outcome=kw.pop('outcome','REFUSED'),first_refusal=kw.pop('first_refusal','QUOTE_STALE_ON_ARRIVAL'),**kw)

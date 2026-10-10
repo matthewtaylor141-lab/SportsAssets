@@ -62,6 +62,11 @@ STDLIB = {"__future__", "asyncio", "datetime", "hashlib", "json", "logging",
           "math", "os", "random", "time", "uuid", "zoneinfo", "typing",
           "contextlib", "dataclasses", "decimal", "collections"}
 ALLOWED_PROJECT = {"sportsassets", "sportsassets.profitability",
+                   # (rc6.3 pr5-port) the durable PAPER selector read: no
+                   # imports, SELECT-only (pinned by test_day_one_paper_epoch
+                   # test_simulated_selector_has_no_writer_dependencies_or_
+                   # calls), as the intel / twin / pos_os allowlists carry it
+                   "sportsassets.simulated_account_context",
                    "sportsassets.intel", "sportsassets.bettor_fee_schedule",
                    # the lost opportunity component (migration 220), called
                    # by the cycle after FORECAST; its own closure and write

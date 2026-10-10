@@ -122,12 +122,21 @@ async def _component(conn, run_id, name, fn, *, summary_of=None):
     return value, status
 
 
-async def run_cycle(conn, *, now=None, account_id=C.PAPER_ACCOUNT,
+async def run_cycle(conn, *, now=None, account_id=None,
                     include_actual=True,
                     lookback_days=R.LOOKBACK_DAYS) -> dict:
-    """One full research cycle on `conn`. Returns what each component did."""
+    """One full research cycle on `conn`. Returns what each component did.
+
+    `account_id` None (the API-armed scheduled loop, _one) is the durable
+    PAPER selector (simulated_account_context.selected_account), as the
+    intel and twin runners resolve it: after an activation or a rollback the
+    capacity, positions, economics and PAPER capital this cycle computes
+    are the selected account's, never the archived one's."""
     if not await ST.tables_ready(conn):
         return {"ran": False, "why": "MIGRATION_216_NOT_APPLIED"}
+    if account_id is None:
+        from ..simulated_account_context import selected_account
+        account_id = await selected_account(conn)
     now = float(time.time() if now is None else now)
     run_id = ST.new_run_id()
     t0 = time.time()

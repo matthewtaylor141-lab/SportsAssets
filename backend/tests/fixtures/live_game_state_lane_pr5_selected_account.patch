@@ -1,0 +1,21 @@
+diff --git a/backend/sportsassets/live_game_state/storage.py b/backend/sportsassets/live_game_state/storage.py
+index 757cda8e..06f33c88 100644
+--- a/backend/sportsassets/live_game_state/storage.py
++++ b/backend/sportsassets/live_game_state/storage.py
+@@ -238,9 +238,15 @@ class PostgresStore:
+     def __init__(self, pool):
+         self.pool = pool
+ 
+-    async def fixtures(self, account_id="paper_acct_main") -> tuple[list[Fixture], dict]:
++    async def fixtures(self, account_id=None) -> tuple[list[Fixture], dict]:
++        """The held fixtures of `account_id`; None (the live-scores worker)
++        is the durable PAPER selector, so Day One's open positions get their
++        live-game display after an activation (display only)."""
+         from ..open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
+         async with self.pool.acquire() as conn:
++            if account_id is None:
++                from ..simulated_account_context import selected_account
++                account_id = await selected_account(conn)
+             async with conn.transaction(readonly=True):
+                 await conn.execute("SET LOCAL statement_timeout = 2000")
+                 rows = await conn.fetch(fixture_query(CANONICAL_OPEN_POSITIONS_SQL), account_id)

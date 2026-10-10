@@ -46,11 +46,12 @@ def measure(decisions,reviews,findings,work,now):
       'improvement_claim':'Only a completed forward evaluation can report its measured result. Research review completion is not a performance gain.'}
 
 
-async def read(conn,now):
-    ds=[dict(r) for r in await conn.fetch("SELECT decision_id,decided_at,strategy,policy_version,verdict,refusal FROM paper_decisions WHERE account_id=$1 AND decided_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY decided_at DESC,decision_id LIMIT 501",W.ACCOUNT,now)]
-    rs=[dict(r) for r in await conn.fetch("SELECT r.review_id,r.reviewed_at,r.measure,CASE WHEN r.review_id=(SELECT x.review_id FROM paper_xavier_reviews x WHERE x.account_id=r.account_id AND x.group_id=r.group_id ORDER BY x.reviewed_at,x.review_id LIMIT 1) THEN extract(epoch FROM(r.reviewed_at-h.created_at)) END AS handoff_latency_s FROM paper_xavier_reviews r LEFT JOIN paper_handoffs h ON h.account_id=r.account_id AND h.group_id=r.group_id WHERE r.account_id=$1 AND r.reviewed_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY r.reviewed_at DESC,r.review_id LIMIT 501",W.ACCOUNT,now)]
-    fs=[dict(r) for r in await conn.fetch("SELECT finding_id,severity,recorded_at FROM paper_audrey_findings WHERE account_id=$1 AND recorded_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY recorded_at DESC,finding_id LIMIT 501",W.ACCOUNT,now)]
-    work=await W.tasks(conn,limit=60)
+async def read(conn,now,*,account=None):
+    acct=await W.scope(conn,account)
+    ds=[dict(r) for r in await conn.fetch("SELECT decision_id,decided_at,strategy,policy_version,verdict,refusal FROM paper_decisions WHERE account_id=$1 AND decided_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY decided_at DESC,decision_id LIMIT 501",acct,now)]
+    rs=[dict(r) for r in await conn.fetch("SELECT r.review_id,r.reviewed_at,r.measure,CASE WHEN r.review_id=(SELECT x.review_id FROM paper_xavier_reviews x WHERE x.account_id=r.account_id AND x.group_id=r.group_id ORDER BY x.reviewed_at,x.review_id LIMIT 1) THEN extract(epoch FROM(r.reviewed_at-h.created_at)) END AS handoff_latency_s FROM paper_xavier_reviews r LEFT JOIN paper_handoffs h ON h.account_id=r.account_id AND h.group_id=r.group_id WHERE r.account_id=$1 AND r.reviewed_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY r.reviewed_at DESC,r.review_id LIMIT 501",acct,now)]
+    fs=[dict(r) for r in await conn.fetch("SELECT finding_id,severity,recorded_at FROM paper_audrey_findings WHERE account_id=$1 AND recorded_at BETWEEN to_timestamp($2-86400) AND to_timestamp($2) ORDER BY recorded_at DESC,finding_id LIMIT 501",acct,now)]
+    work=await W.tasks(conn,limit=60,account=acct)
     cards=measure(ds,rs,fs,work,now)
     # Compare separate strategy/version cohorts; never mix exploration and investment.
     cohorts={}
@@ -60,14 +61,15 @@ async def read(conn,now):
     return cards
 
 
-async def delivery_events(conn,after=0,limit=30):
+async def delivery_events(conn,after=0,limit=30,*,account=None):
     """Read-only cursor adapter for an authenticated Slack outbox consumer.
 
 Caller must apply its installed-app/workspace/channel allowlist and persist its
 own delivery idempotency key. This route never creates a second agent review.
 """
     if type(after) is not int or after<0:raise ValueError('INVALID_CURSOR')
-    rows=await conn.fetch("SELECT e.event_id,e.at,e.actor,e.kind,e.task_id,t.title,e.detail FROM agent_task_events e JOIN agent_tasks t ON t.task_id=e.task_id WHERE t.kind=$1 AND t.spec->>'account_id'=$2 AND e.event_id>$3 AND e.kind='GENUINE_REVIEW' ORDER BY e.event_id LIMIT $4",W.KIND,W.ACCOUNT,after,min(50,max(1,limit)))
+    acct=await W.scope(conn,account)
+    rows=await conn.fetch("SELECT e.event_id,e.at,e.actor,e.kind,e.task_id,t.title,e.detail FROM agent_task_events e JOIN agent_tasks t ON t.task_id=e.task_id WHERE t.kind=$1 AND t.spec->>'account_id'=$2 AND e.event_id>$3 AND e.kind='GENUINE_REVIEW' ORDER BY e.event_id LIMIT $4",W.KIND,acct,after,min(50,max(1,limit)))
     events=[]
     for r in rows:
         d=W.obj(r['detail'])
@@ -81,22 +83,22 @@ own delivery idempotency key. This route never creates a second agent review.
             'delivery_status':'NOT_SENT_BY_THIS_READ','authority':'READ_ONLY'}
 
 
-async def snapshot(conn,now):
-    from .capability_runtime import HEARTBEAT
+async def snapshot(conn,now,*,account=None):
     from .capability_tools import TOOLS
     from .capability_experiments import catalog
-    work=await W.tasks(conn,limit=60)
+    acct=await W.scope(conn,account)
+    work=await W.tasks(conn,limit=60,account=acct)
     for t in work:
         t['overdue']=t['status'] not in W.TERMINAL and t['spec']['due_at']<now
         outcome=t['outcome'];outcome.pop('investigation',None)
         outcome['answer']=str(outcome.get('answer') or '')[:1400]
-    experiments=[dict(r) for r in await conn.fetch("SELECT p.proposal_id,p.agent_id,p.strategy,p.change_class,p.rationale,p.status,p.training_start,p.training_end,p.evaluation_start,p.evaluation_end,p.protocol,p.verdict,p.evaluation,p.last_attempt FROM paper_improvement_proposals p WHERE p.account_id=$1 ORDER BY p.proposed_at DESC LIMIT 20",W.ACCOUNT)]
+    experiments=[dict(r) for r in await conn.fetch("SELECT p.proposal_id,p.agent_id,p.strategy,p.change_class,p.rationale,p.status,p.training_start,p.training_end,p.evaluation_start,p.evaluation_end,p.protocol,p.verdict,p.evaluation,p.last_attempt FROM paper_improvement_proposals p WHERE p.account_id=$1 ORDER BY p.proposed_at DESC LIMIT 20",acct)]
     for e in experiments:
         for k in ('protocol','evaluation','last_attempt'):e[k]=W.obj(e.get(k))
-    heartbeat=W.obj(await conn.fetchval('SELECT value FROM ingestion_state WHERE key=$1',HEARTBEAT))
-    return {'status':'OK','read_at':now,'account_id':W.ACCOUNT,
+    heartbeat=W.obj(await conn.fetchval('SELECT value FROM ingestion_state WHERE key=$1',W.heartbeat_key(acct)))
+    return {'status':'OK','read_at':now,'account_id':acct,
             'data_label':'LIVE MARKET DATA · SIMULATED EXECUTION',
-            'control':await W.control(conn),'heartbeat':heartbeat,'work':work,
+            'control':await W.control(conn,account=acct),'heartbeat':heartbeat,'work':work,
             'work_limit':60,'tool_names':sorted(TOOLS),'experiments':experiments,
             'experiment_catalog':catalog(),
             'scorecards':await read(conn,now),

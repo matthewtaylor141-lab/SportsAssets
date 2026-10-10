@@ -66,9 +66,11 @@ async def propose_due(conn, *, now: float | None = None, force: bool = False) ->
     _LAST["at"] = at
     if not await IMP.has_schema(conn):
         return {"version": VERSION, "ok": False, "refusal": "IMPROVEMENT_SCHEMA_ABSENT"}
-    from .. import bettor_paper_ledger as L
     from ..revenue_reliability import read as RR
-    got = await RR.read(conn, account_id=L.ACCOUNT_ID, now=at)
+    from ..simulated_account_context import selected_account
+    # the evidence of the SELECTED PAPER account (the durable selector), as
+    # the /api/command/revenue-readiness route reads it -- never the archive
+    got = await RR.read(conn, account_id=await selected_account(conn), now=at)
     if got.get("status") != "OK":
         return {"version": VERSION, "ok": False, "refusal": "READBACK_UNAVAILABLE", "why": got.get("why")}
     data = got["data"]

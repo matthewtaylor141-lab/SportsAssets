@@ -12,27 +12,34 @@ from . import capability_work as W
 from .capability_tools import Toolkit
 
 log=logging.getLogger(__name__)
-HEARTBEAT='agent.capabilities.heartbeat:'+W.ACCOUNT
+#: THE HEARTBEAT KEY TEMPLATE: the row is the queue account's
+#: (W.heartbeat_key(account): the durable PAPER selector's account), so after
+#: an activation the worker's liveness is read under the selected account
+HEARTBEAT=W.HEARTBEAT_PREFIX+W.SELECTED_ACCOUNT
 
 
-async def admit(conn,now):
-    """At most six source events per pass; deterministic IDs deduplicate restarts."""
+async def admit(conn,now,*,account=None):
+    """At most six source events per pass; deterministic IDs deduplicate restarts.
+    Source events are the queue account's (W.scope: the durable PAPER
+    selector), and each flow is created for that same account."""
+    acct=await W.scope(conn,account)
     queries=[
       ("SELECT 'handoff:'||h.handoff_id AS source,h.group_id,h.decision_id,NULL::text AS recommendation_id,'XAVIER'::text AS owner,'Review the recorded fill, management alternatives and audit chain.'::text AS title,3 AS priority FROM paper_handoffs h WHERE h.account_id=$1 AND h.created_at<=to_timestamp($3) AND NOT EXISTS(SELECT 1 FROM agent_tasks t WHERE t.kind=$2 AND t.spec->>'account_id'=$1 AND t.spec->>'source_key'='handoff:'||h.handoff_id) ORDER BY h.created_at LIMIT 2"),
       ("SELECT 'recommendation:'||r.recommendation_id AS source,NULL::text AS group_id,NULL::text AS decision_id,r.recommendation_id,r.owner_agent AS owner,'Investigate recorded recommendation: '||left(r.recommendation,380) AS title,4 AS priority FROM paper_recommendations r WHERE r.account_id=$1 AND r.created_at<=to_timestamp($3) AND r.status NOT IN ('CLOSED','IMPROVED','NOT_IMPROVED') AND NOT EXISTS(SELECT 1 FROM agent_tasks t WHERE t.kind=$2 AND t.spec->>'account_id'=$1 AND t.spec->>'source_key'='recommendation:'||r.recommendation_id) ORDER BY r.created_at LIMIT 2"),
       ("SELECT 'settlement:'||s.settlement_id AS source,s.group_id,NULL::text AS decision_id,NULL::text AS recommendation_id,'AUDREY'::text AS owner,'Review this recorded settlement, entry assumptions and management decisions; identify a testable lesson.'::text AS title,3 AS priority FROM paper_settlements s WHERE s.account_id=$1 AND s.recorded_at<=to_timestamp($3) AND NOT EXISTS(SELECT 1 FROM agent_tasks t WHERE t.kind=$2 AND t.spec->>'account_id'=$1 AND t.spec->>'source_key'='settlement:'||s.settlement_id) ORDER BY s.recorded_at LIMIT 2")]
     created=0
     for sql in queries:
-        rows=await conn.fetch(sql,W.ACCOUNT,W.KIND,now)
+        rows=await conn.fetch(sql,acct,W.KIND,now)
         for r in rows:
             ctx={k:v for k,v in {'position_id':r['group_id'],'decision_id':r['decision_id'],'recommendation_id':r['recommendation_id']}.items() if v}
-            result=await W.create_flow(conn,source_key=r['source'],title=r['title'],first=r['owner'],priority=r['priority'],due=now+86400,actor='SYSTEM',now=now,context=ctx)
+            result=await W.create_flow(conn,source_key=r['source'],title=r['title'],first=r['owner'],priority=r['priority'],due=now+86400,actor='SYSTEM',now=now,context=ctx,account=acct)
             created+=3 if result['created'] else 0
     return created
 
 
 async def evidence(pool,task,now):
-    toolkit=Toolkit(task['assignee'],now)
+    # the task's evidence is read from the account the task belongs to
+    toolkit=Toolkit(task['assignee'],now,task['spec'].get('account_id'))
     ctx=task['spec'].get('context',{})
     requests=[('account',None),('lessons',None)]
     if ctx.get('position_id'):requests.append(('position',ctx['position_id']))
@@ -145,16 +152,19 @@ async def tick(pool):
                 if not await W.schema(conn):return {'status':'SCHEMA_UNAVAILABLE'}
                 c=await W.control(conn)
                 if c.get('enabled') is not True:return {'status':'OFF'}
+                # ONE ACCOUNT FOR THE WHOLE TICK: the one its control row was
+                # read for (the selector at the tick's start)
+                acct=c.get('account_id')
     # An admission failure must not starve already queued work.
     try:
         async with asyncio.timeout(5):
             async with pool.acquire() as conn:
-                await admit(conn,now)
+                await admit(conn,now,account=acct)
     except Exception as exc:admission_error=type(exc).__name__
     async with _phase('CLAIM'):
         async with asyncio.timeout(5):
             async with pool.acquire() as conn:
-                task=await W.claim(conn,time.time())
+                task=await W.claim(conn,time.time(),account=acct)
     if task:
         async with _phase('EXECUTE'):
             await execute(pool,task)
@@ -163,19 +173,19 @@ async def tick(pool):
     try:
         async with asyncio.timeout(5):
             async with pool.acquire() as conn:
-                async with conn.transaction():await E.evaluate_due(conn,time.time())
+                async with conn.transaction():await E.evaluate_due(conn,time.time(),account=acct)
     except Exception as exc:evaluation_error=type(exc).__name__
     state={'status':'DEGRADED' if admission_error or evaluation_error else 'OK',
            'at':time.time(),'task_id':task['task_id'] if task else None,
            'admission_error':admission_error,'evaluation_error':evaluation_error,
-           'authority':'RESEARCH_ONLY'}
+           'account_id':acct,'authority':'RESEARCH_ONLY'}
     async with _phase('HEARTBEAT'):
         async with asyncio.timeout(3):
             async with pool.acquire() as conn:
                 # default=str (R30A review): the one heartbeat writer the
                 # dea1b2e datetime fix did not reach; a non-JSON value in a
                 # state field must not fail the tick
-                await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',HEARTBEAT,json.dumps(state,default=str))
+                await conn.execute('INSERT INTO ingestion_state(key,value) VALUES($1,$2::jsonb) ON CONFLICT(key) DO UPDATE SET value=excluded.value',W.heartbeat_key(acct or await W.scope(conn)),json.dumps(state,default=str))
     return state
 
 
