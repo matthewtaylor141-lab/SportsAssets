@@ -515,6 +515,31 @@ async def current_state(conn, account_id: str, strategy: str) -> dict:
             "basis": "NO_EVENT_ROW_INITIAL_STATE"}
 
 
+async def _ancestor_tightening(conn, *, account_id: str, strategy: str,
+                               from_state, to_state: str,
+                               selected) -> bool:
+    """(rc6.3 pr5-port) IS THIS WRITE A TIGHTENING OF A REGISTERED ANCESTOR OF
+    THE SELECTED ACCOUNT? True only when `account_id` is in the selected
+    account's registered lineage (simulated_account_context.account_lineage,
+    nearest first, the selected account itself excluded), `from_state` is
+    that ancestor's current state read now (under the caller's selector
+    lock) and `to_state` is strictly tighter. An unreadable lineage or state
+    is False (the write is refused by name)."""
+    if from_state is None or not isinstance(selected, str) \
+            or not is_tightening(from_state, to_state):
+        return False
+    from .simulated_account_context import account_lineage
+    try:
+        lineage = await account_lineage(conn, selected)
+    except ValueError:
+        return False
+    if account_id not in lineage[1:]:
+        return False
+    cur = await current_state(conn, account_id, strategy)
+    return bool(cur.get("ok")) and cur.get("state") == from_state \
+        and is_tightening(cur["state"], to_state)
+
+
 async def record(conn, *, account_id: str, strategy: str, from_state,
                  to_state: str, rule_id: str, actor: str, evidence: dict,
                  why: str, at: float) -> int:
@@ -531,8 +556,17 @@ async def record(conn, *, account_id: str, strategy: str, from_state,
     after it. A write for a REGISTERED account (paper_acct_main or a
     registered epoch) that is not the selected one is refused by name
     (PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED) instead of landing silently on an
-    archived account. Tightening the SELECTED account is never refused
-    here; an unregistered (legacy / test) account is unaffected."""
+    archived account -- with ONE exception (_ancestor_tightening): a
+    tightening of a registered ANCESTOR of the selected account, strictly
+    tighter than that ancestor's current state read under the same lock.
+    It only makes the account a rollback would restore stricter (and the
+    selected account inherits it wherever it has no event of its own), so
+    nothing is released; it is the rollback-preparation step after an
+    in-epoch tightening (ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION). A
+    write on a deselected descendant (a rolled-back epoch) and every
+    loosening of a non-selected account stay refused by name. Tightening the
+    SELECTED account is never refused here; an unregistered (legacy / test)
+    account is unaffected."""
     from . import bettor_paper_ledger as L
     if to_state not in RANK or (from_state is not None
                                 and from_state not in RANK):
@@ -551,7 +585,11 @@ async def record(conn, *, account_id: str, strategy: str, from_state,
                 await conn.fetchval(
                     "SELECT EXISTS(SELECT 1 FROM paper_account_epochs "
                     " WHERE account_id=$1)", account_id))
-            if registered and account_id != selected:
+            if registered and account_id != selected \
+                    and not await _ancestor_tightening(
+                        conn, account_id=account_id, strategy=strategy,
+                        from_state=from_state, to_state=to_state,
+                        selected=selected):
                 raise ValueError(R_EPOCH_ACCOUNT_NOT_SELECTED)
         return await conn.fetchval(
             "INSERT INTO paper_strategy_lifecycle_events (account_id, "

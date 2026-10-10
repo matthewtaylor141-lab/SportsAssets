@@ -162,6 +162,14 @@ async def test_S2_a_tightening_that_waited_for_the_switch_is_refused_by_name(scr
 
 
 async def test_the_selected_account_is_always_tightened_and_archives_refuse(scratch):
+    """(second review, risk lens P7) The selected account is always
+    tightened. A registered ancestor of it (here paper_acct_main, the account
+    a rollback restores) accepts only a TIGHTENING strictly tighter than its
+    current state -- the rollback-preparation step; a loosening, or a write
+    whose from_state is not the ancestor's current state, is refused by
+    name. (This test asserted before that the ancestor's tightening is
+    refused; that refusal made rollback unreachable after any in-epoch
+    tightening, so the assertion encoded the defect.)"""
     a, b, epoch = scratch
     # automatic tightening of the selected account: recorded
     eid = await LC.record(b, account_id=epoch, strategy=STRAT,
@@ -170,23 +178,138 @@ async def test_the_selected_account_is_always_tightened_and_archives_refuse(scra
                           actor=LC.AUTOMATIC_ACTOR, evidence={'p': 1},
                           why='probe', at=time.time())
     assert isinstance(eid, int)
-    # a write for the archived (registered, not selected) main account is
-    # refused by name; an unregistered legacy account is unaffected
+    # a tightening of the ancestor main: recorded, and nothing is released
+    got = await LC.transition(b, account_id=L.ACCOUNT_ID, strategy=STRAT,
+                              to_state=LC.QUARANTINED, actor=PERSON,
+                              why='prepare rollback', now=time.time())
+    assert got['ok'] and got['from_state'] == LC.ACTIVE_CHALLENGER, got
+    assert (await LC.current_state(a, epoch, STRAT))['state'] \
+        == LC.REDUCED_SIZE
+    assert (await LC.current_state(a, L.ACCOUNT_ID, STRAT))['state'] \
+        == LC.QUARANTINED
+    # a LOOSENING of the non-selected ancestor is refused by name
+    with pytest.raises(ValueError, match=LC.R_EPOCH_ACCOUNT_NOT_SELECTED):
+        await LC.record(b, account_id=L.ACCOUNT_ID, strategy=STRAT,
+                        from_state=LC.QUARANTINED,
+                        to_state=LC.ACTIVE_CHALLENGER, rule_id='RC63_PROBE',
+                        actor=PERSON, evidence={'p': 1}, why='probe',
+                        at=time.time())
+    # a "tightening" from a from_state that is not the ancestor's current
+    # state (QUARANTINED) would loosen it: refused by name
     with pytest.raises(ValueError, match=LC.R_EPOCH_ACCOUNT_NOT_SELECTED):
         await LC.record(b, account_id=L.ACCOUNT_ID, strategy=STRAT,
                         from_state=LC.ACTIVE_CHALLENGER,
                         to_state=LC.REDUCED_SIZE, rule_id='RC63_PROBE',
                         actor=LC.AUTOMATIC_ACTOR, evidence={'p': 1},
                         why='probe', at=time.time())
-    got = await LC.transition(b, account_id=L.ACCOUNT_ID, strategy=STRAT,
-                              to_state=LC.QUARANTINED, actor=PERSON,
-                              why='archive', now=time.time())
-    assert got == {'ok': False, 'refusal': LC.R_EPOCH_ACCOUNT_NOT_SELECTED,
-                   'from_state': LC.ACTIVE_CHALLENGER,
-                   'to_state': LC.QUARANTINED}
+    assert (await LC.current_state(a, L.ACCOUNT_ID, STRAT))['state'] \
+        == LC.QUARANTINED
     legacy = 'paper_unrelated_' + uuid.uuid4().hex[:8]
     assert isinstance(await LC.record(
         b, account_id=legacy, strategy=STRAT,
         from_state=LC.ACTIVE_CHALLENGER, to_state=LC.REDUCED_SIZE,
         rule_id='RC63_PROBE', actor=LC.AUTOMATIC_ACTOR, evidence={'p': 1},
         why='probe', at=time.time()), int)
+
+
+async def test_P7_rollback_stays_reachable_after_an_in_epoch_tightening(scratch):
+    """(second review, risk lens P7) An automatic tightening on the selected
+    epoch makes rollback refuse ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION
+    (safe). A named person's tightening of the account the rollback
+    restores is then recorded, and the rollback goes through with the
+    restriction kept on the restored account. Before this fix that
+    tightening was refused PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED and the
+    rollback stayed unreachable."""
+    a, b, epoch = scratch
+    await LC.record(b, account_id=epoch, strategy=STRAT,
+                    from_state=LC.ACTIVE_CHALLENGER, to_state=LC.REDUCED_SIZE,
+                    rule_id='LOSS_BUDGET_REDUCE', actor=LC.AUTOMATIC_ACTOR,
+                    evidence={'probe': 1}, why='auto', at=time.time())
+    with pytest.raises(E.EpochRefused,
+                       match='ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION'):
+        await E.rollback(a, epoch_id='lc-lock', request_id='lc-lock-u1')
+    prep = await LC.transition(b, account_id=L.ACCOUNT_ID, strategy=STRAT,
+                               to_state=LC.REDUCED_SIZE, actor=PERSON,
+                               why='match the epoch before rollback',
+                               now=time.time())
+    assert prep['ok'], prep
+    done = await E.rollback(a, epoch_id='lc-lock', request_id='lc-lock-u2')
+    assert done['rolled_back'] and done['account_id'] == L.ACCOUNT_ID
+    assert await E.selected_account(a) == L.ACCOUNT_ID
+    assert (await LC.current_state(a, L.ACCOUNT_ID, STRAT))['state'] \
+        == LC.REDUCED_SIZE
+    # the rolled-back epoch is a deselected DESCENDANT now: refused by name
+    got = await LC.transition(b, account_id=epoch, strategy=STRAT,
+                              to_state=LC.QUARANTINED, actor=PERSON,
+                              why='archive', now=time.time())
+    assert got['ok'] is False
+    assert got['refusal'] == LC.R_EPOCH_ACCOUNT_NOT_SELECTED
+
+
+async def test_an_ancestor_tightening_racing_a_rollback_never_releases(scratch):
+    """Two connections, many trials: a named person's tightening of the
+    restored account (main) races a rollback attempt after an in-epoch
+    QUARANTINE. Whatever the interleaving, a rollback that goes through
+    lands on a main at least as strict as the epoch was (QUARANTINED), and a
+    refused rollback leaves the epoch selected and quarantined."""
+    import random
+    a, b, epoch = scratch
+    rnd = random.Random(11)
+    outcomes = {}
+    prev_epoch = epoch
+    for i in range(20):
+        ep = 'lc-race-%d' % i
+        strat = 'RC63_RACE_STRATEGY_%d' % i
+        if i:
+            r = await E._activate_verified(a, epoch_id=ep, request_id=ep,
+                                           proof=_proof(ep))
+            prev_epoch = r['account_id']
+        else:
+            ep = 'lc-lock'
+        sel = await E.selected_account(a)
+        assert sel == prev_epoch
+        restored = await a.fetchval(
+            "SELECT previous_account_id FROM paper_account_epochs "
+            " WHERE account_id=$1", sel)
+        got = await LC.transition(b, account_id=sel, strategy=strat,
+                                  to_state=LC.QUARANTINED, actor=PERSON,
+                                  why='stop', now=time.time())
+        assert got['ok'], got
+
+        async def tighten():
+            await asyncio.sleep(rnd.random() * 0.03)
+            return await LC.transition(b, account_id=restored, strategy=strat,
+                                       to_state=LC.QUARANTINED, actor=PERSON,
+                                       why='prepare rollback',
+                                       now=time.time())
+
+        async def roll():
+            await asyncio.sleep(rnd.random() * 0.03)
+            try:
+                return await E.rollback(a, epoch_id=ep, request_id=ep + '-u')
+            except E.EpochRefused as exc:
+                return {'refused': str(exc)}
+        tq, rb = await asyncio.gather(tighten(), roll())
+        now_sel = await E.selected_account(a)
+        key = ('rolled' if rb.get('rolled_back') else 'refused',
+               'tightened' if tq.get('ok') else tq.get('refusal'))
+        outcomes[key] = outcomes.get(key, 0) + 1
+        assert tq.get('ok'), tq            # the restore target is always
+        if rb.get('rolled_back'):          # tightenable (ancestor or selected)
+            assert now_sel == restored
+            assert (await LC.current_state(a, restored, strat))['state'] \
+                == LC.QUARANTINED
+        else:
+            assert 'ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION' \
+                in rb['refused'], rb
+            assert now_sel == sel
+            assert (await LC.current_state(a, sel, strat))['state'] \
+                == LC.QUARANTINED
+            # the prepared rollback now goes through
+            done = await E.rollback(a, epoch_id=ep, request_id=ep + '-u2')
+            assert done['rolled_back']
+        gate = await LC.entry_gate(a, account_id=await E.selected_account(a),
+                                   strategy=strat, qty=10, limit=.5,
+                                   at=time.time())
+        assert gate.get('refusal') == LC.R_LIFECYCLE_QUARANTINED, gate
+    assert sum(outcomes.values()) == 20
