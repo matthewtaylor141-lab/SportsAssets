@@ -3691,7 +3691,178 @@ def fixture_not_yet_posted(explain, event) -> dict | None:
             "feed_evicted": ab.get("evicted"),
             "near_start_window_s": ab.get("near_start_window_s"),
             "named_near_start": list(ab.get("named_near_start") or []),
-            "named_elsewhere": list(ab.get("named_elsewhere") or [])}
+            "named_elsewhere": list(ab.get("named_elsewhere") or []),
+            # (RC6.3 feed-retention) the evicted records asked the same
+            # question, and the ring's own state
+            "tombstones_near": list(ab.get("tombstones_near") or []),
+            "tombstones_of_sport": ab.get("tombstones_of_sport"),
+            "tombstone_overflow": bool(ab.get("tombstone_overflow")),
+            "evictions_unaccounted": ab.get("evictions_unaccounted"),
+            "records_claimed_by_another_event":
+                ab.get("records_claimed_by_another_event")}
+
+
+#: ── (RC6.3 feed-retention) WHAT STOOD IN THE WAY OF NAMING THE ABSENCE ──
+#:
+#: PRODUCTION (research-sql run 38071612807, 2026-10-10 17:24Z): the feed
+#: held 3,806 of 4,000 events with 281 evictions since the owner started,
+#: NO_EXACT rows every hour for MLS, Liga MX, NCAAF and the NFL, and
+#: NOT_YET_POSTED named in ONE hour of 24 -- the hour the counter was still
+#: zero. The feed cache now keeps a tombstone per eviction and protects the
+#: fixtures someone needs (pinnapi_feed.TOMBSTONE_RING); the absence pass
+#: asks the evicted records themselves (pinnapi_names.NEAR_START_STOP).
+#:
+#: SO EVERY NO_EXACT / NOT_YET_POSTED ROW NAMES ITS BLOCKER. A ledger row
+#: whose WS refusal is PINNAPI_PRIMARY_NO_EXACT_FIXTURE (as its first code,
+#: or beside QUOTE_STALE_ON_ARRIVAL as the fallback's reason) or whose first
+#: code is PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED carries, after its
+#: refusal codes (`absence_evidence_codes`):
+#:   one code per condition that kept `no_candidate_near_start` False or
+#:   kept NOT_YET_POSTED from being named -- the blockers below (each
+#:   classified SOFTWARE / EVENT_IDENTITY, never first); and
+#:   ONE summary string (`absence_summary_code`): PINNAPI_ABSENCE_SUMMARY:
+#:   sport_records=N;feed_evicted=N;named_near_start=N;tombstones_near=N;
+#:   protected_eviction=0|1 -- the counts the audit asked for, parsed back
+#:   by `parse_absence_summary`; declared NOT_REFUSAL in the taxonomy and
+#:   never a first refusal (`_event_outcome`).
+#: Readback: research/rc63_feed_cache_retention_heartbeat.sql.
+R_ABSENCE_BLOCKED_NAMED_NEAR_START = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_RECORD_NEAR_THE_START"
+R_ABSENCE_BLOCKED_TOMBSTONE_NEAR_START = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_AN_EVICTED_RECORD_NEAR_THE_START"
+R_ABSENCE_BLOCKED_TOMBSTONE_OVERFLOW = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_TOMBSTONE_RING_OVERFLOW"
+R_ABSENCE_BLOCKED_EVICTIONS_UNACCOUNTED = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_EVICTIONS_UNACCOUNTED_FOR"
+R_ABSENCE_BLOCKED_NO_RECORD_OF_SPORT = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_RECORD_OF_THE_SPORT"
+R_ABSENCE_BLOCKED_PINNACLE_IN_PAYLOAD = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNACLE_BOOK_IN_THE_PAYLOAD"
+R_ABSENCE_BLOCKED_NATIVE_SEED = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNAPI_NATIVE_SEED"
+R_ABSENCE_BLOCKED_NO_METERED_PAYLOAD = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_METERED_PAYLOAD"
+R_ABSENCE_BLOCKED_NO_ABSENCE_PASS = \
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_ABSENCE_PASS_RECORDED"
+R_ABSENCE_SUMMARY = "PINNAPI_ABSENCE_SUMMARY"
+ABSENCE_SUMMARY_PREFIX = R_ABSENCE_SUMMARY + ":"
+ABSENCE_SUMMARY_FIELDS = ("sport_records", "feed_evicted",
+                          "named_near_start", "tombstones_near",
+                          "protected_eviction")
+#: pinnapi_names.absence's `blocked_by` names -> the ledger's codes
+ABSENCE_BLOCKER_CODES = {
+    "A_RECORD_NEAR_THE_START_NAMES_A_TEAM":
+        R_ABSENCE_BLOCKED_NAMED_NEAR_START,
+    "AN_EVICTED_RECORD_NEAR_THE_START_NAMED_A_TEAM":
+        R_ABSENCE_BLOCKED_TOMBSTONE_NEAR_START,
+    "THE_TOMBSTONE_RING_OVERFLOWED_INSIDE_ITS_WINDOW":
+        R_ABSENCE_BLOCKED_TOMBSTONE_OVERFLOW,
+    "EVICTIONS_THE_TOMBSTONE_RING_DOES_NOT_ACCOUNT_FOR":
+        R_ABSENCE_BLOCKED_EVICTIONS_UNACCOUNTED,
+    "THE_FEED_HOLDS_NO_RECORD_OF_THE_SPORT":
+        R_ABSENCE_BLOCKED_NO_RECORD_OF_SPORT,
+    "A_PINNACLE_BOOK_IN_THE_METERED_PAYLOAD":
+        R_ABSENCE_BLOCKED_PINNACLE_IN_PAYLOAD,
+    "A_PINNAPI_NATIVE_SEED": R_ABSENCE_BLOCKED_NATIVE_SEED,
+    "NO_METERED_PAYLOAD": R_ABSENCE_BLOCKED_NO_METERED_PAYLOAD,
+    "NO_ABSENCE_PASS_RECORDED": R_ABSENCE_BLOCKED_NO_ABSENCE_PASS,
+}
+
+
+def absence_of(explain) -> dict | None:
+    """The absence pass's answer carried by a `select` explain ({"reason",
+    "provenance"}) or by a fallback quote's reference_input
+    ({"fallback_reason", "feed_read"}); None when none was recorded."""
+    ex = explain if isinstance(explain, dict) else {}
+    prov = ex.get("provenance")
+    if not isinstance(prov, dict):
+        prov = ex.get("feed_read")
+    fm = prov.get("fixture_match") if isinstance(prov, dict) else None
+    ab = fm.get("absence") if isinstance(fm, dict) else None
+    return ab if isinstance(ab, dict) else None
+
+
+def ws_reason_of(explain) -> str | None:
+    """The WS refusal a `select` explain or a fallback's reference_input
+    carries."""
+    ex = explain if isinstance(explain, dict) else {}
+    r = ex.get("reason") or ex.get("fallback_reason")
+    return str(r) if r else None
+
+
+def absence_summary(explain, event) -> dict | None:
+    """The counts and blockers for a NO_EXACT row (see R_ABSENCE_SUMMARY):
+    None for any other WS refusal. Pure."""
+    from .. import pinnapi_primary as primary
+    if ws_reason_of(explain) != primary.R_NO_EXACT:
+        return None
+    ab = absence_of(explain)
+    ev = event if isinstance(event, dict) else {}
+    blocked = list((ab or {}).get("blocked_by") or [])
+    if ab is None:
+        blocked.append("NO_ABSENCE_PASS_RECORDED")
+    if ev.get("pinnapi_native") is not None:
+        blocked.append("A_PINNAPI_NATIVE_SEED")
+    elif not isinstance(ev.get("bookmakers"), list):
+        blocked.append("NO_METERED_PAYLOAD")
+    elif pinnacle_absence_in_payload(ev) != R_PAYLOAD_HAS_NO_PINNACLE:
+        blocked.append("A_PINNACLE_BOOK_IN_THE_METERED_PAYLOAD")
+    ab = ab or {}
+
+    def _n(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+    return {"sport_records": _n(ab.get("sport_records")),
+            "feed_evicted": _n(ab.get("evicted_total", ab.get("evicted"))),
+            "named_near_start": len(ab.get("named_near_start") or []),
+            "tombstones_near": len(ab.get("tombstones_near") or []),
+            "protected_eviction": int(_n(ab.get("tombstones_protected")) > 0),
+            "not_yet_posted": fixture_not_yet_posted(explain, event)
+            is not None,
+            "blocked_by": blocked}
+
+
+def absence_summary_code(summary: dict) -> str:
+    """ONE parametrised code with the counts (ABSENCE_SUMMARY_FIELDS)."""
+    s = summary or {}
+    return ABSENCE_SUMMARY_PREFIX + ";".join(
+        "%s=%d" % (k, int(s.get(k) or 0)) for k in ABSENCE_SUMMARY_FIELDS)
+
+
+def parse_absence_summary(code) -> dict | None:
+    """`absence_summary_code` read back from a ledger row's codes; None for
+    any other code or a malformed one."""
+    s = str(code or "")
+    if not s.startswith(ABSENCE_SUMMARY_PREFIX):
+        return None
+    out: dict = {}
+    for part in s[len(ABSENCE_SUMMARY_PREFIX):].split(";"):
+        k, _, v = part.partition("=")
+        if k not in ABSENCE_SUMMARY_FIELDS:
+            return None
+        try:
+            out[k] = int(v)
+        except ValueError:
+            return None
+    return out if len(out) == len(ABSENCE_SUMMARY_FIELDS) else None
+
+
+def absence_evidence_codes(explain, event) -> list:
+    """The codes a NO_EXACT / NOT_YET_POSTED ledger row carries beside its
+    refusal: one per blocker (ABSENCE_BLOCKER_CODES), then the summary.
+    [] for any other WS refusal. Pure."""
+    s = absence_summary(explain, event)
+    if s is None:
+        return []
+    out: list = []
+    for b in s["blocked_by"]:
+        c = ABSENCE_BLOCKER_CODES.get(b)
+        if c and c not in out:
+            out.append(c)
+    out.append(absence_summary_code(s))
+    return out
 
 
 #: ── THE FIXTURE IS PRICED, ITS MONEY LINE IS NOT: TWO SOURCES AGREE ──
@@ -9874,8 +10045,11 @@ def _event_outcome(codes, *, deferred=False) -> dict:
     for c in codes:
         if c not in seen:
             seen.append(c)
+    # the absence summary (RC6.3 feed-retention) is evidence on the row,
+    # never its refusal
     refusals = [c for c in seen if c not in EVENT_NOT_A_REFUSAL
-                and not str(c).startswith("FUNDED:")]
+                and not str(c).startswith("FUNDED:")
+                and not str(c).startswith(ABSENCE_SUMMARY_PREFIX)]
     if "ADMITTED" in seen:
         outcome = "ADMITTED"
     elif refusals:
@@ -10786,6 +10960,27 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         """Facts about the OPEN event that are not refusal codes."""
         if _open_ev["row"] is not None:
             _open_ev["row"].update(fields)
+
+    def _event_codes(codes) -> None:
+        """Evidence codes attributed to the OPEN event without a tally
+        count (RC6.3 feed-retention: the absence summary is one string per
+        row, so it never joins the cycle's tally)."""
+        row = _open_ev["row"]
+        if row is None:
+            return
+        for c in codes or ():
+            if c not in row["_codes"]:
+                row["_codes"].append(c)
+
+    def _absence_evidence(explain_or_ref, ev) -> None:
+        """A NO_EXACT / NOT_YET_POSTED row names what stood in the way of
+        the absence (absence_evidence_codes): the blockers are tallied and
+        attributed, the summary attributed only."""
+        for c in absence_evidence_codes(explain_or_ref, ev):
+            if c.startswith(ABSENCE_SUMMARY_PREFIX):
+                _event_codes([c])
+            else:
+                tally[c] = tally.get(c, 0) + 1
     # THE VENUE'S OWN ERROR TEXT, bounded. A counter says how often the
     # venue refused; only the message says whether that is an entitlement,
     # a closed market or a rate limit -- and those need different actions
@@ -11499,6 +11694,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     _step_refuse(_c)
                 if R_FEED_OWNERSHIP in _np:
                     _note_authority_at_refusal(lat)
+                # (RC6.3 feed-retention) a NO_EXACT or NOT_YET_POSTED row
+                # names what stood in the way of the absence, with the
+                # absence pass's counts
+                _absence_evidence(_ws_why, event)
                 _event_fields({"stage": no_pinnacle_stage(_np),
                                "ws_refusal": _ws_why.get("reason"),
                                "payload_absence":
@@ -11876,6 +12075,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     # THE ONLY PRICE rides on the row as evidence
                     tally[_split["ws_refusal"]] = \
                         tally.get(_split["ws_refusal"], 0) + 1
+                    # (RC6.3 feed-retention) ...and, when that refusal is
+                    # NO_EXACT, what stood in the way of naming the absence
+                    _absence_evidence(quote.get("reference_input") or {},
+                                      event)
                 lat["stale_on_arrival_by_attribution"][code] = \
                     lat["stale_on_arrival_by_attribution"].get(code, 0) + 1
                 _ledger({"global_slug": mapped.get("global_slug")

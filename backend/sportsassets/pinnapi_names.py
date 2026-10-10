@@ -344,14 +344,102 @@ def _acronym(value) -> str:
     return "".join(t[0] for t in toks) if len(toks) >= 2 else ""
 
 
-def shares_a_token(a, b, family) -> bool:
+def shares_a_token(a, b, family, *, near_start: bool = False) -> bool:
     """Do two renderings share one non-trivial token, or is one the
-    other's acronym ("CRB" / "Clube de Regatas Brasil")? Pure."""
-    ta, tb = _tokens(a, family), _tokens(b, family)
+    other's acronym ("CRB" / "Clube de Regatas Brasil")? Pure. With
+    `near_start`, the NEAR_START_STOP words are not tokens either (RC6.3
+    feed-retention: the question asked AT the start, see below)."""
+    if near_start:
+        ta, tb = _tokens_near(a, family), _tokens_near(b, family)
+    else:
+        ta, tb = _tokens(a, family), _tokens(b, family)
     if ta & tb:
         return True
     aa, ab = _acronym(a), _acronym(b)
     return bool((aa and aa in tb) or (ab and ab in ta))
+
+
+#: ── (RC6.3 feed-retention) THE NEAR-START QUESTION, NARROWED TO WHAT CAN
+#: HIDE A FIXTURE ──
+#:
+#: PRODUCTION (software-reds audit, RC6.3b packet hour 2026-10-10 09:54Z: 35
+#: events PINNAPI_PRIMARY_NO_EXACT_FIXTURE; 24 h readback research-sql run
+#: 38071612807: NO_EXACT rows every hour for MLS, Liga MX, NCAAF and the NFL,
+#: NOT_YET_POSTED named in ONE hour of 24). Two things kept the doubt for
+#: fixtures Pinnacle had simply not posted:
+#:
+#:   1 ONE COUNTER FOR EVERY EVICTION. `no_candidate_near_start` required
+#:     the cache's `events_evicted` to be zero -- for the whole process life
+#:     (281 evictions on the live heartbeat at 17:24Z). The cache now leaves
+#:     a TOMBSTONE per eviction (pinnapi_feed.Tombstones: sport, start, the
+#:     two names, when), so the question is asked of the evicted records
+#:     THEMSELVES: a tombstone of the sport inside the match tolerance that
+#:     shares a token with either team keeps the doubt (`tombstones_near`);
+#:     the bare counter is telemetry (`evicted_total`). Two things about the
+#:     ring itself still keep every doubt: it dropped tombstones for
+#:     CAPACITY inside its retention window (`tombstone_overflow`), or the
+#:     counter reports evictions the ring never recorded (`unaccounted`).
+#:   2 AFFILIATIVE TOKENS AT THE SAME START. A slate of MLS kick-offs at one
+#:     start shares "United" and "City"; a Saturday of 40 NCAAF games at one
+#:     start shares "State". Every such record "named" a team of every other
+#:     game at that start, so no game of the slate could be called unposted.
+#:     The near-start test (and ONLY it: the 36 h `sharing` scan is
+#:     unchanged, as is every match rule) ignores NEAR_START_STOP -- the
+#:     affiliative words State / St, United / Utd, City and the soccer
+#:     affiliations -- and ignores a record already CLAIMED one-to-one by a
+#:     DIFFERENT metered event (pinnapi_feed.FixtureClaims, written by
+#:     pinnapi_primary.match_event on every exact match): one fixture is one
+#:     game. A claim covers a record only while the record's names are the
+#:     ones matched, and never a claim by an event of the same two names.
+#:
+#: `blocked_by` names every condition that kept `no_candidate_near_start`
+#: False, so a NO_EXACT ledger row says what stood in the way
+#: (ext_pinnacle_loop.absence_evidence_codes). NOT_YET_POSTED itself still
+#: also requires the metered payload to carry no Pinnacle book.
+NEAR_START_STOP = ABSENCE_STOP | frozenset(("state", "st", "united", "utd",
+                                            "city"))
+#: why `no_candidate_near_start` is False, by name (ledger evidence)
+B_NAMED_NEAR_START = "A_RECORD_NEAR_THE_START_NAMES_A_TEAM"
+B_TOMBSTONE_NEAR_START = "AN_EVICTED_RECORD_NEAR_THE_START_NAMED_A_TEAM"
+B_TOMBSTONE_OVERFLOW = "THE_TOMBSTONE_RING_OVERFLOWED_INSIDE_ITS_WINDOW"
+B_EVICTIONS_UNACCOUNTED = "EVICTIONS_THE_TOMBSTONE_RING_DOES_NOT_ACCOUNT_FOR"
+B_NO_RECORD_OF_SPORT = "THE_FEED_HOLDS_NO_RECORD_OF_THE_SPORT"
+
+
+@functools.lru_cache(maxsize=MEMO_NAMES)
+def _tokens_near(value, family) -> frozenset:
+    return _tokens(value, family) - NEAR_START_STOP
+
+
+def _claimed_by_another(claims, ev, asking: frozenset, now) -> bool:
+    """Is this record covered by a claim (pinnapi_feed.FixtureClaims) of a
+    metered event OTHER than the one asking -- so it cannot be the asking
+    fixture under other names? The claim must still describe the record's
+    current names, and a claim by an event of the asking event's own two
+    names (the same game listed twice) covers nothing."""
+    if claims is None or not isinstance(ev, dict):
+        return False
+    getter = getattr(claims, "get", None)
+    if not callable(getter):
+        return False
+    names = frozenset(_fold(p.get("name"))
+                      for p in (ev.get("participants") or [])
+                      if isinstance(p, dict) and p.get("name"))
+    for fid in (ev.get("id"), ev.get("parentId")):
+        if fid is None:
+            continue
+        try:
+            c = getter(fid, None, now=now) if now is not None else getter(fid)
+        except TypeError:
+            c = getter(fid)
+        if not isinstance(c, dict):
+            continue
+        if frozenset(c.get("fixture_names") or ()) != names:
+            continue
+        if frozenset(c.get("names") or ()) == asking:
+            continue
+        return True
+    return False
 
 
 #: ── NOT YET POSTED: NO CANDIDATE AT THE START (software census closure) ──
@@ -369,8 +457,15 @@ def shares_a_token(a, b, family) -> bool:
 #:                     either participant -- a candidate the names might hide
 #:   named_elsewhere   records naming a participant token, all starting
 #:                     OUTSIDE the tolerance (name + start, up to 4)
-#:   no_candidate_near_start  the feed holds records of the sport, has
-#:                     evicted nothing, and named_near_start is empty
+#:   tombstones_near   evicted records of the sport (pinnapi_feed.Tombstones)
+#:                     starting inside the tolerance that shared a token or
+#:                     an acronym with either participant (RC6.3)
+#:   no_candidate_near_start  the feed holds records of the sport,
+#:                     named_near_start and tombstones_near are empty, and
+#:                     the tombstone ring accounts for every eviction without
+#:                     an overflow inside its window (RC6.3: before, ANY
+#:                     eviction in the process's life kept this False)
+#:   blocked_by        every condition that kept it False, by name
 #:
 #: `no_candidate_near_start` alone decides nothing: the collector calls the
 #: fixture NOT YET POSTED (an EXTERNAL absence) only when the metered
@@ -433,17 +528,29 @@ class AbsenceIndex:
 
 
 def absence(records, *, sport_id, start, home, away, family,
-            evicted=0, tolerance_s=None, prepared=None) -> dict:
+            evicted=0, tolerance_s=None, prepared=None, tombstones=None,
+            claims=None, overflow=False, unaccounted=None,
+            now=None) -> dict:
     """Is the fixture ABSENT from the feed (see the module docstring)? Over
     the feed's raw records (`cache.events` values). {"absent": bool,
     "why": ..., "sport_records": n, "sharing": [up to 4 names]}, plus, when
     `tolerance_s` is given, the near-start scan (NEAR_START_SAMPLE above).
     Pure. `prepared` (an AbsenceIndex of these same records, this sport and
     family) answers the same, scanning only the records that can name a
-    team."""
+    team.
+
+    (RC6.3 feed-retention, see NEAR_START_STOP) `tombstones`: the cache's
+    evicted records inside their retention window (dicts with sport_id,
+    start_s, home, away, protected); `claims`: pinnapi_feed.FixtureClaims
+    (or any mapping of fixture id -> claim); `overflow`: the ring dropped
+    tombstones for capacity inside its window; `unaccounted`: evictions the
+    counter reports beyond the ring's (None: computed as `evicted` minus
+    the tombstones given -- a caller without a ring passes nothing and a
+    bare counter then keeps the doubt, exactly as before)."""
     sport_records, sharing = 0, []
     near, elsewhere = [], []
     tol = None if tolerance_s is None else float(tolerance_s)
+    asking = frozenset((_fold(home), _fold(away)))
     if (prepared is not None and prepared.records is records
             and prepared.sport_id == sport_id and prepared.family == family):
         scan, sport_records = prepared.candidates(home, away), \
@@ -451,6 +558,7 @@ def absence(records, *, sport_id, start, home, away, family,
         counted = True
     else:
         scan, counted = records or (), False
+    claimed_away = 0
     for ev in scan:
         if not isinstance(ev, dict) or ev.get("sport_id") != sport_id:
             continue
@@ -463,7 +571,16 @@ def absence(records, *, sport_id, start, home, away, family,
                  or shares_a_token(n, away, family)]
         if tol is not None and named:
             if st is None or abs(st - float(start)) <= tol:
-                for n in named:
+                # AT THE START: the narrowed test (affiliative words are not
+                # a shared name), and never a record another metered event
+                # already is
+                narrow = [n for n in named
+                          if shares_a_token(n, home, family, near_start=True)
+                          or shares_a_token(n, away, family, near_start=True)]
+                if narrow and _claimed_by_another(claims, ev, asking, now):
+                    claimed_away += 1
+                    narrow = []
+                for n in narrow:
                     if len(near) < NEAR_START_SAMPLE and n not in near:
                         near.append(n)
             elif len(elsewhere) < NEAR_START_SAMPLE:
@@ -474,13 +591,65 @@ def absence(records, *, sport_id, start, home, away, family,
         for n in named:
             if len(sharing) < 4 and n not in sharing:
                 sharing.append(n)
+    # THE EVICTED RECORDS, ASKED THE SAME QUESTIONS (RC6.3)
+    tomb_near, tomb_sharing, tomb_total, tomb_protected = [], [], 0, 0
+    for t in (tombstones or ()):
+        if not isinstance(t, dict) or t.get("sport_id") != sport_id:
+            continue
+        tomb_total += 1
+        if t.get("protected"):
+            tomb_protected += 1
+        st = t.get("start_s")
+        if st is None:
+            st = _epoch(t.get("startTime"))
+        tnames = [str(t.get(k)) for k in ("home", "away") if t.get(k)]
+        named = [n for n in tnames if shares_a_token(n, home, family)
+                 or shares_a_token(n, away, family)]
+        if not named:
+            continue
+        if tol is not None and (st is None or abs(float(st) - float(start))
+                                <= tol):
+            narrow = [n for n in named
+                      if shares_a_token(n, home, family, near_start=True)
+                      or shares_a_token(n, away, family, near_start=True)]
+            for n in narrow:
+                if len(tomb_near) < NEAR_START_SAMPLE and n not in tomb_near:
+                    tomb_near.append(n)
+        if st is None or abs(float(st) - float(start)) <= ABSENCE_WINDOW_S:
+            for n in named:
+                if len(tomb_sharing) < 4 and n not in tomb_sharing:
+                    tomb_sharing.append(n)
+    evicted_total = int(evicted or 0)
+    if unaccounted is None:
+        unaccounted = max(0, evicted_total - tomb_total) \
+            if tombstones is not None else evicted_total
+    unaccounted = int(unaccounted or 0)
+    overflow = bool(overflow)
     out = {"sport_records": sport_records, "sharing": sharing,
-           "window_s": ABSENCE_WINDOW_S, "evicted": int(evicted or 0)}
+           "window_s": ABSENCE_WINDOW_S, "evicted": evicted_total,
+           "evicted_total": evicted_total,
+           "tombstones_of_sport": tomb_total,
+           "tombstones_protected": tomb_protected,
+           "tombstones_sharing": tomb_sharing,
+           "tombstone_overflow": overflow,
+           "evictions_unaccounted": unaccounted,
+           "records_claimed_by_another_event": claimed_away}
     if tol is not None:
+        blocked = []
+        if sport_records == 0:
+            blocked.append(B_NO_RECORD_OF_SPORT)
+        if near:
+            blocked.append(B_NAMED_NEAR_START)
+        if tomb_near:
+            blocked.append(B_TOMBSTONE_NEAR_START)
+        if overflow:
+            blocked.append(B_TOMBSTONE_OVERFLOW)
+        if unaccounted:
+            blocked.append(B_EVICTIONS_UNACCOUNTED)
         out.update(near_start_window_s=tol, named_near_start=near,
-                   named_elsewhere=elsewhere,
-                   no_candidate_near_start=bool(
-                       sport_records > 0 and not evicted and not near))
+                   named_elsewhere=elsewhere, tombstones_near=tomb_near,
+                   no_candidate_near_start=not blocked,
+                   blocked_by=blocked)
     if sharing:
         return dict(out, absent=False,
                     why=("feed records within %.0f h name a participant "
@@ -490,10 +659,22 @@ def absence(records, *, sport_id, start, home, away, family,
         return dict(out, absent=False,
                     why=("the feed holds no record of sport %s at all: its "
                          "scope, not the fixture, is in question" % sport_id))
-    if evicted:
+    if tomb_sharing:
         return dict(out, absent=False,
-                    why=("the cache has evicted %d event(s): the fixture may "
-                         "have been ours to keep" % int(evicted)))
+                    why=("evicted feed records within %.0f h named a "
+                         "participant token (%s): the fixture may have been "
+                         "ours to keep" % (ABSENCE_WINDOW_S / 3600,
+                                           ", ".join(tomb_sharing))))
+    if overflow:
+        return dict(out, absent=False,
+                    why=("the tombstone ring dropped evicted records inside "
+                         "its window: what the cache evicted is not fully "
+                         "known"))
+    if unaccounted:
+        return dict(out, absent=False,
+                    why=("the cache counts %d eviction(s) its tombstone ring "
+                         "does not account for: the fixture may have been "
+                         "ours to keep" % unaccounted))
     return dict(out, absent=True,
                 why=("none of the feed's %d record(s) of sport %s within "
                      "%.0f h of the start shares a token or an acronym with "

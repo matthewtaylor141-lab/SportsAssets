@@ -2311,13 +2311,47 @@ SOFTWARE_CENSUS_CLOSURE = {
         E, DEPTH, "VENUE_BOOK"),
 }
 
+#: (RC6.3 feed-retention) WHAT STOOD IN THE WAY OF NAMING THE ABSENCE: the
+#: evidence codes a PINNAPI_PRIMARY_NO_EXACT_FIXTURE ledger row carries
+#: beside its refusal (ext_pinnacle_loop.absence_evidence_codes), one per
+#: condition that kept the fixture a naming question -- a record (or an
+#: evicted record's tombstone) near the start naming a team, the tombstone
+#: ring having overflowed inside its window, evictions the ring does not
+#: account for, no record of the sport, a Pinnacle book in the metered
+#: payload, a PinnAPI-native seed, no metered payload, no absence pass.
+#: Each is the identity question itself (SOFTWARE, EVENT_IDENTITY) and
+#: never a row's first refusal: NO_EXACT (or NOT_YET_POSTED) stands before
+#: it. The row's one summary string (PINNAPI_ABSENCE_SUMMARY:...) is
+#: declared NOT_REFUSAL below.
+FEED_RETENTION_EVIDENCE = {
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_RECORD_NEAR_THE_START": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_AN_EVICTED_RECORD_NEAR_THE_START": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_TOMBSTONE_RING_OVERFLOW": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_EVICTIONS_UNACCOUNTED_FOR": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_RECORD_OF_THE_SPORT": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNACLE_BOOK_IN_THE_PAYLOAD": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNAPI_NATIVE_SEED": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_METERED_PAYLOAD": (
+        S, MAP, "EVENT_IDENTITY"),
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_ABSENCE_PASS_RECORDED": (
+        S, MAP, "EVENT_IDENTITY"),
+}
+
 for _k, _v in (list(INLINE.items()) + list(SIBLING_STREAMS.items())
                + list(INCIDENT_STREAMS.items())
                + list(INTEGRATION_STREAMS.items())
                + list(COVERAGE_CENSUS.items())
                + list(EXEC_GATING_STREAM.items())
                + list(POS_OS_STREAM.items())
-               + list(SOFTWARE_CENSUS_CLOSURE.items())):
+               + list(SOFTWARE_CENSUS_CLOSURE.items())
+               + list(FEED_RETENTION_EVIDENCE.items())):
     TABLE.setdefault(_k, _v)
 
 #: (RC6) THE PRIORITY ACTIVE REFRESH (market_plane.active_refresh): why the
@@ -2441,6 +2475,18 @@ NOT_REFUSAL = {
         "than its 16,000-character bound is replaced by this marker (no "
         "reader reads it) -- a memory bound on a readback, never a trading, "
         "decision, order or collector refusal",
+    # (RC6.3 feed-retention) the absence pass's counts on a NO_EXACT /
+    # NOT_YET_POSTED ledger row, one parametrised string per row
+    # (PINNAPI_ABSENCE_SUMMARY:sport_records=..;feed_evicted=..;
+    # named_near_start=..;tombstones_near=..;protected_eviction=..) --
+    # evidence beside the refusal, never a refusal itself
+    # (ext_pinnacle_loop.absence_summary_code; `_event_outcome` never
+    # makes it a first refusal)
+    "PINNAPI_ABSENCE_SUMMARY":
+        "workers/ext_pinnacle_loop: the absence pass's counts beside a "
+        "PINNAPI_PRIMARY_NO_EXACT_FIXTURE or NOT_YET_POSTED ledger row "
+        "(RC6.3 feed-retention) -- evidence, never a trading, decision, "
+        "order or collector refusal",
     # RC6 deploy integrity: the judge-held halves of MIGRATION_INTEGRITY
     # and RELEASE (backend/tools is not scanned by the taxonomy test;
     # classified anyway and pinned by test_rc6_deploy_integrity)

@@ -236,6 +236,10 @@ def digest() -> dict:
     d["eviction_standdowns"] = int(_STATE.get("eviction_standdowns") or 0)
     d["eviction_reentries"] = int(_STATE.get("eviction_reentries") or 0)
     d["eviction_standdown_enabled"] = standdown_enabled()
+    # (RC6.3 feed-retention) the cache's eviction counts by class, its
+    # protected set and its tombstone ring ride the heartbeat as
+    # `cache.retention` (FeedCache.census); the census's `protected` block
+    # says where the protected ids came from
     d["runtime_id"] = _STATE.get("runtime_id")
     d["enabled_env"] = enabled()
     d["coverage_census"] = _STATE.get("census")
@@ -351,8 +355,54 @@ async def _census_once(pool) -> dict:
     out = await asyncio.to_thread(
         C.census, rows, view, subscribed_sports=subscribed,
         synced=bool(o and o.cache.authority.synced), now=t0, others=others)
+    # (RC6.3 feed-retention) WHAT THE CACHE MUST KEEP, told to it on the
+    # loop: every feed fixture with a venue counterpart (the census's own
+    # pass, pinnapi_census.venue_counterpart_fixture_ids), the held-watch
+    # targets, and the reactive scheduler's live seeds (the fixtures a
+    # candidate was asked about inside its seed window). The id list never
+    # rides the heartbeat -- only its counts do.
+    counterpart = out.pop("venue_counterpart_fixture_ids", None) or []
+    if o is not None:
+        out["protected"] = protect_fixtures(o.cache, counterpart, now=t0)
     out["computed_at"] = t0
     out["took_ms"] = round((time.time() - t0) * 1000)
+    return out
+
+
+def protect_fixtures(cache, counterpart_ids, *, now: float) -> dict:
+    """`cache.set_protected` with the venue counterparts, the held targets
+    and the live reactive seeds; returns the counts by source (on the
+    census and the heartbeat). Never raises; must run on the event loop."""
+    out = {"venue_counterpart": 0, "held_targets": 0, "reactive_seeds": 0,
+           "protected": 0}
+    try:
+        ids = set(counterpart_ids or ())
+        out["venue_counterpart"] = len(ids)
+        try:
+            from . import pinnapi_held as PH
+            held = set(PH.WATCH.held_events())
+        except Exception:                                       # noqa: BLE001
+            held = set()
+        out["held_targets"] = len(held)
+        ids |= held
+        try:
+            from . import pinnapi_reactive as RX
+            sch = RX.ACTIVE
+            seeds = set()
+            if sch is not None:
+                for eid, seed in list(sch.seeds.items()):
+                    try:
+                        if sch._seed_live(eid, seed):
+                            seeds.add(eid)
+                    except Exception:                           # noqa: BLE001
+                        continue
+        except Exception:                                       # noqa: BLE001
+            seeds = set()
+        out["reactive_seeds"] = len(seeds)
+        ids |= seeds
+        out["protected"] = int(cache.set_protected(ids, at=now))
+    except Exception as exc:                                    # noqa: BLE001
+        out["error"] = type(exc).__name__
     return out
 
 

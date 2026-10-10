@@ -903,6 +903,18 @@ STAGES = (
         # and the evidence code that rides beside it
         "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED",
         "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES",
+        # (RC6.3 feed-retention) what stood in the way of naming the
+        # absence, beside a NO_EXACT row (ext_pinnacle_loop.
+        # absence_evidence_codes): the identity question, never first
+        "PINNAPI_ABSENCE_BLOCKED_BY_A_RECORD_NEAR_THE_START",
+        "PINNAPI_ABSENCE_BLOCKED_BY_AN_EVICTED_RECORD_NEAR_THE_START",
+        "PINNAPI_ABSENCE_BLOCKED_BY_TOMBSTONE_RING_OVERFLOW",
+        "PINNAPI_ABSENCE_BLOCKED_BY_EVICTIONS_UNACCOUNTED_FOR",
+        "PINNAPI_ABSENCE_BLOCKED_BY_NO_RECORD_OF_THE_SPORT",
+        "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNACLE_BOOK_IN_THE_PAYLOAD",
+        "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNAPI_NATIVE_SEED",
+        "PINNAPI_ABSENCE_BLOCKED_BY_NO_METERED_PAYLOAD",
+        "PINNAPI_ABSENCE_BLOCKED_BY_NO_ABSENCE_PASS_RECORDED",
         # (red-team closeout) the fixture is priced but Pinnacle lists no
         # full-game money line for it: its record holds other full-game
         # markets and no s;0;m, AND the metered payload has no Pinnacle h2h
@@ -1277,6 +1289,23 @@ EVALUABILITY_OF = {
     "PINNAPI_PRIMARY_FIXTURE_NOT_YET_POSTED": EXTERNAL_DEPENDENCY,
     "PINNAPI_FEED_NAMES_THE_TEAMS_ONLY_AT_OTHER_START_TIMES":
         EXTERNAL_DEPENDENCY,
+    # (RC6.3 feed-retention) the conditions that kept a miss a naming
+    # question of OURS, recorded beside PINNAPI_PRIMARY_NO_EXACT_FIXTURE
+    # (ext_pinnacle_loop.absence_evidence_codes): each is the identity
+    # question itself, so COULD_NOT_EVALUATE like the refusal it explains
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_RECORD_NEAR_THE_START": COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_AN_EVICTED_RECORD_NEAR_THE_START":
+        COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_TOMBSTONE_RING_OVERFLOW": COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_EVICTIONS_UNACCOUNTED_FOR":
+        COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_RECORD_OF_THE_SPORT": COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNACLE_BOOK_IN_THE_PAYLOAD":
+        COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_A_PINNAPI_NATIVE_SEED": COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_METERED_PAYLOAD": COULD_NOT_EVALUATE,
+    "PINNAPI_ABSENCE_BLOCKED_BY_NO_ABSENCE_PASS_RECORDED":
+        COULD_NOT_EVALUATE,
     # (red-team closeout) TWO SOURCES AGREE PINNACLE LISTS NO MONEY LINE
     # FOR A FIXTURE IT PRICES: the feed's record of the matched fixture
     # parsed on the current epoch and holds other open full-game markets
