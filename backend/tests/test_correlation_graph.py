@@ -574,10 +574,17 @@ def test_the_restated_constants_are_their_sources_own():
     # ALLIE'S FIXTURE QUERY, THE SAME STATEMENT (RC6.3 allie-exposure: both
     # execute open_position_canon's canonical-open-quantity statement; the
     # graph's constant IS that object, and allie_at_decision executes it by
-    # name with no inline SQL of its own to drift from it)
+    # name with no inline SQL of its own to drift from it). RC6.3c
+    # allie-exposure scale: at the decision the fixture and the book come
+    # out of ONE statement (OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL) built on the
+    # very rows statement the graph's fixture query is built on, so the two
+    # still count the same positions the same way; without a fixture the
+    # book statement alone.
     from sportsassets import open_position_canon as OPC
     assert CG.ALLIE_FIXTURE_SQL is OPC.OPEN_EXPOSURE_FIXTURE_SQL
-    assert "OPEN_EXPOSURE_FIXTURE_SQL" in _attrs_in(
+    assert OPC.OPEN_EXPOSURE_ROWS_SQL in CG.ALLIE_FIXTURE_SQL
+    assert OPC.OPEN_EXPOSURE_ROWS_SQL in OPC.OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL
+    assert "OPEN_EXPOSURE_BOOK_AND_FIXTURE_SQL" in _attrs_in(
         SRC / "canonical_components.py", "allie_at_decision")
     assert "OPEN_EXPOSURE_BOOK_SQL" in _attrs_in(
         SRC / "canonical_components.py", "allie_at_decision")
