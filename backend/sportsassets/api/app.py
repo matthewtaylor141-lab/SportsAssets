@@ -616,7 +616,8 @@ async def lifespan(_: FastAPI):
     # kalshi_orders.plan at 1:1,000 and recorded PLANNED / EXCLUDED in its
     # own SHADOW table, plus a GET-only account reconciliation when a Kalshi
     # credential is present. NEVER SUBMITS: it names no submit / cancel / send
-    # primitive and its client's transport refuses everything but GET
+    # primitive, and its account reader has no submit / cancel method and a
+    # transport that refuses everything but GET
     # (tests/test_kalshi_isolation.py, tests/test_rc63_kalshi_shadow.py);
     # it stands down while the Kalshi control is enabled, the Kalshi
     # small-live switch is on or SMALL LIVE is not SHADOW. Kill switch

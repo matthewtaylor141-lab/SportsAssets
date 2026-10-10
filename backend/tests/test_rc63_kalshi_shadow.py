@@ -381,14 +381,40 @@ def test_the_fair_probability_falls_back_to_pinnacle_and_is_rounded_down():
     assert r["state"] == "PLANNED"
 
 
-def test_the_read_only_client_refuses_a_cancel_and_a_fully_gated_submit():
-    """Even with EVERY switch on -- credential, env switch, an enabled
-    control and a fresh complete reconciliation for the same key -- the
-    SHADOW client cannot send: the transport raises before the inner
-    transport sees a byte. A GET still passes."""
+def test_the_account_reader_cannot_submit_or_cancel_and_signs_its_gets():
+    """The SHADOW account reader is not a KalshiClient and has no submit,
+    cancel or order method. Its GET is signed exactly as the client signs
+    (the signature verifies under the key's public half). And the
+    GetOnlyTransport is a second wall: even a real KalshiClient built over
+    it with EVERY switch on -- credential, env switch, an enabled control
+    and a fresh complete reconciliation for the same key -- cannot send a
+    submit or a cancel; the inner transport never sees a byte."""
     env = cred_env(KALSHI_SMALLLIVE_ENABLED="1")
     inner = F.RecordingTransport(F.BALANCE_1234)
-    client = KA.read_only_client(env, transport=inner, clock=lambda: 1000.0)
+    reader = KA.read_only_client(env, transport=inner, clock=lambda: 1000.0)
+    assert not isinstance(reader, KV.KalshiClient)
+    for name in ("submit", "cancel", "_send", "order", "orderbook"):
+        assert not hasattr(reader, name), name
+    got = reader.balance()
+    assert got.status == 200
+    sent = inner.sent[0]
+    assert sent["method"] == "GET" and sent["json"] is None
+    assert sent["url"].endswith("/trade-api/v2/portfolio/balance")
+    h = sent["headers"]
+    key = KV.load_private_key(env["KALSHI_PRIVATE_KEY_PEM"])
+    assert h["KALSHI-ACCESS-KEY"] == env["KALSHI_API_KEY_ID"]
+    assert KV.verify(key.public_key(), h["KALSHI-ACCESS-SIGNATURE"],
+                     h["KALSHI-ACCESS-TIMESTAMP"], "GET",
+                     "/trade-api/v2/portfolio/balance")
+    # no credential: a typed refusal, nothing sent
+    bare = KA.read_only_client({"KALSHI_ENV": "demo"},
+                               transport=F.RaisingTransport())
+    r = bare.balance()
+    assert isinstance(r, KV.Refusal) and r.code == KV.KALSHI_CREDENTIAL_ABSENT
+    # the second wall
+    inner2 = F.RecordingTransport()
+    client = KV.KalshiClient(KA.GetOnlyTransport(inner2), env=env,
+                             clock=lambda: 1000.0)
     fp = KV.fingerprint(env["KALSHI_API_KEY_ID"])
     control = {"enabled": True, "stopped": False, "key_fingerprint": fp,
                "kalshi_env": "demo"}
@@ -401,12 +427,11 @@ def test_the_read_only_client_refuses_a_cancel_and_a_fully_gated_submit():
         client.submit(plan, control=control, reconciliation=recon)
     with pytest.raises(KA.ReadOnlyViolation):
         client.cancel("ord-1")
-    assert inner.sent == []
-    got = client.balance()
-    assert got.status == 200 and [s["method"] for s in inner.sent] == ["GET"]
+    assert inner2.sent == []
     with pytest.raises(KA.ReadOnlyViolation):
-        KA.GetOnlyTransport(inner).send("GET", "u", headers={}, params=None,
-                                        json_body={"x": 1}, timeout=1)
+        KA.GetOnlyTransport(inner2).send("GET", "u", headers={}, params=None,
+                                         json_body={"x": 1}, timeout=1)
+    assert inner2.sent == []
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -974,11 +999,8 @@ def test_migration_367_touches_no_existing_table():
     """Two NEW tables only: the previous release runs unchanged on this
     schema (the upgrade-path receipt's own statement parser)."""
     import re
-    import sys
-    import pathlib
-    sys.path.insert(0, str(pathlib.Path(KS.__file__).resolve().parents[1]
-                           / "tools"))
-    import upgrade_path_receipt as UPR
+
+    from tools import upgrade_path_receipt as UPR
     up = _mig("up")
     created = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", up))
     assert created == {"kalshi_shadow_intents", "kalshi_shadow_account_reads"}

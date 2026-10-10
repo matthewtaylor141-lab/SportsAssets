@@ -24,6 +24,7 @@ else takes recorded responses, so the whole verdict is testable offline.
 """
 from __future__ import annotations
 
+import os
 import time
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -314,13 +315,92 @@ class GetOnlyTransport:
                                 json_body=None, timeout=timeout)
 
 
+class ReadOnlyAccountClient:
+    """THE KALSHI ACCOUNT READER of the SHADOW reconciliation writer: balance,
+    positions, orders, fills and settlements -- GET requests and nothing
+    else. It is NOT a kalshi_venue.KalshiClient (nothing outside
+    kalshi_venue constructs one: tests/test_kalshi_key_classes.py) and it has
+    no submit, cancel or order method at all; its transport is the
+    GetOnlyTransport, a second wall that refuses any other method. A read
+    signs exactly as the client does -- kalshi_venue's own credential
+    checks, cross-venue key refusal, key loader and auth_headers -- and a
+    missing credential is a typed kalshi_venue.Refusal before any byte
+    leaves. Same call surface as the client's reads, so fetch_responses
+    takes either."""
+
+    def __init__(self, transport=None, *, env=None, clock=time.time,
+                 timeout: float = KV.TIMEOUT_S):
+        self._env = os.environ if env is None else env
+        self._transport = GetOnlyTransport(transport)
+        self._clock = clock
+        self._timeout = timeout
+        self._key = None
+
+    def credential_state(self) -> dict:
+        return KV.credential_state(self._env)
+
+    def _read(self, path: str, params: dict | None):
+        env = self._env
+        kid = KV._get(env, KV.KEY_ID_ENV)
+        if not kid or not (KV._get(env, KV.PRIVATE_KEY_PEM_ENV)
+                           or KV._get(env, KV.PRIVATE_KEY_PATH_ENV)):
+            return KV.Refusal(KV.KALSHI_CREDENTIAL_ABSENT)
+        base = KV.BASE_URLS.get(KV._get(env, KV.ENV_ENV).lower())
+        if base is None:
+            return KV.Refusal(KV.KALSHI_ENV_UNSET)
+        if self._key is None:
+            try:
+                pem = KV._read_pem(env)
+                other = KV._other_venue_slots(pem, env)
+                if other:
+                    return KV.Refusal(KV.KALSHI_KEY_REUSED_ACROSS_VENUES,
+                                      {"also_configured_as": other})
+                self._key = KV.load_private_key(pem)
+            except Exception as exc:                          # noqa: BLE001
+                return KV.Refusal(KV.KALSHI_CREDENTIAL_UNREADABLE,
+                                  {"error": type(exc).__name__})
+        headers = KV.auth_headers(kid, self._key, "GET", KV.API_PREFIX + path,
+                                  int(self._clock() * 1000))
+        try:
+            return self._transport.send("GET", base + path, headers=headers,
+                                        params=params, json_body=None,
+                                        timeout=self._timeout)
+        except KV.TransportError as exc:
+            return KV.Response(status=None, error="transport:%s" % exc)
+
+    def balance(self):
+        return self._read("/portfolio/balance", None)
+
+    def positions(self, cursor: str | None = None, limit: int = 200):
+        return self._read("/portfolio/positions",
+                          {"limit": limit, **({"cursor": cursor}
+                                              if cursor else {})})
+
+    def orders(self, status: str | None = None, cursor: str | None = None,
+               limit: int = 100):
+        return self._read("/portfolio/orders",
+                          {"limit": limit,
+                           **({"status": status} if status else {}),
+                           **({"cursor": cursor} if cursor else {})})
+
+    def fills(self, cursor: str | None = None, limit: int = 200):
+        return self._read("/portfolio/fills",
+                          {"limit": limit, **({"cursor": cursor}
+                                              if cursor else {})})
+
+    def settlements(self, cursor: str | None = None, limit: int = 200):
+        return self._read("/portfolio/settlements",
+                          {"limit": limit, **({"cursor": cursor}
+                                              if cursor else {})})
+
+
 def read_only_client(env=None, *, transport=None, clock=time.time,
-                     timeout: float = KV.TIMEOUT_S) -> KV.KalshiClient:
-    """A KalshiClient whose every request passes the GET-only transport.
+                     timeout: float = KV.TIMEOUT_S) -> ReadOnlyAccountClient:
+    """The account reader (no submit, no cancel; GET-only transport).
     `transport` is the inner transport (tests inject a fake; production
     leaves it None for the real one)."""
-    return KV.KalshiClient(GetOnlyTransport(transport), env=env, clock=clock,
-                           timeout=timeout)
+    return ReadOnlyAccountClient(transport, env=env, clock=clock,
+                                 timeout=timeout)
 
 
 def read_only_reconciliation(client: KV.KalshiClient, *,

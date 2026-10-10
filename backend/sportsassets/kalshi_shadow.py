@@ -49,8 +49,9 @@ execution mirror's runner:
   3. RECONCILE (once per RECON_EVERY_S window). With a Kalshi credential
      PRESENT in this process, a read-only account reconciliation
      (kalshi_account.snapshot over GET balance / positions / resting orders
-     / fills / settlements) through kalshi_account.read_only_client -- a
-     transport that raises on anything but GET -- written to migration 196's
+     / fills / settlements) through kalshi_account.read_only_client -- an
+     account reader with no submit / cancel method, over a transport that
+     raises on anything but GET -- written to migration 196's
      kalshi_account_reconciliations (baseline never accepted here). With
      none, a named UNAVAILABLE row in kalshi_shadow_account_reads; nothing
      is written to kalshi_account_reconciliations without a real read.

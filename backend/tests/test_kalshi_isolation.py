@@ -22,15 +22,15 @@ start `_KSHADOW.run(_cap_pool)`. Everything else stays as it was, and the
 exception is fenced by the checks added with it:
 
   * kalshi_shadow never imports kalshi_venue (the client) directly: it
-    reads the account only through kalshi_account.read_only_client, whose
-    transport refuses every method but GET (GetOnlyTransport);
+    reads the account only through kalshi_account.read_only_client -- a
+    ReadOnlyAccountClient, NOT a KalshiClient (nothing outside kalshi_venue
+    constructs one, tests/test_kalshi_key_classes.py), with no submit,
+    cancel or order method and a transport that refuses every method but
+    GET (GetOnlyTransport);
   * kalshi_shadow names no order / cancel / send primitive at all (no
     attribute or name submit, cancel, _send, place, submit_fok,
     cancel_order, post_order, create_order, close_position, KalshiClient,
-    RequestsTransport), and no module outside kalshi_venue / kalshi_account
-    constructs a KalshiClient;
-  * the only KalshiClient kalshi_account constructs is read_only_client's,
-    over GetOnlyTransport;
+    RequestsTransport);
   * nothing a shared-worker loop starts reaches kalshi_shadow (the workers
     must never reach kalshi_orders: tests/test_workers_hold_no_venue_write).
 """
@@ -143,27 +143,26 @@ def test_the_shadow_planner_names_no_order_cancel_or_send_primitive():
     assert "KV" not in named and "kalshi_venue" not in named
 
 
-def test_only_the_venue_and_the_read_only_account_construct_a_client():
-    """No module outside kalshi_venue / kalshi_account builds a KalshiClient,
-    and kalshi_account builds exactly one: read_only_client's, over the
-    GET-only transport."""
-    for p in ROOT.rglob("*.py"):
-        rel = str(p.relative_to(ROOT))
-        if rel in ("kalshi_venue.py", "kalshi_account.py"):
-            continue
-        for node in ast.walk(ast.parse(p.read_text())):
-            if isinstance(node, ast.Call) and ast.unparse(
-                    node.func).split(".")[-1] == "KalshiClient":
-                raise AssertionError((rel, ast.unparse(node)))
+def test_the_account_reader_is_get_only_and_no_kalshi_client():
+    """kalshi_account's ReadOnlyAccountClient defines reads only (no submit,
+    cancel, order or send method), sends through exactly one call with the
+    literal method "GET", and kalshi_account constructs no KalshiClient."""
     tree = ast.parse((ROOT / "kalshi_account.py").read_text())
-    built = []
-    for fn in [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)]:
-        for node in ast.walk(fn):
-            if isinstance(node, ast.Call) and ast.unparse(
-                    node.func).split(".")[-1] == "KalshiClient":
-                built.append((fn.name, ast.unparse(node.args[0])))
-    assert built == [("read_only_client", "GetOnlyTransport(transport)")], \
-        built
+    assert not [n for n in ast.walk(tree) if isinstance(n, ast.Call) and
+                ast.unparse(n.func).split(".")[-1] == "KalshiClient"]
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef)
+               and n.name == "ReadOnlyAccountClient")
+    methods = {n.name for n in cls.body if isinstance(n, ast.FunctionDef)}
+    assert methods == {"__init__", "credential_state", "_read", "balance",
+                       "positions", "orders", "fills", "settlements"}, methods
+    sends = [n for n in ast.walk(cls) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Attribute) and n.func.attr == "send"]
+    assert len(sends) == 1
+    assert isinstance(sends[0].args[0], ast.Constant) and \
+        sends[0].args[0].value == "GET"
+    init = next(n for n in cls.body if isinstance(n, ast.FunctionDef)
+                and n.name == "__init__")
+    assert "self._transport = GetOnlyTransport(transport)" in ast.unparse(init)
 
 
 def test_no_shared_worker_loop_reaches_the_shadow_planner():
