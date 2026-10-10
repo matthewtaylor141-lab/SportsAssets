@@ -96,6 +96,46 @@ durable selector before serving a hit, pin the account for each read and evict
 obsolete account entries; rollback cannot reuse the new epoch's cached view.
 An unreadable selector fails closed instead of returning cached historical data.
 
+## Owner decision required before any activation: a flat source vs. a GREEN packet
+
+This is a conflict between two approved requirements; it is documented here and
+is NOT resolved in code.
+
+- Activation refuses unless the source PAPER account is flat (no held position,
+  open order or reserve: `PAPER_ACCOUNT_HAS_OUTSTANDING_OBLIGATIONS`) and the
+  signed packet is GREEN in all 14 categories (every component d>0 and >=95%)
+  and was built no more than 900 s earlier.
+- The approved judge (`scorecard_14.py` at `42616dcd`) scores a unit with a zero
+  denominator UNMEASURED and not passing. With nothing held, the Xavier unit
+  `held_positions_with_complete_current_packet` is UNMEASURED [0,0] (or
+  READ_UNAVAILABLE where the Xavier rate is unread), and so is the
+  Data-freshness unit `held_positions_fresh`: "Xavier and agent coordination"
+  and "Data freshness and latency" cannot pass, so a packet built on a flat
+  account is never GREEN. The real approved-judge packet (pm-acceptance
+  38002788631, release 16d23450) shows exactly this: `paper_freshness`
+  open_positions 0 and both units UNMEASURED [0,0].
+- The only path today is to hold positions when the packet is built and be
+  fully flat within the 15-minute window, so the packet attests a book that no
+  longer exists at activation.
+
+The owner chooses one of (the GREEN requirement itself is not loosened under
+any option):
+
+1. A reviewed judge rule for a deliberately flat activation packet: the two
+   held-position units are scored NOT_APPLICABLE (named, counted, never a pass
+   by omission) only when the packet also attests the flat receipt the
+   activation will check -- a judge change, so a new pinned `JUDGE_SHA` after
+   review.
+2. Activation carries open positions into the archive under continued Xavier
+   management (Xavier's settlement pass already walks the epoch family; its
+   exit/protection management of archived holdings and the account-local
+   accounting would need their own review), so the packet can be built and
+   activated on a held book.
+3. A documented, deliberate flatten procedure: an operator-run sequence that
+   exits every position, then builds and signs the packet and activates
+   inside 900 s -- with the stated caveat that the packet attests positions
+   that are closed at activation.
+
 ## Rollback
 
 The operator `rollback` action requires epoch and request IDs. It restores the
