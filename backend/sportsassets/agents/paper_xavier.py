@@ -1860,22 +1860,62 @@ OUTCOME_ROWS_SQL = """
 """
 
 
+async def _rows_by_slug(conn, sql: str, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement `sql` -- the `us_market_slug = ANY($1::text[]) ... ORDER BY id`
+    form of a per-slug read, selecting us_market_slug too. Each slug's rows
+    are the per-slug read's rows as dicts with the same keys (the slug key
+    removed), in the same id order; a slug with no rows maps to []. The one
+    statement orders by id over all contracts, and appending in that order
+    keeps each contract's rows in id order."""
+    wanted = sorted({s for s in slugs if s})
+    out: dict = {s: [] for s in wanted}
+    if not wanted:
+        return out
+    for r in await conn.fetch(sql, wanted):
+        d = dict(r)
+        out[d.pop("us_market_slug")].append(d)
+    return out
+
+
 async def outcome_rows_by_slug(conn, slugs) -> dict:
     """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
     statement (OUTCOME_ROWS_SQL). Each slug's rows are the rows of the former
     per-slug read (`WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL
     ORDER BY id`), as dicts with the same keys, in the same id order; a slug
-    with no outcome rows maps to []. The one statement orders by id over all
-    contracts, and appending in that order keeps each contract's rows in id
-    order."""
-    wanted = sorted({s for s in slugs if s})
-    out: dict = {s: [] for s in wanted}
-    if not wanted:
-        return out
-    for r in await conn.fetch(OUTCOME_ROWS_SQL, wanted):
-        d = dict(r)
-        out[d.pop("us_market_slug")].append(d)
-    return out
+    with no outcome rows maps to []."""
+    return await _rows_by_slug(conn, OUTCOME_ROWS_SQL, slugs)
+
+
+#: THE VENUE PRICE-SETTLEMENT ROWS OF MANY CONTRACTS IN ONE STATEMENT (RC6.3c
+#: pass-hardening, round 3): VENUE_PRICE_SQL's rows for every contract of a
+#: batch at once. bettor_capital_authority.settle_shadows (pass step
+#: shadow_settlement, BEFORE derek in the pass order) ran, per PENDING shadow,
+#: the per-slug outcome read above and then VENUE_PRICE_SQL when that settled
+#: nothing: up to 2 x SETTLE_PER_PASS = 400 scans of external_valuations a
+#: run, every RUN_EVERY_S, with a pending shadow re-read on every run (the
+#: independent reviewer's measurement: 200 pending shadows, 400 scans, 10.3 s
+#: on a 40,000-row table). `venue_price_rows_by_slug` groups the rows per
+#: contract in the same id order with the same keys, so
+#: `venue_price_settlement` sees, per shadow, exactly the rows VENUE_PRICE_SQL
+#: returned.
+VENUE_PRICE_ROWS_SQL = """
+    SELECT id, us_market_slug, buy_intent, settlement_read, settlement_read_at,
+           settlement_comparison->>'venue_rules_text' AS rules
+      FROM external_valuations
+     WHERE us_market_slug = ANY($1::text[]) AND outcome_basis IS NULL
+       AND settlement_read IS NOT NULL AND settlement_read_at IS NOT NULL
+     ORDER BY id
+"""
+
+
+async def venue_price_rows_by_slug(conn, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement (VENUE_PRICE_ROWS_SQL). Each slug's rows are the rows
+    VENUE_PRICE_SQL returns for it, as dicts with the same keys (id,
+    buy_intent, settlement_read, settlement_read_at, rules), in the same id
+    order; a slug with no such rows maps to []."""
+    return await _rows_by_slug(conn, VENUE_PRICE_ROWS_SQL, slugs)
 
 
 def outcome_for(rows: list, *, holding_side: str) -> dict:

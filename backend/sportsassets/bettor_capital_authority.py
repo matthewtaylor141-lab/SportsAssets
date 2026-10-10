@@ -77,9 +77,13 @@ adverse-selection estimate of bettor_capital_eligibility. It is labelled
 evidence_class = SHADOW_COUNTERFACTUAL, pnl_class = NOT_REALIZED_PNL; it is
 never a paper order, never reserves cash, never exposure.
 
-When the contract settles (authoritative evidence only, xavier_management.
-settlement_outcome -- the existing read path), `settle_shadows` writes the
-counterfactual outcome as its own append-only row:
+When the contract settles (authoritative evidence only: xavier_management.
+settlement_outcome's verdict, `settlement_from_rows`, over the outcome rows
+and the venue's price-settlement rows of the WHOLE batch read in two
+statements -- paper_xavier.outcome_rows_by_slug and venue_price_rows_by_slug,
+never one read per shadow; the pass step stops before its deadline and names
+the cut), `settle_shadows` writes the counterfactual outcome as its own
+append-only row:
   MARKETABLE  the FIRST READABLE book observed in [decided + delay, expires]
               (the simulator's own window rule) walked at the limit; with no
               such observation, the decision walk charged at the IOC
@@ -171,6 +175,12 @@ BASIS_RESTING = "RESTING_RULE_ON_THE_OBSERVATIONS_IN_THE_ORDER_WINDOW"
 BASIS_RESTING_NONE = "RESTING_NO_EXECUTION_BOOK_OBSERVED_NO_FILL_ASSUMED"
 SETTLE_PER_PASS = 200
 RUN_EVERY_S = 600.0
+#: settle_shadows stops examining shadows this long before the pass step's
+#: deadline (ctx["step_deadline"], monotonic) and names the cut: a pending
+#: shadow is re-read on every run (it never backs off), so the step bounds
+#: its own time instead of being cut by the pass
+SETTLE_STOP_BEFORE_DEADLINE_S = 1.0
+R_SETTLE_CUT_AT_STEP_DEADLINE = "SHADOW_SETTLEMENT_CUT_AT_THE_STEP_DEADLINE"
 
 T_SHADOW = "paper_shadow_counterfactuals"
 T_OUTCOME = "paper_shadow_counterfactual_outcomes"
@@ -883,25 +893,94 @@ def counterfactual_pnl(*, outcome: str, payout_per_contract, filled: float,
     return float(filled) * float(payout_per_contract or 0.0) - cost - fees
 
 
+async def batched_settlement(conn, slugs):
+    """THE SETTLEMENT EVIDENCE OF A WHOLE BATCH OF SHADOWS IN TWO STATEMENTS
+    (RC6.3c pass-hardening, round 3). settle_shadows used to call
+    xavier_management.settlement_outcome per PENDING shadow: the per-contract
+    outcome read, then paper_xavier.VENUE_PRICE_SQL when that settled nothing
+    -- up to 2 x SETTLE_PER_PASS scans of the valuations table (which has no
+    index on us_market_slug) every run, BEFORE derek in the pass order, and a
+    pending shadow re-read on every run (the independent reviewer: 200
+    pending shadows, 400 scans, 10.3 s). Here the outcome rows of all the
+    batch's contracts are read in ONE statement
+    (paper_xavier.outcome_rows_by_slug) and the venue price-settlement rows
+    in ONE more (paper_xavier.venue_price_rows_by_slug), each grouped per
+    contract in id order. Returns a settlement_fn(conn, slug, holding_side)
+    -> dict that
+    gives settlement_outcome's exact verdict for each shadow from those rows,
+    by the same pure code (xavier_management.settlement_from_rows ->
+    paper_xavier.outcome_for / venue_price_settlement, unchanged), and touches
+    the connection no further; a failure in that code is answered as
+    settlement_outcome answers it (outcome None, SETTLEMENT_READ_FAILED)."""
+    from .agents import paper_xavier as PX
+    from .agents import xavier_management as XM
+    by_slug = await PX.outcome_rows_by_slug(conn, slugs)
+    venue_by_slug = await PX.venue_price_rows_by_slug(conn, slugs)
+
+    async def fn(_conn, slug, holding_side):
+        try:
+            return XM.settlement_from_rows(
+                by_slug.get(slug, []), venue_by_slug.get(slug, []),
+                holding_side=holding_side)
+        except Exception as exc:                                # noqa: BLE001
+            return {"outcome": None, "why": "SETTLEMENT_READ_FAILED:%s"
+                    % type(exc).__name__}
+    return fn
+
+
 async def settle_shadows(conn, *, now: float, account_id: str | None = None,
                          limit: int = SETTLE_PER_PASS,
-                         settlement_fn=None) -> dict:
+                         settlement_fn=None, step_deadline=None) -> dict:
     """Write the counterfactual OUTCOME of every unsettled shadow whose
     contract has authoritative settlement evidence. Append-only; idempotent
-    (one outcome per shadow)."""
+    (one outcome per shadow). The settlement evidence of the whole batch is
+    read in TWO statements (`batched_settlement`) unless a `settlement_fn`
+    (conn, slug, holding_side) is given; with a `step_deadline` (the pass
+    step's, monotonic) the loop stops SETTLE_STOP_BEFORE_DEADLINE_S before it
+    and names the cut (R_SETTLE_CUT_AT_STEP_DEADLINE, with the shadows not
+    examined -- the next run resumes with them)."""
     out = {"examined": 0, "settled": 0, "pending": 0, "errors": 0}
     if not await schema(conn):
         return dict(out, refusal="MIGRATION_305_NOT_APPLIED")
-    if settlement_fn is None:
-        from .agents import xavier_management as XM
-        settlement_fn = XM.settlement_outcome
     rows = await conn.fetch(
         "SELECT s.* FROM paper_shadow_counterfactuals s "
         "  LEFT JOIN paper_shadow_counterfactual_outcomes o USING (shadow_id)"
         " WHERE o.shadow_id IS NULL AND ($1::text IS NULL OR s.account_id=$1)"
         "   AND s.decided_at <= $2 ORDER BY s.decided_at LIMIT $3",
         account_id, _ts(now), int(limit))
+
+    def time_is_up() -> bool:
+        return step_deadline is not None and time.monotonic() >= (
+            float(step_deadline) - SETTLE_STOP_BEFORE_DEADLINE_S)
+
+    def cut() -> None:
+        left = len(rows) - out["examined"]
+        out["cut"] = R_SETTLE_CUT_AT_STEP_DEADLINE
+        out["not_examined"] = left
+        out["why"] = ("%s: %d of %d pending shadows not examined, less than "
+                      "%.1fs of the step left" % (
+                          R_SETTLE_CUT_AT_STEP_DEADLINE, left, len(rows),
+                          SETTLE_STOP_BEFORE_DEADLINE_S))
+
+    if rows and settlement_fn is None:
+        if time_is_up():
+            cut()
+            return out
+        try:
+            settlement_fn = await batched_settlement(
+                conn, [r["us_market_slug"] for r in rows])
+        except Exception as exc:                                # noqa: BLE001
+            # the batch's reads failed: as the per-contract read answered a
+            # failure (outcome None, SETTLEMENT_READ_FAILED), every shadow of
+            # the batch stays pending and is examined again next run; the
+            # failure is named
+            out["examined"] = out["pending"] = len(rows)
+            out["why"] = "SETTLEMENT_READ_FAILED:%s" % type(exc).__name__
+            return out
     for rr in rows:
+        if time_is_up():
+            cut()
+            break
         r = dict(rr)
         out["examined"] += 1
         try:
@@ -948,15 +1027,17 @@ _LAST_RUN: dict = {}
 
 async def step(conn, ctx: dict) -> dict:
     """THE PAPER PASS STEP: settle shadow counterfactuals, at most every
-    RUN_EVERY_S. Records evidence only; never places, cancels or sizes an
-    order."""
+    RUN_EVERY_S, in two reads for the whole batch (`batched_settlement`) and
+    within the pass step's deadline (ctx["step_deadline"]). Records evidence
+    only; never places, cancels or sizes an order."""
     acct = ctx.get("account_id")
     now = float(ctx["now"])
     last = _LAST_RUN.get(acct)
     if last is not None and 0 <= now - last < RUN_EVERY_S:
         return {"ran": False, "why": "RAN_WITHIN_RUN_EVERY_S"}
     _LAST_RUN[acct] = now
-    got = await settle_shadows(conn, now=now, account_id=acct)
+    got = await settle_shadows(conn, now=now, account_id=acct,
+                               step_deadline=ctx.get("step_deadline"))
     return dict(got, ran=True)
 
 

@@ -1839,6 +1839,12 @@ INLINE = {
         S, CAP, "AGENT_EVALUATION"),
     "PAPER_STEP_LEFT_A_TRANSACTION_OPEN": (S, INT, "AGENT_EVALUATION"),
     "PAPER_STEP_RETURNED_AN_ERROR": (S, INT, "AGENT_EVALUATION"),
+    # (rc6.3c pass-hardening, round 3) the shadow_settlement step stops
+    # examining pending shadows SETTLE_STOP_BEFORE_DEADLINE_S before the pass
+    # step's deadline and names the cut and the shadows not examined (a
+    # pending shadow is re-read every run; the next run resumes with them)
+    "SHADOW_SETTLEMENT_CUT_AT_THE_STEP_DEADLINE": (
+        S, CAP, "AGENT_EVALUATION"),
     # (rc6.3b pass-stall) the coverage step's own bounded outcomes: its run
     # cut at its budget or raised (the watermark still advances, so it backs
     # off for REFRESH_EVERY_S), given no pass time to run in, and snapshots

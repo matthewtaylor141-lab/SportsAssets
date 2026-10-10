@@ -1325,36 +1325,90 @@ async def _actual_review_hook(conn, h, *, review_id, at, trigger, due_at,
 # VALUE-ADD (upgrade H)
 # ═════════════════════════════════════════════════════════════════════
 
+#: the per-contract outcome read of `settlement_outcome`. A pass step that
+#: needs the settlement of MANY contracts does not run this once per contract
+#: (RC6.3c pass-hardening S and round 3): it reads them all at once
+#: (paper_xavier.outcome_rows_by_slug, the `= ANY` form of this statement)
+#: and judges each contract's rows with `settlement_from_rows` -- the same
+#: verdict, one statement.
+SETTLEMENT_OUTCOME_SQL = (
+    "SELECT id, buy_intent, outcome, outcome_known, outcome_basis, "
+    "       outcome_at FROM external_valuations "
+    " WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL "
+    " ORDER BY id")
+
+
+def settlement_from_outcome(got: dict) -> dict | None:
+    """The held side's settlement from the outcome rows' verdict
+    (paper_xavier.outcome_for): WON pays 1 per contract, LOST 0, a VOID
+    refunds; CONFLICTING evidence settles nothing, by name. None when the
+    rows settle nothing and do not conflict -- the venue's own price
+    settlement is then consulted (`settlement_from_venue_price`). Pure."""
+    if got.get("outcome") == "WON":
+        return {"outcome": "WON", "payout_per_contract": 1.0,
+                "evidence": got.get("evidence")}
+    if got.get("outcome") == "LOST":
+        return {"outcome": "LOST", "payout_per_contract": 0.0,
+                "evidence": got.get("evidence")}
+    if got.get("outcome") == "VOID_REFUND":
+        return {"outcome": "VOID_REFUND", "payout_per_contract": None,
+                "refund": True, "evidence": got.get("evidence")}
+    if got.get("why") == "CONFLICTING_SETTLEMENT_EVIDENCE":
+        return {"outcome": None, "why": got["why"]}
+    return None
+
+
+def settlement_from_venue_price(got: dict, vp: dict) -> dict:
+    """The held side's settlement from the venue's own price settlement
+    (paper_xavier.venue_price_settlement), consulted because the outcome
+    rows settled nothing (`got`, their verdict, names why when neither
+    settles). Pure."""
+    if vp.get("price") is not None:
+        return {"outcome": "SETTLED_AT_VENUE_PRICE",
+                "payout_per_contract": float(vp["price"]),
+                "evidence": vp.get("evidence")}
+    return {"outcome": None, "why": got.get("why") or vp.get("why")}
+
+
+def settlement_from_rows(outcome_rows: list, venue_rows: list, *,
+                         holding_side: str) -> dict:
+    """`settlement_outcome`'s verdict from rows already read: one contract's
+    outcome rows (SETTLEMENT_OUTCOME_SQL's, or its share of
+    paper_xavier.outcome_rows_by_slug) and its venue price-settlement rows
+    (paper_xavier.VENUE_PRICE_SQL's, or its share of
+    paper_xavier.venue_price_rows_by_slug). The venue rows are consulted
+    exactly where settlement_outcome reads them: when the outcome rows settle
+    nothing and do not conflict. Pure; raises what outcome_for /
+    venue_price_settlement raise (the caller names the failure as
+    settlement_outcome does)."""
+    from . import paper_xavier as PX
+    got = PX.outcome_for(outcome_rows, holding_side=holding_side)
+    st = settlement_from_outcome(got)
+    if st is not None:
+        return st
+    vp = PX.venue_price_settlement(venue_rows, holding_side=holding_side)
+    return settlement_from_venue_price(got, vp)
+
+
 async def settlement_outcome(conn, slug: str, holding_side: str) -> dict:
     """The held side's payout per contract from authoritative venue
     evidence (paper_xavier.outcome_for / venue_price_settlement), or
-    None. Never raises."""
+    None. Never raises. ONE contract, read per contract -- step_value_add's
+    theses (at least VALUE_ADD_MIN_PER_PASS a pass) and complete_marks' open
+    positions (the acceptance read); a pass step over MANY contracts reads
+    them in one statement each and judges them with `settlement_from_rows`
+    (bettor_capital_authority.settle_shadows)."""
     from . import paper_xavier as PX
     try:
-        rows = [dict(r) for r in await conn.fetch(
-            "SELECT id, buy_intent, outcome, outcome_known, outcome_basis, "
-            "       outcome_at FROM external_valuations "
-            " WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL "
-            " ORDER BY id", slug)]
+        rows = [dict(r) for r in await conn.fetch(SETTLEMENT_OUTCOME_SQL,
+                                                  slug)]
         got = PX.outcome_for(rows, holding_side=holding_side)
-        if got.get("outcome") == "WON":
-            return {"outcome": "WON", "payout_per_contract": 1.0,
-                    "evidence": got.get("evidence")}
-        if got.get("outcome") == "LOST":
-            return {"outcome": "LOST", "payout_per_contract": 0.0,
-                    "evidence": got.get("evidence")}
-        if got.get("outcome") == "VOID_REFUND":
-            return {"outcome": "VOID_REFUND", "payout_per_contract": None,
-                    "refund": True, "evidence": got.get("evidence")}
-        if got.get("why") == "CONFLICTING_SETTLEMENT_EVIDENCE":
-            return {"outcome": None, "why": got["why"]}
+        st = settlement_from_outcome(got)
+        if st is not None:
+            return st
         vrows = [dict(r) for r in await conn.fetch(PX.VENUE_PRICE_SQL, slug)]
         vp = PX.venue_price_settlement(vrows, holding_side=holding_side)
-        if vp.get("price") is not None:
-            return {"outcome": "SETTLED_AT_VENUE_PRICE",
-                    "payout_per_contract": float(vp["price"]),
-                    "evidence": vp.get("evidence")}
-        return {"outcome": None, "why": got.get("why") or vp.get("why")}
+        return settlement_from_venue_price(got, vp)
     except Exception as exc:                                    # noqa: BLE001
         return {"outcome": None, "why": "SETTLEMENT_READ_FAILED:%s"
                 % type(exc).__name__}
