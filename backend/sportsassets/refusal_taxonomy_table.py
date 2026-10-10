@@ -2452,6 +2452,25 @@ WRAPPERS = {
 #: R_-NAMED CONSTANTS THAT ARE NOT REFUSAL CODES (states, record kinds,
 #: route names, reasons), each with why.
 NOT_REFUSAL = {
+    # (rc6.3c quiet-line evidence, QL-1) the evidence code the collector
+    # writes beside a FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE /
+    # FEED_QUOTE_OLDER_THAN_LIMIT refusal on the ledger row
+    # (bettor_external_shadow.quiet_line_code): whether the held-read rule
+    # would have admitted the price, with the measurements as its detail --
+    # evidence for the C1 decision, never a refusal, never a first refusal,
+    # never a decision input
+    "QUIET_LINE_WOULD_PASS_ON_CONFIRMATION":
+        "bettor_external_shadow.quiet_line_code: evidence beside a feed "
+        "freshness refusal on the collector ledger row -- the held-read "
+        "rule (a provider-stamped confirmation inside the same limit) would "
+        "have admitted the price; measurements in the detail; never a "
+        "trading, decision, order or collector refusal",
+    "QUIET_LINE_WOULD_NOT_PASS_ON_CONFIRMATION":
+        "bettor_external_shadow.quiet_line_code: evidence beside a feed "
+        "freshness refusal on the collector ledger row -- no provider-"
+        "stamped confirmation inside the limit, so the held-read rule would "
+        "not have admitted the price either; measurements in the detail; "
+        "never a trading, decision, order or collector refusal",
     "HEARTBEAT_SECTION_OVER_BOUND_OMITTED":
         "workers/universal_market_plane: a plane heartbeat section larger "
         "than its 16,000-character bound is replaced by this marker (no "

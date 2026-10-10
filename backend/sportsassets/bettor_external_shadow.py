@@ -1072,6 +1072,88 @@ LEDGER_STAGE_OF = dict(STAGE_OF, **{c: "3_IDENTITY" for c in
 #: the wrapper a WS evaluation records when its PinnAPI price is not usable
 WS_REFERENCE_WRAPPER = "WS_REFERENCE_NOT_USABLE"
 
+#: ── QUIET LINE OR FROZEN FEED: THE EVIDENCE CODE BESIDE A FRESHNESS REFUSAL ──
+#:
+#: (RC6.3c QL-1, evidence only.) When the PinnAPI read was refused
+#: FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE or FEED_QUOTE_OLDER_THAN_LIMIT and
+#: that reason is recorded on a collector ledger row (ext_candidate_outcomes.
+#: codes), ONE evidence code follows it. Its head says whether the held-read
+#: rule (a provider-stamped confirmation inside the same limit, pinnapi_feed.
+#: read_held) would have admitted the price; its detail carries the
+#: measurements the C1 decision needs, as `key=value` pairs:
+#:
+#:   QUIET_LINE_WOULD_PASS_ON_CONFIRMATION:no_observed_change_s=7201.3;
+#:       age_since_confirmation_s=10;limit_s=30
+#:   QUIET_LINE_WOULD_NOT_PASS_ON_CONFIRMATION:no_observed_change_s=61.2;
+#:       age_since_confirmation_s=none;limit_s=30
+#:
+#: NEITHER HEAD IS A REFUSAL (refusal_taxonomy_table.NOT_REFUSAL): it never
+#: becomes a first refusal (ext_pinnacle_loop._event_outcome), the first-loss
+#: census drops it from a row's refusal codes (coverage_first_loss), and no
+#: decision reads it. It is read by name from the jsonb `codes` column, so a
+#: frozen feed can be told from a quiet line in production without a
+#: migration. The numbers are the read's own provenance (pinnapi_feed.
+#: quiet_line_evidence), never recomputed here.
+QUIET_LINE_WOULD_PASS = "QUIET_LINE_WOULD_PASS_ON_CONFIRMATION"
+QUIET_LINE_WOULD_NOT_PASS = "QUIET_LINE_WOULD_NOT_PASS_ON_CONFIRMATION"
+QUIET_LINE_HEADS = (QUIET_LINE_WOULD_PASS, QUIET_LINE_WOULD_NOT_PASS)
+#: detail key -> the evidence field it is read from
+QUIET_LINE_DETAIL = (("no_observed_change_s", "no_observed_change_s"),
+                     ("age_since_confirmation_s", "age_since_confirmation_s"),
+                     ("limit_s", "confirmation_limit_s"))
+
+
+def _quiet_line_number(v) -> str:
+    if v is None:
+        return "none"
+    try:
+        s = "%.3f" % float(v)
+    except (TypeError, ValueError):
+        return "none"
+    s = s.rstrip("0").rstrip(".")
+    return s if s not in ("", "-", "-0") else "0"
+
+
+def quiet_line_code(evidence) -> str | None:
+    """The evidence code for one refused read's quiet-line evidence
+    (pinnapi_primary.quiet_line_evidence); None when there is none. Pure."""
+    if not isinstance(evidence, dict) or not isinstance(
+            evidence.get("would_pass_on_confirmation"), bool):
+        return None
+    head = (QUIET_LINE_WOULD_PASS if evidence["would_pass_on_confirmation"]
+            else QUIET_LINE_WOULD_NOT_PASS)
+    detail = ";".join("%s=%s" % (k, _quiet_line_number(evidence.get(src)))
+                      for k, src in QUIET_LINE_DETAIL)
+    return "%s:%s" % (head, detail)
+
+
+def is_quiet_line_code(code) -> bool:
+    """True for a quiet-line evidence code (either head, any detail)."""
+    return str(code or "").partition(":")[0] in QUIET_LINE_HEADS
+
+
+def parse_quiet_line_code(code) -> dict | None:
+    """{would_pass_on_confirmation, no_observed_change_s,
+    age_since_confirmation_s, limit_s} read back from an evidence code (a
+    number that does not parse is None); None for any other code. Pure."""
+    s = str(code or "")
+    head, _, detail = s.partition(":")
+    if head not in QUIET_LINE_HEADS:
+        return None
+    out = {"would_pass_on_confirmation": head == QUIET_LINE_WOULD_PASS}
+    pairs = {}
+    for part in detail.split(";"):
+        k, eq, v = part.partition("=")
+        if eq:
+            pairs[k.strip()] = v.strip()
+    for k, _src in QUIET_LINE_DETAIL:
+        v = pairs.get(k)
+        try:
+            out[k] = None if v in (None, "", "none") else float(v)
+        except ValueError:
+            out[k] = None
+    return out
+
 
 def ledger_stage_of(code) -> str | None:
     """The lane stage an event-ledger row carrying `code` as its first
