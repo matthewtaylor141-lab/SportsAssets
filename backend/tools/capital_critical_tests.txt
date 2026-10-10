@@ -1335,6 +1335,8 @@ tests/test_market_plane_full_mode_boot.py
 tests/test_rc5_pmx_consumer_books.py
 # (RC5) FEED_OWNERSHIP_NOT_HELD counted by the PinnAPI authority's state; resync wait before every cycle of the hold
 tests/test_rc5_feed_ownership_authority.py
+# (rc6.2 enter-integrity) an ENTER is truthful and never ends in nothing: exploration and maker read the same lifecycle decision gate as Derek / completed-game (a no-entry state is a DECISION-stage refusal with the lifecycle's code, state and event id; same census and shadow as the ledger recorded; the ledger gate unchanged); a recorded ENTER's order sequence survives the caller's cancellation (reactive deadline, pass hard timeout) and one that cannot finish is named at once (ENTER_ORDER_ABANDONED with its cause); the ENTER row's own INSERT is the owed sequence's first step (a deadline while it waits on the account lock no longer leaves an ENTER nothing owes) and a repeat cancellation never hands back a connection the owed sequence is still using
+tests/test_rc62_enter_integrity.py
 # (RC6 api-stall) the observation pass's label reads parse off the API event loop; same labelled rows, order and exclusions feed the model planning
 tests/test_rc6_pair_observations_off_loop.py
 # (RC6 api-stall) the intel shadow cycle's pure steps run in worker threads; same SHADOW results

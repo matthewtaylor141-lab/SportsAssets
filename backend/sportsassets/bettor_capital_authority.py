@@ -710,6 +710,24 @@ async def after_ledger_refusal(conn, o: dict, got: dict, *, at: float
     """A REFUSED ENTRY BUY at the ledger: the census row, and -- when the
     refusal is a missing capital authority and the order's own evidence is
     capital-eligible -- its SHADOW_COUNTERFACTUAL. Never raises."""
+    return await after_entry_refusal(conn, o, got, at=at, stage="LEDGER")
+
+
+async def after_entry_refusal(conn, o: dict, got: dict, *, at: float,
+                              stage: str = "LEDGER") -> dict:
+    """`after_ledger_refusal` at a named stage. stage="DECISION" (RC6.2
+    enter-integrity): the exploration and maker policies refuse a no-entry
+    lifecycle state at the decision (paper_derek.lifecycle_gate) with the
+    order the decision defines (`o`, no idempotency key: none was written)
+    -- the SAME census row (refusal, lifecycle state and event id in its
+    detail) and the SAME shadow under the SAME bind the ledger recorded when
+    it was the ledger that refused, labelled stage DECISION / source
+    DECISION_CAPITAL_GATE. The census and shadow writes never raise (each
+    its own savepoint); the bind's read is the caller's to guard, as
+    submit_order guards it at the ledger."""
+    if stage not in ("DECISION", "LEDGER"):
+        raise ValueError("stage")
+    source = SRC_LEDGER if stage == "LEDGER" else SRC_DECISION
     out: dict[str, Any] = {}
     refusal = got.get("refusal")
     if not refusal or refusal in NOT_INSTRUMENTED or got.get("duplicate"):
@@ -738,7 +756,7 @@ async def after_ledger_refusal(conn, o: dict, got: dict, *, at: float
             ev = PBIND.bound_evidence(ev, b)
     label = o.get("label") if isinstance(o.get("label"), dict) else {}
     out["census_id"] = await record_refusal(
-        conn, account_id=o["account_id"], strategy=strategy, stage="LEDGER",
+        conn, account_id=o["account_id"], strategy=strategy, stage=stage,
         refusal=refusal, decision_id=o.get("decision_id"),
         order_key=o.get("idempotency_key"), slug=o.get("us_market_slug"),
         holding_side=o.get("holding_side"), fixture=o.get("fixture"),
@@ -755,7 +773,7 @@ async def after_ledger_refusal(conn, o: dict, got: dict, *, at: float
         out["shadow"] = await record_shadow(
             conn, account_id=o["account_id"], strategy=strategy,
             decision_id=o.get("decision_id"),
-            order_key=o.get("idempotency_key"), source=SRC_LEDGER,
+            order_key=o.get("idempotency_key"), source=source,
             capital_refusal=refusal,
             lifecycle_state=(got.get("lifecycle") or {}).get("state")
             or got.get("state"),

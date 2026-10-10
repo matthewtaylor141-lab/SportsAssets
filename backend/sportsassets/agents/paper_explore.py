@@ -524,6 +524,24 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                     if not mgmt_protect["protectable"]:
                         refusals.append(R_XAVIER_CANNOT_PROTECT)
     PD.recheck_primary_reference(cand, pin, ctx, refusals)
+    # ── THE STRATEGY LIFECYCLE, THE LAST ENTRY CONDITION (RC6.2 enter-
+    # integrity). The same decision-stage read Derek and the completed-game
+    # policy make (PD.lifecycle_gate = bettor_strategy_lifecycle.
+    # decision_gate): a no-entry state (SHADOW_ONLY / QUARANTINED / RETIRED)
+    # or an unreadable one REFUSES HERE, by the lifecycle's own code, so the
+    # decision row says what the ledger would have said. Production
+    # 2026-10-06 05:37:53Z .. 10-09: QUARANTINED (lifecycle event 3), ~2,700
+    # exploration decisions recorded ENTER and only the ledger's entry gate
+    # (LC.entry_gate, under the account lock) refused them. The decision
+    # population is unchanged -- only its verdict is truthful -- and the
+    # ledger gate is unchanged: still the final guard. REDUCED_SIZE does not
+    # refuse; its size cap stays the ledger's, exactly as before.
+    lifecycle = None
+    if not refusals:
+        lifecycle = await PD.lifecycle_gate(conn, ctx, strategy=STRATEGY,
+                                            at=at)
+        if lifecycle.get("refusal"):
+            refusals.append(lifecycle["refusal"])
     verdict = DP.ENTER if not refusals else DP.REFUSE
     best_px = levels[0]["price"] if levels else None
     gross = (None if best_px is None or p is None
@@ -560,6 +578,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         "exceptional_terms": match.get("exceptional_terms"),
         "xavier_management": {"price": mgmt_price,
                               "protection": mgmt_protect},
+        "lifecycle": lifecycle,
         "refusals": refusals,
         # the keys the readbacks and the investment-policy views read
         "best_level_edge_pp": gross, "threshold_edge_pp": None}
@@ -597,7 +616,8 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
         {"condition": "entry_cost_incl_fees_against_target",
          "passed": None if not sized.get("qty") else True,
          "value": sized.get("reservation_usd"),
-         "threshold": MAX_ENTRY_COST_USD, "target": TARGET_ENTRY_COST_USD, "units": "USD"}]
+         "threshold": MAX_ENTRY_COST_USD, "target": TARGET_ENTRY_COST_USD, "units": "USD"},
+        PD.lifecycle_condition(lifecycle)]
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
         "disclosure": DISCLOSURE, "economics_label": ECONOMICS_LABEL,
@@ -642,54 +662,106 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
            "book_source": ctx.get("last_book_source"),
            "book_age_s": ctx.get("last_book_age_s"),
            "cooldown_s": ctx.get("last_book_cooldown_s")}
-    inserted = await conn.fetchval(
-        "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
-        " decided_at, valuation_id, us_market_slug, holding_side, intent, "
-        " fixture, label, verdict, refusal, refusals, p_internal, "
-        " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
-        " book, proposed_qty, limit_price, economics, qualification_gaps, "
-        " policy_version, policy_decision, alternatives, optimistic, "
-        " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
-        " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
-        " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
-        " $25::jsonb,$26::jsonb,$27,$28,$29::jsonb) ON CONFLICT DO NOTHING "
-        " RETURNING decision_id",
-        did, ctx["session_id"], ctx["account_id"], L._ts(at),
-        cand["valuation_id"], cand.get("us_market_slug"), side,
-        cand.get("side"), cand.get("fixture"),
-        json.dumps(label, default=str), verdict, rec["refusal"], refusals,
-        json.dumps(internal_rec, default=str), p,
-        json.dumps(pin, default=str),
-        None if obs is None else obs["obs_id"],
-        None if book is None else json.dumps(book, default=str),
-        (None if not sized.get("qty") else L.D(sized["qty"])),
-        (None if sized.get("limit") is None else L.D(sized["limit"])),
-        json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
-        VERSION, json.dumps(policy_decision, default=str),
-        json.dumps(alts, default=str),
-        None if optimistic is None else json.dumps(optimistic, default=str),
-        cfg["simulator_version"], STRATEGY,
-        json.dumps(provenance, default=str))
-    if inserted is None:
-        return dict(rec, duplicate=True)
-    cevidence = CA.capital_evidence(
-        capital, p=p, limit=sized.get("limit"),
-        threshold_edge_pp=PB.CG_MIN_EDGE_PP_V2, basis="EXPLORATION_ENTRY",
-        levels=levels, book_obs_id=None if obs is None else obs.get("obs_id"),
-        book_observed_at=None if obs is None else obs.get("observed_at"))
-    # THE DECISION'S CONTROL INPUTS, carried to the ledger's profitability
-    # bind (control 25; this policy has no decision-stage bind): the
-    # probability's and the book's observation instants and the settlement
-    # verdict the capital evaluation resolved. The bind re-checks them under
-    # the account lock and refuses by name when one is missing.
-    from .. import bettor_paper_profitability_bind as PBIND
-    cevidence = PBIND.carry_inputs(
-        cevidence, evaluated_at=at, p_observed_at=pin.get("at"),
-        book_observed_at=None if obs is None else obs.get("observed_at"),
-        settlement={"compatibility": (
-            "COMPATIBLE" if match.get("established") is True
-            else "NOT_ESTABLISHED_BY_THE_MATCH")})
+
+    async def insert_row():
+        # THE DECISION ROW. For an ENTER it is the FIRST step of the owed
+        # order sequence (PD.owed_order(record=...), RC6.2 enter-integrity
+        # rework): a deadline that falls while it waits on the account row
+        # lock can no longer leave a committed ENTER that nothing owes.
+        return await conn.fetchval(
+            "INSERT INTO paper_decisions (decision_id, session_id, account_id, "
+            " decided_at, valuation_id, us_market_slug, holding_side, intent, "
+            " fixture, label, verdict, refusal, refusals, p_internal, "
+            " internal_model, p_pinnacle, pinnacle, p_blended, book_obs_id, "
+            " book, proposed_qty, limit_price, economics, qualification_gaps, "
+            " policy_version, policy_decision, alternatives, optimistic, "
+            " simulator_version, strategy, provenance) VALUES ($1,$2,$3,$4,$5,"
+            " $6,$7,$8,$9,$10::jsonb,$11,$12,$13,NULL,$14::jsonb,$15,$16::jsonb,"
+            " NULL,$17,$18::jsonb,$19,$20,$21::jsonb,$22::jsonb,$23,$24::jsonb,"
+            " $25::jsonb,$26::jsonb,$27,$28,$29::jsonb) ON CONFLICT DO NOTHING "
+            " RETURNING decision_id",
+            did, ctx["session_id"], ctx["account_id"], L._ts(at),
+            cand["valuation_id"], cand.get("us_market_slug"), side,
+            cand.get("side"), cand.get("fixture"),
+            json.dumps(label, default=str), verdict, rec["refusal"], refusals,
+            json.dumps(internal_rec, default=str), p,
+            json.dumps(pin, default=str),
+            None if obs is None else obs["obs_id"],
+            None if book is None else json.dumps(book, default=str),
+            (None if not sized.get("qty") else L.D(sized["qty"])),
+            (None if sized.get("limit") is None else L.D(sized["limit"])),
+            json.dumps(economics_rec, default=str), json.dumps(gaps, default=str),
+            VERSION, json.dumps(policy_decision, default=str),
+            json.dumps(alts, default=str),
+            None if optimistic is None else json.dumps(optimistic, default=str),
+            cfg["simulator_version"], STRATEGY,
+            json.dumps(provenance, default=str))
+
+    delay = float(sim_cfg["decision_to_execution_delay_s"])
+
+    def build_order() -> dict:
+        cevidence = CA.capital_evidence(
+            capital, p=p, limit=sized.get("limit"),
+            threshold_edge_pp=PB.CG_MIN_EDGE_PP_V2, basis="EXPLORATION_ENTRY",
+            levels=levels,
+            book_obs_id=None if obs is None else obs.get("obs_id"),
+            book_observed_at=None if obs is None else obs.get("observed_at"))
+        # THE DECISION'S CONTROL INPUTS, carried to the ledger's
+        # profitability bind (control 25; this policy has no decision-stage
+        # bind): the probability's and the book's observation instants and
+        # the settlement verdict the capital evaluation resolved. The bind
+        # re-checks them under the account lock and refuses by name when one
+        # is missing.
+        from .. import bettor_paper_profitability_bind as PBIND
+        cevidence = PBIND.carry_inputs(
+            cevidence, evaluated_at=at, p_observed_at=pin.get("at"),
+            book_observed_at=None if obs is None else obs.get("observed_at"),
+            settlement={"compatibility": (
+                "COMPATIBLE" if match.get("established") is True
+                else "NOT_ESTABLISHED_BY_THE_MATCH")})
+        # ── THE PAPER ORDER THIS DECISION DEFINES (limits re-checked under
+        # the lock); written only for an ENTER, and the shape a no-entry
+        # lifecycle refusal's census row and shadow are recorded from.
+        return {"idempotency_key": "%s:ENTRY" % did,
+                "account_id": ctx["account_id"],
+                "session_id": ctx["session_id"],
+                "group_id": PB.group_id_for(did), "role": "ENTRY",
+                "direction": "BUY", "holding_side": side,
+                "intent": cand.get("side"),
+                "us_market_slug": cand.get("us_market_slug"),
+                "fixture": cand.get("fixture"), "label": label,
+                "order_type": "MARKETABLE", "time_in_force": "IOC",
+                "allow_partial": True, "qty": sized.get("qty"),
+                "limit_price": sized.get("limit"),
+                "wire_price": sized.get("wire"),
+                "decision_id": did, "decided_at": at,
+                "eligible_at": at + delay,
+                "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
+                "simulator_version": cfg["simulator_version"],
+                "strategy": STRATEGY, "capital_evidence": cevidence}
     if verdict != DP.ENTER:
+        if await insert_row() is None:
+            return dict(rec, duplicate=True)
+        order = build_order()
+        cevidence = order["capital_evidence"]
+        if lifecycle is not None and lifecycle.get("refusal") and \
+                refusals == [lifecycle["refusal"]]:
+            # A NO-ENTRY LIFECYCLE STATE, REFUSED AT DECISION: the census row
+            # (stage DECISION, the lifecycle's code, its state and event id)
+            # and -- for a no-capital-authority state whose evidence is
+            # capital-eligible -- the SHADOW_COUNTERFACTUAL under the same
+            # profitability bind, exactly as the ledger recorded them when it
+            # was the ledger that refused (CA.after_entry_refusal).
+            try:
+                await CA.after_entry_refusal(
+                    conn, dict(order, idempotency_key=None),
+                    {"refusal": lifecycle["refusal"], "lifecycle": lifecycle,
+                     "state": lifecycle.get("state")}, at=at,
+                    stage="DECISION")
+            except Exception as exc:                            # noqa: BLE001
+                # evidence only, guarded as at the ledger
+                rec["census_error"] = type(exc).__name__
+            return rec
         # THE ENTRY-REFUSAL CENSUS (migration 305): evidence only.
         await CA.record_refusal(
             conn, account_id=ctx["account_id"], strategy=STRATEGY,
@@ -703,71 +775,77 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
             executable_ev_usd=(econ or {}).get("expected_net_profit_usd"),
             qty=sized.get("qty"), limit_price=sized.get("limit"), at=at)
         return rec
-    # THE ENTER IS RECORDED: its paper order is owed (PD.bounded_decision).
-    PD.enter_recorded(ctx, did)
-    # ── ONE DECISION -> ONE EXECUTION INTENT: PAPER ONLY ───────────────
-    # Exploration is training: the executing process's hook records the
-    # intent with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE); the
-    # actual lane never sees it and nothing is dispatched.
-    rec["execution_intent_id"], rec["actual_lane"] = None, "PAPER_ONLY"
-    hook = DH.DECISION_HOOK
-    if hook is not None:
-        try:
-            got_i = await hook(conn, {
-                "decision_id": did, "valuation_id": cand["valuation_id"],
-                "strategy": STRATEGY, "policy_version": VERSION,
-                "slug": cand["us_market_slug"], "order_intent": cand.get("side"),
-                "holding_side": side, "group_id": PB.group_id_for(did),
-                "order_type": "MARKETABLE", "time_in_force": "IOC",
-                "paper_target_qty": sized["qty"], "limit_price": sized["limit"],
-                "wire_price": sized["wire"],
-                "book_obs_id": None if obs is None else obs["obs_id"],
-                "book_observed_at": (None if obs is None
-                                     else float(obs["observed_at"])),
-                "decided_at": at,
-                "evidence": {"valuation_id": cand["valuation_id"], "training": True},
-                "timeline": {"decision_complete": {"utc_s": at}}}) or {}
-            rec["execution_intent_id"] = got_i.get("intent_id")
-            rec["actual_lane"] = got_i.get("actual_lane") or "PAPER_ONLY"
-        except Exception as exc:                                # noqa: BLE001
-            rec["actual_lane"] = "EXECUTION_HOOK_FAILED:%s" % type(exc).__name__
-    # ── ONLY NOW, THE PAPER ORDER (limits re-checked under the lock) ──
-    delay = float(sim_cfg["decision_to_execution_delay_s"])
-    order = {"idempotency_key": "%s:ENTRY" % did,
-             "account_id": ctx["account_id"],
-             "session_id": ctx["session_id"],
-             "group_id": PB.group_id_for(did), "role": "ENTRY",
-             "direction": "BUY", "holding_side": side,
-             "intent": cand.get("side"),
-             "us_market_slug": cand["us_market_slug"],
-             "fixture": cand.get("fixture"), "label": label,
-             "order_type": "MARKETABLE", "time_in_force": "IOC",
-             "allow_partial": True, "qty": sized["qty"],
-             "limit_price": sized["limit"], "wire_price": sized["wire"],
-             "decision_id": did, "decided_at": at,
-             "eligible_at": at + delay,
-             "expires_at": at + float(sim_cfg["marketable_ttl_s"]),
-             "simulator_version": cfg["simulator_version"],
-             "strategy": STRATEGY, "capital_evidence": cevidence}
-    got = await L.submit_order(
-        conn, order, caps=cfg["risk"], fee_fn=fee_fn, now=at,
-        exclusive_fixture=True,
-        locked_check=locked_check_for(cand.get("fixture"),
-                                      cand["us_market_slug"]))
-    rec["order"] = {k: got.get(k) for k in ("ok", "refusal", "duplicate")}
-    if got.get("ok"):
-        rec["order_id"] = got["order"]["order_id"]
-        rec["eligible_at"] = at + delay
-    else:
-        rec["order_refusal"] = got.get("refusal")
-        await PD._finding(conn, ctx, kind=PB.R_ORDER_REFUSED, subject=did,
-                          detail={"refusal": got.get("refusal"),
-                                  "decision_id": did, "at": at,
-                                  "strategy": STRATEGY,
-                                  "disclosure": DISCLOSURE,
-                                  **{k: v for k, v in got.items()
-                                     if k not in ("ok",)}})
-    return rec
+    # AN ENTER: ITS ROW AND ITS PAPER ORDER ARE OWED (PD.bounded_decision
+    # stops cutting as the row's INSERT starts), and a cancellation of the
+    # caller no longer cuts them (PD.owed_order runs `insert_row` as the
+    # sequence's first step).
+
+    async def sequence(progress: dict) -> dict:
+        progress["stage"] = "PAPER_ORDER_BUILDING"
+        order = build_order()
+        # ── ONE DECISION -> ONE EXECUTION INTENT: PAPER ONLY ───────────
+        # Exploration is training: the executing process's hook records the
+        # intent with live_eligible = false (STRATEGY_NOT_LIVE_ELIGIBLE); the
+        # actual lane never sees it and nothing is dispatched.
+        progress["stage"] = "EXECUTION_HOOK"
+        rec["execution_intent_id"], rec["actual_lane"] = None, "PAPER_ONLY"
+        hook = DH.DECISION_HOOK
+        if hook is not None:
+            try:
+                got_i = await hook(conn, {
+                    "decision_id": did, "valuation_id": cand["valuation_id"],
+                    "strategy": STRATEGY, "policy_version": VERSION,
+                    "slug": cand["us_market_slug"],
+                    "order_intent": cand.get("side"),
+                    "holding_side": side, "group_id": PB.group_id_for(did),
+                    "order_type": "MARKETABLE", "time_in_force": "IOC",
+                    "paper_target_qty": sized["qty"],
+                    "limit_price": sized["limit"],
+                    "wire_price": sized["wire"],
+                    "book_obs_id": None if obs is None else obs["obs_id"],
+                    "book_observed_at": (None if obs is None
+                                         else float(obs["observed_at"])),
+                    "decided_at": at,
+                    "evidence": {"valuation_id": cand["valuation_id"],
+                                 "training": True},
+                    "timeline": {"decision_complete": {"utc_s": at}}}) or {}
+                rec["execution_intent_id"] = got_i.get("intent_id")
+                rec["actual_lane"] = got_i.get("actual_lane") or "PAPER_ONLY"
+            except Exception as exc:                            # noqa: BLE001
+                rec["actual_lane"] = ("EXECUTION_HOOK_FAILED:%s"
+                                      % type(exc).__name__)
+        # ── ONLY NOW, THE PAPER ORDER (limits re-checked under the lock) ──
+        progress["stage"] = "PAPER_ORDER_SUBMITTING"
+        got = await L.submit_order(
+            conn, order, caps=cfg["risk"], fee_fn=fee_fn, now=at,
+            exclusive_fixture=True,
+            locked_check=locked_check_for(cand.get("fixture"),
+                                          cand["us_market_slug"]))
+        rec["order"] = {k: got.get(k) for k in ("ok", "refusal",
+                                                "duplicate")}
+        if got.get("ok"):
+            progress["outcome"] = "ORDER"
+            rec["order_id"] = got["order"]["order_id"]
+            rec["eligible_at"] = at + delay
+        else:
+            progress.update(stage="ORDER_REFUSED_NOT_YET_NAMED",
+                            order_refusal=got.get("refusal"))
+            rec["order_refusal"] = got.get("refusal")
+            await PD._finding(conn, ctx, kind=PB.R_ORDER_REFUSED,
+                              subject=did,
+                              detail={"refusal": got.get("refusal"),
+                                      "decision_id": did, "at": at,
+                                      "strategy": STRATEGY,
+                                      "disclosure": DISCLOSURE,
+                                      **{k: v for k, v in got.items()
+                                         if k not in ("ok",)}})
+            progress["outcome"] = "ORDER_REFUSED"
+        return rec
+
+    return await PD.owed_order(conn, ctx, decision_id=did, strategy=STRATEGY,
+                               record=insert_row,
+                               duplicate=lambda: dict(rec, duplicate=True),
+                               sequence=sequence)
 
 
 async def step(conn, ctx: dict) -> dict:
