@@ -2807,3 +2807,25 @@ DAY_ONE_PORT_STREAM = {
 }
 for _k, _v in DAY_ONE_PORT_STREAM.items():
     TABLE.setdefault(_k, _v)
+
+#: (rc6.3 pr5-port) why the previous release is not a certified rollback
+#: once production has a PAPER epoch (tools/rollback_readiness.py and
+#: tools/scorecard_14.rollback_ready, from the release readback's read-only
+#: `paper_epochs`): evidence of the acceptance judge, never a trading,
+#: decision, order or collector refusal
+NOT_REFUSAL.update({
+    "ROLLBACK_PAPER_EPOCH_ACTIVATED":
+        "tools/rollback_readiness + scorecard_14 (rc6.3 pr5-port): the "
+        "release adds the PAPER epoch migration (317) over the rollback "
+        "target and production has activated an epoch -- the target has no "
+        "selector and the upgrade receipt's dormancy proof no longer holds; "
+        "evidence quality of the acceptance judge, never a trading, decision, "
+        "order or collector refusal",
+    "ROLLBACK_PAPER_EPOCH_STATE_UNREAD":
+        "tools/rollback_readiness + scorecard_14 (rc6.3 pr5-port): the "
+        "release adds the PAPER epoch migration (317) over the rollback "
+        "target and production's epoch state (release readback paper_epochs) "
+        "could not be read -- no proof that no epoch exists; evidence quality "
+        "of the acceptance judge, never a trading, decision, order or "
+        "collector refusal",
+})

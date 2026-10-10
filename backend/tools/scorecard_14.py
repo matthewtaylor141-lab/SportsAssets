@@ -232,6 +232,16 @@ R_ROLLBACK_DEPLOY_STATUS_UNKNOWN = "ROLLBACK_DEPLOY_STATUS_UNKNOWN"
 #: list is not newest-first, so what ran before cannot be read from it
 R_ROLLBACK_SERVED_NEWER_THAN_LIVE = \
     "ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY"
+#: (rc6.3 pr5-port) PRODUCTION'S PAPER EPOCH STATE (acc/release.json
+#: `paper_epochs`, GET /api/command/release, read only): a release that adds
+#: the epoch migration (317) over the rollback target, on a production that
+#: has activated an epoch, has no certified old-binary rollback -- the target
+#: has no selector and the upgrade receipt's dormancy proof of 317's guards
+#: holds only while no epoch exists; and a state that cannot be read is no
+#: proof that none does
+R_ROLLBACK_PAPER_EPOCH_ACTIVATED = "ROLLBACK_PAPER_EPOCH_ACTIVATED"
+R_ROLLBACK_PAPER_EPOCH_STATE_UNREAD = "ROLLBACK_PAPER_EPOCH_STATE_UNREAD"
+EPOCH_MIGRATION_PREFIX = "317_"
 #: Render's deploy statuses that never served (the same set as
 #: tools/rollback_readiness.NEVER_SERVED, pinned equal by test): an
 #: allowlist -- any status that is not one of these, `live` or
@@ -1101,6 +1111,31 @@ def _migration_delta(rb) -> dict:
             "changed": changed[:20]}
 
 
+def paper_epoch_rollback(acc, rb) -> tuple:
+    """(reasons, state): production's PAPER epoch state against this
+    rollback. Concerned only when the release ADDS the epoch migration over
+    the target (the judge's own reading of the record's full added list).
+    Unread or malformed: ROLLBACK_PAPER_EPOCH_STATE_UNREAD. Any epoch
+    (rolled-back ones included): ROLLBACK_PAPER_EPOCH_ACTIVATED."""
+    m = rb.get("migrations") if isinstance(rb.get("migrations"), dict) else {}
+    brings = any(str(x).startswith(EPOCH_MIGRATION_PREFIX)
+                 for x in (m.get("added") or []))
+    state = {"release_adds_epoch_migration": brings, "read": False,
+             "epochs": None, "selected_account": None}
+    rel = _opt(acc, "release.json")
+    pe = rel.get("paper_epochs") if isinstance(rel, dict) else None
+    n = pe.get("epochs") if isinstance(pe, dict) else None
+    if not (isinstance(pe, dict) and pe.get("status") == "OK"
+            and isinstance(n, int) and not isinstance(n, bool) and n >= 0):
+        return ([R_ROLLBACK_PAPER_EPOCH_STATE_UNREAD] if brings else []), state
+    state.update(read=True, epochs=n,
+                 selected_account=pe.get("selected_account"))
+    if brings and n > 0:
+        return ["%s:%d:%s" % (R_ROLLBACK_PAPER_EPOCH_ACTIVATED, n,
+                              pe.get("selected_account"))], state
+    return [], state
+
+
 def upgrade_receipt(acc, release_sha, target_fingerprint) -> dict:
     """THE UPGRADE-PATH RECEIPT (acc/upgrade_path.json, tools/
     upgrade_path_receipt.py readback of capital-critical's attested
@@ -1352,7 +1387,13 @@ def rollback_ready(acc, release_sha):
     (_service_rollback), never the record's list as written -- a service
     off the release stays where it is (NONE, no command, NOT_READY kept),
     and no command is passed on for a commit that service was not live on
-    before."""
+    before.
+
+    THE PAPER EPOCH (rc6.3 pr5-port): when the release adds the epoch
+    migration over the target, production's epoch state is read from the
+    release readback (paper_epoch_rollback): any epoch, or a state that
+    cannot be read, keeps the rollback NOT_READY by name -- a fresh-database
+    dormancy proof never certifies rollback for an activated production."""
     rb, why = _rollback_doc(acc, release_sha)
     if rb is None:
         if why.startswith("READ_UNAVAILABLE"):
@@ -1385,6 +1426,8 @@ def rollback_ready(acc, release_sha):
            for s, p in plans.items()):
         reasons.append(R_ROLLBACK_COMMANDS_INCOMPLETE)
     delta = _migration_delta(rb)
+    epoch_reasons, epochs = paper_epoch_rollback(acc, rb)
+    reasons += epoch_reasons
     rec = upgrade_receipt(acc, release_sha, delta["target_fingerprint"])
     compat = rec.get("rollback_compatibility") if isinstance(
         rec.get("rollback_compatibility"), dict) else {}
@@ -1409,7 +1452,8 @@ def rollback_ready(acc, release_sha):
         # on `stay_on`); the commands are only those re-derived here
         "rollback_by_service": plans,
         "commands": passed, "procedure": rb.get("procedure"),
-        "migration_delta": delta, "reasons": reasons[:16]}
+        "migration_delta": delta, "paper_epochs": epochs,
+        "reasons": reasons[:16]}
 
 
 # ── V2: the inputs' identities, and the pinning record ───────────────────

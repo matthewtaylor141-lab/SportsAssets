@@ -68,6 +68,17 @@ commit whose gates, ancestry and migrations the judge reads) is the one
 commit every service on the release goes back to; when they differ there
 is none, named, and each still gets only its own command.
 
+THE PAPER EPOCH (rc6.3 pr5-port). The upgrade receipt proves migration
+317's seven guards dormant only on a database with no epoch (the capital-
+critical scratch database never has one). When the release adds 317 over
+the target, production's epoch state -- acc/release.json `paper_epochs`
+(GET /api/command/release, read only) -- decides: any epoch, rolled-back
+ones included, is ROLLBACK_PAPER_EPOCH_ACTIVATED; a readback present but
+unreadable is ROLLBACK_PAPER_EPOCH_STATE_UNREAD (both NOT_READY). In the
+pm-acceptance job this step runs before the production readbacks, so the
+record says RELEASE_READBACK_NOT_IN_ACC and the judge, which runs after
+them, applies the same rule (and refuses an absent state as unread).
+
 The scorecard re-judges every fact (tools/scorecard_14.rollback_ready);
 this file's own status is a convenience, not the verdict.
 
@@ -140,6 +151,14 @@ R_DEPLOY_STATUS_UNKNOWN = "ROLLBACK_DEPLOY_STATUS_UNKNOWN"
 #: deploy: the list is not newest-first as Render writes it, so what ran
 #: before the live deploy cannot be read from its order
 R_SERVED_NEWER_THAN_LIVE = "ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY"
+#: (rc6.3 pr5-port) THE PAPER EPOCH STATE: the release adds migration 317
+#: (the account-backed PAPER epoch) over the target, and production has
+#: activated an epoch -- the target has no selector and the upgrade
+#: receipt's dormancy proof of 317's guards no longer holds; or that state
+#: (acc/release.json `paper_epochs`, GET /api/command/release) is not read
+R_PAPER_EPOCH_ACTIVATED = "ROLLBACK_PAPER_EPOCH_ACTIVATED"
+R_PAPER_EPOCH_STATE_UNREAD = "ROLLBACK_PAPER_EPOCH_STATE_UNREAD"
+EPOCH_MIGRATION_PREFIX = "317_"
 #: a service's history is not usable at all: no action can be derived
 _HISTORY_UNUSABLE = (R_DEPLOYS_UNREADABLE, R_NO_SINGLE_LIVE_DEPLOY,
                      R_DEPLOY_STATUS_UNKNOWN, R_SERVED_NEWER_THAN_LIVE)
@@ -399,6 +418,38 @@ def gates_not_green(doc, sha) -> list:
     return bad
 
 
+def paper_epochs(acc: pathlib.Path, added) -> dict:
+    """Production's PAPER epoch state from the release readback in ACC
+    (release.json `paper_epochs`) and what it means for this rollback.
+    Only a release that ADDS the epoch migration over the target is
+    concerned (the target then has no selector). Absent readback: not read
+    here (in the pm-acceptance job this step runs before the production
+    readbacks; the judge, which runs after them, decides --
+    scorecard_14.rollback_ready). Present but unreadable: refused by name.
+    Any epoch: refused by name."""
+    brings = any(str(x).startswith(EPOCH_MIGRATION_PREFIX)
+                 for x in (added or []))
+    out = {"release_adds_epoch_migration": brings, "read": False,
+           "epochs": None, "selected_account": None, "reasons": []}
+    rel = _json(pathlib.Path(acc) / "release.json")
+    if rel is None:
+        out["why"] = "RELEASE_READBACK_NOT_IN_ACC"
+        return out
+    pe = rel.get("paper_epochs") if isinstance(rel, dict) else None
+    n = pe.get("epochs") if isinstance(pe, dict) else None
+    if not (isinstance(pe, dict) and pe.get("status") == "OK"
+            and isinstance(n, int) and not isinstance(n, bool) and n >= 0):
+        out["why"] = "PAPER_EPOCHS_UNREADABLE"
+        if brings:
+            out["reasons"].append(R_PAPER_EPOCH_STATE_UNREAD)
+        return out
+    out.update(read=True, epochs=n, selected_account=pe.get("selected_account"))
+    if brings and n > 0:
+        out["reasons"].append("%s:%d:%s" % (R_PAPER_EPOCH_ACTIVATED, n,
+                                            pe.get("selected_account")))
+    return out
+
+
 def build(acc, *, sha, target_migrations=None, release_migrations=None,
           target_is_ancestor=None) -> dict:
     acc = pathlib.Path(acc)
@@ -420,13 +471,15 @@ def build(acc, *, sha, target_migrations=None, release_migrations=None,
     mig = migrations(target_migrations, release_migrations) if tgt else \
         migrations(None, release_migrations)
     reasons += mig.pop("reasons")
+    epochs = paper_epochs(acc, mig.get("added"))
+    reasons += epochs.pop("reasons")
     status = NOT_READY if reasons or not tgt else (
         READY if mig["identical"] else SCHEMA_BY_RECEIPT)
     return {"version": VERSION, "sha": sha, "target_sha": tgt,
             "services": svcs, "target_is_ancestor_of_release":
             target_is_ancestor, "target_gates": gates if isinstance(
                 gates, dict) else None, "migrations": mig,
-            "rollback_by_service": plans,
+            "rollback_by_service": plans, "paper_epochs": epochs,
             "commands": {s: command(s, plans[s], svcs[s]) for s in SERVICES},
             "procedure": PROCEDURE, "status": status,
             "reasons": reasons, "deploys_nothing": True}

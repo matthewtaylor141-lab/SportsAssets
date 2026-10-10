@@ -126,6 +126,18 @@ this narrowly by matching installed definitions and bodies against migration
 317 and checking empty epoch history; other added/changed triggers remain
 unproven. After activation, old-binary rollback is explicitly not certified;
 use the logical account rollback and retain the new schema/application.
+The automated evidence says so too: the release readback
+(`GET /api/command/release`, `acc/release.json` in the pm-acceptance packet)
+carries production's read-only `paper_epochs` (epochs ever activated,
+rollbacks, selected account), and when the release adds migration 317 over the
+rollback target, `tools/rollback_readiness.py` (when that readback is in its
+input) and the judge's `rollback_ready` unit report NOT_READY by name once any
+epoch exists (`ROLLBACK_PAPER_EPOCH_ACTIVATED`, rolled-back epochs included)
+or when the state cannot be read (`ROLLBACK_PAPER_EPOCH_STATE_UNREAD`). In the
+pm-acceptance job the rollback step runs before the production readbacks, so
+its record says `RELEASE_READBACK_NOT_IN_ACC` and the judge, which runs after
+them, decides; moving that step after "Production readbacks" (a workflow
+change left to owner review) would let the record carry the same verdict.
 
 Tests use synthetic local accounts and acceptance fixtures, including simulated
 signature command failures; those fixtures are not production acceptance.

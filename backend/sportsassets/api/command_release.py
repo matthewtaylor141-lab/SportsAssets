@@ -283,6 +283,36 @@ async def schema(conn) -> dict:
     return await _section(conn, fn)
 
 
+async def paper_epochs(conn) -> dict:
+    """PRODUCTION'S PAPER EPOCH STATE (migration 317), read only: whether
+    the epoch tables exist, how many epochs were ever activated (rolled-back
+    ones included: their guards stay armed), the rollbacks recorded and the
+    selected account. The pm-acceptance judge reads it from this readback
+    (acc/release.json): once any epoch exists, a previous release without
+    the epoch migration is no certified old-binary rollback target -- the
+    upgrade receipt's dormancy proof of migration 317's guards holds only
+    while no epoch exists (tools/rollback_readiness.py,
+    tools/scorecard_14.rollback_ready)."""
+    async def fn(c):
+        if not await c.fetchval(
+                "SELECT to_regclass('public.paper_account_epochs') IS NOT NULL"):
+            return {"status": "OK", "migration_317_applied": False,
+                    "epochs": 0, "rollbacks": 0, "selected_account": None,
+                    "source": "no paper_account_epochs table (migration 317 "
+                              "not applied)"}
+        n = await c.fetchval("SELECT count(*) FROM paper_account_epochs")
+        rb = await c.fetchval(
+            "SELECT count(*) FROM paper_epoch_events WHERE kind='ROLLBACK'")
+        sel = await c.fetchval(
+            "SELECT account_id FROM paper_epoch_control WHERE singleton")
+        return {"status": "OK", "migration_317_applied": True,
+                "epochs": int(n or 0), "rollbacks": int(rb or 0),
+                "selected_account": sel,
+                "source": "paper_account_epochs / paper_epoch_events / "
+                          "paper_epoch_control (migration 317), read only"}
+    return await _section(conn, fn)
+
+
 async def _read_only(fn):
     pool = await _pool()
     async with pool.acquire() as conn:
@@ -307,6 +337,7 @@ async def build_release(conn) -> dict:
         "api": api, "workers": workers,
         "alignment": alignment(api.get("sha"), workers.get("sha")),
         "schema": sch,
+        "paper_epochs": await paper_epochs(conn),
         "receipts": receipts,
         "running_build_receipts": [r["file"] for r in matching],
         "running_build_gated": (
