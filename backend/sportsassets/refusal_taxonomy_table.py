@@ -54,6 +54,26 @@ TABLE = {
     "NO_ELIGIBLE_ROUTE": (S, DATA, "VENUE_BOOK"),
     "INSUFFICIENT_DEPTH": (E, DEPTH, "VENUE_BOOK"),
     "NO_BOOK": (S, DATA, "VENUE_BOOK"),
+    # (rc6.3 route-book) the canonical route's PMUS book, judged at routing
+    # time (canonical_claims_db.route_books): older than the route bound,
+    # another market's book, the venue's own not-open state (data, as
+    # MARKET_NOT_OPEN's row), a crossed book, no receipt instant, a failed
+    # on-demand read, a read deferred with nothing sent while the venue's
+    # hold or 429 cooldown is in force (as VENUE_429_COOLDOWN_NORMAL_READ_
+    # DEFERRED's row), or no read left in the pass's bounded budget -- each
+    # a route candidate with no book, never costed
+    "PMUS_ROUTE_BOOK_OLDER_THAN_THE_ROUTE_BOUND": (S, FRESH, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_IS_NOT_THE_ALIAS_MARKET": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_MARKET_NOT_OPEN": (S, DATA, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_CROSSED": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_HAS_NO_RECEIPT_INSTANT": (S, INT, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_READ_FAILED": (S, DATA, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_READ_DEFERRED_VENUE_HOLD": (S, FRESH, "VENUE_BOOK"),
+    "PMUS_ROUTE_BOOK_NOT_READ_PASS_BUDGET_SPENT": (S, FRESH, "VENUE_BOOK"),
+    # (rc6.3 route-book review 1) the venue's newest word says the market is
+    # not open, older than the route bound and inside the 900 s (ended:
+    # 3600 s) hold: not read again yet (data, as MARKET_NOT_OPEN's row)
+    "PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN": (S, DATA, "VENUE_BOOK"),
     # (RC5 Xavier no-growth) a canonical held position with no Xavier
     # handoff is named in the management census (ours: a handoff gap), and
     # a protection that cannot be priced is recorded instead of raising

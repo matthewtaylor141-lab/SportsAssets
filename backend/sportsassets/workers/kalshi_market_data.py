@@ -371,8 +371,79 @@ def coverage(fixtures: dict) -> dict:
     return by
 
 
+#: (rc6.3 route-book) the on-demand PMUS route-book reads' kill switch
+#: (default on; off = no read is made, a stale or absent book is refused
+#: by name exactly as without a budget)
+ROUTE_BOOK_ENV_FLAG = "CANONICAL_PMUS_ROUTE_BOOK_READS"
+
+
+def route_book_reads_enabled(env=None) -> bool:
+    env = os.environ if env is None else env
+    return str(env.get(ROUTE_BOOK_ENV_FLAG, "on")).strip().lower() not in (
+        "off", "0", "false", "no")
+
+
+#: the read deferred by name while the venue's hold or 429 cooldown is in
+#: force (institutional_md's probe defers under the same name)
+ROUTE_READ_DEFERRED = "VENUE_HOLD_IN_FORCE"
+ROUTE_READ_SERVED_BY = "PUBLIC_GATEWAY_KEYLESS"
+
+
+def public_book_read_blocking(slug: str, *, deadline_epoch_s=None) -> dict:
+    """ONE keyless PMUS public book read for the route book (blocking; run
+    off the loop). The workers' existing paced retail client --
+    institutional_same_book.retail_book_read, the one institutional_md's
+    same-book probe uses: NO key (no credential class is spent on routing
+    evidence), only GET /v1/markets/{slug}/book, every transport wrapped
+    GET-only outermost around venue_request_gate.PacedTransport (the
+    process write lock, the escalating 429 cooldown, the hard not-before
+    gate, venue_pace). Deferred BY NAME, without a request, while the
+    venue's hold or the cooldown is in force (normal_read_gate, the probe's
+    own pre-read gate); the read carries its deadline to the gate.
+    `observed_at` is OUR RECEIPT of the response. Never raises.
+
+    NOT the paper book owner (paper_market_data): no module outside the
+    paper path may import a paper module
+    (tests/test_paper_records_cannot_reach_the_funded_path), and its import
+    closure would put venue-write modules in the shared workers' reach
+    (tests/test_workers_hold_no_venue_write)."""
+    from .. import institutional_same_book as SB
+    from .. import venue_request_gate as grt
+    t0 = time.time()
+    try:
+        g = grt.normal_read_gate() or {}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"marketData": None, "error": type(exc).__name__,
+                "observed_at": t0, "served_by": ROUTE_READ_SERVED_BY}
+    if g.get("blocking"):
+        return {"marketData": None, "error": ROUTE_READ_DEFERRED,
+                "observed_at": t0, "served_by": ROUTE_READ_SERVED_BY,
+                "gate": {"reason": g.get("reason"),
+                         "seconds_left": g.get("seconds_left")}}
+    rid = grt.begin_read(slug=slug, deadline_epoch_s=deadline_epoch_s)
+    grt.bind_read(rid)
+    try:
+        got = SB.retail_book_read(slug)
+    except Exception as exc:                                    # noqa: BLE001
+        got = {"marketData": None, "error": type(exc).__name__}
+    finally:
+        grt.bind_read(None)
+        grt.end_read(rid)
+    return {"marketData": got.get("marketData"), "error": got.get("error"),
+            "observed_at": time.time(), "served_by": ROUTE_READ_SERVED_BY}
+
+
+class _PublicRouteReader:
+    """The route book's bounded on-demand reader: one keyless public book
+    read (public_book_read_blocking) in a worker thread."""
+
+    async def __call__(self, slug, *, deadline_epoch_s, timeout_s):
+        return await asyncio.to_thread(public_book_read_blocking, slug,
+                                       deadline_epoch_s=deadline_epoch_s)
+
+
 async def claims_pass(pool, *, now: float | None = None,
-                      record: bool = True) -> dict:
+                      record: bool = True, route_reader=None) -> dict:
     """Canonical claims over the PERSISTED evidence (canonical_claims_db, the
     same assembler Adriana's runner reads): aliases, the best all-in route
     of every claim at RECEIPT_QTY, and the claim-first structures for the
@@ -387,7 +458,17 @@ async def claims_pass(pool, *, now: float | None = None,
     `now` and canonical_venue.quotes refused it BOOK_TIME_IN_FUTURE
     (production 24 h: 2,124 Kalshi candidates). A venue clock ahead of ours
     is still refused; staleness only gets stricter. An explicit `now`
-    stays a fixed evaluation instant. Receipts stay SHADOW."""
+    stays a fixed evaluation instant. Receipts stay SHADOW.
+
+    THE PMUS ROUTE BOOK (rc6.3 route-book). After the settlement
+    certificates and before any route is costed, every PMUS route
+    candidate gets a judged book or a named refusal
+    (canonical_claims_db.route_books): the recorded paper read while it is
+    fresh, else a bounded on-demand read through `route_reader` (default:
+    the keyless paced public book read, `_PublicRouteReader`). Reads are made on
+    RECORDING passes only (`record`; at most ROUTE_BOOK_MAX_READS), so the
+    receipts that are kept carry a book read for them; the live evaluation
+    instant is taken after those reads (the read-time clock above)."""
     live = now is None
     now = float(now if now is not None else time.time())
     from .. import canonical_claims_db as KCDB
@@ -404,6 +485,7 @@ async def claims_pass(pool, *, now: float | None = None,
         assembled = await KCDB.assemble(c, now=now, scope=scope)
         if live:
             now = max(now, time.time())
+        staged = []
         for fx, built, insts in assembled:
             aliases_n += len(insts)
             # settlement certificates: decide, append, strip (red team)
@@ -411,6 +493,20 @@ async def claims_pass(pool, *, now: float | None = None,
             cert = (await RTS.apply(c, built))[1]
             for k, v in cert_counts.items():
                 certs[k] = certs.get(k, 0) + v
+            staged.append((fx, built, insts, cert))
+        # (rc6.3 route-book) a judged PMUS book for every PMUS route
+        # candidate, read at routing time, or its refusal by name
+        reads = (KCDB.ROUTE_BOOK_MAX_READS
+                 if record and route_book_reads_enabled() else 0)
+        route_census = await KCDB.route_books(
+            c, [(fx, built) for fx, built, _i, _c in staged], now=now,
+            reader=(route_reader if route_reader is not None
+                    else _PublicRouteReader()) if reads else None,
+            reads=reads, max_age_s=ROUTE_MAX_AGE_S)
+        if live:
+            # the books just read are not "in the future" either
+            now = max(now, time.time())
+        for fx, built, insts, cert in staged:
             terms = next((i.fee_terms for i in insts
                           if i.venue == KCL.KALSHI and i.fee_terms), None)
             fees = CC.fee_functions(at=now, sport=fx.sport,
@@ -443,6 +539,7 @@ async def claims_pass(pool, *, now: float | None = None,
     return {"fixtures_priced": len(scans), "aliases": aliases_n,
             "fixture_scope": scope,
             "routes": routes_n, "structures": census,
+            "pmus_route_books": route_census,
             "settlement_certificates": certs,
             "equivalence_receipts": equivalences[:6],
             "best_route_receipts": best_routes[:4]}
