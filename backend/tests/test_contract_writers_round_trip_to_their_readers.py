@@ -150,13 +150,27 @@ async def test_k4_the_actual_order_record_reads_back_through_audrey_and_the_mana
 # ═════════════ K5 · WORK REQUESTS -> FLOOR WORKSPACE + IDENTITY ══════════
 
 @pg
-async def test_k5_xaviers_work_requests_read_back_through_the_floor_and_identity_routes():
+async def test_k5_xaviers_work_requests_read_back_through_the_floor_and_identity_routes(
+        monkeypatch):
+    """Runs at F.ISOLATED, a time no other proof commits at. The floor's
+    Xavier queue is the NEWEST 25 open requests (ORDER BY enqueued_at DESC
+    LIMIT 25) of every account; at this file's fixed 2026-09 epoch a database
+    that already holds 25 or more later open requests -- the second
+    capital-critical run on one database does -- pushed this test's own
+    request off the page and the assertion below that every request it wrote
+    is listed failed. Dated after everything any proof commits, its requests
+    are the newest and on the page whatever the neighbours left. Every
+    assertion is unchanged; only the instant moved (the held position and the
+    review are built relative to XR.AT, which this test sets)."""
     from sportsassets.api import agents_identity as AID
     from sportsassets.api import command_floor as FL
+    from tests import agent_ops_fixture as AOF
+    at = AOF.ISOLATED
+    monkeypatch.setattr(XR, "AT", at)
     conn, tx = await _tx()
     try:
         a, g, slug = await XR._held(conn, "k5", entry_age_s=3600)
-        t1 = AT + 100                 # the review's probability is stale
+        t1 = at + 100                 # the review's probability is stale
         await PX.review_group(conn, XR._ctx(a, t1), g, trigger=PX.T_BACKSTOP)
         written = {r["request_id"]: dict(r) for r in await conn.fetch(
             "SELECT r.* FROM agent_work_open o JOIN agent_work_requests r "
@@ -182,6 +196,59 @@ async def test_k5_xaviers_work_requests_read_back_through_the_floor_and_identity
         counts = ws.get("counts") or {}
         assert (counts.get("open_requests_by_kind") or {}).get(
             WQ.K_PROBABILITY, 0) >= 1, counts
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_k5_the_floors_xavier_queue_is_the_newest_25_open_requests(
+        monkeypatch):
+    """THE LEAK K5 ABOVE IS ISOLATED FROM, MADE ON PURPOSE. The floor's
+    Xavier queue is the newest 25 open requests by enqueued_at, of every
+    account. Here this test's own stale-review request is written at one
+    instant and 25 requests of other accounts are enqueued after it through
+    the real queue writer: the floor lists those 25 and the older one is not
+    on the page. That is what a database holding 25 later open requests does
+    to a proof dated at an ordinary epoch -- the second capital-critical run
+    on one database -- and why K5 runs at F.ISOLATED. (The page bound is the
+    floor's, deliberate: a workspace is the newest 25, not a backlog.)
+
+    This proof runs in its OWN isolated band, a day after K5's (F.ISOLATED
+    + 86400): the 25 it enqueues must be the newest open requests in the
+    database for the page to be exactly them, so on a database that already
+    holds wall-clock-dated open requests the ordinary epoch would have put
+    the neighbours' requests on the page instead of these -- the very leak
+    it demonstrates."""
+    from sportsassets.api import command_floor as FL
+    from tests import agent_ops_fixture as AOF
+    at = AOF.ISOLATED + 86400.0
+    monkeypatch.setattr(XR, "AT", at)
+    conn, tx = await _tx()
+    try:
+        a, g, slug = await XR._held(conn, "k5n", entry_age_s=3600)
+        t1 = at + 100
+        await PX.review_group(conn, XR._ctx(a, t1), g, trigger=PX.T_BACKSTOP)
+        mine = {r["request_id"] for r in await conn.fetch(
+            "SELECT r.request_id FROM agent_work_open o JOIN "
+            " agent_work_requests r ON r.request_id = o.request_id "
+            " WHERE o.group_id=$1", g)}
+        assert mine, "the stale review enqueued no reacquisition"
+        later = []
+        for i in range(25):
+            got = await WQ.enqueue(
+                conn, kind=WQ.K_PROBABILITY, group_id="paper_g_k5n_%d" % i,
+                reason="WAITING_FOR_FRESH_EVIDENCE", at=t1 + 1 + i,
+                batch_id="k5n-%d" % i, slug="k5n-slug-%d" % i,
+                detail={"account_id": "k5n-%d" % i})
+            assert got["enqueued"], got
+            later.append(got["request_id"])
+        detail = await FL.build_agent_detail(conn, "xavier", now=t1 + 60)
+        listed = [q["id"] for q in (detail.get("queue") or [])
+                  if q.get("kind") == "agent_work_requests"]
+        assert len(listed) == 25
+        assert set(listed) == set(later)
+        assert not (mine & set(listed))
     finally:
         await tx.rollback()
         await conn.close()
