@@ -86,6 +86,7 @@ exists. Detection never changes a mapping, a mandate or an order: it reports.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import hashlib
 import json
@@ -106,6 +107,25 @@ R_SETTLEMENT_UNMEASURED = ("NOT_MEASURED_BY_THE_COLLECTION_LEDGER: it records no
 REFRESH_EVERY_S = 900.0
 #: days re-computed each pass: today and yesterday (yesterday is finalised).
 REFRESH_DAYS = 2
+
+# THE STEP IS BOUNDED AND BACKS OFF (RC6.3b pass-stall). Production
+# 2026-10-10: the step's first league statement ran 50+ s on the pooled
+# connection, run_once's hard timeout cut the whole pass, and because the
+# watermark was written only after run() completed the step was due again on
+# the very next pass -- every pass died the same way for hours.
+#: the step's own budget for run(), well under the pass's bound for steps
+#: (paper_runtime: HARD_TIMEOUT_S less the record's reserve = 80 s). It is
+#: cut further to the pass time the step is given (ctx["step_deadline"]).
+RUN_BUDGET_S = 30.0
+#: pass time kept after run() for the watermark and the Audrey finding
+STEP_WRITE_MARGIN_S = 3.0
+#: less than this of budget and the step does not start a run at all
+MIN_RUN_BUDGET_S = 2.0
+#: a snapshot is reported stale once it is older than the refresh interval
+#: PLUS this grace: the step is due every REFRESH_EVERY_S but runs on a pass
+#: (every ~2 min) and takes time, so a healthy snapshot is up to ~1,000 s old
+#: just before its refresh. A snapshot older than that was not refreshed.
+STALE_GRACE_S = 120.0
 
 STAGES = ("provider", "normalized", "venue_discovered", "mapped",
           "settlement_supported", "evaluated", "decided", "entered",
@@ -168,6 +188,13 @@ R_DENOM_NULL = "DENOMINATOR_UNMEASURED"
 R_NUM_NULL = "NUMERATOR_UNMEASURED"
 R_NO_SESSION = "NO_PAPER_SESSION_CONTEXT"
 R_FINDING_FAILED = "AUDREY_FINDING_WRITE_FAILED"
+#: the step's own named outcomes (RC6.3b): a run cut at its budget, a run that
+#: raised, snapshots not refreshed for longer than the refresh interval, and a
+#: step given no pass time to run in
+R_RUN_TIMED_OUT = "COVERAGE_RUN_EXCEEDED_ITS_BUDGET"
+R_RUN_FAILED = "COVERAGE_RUN_FAILED"
+R_SNAPSHOTS_STALE = "COVERAGE_SNAPSHOTS_STALE"
+R_NO_PASS_TIME = "COVERAGE_STEP_HAD_NO_PASS_TIME"
 
 
 def league_name(key: str) -> str:
@@ -422,12 +449,19 @@ async def _read(conn, table_deps: tuple, sql: str, *args):
         return "%s:%s" % (R_READ_FAILED, type(exc).__name__)
 
 
-async def funnel_for_day(conn, day: _dt.date, tz: str) -> dict:
-    """{league: row} for one local day. Never raises."""
+async def funnel_for_day(conn, day: _dt.date, tz: str, *,
+                         trace: dict | None = None) -> dict:
+    """{league: row} for one local day. Never raises. `trace`, when given,
+    is told which source is being read (`in_flight`, "<tz> <day> <source>"),
+    so a run that is cut can say which statement it was in."""
     start, end = day_window(day, tz)
     rows: dict[str, dict] = {}
     unavailable_all: dict[str, str] = {}
     sources: dict[str, Any] = {}
+
+    def mark(source: str) -> None:
+        if trace is not None:
+            trace["in_flight"] = "%s %s %s" % (tz, day.isoformat(), source)
 
     def row(league, family=None):
         r = rows.setdefault(league, {"league": league, "sport_family": family,
@@ -436,6 +470,7 @@ async def funnel_for_day(conn, day: _dt.date, tz: str) -> dict:
             r["sport_family"] = family
         return r
 
+    mark("provider")
     got = await _read(conn, ("ext_candidate_outcomes",), PROVIDER_SQL,
                       start, end, list(VENUE_ABSENT))
     prov_cols = ("provider_events", "normalized_events", "venue_discovered",
@@ -460,6 +495,7 @@ async def funnel_for_day(conn, day: _dt.date, tz: str) -> dict:
     sources["provider"] = "ext_candidate_outcomes"
 
     async def single(name, deps, sql, col_map):
+        mark(name)
         res = await _read(conn, deps, sql, start, end)
         if isinstance(res, str):
             for c in col_map.values():
@@ -490,6 +526,7 @@ async def funnel_for_day(conn, day: _dt.date, tz: str) -> dict:
                               "actual_submitted": "actual_submitted",
                               "actual_filled": "actual_filled"})
 
+    mark("catalogue")
     cat = await _read(conn, ("us_premap",), CATALOGUE_SQL, start, end)
     if isinstance(cat, str):
         unavailable_all["venue_catalogue_events"] = cat
@@ -685,35 +722,39 @@ def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
 # ═════════════════════════════════════════════════════════════════════
 
 async def persist_day(conn, f: dict, *, now: float) -> int:
-    """Upsert every league row of one computed day. Returns rows written."""
+    """Upsert every league row of one computed day, in one transaction.
+    Returns rows written."""
     day = _dt.date.fromisoformat(f["day"])
     final = now >= f["window"][1]
     n = 0
     cols = [COLUMN[s] for s in STAGES] + list(EXTRA_COLUMNS)
-    for league, r in f["leagues"].items():
-        vals = [r.get(c) for c in cols]
-        await conn.execute(
-            "INSERT INTO coverage_funnel_snapshots (tz, day, league, "
-            " sport_family, %s, ratios, unavailable, sources, final, version,"
-            " computed_at) VALUES ($1,$2,$3,$4,%s,$%d::jsonb,$%d::jsonb,"
-            " $%d::jsonb,$%d,$%d,to_timestamp($%d)) "
-            "ON CONFLICT (tz, day, league) DO UPDATE SET "
-            " sport_family = EXCLUDED.sport_family, %s, "
-            " ratios = EXCLUDED.ratios, unavailable = EXCLUDED.unavailable,"
-            " sources = EXCLUDED.sources, final = EXCLUDED.final,"
-            " version = EXCLUDED.version, computed_at = EXCLUDED.computed_at"
-            " WHERE NOT coverage_funnel_snapshots.final" % (
-                ", ".join(cols),
-                ", ".join("$%d" % (5 + i) for i in range(len(cols))),
-                5 + len(cols), 6 + len(cols), 7 + len(cols), 8 + len(cols),
-                9 + len(cols), 10 + len(cols),
-                ", ".join("%s = EXCLUDED.%s" % (c, c) for c in cols)),
-            f["tz"], day, league, r.get("sport_family"), *vals,
-            json.dumps(r.get("ratios") or {}),
-            json.dumps(r.get("unavailable") or {}),
-            json.dumps(f.get("sources") or {}, default=str), final, VERSION,
-            float(now))
-        n += 1
+    # ONE DAY IS WRITTEN WHOLE OR NOT AT ALL (RC6.3b): a run cut between two
+    # league rows leaves none of this day's rows, and the days before it stay
+    async with conn.transaction():
+        for league, r in f["leagues"].items():
+            vals = [r.get(c) for c in cols]
+            await conn.execute(
+                "INSERT INTO coverage_funnel_snapshots (tz, day, league, "
+                " sport_family, %s, ratios, unavailable, sources, final, version,"
+                " computed_at) VALUES ($1,$2,$3,$4,%s,$%d::jsonb,$%d::jsonb,"
+                " $%d::jsonb,$%d,$%d,to_timestamp($%d)) "
+                "ON CONFLICT (tz, day, league) DO UPDATE SET "
+                " sport_family = EXCLUDED.sport_family, %s, "
+                " ratios = EXCLUDED.ratios, unavailable = EXCLUDED.unavailable,"
+                " sources = EXCLUDED.sources, final = EXCLUDED.final,"
+                " version = EXCLUDED.version, computed_at = EXCLUDED.computed_at"
+                " WHERE NOT coverage_funnel_snapshots.final" % (
+                    ", ".join(cols),
+                    ", ".join("$%d" % (5 + i) for i in range(len(cols))),
+                    5 + len(cols), 6 + len(cols), 7 + len(cols), 8 + len(cols),
+                    9 + len(cols), 10 + len(cols),
+                    ", ".join("%s = EXCLUDED.%s" % (c, c) for c in cols)),
+                f["tz"], day, league, r.get("sport_family"), *vals,
+                json.dumps(r.get("ratios") or {}),
+                json.dumps(r.get("unavailable") or {}),
+                json.dumps(f.get("sources") or {}, default=str), final, VERSION,
+                float(now))
+            n += 1
     return n
 
 
@@ -805,21 +846,31 @@ async def raise_alert(conn, a: dict, *, tz: str, day: str, now: float,
 
 
 async def run(conn, *, now: float | None = None, ctx: dict | None = None,
-              days: int = REFRESH_DAYS) -> dict:
+              days: int = REFRESH_DAYS, progress: dict | None = None) -> dict:
     """Compute and persist the last `days` local days in both timezones,
-    then detect collapses on ALERT_TIMEZONE days. Never raises."""
+    then detect collapses on ALERT_TIMEZONE days. Never raises
+    (CancelledError excepted).
+
+    `progress`, when given, IS the result dict, filled as the run goes
+    (`snapshots` written so far, `windows_done`, the source `in_flight`): a
+    caller that cuts the run (the step's budget) still has what it persisted
+    -- each day is written whole, in its own transaction, so a run cut part
+    way keeps every day it had finished."""
     at = float(now if now is not None else time.time())
-    out: dict[str, Any] = {"version": VERSION, "at": at, "snapshots": 0,
-                           "alerts": [], "errors": {}}
+    out: dict[str, Any] = progress if progress is not None else {}
+    out.update({"version": VERSION, "at": at, "snapshots": 0, "alerts": [],
+                "errors": {}, "windows_done": [], "in_flight": None})
     if not await _regclass(conn, "coverage_funnel_snapshots"):
         return dict(out, ran=False, why="MIGRATION_209_NOT_APPLIED")
     for tz in TIMEZONES:
         today = local_day(at, tz)
         for back in range(days - 1, -1, -1):
             day = today - _dt.timedelta(days=back)
+            out["in_flight"] = "%s %s" % (tz, day.isoformat())
             try:
-                f = await funnel_for_day(conn, day, tz)
+                f = await funnel_for_day(conn, day, tz, trace=out)
                 out["snapshots"] += await persist_day(conn, f, now=at)
+                out["windows_done"].append("%s %s" % (tz, day.isoformat()))
             except Exception as exc:                            # noqa: BLE001
                 out["errors"]["%s:%s" % (tz, day)] = "%s: %s" % (
                     type(exc).__name__, str(exc)[:160])
@@ -849,12 +900,78 @@ async def run(conn, *, now: float | None = None, ctx: dict | None = None,
                         conn, a, tz=tz, day=day.isoformat(), now=at,
                         ctx=ctx))
     out["ran"] = True
+    out["in_flight"] = None
     return out
+
+
+def _run_budget_s(ctx: dict) -> float:
+    """The run's budget: RUN_BUDGET_S, cut to the pass time the step was
+    given (`ctx["step_deadline"]`, a monotonic instant the pass sets) less the
+    time kept to write the watermark. No deadline in ctx (a direct call) is
+    the whole RUN_BUDGET_S."""
+    budget = float(RUN_BUDGET_S)
+    dl = ctx.get("step_deadline")
+    if dl is not None:
+        budget = min(budget, float(dl) - time.monotonic()
+                     - float(STEP_WRITE_MARGIN_S))
+    return budget
+
+
+async def _write_watermark(conn, value: dict) -> None:
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        WATERMARK_KEY, json.dumps(value, default=str))
+
+
+async def _failure_finding(conn, ctx: dict, *, at: float, wm: dict) -> dict:
+    """A failed or timed-out run, to Audrey: one finding per UTC day (the
+    snapshots are going stale; the daily report names it). Best effort -- it
+    never changes the step's result."""
+    if not (ctx.get("session_id") and ctx.get("account_id")):
+        return {"ok": False, "refusal": R_NO_SESSION}
+    try:
+        from . import paper_audrey as PA
+        day = _dt.datetime.fromtimestamp(at, _dt.timezone.utc).date()
+        code = R_RUN_TIMED_OUT if wm.get("timed_out") else R_RUN_FAILED
+        async with conn.transaction():
+            got = await PA.finding(
+                conn, dict(ctx, now=at), kind=R_RUN_FAILED,
+                subject=WATERMARK_KEY, severity="WARNING",
+                scope=day.isoformat(),
+                detail={"code": code, "timed_out": bool(wm.get("timed_out")),
+                        "why": wm.get("why"), "at": at,
+                        "snapshots_written": wm.get("snapshots"),
+                        "in_flight": wm.get("in_flight"),
+                        "budget_s": wm.get("budget_s"),
+                        "refresh_every_s": REFRESH_EVERY_S,
+                        "stale_after_s": REFRESH_EVERY_S + STALE_GRACE_S,
+                        "consequence": "the coverage snapshots are not "
+                                       "refreshed until the next attempt "
+                                       "(%s s); Command reports them %s "
+                                       "once older than the stale bound"
+                                       % (int(REFRESH_EVERY_S),
+                                          R_SNAPSHOTS_STALE),
+                        "version": VERSION})
+        return {"ok": True, "finding_id": got["finding_id"]}
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": "%s:%s" % (R_FINDING_FAILED,
+                                                   type(exc).__name__)}
 
 
 async def step(conn, ctx: dict) -> dict:
     """THE SCHEDULED HOOK (paper pass): at most every REFRESH_EVERY_S, on
-    the main paper account's session only. Never raises."""
+    the main paper account's session only. Never raises.
+
+    BOUNDED AND BACKING OFF (RC6.3b): run() has its own budget
+    (_run_budget_s). On a timeout or an error the step STILL advances its
+    watermark with the failure recorded ({"at", "version", "timed_out",
+    "why", ...}), so it is not retried on every pass but after
+    REFRESH_EVERY_S; it returns a named error code (R_RUN_TIMED_OUT /
+    R_RUN_FAILED) and writes one Audrey finding for the day. What the run had
+    persisted before it was cut stays (a day is written whole). A step given
+    no time to run (R_NO_PASS_TIME) leaves the watermark alone: nothing
+    failed in coverage, it is simply due again."""
     from .. import bettor_paper_ledger as L
     clock = ctx.get("clock") or (lambda: float(ctx["now"]))
     at = float(clock())
@@ -866,17 +983,72 @@ async def step(conn, ctx: dict) -> dict:
             WATERMARK_KEY)) or {}
         if last.get("at") is not None and \
                 at - float(last["at"]) < REFRESH_EVERY_S:
-            return {"ran": False, "why": "NOT_DUE", "last_at": last["at"]}
-        res = await run(conn, now=at, ctx=ctx)
-        await conn.execute(
-            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
-            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            WATERMARK_KEY, json.dumps({"at": at, "version": VERSION,
-                                       "alerts": len(res.get("alerts") or [])
-                                       }))
-        return {"ran": bool(res.get("ran")), "snapshots": res.get("snapshots"),
-                "alerts": len(res.get("alerts") or []),
-                "errors": res.get("errors")}
+            backed_off = (R_RUN_TIMED_OUT if last.get("timed_out") else
+                          R_RUN_FAILED if last.get("failed") else None)
+            return {"ran": False, "why": "NOT_DUE", "last_at": last["at"],
+                    "backed_off": backed_off,
+                    "next_due_in_s": round(
+                        REFRESH_EVERY_S - (at - float(last["at"])), 3)}
+        budget = _run_budget_s(ctx)
+        if budget < MIN_RUN_BUDGET_S:
+            return {"ran": False, "why": R_NO_PASS_TIME,
+                    "budget_s": round(budget, 3)}
+        progress: dict[str, Any] = {}
+        t_run = time.monotonic()
+        in_tx = bool(getattr(conn, "is_in_transaction", lambda: False)())
+        failure: dict | None = None
+        bound = asyncio.timeout(budget)
+        try:
+            async with bound:
+                res = await run(conn, now=at, ctx=ctx, progress=progress)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                                # noqa: BLE001
+            took = round(time.monotonic() - t_run, 3)
+            if bound.expired():
+                failure = {"timed_out": True, "failed": False,
+                           "why": "%s: run() was cut at its %.1fs budget "
+                                  "after %.1fs%s" % (
+                                      R_RUN_TIMED_OUT, budget, took,
+                                      (" in %s" % progress["in_flight"])
+                                      if progress.get("in_flight") else "")}
+            else:
+                failure = {"timed_out": False, "failed": True,
+                           "why": "%s: %s: %s" % (R_RUN_FAILED,
+                                                  type(exc).__name__,
+                                                  str(exc)[:160])}
+            failure.update(
+                snapshots=int(progress.get("snapshots") or 0),
+                in_flight=progress.get("in_flight"),
+                windows_done=list(progress.get("windows_done") or []),
+                budget_s=round(budget, 3), elapsed_s=took)
+        if failure is None:
+            await _write_watermark(conn, {
+                "at": at, "version": VERSION,
+                "alerts": len(res.get("alerts") or [])})
+            return {"ran": bool(res.get("ran")),
+                    "snapshots": res.get("snapshots"),
+                    "alerts": len(res.get("alerts") or []),
+                    "errors": res.get("errors")}
+        # a cancelled run may have left a transaction of its own open
+        try:
+            if getattr(conn, "is_in_transaction", lambda: False)() \
+                    and not in_tx:
+                await conn.execute("ROLLBACK")
+        except Exception:                                       # noqa: BLE001
+            pass
+        wm = dict(failure, at=at, version=VERSION)
+        await _write_watermark(conn, wm)
+        finding = await _failure_finding(conn, ctx, at=at, wm=wm)
+        return {"ran": False, "timed_out": failure["timed_out"],
+                "error": R_RUN_TIMED_OUT if failure["timed_out"]
+                else R_RUN_FAILED,
+                "why": failure["why"], "snapshots": failure["snapshots"],
+                "in_flight": failure["in_flight"],
+                "budget_s": failure["budget_s"],
+                "next_due_in_s": REFRESH_EVERY_S,
+                "audrey_finding": finding.get("finding_id"),
+                "audrey_refusal": finding.get("refusal")}
     except Exception as exc:                                    # noqa: BLE001
         return {"ran": False, "error": "%s: %s" % (type(exc).__name__,
                                                    str(exc)[:200])}
@@ -911,6 +1083,61 @@ async def pinnapi_supplement(conn, *, now: float) -> dict:
                 "why": "%s: %s" % (type(exc).__name__, str(exc)[:120])}
 
 
+def stale_after_s() -> float:
+    """The age past which a non-final snapshot is stale: the refresh interval
+    plus the grace a late pass is allowed."""
+    return float(REFRESH_EVERY_S) + float(STALE_GRACE_S)
+
+
+async def snapshot_freshness(conn, *, now: float, tz: str = ALERT_TIMEZONE,
+                             days: int = 7) -> dict:
+    """HOW OLD THE SNAPSHOTS COMMAND SHOWS ARE, BY NAME (RC6.3b). The newest
+    snapshot of the window `coverage_payload` returns older than the refresh
+    interval (plus the grace a late pass gets) is COVERAGE_SNAPSHOTS_STALE --
+    never "current". With the age comes the step's last attempt (the
+    watermark: a run that timed out or failed says so and why). A final day
+    is never refreshed again by design and is not judged here."""
+    out: dict[str, Any] = {
+        "status": "NO_SNAPSHOTS", "code": None, "newest_computed_at": None,
+        "age_s": None, "refresh_every_s": REFRESH_EVERY_S,
+        "stale_after_s": stale_after_s(), "last_attempt": None}
+    try:
+        today = local_day(now, tz)
+        newest = await conn.fetchval(
+            "SELECT extract(epoch FROM max(computed_at))::float8 FROM "
+            " coverage_funnel_snapshots WHERE tz=$1 AND day > $2::date - $3::int"
+            " AND NOT final", tz, today, int(days))
+        if newest is None:
+            # nothing live in the window: judge the newest of any kind
+            newest = await conn.fetchval(
+                "SELECT extract(epoch FROM max(computed_at))::float8 FROM "
+                " coverage_funnel_snapshots WHERE tz=$1 AND day > "
+                " $2::date - $3::int", tz, today, int(days))
+        if newest is not None:
+            age = float(now) - float(newest)
+            stale = age > stale_after_s()
+            out.update(newest_computed_at=float(newest),
+                       age_s=round(age, 3),
+                       status=R_SNAPSHOTS_STALE if stale else "CURRENT",
+                       code=R_SNAPSHOTS_STALE if stale else None)
+    except Exception as exc:                                    # noqa: BLE001
+        out.update(status="UNAVAILABLE", why="%s: %s" % (
+            type(exc).__name__, str(exc)[:160]))
+    try:
+        from .. import bettor_paper_ledger as L
+        last = L._j(await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            WATERMARK_KEY)) or {}
+        if last:
+            out["last_attempt"] = {k: last.get(k) for k in (
+                "at", "version", "timed_out", "failed", "why", "snapshots",
+                "in_flight", "budget_s", "elapsed_s", "alerts")
+                if k in last}
+    except Exception:                                           # noqa: BLE001
+        pass
+    return out
+
+
 async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
                            now: float | None = None) -> dict:
     """Persisted snapshots (newest day first) + alerts; today computed
@@ -938,6 +1165,15 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
     by_day: dict[str, list] = {}
     for r in rows:
         d = _row_out(r)
+        # A PERSISTED ROW IS NEVER SHOWN AS CURRENT WITHOUT ITS AGE (RC6.3b):
+        # past the stale bound a row the step should have refreshed says so
+        # by name; a final day is not refreshed again by design
+        age = (at - float(d["computed_at"])
+               if d.get("computed_at") is not None else None)
+        d["age_s"] = None if age is None else round(age, 3)
+        d["stale"] = bool(age is not None and not d.get("final")
+                          and age > stale_after_s())
+        d["stale_code"] = R_SNAPSHOTS_STALE if d["stale"] else None
         by_day.setdefault(d["day"], []).append(d)
     live = False
     if today.isoformat() not in by_day:
@@ -975,6 +1211,8 @@ async def coverage_payload(conn, *, tz: str = ALERT_TIMEZONE, days: int = 7,
     except Exception as exc:                                    # noqa: BLE001
         out["nfl_reconciliation"] = {"status": "UNAVAILABLE", "why": "%s: %s" % (
             type(exc).__name__, str(exc)[:160])}
+    out["snapshot_freshness"] = await snapshot_freshness(
+        conn, now=at, tz=tz, days=days)
     out.update(status="OK" if by_day else "EMPTY",
                why=None if by_day else "NO_SNAPSHOTS_AND_NO_PROVIDER_RECORDS",
                today_computed_live=live,

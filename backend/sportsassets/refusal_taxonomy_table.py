@@ -1789,6 +1789,14 @@ INLINE = {
     # own health record and heartbeat
     "PAPER_STEP_EXCEEDED_PASS_TIME": (S, INT, "AGENT_EVALUATION"),
     "PAPER_STEP_SKIPPED_PASS_TIME_SPENT": (S, CAP, "AGENT_EVALUATION"),
+    # (rc6.3b pass-stall) the coverage step's own bounded outcomes: its run
+    # cut at its budget or raised (the watermark still advances, so it backs
+    # off for REFRESH_EVERY_S), given no pass time to run in, and snapshots
+    # older than the refresh interval reported stale by name
+    "COVERAGE_RUN_EXCEEDED_ITS_BUDGET": (S, CAP, "ACCOUNTING"),
+    "COVERAGE_RUN_FAILED": (S, INT, "ACCOUNTING"),
+    "COVERAGE_SNAPSHOTS_STALE": (S, FRESH, "ACCOUNTING"),
+    "COVERAGE_STEP_HAD_NO_PASS_TIME": (S, CAP, "ACCOUNTING"),
     # Xavier's held measure: an ok feed read naming no change instant is
     # not evidence of currency (paper_benchmark.xavier_measure)
     "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT": (S, FRESH, "FRESHNESS"),
