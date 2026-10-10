@@ -566,6 +566,12 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
                     "live": e.get("live")}
                    for sid in sorted(subscribed_sports)
                    for e in (feed_view.get(sid) or [])][:10]
+    # (RC6.3 feed-retention) every feed fixture the venue's events can be
+    # tied to, for the cache's protection (set apart from the counts: the
+    # runtime pops the id list before the census rides the heartbeat)
+    counterpart = venue_counterpart_fixture_ids(
+        {ek: (teams[ek], starts[ek], st) for ek, (st, _) in by_event.items()},
+        feed_view)
     states = collections.Counter()
     for k, n in counts.items():
         if not k.startswith("reason|") and k != 'clock_artifact':
@@ -588,4 +594,91 @@ def census(rows, feed_view: dict, *, subscribed_sports, synced: bool,
             "feed_event_sample": feed_sample,
             "truncated_at": (MAX_CONTRACTS if rows_total >= MAX_CONTRACTS
                              else None),
-            "phase_basis": "VENUE_START_TIME"}
+            "phase_basis": "VENUE_START_TIME",
+            "venue_counterpart_fixture_ids": counterpart["ids"],
+            "venue_counterpart_by_state": counterpart["by_state"]}
+
+
+#: ── (RC6.3 feed-retention) WHICH FEED FIXTURES THE VENUE'S EVENTS NAME ──
+#:
+#: The cache evicts beyond its caps (pinnapi_feed.TOMBSTONE_RING): the
+#: fixtures that must go LAST are the ones the venue lists -- a feed fixture
+#: with any venue counterpart. Per venue event (its two structured team
+#: names and start), over the feed's fixtures of the same sport:
+#:   MATCHED             both names exactly, inside the start tolerance (the
+#:                       census's own match, either family support)
+#:   AMBIGUOUS           two or more fixtures fit: every one of them
+#:   TIME_MISMATCH       both names exactly, at another start (the venue's
+#:                       and the feed's clocks disagree, or a re-timed game)
+#:   PARTICIPANT_MISMATCH  exactly one name exactly, inside the tolerance (a
+#:                       renaming on one side, a split-name record)
+#: Names are compared by the census's own exact fold, by lookup (one dict of
+#: folded name -> fixtures per sport), so a census of 500 venue events over
+#: 2,600 fixtures costs one pass over each. The record that prices a
+#: fixture now (its live child) is protected with it. Pure; runs off the
+#: loop with the census.
+COUNTERPART_STATES = ("MATCHED", "AMBIGUOUS", "TIME_MISMATCH",
+                      "PARTICIPANT_MISMATCH")
+
+
+def venue_counterpart_fixture_ids(venue_events: dict, feed_view: dict) -> dict:
+    """{"ids": fixture ids (sorted by text), "by_state": {state: fixtures}}
+    -- `venue_events`: {(sport id, slug): (team names, starts, census
+    state)} as `census` grouped them; `feed_view`: `feed_event_view`'s
+    {sport id: [fixture]}."""
+    from .workers import ext_pinnacle_loop as X
+
+    def norm(s):
+        return ' '.join(X._fold(s or "").split())
+
+    by_name: dict = {}
+    for sid, fixtures in (feed_view or {}).items():
+        d = by_name.setdefault(sid, {})
+        for e in fixtures or ():
+            for nm in (norm(e.get("home")), norm(e.get("away"))):
+                if nm:
+                    d.setdefault(nm, []).append(e)
+    ids: dict = {}
+    by_state: collections.Counter = collections.Counter()
+    for (sid, _slug), (teams, starts, _state) in (venue_events or {}).items():
+        names = {norm(t) for t in (teams or ()) if norm(t)}
+        if len(names) != 2 or sid not in by_name:
+            continue
+        start = next((_epoch(s) for s in (starts or ())
+                      if _epoch(s) is not None), None)
+        a, b = sorted(names)
+        seen: dict = {}
+        for e in by_name[sid].get(a, []) + by_name[sid].get(b, []):
+            seen[id(e)] = e
+        both, one = [], []
+        for e in seen.values():
+            fn = {norm(e.get("home")), norm(e.get("away"))}
+            fs = _epoch(e.get("start"))
+            near = (start is not None and fs is not None
+                    and abs(fs - start) <= START_TOLERANCE_S)
+            if fn == names:
+                if near:
+                    both.append(e)
+                else:
+                    ids[str(e["id"])] = e
+                    by_state["TIME_MISMATCH"] += 1
+            elif near and (a in fn or b in fn):
+                one.append(e)
+        if len(both) == 1:
+            by_state["MATCHED"] += 1
+        elif both:
+            by_state["AMBIGUOUS"] += len(both)
+        for e in both:
+            ids[str(e["id"])] = e
+        for e in one:
+            ids[str(e["id"])] = e
+            by_state["PARTICIPANT_MISMATCH"] += 1
+    out = []
+    for k in sorted(ids):
+        e = ids[k]
+        out.append(e["id"])
+        if e.get("quote_id") is not None and e["quote_id"] != e["id"]:
+            out.append(e["quote_id"])
+    return {"ids": out,
+            "by_state": {s: int(by_state.get(s, 0))
+                         for s in COUNTERPART_STATES}}

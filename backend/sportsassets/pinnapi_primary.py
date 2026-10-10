@@ -11,6 +11,7 @@ from datetime import datetime
 import functools
 import math
 import re
+import time
 import unicodedata
 
 from . import pinnapi_feed as F
@@ -58,6 +59,11 @@ R_NOT_IN_FEED = N.R_NOT_IN_FEED
 CANONICAL = "CANONICAL"
 RAW = ("__raw_records__",)
 EVICTED = ("__events_evicted__",)
+#: (RC6.3 feed-retention) the cache's tombstone ring and fixture-claim
+#: registry (pinnapi_feed.Tombstones / FixtureClaims), carried by reference
+#: so the index path and the scan path read the same state at call time
+TOMBSTONES = ("__tombstones__",)
+CLAIMS = ("__claims__",)
 #: (RC6) the index's per-(sport, family) absence pass, built on first miss
 ABSENCE = "__absence__"
 MATCH_EXACT = "EXACT_FOLDED_NAMES"
@@ -181,6 +187,8 @@ def fixture_index(cache) -> dict:
                 (fx["id"], ch, ca, start))
     out[RAW] = [dict(v) for v in cache.events.values() if isinstance(v, dict)]
     out[EVICTED] = _evicted(cache)
+    out[TOMBSTONES] = getattr(cache, "tombstones", None)
+    out[CLAIMS] = getattr(cache, "claims", None)
     return out
 
 
@@ -237,6 +245,44 @@ def _evicted(cache) -> int:
         return 0
 
 
+def _clock(cache) -> float:
+    """The cache's wall clock (pinnapi_feed.FeedCache.clock; tests pin it),
+    else time.time()."""
+    clock = getattr(cache, "clock", None)
+    try:
+        return float(clock()) if callable(clock) else time.time()
+    except Exception:                                           # noqa: BLE001
+        return time.time()
+
+
+def _claim(cache, hit, event, *, now) -> None:
+    """(RC6.3 feed-retention) Record that the fixture `hit` IS this METERED
+    event, by an exact one-to-one match (pinnapi_feed.FixtureClaims): the
+    absence pass of a later miss then knows the record is another game. A
+    PinnAPI-native seed claims nothing (its identity is the fixture itself);
+    an event without an id claims nothing. Never raises."""
+    try:
+        claims = getattr(cache, "claims", None)
+        if claims is None or not isinstance(event, dict):
+            return
+        if event.get("pinnapi_native") is not None or event.get("id") is None:
+            return
+        fid, labels = hit
+        ev = cache.events.get(fid) if isinstance(
+            getattr(cache, "events", None), dict) else None
+        if not isinstance(ev, dict):
+            return
+        fixture_names = frozenset(N._fold(p.get("name"))
+                                  for p in (ev.get("participants") or [])
+                                  if isinstance(p, dict) and p.get("name"))
+        claims.record(fid, event_id=event.get("id"),
+                      names=frozenset((N._fold(event.get("home_team")),
+                                       N._fold(event.get("away_team")))),
+                      fixture_names=fixture_names, at=now)
+    except Exception:                                           # noqa: BLE001
+        return
+
+
 def _candidates(cache, sid, home, away, *, index, canonical_tier, family):
     """The fixtures of sport `sid` that could carry {home, away}: from the
     index, exactly those two (folded or canonical) names; else every
@@ -284,7 +330,15 @@ def match_event(cache, event, family, *, index=None, explain=None):
 
     `event["sport_key"]` (the metered provider's competition, carried on
     its events) scopes the competition-only renderings; a validate call
-    passes the one the selection recorded."""
+    passes the one the selection recorded.
+
+    (RC6.3 feed-retention) A hit by a METERED event is recorded as that
+    fixture's claim (`_claim`, pinnapi_feed.FixtureClaims); a miss asks the
+    absence pass about the cache's EVICTED records (its tombstone ring) and
+    ignores records a metered event that is provably another game already
+    is -- the asking event's own id is handed in, so its own earlier claim
+    never covers a record against it -- see pinnapi_names.NEAR_START_STOP.
+    The match rules are unchanged."""
     sid = SPORTS.get(family)
     start = epoch(event.get("commence_time"))
     home, away = name(event.get("home_team")), name(event.get("away_team"))
@@ -293,11 +347,13 @@ def match_event(cache, event, family, *, index=None, explain=None):
     if start is None or not home or not away or home == away:
         return None, "PINNAPI_PRIMARY_FIXTURE_UNPROVED"
     ex = explain if isinstance(explain, dict) else {}
+    now = _clock(cache)
     hit, why = _match_tier(cache, event, sid, start, home, away,
                            index=index, canonical_tier=False, family=family)
     if why != R_NO_EXACT:
         if why is None:
             ex.update(name_match=MATCH_EXACT, rules=[])
+            _claim(cache, hit, event, now=now)
         return hit, why
     sport_key = event.get("sport_key")
     ch = N.canonical(event.get("home_team"), family, sport_key)
@@ -312,6 +368,7 @@ def match_event(cache, event, family, *, index=None, explain=None):
                           rules=sorted(set(ch["rules"] + ca["rules"])),
                           canonical={"home": ch["name"], "away": ca["name"]},
                           version=N.VERSION, sport_key=sport_key)
+                _claim(cache, hit, event, now=now)
             return hit, why
     records = index.get(RAW) if index is not None else \
         [v for v in cache.events.values() if isinstance(v, dict)]
@@ -325,10 +382,29 @@ def match_event(cache, event, family, *, index=None, explain=None):
         if prepared is None:
             prepared = index[(ABSENCE, sid, family)] = N.AbsenceIndex(
                 records, sid, family)
+    # (RC6.3 feed-retention) the evicted records themselves, the ring's
+    # own state, and which records another metered event already is -- the
+    # same objects on the index path and the scan path (fixture_index)
+    ring = index.get(TOMBSTONES) if index is not None else \
+        getattr(cache, "tombstones", None)
+    claims = index.get(CLAIMS) if index is not None else \
+        getattr(cache, "claims", None)
+    tomb, overflow, unaccounted = [], False, None
+    if ring is not None:
+        try:
+            tomb = ring.within(now)
+            overflow = bool(ring.overflow_inside(now))
+            unaccounted = int(ring.unaccounted(evicted))
+        except Exception:                                       # noqa: BLE001
+            # an unreadable ring keeps every doubt: the bare counter rules
+            tomb, overflow, unaccounted = [], False, None
     ab = N.absence(records, sport_id=sid, start=start,
                    home=event.get("home_team"), away=event.get("away_team"),
                    family=family, evicted=evicted,
-                   tolerance_s=START_TOLERANCE_S, prepared=prepared)
+                   tolerance_s=START_TOLERANCE_S, prepared=prepared,
+                   tombstones=tomb if ring is not None else None,
+                   claims=claims, overflow=overflow, unaccounted=unaccounted,
+                   now=now, event_id=event.get("id"))
     ex.update(absence=ab)
     return None, (N.R_NOT_IN_FEED if ab["absent"] else R_NO_EXACT)
 

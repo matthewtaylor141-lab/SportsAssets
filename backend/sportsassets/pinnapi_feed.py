@@ -70,8 +70,10 @@ it were (`fresh_now_if_measured_from_confirmation`, labelled a
 counterfactual), for the owner to decide on.
 
 BOUNDS. The cache holds at most MAX_EVENTS events and MAX_MARKETS markets;
-events the provider deletes or closes are dropped at once; the oldest-touched
-events are evicted beyond the cap (and counted). Latency samples live in
+events the provider deletes or closes are dropped at once; beyond a cap,
+events are evicted unprotected first, farthest start first, then
+least-recently-touched, each counted by class and leaving a tombstone (RC6.3
+feed-retention, see TOMBSTONE_RING below). Latency samples live in
 fixed-size rings. Nothing here persists raw frames.
 
   CAPACITY FOR THE R30A SCOPE (sports 1-6), ARITHMETIC NOT HOPE. Measured:
@@ -101,10 +103,12 @@ from __future__ import annotations
 import asyncio
 import collections
 import functools
+import heapq
 import math
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Optional
 
 PARSER_VERSION = "ARCADIA_RAW_V1_OBSERVED_2026_10_01"
@@ -114,6 +118,72 @@ FULL_GAME_MONEYLINE_KEY = "s;0;m"
 MAX_EVENTS = 4000
 MAX_MARKETS = 120_000
 RING = 4096
+
+# ── (RC6.3 feed-retention) WHAT THE CACHE EVICTED, AND WHAT IT KEEPS ──────
+#
+# THE DEFECT (software-reds audit of the RC6.3b packet hour, 2026-10-10
+# 09:54Z: PINNAPI_PRIMARY_NO_EXACT_FIXTURE 35 events, every one SOFTWARE).
+# `_bound` evicted the LEAST-RECENTLY-TOUCHED record beyond the caps -- a
+# quiet fixture the venue lists and the collector asks about every cycle (an
+# MLS or Liga MX game days out, re-priced by Pinnacle a few times a day) went
+# first, while a churning in-play record nobody asks about stayed -- and all
+# an eviction left behind was ONE process-wide counter (`events_evicted`).
+# pinnapi_names.absence, which must keep the naming doubt whenever the
+# fixture may have been ours to keep, therefore kept it for EVERY miss once
+# anything at all had been evicted: no fixture could be named NOT YET POSTED
+# while the counter was above zero, and the evicted fixtures themselves came
+# back only when the provider next re-sent them.
+#
+# NOW:
+#   TOMBSTONES (`Tombstones`). Every eviction leaves a tombstone -- the
+#   record's id, sport, start, its two participant names, the instant, and
+#   whether it was protected -- in a bounded ring kept for
+#   TOMBSTONE_RETENTION_S past the LATER of the eviction and the record's
+#   START (`Tombstones.expires_at`). The window itself is at least the
+#   absence window plus the collector's behind-horizon plus the match
+#   tolerance (pinnapi_names.ABSENCE_WINDOW_S 36 h + collector_coverage.
+#   HORIZON_BEHIND_S 6 h + pinnapi_primary.START_TOLERANCE_S 90 min; pinned
+#   by tests/test_rc63_feed_cache_retention), so a miss whose fixture could
+#   have been an evicted record finds that record's tombstone instead of a
+#   bare counter. WHY THE START, NOT THE EVICTION ALONE (independent review
+#   of 3764b24b): `_bound` evicts the FARTHEST start first, and the collector
+#   asks about a metered event only inside collector_coverage.HORIZON_AHEAD_S
+#   (24 h) of its start -- a fixture five days out, evicted today, is asked
+#   about four days from now. Measured from the eviction, its tombstone was
+#   gone by then and the miss read as proved absent (NOT_IN_FEED or
+#   NOT_YET_POSTED, EXTERNAL) on no evidence; measured from its start, the
+#   tombstone stands through every question the collector can ask about it.
+#   A tombstone with no readable start ages from its eviction (the feed's
+#   matchup frame carries the start with the participants, so such a record
+#   is a markets-only stub that names no team; `absence` treats an
+#   unreadable start as near every start while it is held). A tombstone is
+#   RESOLVED when its event comes back. The ring is bounded: a tombstone
+#   dropped for CAPACITY while still inside its window is counted
+#   (`overflowed`, with the instant) and keeps every absence doubt until the
+#   latest window of anything so dropped has passed (`overflow_until`); one
+#   dropped for AGE is no doubt. Expiry is no longer monotonic in eviction
+#   order, so the ring prunes by a full sweep at capacity and on every read
+#   (O(ring), the same order as the read's own copy), and from the left
+#   otherwise. The counter stays, as telemetry -- and a counted eviction the
+#   ring cannot account for keeps the doubt.
+#   PROTECTION (`set_protected`). The runtime names the fixtures someone
+#   needs (pinnapi_feed_runtime._census_once: every feed fixture with a venue
+#   counterpart, the held-watch targets, the reactive scheduler's live
+#   seeds). `_bound` then evicts UNPROTECTED records first, the FARTHEST start
+#   first, then the least-recently-touched; a protected record (or the live
+#   child of one) goes only when nothing unprotected is left, and that is
+#   counted apart (`events_evicted_protected`). The record a frame is
+#   applying is never evicted by its own frame, as before. MAX_EVENTS and
+#   MAX_MARKETS are unchanged (raising them needs the RSS headroom read first).
+TOMBSTONE_RING = 16384
+#: 36 h (absence window) + 6 h (the collector asks about a game up to 6 h
+#: after its start) + 1.5 h (match tolerance) + margin; measured from the
+#: later of the eviction and the record's start (see above)
+TOMBSTONE_RETENTION_S = 48 * 3600
+#: the fixture-claim registry's bounds (`FixtureClaims`, written by
+#: pinnapi_primary.match_event): a claim older than this is not consulted
+CLAIMS_MAX = 8192
+CLAIM_TTL_S = 12 * 3600
 
 # ── (RC6) THE SUBSCRIBE SNAPSHOT IS BUILT OFF THE EVENT LOOP ──────────
 #
@@ -841,6 +911,280 @@ def canonical_id(events, event_id):
     return event_id
 
 
+def _start_s(value) -> Optional[float]:
+    """A record's startTime as epoch seconds (ISO text with a zone, or a
+    number), else None -- for ANY value, including an unhashable one (a
+    list or dict in a malformed frame: independent review of 3764b24b,
+    probe A -- the memo raised TypeError out of `apply`). Memoised by the
+    text: `_bound` ranks every cached record's start on each eviction."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            out = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return out if math.isfinite(out) else None
+    if not isinstance(value, str):
+        return None
+    return _start_s_text(value)
+
+
+@functools.lru_cache(maxsize=16384)
+def _start_s_text(text: str) -> Optional[float]:
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return None
+        out = dt.timestamp()
+        return out if math.isfinite(out) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+class Tombstones:
+    """(RC6.3 feed-retention) THE RING OF EVICTED RECORDS -- see the module
+    note at TOMBSTONE_RING. Written only by `FeedCache._evict` (on the event
+    loop, or in a snapshot build's private copy merged at the swap); read by
+    pinnapi_primary.match_event for the absence pass. Each tombstone is a
+    dict: id, sport_id, start_s, startTime, home, away, parentId,
+    evicted_at (s), protected, expires_at (s). One unresolved tombstone per
+    event id.
+
+    A tombstone EXPIRES at `expires_at` = the later of its eviction and its
+    start, plus the retention (see the module note: the farthest starts are
+    evicted first and asked about last). Expiry is therefore not monotonic
+    in eviction order: `prune` pops the expired from the left as far as it
+    can, `sweep` walks the whole ring (at capacity, and on every read)."""
+
+    def __init__(self, *, size: int = TOMBSTONE_RING,
+                 retention_s: float = TOMBSTONE_RETENTION_S):
+        self.size, self.retention_s = int(size), float(retention_s)
+        self.xs: collections.deque = collections.deque()
+        self.by_id: dict = {}
+        self.recorded = 0          # tombstones ever written
+        self.expired = 0           # aged out past the retention: no doubt
+        self.resolved = 0          # the event came back
+        self.overflowed = 0        # dropped for capacity INSIDE the window
+        self.overflow_at: Optional[float] = None
+        #: the latest instant anything dropped for capacity would still have
+        #: been held: the overflow doubt lasts until then
+        self.overflow_until: Optional[float] = None
+        self.protected_recorded = 0
+
+    def expires_at(self, t: dict) -> float:
+        """When this tombstone is no doubt any more: the retention window
+        past the later of its eviction and its start (an unreadable start:
+        past its eviction)."""
+        evicted_at = float(t["evicted_at"])
+        st = t.get("start_s")
+        try:
+            st = None if st is None else float(st)
+        except (TypeError, ValueError):
+            st = None
+        if st is None or not math.isfinite(st):
+            return evicted_at + self.retention_s
+        return max(evicted_at, st) + self.retention_s
+
+    def add(self, t: dict) -> None:
+        now = float(t["evicted_at"])
+        t["expires_at"] = self.expires_at(t)
+        self.prune(now)
+        eid = t.get("id")
+        if eid in self.by_id:
+            # an unresolved tombstone of this id already stands (the record
+            # was re-added without its tombstone being resolved): the newer
+            # eviction replaces it, the older is dropped as resolved
+            self.resolve(eid)
+        if len(self.xs) >= self.size:
+            # at capacity: everything expired or resolved anywhere in the
+            # ring goes before anything live is dropped
+            self.sweep(now)
+        while len(self.xs) >= self.size:
+            dropped = self.xs.popleft()
+            if self.by_id.get(dropped.get("id")) is dropped:
+                del self.by_id[dropped["id"]]
+            if not dropped.get("resolved"):
+                self.overflowed += 1
+                self.overflow_at = now
+                # never a shorter doubt than the old rule (the window from
+                # the drop), and as long as the dropped one would have stood
+                until = max(now + self.retention_s,
+                            float(dropped.get("expires_at")
+                                  or self.expires_at(dropped)))
+                self.overflow_until = until if self.overflow_until is None \
+                    else max(self.overflow_until, until)
+        self.xs.append(t)
+        self.by_id[eid] = t
+        self.recorded += 1
+        if t.get("protected"):
+            self.protected_recorded += 1
+
+    def _expired(self, d: dict, now: float) -> bool:
+        exp = d.get("expires_at")
+        if exp is None:
+            exp = d["expires_at"] = self.expires_at(d)
+        return float(exp) < float(now)
+
+    def _forget(self, d: dict) -> None:
+        if self.by_id.get(d.get("id")) is d:
+            del self.by_id[d["id"]]
+        if not d.get("resolved"):
+            self.expired += 1
+
+    def prune(self, now: float) -> None:
+        """Drop resolved and expired tombstones from the left, as far as the
+        first one still standing (cheap; the ring is in eviction order, and
+        most expire in it)."""
+        now = float(now)
+        while self.xs:
+            d = self.xs[0]
+            if not (d.get("resolved") or self._expired(d, now)):
+                break
+            self.xs.popleft()
+            self._forget(d)
+
+    def sweep(self, now: float) -> None:
+        """Drop resolved and expired tombstones ANYWHERE in the ring (a far
+        start keeps a tombstone standing behind expired ones). O(ring)."""
+        now = float(now)
+        self.prune(now)
+        if not any(d.get("resolved") or self._expired(d, now)
+                   for d in self.xs):
+            return
+        kept = collections.deque()
+        for d in self.xs:
+            if d.get("resolved") or self._expired(d, now):
+                self._forget(d)
+            else:
+                kept.append(d)
+        self.xs = kept
+
+    def resolve(self, eid) -> bool:
+        """The event is held again: its tombstone is no longer a doubt."""
+        t = self.by_id.pop(eid, None)
+        if t is None:
+            return False
+        t["resolved"] = True
+        self.resolved += 1
+        return True
+
+    def within(self, now: float) -> list:
+        """Every unresolved tombstone still standing at `now`, oldest
+        eviction first (copies: the caller may keep them in an index)."""
+        self.sweep(now)
+        return [dict(t) for t in self.xs if not t.get("resolved")]
+
+    def near(self, sport_id, start, tolerance_s: float, now: float) -> list:
+        """The unresolved tombstones of `sport_id` inside the window whose
+        start is within `tolerance_s` of `start` (or unreadable)."""
+        out = []
+        for t in self.within(now):
+            if t.get("sport_id") != sport_id:
+                continue
+            st = t.get("start_s")
+            if st is None or start is None or \
+                    abs(float(st) - float(start)) <= float(tolerance_s):
+                out.append(t)
+        return out
+
+    def overflow_inside(self, now: float) -> bool:
+        """True while a tombstone dropped for CAPACITY may still have been
+        standing (its own window, from the later of its eviction and its
+        start; never shorter than the window from the drop): the ring
+        cannot say what it lost."""
+        if self.overflow_at is None:
+            return False
+        until = self.overflow_until
+        if until is None:
+            until = self.overflow_at + self.retention_s
+        return float(now) <= float(until)
+
+    def unaccounted(self, evicted_total) -> int:
+        """Evictions the counter reports beyond those this ring recorded:
+        never below zero. In production both move together in
+        `FeedCache._evict`; any difference is an eviction the ring cannot
+        place, and keeps the absence doubt (fail closed)."""
+        try:
+            return max(0, int(evicted_total or 0) - int(self.recorded))
+        except (TypeError, ValueError):
+            return 0
+
+    def merge(self, other: "Tombstones") -> None:
+        """A snapshot build's private ring, folded into this one at the
+        swap (on the loop)."""
+        for t in list(other.xs):
+            if not t.get("resolved"):
+                self.add(dict(t))
+
+    def status(self, now: Optional[float] = None) -> dict:
+        now = time.time() if now is None else float(now)
+        self.sweep(now)
+        held = [t for t in self.xs if not t.get("resolved")]
+        return {"held": len(held),
+                "held_protected": sum(1 for t in held if t.get("protected")),
+                # standing only by their START (past the window from their
+                # eviction): the far fixtures the eviction order targets
+                "held_by_start": sum(
+                    1 for t in held
+                    if float(t["evicted_at"]) + self.retention_s < now),
+                "held_start_unknown": sum(1 for t in held
+                                          if t.get("start_s") is None),
+                "size": self.size, "retention_s": self.retention_s,
+                "recorded": self.recorded, "expired": self.expired,
+                "resolved": self.resolved, "overflowed": self.overflowed,
+                "overflow_at": self.overflow_at,
+                "overflow_until": self.overflow_until,
+                "overflow_inside_window": self.overflow_inside(now),
+                "protected_recorded": self.protected_recorded}
+
+
+class FixtureClaims:
+    """(RC6.3 feed-retention) WHICH FEED FIXTURE IS WHICH METERED EVENT, BY
+    AN EXACT ONE-TO-ONE MATCH. pinnapi_primary.match_event records a claim
+    whenever a METERED event (never a PinnAPI-native seed, whose identity is
+    the fixture itself) matched exactly one fixture by both names and the
+    start. pinnapi_names.absence then ignores, when it looks for a candidate
+    near a MISSED event's start, any record so claimed by a DIFFERENT metered
+    event: one fixture is one game, so a fixture that IS Atlanta United v
+    Orlando City cannot also be D.C. United v New York Red Bulls under other
+    names. A claim names the fixture's folded participant names as matched,
+    so a record whose names have since changed is not covered by it. Bounded
+    (CLAIMS_MAX, least-recently-written first) and aged (CLAIM_TTL_S)."""
+
+    def __init__(self, *, maxlen: int = CLAIMS_MAX, ttl_s: float = CLAIM_TTL_S):
+        self.maxlen, self.ttl_s = int(maxlen), float(ttl_s)
+        self.xs: "collections.OrderedDict" = collections.OrderedDict()
+        self.recorded = 0
+
+    def record(self, fixture_id, *, event_id, names: frozenset,
+               fixture_names: frozenset, at: float) -> None:
+        self.xs.pop(fixture_id, None)
+        self.xs[fixture_id] = {"event_id": event_id,
+                               "names": frozenset(names),
+                               "fixture_names": frozenset(fixture_names),
+                               "at": float(at)}
+        self.recorded += 1
+        while len(self.xs) > self.maxlen:
+            self.xs.popitem(last=False)
+
+    def get(self, fixture_id, default=None, *, now: Optional[float] = None):
+        c = self.xs.get(fixture_id)
+        if c is None:
+            return default
+        now = time.time() if now is None else float(now)
+        if not 0 <= now - c["at"] <= self.ttl_s:
+            return default
+        return c
+
+    def __len__(self) -> int:
+        return len(self.xs)
+
+    def status(self) -> dict:
+        return {"held": len(self.xs), "recorded": self.recorded,
+                "max": self.maxlen, "ttl_s": self.ttl_s}
+
+
 class FeedCache:
     def __init__(self, *, authority: Optional[FeedAuthority] = None,
                  extract: Callable = extract_markets,
@@ -849,6 +1193,14 @@ class FeedCache:
         self.authority = authority or FeedAuthority()
         self.extract = extract
         self.max_events, self.max_markets = max_events, max_markets
+        # (RC6.3 feed-retention) the wall clock the evictions are stamped
+        # and ranked by (tests pin it), the protected fixture ids, the
+        # tombstone ring and the fixture-claim registry (see TOMBSTONE_RING)
+        self.clock: Callable[[], float] = time.time
+        self._protected: frozenset = frozenset()
+        self.protected_set_at: Optional[float] = None
+        self.tombstones = Tombstones()
+        self.claims = FixtureClaims()
         # frames received per (PinnAPI sport id, frame type): the measured
         # per-sport rate the R30A scope widening is judged on (bounded:
         # at most 12 sports x the handful of frame types)
@@ -967,6 +1319,13 @@ class FeedCache:
                        max_events=self.max_events,
                        max_markets=self.max_markets)
         sh.offload_snapshots = False
+        # the build evicts by the same protection, on the same clock, into
+        # a ring of its own (merged at the swap: the real ring is read on
+        # the loop meanwhile); the claims are only ever written on the loop
+        sh.clock, sh._protected = self.clock, self._protected
+        sh.tombstones = Tombstones(size=self.tombstones.size,
+                                   retention_s=self.tombstones.retention_s)
+        sh.claims = self.claims
         sh.events = collections.OrderedDict(
             (k, dict(v) if isinstance(v, dict) else v)
             for k, v in self.events.items())
@@ -1028,6 +1387,11 @@ class FeedCache:
     def _swap_in(self, sh) -> None:
         self.generation += 1
         self.events, self.quotes = sh.events, sh.quotes
+        # (RC6.3 feed-retention) the build's evictions join the ring; every
+        # tombstone whose event the snapshot brought back is resolved
+        self.tombstones.merge(sh.tombstones)
+        for eid in [e for e in self.tombstones.by_id if e in self.events]:
+            self.tombstones.resolve(eid)
         self.counts.update(sh.counts)
         self.confirmations.update(sh.confirmations)
         for fk, n in sh.frames_by_sport_type.items():
@@ -1241,8 +1605,10 @@ class FeedCache:
 
     def _touch_meta(self, ev, *, stream, sport):
         eid = ev["id"]
-        cur = self.events.get(eid) or {"id": eid, "stream": stream,
-                                       "sport_id": sport}
+        cur = self.events.get(eid)
+        if cur is None:
+            cur = {"id": eid, "stream": stream, "sport_id": sport}
+            self.tombstones.resolve(eid)
         # 'units' and 'special' decide whether a child record is the live
         # game or a prop/derived-count matchup (classify_child).
         for k in ("participants", "league", "startTime", "status", "isLive",
@@ -1252,13 +1618,86 @@ class FeedCache:
                 cur[k] = ev[k]
         self.events[eid] = cur
         self.events.move_to_end(eid)
-        self._bound()
+        self._bound(keep=eid)
 
     def _drop_event(self, eid):
         self.events.pop(eid, None)
         for k in self._keys_of(eid):
             del self.quotes[k]
         self.counts["events_deleted"] += 1
+
+    # ── (RC6.3 feed-retention) protection, eviction order, tombstones ──
+    def set_protected(self, ids, *, at: Optional[float] = None) -> int:
+        """Name the fixtures `_bound` evicts LAST (see TOMBSTONE_RING): the
+        venue's counterparts, the held targets, the live reactive seeds --
+        as pinnapi_feed_runtime._census_once resolves them each census. A
+        live-phase child of a protected fixture is protected with it. Ids
+        are matched as given and as their int / str spellings. Replaces the
+        previous set whole; returns its size."""
+        out: set = set()
+        for x in ids or ():
+            if x is None:
+                continue
+            out.add(x)
+            s = str(x)
+            out.add(s)
+            if s.isdigit():
+                out.add(int(s))
+        self._protected = frozenset(out)
+        self.protected_set_at = self.clock() if at is None else float(at)
+        self.counts["protected_sets"] += 1
+        return len(out)
+
+    def is_protected(self, eid, ev=None) -> bool:
+        prot = self._protected
+        if not prot:
+            return False
+        if eid in prot:
+            return True
+        ev = ev if ev is not None else self.events.get(eid)
+        pid = ev.get("parentId") if isinstance(ev, dict) else None
+        return pid is not None and pid in prot
+
+    def _rank(self, now: float, keep=None) -> list:
+        """[((protected, -distance from now, touch position), id)] over the
+        events: ascending is the eviction order -- unprotected first, the
+        farthest start first (an unreadable start is farthest), then the
+        least-recently-touched. `keep` (the record a frame is applying) is
+        left out: a record is never evicted by its own frame."""
+        out = []
+        for pos, (eid, ev) in enumerate(self.events.items()):
+            if eid == keep:
+                continue
+            st = _start_s(ev.get("startTime")) if isinstance(ev, dict) \
+                else None
+            dist = math.inf if st is None else abs(st - now)
+            out.append(((self.is_protected(eid, ev), -dist, pos), eid))
+        return out
+
+    def _evict(self, eid, *, protected: bool, now_s: float) -> None:
+        """Drop one event for capacity, counted by class, and leave its
+        tombstone."""
+        ev = self.events.pop(eid, None)
+        for k in self._keys_of(eid):
+            del self.quotes[k]
+        self.counts["events_evicted"] += 1
+        self.counts["events_evicted_protected" if protected
+                    else "events_evicted_unprotected"] += 1
+        if isinstance(ev, dict):
+            p = participants(ev)
+            self.tombstones.add({
+                "id": eid, "sport_id": ev.get("sport_id"),
+                "start_s": _start_s(ev.get("startTime")),
+                "startTime": ev.get("startTime"),
+                "home": p.get("home"), "away": p.get("away"),
+                "parentId": ev.get("parentId"),
+                "evicted_at": float(now_s), "protected": bool(protected)})
+        else:
+            self.tombstones.add({"id": eid, "sport_id": None, "start_s": None,
+                                 "startTime": None, "home": None,
+                                 "away": None, "parentId": None,
+                                 "evicted_at": float(now_s),
+                                 "protected": bool(protected)})
 
     def _unreadable(self, eid, *, frame_ts, rx) -> None:
         """A record for a HELD event did not parse (adversarial
@@ -1304,6 +1743,8 @@ class FeedCache:
         if not keep_meta:
             self._touch_meta(ev, stream=stream, sport=sport)
         else:
+            if eid not in self.events:
+                self.tombstones.resolve(eid)
             self.events.setdefault(eid, {"id": eid, "stream": stream,
                                          "sport_id": sport})
             self.events.move_to_end(eid)
@@ -1344,7 +1785,7 @@ class FeedCache:
         if eid in self.events:
             self.events[eid]["_markets_version"] = markets_version
             self.events[eid].pop("_unparsed_since", None)
-        self._bound()
+        self._bound(keep=eid)
         return True
 
     def _merge_event(self, rec, *, stream, sport, epoch, frame_ts, rx):
@@ -1391,7 +1832,7 @@ class FeedCache:
             self.confirmations[C_LIVE_REC] += 1
         if rec.get("version") is not None and eid in self.events:
             self.events[eid]["_markets_version"] = _num(rec.get("version"))
-        self._bound()
+        self._bound(keep=eid)
 
     @staticmethod
     def _carry_confirmation(q, prev) -> None:
@@ -1420,19 +1861,27 @@ class FeedCache:
                                else first_observed))
         return q
 
-    def _bound(self):
-        while len(self.events) > self.max_events:
-            eid, _ = self.events.popitem(last=False)
-            for k in self._keys_of(eid):
-                del self.quotes[k]
-            self.counts["events_evicted"] += 1
+    def _bound(self, keep=None):
+        """Hold at most max_events events and max_markets markets. Beyond a
+        cap, whole events are evicted in `_rank`'s order -- unprotected
+        first, the farthest start first, then the least-recently-touched --
+        each leaving a tombstone (RC6.3 feed-retention; before, the
+        least-recently-touched event went whatever its start or who needed
+        it). O(events) per over-cap frame: a frame that only updates a held
+        record costs the two length checks."""
+        over = len(self.events) - self.max_events
+        if over <= 0 and len(self.quotes) <= self.max_markets:
+            return
+        now = float(self.clock())
+        if over > 0:
+            for key, eid in heapq.nsmallest(over, self._rank(now, keep)):
+                self._evict(eid, protected=key[0], now_s=now)
         if len(self.quotes) > self.max_markets:
-            # evict whole least-recently-touched events until within bound
-            for eid in list(self.events):
+            # evict whole events, in the same order, until within bound
+            for key, eid in sorted(self._rank(now, keep)):
                 if len(self.quotes) <= self.max_markets:
                     break
-                self._drop_event(eid)
-                self.counts["events_evicted"] += 1
+                self._evict(eid, protected=key[0], now_s=now)
 
     # ── the ONE read path for Derek and Xavier ──────────────────────
     def read(self, event_id, key, *, evaluated_ms: Optional[float] = None,
@@ -1636,4 +2085,22 @@ class FeedCache:
                     "min_events": SNAPSHOT_OFFLOOP_MIN_EVENTS,
                     "building": self._pending is not None,
                     "queued_frames": len(self._backlog),
-                    "build_ms": self.snapshot_build_ms.summary()}}
+                    "build_ms": self.snapshot_build_ms.summary()},
+                # (RC6.3 feed-retention) what the cache protects, what it
+                # evicted by class, and the tombstone ring's state
+                "retention": self.retention_status(now_s=now / 1000.0)}
+
+    def retention_status(self, *, now_s: Optional[float] = None) -> dict:
+        now_s = float(self.clock()) if now_s is None else float(now_s)
+        held_protected = sum(1 for eid, ev in self.events.items()
+                             if self.is_protected(eid, ev))
+        return {"protected_ids": len(self._protected),
+                "protected_events_held": held_protected,
+                "protected_set_at": self.protected_set_at,
+                "evicted_total": int(self.counts.get("events_evicted", 0)),
+                "evicted_unprotected": int(
+                    self.counts.get("events_evicted_unprotected", 0)),
+                "evicted_protected": int(
+                    self.counts.get("events_evicted_protected", 0)),
+                "tombstones": self.tombstones.status(now_s),
+                "claims": self.claims.status()}
