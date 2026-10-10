@@ -63,7 +63,13 @@ venue's own settlement joined onto `external_valuations` (outcome_basis
 VENUE_SETTLEMENT_PRICE / VENUE_REPORTED_OUTCOME for a 0/1, CONFIRMED_VOID for
 a refund), unanimous across the rows for the contract. A later disagreement
 with what was settled books a CORRECTION; conflicting evidence settles
-nothing and is recorded as a finding.
+nothing and is recorded as a finding. The settle step reads the outcome rows
+of EVERY position's contract -- open and closed, because a closed position's
+settlement can still be corrected -- in ONE statement (OUTCOME_ROWS_SQL,
+grouped per contract in id order), never one statement per position:
+external_valuations has no index on us_market_slug, so each per-contract read
+scanned the table, and production (release 4534b43f, 2026-10-10) spent about
+35 s of every pass on ~517 such reads that settled nothing.
 """
 from __future__ import annotations
 
@@ -1831,6 +1837,47 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
             "rule": "the contract's stated last-fair-market-price settlement"}
 
 
+#: THE VENUE-JOINED OUTCOME ROWS OF MANY CONTRACTS IN ONE STATEMENT (RC6.3c
+#: pass-hardening S). The settle step used to run, PER POSITION,
+#:   SELECT id, buy_intent, outcome, outcome_known, outcome_basis, outcome_at
+#:     FROM external_valuations WHERE us_market_slug=$1
+#:      AND outcome_basis IS NOT NULL ORDER BY id
+#: -- with include_closed=True that is one statement for every position the
+#: account ever held (production 2026-10-10: ~517, almost all closed), and
+#: external_valuations has no index on us_market_slug, so each one scanned
+#: the table: step_elapsed_s settle 35.374 s with settled 0, waiting 0; one
+#: pass of 80.2 s hit the step bound and lost agent_work_queues, lesson_usage
+#: and agent_memory. This statement reads the same rows for every contract at
+#: once; `outcome_rows_by_slug` groups them per contract in the same id
+#: order, so `outcome_for` sees, per position, exactly the rows the per-slug
+#: statement returned.
+OUTCOME_ROWS_SQL = """
+    SELECT id, us_market_slug, buy_intent, outcome, outcome_known,
+           outcome_basis, outcome_at
+      FROM external_valuations
+     WHERE us_market_slug = ANY($1::text[]) AND outcome_basis IS NOT NULL
+     ORDER BY id
+"""
+
+
+async def outcome_rows_by_slug(conn, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement (OUTCOME_ROWS_SQL). Each slug's rows are the rows of the former
+    per-slug read (`WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL
+    ORDER BY id`), as dicts with the same keys, in the same id order; a slug
+    with no outcome rows maps to []. The one statement orders by id over all
+    contracts, and appending in that order keeps each contract's rows in id
+    order."""
+    wanted = sorted({s for s in slugs if s})
+    out: dict = {s: [] for s in wanted}
+    if not wanted:
+        return out
+    for r in await conn.fetch(OUTCOME_ROWS_SQL, wanted):
+        d = dict(r)
+        out[d.pop("us_market_slug")].append(d)
+    return out
+
+
 def outcome_for(rows: list, *, holding_side: str) -> dict:
     """Our side's settlement from the venue-joined valuation rows. Pure."""
     ours = DP.LONG if holding_side == "LONG" else DP.SHORT
@@ -1870,12 +1917,14 @@ async def step_settle(conn, ctx: dict) -> dict:
     if not has:
         return dict(out, refusal="OUTCOME_EVIDENCE_COLUMNS_ABSENT")
     allpos = await L.positions(conn, acct, include_closed=True)
+    # EVERY POSITION'S OUTCOME ROWS IN ONE STATEMENT (RC6.3c pass-hardening
+    # S; see OUTCOME_ROWS_SQL): the per-position read ran once for each of
+    # the account's positions ever held and took ~35 s of every production
+    # pass. Per position the rows are the same, in the same id order.
+    by_slug = await outcome_rows_by_slug(
+        conn, [p["us_market_slug"] for p in allpos])
     for p in allpos:
-        rows = [dict(r) for r in await conn.fetch(
-            "SELECT id, buy_intent, outcome, outcome_known, outcome_basis, "
-            "       outcome_at FROM external_valuations "
-            " WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL "
-            " ORDER BY id", p["us_market_slug"])]
+        rows = by_slug.get(p["us_market_slug"], [])
         got = outcome_for(rows, holding_side=p["holding_side"])
         key = "venue-final:%s" % p["us_market_slug"]
         vp = None
