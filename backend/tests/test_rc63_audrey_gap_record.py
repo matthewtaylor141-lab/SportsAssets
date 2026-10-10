@@ -26,7 +26,11 @@ Proven against Postgres through the real step():
   * the paper Audrey read model counts these findings;
   * the new code's first pass after an old-code worker turned midnight closes
     the day before the deploy, the days before it stay history, and no
-    history day is named (no backfill).
+    history day is named (no backfill);
+  * a report clock behind the newest reported day closes and names nothing,
+    with no closed day (a host still in day 1 while day 2 was reported must
+    not close history day 0) and after a closed day; the next pass on a
+    correct clock closes what is due.
 """
 from __future__ import annotations
 
@@ -493,6 +497,119 @@ async def test_the_first_pass_after_an_old_worker_turned_midnight_closes():
         assert [c["report_day"] for c in turn["closing"]] == [str(_day(2))]
         assert await _finals_per_day(conn, a) == {
             DAY0: 0, _day(1): 1, _day(2): 1, _day(3): 0}
+        assert await _named(conn, a) == []
+    finally:
+        await conn.close()
+
+
+@pg
+async def test_a_clock_behind_the_newest_report_closes_no_history_day():
+    """The deploy guard (a session with no closed day closes its newest
+    reported day that is over) never acts on a report clock behind the
+    newest reported day: such a clock writes nothing (rc6.2). With no closed
+    day and old-code versions on day 0 (history), day 1 and day 2 (its
+    midnight), a host whose clock is still in day 1 -- seconds of skew at
+    midnight -- closes nothing, so day 0 is never closed retroactively; a
+    clock further behind names no history day either. The next pass on a
+    correct clock closes day 1 only."""
+    conn = await H.connect()
+    try:
+        a = await H.new_account(conn, "audskew", now=_start(-1) + 3600)
+        sess = _ctx(a, T)["session"]
+        acct = a["account_id"]
+        # day -1: fills, no report (history before the first closed day)
+        await _fill(conn, a, "hist", _start(-1) + 12 * 3600)
+
+        async def old(now):
+            """A version as the code before day closing writes it."""
+            return await PA.write_report(conn, session=sess, account_id=acct,
+                                         now=now)
+        assert (await old(T))["written"]                      # day 0 v1
+        assert (await old(END0 + 3600))["written"]            # day 1 v1
+        assert (await old(_start(2) + 5))["written"]          # day 2 v1
+        before = await _days(conn, a)
+        assert before == {DAY0: [(1, False)], _day(1): [(1, False)],
+                          _day(2): [(1, False)]}
+        # a host whose clock is still in day 1, a minute before midnight
+        skew = _start(2) - 60
+        assert await PA.days_to_close(conn, session=sess,
+                                      closed_at=skew) == []
+        back = await PA.step(conn, _ctx(a, skew))
+        assert back["closing"] == [] and back["days_closed"] == 0
+        assert back["report"] is None
+        assert back["report_held"] == "REPORT_CLOCK_BEHIND_THE_NEWEST_REPORT"
+        assert back["days_not_reconciled"] == 0
+        assert await _days(conn, a) == before          # day 0 not closed
+        assert await _named(conn, a) == []
+        # a clock further behind (in day 0): nothing to close, and the
+        # naming read looks at no history day (day -1 has fills)
+        far = T + 60
+        assert await PA.days_to_close(conn, session=sess,
+                                      closed_at=far) == []
+        assert await PA.days_not_reconciled(conn, session=sess,
+                                            account_id=acct,
+                                            closed_at=far) == []
+        got_far = await PA.step(conn, _ctx(a, far))
+        assert got_far["closing"] == [] and got_far["report"] is None
+        assert await _days(conn, a) == before
+        assert await _named(conn, a) == []
+        # the next pass on a correct clock closes day 1, and only day 1
+        got = await PA.step(conn, _ctx(a, _start(2) + 60))
+        assert got["closing"] == [{"report_day": str(_day(1)),
+                                   "written": True, "version": 2,
+                                   "why": None, "final": True}]
+        assert got["report_held"] is None
+        days = await _days(conn, a)
+        assert days[DAY0] == [(1, False)]              # history, not closed
+        assert days[_day(1)] == [(1, False), (2, True)]
+        assert await _finals_per_day(conn, a) == {
+            DAY0: 0, _day(1): 1, _day(2): 0}
+        assert got["days_not_reconciled"] == 0
+        assert await _named(conn, a) == []
+    finally:
+        await conn.close()
+
+
+@pg
+async def test_a_clock_behind_the_newest_report_closes_nothing_after_a_closed_day():
+    """The same rule once the session has a closed day: old-code workers
+    turned two midnights after the new code closed day 0 (days 1 and 2 open,
+    day 3 reported). A host whose clock is in day 2 closes nothing, not even
+    day 1, which is over by its clock; the next pass on a correct clock
+    closes days 1 and 2 (both after the newest closed day)."""
+    conn = await H.connect()
+    try:
+        a = await H.new_account(conn, "audskew2", now=T)
+        sess = _ctx(a, T)["session"]
+        acct = a["account_id"]
+        assert (await PA.step(conn, _ctx(a, T)))["report"]["version"] == 1
+        turn = await PA.step(conn, _ctx(a, _start(1) + 30))
+        assert [c["report_day"] for c in turn["closing"]] == [str(DAY0)]
+
+        async def old(now):
+            """A version as the code before day closing writes it."""
+            return await PA.write_report(conn, session=sess, account_id=acct,
+                                         now=now)
+        assert (await old(_start(2) + 5))["written"]          # day 2 v1
+        assert (await old(_start(3) + 5))["written"]          # day 3 v1
+        before = await _days(conn, a)
+        assert before == {DAY0: [(1, False), (2, True)],
+                          _day(1): [(1, False)], _day(2): [(1, False)],
+                          _day(3): [(1, False)]}
+        skew = _start(3) - 60                      # in day 2, behind day 3
+        assert await PA.days_to_close(conn, session=sess,
+                                      closed_at=skew) == []
+        back = await PA.step(conn, _ctx(a, skew))
+        assert back["closing"] == [] and back["report"] is None
+        assert back["report_held"] == "REPORT_CLOCK_BEHIND_THE_NEWEST_REPORT"
+        assert await _days(conn, a) == before
+        got = await PA.step(conn, _ctx(a, _start(3) + 60))
+        assert [(c["report_day"], c["written"], c["final"])
+                for c in got["closing"]] == [(str(_day(1)), True, True),
+                                             (str(_day(2)), True, True)]
+        assert got["report_held"] is None
+        assert await _finals_per_day(conn, a) == {
+            DAY0: 1, _day(1): 1, _day(2): 1, _day(3): 0}
         assert await _named(conn, a) == []
     finally:
         await conn.close()

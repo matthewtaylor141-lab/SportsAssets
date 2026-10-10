@@ -18,7 +18,10 @@ closing version was written (the row's `recorded_at`), as every version's
 are at its writing. Nothing is appended to a day after its final version. A
 day with no report (no pass ran on it) gets none, final or otherwise; the
 days before the session's first closed day are history and are not closed
-retroactively. Final never implies `reconciles`.
+retroactively. Final never implies `reconciles`. A report clock behind the
+session's newest reported day (its day is before that day: a clock stepped
+back, or a host behind the one that ran the last pass) writes nothing: no
+version, no closing version and no named day.
 
 A DAY NO REPORT COVERS IS RECORDED BY NAME. A day on which the paper pass
 ran and the account has activity (ledger entries, decisions, orders, fills,
@@ -47,13 +50,18 @@ writes the old day's last version (not final) and the new day's first one.
 If a worker still on that code reaches midnight first, the new code's first
 pass finds no closed day and the new day already reported. So a session with
 no closed day closes its newest reported day that is OVER, not its newest
-reported day: that first pass still closes the day before the deploy. What
-the guard cannot cover: if old-code workers turn two midnights before the
-new code's first pass, only the later of those days is closed, and the
-earlier stays without a final version, as history; and while both versions
-run, an old-code worker whose clock is behind midnight can append a non-final
-version to a day the new code closed (it has no ALREADY_FINAL rule). Such a
-day keeps its final version and is never closed again.
+reported day: that first pass still closes the day before the deploy. The
+guard acts only on a clock that is not behind the newest reported day. A
+host whose clock is still in an earlier day (seconds of skew between hosts
+at midnight) closes nothing, because by its clock the newest reported day
+that is over is an earlier day, which is history. A correct clock closes
+the day before the deploy at its next pass. What the guard cannot cover: if
+old-code workers turn two midnights before the new code's first pass, only
+the later of those days is closed, and the earlier stays without a final
+version, as history; and while both versions run, an old-code worker whose
+clock is behind midnight can append a non-final version to a day the new
+code closed (it has no ALREADY_FINAL rule). Such a day keeps its final
+version and is never closed again.
 
 DEFINITIONS, ENFORCED IN CODE:
   acquisition volume   sum(qty x price + fee) over BUY fills of the day,
@@ -756,7 +764,14 @@ async def days_to_close(conn, *, session: dict, closed_at: float) -> list:
     after it (a worker on the code before day closing reached midnight
     first: the deploy-time transient in the module docstring) does not hide
     it. A day with no version is never a candidate (no pass reported it, so
-    it gets no report)."""
+    it gets no report).
+
+    A CLOSING CLOCK BEHIND THE NEWEST REPORTED DAY CLOSES NOTHING (a report
+    clock behind the newest report writes nothing): the session has a
+    version for a day after the day of `closed_at`. "Over" is judged on
+    that clock, so for a session with no closed day its newest reported
+    day that is over would be an earlier day, which is history. The next
+    pass on a correct clock closes what is due."""
     tz = session.get("reporting_tz") or "America/New_York"
     today = day_bounds(closed_at, tz)[0]
     rows = await conn.fetch(
@@ -764,6 +779,7 @@ async def days_to_close(conn, *, session: dict, closed_at: float) -> list:
         "             FROM paper_audrey_reports WHERE session_id=$1 "
         "            GROUP BY report_day) "
         "SELECT report_day FROM d WHERE NOT closed AND report_day < $2 "
+        "   AND NOT EXISTS (SELECT 1 FROM d WHERE report_day > $2) "
         "   AND report_day > coalesce("
         "       (SELECT max(report_day) FROM d WHERE closed), "
         "       (SELECT max(report_day) FROM d WHERE report_day < $2) - 1) "
@@ -805,7 +821,12 @@ async def days_not_reconciled(conn, *, session: dict, account_id: str,
     report version is covered by it; a day already recorded (its
     DAY_NOT_RECONCILED finding exists) is skipped; a day with no activity on
     the account (ACTIVITY) is not a gap of Audrey's. Each remaining day is
-    returned with its window and its activity counts per source."""
+    returned with its window and its activity counts per source.
+
+    A clock behind the newest reported day (the session has a version for a
+    day after the day of `closed_at`) looks at nothing: the bases above are
+    judged on that clock and could reach back before the days the next
+    correct clock looks at (a backfill)."""
     tz = session.get("reporting_tz") or "America/New_York"
     sid = session["session_id"]
     today = day_bounds(closed_at, tz)[0]
@@ -814,8 +835,12 @@ async def days_not_reconciled(conn, *, session: dict, account_id: str,
         "         WHERE session_id=$1 AND final) AS closed, "
         "       (SELECT max(report_day) FROM paper_audrey_reports "
         "         WHERE session_id=$1 AND report_day < $2) AS reported, "
+        "       EXISTS (SELECT 1 FROM paper_audrey_reports "
+        "         WHERE session_id=$1 AND report_day > $2) AS behind, "
         "       (SELECT started_at FROM paper_sessions "
         "         WHERE session_id=$1) AS started", sid, today)
+    if b["behind"]:
+        return []
     if b["closed"] is not None:
         after, basis = b["closed"], "NEWEST_CLOSED_DAY"
     elif b["reported"] is not None:
@@ -934,7 +959,8 @@ async def step(conn, ctx: dict) -> dict:
     rep_now = max(float(clock()), last_fill or 0.0)
     # THE CLOSING VERSIONS FIRST: every reported day that is over by the
     # report clock -- the day before, or the last reported day after a gap
-    # of whole days in which no pass ran -- gets its one final version.
+    # of whole days in which no pass ran -- gets its one final version; a
+    # clock behind the newest report closes nothing (days_to_close).
     closing = await close_days(conn, session=sess,
                                account_id=ctx["account_id"],
                                closed_at=rep_now)
