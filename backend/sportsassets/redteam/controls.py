@@ -381,7 +381,34 @@ def by_event(rows: list) -> list:
             in sorted(agg.items())]
 
 
-def profit_breakers(rows: list) -> dict:
+#: the attribution read left out a position of the control's own population
+#: (intel.attribution.load_paper reads the whole population in pages; only
+#: its safety stop, PAPER_POSITIONS_LIMIT, can cut it): the control is RED
+#: by this name, never a pass on a subset
+B_READ_TRUNCATED = "ATTRIBUTION_READ_TRUNCATED"
+
+
+def _read_blockers(read: dict | None) -> list:
+    return [B_READ_TRUNCATED] if read and read.get("complete") is False \
+        else []
+
+
+def population_read(read: dict | None, *, since: float | None,
+                    window_days: float | None) -> dict | None:
+    """What the attribution read holds of ONE control's population (decided
+    at or after `since`; None = every position): the read's own figures and
+    `complete` -- None when nothing describes the read. The population is
+    named by its RULE (`population_window_days`, None = every position),
+    never by an instant that moves with the clock: a receipt is deduplicated
+    by its evidence hash, so evidence holds no `now`."""
+    from ..intel import attribution as IA
+    if not read:
+        return None
+    return dict(read, population_window_days=window_days,
+                complete=IA.read_complete_since(read, since))
+
+
+def profit_breakers(rows: list, read: dict | None = None) -> dict:
     obs = by_event(rows)
     rep = RTP.mechanism_breaker(obs, min_n=30)
     events = {}
@@ -414,11 +441,13 @@ def profit_breakers(rows: list) -> dict:
                       "cumulative_residual": "0"}
     eligible = [m for m, v in out.items() if v["status"] == "ELIGIBLE"]
     disabled = [m for m, v in out.items() if v["status"] == "DISABLED"]
-    return result("PROFIT_BREAKERS", GREEN if eligible and not disabled
-                  else RED, ["MECHANISM_DISABLED:%s" % m for m in disabled]
-                  + ([] if eligible else ["NO_MECHANISM_ELIGIBLE"]),
+    blockers = (["MECHANISM_DISABLED:%s" % m for m in disabled]
+                + ([] if eligible else ["NO_MECHANISM_ELIGIBLE"])
+                + _read_blockers(read))
+    return result("PROFIT_BREAKERS", GREEN if eligible and not blockers
+                  else RED, blockers,
                   {"mechanisms": out, "eligible": eligible,
-                   "disabled": disabled,
+                   "disabled": disabled, "read": read,
                    "rule": ("each sleeve alone: a failing sleeve is disabled "
                             "without touching another; a good sleeve never "
                             "hides a failing one")})
@@ -426,7 +455,7 @@ def profit_breakers(rows: list) -> dict:
 
 # ── attribution ──────────────────────────────────────────────────────────
 
-def attribution(attributed: list) -> dict:
+def attribution(attributed: list, read: dict | None = None) -> dict:
     claim = [r for r in attributed if r.get("identity_claimed")
              and r.get("realized_pnl_usd") is not None]
     comps = {"selection": sum((D(r.get("model_edge_usd")) for r in claim),
@@ -448,8 +477,10 @@ def attribution(attributed: list) -> dict:
     blockers = list(g["blockers"])
     if not claim:
         blockers.append("NO_SETTLED_POSITION_CLAIMS_THE_IDENTITY")
+    blockers += _read_blockers(read)
     return result("ATTRIBUTION", GREEN if not blockers else RED, blockers,
                   {"positions_identity_claimed": len(claim),
+                   "read": read,
                    "settled_positions_without_identity": unmeasured,
                    "realized_pnl": str(g["realized"]),
                    "components": {k: str(v) for k, v in
@@ -462,9 +493,27 @@ def attribution(attributed: list) -> dict:
                    "rule": "one additive identity; no dollar claimed twice"})
 
 
-async def attributed_positions(conn, *, now: float) -> tuple:
+#: ATTRIBUTION's and PROFIT_BREAKERS' population: the PAPER positions decided
+#: in the last 60 days (intel.attribution's window, unchanged)
+ATTRIBUTION_WINDOW_DAYS = 60.0
+
+
+async def attributed_positions(conn, *, now: float,
+                               detail: dict | None = None) -> tuple:
+    """EVERY PAPER position, attributed (no window; read whole, a page at a
+    time, up to load_paper's safety stop, and `detail` receives the read's
+    figures and whether the stop left any out). Each
+    consumer takes ITS declared population from these rows: ATTRIBUTION and
+    PROFIT_BREAKERS the last 60 days (`attribution_window`), the research
+    study every position (its plan declares no window), the forward
+    scoreboard its cohort since the thresholds' frozen_at. RC6.2: one
+    60-day read served all of them, so the study and the scoreboard cohort
+    would lose their oldest members as they aged past 60 days."""
     from ..intel import attribution as IA
-    rows = await IA.load_paper(conn, now=now)
+    meta: dict = {}
+    rows = await IA.load_paper(conn, now=now, days=None, meta=meta)
+    if detail is not None:
+        detail.update(meta)
     gids = sorted({r.get("group_id") for r in rows if r.get("group_id")})
     fx = {}
     if gids:
@@ -472,6 +521,17 @@ async def attributed_positions(conn, *, now: float) -> tuple:
             "SELECT group_id, max(fixture) fixture FROM paper_fills WHERE "
             "group_id = ANY($1::text[]) GROUP BY 1", gids)}
     return rows, fx
+
+
+def attribution_window(rows: list, read: dict | None, *, now: float,
+                       days: float = ATTRIBUTION_WINDOW_DAYS) -> tuple:
+    """(ATTRIBUTION's / PROFIT_BREAKERS' rows, what the read holds of them):
+    the positions decided in the last `days`, and whether the read holds
+    every one of them."""
+    from ..intel import attribution as IA
+    since = float(now) - float(days) * 86400.0
+    return IA.within(rows, since), population_read(read, since=since,
+                                                   window_days=days)
 
 
 # ── digital twin ─────────────────────────────────────────────────────────
@@ -490,6 +550,9 @@ def twin(rep: dict) -> dict:
                                                            e.compared))
     if "optimistic_false_fills" not in rep:
         blockers.append("OPTIMISTIC_FALSE_FILLS_NOT_MEASURED")
+    if (rep.get("read") or {}).get("truncated"):
+        # the read left newer fresh orders out: no agreement over a subset
+        blockers.append("TWIN_READ_TRUNCATED")
     return result("DIGITAL_TWIN", GREEN if not blockers else RED, blockers,
                   {"compared": e.compared, "matched": e.matched,
                    "agreement": g.get("agreement"),
@@ -503,6 +566,7 @@ def twin(rep: dict) -> dict:
                                   "lookahead": 0,
                                   "frozen": "package defaults, unchanged"},
                    "historical_baseline": rep.get("diagnosis_receipt"),
+                   "read": rep.get("read"),
                    "twin_pnl_used_for_capital": False})
 
 
@@ -549,7 +613,9 @@ def samples(prob: dict, registry: dict) -> dict:
                                            "holdout")} if parts else None)})
 
 
-def multiple_testing(registry: dict) -> dict:
+def multiple_testing(registry: dict, read: dict | None = None) -> dict:
+    """`read`: what the attribution read holds of the study's population
+    (every PAPER position: the plan declares no window)."""
     tested = int(registry.get("candidates_tested") or 0)
     pre = int(registry.get("preregistered") or 0)
     selected_after = bool(registry.get("selected_after_holdout"))
@@ -566,8 +632,10 @@ def multiple_testing(registry: dict) -> dict:
         # a strategy in the measured data that the registration does not
         # name is an unregistered candidate however the counts compare
         blockers.append("UNREGISTERED_CANDIDATES_TESTED")
+    blockers += _read_blockers(read)
     return result("MULTIPLE_TESTING", GREEN if not blockers else RED,
                   blockers, {"candidates_tested": tested,
+                             "read": read,
                              "preregistered": pre,
                              "selected_after_holdout": selected_after,
                              "pbo": "UNMEASURED" if pbo is None else pbo,
@@ -588,6 +656,9 @@ def multiple_testing(registry: dict) -> dict:
                              "days": m.get("days"),
                              "events": m.get("events"),
                              "excluded": m.get("excluded"),
+                             # observations made before / after the
+                             # registration (a label; no rule added)
+                             "provenance": m.get("provenance"),
                              "study": registry.get("study"),
                              "plan_sha": registry.get("plan_sha"),
                              "champion": "CASH (no candidate beats it "

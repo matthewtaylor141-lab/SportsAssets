@@ -241,8 +241,12 @@ ENTRY_BOOK_SQL = """
 async def read(conn, *, now: float) -> dict:
     from . import bettor_paper_ledger as L
     from .intel import attribution as A
+    # MAX_POSITIONS counts POSITIONS (RC6.2: the bound used to count every
+    # ENTER decision, orderless ones included); a read the bound cut is
+    # named in the report, never presented as the whole book
+    meta: dict = {}
     rows = await A.load_paper(conn, now=now, days=HISTORY_DAYS,
-                              limit=MAX_POSITIONS)
+                              limit=MAX_POSITIONS, meta=meta)
     gids = sorted({r["group_id"] for r in rows if r.get("group_id")})
     cov, missed, spreads, fixtures, stale = {}, {}, {}, {}, 0
     if gids:
@@ -266,5 +270,7 @@ async def read(conn, *, now: float) -> dict:
             v, q = vwap.get(g, (None, None))
             if mid is not None and v is not None and q is not None:
                 spreads[g] = round(q * (v - mid), 6)
-    return build(rows, coverage=cov, missed=missed, spreads=spreads,
-                 fixtures=fixtures, stale_entries=stale)
+    out = build(rows, coverage=cov, missed=missed, spreads=spreads,
+                fixtures=fixtures, stale_entries=stale)
+    out["positions_read"] = dict(meta, complete=not meta.get("truncated"))
+    return out

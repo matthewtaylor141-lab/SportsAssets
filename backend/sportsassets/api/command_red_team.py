@@ -155,12 +155,14 @@ async def pm_read(conn, *, now: float) -> dict:
     from ..completion import read as CMP
     data, res = await build(conn, now=now)
     sec = CMP._Sections(conn)
+    aread: dict = {}
     attributed, fixtures = await sec.run(
-        "attribution", lambda: C.attributed_positions(conn, now=now),
+        "attribution", lambda: C.attributed_positions(conn, now=now,
+                                                      detail=aread),
         ([], {}))
     sb = await sec.run("scoreboard", lambda: SB.read(
-        conn, now=now, attributed=attributed, fixtures=fixtures),
-        {"status": "UNAVAILABLE"})
+        conn, now=now, attributed=attributed, fixtures=fixtures,
+        read=aread), {"status": "UNAVAILABLE"})
     if not sec.timings.get("attribution", {}).get("ok", True):
         # a scoreboard over no positions is not a scoreboard
         sb = {"status": "UNAVAILABLE", "why": "ATTRIBUTION_READ_FAILED"}

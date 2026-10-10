@@ -32,6 +32,8 @@
                 Without it (before RC6) every optimistic diagnosis saw no
                 pre-activation book and named every PAPER fill
                 CANCELLED_BEFORE_FIRST_ELIGIBLE_BOOK (production RC5: 7 of 7).
+                The whole fresh population is replayed, a page at a time
+                (TWIN_PAGE_ORDERS / TWIN_MAX_ORDERS below).
 
   labels        a position's settlement is its LATEST version
                 (paper_settlements is versioned; a correction appends v2).
@@ -108,6 +110,18 @@ SELECT d.*, l.y_long, pm.event_slug,""" + BOOK_TOP + """
   LEFT JOIN pm ON pm.market_slug = d.slug
  LIMIT $2"""
 
+#: THE DECLARED WINDOW IS PRICED WHOLE (RC6.2 p-evcontrols). The bound was
+#: 2,000 decisions: production completion.json (pm-acceptance 37888018192)
+#: priced 1,992 + 8 dropped = 2,000 exactly, against about 4,300 ENTER
+#: decisions in its 7-day window (research-sql 37943749921 §6), so
+#: `window_days: 7` described the newest ~2.4 days -- one strategy. The bound
+#: is now a safety stop well above the window's volume (production's busiest
+#: day, 2026-10-05: 1,251 ENTER decisions), the pricing runs on the CPU lane,
+#: and a read the bound cuts is CASH by name (EV_READ_TRUNCATED), never a
+#: verdict over a subset.
+EV_MAX_DECISIONS = 20000
+EV_READ_TRUNCATED = "READ_TRUNCATED_WINDOW_NOT_PRICED_WHOLE"
+
 #: one hashed us_premap read for the event slugs (was a sequential probe
 #: per decision row)
 EV_SQL = """
@@ -117,7 +131,7 @@ WITH d0 AS (
     FROM paper_decisions d
    WHERE d.verdict = 'ENTER' AND d.book_obs_id IS NOT NULL
      AND d.decided_at > now() - make_interval(days => $1)
-   ORDER BY d.decided_at DESC
+   ORDER BY d.decided_at DESC, d.decision_id DESC
    LIMIT $2),
 pm AS (SELECT DISTINCT ON (market_slug) market_slug, event_slug
          FROM us_premap
@@ -129,7 +143,7 @@ SELECT d.decision_id, extract(epoch FROM d.decided_at) at, d.strategy,
   LEFT JOIN paper_book_observations o ON o.obs_id = d.book_obs_id
                                      AND o.error IS NULL
   LEFT JOIN pm ON pm.market_slug = d.us_market_slug
- ORDER BY d.decided_at DESC"""
+ ORDER BY d.decided_at DESC, d.decision_id DESC"""
 
 TWIN_SQL = """
 SELECT json_build_object(
@@ -167,8 +181,38 @@ SELECT json_build_object(
  WHERE o.time_in_force IN ('IOC', 'FOK') AND o.terminal_at IS NOT NULL
    AND o.role IN ('ENTRY', 'EXIT', 'REDUCE')
    AND o.eligible_at > to_timestamp($1)
- ORDER BY o.eligible_at
+ ORDER BY o.eligible_at, o.order_id
  LIMIT $2"""
+
+#: THE TWIN'S POPULATION IS READ WHOLE (RC6.2 p-evcontrols, review rework).
+#: The population -- every terminal IOC/FOK ENTRY/EXIT/REDUCE order eligible
+#: after the frozen instant TWIN_DIAGNOSIS_WINDOW_END -- only grows. The read
+#: was bounded at 800 orders. From the 801st on, a cut read certifies nothing
+#: (TWIN_READ_TRUNCATED), so DIGITAL_TWIN would turn RED for good on a known
+#: schedule: at the 2026-10-05 rate of 586 orders a day, about 1.35 days after
+#: entries resume (about 1.2 days after the 100th order); at the 10-02..04
+#: rate of about 54 a day, about 14.7 days. The scorecard would have labelled
+#: that RED forward evidence.
+#: The read now runs through a server-side cursor TWIN_PAGE_ORDERS at a time.
+#: Each page is decoded and replayed on the API's CPU lane into one streaming
+#: agreement (completion.fill_replay.Agreement), so memory holds one page,
+#: not the population. TWIN_MAX_ORDERS is a safety stop, not a sample size.
+#: research-sql 37970656946 (2026-10-09T18:04Z) measured production:
+#:   - TWIN_SQL costs 0.21-0.50 ms per order on the server (794 orders in
+#:     207 ms and in 395 ms; a page of 500 in 112 ms).
+#:   - Each order carries 4,664 bytes on average (p95 13,845, max 61,825).
+#:   - The predicate's whole history is 794 orders; the fresh population is 7.
+#: LOCAL, on 20,000 synthetic orders of production's shape (5,228 bytes each
+#: on average): 6.8 s of server execution (0.34 ms per order, inside
+#: production's range), 3.2 s of decoding and replay on the CPU lane (40
+#: jobs of about 80 ms), 12.1 s end to end. The paged read peaks at 26 MB of
+#: Python allocations; a one-shot read of the same rows peaks at 903 MB.
+#: At the stop the read therefore costs about 4-10 s of production database
+#: time, spread over 40 fetches of 0.1-0.25 s, inside the readback's 80 s
+#: budget. The stop is 25 times production's whole history. A read the stop
+#: cuts still certifies nothing, by name.
+TWIN_PAGE_ORDERS = 500
+TWIN_MAX_ORDERS = 20000
 
 
 def orient(bid, ask, side):
@@ -351,18 +395,70 @@ def ev_block(rows: list, *, authority: str, fee_fn) -> dict:
             "authority_granted": False}
 
 
-def twin_block(orders: list) -> dict:
-    fresh = [o for o in orders
-             if float(o.get("eligible") or 0) > TWIN_DIAGNOSIS_WINDOW_END]
-    rep = TW.agreement(fresh)
+def ev_population(out: dict, *, read: int, limit: int,
+                  truncated: bool) -> dict:
+    """`ev_block`'s verdict with WHAT IT COVERS of the declared window: the
+    decisions read, and whether the bound left any out. A cut read can
+    never pass: its verdict is CASH by name (EV_READ_TRUNCATED), the subset's
+    own verdict kept beside it as evidence only."""
+    out = dict(out, population={
+        "decisions_read": int(read), "limit": int(limit),
+        "truncated": bool(truncated),
+        "population_in_window": None if truncated else int(read),
+        "population_at_least": int(read) + (1 if truncated else 0),
+        "covers_the_declared_window": not truncated})
+    if truncated:
+        out.update(subset_verdict=out.get("verdict"),
+                   subset_reason=out.get("reason"), verdict="CASH",
+                   reason=EV_READ_TRUNCATED)
+    return out
+
+
+#: a read that left a member of the twin's population out (the safety stop
+#: TWIN_MAX_ORDERS cut it, oldest first, so the NEWEST orders -- the ones that
+#: say whether the twin still agrees -- are the ones missing) certifies
+#: nothing, by this name; DIGITAL_TWIN names TWIN_READ_TRUNCATED
+TWIN_READ_TRUNCATED = "READ_TRUNCATED_NEWER_ORDERS_NOT_REPLAYED"
+TWIN_READ_ORDER = "eligible_at, order_id ascending (oldest first)"
+
+
+def _fresh(orders: list) -> list:
+    return [o for o in orders
+            if float(o.get("eligible") or 0) > TWIN_DIAGNOSIS_WINDOW_END]
+
+
+def twin_page(acc, texts: list) -> int:
+    """One page of TWIN_SQL rows, decoded and replayed into the streaming
+    agreement `acc` (pure; run on the API's CPU lane). Returns the orders
+    the page held."""
+    import json
+    orders = [json.loads(t) for t in texts]
+    acc.add(_fresh(orders))
+    return len(orders)
+
+
+def twin_report(rep: dict, *, orders_read: int, truncated: bool,
+                limit: int | None, pages: int | None = None,
+                page_orders: int | None = None) -> dict:
+    """The twin's verdict over an agreement report, with what the read
+    covers. A cut read certifies nothing."""
     rate = rep.get("fill_agreement_rate")
     enough = rep["replayed"] >= TWIN_MIN_FRESH_ORDERS
-    certified = bool(enough and rate is not None and rate >= TW.TARGET)
+    certified = bool(enough and rate is not None and rate >= TW.TARGET
+                     and not truncated)
+    read = {"orders_read": int(orders_read), "limit": limit,
+            "truncated": bool(truncated), "order": TWIN_READ_ORDER,
+            "population": None if truncated else int(orders_read),
+            "population_at_least": int(orders_read) + (1 if truncated else 0),
+            "covers_the_population": not truncated}
+    if pages is not None:
+        read.update(pages=int(pages), page_orders=page_orders)
     return dict(rep, fresh_since=TWIN_DIAGNOSIS_WINDOW_END,
                 min_fresh_orders=TWIN_MIN_FRESH_ORDERS,
-                status=("CERTIFIED" if certified else
+                status=(TWIN_READ_TRUNCATED if truncated else
+                        "CERTIFIED" if certified else
                         "ACCUMULATING" if not enough else "BELOW_TARGET"),
-                certified=certified,
+                certified=certified, read=read,
                 diagnosis_receipt={
                     "source": "Profitability Stack V1 twin run 37643890985",
                     "optimistic_fill_agreement": 0.700508,
@@ -375,6 +471,13 @@ def twin_block(orders: list) -> dict:
                         "in-sample, never the certification")})
 
 
+def twin_block(orders: list, *, truncated: bool = False,
+               limit: int | None = None) -> dict:
+    """The twin's verdict over a list already in hand."""
+    return twin_report(TW.agreement(_fresh(orders)), orders_read=len(orders),
+                       truncated=truncated, limit=limit)
+
+
 async def read_probability(conn, *, days: int = 30, limit: int = 5000) -> dict:
     rows = [dict(r) for r in await conn.fetch(PROB_SQL, int(days), int(limit))]
     out = probability_block(rows)
@@ -383,8 +486,9 @@ async def read_probability(conn, *, days: int = 30, limit: int = 5000) -> dict:
 
 
 async def read_ev(conn, *, authority: str, days: int = 7,
-                  limit: int = 2000) -> dict:
+                  limit: int = EV_MAX_DECISIONS) -> dict:
     from .. import calibration_fees as CF
+    from .. import cpu_lane as _cpu
 
     def fee_fn(price, at):
         iso = datetime.fromtimestamp(float(at), timezone.utc).strftime(
@@ -394,15 +498,49 @@ async def read_ev(conn, *, authority: str, days: int = 7,
         if got.get("BLOCKER") or got.get("FEE") is None:
             return None
         return float(got["FEE"]) / 100.0
-    rows = [dict(r) for r in await conn.fetch(EV_SQL, int(days), int(limit))]
-    out = ev_block(rows, authority=authority, fee_fn=fee_fn)
+    # one past the bound is read, so a cut window is known, not guessed
+    rows = [dict(r) for r in await conn.fetch(EV_SQL, int(days),
+                                              int(limit) + 1)]
+    truncated = len(rows) > int(limit)
+    rows = rows[:int(limit)]
+    # the pricing is pure: on the API's CPU lane (one worker thread for
+    # every such job: cpu_lane), never on the event loop, at the window's
+    # whole size
+    out = await _cpu.run(ev_block, rows, authority=authority, fee_fn=fee_fn)
+    out = ev_population(out, read=len(rows), limit=int(limit),
+                        truncated=truncated)
     out["window_days"] = days
     return out
 
 
-async def read_twin(conn, *, limit: int = 800) -> dict:
-    import json
-    rows = await conn.fetch(TWIN_SQL, float(TWIN_DIAGNOSIS_WINDOW_END),
-                            int(limit))
-    orders = [json.loads(r["j"]) for r in rows]
-    return twin_block(orders)
+async def read_twin(conn, *, limit: int = TWIN_MAX_ORDERS,
+                    page: int = TWIN_PAGE_ORDERS) -> dict:
+    """The WHOLE fresh twin population, a page at a time through a
+    server-side cursor. Each page is decoded and replayed on the CPU lane
+    into one streaming agreement, so memory holds one page. One row past
+    `limit` is asked for, so a cut is known, not guessed: a cut read
+    certifies nothing (TWIN_READ_TRUNCATED)."""
+    from .. import cpu_lane as _cpu
+    limit, page = int(limit), max(1, int(page))
+    acc = TW.Agreement()
+    read = pages = 0
+    truncated = False
+    # a cursor lives in a transaction: inside the readback's section (its
+    # own savepoint, statement timeout per FETCH) this is a nested savepoint
+    async with conn.transaction():
+        cur = await conn.cursor(TWIN_SQL, float(TWIN_DIAGNOSIS_WINDOW_END),
+                                limit + 1)
+        while True:
+            rows = await cur.fetch(page)
+            fetched = len(rows)
+            if fetched > limit - read:
+                truncated = True
+                rows = rows[:limit - read]
+            if rows:
+                pages += 1
+                read += await _cpu.run(twin_page, acc,
+                                       [r["j"] for r in rows])
+            if truncated or fetched < page:
+                break
+    return twin_report(acc.report(), orders_read=read, truncated=truncated,
+                       limit=limit, pages=pages, page_orders=page)

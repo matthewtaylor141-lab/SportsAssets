@@ -1467,3 +1467,9 @@ tests/test_rc62_kalshi_terms_wording.py
 tests/test_rc62_plane_fixture_scope.py
 # (RC6.2 p-coverage rework) no sports market leaves the registry or the coverage denominator by its venue code: gtasc (Guatemalan soccer, production's 6 listed money lines) reads soccer; a code excludes only a row whose own market type names no sport (ontology.excluded_as_non_sports, read by populate, the waterfall and the venue count alike); a held or candidate market is never excluded and keeps its own catalogue row
 tests/test_rc62_non_sports_population.py
+# (RC6.2 p-evcontrols) the attribution read counts POSITIONS, never orderless ENTER decisions, and reads its WHOLE population a page at a time (no cliff at 5,000: the study and the forward scoreboard stay whole past it; a paged read equals the one-shot read); only the 20,000 safety stop can cut it, and a read that left out a member of a control's own population turns ATTRIBUTION / PROFIT_BREAKERS / MULTIPLE_TESTING RED by name (ATTRIBUTION_READ_TRUNCATED) and the forward scoreboard UNAVAILABLE; the study reads every position (its plan declares no window)
+tests/test_rc6_p_evcontrols_attribution_read.py
+# (RC6.2 p-evcontrols) the executable-EV verdict prices its whole declared window (a cut read is CASH by name, never a verdict over a subset); the digital twin replays its WHOLE fresh population a page at a time (no cliff at 800; the streamed agreement equals the whole list's) and never certifies on a cut population (TWIN_READ_TRUNCATED)
+tests/test_rc6_p_evcontrols_ev_twin_read.py
+# (RC6.2 p-evcontrols) the strategy-selection study reports which observations were made before / after its registration (a label: the measurement, the plan and its sha unchanged, no rule added)
+tests/test_rc6_p_evcontrols_study_provenance.py

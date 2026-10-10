@@ -436,28 +436,36 @@ async def evaluate(conn, *, now: float | None = None,
     controls["TRUTH_QUORUM"] = C.quorum(rows, now=now,
                                         audrey_open_discrepancies=open_disc,
                                         source_detail=qdetail, venue=venue)
-    attributed, fixtures = await sec.run(
-        "attribution", lambda: C.attributed_positions(conn, now=now),
+    # EVERY PAPER position, read once; each control takes its own declared
+    # population from it, and a read that left one of its members out turns
+    # it RED by name (ATTRIBUTION_READ_TRUNCATED), never a pass on a subset
+    aread: dict = {}
+    every, fixtures = await sec.run(
+        "attribution", lambda: C.attributed_positions(conn, now=now,
+                                                      detail=aread),
         ([], {}))
+    attributed, wread = C.attribution_window(every, aread, now=now)
     mech = C.mechanism_rows(attributed, fixtures)
-    controls["PROFIT_BREAKERS"] = C.profit_breakers(mech)
-    controls["ATTRIBUTION"] = C.attribution(attributed)
+    controls["PROFIT_BREAKERS"] = C.profit_breakers(mech, read=wread)
+    controls["ATTRIBUTION"] = C.attribution(attributed, read=wread)
     controls["DIGITAL_TWIN"] = C.twin(comp.get("digital_twin") or {})
     reg = await sec.run("holdout_registry",
                         lambda: C.holdout_registry(conn), {})
     # THE REGISTERED STUDY'S PBO / DSR over the attribution rows read above
-    # (pure; train + test events only, the holdout slice never read)
+    # (pure; train + test events only, the holdout slice never read) -- the
+    # plan's population is EVERY position: it declares no window
     # (a worker thread: up to 12,870 CSCV splits must not hold the API loop)
     import asyncio
     from . import research_registry as RREG
-    mt = await asyncio.to_thread(RREG.measure, reg, attributed, fixtures)
+    mt = await asyncio.to_thread(RREG.measure, reg, every, fixtures)
     reg = dict(reg, measurement=mt, pbo_ok=mt.get("pbo_ok"),
                dsr_ok=mt.get("dsr_ok"),
                candidates_tested=max(int(reg.get("candidates_tested") or 0),
                                      int(mt.get("candidates_tested") or 0)))
     controls["SAMPLE_INTEGRITY"] = C.samples(comp.get("probability") or {},
                                              reg)
-    controls["MULTIPLE_TESTING"] = C.multiple_testing(reg)
+    controls["MULTIPLE_TESTING"] = C.multiple_testing(
+        reg, read=C.population_read(aread, since=None, window_days=None))
     from .. import allie_capital as ALLIE
     controls["CAPACITY"] = C.capacity(
         await sec.run("capacity", lambda: capacity_points(conn), []),

@@ -346,6 +346,60 @@ def _day(at) -> str | None:
         return None
 
 
+#: WHEN EACH OBSERVATION WAS MADE, AGAINST THE REGISTRATION (RC6.2
+#: p-evcontrols; a label, no rule). The registry's PREREGISTER row is written
+#: when a release carrying this module first runs, so every observation made
+#: before it -- in production, all of 2026-10-01..06, the holdout events
+#: included, which the lifecycle quarantines already reacted to -- is
+#: RETROSPECTIVE under a "preregistered" study. The measurement keeps every
+#: train + test observation (nothing leaves the population); the evidence
+#: says how many were made after registration. Whether acceptance must rest
+#: on those alone is the owner's decision, not added here.
+BEFORE, AFTER, UNKNOWN = ("before_registration", "after_registration",
+                          "registration_time_unknown")
+
+
+def _epoch(v) -> float | None:
+    if v is None:
+        return None
+    if hasattr(v, "timestamp"):
+        return float(v.timestamp())
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _when(at, reg_at: float | None) -> str:
+    a = _epoch(at)
+    if reg_at is None or a is None:
+        return UNKNOWN
+    return BEFORE if a < reg_at else AFTER
+
+
+def provenance(prov: dict, reg_at: float | None) -> dict:
+    n_b = prov[BEFORE]["observations"]
+    n_a = prov[AFTER]["observations"]
+    n_u = prov[UNKNOWN]["observations"]
+    # an observation whose instant (or the registration's) is unknown is
+    # neither: the share is then unknown too, never guessed
+    known = n_u == 0 and (n_a + n_b) > 0
+    return {
+        "registered_at": reg_at,
+        "basis": ("each observation's decided_at against the PREREGISTER "
+                  "row's at"),
+        "observations": {w: prov[w]["observations"] for w in prov},
+        "days": {w: len(prov[w]["days"]) for w in prov},
+        "events": {w: len(prov[w]["events"]) for w in prov},
+        "holdout_events": {w: len(prov[w]["holdout_events"]) for w in prov},
+        "prospective_share": (n_a / (n_a + n_b)) if known else None,
+        "all_retrospective": known and n_a == 0,
+        "acceptance_rule": ("UNCHANGED: PBO and DSR are measured over every "
+                            "train + test observation; whether acceptance "
+                            "must rest on observations made after "
+                            "registration is an owner decision")}
+
+
 def measure(registry: dict, attributed: list, fixtures: dict) -> dict:
     """PBO / DSR of the registered study over train + test events.
 
@@ -363,6 +417,9 @@ def measure(registry: dict, attributed: list, fixtures: dict) -> dict:
     cells: dict = {}
     excluded = {HOLDOUT: 0, "NO_EVENT": 0, "NO_DAY": 0}
     events_used: set = set()
+    reg_at = _epoch(registry.get("registered_at"))
+    prov = {w: {"observations": 0, "days": set(), "events": set(),
+                "holdout_events": set()} for w in (BEFORE, AFTER, UNKNOWN)}
     for r in attributed or []:
         if not r.get("identity_claimed") or r.get("realized_pnl_usd") is None:
             continue
@@ -370,8 +427,10 @@ def measure(registry: dict, attributed: list, fixtures: dict) -> dict:
         if not ev:
             excluded["NO_EVENT"] += 1
             continue
+        when = _when(r.get("decided_at"), reg_at)
         if slice_of(str(ev)) == HOLDOUT:
             excluded[HOLDOUT] += 1
+            prov[when]["holdout_events"].add(str(ev))
             continue
         d = _day(r.get("decided_at"))
         if d is None:
@@ -384,12 +443,16 @@ def measure(registry: dict, attributed: list, fixtures: dict) -> dict:
             continue
         cells[(d, s)] = cells.get((d, s), 0.0) + pnl
         events_used.add(str(ev))
+        prov[when]["observations"] += 1
+        prov[when]["days"].add(d)
+        prov[when]["events"].add(str(ev))
     tested = sorted({s for _d, s in cells})
     days = sorted({d for d, _s in cells})
     unregistered = [s for s in tested if s not in reg]
     out = dict(base, tested=tested, candidates_tested=len(tested),
                unregistered_tested=unregistered, days=len(days),
-               events=len(events_used), excluded=excluded)
+               events=len(events_used), excluded=excluded,
+               provenance=provenance(prov, reg_at))
     matrix = [[cells.get((d, s), 0.0) for s in tested] for d in days]
     p = pbo_cscv(matrix, blocks=blocks_for(len(days)))
     out["pbo"], out["pbo_why"] = p.get("pbo"), p.get("why")
