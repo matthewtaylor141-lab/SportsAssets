@@ -27,6 +27,14 @@
 --     entry-fill schedulers add passes. So beats can be CLOSER than 60 s and the passes counter legitimately exceeds
 --     elapsed / 60: the counter is therefore checked against the beats seen, EXACTLY, never against elapsed time.
 --   * A pass that runs past 60 s coalesces the next tick and leaves a slot too (its beat shows elapsed_s > 60).
+--   * WHERE A BEAT'S INSTANT COMES FROM. The servicing task schedules the paper pass AFTER its own service
+--     (_service_once -> _agents_after_service, ext_pinnacle_loop.py:9511, :9642), and the next servicing pass starts
+--     max(60 s, previous pass duration + 5 s) after the previous one started (:9827-9828). So a beat-to-beat gap is
+--     60 s PLUS THE CHANGE in the servicing pass's own duration: a servicing pass that takes 35 s longer than the one
+--     before it shows as a 95 s beat gap with no paper pass missed (the gaps after it are 60 s again, and 25 s when
+--     it shortens back). C10 prints the servicing task's own cadence record (ingestion_state
+--     ext_pinnacle_last_servicing: last / max pass elapsed, recent start gaps) so such a gap can be told from a
+--     missed pass; it is still a FAIL of the strict rules below and must be explained by C10 in the report.
 --     On RC6.3c the settle step is subsecond and a pass is well under the 20 s pass budget, so that must not happen
 --     either: the slot rule below has no tolerance.
 --
@@ -210,3 +218,13 @@ SELECT count(*) AS beats_since_boot, count(*) FILTER (WHERE gap_s > 90) AS gaps_
        to_char((SELECT boot_at FROM boot), 'YYYY-MM-DD HH24:MI:SS') AS boot_at,
        CASE WHEN coalesce(sum(greatest(round(gap_s / 60.0) - 1, 0)), 0) = 0 AND count(*) FILTER (WHERE gap_s > 90) = 0 THEN 'ok' ELSE 'FAIL' END AS verdict_this_ring
   FROM g;
+
+\echo C10 the servicing task that schedules the paper pass (ingestion_state ext_pinnacle_last_servicing): its own cadence, so a beat gap over 90 s can be told from a late tick
+SELECT CASE WHEN jsonb_typeof(value->'at') = 'number' THEN to_char(to_timestamp((value->>'at')::float8), 'MM-DD HH24:MI:SS') END AS written,
+       value->>'state' AS state, value->>'source' AS source,
+       CASE WHEN jsonb_typeof(value->'pass_at') = 'number' THEN to_char(to_timestamp((value->>'pass_at')::float8), 'HH24:MI:SS') END AS pass_at,
+       value->>'elapsed_s' AS pass_elapsed_s, value->'servicing_cadence'->>'servicer' AS servicer, value->'servicing_cadence'->>'task_active' AS task_active,
+       value->'servicing_cadence'->>'passes' AS passes, value->'servicing_cadence'->>'skipped_busy' AS skipped_busy, value->'servicing_cadence'->>'errors' AS errors,
+       value->'servicing_cadence'->>'last_pass_elapsed_s' AS last_pass_elapsed_s, value->'servicing_cadence'->>'max_pass_elapsed_s' AS max_pass_elapsed_s,
+       value->'servicing_cadence'->'recent_start_gaps_s' AS recent_start_gaps_s, left(value->'writer'->>'commit', 12) AS writer_commit
+  FROM ingestion_state WHERE key = 'ext_pinnacle_last_servicing';
