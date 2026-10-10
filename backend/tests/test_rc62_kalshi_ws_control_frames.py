@@ -24,7 +24,12 @@ equal the venue's TRUE book as of the highest data seq delivered.
   * a delete the venue REFUSED (error 27 is documented for any command on
     the subscription) left the market held: wanted again, its add was "no
     action" and the book waited for ever. It is asked for by get_snapshot
-    now; a market still dropped is deleted again, bounded.
+    now; a market still dropped is deleted again, bounded. (ROUND 4: the
+    "left the market held" reading was itself the defect -- no error is
+    documented to mean the command did not run, and a delete answered by
+    error 18 after it ran served a stale book. The market is added again
+    alone and its confirmation asks for the snapshot; the liveness this
+    bullet fixed is kept. tests/test_rc62_kalshi_ws_errored_commands.py.)
   * a separate counter that numbered `subscribed`: the documented false
     gap at the first `ok`, then the add's own snapshot at the next DATA seq
     was a second gap while the get_snapshot was outstanding -- the session
@@ -381,16 +386,23 @@ def _quiet_free(steps):
 
 def test_a_market_wanted_again_after_its_delete_was_refused_gets_its_snapshot():
     """The review's repro: B dropped, its delete refused (27, scoped), B
-    wanted again. The venue holds B (an error leaves it as it was), so an
-    add would be "no action" with no snapshot -- B waited AWAITING_SNAPSHOT
-    for the rest of the session. Now its snapshot is asked for, and B ends
-    CURRENT with the venue's book; never CURRENT before."""
+    wanted again. The venue holds B, so a plain add would be "no action"
+    with no snapshot -- B waited AWAITING_SNAPSHOT for the rest of the
+    session. It ends CURRENT with the venue's book; never CURRENT before.
+    (Round 4) The client no longer takes the error for "the venue still
+    holds B" -- no error is documented to mean the command did not run
+    (tests/test_rc62_kalshi_ws_errored_commands.py: error 18, the delete
+    DID run) -- so B is added again ALONE (here "no action": the `ok` lists
+    it) and its confirmation asks for the snapshot; the round-3 version of
+    this test pinned a get_snapshot sent straight after the error."""
     v = RefuseDeletes()
     want = [A, B]
     steps = _quiet_free([
         lambda v_: (want.remove(B), v_.sub.forget([B])), "idle",  # delete
         "process", "deliver",                          # error 27 (scoped)
         lambda v_: want.append(B), "idle",              # wanted again
+        "process", "deliver",                           # add B: no action
+        "idle",                                         # confirmed: snapshot
         "process", "deliver",                           # B's get_snapshot
         lambda v_: v_.activity(B, "0.44", "6"), "deliver",
         lambda v_: v_.activity(A, "0.45", "2"), "deliver", "idle"])
@@ -398,7 +410,7 @@ def test_a_market_wanted_again_after_its_delete_was_refused_gets_its_snapshot():
     assert seen["violations"] == [], seen["violations"][:2]
     acts = [(a, ts) for _c, a, ts in v.commands()]
     assert acts == [(None, [A, B]), ("delete_markets", [B]),
-                    ("get_snapshot", [B])], acts
+                    ("add_markets", [B]), ("get_snapshot", [B])], acts
     fin = seen["final"]
     assert fin[A]["ok"] and fin[B]["ok"]
     assert VM._code_book(fin[B]) == v.truth[B]

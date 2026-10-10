@@ -24,7 +24,14 @@ orderbook-updates, changelog 2025-09-25 / 2026-06-18), in three variants:
      end the subscription. ONE counter per sid: snapshots, deltas, `ok`,
      `unsubscribed` and scoped errors all take the sid's next seq. The venue
      changes EVERY market's book, held or not, and streams deltas only of
-     the markets it holds.
+     the markets it holds. (Round 4) ANY update command may be answered by
+     an error AFTER the venue executed it -- error 18, "Server timed out
+     while processing command": an errored delete DID take its markets out,
+     an errored add DID take them (its snapshots come before the error or
+     after it), an errored get_snapshot's snapshots went out. No error code
+     is documented to mean "not executed": errors 26 / 27 are modelled as
+     refusals the venue did not run, and the client must not rely on that
+     for either.
   S  as D, but control frames (`ok`, `unsubscribed`, scoped errors) carry a
      SEPARATE per-sid counter (from 1; a lost control frame still advanced
      it); data frames run by themselves; the venue may send ONE scoped
@@ -130,7 +137,7 @@ book as of the HIGHEST data seq delivered on its subscription.
 
 GENERATORS (deterministic):
   (a) WsBooks, EXHAUSTIVE per variant: every event sequence up to depth D
-      from seventeen roots (the counts are pinned), over 2 sid numbers and 3
+      from eighteen roots (the counts are pinned), over 2 sid numbers and 3
       markets: snapshot / delta at the next seq, past a lost frame, a
       duplicate and a replay of a delivered data frame (of ANY market:
       a snapshot of one the venue does not hold is get_snapshot's answer);
@@ -150,16 +157,29 @@ GENERATORS (deterministic):
       losses / duplicates / replays of data frames, lost control frames,
       (round 3) duplicated and replayed control frames, deletes refused by
       error 27, the separate counter's unasked frame, terminal errors, the
-      venue's unsubscribe, disconnects; the worker drops and re-wants
+      venue's unsubscribe, disconnects; (round 4) add / delete /
+      get_snapshot commands the venue EXECUTES and answers by error 18,
+      drawn from a generator of their own; the worker drops and re-wants
       markets at arbitrary points, also while a command is being sent).
       Seeds per variant; odd seeds inject faults, half of those as a storm.
       Under D every seed must end with every wanted market CURRENT, equal to
       venue truth and served by the store, and the commands sent bounded by
-      O(markets x connections + gaps + refreshes); under S, R and S1 safety
-      is asserted and liveness measured.
+      O(markets x connections + gaps + refreshes) -- except (round 4) a
+      market whose adds were answered by refusal-looking replies twice or
+      more, one of them an error after the venue ran the add: the client's
+      refusal budget is spent, it stays GAP (fail closed) and is counted
+      (liveness_budget_spent; see _quiescence); under S, R and S1 safety is
+      asserted and liveness measured.
   (c) every _ORDERINGS script, the 63 drop-anywhere cases and the other
       scripted Subscriber tests re-run with the oracle (D) checking every
       step, on top of their own assertions.
+
+ASSUMPTION E0 IS REFUSED (round 4): rounds 2 and 3 of the client assumed,
+unnamed, that an error answering an add / delete leaves the venue as it was.
+No error code is documented to mean that, and the model's venue now answers
+by error 18 after executing (enumeration reply "err18x"; the Subscriber sims'
+err_exec_* behaviours); the oracle reads an errored delete as vouching for
+nothing (Oracle._settle).
 
 ASSUMPTIONS beyond the documented text, each named where it is used: S0
 and S5 (first snapshots on numbers never acknowledged as ours; counted
@@ -207,6 +227,18 @@ with another market by one error 26, stayed GAP while the venue held it
 (seed D-50869); a market dropped and re-wanted while its add was in flight
 waited on that add's own snapshot, which no gap could name (seed D-50213)
 -- each has a directed test in tests/test_rc62_kalshi_ws_control_frames.py.
+(Round 4, blocking) a delete answered by an error was taken as having left
+the market held (E0): re-wanted, the client asked for its snapshot by
+get_snapshot, which the venue answers for ANY ticker -- when the delete had
+in fact run (error 18, a timeout), that snapshot made the book CURRENT with no
+delta ever following. The proof's venue refused deletes only by error 27 (not
+run), so it could not see it; with the executed-then-errored delete the
+enumeration finds it at depth 3 from root b_delete_unanswered (reply err18x,
+want, snapshot; P2 by true membership) on every variant, and the D sims find
+it as CURRENT_BOOK_IS_NOT_VENUE_TRUTH; tests/test_rc62_kalshi_ws_errored_
+commands.py pins it. The same rule left a market whose ADD had run but been
+answered by error 18 waiting for an own snapshot that had gone (a liveness
+hole, now closed; a re-add refused by 18 is retried later like 27).
 
 MUTATION CHECK (offline, scratch script; each mutant of the client must be
 caught): RC6.1's `ok` that never advances the sequence (P2, D), no
@@ -218,6 +250,13 @@ applied whatever the venue holds, an unanswered add counted as held, an
 `ok`'s list ignored (P2 by true membership; the sims) -- all caught;
 (round 3) the bound one short (P2, S1 from "acked" at depth 3), a replay
 taken as a separate counter (P2, D with control replays) -- caught here;
+(round 4) an errored delete read as "the venue is as it was" (assumption
+E0: P2 from root b_delete_unanswered at depth 3 on every variant, and the D
+and S sims within the first seeds; test_the_enumeration_finds_an_errored_
+delete_read_as_not_run, test_the_subscriber_sims_find_...), an errored delete
+that keeps its market known held, and no unknown-effect marking at all --
+caught here; an errored add not marked unsure -- a liveness hole, caught by
+tests/test_rc62_kalshi_ws_errored_commands.py;
 an unknown id's bound counting no command, the separate-mode loss check
 removed, the refused-delete repair removed -- caught by
 tests/test_rc62_kalshi_ws_control_frames.py.
@@ -226,7 +265,7 @@ a number first seen after our ack is NOT a safety violation (the RC6 rules
 for numbers not ours are safe); the runtime ignores them by policy
 (test_rc62_kalshi_ws_protocol pins it).
 
-CI runs the default sizes (937,385 enumerated sequences; 100 Subscriber
+CI runs the default sizes (1,117,574 enumerated sequences; 100 Subscriber
 seeds per variant). Larger runs (offline): KALSHI_PROOF_DEPTH (every root's
 depth), KALSHI_PROOF_SEEDS / KALSHI_PROOF_SEED_BASE. SMALL LIVE = SHADOW:
 read-only market data only; nothing here touches an order path.
@@ -574,8 +613,9 @@ class Oracle:
         ticker list after the update): every market whose add / delete up
         to `cid` was unanswered is HELD exactly when listed; a HELD market
         the list lacks is NOT. Without a list, an `ok` settles its own
-        command; an error refuses its own add (a refused delete leaves the
-        venue as it was)."""
+        command; an error refuses its own add; (round 4) an error answering
+        a delete leaves its market NOT held -- the delete may well have run
+        (error 18, the server's timeout) -- until a list says."""
         if cid in self.answered or cid not in self.cmds:
             return
         self.answered.add(cid)
@@ -602,9 +642,18 @@ class Oracle:
             if cid not in s.pend.get(t, ()):
                 continue
             s.pend[t] = [c for c in s.pend[t] if c != cid]
-            # an error leaves the venue as it was: nothing becomes known
             if typ == "ok" and s.known.get(t, (-1, False))[0] <= cid:
                 s.known[t] = (cid, action == "add_markets")
+            elif typ == "error" and action == "delete_markets" and \
+                    s.known.get(t, (-1, False))[0] <= cid:
+                # (round 4) AN ERROR SAYS NOTHING ABOUT MEMBERSHIP: no code
+                # is documented to mean the command did not run (18 is the
+                # server's timeout), so after an errored delete the venue
+                # does not vouch for t -- not held until a reply with the
+                # full list says. (An errored add of a market not held
+                # vouches for nothing either, and an add never removes a
+                # market: `known` is unchanged.)
+                s.known[t] = (cid, False)
             self._mark(s, t, i)
 
     def holds(self, s, t, at) -> bool:
@@ -1044,6 +1093,10 @@ def w_events(o: Oracle) -> list:
                 ev += [("reply", sid, "ok", "next"),
                        ("reply", sid, "ok", "skip"),
                        ("reply", sid, "err27", "next"),
+                       # (round 4) an error AFTER the venue executed the
+                       # command (18, the server's timeout): the delete
+                       # DID take the market out
+                       ("reply", sid, "err18x", "next"),
                        ("end", sid, "err10"), ("end", sid, "unsubscribed")]
                 pend = o.unanswered.get(sid)
                 if pend and o.cmds[pend[0]][1] == "add_markets":
@@ -1145,6 +1198,8 @@ def w_apply(b: KWS.WsBooks, o: Oracle, ev) -> list:
             last = k == len(cids) - 1
             if last and what in ("lack", "err27"):
                 continue                # refused: the venue is unchanged
+            # ("err18x": executed, then answered by an error: the venue's
+            # state is the command's, the client is told only of an error)
             if c[1] == "add_markets":
                 venue |= set(c[2])
             else:
@@ -1162,6 +1217,8 @@ def w_apply(b: KWS.WsBooks, o: Oracle, ev) -> list:
                                                  "delete_markets")
         if what == "err27":
             m = m_error(cids[-1], 27, sid=sid, seq=seq)
+        elif what == "err18x":
+            m = m_error(cids[-1], 18, sid=sid, seq=seq)
         else:
             m = m_ok(cids[-1], sid, seq,
                      sorted(venue) if membership else None)
@@ -1253,6 +1310,12 @@ ROOTS = {
     # sent before the delete may still be on its way
     "b_deleted_and_wanted_again": _ALL_ON_1 + [
         ("forget", WB), ("delete", 1, WB), ("want", WB), ("add", 1, WB)],
+    # (round 4) B dropped, its delete sent and not yet answered: the reply
+    # may be `ok`, error 27 (not run), or error 18 AFTER the venue took B out
+    # -- then B is wanted again and a get_snapshot's answer for it (a
+    # snapshot of a market the venue no longer holds) is in the sequence
+    "b_delete_unanswered": _ALL_ON_1 + [("forget", WB),
+                                        ("delete", 1, WB)],
 }
 #: CI depth per (root, variant): 3 where each variant's hard cases live --
 #: under D the two densest roots and the two venue-membership roots (a
@@ -1271,7 +1334,10 @@ DEEP = {("fresh", D), ("all_current_on_sid_1", D), ("acked", S),
         ("acked", S1), ("a_reply_after_data", S1),
         # (RC6.2 review) venue membership: a refused add, a delete and a
         # re-add in flight
-        ("an_add_refused", D), ("b_deleted_and_wanted_again", D)}
+        ("an_add_refused", D), ("b_deleted_and_wanted_again", D),
+        # (round 4) an errored delete that ran, the market wanted again and
+        # a snapshot of it: the blocking finding is a depth-3 path from here
+        ("b_delete_unanswered", D)}
 
 
 def ci_depth(root, variant):
@@ -1281,75 +1347,79 @@ def ci_depth(root, variant):
 #: sequences enumerated per (variant, root) at its CI depth -- pinned: the
 #: alphabet is the oracle's, so the count does not depend on the code
 CI_COUNTS = {
-    (D, 'a_reply_after_data'): 2459,
-    (D, 'acked'): 1431,
-    (D, 'all_current_on_sid_1'): 117245,
-    (D, 'an_add_refused'): 104769,
-    (D, 'an_add_unanswered'): 2063,
-    (D, 'announced_not_ours_then_a_delta'): 1508,
-    (D, 'b_deleted_and_wanted_again'): 117518,
-    (D, 'b_dropped_and_wanted_again'): 2367,
-    (D, 'b_dropped_on_live_sid_1'): 2460,
-    (D, 'delta_before_the_first_snapshot'): 1508,
-    (D, 'first_snapshot_refused_after_a_delta'): 1502,
-    (D, 'frames_on_a_number_not_ours'): 2353,
-    (D, 'fresh'): 44802,
-    (D, 'gapped_on_sid_1'): 2367,
-    (D, 'reconnected_after_all_current'): 1154,
-    (D, 'recovering_on_sid_1'): 2459,
-    (D, 'sid_1_ended_by_error'): 1430,
-    (R, 'a_reply_after_data'): 2461,
-    (R, 'acked'): 1433,
-    (R, 'all_current_on_sid_1'): 2369,
-    (R, 'an_add_refused'): 2149,
-    (R, 'an_add_unanswered'): 2065,
-    (R, 'announced_not_ours_then_a_delta'): 1508,
-    (R, 'b_deleted_and_wanted_again'): 2371,
-    (R, 'b_dropped_and_wanted_again'): 2369,
-    (R, 'b_dropped_on_live_sid_1'): 2462,
-    (R, 'delta_before_the_first_snapshot'): 1508,
-    (R, 'first_snapshot_refused_after_a_delta'): 1502,
-    (R, 'frames_on_a_number_not_ours'): 2355,
-    (R, 'fresh'): 1154,
-    (R, 'gapped_on_sid_1'): 2369,
-    (R, 'reconnected_after_all_current'): 1154,
-    (R, 'recovering_on_sid_1'): 2461,
-    (R, 'sid_1_ended_by_error'): 60424,
-    (S, 'a_reply_after_data'): 123912,
-    (S, 'acked'): 64176,
-    (S, 'all_current_on_sid_1'): 2459,
-    (S, 'an_add_refused'): 2147,
-    (S, 'an_add_unanswered'): 2146,
-    (S, 'announced_not_ours_then_a_delta'): 1509,
-    (S, 'b_deleted_and_wanted_again'): 2461,
-    (S, 'b_dropped_and_wanted_again'): 2459,
-    (S, 'b_dropped_on_live_sid_1'): 2554,
-    (S, 'delta_before_the_first_snapshot'): 1509,
-    (S, 'first_snapshot_refused_after_a_delta'): 1503,
-    (S, 'frames_on_a_number_not_ours'): 2442,
-    (S, 'fresh'): 1156,
-    (S, 'gapped_on_sid_1'): 2459,
-    (S, 'reconnected_after_all_current'): 1156,
-    (S, 'recovering_on_sid_1'): 2459,
-    (S, 'sid_1_ended_by_error'): 1431,
-    (S1, 'a_reply_after_data'): 123912,
-    (S1, 'acked'): 64176,
-    (S1, 'all_current_on_sid_1'): 2459,
-    (S1, 'an_add_refused'): 2147,
-    (S1, 'an_add_unanswered'): 2146,
-    (S1, 'announced_not_ours_then_a_delta'): 1509,
-    (S1, 'b_deleted_and_wanted_again'): 2461,
-    (S1, 'b_dropped_and_wanted_again'): 2459,
-    (S1, 'b_dropped_on_live_sid_1'): 2554,
-    (S1, 'delta_before_the_first_snapshot'): 1509,
-    (S1, 'first_snapshot_refused_after_a_delta'): 1503,
-    (S1, 'frames_on_a_number_not_ours'): 2442,
-    (S1, 'fresh'): 1156,
-    (S1, 'gapped_on_sid_1'): 2459,
-    (S1, 'reconnected_after_all_current'): 1156,
-    (S1, 'recovering_on_sid_1'): 2459,
-    (S1, 'sid_1_ended_by_error'): 1431,
-}                       # 937,385 sequences in all
+    (D, 'a_reply_after_data'): 2557,
+    (D, 'acked'): 1504,
+    (D, 'all_current_on_sid_1'): 124397,
+    (D, 'an_add_refused'): 111143,
+    (D, 'an_add_unanswered'): 2152,
+    (D, 'announced_not_ours_then_a_delta'): 1509,
+    (D, 'b_delete_unanswered'): 124391,
+    (D, 'b_deleted_and_wanted_again'): 124814,
+    (D, 'b_dropped_and_wanted_again'): 2464,
+    (D, 'b_dropped_on_live_sid_1'): 2559,
+    (D, 'delta_before_the_first_snapshot'): 1509,
+    (D, 'first_snapshot_refused_after_a_delta'): 1503,
+    (D, 'frames_on_a_number_not_ours'): 2447,
+    (D, 'fresh'): 44980,
+    (D, 'gapped_on_sid_1'): 2464,
+    (D, 'reconnected_after_all_current'): 1156,
+    (D, 'recovering_on_sid_1'): 2557,
+    (D, 'sid_1_ended_by_error'): 1431,
+    (R, 'a_reply_after_data'): 2559,
+    (R, 'acked'): 1506,
+    (R, 'all_current_on_sid_1'): 2466,
+    (R, 'an_add_refused'): 2239,
+    (R, 'an_add_unanswered'): 2154,
+    (R, 'announced_not_ours_then_a_delta'): 1509,
+    (R, 'b_delete_unanswered'): 2466,
+    (R, 'b_deleted_and_wanted_again'): 2469,
+    (R, 'b_dropped_and_wanted_again'): 2466,
+    (R, 'b_dropped_on_live_sid_1'): 2561,
+    (R, 'delta_before_the_first_snapshot'): 1509,
+    (R, 'first_snapshot_refused_after_a_delta'): 1503,
+    (R, 'frames_on_a_number_not_ours'): 2449,
+    (R, 'fresh'): 1156,
+    (R, 'gapped_on_sid_1'): 2466,
+    (R, 'reconnected_after_all_current'): 1156,
+    (R, 'recovering_on_sid_1'): 2559,
+    (R, 'sid_1_ended_by_error'): 60638,
+    (S, 'a_reply_after_data'): 131207,
+    (S, 'acked'): 68615,
+    (S, 'all_current_on_sid_1'): 2557,
+    (S, 'an_add_refused'): 2237,
+    (S, 'an_add_unanswered'): 2236,
+    (S, 'announced_not_ours_then_a_delta'): 1510,
+    (S, 'b_delete_unanswered'): 2557,
+    (S, 'b_deleted_and_wanted_again'): 2560,
+    (S, 'b_dropped_and_wanted_again'): 2557,
+    (S, 'b_dropped_on_live_sid_1'): 2654,
+    (S, 'delta_before_the_first_snapshot'): 1510,
+    (S, 'first_snapshot_refused_after_a_delta'): 1504,
+    (S, 'frames_on_a_number_not_ours'): 2537,
+    (S, 'fresh'): 1158,
+    (S, 'gapped_on_sid_1'): 2557,
+    (S, 'reconnected_after_all_current'): 1158,
+    (S, 'recovering_on_sid_1'): 2557,
+    (S, 'sid_1_ended_by_error'): 1432,
+    (S1, 'a_reply_after_data'): 131207,
+    (S1, 'acked'): 68615,
+    (S1, 'all_current_on_sid_1'): 2557,
+    (S1, 'an_add_refused'): 2237,
+    (S1, 'an_add_unanswered'): 2236,
+    (S1, 'announced_not_ours_then_a_delta'): 1510,
+    (S1, 'b_delete_unanswered'): 2557,
+    (S1, 'b_deleted_and_wanted_again'): 2560,
+    (S1, 'b_dropped_and_wanted_again'): 2557,
+    (S1, 'b_dropped_on_live_sid_1'): 2654,
+    (S1, 'delta_before_the_first_snapshot'): 1510,
+    (S1, 'first_snapshot_refused_after_a_delta'): 1504,
+    (S1, 'frames_on_a_number_not_ours'): 2537,
+    (S1, 'fresh'): 1158,
+    (S1, 'gapped_on_sid_1'): 2557,
+    (S1, 'reconnected_after_all_current'): 1158,
+    (S1, 'recovering_on_sid_1'): 2557,
+    (S1, 'sid_1_ended_by_error'): 1432,
+}                       # 1,117,574 sequences in all
 
 
 def root_state(root, variant, *, s5=True, s0=True):
@@ -1614,6 +1684,11 @@ class _VenueConn:
         self.refusals = {}          # market -> adds of it refused (26 / 27
                                     # / not taken) on this connection
         self.ctrl_seen = []         # (round 3) control frames delivered
+        #: (round 4) market -> [replies that look like a refusal of an add
+        #: naming it -- an error, or an `ok` lacking it -- since a reply
+        #: last LISTED it or the worker last dropped it, whether one of them
+        #: was an error after the venue RAN the add]
+        self.streak = {}
 
 
 class _Socket:
@@ -1676,6 +1751,17 @@ class SubscriberSim:
         self.p_27 = r.uniform(0.05, 0.2) if refusing else 0.0
         self.p_not_taken = r.uniform(0.05, 0.2) if refusing else 0.0
         self.scoped_errors = r.random() < 0.5
+        # (round 4) commands the venue EXECUTES and then answers by an error
+        # (18, the server's timeout): no error is documented to mean the
+        # command did not run. Drawn from a generator of their own, so the
+        # scenarios every other seed produces are the ones the earlier rounds
+        # pinned until such an error happens
+        rx = self.rng_x = random.Random("%s-exec-error-%d" % (variant, seed))
+        erroring = rx.random() < 0.6
+        self.p_exec_err = {
+            "delete_markets": rx.uniform(0.25, 0.7) if erroring else 0.0,
+            "add_markets": rx.uniform(0.05, 0.25) if erroring else 0.0,
+            "get_snapshot": rx.uniform(0.05, 0.25) if erroring else 0.0}
         self.truth = {t: {"yes": {Decimal("0.4%d" % k): Decimal(10 + k)},
                           "no": {Decimal("0.5%d" % k): Decimal(20 + k)}}
                       for k, t in enumerate(SMARKETS)}
@@ -1734,7 +1820,15 @@ class SubscriberSim:
                        # the venue, a delete it refused (27), the separate
                        # counter's unasked frame
                        "ctrl_duplicated": 0, "ctrl_replayed": 0,
-                       "refused_delete": 0, "unasked": 0}
+                       "refused_delete": 0, "unasked": 0,
+                       # (round 4) commands executed, then answered by error
+                       # 18: a delete that DID take its markets out, an add
+                       # that took them, a get_snapshot whose snapshots went
+                       "err_exec_delete": 0, "err_exec_add": 0,
+                       "err_exec_get_snapshot": 0,
+                       # a market the venue holds but the client gave up on
+                       # (see _quiescence): measured, not required
+                       "liveness_budget_spent": 0}
 
     # ── the run ──
     def run(self):
@@ -1835,6 +1929,9 @@ class SubscriberSim:
                 return
             new = sorted(self.want + [r.choice(cands)])
         self.want[:] = new
+        if self.conn is not None:
+            for t in before - set(new):
+                self.conn.streak.pop(t, None)   # a new want, a new budget
         W.prune_untracked(self.sub, self.written, self.want)
         _drive(W.retire_untracked(self.store, self.want))
         for t in sorted(before - set(new)):
@@ -2015,10 +2112,32 @@ class SubscriberSim:
                                  "msg": {"code": UNASKED_CODE,
                                          "msg": "unasked"}}, None, "ctrl"))
 
-    def _emit_ok(self, cid):
+    def _emit_ok(self, cid, settles=True):
         sub = self.conn.sub
+        if settles:
+            # an add / delete / subscribe `ok` lists the subscription: the
+            # client knows (a get_snapshot's, which no document gives a list,
+            # settles nothing)
+            for t in sub["markets"]:
+                self.conn.streak.pop(t, None)
         self.conn.out_q.append((m_ok(cid, sub["sid"], self._seq(True),
                                      sub["markets"]), None, "ctrl"))
+
+    def _streak(self, t, *, executed=False):
+        s = self.conn.streak.setdefault(t, [0, False])
+        s[0] += 1
+        s[1] = s[1] or executed
+
+    def _exec_error(self, action) -> bool:
+        """(round 4) Does the venue answer this command, which it EXECUTES,
+        by error 18 instead of its reply?"""
+        if self.rng_x.random() < self.p_exec_err[action]:
+            self.counts["err_exec_" + {"add_markets": "add",
+                                       "delete_markets": "delete",
+                                       "get_snapshot": "get_snapshot"}
+                        [action]] += 1
+            return True
+        return False
 
     def _emit_error(self, cid, code):
         sub = self.conn.sub
@@ -2083,6 +2202,8 @@ class SubscriberSim:
                 self.counts["refused_%d" % refuse] += 1
                 for t in new:
                     c.refusals[t] = c.refusals.get(t, 0) + 1
+                for t in ts:
+                    self._streak(t)
                 self._emit_error(cid, refuse)
                 return
             taken = []
@@ -2091,16 +2212,24 @@ class SubscriberSim:
                     # not taken: the `ok` lists the subscription without it
                     self.counts["not_taken"] += 1
                     c.refusals[t] = c.refusals.get(t, 0) + 1
+                    self._streak(t)
                 else:
                     taken.append(t)
             sub["markets"] += taken
+            # (round 4) executed, then answered by error 18 instead of `ok`
+            if self._exec_error("add_markets"):
+                for t in ts:
+                    self._streak(t, executed=True)
+                reply = (lambda: self._emit_error(cid, 18))
+            else:
+                reply = (lambda: self._emit_ok(cid))
             if self.snap_first and taken:
                 self.counts["adds_snap_first"] += 1
                 for t in taken:
                     self._emit(sub, t, None)
-                self._emit_ok(cid)
+                reply()
             else:
-                self._emit_ok(cid)
+                reply()
                 for t in taken:
                     self._emit(sub, t, None)
         elif action == "delete_markets":
@@ -2111,7 +2240,12 @@ class SubscriberSim:
                 self._emit_error(cid, 27)
                 return
             sub["markets"] = [t for t in sub["markets"] if t not in ts]
-            self._emit_ok(cid)
+            if self._exec_error("delete_markets"):
+                # (round 4) the delete DID take the markets out; the venue
+                # answers error 18 (the server timed out processing it)
+                self._emit_error(cid, 18)
+            else:
+                self._emit_ok(cid)
         elif action == "get_snapshot":
             if r.random() < self.p_27:
                 self.counts["refused_27"] += 1
@@ -2120,14 +2254,18 @@ class SubscriberSim:
             # docs: "returns an orderbook_snapshot for the requested
             # market_tickers without modifying the subscription" -- held
             # or not; an `ok` is not documented for it
-            if self.gs_ok:
-                self._emit_ok(cid)
-            else:
+            failed = self._exec_error("get_snapshot")
+            if self.gs_ok and not failed:
+                self._emit_ok(cid, settles=False)
+            elif not self.gs_ok:
                 self.counts["get_snapshot_without_ok"] += 1
             for t in ts:
                 if t not in sub["markets"]:
                     self.counts["snapshots_of_markets_not_held"] += 1
                 self._emit(sub, t, None)
+            if failed:
+                # (round 4) the snapshots went out; the reply is an error
+                self._emit_error(cid, 18)
 
     def _venue_end(self):
         """The venue ends our subscription: error 10 / 25, or its own
@@ -2267,14 +2405,36 @@ class SubscriberSim:
         wanted market the venue does not hold was refused at least twice
         on this connection (the client added it again once) and is GAP,
         named R_NOT_HELD_BY_VENUE, never CURRENT; the commands sent are
-        bounded."""
+        bounded.
+
+        (Round 4) ONE exception, for a venue that RUNS commands and answers
+        them by error 18: the client cannot tell such a reply from a
+        refusal, so a wanted market the venue holds may stay GAP (named
+        R_NOT_HELD_BY_VENUE) when at least two replies that look like a
+        refusal of an add naming it came since a reply last LISTED it (or
+        the worker last dropped it) and one of them was an error after the
+        venue ran the add -- the client's refusal budget (one re-add and
+        MAX_RATE_LIMIT_RETRIES later retries a want) is spent, exactly as
+        for a market the venue really refuses twice. Fail closed, never
+        stale (every other property is checked at every event), and healed
+        by the next `ok` that lists the market -- any add or delete of
+        another market answers with the full list -- which a quiescent run
+        has none of. Counted (liveness_budget_spent)."""
         self._check("at quiescence")
         self._flush()
         c = self.conn
         held = set(c.sub["markets"]) if c.sub is not None else set()
+        spent = set()
+        for t in self.want:
+            cur = self.books.current(t)
+            n, ran = c.streak.get(t, (0, False))
+            if t in held and not cur["ok"] and n >= 2 and ran and \
+                    cur.get("why") == KWS.R_NOT_HELD_BY_VENUE:
+                spent.add(t)
+        self.counts["liveness_budget_spent"] += len(spent)
         self.live = all(self.books.current(t)["ok"] and _code_book(
             self.books.current(t)) == self.truth[t]
-            for t in self.want if t in held)
+            for t in self.want if t in held and t not in spent)
         self.not_held = sorted(t for t in self.want if t not in held)
         if self.variant == D:
             for t in self.want:
@@ -2285,6 +2445,8 @@ class SubscriberSim:
                         self._violate("quiescence", [(
                             "LIVENESS_NOT_HELD", t, cur["state"],
                             cur.get("why"), c.refusals.get(t, 0))])
+                elif t in spent:
+                    continue
                 elif not cur["ok"] or _code_book(cur) != self.truth[t]:
                     self._violate("quiescence", [(
                         "LIVENESS_AT_QUIESCENCE", t, cur["state"],
@@ -2320,7 +2482,15 @@ class SubscriberSim:
                 + 2 * (c["refused_26"] + c["refused_27"]) + c["not_taken"]
                 + 2 * st["readd_after_gap"] + st["snapshots_not_held"]
                 # (round 3) a refused delete -> its one later retry
-                + c["refused_delete"])
+                + c["refused_delete"]
+                # (round 4) an error answering a command the venue ran: an
+                # errored delete -> its retry, the market's add alone when it
+                # is wanted again and the snapshot the add's `ok` asks for;
+                # an errored add -> its one re-add, a later retry (18 is a
+                # timeout, as transient as 27) and the snapshot the `ok`
+                # asks for; an errored get_snapshot -> asked again
+                + 3 * c["err_exec_delete"] + 3 * c["err_exec_add"]
+                + c["err_exec_get_snapshot"])
 
 
 def _new_sim(seed, variant):
@@ -2382,7 +2552,9 @@ def test_the_subscriber_against_the_model_venue(variant):
               "adds_snap_first", "rewant_with_snapshot_in_flight",
               # (round 3) control frames duplicated and replayed, deletes
               # refused (27)
-              "ctrl_duplicated", "ctrl_replayed", "refused_delete"):
+              "ctrl_duplicated", "ctrl_replayed", "refused_delete",
+              # (round 4) commands the venue ran and answered by error 18
+              "err_exec_delete", "err_exec_add", "err_exec_get_snapshot"):
         assert total[k] > 0, (variant, k, total)
     if variant == R:
         assert total["reused_sids"] > 0
@@ -2741,6 +2913,73 @@ def test_a_replayed_control_frame_breaks_the_shared_sequence(monkeypatch):
         bad += check(o, b, universe=WMARKETS)
     assert b.anchors[1]["mode"] == KWS.SEPARATE
     assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" for x in bad), bad
+
+
+class _ErroredDeleteReadAsNotRun(KWS.WsBooks):
+    """The rule rounds 2 and 3 followed without naming it (assumption E0):
+    an error answering a delete leaves the venue as it was -- the market
+    stays held and nothing is unsure."""
+
+    def _unknown_effect(self, a, t, cid, action):
+        if action == "delete_markets":
+            return
+        return super()._unknown_effect(a, t, cid, action)
+
+
+@pytest.mark.parametrize("variant", [D, S])
+def test_the_enumeration_finds_an_errored_delete_read_as_not_run(
+        monkeypatch, variant):
+    """(round 4) THE PROOF SEES THE BLOCKING FINDING. The path the review
+    found, from root b_delete_unanswered: B's delete is answered by error 18
+    AFTER the venue ran it (reply err18x), B is wanted again, and a
+    snapshot of B follows in the sequence (what a get_snapshot of B
+    returns: the venue answers for any ticker). The client that reads the
+    error as "the venue is as it was" makes B CURRENT while the venue no
+    longer holds it (P2_CURRENT_WITHOUT_CONTINUITY: no delta of B will ever
+    follow); the real one leaves B unsure and applies nothing."""
+    path = [("reply", 1, "err18x", "next"), ("want", WB),
+            ("msg", 1, WB, SNAP, "next")]
+
+    def run():
+        b, o = root_state("b_delete_unanswered", variant)
+        bad = []
+        for ev in path:
+            for e in w_apply(b, o, ev):
+                o.record(e)
+            bad += check(o, b, universe=WMARKETS)
+        return b, o, bad
+    b, o, bad = run()
+    assert bad == [], bad
+    assert not b.current(WB)["ok"] and not b.held(1, WB)
+    assert o.venue[1] == {WA, WC}               # the delete DID run
+    monkeypatch.setattr(KWS, "WsBooks", _ErroredDeleteReadAsNotRun)
+    b, o, bad = run()
+    assert b.current(WB)["ok"], "the reviewed client serves B CURRENT"
+    assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" and x[1] == WB
+               for x in bad), bad
+    # and the exhaustive enumeration from the root finds it on its own
+    _n, found = enumerate_root("b_delete_unanswered", variant, 3)
+    assert found and found[0][2][0][0] == "P2_CURRENT_WITHOUT_CONTINUITY", \
+        found[:1]
+
+
+def test_the_subscriber_sims_find_an_errored_delete_read_as_not_run(
+        monkeypatch):
+    """(round 4) The Subscriber sims' venue now RUNS deletes (and adds, and
+    get_snapshots) and answers them by error 18: against the round-3 reading
+    of such an error they record a CURRENT book that is not the venue's
+    true book, within the first seeds."""
+    monkeypatch.setattr(KWS, "WsBooks", _ErroredDeleteReadAsNotRun)
+    bad = []
+    for seed in range(60):
+        sim = run_seed(seed, D)
+        bad += [v for v in sim.violations]
+        if bad:
+            break
+    assert bad, "no seed of the first 60 saw the errored delete"
+    kinds = {x[0] for _v, _s, _st, _w, found in bad for x in found}
+    assert kinds & {"P2_CURRENT_WITHOUT_CONTINUITY",
+                    "CURRENT_BOOK_IS_NOT_VENUE_TRUTH"}, kinds
 
 
 def _forced_current(b, t, sid):
