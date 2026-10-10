@@ -11,11 +11,20 @@ orderbook-updates, changelog 2025-09-25 / 2026-06-18), in three variants:
      answered by `subscribed` {id, sid}; a repeated subscribe MERGES into the
      same sid, answered by `ok` {id, sid, seq, msg.market_tickers} (tickers
      already held: no action, no snapshot); update_subscription add_markets /
-     delete_markets / get_snapshot act on that sid and are answered by `ok`
-     (seq), get_snapshot's snapshots following in the sid's sequence;
-     `unsubscribe` of an unknown sid -> error 7; errors 10 / 25 end the
-     subscription. ONE counter per sid: snapshots, deltas, `ok`,
-     `unsubscribed` and scoped errors all take the sid's next seq.
+     delete_markets act on that sid and are answered by `ok` (seq, the full
+     ticker list after the command) -- or REFUSED: error 26 past the
+     subscription's market limit, error 27 (the command rate), or an `ok`
+     whose list lacks a ticker the venue did not take; an add's snapshots
+     come after its `ok` or before it (the order is not documented);
+     get_snapshot "returns an orderbook_snapshot for the requested
+     market_tickers without modifying the subscription": a snapshot of
+     EVERY requested ticker, held or not, in the sid's sequence, with an
+     `ok` or without one (none is documented); errors with or without
+     (sid, seq); `unsubscribe` of an unknown sid -> error 7; errors 10 / 25
+     end the subscription. ONE counter per sid: snapshots, deltas, `ok`,
+     `unsubscribed` and scoped errors all take the sid's next seq. The venue
+     changes EVERY market's book, held or not, and streams deltas only of
+     the markets it holds.
   S  as D, but control frames (`ok`, `unsubscribed`, scoped errors) carry a
      SEPARATE per-sid counter (from 1; a lost control frame still advanced
      it); data frames run by themselves.
@@ -47,7 +56,15 @@ variant, and imports nothing from kalshi_ws:
     alone decide: CURRENT books on numbers never acknowledged as ours, and
     nothing else;
   * errors 10 / 25 and `unsubscribed` END a subscription; a disconnect ends
-    every one.
+    every one;
+  * (RC6.2 review) VENUE MEMBERSHIP: a snapshot is a valid book only while
+    the venue holds the market on the subscription from before that
+    snapshot until now (else deltas of it are missing). In the WsBooks
+    enumeration the oracle takes this from the venue's TRUE membership (the
+    generator's "venue" records), never from the replies the client reads;
+    in the Subscriber sims every CURRENT book is compared with the venue's
+    true book of that market -- held or not -- as of the highest seq
+    delivered.
 It RECORDS every event -- connect / disconnect, want / drop, every frame
 delivered, every command sent -- and derives, for every market t:
   * LEGITIMATE CURRENT (`legit`, per sid): t wanted (not dropped since its
@@ -55,13 +72,16 @@ delivered, every command sent -- and derives, for every market t:
     subscription now holding sid s, was not a late / replayed / duplicate
     frame (its seq above every seq before it), and no frame of that
     subscription's sequence after it broke the sequence; the subscription
-    has not ended. The book is that snapshot plus every later delta of t on
+    has not ended; (anchored) the venue has held t on it since before that
+    snapshot. The book is that snapshot plus every later delta of t on
     s (Decimal, exact). A snapshot right after a loss is legitimate: it is
     the whole book at its seq.
   * PROMISED CURRENT (`promised`, D only; per-event liveness): on an
     anchored subscription, t's latest snapshot was the sequence's next
-    frame, nothing after it broke the sequence, and no control frame came
-    after it (so both readings of the counter agree on what followed).
+    frame, nothing after it broke the sequence, no control frame came after
+    it (so both readings of the counter agree on what followed), and the
+    venue's replies vouch it held t since before it (what a client can
+    know).
 
 PROPERTIES, checked after EVERY event (`check`):
   P1  a dropped market, until it is wanted again, is held nowhere: no book,
@@ -103,14 +123,19 @@ book as of the HIGHEST data seq delivered on its subscription.
 
 GENERATORS (deterministic):
   (a) WsBooks, EXHAUSTIVE per variant: every event sequence up to depth D
-      from fourteen roots (the counts are pinned), over 2 sid numbers and 3
+      from seventeen roots (the counts are pinned), over 2 sid numbers and 3
       markets: snapshot / delta at the next seq, past a lost frame, a
-      duplicate and a replay of a delivered data frame; the reply to an
-      update command (`ok` / error 27; next, or past a lost frame -- under S
-      a lost reply still advanced the counter); errors 10 / 25 and the
-      venue's `unsubscribed`; our ack (bind + `subscribed`, a fresh number,
-      or under R an ended one); an announcement answering no command of
-      ours; forget; want; disconnect / connect.
+      duplicate and a replay of a delivered data frame (of ANY market:
+      a snapshot of one the venue does not hold is get_snapshot's answer);
+      our add_markets / delete_markets of one market (the Subscriber's
+      records); the reply to the oldest unanswered one (`ok` with the full
+      list, an `ok` whose list lacks the added market, error 27; next, or
+      past a lost reply -- the venue executed it; under S a lost reply still
+      advanced the counter) or, with none unanswered, to a get_snapshot;
+      errors 10 / 25 and the venue's `unsubscribed`; our ack (bind +
+      `subscribed`, a fresh number, or under R an ended one); an
+      announcement answering no command of ours; forget; want; disconnect /
+      connect.
   (b) Subscriber: the real Subscriber.run, the worker's wanted-set step
       (prune_untracked + retire_untracked), flush, reassert and gap sink
       against the model venue (late command processing, chunks of two,
@@ -126,6 +151,13 @@ GENERATORS (deterministic):
       scripted Subscriber tests re-run with the oracle (D) checking every
       step, on top of their own assertions.
 
+ASSUMPTIONS beyond the documented text, each named where it is used: S0
+and S5 (first snapshots on numbers never acknowledged as ours; counted
+below); H0 (`subscribed` means the venue took every market the subscribe
+named) and H1 (an add answered by an `ok` with no list took its markets) --
+the venue membership rule; C1 / C2 (a SEPARATE control counter answers each
+command at most once, in command order) -- variant S only.
+
 FOUND AND FIXED by this model (each has a directed test): an acknowledged
 subscription ended by error 10 / 25 kept its markets associated with its
 number, so a later subscription under the same number "held" them (P1b per
@@ -134,19 +166,29 @@ acknowledged as ours, re-announced, kept the old markets in ticker_sid
 (_revive now drops them); a snapshot making a book CURRENT on one
 acknowledged sid left it marked for a snapshot on another (I2; every mark
 is cleared). And on the reader path: the immediate GAP write closes the
-window between a gap and the next flush (R0).
+window between a gap and the next flush (R0). (RC6.2 review, blocking) a
+get_snapshot answer made a market the venue did not hold CURRENT, and a
+snapshot sent before our delete_markets made a re-wanted market CURRENT
+while the venue streamed nothing for it -- the venue-membership rule
+(tests/test_rc62_kalshi_ws_venue_membership.py); the model's venue used to
+answer get_snapshot only for held markets, never refused an add, and
+compared books with the truth at their own last frame, so it could not see
+either.
 
 MUTATION CHECK (offline, scratch script; each mutant of the client must be
 caught): RC6.1's `ok` that never advances the sequence (P2, D), no
 control-frame guard (P2, S from "acked" at depth 3), a gap that leaves its
 books CURRENT (I2 / P2), no gap sink (R0 in the Subscriber sims), an ended
 subscription keeping its associations (P1b), a replayed frame accepted (P2),
-a late ack reviving a dropped market (P1) -- all caught. Applying frames on
+a late ack reviving a dropped market (P1); (RC6.2 review) a snapshot
+applied whatever the venue holds, an unanswered add counted as held, an
+`ok`'s list ignored (P2 by true membership; the sims) -- all caught.
+Applying frames on
 a number first seen after our ack is NOT a safety violation (the RC6 rules
 for numbers not ours are safe); the runtime ignores them by policy
 (test_rc62_kalshi_ws_protocol pins it).
 
-CI runs the default sizes (467,851 enumerated sequences; 100 Subscriber
+CI runs the default sizes (700,278 enumerated sequences; 100 Subscriber
 seeds per variant). Larger runs (offline): KALSHI_PROOF_DEPTH (every root's
 depth), KALSHI_PROOF_SEEDS / KALSHI_PROOF_SEED_BASE. SMALL LIVE = SHADOW:
 read-only market data only; nothing here touches an order path.
@@ -235,8 +277,9 @@ def _levels(pairs) -> dict:
 class _Sub:
     """One subscription as the client saw it, under one sid number."""
     __slots__ = ("acks", "anchored", "book", "cmds", "created", "ctop",
-                 "ctrl_at", "ended", "first_snap", "last_break", "msgs",
-                 "s0", "s5", "seen", "sid", "snap_at", "top")
+                 "ctrl_at", "ended", "first_snap", "held_since", "known",
+                 "last_break", "msgs", "pend", "s0", "s5", "seen", "sid",
+                 "snap_at", "top", "vsince", "dels")
 
     def __init__(self, sid, created, *, anchored=False):
         self.sid = sid
@@ -256,6 +299,19 @@ class _Sub:
         self.snap_at = {}           # t -> (pos, log index, fresh, in_seq)
         self.book = {}              # t -> latest snapshot + later deltas
         self.seen = {}              # t -> log index of its latest frame
+        #: (anchored) what the venue's replies say it holds: t -> (command
+        #: id, held) -- t's state right after that command, by the latest
+        #: reply that spoke about it (our ack: command 0) -- and t -> the
+        #: add / delete commands naming t still unanswered. HELD: nothing
+        #: unanswered and the known state holds t
+        self.known = {}
+        self.pend = {}
+        self.held_since = {}        # t -> log index it became HELD at
+        #: (anchored) TRUTH, from the generator's "venue" records -- never
+        #: from the frames the client reads: t -> the log index since which
+        #: the venue has held t on this subscription without a break
+        self.vsince = {}
+        self.dels = {}              # add / delete command id -> a delete?
 
     def copy(self) -> _Sub:
         c = _Sub(self.sid, self.created, anchored=self.anchored)
@@ -267,6 +323,10 @@ class _Sub:
         c.snap_at, c.seen = dict(self.snap_at), dict(self.seen)
         c.book = {t: {"yes": dict(bk["yes"]), "no": dict(bk["no"])}
                   for t, bk in self.book.items()}
+        c.known, c.held_since = dict(self.known), dict(self.held_since)
+        c.vsince = dict(self.vsince)
+        c.dels = dict(self.dels)
+        c.pend = {t: list(v) for t, v in self.pend.items()}
         return c
 
     def view(self):
@@ -276,7 +336,21 @@ class _Sub:
                 tuple(self.acks), tuple(self.cmds),
                 sorted(self.snap_at.items()),
                 sorted((t, sorted(b["yes"].items()), sorted(b["no"].items()))
-                       for t, b in self.book.items()))
+                       for t, b in self.book.items()),
+                sorted(self.known.items()),
+                sorted((t, tuple(v)) for t, v in self.pend.items()),
+                sorted(self.held_since.items()), sorted(self.vsince.items()),
+                sorted(self.dels.items()))
+
+    def is_held(self, t) -> bool:
+        """By the venue's replies: the latest known state holds t and no
+        delete of ours after it is unanswered (by the protocol an add never
+        removes a market -- one already held is "no action")."""
+        k = self.known.get(t)
+        if k is None or not k[1]:
+            return False
+        return not any(self.dels.get(c) and c > k[0]
+                       for c in self.pend.get(t, ()))
 
 
 class Oracle:
@@ -285,9 +359,16 @@ class Oracle:
     (re)wanted market's liveness starts -- at the want ("want", WsBooks
     driven directly) or at the first command naming it ("subscribe")."""
 
-    def __init__(self, *, variant=D, live_from="want", s5=True, s0=True):
+    def __init__(self, *, variant=D, live_from="want", s5=True, s0=True,
+                 truth_membership=False):
         self.variant = variant
         self.live_from = live_from
+        #: (RC6.2 review) P2 by the venue's TRUE membership (the generator's
+        #: "venue" records: the WsBooks enumeration) -- not by the replies
+        #: the client reads; without such records (scripted sockets, the
+        #: Subscriber sims, whose CURRENT books are compared with the
+        #: venue's true books instead) by the replies
+        self.truth_membership = truth_membership
         self.s5, self.s0 = s5, s0
         #: how many times S5 / S0 decided a verdict the protocol would not
         self.s5_used = self.s0_used = 0
@@ -308,11 +389,18 @@ class Oracle:
         self.acked_ids = set()      # ids a `subscribed` or `ok` answered
         self.first_sub_cmd = {}
         self.latest_snap = {}
+        #: command ids a reply answered (a repeated reply settles nothing)
+        self.answered = set()
+        #: (generator state, never a verdict) sid -> add / delete command
+        #: ids not yet answered, in order; sid -> what the venue holds
+        self.unanswered = {}
+        self.venue = {}
 
     def copy(self) -> Oracle:
         c = Oracle.__new__(Oracle)
         c.variant, c.live_from, c.s5, c.s0 = (self.variant, self.live_from,
                                               self.s5, self.s0)
+        c.truth_membership = self.truth_membership
         c.s5_used, c.s0_used = self.s5_used, self.s0_used
         c.log = list(self.log)
         c.connected = self.connected
@@ -328,12 +416,18 @@ class Oracle:
         c.first_sub_cmd = dict(self.first_sub_cmd)
         c.latest_snap = {t: (i, same[id(s)])
                          for t, (i, s) in self.latest_snap.items()}
+        c.answered = set(self.answered)
+        c.unanswered = {k: list(v) for k, v in self.unanswered.items()}
+        c.venue = {k: set(v) for k, v in self.venue.items()}
         return c
 
     def verdicts(self, markets) -> tuple:
         return (self.connected, self.s5_used, self.s0_used,
                 sorted(self.cmds.items(), key=str), sorted(self.sub_ids),
-                sorted(self.acked_ids), sorted(self.wanted),
+                sorted(self.acked_ids), sorted(self.answered),
+                sorted((k, tuple(v)) for k, v in self.unanswered.items()),
+                sorted((k, sorted(v)) for k, v in self.venue.items()),
+                sorted(self.wanted),
                 sorted(self.dropped), sorted(self.dropped_this_session),
                 sorted(self.subscribable), [s.view() for s in self.all_subs],
                 sorted((k, s.view()) for k, s in self.subs.items()),
@@ -378,20 +472,106 @@ class Oracle:
                 self.dropped_this_session.add(t)
         elif kind == "sub":
             _, cid, tickers = entry
-            self.cmds[cid] = (i, "subscribe", tuple(tickers))
+            self.cmds[cid] = (i, "subscribe", tuple(tickers), None)
             self.sub_ids.add(cid)
             self._first_cmd(i, tickers)
         elif kind == "upd":
             _, cid, sid, action, tickers = entry
-            self.cmds[cid] = (i, action, tuple(tickers))
+            self.cmds[cid] = (i, action, tuple(tickers), sid)
             s = self.subs.get(sid)
             if s is not None and not s.ended:
                 s.cmds.append((i, action, tuple(tickers)))
+                if s.anchored and action in ("add_markets",
+                                             "delete_markets"):
+                    # in motion until the venue answers it
+                    s.dels[cid] = action == "delete_markets"
+                    for t in tickers:
+                        s.pend.setdefault(t, []).append(cid)
+                        self._mark(s, t, i)
+                    self.unanswered.setdefault(sid, []).append(cid)
             if action != "delete_markets":
                 self._first_cmd(i, tickers)
         elif kind == "msg":
             self._message(i, entry[1])
+        elif kind == "lost":
+            # (generator) the venue's reply to this command was lost
+            for v in self.unanswered.values():
+                if entry[1] in v:
+                    v.remove(entry[1])
+        elif kind == "venue":
+            # (generator) what the venue TRULY holds on a sid now -- also on
+            # the subscription now holding the number (its vsince)
+            sid, now = entry[1], set(entry[2])
+            self.venue[sid] = now
+            s = self.subs.get(sid)
+            if s is not None and s.anchored and not s.ended:
+                for t in sorted(now - set(s.vsince)):
+                    s.vsince[t] = i
+                for t in sorted(set(s.vsince) - now):
+                    del s.vsince[t]
         return i
+
+    @staticmethod
+    def _mark(s, t, i):
+        """Keep held_since in step with is_held."""
+        if s.is_held(t):
+            s.held_since.setdefault(t, i)
+        else:
+            s.held_since.pop(t, None)
+
+    def _settle(self, i, s, cid, typ, m):
+        """The venue's reply to our add / delete `cid`, on the anchored
+        subscription s (asyncapi: the `ok` carries the subscription's full
+        ticker list after the update): every market whose add / delete up
+        to `cid` was unanswered is HELD exactly when listed; a HELD market
+        the list lacks is NOT. Without a list, an `ok` settles its own
+        command; an error refuses its own add (a refused delete leaves the
+        venue as it was)."""
+        if cid in self.answered or cid not in self.cmds:
+            return
+        self.answered.add(cid)
+        for v in self.unanswered.values():
+            if cid in v:
+                v.remove(cid)
+        _i, action, ts, _sid = self.cmds[cid]
+        if action not in ("add_markets", "delete_markets") or \
+                not s.anchored or s.ended:
+            return
+        body = m.get("msg") if isinstance(m.get("msg"), dict) else {}
+        listed = body.get("market_tickers") if typ == "ok" else None
+        if isinstance(listed, list):
+            # the state of EVERY market after cid; every command up to cid
+            # is in it
+            on = set(listed)
+            for t in sorted(set(s.known) | set(s.pend) | on):
+                s.pend[t] = [c for c in s.pend.get(t, ()) if c > cid]
+                if s.known.get(t, (-1, False))[0] <= cid:
+                    s.known[t] = (cid, t in on)
+                self._mark(s, t, i)
+            return
+        for t in ts:
+            if cid not in s.pend.get(t, ()):
+                continue
+            s.pend[t] = [c for c in s.pend[t] if c != cid]
+            # an error leaves the venue as it was: nothing becomes known
+            if typ == "ok" and s.known.get(t, (-1, False))[0] <= cid:
+                s.known[t] = (cid, action == "add_markets")
+            self._mark(s, t, i)
+
+    def holds(self, s, t, at) -> bool:
+        """(anchored s) the venue's replies vouch that it held t on s from
+        before log index `at` until now: no delta of t was withheld (what a
+        correct client can know: liveness, `promised`)."""
+        return s.is_held(t) and s.held_since.get(t, at) < at
+
+    def venue_held(self, s, t, at) -> bool:
+        """(anchored s) P2's membership condition: the venue held t on s
+        from before log index `at` until now -- by its TRUE state when the
+        generator records it, else by its replies."""
+        if not self.truth_membership:
+            return self.holds(s, t, at)
+        since = s.vsince.get(t)
+        return since is not None and since < at
 
     def _first_cmd(self, i, tickers):
         for t in tickers:
@@ -418,6 +598,11 @@ class Oracle:
                     ours and not s.anchored and s.first_snap is None):
                 s = self.subs[sid] = _Sub(sid, i, anchored=ours)
                 self.all_subs.append(s)
+                if ours:
+                    # the venue holds every market our subscribe named
+                    for t in self.cmds[cid][2]:
+                        s.known[t] = (0, True)
+                        self._mark(s, t, i)
             s.acks.append(cid)
             return
         if typ in ("ok", "error", "unsubscribed"):
@@ -425,16 +610,31 @@ class Oracle:
             if typ == "ok" and cid in self.cmds:
                 self.acked_ids.add(cid)
             sid = m.get("sid")
+            code = (m.get("msg") or {}).get("code")
             if sid is None:
+                if typ != "error":
+                    return
+                if code in TERMINAL:
+                    # unscoped: the connection's subscription(s) ended
+                    for x in self.subs.values():
+                        x.ended = True
+                    return
+                c = self.cmds.get(cid)
+                x = self.subs.get(c[3]) if c is not None else None
+                if x is not None and not x.ended:
+                    self._settle(i, x, cid, typ, m)
                 return
             s = self.subs.get(sid)
             if s is None or s.ended:
                 return
-            code = (m.get("msg") or {}).get("code")
+            if typ == "unsubscribed" or code in TERMINAL:
+                if m.get("seq") is not None:
+                    self._control(i, s, m["seq"])
+                s.ended = True
+                return
+            self._settle(i, s, cid, typ, m)
             if m.get("seq") is not None:
                 self._control(i, s, m["seq"])
-            if typ == "unsubscribed" or code in TERMINAL:
-                s.ended = True
             return
         if typ not in (SNAP, DELTA):
             return
@@ -524,11 +724,18 @@ class Oracle:
             at = s.snap_at.get(t)
             if at is None or at[1] < e:
                 continue
-            pos, _i, fresh, _in_seq = at
+            pos, i_snap, fresh, _in_seq = at
             if not fresh or s.last_break > pos:
                 continue
             if not s.anchored and s.last_break >= 0:
                 continue        # no command can repair such a subscription
+            if s.anchored and not self.venue_held(s, t, i_snap):
+                # (RC6.2 review) the venue did not hold t from before the
+                # snapshot until now: deltas of t are missing (get_snapshot
+                # answers for any market "without modifying the
+                # subscription"; a snapshot sent before our delete may be
+                # read after the market is wanted again)
+                continue
             out[sid] = s.book[t]
         return out
 
@@ -557,8 +764,10 @@ class Oracle:
         s = ls[1]
         if self.subs.get(s.sid) is not s or s.ended or not s.anchored:
             return None
-        pos, _i, fresh, in_seq = s.snap_at[t]
+        pos, i_snap, fresh, in_seq = s.snap_at[t]
         if not in_seq or s.last_break > pos or s.ctrl_at > pos:
+            return None
+        if not self.holds(s, t, i_snap):
             return None
         return s.book[t]
 
@@ -605,17 +814,21 @@ def check(o: Oracle, b: KWS.WsBooks, *, sub=None, written=None,
     want_snap = set().union(*b.recover.values()) if b.recover else set()
     awaiting = set().union(*(a["awaiting"] for a in b.anchors.values())) \
         if b.anchors else set()
+    readd = set().union(*b.refused.values(), *b.readd_lost.values()) \
+        if (b.refused or b.readd_lost) else set()
     for t in sorted(o.dropped):
         held = [name for name, hit in (
             ("book", t in b.books), ("resubscribe", t in b.resubscribe),
             ("recover", t in want_snap or t in awaiting),
+            ("refused/readd_lost", t in readd),
             ("sid_markets/ticker_sid", t in assoc),
             ("current", cur[t]["ok"]),
             ("subscribed", sub is not None and t in sub.subscribed),
             ("pending", sub is not None and any(
                 t in ts for ts in sub.pending.values())),
             ("queued", sub is not None and (
-                t in sub.queued_add or t in sub.readd or t in sub.rewant)),
+                t in sub.queued_add or t in sub.readd or t in sub.rewant
+                or t in sub.rate_retry)),
             ("written", written is not None and t in written)) if hit]
         if held:
             bad.append(("P1_DROPPED_MARKET_HELD", t, held))
@@ -766,6 +979,21 @@ def w_events(o: Oracle) -> list:
                        ("reply", sid, "ok", "skip"),
                        ("reply", sid, "err27", "next"),
                        ("end", sid, "err10"), ("end", sid, "unsubscribed")]
+                pend = o.unanswered.get(sid)
+                if pend and o.cmds[pend[0]][1] == "add_markets":
+                    # the venue does not take the market: its `ok` lists
+                    # the subscription without it
+                    ev.append(("reply", sid, "lack", "next"))
+                s = o.subs[sid]
+                for t in WMARKETS:
+                    pend = s.pend.get(t)
+                    if t in o.wanted and t in o.subscribable and \
+                            not pend and not s.is_held(t):
+                        ev.append(("add", sid, t))
+                    if t in o.dropped and (s.is_held(t) or any(
+                            o.cmds[c][1] == "add_markets"
+                            for c in pend or ())):
+                        ev.append(("delete", sid, t))
             if _may_ack(o, sid):
                 ev.append(("ack", sid))
             ev.append(("announce", sid))
@@ -790,36 +1018,80 @@ def w_apply(b: KWS.WsBooks, o: Oracle, ev) -> list:
         m = (_w_snapshot if typ == SNAP else _w_delta)(sid, seq, t)
         b.on_message(m, recv_at=NOW)
         return [("msg", m)]
-    if kind == "ack":
+    if kind in ("ack", "ack_only"):
         # the Subscriber's handling of `subscribed` answering its subscribe:
         # bind (ours), then the message; it named every market subscribable
+        # ("ack_only", roots: the markets given), and the venue holds them
         cid = _new_cid(o)
-        ts = sorted(o.subscribable)
+        ts = sorted(o.subscribable) if kind == "ack" else list(ev[2])
         m = m_subscribed(cid, ev[1])
         b.bind(ev[1], ts)
         b.on_message(m, recv_at=NOW)
-        return [("sub", cid, tuple(ts)), ("msg", m)]
+        return [("sub", cid, tuple(ts)), ("msg", m),
+                ("venue", ev[1], tuple(ts))]
+    if kind in ("add", "delete"):
+        # the Subscriber's add (bound to the sid when sent) / delete
+        _, sid, t = ev
+        cid = _new_cid(o)
+        action = "add_markets" if kind == "add" else "delete_markets"
+        if kind == "add":
+            b.bind(sid, [t])
+        b.command_sent(sid, cid, action, [t])
+        return [("upd", cid, sid, action, (t,))]
     if kind == "announce":
         m = m_subscribed(None, ev[1])
         b.bind(ev[1], [], ours=False)
         b.on_message(m, recv_at=NOW)
         return [("msg", m)]
     if kind == "reply":
-        # an update command sent on the sid (the Subscriber's record), and
-        # its reply: `ok` / error 27 -- under S a lost reply still advanced
-        # the counter, so "skip" stands for two commands, one reply lost
+        # the venue's reply to the oldest unanswered add / delete on the sid
+        # (none: to a get_snapshot sent now, the Subscriber's record):
+        # `ok` (the full list after it), `ok` whose list lacks the add's
+        # market, error 27 -- "skip": two commands, the first one's reply
+        # lost (the venue executed it; under S it still advanced the
+        # counter)
         _, sid, what, v = ev
         out = []
-        cids = [_new_cid(o) + k for k in range(2 if v == "skip" else 1)]
-        for cid in cids:
+        pend = list(o.unanswered.get(sid, ()))
+        venue = set(o.venue.get(sid, ()))
+        cids = []
+        for k in range(2 if v == "skip" else 1):
+            if pend:
+                cids.append(pend.pop(0))
+                continue
+            cid = _new_cid(o) + k
             b.command_sent(sid, cid)
             out.append(("upd", cid, sid, "get_snapshot", ()))
+            cids.append(cid)
+        for k, cid in enumerate(cids):
+            c = o.cmds.get(cid)
+            if c is None or c[1] not in ("add_markets", "delete_markets"):
+                continue
+            last = k == len(cids) - 1
+            if last and what in ("lack", "err27"):
+                continue                # refused: the venue is unchanged
+            if c[1] == "add_markets":
+                venue |= set(c[2])
+            else:
+                venue -= set(c[2])
+            if not last:
+                # executed before the next command, its reply lost: the
+                # venue's state in between is part of the truth
+                out.append(("venue", sid, tuple(sorted(venue))))
+        if v == "skip":
+            out.append(("lost", cids[0]))
         top = _top(o, sid, control=True)
         seq = top + (2 if v == "skip" else 1)
-        m = (m_ok(cids[-1], sid, seq) if what == "ok"
-             else m_error(cids[-1], 27, sid=sid, seq=seq))
+        c = o.cmds.get(cids[-1])
+        membership = c is not None and c[1] in ("add_markets",
+                                                 "delete_markets")
+        if what == "err27":
+            m = m_error(cids[-1], 27, sid=sid, seq=seq)
+        else:
+            m = m_ok(cids[-1], sid, seq,
+                     sorted(venue) if membership else None)
         b.on_message(m, recv_at=NOW)
-        return out + [("msg", m)]
+        return out + [("venue", sid, tuple(sorted(venue))), ("msg", m)]
     if kind == "end":
         _, sid, what = ev
         seq = _top(o, sid, control=True) + 1
@@ -843,7 +1115,7 @@ def w_apply(b: KWS.WsBooks, o: Oracle, ev) -> list:
 
 
 def _derive(log, variant) -> Oracle:
-    o = Oracle(variant=variant)
+    o = Oracle(variant=variant, truth_membership=True)
     for e in log:
         o.record(e)
     return o
@@ -879,15 +1151,33 @@ ROOTS = {
         ("msg", 1, WA, DELTA, "skip"), ("msg", 1, WB, SNAP, "dup")],
     "reconnected_after_all_current": _ALL_ON_1 + [
         ("msg", 1, WB, DELTA, "next"), ("disconnect",), ("connect",)],
+    # (RC6.2 review, venue membership) our subscribe named A only; B's
+    # add is sent on the sid and not yet answered
+    "an_add_unanswered": [("ack_only", 1, (WA,)), ("msg", 1, WA, SNAP,
+                                                     "next"),
+                          ("add", 1, WB)],
+    # ... and the venue's `ok` lacks B (it did not take it): a get_snapshot
+    # reply for B would be a snapshot of a market it does not stream
+    "an_add_refused": [("ack_only", 1, (WA,)), ("msg", 1, WA, SNAP, "next"),
+                       ("add", 1, WB), ("reply", 1, "lack", "next")],
+    # B dropped (delete sent), wanted again (add sent): a snapshot of B
+    # sent before the delete may still be on its way
+    "b_deleted_and_wanted_again": _ALL_ON_1 + [
+        ("forget", WB), ("delete", 1, WB), ("want", WB), ("add", 1, WB)],
 }
 #: CI depth per (root, variant): 3 where each variant's hard cases live --
-#: under D the two densest roots; under S the roots where a separate
+#: under D the two densest roots and the two venue-membership roots (a
+#: refused add; a delete and a re-add in flight); under S the roots where a
+#: separate
 #: counter's reply can coincide with the shared slot (a mutant without the
 #: control-frame guard is caught from "acked" at depth 3: snapshot, a reply
 #: past a lost one, a delta past a lost frame); under R the reused number --
 #: 2 everywhere else
 DEEP = {("fresh", D), ("all_current_on_sid_1", D), ("acked", S),
-        ("a_reply_after_data", S), ("sid_1_ended_by_error", R)}
+        ("a_reply_after_data", S), ("sid_1_ended_by_error", R),
+        # (RC6.2 review) venue membership: a refused add, a delete and a
+        # re-add in flight
+        ("an_add_refused", D), ("b_deleted_and_wanted_again", D)}
 
 
 def ci_depth(root, variant):
@@ -897,54 +1187,63 @@ def ci_depth(root, variant):
 #: sequences enumerated per (variant, root) at its CI depth -- pinned: the
 #: alphabet is the oracle's, so the count does not depend on the code
 CI_COUNTS = {
-    (D, 'a_reply_after_data'): 2361,
-    (D, 'acked'): 1425,
-    (D, 'all_current_on_sid_1'): 116414,
+    (D, 'a_reply_after_data'): 2364,
+    (D, 'acked'): 1428,
+    (D, 'all_current_on_sid_1'): 116831,
+    (D, 'an_add_refused'): 98783,
+    (D, 'an_add_unanswered'): 2059,
     (D, 'announced_not_ours_then_a_delta'): 1508,
-    (D, 'b_dropped_and_wanted_again'): 2361,
-    (D, 'b_dropped_on_live_sid_1'): 2361,
+    (D, 'b_deleted_and_wanted_again'): 117100,
+    (D, 'b_dropped_and_wanted_again'): 2364,
+    (D, 'b_dropped_on_live_sid_1'): 2457,
     (D, 'delta_before_the_first_snapshot'): 1508,
     (D, 'first_snapshot_refused_after_a_delta'): 1502,
-    (D, 'frames_on_a_number_not_ours'): 2347,
-    (D, 'fresh'): 44784,
-    (D, 'gapped_on_sid_1'): 2361,
+    (D, 'frames_on_a_number_not_ours'): 2350,
+    (D, 'fresh'): 44796,
+    (D, 'gapped_on_sid_1'): 2364,
     (D, 'reconnected_after_all_current'): 1154,
-    (D, 'recovering_on_sid_1'): 2361,
+    (D, 'recovering_on_sid_1'): 2364,
     (D, 'sid_1_ended_by_error'): 1430,
-    (R, 'a_reply_after_data'): 2363,
-    (R, 'acked'): 1427,
-    (R, 'all_current_on_sid_1'): 2363,
+    (R, 'a_reply_after_data'): 2366,
+    (R, 'acked'): 1430,
+    (R, 'all_current_on_sid_1'): 2366,
+    (R, 'an_add_refused'): 2062,
+    (R, 'an_add_unanswered'): 2061,
     (R, 'announced_not_ours_then_a_delta'): 1508,
-    (R, 'b_dropped_and_wanted_again'): 2363,
-    (R, 'b_dropped_on_live_sid_1'): 2363,
+    (R, 'b_deleted_and_wanted_again'): 2368,
+    (R, 'b_dropped_and_wanted_again'): 2366,
+    (R, 'b_dropped_on_live_sid_1'): 2459,
     (R, 'delta_before_the_first_snapshot'): 1508,
     (R, 'first_snapshot_refused_after_a_delta'): 1502,
-    (R, 'frames_on_a_number_not_ours'): 2349,
+    (R, 'frames_on_a_number_not_ours'): 2352,
     (R, 'fresh'): 1154,
-    (R, 'gapped_on_sid_1'): 2363,
+    (R, 'gapped_on_sid_1'): 2366,
     (R, 'reconnected_after_all_current'): 1154,
-    (R, 'recovering_on_sid_1'): 2363,
-    (R, 'sid_1_ended_by_error'): 60406,
-    (S, 'a_reply_after_data'): 116630,
-    (S, 'acked'): 59750,
-    (S, 'all_current_on_sid_1'): 2361,
+    (R, 'recovering_on_sid_1'): 2366,
+    (R, 'sid_1_ended_by_error'): 60418,
+    (S, 'a_reply_after_data'): 117047,
+    (S, 'acked'): 60059,
+    (S, 'all_current_on_sid_1'): 2364,
+    (S, 'an_add_refused'): 2060,
+    (S, 'an_add_unanswered'): 2059,
     (S, 'announced_not_ours_then_a_delta'): 1508,
-    (S, 'b_dropped_and_wanted_again'): 2361,
-    (S, 'b_dropped_on_live_sid_1'): 2361,
+    (S, 'b_deleted_and_wanted_again'): 2366,
+    (S, 'b_dropped_and_wanted_again'): 2364,
+    (S, 'b_dropped_on_live_sid_1'): 2457,
     (S, 'delta_before_the_first_snapshot'): 1508,
     (S, 'first_snapshot_refused_after_a_delta'): 1502,
-    (S, 'frames_on_a_number_not_ours'): 2347,
+    (S, 'frames_on_a_number_not_ours'): 2350,
     (S, 'fresh'): 1154,
-    (S, 'gapped_on_sid_1'): 2361,
+    (S, 'gapped_on_sid_1'): 2364,
     (S, 'reconnected_after_all_current'): 1154,
-    (S, 'recovering_on_sid_1'): 2361,
+    (S, 'recovering_on_sid_1'): 2364,
     (S, 'sid_1_ended_by_error'): 1430,
-}                       # 467,851 sequences in all
+}                       # 700,278 sequences in all
 
 
 def root_state(root, variant, *, s5=True, s0=True):
     b = KWS.WsBooks(clock=_clock)
-    o = Oracle(variant=variant, s5=s5, s0=s0)
+    o = Oracle(variant=variant, s5=s5, s0=s0, truth_membership=True)
     for t in WMARKETS:
         b.want([t])
         o.record(("want", t))
@@ -1199,6 +1498,8 @@ class _VenueConn:
         self.lost = {}              # vinc -> [data frames lost]
         self.last_seq = {}          # vinc -> last data seq delivered
         self.max_seq = {}           # vinc -> highest data seq delivered
+        self.refusals = {}          # market -> adds of it refused (26 / 27
+                                    # / not taken) on this connection
 
 
 class _Socket:
@@ -1232,7 +1533,8 @@ class SubscriberSim:
         self.w = {"deliver": r.randint(25, 60), "process": r.randint(2, 14),
                   "activity": r.randint(8, 25), "drop": r.randint(1, 6),
                   "rewant": r.randint(1, 6), "flush": 3, "reassert": 2,
-                  "venue_end": r.randint(0, 2), "disconnect": r.randint(0, 2)}
+                  "venue_end": r.randint(0, 2), "disconnect": r.randint(0, 2),
+                  "idle": 1}
         storm = faults and seed % 4 == 3
         self.p_loss, self.p_dup, self.p_replay = (
             (0.0, 0.0, 0.0) if not faults else
@@ -1243,6 +1545,20 @@ class SubscriberSim:
         self.p_ctrl_loss = r.uniform(0.05, 0.2) if faults else 0.0
         self.p_reuse = r.uniform(0.3, 0.95)
         self.p_send_refresh = r.uniform(0.05, 0.3)
+        # (RC6.2 review) the documented venue's other behaviours, per seed:
+        # an add's snapshots before its `ok` (the order is not documented);
+        # get_snapshot answered by snapshots only (no `ok` is documented
+        # for it) or also by an `ok`; refusals of an add -- error 26 past a
+        # per-subscription market limit, error 27 (the command rate), a
+        # ticker the venue silently does not take (its `ok` lacks it);
+        # errors with or without (sid, seq)
+        self.snap_first = r.random() < 0.5
+        self.gs_ok = r.random() < 0.5
+        refusing = r.random() < 0.5
+        self.market_limit = r.choice((3, None)) if refusing else None
+        self.p_27 = r.uniform(0.05, 0.2) if refusing else 0.0
+        self.p_not_taken = r.uniform(0.05, 0.2) if refusing else 0.0
+        self.scoped_errors = r.random() < 0.5
         self.truth = {t: {"yes": {Decimal("0.4%d" % k): Decimal(10 + k)},
                           "no": {Decimal("0.5%d" % k): Decimal(20 + k)}}
                       for k, t in enumerate(SMARKETS)}
@@ -1252,9 +1568,13 @@ class SubscriberSim:
         self.epochs = {}            # market -> times its book left CURRENT
         self.prev_state = {}
         self.store = BooksStore(epoch_of=lambda t: self.epochs.get(t, 0))
+        #: the runtime's clock: still, except that at quiescence time
+        #: passes until what the client scheduled is due (an error-27
+        #: retry, a reply's timeout)
+        self.t = NOW
         self.sub = KWS.Subscriber(self._connect, self.books,
                                   wanted=lambda: list(self.want),
-                                  clock=_clock, backoff=(0,),
+                                  clock=lambda: self.t, backoff=(0,),
                                   gap_sink=self._gap_sink)
         self.oracle = Oracle(variant=variant, live_from="subscribe")
         for t in self.want:
@@ -1263,6 +1583,8 @@ class SubscriberSim:
         self.steps = 0
         self.connections = 0
         self.vinc_n = 0
+        #: (vinc, data seq) -> the venue's FULL truth (every market, held or
+        #: not) when that data frame was sent
         self.truth_at = {}
         self.vinc_of = {}
         self.max_seq_all = {}       # vinc -> highest data seq delivered
@@ -1271,6 +1593,9 @@ class SubscriberSim:
         self.conn = None
         self.calm_rounds = 3
         self.calm_budget = None
+        #: the worker's wanted set changed since the client last read: the
+        #: runtime's idle recheck (IDLE_RECHECK_S) would run its commands
+        self.refreshed = False
         self.n_commands = 0
         self.counts = {"delivered": 0, "lost": 0, "duplicated": 0,
                        "replayed": 0, "ctrl_lost": 0, "acks": 0,
@@ -1280,7 +1605,14 @@ class SubscriberSim:
                        "refresh_during_send": 0, "flushes": 0,
                        "rows_written": 0, "reasserts": 0, "restamped": 0,
                        "reader_checks": 0, "gap_writes": 0,
-                       "client_session_ends": 0}
+                       "client_session_ends": 0,
+                       # (RC6.2 review) the documented venue's behaviours
+                       "refused_26": 0, "refused_27": 0, "not_taken": 0,
+                       "snapshots_of_markets_not_held": 0,
+                       "snapshots_delivered_not_held": 0,
+                       "get_snapshot_without_ok": 0, "adds_snap_first": 0,
+                       "rewant_with_snapshot_in_flight": 0,
+                       "idle_rechecks": 0, "time_waits": 0}
 
     # ── the run ──
     def run(self):
@@ -1331,20 +1663,20 @@ class SubscriberSim:
         await W.write_gaps(self.store, self.books, self.written, tickers)
 
     def _truth(self, t, sid):
+        """(RC6.2 review) The venue's TRUE book of t -- held or not -- as of
+        the HIGHEST data seq delivered on the subscription now holding sid
+        (it used to be the truth at t's own latest frame, blind to changes
+        the venue made to a market it no longer streamed)."""
         s = self.oracle.subs.get(sid)
         if s is None or t not in s.snap_at:
             return "NO_SNAPSHOT_OF_IT_ON_ITS_SID"
-        pos, i = s.snap_at[t][:2]
-        vinc = self.vinc_of.get(i)
-        if any(self.vinc_of.get(j) != vinc for j, _q, ty, _t in s.msgs[pos:]
-               if ty != "ctrl"):
+        vincs = {self.vinc_of.get(j) for j, _q, ty, _t in s.msgs
+                 if ty != "ctrl"}
+        if len(vincs) != 1 or None in vincs:
             return "ORACLE_SUBSCRIPTION_MISMATCH"
-        snap_seq = s.msgs[pos][1]
-        for q in range(self.conn_max_seq(vinc), snap_seq - 1, -1):
-            rec = self.truth_at.get((vinc, q))
-            if rec is not None and rec[0] == t:
-                return rec[1]
-        return "NO_TRUTH"
+        vinc = vincs.pop()
+        rec = self.truth_at.get((vinc, self.conn_max_seq(vinc)))
+        return "NO_TRUTH" if rec is None else rec[t]
 
     def conn_max_seq(self, vinc):
         return self.max_seq_all.get(vinc, 0)
@@ -1389,6 +1721,7 @@ class SubscriberSim:
         for t in sorted(set(new) - before):
             self.oracle.record(("want", t))
             self.counts["rewants"] += 1
+        self.refreshed = True
         self._check("after the worker's refresh (%s)" % kind)
 
     def _during_send(self):
@@ -1434,6 +1767,13 @@ class SubscriberSim:
         p = m.get("params") or {}
         ts = list(p.get("market_tickers") or ())
         action = p.get("action")
+        if action == "add_markets" and any(
+                x[2] == "data" and x[0]["type"] == SNAP
+                and x[0]["msg"]["market_ticker"] in ts
+                for x in self.conn.out_q):
+            # a snapshot of the market, sent before (say) our delete, is
+            # still on its way while we add it again
+            self.counts["rewant_with_snapshot_in_flight"] += 1
         if m.get("cmd") == "subscribe" or action in ("add_markets",
                                                      "get_snapshot"):
             hit = set(ts) & self.oracle.dropped
@@ -1468,9 +1808,27 @@ class SubscriberSim:
                 self._violate("calm", [("NO_QUIESCENCE", self.calm_budget)])
                 continue
             act = self._choose(calm)
+            if act == "quiet" and self.refreshed:
+                act = "idle"
+            if act == "quiet" and self.sub.next_due() is not None:
+                # nothing in flight, but the client has something scheduled
+                # (a rate-limit retry, a reply's timeout): quiescence only
+                # once time has passed to it
+                self.t = max(self.t, self.sub.next_due())
+                self.counts["time_waits"] += 1
+                act = "idle"
+            if act == "idle":
+                # nothing to read for IDLE_RECHECK_S: the runtime's
+                # wait_for times out and it runs its commands (a session
+                # waiting on a venue that holds nothing still sees the
+                # wanted set change)
+                self.refreshed = False
+                self.counts["idle_rechecks"] += 1
+                raise asyncio.TimeoutError()
             if act == "deliver":
                 m = self._deliver(calm)
                 if m is not None:
+                    self.refreshed = False
                     return json.dumps(m)
             elif act == "process":
                 self._process()
@@ -1526,6 +1884,14 @@ class SubscriberSim:
         self.conn.out_q.append((m_ok(cid, sub["sid"], self._seq(True),
                                      sub["markets"]), None, "ctrl"))
 
+    def _emit_error(self, cid, code):
+        sub = self.conn.sub
+        if self.scoped_errors:
+            m = m_error(cid, code, sid=sub["sid"], seq=self._seq(True))
+        else:
+            m = m_error(cid, code)
+        self.conn.out_q.append((m, None, "ctrl"))
+
     def _new_sub(self):
         c, r = self.conn, self.rng
         if self.variant == R and c.ended_numbers and r.random() < \
@@ -1565,20 +1931,59 @@ class SubscriberSim:
             c.out_q.append((m_error(cid, 7), None, "meta"))
             return
         action = p.get("action")
+        r = self.rng
         if action == "add_markets":
             new = [t for t in ts if t not in sub["markets"]]
-            sub["markets"] += new
-            self._emit_ok(cid)
+            refuse = None
+            if self.market_limit is not None and \
+                    len(sub["markets"]) + len(new) > self.market_limit:
+                refuse = 26
+            elif r.random() < self.p_27:
+                refuse = 27
+            if refuse is not None:
+                # the whole command refused: the subscription unchanged
+                self.counts["refused_%d" % refuse] += 1
+                for t in new:
+                    c.refusals[t] = c.refusals.get(t, 0) + 1
+                self._emit_error(cid, refuse)
+                return
+            taken = []
             for t in new:
-                self._emit(sub, t, None)
+                if r.random() < self.p_not_taken:
+                    # not taken: the `ok` lists the subscription without it
+                    self.counts["not_taken"] += 1
+                    c.refusals[t] = c.refusals.get(t, 0) + 1
+                else:
+                    taken.append(t)
+            sub["markets"] += taken
+            if self.snap_first and taken:
+                self.counts["adds_snap_first"] += 1
+                for t in taken:
+                    self._emit(sub, t, None)
+                self._emit_ok(cid)
+            else:
+                self._emit_ok(cid)
+                for t in taken:
+                    self._emit(sub, t, None)
         elif action == "delete_markets":
             sub["markets"] = [t for t in sub["markets"] if t not in ts]
             self._emit_ok(cid)
         elif action == "get_snapshot":
-            self._emit_ok(cid)
+            if r.random() < self.p_27:
+                self.counts["refused_27"] += 1
+                self._emit_error(cid, 27)
+                return
+            # docs: "returns an orderbook_snapshot for the requested
+            # market_tickers without modifying the subscription" -- held
+            # or not; an `ok` is not documented for it
+            if self.gs_ok:
+                self._emit_ok(cid)
+            else:
+                self.counts["get_snapshot_without_ok"] += 1
             for t in ts:
-                if t in sub["markets"]:
-                    self._emit(sub, t, None)
+                if t not in sub["markets"]:
+                    self.counts["snapshots_of_markets_not_held"] += 1
+                self._emit(sub, t, None)
 
     def _venue_end(self):
         """The venue ends our subscription: error 10 / 25, or its own
@@ -1617,8 +2022,9 @@ class SubscriberSim:
         else:
             side, price, d = change
             m = m_delta(sub["sid"], sub["seq"], t, price, d, side)
-        self.truth_at[(sub["vinc"], sub["seq"])] = (
-            t, {"yes": dict(bk["yes"]), "no": dict(bk["no"])})
+        self.truth_at[(sub["vinc"], sub["seq"])] = {
+            x: {"yes": dict(v["yes"]), "no": dict(v["no"])}
+            for x, v in self.truth.items()}
         self.conn.out_q.append((m, sub["vinc"], "data"))
         self.conn.sent.setdefault(sub["vinc"], []).append(m)
 
@@ -1652,8 +2058,10 @@ class SubscriberSim:
     def _deliver(self, calm):
         c, r = self.conn, self.rng
         m, vinc, kind = c.out_q.popleft()
+        # a lost control frame is one carrying a seq (a lost error without
+        # one could never be noticed by any client)
         if kind == "ctrl" and not calm and self.faults and \
-                r.random() < self.p_ctrl_loss:
+                m.get("seq") is not None and r.random() < self.p_ctrl_loss:
             self.counts["ctrl_lost"] += 1
             return None
         if kind == "data" and not calm and self.faults:
@@ -1673,6 +2081,13 @@ class SubscriberSim:
                     c.out_q.appendleft((m, vinc, kind))
                     m = r.choice(old)
                     self.counts["replayed"] += 1
+        if kind == "data" and m.get("type") == SNAP and (
+                c.sub is None or m["sid"] != c.sub["sid"]
+                or m["msg"]["market_ticker"] not in c.sub["markets"]):
+            # a snapshot of a market the venue does not hold when it is
+            # delivered: sent before our delete was processed (and read
+            # after it), or a get_snapshot's answer for a market not held
+            self.counts["snapshots_delivered_not_held"] += 1
         i = self.oracle.record(("msg", m))
         self.counts["delivered"] += 1
         if vinc is not None:
@@ -1688,17 +2103,31 @@ class SubscriberSim:
         return m
 
     def _quiescence(self):
-        """Nothing in flight, nothing awaited: (D) every wanted market is
-        CURRENT with the venue's true book, and after the worker's flush
-        the store serves exactly that; the commands sent are bounded."""
+        """Nothing in flight, nothing awaited: (D) every wanted market the
+        venue holds is CURRENT with the venue's true book, and after the
+        worker's flush the store serves exactly that; (RC6.2 review) every
+        wanted market the venue does not hold was refused at least twice
+        on this connection (the client added it again once) and is GAP,
+        named R_NOT_HELD_BY_VENUE, never CURRENT; the commands sent are
+        bounded."""
         self._check("at quiescence")
         self._flush()
+        c = self.conn
+        held = set(c.sub["markets"]) if c.sub is not None else set()
         self.live = all(self.books.current(t)["ok"] and _code_book(
-            self.books.current(t)) == self.truth[t] for t in self.want)
+            self.books.current(t)) == self.truth[t]
+            for t in self.want if t in held)
+        self.not_held = sorted(t for t in self.want if t not in held)
         if self.variant == D:
             for t in self.want:
                 cur = self.books.current(t)
-                if not cur["ok"] or _code_book(cur) != self.truth[t]:
+                if t not in held:
+                    if cur["ok"] or c.refusals.get(t, 0) < 2 or \
+                            cur.get("why") != KWS.R_NOT_HELD_BY_VENUE:
+                        self._violate("quiescence", [(
+                            "LIVENESS_NOT_HELD", t, cur["state"],
+                            cur.get("why"), c.refusals.get(t, 0))])
+                elif not cur["ok"] or _code_book(cur) != self.truth[t]:
                     self._violate("quiescence", [(
                         "LIVENESS_AT_QUIESCENCE", t, cur["state"],
                         cur.get("why"))])
@@ -1713,12 +2142,25 @@ class SubscriberSim:
         """O(markets x connections + gaps + refreshes): per connection one
         subscribe, ceil(M / 2) adds (chunks of two) and one re-add per
         market; per gap ceil(M / 2) get_snapshots (one recovery, the same
-        chunks); per refresh one delete or add or get_snapshot."""
+        chunks); per refresh one delete or add or get_snapshot. (RC6.2
+        review) That bound is unchanged; on top of it, each documented
+        venue behaviour the old venue never showed is allowed exactly its
+        own price, so a seed without them meets the old bound: an add
+        refused by error 26 / 27 -> its re-add and one later retry (a
+        get_snapshot refused by 27 -> asked again); a ticker the venue did
+        not take -> its re-add; a market whose add was unanswered at a gap
+        -> its re-add and the get_snapshot its confirmation asks for; a
+        snapshot of a market whose add / delete was unanswered (an add's
+        own before its `ok`, a pre-delete one, a get_snapshot answer) ->
+        one get_snapshot once the venue confirms the market."""
         m = len(SMARKETS)
         per_conn = 1 + -(-m // 2) + m
+        c, st = self.counts, self.books.stats
         return (self.connections * per_conn
-                + self.books.stats["gaps"] * -(-m // 2)
-                + self.counts["drops"] + self.counts["rewants"])
+                + st["gaps"] * -(-m // 2)
+                + c["drops"] + c["rewants"]
+                + 2 * (c["refused_26"] + c["refused_27"]) + c["not_taken"]
+                + 2 * st["readd_after_gap"] + st["snapshots_not_held"])
 
 
 def _new_sim(seed, variant):
@@ -1764,7 +2206,20 @@ def test_the_subscriber_against_the_model_venue(variant):
     for k in ("lost", "duplicated", "replayed", "ctrl_lost", "late_acks",
               "drops", "rewants", "venue_ends", "venue_unsubscribes",
               "disconnects", "refresh_during_send", "rows_written",
-              "restamped", "reader_checks", "gap_writes"):
+              "restamped", "reader_checks", "gap_writes",
+              # (RC6.2 review) the documented venue's behaviours the
+              # client must be safe under: snapshots of a market the venue
+              # does not hold when they are read, get_snapshot without an
+              # `ok`, refused adds (26, 27, a ticker not taken), an add's
+              # snapshots before its `ok`, a re-add while the market's old
+              # snapshot is in flight. (The venue answers get_snapshot for
+              # every requested ticker, held or not -- the client names
+              # only markets the venue holds, so that answer for a market
+              # not held is measured, not required:
+              # snapshots_of_markets_not_held.)
+              "refused_26", "refused_27", "not_taken",
+              "snapshots_delivered_not_held", "get_snapshot_without_ok",
+              "adds_snap_first", "rewant_with_snapshot_in_flight"):
         assert total[k] > 0, (variant, k, total)
     if variant == R:
         assert total["reused_sids"] > 0
@@ -2036,6 +2491,64 @@ def test_a_separate_counters_coincidence_never_hides_a_lost_delta():
         assert check(o, b, universe=WMARKETS) == [], ev
     assert b.current(WA)["ok"] and b.stats["gaps"] == 0
     assert b.stats["deltas"] == 1
+
+
+def _forced_current(b, t, sid):
+    """A mutant of the books: t CURRENT on sid with the levels it has."""
+    m = _clone_books(b)
+    m.books[t].update(state=KWS.CURRENT, sid=sid)
+    return m
+
+
+def test_scenario_a_a_snapshot_of_a_market_the_venue_refused_is_never_current():
+    """(RC6.2 review, blocking: the protocol review's scenario A, in the
+    model) Our subscribe named A; B's add is answered by an `ok` whose list
+    lacks B. A snapshot of B then arrives in the sid's sequence -- what
+    get_snapshot sends for any requested ticker, held or not. The books
+    keep the sequence and never apply it. The oracle -- by the venue's TRUE
+    membership -- has no legitimate book of B, so a mutant holding B
+    CURRENT is a P2 violation at once (the RC6.2 candidate's books were
+    that mutant)."""
+    b, o = root_state("an_add_refused", D)
+    assert b.books[WB]["why"] == KWS.R_NOT_HELD_BY_VENUE
+    for e in w_apply(b, o, ("msg", 1, WB, SNAP, "next")):
+        o.record(e)
+    assert check(o, b, universe=WMARKETS) == []
+    assert not b.current(WB)["ok"] and b.stats["snapshots_not_held"] == 1
+    assert o.legit(WB) == {}
+    bad = check(o, _forced_current(b, WB, 1), universe=WMARKETS)
+    assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" and x[1] == WB
+               for x in bad), bad
+
+
+def test_a_pre_delete_snapshot_of_a_rewanted_market_is_never_current():
+    """(RC6.2 review, blocking: the safety review, in the model) B was
+    dropped (delete_markets sent) and wanted again (add_markets sent); its
+    snapshot from before the delete arrives in sequence, then the venue's
+    `ok` to the delete (B gone) and to the add (B back). The books never
+    apply the pre-delete snapshot; by the venue's true membership that
+    snapshot stops being a valid book of B the moment the venue processed
+    the delete, so a mutant that applied it is a P2 violation from then on
+    -- and, after the re-add, B is CURRENT again only from a snapshot that
+    follows the add's `ok`."""
+    b, o = root_state("b_deleted_and_wanted_again", D)
+    steps = [("msg", 1, WB, SNAP, "next"),       # the pre-delete snapshot
+             ("reply", 1, "ok", "next"),         # the delete: B gone
+             ("reply", 1, "ok", "next")]         # the add: B back
+    for i, ev in enumerate(steps):
+        for e in w_apply(b, o, ev):
+            o.record(e)
+        assert check(o, b, universe=WMARKETS) == [], ev
+        assert not b.current(WB)["ok"], ev
+        if i >= 1:
+            bad = check(o, _forced_current(b, WB, 1), universe=WMARKETS)
+            assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" and
+                       x[1] == WB for x in bad), (ev, bad)
+    # the add's own snapshot, after its `ok`: CURRENT, and legitimate
+    for e in w_apply(b, o, ("msg", 1, WB, SNAP, "next")):
+        o.record(e)
+    assert check(o, b, universe=WMARKETS) == []
+    assert b.current(WB)["ok"] and sorted(o.legit(WB)) == [1]
 
 
 # ── regressions the RC6 model found (the legacy rules, unchanged) ───────
