@@ -151,8 +151,16 @@ def test_priorities_put_held_and_candidates_first():
 
 
 def test_non_sports_leagues_are_excluded_by_name():
+    # (RC6.2, p-coverage rework) as the venue lists them: a BTC market has
+    # no sports market type (research-sql run 37966271096 P1: all 8,800
+    # btc markets untyped). This case used to carry this file's default
+    # football type -- and a typed sports row is never dropped by its code
+    # (ontology.excluded_as_non_sports, tests/test_rc62_non_sports_
+    # population.py)
+    assert POP.contract_row(_cat("b1", event="aec-btc-up-2026",
+                                 sports_type=None), now=NOW) is None
     assert POP.contract_row(_cat("b1", event="aec-btc-up-2026"),
-                            now=NOW) is None
+                            now=NOW) is not None
 
 
 def test_a_listing_past_the_horizon_is_not_venue_active_unless_required():

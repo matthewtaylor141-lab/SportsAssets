@@ -1,0 +1,1103 @@
+{
+ "_what": "Real venue rule texts the settlement terms reader is tested against: every Polymarket US money-line text and every self-contradicting UFC text in the 2,028-row read, and one Kalshi game-winner rule block per distinct postponement wording among the 360 read, each with the reading b3f1b0cd's code gave it.",
+ "_source": "research-sql run 37939739782 (research/rc6_p-coverage_texts.sql, T1 / T3, 2026-10-09); readings computed with the b3f1b0cd tree in this lane",
+ "pmus_money_lines": [
+  {
+   "contract_id": "aec-npb-ygo-ybo-2026-10-10",
+   "event_id": "npb-ygo-ybo-2026-10-10",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "78091ed78edf353156d8dd5c74fdf0c0b98c29ef44ee03f011b5e486d201a1a4",
+   "rules_text": "This market will settle to the winner of the Yomiuri Giants vs Yokohama BayStars NPB game scheduled for Oct 10, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-npb-ssl-nhf-2026-10-11",
+   "event_id": "npb-ssl-nhf-2026-10-11",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "13d54db81b097e671ce2d537b5fa2958dd67292ff57c9d105903bafef45998f3",
+   "rules_text": "This market will settle to the winner of the Saitama Seibu Lions vs Nippon Ham Fighters NPB game scheduled for Oct 11, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-npb-ssl-nhf-2026-10-10",
+   "event_id": "npb-ssl-nhf-2026-10-10",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "4fcb8b2e3e611f41d033edf9ec2d8b9027650b973b60819f68a71dbf755a3456",
+   "rules_text": "This market will settle to the winner of the Saitama Seibu Lions vs Nippon Ham Fighters NPB game scheduled for Oct 10, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-kbo-sla-kwt-2026-10-11",
+   "event_id": "kbo-sla-kwt-2026-10-11",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "d245a0019dbe7efaf2fffa3eaa8855918bac33b64faa65da18d6d0d60a0e7eea",
+   "rules_text": "This market will settle to the winner of the Samsung Lions vs KT Wiz KBO game scheduled for Oct 11, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KBO.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-kbo-dbo-lgo-2026-10-12",
+   "event_id": "kbo-dbo-lgo-2026-10-12",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "859ab512a2cf6f33ef47f7553c488ba96f9e83dbbb6d27574254bcb110d781c4",
+   "rules_text": "This market will settle to the winner of the Doosan Bears vs Lotte Giants KBO game scheduled for Oct 12, 2026 at 5:30AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KBO.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-npb-ygo-ybo-2026-10-11",
+   "event_id": "npb-ygo-ybo-2026-10-11",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "38d3e60ad0a291daf4f9208a50b8b5a095169195602aa55d00a65d9de4594fbb",
+   "rules_text": "This market will settle to the winner of the Yomiuri Giants vs Yokohama BayStars NPB game scheduled for Oct 11, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-kbo-sla-kwt-2026-10-12",
+   "event_id": "kbo-sla-kwt-2026-10-12",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "7087eca3d41ffc8bbd2023a7a5afa4d0db33f260e9782bcbb2b8dddfdf0c541f",
+   "rules_text": "This market will settle to the winner of the Samsung Lions vs KT Wiz KBO game scheduled for Oct 12, 2026 at 5:30AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KBO.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-mlb-cws-cle-2026-10-10",
+   "event_id": "mlb-cws-cle-2026-10-10",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "e9e2d27bdd330958f3b71b0062182040be73c532d52ff2e3adb734b4f85900cf",
+   "rules_text": "This market will settle to the winner of the Chicago White Sox vs Cleveland Guardians MLB AL Division Series Game 5 scheduled for 2026-10-10 at 8:00PM ET. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-kbo-kti-lgo-2026-10-11",
+   "event_id": "kbo-kti-lgo-2026-10-11",
+   "market_type": "baseball_team_full_game_winner",
+   "rules_sha256": "7d30e0abab7801856517657d8fd1f25a28e7096f0bbe052b3b09d224c229208c",
+   "rules_text": "This market will settle to the winner of the Kia Tigers vs Lotte Giants KBO game scheduled for Oct 11, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KBO.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-gbl-kar-vik-2026-10-10",
+   "event_id": "gbl-kar-vik-2026-10-10",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "809d40005e126bcbabcace17230fce3393fd4da722e92227b8ba80b8b8f65798",
+   "rules_text": "This market will settle to the winner of the AS Karditsas vs Vikos GBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from GBL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-koris-lah-kou-2026-10-14",
+   "event_id": "koris-lah-kou-2026-10-14",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "a9ab9537729fcb16c4530f8bfc7b6ed2131eb8ba9b96aefc1ace0a4612b956b2",
+   "rules_text": "This market will settle to the winner of the Lahti Basketball vs Kouvot Kouvola Korisliiga game scheduled for Oct 14, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Korisliiga.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nba-chi-den-2026-10-11",
+   "event_id": "nba-chi-den-2026-10-11",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "bc6ee62d2b4553d49431c08e0d2db620a570fc5d4233375322d0f73437dcff5a",
+   "rules_text": "This market will settle to the winner of the CHI Bulls vs DEN Nuggets professional basketball game originally scheduled for Oct 11, 2026 at 9:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nba-min-mia-2026-10-21",
+   "event_id": "nba-min-mia-2026-10-21",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "f4660a2f175a26081deb8453cc6362a09b537ce720827ba6a6f778523a210a56",
+   "rules_text": "This market will settle to the winner of the MIN Timberwolves vs MIA Heat professional basketball game originally scheduled for Oct 21, 2026 at 7:30PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-aba-krk-fmp-2026-10-09",
+   "event_id": "aba-krk-fmp-2026-10-09",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "905beedc93aa982867a2f253ff6f44386c604e6c4dd2c7a81a2ba65cf8f225a0",
+   "rules_text": "This market will settle to the winner of the KK Krka Novo Mesto vs KK FMP Belgrade Adriatic ABA League game scheduled for Oct 9, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Adriatic ABA League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nba-bos-det-2026-10-20",
+   "event_id": "nba-bos-det-2026-10-20",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "c24a283bc4cd8b637fe4aa8ca70cad4e8473ca0dfcdc66d15a1dfbb353985a2c",
+   "rules_text": "This market will settle to the winner of the BOS Celtics vs DET Pistons professional basketball game originally scheduled for Oct 20, 2026 at 3:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-vtb-ura-ppk-2026-10-10",
+   "event_id": "vtb-ura-ppk-2026-10-10",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "19dfee26a0f49257131b5a14d6c5381a495f61c0d6ace4c43ba65611824fa7cd",
+   "rules_text": "This market will settle to the winner of the BK Uralmash Yekaterinburg vs Parma Permsky Kray VTB United League game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from VTB United League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nba-pho-sa-2026-10-14",
+   "event_id": "nba-pho-sa-2026-10-14",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "48281467117d8a029b2ce2e9ca1541aa545ed188f66f4fd4383de063330e1b48",
+   "rules_text": "This market will settle to the winner of the PHO Suns vs SA Spurs professional basketball game originally scheduled for Oct 14, 2026 at 8:00PM ET. Overtime is included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-bskt3x3-dis-neo-2026-10-09-c4887f15",
+   "event_id": "bskt3x3-dis-neo-2026-10-09-c4887f15",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "4cc12d92c490ef59418d4ca1d377e0189c9eb27048643035011daa9edecdf058",
+   "rules_text": "This market will settle to the winner of the District Kings (3x3) vs Neon Basket (3x3) BSKT Cup 3x3 game scheduled for Oct 9, 2026. Overtime is included if played. If the game does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. Outcome sourced from BSKT Cup 3x3.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-lnbp-abe-ssl-2026-10-11",
+   "event_id": "lnbp-abe-ssl-2026-10-11",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "b3590e62217fb7b88ecb3fc09f2c9e02be5ca105e698263d2208e66a69000a7e",
+   "rules_text": "This market will settle to the winner of the Abejas de Leon vs Santos Del Potosi LNBP game scheduled for Oct 11, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from LNBP.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-slnbl-rog-gor-2026-10-10",
+   "event_id": "slnbl-rog-gor-2026-10-10",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "d9501f9c19d2f345e52c6a3a5b33851c71fa6f1c23e3dde29e521f1557738803",
+   "rules_text": "This market will settle to the winner of the Rogaska vs Nova Gorica SLNBL game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SLNBL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-kbl-egi-won-2026-10-10",
+   "event_id": "kbl-egi-won-2026-10-10",
+   "market_type": "basketball_team_full_game_winner",
+   "rules_sha256": "366b2e943af31b6c6bc513308f7e1e0e1bc2a74931364ce8c53a194ab244c44b",
+   "rules_text": "This market will settle to the winner of the KCC Egis vs Wonju DB New Generation Korean Basketball League game scheduled for Oct 10, 2026. Overtime is included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Korean Basketball League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-brwn-prnce-2026-10-17",
+   "event_id": "cfb-brwn-prnce-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "becb2be7d4d1ecc8014a1adfea424121d0a5118fa0dca5ea755ea68903fc1a06",
+   "rules_text": "This market will settle to the winner of the Brown vs Princeton College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-hamp-sacred-2026-10-17",
+   "event_id": "cfb-hamp-sacred-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "56f30ccb026f5f7edf25a256a541a618a1502371dd3433de56e1e23706dadcf7",
+   "rules_text": "This market will settle to the winner of the Hampton vs Sacred Heart College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-vir-smu-2026-10-17",
+   "event_id": "cfb-vir-smu-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "173f12eb0a4feeb2c3a18dc4bcca170c37b0c95b39ebd27cba44b20e18bb1748",
+   "rules_text": "This market will settle to the winner of the Virginia vs SMU College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-wake-cah-2026-10-17",
+   "event_id": "cfb-wake-cah-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "3b2728aba26b6898e471a586fcf2695eca884a353e24eb3d89abe920d19257b1",
+   "rules_text": "This market will settle to the winner of the Wake Forest vs California College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-vamil-woff-2026-10-17",
+   "event_id": "cfb-vamil-woff-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "09614b0acb84cb89e5d991b5268c0e0f0e330903584e90f4dda8907aa4b546f3",
+   "rules_text": "This market will settle to the winner of the VMI vs Wofford College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-flint-jaxst-2026-10-13",
+   "event_id": "cfb-flint-jaxst-2026-10-13",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "93350b96d08f99c86bb195a32320070b451f850ad05accfa75a56ef7f4f86539",
+   "rules_text": "This market will settle to the winner of the Florida International vs Jacksonville State College Football game scheduled for Oct 13, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-yngst-indst-2026-10-10",
+   "event_id": "cfb-yngst-indst-2026-10-10",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "6f18af9809cb00ff5847fcd61151b39fc1252a6806fab00eb7305b60527e2a09",
+   "rules_text": "This market will settle to the winner of the Youngstown State vs Indiana State College Football game scheduled for Oct 10, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-holy-harv-2026-10-17",
+   "event_id": "cfb-holy-harv-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "ba10af831c47da3a4bcbaa33dedf3082f92fdf9a7bb3d1f3f6d7e41bf22af830",
+   "rules_text": "This market will settle to the winner of the Holy Cross vs Harvard College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-jmad-applst-2026-10-22",
+   "event_id": "cfb-jmad-applst-2026-10-22",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "a57433f51d0f7b9a8bf4e936f1041f649f23f8d42692eb93a97b09cc6f6a269f",
+   "rules_text": "This market will settle to the winner of the James Madison vs Appalachian State College Football game scheduled for Oct 22, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-ark-vand-2026-10-17",
+   "event_id": "cfb-ark-vand-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "dde7d30b9efd623f652622f564f942e00017df271634756da9034940546a720b",
+   "rules_text": "This market will settle to the winner of the Arkansas vs Vanderbilt College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-gast-jmad-2026-10-17",
+   "event_id": "cfb-gast-jmad-2026-10-17",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "a4da8fee7e700813d550e5b5a71d55b7c52966820f1ec1068a1c54c447157263",
+   "rules_text": "This market will settle to the winner of the Georgia State vs James Madison College Football game scheduled for Oct 17, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cfb-more-day-2026-10-10",
+   "event_id": "cfb-more-day-2026-10-10",
+   "market_type": "football_team_full_game_winner",
+   "rules_sha256": "985ffdc1dda59ab28caf51a42d94e251409c5bb99a713256b2803ebf5315b724",
+   "rules_text": "This market will settle to the winner of the Morehead State vs Dayton College Football game scheduled for Oct 10, 2026. Overtime is included if played. If a tied final score is reported and no official winner is declared, this market will not resolve automatically and will be reviewed against the official governing-body result. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from the relevant governing body.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nhl-van-nyr-2026-10-11",
+   "event_id": "nhl-van-nyr-2026-10-11",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "9769678e03b9162309d16c40b277e1e4217dca9b360f6fc9dbb58ce26db17d2a",
+   "rules_text": "This market will settle to the winner of the VAN Canucks vs NYR Rangers NHL game scheduled for Oct 11, 2026 at 6:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-cehl-lib-kva-2026-10-09",
+   "event_id": "cehl-lib-kva-2026-10-09",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "a8efadca7a8417093ae6daa310682f8f178bb4f425dacd04fe83da33e57aafc3",
+   "rules_text": "This market will settle to the winner of the Liberec vs Karlovy Vary Czech Extraliga game scheduled for Oct 9, 2026 at 12:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from Czech Extraliga.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-del-kec-sww-2026-10-09",
+   "event_id": "del-kec-sww-2026-10-09",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "3afb04b9891b6ae25b51ffec775c9997bab82933d52ee6349ccdbdc177d04fb1",
+   "rules_text": "This market will settle to the winner of the Koelner Haie vs Schwenninger Wild Wings DEL game scheduled for Oct 9, 2026 at 1:30PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from DEL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-ahl-tuc-sjb-2026-10-10",
+   "event_id": "ahl-tuc-sjb-2026-10-10",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "2fbe05cc12c8c34dcb0be5e9f14386222ceaadbb917c0d09777ec20028b2421c",
+   "rules_text": "This market will settle to the winner of the Tucson Roadrunners vs San Jose Barracuda AHL game scheduled for Oct 10, 2026 at 9:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from AHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nhl-det-mon-2026-10-10",
+   "event_id": "nhl-det-mon-2026-10-10",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "7d2db38edddc95dd0ae66ee54d68262e98ea4edf4d640d4ab8b3e24130dc912c",
+   "rules_text": "This market will settle to the winner of the DET Red Wings vs MTL Canadiens NHL game scheduled for Oct 10, 2026 at 7:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nhl-car-phi-2026-10-11",
+   "event_id": "nhl-car-phi-2026-10-11",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "d919e337342aac8a269242d83994e7616ef59fd77b7332c807eff688714322fa",
+   "rules_text": "This market will settle to the winner of the CAR Hurricanes vs PHI Flyers NHL game scheduled for Oct 11, 2026 at 7:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-ahl-man-chi-2026-10-10",
+   "event_id": "ahl-man-chi-2026-10-10",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "3d3199c5e019cbcd8723ba7e8acdbf152ca6c829e8b5efceab04d356ae2bf9af",
+   "rules_text": "This market will settle to the winner of the Manitoba Moose vs Chicago Wolves AHL game scheduled for Oct 10, 2026 at 8:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from AHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-khl-soc-spk-2026-10-09",
+   "event_id": "khl-soc-spk-2026-10-09",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "23a4f538d315774192578bf4053e2fbb129b54854d23d7ceeb731062c8ce56a3",
+   "rules_text": "This market will settle to the winner of the HC Sochi vs Spartak Moscow KHL game scheduled for Oct 9, 2026 at 12:30PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nhl-cgy-ana-2026-10-13",
+   "event_id": "nhl-cgy-ana-2026-10-13",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "0cb9eba2de90bf79dcf351c010e7cbe41ddad37c63bd1b3741842a4b976204b1",
+   "rules_text": "This market will settle to the winner of the CGY Flames vs ANA Ducks NHL game scheduled for Oct 13, 2026 at 9:45PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-snhl-scl-scrj-2026-10-09",
+   "event_id": "snhl-scl-scrj-2026-10-09",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "7f3bf0f337df6b2ebb58e6eddcee26db820a8b43dea9d510bab5b864c80300f1",
+   "rules_text": "This market will settle to the winner of the SCL Tigers vs Rapperswil-Jona Lakers National League game scheduled for Oct 9, 2026 at 1:45PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from National League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-khl-lok-dmn-2026-10-10",
+   "event_id": "khl-lok-dmn-2026-10-10",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "1eeec96df6911e3c6cfb956625ae16858e91eef27faf1dcebfa946ed1f053421",
+   "rules_text": "This market will settle to the winner of the Lokomotiv Yaroslavl vs Dinamo Minsk KHL game scheduled for Oct 10, 2026 at 10:00AM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from KHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "aec-nhl-min-fla-2026-10-10",
+   "event_id": "nhl-min-fla-2026-10-10",
+   "market_type": "hockey_team_full_game_winner",
+   "rules_sha256": "24102f03f0955ba1954bb63dbacb3e64493635b01dc740054f74b6ac1b297909",
+   "rules_text": "This market will settle to the winner of the MIN Wild vs FLA Panthers NHL game scheduled for Oct 10, 2026 at 6:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-uecl-ata-paf-2026-10-15-paf",
+   "event_id": "uecl-ata-paf-2026-10-15",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "2cc0995b49c6273cee052e0fba0de826db45d32cb4cc10e38aa1e0d8f036a9d3",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Atalanta BC vs P\u00e1fos FC UECL match scheduled for 2026-10-15 3:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from UEFA.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-spl-fay-riy-2026-10-11-draw",
+   "event_id": "spl-fay-riy-2026-10-11",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "23dad6392671394eef203f39676d826422428e7e9a2b35f9dfb92d7d964b9d9a",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Al Fayha Saudi Club vs Al Riyadh Saudi Club Saudi Pro League match scheduled for 2026-10-11 9:40AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SAFF.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-peu20-por-rec-2026-10-10-rec",
+   "event_id": "peu20-por-rec-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "6efb0977f3aee505fd40fbce5a56e355920590fbf7924a5bdf916912260f9d97",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the CA Porto PE vs SC Recife PE Pernambucano U20 match scheduled for 2026-10-10 2:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from Federa\u00e7\u00e3o Pernambucana de Futebol.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-engnl-wor-sol-2026-10-10-sol",
+   "event_id": "engnl-wor-sol-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "27b03f5f85975d6e4e86c0dad9ece6a1fdb40adf5a1f65fac19d78fdb16f96e3",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Worthing FC vs Solihull Moors FC English National League match scheduled for 2026-10-10 10:00AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from National League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-epl-cfc-bor-2026-10-10-bor",
+   "event_id": "epl-cfc-bor-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "540dce797569e217526f475a2944a98b2d98f8a916a45dd67993a7c780b1d289",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Chelsea FC vs AFC Bournemouth Premier League match scheduled for 2026-10-10 10:00AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Premier League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-ekst-leg-wis-2026-10-11-leg",
+   "event_id": "ekst-leg-wis-2026-10-11",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "b9f3872f35dd6f7fa7305e71aec46ae88960f9e631012f5f8c722e4551abecd3",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Legia Warszawa vs Wisla Krakow Ekstraklasa match scheduled for 2026-10-11 2:15PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Ekstraklasa SA.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-mls-ner-sea-2026-10-10-sea",
+   "event_id": "mls-ner-sea-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "73416a9efe3c1f366c6e79373db0cdafd2959f4d1b3ac3f89e6798ae4404c88a",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the New England Revolution vs Seattle Sounders FC MLS match scheduled for 2026-10-10 7:30PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLS.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-csl-xin-hen-2026-10-09-hen",
+   "event_id": "csl-xin-hen-2026-10-09",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "52980626609b9a6785b357983f3dac55930234f6658df7c35dffceb0ba671c88",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Shenzhen Xinpengcheng FC vs Henan FC CSL match scheduled for 2026-10-09 7:35AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from CFA.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-lexp-tla-pir-2026-10-10-draw",
+   "event_id": "lexp-tla-pir-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "1422870864a8c5e70e1e37a2a9d25a0f959c8edce4189e9e61e5aca326be0511",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Tlaxcala FC vs Piratas Veracruz Liga de Expansi\u00f3n MX match scheduled for 2026-10-10 6:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Liga MX.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-egpl-smo-gha-2026-10-12-gha",
+   "event_id": "egpl-smo-gha-2026-10-12",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "2c91cefde5031d4e1d90dade41ae48e5da62420470dd5394eccf27a60968b88e",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Smouha SC vs Ghazl El Mahalla SC Egyptian Premier League match scheduled for 2026-10-12 1:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from Egyptian Premier League.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-lpc-pun-ala-2026-10-10-ala",
+   "event_id": "lpc-pun-ala-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "b1f639d6be234ccfd09312d976523ea2fce30a31ce650599334b0bda1d9c1c30",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Puntarenas FC vs LD Alajuelense Liga Prom\u00e9rica match scheduled for 2026-10-10 7:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from FEDEFUTBOL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "atc-uslc-det-rho-2026-10-10-det",
+   "event_id": "uslc-det-rho-2026-10-10",
+   "market_type": "soccer_team_full_time_winner",
+   "rules_sha256": "1a09403972814c6c59e612e118658354b36ca432a7a8d881ccad86d00a857be4",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Detroit City FC vs Rhode Island FC USL Championship match scheduled for 2026-10-10 7:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from USL.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN"
+    },
+    "contradicted": []
+   }
+  }
+ ],
+ "pmus_ufc": [
+  {
+   "contract_id": "astatc-ufc-andfil-kaikam-2026-10-10-mov-f1-dec",
+   "event_id": "ufc-andfil-kaikam-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "d74ae12f5548a0ce61c2858669961c3281e4858c0980585b906bc2890101c757",
+   "rules_text": "If Andre Fili wins by decision in the Andre Fili vs Kai Kamaka III UFC fight, scheduled for October 10, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Andre Fili is declared the winner by unanimous decision (all three judges score in Andre Fili's favor), majority decision (two judges score in Andre Fili's favor and one judge scores it a draw), or split decision (two judges score in Andre Fili's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Andre Fili is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-ufc-matcam-jaiher-2026-10-10-mov-f2-sub",
+   "event_id": "ufc-matcam-jaiher-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "f6e045f1888033d8a8230d5fc08cca0e47e0cecd2986ebfbfd25d7de8fa8cffc",
+   "rules_text": "If Jai Herbert wins by submission in the Matheus Camilo vs Jai Herbert UFC fight, scheduled for October 10, this market will settle to Yes. A submission is defined as a fight-ending stoppage in which Jai Herbert's opponent verbally or physically taps out, is rendered unconscious by a chokehold, or the referee stops the fight because the opponent is unable to escape a submission hold and is at risk of serious injury. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-ufc-julwal-germee-2026-10-10-mov-f1-sub",
+   "event_id": "ufc-julwal-germee-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "b8f63d56f3ad6852ea7039dd8606ddd911d3d815225da8f7bf15dbac3fd49a1d",
+   "rules_text": "If Julius Walker wins by submission in the Julius Walker vs Gerald Meerschaert UFC fight, scheduled for October 10, this market will settle to Yes. A submission is defined as a fight-ending stoppage in which Julius Walker's opponent verbally or physically taps out, is rendered unconscious by a chokehold, or the referee stops the fight because the opponent is unable to escape a submission hold and is at risk of serious injury. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-ufc-frapra-ismbon-2026-10-10-mov-f1-dec",
+   "event_id": "ufc-frapra-ismbon-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "5fd8ef30eb8fcf803502a6adbeb8c7125888bc03ee4321716698588f1e0368e4",
+   "rules_text": "If Francisco Prado wins by decision in the Francisco Prado vs Ismael Bonfim UFC fight, scheduled for October 10, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Francisco Prado is declared the winner by unanimous decision (all three judges score in Francisco Prado's favor), majority decision (two judges score in Francisco Prado's favor and one judge scores it a draw), or split decision (two judges score in Francisco Prado's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Francisco Prado is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-ufc-malwel-otatan-2026-10-10-mov-f1-dec",
+   "event_id": "ufc-malwel-otatan-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "defd118606fd67e40949dc19526c3a41f26277ba8ffdde61470c0242a4310116",
+   "rules_text": "If Malcolm Wellmaker wins by decision in the Malcolm Wellmaker vs Otari Tanzilovi UFC fight, scheduled for October 10, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Malcolm Wellmaker is declared the winner by unanimous decision (all three judges score in Malcolm Wellmaker's favor), majority decision (two judges score in Malcolm Wellmaker's favor and one judge scores it a draw), or split decision (two judges score in Malcolm Wellmaker's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Malcolm Wellmaker is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-dwcs-jasash-grefos-2026-10-13-mov-f1-dec",
+   "event_id": "dwcs-jasash-grefos-2026-10-13",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "14af2e0bd3499a5534894969e3801116ba5bc8cf5a9670c24f6a48e4aabd811a",
+   "rules_text": "If Jason Asher wins by decision in the Jason Asher vs Greg Foster DWCS fight, scheduled for October 13, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Jason Asher is declared the winner by unanimous decision (all three judges score in Jason Asher's favor), majority decision (two judges score in Jason Asher's favor and one judge scores it a draw), or split decision (two judges score in Jason Asher's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Jason Asher is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the DWCS fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-dwcs-ilibul-erivis-2026-10-13-mov-f2-dec",
+   "event_id": "dwcs-ilibul-erivis-2026-10-13",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "80cbdb280f4e852bc184c84bac543de003d2f528bb71138db8bb05ba085e4f84",
+   "rules_text": "If Erick Visconde wins by decision in the Ilias Bulaid vs Erick Visconde DWCS fight, scheduled for October 13, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Erick Visconde is declared the winner by unanimous decision (all three judges score in Erick Visconde's favor), majority decision (two judges score in Erick Visconde's favor and one judge scores it a draw), or split decision (two judges score in Erick Visconde's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Erick Visconde is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the DWCS fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  },
+  {
+   "contract_id": "astatc-ufc-loogod-ketsou-2026-10-10-mov-f1-dec",
+   "event_id": "ufc-loogod-ketsou-2026-10-10",
+   "market_type": "ufc_method_of_victory",
+   "rules_sha256": "093b348f0072bd197c76f593957b801d6f8a97d08184629791fd85c23108ccaf",
+   "rules_text": "If Loopy God\u00ednez wins by decision in the Loopy God\u00ednez vs Ketlen Souza UFC fight, scheduled for October 10, this market will settle to Yes. A decision is defined as a result determined by the judges' scorecards after all scheduled rounds have been completed, in which Loopy God\u00ednez is declared the winner by unanimous decision (all three judges score in Loopy God\u00ednez's favor), majority decision (two judges score in Loopy God\u00ednez's favor and one judge scores it a draw), or split decision (two judges score in Loopy God\u00ednez's favor and one judge scores for the opponent). A technical decision, where the fight is stopped due to an accidental foul after enough rounds have been completed for the judges to render a decision and Loopy God\u00ednez is declared the winner on the scorecards, also counts as a win by decision. Outcome sourced from the relevant governing body or event organizers.\nIf the bout is declared a No Contest by the governing body due to an accidental foul, a pre-existing injury, or any other circumstance that prevents a definitive result from being determined, this market will settle to fair market price, as determined by the Exchange. Any post-fight changes to the official result, including overturned decisions or retroactive No Contest rulings following a failed drug test, will not affect settlement once the market has already settled.\nIf the UFC fight is postponed or delayed within two weeks of the original date, the market will remain open and will settle once the fight is complete. Cancellation or rescheduling beyond the two-week window results in resolution at the last fair market price.",
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": [
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+    ]
+   }
+  }
+ ],
+ "kalshi_winners": [
+  {
+   "contract_id": "kalshi:KXABAGAME-26OCT111400VIEKPB-KPB",
+   "series": "KXABAGAME",
+   "event_ticker": "KXABAGAME-26OCT111400VIEKPB",
+   "tags": [
+    "Basketball"
+   ],
+   "series_title": "Adriatic ABA Game",
+   "rules_sha256": "6ad3803ea16e3709ccc90963af3c8cc97b73b76f1d8492223d3a67f98a9ad0e4",
+   "rules_primary": "If KK Partizan Belgrade wins the BC Vienna vs KK Partizan Belgrade men's professional Adriatic ABA basketball game originally scheduled for Oct 11, 2026 at 2:00 PM EDT, then the market resolves to Yes.",
+   "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Basketball",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXAFCCLGAME-26OCT13NUJGAM-TIE",
+   "series": "KXAFCCLGAME",
+   "event_ticker": "KXAFCCLGAME-26OCT13NUJGAM",
+   "tags": [
+    "Soccer"
+   ],
+   "series_title": "AFC Champions League Game",
+   "rules_sha256": "6c3bbdd78cf68c5ba6a6b8600bf52cf4a080a0580c74da1313a4723579faadd6",
+   "rules_primary": "If Tie is the result of the Newcastle vs Gamba professional AFC Champions League soccer game originally scheduled for Oct 13, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties), then the market resolves to Yes.",
+   "rules_secondary": "The following market refers to the Newcastle vs Gamba professional AFC Champions League soccer game originally scheduled for Oct 13, 2026 after 90 minutes plus stoppage time (does not include extra time or penalties). If the game ends in a tie, the market called \"Tie\" resolves to Yes. If the game is cancelled or rescheduled to over 48 hours away, the market will resolve to a fair price in accordance with the rules. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Soccer",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "BOOK_TERMS_SCOPE_NOT_ESTABLISHED:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXAHLGAME-26OCT102100HENSAN-SAN",
+   "series": "KXAHLGAME",
+   "event_ticker": "KXAHLGAME-26OCT102100HENSAN",
+   "tags": [
+    "Hockey"
+   ],
+   "series_title": "AHL Game",
+   "rules_sha256": "5d454ad82ce4b99cbec0da4332743c7f70a8bbc4801abe7d1db492cfd3b4f452",
+   "rules_primary": "If San Diego Gulls wins the Henderson Silver Knights vs San Diego Gulls professional AHL hockey game originally scheduled for Oct 10, 2026, then the market resolves to Yes.",
+   "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Hockey",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXCFLGAME-26OCT09EDMHAM-HAM",
+   "series": "KXCFLGAME",
+   "event_ticker": "KXCFLGAME-26OCT09EDMHAM",
+   "tags": [
+    "Football"
+   ],
+   "series_title": "CFL Game",
+   "rules_sha256": "134cf44716ef74a877cfbd3b2b691f4569397d304e50980818959872aa13a157",
+   "rules_primary": "If the Hamilton Tiger-Cats win the Edmonton Elks vs Hamilton Tiger-Cats professional CFL football game originally scheduled for Oct 9, 2026, then the market resolves to Yes.",
+   "rules_secondary": "The following market refers to the Edmonton Elks vs Hamilton Tiger-Cats professional CFL football game originally scheduled for Oct 9, 2026. If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished (within two days). If the game is cancelled or rescheduled to over two days away, the market will resolve to a fair price in accordance with the rules. If the game is declared a tie, the market will resolve to 50/50 for both teams. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Football",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "INCOMPATIBLE_NOT_PRICEABLE:POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED:SETTLEMENT_DIFFERENCE_ORDINARY_COMPLETION_NOT_ESTABLISHED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXKBOGAME-26OCT110100LOTKIA-LOT",
+   "series": "KXKBOGAME",
+   "event_ticker": "KXKBOGAME-26OCT110100LOTKIA",
+   "tags": [
+    "Baseball"
+   ],
+   "series_title": "KBO Game",
+   "rules_sha256": "3733800cd3d40c6457ec3f158e4f55df7eb306037806ccaa4dd92da7a0dd913e",
+   "rules_primary": "If Lotte Giants wins the Lotte Giants vs Kia Tigers Korea KBO game originally scheduled for Oct 11, 2026 at 1:00 AM EDT, then the market resolves to Yes.",
+   "rules_secondary": "The following market refers to the Lotte Giants vs Kia Tigers Korea KBO game originally scheduled for Oct 11, 2026 at 1:00 AM EDT. If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished (within two days). If the game is cancelled or rescheduled to over two days away, the market will resolve to a fair price in accordance with the rules. If the game ends in a tie the markets will resolve to 50/50. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Baseball",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "BOOK_TERMS_SCOPE_NOT_ESTABLISHED:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXMLBGAME-26OCT112000LADMIL-LAD",
+   "series": "KXMLBGAME",
+   "event_ticker": "KXMLBGAME-26OCT112000LADMIL",
+   "tags": [
+    "Baseball"
+   ],
+   "series_title": "Professional Baseball Game",
+   "rules_sha256": "96cab16067e785bef43d2b5459635851e8a81b2271f5de5dd5c321bbea530dfb",
+   "rules_primary": "If Los Angeles D wins the Los Angeles D vs Milwaukee professional baseball game originally scheduled for Oct 11, 2026, then the market resolves to Yes.",
+   "rules_secondary": "The following market refers to the Los Angeles D vs Milwaukee professional baseball game originally scheduled for Oct 11, 2026. If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished (within two days). If the game is cancelled or rescheduled to over two days away, the market will resolve to a fair price in accordance with the rules. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Baseball",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "BOOK_TERMS_SCOPE_NOT_ESTABLISHED:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
+    },
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXNCAAFGAME-26OCT17UCDSUU-UCD",
+   "series": "KXNCAAFGAME",
+   "event_ticker": "KXNCAAFGAME-26OCT17UCDSUU",
+   "tags": [
+    "Football"
+   ],
+   "series_title": "College Football Game",
+   "rules_sha256": "568a7957b6d7b9a3d2dcd556afd4620aae4a4be7a422d72c5905ff881ff42602",
+   "rules_primary": "If UC Davis wins the UC Davis vs Southern Utah college football game originally scheduled for Oct 17, 2026, then the market resolves to Yes.",
+   "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, the market will resolve to a fair price. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the NCAA. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Football",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXNCAAHGAME-26OCT09QUIMAI-QUI",
+   "series": "KXNCAAHGAME",
+   "event_ticker": "KXNCAAHGAME-26OCT09QUIMAI",
+   "tags": [
+    "Hockey"
+   ],
+   "series_title": "College Hockey Game",
+   "rules_sha256": "d45d5c24c8a47322fa3fdb98c885e96894c12c28d92f34d2b8c28fdeeb729e8c",
+   "rules_primary": "If Quinnipiac wins the Quinnipiac vs Maine men's college hockey game originally scheduled for Oct 9, 2026, then the market resolves to Yes.",
+   "rules_secondary": "In the event of a tie, all markets will resolve to 50/50. If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the NCAA. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Hockey",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXNFLGAME-26OCT11CLENYJ-CLE",
+   "series": "KXNFLGAME",
+   "event_ticker": "KXNFLGAME-26OCT11CLENYJ",
+   "tags": [
+    "Football"
+   ],
+   "series_title": "NFL Game",
+   "rules_sha256": "83ecc3f6a82c569d535c90eeaf7142e3563e30891f39642f349351735b0b9136",
+   "rules_primary": "If Cleveland wins the CLE Browns vs NY Jets Pro Football game originally scheduled for Oct 11, 2026, then the market resolves to Yes.",
+   "rules_secondary": "The following market refers to the team who wins the CLE Browns vs NY Jets Pro Football game originally scheduled for Oct 11, 2026. If the game ends in a tie, the market will resolve to $0.50 for each team. If the game is postponed but begins within 48 hours from its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is not started within 48 hours, the market will resolve to a fair price. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Football",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXNHLGAME-26OCT12OTTNJ-OTT",
+   "series": "KXNHLGAME",
+   "event_ticker": "KXNHLGAME-26OCT12OTTNJ",
+   "tags": [
+    "Hockey"
+   ],
+   "series_title": "NHL Game",
+   "rules_sha256": "a215b99d13aea58fe6e3f413b41e2343b349b4f16b93215c699df3ffa369de19",
+   "rules_primary": "If Ottawa wins the Ottawa vs New Jersey NHL game originally scheduled for Oct 12, 2026, then the market resolves to Yes.",
+   "rules_secondary": "If the game is postponed but begins within 48 hours of its originally scheduled start time, the market will remain open and resolve based on the official final result. If the game is cancelled or not started within 48 hours of its originally scheduled start, all markets will resolve to a fair price.",
+   "plane_state_at_b3f1b0cd": [
+    "Hockey",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "VENUE_RULES_SILENT_ON:COMPLETED_IN_REGULATION,DECIDED_AFTER_REGULATION,CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM,STOPPED_BEFORE_THE_MINIMUM,SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW,POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {},
+    "contradicted": []
+   }
+  },
+  {
+   "contract_id": "kalshi:KXWNBAGAME-26OCT09GSLV-GS",
+   "series": "KXWNBAGAME",
+   "event_ticker": "KXWNBAGAME-26OCT09GSLV",
+   "tags": [
+    "Basketball"
+   ],
+   "series_title": "Women's Pro Basketball Game",
+   "rules_sha256": "a3c823a2094f9d1c02bd2f484db3063aa29e55015c1cf60a5cae1e30bb0cb170",
+   "rules_primary": "If Golden State wins the Golden State vs Las Vegas women's Pro Basketball game originally scheduled for Oct 9, 2026, then the market resolves to Yes.",
+   "rules_secondary": "If this game is postponed or delayed, the market will remain open and close after the rescheduled game has finished (within 2 days). If the cancelled game is not played or is rescheduled further than 2 days out, all markets will resolve to a fair price in accordance with the rules. Kalshi is not affiliated, associated, authorized, endorsed by, or in any way officially connected with the Governing League. All trademarks, logos, and brand names are the property of their respective owners.",
+   "plane_state_at_b3f1b0cd": [
+    "Basketball",
+    "WINNER",
+    "MAPPED_BUT_SETTLEMENT_NOT_PROVEN",
+    "INCOMPATIBLE_NOT_PRICEABLE:POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED:SETTLEMENT_DIFFERENCE_ORDINARY_COMPLETION_NOT_ESTABLISHED"
+   ],
+   "terms_read_at_b3f1b0cd": {
+    "terms": {
+     "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED": "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
+    },
+    "contradicted": []
+   }
+  }
+ ]
+}

@@ -1594,6 +1594,24 @@ TABLE = {
     "BOOK_TERMS_SCOPE_NOT_ESTABLISHED": (S, SET, "SETTLEMENT_COMPATIBILITY"),
     "LINE_VENUE_TEXT_STATES_NO_EXCEPTIONAL_RULE": (
         S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6.2, p-coverage) the soccer organiser source: the provider key and
+    # the venue's own league code naming different declared competitions,
+    # and an organiser payload that is not the declared competition
+    # (bettor_soccer_fixture) -- fixture identity, like their siblings; and
+    # the quote context's two pieces of evidence disagreeing (the entry lane)
+    "PROVIDER_KEY_AND_VENUE_LEAGUE_NAME_DIFFERENT_COMPETITIONS": (
+        S, MAP, "EVENT_IDENTITY"),
+    "ORGANISER_PAYLOAD_IS_NOT_THE_DECLARED_COMPETITION": (
+        S, MAP, "EVENT_IDENTITY"),
+    "QUOTE_CONTEXT_EVIDENCE_DISAGREES": (S, DATA, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6.2, p-coverage) a never-valued contract whose two quote contexts
+    # read its terms differently under its event's fixture scope
+    # (market_plane.settlement)
+    "QUOTE_CONTEXT_DECIDES_THE_TERMS": (S, SET, "SETTLEMENT_COMPATIBILITY"),
+    # (RC6.2, p-coverage rework) ... and the cap on that reading: both
+    # contexts COMPATIBLE under a fixture scope is named, never a proof
+    "FIXTURE_SCOPED_READING_IS_NOT_A_PROOF": (
+        S, SET, "SETTLEMENT_COMPATIBILITY"),
     # ... and the GET-only Kalshi sports catalogue's named truncations and
     # its transport's non-GET refusal (kalshi_catalogue)
     "KALSHI_CATALOGUE_NON_GET_METHOD_REFUSED": (S, INT, "INGESTION"),
@@ -1899,6 +1917,12 @@ INCIDENT_STREAMS = {
     "NO_READABLE_BOOK_OBSERVED_AT_OR_AFTER_DECISION_PLUS_DELAY_YET":
         (S, FRESH, "FILL"),
     "ENTER_WITHOUT_ORDER": (S, INT, "ORDER"),
+    # RC6.2 enter-integrity: a recorded ENTER whose order sequence could not
+    # finish (the caller's cancellation and the grace ran out, a second
+    # cancellation, or the sequence raised), named at once with its cause by
+    # paper_derek.owed_order -- the backstop's integrity failure, named at
+    # the instant and with the cause
+    "ENTER_ORDER_ABANDONED": (S, INT, "ORDER"),
     # our own venue request gate refused to dispatch (pacing, not the venue)
     "VENUE_GATE_COOLDOWN": (S, CAP, "VENUE_BOOK"),
     "VENUE_RATE_LIMITED": (S, DATA, "VENUE_BOOK"),
@@ -2501,6 +2525,18 @@ NOT_REFUSAL = {
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
     'ROLLBACK_RELEASE_MIGRATIONS_UNREADABLE':
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_COMMIT_NOT_PREVIOUSLY_LIVE_ON_THE_SERVICE':
+        "tools/rollback_readiness (rc6.3 rollback-fix): a service's rollback is refused and no deploy command is written because the commit is not one that service's OWN Render deploy history shows it was live on before -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_FOR_A_SERVICE_NOT_ON_THE_RELEASE':
+        "tools/scorecard_14 (rc6.3 rollback-fix): the rollback record wrote a deploy command for a service that is not live on the release (approved-judge 38002788631: market plane on 732cc0c6 given 3d5af039, the release that hung it); the judge passes no command for it, the service stays on its current commit -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT':
+        "tools/scorecard_14 (rc6.3 rollback-fix): a service's rollback command, or the record's live or previous commit for it, is not what that service's OWN Render deploy history in the packet says (its previous live commit); the judge passes no command for it -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_DEPLOY_ACTION':
+        "tools/scorecard_14 (rc6.3 rollback-fix): the command written for a service is not that service's own documented deploy-by-commit action (a right commit must never ride to another service); the judge passes no command for it -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_DEPLOY_STATUS_UNKNOWN':
+        "tools/rollback_readiness + tools/scorecard_14 (rc6.3 rollback-fix): a deploy in a service's Render deploy list carries a status Render does not document (only build_failed, update_failed, canceled, pre_deploy_failed, created, queued, build_in_progress, update_in_progress and pre_deploy_in_progress are taken as never served) newer than the live deploy or between it and the previous live commit: whether it served cannot be known, so the service's rollback is refused and no deploy command is written or passed on -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY':
+        "tools/rollback_readiness + tools/scorecard_14 (rc6.3 rollback-fix): a deploy that served (deactivated) is newer in a service's Render deploy list than its live deploy: the list is not newest-first as Render writes it, so what the service ran before cannot be read from it; the service's rollback is refused and no deploy command is written or passed on -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
     'UPGRADE_NOT_A_FULL_SHA':
         "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
     'UPGRADE_BASE_BUILD_FAILED':

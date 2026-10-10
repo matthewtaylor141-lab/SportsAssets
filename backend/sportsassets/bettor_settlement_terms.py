@@ -105,9 +105,23 @@ PAY_LATER = "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
 #: disagreement. Nothing is admitted that was not admitted before.
 PAY_LAST_FAIR_MARKET_PRICE = (
     "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN")
+#: (RC6.2, p-coverage) KALSHI'S OWN WORDS FOR THE SAME STATE, AND A DIFFERENT
+#: PRICE. Every Kalshi game-winner rule block read (research-sql run
+#: 37939739782 T3, 360 real blocks, 2026-10-09) settles a cancelled game, or
+#: one not started / rescheduled beyond its window, with "the market will
+#: resolve to a fair price (in accordance with the rules)" -- a price the
+#: exchange determines, which is neither a stake return nor (by its words)
+#: the market's last traded price. It was unreadable, so the condition read
+#: as venue-SILENT (VENUE_RULES_SILENT_ON for every Kalshi basketball,
+#: hockey and NFL winner). Read, it DIFFERS from the bookmaker's stake
+#: return: stricter, never looser, exactly as PAY_LAST_FAIR_MARKET_PRICE was.
+#: No Polymarket US text in the same read carries the phrase.
+PAY_VENUE_FAIR_PRICE = (
+    "PAYS_A_FAIR_PRICE_THE_VENUE_DETERMINES_NOT_A_STAKE_RETURN")
 
 PAYOUTS = (PAY_ON_FINAL, PAY_ON_PARTIAL, PAY_ON_PARTIAL_WALKOFF,
-           PAY_STAKE_BACK, PAY_NO, PAY_LATER, PAY_LAST_FAIR_MARKET_PRICE)
+           PAY_STAKE_BACK, PAY_NO, PAY_LATER, PAY_LAST_FAIR_MARKET_PRICE,
+           PAY_VENUE_FAIR_PRICE)
 
 #: WHERE TWO PAYOUT NAMES DESCRIBE THE SAME CASH, PER CONDITION.
 #:
@@ -323,7 +337,12 @@ CONDITION_PROSE = {
     # two payouts and reported the venue as self-contradictory.
     C_NOT_PLAYED: (r"\babandon\w*", r"\bpostpon\w*",
                    r"\bcancel\w*", r"\bnot\s+(?:be\s+)?(?:played|completed)\b",
-                   r"\bnever\s+completed\b", r"\brescheduled\b"),
+                   r"\bnever\s+completed\b", r"\brescheduled\b",
+                   # (RC6.2) Kalshi's NFL wording: "If the game is not
+                   # started within 48 hours, the market will resolve to a
+                   # fair price" (T3, run 37939739782; no Polymarket US text
+                   # in the 2,028 read carries "not started")
+                   r"\bnot\s+(?:be\s+)?started\b"),
 }
 
 PAYOUT_PROSE = {
@@ -343,6 +362,7 @@ PAYOUT_PROSE = {
         r"\blast\s+traded\s+price\b",
         r"\bsettle[sd]?\s+(?:to\s+)?the\s+(?:then[\s-]*)?"
         r"(?:current|prevailing)\s+market\s+price\b"),
+    PAY_VENUE_FAIR_PRICE: (r"\bresolve[sd]?\s+to\s+a\s+fair\s+price\b",),
     PAY_STAKE_BACK: (r"\bvoid\w*", r"\brefund\w*",
                      r"\bstakes?\s+(?:are\s+|will\s+be\s+)?return\w*",
                      r"\bno\s+action\b", r"\bmoney\s+back\b"),
@@ -362,6 +382,25 @@ PAYOUT_PROSE = {
 }
 
 _SENTENCE = re.compile(r"[^.;\n]+[.;\n]?")
+
+#: (RC6.2, p-coverage) A DELAYED FIXTURE THAT IS THEN PLAYED IS NOT ONE THAT
+#: IS NEVER COMPLETED. Kalshi states the two cases in two sentences (T3,
+#: research-sql run 37939739782): "If this game is postponed or delayed, the
+#: market will remain open and close after the rescheduled game has finished
+#: (within two days)" and "If the game is cancelled or rescheduled to over
+#: two days away, the market will resolve to a fair price". "postponed"
+#: names C_NOT_PLAYED, so the first sentence read as C_NOT_PLAYED ->
+#: PAY_LATER and, once the second is readable, the venue would read as giving
+#: one condition two payouts. A sentence whose only payout is to stay open
+#: (optionally then grading the official result) AND that states the fixture
+#: is then completed describes the delayed-and-played case: it states no
+#: rule for C_NOT_PLAYED. Only that combination; no Polymarket US money-line
+#: text in the read carries "remain open".
+_COMPLETED_AFTER_DELAY = (
+    r"\bafter\s+the\s+rescheduled\s+\w+\s+has\s+finished\b",
+    r"\bonce\s+the\s+\w+\s+is\s+complete[d]?\b",
+    r"\bbut\s+begins\s+within\b",
+)
 
 
 def sentences(prose: str):
@@ -393,6 +432,14 @@ def read_terms(prose: str) -> dict:
         # exception-carrying sentence state no rule at all.
         if PAY_ON_PARTIAL_WALKOFF in pays and PAY_ON_PARTIAL in pays:
             pays = [x for x in pays if x != PAY_ON_PARTIAL]
+        if C_NOT_PLAYED in conds and PAY_LATER in pays and \
+                set(pays) <= {PAY_LATER, PAY_ON_FINAL} and \
+                any(re.search(p, sent) for p in _COMPLETED_AFTER_DELAY):
+            evidence.setdefault(C_NOT_PLAYED, []).append(
+                {"sentence": sent, "payouts_matched": pays, "used": False,
+                 "why": ("the sentence describes a delayed fixture that is "
+                         "then completed, not one never completed")})
+            conds = [c for c in conds if c != C_NOT_PLAYED]
         if len(pays) != 1 or not conds:
             for c in conds:
                 evidence.setdefault(c, []).append(

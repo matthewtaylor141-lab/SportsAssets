@@ -492,6 +492,32 @@ async def test_a_changed_frame_evaluates_through_the_real_cycle_and_paper_hook(
     assert R.ACTIVE.counts["COMPLETED"] == 1
 
 
+@pg
+async def test_the_ws_quotes_proved_prematch_label_is_its_recorded_context(
+        env):
+    """(RC6.2, p-coverage) THROUGH THE REAL CYCLE: the PinnAPI reader proved
+    this quote's stream (prematch) against the event's own isLive flag, and
+    the venue-native fixture has no condition key, so no fixture context
+    exists. The entry lane now records the provider's label as the quote
+    context (bettor_settlement_terms.book_context_for's authoritative
+    source) instead of none. On b3f1b0cd quote_context was None and the
+    settlement blockers named QUOTE_CONTEXT_NOT_ESTABLISHED."""
+    e = env
+    await _start_and_discover(e)
+    tick(e.cache, e.eid, WS_EDGE)
+    rows = await _wait_terminal(e)
+    vids = await _priced(e, rows[0]["detail"]["valuation_ids"])
+    v = await _valuation(e, vids[0])
+    sc = H.j(v["settlement_comparison"])
+    assert sc["reference_input"]["stream"] == "prematch"
+    assert sc["quote_context"] == "PRE_GAME"
+    assert sc["quote_context_basis"] == "PROVIDER_QUOTE_LABEL"
+    assert sc["quote_provider_label"] == "PRE_GAME"
+    assert sc["quote_context_refusal"] is None
+    assert not any("QUOTE_CONTEXT_NOT_ESTABLISHED" in b
+                   for b in sc.get("blockers") or [])
+
+
 # ═════════════════════════════════════════════════════════════════════
 # 1b · PINNAPI IS THE SOLE PROBABILITY AUTHORITY (V3, owner 2026-10-03)
 # ═════════════════════════════════════════════════════════════════════

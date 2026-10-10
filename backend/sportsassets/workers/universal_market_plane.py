@@ -374,17 +374,23 @@ async def venue_active_count(conn, *, now: float) -> int:
     """Active SPORTS contracts the venue catalogue lists (non-sports leagues
     excluded by name). (RC6) The league is read by populate.league_of's
     grammar: the venue's event slug carries its league FIRST, so the second
-    segment this read before was a team code and excluded nothing."""
+    segment this read before was a team code and excluded nothing.
+    (RC6.2, p-coverage rework) By ontology.excluded_as_non_sports, as the
+    registry: a row whose market type names a sport is counted whatever its
+    code (NAMES_SPORT_SQL_REGEX is that rule's sport-head test)."""
     try:
         return int(await conn.fetchval(
             "SELECT count(DISTINCT market_slug) FROM us_premap "
             " WHERE market_slug IS NOT NULL "
             "   AND listing_state = ANY($1::text[]) "
             "   AND updated_at > to_timestamp($2) "
-            "   AND NOT (" + _LEAGUE_SQL + " = ANY($3::text[]))",
+            "   AND NOT (" + _LEAGUE_SQL + " = ANY($3::text[]) "
+            "            AND replace(lower(btrim(coalesce(sports_type, ''))),"
+            "                        '-', '_') !~ $5)",
             list(POP.ACTIVE_LISTING_STATES), now - POP.ACTIVE_HORIZON_S,
             sorted(POP.O.NON_SPORTS_LEAGUES),
-            sorted(POP.MARKET_KIND_PREFIXES)) or 0)
+            sorted(POP.MARKET_KIND_PREFIXES),
+            POP.O.NAMES_SPORT_SQL_REGEX) or 0)
     except Exception:                                           # noqa: BLE001
         return -1
 
