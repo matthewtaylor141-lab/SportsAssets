@@ -75,11 +75,15 @@ async def test_the_day_turn_records_the_previous_days_closing_version_final(
         r2 = await PA.step(conn, _ctx(a, T + 60 + PA.REPORT_EVERY_S))
         assert r2["report"]["written"] and r2["report"]["version"] == 2
         await _reserve(conn, a, "o2", T + 120 + PA.REPORT_EVERY_S)
-        # the last intra-day pass, half a second before midnight
-        r3 = await PA.step(conn, _ctx(a, END0 - 0.5))
+        # the last intra-day pass, at the day's last millisecond: its window
+        # is the closing version's own ([start, end) of the day), so both
+        # read the same rows and "unchanged" does not depend on what other
+        # tests left in the shared database (the book-read counts are not
+        # per account)
+        r3 = await PA.step(conn, _ctx(a, END0 - 0.001))
         assert r3["report"]["written"] and r3["report"]["version"] == 3
         if late_activity:
-            await _reserve(conn, a, "o3", END0 - 0.25)
+            await _reserve(conn, a, "o3", END0 - 0.0005)
         # THE DAY TURNS
         turn = END0 + 30
         r4 = await PA.step(conn, _ctx(a, turn))
@@ -92,8 +96,12 @@ async def test_the_day_turn_records_the_previous_days_closing_version_final(
         assert L._epoch(closing["generated_at"]) == pytest.approx(
             END0 - 0.001, abs=1e-3)
         assert closing["reconciles"] is True
+        assert H.j(closing["report"])["window"] == \
+            H.j(rows[2]["report"])["window"]
         # unchanged content is recorded again as the final version
         assert (closing["digest"] == rows[2]["digest"]) is (not late_activity)
+        if not late_activity:
+            assert H.j(closing["report"]) == H.j(rows[2]["report"])
         assert [r["final"] for r in await _versions(conn, a, DAY1)] == [False]
         # later passes in the new day never close (or re-close) day 0
         await _reserve(conn, a, "o4", turn + 60)
