@@ -884,8 +884,12 @@ def test_a_refused_add_markets_is_added_again_once(monkeypatch):
     ts = ["K-A", "K-B", "K-C", "K-D"]
     v = _Refusing("add_markets", 1)
     sub, books, seen = drive(v, ts, until=_drained(v))
+    # (round 4) the refusal is no proof the add did not run (error 18 is a
+    # timeout): the re-added market is UNSURE, so its confirming `ok` asks
+    # for a snapshot by get_snapshot instead of waiting for the add's own
+    # (which a venue that had taken the market already never sends)
     assert [c[1] for c in v.commands()] == [None, "add_markets",
-                                            "add_markets"]
+                                            "add_markets", "get_snapshot"]
     assert seen["counts"]["current"] == 4
     v2 = _Refusing("add_markets", 2)
     sub2, books2, seen2 = drive(v2, ts, until=_drained(v2))

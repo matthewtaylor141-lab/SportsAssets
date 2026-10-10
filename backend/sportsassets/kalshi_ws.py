@@ -162,7 +162,8 @@ it named -- assumption H0: `subscribed` means the venue took them all),
 then by every add / delete reply -- the `ok`'s msg.market_tickers is the
 full list after that command and settles every command up to it (an `ok`
 with no list settles its own command: assumption H1, an add answered `ok`
-took its markets); an error leaves the venue as it was. A snapshot of a
+took its markets). AN ERROR SAYS NOTHING ABOUT MEMBERSHIP (round 4; see
+below). A snapshot of a
 market not held is in the sequence and never applied (snapshots_not_held);
 get_snapshot names only held markets; a held book the list lacks is GAP
 (R_NOT_HELD_BY_VENUE); a market whose add or re-add a reply confirms gets
@@ -174,21 +175,43 @@ with those re-adds spent (MAX_READDS_PER_MARKET) the session ends
 (ReplyTimeout, R_REPLY_TIMEOUT: fail closed, the reconnect subscribes
 afresh). A market dropped and wanted again before its delete went out is
 asked for by get_snapshot only while the venue holds it; otherwise it is
-added again. (Round 3) A delete the venue REFUSES (an error: error 27 is
-documented for any command on the subscription) leaves the market held: a
-market wanted again after that is asked for by get_snapshot (an add would
-be "no action", no snapshot), one still dropped is deleted again
-RATE_LIMIT_RETRY_S later (MAX_RATE_LIMIT_RETRIES a session). A market the
-venue may hold although no reply said so (an add of it whose reply was
-taken as lost) that a refusal then names is re-added ALONE: error 26 refuses
-a whole command for one market, and an add of a held market alone is "no
-action", answered by `ok` with the full list (it used to stay GAP, not
-held, while the venue streamed it). A market dropped and wanted again
-while its add was in flight is asked for by get_snapshot when the reply
-confirms it, never left waiting on the add's own snapshot (it is not bound
-to the sid, so a gap could not name it if that snapshot were lost).
+added again. A market the venue may hold although no reply said so (an add
+of it whose reply was taken as lost) that a refusal then names is re-added
+ALONE: error 26 refuses a whole command for one market, and an add of a held
+market alone is "no action", answered by `ok` with the full list (it used to
+stay GAP, not held, while the venue streamed it). A market dropped and wanted
+again while its add was in flight is asked for by get_snapshot when the
+reply confirms it, never left waiting on the add's own snapshot (it is not
+bound to the sid, so a gap could not name it if that snapshot were lost).
 Bounded: the re-add budgets, the command rate and the per-market
 get_snapshot bounds.
+
+AN ERROR SAYS NOTHING ABOUT MEMBERSHIP (round 4, replacing an assumption
+rounds 2 and 3 made without naming it: E0, "any error means the command was
+not run, the venue is as it was"). No error code is documented to mean that.
+Error 18 is "Server timed out while processing command" -- the command may
+well have run; error 27 "exceeded its command rate limit" does not say
+nothing happened either. Round 3 took a delete answered by an error as
+having left the market held, and a market wanted again after it was asked for
+by get_snapshot (answered for ANY ticker, "without modifying the
+subscription"): when the delete HAD run, the venue's snapshot of a market it
+no longer held made the book CURRENT and no delta ever followed -- a stale
+book served as current (reproduced against fde50aff:
+tests/test_rc62_kalshi_ws_errored_commands.py). So an error answering an add
+or a delete leaves its markets UNSURE: a delete leaves the market not held
+(no snapshot of it applied, no get_snapshot naming it), an add leaves one not
+known held not held; only a reply with the full ticker list says (WsBooks.
+_settle, _unknown_effect). A market wanted again meanwhile is added again
+ALONE: if the venue holds it, the add is "no action" and its `ok` lists it;
+if not, the add takes it and sends its own snapshot -- either way the `ok`'s
+list holds it and its confirmation asks for a snapshot (no own snapshot is
+waited for from an unsure market). A dropped market the venue may still hold
+is deleted again RATE_LIMIT_RETRY_S later (MAX_RATE_LIMIT_RETRIES a
+session); an add refused by 18 or 27 is retried later after its one re-add
+(RETRY_LATER_ERROR_CODES). Errors still count, end a subscription only when
+they are 10 / 25, and carry (sid, seq) into the sequence rule as before.
+The assumptions the membership rule rests on are H0 and H1 above and no
+other: not E0.
 
 SNAPSHOTS ARE IN THE SEQUENCE TOO (RC6 red-team, replay). Kalshi: seq is
 "used for snapshot/delta consistency". A replayed or out-of-order snapshot
@@ -288,14 +311,21 @@ MAX_CMD_INDEX = 1024
 TERMINAL_ERROR_CODES = frozenset((10, 25))
 #: (RC6.2 review) the per-subscription command rate limit error
 RATE_LIMIT_ERROR = 27
+#: (round 4) "Command timeout - Server timed out while processing command":
+#: the command may well have run (an error says nothing about it), and the
+#: failure is as transient as the rate limit's
+TIMEOUT_ERROR = 18
+#: the errors an add refused by is retried LATER for (RATE_LIMIT_RETRY_S,
+#: MAX_RATE_LIMIT_RETRIES a session) once its one immediate re-add is spent
+RETRY_LATER_ERROR_CODES = frozenset((RATE_LIMIT_ERROR, TIMEOUT_ERROR))
 #: (RC6.2 review) re-adds of one market in one session after a gap that may
 #: have lost the reply to its add, at most (a refusal -- an error, or an
 #: `ok` whose list lacks it -- re-adds it once more, its own budget)
 MAX_READDS_PER_MARKET = 2
 #: (RC6.2 review) a market whose re-add was refused again by error 27 (the
-#: command rate) is added again this long after, at most
-#: MAX_RATE_LIMIT_RETRIES times a session (a retry inside the same rate
-#: window would be refused again)
+#: command rate; round 4: or 18, a timeout) is added again this long after,
+#: at most MAX_RATE_LIMIT_RETRIES times a session (a retry inside the same
+#: rate window would be refused again)
 RATE_LIMIT_RETRY_S = 30.0
 MAX_RATE_LIMIT_RETRIES = 3
 #: (RC6.2 review) an add / delete the venue has not answered this long after
@@ -501,7 +531,10 @@ class WsBooks:
                       # (a second reply, no command we know, a reply after a
                       # gap, above the bound): replays; SEPARATE sids proved
                       # shared after all by a control frame above the bound
-                      "control_replayed": 0, "control_seq_shared_again": 0}
+                      "control_replayed": 0, "control_seq_shared_again": 0,
+                      # (round 4) errors answering our add / delete: the
+                      # venue's membership after them is unknown (UNSURE)
+                      "membership_unknown_after_error": 0}
         self.resubscribe: set = set()
         #: (RC6 acceptance model) sid -> the HIGHEST seq of a delta seen on
         #: a sid not acknowledged as ours, before its first snapshot: not its
@@ -953,11 +986,23 @@ class WsBooks:
         state after `cid` is known -- held exactly when listed -- and every
         command up to `cid` is reflected in it. An `ok` without a list
         speaks for its own command (an add held its markets, a delete
-        removed them). An error leaves the venue as it was before the
-        command: nothing becomes known, the command is just no longer
-        pending (so a refused re-add of a market whose earlier add the
-        venue confirmed leaves it held). Each command is settled once: a
-        repeated reply is ignored."""
+        removed them).
+
+        (Round 4) AN ERROR SAYS NOTHING ABOUT MEMBERSHIP. No error code is
+        documented to mean "the command was not run" (error 18 is "Server
+        timed out while processing command": the delete may well have run;
+        error 27 is "exceeded its command rate limit", not that nothing
+        happened), so no error is read as "the venue is as it was" -- round
+        3 did, and a market whose delete the venue answered by an error
+        after taking it out was taken as still held: re-wanted, its
+        get_snapshot (answered for any market, "without modifying the
+        subscription") made it CURRENT with no delta ever following. An
+        errored DELETE leaves the market not held and UNSURE until a reply
+        with the full list says (`_unknown_effect`); an errored ADD leaves a
+        market not already held UNSURE (an add never removes a market). The
+        command is just no longer pending (so a refused re-add of a market
+        whose earlier add the venue confirmed leaves it held). Each command
+        is settled once: a repeated reply is ignored."""
         info = a["cmds"].pop(cid, None) if type(cid) is int else None
         if info is None:
             return
@@ -982,14 +1027,18 @@ class WsBooks:
                 if typ == "ok" and a["known"].get(t, (-1, False))[0] <= cid:
                     a["known"][t] = (cid, action == "add_markets")
                     a["unsure"].discard(t)
+                elif typ == "error" and cid in (x[0] for x in p):
+                    self._unknown_effect(a, t, cid, action)
             answered = len(left) != len(p)
             if left:
                 a["pend"][t] = left
                 if answered and typ == "error" and \
-                        action == "delete_markets" and \
-                        a["known"].get(t, (0, False))[1]:
-                    # our delete refused: the add after it will find t
-                    # held -- "no action", no snapshot of its own
+                        action == "delete_markets":
+                    # our delete answered by an error: it may or may not
+                    # have run, so the add after it may find t held --
+                    # "no action", no snapshot of its own -- or take it:
+                    # its own snapshot is not to be waited for (its
+                    # confirmation asks for one by get_snapshot)
                     a["expect"].pop(t, None)
             else:
                 a["pend"].pop(t, None)
@@ -998,6 +1047,30 @@ class WsBooks:
                 self._confirm(a, sid, t, cid)
             elif not now and not left and (was or answered):
                 self._refuse(a, sid, t, code if typ == "error" else None)
+
+    def _unknown_effect(self, a, t, cid, action) -> None:
+        """(Round 4) Our add / delete `cid` of t was answered by an ERROR:
+        what the venue holds is unknown (see _settle). A later reply that
+        already spoke about t stands (`known` carries the command id it
+        speaks for). A delete: t is no longer known held, and may or may not
+        be on the subscription. An add: a market not known held may be on
+        the subscription now (an add of a held market changes nothing).
+        Either way t is UNSURE: not held, so no snapshot of it is applied
+        and no get_snapshot names it, until a reply with the full list
+        settles it; wanted again it is added ALONE (an add of a held market
+        is "no action", answered by an `ok` listing it; of one not held, it
+        takes it and sends its own snapshot) and its confirmation asks for a
+        snapshot (no own snapshot is expected for an unsure market)."""
+        k = a["known"].get(t)
+        if k is not None and k[0] > cid:
+            return
+        if action == "delete_markets":
+            a["known"][t] = (cid, False)
+            a["unsure"].add(t)
+            self.stats["membership_unknown_after_error"] += 1
+        elif k is None or not k[1]:
+            a["unsure"].add(t)
+            self.stats["membership_unknown_after_error"] += 1
 
     def _confirm(self, a, sid, t, cid) -> None:
         """The venue holds t on the subscription (settled by the reply to
@@ -1122,6 +1195,17 @@ class WsBooks:
         say so, and nothing naming t is unanswered)?"""
         a = self.anchors.get(sid)
         return a is not None and not a["ended"] and self._held(a, t)
+
+    def may_hold(self, sid, t) -> bool:
+        """(Round 4) May the venue hold t on the live acknowledged `sid`:
+        its replies say so (held), or a command of ours naming t was
+        answered by an error and no reply with the full list has settled it
+        since (unsure)? Only a cleanup asks this (a dropped market is
+        deleted again); a book is never made CURRENT by it -- `held` alone
+        does that."""
+        a = self.anchors.get(sid)
+        return a is not None and not a["ended"] and (
+            self._held(a, t) or t in a["unsure"])
 
     def hold_subscribed(self, sid, tickers) -> None:
         """(RC6.2 review) The `subscribed` answering our subscribe: the
@@ -1955,6 +2039,16 @@ class Subscriber:
         self.solo_readd.difference_update(gone)
         for t in gone:
             self.rate_retry.pop(t, None)
+            # (round 4) the refusal budgets are per WANT: a market wanted
+            # again after a drop starts afresh. They were per session, and a
+            # market refused in an earlier want (by 18 or 27 once the venue
+            # may have run the add anyway, or not taken) found its re-add
+            # and its retries spent when the venue then HELD it: it stayed
+            # GAP, streamed and ignored, for the rest of the session. Still
+            # bounded by what the worker asks for: a refusal costs at most
+            # one re-add and MAX_RATE_LIMIT_RETRIES retries per want.
+            self.readds.pop(t, None)
+            self.rate_retries.pop(t, None)
         return held
 
     def _end(self, cls, detail: str = ""):
@@ -2036,15 +2130,26 @@ class Subscriber:
                     self.queued_delete.discard(t)
                     self.rewant.append(t)
                 elif self.sid is not None and self.books.held(self.sid, t):
-                    # (RC6.2 review, round 3) dropped and wanted again after
-                    # the venue REFUSED its delete: the venue holds it by its
-                    # own replies, so an add would be "no action" with no
-                    # snapshot (the book waited for ever) -- its snapshot is
-                    # asked for; a later drop deletes it again
+                    # dropped and wanted again while the venue's own replies
+                    # say it holds the market (a reply with the full list
+                    # that lists it, nothing of ours naming it unanswered):
+                    # an add would be "no action" with no snapshot (the book
+                    # waited for ever) -- its snapshot is asked for; a later
+                    # drop deletes it again. (Round 4) NEVER on the strength
+                    # of an errored delete: an error says nothing about
+                    # membership, the market is UNSURE then, not held (see
+                    # WsBooks._settle) and takes the branch below
                     self.on_venue.setdefault(t, 0)
                     self.rewant.append(t)
                 else:
                     self.queued_add.append(t)
+                    if self.sid is not None and self.books.unsure(self.sid, t):
+                        # (round 4) the venue may hold it already (an
+                        # errored delete or add of it): added ALONE -- an add
+                        # of a held market is "no action", answered by `ok`
+                        # with the full list, which an error 26 for another
+                        # market in the same command could hide
+                        self.solo_readd.add(t)
         if self.sub_id is None:
             first = sorted(t for t in self.queued_add
                            if t not in self.books.forgotten)
@@ -2087,7 +2192,7 @@ class Subscriber:
                         del self.delete_retry[t]
                         if (t not in self.books.books or
                                 t in self.books.forgotten) and \
-                                self.books.held(sid, t):
+                                self.books.may_hold(sid, t):
                             self.queued_delete.add(t)
             if self.queued_delete:
                 ts = sorted(self.queued_delete)
@@ -2211,7 +2316,8 @@ class Subscriber:
         (WsBooks._settle) and from a gap, turned into re-adds, bounded: a
         market the venue refused or did not list is added again ONCE (a
         second refusal leaves it GAP, not held -- after error 27, the
-        command rate, it is retried RATE_LIMIT_RETRY_S later, at most
+        command rate, or 18, a timeout (the add may even have run: round 4),
+        it is retried RATE_LIMIT_RETRY_S later, at most
         MAX_RATE_LIMIT_RETRIES times); a market whose add was unanswered
         at a gap is added again (the lost frame may be its reply), within
         MAX_READDS_PER_MARKET (its own budget: a refusal after those still
@@ -2241,7 +2347,7 @@ class Subscriber:
                     # (round 3) the venue may hold it already: re-added
                     # alone (see _commands)
                     self.solo_readd.add(t)
-            elif mine[t] == RATE_LIMIT_ERROR and \
+            elif mine[t] in RETRY_LATER_ERROR_CODES and \
                     self.rate_retries.get(t, 0) < MAX_RATE_LIMIT_RETRIES:
                 self.rate_retries[t] = self.rate_retries.get(t, 0) + 1
                 self.rate_retry[t] = self.clock() + RATE_LIMIT_RETRY_S
@@ -2312,22 +2418,26 @@ class Subscriber:
                 and t not in self.books.forgotten])
 
     def _delete_refused(self, tickers) -> None:
-        """(RC6.2 review, round 3) Our delete_markets answered by an error
-        (27, the per-subscription command rate, or any other refusal): the
-        venue still holds the markets -- an error leaves it as it was
-        (WsBooks._settle). A market wanted again meanwhile is the venue's
-        already: its snapshot is asked for (the reply's confirmation, or the
-        wanted-set step finding it held). One still dropped is deleted again
-        RATE_LIMIT_RETRY_S later (a retry inside the same rate window would
-        be refused again), at most MAX_RATE_LIMIT_RETRIES times a session;
-        never a loop (each refusal schedules at most one retry). It used to
-        stay on the venue for the rest of the session, and when wanted again
-        its add was "no action": no snapshot, the book waited for ever."""
+        """(RC6.2 review, round 3; round 4) Our delete_markets answered by an
+        error (27, the per-subscription command rate, 18, the server's
+        timeout, or any other): whether the venue took the markets out is
+        UNKNOWN -- an error says nothing about membership (WsBooks._settle:
+        round 3 took "the venue still holds them" and a market whose delete
+        had in fact run was re-wanted and served stale). A market wanted
+        again meanwhile is added again ALONE by the wanted-set step (its
+        `ok` lists it, held or taken, and its confirmation asks for the
+        snapshot). One still dropped that the venue may hold is deleted
+        again RATE_LIMIT_RETRY_S later (a retry inside the same rate window
+        would be refused again), at most MAX_RATE_LIMIT_RETRIES times a
+        session; never a loop (each refusal schedules at most one retry).
+        It used to stay on the venue for the rest of the session, and when
+        wanted again its add was "no action": no snapshot, the book waited
+        for ever."""
         now = self.clock()
         for t in tickers:
             if t in self.books.books and t not in self.books.forgotten:
                 continue
-            if not self.books.held(self.sid, t):
+            if not self.books.may_hold(self.sid, t):
                 continue
             n = self.delete_retries.get(t, 0)
             if n >= MAX_RATE_LIMIT_RETRIES:
