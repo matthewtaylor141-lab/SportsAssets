@@ -108,6 +108,8 @@ K_FEED = 7723901544120036
 K_INTEL, K_POS, K_TWIN = 0x494E5431, 0x504F5331, 0x54574E31
 K_POSITION_LEARNING = 0x504F534C
 K_CAPITAL_READINESS = 0x43524C31
+#: (rc6.3 kalshi-shadow) the Kalshi SHADOW planner's per-pass lock
+K_KSHADOW = 0x4B534831
 
 _ON = ("on", "1", "true", "yes")
 _OFF = ("off", "0", "false", "no")
@@ -317,6 +319,19 @@ API_LOOPS = (
                  "scan id"},
           armed=("env_not_off", "ADRIANA_RUNNER_ENABLED", "1"),
           sources=(_hb("agent_adriana", *OK_ERROR),)),
+    # (rc6.3 kalshi-shadow) SHADOW only: the Kalshi leg of each linked PAPER
+    # decision planned with kalshi_orders.plan and recorded PLANNED /
+    # EXCLUDED (migration 367); a GET-only account reconciliation per 15
+    # min window. Never submits. 'stood_down' is a pass that ran and found
+    # a Kalshi live-money switch on (or its tables absent) and so recorded
+    # nothing -- the writer's business outcome, not a failure.
+    _spec("kalshi_shadow.runner", "api", 15.0, critical=False,
+          lease={"kind": "ADVISORY_PER_CYCLE", "key": K_KSHADOW,
+                 "why": "pg_try_advisory_xact_lock per planning pass; rows "
+                        "are keyed per decision (UNIQUE) and append-only"},
+          armed=("env_not_off", "KALSHI_SHADOW_PLANNER", "on"),
+          sources=(_hb("kalshi_shadow", "ok", "stood_down"),),
+          note="SHADOW only; no order, cancel or capital path"),
     _spec("redteam.runner", "api", 300.0, critical=False,
           lease={"kind": "NONE", "why": "append-only receipts keyed per "
                  "pass and evidence hash"},

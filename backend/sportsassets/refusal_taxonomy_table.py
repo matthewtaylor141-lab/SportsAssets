@@ -2804,3 +2804,59 @@ ECON_BINDING_STREAM = {
 }
 for _k, _v in ECON_BINDING_STREAM.items():
     TABLE.setdefault(_k, _v)
+
+#: (rc6.3 kalshi-shadow) THE KALSHI SHADOW PLANNER'S NAMED EXCLUSIONS
+#: (kalshi_shadow, written to migration 367's kalshi_shadow_intents; SHADOW
+#: only, never an order). A missing certified counterpart, an ambiguous one,
+#: a counterpart kalshi_orders cannot buy (a NO leg only), an unreadable
+#: plan input, a missing fair probability, an unknown fee schedule and an
+#: unreadable book are SOFTWARE (mapping / capability / data / integrity /
+#: freshness); a stale decision or book is FRESHNESS; the 1:1000 size below
+#: the venue minimum, the per-order cap and the account's cash are RISK
+#: rails at the order; an off-tick-range or crossing price, no ask at the
+#: limit, too little depth at the limit, and a non-positive net EV (with or
+#: without the fee) are ECONOMIC. (r2) A decision of a strategy or policy
+#: version outside the owner's live-eligibility allowlist is the same RISK
+#: rail at admission as STRATEGY_NOT_LIVE_ELIGIBLE; a paper order past its
+#: own expiry at plan time is FRESHNESS, like a stale decision.
+KALSHI_SHADOW_STREAM = {
+    "KALSHI_SHADOW_STRATEGY_NOT_LIVE_ELIGIBLE": (E, RAIL, "RISK_ADMISSION"),
+    "KALSHI_SHADOW_PAPER_ORDER_EXPIRED_BEFORE_PLAN": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_NO_CERTIFIED_COUNTERPART": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_COUNTERPART_ONLY_A_NO_LEG": (S, CAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_COUNTERPART_AMBIGUOUS": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_MAPPING_NOT_ESTABLISHED": (S, MAP, "VENUE_MAPPING"),
+    "KALSHI_SHADOW_BELOW_VENUE_MINIMUM": (E, RAIL, "ORDER"),
+    "KALSHI_SHADOW_ABOVE_ORDER_CAP": (E, RAIL, "ORDER"),
+    "KALSHI_SHADOW_INSUFFICIENT_CASH": (E, RAIL, "RISK_ADMISSION"),
+    "KALSHI_SHADOW_UNSUPPORTED_ORDER": (S, CAP, "ORDER"),
+    "KALSHI_SHADOW_PRICE_OUT_OF_RANGE": (E, PRICE, "ORDER"),
+    "KALSHI_SHADOW_POST_ONLY_WOULD_CROSS": (E, PRICE, "ORDER"),
+    "KALSHI_SHADOW_POST_ONLY_BOOK_UNKNOWN": (S, DATA, "VENUE_BOOK"),
+    "KALSHI_SHADOW_PLAN_EXCLUDED": (S, INT, "ORDER"),
+    "KALSHI_SHADOW_NO_FAIR_PROBABILITY": (S, DATA, "PROBABILITY"),
+    "KALSHI_SHADOW_DECISION_STALE_AT_PLAN": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_BOOK_UNAVAILABLE": (S, DATA, "VENUE_BOOK"),
+    "KALSHI_SHADOW_BOOK_STALE": (S, FRESH, "FRESHNESS"),
+    "KALSHI_SHADOW_NOT_EXECUTABLE_AT_LIMIT": (E, PRICE, "VENUE_BOOK"),
+    "KALSHI_SHADOW_INSUFFICIENT_DEPTH_AT_LIMIT": (E, DEPTH, "VENUE_BOOK"),
+    "KALSHI_SHADOW_FEE_TERMS_UNKNOWN": (S, DATA, "EV"),
+    "KALSHI_SHADOW_FEE_MAKES_EV_NEGATIVE": (E, EV, "EV"),
+    "KALSHI_SHADOW_EV_NOT_POSITIVE": (E, EV, "EV"),
+}
+for _k, _v in KALSHI_SHADOW_STREAM.items():
+    TABLE.setdefault(_k, _v)
+#: the SHADOW planner's own runner states (heartbeat / account-read
+#: records): why a pass recorded nothing, or why no account was read --
+#: never a decision, order or collector refusal
+_KSH_RUNNER = ("kalshi_shadow (rc6.3 kalshi-shadow): a SHADOW planner runner "
+               "state (stood down while a Kalshi live-money switch is on or "
+               "its tables are absent, or the read-only account read timed "
+               "out) -- recorded in its heartbeat / kalshi_shadow_account_"
+               "reads, never a trading, decision, order or collector refusal")
+for _k in ("KALSHI_SHADOW_STOOD_DOWN_CONTROL_ENABLED",
+           "KALSHI_SHADOW_STOOD_DOWN_ENV_SWITCH_ON",
+           "KALSHI_SHADOW_STOOD_DOWN_SMALL_LIVE_NOT_SHADOW",
+           "KALSHI_SHADOW_SCHEMA_ABSENT",
+           "KALSHI_SHADOW_ACCOUNT_READ_TIMEOUT"):
+    NOT_REFUSAL.setdefault(_k, _KSH_RUNNER)
