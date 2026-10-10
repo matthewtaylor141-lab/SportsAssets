@@ -17,16 +17,14 @@ SELECT calls, round(mean_exec_time::numeric, 0) AS mean_ms, round(max_exec_time:
   FROM pg_stat_statements WHERE query ILIKE '%ext_candidate_outcomes%'
  ORDER BY total_exec_time DESC LIMIT 15;
 \echo C5 one EVENT_LEAGUE CTE alone, timed (the m half, today window)
-\timing on
-SELECT count(*) FROM (SELECT DISTINCT ON (provider_event_id) provider_event_id, sport_key
+SELECT count(*) AS m_rows, clock_timestamp() - statement_timestamp() AS elapsed FROM (SELECT DISTINCT ON (provider_event_id) provider_event_id, sport_key
   FROM ext_candidate_outcomes WHERE provider_event_id IS NOT NULL
    AND cycle_at >= date_trunc('day', now()) - interval '14 days' AND cycle_at < date_trunc('day', now()) + interval '2 days'
  ORDER BY provider_event_id, cycle_at DESC) m;
-SELECT count(*) FROM (SELECT DISTINCT ON (us_market_slug) us_market_slug, sport_key
+SELECT count(*) AS ms_rows, clock_timestamp() - statement_timestamp() AS elapsed FROM (SELECT DISTINCT ON (us_market_slug) us_market_slug, sport_key
   FROM ext_candidate_outcomes WHERE us_market_slug IS NOT NULL
    AND cycle_at >= date_trunc('day', now()) - interval '14 days' AND cycle_at < date_trunc('day', now()) + interval '2 days'
  ORDER BY us_market_slug, cycle_at DESC) ms;
-\timing off
 \echo C6 plan of the m CTE (EXPLAIN without ANALYZE)
 EXPLAIN SELECT DISTINCT ON (provider_event_id) provider_event_id, sport_key
   FROM ext_candidate_outcomes WHERE provider_event_id IS NOT NULL
