@@ -204,6 +204,51 @@ def genuine(reply):
                     for f in (reply.get('facts') or []) if isinstance(f,dict)))
 
 
+# WHY A REVIEW WAS NOT A GENUINE REVIEW, BY NAME (rc6.3 capability). Every
+# non-genuine reply used to be recorded as the one NO_GENUINE_GROUNDED_REVIEW,
+# so 912 directive-path refusals (REQUIRES_OPERATOR_CREDENTIAL) and 55 model
+# HTTP_400 failures read the same as an answer that cited nothing, and the
+# cause could only be found by joining the chat transcript (research-sql runs
+# 38008493448 / 38009039152). The reply's own status, refusal and provider
+# failure are now carried in the code: REVIEW_PERSONA_REFUSED:<refusal>,
+# REVIEW_MODEL_ANSWER_NOT_USED:<provider failure>, REVIEW_MODEL_UNAVAILABLE:
+# <reason>, REVIEW_PERSONA_INTERRUPTED, REVIEW_PERSONA_ERROR:<error>.
+R_NO_GENUINE_GROUNDED_REVIEW='NO_GENUINE_GROUNDED_REVIEW'
+R_REVIEW_PERSONA_REFUSED='REVIEW_PERSONA_REFUSED'
+R_REVIEW_MODEL_ANSWER_NOT_USED='REVIEW_MODEL_ANSWER_NOT_USED'
+R_REVIEW_MODEL_UNAVAILABLE='REVIEW_MODEL_UNAVAILABLE'
+R_REVIEW_PERSONA_INTERRUPTED='REVIEW_PERSONA_INTERRUPTED'
+R_REVIEW_PERSONA_ERROR='REVIEW_PERSONA_ERROR'
+
+
+def _detail(v):
+    return ''.join(ch for ch in str(v) if ch.isalnum() or ch in '_:.-')[:80] or '-'
+
+
+def incomplete_reason(reply):
+    """The named reason a reply is not a genuine grounded review (None when
+    it is one). Reads only what the reply records; decides nothing."""
+    if genuine(reply):return None
+    reply=reply or {}
+    status=reply.get('status');provider=reply.get('provider') or {}
+    if status=='PENDING':
+        return 'PROVIDER_REQUEST_IN_PROGRESS'  # finish() keeps its own poll budget
+    if status=='LLM_UNAVAILABLE':
+        return R_REVIEW_MODEL_UNAVAILABLE+':'+_detail(reply.get('llm_reason') or reply.get('reason') or '-')
+    if status=='INTERRUPTED':
+        return R_REVIEW_PERSONA_INTERRUPTED
+    if status in ('ERROR','UNAVAILABLE'):
+        return R_REVIEW_PERSONA_ERROR+':'+_detail(reply.get('error') or reply.get('reason') or status)
+    if status and status!='ANSWERED':
+        # REFUSED (the authority screen; Derek/Xavier refusing an
+        # instruction) or the directive path's own status, e.g.
+        # REQUIRES_OPERATOR_CREDENTIAL
+        return R_REVIEW_PERSONA_REFUSED+':'+_detail(reply.get('refusal') or status)
+    if provider.get('failure'):
+        return R_REVIEW_MODEL_ANSWER_NOT_USED+':'+_detail(provider['failure'])
+    return R_NO_GENUINE_GROUNDED_REVIEW
+
+
 async def finish(conn,task,reply,now,*,error=None):
     """CAS completion: a revoked/expired worker cannot record a review."""
     async with conn.transaction():
@@ -224,7 +269,9 @@ async def finish(conn,task,reply,now,*,error=None):
                 s['attempts']=max(0,s['attempts']-1)
                 retry_after=now+65
             error='PROVIDER_REQUEST_IN_PROGRESS' if status=='WAITING' else 'PROVIDER_PENDING_BUDGET_EXHAUSTED'
-        outcome={'reviewed':good,'message_id':reply.get('message_id'),'answer':str(reply.get('answer') or '')[:6000] if good else None,'provider_mode':(reply.get('provider') or {}).get('mode'),'source_ids':[str(f.get('record_id')) for f in (reply.get('facts') or [])[:30]],'error':error or (None if good else 'NO_GENUINE_GROUNDED_REVIEW'),'completed_at':now if good else None}
+        outcome={'reviewed':good,'message_id':reply.get('message_id'),'answer':str(reply.get('answer') or '')[:6000] if good else None,'provider_mode':(reply.get('provider') or {}).get('mode'),'source_ids':[str(f.get('record_id')) for f in (reply.get('facts') or [])[:30]],'error':error or (None if good else incomplete_reason(reply)),'completed_at':now if good else None}
+        if not good and (reply.get('provider') or {}).get('failure'):
+            outcome['provider_failure']=_detail(reply['provider']['failure'])
         outcome['investigation']=current['outcome'].get('investigation',[])
         s.update(claim_token=None,lease_until=retry_after)
         await conn.execute("UPDATE agent_tasks SET status=$2,spec=$3::jsonb,outcome=$4::jsonb,updated_at=to_timestamp($5) WHERE task_id=$1",task['task_id'],status,json.dumps(s),json.dumps(outcome),now)

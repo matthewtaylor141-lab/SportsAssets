@@ -5,6 +5,7 @@ calls a venue, changes a trading switch, activates a proposal or sends Slack.
 """
 from __future__ import annotations
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -77,10 +78,17 @@ def request_id(task):
     return 'capreview:'+(W.stable(task['task_id']) if n<=1 else W.stable(task['task_id'],n))
 
 async def execute(pool,task):
+    """Evidence, then the persona review, then the fenced completion.
+
+    A step that raises is recorded with the step's name (rc6.3): 1,138
+    production reviews were recorded as a bare 'TimeoutError', and only
+    their 55.1-67.7 s claim-to-outcome times (research-sql run 38008493448)
+    showed it was the persona call, not the 10 s evidence read."""
     from . import persona_chat as P
-    reply={};error=None
+    reply={};error=None;step='EVIDENCE'
     try:
         if not await evidence(pool,task,time.time()):return
+        step='CONVERSE'
         context={k:v for k,v in task['spec'].get('context',{}).items() if k in ('position_id','decision_id')}
         context['capability_task_id']=task['task_id']
         async with asyncio.timeout(55):
@@ -96,10 +104,12 @@ async def execute(pool,task):
         # Lease expiration enables recovery; never complete work on cancellation.
         raise
     except Exception as exc:
-        error=type(exc).__name__
+        error=step+':'+type(exc).__name__
     async with asyncio.timeout(5):
         async with pool.acquire() as conn:
             await W.finish(conn,task,reply,time.time(),error=error)
+    return {'task_id':task['task_id'],'reviewed':error is None and W.genuine(reply),
+            'error':error or W.incomplete_reason(reply)}
 
 
 class TickPhaseFailed(Exception):
@@ -120,62 +130,144 @@ class TickPhaseFailed(Exception):
     the pool's six life-long lock holders (db.lease_session); the phase now
     rides the exception, is logged and is recorded in loop health
     (runtime_loop_health agents.capability_runtime ERROR), so the next
-    failure CONFIRMS or refutes that inference by name."""
+    failure CONFIRMS or refutes that inference by name.
 
-    def __init__(self, phase, exc):
-        super().__init__('%s: %s' % (phase, type(exc).__name__))
+    WHERE INSIDE THE STEP, AND HOW LATE (rc6.3). A step's budget covers both
+    the wait for a pool connection and its statements, so 'CLAIM:
+    TimeoutError' still could not say which one ran out (81 errors recorded,
+    the newest 'CONTROL: TimeoutError' at 2026-10-10 00:16:51Z under 16d23450;
+    research-sql run 38008493448). The server side is not the explanation: the
+    claim's control-row read 'SELECT value FROM ingestion_state WHERE key=$1
+    FOR UPDATE' has mean 0.10 ms over 236,072 calls and max 2,880 ms, while
+    the SAME read without FOR UPDATE has max 2,972 ms over 1,276,198 calls --
+    a database-wide stall that hits every reader of that table, not contention
+    on the control row. The API event loop meanwhile was held >= 2 s six times
+    in the current process (max 5.2 s; held by profitability/runner,
+    ext_pinnacle learn fit, twin runner: the loop watchdog's ring), and a held
+    loop expires a 3-5 s budget whatever the database does. So the failure now
+    names its sub-step -- POOL_ACQUIRE (waiting for a slot), STATEMENTS
+    (holding a connection), POOL_RELEASE -- with the time it took against its
+    budget, and says when the timeout fired late (the loop was held past the
+    deadline), so the next one attributes itself."""
+
+    def __init__(self, phase, exc, step=None, elapsed_s=None, budget_s=None):
         self.phase, self.cause = phase, exc
+        self.step, self.elapsed_s, self.budget_s = step, elapsed_s, budget_s
+        super().__init__(self.describe())
+
+    def describe(self):
+        out = '%s: %s' % (self.phase, type(self.cause).__name__)
+        if self.step:
+            out += ' at %s' % self.step
+            if self.elapsed_s is not None and self.budget_s:
+                out += ' after %.2fs of a %gs budget' % (self.elapsed_s,
+                                                         self.budget_s)
+                late = self.elapsed_s - self.budget_s
+                if late >= LATE_S:
+                    out += (' (expired %.2fs late: the event loop was held '
+                            'past the deadline)' % late)
+        return out
+
+
+#: a timeout observed this long after its deadline fired late: the event
+#: loop could not run the timeout's callback on time
+LATE_S = 0.5
+POOL_ACQUIRE, STATEMENTS, POOL_RELEASE = 'POOL_ACQUIRE', 'STATEMENTS', 'POOL_RELEASE'
 
 
 class _phase:
-    def __init__(self, name):
-        self.name = name
+    """One bounded step of the tick: its budget, the sub-step in flight, and
+    the deadline its timeout actually armed (so lateness is measured against
+    the real deadline)."""
+
+    def __init__(self, name, budget_s=None):
+        self.name, self.budget_s = name, budget_s
+        self.step = None
+        self.t0 = None
+        self._timeout = None
+
+    def at(self, step):
+        self.step = step
+
+    def bound(self):
+        """The step's timeout (asyncio.timeout(budget_s)), remembered."""
+        self._timeout = asyncio.timeout(self.budget_s)
+        return self._timeout
 
     async def __aenter__(self):
+        self.t0 = asyncio.get_running_loop().time()
         return self
 
     async def __aexit__(self, et, ev, tb):
         if ev is not None and isinstance(ev, Exception) and not isinstance(
                 ev, TickPhaseFailed):
-            raise TickPhaseFailed(self.name, ev) from ev
+            now = asyncio.get_running_loop().time()
+            budget = self.budget_s
+            when = self._timeout.when() if self._timeout is not None else None
+            if when is not None:
+                budget = round(when - self.t0, 3)
+            raise TickPhaseFailed(
+                self.name, ev, step=self.step, elapsed_s=now - self.t0,
+                budget_s=budget) from ev
         return False
 
 
+@contextlib.asynccontextmanager
+async def _conn(pool, ph):
+    """`pool.acquire()`, marking on the phase which sub-step is in flight."""
+    ph.at(POOL_ACQUIRE)
+    async with pool.acquire() as conn:
+        ph.at(STATEMENTS)
+        yield conn
+        ph.at(POOL_RELEASE)
+
+
+async def _optional(name, budget_s, pool, fn):
+    """A step whose failure degrades the tick instead of failing it: the
+    attributed failure text, or None."""
+    try:
+        async with _phase(name, budget_s) as ph:
+            async with ph.bound():
+                async with _conn(pool, ph) as conn:
+                    await fn(conn)
+    except TickPhaseFailed as exc:
+        return exc.describe()
+    return None
+
+
 async def tick(pool):
-    now=time.time();admission_error=None
-    async with _phase('CONTROL'):
-        async with asyncio.timeout(3):
-            async with pool.acquire() as conn:
+    now=time.time()
+    async with _phase('CONTROL', 3) as ph:
+        async with ph.bound():
+            async with _conn(pool, ph) as conn:
                 if not await W.schema(conn):return {'status':'SCHEMA_UNAVAILABLE'}
                 c=await W.control(conn)
                 if c.get('enabled') is not True:return {'status':'OFF'}
     # An admission failure must not starve already queued work.
-    try:
-        async with asyncio.timeout(5):
-            async with pool.acquire() as conn:
-                await admit(conn,now)
-    except Exception as exc:admission_error=type(exc).__name__
-    async with _phase('CLAIM'):
-        async with asyncio.timeout(5):
-            async with pool.acquire() as conn:
+    admission_error=await _optional('ADMIT', 5, pool, lambda conn: admit(conn,now))
+    async with _phase('CLAIM', 5) as ph:
+        async with ph.bound():
+            async with _conn(pool, ph) as conn:
                 task=await W.claim(conn,time.time())
+    review=None
     if task:
         async with _phase('EXECUTE'):
-            await execute(pool,task)
+            review=await execute(pool,task)
     from . import capability_experiments as E
-    evaluation_error=None
-    try:
-        async with asyncio.timeout(5):
-            async with pool.acquire() as conn:
-                async with conn.transaction():await E.evaluate_due(conn,time.time())
-    except Exception as exc:evaluation_error=type(exc).__name__
+
+    async def _evaluate(conn):
+        async with conn.transaction():await E.evaluate_due(conn,time.time())
+    evaluation_error=await _optional('EVALUATE', 5, pool, _evaluate)
     state={'status':'DEGRADED' if admission_error or evaluation_error else 'OK',
            'at':time.time(),'task_id':task['task_id'] if task else None,
            'admission_error':admission_error,'evaluation_error':evaluation_error,
+           # the claimed review's outcome by name (rc6.3): a failed review
+           # used to leave an OK heartbeat with no trace of why
+           'review':review,
            'authority':'RESEARCH_ONLY'}
-    async with _phase('HEARTBEAT'):
-        async with asyncio.timeout(3):
-            async with pool.acquire() as conn:
+    async with _phase('HEARTBEAT', 3) as ph:
+        async with ph.bound():
+            async with _conn(pool, ph) as conn:
                 # default=str (R30A review): the one heartbeat writer the
                 # dea1b2e datetime fix did not reach; a non-JSON value in a
                 # state field must not fail the tick
@@ -183,23 +275,55 @@ async def tick(pool):
     return state
 
 
+async def _loop_pool(get_pool):
+    from .. import loop_health as LH
+    try:
+        return await asyncio.wait_for(get_pool(),LH.RECORD_TIMEOUT_S)
+    except asyncio.CancelledError:raise
+    except Exception:return None
+
+
 async def _record_failure(get_pool,error):
     """The failed tick in loop health (never raises, bounded)."""
     from .. import loop_health as LH
-    try:
-        pool=await asyncio.wait_for(get_pool(),LH.RECORD_TIMEOUT_S)
-    except asyncio.CancelledError:raise
-    except Exception:return
+    pool=await _loop_pool(get_pool)
+    if pool is None:return
     await LH.record(pool,'agents.capability_runtime',process='api',phase=LH.ERROR,error=error)
+
+
+async def _record_pass(get_pool,state):
+    """A completed tick in loop health (rc6.3; never raises, bounded).
+
+    run() used to record ONLY failures, so runtime_loop_health read
+    'starts 0, successes 0, errors 81' for a loop whose heartbeat said OK
+    (research-sql runs 37978689499, 38008493448). A tick that wrote an OK
+    heartbeat is now a SUCCESS, with what it did; a DEGRADED one (admission
+    or evaluation failed) is an ERROR naming both; a tick that found the
+    worker switched off or its schema absent ran nothing and records
+    nothing, as before."""
+    from .. import loop_health as LH
+    status=(state or {}).get('status')
+    if status not in ('OK','DEGRADED'):return
+    pool=await _loop_pool(get_pool)
+    if pool is None:return
+    detail={k:state.get(k) for k in ('status','task_id','review')}
+    if status=='OK':
+        await LH.record(pool,'agents.capability_runtime',process='api',phase=LH.SUCCESS,detail=detail)
+    else:
+        await LH.record(pool,'agents.capability_runtime',process='api',phase=LH.ERROR,
+                        error='DEGRADED: admission=%s; evaluation=%s'%(state.get('admission_error'),state.get('evaluation_error')),
+                        detail=detail)
 
 
 async def run(get_pool):
     while True:
-        try:await tick(await get_pool())
+        try:
+            state=await tick(await get_pool())
+            await _record_pass(get_pool,state)
         except asyncio.CancelledError:raise
         except TickPhaseFailed as exc:
-            log.warning('agent research tick failed in %s: %s',exc.phase,type(exc.cause).__name__)
-            await _record_failure(get_pool,'%s: %s'%(exc.phase,type(exc.cause).__name__))
+            log.warning('agent research tick failed in %s',exc.describe())
+            await _record_failure(get_pool,exc.describe())
         except Exception as exc:
             log.warning('agent research tick failed: %s',type(exc).__name__)
             await _record_failure(get_pool,exc)
