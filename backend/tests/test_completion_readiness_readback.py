@@ -113,7 +113,11 @@ def _inputs(**over):
                           now=NOW)
     md = {"priority_freshness": {"rate": 0.99}}
     gates = {"software_reds_zero": {"value": True, "evidence": {"software": 0}},
-             "xavier_complete": {"value": True},
+             # the gate's real shape: GREEN over counted open positions (a
+             # GREEN over none is UNMEASURED, RC6.2 p-xavier M-1)
+             "xavier_complete": {"value": True, "evidence": {
+                 "open_positions": 2, "counted_open_positions": 2,
+                 "complete_current_packets": 2}},
              "production_canary_clean": {"value": True},
              "small_live_shadow": {"value": True}}
     kw = dict(runtime=rt, market_data=md,

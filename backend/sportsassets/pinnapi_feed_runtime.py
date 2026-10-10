@@ -246,6 +246,14 @@ def digest() -> dict:
                              if _STATE.get("discovery") else None)
     from . import pinnapi_held as PH
     d["held_priority_targets"] = PH.WATCH.status()
+    # THE HELD-REVIEW SCHEDULER'S COUNTERS, persisted with every beat (RC6.2
+    # p-xavier SW-2): busy retries, drops past the 30 s window, reviews made
+    # inside a paper pass, and the newest notify-to-review outcomes. Before
+    # this they lived only in memory, so a held change that was never
+    # reviewed in time was invisible in production. Read only, through the
+    # held watch -- the module that schedules those reviews (this runtime
+    # imports no paper module).
+    d["held_review_scheduler"] = PH.held_review_scheduler_status()
     return d
 
 

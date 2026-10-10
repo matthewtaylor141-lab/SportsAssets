@@ -189,7 +189,16 @@ ALLOWED_IMPORTS = {"__future__", "annotations", "asyncio", "hashlib", "json", "m
                    # table, standard library only (pinned in
                    # tests/test_rc6_xavier_held_fixture.py); no venue, order,
                    # execution or funded path
-                   "xavier_held_fixture"}
+                   "xavier_held_fixture",
+                   # (RC6.2 SW-1b) the one protectability check every paper
+                   # entry runs (paper_explore.xavier_can_protect_fills ->
+                   # paper_xavier.protective_price), imported at call time.
+                   # paper_explore's own module-level imports are all
+                   # already allowed here (pinned in
+                   # tests/test_rc6_pxavier_every_entry_asks_protection.py),
+                   # so no venue, order, execution or funded module is
+                   # reachable through it
+                   "paper_explore"}
 
 
 def _imports(path: pathlib.Path) -> list:

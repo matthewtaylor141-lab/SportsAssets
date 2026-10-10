@@ -319,6 +319,18 @@ def paper_review_listener(event_id, slugs) -> None:
     PR.schedule_held_review(slugs)
 
 
+def held_review_scheduler_status() -> dict:
+    """What became of the reviews paper_review_listener scheduled: the paper
+    held-review scheduler's counters and newest outcomes (paper_runtime.
+    held_review_status), for the feed heartbeat (RC6.2 p-xavier SW-2). Read
+    only; never raises."""
+    try:
+        from .agents import paper_runtime as PR
+        return PR.held_review_status()
+    except Exception as exc:                                    # noqa: BLE001
+        return {"unread": type(exc).__name__}
+
+
 def add_listener(fn, *, watch: HeldWatch | None = None) -> None:
     w = watch or WATCH
     if fn not in w.listeners:
