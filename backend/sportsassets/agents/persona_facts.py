@@ -17,7 +17,9 @@ WHERE FACTS COME FROM, in order
      from `paper_brief.summary` -- the live balances the Command Centre strip
      shows (`bettor_paper_ledger.balances`), the active session and its
      health, and today's paper decisions by verdict and refusal. For a named
-     position every paper table (`paper_*` / `*_paper_*`) is searched for it.
+     position every paper table (`paper_*` / `*_paper_*`) is searched for it:
+     by its key columns when the position is named by id (ID_COLUMNS), by
+     the record text when it is named by a team.
   3. the funded book's positions (`bettor_funded_intents`, `_fills`,
      `_economics`) and the LEGACY desk accounts' cash
      (`bettor_desk_account_state`) -- labelled as the legacy desk account
@@ -252,6 +254,77 @@ def _row_key(row: dict) -> str:
     return str(next(iter(row.values()), "?"))
 
 
+#: THE COLUMNS A CONTEXT ID IS MATCHED ON (rc6.3 capability). A context id
+#: (a paper position's group id, a decision id, an intent id) names a record
+#: by its key, so a table is searched on the key columns it has, by equality
+#: -- the indexed paper_decisions.decision_id, paper_orders.group_id /
+#: decision_id, paper_fills.group_id, paper_xavier_reviews.group_id ... --
+#: never by serialising every row to JSON text and matching the id inside it.
+#:
+#: WHY (production, research-sql runs 38008493448 and 38009039152, SELECT
+#: only). The text match read every paper table end to end, detoasting each
+#: row: paper_decisions is 3,235 MB and paper_xavier_reviews 1,640 MB, and the
+#: position search on paper_xavier_reviews alone averaged 12.9 s (611 calls,
+#: max 29.8 s). The capability worker's reviews are all scoped to a position,
+#: so the fact read grew with the tables -- the median question-to-answer time
+#: of a completed review went 24 s (10-02), 29 s, 36 s, 48 s, 53 s (10-06) --
+#: until it no longer fitted the worker's 55 s budget: 1,138 reviews ended
+#: TimeoutError at 55.1-67.7 s (XAVIER 1,081, DEREK 57), 549 of the 575
+#: questions of 10-07 never reached a reply row.
+ID_COLUMNS = ("group_id", "decision_id", "intent_id", "position_id",
+              "xavier_decision_id")
+#: text columns that NAME a record by a composite of its ids -- Audrey's
+#: finding `subject` (a group id, an order id, a position key) and the
+#: `position_key` 'paperpos:<account>:<group>:<slug>:<side>' -- matched by
+#: substring on that one column, which is cheap: no row is serialised
+REF_COLUMNS = ("subject", "position_key")
+
+ID_COLUMNS_SQL = (
+    "SELECT table_name, column_name FROM information_schema.columns "
+    " WHERE table_schema = current_schema() AND table_name = ANY($1::text[]) "
+    "   AND column_name = ANY($2::text[]) "
+    "   AND data_type IN ('text', 'character varying') "
+    " ORDER BY table_name, ordinal_position")
+
+#: a table with none of the key columns cannot hold the record a context id
+#: names by key; it is listed in `checked` under this status, not scanned
+NO_KEY_COLUMN = "NO_KEY_COLUMN_FOR_CONTEXT_ID"
+
+
+async def _id_columns(conn, tables: list) -> dict:
+    """{table: [its text key / reference columns]} in one read."""
+    rows = await conn.fetch(ID_COLUMNS_SQL, list(tables),
+                            list(ID_COLUMNS + REF_COLUMNS))
+    out: dict = {}
+    for r in rows:
+        out.setdefault(r["table_name"], []).append(r["column_name"])
+    return out
+
+
+def _like_pattern(v: str) -> str:
+    return "%" + str(v).replace("\\", "\\\\").replace("%", "\\%").replace(
+        "_", "\\_") + "%"
+
+
+def _by_key(columns: list, context_ids, first: int) -> tuple:
+    """(SQL, args): `x.key = ANY($n)` over the key columns, `x.ref LIKE
+    ANY($m)` over the reference columns, OR-ed; parameters from $first."""
+    keys = [c for c in columns if c in ID_COLUMNS]
+    refs = [c for c in columns if c in REF_COLUMNS]
+    parts, args = [], []
+    if keys:
+        args.append(list(context_ids))
+        n = first + len(args) - 1
+        parts += ['x."%s" = ANY($%d::text[])' % (c.replace('"', ''), n)
+                  for c in keys]
+    if refs:
+        args.append([_like_pattern(i) for i in context_ids])
+        n = first + len(args) - 1
+        parts += ['x."%s" LIKE ANY($%d::text[])' % (c.replace('"', ''), n)
+                  for c in refs]
+    return " OR ".join(parts), args
+
+
 async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
     tables = await paper_tables(conn)
     if not tables:
@@ -259,6 +332,7 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
         f.miss(PAPER_NOT_IN_BUILD)
         return False
     found = False
+    keys = await _id_columns(conn, tables) if context_ids else {}
     for t in tables:
         if t == "paper_xavier_reviews":
             # XAVIER'S REVIEWS ARE NEVER DUMPED UNORDERED (owner P0): an
@@ -268,14 +342,29 @@ async def _paper(conn, f: Facts, *, likes, context_ids, limit=5) -> bool:
             found = await _xavier_current(
                 conn, f, likes=likes, context_ids=context_ids) or found
             continue
+        cols = keys.get(t) or []
+        if context_ids and not likes and not cols:
+            f.check(t, NO_KEY_COLUMN, 0, "no %s column" % "/".join(
+                ID_COLUMNS + REF_COLUMNS))
+            continue
         try:
-            if likes or context_ids:
+            if likes:
+                # a named subject (a team): the record text is searched for
+                # its terms; context ids still match on the key columns
+                where, extra = _by_key(cols, context_ids, 2) if (
+                    cols and context_ids) else ("", [])
+                args = [likes] + extra
                 rows = await conn.fetch(
                     'SELECT to_jsonb(x) AS j FROM "%s" x WHERE '
-                    " to_jsonb(x)::text ILIKE ANY($1::text[]) OR "
-                    " to_jsonb(x)::text LIKE ANY($2::text[]) LIMIT $3"
-                    % t.replace('"', ''), likes or [],
-                    ["%" + i + "%" for i in context_ids], int(limit))
+                    " to_jsonb(x)::text ILIKE ANY($1::text[])%s LIMIT $%d"
+                    % (t.replace('"', ''), (" OR " + where) if where else "",
+                       len(args) + 1), *args, int(limit))
+            elif context_ids:
+                where, args = _by_key(cols, context_ids, 1)
+                rows = await conn.fetch(
+                    'SELECT to_jsonb(x) AS j FROM "%s" x WHERE %s LIMIT $%d'
+                    % (t.replace('"', ''), where, len(args) + 1),
+                    *args, int(limit))
             else:
                 rows = await conn.fetch(
                     'SELECT to_jsonb(x) AS j FROM "%s" x LIMIT $1'
@@ -304,6 +393,20 @@ XAVIER_CURRENT_SQL = (
     "                       WHERE o.us_market_slug ILIKE ANY($1::text[]) "
     "                          OR o.group_id LIKE ANY($2::text[])) "
     " ORDER BY r.group_id, r.reviewed_at DESC, r.review_id DESC LIMIT $3")
+
+#: THE SAME READ FOR CONTEXT IDS ONLY (rc6.3 capability): the reviews of the
+#: named group(s), and of the groups whose orders a named decision opened,
+#: on paper_xavier_reviews (group_id, reviewed_at DESC) and paper_orders
+#: (decision_id, role) -- not a JSON-text scan of every review (production:
+#: 611 calls of XAVIER_CURRENT_SQL, mean 12.9 s, max 29.8 s; see ID_COLUMNS).
+XAVIER_CURRENT_BY_ID_SQL = (
+    "SELECT r.review_id, r.group_id, r.reviewed_at, r.trigger, "
+    "       r.recommendation, r.refusal, r.measure, r.selection "
+    "  FROM paper_xavier_reviews r "
+    " WHERE r.group_id IN (SELECT g FROM unnest($1::text[]) AS g "
+    "                       UNION SELECT o.group_id FROM paper_orders o "
+    "                       WHERE o.decision_id = ANY($1::text[])) "
+    " ORDER BY r.group_id, r.reviewed_at DESC, r.review_id DESC LIMIT $2")
 
 
 def xavier_decision_text(d: dict, group_id) -> str:
@@ -346,9 +449,13 @@ async def _xavier_current(conn, f: Facts, *, likes, context_ids,
     from .. import xavier_freshness as XF
     from . import xavier_management as XM
     try:
-        rows = [dict(r) for r in await conn.fetch(
-            XAVIER_CURRENT_SQL, likes or [],
-            ["%" + i + "%" for i in context_ids or []], int(limit))]
+        if context_ids and not likes:
+            rows = [dict(r) for r in await conn.fetch(
+                XAVIER_CURRENT_BY_ID_SQL, list(context_ids), int(limit))]
+        else:
+            rows = [dict(r) for r in await conn.fetch(
+                XAVIER_CURRENT_SQL, likes or [],
+                ["%" + i + "%" for i in context_ids or []], int(limit))]
     except Exception as exc:                                    # noqa: BLE001
         f.check("paper_xavier_reviews", "READ_FAILED", 0, type(exc).__name__)
         return False
