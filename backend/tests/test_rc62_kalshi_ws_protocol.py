@@ -584,12 +584,25 @@ class _Burst:
 
 
 def burst_frames(n_markets=2000, n_frames=50_000):
+    """The documented venue's frames for one subscribe of the first chunk
+    and add_markets of the rest (command ids 2, 3, ...): `subscribed`, the
+    chunk's snapshots, then per add its `ok` (the sid's next seq, the full
+    list) and its markets' snapshots; then deltas. (RC6.2 review: the
+    venue answers every add -- a market is made CURRENT only once the
+    venue confirmed it holds it, so a script without the replies would
+    leave the added markets awaiting.)"""
     ts = ["KXB-%04d" % i for i in range(n_markets)]
     out = [json.dumps(SR.m_subscribed(1, 1))]
     seq = 0
-    for t in ts:
-        seq += 1
-        out.append(json.dumps(snap(1, seq, t)))
+    held = []
+    for k, c in enumerate(KWS.chunks(ts)):
+        held += c
+        if k:
+            seq += 1
+            out.append(json.dumps(ok(k + 1, 1, seq, held)))
+        for t in c:
+            seq += 1
+            out.append(json.dumps(snap(1, seq, t)))
     i = 0
     while len(out) < n_frames:
         seq += 1
@@ -643,8 +656,13 @@ def test_a_50000_frame_burst_never_holds_the_loop_50_ms():
           % (len(frames), elapsed, len(holds_cpu), worst * 1000,
              max(holds_wall) * 1000))
     assert sock.i == len(frames)
+    n_adds = -(-2000 // KWS.SUBSCRIBE_CHUNK) - 1
+    assert [m["params"].get("action") for m in sock.sent] == \
+        [None] + ["add_markets"] * n_adds
     assert books.stats["gaps"] == 0 and books.stats["snapshots"] == 2000
-    assert books.stats["deltas"] == len(frames) - 1 - 2000
+    assert books.stats["snapshots_not_held"] == 0
+    assert books.stats["control_consumed"] == n_adds
+    assert books.stats["deltas"] == len(frames) - 1 - 2000 - n_adds
     # the session yielded at least once per YIELD_EVERY_FRAMES frames
     assert len(holds_cpu) >= len(frames) // KWS.YIELD_EVERY_FRAMES
     assert worst < 0.050, worst

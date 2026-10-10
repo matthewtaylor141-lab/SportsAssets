@@ -27,9 +27,10 @@ snapshot comes back). So, per connection:
     {id: that command} names the sid. Every further market is added with
     `update_subscription` add_markets {sid}, removed with delete_markets
     {sid}; each chunk is bound to the sid when it is SENT. The `ok` of an
-    add / delete / get_snapshot carries the venue's full ticker list after
-    that command: a ticker we expect there but the venue lacks is GAP
-    (R_NOT_HELD_BY_VENUE) and added again ONCE.
+    add / delete carries the venue's full ticker list after that command:
+    a ticker we want there but the venue lacks (or refused by an error) is
+    GAP (R_NOT_HELD_BY_VENUE) and added again ONCE (after error 27, the
+    command rate, retried later: RATE_LIMIT_RETRY_S, bounded).
   * A sequence gap never tears the subscription down (RC6.1 unsubscribed the
     sid and subscribed again; the merge answered `ok`, the next snapshot
     looked like a gap, and every snapshot on the "dead" sid subscribed its
@@ -42,8 +43,10 @@ snapshot comes back). So, per connection:
     run loop reconnects after its backoff.
   * Only errors 10 (channel error) and 25 (subscription buffer overflow)
     end a subscription ("the user must resubscribe"): its books GAP, the
-    session ends and the reconnect subscribes afresh. Every other error is
-    counted; one carrying (sid, seq) is a control frame of the sequence. An
+    session ends and the reconnect subscribes afresh -- also a 10 / 25
+    WITHOUT a sid (the connection holds one subscription; fail closed).
+    Every other error is counted; one carrying (sid, seq) is a control
+    frame of the sequence. An
     `unsubscribed` naming a sid we hold (we never send `unsubscribe`, so the
     venue did) GAPs that sid's books (R_UNSUBSCRIBED_BY_VENUE) and ends the
     session.
@@ -82,13 +85,53 @@ slot, or (after a loss) above it -- a gap, as for data. Separate counter: a
 control frame can take a slot only while no book of the sid is CURRENT
 (nothing to hide; the data frames it may stand in for precede every
 snapshot applied after it, and a snapshot is a whole book) or when its seq
-is beyond any separate counter (impossible) -- even when control frames
-themselves are lost. What it costs: under a shared counter, a false gap
+is beyond any separate counter -- even when control frames themselves are
+lost. "Beyond any separate counter" rests on two assumptions about a
+SEPARATE counter (the documented shared one needs neither), named here and
+in the proof: C1 the venue answers each of our commands with at most one
+control frame (plus at most CONTROL_SEQ_SLACK it sends unasked), and C2 it
+answers them in the order it received them -- so the reply to our j-th
+update command on the sid carries at most j + CONTROL_SEQ_SLACK. (Without
+C2 the only safe bound is every command sent so far; that bound makes a
+false gap of the documented venue's ordinary first `ok`s whenever several
+add_markets are in flight on a quiet sid, so it is not used.) On a sid
+never acknowledged as ours the bound is every command of the connection.
+What it costs: under a shared counter, a false gap
 only when a sid has carried no more frames than update commands (a
 one-market quiet subscription: one gap, one get_snapshot, then the counts
 part); under a separate counter, none in the usual shape (the first `ok`
 after any data is at or below the last seq: SEPARATE, no gap), at most one
 gap and one get_snapshot otherwise; never a storm.
+
+VENUE MEMBERSHIP (RC6.2 review). Sequence continuity of the sid is not
+enough: get_snapshot "returns an orderbook_snapshot for the requested
+market_tickers without modifying the subscription" (asyncapi; changelog
+2026-04-20: "without adding them to the subscription or affecting the
+existing delta stream") -- a snapshot of a market the venue does not hold
+is in the sid's sequence, but no delta of that market follows it. And a
+snapshot the venue sent before our delete_markets may arrive after the
+market is wanted again (add_markets sent), while the venue streams nothing
+for it between the two. So a snapshot makes a book CURRENT only when the
+venue HOLDS the market on the sid by its own replies, with nothing naming
+the market unanswered: held from our subscribe's `subscribed` (every market
+it named -- assumption H0: `subscribed` means the venue took them all),
+then by every add / delete reply -- the `ok`'s msg.market_tickers is the
+full list after that command and settles every command up to it (an `ok`
+with no list settles its own command: assumption H1, an add answered `ok`
+took its markets); an error leaves the venue as it was. A snapshot of a
+market not held is in the sequence and never applied (snapshots_not_held);
+get_snapshot names only held markets; a held book the list lacks is GAP
+(R_NOT_HELD_BY_VENUE); a market whose add or re-add a reply confirms gets
+its snapshot -- the add's own when it comes after that reply, otherwise one
+get_snapshot. A gap with an add unanswered re-adds the market (the lost
+frame may be the reply), and so does an add unanswered REPLY_TIMEOUT_S
+after it was sent (a sid that carries nothing else never shows the loss);
+with those re-adds spent (MAX_READDS_PER_MARKET) the session ends
+(ReplyTimeout, R_REPLY_TIMEOUT: fail closed, the reconnect subscribes
+afresh). A market dropped and wanted again before its delete went out is
+asked for by get_snapshot only while the venue holds it; otherwise it is
+added again. Bounded: the re-add budgets, the command rate and the
+per-market get_snapshot bounds.
 
 SNAPSHOTS ARE IN THE SEQUENCE TOO (RC6 red-team, replay). Kalshi: seq is
 "used for snapshot/delta consistency". A replayed or out-of-order snapshot
@@ -178,11 +221,32 @@ WANTED_RECHECK_FRAMES = 200
 #: the reply to our j-th update command on a sid (the subscribe's own reply
 #: may count); a control frame above it can only be a shared slot
 CONTROL_SEQ_SLACK = 1
-#: (RC6.2) command ids remembered per sid for that bound, at most
+#: (RC6.2) command ids remembered per sid for that bound (and unanswered
+#: add / delete commands), at most
 MAX_CMD_INDEX = 1024
 #: (RC6.2) errors that END a subscription ("the user must resubscribe"):
 #: 10 channel error, 25 subscription buffer overflow
 TERMINAL_ERROR_CODES = frozenset((10, 25))
+#: (RC6.2 review) the per-subscription command rate limit error
+RATE_LIMIT_ERROR = 27
+#: (RC6.2 review) re-adds of one market in one session after a gap that may
+#: have lost the reply to its add, at most (a refusal -- an error, or an
+#: `ok` whose list lacks it -- re-adds it once more, its own budget)
+MAX_READDS_PER_MARKET = 2
+#: (RC6.2 review) a market whose re-add was refused again by error 27 (the
+#: command rate) is added again this long after, at most
+#: MAX_RATE_LIMIT_RETRIES times a session (a retry inside the same rate
+#: window would be refused again)
+RATE_LIMIT_RETRY_S = 30.0
+MAX_RATE_LIMIT_RETRIES = 3
+#: (RC6.2 review) an add / delete the venue has not answered this long after
+#: it was sent: its reply is taken as lost, as at a gap (a market the venue
+#: then holds nothing for sends no frame that could reveal the loss)
+REPLY_TIMEOUT_S = 30.0
+#: (RC6.2 review) a session that lasted this long before it ended resets
+#: the reconnect backoff (a session only ever ends by raising, so the index
+#: never went back to the first step)
+BACKOFF_RESET_AFTER_S = 300.0
 #: (RC6.2) bounded diagnostics: the first DIAG_CONNECTIONS connections of a
 #: process log at most DIAG_MAX_CONTROL control frames and DIAG_MAX_COMMANDS
 #: commands each (KWS_CTRL / KWS_NEXT / KWS_CMD; no tickers, no book data)
@@ -224,6 +288,9 @@ R_COMMAND_RATE = "KALSHI_WS_COMMAND_RATE_BOUND"
 R_SNAPSHOT_REQUEST_BOUND = "KALSHI_WS_SNAPSHOT_REQUEST_BOUND"
 R_SUBSCRIPTION_ENDED = "KALSHI_WS_SUBSCRIPTION_ENDED"
 R_SUBSCRIBE_REFUSED = "KALSHI_WS_SUBSCRIBE_REFUSED"
+#: (RC6.2 review) session end: a market's add went unanswered past
+#: REPLY_TIMEOUT_S after its re-adds were spent
+R_REPLY_TIMEOUT = "KALSHI_WS_REPLY_TIMEOUT"
 
 
 # ── signing (the handshake and the limits read) ─────────────────────────
@@ -364,7 +431,12 @@ class WsBooks:
                       "errors_nonterminal": 0, "control_frames": 0,
                       "control_consumed": 0, "control_ignored": 0,
                       "control_seq_separate": 0, "unsubscribed_by_venue": 0,
-                      "not_held_by_venue": 0}
+                      "not_held_by_venue": 0,
+                      # (RC6.2 review) snapshots of a market the venue was
+                      # not known to hold on the sid: in its sequence,
+                      # never applied; markets re-added because their add
+                      # was unanswered at a gap
+                      "snapshots_not_held": 0, "readd_after_gap": 0}
         self.resubscribe: set = set()
         #: (RC6 acceptance model) sid -> the HIGHEST seq of a delta seen on
         #: a sid not acknowledged as ours, before its first snapshot: not its
@@ -377,6 +449,13 @@ class WsBooks:
         #: (the worker's flush key)
         self.rev = 0
         self.connected = False
+        #: (RC6.2 review) sid -> {market: error code or None}: markets the
+        #: venue refused or did not list (the subscriber decides on a
+        #: re-add and clears it)
+        self.refused: dict = {}
+        #: (RC6.2 review) sid -> markets whose add was unanswered at a gap
+        #: (the reply may be the lost frame; the subscriber adds them again)
+        self.readd_lost: dict = {}
         #: (RC6) markets the runtime stopped tracking in THIS session (see
         #: `forget`); cleared with the session
         self.forgotten: set = set()
@@ -386,8 +465,23 @@ class WsBooks:
         #: the sequence since it), n_cmds (update commands sent on it),
         #: cmd_index (command id -> its 1-based index among them), ended
         #: (None, or why it ended), awaiting (markets whose requested
-        #: snapshot is outstanding)
+        #: snapshot is outstanding); (RC6.2 review, VENUE MEMBERSHIP) known
+        #: (market -> (command id, held): what the venue's latest reply that
+        #: spoke about it says -- our `subscribed` is command 0), pend
+        #: (market -> [(command id, action)] of the add / delete commands
+        #: naming it the venue has not answered), cmds (unanswered add /
+        #: delete id -> (action, tickers)), expect (market -> the add whose
+        #: own snapshot is still to come), unheld_snap (markets a snapshot of
+        #: which arrived while an add / delete naming them was unanswered),
+        #: unsure (markets whose add's reply may have been lost: whether the
+        #: venue holds them is unknown until a reply says)
         self.anchors: dict = {}
+        #: (RC6.2 review) commands sent on this connection (every kind): a
+        #: separate control counter on any sid cannot pass it (+ the slack)
+        self.conn_cmds = 0
+        #: (RC6.2 review) sids never acknowledged as ours whose control
+        #: frames proved a separate counter (counted, never sequenced)
+        self.legacy_separate: set = set()
         #: (RC6.2) sid numbers seen before any ack of ours on this connection
         self.legacy_sids: set = set()
         #: (RC6.2) sid -> markets of an acknowledged sid to ask a fresh
@@ -451,6 +545,10 @@ class WsBooks:
             for a in self.anchors.values():
                 a["awaiting"].discard(t)
             for ms in self.recover.values():
+                ms.discard(t)
+            for ms in self.refused.values():
+                ms.pop(t, None)
+            for ms in self.readd_lost.values():
                 ms.discard(t)
             self.resubscribe.discard(t)
             self.left_current.discard(t)
@@ -531,6 +629,7 @@ class WsBooks:
 
     def on_connected(self) -> None:
         self.connected = True
+        self.conn_cmds = 0
 
     def on_disconnected(self) -> None:
         """Every book GAP: a book held across a reconnect is never reused.
@@ -550,6 +649,10 @@ class WsBooks:
         self.anchors.clear()
         self.legacy_sids.clear()
         self.recover.clear()
+        self.refused.clear()
+        self.readd_lost.clear()
+        self.legacy_separate.clear()
+        self.conn_cmds = 0
         self.fatal = None
         # a new session subscribes only what is wanted
         self.forgotten.clear()
@@ -559,6 +662,12 @@ class WsBooks:
         add_markets / get_snapshot chunk is being sent on it): the markets
         it carries are known before their snapshots arrive. A market
         CURRENT on another sid keeps that sid.
+
+        (RC6.2 review) On the ack that starts an acknowledged subscription
+        the venue holds every market in `tickers` from its `subscribed` on
+        (VENUE MEMBERSHIP; hold_subscribed adds the markets the subscribe
+        named that were dropped while it awaited its ack). Only a market the
+        venue holds can be made CURRENT by a snapshot (_acked_data).
 
         `ours`: the ack answers the subscribe command this session sent
         (its id). Then the subscription's messages follow it in order from
@@ -598,8 +707,13 @@ class WsBooks:
                 self.anchors[sid] = {"mode": SHARED, "last_data": prev,
                                      "ctrl_since_data": 0, "n_cmds": 0,
                                      "cmd_index": {},
-                                     "ended": None, "awaiting": set()}
+                                     "ended": None, "awaiting": set(),
+                                     "known": {t: (0, True) for t in tickers},
+                                     "pend": {}, "cmds": {}, "expect": {},
+                                     "unheld_snap": set(), "unsure": set()}
                 self.recover.pop(sid, None)
+                self.refused.pop(sid, None)
+                self.readd_lost.pop(sid, None)
         else:
             if sid in self.anchors or self._unknown(sid):
                 return
@@ -628,6 +742,7 @@ class WsBooks:
             self.sid_seq.pop(sid, None)
             self.sid_pre.pop(sid, None)
             self.sid_markets.pop(sid, None)
+            self.legacy_separate.discard(sid)
             # (RC6.2 acceptance model, P1b per subscription) nothing the
             # old subscription carried is associated with the new one
             for t, s in list(self.ticker_sid.items()):
@@ -676,7 +791,17 @@ class WsBooks:
         seen (the gap frame's when it skipped ahead; a replay or duplicate
         never lowers it), every market bound to it named for a fresh
         snapshot. The sid stays live. A gap while a requested snapshot is
-        still outstanding asks the subscriber to end the session."""
+        still outstanding asks the subscriber to end the session.
+
+        (RC6.2 review) Named for a snapshot: only the markets the venue
+        holds -- never one it refused, does not list or has an unanswered
+        add / delete for (get_snapshot answers for any market, held or not,
+        "without modifying the subscription": no delta would follow). A
+        market whose add is unanswered is named for ONE re-add instead
+        (`readd_lost`): the lost frame may be that add's reply or its own
+        snapshot, and only a reply settles whether the venue holds it; the
+        reply that confirms it then asks for its snapshot (`expect` is
+        dropped, so _confirm does)."""
         if a["awaiting"]:
             self.fatal = self.fatal or R_GAP_DURING_RECOVERY
         self.stats["gaps"] += 1
@@ -696,8 +821,13 @@ class WsBooks:
                 continue
             if b["state"] == CURRENT:
                 self._touch(t, b, state=GAP, why=why)
-            need.add(t)
             self.resubscribe.add(t)
+            if self._held(a, t):
+                need.add(t)
+            elif self._pending_add(a, t):
+                self.readd_lost.setdefault(sid, set()).add(t)
+                self.stats["readd_after_gap"] += 1
+                a["expect"].pop(t, None)
 
     def _end(self, sid, why) -> None:
         """An acknowledged subscription ENDED (error 10 / 25, or the
@@ -726,6 +856,208 @@ class WsBooks:
         self.dead_sids.add(sid)
         self.fatal = self.fatal or R_SUBSCRIPTION_ENDED
 
+    # ── venue membership of an acknowledged subscription (RC6.2 review) ──
+    #
+    # What the venue holds on the sid, from its own replies: `known[t]` is
+    # (command id, held) -- t's state right after that command, by the
+    # latest reply that spoke about it (our `subscribed` counts as command
+    # 0, holding every market the subscribe named) -- and `pend[t]` the
+    # add / delete commands naming t the venue has not answered. t is HELD
+    # when the known state holds it and no delete of ours after that state
+    # is unanswered (an add never removes a market: one the venue holds is
+    # "no action"); only then can a snapshot of t make its book CURRENT.
+
+    @staticmethod
+    def _held(a, t) -> bool:
+        k = a["known"].get(t)
+        if k is None or not k[1]:
+            return False
+        return not any(act == "delete_markets" and c > k[0]
+                       for c, act in a["pend"].get(t, ()))
+
+    @staticmethod
+    def _pending_add(a, t) -> bool:
+        return any(act == "add_markets" for _c, act in a["pend"].get(t, ()))
+
+    def _settle(self, a, sid, cid, typ, m, code=None) -> None:
+        """The venue's reply (`ok` / `error`) to our add / delete `cid`.
+        The `ok` carries the subscription's FULL ticker list after the
+        update (asyncapi OK Response, msg.market_tickers): every market's
+        state after `cid` is known -- held exactly when listed -- and every
+        command up to `cid` is reflected in it. An `ok` without a list
+        speaks for its own command (an add held its markets, a delete
+        removed them). An error leaves the venue as it was before the
+        command: nothing becomes known, the command is just no longer
+        pending (so a refused re-add of a market whose earlier add the
+        venue confirmed leaves it held). Each command is settled once: a
+        repeated reply is ignored."""
+        info = a["cmds"].pop(cid, None) if type(cid) is int else None
+        if info is None:
+            return
+        action, ts = info
+        msg = m.get("msg") if isinstance(m.get("msg"), dict) else {}
+        listed = msg.get("market_tickers") if typ == "ok" else None
+        if isinstance(listed, list):
+            on = set(listed)
+            touched = set(a["known"]) | set(a["pend"]) | on
+        else:
+            touched = set(ts)
+        for t in sorted(touched):
+            was = self._held(a, t)
+            p = a["pend"].get(t, [])
+            if isinstance(listed, list):
+                left = [x for x in p if x[0] > cid]
+                if a["known"].get(t, (-1, False))[0] <= cid:
+                    a["known"][t] = (cid, t in on)
+                    a["unsure"].discard(t)
+            else:
+                left = [x for x in p if x[0] != cid]
+                if typ == "ok" and a["known"].get(t, (-1, False))[0] <= cid:
+                    a["known"][t] = (cid, action == "add_markets")
+                    a["unsure"].discard(t)
+            answered = len(left) != len(p)
+            if left:
+                a["pend"][t] = left
+                if answered and typ == "error" and \
+                        action == "delete_markets" and \
+                        a["known"].get(t, (0, False))[1]:
+                    # our delete refused: the add after it will find t
+                    # held -- "no action", no snapshot of its own
+                    a["expect"].pop(t, None)
+            else:
+                a["pend"].pop(t, None)
+            now = self._held(a, t)
+            if now and not was:
+                self._confirm(a, sid, t, cid)
+            elif not now and not left and (was or answered):
+                self._refuse(a, sid, t, code if typ == "error" else None)
+
+    def _confirm(self, a, sid, t, cid) -> None:
+        """The venue holds t on the subscription (settled by the reply to
+        `cid`). A book that is not CURRENT gets a snapshot: the add's own
+        -- only when this is the add's own reply, the add found t not held
+        and no snapshot of t came before the reply -- or else a
+        get_snapshot (unless one is already outstanding)."""
+        exp = a["expect"].pop(t, None)
+        seen = t in a["unheld_snap"]
+        a["unheld_snap"].discard(t)
+        b = self.books.get(t)
+        if b is None or t in self.forgotten:
+            return
+        if b["state"] == CURRENT and b["sid"] is not None:
+            return                  # served here, or on another live sid
+        if t in a["awaiting"]:
+            return
+        if seen or exp != cid:
+            self.recover.setdefault(sid, set()).add(t)
+
+    def _refuse(self, a, sid, t, code) -> None:
+        """The venue does not hold t on the subscription (it refused the
+        add, its list lacks t, or our delete took it out), and nothing
+        naming t is unanswered: no snapshot of t on it is applied until a
+        reply holds it again; a wanted book is GAP (R_NOT_HELD_BY_VENUE),
+        nothing is outstanding for it, and the subscriber is told
+        (`refused`, with the error code if any)."""
+        a["expect"].pop(t, None)
+        a["unheld_snap"].discard(t)
+        b = self.books.get(t)
+        if b is None or t in self.forgotten:
+            return
+        self.stats["not_held_by_venue"] += 1
+        a["awaiting"].discard(t)
+        need = self.recover.get(sid)
+        if need is not None:
+            need.discard(t)
+        lost = self.readd_lost.get(sid)
+        if lost is not None:
+            lost.discard(t)
+        ms = self.sid_markets.get(sid)
+        if self._current_elsewhere(b, sid):
+            # served by another live subscription: nothing to repair here
+            if ms is not None:
+                ms.discard(t)
+            return
+        self._touch(t, b, state=GAP, why=R_NOT_HELD_BY_VENUE)
+        self.resubscribe.add(t)
+        if ms is not None:
+            ms.discard(t)
+        if self.ticker_sid.get(t) == sid:
+            self.ticker_sid.pop(t, None)
+        self.refused.setdefault(sid, {})[t] = code
+
+    def adding(self, sid, t) -> bool:
+        """Is an add naming t on `sid` unanswered?"""
+        a = self.anchors.get(sid)
+        return a is not None and self._pending_add(a, t)
+
+    def unanswered(self, sid) -> dict:
+        """(RC6.2 review) The add / delete commands on `sid` the venue has
+        not answered: id -> (action, tickers)."""
+        a = self.anchors.get(sid)
+        return {} if a is None or a["ended"] else a["cmds"]
+
+    def reply_lost(self, sid, cid) -> list:
+        """(RC6.2 review) Our add `cid` on `sid` went unanswered past
+        REPLY_TIMEOUT_S: its reply is taken as lost, as at a gap -- every
+        market still waiting on it is named for a re-add (`readd_lost`) and
+        no longer expects the add's own snapshot; returns them. (A late
+        reply is still the venue's word: it settles what it says. A delete
+        whose reply is lost stays unanswered: until a later reply settles
+        it the market is not held.)"""
+        a = self.anchors.get(sid)
+        if a is None or a["ended"]:
+            return []
+        info = a["cmds"].get(cid)
+        if info is None or info[0] != "add_markets":
+            return []
+        out = []
+        for t in info[1]:
+            if (cid, "add_markets") in a["pend"].get(t, ()) and \
+                    t not in self.forgotten and t in self.books:
+                self.readd_lost.setdefault(sid, set()).add(t)
+                a["expect"].pop(t, None)
+                out.append(t)
+        return out
+
+    def replace_add(self, sid, t) -> None:
+        """(RC6.2 review) t's unanswered add on `sid` is taken over by the
+        re-add about to be sent after a gap (its reply may have been the
+        lost frame): t no longer waits on it. A later `ok` with the full
+        list still settles t; an error to the re-add then refuses t (and
+        the bounded re-add / rate retry follows) instead of leaving it
+        waiting for ever on a reply that was lost. Safe: t is held only if
+        the venue's latest reply said so and nothing naming t is
+        unanswered -- an add of a market the venue holds is "no action"."""
+        a = self.anchors.get(sid)
+        if a is None:
+            return
+        p = [x for x in a["pend"].get(t, ()) if x[1] != "add_markets"]
+        if p:
+            a["pend"][t] = p
+        else:
+            a["pend"].pop(t, None)
+        # the venue may hold t already (the lost reply an `ok`): the re-add
+        # may be "no action", with no snapshot of its own to wait for
+        a["unsure"].add(t)
+
+    def held(self, sid, t) -> bool:
+        """Does the venue hold t on the live acknowledged `sid` (its replies
+        say so, and nothing naming t is unanswered)?"""
+        a = self.anchors.get(sid)
+        return a is not None and not a["ended"] and self._held(a, t)
+
+    def hold_subscribed(self, sid, tickers) -> None:
+        """(RC6.2 review) The `subscribed` answering our subscribe: the
+        venue holds every market the subscribe NAMED -- also one dropped
+        while it awaited its ack (bind leaves that one unbound; its
+        delete_markets follows). Assumption H0 (module docstring)."""
+        a = self.anchors.get(sid)
+        if a is None or a["ended"]:
+            return
+        for t in tickers:
+            if t not in a["pend"] and t not in a["known"]:
+                a["known"][t] = (0, True)
+
     def _control_seq(self, a, sid, seq, cid=None) -> str:
         """Where a control frame's seq sits in an acknowledged sid's
         sequence (module docstring, THE SEQUENCE RULE FOR CONTROL FRAMES).
@@ -738,6 +1070,8 @@ class WsBooks:
             return "IGNORED"
         last = self.sid_seq.get(sid) or 0
         if seq == last + 1:
+            # the reply to our j-th update command (unknown command: every
+            # command sent) -- assumptions C1 and C2 (module docstring)
             j = a["cmd_index"].get(cid, a["n_cmds"]) \
                 if type(cid) is int else a["n_cmds"]
             if seq > j + CONTROL_SEQ_SLACK or not self._current_on(sid):
@@ -753,6 +1087,40 @@ class WsBooks:
             self.stats["control_seq_separate"] += 1
             self.stats["control_ignored"] += 1
             return "SEPARATE"
+        return "GAP"
+
+    def _legacy_control_seq(self, sid, seq) -> str:
+        """(RC6.2 review) A control frame (`ok`, a non-terminal scoped
+        error) on a sid never acknowledged as ours, by THE SEQUENCE RULE FOR
+        CONTROL FRAMES: seq == last + 1 is the next slot -- taken while no
+        book of the sid is CURRENT (nothing to hide) or when the seq is past
+        what a separate counter could carry (every command sent on this
+        connection, each answered at most once, + CONTROL_SEQ_SLACK); at or
+        under that with a CURRENT book it is a gap (ambiguous); seq <= last
+        proves a separate counter (the sid's control frames are counted,
+        never sequenced, from then on); past last + 1 is a gap. Such a sid
+        DIES on a gap (the RC6 rule; no command is ever sent for it). RC6.1
+        ignored the frame without advancing the sid, so the next delta was a
+        false gap (contract probe 1). With no sequence yet (nothing but
+        deltas ahead of the first snapshot) the frame is not in it."""
+        last = self.sid_seq.get(sid)
+        if seq is None or last is None or sid in self.legacy_separate:
+            self.stats["control_ignored"] += 1
+            return "IGNORED"
+        if seq == last + 1:
+            if seq > self.conn_cmds + CONTROL_SEQ_SLACK or \
+                    not self._current_on(sid):
+                self.sid_seq[sid] = seq
+                self.stats["control_consumed"] += 1
+                return "CONSUMED"
+            self._gap_sid(sid, R_CONTROL_SEQUENCE_AMBIGUOUS)
+            return "GAP"
+        if seq <= last:
+            self.legacy_separate.add(sid)
+            self.stats["control_seq_separate"] += 1
+            self.stats["control_ignored"] += 1
+            return "SEPARATE"
+        self._gap_sid(sid, R_SEQ_GAP)
         return "GAP"
 
     def _data_seq(self, a, sid, seq) -> bool:
@@ -784,7 +1152,20 @@ class WsBooks:
             self.stats["errors"] += 1
             self.stats["errors_terminal" if code in TERMINAL_ERROR_CODES
                        else "errors_nonterminal"] += 1
+        cid = m.get("id")
         a = self.anchors.get(sid) if sid is not None else None
+        if a is None and sid is None and typ == "error":
+            # (RC6.2 review) an error without a sid ("present when the error
+            # is scoped to a subscription"): a 10 / 25 ends what this
+            # connection holds -- ONE subscription -- fail closed; any
+            # other answers our command by its id
+            if code in TERMINAL_ERROR_CODES:
+                return self._end_unscoped()
+            for s, x in self.anchors.items():
+                if not x["ended"] and type(cid) is int and cid in x["cmds"]:
+                    self._settle(x, s, cid, "error", m, code)
+                    break
+            return "ERROR"
         if a is None:
             if sid is not None and self._unknown(sid):
                 self.stats["ignored_unknown_sid"] += 1
@@ -798,6 +1179,14 @@ class WsBooks:
                     self.stats["unsubscribed_by_venue"] += 1
                     self._gap_sid(sid, R_UNSUBSCRIBED_BY_VENUE)
                     return "UNSUBSCRIBED"
+                else:
+                    # (RC6.2 review, contract probe 1) its `ok` / scoped
+                    # error is in its sequence too, by the same rule
+                    out = self._legacy_control_seq(sid, m.get("seq"))
+                    if out == "GAP":
+                        return "GAP"
+                    if out == "CONSUMED":
+                        return "ERROR" if typ == "error" else "OK"
             return "ERROR" if typ == "error" else "IGNORED"
         if a["ended"]:
             self.stats["ignored_dead_sid"] += 1
@@ -810,8 +1199,11 @@ class WsBooks:
         if typ == "error" and code in TERMINAL_ERROR_CODES:
             self._end(sid, R_SUB_ERROR)
             return "ERROR"
+        # (RC6.2 review) what the venue holds, from its reply to our command
+        # (a frame after a loss is still the venue's own word on it)
+        self._settle(a, sid, cid, typ, m, code)
         seq = m.get("seq")
-        out = self._control_seq(a, sid, seq, m.get("id"))
+        out = self._control_seq(a, sid, seq, cid)
         if out in ("GAP", "AMBIGUOUS"):
             self._gap_acked(a, sid, R_SEQ_GAP if out == "GAP"
                             else R_CONTROL_SEQUENCE_AMBIGUOUS, seq,
@@ -833,15 +1225,51 @@ class WsBooks:
                     why = R_SNAPSHOT_OUT_OF_SEQUENCE
             self._gap_acked(a, sid, why, seq, data=True)
             return "GAP"
+        if typ == SNAP and a["pend"].get(t) and not self._held(a, t):
+            # (RC6.2 review) a snapshot of t while an add / delete naming it
+            # is unanswered and the venue is not known to hold it -- maybe
+            # the add's own (the order of an add's `ok` and its snapshots is
+            # not documented): once a reply confirms t, a fresh one is asked
+            # for (_confirm). Also while t is not tracked: it may be wanted
+            # again before that reply.
+            a["unheld_snap"].add(t)
         b = self.books.get(t)
         if b is None or t in self.forgotten:
             # a market we no longer track (or never did): its seq is kept
             self.stats["ignored_not_tracked"] += 1
             return "IGNORED_NOT_TRACKED"
         if typ == SNAP:
+            # its request, if any, is answered
+            a["awaiting"].discard(t)
+            if not self._held(a, t):
+                # (RC6.2 review) the venue is not known to hold t on the
+                # sid: get_snapshot answers for any market, held or not
+                # ("without adding them to the subscription"), and a
+                # snapshot sent before our delete may arrive after the
+                # market is wanted again -- no delta would follow either.
+                # In the sequence, never applied; once a reply confirms t,
+                # a fresh snapshot is asked for (_confirm)
+                self.stats["snapshots_not_held"] += 1
+                return "IGNORED_NOT_HELD"
             self._apply_snapshot(t, b, sid, seq, msg, m, at)
             return "SNAPSHOT"
         return self._apply_delta(t, b, sid, seq, msg, m, at)
+
+    def _end_unscoped(self) -> str:
+        """(RC6.2 review) error 10 / 25 without a sid: every live
+        subscription of the connection ends (it holds ONE)."""
+        live = sorted((s for s, x in self.anchors.items() if not x["ended"]),
+                      key=str)
+        for s in live:
+            self._end(s, R_SUB_ERROR)
+        others = sorted({s for s in list(self.sid_seq) + list(
+            self.sid_markets) if s not in self.anchors
+            and s not in self.dead_sids}, key=str)
+        for s in others:
+            self._gap_sid(s, R_SUB_ERROR)
+        if live or others:
+            self.fatal = self.fatal or R_SUBSCRIPTION_ENDED
+        return "ERROR"
 
     def _apply_snapshot(self, t, b, sid, seq, msg, m, at) -> None:
         yes = {_d(p): _d(q) for p, q in msg.get("yes_dollars_fp") or []}
@@ -887,15 +1315,44 @@ class WsBooks:
         return "DELTA"
 
     # ── the subscriber's records on an acknowledged sid ──
-    def command_sent(self, sid, cid=None) -> None:
-        """An update command (id `cid`) was sent on an acknowledged sid."""
+    def command_out(self) -> None:
+        """(RC6.2 review) A command of any kind left on this connection."""
+        self.conn_cmds += 1
+
+    def command_sent(self, sid, cid=None, action=None, tickers=()) -> None:
+        """An update command (id `cid`) was sent on an acknowledged sid.
+        (RC6.2 review) An add / delete (`action`, `tickers`) puts its
+        markets in motion: until the venue answers it, the venue may or may
+        not hold them, so no snapshot of them is applied. An add expects
+        the market's own snapshot only when the venue does not hold it
+        (not confirmed, or a delete of ours goes first)."""
         a = self.anchors.get(sid)
-        if a is not None:
-            a["n_cmds"] += 1
-            if cid is not None:
-                a["cmd_index"][cid] = a["n_cmds"]
-                while len(a["cmd_index"]) > MAX_CMD_INDEX:
-                    a["cmd_index"].pop(next(iter(a["cmd_index"])))
+        if a is None:
+            return
+        a["n_cmds"] += 1
+        if cid is None:
+            return
+        a["cmd_index"][cid] = a["n_cmds"]
+        while len(a["cmd_index"]) > MAX_CMD_INDEX:
+            a["cmd_index"].pop(next(iter(a["cmd_index"])))
+        if action not in ("add_markets", "delete_markets"):
+            return
+        a["cmds"][cid] = (action, tuple(tickers))
+        while len(a["cmds"]) > MAX_CMD_INDEX:
+            a["cmds"].pop(next(iter(a["cmds"])))
+        for t in tickers:
+            p = a["pend"].setdefault(t, [])
+            # an add expects the market's own snapshot when the venue will
+            # not hold it before the add: not known held with nothing in
+            # flight, or our delete goes first
+            fresh = (p[-1][1] == "delete_markets") if p else (
+                not a["known"].get(t, (0, False))[1]
+                and t not in a["unsure"])
+            p.append((cid, action))
+            a["unheld_snap"].discard(t)
+            a["expect"].pop(t, None)
+            if action == "add_markets" and fresh:
+                a["expect"][t] = cid
 
     def requested(self, sid, tickers) -> None:
         """A get_snapshot naming `tickers` was sent on `sid`: outstanding
@@ -904,32 +1361,11 @@ class WsBooks:
         if a is not None:
             a["awaiting"].update(t for t in tickers if t in self.books)
 
-    def not_held(self, sid, tickers) -> None:
-        """The venue's own list of the sid's tickers lacks these: no
-        snapshot will come for them on it -- GAP, nothing outstanding."""
-        a = self.anchors.get(sid)
-        for t in tickers:
-            b = self.books.get(t)
-            if b is None:
-                continue
-            self.stats["not_held_by_venue"] += 1
-            if a is not None:
-                a["awaiting"].discard(t)
-            need = self.recover.get(sid)
-            if need is not None:
-                need.discard(t)
-            if not self._current_elsewhere(b, sid):
-                self._touch(t, b, state=GAP, why=R_NOT_HELD_BY_VENUE)
-            self.resubscribe.add(t)
-            ms = self.sid_markets.get(sid)
-            if ms is not None:
-                ms.discard(t)
-            if self.ticker_sid.get(t) == sid:
-                self.ticker_sid.pop(t, None)
-
     def unrequest(self, sid, tickers) -> None:
         """A get_snapshot naming `tickers` on `sid` was refused: nothing is
-        outstanding for them any more; those not CURRENT are named again."""
+        outstanding for them any more; those not CURRENT are named again
+        (RC6.2 review: only while the venue holds them -- one whose add is
+        unanswered is asked for when a reply confirms it)."""
         a = self.anchors.get(sid)
         if a is None or a["ended"]:
             return
@@ -937,8 +1373,9 @@ class WsBooks:
         for t in tickers:
             a["awaiting"].discard(t)
             b = self.books.get(t)
-            if b is not None and not (b["state"] == CURRENT and
-                                      b["sid"] == sid):
+            if b is not None and t not in self.forgotten and not (
+                    b["state"] == CURRENT and b["sid"] == sid) and \
+                    self._held(a, t):
                 need.add(t)
 
     def awaiting(self, sid) -> set:
@@ -1062,7 +1499,11 @@ class WsBooks:
                 "connected": self.connected,
                 "subscriptions": {str(s): {"mode": a["mode"],
                                            "ended": a["ended"],
-                                           "awaiting": len(a["awaiting"])}
+                                           "awaiting": len(a["awaiting"]),
+                                           "held_by_venue": sum(
+                                               1 for t in a["known"]
+                                               if self._held(a, t)),
+                                           "unanswered": len(a["pend"])}
                                   for s, a in sorted(self.anchors.items(),
                                                      key=lambda x: str(x[0]))},
                 **self.stats}
@@ -1162,6 +1603,15 @@ class SubscribeRefused(SessionEnd):
     code = R_SUBSCRIBE_REFUSED
 
 
+class ReplyTimeout(SessionEnd):
+    """(RC6.2 review) A market's add went unanswered past REPLY_TIMEOUT_S
+    after its re-adds (MAX_READDS_PER_MARKET) were spent: whether the venue
+    holds it cannot be learned on this connection -- the reconnect
+    subscribes afresh."""
+
+    code = R_REPLY_TIMEOUT
+
+
 _FATAL = {R_GAP_DURING_RECOVERY: GapDuringRecovery,
           R_SUBSCRIPTION_ENDED: SubscriptionEnded,
           R_SUBSCRIBE_REFUSED: SubscribeRefused}
@@ -1256,8 +1706,23 @@ class Subscriber:
         self.cmd_kind: dict = {}        # command id -> its kind
         self.window = collections.deque()
         self.snap_requests: dict = {}
+        #: re-adds per market this session: after a refusal (at most one)
+        #: and after a gap that may have lost the add's reply (at most
+        #: MAX_READDS_PER_MARKET) -- two budgets, so a market whose gap
+        #: re-adds were spent is still added again once when refused
         self.readds: dict = {}
+        self.gap_readds: dict = {}
         self.unrecovered = {}
+        #: (RC6.2 review) every market our one subscribe named (the venue
+        #: holds them all once it answers `subscribed`)
+        self.sub_tickers: list = []
+        #: (RC6.2 review) market -> when its add is retried after the venue
+        #: refused it twice for the command rate (error 27); retries so far
+        self.rate_retry: dict = {}
+        self.rate_retries: dict = {}
+        #: (RC6.2 review) add / delete command id -> when it was sent (its
+        #: reply's timeout, REPLY_TIMEOUT_S)
+        self.sent_at: dict = {}
         self._w_obj, self._w_len, self._w_ver, self._w_frames = \
             None, -1, -1, 0
 
@@ -1304,6 +1769,8 @@ class Subscriber:
         self.queued_add = [t for t in self.queued_add if t not in gone]
         self.rewant = [t for t in self.rewant if t not in gone]
         self.readd = [t for t in self.readd if t not in gone]
+        for t in gone:
+            self.rate_retry.pop(t, None)
         return held
 
     def _end(self, cls, detail: str = ""):
@@ -1335,8 +1802,14 @@ class Subscriber:
             cmd["params"]["action"]
         self.cmd_kind[cmd["id"]] = kind
         self.commands_sent[kind] = self.commands_sent.get(kind, 0) + 1
+        if kind in ("add_markets", "delete_markets"):
+            self.sent_at[cmd["id"]] = now
+            while len(self.sent_at) > MAX_CMD_INDEX:
+                self.sent_at.pop(next(iter(self.sent_at)))
+        self.books.command_out()
         if sid is not None:
-            self.books.command_sent(sid, cmd["id"])
+            self.books.command_sent(sid, cmd["id"], kind,
+                                    cmd["params"].get("market_tickers") or ())
         while len(self.pending) > MAX_PENDING_SUBSCRIBES:
             self.pending.pop(next(iter(self.pending)))
         self._diag_cmd(cmd)
@@ -1387,12 +1860,30 @@ class Subscriber:
                 self.queued_add = first[len(c):]
                 cmd = self.cmd.subscribe(c)
                 self.sub_id = cmd["id"]
+                self.sub_tickers = list(c)
                 self.pending[cmd["id"]] = list(c)
                 for t in c:
                     self.on_venue[t] = cmd["id"]
                 await self._send(ws, cmd)
                 sent += 1
         sid = self.sid
+        if sid is not None and self.rewant:
+            # (RC6.2 review) a market dropped and wanted again before its
+            # delete went out, by what the venue holds -- held: its snapshot
+            # (get_snapshot below); its add unanswered: the reply settles it
+            # (a confirmation asks for its snapshot); neither (its add was
+            # refused or not taken while it was dropped): added again
+            keep = []
+            for t in self.rewant:
+                if t not in self.books.books or t in self.books.forgotten:
+                    continue
+                if self.books.held(sid, t):
+                    keep.append(t)
+                elif not self.books.adding(sid, t):
+                    self.queued_add.append(t)
+            self.rewant = keep
+        if sid is not None and self.sent_at:
+            self._reply_timeouts(sid)
         if sid is not None:
             if self.queued_delete:
                 ts = sorted(self.queued_delete)
@@ -1405,6 +1896,14 @@ class Subscriber:
                         self.on_venue.pop(t, None)
                     await self._send(ws, cmd, sid)
                     sent += 1
+            if self.rate_retry:
+                now = self.clock()
+                for t in sorted(self.rate_retry):
+                    if self.rate_retry[t] <= now:
+                        del self.rate_retry[t]
+                        if t in self.books.books and \
+                                t not in self.books.forgotten:
+                            self.readd.append(t)
             adds = sorted(set(self.queued_add) | set(self.readd)) if (
                 self.queued_add or self.readd) else ()
             self.queued_add, self.readd = [], []
@@ -1428,15 +1927,22 @@ class Subscriber:
                 want_snap = set(gap) | set(self.rewant)
                 self.rewant = []
                 outstanding = self.books.awaiting(sid)
+                # (RC6.2 review) only a market the venue holds: get_snapshot
+                # answers for any market "without modifying the
+                # subscription", and no delta follows a snapshot of one it
+                # does not hold (one whose add is unanswered is asked for
+                # when a reply confirms it)
                 need = sorted(t for t in want_snap if t in self.books.books
                               and t not in self.books.forgotten
-                              and t not in outstanding)
+                              and t not in outstanding
+                              and self.books.held(sid, t))
             if need:
                 if gap:
                     self.resubscribes += 1
                 for c in chunks(need):
                     c = [t for t in c if t not in self.books.forgotten
-                         and t in self.books.books]
+                         and t in self.books.books
+                         and self.books.held(sid, t)]
                     if not c:
                         continue
                     self._count_requests(c)
@@ -1461,6 +1967,7 @@ class Subscriber:
                 self.sid = sid
                 self.books.bind(sid, self.pending.pop(cid, None) or [],
                                 ours=True)
+                self.books.hold_subscribed(sid, self.sub_tickers)
             else:
                 self.books.bind(sid, [], ours=False)
             return self.books.on_message(m, recv_at=self.clock())
@@ -1470,73 +1977,110 @@ class Subscriber:
             self.books.fatal = self.books.fatal or R_SUBSCRIBE_REFUSED
         out = self.books.on_message(m, recv_at=self.clock())
         if typ == "ok":
-            self._reconcile(m)
+            if type(cid) is int:
+                self.pending.pop(cid, None)
         elif typ == "error" and type(cid) is int:
             self._refused(cid, m)
         elif out == "SNAPSHOT":
             # its book is CURRENT again: its repairs converged
             self.unrecovered.pop((m.get("msg") or {}).get("market_ticker"),
                                  None)
+        self._readds()
         return out
 
-    def _reconcile(self, m: dict) -> None:
-        """An `ok` on our sid answering one of our update commands carries
-        the venue's full ticker list after it: a market a command up to it
-        added and the list lacks is GAP and added again ONCE (a second
-        absence leaves it GAP); a listed market we no longer want has no
-        book, so it is never CURRENT."""
-        cid = m.get("id")
-        if type(cid) is not int:
+    def _readds(self) -> None:
+        """(RC6.2 review) What the books learned from the venue's replies
+        (WsBooks._settle) and from a gap, turned into re-adds, bounded: a
+        market the venue refused or did not list is added again ONCE (a
+        second refusal leaves it GAP, not held -- after error 27, the
+        command rate, it is retried RATE_LIMIT_RETRY_S later, at most
+        MAX_RATE_LIMIT_RETRIES times); a market whose add was unanswered
+        at a gap is added again (the lost frame may be its reply), within
+        MAX_READDS_PER_MARKET (its own budget: a refusal after those still
+        re-adds once). Hard bounds per market and session: 1 + 2 + 3
+        re-adds, and the command rate (they are not snapshot requests: the
+        plane-hang and per-market get_snapshot bounds count get_snapshot
+        only, so a market refused once and then caught by a gap is not a
+        "storm"). A listed market we no longer want has no book, so it is
+        never CURRENT."""
+        refused = self.books.refused
+        lost = self.books.readd_lost
+        if not refused and not lost:
             return
-        self.pending.pop(cid, None)
-        # only an add / delete changes the subscription, and its `ok` is
-        # documented to carry the full list after it (a get_snapshot's list
-        # is not relied on)
-        if self.cmd_kind.get(cid) not in ("add_markets", "delete_markets") \
-                or self.sid is None or m.get("sid") != self.sid:
-            return
-        listed = (m.get("msg") or {}).get("market_tickers")
-        if not isinstance(listed, list):
-            return
-        holds = set(listed)
-        missing = sorted(t for t, at in self.on_venue.items()
-                         if at <= cid and t not in holds
-                         and t in self.books.books)
-        if not missing:
-            return
-        self.books.not_held(self.sid, missing)
-        for t in missing:
+        mine = refused.pop(self.sid, {}) if self.sid is not None else {}
+        gap = lost.pop(self.sid, set()) if self.sid is not None else set()
+        refused.clear()
+        lost.clear()
+        for t in sorted(mine):
+            if t not in self.books.books or t in self.books.forgotten:
+                continue
             self.on_venue.pop(t, None)
-            if self.readds.get(t, 0) < 1:
-                self.readds[t] = self.readds.get(t, 0) + 1
-                self._count_requests([t])
+            n = self.readds.get(t, 0)
+            if n < 1:
+                self.readds[t] = n + 1
                 self.readd.append(t)
+            elif mine[t] == RATE_LIMIT_ERROR and \
+                    self.rate_retries.get(t, 0) < MAX_RATE_LIMIT_RETRIES:
+                self.rate_retries[t] = self.rate_retries.get(t, 0) + 1
+                self.rate_retry[t] = self.clock() + RATE_LIMIT_RETRY_S
+        for t in sorted(gap):
+            if t not in self.books.books or t in self.books.forgotten or \
+                    not self.books.adding(self.sid, t):
+                continue
+            n = self.gap_readds.get(t, 0)
+            if n < MAX_READDS_PER_MARKET:
+                self.gap_readds[t] = n + 1
+                self.books.replace_add(self.sid, t)
+                self.readd.append(t)
+
+    def _reply_timeouts(self, sid) -> None:
+        """(RC6.2 review) An add the venue has not answered REPLY_TIMEOUT_S
+        after it was sent: its reply is taken as lost (a sid that carries
+        nothing else would never show the loss) -- its markets are re-added
+        within the gap re-add budget; a market whose budget is spent ends
+        the session (ReplyTimeout: fail closed, the reconnect subscribes
+        afresh). Never a loop: each command times out once."""
+        now = self.clock()
+        open_ = self.books.unanswered(sid)
+        for cid, at in list(self.sent_at.items()):
+            if cid not in open_:
+                del self.sent_at[cid]
+                continue
+            if now - at < REPLY_TIMEOUT_S:
+                continue
+            del self.sent_at[cid]
+            for t in self.books.reply_lost(sid, cid):
+                if self.gap_readds.get(t, 0) >= MAX_READDS_PER_MARKET:
+                    self._end(ReplyTimeout, "%s unanswered %.0f s after its "
+                              "re-adds" % (t, now - at))
+        self._readds()
+
+    def next_due(self):
+        """(RC6.2 review) When the session next acts with nothing read (a
+        rate-limit retry, a reply's timeout), or None."""
+        due = list(self.rate_retry.values())
+        if self.sid is not None:
+            open_ = self.books.unanswered(self.sid)
+            due += [at + REPLY_TIMEOUT_S for cid, at in self.sent_at.items()
+                    if cid in open_]
+        return min(due) if due else None
 
     def _refused(self, cid, m: dict) -> None:
         """An `error` answering one of our update commands (counted; only
-        10 / 25 are fatal, and the books handled those): the markets a
-        refused get_snapshot named will get no snapshot from it -- they are
-        asked again (bounded: the per-market and plane-hang bounds end the
-        session past their limits); those of a refused add_markets are added
-        again ONCE (a second refusal leaves them GAP, not held)."""
+        10 / 25 are fatal, and the books handled those; a refused add /
+        delete is settled by the books and re-added by _readds): the
+        markets a refused get_snapshot named will get no snapshot from it
+        -- they are asked again (bounded: the per-market and plane-hang
+        bounds end the session past their limits)."""
         named = self.pending.pop(cid, None) or []
         kind = self.cmd_kind.get(cid)
         code = (m.get("msg") or {}).get("code")
         if self.sid is None or code in TERMINAL_ERROR_CODES or not named:
             return
-        live = [t for t in named if t in self.books.books
-                and t not in self.books.forgotten]
         if kind == "get_snapshot":
-            self.books.unrequest(self.sid, live)
-        elif kind == "add_markets":
-            again = [t for t in live if self.readds.get(t, 0) < 1]
-            self.books.not_held(self.sid, [t for t in live
-                                           if t not in again])
-            for t in again:
-                self.on_venue.pop(t, None)
-                self.readds[t] = self.readds.get(t, 0) + 1
-                self._count_requests([t])
-                self.readd.append(t)
+            self.books.unrequest(self.sid, [
+                t for t in named if t in self.books.books
+                and t not in self.books.forgotten])
 
     async def _drain_gaps(self) -> None:
         if not self.books.left_current:
@@ -1609,8 +2153,15 @@ class Subscriber:
                 pass
 
     async def run(self, *, stop=None) -> None:
+        """Sessions until `stop`; between two, the backoff. (RC6.2 review)
+        A session only ever ends by raising, so the backoff index never
+        went back to its first step: after six ends in the life of the
+        process every reconnect waited the last step. A session that lasted
+        BACKOFF_RESET_AFTER_S is not a reconnect loop: the next wait starts
+        from the first step again."""
         i = 0
         while stop is None or not stop.is_set():
+            started = self.clock()
             try:
                 await self.session()
                 i = 0
@@ -1618,6 +2169,12 @@ class Subscriber:
                 raise
             except Exception as exc:                            # noqa: BLE001
                 self.last_error = type(exc).__name__
+                try:
+                    lasted = float(self.clock()) - float(started)
+                except (TypeError, ValueError):
+                    lasted = 0.0
+                if lasted >= BACKOFF_RESET_AFTER_S:
+                    i = 0
             await asyncio.sleep(self.backoff[min(i, len(self.backoff) - 1)])
             i += 1
 

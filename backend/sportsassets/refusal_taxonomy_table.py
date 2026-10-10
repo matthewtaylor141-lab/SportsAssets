@@ -1699,6 +1699,7 @@ TABLE = {
     "KALSHI_WS_SNAPSHOT_REQUEST_BOUND": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_SUBSCRIPTION_ENDED": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_SUBSCRIBE_REFUSED": (S, FRESH, "VENUE_BOOK"),
+    "KALSHI_WS_REPLY_TIMEOUT": (S, FRESH, "VENUE_BOOK"),
     "KALSHI_WS_CREDENTIAL_NOT_PROVISIONED": (S, CAP, "INGESTION"),
     # the dedicated market plane refuses to run beside an order-capable
     # credential (market_plane_guard): a provisioning defect, ours to fix
