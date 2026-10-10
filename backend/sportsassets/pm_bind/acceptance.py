@@ -807,7 +807,11 @@ def _collect(*, red: dict, scoreboard: dict, release: dict | None,
             "repaired fill replay")
     xav = gates.get("xavier_complete") or {}
     if "value" in xav:
-        put("xavier_complete_rate", 1.0 if xav.get("value") is True else 0.0,
+        # a GREEN gate over no counted open position binds nothing (the
+        # field is then without machine evidence), never 1.0 (RC6.2
+        # p-xavier M-1: capital_readiness.feeds.xavier_complete_rate)
+        from ..capital_readiness import feeds as _XF
+        put("xavier_complete_rate", _XF.xavier_complete_rate(xav),
             "capital readiness gate xavier_complete")
     dmech = ((scoreboard or {}).get("mechanisms") or {}).get(
         "DIRECTIONAL") or {}

@@ -44,7 +44,11 @@ def green_red() -> dict:
             "gate_evidence": {
                 "software_reds_zero": {"evidence": {"software": 0}},
                 "production_canary_clean": {"value": True},
-                "xavier_complete": {"value": True}}},
+                # the gate's real shape: GREEN over counted open positions
+                # (a GREEN over none is UNMEASURED, RC6.2 p-xavier M-1)
+                "xavier_complete": {"value": True, "evidence": {
+                    "open_positions": 3, "counted_open_positions": 3,
+                    "complete_current_packets": 3}}}},
         "controls": {
             "MIGRATION_INTEGRITY": g, "TRUTH_QUORUM": g,
             "CREDENTIAL_CLASSES": g, "PROFIT_BREAKERS": g,

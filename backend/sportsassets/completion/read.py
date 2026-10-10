@@ -955,8 +955,10 @@ def readiness_block(*, runtime, market_data, management, gates, probability,
     canary = gates.get("production_canary_clean") or {}
     small = gates.get("small_live_shadow") or {}
     mgmt_rate = management.get("fresh_rate")
-    xav_rate = 1.0 if xav.get("value") is True else (
-        0.0 if xav else None)
+    # GREEN over no counted open position is UNMEASURED, never 1.0 (RC6.2
+    # p-xavier M-1: capital_readiness.feeds.xavier_complete_rate)
+    from ..capital_readiness import feeds as _XF
+    xav_rate = _XF.xavier_complete_rate(xav)
     e = RG.ReadinessEvidence(
         no_oom_minutes=float(sw.get("minutes_since_process_start") or 0.0),
         # unmeasured headroom fails closed (1.0 >= 0.85)

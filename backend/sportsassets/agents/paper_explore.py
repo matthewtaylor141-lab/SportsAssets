@@ -223,6 +223,129 @@ def xavier_can_protect(*, econ: dict, fee_fn, at) -> dict:
             "rule": "paper_xavier.protective_price (unchanged)"}
 
 
+# ── EVERY PAPER ENTRY STRATEGY ASKS THE SAME QUESTION (SW-1b) ───────────
+#
+# Exploration was the only entry that asked it. COMPLETED_GAME V3 (an edge of
+# 0.5 pp and a positive net EV, with no upper price bound), the maker, the
+# strict benchmark and Derek could still admit an entry that
+# paper_xavier.protective_price can never protect. The 0.98 case: 350 bought
+# at 0.98 cost 343.48 with fees, so the protection needs 343.48 + 3.50 =
+# 346.98, while selling all 350 at 0.99 returns 346.50 - 0.24 = 346.26. Such
+# a position is NO_VALID_ACTIVE_PROTECTION for its whole life, which is the
+# cause behind the production member's incomplete packet. Every paper entry
+# decision (exploration included) now runs xavier_can_protect_entry below and
+# refuses R_XAVIER_CANNOT_PROTECT by name. It only refuses. No price, edge,
+# fee, size or risk threshold is read or moved, and the protective price rule
+# itself is unchanged.
+def xavier_can_protect_fills(*, fills, qty, limit, fee_fn, at) -> dict:
+    """xavier_can_protect for an entry of `qty` contracts bought along
+    `fills`, which are (price, qty) pairs in the order the walk takes them,
+    best first. The first `qty` contracts of the walk are used, each fill
+    paying its own buy fee as the ledger books a fill. Any quantity beyond
+    the walk is costed at `limit`, the most the order can pay. Pure but for
+    the fee function."""
+    from .. import bettor_paper_ledger as LDG
+    take, left = [], float(qty or 0.0)
+    for px, q in fills or []:
+        if left <= 1e-9:
+            break
+        t = min(float(q), left)
+        if t > 0:
+            take.append((float(px), t))
+            left -= t
+    if left > 1e-9:
+        take.append((float(limit), left))
+    cost = sum(px * t for px, t in take)
+    fees = sum(float(LDG._fee(fee_fn, t, px, at)) for px, t in take)
+    got = xavier_can_protect(
+        econ={"qty": sum(t for _, t in take), "acquisition_cost_usd": cost,
+              "fees_usd": fees}, fee_fn=fee_fn, at=at)
+    got.update(acquisition_cost_usd=round(cost, 9), fees_usd=round(fees, 9),
+               basis=("the entry's walk up to its quantity, each fill with "
+                      "its own buy fee; any quantity beyond the walk at the "
+                      "order's limit"))
+    return got
+
+
+# ── THE DECISION WALK IS NOT WHAT THE LEDGER BOOKS (SW-1b review round 3) ──
+#
+# A MARKETABLE entry is filled by the simulator (bettor_paper_simulator.
+# _marketable) on the FIRST readable book at or after decision + delay,
+# walking THAT book up to the order's limit, each fill at its own level's
+# price. When the cheaper levels the decision walked are gone by then, the
+# whole order is booked at the limit. Reproduced on 4440cb02 through two real
+# paper passes: COMPLETED_GAME at p 0.999 against [(0.97, 4800), (0.99,
+# 6000)] walked 4800 @ 0.97 + 150 @ 0.99 (protectable at a cost of 4814.31)
+# and was an ENTER with limit 0.99; the book became [(0.99, 6000)] and the
+# order filled 4950 @ 0.99 (cost 4903.91), which no protective price covers
+# -- the PKE failure, entered by a strategy that had asked. A RESTING entry
+# (the maker) is booked at its own limit (BASIS_CROSS), every fill.
+#
+# So every paper entry asks BOTH questions and enters only when both are
+# answered yes:
+#   AT_THE_DECISION_WALK  the walk the decision priced (as before);
+#   AT_THE_ORDER_LIMIT    the order's whole quantity booked at its limit in
+#                         one fill: the highest price the simulator can book
+#                         any fill of that order at.
+# What this does NOT ask, stated so nobody reads more into it: a booking
+# that is a PART of the quantity, or the quantity split over several fills
+# (each fill's fee rounded to the cent on its own). Under the DEPLOYED fee
+# schedule (0.0695 x C x p x (1 - p), rounded to the cent per fill) such a
+# booking of an order that passes is protectable too. The argument, with the
+# sale of the whole position at 0.99 as the witness: before rounding, a
+# limit L <= 0.97 leaves at least 0.0072 per contract between that sale
+# (less its fee and the 0.01 buffer) and L plus its buy fee, and a cheaper
+# fill leaves more; a fill's rounding can only cost anything once its raw
+# fee reaches half a cent, by which point that fill's own margin is several
+# times the half cent it can lose (at 0.97: 2.5 contracts, 0.018), and the
+# sale fee only rounds up from 7.3 contracts, where the position's margin
+# is already over 0.05. L = 0.98 passes only while no fee rounds up (1 to 3
+# whole contracts), and nothing smaller or cheaper rounds up then. L = 0.99
+# never passes. tests/test_rc63_pxavier_protection_at_the_
+# order_limit.py pins which limits pass, and checks every one-fill, two-fill
+# (the limit and each cheaper cent) and k-equal-fill booking of the sizes it
+# tries, for every limit on the cent grid. Under another fee function (an
+# injected test schedule, a minimum fee per fill) a partial or split booking
+# is NOT covered by this check. The capital gate's bound size is asked again
+# by its callers; a quantity the ledger trims under its own lock after the
+# decision is not asked again (a smaller quantity at the same limit: covered
+# under the deployed schedule by the same argument, not under another).
+def xavier_can_protect_entry(*, fills, qty, limit, fee_fn, at) -> dict:
+    """THE CHECK EVERY PAPER ENTRY DECISION RUNS: xavier_can_protect_fills
+    on the decision walk (`fills`, the first `qty` contracts, any remainder
+    at `limit`) AND on the whole `qty` booked at the order's `limit` in one
+    fill. Protectable only when both are. The top-level figures are the
+    binding check's: the first that fails (the limit first), else the order
+    limit's, the worst booking either check prices. Pure but for the fee
+    function."""
+    walk = xavier_can_protect_fills(fills=fills, qty=qty, limit=limit,
+                                    fee_fn=fee_fn, at=at)
+    at_limit = xavier_can_protect_fills(fills=[], qty=qty, limit=limit,
+                                        fee_fn=fee_fn, at=at)
+    at_limit["basis"] = ("the order's whole quantity booked at its limit in "
+                         "one fill, with that fill's buy fee: the highest "
+                         "price the simulator books any fill of it at")
+    if not at_limit["protectable"]:
+        binding, name = at_limit, "AT_THE_ORDER_LIMIT"
+    elif not walk["protectable"]:
+        binding, name = walk, "AT_THE_DECISION_WALK"
+    else:
+        binding, name = at_limit, "AT_THE_ORDER_LIMIT"
+    out = {k: binding.get(k) for k in (
+        "qty", "cost_basis_usd", "protective_price", "refusal",
+        "acquisition_cost_usd", "fees_usd", "rule")}
+    out.update(
+        protectable=bool(walk["protectable"] and at_limit["protectable"]),
+        binding_check=name, limit=float(limit),
+        checks={"AT_THE_DECISION_WALK": walk,
+                "AT_THE_ORDER_LIMIT": at_limit},
+        basis=("protectable only if both the decision walk and the whole "
+               "quantity at the order's limit are; partial and split "
+               "bookings are covered by this only under the deployed fee "
+               "schedule"))
+    return out
+
+
 # ═════════════════════════════════════════════════════════════════════
 # THE LIMITS (read on the caller's connection; re-checked under the lock)
 # ═════════════════════════════════════════════════════════════════════
@@ -518,8 +641,15 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         refusals.extend(r for r in capital["refusals"]
                                         if r not in refusals)
                     # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED
-                    mgmt_protect = xavier_can_protect(econ=econ,
-                                                      fee_fn=fee_fn, at=at)
+                    # (xavier_can_protect_entry, the check every paper entry
+                    # runs): the decision walk AND the order's whole
+                    # quantity at its limit. Exploration buys at the best
+                    # level only, so the two coincide here; asked through
+                    # the one check all the same.
+                    mgmt_protect = xavier_can_protect_entry(
+                        fills=[(t["price"], t["take"])
+                               for t in walk["takes"]], qty=sized["qty"],
+                        limit=sized["limit"], fee_fn=fee_fn, at=at)
                     econ["xavier_protection"] = mgmt_protect
                     if not mgmt_protect["protectable"]:
                         refusals.append(R_XAVIER_CANNOT_PROTECT)

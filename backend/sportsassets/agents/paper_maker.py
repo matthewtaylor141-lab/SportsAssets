@@ -65,6 +65,7 @@ from .. import gross_edge_inputs as GEI
 from . import derek_policy as DP
 from . import paper_benchmark as PB
 from . import paper_derek as PD
+from . import paper_explore as PEX
 
 POL = PB.MAKER_POLICY
 STRATEGY = PB.MAKER_STRATEGY
@@ -205,6 +206,7 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
     qty, econ, book_age, queue = 0, None, None, None
     capital: dict | None = None
     gross_inputs: dict | None = None
+    mgmt_protect: dict | None = None
     if not refusals:
         bk = await PB.book_for(conn, ctx, cand["us_market_slug"],
                                basis=STRATEGY)
@@ -323,6 +325,20 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                         if not capital.get("capital_eligible"):
                             refusals.extend(r for r in capital["refusals"]
                                             if r not in refusals)
+                        # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED
+                        # (SW-1b, paper_explore.xavier_can_protect_entry,
+                        # the check every paper entry runs): a resting order
+                        # is booked at its own limit, every fill
+                        # (BASIS_CROSS), so its walk IS the whole quantity
+                        # at the limit, with the fee the simulator charges
+                        # on that fill. Resting one cent below a 0.99 ask is
+                        # 0.98, where no protective price exists.
+                        mgmt_protect = PEX.xavier_can_protect_entry(
+                            fills=[(lim, qty)], qty=qty, limit=lim,
+                            fee_fn=fee_fn, at=at)
+                        econ["xavier_protection"] = mgmt_protect
+                        if not mgmt_protect["protectable"]:
+                            refusals.append(PEX.R_XAVIER_CANNOT_PROTECT)
                     queue = await SIM.queue_ahead_at_placement(
                         conn, slug=cand["us_market_slug"], direction="BUY",
                         holding_side=side, limit=lim, market_data=md,
@@ -403,6 +419,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
          "value": (econ or {}).get("expected_net_profit_if_filled_usd"),
          "threshold": 0.0, "units": "USD",
          "rule": "strictly greater than zero, taker fee charged"},
+        {"condition": "xavier_can_place_the_standing_protection",
+         "passed": None if mgmt_protect is None
+         else mgmt_protect["protectable"],
+         "value": None if mgmt_protect is None
+         else mgmt_protect["protective_price"],
+         "refusal": (PEX.R_XAVIER_CANNOT_PROTECT if mgmt_protect is not None
+                     and not mgmt_protect["protectable"] else None),
+         "rule": "paper_xavier.protective_price (unchanged)"},
         PD.lifecycle_condition(lifecycle)]
     policy_decision = {
         "strategy": STRATEGY, "policy_version": VERSION,
