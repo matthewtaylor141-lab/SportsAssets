@@ -148,11 +148,25 @@ class TickPhaseFailed(Exception):
     names its sub-step -- POOL_ACQUIRE (waiting for a slot), STATEMENTS
     (holding a connection), POOL_RELEASE -- with the time it took against its
     budget, and says when the timeout fired late (the loop was held past the
-    deadline), so the next one attributes itself."""
+    deadline), so the next one attributes itself.
 
-    def __init__(self, phase, exc, step=None, elapsed_s=None, budget_s=None):
+    LATENESS IS MEASURED WHEN THE DEADLINE FIRES, NOT AFTER THE UNWIND (rc6.3
+    review). `elapsed_s` is the time from the step's start to the moment its
+    deadline actually fired on the event loop, so `elapsed_s - budget_s` is
+    only the time the loop could not run due callbacks. The unwind after the
+    deadline is reported apart as `unwind_s`: when a cancelled statement was in
+    flight, asyncpg's release awaits the server's answer to the cancel
+    (_wait_for_cancellation) and then reset() -- two more round trips that
+    take as long as a stalled database takes, without holding the loop.
+    Counting that wait as lateness said 'the event loop was held' for a loop
+    that never was (real asyncpg through a delaying proxy: 'after 3.32s of a
+    0.3s budget (expired 3.02s late ...)' with a largest loop lag of 4 ms)."""
+
+    def __init__(self, phase, exc, step=None, elapsed_s=None, budget_s=None,
+                 unwind_s=None):
         self.phase, self.cause = phase, exc
         self.step, self.elapsed_s, self.budget_s = step, elapsed_s, budget_s
+        self.unwind_s = unwind_s
         super().__init__(self.describe())
 
     def describe(self):
@@ -166,39 +180,69 @@ class TickPhaseFailed(Exception):
                 if late >= LATE_S:
                     out += (' (expired %.2fs late: the event loop was held '
                             'past the deadline)' % late)
+            if self.unwind_s is not None and self.unwind_s >= SLOW_UNWIND_S:
+                out += ('; unwinding after the deadline (cancel and release) '
+                        'took %.2fs more' % self.unwind_s)
         return out
 
 
-#: a timeout observed this long after its deadline fired late: the event
+#: a timeout that fired this long after its deadline fired late: the event
 #: loop could not run the timeout's callback on time
 LATE_S = 0.5
+#: an unwind after the deadline (cancelling the in-flight statement and
+#: releasing the connection) this long is named: the database answered the
+#: cancel and the reset slowly
+SLOW_UNWIND_S = 0.5
 POOL_ACQUIRE, STATEMENTS, POOL_RELEASE = 'POOL_ACQUIRE', 'STATEMENTS', 'POOL_RELEASE'
 
 
 class _phase:
     """One bounded step of the tick: its budget, the sub-step in flight, and
     the deadline its timeout actually armed (so lateness is measured against
-    the real deadline)."""
+    the real deadline).
+
+    bound() also arms a probe at the timeout's own deadline. The probe and the
+    timeout's callback are due at the same loop time, so they run in the same
+    loop iteration, before the cancelled task resumes: the probe's stamp is
+    when the deadline fired, and its delay past the deadline is only the time
+    the loop was held. Whatever the step spends unwinding after that
+    (asyncpg's cancel wait and reset() on release) is reported apart."""
 
     def __init__(self, name, budget_s=None):
         self.name, self.budget_s = name, budget_s
         self.step = None
         self.t0 = None
         self._timeout = None
+        self._probe = None
+        #: loop time at which the deadline fired, and the sub-step in flight
+        #: then (None while it has not fired)
+        self.fired_at = None
+        self.fired_step = None
 
     def at(self, step):
         self.step = step
 
     def bound(self):
-        """The step's timeout (asyncio.timeout(budget_s)), remembered."""
+        """The step's timeout (asyncio.timeout(budget_s)), remembered, with
+        a probe due at the same deadline."""
+        loop = asyncio.get_running_loop()
         self._timeout = asyncio.timeout(self.budget_s)
+        when = self._timeout.when()
+        if when is not None:
+            self._probe = loop.call_at(when, self._fired, loop)
         return self._timeout
+
+    def _fired(self, loop):
+        self.fired_at = loop.time()
+        self.fired_step = self.step
 
     async def __aenter__(self):
         self.t0 = asyncio.get_running_loop().time()
         return self
 
     async def __aexit__(self, et, ev, tb):
+        if self._probe is not None:
+            self._probe.cancel()
         if ev is not None and isinstance(ev, Exception) and not isinstance(
                 ev, TickPhaseFailed):
             now = asyncio.get_running_loop().time()
@@ -206,9 +250,13 @@ class _phase:
             when = self._timeout.when() if self._timeout is not None else None
             if when is not None:
                 budget = round(when - self.t0, 3)
+            step, elapsed, unwind = self.step, now - self.t0, None
+            if self.fired_at is not None:
+                step = self.fired_step or step
+                elapsed, unwind = self.fired_at - self.t0, now - self.fired_at
             raise TickPhaseFailed(
-                self.name, ev, step=self.step, elapsed_s=now - self.t0,
-                budget_s=budget) from ev
+                self.name, ev, step=step, elapsed_s=elapsed,
+                budget_s=budget, unwind_s=unwind) from ev
         return False
 
 
