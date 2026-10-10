@@ -408,12 +408,14 @@ async def test_one_admissible_decision_makes_exactly_one_idempotent_submission(m
         lel = __import__("json").loads(lel) if isinstance(lel, str) else lel
         assert lel["admission"]["verdict"] == AA.LIVE_ADMISSIBLE
         assert lel["admission"]["digest"]
-        e.venue.behaviour = [{"fill": 3}]
+        e.venue.behaviour = [{"fill": 2}]
         got = await e.lane._run(e.conn, it["intent_id"])
         assert got["state"] == EI.A_SUBMITTED, got
         assert len(e.venue.placed) == 1
         placed = e.venue.placed[0]
-        assert placed["quantity"] == 3 and float(placed["price"]["value"]) == 0.55
+        # rc6.3 pmus-sizing: 2,702 / 1,000 = 2.702 is ROUNDED DOWN to 2
+        # contracts (half-even sent 3: ABOVE the 1:1000 target)
+        assert placed["quantity"] == 2 and float(placed["price"]["value"]) == 0.55
         assert placed["tif"] == M.TIF["IOC"]
         # duplicate dispatch: no second order
         await e.conn.execute("UPDATE execution_intents SET actual_state = 'DISPATCHED',"

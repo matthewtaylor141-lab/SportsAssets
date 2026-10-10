@@ -2728,6 +2728,24 @@ NOT_REFUSAL = {
         "complete) -- a readback state, never a trading refusal",
 }
 
+#: (rc6.3 pmus-sizing) THE ACTUAL BUY ON THE MARKET'S OWN TRADING RULES
+#: (execmirror.market_rules / price_tick_refusal, execution_intent step 4,
+#: outside SHADOW only): the market's record unreadable, its minimum trade
+#: quantity or price tick absent, are data our read did not obtain; a
+#: minimum the venue's documentation states no quantity step for, and a
+#: decision's wire price that is not on the market's tick (never re-priced),
+#: are capability gaps of our sizing / pricing -- all SOFTWARE at risk
+#: admission, PRICE_NOT_ON_VENUE_TICK's row being the precedent.
+PMUS_SIZING_STREAM = {
+    "VENUE_MARKET_RECORD_UNREADABLE": (S, DATA, "RISK_ADMISSION"),
+    "MARKET_MINIMUM_TRADE_QTY_ABSENT": (S, DATA, "RISK_ADMISSION"),
+    "MARKET_QUANTITY_INCREMENT_NOT_ESTABLISHED": (S, CAP, "RISK_ADMISSION"),
+    "MARKET_PRICE_TICK_ABSENT": (S, DATA, "RISK_ADMISSION"),
+    "LIMIT_PRICE_NOT_ON_THE_MARKET_TICK": (S, CAP, "RISK_ADMISSION"),
+}
+for _k, _v in PMUS_SIZING_STREAM.items():
+    TABLE.setdefault(_k, _v)
+
 #: (rc6 econ-binding) THE PROFITABILITY BIND'S CONTROL INPUTS (bettor_paper_
 #: profitability_bind control 25, at the decision and under the ledger's
 #: account lock): a learned model absent or fitted longer ago than its bound,

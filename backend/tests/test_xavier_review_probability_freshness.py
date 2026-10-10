@@ -364,7 +364,9 @@ async def _live(conn, monkeypatch, *, fresh: bool, wired: bool = True):
     if wired:
         # what api/app.py hands the lane (execmirror imports no paper module)
         mirror._probability_reader = PX.live_position_evidence
-    po = await TE._paper_order(conn, acct, qty=2702)
+    # rc6.3 pmus-sizing: a whole 3,000 (3 contracts at 1:1000); 2,702 is
+    # now ROUNDED DOWN to 2 contracts, never enlarged to 3
+    po = await TE._paper_order(conn, acct, qty=3000)
     now = time.time()
     vid = await _reading(conn, po["slug"], decided_at=now - 3600,
                          pin_age_s=5.0, p=0.62)
@@ -375,7 +377,7 @@ async def _live(conn, monkeypatch, *, fresh: bool, wired: bool = True):
     if fresh:
         await _reading(conn, po["slug"], decided_at=now - 1, pin_age_s=5.0,
                        p=0.71)
-    await TE._paper_fill(conn, acct, po, qty=2702)
+    await TE._paper_fill(conn, acct, po, qty=3000)
     venue.behaviour = [{"fill": 3}]
     await mirror.tick(conn)
     h = await conn.fetchrow("SELECT * FROM smalllive_handoffs WHERE "

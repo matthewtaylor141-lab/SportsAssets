@@ -50,9 +50,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_EVEN, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_EVEN, Decimal
 from typing import Any
 
 from . import execmirror_probe as EP
@@ -308,6 +309,343 @@ def plan_sell(order: dict, *, scale, paper_open_qty, live_held: int,
                 params=venue_params(order, live),
                 detail={"fraction_of_inventory": str(frac), "held": live_held,
                         "committed": live_committed, "closes": closes})
+
+
+# ─────────── THE MARKET'S OWN TRADING RULES (rc6.3 pmus-sizing) ───────────
+#
+# THE DEFECT (contract audit item 3d). An ACTUAL BUY was sized by scale_qty
+# -- paper qty / scale rounded HALF-EVEN to whole contracts -- and never read
+# the market it trades: a $1,500 PAPER decision at 0.62 (2,419 contracts) is
+# 2.419 at 1:1000 and went out as 2; 2.702 went out as 3 (ABOVE the 1:1000
+# target); a market whose minimum is above one contract would have been sent
+# below it; and no limit price was checked against the market's tick.
+#
+# THE VENUE'S RULES (docs.polymarket.us, read 2026-10-10):
+#   get-market-by-slug  minimumTradeQty: "Minimum order quantity in contracts
+#                       (e.g. 0.01 = 1% of a contract, 1.0 = one whole
+#                       contract)"; orderPriceMinTickSize: "Minimum tick size
+#                       for order price". No field states a quantity step.
+#   fractional shares   "These markets trade in steps of 0.01 contracts";
+#                       "A small number of markets, mostly futures, still
+#                       trade in whole contracts only"; a quantity is
+#                       "rounded down to the market's step size: 0.01
+#                       contracts on most markets, or 1 contract on
+#                       whole-contract markets".
+#   create-order        quantity "Supports decimal quantities on markets whose
+#                       minimumTradeQty is less than 1".
+# So a market's QUANTITY INCREMENT is the documented step its minimumTradeQty
+# selects: 0.01 when the minimum is below one contract (and is itself a
+# multiple of 0.01), one contract when the minimum is one or more WHOLE
+# contracts. Any other minimum is a market the documentation does not
+# describe: its increment is NOT established and the order is refused by
+# name. Nothing is ever assumed -- no field is defaulted to 1.
+#
+# THE LANE'S OWN UNIT (LANE_QTY_UNIT). execmirror_orders.live_qty and
+# execution_intents.live_qty are INTEGER columns (migrations 192, 199); every
+# SELL of an actual position (live_inventory, plan_sell) counts whole
+# contracts, and retyping either column is ROLLBACK_COLUMN_TYPE_CHANGED,
+# which tools/upgrade_path_receipt.py blocks. So the lane records and sends
+# multiples of one contract: a BUY is sized to the smallest step that is a
+# multiple of BOTH the market's increment and the lane's unit (their least
+# common multiple -- one contract on every documented market), rounded DOWN.
+# The exact size at the market's own increment is computed and recorded
+# beside it (`market_exact_qty`), so what the lane's unit costs against the
+# 1:1000 target is on the record; sending it needs numeric quantity storage
+# and a fractional SELL path first.
+#
+# THE RULE (pure: market_rules, size_to_market, price_tick_refusal,
+# plan_entry_on_market; the ACTUAL lane applies it, execution_intent step 4):
+#   rules   read from the market's own record (Venue.market); a field absent,
+#           unreadable or outside the documentation -> refused by its own
+#           name;
+#   size    raw = paper qty / scale exactly; live = floor(raw / step) x step;
+#           live below the market's minimum (or zero) -> BELOW_VENUE_MINIMUM,
+#           never enlarged to reach it;
+#   price   the limit (wire) price must be an exact multiple of the market's
+#           tick, inside (0, 1), and exactly what the order carries at its 4
+#           decimals (venue_params); otherwise LIMIT_PRICE_NOT_ON_THE_MARKET_
+#           TICK -- never re-priced: the canonical intent fixes the wire price,
+#           and an order re-priced from it is another decision
+#           (live_parity.authorize_live_exposure refuses one);
+#   caps    cost = collateral per contract x live, against the per-order cap
+#           and the buying power, as plan_buy.
+# Without the market's record (SMALL LIVE is SHADOW: the lane reads nothing
+# from the venue, and no order can be authorized) the size is the lane's unit
+# rule alone and is labelled so (SIZING_BASIS_LANE_UNIT_ONLY): an upper bound
+# of what the market rule would size, never sent.
+MARKET_RULES_VERSION = "PMUS_MARKET_TRADING_RULES_V1"
+ENTRY_SIZING_RULE = ("FLOOR_TO_LCM(MARKET_QTY_INCREMENT, LANE_QTY_UNIT); "
+                     "BELOW_MARKET_MINIMUM_REFUSED; LIMIT_ON_MARKET_TICK")
+LANE_QTY_UNIT = Decimal(1)
+FRACTIONAL_QTY_STEP = Decimal("0.01")
+WHOLE_QTY_STEP = Decimal(1)
+MIN_QTY_FIELDS = ("minimumTradeQty", "minimum_trade_qty")
+PRICE_TICK_FIELDS = ("orderPriceMinTickSize", "order_price_min_tick_size")
+SIZING_BASIS_MARKET = "MARKET_TRADING_RULES"
+SIZING_BASIS_LANE_UNIT_ONLY = "LANE_UNIT_ONLY_MARKET_RULES_NOT_READ_IN_SHADOW"
+R_MARKET_RECORD_UNREADABLE = "VENUE_MARKET_RECORD_UNREADABLE"
+R_MIN_QTY_ABSENT = "MARKET_MINIMUM_TRADE_QTY_ABSENT"
+R_QTY_INCREMENT_NOT_ESTABLISHED = "MARKET_QUANTITY_INCREMENT_NOT_ESTABLISHED"
+R_PRICE_TICK_ABSENT = "MARKET_PRICE_TICK_ABSENT"
+R_PRICE_OFF_TICK = "LIMIT_PRICE_NOT_ON_THE_MARKET_TICK"
+
+
+def _rule_field(m: dict, names: tuple):
+    """(field, raw value) of the first of `names` the record carries."""
+    for n in names:
+        if n in m and m[n] is not None:
+            return n, m[n]
+    return None, None
+
+
+def _positive_decimal(v) -> Decimal | None:
+    if isinstance(v, dict):
+        v = v.get("value")
+    if v is None or isinstance(v, bool) or v == "":
+        return None
+    try:
+        d = Decimal(str(v))
+    except Exception:                                         # noqa: BLE001
+        return None
+    return d if d.is_finite() and d > 0 else None
+
+
+def market_rules(record, *, slug: str | None = None) -> dict:
+    """THE MARKET'S TRADING RULES from its own record (pure): {ok, refusal,
+    minimum_trade_qty, quantity_increment, price_tick (Decimals), the fields
+    and raw values read, increment_basis, missing}. `record` is the venue's
+    get-market-by-slug answer ({"market": {...}} or the market itself). Every
+    field absent, unreadable, non-positive or outside the documented steps is
+    named in `missing`; `refusal` is the first of them. `slug`, when given,
+    must be the record's own slug (a record of another market is
+    unreadable for this one)."""
+    m = record.get("market") if isinstance(record, dict) and \
+        isinstance(record.get("market"), dict) else record
+    out = {"ok": False, "version": MARKET_RULES_VERSION, "refusal": None,
+           "missing": [], "slug": None, "minimum_trade_qty": None,
+           "quantity_increment": None, "price_tick": None,
+           "fields": {}, "raw": {}, "increment_basis": None}
+    if not isinstance(m, dict) or not m:
+        return dict(out, refusal=R_MARKET_RECORD_UNREADABLE,
+                    missing=[R_MARKET_RECORD_UNREADABLE],
+                    why="the venue returned no market record")
+    out["slug"] = m.get("slug")
+    if slug is not None and m.get("slug") not in (None, slug):
+        return dict(out, refusal=R_MARKET_RECORD_UNREADABLE,
+                    missing=[R_MARKET_RECORD_UNREADABLE],
+                    why="the record names another market (%s)" % m.get("slug"))
+    mf, mv = _rule_field(m, MIN_QTY_FIELDS)
+    tf, tv = _rule_field(m, PRICE_TICK_FIELDS)
+    out["fields"] = {"minimum_trade_qty": mf, "price_tick": tf}
+    out["raw"] = {"minimum_trade_qty": None if mv is None else str(mv),
+                  "price_tick": None if tv is None else str(tv)}
+    mn, tk = _positive_decimal(mv), _positive_decimal(tv)
+    missing = []
+    if mn is None:
+        missing.append(R_MIN_QTY_ABSENT)
+    step = None
+    if mn is not None:
+        if mn < 1 and mn % FRACTIONAL_QTY_STEP == 0:
+            step, basis = FRACTIONAL_QTY_STEP, (
+                "DOCUMENTED: minimumTradeQty < 1 -> fractional market, steps "
+                "of 0.01 contracts")
+        elif mn >= 1 and mn % WHOLE_QTY_STEP == 0:
+            step, basis = WHOLE_QTY_STEP, (
+                "DOCUMENTED: minimumTradeQty a whole number >= 1 -> "
+                "whole-contract market, steps of 1 contract")
+        else:
+            missing.append(R_QTY_INCREMENT_NOT_ESTABLISHED)
+            basis = ("minimumTradeQty %s is neither a multiple of 0.01 below "
+                     "one contract nor a whole number of contracts: the "
+                     "documentation states no step for it" % mn)
+        out["increment_basis"] = basis
+    if tk is None or tk >= 1:
+        missing.append(R_PRICE_TICK_ABSENT)
+    out.update(minimum_trade_qty=mn, quantity_increment=step,
+               price_tick=None if tk is None or tk >= 1 else tk,
+               missing=missing)
+    if missing:
+        return dict(out, refusal=missing[0])
+    return dict(out, ok=True)
+
+
+def lane_qty_step(increment: Decimal, unit: Decimal = LANE_QTY_UNIT) -> Decimal:
+    """The smallest positive quantity that is a multiple of BOTH `increment`
+    (the market's) and `unit` (what the lane can record): their least common
+    multiple, exactly (pure)."""
+    inc, un = Decimal(str(increment)), Decimal(str(unit))
+    if inc <= 0 or un <= 0:
+        raise ValueError("QTY_STEP_NOT_POSITIVE")
+    e = max(0, -inc.as_tuple().exponent, -un.as_tuple().exponent)
+    k = Decimal(10) ** e
+    a, b = int(inc * k), int(un * k)
+    if Decimal(a) != inc * k or Decimal(b) != un * k:
+        raise ValueError("QTY_STEP_NOT_A_TERMINATING_DECIMAL")
+    return Decimal(a * b // math.gcd(a, b)) / k
+
+
+def _floor_to(q: Decimal, step: Decimal) -> Decimal:
+    return (q / step).to_integral_value(rounding=ROUND_FLOOR) * step
+
+
+def size_to_market(paper_qty, scale, rules: dict | None = None, *,
+                   unit: Decimal = LANE_QTY_UNIT) -> dict:
+    """A BUY's live size at 1:`scale` (pure). With the market's rules
+    (market_rules, ok): floor to lane_qty_step(the market's increment, `unit`)
+    and refuse below the market's minimum; without them: the lane's unit rule
+    alone (step = minimum = `unit`), labelled SIZING_BASIS_LANE_UNIT_ONLY.
+    Never enlarged: live <= raw always. `live_qty` is 0 when refused."""
+    raw = Decimal(str(paper_qty)) / Decimal(str(scale))
+    if rules is not None and rules.get("ok"):
+        inc, minimum = rules["quantity_increment"], rules["minimum_trade_qty"]
+        basis = SIZING_BASIS_MARKET
+    else:
+        inc, minimum, basis = unit, unit, SIZING_BASIS_LANE_UNIT_ONLY
+    step = lane_qty_step(inc, unit)
+    computed = _floor_to(raw, step) if raw > 0 else Decimal(0)
+    exact_at_market = _floor_to(raw, inc) if raw > 0 else Decimal(0)
+    refused = computed <= 0 or computed < minimum
+    live = Decimal(0) if refused else computed
+    return {"rule": ENTRY_SIZING_RULE, "basis": basis,
+            "scale": Decimal(str(scale)), "raw_qty": raw,
+            "computed_qty": computed, "live_qty": live,
+            "rounding_delta": live - raw,
+            "market_increment": inc, "lane_unit": unit, "step": step,
+            "market_minimum": minimum, "market_exact_qty": exact_at_market,
+            "refusal": BELOW_VENUE_MINIMUM if refused else None}
+
+
+def _s(v):
+    return None if v is None else str(v)
+
+
+def rules_record(rules: dict | None) -> dict | None:
+    """The JSON-safe record of the market rules read (or why not)."""
+    if rules is None:
+        return None
+    return {"version": rules.get("version"), "ok": bool(rules.get("ok")),
+            "refusal": rules.get("refusal"),
+            "missing": list(rules.get("missing") or []),
+            "slug": rules.get("slug"),
+            "minimum_trade_qty": _s(rules.get("minimum_trade_qty")),
+            "quantity_increment": _s(rules.get("quantity_increment")),
+            "price_tick": _s(rules.get("price_tick")),
+            "fields": rules.get("fields"), "raw": rules.get("raw"),
+            "increment_basis": rules.get("increment_basis"),
+            "why": rules.get("why"), "error": rules.get("error")}
+
+
+def sizing_record(size: dict, rules: dict | None) -> dict:
+    """The JSON-safe record of one sizing and the rules it used (written on
+    the execution intent's evidence as `live_sizing`)."""
+    rec = {k: _s(size.get(k)) for k in (
+        "raw_qty", "computed_qty", "live_qty", "rounding_delta",
+        "market_increment", "lane_unit", "step", "market_minimum",
+        "market_exact_qty", "scale")}
+    rec.update(rule=size.get("rule"), basis=size.get("basis"),
+               refusal=size.get("refusal"), market_rules=rules_record(rules))
+    return rec
+
+
+def price_tick_refusal(wire_price, rules: dict) -> dict | None:
+    """None when the limit (wire) price is on the market's tick, inside
+    (0, 1) and carried exactly by venue_params' 4 decimals; otherwise
+    {refusal: R_PRICE_OFF_TICK, ...} with the price, the tick and the
+    neighbouring tick prices (pure). Never re-priced (see the rule above)."""
+    tick = (rules or {}).get("price_tick")
+    try:
+        p = Decimal(str(wire_price))
+    except Exception:                                         # noqa: BLE001
+        p = None
+    if tick is None:
+        return {"refusal": R_PRICE_TICK_ABSENT, "wire_price": str(wire_price)}
+    if p is None or not p.is_finite():
+        return {"refusal": R_PRICE_OFF_TICK, "wire_price": str(wire_price),
+                "tick": str(tick), "why": "the wire price is not a number"}
+    sent = Decimal("%.4f" % float(p))
+    below = (p / tick).to_integral_value(rounding=ROUND_FLOOR) * tick
+    above = (p / tick).to_integral_value(rounding=ROUND_CEILING) * tick
+    why = None
+    if not (0 < p < 1):
+        why = "the wire price is outside (0, 1)"
+    elif p % tick != 0:
+        why = "the wire price is not a multiple of the market's tick"
+    elif sent != p:
+        why = "the order carries the price at 4 decimals and would change it"
+    if why is None:
+        return None
+    return {"refusal": R_PRICE_OFF_TICK, "wire_price": str(p),
+            "tick": str(tick), "tick_below": str(below),
+            "tick_above": str(above), "price_sent": str(sent), "why": why,
+            "never_repriced": "the canonical intent fixes the wire price"}
+
+
+def plan_entry_on_market(order: dict, *, scale, buying_power, max_order_usd,
+                         rules: dict | None) -> Plan:
+    """THE ACTUAL BUY's plan on the market's own rules (pure): the order form,
+    the tick (with rules), the size (size_to_market), then the per-order cap
+    and the buying power exactly as plan_buy. `detail` carries the sizing,
+    flat and stringified."""
+    if str(order.get("time_in_force")) not in TIF:
+        return Plan("EXCLUDED", exclusion=UNSUPPORTED_ORDER,
+                    detail={"time_in_force": order.get("time_in_force")})
+    if rules is not None:
+        if not rules.get("ok"):
+            return Plan("EXCLUDED", exclusion=rules.get("refusal")
+                        or R_MARKET_RECORD_UNREADABLE,
+                        detail={"missing": ",".join(rules.get("missing") or [])})
+        off = price_tick_refusal(order["wire_price"], rules)
+        if off is not None:
+            return Plan("EXCLUDED", exclusion=off.pop("refusal"), detail=off)
+    sz = size_to_market(order["qty"], scale, rules)
+    sdet = {"sizing_rule": sz["rule"], "sizing_basis": sz["basis"],
+            "sizing_step": str(sz["step"]),
+            "market_minimum": str(sz["market_minimum"]),
+            "computed_qty": str(sz["computed_qty"]),
+            "market_exact_qty": str(sz["market_exact_qty"])}
+    base = dict(scaled_qty=sz["raw_qty"], rounding_delta=sz["rounding_delta"])
+    if sz["refusal"]:
+        return Plan("EXCLUDED", exclusion=sz["refusal"], **base,
+                    detail=dict(sdet, why=(
+                        "paper qty / %s is %s: below the market's minimum %s "
+                        "at step %s, never enlarged"
+                        % (scale, sz["raw_qty"], sz["market_minimum"],
+                           sz["step"]))))
+    if sz["live_qty"] != sz["live_qty"].to_integral_value():
+        raise ValueError("LIVE_QTY_NOT_A_WHOLE_NUMBER_OF_CONTRACTS")
+    live = int(sz["live_qty"])
+    cost = collateral_per_contract(order["intent"], order["wire_price"]) * live
+    if cost > Decimal(str(max_order_usd)):
+        return Plan("EXCLUDED", exclusion=ABOVE_ORDER_CAP, live_qty=live, **base,
+                    detail=dict(sdet, cost_usd=str(cost),
+                                cap_usd=str(max_order_usd)))
+    if buying_power is not None and cost > Decimal(str(buying_power)):
+        return Plan("EXCLUDED", exclusion=INSUFFICIENT_CASH, live_qty=live, **base,
+                    detail=dict(sdet, cost_usd=str(cost),
+                                buying_power_usd=str(buying_power)))
+    return Plan("PLANNED", live_qty=live, params=venue_params(order, live),
+                detail=dict(sdet, cost_usd=str(cost)), **base)
+
+
+def live_qty_rule_broken(live_qty, scaled_qty, live_sizing=None) -> bool:
+    """AUDREY'S CHECK of a row's live size against the rule that sized it
+    (pure). A row the ACTUAL lane sized on this rule (its intent carries the
+    `live_sizing` record, with its step) breaks it when the live size is
+    ABOVE the scaled target (enlarged) or short of it by a whole step or
+    more; any other row (plan_buy / scale_qty: the nearest whole contract)
+    when it is more than half a contract away, as before."""
+    live, scaled = Decimal(str(live_qty)), Decimal(str(scaled_qty))
+    ls = live_sizing
+    if isinstance(ls, str):
+        try:
+            ls = json.loads(ls)
+        except ValueError:
+            ls = None
+    step = _positive_decimal((ls or {}).get("step")) if isinstance(
+        ls, dict) else None
+    if step is None:
+        return abs(live - scaled) > Decimal("0.5")
+    return live > scaled or scaled - live >= step
 
 
 def fill_delta(prev_cum, prev_avg, prev_fee, cum, avg, fee):
@@ -878,6 +1216,15 @@ class Venue:
         return {"bid": _quote_px(d, "bestBid", "best_bid", "bid"),
                 "ask": _quote_px(d, "bestAsk", "best_ask", "ask"),
                 "state": d.get("state"), "error": None}
+
+    def market(self, slug: str) -> dict:
+        """THE MARKET'S OWN RECORD (rc6.3 pmus-sizing): the documented
+        get-market-by-slug read (GET /v1/market/slug/{slug}; read-only, paced,
+        never retried here). Its minimumTradeQty and orderPriceMinTickSize
+        are what an ACTUAL BUY is sized and priced against (market_rules).
+        Called only outside SHADOW (execution_intent step 4)."""
+        r = self._call(self._c.markets.retrieve_by_slug, slug) or {}
+        return r.get("market") if isinstance(r.get("market"), dict) else r
 
 
 def _classify(exc: Exception) -> str:
@@ -2254,14 +2601,16 @@ class Mirror:
                     # ENTRY paper order of the same decision (never its parent)
                     ei = await conn.fetchrow(
                         """SELECT i.decision_id, p.order_id, p.qty AS p_qty,
-                                  p.state AS p_state
+                                  p.state AS p_state,
+                                  i.evidence->'live_sizing' AS live_sizing
                              FROM execution_intents i LEFT JOIN paper_orders p
                                ON p.decision_id = i.decision_id AND p.role = 'ENTRY'
                             WHERE i.intent_id = $1""", m["execution_intent_id"])
                     if ei is not None:
                         m = dict(m, decision_id=ei["decision_id"],
                                  paper_order_id=ei["order_id"], p_qty=ei["p_qty"],
-                                 p_state=ei["p_state"], _sibling=True)
+                                 p_state=ei["p_state"], _sibling=True,
+                                 _live_sizing=ei["live_sizing"])
                 pf = await conn.fetchrow(
                     "SELECT coalesce(sum(qty), 0) AS q, avg(price) AS px, coalesce(sum(fee_usd),0) AS fee "
                     "FROM paper_fills WHERE order_id = $1", m["paper_order_id"]) if m["paper_order_id"] else None
@@ -2336,7 +2685,8 @@ class Mirror:
                 if Decimal(str(lf["q"])) > Decimal(m["live_qty"] or 0):
                     disc.append({"code": "LIVE_FILLED_MORE_THAN_INTENDED", "mirror_id": m["mirror_id"]})
                 if m["paper_qty"] is not None and m["scaled_qty"] is not None and m["live_qty"]:
-                    if abs(Decimal(m["live_qty"]) - Decimal(str(m["scaled_qty"]))) > Decimal("0.5"):
+                    if live_qty_rule_broken(m["live_qty"], m["scaled_qty"],
+                                            m.get("_live_sizing")):
                         disc.append({"code": "LIVE_QTY_NOT_THE_ROUNDED_SCALED_QTY",
                                      "mirror_id": m["mirror_id"]})
                 if pf is not None and Decimal(str(lf["q"])) > 0 and Decimal(str(pf["q"])) == 0 \

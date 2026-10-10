@@ -527,7 +527,9 @@ async def test_an_actual_positions_value_add_uses_venue_fills_and_settlement(
         acct, venue, mirror = await TE._setup(conn, monkeypatch)
         mirror._probability_reader = PX.live_position_evidence
         mirror._management_assessor = XM.actual_review_hook
-        po = await TE._paper_order(conn, acct, qty=2702)
+        # rc6.3 pmus-sizing: a whole 3,000 (3 contracts at 1:1000); 2,702 is
+        # now ROUNDED DOWN to 2 contracts, never enlarged to 3
+        po = await TE._paper_order(conn, acct, qty=3000)
         now = _time.time()
         vid = await XF._reading(conn, po["slug"], decided_at=now - 3600,
                                 pin_age_s=5.0, p=0.62)
@@ -535,7 +537,7 @@ async def test_an_actual_positions_value_add_uses_venue_fills_and_settlement(
                                  p=0.62, at=now - 3600)
         await conn.execute("UPDATE execution_intents SET decision_id=$2 "
                            " WHERE group_id=$1", po["group_id"], did)
-        await TE._paper_fill(conn, acct, po, qty=2702)
+        await TE._paper_fill(conn, acct, po, qty=3000)
         venue.behaviour = [{"fill": 3}]
         await mirror.tick(conn)
         t = await XM.thesis_for(conn, XM.K_ACTUAL, po["group_id"])

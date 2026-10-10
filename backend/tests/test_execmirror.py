@@ -194,6 +194,7 @@ class FakeVenue:
         self.cancel_all_calls = 0
         self.book = {"bestBid": {"value": "0.40"}, "bestAsk": {"value": "0.45"}}
         self._n = 0
+        self.markets, self.market_reads = {}, []     # rc6.3: see market()
 
     def _new(self, params):
         self._n += 1
@@ -282,6 +283,19 @@ class FakeVenue:
 
     def bbo(self, slug):
         return dict(self.book)
+
+    # rc6.3 pmus-sizing: the market's own record (Venue.market), read by the
+    # ACTUAL lane outside SHADOW only. Default: the documented fractional
+    # market (minimumTradeQty 0.01, tick 0.01 -- the measured fixture
+    # tests/fixtures/pmus_settled_market_2026_09_24_az_col.json); a test
+    # sets `markets[slug]` (a dict, or an Exception to raise) to vary it.
+    def market(self, slug):
+        self.market_reads.append(slug)
+        rec = self.markets.get(slug, {"slug": slug, "minimumTradeQty": 0.01,
+                                      "orderPriceMinTickSize": 0.01})
+        if isinstance(rec, Exception):
+            raise rec
+        return dict(rec)
 
 
 # ─────────────────────────── database proofs ───────────────────────────
@@ -430,20 +444,21 @@ async def test_an_entry_is_placed_once_and_its_fills_come_from_the_venue(monkeyp
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, qty=2702)
-        venue.behaviour = [{"fill": 2}]                 # IOC: 2 of 3 trade
+        venue.behaviour = [{"fill": 1}]                 # IOC: 1 of 2 trade
         await mirror.tick(conn)
         await mirror.tick(conn)                         # duplicate prevention
         assert len(venue.placed) == 1
-        assert venue.placed[0]["quantity"] == 3 and venue.placed[0]["intent"] == "ORDER_INTENT_BUY_LONG"
+        # rc6.3 pmus-sizing: 2.702 is ROUNDED DOWN to 2 (never enlarged to 3)
+        assert venue.placed[0]["quantity"] == 2 and venue.placed[0]["intent"] == "ORDER_INTENT_BUY_LONG"
         r = await _row(conn, po["order_id"])
-        assert r["state"] == "CANCELLED" and r["cum_qty"] == 2   # IOC remainder cancelled
-        assert r["rounding_delta"] == Decimal("0.298000")
+        assert r["state"] == "CANCELLED" and r["cum_qty"] == 1   # IOC remainder cancelled
+        assert r["rounding_delta"] == Decimal("-0.702000")
         fills = await conn.fetch("SELECT * FROM execmirror_fills WHERE mirror_id = $1",
                                  r["mirror_id"])
-        assert [f["qty"] for f in fills] == [Decimal(2)]
+        assert [f["qty"] for f in fills] == [Decimal(1)]
         assert fills[0]["source"] == "VENUE_ORDER_RECORD"
         inv = await M.live_inventory(conn, po["group_id"])
-        assert inv["held"] == 2 and inv["opened_intent"] == "ORDER_INTENT_BUY_LONG"
+        assert inv["held"] == 1 and inv["opened_intent"] == "ORDER_INTENT_BUY_LONG"
     finally:
         await conn.close()
 
@@ -762,17 +777,18 @@ async def test_the_management_view_shows_paper_beside_live(monkeypatch):
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, qty=2702)
-        venue.behaviour = [{"fill": 3}]
+        venue.behaviour = [{"fill": 2}]
         await mirror.tick(conn)
         await _paper_fill(conn, acct, po, qty=2702)
         v = await V.view(conn)
         o = next(x for x in v["orders"] if x["paper_order_id"] == po["order_id"])
-        assert o["expected_scaled_qty"] == 2.702 and o["live"]["qty"] == 3
-        assert o["live"]["venue_order_id"] == "v1" and o["live"]["filled_qty"] == 3
+        # rc6.3 pmus-sizing: 2.702 is ROUNDED DOWN to 2 (never enlarged to 3)
+        assert o["expected_scaled_qty"] == 2.702 and o["live"]["qty"] == 2
+        assert o["live"]["venue_order_id"] == "v1" and o["live"]["filled_qty"] == 2
         assert v["coverage"]["mirrored"] == 1
         assert v["title"] == "LEGACY MIRROR VALIDATION · execution mirror · 1:1000"
         mk = next(m for m in v["pnl"]["markets"] if m["market"] == po["slug"])
-        assert mk["live"]["entry_target_qty"] == 3
+        assert mk["live"]["entry_target_qty"] == 2
         e = mk["comparison"]["explained"]
         assert abs(sum(e.values()) - mk["comparison"]["difference"]) < 1e-5
     finally:
@@ -902,7 +918,8 @@ async def test_a_paper_sibling_that_ended_never_stops_the_actual_sibling(monkeyp
         acct, venue, mirror = await _setup(conn, monkeypatch)
         po = await _paper_order(conn, acct, qty=2702, state="CANCELED")
         await mirror.tick(conn)
-        assert len(venue.placed) == 1 and venue.placed[0]["quantity"] == 3
+        # rc6.3 pmus-sizing: 2.702 is ROUNDED DOWN to 2 (never enlarged to 3)
+        assert len(venue.placed) == 1 and venue.placed[0]["quantity"] == 2
         r = await _row(conn, po["order_id"])
         assert r["execution_intent_id"] == po["intent_id"] and r["exclusion"] is None
     finally:
@@ -952,8 +969,10 @@ async def test_an_actual_fill_hands_the_actual_position_to_xavier_with_a_fresh_q
     conn = await _conn()
     try:
         acct, venue, mirror = await _setup(conn, monkeypatch)
-        po = await _paper_order(conn, acct, qty=2702)
-        await _paper_fill(conn, acct, po, qty=2702)
+        # rc6.3 pmus-sizing: a whole 3,000 (3 contracts at 1:1000); 2,702 is
+        # now ROUNDED DOWN to 2, never enlarged to 3
+        po = await _paper_order(conn, acct, qty=3000)
+        await _paper_fill(conn, acct, po, qty=3000)
         venue.behaviour = [{"fill": 3}]
         await mirror.tick(conn)                       # entry placed and filled
         h = await conn.fetchrow("SELECT * FROM smalllive_handoffs WHERE group_id = $1",
@@ -1002,15 +1021,17 @@ async def test_audrey_matches_a_clean_chain_and_names_each_discrepancy(monkeypat
         did = await _decision(conn, acct, "mlb-test-%s" % grp[-4:])
         po = await _paper_order(conn, acct, qty=2702, group=grp, decision_id=did)
         await _paper_fill(conn, acct, po, qty=2702)
-        venue.behaviour = [{"fill": 3}]
+        venue.behaviour = [{"fill": 2}]
         await mirror.tick(conn)
         rec = await conn.fetchrow("SELECT * FROM smalllive_reconciliations WHERE group_id = $1",
                                   po["group_id"])
+        # rc6.3 pmus-sizing: 2.702 is ROUNDED DOWN to 2 -- 0.702 short of the
+        # scaled quantity, inside the rule's one-contract step, so MATCHED
         assert rec is not None and rec["status"] == "MATCHED", rec
         chain = json.loads(rec["chain"]) if isinstance(rec["chain"], str) else rec["chain"]
         link = chain["links"][0]
         assert link["decision_id"] == did and link["decision_found"] is True
-        assert link["live_fill_qty"] == "3.000000" or Decimal(link["live_fill_qty"]) == 3
+        assert link["live_fill_qty"] == "2.000000" or Decimal(link["live_fill_qty"]) == 2
         assert chain["handoff_id"] and chain["paper_and_actual_pnl_are_separate"] is True
         # a live order whose paper order has no decision is named
         orphan = await _paper_order(conn, acct, qty=2702)
@@ -1106,7 +1127,8 @@ async def test_a_hedge_is_live_only_for_a_group_whose_entry_acquired_live_invent
         venue.behaviour = [{"fill": 3}]
         await mirror.tick(conn)
         assert len(venue.placed) == 1
-        assert await M.live_entry_qty(conn, po["group_id"]) == 3
+        # rc6.3 pmus-sizing: the ENTRY's 2.702 is ROUNDED DOWN to 2 contracts
+        assert await M.live_entry_qty(conn, po["group_id"]) == 2
         hedge = await _paper_order(conn, acct, role="HEDGE", group=po["group_id"],
                                    intent="ORDER_INTENT_BUY_SHORT", qty=2702)
         venue.behaviour = [{"fill": 3}]
@@ -1116,6 +1138,6 @@ async def test_a_hedge_is_live_only_for_a_group_whose_entry_acquired_live_invent
         assert len(venue.placed) == 2
         assert venue.placed[1]["intent"] == "ORDER_INTENT_BUY_SHORT"
         # the hedge's own fill never counts as the inventory it protects
-        assert await M.live_entry_qty(conn, po["group_id"]) == 3
+        assert await M.live_entry_qty(conn, po["group_id"]) == 2
     finally:
         await conn.close()

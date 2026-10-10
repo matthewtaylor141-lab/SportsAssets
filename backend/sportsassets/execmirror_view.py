@@ -355,6 +355,16 @@ def _is_buy(intent) -> bool:
     return str(intent or "").startswith("ORDER_INTENT_BUY")
 
 
+def _entry_sizing_rule() -> dict:
+    """The ACTUAL BUY's sizing rule as the code applies it (rc6.3
+    pmus-sizing), read from execmirror (lazily: the view imports no venue
+    lane at module load)."""
+    from . import execmirror as M
+    return {"rule": M.ENTRY_SIZING_RULE, "version": M.MARKET_RULES_VERSION,
+            "lane_qty_unit": str(M.LANE_QTY_UNIT),
+            "without_market_rules": M.SIZING_BASIS_LANE_UNIT_ONLY}
+
+
 def control_summary(ctl: dict) -> dict:
     """Mirror control, as management needs it: never the full account
     fingerprint (a prefix identifies the account without publishing it)."""
@@ -370,6 +380,10 @@ def control_summary(ctl: dict) -> dict:
             "cap_usd_per_order": _f(ctl.get("max_order_usd")),
             "scale": _f(ctl.get("scale")),
             "rounding": ctl.get("rounding"),
+            # rc6.3 pmus-sizing: the `rounding` column is migration 192's
+            # recorded default; the ACTUAL BUY is sized by this rule (the
+            # code's, execmirror.size_to_market)
+            "entry_sizing_rule": _entry_sizing_rule(),
             "account_fingerprint_prefix": (str(fp)[:8] if fp else None),
             "revision": ctl.get("revision"),
             "updated_at": _iso(ctl.get("updated_at")),
