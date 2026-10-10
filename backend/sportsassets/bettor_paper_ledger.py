@@ -1379,10 +1379,14 @@ async def ledger_after(conn, account_id: str = ACCOUNT_ID, *,
 
 
 async def latest_entries(conn, account_id: str = ACCOUNT_ID, *,
-                         limit: int = 50) -> list:
+                         limit: int = 50, before_seq: int | None = None) -> list:
+    """The account's ledger entries, newest first; `before_seq` (rc6.3
+    pr5-port) pages back: only entries with a lower sequence."""
     rows = await conn.fetch(
         "SELECT * FROM paper_ledger WHERE account_id = $1 "
-        " ORDER BY seq DESC LIMIT $2", account_id, int(limit))
+        "   AND ($3::bigint IS NULL OR seq < $3) "
+        " ORDER BY seq DESC LIMIT $2", account_id, int(limit),
+        None if before_seq is None else int(before_seq))
     return [entry_view(r) for r in rows]
 
 

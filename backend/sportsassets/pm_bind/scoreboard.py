@@ -209,20 +209,38 @@ def ledger_reconciliation(claimed: list, positions: list, *,
             "basis": "PAPER ledger positions (bettor_paper_ledger.positions)"}
 
 
+async def ledger_positions_of(conn, accounts: list) -> list:
+    """The PAPER ledger's positions over every account of `accounts` (each
+    position carries its own account's group ids)."""
+    out: list = []
+    for aid in accounts:
+        out += await ledger_positions(conn, aid)
+    return out
+
+
 async def read(conn, *, now: float, account_id: str | None = None,
                attributed=None, fixtures=None, read=None) -> dict:
     """`attributed` / `fixtures` / `read`: controls.attributed_positions'
     rows (EVERY PAPER position) and its read figures. A read that left out
     a position of the forward cohort is no scoreboard: UNAVAILABLE by name
-    (ATTRIBUTION_READ_TRUNCATED), never one over a subset. `account_id`
-    None is the durable PAPER selector, resolved where the ledger is read
-    (after the truncation check, which needs no database)."""
+    (ATTRIBUTION_READ_TRUNCATED), never one over a subset.
+
+    ONE POPULATION ON BOTH SIDES (rc6.3 pr5-port): the claims are the
+    attribution read's accounts -- the selected account's epoch family
+    (controls.attribution_accounts; `account_id` None is the durable
+    selector) -- and the ledger reconciliation reads exactly those accounts
+    (`read["accounts"]` when the caller's read names them). Before this fix
+    the claims read paper_acct_main (load_paper's default) while the ledger
+    read the selected account, so after an activation every claimed group
+    was absent from the ledger and Day One's positions never entered the
+    scoreboard. Accounts are resolved after the truncation check, which
+    needs no database."""
     th = thresholds()
     since = cohort_start(th)
     if attributed is None:
         read = {}
-        attributed, fixtures = await C.attributed_positions(conn, now=now,
-                                                            detail=read)
+        attributed, fixtures = await C.attributed_positions(
+            conn, now=now, detail=read, account_id=account_id)
     cohort_read = C.population_read(read, since=since, window_days=None)
     if cohort_read is not None:
         # the cohort's rule: every position since the frozen_at date (a
@@ -254,10 +272,9 @@ async def read(conn, *, now: float, account_id: str | None = None,
         outcome_variance=s("outcome_variance_usd"),
         reported_total=s("cash_pnl_usd"),
         tolerance=D(str(th["global"]["pnl_reconciliation_tolerance_usd"])))
-    if account_id is None:
-        from ..simulated_account_context import selected_account
-        account_id = await selected_account(conn)
-    led = await ledger_positions(conn, account_id)
+    accounts = (list((read or {}).get("accounts") or [])
+                or await C.attribution_accounts(conn, account_id))
+    led = await ledger_positions_of(conn, accounts)
     total = sum((D(str(p["realized_pnl_usd"])) for p in led), D(0))
     ledrec = ledger_reconciliation(claim, led, tolerance=D(str(
         th["global"]["pnl_reconciliation_tolerance_usd"])))
@@ -278,6 +295,7 @@ async def read(conn, *, now: float, account_id: str | None = None,
             "reconciliation": _s(rec),
             "ledger_reconciliation": ledrec,
             "paper_ledger_realized_total_usd": str(total),
+            "paper_accounts": accounts,
             "theoretical_arb_is_not_realized": True,
             "authority": "READ_ONLY_EVIDENCE_NO_LEDGER"}
 

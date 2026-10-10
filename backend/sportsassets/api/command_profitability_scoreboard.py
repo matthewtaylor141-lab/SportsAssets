@@ -63,7 +63,9 @@ async def read(conn, *, account_id: str, now: float,
                 type(exc).__name__, str(exc)[:160]), computed_at=now)
     finally:
         await tr.rollback()
-    return envelope("OK", None, data=got, computed_at=now)
+    # (rc6.3 pr5-port) the population is named: the PAPER account read
+    return dict(envelope("OK", None, data=got, computed_at=now),
+                account_id=account_id)
 
 
 @router.get(PATH, dependencies=[Depends(require_read)])

@@ -770,8 +770,14 @@ async def test_the_graph_of_a_real_paper_book(monkeypatch):
         async def pool():
             return _Pool(conn)
         monkeypatch.setattr(API, "_pool", pool)
-        from sportsassets import position_rooms as PR
-        monkeypatch.setattr(PR, "PAPER_ACCOUNT_ID", a["account_id"])
+        # (rc6.3 pr5-port) the route's graph reads the durable PAPER selector
+        # (correlation_graph.read), no longer position_rooms.PAPER_ACCOUNT_ID:
+        # the test's account is the selected one here
+        from sportsassets import simulated_account_context as SAC
+
+        async def _selected(_conn):
+            return a["account_id"]
+        monkeypatch.setattr(SAC, "selected_account", _selected)
         via = await API.correlation_graph(Response())
         assert via["ok"] and len(via["nodes"]) == 5
         assert via["authority"] == CG.AUTHORITY

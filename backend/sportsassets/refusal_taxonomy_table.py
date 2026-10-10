@@ -2829,3 +2829,18 @@ NOT_REFUSAL.update({
         "of the acceptance judge, never a trading, decision, order or "
         "collector refusal",
 })
+
+#: (rc6.3 pr5-port, second review) intel.attribution.load_paper named no
+#: PAPER account (or a malformed one): its paper_acct_main default kept the
+#: red-team controls, the forward scoreboard and the loss attribution on the
+#: archive after an activation, so a read now refuses rather than guess --
+#: the software's own account selection, SOFTWARE / INTEGRITY, out of the
+#: trading funnel (a read, no order). The outgoing account's Audrey version
+#: that was not stored at a PAPER switch (paper_audrey.write_switch_version)
+#: refuses the switch whole: the same class as the report it could not write.
+DAY_ONE_PORT_REVIEW2_STREAM = {
+    "ATTRIBUTION_PAPER_ACCOUNT_NOT_NAMED": (S, INT, "OUT_OF_FUNNEL"),
+    "PAPER_SWITCH_AUDREY_VERSION_NOT_STORED": (S, INT, "OUT_OF_FUNNEL"),
+}
+for _k, _v in DAY_ONE_PORT_REVIEW2_STREAM.items():
+    TABLE.setdefault(_k, _v)

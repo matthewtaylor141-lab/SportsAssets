@@ -238,15 +238,24 @@ ENTRY_BOOK_SQL = """
 """
 
 
-async def read(conn, *, now: float) -> dict:
+async def read(conn, *, now: float, account_id: str | None = None) -> dict:
+    """THE LOSS ATTRIBUTION OF THE CURRENT PAPER BOOK: the selected PAPER
+    account (rc6.3 pr5-port; `account_id` None is the durable selector), named
+    in the report. Before this fix it named no account and load_paper's
+    default read paper_acct_main, so after an activation the route showed
+    the archive's losses as the current book."""
     from . import bettor_paper_ledger as L
     from .intel import attribution as A
+    if account_id is None:
+        from .simulated_account_context import selected_account
+        account_id = await selected_account(conn)
     # MAX_POSITIONS counts POSITIONS (RC6.2: the bound used to count every
     # ENTER decision, orderless ones included); a read the bound cut is
     # named in the report, never presented as the whole book
     meta: dict = {}
     rows = await A.load_paper(conn, now=now, days=HISTORY_DAYS,
-                              limit=MAX_POSITIONS, meta=meta)
+                              limit=MAX_POSITIONS, meta=meta,
+                              account_id=account_id)
     gids = sorted({r["group_id"] for r in rows if r.get("group_id")})
     cov, missed, spreads, fixtures, stale = {}, {}, {}, {}, 0
     if gids:
@@ -273,4 +282,5 @@ async def read(conn, *, now: float) -> dict:
     out = build(rows, coverage=cov, missed=missed, spreads=spreads,
                 fixtures=fixtures, stale_entries=stale)
     out["positions_read"] = dict(meta, complete=not meta.get("truncated"))
+    out["account_id"] = account_id
     return out

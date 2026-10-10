@@ -294,7 +294,8 @@ async def _read(conn, *, since, since_source: str, now: float, account_id: str |
     finally:
         await tr.rollback()
     if data is None:
-        return {"status": "UNAVAILABLE", "why": sources, "data": None}
+        return {"status": "UNAVAILABLE", "why": sources, "data": None,
+                "account_id": account_id}
     # R30A: the serving build's decision logic against the effective
     # cutover's (decision_logic is pure: no execution module is imported)
     from .. import decision_logic as DL
@@ -302,7 +303,9 @@ async def _read(conn, *, since, since_source: str, now: float, account_id: str |
     out = await asyncio.to_thread(
         V.compute, data, now=now, since=since, cutover=cutover,
         since_source=since_source, sources=sources, build_logic=build)
-    return {"status": "OK", "why": None, "data": out}
+    # (rc6.3 pr5-port) the population is named: the PAPER account read
+    return {"status": "OK", "why": None, "data": out,
+            "account_id": account_id}
 
 
 @router.get(PATH, dependencies=[Depends(require_read)])
@@ -332,6 +335,7 @@ async def profitability_validation(
                      data=got.get("data"), since=since,
                      summed_across_books=False,
                      summed_across_sleeves=False)
+    out["account_id"] = account_id
     for cached_key in list(_CACHE):
         if cached_key[0] != account_id or now - _CACHE[cached_key][0] >= CACHE_S:
             del _CACHE[cached_key]

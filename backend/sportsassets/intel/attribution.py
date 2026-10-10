@@ -251,7 +251,12 @@ def summarize(rows: list) -> dict:
 #: and 636 a day, 0 orders) crowded the actual positions out of the newest
 #: 5,000 -- `paper_rows` discards an orderless decision anyway, so the bound
 #: now counts positions only (paper_orders_decision_role_idx serves the
-#: probe). `$1` NULL = no window (a population no window declares).
+#: probe). `$1` NULL = no window (a population no window declares). `$2`
+#: (rc6.3 pr5-port) the PAPER accounts read, always named by the caller: the
+#: selected account, or the risk controls' epoch lineage
+#: (simulated_account_context.risk_history_accounts). There is no default
+#: account: before Day One every caller that omitted it read paper_acct_main
+#: and kept reading the archive after an activation.
 PAPER_DECISIONS_SQL = """
     SELECT d.decision_id, d.decided_at, d.valuation_id, d.us_market_slug,
            d.holding_side, d.p_pinnacle, d.p_blended, d.p_internal,
@@ -259,7 +264,7 @@ PAPER_DECISIONS_SQL = """
       FROM paper_decisions d
      WHERE d.verdict = 'ENTER'
        AND ($1::float8 IS NULL OR d.decided_at >= to_timestamp($1))
-       AND ($2::text IS NULL OR d.account_id = $2)
+       AND d.account_id = ANY($2::text[])
        AND EXISTS (SELECT 1 FROM paper_orders o
                     WHERE o.decision_id = d.decision_id
                       AND o.role = 'ENTRY')
@@ -341,8 +346,24 @@ def within(rows: list, since: float | None) -> list:
     return out
 
 
-async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
-                     account_id=C.PAPER_ACCOUNT,
+#: (rc6.3 pr5-port) load_paper was called without naming the PAPER
+#: account(s) it reads: refused, never a silent default account
+R_ACCOUNT_NOT_NAMED = "ATTRIBUTION_PAPER_ACCOUNT_NOT_NAMED"
+
+
+def paper_accounts(account_id) -> list:
+    """The PAPER accounts a read names: one account id, or a non-empty list
+    of them (an epoch lineage, nearest first). Anything else refuses by name
+    (R_ACCOUNT_NOT_NAMED)."""
+    if isinstance(account_id, str) and account_id:
+        return [account_id]
+    if isinstance(account_id, (list, tuple)) and account_id and all(
+            isinstance(a, str) and a for a in account_id):
+        return list(dict.fromkeys(account_id))
+    raise ValueError(R_ACCOUNT_NOT_NAMED)
+
+
+async def load_paper(conn, *, now, account_id, days=PAPER_WINDOW_DAYS,
                      limit=PAPER_POSITIONS_LIMIT,
                      meta: dict | None = None,
                      page=PAPER_PAGE_POSITIONS) -> list:
@@ -352,9 +373,16 @@ async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
     it is asked for, so a cut is known, not guessed. `meta`, when given,
     receives what was read and whether the stop left a position out
     (`truncated`, and `newest_unread_at`, the decided_at of the newest one
-    it left out), so a caller never takes a subset for the population."""
+    it left out), so a caller never takes a subset for the population.
+
+    `account_id` IS REQUIRED (rc6.3 pr5-port): one PAPER account or a list
+    of them (paper_accounts). It had a paper_acct_main default, and the
+    red-team controls, the forward scoreboard's claims and the Command loss
+    attribution called it without one, so after an activation they kept
+    reading the archive. `meta` names the accounts read."""
     from . import reads as R
 
+    accounts = paper_accounts(account_id)
     since = None if days is None else float(now) - float(days) * 86400.0
     limit, page = int(limit), max(1, int(page))
     out: list = []
@@ -365,7 +393,7 @@ async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
     # savepoint, statement timeout per statement and per FETCH) this is a
     # nested savepoint. The cursor reads ONE snapshot of the population.
     async with conn.transaction():
-        cur = await conn.cursor(PAPER_DECISIONS_SQL, since, account_id,
+        cur = await conn.cursor(PAPER_DECISIONS_SQL, since, accounts,
                                 limit + 1)
         while True:
             decs = [dict(r) for r in await cur.fetch(page)]
@@ -408,7 +436,8 @@ async def load_paper(conn, *, now, days=PAPER_WINDOW_DAYS,
                 break
     if meta is not None:
         meta.update({
-            "population": PAPER_POPULATION, "window_days": days,
+            "population": PAPER_POPULATION, "accounts": accounts,
+            "window_days": days,
             "since": since, "limit": limit, "positions_read": read,
             "truncated": truncated, "newest_unread_at": newest_unread_at,
             "oldest_read_at": oldest_read_at, "order": PAPER_READ_ORDER,

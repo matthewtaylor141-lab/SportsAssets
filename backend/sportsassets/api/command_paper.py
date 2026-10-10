@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -127,24 +128,84 @@ async def account_payload(conn, *, entries: int = 50,
     return out
 
 
+async def registered_epochs(conn) -> list:
+    """(rc6.3 pr5-port) every registered PAPER epoch, oldest first, with
+    whether it is selected now and whether it was rolled back -- a pointer
+    to a rolled-back epoch's archive and Audrey reports (read only)."""
+    if not await conn.fetchval(
+            "SELECT to_regclass('paper_account_epochs') IS NOT NULL"):
+        return []
+    selected = await conn.fetchval(
+        "SELECT account_id FROM paper_epoch_control WHERE singleton")
+    rows = await conn.fetch(
+        "SELECT e.epoch_id, e.account_id, e.previous_account_id, "
+        "       extract(epoch FROM e.opened_at)::float8 AS opened_at, "
+        "       (SELECT extract(epoch FROM max(v.recorded_at))::float8 "
+        "          FROM paper_epoch_events v WHERE v.epoch_id = e.epoch_id "
+        "           AND v.kind = 'ROLLBACK') AS rolled_back_at "
+        "  FROM paper_account_epochs e ORDER BY e.opened_at, e.epoch_id")
+    return [dict(dict(r), selected=r['account_id'] == selected,
+                 rolled_back=r['rolled_back_at'] is not None,
+                 archive_href='/api/command/paper/archive/%s' % r['account_id'],
+                 audrey_href='/api/command/paper/audrey?account_id=%s'
+                             % r['account_id'])
+            for r in rows]
+
+
 @router.get('/api/command/paper/day-one', dependencies=[Depends(require_read)])
 async def day_one_epoch():
     from .. import bettor_paper_epoch as E
     pool = await _pool()
     async with pool.acquire() as conn:
-        return await E.read_account_epoch(conn)
+        out = await E.read_account_epoch(conn)
+        # after a rollback the selected account is no epoch (day_one False):
+        # the registered epochs, rolled-back ones included, stay reachable
+        out['registered_epochs'] = await registered_epochs(conn)
+        return out
+
+
+#: (rc6.3 pr5-port) the archive view's page bound (newest first)
+ARCHIVE_PAGE_MAX = 500
+LABEL_HISTORICAL = 'HISTORICAL PAPER — LOSSES AND OBLIGATIONS PRESERVED'
+LABEL_SELECTED = 'SELECTED PAPER ACCOUNT — THE CURRENT SIMULATED BOOK'
 
 
 @router.get('/api/command/paper/archive/{account_id}', dependencies=[Depends(require_read)])
-async def historical_account(account_id: str):
+async def historical_account(
+        account_id: str,
+        before_seq: Annotated[int | None, Query(ge=1)] = None,
+        limit: Annotated[int, Query(ge=1, le=ARCHIVE_PAGE_MAX)] = 100):
+    """A PAPER account's balances and its ledger, newest first, a page at a
+    time (rc6.3 pr5-port): `before_seq` pages back to the account's first
+    entry (`page.next_before_seq` is the next page's cursor, None at the
+    first entry). The selected account is labelled as the current book,
+    never HISTORICAL; an unreadable selector refuses by name."""
     from .. import bettor_paper_ledger as L
     if not L.is_paper_id(account_id):
         raise HTTPException(status_code=400, detail='NOT_A_PAPER_IDENTIFIER')
     pool = await _pool()
     async with pool.acquire() as conn:
-        return {'label': 'HISTORICAL PAPER — LOSSES AND OBLIGATIONS PRESERVED',
-                'account_id': account_id, 'balances': await L.balances(conn, account_id),
-                'ledger': await L.latest_entries(conn, account_id, limit=100)}
+        try:
+            selected = await L.selected_account(conn)
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+        rows = await L.latest_entries(conn, account_id, limit=int(limit),
+                                      before_seq=before_seq)
+        seqs = [r.get('sequence') for r in rows
+                if r.get('sequence') is not None]
+        nxt = min(seqs) if seqs and len(rows) == int(limit) else None
+        if nxt is not None and not await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM paper_ledger WHERE "
+                " account_id=$1 AND seq < $2)", account_id, nxt):
+            nxt = None
+        return {'label': (LABEL_SELECTED if account_id == selected
+                          else LABEL_HISTORICAL),
+                'account_id': account_id, 'selected_account_id': selected,
+                'balances': await L.balances(conn, account_id),
+                'ledger': rows,
+                'page': {'before_seq': before_seq, 'limit': int(limit),
+                         'order': 'seq descending (newest first)',
+                         'next_before_seq': nxt}}
 
 
 async def session_brief(conn, bal: dict) -> dict:
@@ -426,12 +487,39 @@ async def paper_xavier(limit: int = Query(100, ge=1, le=1000)) -> dict:
 
 @router.get("/api/command/paper/audrey",
             dependencies=[Depends(require_read)])
-async def paper_audrey(limit: int = Query(50, ge=1, le=500)) -> dict:
+async def paper_audrey(
+        limit: Annotated[int, Query(ge=1, le=500)] = 50,
+        account_id: Annotated[str | None, Query()] = None) -> dict:
+    """Audrey's daily reports and audit entries of the selected PAPER
+    account, or (rc6.3 pr5-port) of another account of its epoch family
+    (`account_id`: the archived source, a rolled-back or sibling epoch),
+    whose switch-day and late-revision versions Audrey still writes. An
+    account outside the family is refused by name."""
     pool = await _pool()
     async with pool.acquire() as conn:
         if not await _schema(conn):
             return dict(_labels(), audrey=_unavailable_schema())
-        return await _readmodel("audrey_payload", conn, limit=limit)
+        if account_id is not None:
+            from ..simulated_account_context import (risk_history_accounts,
+                                                     selected_account)
+            try:
+                family = await risk_history_accounts(
+                    conn, await selected_account(conn))
+            except ValueError as exc:
+                raise HTTPException(status_code=503, detail=str(exc))
+            if account_id not in family:
+                raise HTTPException(status_code=404, detail={
+                    "reason": "NOT_AN_ACCOUNT_OF_THE_PAPER_EPOCH_FAMILY",
+                    "family": family})
+        out = await _readmodel("audrey_payload", conn, limit=limit,
+                               account_id=account_id)
+        out["account_id"] = account_id or await _selected(conn)
+        return out
+
+
+async def _selected(conn):
+    from ..simulated_account_context import selected_account
+    return await selected_account(conn)
 
 
 @router.get("/api/command/paper/benchmark",

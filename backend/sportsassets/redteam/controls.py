@@ -498,8 +498,26 @@ def attribution(attributed: list, read: dict | None = None) -> dict:
 ATTRIBUTION_WINDOW_DAYS = 60.0
 
 
+async def attribution_accounts(conn, account_id: str | None = None) -> list:
+    """THE PAPER ACCOUNTS THE RISK AND LEARNING CONTROLS READ (rc6.3
+    pr5-port): the selected account's epoch family
+    (simulated_account_context.risk_history_accounts: the selected account,
+    its registered ancestors, rolled-back children and sibling epochs), so
+    an activation neither resets their populations nor hides Day One's
+    positions from them. Each position keeps its own account and original
+    decided_at. Before any epoch the family is paper_acct_main alone (the
+    population read before Day One). `account_id` None is the durable
+    selector."""
+    from ..simulated_account_context import (risk_history_accounts,
+                                             selected_account)
+    if account_id is None:
+        account_id = await selected_account(conn)
+    return await risk_history_accounts(conn, account_id)
+
+
 async def attributed_positions(conn, *, now: float,
-                               detail: dict | None = None) -> tuple:
+                               detail: dict | None = None,
+                               account_id: str | None = None) -> tuple:
     """EVERY PAPER position, attributed (no window; read whole, a page at a
     time, up to load_paper's safety stop, and `detail` receives the read's
     figures and whether the stop left any out). Each
@@ -508,10 +526,19 @@ async def attributed_positions(conn, *, now: float,
     study every position (its plan declares no window), the forward
     scoreboard its cohort since the thresholds' frozen_at. RC6.2: one
     60-day read served all of them, so the study and the scoreboard cohort
-    would lose their oldest members as they aged past 60 days."""
+    would lose their oldest members as they aged past 60 days.
+
+    THE POPULATION'S ACCOUNTS (rc6.3 pr5-port) are the selected account's
+    epoch family (attribution_accounts); `detail["accounts"]` names them, so
+    a consumer that reconciles these rows (the forward scoreboard's ledger
+    check) reads the same accounts. Before this fix the read named no
+    account and load_paper's default read paper_acct_main after an
+    activation."""
     from ..intel import attribution as IA
     meta: dict = {}
-    rows = await IA.load_paper(conn, now=now, days=None, meta=meta)
+    accounts = await attribution_accounts(conn, account_id)
+    rows = await IA.load_paper(conn, now=now, days=None, meta=meta,
+                               account_id=accounts)
     if detail is not None:
         detail.update(meta)
     gids = sorted({r.get("group_id") for r in rows if r.get("group_id")})

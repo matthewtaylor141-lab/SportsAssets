@@ -1556,7 +1556,7 @@ async def _core_or_unavailable(conn, acct, now):
 
 async def summary_report(conn, *, account_id: str | None = None,
                          now: float | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:
@@ -1575,7 +1575,7 @@ async def pnl_report(conn, *, account_id: str | None = None,
                      now: float | None = None, period: str = "ALL",
                      start: str | None = None,
                      end: str | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:
@@ -1590,7 +1590,7 @@ async def pnl_report(conn, *, account_id: str | None = None,
 
 async def performance_report(conn, *, account_id: str | None = None,
                              now: float | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:
@@ -1627,7 +1627,7 @@ async def standing_orders(conn, acct: str) -> dict:
 
 async def positions_report(conn, *, account_id: str | None = None,
                            now: float | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:
@@ -1734,7 +1734,7 @@ async def fetch_orders(conn, acct: str, *, limit: int | None,
 async def blotter_report(conn, *, account_id: str | None = None,
                          now: float | None = None, kind: str = "both",
                          limit: int = 50, offset: int = 0) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     at = float(now if now is not None else time.time())
     out = base(at, acct)
     if not await has_schema(conn):
@@ -1772,7 +1772,7 @@ async def blotter_report(conn, *, account_id: str | None = None,
 
 async def attribution_report(conn, *, account_id: str | None = None,
                              now: float | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:
@@ -1815,7 +1815,7 @@ async def open_order_commitments(conn, acct: str, meta: dict) -> dict:
 
 async def risk_report(conn, *, account_id: str | None = None,
                       now: float | None = None) -> dict:
-    acct = account_id or _L().ACCOUNT_ID
+    acct = account_id or await _L().selected_account(conn)
     c, at, why = await _core_or_unavailable(conn, acct, now)
     out = base(at or time.time(), acct)
     if c is None:

@@ -1439,7 +1439,16 @@ async def read(conn, *, now: float | None = None,
     refusal, never a partial graph."""
     from . import settlement_exception_risk as SER
     at = float(now if now is not None else time.time())
-    acct = account_id or PR.PAPER_ACCOUNT_ID
+    if account_id is None:
+        # (rc6.3 pr5-port) the durable PAPER selector, as position_rooms.load
+        # (Command's position rooms) resolves it: before this the graph read
+        # paper_acct_main after an activation. Unreadable -> named refusal.
+        from .simulated_account_context import selected_account
+        try:
+            account_id = await selected_account(conn)
+        except ValueError as exc:
+            return {"ok": False, "refusal": str(exc)}
+    acct = account_id
     raw = await PR._paper(conn, at, acct)
     if not raw.get("available"):
         return {"ok": False,
