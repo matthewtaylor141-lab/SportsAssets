@@ -43,9 +43,15 @@ the loop's sources is within HEALTH_FACTOR (3) x its cadence; UNHEALTHY when
 older, when the loop has NEVER succeeded since its last known start (its own
 START record, or the process's boot) and that start is more than 3 x cadence
 ago, or when a capital-critical, armed loop's writer lock is held by no
-backend; STARTING when it started less than 3 x cadence ago and has not
-succeeded yet; DISABLED (named) when the loop is not armed in this
-deployment; EVENT_DRIVEN when it has no cadence to judge against;
+backend; DEGRADED (RC6.2 D6g, why LATEST_RUN_PHASE_ERRORS:<phase>:<err>)
+when the newest success inside 3 x cadence is a service heartbeat whose
+detail records non-empty phase_errors -- the loop ran but its run's phases
+errored (production: archer_runner beat 'ok' with {results: TimeoutError}
+on every run), so it is never HEALTHY, and a capital-critical DEGRADED loop
+is in capital_critical_not_healthy; STARTING when it started less than 3 x
+cadence ago and has not succeeded yet; DISABLED (named) when the loop is
+not armed in this deployment; EVENT_DRIVEN when it has no cadence to judge
+against;
 UNAVAILABLE (named) only when its sources are unreadable or absent, or when
 nothing says when it last started -- never a manufactured success.
 
@@ -73,7 +79,8 @@ from datetime import datetime, timezone
 
 log = logging.getLogger(__name__)
 
-VERSION = "LOOP_HEALTH_V1"
+#: V2 (RC6.2 D6g): the verdict vocabulary gained DEGRADED
+VERSION = "LOOP_HEALTH_V2"
 HEALTH_FACTOR = 3.0
 RECORD_TIMEOUT_S = 3.0
 WARN_EVERY_S = 300.0
@@ -1016,7 +1023,9 @@ async def read(conn, *, now: float | None = None, env=None) -> dict:
                     "than %g x the loop's cadence, or when there is none "
                     "since a start more than %g x cadence ago; a heartbeat "
                     "counts only when its status is in its writer's "
-                    "success vocabulary" % (HEALTH_FACTOR, HEALTH_FACTOR),
+                    "success vocabulary; DEGRADED when the newest success "
+                    "is a heartbeat whose detail records non-empty "
+                    "phase_errors" % (HEALTH_FACTOR, HEALTH_FACTOR),
             "process_started_at": {"api": boots["api"],
                                    "workers": boots["workers"]},
             "loops": loops, "summary": summary,

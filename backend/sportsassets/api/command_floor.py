@@ -25,7 +25,12 @@ timestamps -- nothing here is invented for animation:
   CHALLENGING   Karen with a run in progress or a challenge raised inside
                 ACTIVE_WINDOW_S
   WAITING       agent_status says WAITING_FOR_EVIDENCE / WAITING_FOR_PROVIDER
-                / BLOCKED / FAILED / RECOVERING (the activity says on what)
+                / BLOCKED / FAILED / RECOVERING (the activity says on what);
+                or (RC6.2 D6g) Archer's newest finished run, inside the
+                heartbeat window, recorded phase errors or ended FAILED: the
+                detail reads "DEGRADED: ..." naming that run's phase errors
+                and how many of his last RUN_HISTORY finished runs errored,
+                and the desk carries the run as `degraded` (agent_runs)
   IDLE          heartbeat fresh, nothing in progress or recent
 
 THE WORK STATE (owner R30, `work_state` / `work_detail` / `work_basis` /
@@ -118,6 +123,12 @@ STALE_FACTOR = 3.0                # x the agent's recorded cadence
 RUN_WINDOW_FLOOR_S = 600.0        # a run older than this is not "in progress"
 DETAIL_WINDOW_S = 86400.0         # a workspace's timeline: the last day
 ALLOCATOR_CYCLE_S = 600.0         # intel/runner.CYCLE_S (read, not imported)
+#: (RC6.2 D6g) the newest finished runs read for a desk's run-error figure
+#: (one hour of Archer at his 300 s cadence)
+RUN_HISTORY = 12
+#: (RC6.2 D6g) the desks whose newest finished run is read for recorded
+#: phase errors (archer_runner records them in the run's summary)
+RUN_ERROR_DESKS = ("ARCHER",)
 #: evidence ids carried per collaboration edge (= merge_edges max_evidence)
 EDGE_EVIDENCE = 5
 #: = the agent_conv_agents_ck CHECK of agent_conversation_messages (224 /
@@ -310,14 +321,71 @@ def run_in_progress(status: dict | None, now: float,
     return 0 <= now - started <= max(window_s, RUN_WINDOW_FLOOR_S)
 
 
+def run_phase_errors(raw) -> dict:
+    """(RC6.2 D6g) The non-empty phase_errors object a runner recorded in a
+    run's summary (jsonb text or a dict), else {}. Pure."""
+    v = _j(raw) if isinstance(raw, (str, bytes)) else raw
+    if not isinstance(v, dict):
+        return {}
+    return {str(k): str(e)[:120] for k, e in v.items() if e}
+
+
+def _run_errored(run: dict) -> bool:
+    return (run.get("outcome") == "FAILED"
+            or bool(run_phase_errors(run.get("phase_errors"))))
+
+
+def run_degraded(runs: list, *, now: float, window_s: float) -> dict | None:
+    """(RC6.2 D6g) THE DESK'S RUN-ERROR TRUTH, from the agent's own runs.
+
+    `runs`: the agent's newest finished agent_runs rows, newest first (at
+    most RUN_HISTORY). When the NEWEST finished run -- finished inside
+    `window_s` of `now` -- recorded phase errors or ended FAILED, returns
+    that run (id, finished_at, outcome, phase_errors) and how many of the
+    runs read errored (outcome FAILED or non-empty phase_errors, the rule
+    agent_status_contract counts failed runs by). Otherwise None: a newest
+    run that is clean, or older than the window, is not degraded, whatever
+    the lifetime agent_status counters say. Pure."""
+    if not runs:
+        return None
+    newest = runs[0]
+    fin = _ep(newest.get("finished_at"))
+    if fin is None or now - fin > window_s or not _run_errored(newest):
+        return None
+    pe = run_phase_errors(newest.get("phase_errors"))
+    return {"why": "LATEST_RUN_PHASE_ERRORS" if pe else "LATEST_RUN_FAILED",
+            "source": "agent_runs", "run_id": newest.get("run_id"),
+            "finished_at": fin, "outcome": newest.get("outcome"),
+            "phase_errors": pe,
+            "errored_runs": sum(1 for r in runs if _run_errored(r)),
+            "finished_runs_read": len(runs),
+            "rule": "a finished run errored when its outcome is FAILED or "
+                    "its summary records non-empty phase_errors"}
+
+
+def degraded_detail(d: dict) -> str:
+    """The desk detail for a `run_degraded` result. Pure."""
+    pe = d.get("phase_errors") or {}
+    what = ("recorded phase errors %s" % ",".join(
+        "%s:%s" % kv for kv in sorted(pe.items())) if pe else
+        "ended %s" % d.get("outcome"))
+    return ("DEGRADED: newest finished run %s · %d of the last %d finished "
+            "runs errored" % (what, d["errored_runs"],
+                              d["finished_runs_read"]))
+
+
 def derive_state(agent: str, *, now: float, deployed: bool,
                  deploy_why: str | None, heartbeat_at, stale_s: float,
-                 status: dict | None, signals: list) -> dict:
+                 status: dict | None, signals: list,
+                 degraded: dict | None = None) -> dict:
     """THE ONE STATE OF ONE DESK, from real rows only. Pure.
 
     `signals`: recent real activities, each {"at", "hint" (WORKING_ON /
-    REVIEWING / CHALLENGING), "label", "ref", "basis"}. Returns {"state",
-    "detail", "since", "basis", "activity_basis", "heartbeat_age_s"}."""
+    REVIEWING / CHALLENGING), "label", "ref", "basis"}. `degraded`: a
+    `run_degraded` result (RC6.2 D6g) -- the newest finished run errored;
+    it outranks recent outputs and the recorded agent_status (a run now in
+    progress is still shown as such). Returns {"state", "detail", "since",
+    "basis", "activity_basis", "heartbeat_age_s"} (+ "degraded" when used)."""
     hb = _ep(heartbeat_at)
     age = None if hb is None else round(max(0.0, now - hb), 1)
     out = {"heartbeat_age_s": age, "stale_after_s": stale_s,
@@ -345,6 +413,14 @@ def derive_state(agent: str, *, now: float, deployed: bool,
                     activity_basis="RUN_IN_PROGRESS",
                     basis=[{"kind": "agent_status", "id": agent,
                             "at": _ep(st.get("last_run_started_at"))}])
+    if degraded:
+        return dict(out, state="WAITING", detail=degraded_detail(degraded),
+                    since=degraded.get("finished_at"),
+                    activity_basis=degraded.get("why"), degraded=degraded,
+                    basis=[{"kind": "agent_runs",
+                            "id": degraded.get("run_id"),
+                            "at": degraded.get("finished_at"),
+                            "why": degraded.get("why")}])
     recent = sorted([s for s in signals or []
                      if _ep(s.get("at")) is not None
                      and 0 <= now - _ep(s["at"]) <= ACTIVE_WINDOW_S],
@@ -683,6 +759,24 @@ async def _archer(rd: _Reads, now: float) -> dict:
                 "last": None if last is None else dict(last)}
     return await rd.run("eddie_execution_estimates",
                         ("eddie_execution_estimates",), fn) or {}
+
+
+#: (RC6.2 D6g) one agent's newest FINISHED runs, newest first, with the
+#: phase errors its runner recorded in the run's summary (finish_run);
+#: agent_runs_agent_idx (agent_id, started_at DESC) bounds it. $2 = the cap.
+LAST_RUNS_SQL = (
+    "SELECT run_id, started_at, finished_at, outcome, "
+    "       summary -> 'phase_errors' AS phase_errors "
+    "  FROM agent_runs WHERE agent_id = $1 AND finished_at IS NOT NULL "
+    " ORDER BY started_at DESC LIMIT $2")
+
+
+async def _last_runs(rd: _Reads, agent: str) -> list:
+    async def fn(conn):
+        return [dict(r) for r in await conn.fetch(LAST_RUNS_SQL, agent,
+                                                  RUN_HISTORY)]
+    return await rd.run("agent_runs.%s" % agent, ("agent_runs",), fn,
+                        default=[]) or []
 
 
 async def _scout(rd: _Reads, now: float) -> dict:
@@ -1314,9 +1408,15 @@ async def build_floor(conn, *, now: float | None = None,
                                 "ref": e["evidence"][0] if e["evidence"]
                                 else None})
 
+        # (RC6.2 D6g) the newest finished run's own recorded phase errors,
+        # never the lifetime agent_status runs/errors counters
+        degraded = run_degraded(await _last_runs(rd, a), now=now,
+                                window_s=stale_s) \
+            if a in RUN_ERROR_DESKS and deployed else None
         state = derive_state(a, now=now, deployed=deployed,
                              deploy_why=deploy_why, heartbeat_at=hb_at,
-                             stale_s=stale_s, status=st, signals=signals)
+                             stale_s=stale_s, status=st, signals=signals,
+                             degraded=degraded)
         wk = work_states.get(a) if deployed else None
         tgt = by_target.get(a) or {}
         agents.append({
@@ -1342,6 +1442,9 @@ async def build_floor(conn, *, now: float | None = None,
             "state": state["state"], "state_detail": state["detail"],
             "state_since": state["since"], "state_basis": state["basis"],
             "activity_basis": state["activity_basis"],
+            # (RC6.2 D6g) the errored newest finished run, also while a new
+            # run is in progress; None when it is clean or not read
+            "degraded": degraded,
             "focus": focus, "last_output": last_output,
             "monitor": monitor,
             "work_state": (wk or {}).get("state"),

@@ -6,7 +6,8 @@ reasons?
   loops        the runtime loop verdicts (sportsassets/loop_health.py, its
                own reader): counts by verdict, alive share among the loops
                that should be running (DISABLED and EVENT_DRIVEN excluded),
-               the capital-critical loops not healthy
+               the stale (UNHEALTHY) and DEGRADED shares beside it, the
+               capital-critical loops not healthy
   decisions    decisions and entries per hour over the last 1 h and 24 h,
                the strategies that decided in 24 h, the age of the newest
                decision and the longest silence between decisions in 24 h
@@ -34,12 +35,16 @@ def loops_block(lh):
     expected = [lp for lp in loops if lp.get("status") not in NOT_EXPECTED]
     healthy = [lp for lp in expected if lp.get("status") == "HEALTHY"]
     unhealthy = [lp for lp in expected if lp.get("status") == "UNHEALTHY"]
+    # (RC6.2 D6g) running, but its newest run's phases errored: neither
+    # alive (healthy) nor stale, so it has its own share
+    degraded = [lp for lp in expected if lp.get("status") == "DEGRADED"]
     return {"status": C.OK if loops else C.EMPTY,
             "why": None if loops else "NO_LOOP_IN_INVENTORY",
             "summary": got.get("summary"), "loops": len(loops),
             "expected_running": len(expected),
             "alive_share": C.share(len(healthy), len(expected)),
             "stale_share": C.share(len(unhealthy), len(expected)),
+            "degraded_share": C.share(len(degraded), len(expected)),
             "capital_critical_not_healthy":
                 got.get("capital_critical_not_healthy") or [],
             "sources_missing": got.get("sources_missing") or []}
