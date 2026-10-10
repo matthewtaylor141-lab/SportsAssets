@@ -121,7 +121,7 @@ async def test_the_six_hundred_position_proof_leaves_no_ledger_rows_behind():
         loops_before = await _paper_sql_valuation_loops(conn)
         settled_before = (await SER.measure(conn))["source"][
             "paper_settled_positions"]
-        await T.test_the_settle_step_reads_outcome_rows_in_one_statement_for_six_hundred_positions()  # noqa: E501
+        await T.test_the_settle_step_reads_outcome_rows_in_one_statement_for_six_hundred_positions()
         after = await _rows_of_the_proofs(conn)
         # ada9270c: paper_settlements +600, paper_fills +600, paper_orders +600,
         # settlements_without_a_valuation_row +600
@@ -142,7 +142,7 @@ async def test_the_every_kind_proof_leaves_no_ledger_rows_behind(monkeypatch):
     try:
         before = await _rows_of_the_proofs(conn)
         loops_before = await _paper_sql_valuation_loops(conn)
-        await T.test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_with_the_per_slug_loop(  # noqa: E501
+        await T.test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_with_the_per_slug_loop(
             monkeypatch)
         after = await _rows_of_the_proofs(conn)
         # ada9270c: the two accounts' settlements (the ledger's own, the
@@ -158,7 +158,7 @@ async def test_the_row_for_row_proof_leaves_no_valuation_rows_behind():
     conn = await H.connect()
     try:
         before = await _rows_of_the_proofs(conn)
-        await T.test_the_batched_read_returns_each_contracts_rows_as_the_per_slug_read_did()  # noqa: E501
+        await T.test_the_batched_read_returns_each_contracts_rows_as_the_per_slug_read_did()
         assert await _rows_of_the_proofs(conn) == before
     finally:
         await conn.close()
