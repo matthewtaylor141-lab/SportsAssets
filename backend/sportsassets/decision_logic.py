@@ -165,6 +165,12 @@ DECISION_LOGIC_FILES = (
     # lost_opportunity/score.py do -- pinned, so a change restarts the
     # forward window rather than slipping under it
     "execution_evidence.py", "settlement_exception_risk.py",
+    # (RC6.3 allie-exposure) the canonical open-quantity rule and the open
+    # exposure statements Allie's book / fixture inputs execute
+    # (canonical_components.allie_at_decision): they set the exposure the
+    # intent's allie component records, so a change restarts the forward
+    # window rather than slipping under it
+    "open_position_canon.py",
     "opportunity_score_v2.py")
 
 #: THE ROOTS whose package imports the test derives the list from: the
