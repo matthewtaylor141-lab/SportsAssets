@@ -474,13 +474,53 @@ async def filler_valuations(conn, n, *, prefix):
         prefix + "o%")
 
 
-async def purge(conn, prefixes):
+#: THE PAPER LEDGER ROWS A PROOF ACCOUNT CARRIES, deleted with the valuations
+#: when the proof ends (the order respects paper_order_events -> paper_orders
+#: and leaves the account, its session and its INITIAL_FUNDING entry: a fresh,
+#: funded, empty paper account is the state every other proof already leaves).
+_ACCOUNT_ROWS_SQL = (
+    "DELETE FROM paper_settlements WHERE account_id = ANY($1::text[])",
+    "DELETE FROM paper_fills WHERE account_id = ANY($1::text[])",
+    ("DELETE FROM paper_order_events WHERE order_id IN (SELECT order_id "
+     " FROM paper_orders WHERE account_id = ANY($1::text[]))"),
+    "DELETE FROM paper_orders WHERE account_id = ANY($1::text[])",
+    ("DELETE FROM paper_ledger WHERE account_id = ANY($1::text[]) "
+     " AND kind <> 'INITIAL_FUNDING'"),
+    "DELETE FROM paper_audrey_findings WHERE account_id = ANY($1::text[])",
+)
+
+
+async def purge(conn, prefixes, accounts=()):
+    """What this proof wrote, removed -- and only that: the valuations under
+    its slug prefixes, and the paper orders, fills, settlements, ledger
+    entries and findings of the paper accounts it created (`accounts`).
+
+    THE SETTLEMENT ROWS ARE NOT OPTIONAL (backend-tests 38076712880 on
+    dd25c588). This proof seeds 1,200+ settled positions under fresh
+    accounts; with only the valuations purged, their paper_settlements rows
+    stayed committed in the shared CI database, each on a contract that no
+    longer has a valuation row. settlement_exception_risk.measure (the
+    canonical decision's settlement-exception component, run under the 2.0 s
+    component bound) reads paper_settlements with one LATERAL scan of
+    external_valuations PER SETTLEMENT ROW (no index on us_market_slug), so
+    1,200 leftover rows x the valuations other tests had since committed made
+    the read 4+ s in CI and the component COMPONENT_TIMEOUT_AT_DECISION_2.0S
+    in tests/test_settlement_exception_risk.py::
+    test_the_cost_rides_on_the_intent_and_gates_nothing, 2,700 tests later
+    (measured locally: 1,216 rows x 20,000 valuations = 6.7 s; the same
+    valuations with the rows removed, 0.01 s). The polluter cleans up what it
+    wrote; the victim's read is production code and is not changed here."""
+    accts = [a["account_id"] if isinstance(a, dict) else a
+             for a in (accounts or ()) if a]
     async with conn.transaction():
         await conn.execute("SET LOCAL session_replication_role = replica")
         for p in prefixes:
             await conn.execute(
                 "DELETE FROM external_valuations WHERE us_market_slug LIKE $1",
                 p + "%")
+        if accts:
+            for sql in _ACCOUNT_ROWS_SQL:
+                await conn.execute(sql, accts)
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -546,10 +586,12 @@ EXPECTED_DIGEST = {"settled": 4, "corrected": 1, "conflicts": 1, "waiting": 2,
 async def test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_with_the_per_slug_loop(
         monkeypatch):
     conn = await H.connect()
+    accounts: list = []
     try:
         # A: the base's read, one statement per contract, through the same
         # step (the batched read swapped for the per-slug reference)
         a1, k1 = await seed_kinds(conn, "s1old")
+        accounts.append(a1)
         monkeypatch.setattr(PX, "outcome_rows_by_slug", per_slug_reference)
         reads = Counting(conn)
         res_old = await PX.step_settle(reads, _ctx(a1, AT))
@@ -558,6 +600,7 @@ async def test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_
         snap_old = await snapshot(conn, a1, k1)
         # B: the batched read
         a2, k2 = await seed_kinds(conn, "s2new")
+        accounts.append(a2)
         reads = Counting(conn)
         res_new = await PX.step_settle(reads, _ctx(a2, AT))
         snap_new = await snapshot(conn, a2, k2)
@@ -613,7 +656,7 @@ async def test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_
         assert again_new["conflicts"] == 1 and again_new["waiting"] == 2
         assert await snapshot(conn, a2, k2) == snap_new
     finally:
-        await purge(conn, [SYN])
+        await purge(conn, [SYN], accounts=accounts)
         await conn.close()
 
 
@@ -625,6 +668,7 @@ async def test_the_settle_step_books_the_same_outcomes_with_the_batched_read_as_
 async def test_the_settle_step_reads_outcome_rows_in_one_statement_for_six_hundred_positions():
     conn = await H.connect()
     pre = SYN + "bulk-"
+    a = None
     try:
         a = await H.new_account(conn, "s3bulk", now=AT - 60_000.0)
         slugs = await bulk_closed_positions(conn, a, 600, prefix=pre)
@@ -642,7 +686,7 @@ async def test_the_settle_step_reads_outcome_rows_in_one_statement_for_six_hundr
         by = await PX.outcome_rows_by_slug(conn, slugs)
         assert len(by) == 600 and all(len(v) == 1 for v in by.values())
     finally:
-        await purge(conn, [pre])
+        await purge(conn, [pre], accounts=[a])
         await conn.close()
 
 
@@ -664,6 +708,7 @@ async def test_the_settle_step_is_under_two_seconds_at_production_scale():
     pass); the batched read scans it once."""
     conn = await H.connect()
     pre, fill = SYN + "scale-", SYN + "fill-" + uuid.uuid4().hex[:6] + "-"
+    a = None
     try:
         a = await H.new_account(conn, "s4scale", now=AT - 60_000.0)
         slugs = await bulk_closed_positions(conn, a, POSITIONS, prefix=pre)
@@ -695,7 +740,7 @@ async def test_the_settle_step_is_under_two_seconds_at_production_scale():
                                                                  batched_s))
         assert batched == ref
     finally:
-        await purge(conn, [pre, fill])
+        await purge(conn, [pre, fill], accounts=[a])
         await conn.close()
 
 
