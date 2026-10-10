@@ -15,7 +15,9 @@ what docs.kalshi.com documents (websocket-connection, asyncapi, changelog
     `ok` takes the sid's next seq (one counter per sid, the plain reading
     of the schema) -- then the new markets' snapshots;
   * update_subscription add_markets / delete_markets / get_snapshot act on
-    the same sid and are answered by `ok` (seq) the same way;
+    the same sid and are answered by `ok` (seq) the same way; get_snapshot
+    then sends a snapshot of EVERY requested ticker, held or not ("without
+    modifying the subscription");
   * unsubscribe {sids} -> `unsubscribed` {id, sid, seq}; an unknown sid ->
     error code 7.
 
@@ -141,9 +143,12 @@ class DocVenue:
                                    if t not in ts]
             self.out.append(self._ok(cid))
         elif action == "get_snapshot":
+            # asyncapi: "returns an orderbook_snapshot for the requested
+            # market_tickers without modifying the subscription" -- for
+            # every requested ticker, held or not (RC6.2 review: it used
+            # to answer only the held ones, which the docs contradict)
             self.out.append(self._ok(cid))
-            self.out.extend(self._snap(t) for t in ts
-                            if t in self.sub["markets"])
+            self.out.extend(self._snap(t) for t in ts)
         else:
             self.out.append(self._error(cid, 13))
 
