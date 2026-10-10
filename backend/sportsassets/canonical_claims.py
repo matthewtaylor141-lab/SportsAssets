@@ -268,6 +268,13 @@ class Instrument:
     rules_sha256: str | None = None
     #: KALSHI: the published fee terms in force (kalshi_fees.effective_terms)
     fee_terms: dict | None = None
+    #: (rc6.3 route-book) where the book a ROUTE is costed on came from
+    #: (canonical_claims_db.route_books), and -- when no book may be used --
+    #: why, by name: the alias is then a route candidate with no book, never
+    #: costed on a stale or mismatched one. None on every other path.
+    book_source: str | None = None
+    book_refusal: str | None = None
+    book_detail: dict | None = None
     vector: dict = field(default_factory=dict)
     fingerprint: str | None = None
     refusals: list = field(default_factory=list)
@@ -387,7 +394,9 @@ def route_claim(fx: Fixture, fp: str, members: list, *, qty: int,
     insts = [package_instrument(fx, i) for i in members]
     books = {}
     for i, pi in zip(members, insts):
-        b = package_book(i, max_age_s=max_age_s)
+        # (rc6.3 route-book) an alias whose book was refused by name is
+        # never costed, alone or in a split
+        b = None if i.book_refusal else package_book(i, max_age_s=max_age_s)
         if b is not None:
             books[pi.key] = b
     cand = []
@@ -399,6 +408,12 @@ def route_claim(fx: Fixture, fp: str, members: list, *, qty: int,
                "ask": None if not i.asks else str(min(
                    Decimal(str(p)) for p, _q in i.asks)),
                "depth": sum(int(q) for _p, q in i.asks)}
+        if i.book_source:
+            row["book_source"] = i.book_source
+        if i.book_refusal:
+            cand.append(dict(row, eligible=False, reason=i.book_refusal,
+                             book_detail=dict(i.book_detail or {})))
+            continue
         if b is None:
             cand.append(dict(row, eligible=False, reason="NO_BOOK"))
             continue

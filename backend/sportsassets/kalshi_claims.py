@@ -157,6 +157,21 @@ def map_pmus(k: KMD.KalshiFixture, candidates: list) -> dict:
             "rejected": dict(list(why.items())[:10])}
 
 
+def pmus_asks(book: dict | None) -> tuple:
+    """(YES asks, NO asks) of ONE PMUS market's book: YES (BUY_LONG) at the
+    offers; NO (BUY_SHORT, the same market's other side) at 1 - each bid --
+    the venue's own intent, never a synthesized price. Levels below one
+    contract are dropped; each side sorted cheapest first."""
+    b = book or {}
+    offers = tuple(sorted(((Decimal(str(p)), int(q)) for p, q in
+                           (b.get("offers") or ()) if int(q) >= 1),
+                          key=lambda z: z[0]))
+    short = tuple(sorted(((Decimal(1) - Decimal(str(p)), int(q)) for p, q in
+                          (b.get("bids") or ()) if int(q) >= 1),
+                         key=lambda z: z[0]))
+    return offers, short
+
+
 def pmus_instruments(k: KMD.KalshiFixture, m: dict, *, evidence: dict | None,
                      book: dict | None, sport: str | None = None) -> list:
     """m = map_pmus(...)['pmus']: LONG is YES on team_a; SHORT is the NO of
@@ -168,12 +183,7 @@ def pmus_instruments(k: KMD.KalshiFixture, m: dict, *, evidence: dict | None,
         return []
     s, st = _settlement(evidence)
     b = book or {}
-    offers = tuple(sorted(((Decimal(str(p)), int(q)) for p, q in
-                           (b.get("offers") or ()) if int(q) >= 1),
-                          key=lambda z: z[0]))
-    short = tuple(sorted(((Decimal(1) - Decimal(str(p)), int(q)) for p, q in
-                          (b.get("bids") or ()) if int(q) >= 1),
-                         key=lambda z: z[0]))
+    offers, short = pmus_asks(b)
     obs = b.get("observed_at")
     common = dict(venue=POLYMARKET_US, market_id=str(m["slug"]),
                   subject=subj, settlement=s, settlement_status=st,
