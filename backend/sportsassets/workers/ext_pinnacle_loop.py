@@ -2567,6 +2567,18 @@ WHY_DUPLICATE_INSTRUMENT = (
     "becomes two independent executable quantities against one book's "
     "depth -- and because a book that is never reused can never be stale")
 
+def quiet_line_ledger_code(reason, provenance) -> tuple:
+    """(evidence, code) for a WS read refused `reason` with `provenance`
+    (pinnapi_primary.select's explain["provenance"] or the fallback's
+    reference_input["feed_read"]): the quiet-line evidence the read carried
+    (pinnapi_primary.quiet_line_evidence) and the ONE ledger code that
+    records it beside the reason (bettor_external_shadow.quiet_line_code).
+    (None, None) for any other reason, or a read that carried none. Pure."""
+    from .. import pinnapi_primary as primary
+    ev = primary.quiet_line_evidence(reason, provenance)
+    return ev, ext.quiet_line_code(ev)
+
+
 WHY_SKIPPED_ON_ARRIVAL = (
     "the provider's quote was already older than the 30 s rule at the "
     "moment this candidate came up, before any venue read. The venue read "
@@ -9874,8 +9886,11 @@ def _event_outcome(codes, *, deferred=False) -> dict:
     for c in codes:
         if c not in seen:
             seen.append(c)
+    # (QL-1) the quiet-line evidence code beside a feed freshness refusal
+    # is evidence, never a refusal: it can never be a row's first refusal
     refusals = [c for c in seen if c not in EVENT_NOT_A_REFUSAL
-                and not str(c).startswith("FUNDED:")]
+                and not str(c).startswith("FUNDED:")
+                and not ext.is_quiet_line_code(c)]
     if "ADMITTED" in seen:
         outcome = "ADMITTED"
     elif refusals:
@@ -10786,6 +10801,24 @@ async def cycle(conn, *, stream_seed=None) -> dict:
         """Facts about the OPEN event that are not refusal codes."""
         if _open_ev["row"] is not None:
             _open_ev["row"].update(fields)
+
+    def _note_quiet_line(reason, provenance):
+        """(QL-1) THE QUIET-LINE EVIDENCE BESIDE A FEED FRESHNESS REFUSAL:
+        when the WS read refused FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE /
+        FEED_QUOTE_OLDER_THAN_LIMIT and that reason has just been recorded
+        on the OPEN event's row, its evidence code follows it in the row's
+        codes (directly: the detail carries measurements, so it is never a
+        tally key) and the cycle counts which way it went. Returns the
+        evidence dict (for the heartbeat ledger entry), or None."""
+        ev, code = quiet_line_ledger_code(reason, provenance)
+        if code is None or _open_ev["row"] is None:
+            return None
+        _open_ev["row"]["_codes"].append(code)
+        key = ("would_pass_on_confirmation"
+               if ev.get("would_pass_on_confirmation")
+               else "would_not_pass_on_confirmation")
+        lat["quiet_line"][key] += 1
+        return ev
     # THE VENUE'S OWN ERROR TEXT, bounded. A counter says how often the
     # venue refused; only the message says whether that is an entitlement,
     # a closed market or a rate limit -- and those need different actions
@@ -10945,6 +10978,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
            # every arrival refusal by the code it was written under
            # (QUOTE_STALE_AS_DELIVERED_RULE)
            "stale_on_arrival_by_attribution": {},
+           # (QL-1) feed freshness refusals recorded on a ledger row, by
+           # whether the held-read rule would have admitted the price
+           "quiet_line": {"would_pass_on_confirmation": 0,
+                          "would_not_pass_on_confirmation": 0},
            "requeued_after_our_delay": 0,
            "skipped_stale_on_arrival": 0, "arrival_skip_samples": 0,
            "deduplicated_requests": 0, "venue_requests": 0,
@@ -11489,6 +11526,13 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                     tally[_ws_why["reason"]] = \
                         tally.get(_ws_why["reason"], 0) + 1
                     _event_fields({"ws_refusal": _ws_why["reason"]})
+                # (QL-1) a feed freshness refusal carries its quiet-line
+                # evidence: the read's own provenance, from the explain or
+                # the fallback it left (a re-read for the reason alone
+                # carries none, and none is invented)
+                _note_quiet_line(_ws_reason, _ws_why.get("provenance")
+                                 or ((quote or {}).get("reference_input")
+                                     or {}).get("feed_read"))
                 continue
             if quote is None:
                 # NO USABLE PINNACLE PRICE, BY CAUSE (no_pinnacle_codes): the
@@ -11516,6 +11560,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                                               event),
                                "formerly_recorded_as":
                                    R_NO_PINNACLE_ON_EVENT})
+                # (QL-1) the WS freshness refusal just recorded on the row
+                # carries its quiet-line evidence beside it
+                _note_quiet_line(_ws_why.get("reason"),
+                                 _ws_why.get("provenance"))
                 continue
             if stream_seed is not None:
                 source = quote["reference_input"]
@@ -11871,11 +11919,20 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                 code = _split["code"]
                 tally[code] = tally.get(code, 0) + 1
                 _step_refuse(code)
+                _ql = None
                 if _split["ws_refusal"]:
                     # THE PINNAPI REFUSAL THAT LEFT THE METERED QUOTE AS
                     # THE ONLY PRICE rides on the row as evidence
                     tally[_split["ws_refusal"]] = \
                         tally.get(_split["ws_refusal"], 0) + 1
+                    # (QL-1) ...and, for a feed freshness refusal, whether
+                    # the held-read rule would have admitted the WS price
+                    # (quiet line) or no provider confirmation was inside
+                    # the limit either (frozen feed): the read's own
+                    # provenance, carried on the fallback it left
+                    _ql = _note_quiet_line(
+                        _split["ws_refusal"],
+                        (quote.get("reference_input") or {}).get("feed_read"))
                 lat["stale_on_arrival_by_attribution"][code] = \
                     lat["stale_on_arrival_by_attribution"].get(code, 0) + 1
                 _ledger({"global_slug": mapped.get("global_slug")
@@ -11899,6 +11956,9 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                          # left this quote as the only price
                          "attribution": _split["basis"],
                          "ws_refusal": _split["ws_refusal"],
+                         # (QL-1) the WS read's quiet-line evidence, when
+                         # the refusal beside it is a freshness one
+                         "quiet_line": _ql,
                          "why": WHY_SKIPPED_ON_ARRIVAL})
                 continue
 
@@ -12990,6 +13050,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                # ...and every arrival refusal by the code it carries
                "stale_on_arrival_by_attribution":
                    dict(lat["stale_on_arrival_by_attribution"]),
+               # (QL-1) the feed freshness refusals recorded on ledger rows
+               # this cycle, by whether a provider-stamped confirmation
+               # inside the limit would have admitted the price (quiet
+               # line) or not (frozen feed) -- evidence for C1, no decision
+               "quiet_line": dict(lat["quiet_line"]),
                # ...and how many of those go first in their competition's
                # next fetch (REQUEUE_AFTER_OUR_DELAY_RULE)
                "requeued_after_our_delay": lat["requeued_after_our_delay"],
@@ -13883,6 +13948,7 @@ def _freshness_digest(out: dict) -> dict | None:
             "provider_stale_on_arrival": lat.get("provider_stale_on_arrival"),
             "stale_on_arrival_due_to_our_processing": lat.get(
                 "stale_on_arrival_due_to_our_processing"),
+            "quiet_line": lat.get("quiet_line"),
             "skipped_stale_on_arrival": lat.get("skipped_stale_on_arrival"),
             "samples_from_arrival_skips": lat.get(
                 "samples_from_arrival_skips"),

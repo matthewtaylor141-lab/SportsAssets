@@ -449,6 +449,11 @@ def select(cache, event, fallback, *, family, sharp_books, at,
     got = cache.read(qid, F.FULL_GAME_MONEYLINE_KEY,
                      evaluated_ms=at * 1000, max_age_s=max_age_s)
     if not got.get("ok"):
+        # THE READ'S OWN PROVENANCE RIDES WITH THE REFUSAL (explain
+        # ["provenance"], and the fallback's reference_input["feed_read"]):
+        # for a change-rule refusal that is the quiet-line evidence too
+        # (pinnapi_feed.quiet_line_evidence; read back by
+        # `quiet_line_evidence` below for the collector's ledger row)
         prov = got.get("provenance")
         if got.get("reason") == F.R_UNKNOWN_MARKET and \
                 callable(getattr(cache, "market_list", None)):
@@ -499,6 +504,33 @@ def select(cache, event, fallback, *, family, sharp_books, at,
             "home": event["home_team"], "away": event["away_team"],
             "event_id": event.get("id"),
             "commence_time": event["commence_time"], "reference_input": prov}
+
+
+#: ── QUIET LINE OR FROZEN FEED: THE EVIDENCE A REFUSED READ CARRIES (QL-1) ──
+#:
+#: `pinnapi_feed.read` puts three measured facts on every R_NO_CHANGE_TIME /
+#: R_STALE refusal (would_pass_on_confirmation, no_observed_change_s,
+#: age_since_confirmation_s; see QUIET LINE OR FROZEN FEED there). `select`
+#: carries that provenance unchanged on `explain["provenance"]` and on the
+#: metered fallback's reference_input["feed_read"]; this reads the evidence
+#: back off either, by name, for the collector's ledger row. None for any
+#: other refusal and for a provenance written before the fields existed (a
+#: reader of an older release's record never invents them).
+QUIET_LINE_REFUSALS = (F.R_NO_CHANGE_TIME, F.R_STALE)
+
+
+def quiet_line_evidence(reason, provenance) -> dict | None:
+    """{would_pass_on_confirmation, no_observed_change_s,
+    no_observed_change_basis, age_since_confirmation_s, confirmation_limit_s}
+    of a change-rule refusal's provenance, else None. Pure."""
+    if reason not in QUIET_LINE_REFUSALS or not isinstance(provenance, dict):
+        return None
+    if not isinstance(provenance.get("would_pass_on_confirmation"), bool):
+        return None
+    out = {k: provenance.get(k) for k in F.QUIET_LINE_FIELDS}
+    out["no_observed_change_basis"] = provenance.get("no_observed_change_basis")
+    out["confirmation_limit_s"] = provenance.get("confirmation_limit_s")
+    return out
 
 
 #: ── THE RECHECK'S CLOCK GUARD: THE PRICE, NOT ITS LATEST RE-ASSERTION ──

@@ -235,8 +235,10 @@ def _ledger_codes(ev: dict) -> list:
     out = []
     for c in [ev.get("first_refusal")] + list(_jsonish(ev.get("codes")) or []):
         s = str(c or "")
+        # (QL-1) the quiet-line evidence code beside a feed freshness
+        # refusal is evidence, never a refusal: dropped like the others
         if not s or s in _NOT_REFUSAL or s.startswith("FUNDED:") or \
-                s == ext.WS_REFERENCE_WRAPPER:
+                s == ext.WS_REFERENCE_WRAPPER or ext.is_quiet_line_code(s):
             continue
         if s not in out:
             out.append(s)

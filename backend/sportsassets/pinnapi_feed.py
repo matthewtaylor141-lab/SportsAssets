@@ -223,6 +223,38 @@ CLOCK_LOCAL = "LOCAL_RECEIPT_NO_PROVIDER_TS"
 PROVIDER_CONFIRMATIONS = (C_LIVE_REC, C_PREMATCH_MARKETS, C_MATCHUP_VERSION)
 FRESHNESS_BASIS_CONFIRMED = "PROVIDER_STAMPED_CONFIRMATION_OF_UNCHANGED_PRICE"
 
+# ── QUIET LINE OR FROZEN FEED (RC6.3c QL-1: EVIDENCE ONLY) ───────────
+#: A change-rule refusal (R_NO_CHANGE_TIME / R_STALE) says the price has not
+#: been seen to move inside the limit. It does not say whether the provider
+#: is still asserting that price (a QUIET LINE: a game days away whose money
+#: line nobody moves, re-sent by every authoritative list) or has stopped
+#: talking about the market (a FROZEN FEED). Production could not tell the
+#: two apart: 33 of the 38 QUOTE_STALE_ON_ARRIVAL events of the RC6.3b packet
+#: window carried one of these two refusals beside them, and the one
+#: FEED_QUOTE_AGE_UNKNOWN_NO_OBSERVED_CHANGE first loss carried nothing else.
+#: Every such refusal's provenance now carries, MEASURED and never a decision
+#: input of `read`:
+#:   no_observed_change_s        how long no change has been observed: from
+#:                               the last observed change when one is known
+#:                               (R_STALE), else from our first receipt of
+#:                               this exact price on this connection (at least
+#:                               this long; `no_observed_change_basis` names
+#:                               which)
+#:   age_since_confirmation_s    the age of the latest confirmation of this
+#:                               price (any kind, any clock; None when the
+#:                               price was never confirmed)
+#:   would_pass_on_confirmation  whether the HELD-read rule (`read_held`: a
+#:                               PROVIDER-STAMPED confirmation of an admitted
+#:                               kind inside the SAME limit) would have
+#:                               admitted the price at this instant
+#: `read` refuses exactly as before. The entry switch (PINNAPI_ENTRY_ON_
+#: CONFIRMATION, `read_entry`) is NOT built here: C1 chooses on this evidence.
+NO_CHANGE_SINCE_LAST_CHANGE = "SINCE_THE_LAST_OBSERVED_CHANGE"
+NO_CHANGE_SINCE_FIRST_OBSERVED = ("SINCE_OUR_FIRST_RECEIPT_OF_THIS_PRICE_ON_"
+                                  "THIS_CONNECTION_NO_CHANGE_OBSERVED")
+QUIET_LINE_FIELDS = ("would_pass_on_confirmation", "no_observed_change_s",
+                     "age_since_confirmation_s")
+
 # ── IN-PLAY: Pinnacle's live game is a CHILD matchup (R30A RC3) ──────
 #: A child record is the LIVE PHASE of its parent only when every one of
 #: these holds; anything else is named and never priced as the fixture.
@@ -343,6 +375,45 @@ class Ring:
             return round(s[min(len(s) - 1, int(round(p * (len(s) - 1))))], 1)
         return {"n": len(s), "p50": q(.5), "p95": q(.95), "p99": q(.99),
                 "max": round(s[-1], 1)}
+
+
+def confirmation_admits(q, ev_ms, max_age_s) -> bool:
+    """THE HELD-READ ADMISSION RULE AS A PURE QUESTION (`read_held`): the
+    quote's latest confirmation is PROVIDER-STAMPED, of an admitted kind
+    (PROVIDER_CONFIRMATIONS) and dated within [0, max_age_s] of the
+    evaluation instant. Asked for evidence by `read`; decided on by
+    `read_held` alone (whose own test pins that the two agree)."""
+    if q is None or q.confirmed_ms is None or \
+            q.confirmed_clock != CLOCK_PROVIDER or \
+            q.confirmed_by not in PROVIDER_CONFIRMATIONS:
+        return False
+    age = (ev_ms - q.confirmed_ms) / 1000.0
+    return 0 <= age <= max_age_s
+
+
+def quiet_line_evidence(q, *, evaluated_ms, max_age_s, change_ms) -> dict:
+    """THE QUIET-LINE EVIDENCE of one change-rule refusal (QL-1), pure:
+    `no_observed_change_s` from the last observed change when `change_ms` is
+    known (R_STALE) else from our first receipt of this exact price on this
+    connection (R_NO_CHANGE_TIME), the basis named; the age of the latest
+    confirmation (None when never confirmed); and whether `read_held`'s rule
+    would admit the price at `evaluated_ms` under `max_age_s`. Provenance
+    only: nothing here is a decision input of `read`."""
+    if change_ms is not None:
+        since, basis = change_ms, NO_CHANGE_SINCE_LAST_CHANGE
+    else:
+        since, basis = q.first_observed_ms, NO_CHANGE_SINCE_FIRST_OBSERVED
+    return {
+        "no_observed_change_s": (
+            None if since is None
+            else round((evaluated_ms - since) / 1000.0, 3)),
+        "no_observed_change_basis": basis,
+        "age_since_confirmation_s": (
+            None if q.confirmed_ms is None
+            else round((evaluated_ms - q.confirmed_ms) / 1000.0, 3)),
+        "would_pass_on_confirmation": confirmation_admits(q, evaluated_ms,
+                                                          max_age_s),
+        "confirmation_limit_s": float(max_age_s)}
 
 
 class FeedAuthority:
@@ -1405,7 +1476,12 @@ class FeedCache:
                 "confirmation_is_a_decision_input": False}
         if at is None:
             # no change observed on this epoch (first seen in the subscribe
-            # snapshot, or after a reconnect): the age is genuinely unknown
+            # snapshot, or after a reconnect): the age is genuinely unknown.
+            # QL-1: how long, and whether a provider confirmation inside the
+            # limit would have admitted it -- evidence beside the refusal
+            prov.update(quiet_line_evidence(q, evaluated_ms=ev_ms,
+                                            max_age_s=max_age_s,
+                                            change_ms=None))
             return {"ok": False, "reason": R_NO_CHANGE_TIME, "quote": q,
                     "provenance": prov}
         age = (ev_ms - at) / 1000.0
@@ -1416,6 +1492,9 @@ class FeedCache:
             return {"ok": False, "reason": R_FUTURE, "quote": q,
                     "provenance": prov}
         if age > max_age_s:
+            prov.update(quiet_line_evidence(q, evaluated_ms=ev_ms,
+                                            max_age_s=max_age_s,
+                                            change_ms=at))
             return {"ok": False, "reason": R_STALE, "quote": q,
                     "provenance": prov}
         return {"ok": True, "quote": q, "provenance": prov}
