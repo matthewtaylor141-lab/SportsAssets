@@ -368,9 +368,13 @@ async def assemble(conn, *, now: float | None = None,
 # alias that IS a route candidate (a member of a certified claim class --
 # an alias refused before routing is never read for), ONE book per market
 # (its YES at the offers, its NO at 1 - bid: kalshi_claims.pmus_asks):
-#   1. the newest of the recorded paper read and this process's last
-#      accepted on-demand read, used as is while it is inside the route
-#      bound by more than ROUTE_BOOK_LEAD_S (no request);
+#   1. the market's newest book (`_newest_book` by OUR receipt instant; at
+#      one instant the venue's word about the market first): the recorded
+#      paper read, this process's last accepted on-demand read and its last
+#      on-demand read that was the venue's word about the market (not open,
+#      crossed). An open book is used as is while it is inside the route
+#      bound by more than ROUTE_BOOK_LEAD_S (no request); a word inside the
+#      bound refuses the alias by its name, unread;
 #   2. otherwise a BOUNDED ON-DEMAND READ through the injected reader --
 #      in production the workers' existing paced KEYLESS retail client
 #      (workers.kalshi_market_data.public_book_read_blocking ->
@@ -391,9 +395,10 @@ async def assemble(conn, *, now: float | None = None,
 #      just read goes behind every market not yet tried and an accepted
 #      book forgotten after PMUS_BOOK_WINDOW_S keeps its place; a read
 #      deferred with nothing sent keeps its place -- then the soonest
-#      start. A market held as not open (2a) joins that order at the END
-#      of its hold (`read_after`): read again LAST, behind every market
-#      waiting since before then. Every cross-venue market that may be
+#      start. A market held as not open on our own word (2a) joins that
+#      order at the END of its hold (`read_after`): read again LAST, behind
+#      every market waiting since before then (a word only the paper
+#      runtime recorded: 2a). Every cross-venue market that may be
 #      read therefore gets a read within ceil(N / ROUTE_BOOK_MAX_READS)
 #      recording passes of joining the order (N the cross-venue markets
 #      that may be read; while each pass makes its ROUTE_BOOK_MAX_READS
@@ -408,7 +413,30 @@ async def assemble(conn, *, now: float | None = None,
 #      PMUS_ROUTE_BOOK_MARKET_NOT_OPEN, past it while held
 #      PMUS_ROUTE_BOOK_HELD_VENUE_SAID_NOT_OPEN (the read's own age and
 #      the hold left ride on the receipt). A newer book of the market
-#      releases the hold at once;
+#      releases the hold at once. A word only the PAPER RUNTIME recorded is
+#      seen only while `pmus_book` returns it (PMUS_BOOK_WINDOW_S, 900 s
+#      from its receipt, the same length as the not-open hold): such an
+#      ENDED word therefore holds the market until then, not for
+#      ROUTE_BOOK_ENDED_HOLD_S (the hold_left_s on the receipt counts that
+#      word's own clock and so can overstate), and a market never read on
+#      demand rejoins the order at its release as never sent (first, not
+#      last) -- bounded: one read, after which our own word governs, the
+#      ENDED hold included;
+#   2b. THE NEWEST WORD GOVERNS IN THE PASS THAT READS IT (independent
+#      review 2 of b5290832: the read branch fell back to the older open
+#      book whenever that book was still inside the route bound, also when
+#      the read just made answered CLOSED, SUSPENDED or crossed, so the
+#      alias was costed and eligible on a market the venue had just called
+#      not open). A read that is the venue's word about the market (not
+#      open, crossed) with OUR receipt instant at least as new as the book
+#      it would replace (`said_newer`) refuses the alias by that name in
+#      that very pass -- the older open book is never costed over it, and
+#      the receipt's book_detail is the read's -- exactly as `_newest_book`
+#      keeps it on every pass after. The older book still holds only when
+#      the read said nothing newer about the market: deferred (nothing
+#      sent), failed or timed out, another market's book, no receipt
+#      instant (the production reader stamps every answer), or a receipt
+#      older than that book (the newer book governs, as on every pass);
 #   3. every book used is JUDGED (`judge_route_book`) at the read-time
 #      clock: it is this alias's market (a payload naming another slug is
 #      MISMATCH), it has our receipt instant, its own state does not say
@@ -500,8 +528,9 @@ READ_DEFERRED_ERRORS = frozenset({
 #: refusals that are the venue's word about the MARKET: inside the bound
 #: such a book is not re-read (the budget goes to markets that can price),
 #: whether the paper runtime recorded it or our on-demand read answered it
-#: (review 1: `_attempt_put` keeps such a read as the market's newest book);
-#: a not-open word is also held past the bound (`hold_left_s`)
+#: (review 1: `_attempt_put` keeps such a read as the market's newest book;
+#: review 2: in the pass that reads it too, `said_newer`); a not-open word
+#: is also held past the bound (`hold_left_s`)
 _MARKET_REFUSALS = frozenset({R_PMUS_ROUTE_BOOK_NOT_OPEN,
                               R_PMUS_ROUTE_BOOK_CROSSED})
 
@@ -671,13 +700,56 @@ def _attempt_put(attempts: dict, slug: str, book: dict, why, *,
             attempts[s].get("tried_at") or 0.0)), None)
 
 
+def market_word(slug: str, book: dict | None) -> str | None:
+    """PURE. (review 2) The venue's word about market `slug` that `book`
+    carries -- R_PMUS_ROUTE_BOOK_NOT_OPEN or R_PMUS_ROUTE_BOOK_CROSSED --
+    WHATEVER its receipt instant or age; None when it carries none (no
+    book, a failed or deferred read, another market's book, or an open,
+    uncrossed book). The judge's own rule, read as if timed now."""
+    if book is None:
+        return None
+    why = judge_route_book(slug, dict(book, observed_at=0.0), now=0.0,
+                           max_age_s=float("inf"))
+    return why if why in _MARKET_REFUSALS else None
+
+
+def newest_route_book(slug: str, books) -> dict | None:
+    """PURE. (review 2) The newest of `books` by OUR receipt instant; at
+    one instant the venue's word about the market (not open, crossed)
+    before a book that carries none -- so a not-open or crossed word at
+    least as new as an open book is never passed over for it, in any
+    pass."""
+    cands = [b for b in books if b is not None]
+    return max(cands, key=lambda b: (
+        float(b.get("observed_at") or 0.0),
+        market_word(slug, b) is not None)) if cands else None
+
+
+def said_newer(slug: str, read: dict | None, book: dict | None) -> bool:
+    """PURE. (review 2) True when the on-demand read `read` is the venue's
+    word about market `slug` (`market_word`: not open, crossed), carries
+    OUR receipt instant, and is the newest of it and `book`
+    (`newest_route_book`: not older; at one instant the word first). Such
+    a read governs in the very pass that made it: `book` is never costed
+    over it, exactly as `_newest_book` keeps it on every later pass. A
+    read with no receipt instant is refused by its own name
+    (PMUS_ROUTE_BOOK_HAS_NO_RECEIPT_INSTANT) like a failed read: it cannot
+    be ordered by the book-age rule, and the production reader stamps
+    every answer (workers.kalshi_market_data.public_book_read_blocking)."""
+    if read is None or read.get("observed_at") is None or \
+            market_word(slug, read) is None:
+        return False
+    return newest_route_book(slug, (book, read)) is read
+
+
 def _newest_book(slug: str, obs, memo: dict, attempts: dict):
-    """The market's newest book by OUR receipt instant: the recorded paper
+    """The market's newest book (`newest_route_book`): the recorded paper
     read, this process's last accepted on-demand read, and the last
     on-demand read that was the venue's word about the market (not open,
     crossed) -- so a newer word that the market is not open is never
     passed over for an older open book, and a newer open book releases a
-    not-open hold."""
+    not-open hold. (The pass that makes a read applies the same rule to
+    the read it just made: `route_books`, review 2.)"""
     cands = []
     if obs is not None:
         cands.append(route_book_from_paper(slug, obs))
@@ -686,8 +758,7 @@ def _newest_book(slug: str, obs, memo: dict, attempts: dict):
     rec = attempts.get(slug) or {}
     if rec.get("book") is not None and rec.get("why") in _MARKET_REFUSALS:
         cands.append(rec["book"])
-    return max(cands, key=lambda b: float(b.get("observed_at") or 0.0)) \
-        if cands else None
+    return newest_route_book(slug, cands)
 
 
 def hold_left_s(book: dict | None, why: str | None, *, now: float) -> float:
@@ -716,7 +787,12 @@ def read_after(book: dict | None, why: str | None, *, sent_at) -> tuple:
     recording passes and a 30 s route bound every open market needs a read
     on every pass, so a last rank is never reached once
     ROUTE_BOOK_MAX_READS open markets are routed, and a market read
-    SUSPENDED or HALTED once would never be read again.)"""
+    SUSPENDED or HALTED once would never be read again.) A word only the
+    paper runtime recorded is seen only while `pmus_book` returns it
+    (PMUS_BOOK_WINDOW_S, 900 s from its receipt): an ENDED word of it holds
+    900 s, not ROUTE_BOOK_ENDED_HOLD_S, and once it drops out a market
+    never read on demand counts as never sent and goes first, not last --
+    one read, after which our own word governs."""
     at = None if sent_at is None else float(sent_at)
     if book is not None and why == R_PMUS_ROUTE_BOOK_NOT_OPEN and \
             book.get("observed_at") is not None:
@@ -820,9 +896,19 @@ async def route_books(conn, assembled, *, now: float, reader=None,
             if why_rd is None:
                 chosen = tried
                 _memo_put(memo, slug, tried, now=at)
-            elif best is not None and why_best is None:
-                chosen = best        # the read failed; the book still holds
+            elif best is not None and why_best is None and \
+                    not said_newer(slug, tried, best):
+                # the read said nothing newer about this market than the
+                # book: deferred (nothing sent), failed, another market's
+                # book, no receipt instant, its own receipt past the bound,
+                # or the venue's word with an OLDER receipt -- the book
+                # still holds
+                chosen = best
             else:
+                # (review 2) refused by the read's own name -- and when it
+                # is the venue's word about the market (not open, crossed)
+                # at least as new as the open book, that book is NEVER
+                # costed: the newest word governs in the pass that read it
                 why = why_rd
         elif best is not None and why_best is None:
             chosen = best            # inside the bound, not re-read
