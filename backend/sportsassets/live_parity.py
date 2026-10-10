@@ -1557,7 +1557,7 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
                            ent, obs, md, econ, p, best_edge, verdict, refusals,
                            policy_decision, at, label, book_age, cfg, params,
                            pin, book_max_age=None, book_source=None,
-                           clock=None) -> dict | None:
+                           clock=None, account_id=None) -> dict | None:
     """THE DECISION HOOK (decision_hooks.CANONICAL_DECISION): BUILD AND
     RECORD THE ONE CANONICAL DECISION INTENT of an ENTER
     decision (live_parity.build_decision_intent), with the agent components
@@ -1604,7 +1604,7 @@ async def canonical_decision(conn, *, did, strategy, version, cand, side, sized,
         comps = await CC.at_decision(conn, decision=decision,
                                      book_row=book_row, cost_usd=cost, p=p,
                                      wire=sized.get("wire"), now=at,
-                                     contract=cand)
+                                     contract=cand, account_id=account_id)
         pinnacle = cand.get("pinnacle") or {}
         pin = pin or {}
         prm = params if isinstance(params, dict) else None
