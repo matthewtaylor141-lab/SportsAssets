@@ -313,10 +313,23 @@ def venue_lists_active(r: dict, *, now: float) -> bool:
 def contract_row(r: dict, *, now: float, held=frozenset(),
                  candidates=frozenset()) -> dict | None:
     """PURE. One catalogue market (grouped sides) -> its registry row, or
-    None for a non-sports league (named in `excluded`)."""
+    None for a non-sports market (named in `excluded`).
+
+    (RC6.2, p-coverage rework) NON-SPORTS IS DECIDED BY THE ROW, NOT THE
+    CODE ALONE (ontology.excluded_as_non_sports): the code must be in
+    NON_SPORTS_LEAGUES AND the venue's own market type must name no sport.
+    And a market that is HELD or an evaluated CANDIDATE is never excluded
+    -- it is required, so it keeps its own catalogue row (event, type,
+    ontology) instead of the NOT_IN_CURRENT_CATALOGUE stub the required
+    pass would otherwise write for a market the catalogue does list.
+    Before, RC6.1 dropped every market of a listed code before reading its
+    type: all of `gtasc` (Guatemalan soccer, typed soccer money lines and
+    a held PAPER position included) left the registry and the coverage
+    denominator."""
     slug = r["market_slug"]
     league = league_of(r.get("event_slug"), r.get("team_league"))
-    if league in O.NON_SPORTS_LEAGUES:
+    if slug not in held and slug not in candidates and \
+            O.excluded_as_non_sports(league, r.get("sports_type")):
         return None
     sides = _jsonish(r.get("sides")) or []
     longs = [s for s in sides if "LONG" in str(s.get("intent") or "").upper()]
@@ -619,8 +632,10 @@ async def populate(conn, *, since: float, now: float | None = None,
 
 
 #: what a FULL pass's record says the exclusion rule is
-EXCLUDED_RULE = ("ontology.NON_SPORTS_LEAGUES, by the venue league code of "
-                 "the event slug (populate.league_of)")
+EXCLUDED_RULE = ("ontology.excluded_as_non_sports: a venue league code of "
+                 "the event slug (populate.league_of) in "
+                 "ontology.NON_SPORTS_LEAGUES AND a market type naming no "
+                 "sport; never a held or candidate market")
 
 
 def full_pass_record(out: dict, *, at: float) -> dict:
@@ -823,6 +838,17 @@ COVERAGE_ROWS_SQL_RC6 = COVERAGE_ROWS_SQL.replace(
     "family,\n           period,",
     "family,\n           period, market_type, event_start,", 1)
 assert COVERAGE_ROWS_SQL_RC6 != COVERAGE_ROWS_SQL
+#: (RC6.2, p-coverage) the venue's own fixture row (migration 183) for a
+#: soccer / baseball money line's event: the competition phase and game
+#: format its captured book terms are scoped by. Read only with
+#: `derivative_terms`; a failed read is an absent row (no scope), never an
+#: invented one.
+FIXTURE_SCOPE_SQL = """
+    SELECT venue_fixture_key, phase, game_format, competition, source,
+           retrieved_at
+      FROM venue_fixture_metadata
+     WHERE venue = 'PMUS' AND venue_fixture_key = ANY($1::text[])
+"""
 COVERAGE_WRITE_SQL = (
     "UPDATE market_plane_registry SET coverage_state = $2, "
     "       coverage_why = $3, coverage_at = to_timestamp($4) "
@@ -887,7 +913,14 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
     `outside_registry` (the plane's last full_pass_record) is carried into
     the waterfall as the markets kept out of the registry by name, beside
     the sums and never in them. Both False: the RC5 / RC6-refresh output
-    exactly."""
+    exactly.
+
+    THE EVENT'S FIXTURE SCOPE (RC6.2, p-coverage; with `derivative_terms`
+    only): for a Polymarket US soccer / baseball money line the page also
+    reads the venue's own fixture row (FIXTURE_SCOPE_SQL, ('PMUS',
+    'event:<event id>')) and market_plane.settlement reads the contract's
+    text under that phase and format in both quote contexts. No row, no
+    scope: the RC6 reading exactly."""
     from .models import TERMINAL_STATES
     from .coverage import VERSION as MATRIX_VERSION
     from . import settlement as S
@@ -967,6 +1000,16 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                      ) if rules_ok else {}
             for r in rules.values():
                 r["evidence"] = _jsonish(r.get("evidence")) or {}
+            # (RC6.2) the fixture scope of the page's scoped money lines
+            scopes = {}
+            if derivative_terms:
+                fkeys = sorted({S.fixture_key(r) for r in rows
+                                if r.get("venue") == VENUE
+                                and S.h2h_family(r) in S.SCOPED_H2H_FAMILIES
+                                and S.fixture_key(r)})
+                scopes = (await _fetch_chunked(
+                    conn, FIXTURE_SCOPE_SQL, fkeys,
+                    key="venue_fixture_key")) if fkeys else {}
             # THE TEXT, ONLY WHERE A TERMS COMPARISON IS STILL TO BE MADE: a
             # never-attested full-event winner whose (fingerprint, family,
             # league) was not in this process's comparison cache when the
@@ -1002,7 +1045,10 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                         or rr.get("venue") not in (VENUE, KALSHI) \
                         or fam is None:
                     continue
-                tk = (rr.get("rules_sha256"), fam, r.get("competition"))
+                tk = S.terms_key(rr.get("rules_sha256"), fam,
+                                 r.get("competition"),
+                                 scopes.get(S.fixture_key(r)) if (
+                                     fam in S.SCOPED_H2H_FAMILIES) else None)
                 if tk in S._TERMS_CACHE and tk not in loaded_keys:
                     rr["rules_text"] = ""      # cached: the text is not re-read
                 else:
@@ -1053,7 +1099,8 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                 st = S.state_for(r, valuation=vals.get(s),
                                  rules=rules.get(s), priced=priced.get(s),
                                  rules_looked_up=rules_ok,
-                                 derivative_terms=derivative_terms)
+                                 derivative_terms=derivative_terms,
+                                 fixture_scope=scopes.get(S.fixture_key(r)))
                 t = classify(r, valuation=vals.get(s), candidate=cands.get(s),
                              fresh_book=fresh, book_source=src,
                              external_codes=ext, settlement=st)
@@ -1134,7 +1181,7 @@ async def coverage_pass(conn, *, fresh_symbols=frozenset(), now=None,
                     await conn.executemany(SETTLEMENT_WRITE_SQL,
                                            schanged[i:i + 1000])
             del rows, vals, cands, rest, priced, rules, texts, changed, \
-                schanged
+                schanged, scopes
     except BaseException:
         if tr is not None:
             try:

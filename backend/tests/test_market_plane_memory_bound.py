@@ -856,8 +856,13 @@ def test_populate_paged_writes_the_single_batch_rows(monkeypatch, page):
             assert got["new"][0] == got["rc4"][0]          # outputs
             assert got["new"][1] == got["rc4"][1]          # rows + events
             outs = got["new"][0]
+            # (RC6.2, p-coverage rework) the seed types the btc rows round
+            # robin too: 6 of its 12 carry a sports market type (football /
+            # basketball), and a typed sports row is never dropped by its
+            # code (ontology.excluded_as_non_sports); the 6 futures /
+            # unrecognised ones are excluded by name
             assert outs[0]["read"] == 37 and outs[0]["excluded"] == \
-                {"btc": 12}
+                {"btc": 6}
             # the required market the catalogue does not list is added
             # (the shared test database may hold other proofs' held and
             # candidate markets too: counted, never assumed absent)

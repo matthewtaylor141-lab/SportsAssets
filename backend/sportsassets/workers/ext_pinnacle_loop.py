@@ -6297,18 +6297,32 @@ async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
                        "contract, so there is no venue-native key to bind "
                        "fixture evidence to")}
         return dict(base, refusal=SF.R_NO_EVENT_KEY, acquisition=acq)
-    src = SF.source_for(sport_key)
+    # (RC6.2, p-coverage) THE SOURCE FROM THE VENUE'S OWN LEAGUE CODE FIRST:
+    # PinnAPI quotes carry the generic provider key 'pinnapi_soccer', which
+    # no declared source matched (bettor_soccer_fixture.VENUE_LEAGUE_SOURCES)
+    res = SF.resolve_source(sport_key, event_slug)
+    src = res["source"]
     if src is None:
-        r = "%s:%s" % (SF.R_NO_SOURCE, sport_key)
+        r = "%s:%s" % (res["refusal"], res["refusal_subject"])
         acq = {"attempted": False, "refusal": r,
-               "why": ("no organiser-published schedule source is declared "
-                       "for %r, so the competition phase, the match format "
-                       "and the event state cannot be established from an "
-                       "authoritative source" % (sport_key,))}
+               "venue_league": res["venue_league"], "sport_key": sport_key,
+               "why": (("the provider key %r and the venue league code %r "
+                        "name different declared competitions"
+                        % (sport_key, res["venue_league"]))
+                       if res["refusal"] == SF.R_SOURCES_DISAGREE else
+                       ("no organiser-published schedule source is declared "
+                        "for %r (provider key %r, venue league code %r), so "
+                        "the competition phase, the match format and the "
+                        "event state cannot be established from an "
+                        "authoritative source"
+                        % (res["refusal_subject"], sport_key,
+                           res["venue_league"])))}
         return dict(base, refusal=r, acquisition=acq)
     row = await SF.read(conn, key)
     need = fstore.needs_acquisition(row, now=now)
-    acq = {"attempted": False, "decided": need, "source": src["source"]}
+    acq = {"attempted": False, "decided": need, "source": src["source"],
+           "source_basis": res["basis"], "competition": src["competition"],
+           "venue_league": res["venue_league"]}
     if not need.get("acquire"):
         return dict(row, venue_fixture_key=key, key_kind="VENUE_NATIVE_EVENT",
                     acquisition=acq)
@@ -6361,14 +6375,227 @@ async def acquire_venue_fixture_scope(conn, *, event_slug, sport_key, home,
         fresh = await SF.read(conn, key)
         return dict(fresh, venue_fixture_key=key,
                     key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    tried = acq["dates_tried"]
     acq["refusal"] = acq.get("refusal") or (
         SF.R_FETCH if acq.get("fetch_errors") and not any(
-            t.get("matched") is False for t in acq["dates_tried"])
+            t.get("matched") is False for t in tried)
+        # (RC6.2) every schedule read was ANOTHER competition: the declared
+        # source is wrong, and that is named rather than read as no match
+        else SF.R_COMPETITION if tried and all(
+            SF.R_COMPETITION in (t.get("refusals") or []) for t in tried)
         else SF.R_NO_MATCH)
     acq["why"] = acq.get("why") or (
         "the organiser schedule gave no unique match for %r vs %r on %s"
         % (home, away, dates))
     return dict(row, venue_fixture_key=key, acquisition=acq)
+
+
+#: (RC6.2, p-coverage) the venue league codes the league schedule reader
+#: (bettor_fixture_metadata: the MLB Stats API) covers. KBO / NPB have no
+#: organiser source here and are refused by their own code.
+MLB_VENUE_LEAGUES = frozenset({"mlb"})
+
+
+async def acquire_venue_baseball_scope(conn, *, event_slug, home, away,
+                                       commence_iso, now, cache,
+                                       fetcher=None) -> dict:
+    """THE SCOPE EVIDENCE FOR A VENUE-NATIVE MLB CONTRACT (RC6.2).
+
+    THE DEFECT. A baseball contract whose identity came from the venue's own
+    catalogue has no global condition id, so it was refused
+    FIXTURE_METADATA_HAS_NO_CONDITION_KEY and its comparison never saw the
+    phase, the format or the game state (production, research-sql runs
+    37941166989 M7 / 37949739839 R5: every venue-native MLB / KBO / NPB money
+    line valued in 24 h read UNKNOWN). The SAME league schedule the
+    condition-keyed path reads (bettor_fixture_metadata: parse_games,
+    match_fixture, evidence_from -- unchanged) is now read for it and the
+    evidence persisted under the venue's OWN namespaced event key
+    (venue_fixture_metadata, migration 183), exactly as the soccer path
+    does; never under a borrowed or invented condition id. A league the
+    schedule does not cover is refused by its code."""
+    from .. import bettor_soccer_fixture as SF
+
+    def _epoch_start(r):
+        # the condition-keyed store returns the actual start as epoch
+        # seconds (FIXTURE_META_SQL) and context_for reads it as a number;
+        # the venue store returns ISO text -- converted here, once
+        out = dict(r)
+        if out.get("actual_start_at") is not None:
+            out["actual_start_at"] = fmeta_mod._epoch(out["actual_start_at"])
+        return out
+    key = SF.venue_fixture_key(event_slug)
+    base = {"read": False, "venue_fixture_key": key, "key_kind":
+            "VENUE_NATIVE_EVENT", "error": None}
+    code = SF.venue_league_of(event_slug)
+    if code not in MLB_VENUE_LEAGUES:
+        r = "%s:%s" % (SF.R_NO_SOURCE, code)
+        acq = {"attempted": False, "refusal": r, "venue_league": code,
+               "why": ("no league schedule source is declared for the venue "
+                       "league %r, so the phase, the format and the game "
+                       "state cannot be established from an authoritative "
+                       "source" % (code,))}
+        return dict(base, refusal=r, acquisition=acq)
+    row = await SF.read(conn, key)
+    need = fstore.needs_acquisition(row, now=now)
+    acq = {"attempted": False, "decided": need, "source": fmeta_mod.SOURCE,
+           "source_basis": "VENUE_LEAGUE_CODE", "venue_league": code}
+    if not need.get("acquire"):
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    if not (str(home or "").strip() and str(away or "").strip()):
+        acq.update(refusal=SF.R_BINDING,
+                   why="the odds provider gave no pair of team names")
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    acquisition=acq)
+    dates = _official_date_candidates(commence_iso)
+    if not dates:
+        acq.update(refusal="COMMENCE_TIME_NOT_READABLE",
+                   why="the event's commence time could not be read")
+        return dict(_epoch_start(row), venue_fixture_key=key,
+                    acquisition=acq)
+    acq.update(attempted=True, dates_tried=[])
+    fetch = fetcher or _fetch_schedule_blocking
+    import datetime as _dt
+    for date_str in dates:
+        if date_str not in cache:
+            if len([k for k in cache if cache[k] is not None]) >= \
+                    FIXTURE_MAX_DATES_PER_CYCLE:
+                acq.update(refusal="FIXTURE_FETCH_BUDGET_SPENT",
+                           why="this cycle's schedule-read bound is spent")
+                return dict(_epoch_start(row), venue_fixture_key=key,
+                            acquisition=acq)
+            got = await asyncio.to_thread(fetch, date_str)
+            cache[date_str] = got if got.get("ok") else None
+            if not got.get("ok"):
+                acq.setdefault("fetch_errors", []).append(
+                    {"date": date_str, "error": got.get("error"),
+                     "url": got.get("url")})
+        got = cache.get(date_str)
+        if got is None:
+            continue
+        parsed = fmeta_mod.parse_games(got["payload"])
+        if not parsed.get("ok"):
+            acq.setdefault("parse_refusals", []).append(
+                {"date": date_str, "refusal": parsed.get("refusal")})
+            continue
+        m = fmeta_mod.match_fixture(parsed["games"], home=home, away=away,
+                                   official_date=date_str)
+        acq["dates_tried"].append({"date": date_str,
+                                   "games": parsed.get("total"),
+                                   "matched": bool(m.get("ok")),
+                                   "refusal": m.get("refusal")})
+        if not m.get("ok"):
+            continue
+        at = _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        ev = fmeta_mod.evidence_from(m["game"], retrieved_at=at,
+                                     source_url=got["url"])
+        start = ev.get("actual_start_at")
+        vrow = {"competition": "MLB", "phase": ev.get("phase"),
+                "game_format": ev.get("game_format"),
+                "play_has_begun": ev.get("play_has_begun"),
+                "event_state_raw": ev.get("event_state_raw"),
+                "actual_start_at": (
+                    _dt.datetime.fromtimestamp(float(start),
+                                               _dt.timezone.utc).isoformat()
+                    if start is not None else None),
+                "scheduled_kickoff": None,
+                "start_evidence": ev.get("start_evidence"),
+                "official_date": ev.get("official_date"),
+                "home_team": ev.get("home"), "away_team": ev.get("away"),
+                "orientation": "SAME",
+                "source_match_id": (str(ev["game_pk"])
+                                    if ev.get("game_pk") is not None
+                                    else None),
+                "source": ev.get("source"), "source_url": ev.get("source_url"),
+                "retrieved_at": at, "refusals": ev.get("refusals"),
+                "raw": {"game": m["game"],
+                        "phase_uncovered": ev.get("phase_uncovered"),
+                        "scheduled_innings": ev.get("scheduled_innings")}}
+        acq["write"] = await SF.upsert(conn, key, vrow,
+                                       sport_family="baseball",
+                                       reader_version=fmeta_mod.VERSION)
+        acq["evidence_refusals"] = list(ev.get("refusals") or [])
+        fresh = await SF.read(conn, key)
+        return dict(_epoch_start(fresh), venue_fixture_key=key,
+                    key_kind="VENUE_NATIVE_EVENT", acquisition=acq)
+    acq["refusal"] = acq.get("refusal") or fmeta_mod.R_NO_MATCH
+    acq["why"] = acq.get("why") or (
+        "no schedule date returned exactly one game for %r vs %r"
+        % (away, home))
+    return dict(_epoch_start(row), venue_fixture_key=key, acquisition=acq)
+
+
+# ── (RC6.2, p-coverage) THE QUOTE'S OWN PRE-MATCH / IN-PLAY LABEL ──────
+#
+# THE DEFECT. The entry lane established the quote context ONLY from the
+# fixture row (`fmeta_mod.context_for`), and a soccer organiser publishes a
+# SCHEDULED kick-off, never an observed start: a match reported begun gave
+# "no start stamp and no provider label", and one reported not begun gave
+# nothing for a quote observed after that report. Production, 14 days to
+# 2026-10-09 (research-sql run 37946119133 G2): of 32 UNL money lines whose
+# scope WAS established (LEAGUE_OR_GROUP_STAGE, SCHEDULED_NINETY_MINUTES),
+# 27 read verdict UNKNOWN for want of a context -- 24 of them priced from a
+# PinnAPI quote whose stream (live / prematch) the reader had PROVED against
+# the event's own isLive flag (pinnapi_primary refuses
+# PINNAPI_PRIMARY_PHASE_UNPROVED otherwise) and the lane then dropped.
+#
+# THE RULE, unchanged: bettor_settlement_terms.book_context_for already
+# names the provider's own market label the AUTHORITATIVE context ("a
+# statement about the market the price came from rather than an inference
+# from a clock"). The lane now passes it. When the fixture also yields a
+# context, the two must agree; disagreeing evidence establishes NOTHING
+# (QUOTE_CONTEXT_EVIDENCE_DISAGREES) -- neither is preferred.
+R_CONTEXT_EVIDENCE_DISAGREES = "QUOTE_CONTEXT_EVIDENCE_DISAGREES"
+PINNAPI_WS_PROVIDER = "pinnapi.com/raw-websocket"
+
+
+def provider_stream_label(quote):
+    """PURE. True (IN PLAY) / False (PRE-MATCH) for a PinnAPI primary quote
+    whose stream its reader proved; None for any other quote."""
+    ri = (quote or {}).get("reference_input") or {}
+    if ri.get("provider") != PINNAPI_WS_PROVIDER:
+        return None
+    s = ri.get("stream")
+    return True if s == "live" else (False if s == "prematch" else None)
+
+
+def reconcile_quote_context(ctx_ev, label) -> dict:
+    """PURE. The quote context from the fixture's event state (`ctx_ev`, from
+    fmeta_mod.context_for, or None) and the provider's proved label (`label`,
+    provider_stream_label). Returns the attest inputs -- `book_context` (the
+    fixture's established context) or `quote_is_in_play` (the label alone) --
+    and the record's context, basis and why. Disagreement establishes
+    nothing."""
+    from .. import bettor_settlement_terms as _ST
+    fx = (ctx_ev or {}).get("context")
+    lab = None if label is None else (_ST.CTX_LIVE if label
+                                      else _ST.CTX_PRE_GAME)
+    out = {"context": None, "book_context": None, "quote_is_in_play": None,
+           "basis": None, "refusal": None, "fixture_context": fx,
+           "provider_label": lab}
+    if fx and lab and fx != lab:
+        out.update(refusal=R_CONTEXT_EVIDENCE_DISAGREES, why=(
+            "the fixture's reported event state places this quote %s and "
+            "the provider labelled its market %s: two pieces of evidence "
+            "disagree, so neither establishes the context" % (fx, lab)))
+    elif fx:
+        out.update(context=fx, book_context=fx,
+                   basis=("FIXTURE_EVENT_STATE_AND_PROVIDER_LABEL" if lab
+                          else "FIXTURE_EVENT_STATE"),
+                   why=(ctx_ev or {}).get("why"))
+    elif lab:
+        out.update(context=lab, quote_is_in_play=bool(label),
+                   basis="PROVIDER_QUOTE_LABEL",
+                   why=("the provider labelled this quote's market %s (its "
+                        "stream proved against the event's own live flag); "
+                        "the fixture evidence established no context: %s"
+                        % ("IN PLAY" if label else "PRE-MATCH",
+                           (ctx_ev or {}).get("why")
+                           or "no fixture event state was read")))
+    else:
+        out["why"] = (ctx_ev or {}).get("why")
+    return out
 
 
 async def acquire_fixture_scope(conn, *, condition_id, home, away,
@@ -6419,6 +6646,14 @@ async def acquire_fixture_scope(conn, *, condition_id, home, away,
             conn, event_slug=venue_event_slug, sport_key=sport_key,
             home=home, away=away, commence_iso=commence_iso, now=now,
             cache=cache, fetcher=venue_fetcher)
+    if not str(condition_id or "").strip() and \
+            str(sport_family or "") == "baseball" and \
+            str(venue_event_slug or "").strip():
+        # (RC6.2) A VENUE-NATIVE BASEBALL CONTRACT: the league schedule
+        # under the venue's own event key, as the soccer path above
+        return await acquire_venue_baseball_scope(
+            conn, event_slug=venue_event_slug, home=home, away=away,
+            commence_iso=commence_iso, now=now, cache=cache, fetcher=fetcher)
     if not str(condition_id or "").strip():
         acq = {"attempted": False, "refusal": R_FIXTURE_KEY_ABSENT,
                "why": ("no global condition id to key the fixture row by "
@@ -11963,6 +12198,10 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                      "actual_start_at": fmeta.get("actual_start_at"),
                      "retrieved_at": fmeta.get("retrieved_at")},
                     observed_at=_quote_epoch(quote))
+            # (RC6.2) and the quote's own proved pre-match / in-play label,
+            # which must agree with the fixture's when both exist
+            qctx = reconcile_quote_context(ctx_ev,
+                                           provider_stream_label(quote))
             srule = vset.attest(
                 sport_family=family, market="h2h",
                 venue_evidence=vevid,
@@ -11972,12 +12211,14 @@ async def cycle(conn, *, stream_seed=None) -> dict:
                                           == "pinnapi.com/raw-websocket" else
                                           "theoddsapi:h2h:%s" % devig.BOOK)},
                 observed_at=_quote_epoch(quote),
-                book_context=(ctx_ev or {}).get("context"),
+                book_context=qctx["book_context"],
+                quote_is_in_play=qctx["quote_is_in_play"],
                 phase=fmeta.get("phase"),
                 game_format=fmeta.get("game_format"))
             srule["book_rule"] = vset.BOOK_SETTLEMENT.get(family)
             srule["fixture_metadata"] = fmeta
             srule["quote_context_evidence"] = ctx_ev
+            srule["quote_context_reconciliation"] = qctx
 
             # ── THE DECISION INSTANT, TAKEN HERE ────────────────────
             # After the venue book read, the venue rules read and the
@@ -12278,8 +12519,11 @@ async def cycle(conn, *, stream_seed=None) -> dict:
             # game format, and the provenance says which one applied.
             rec["settlement_comparison"] = dict(
                 _settlement_compatibility(srule),
-                quote_context=(ctx_ev or {}).get("context"),
-                quote_context_why=(ctx_ev or {}).get("why"),
+                quote_context=qctx["context"],
+                quote_context_why=qctx.get("why"),
+                quote_context_basis=qctx["basis"],
+                quote_context_refusal=qctx["refusal"],
+                quote_provider_label=qctx["provider_label"],
                 scope_phase=fmeta.get("phase"),
                 scope_game_format=fmeta.get("game_format"),
                 fixture_source=fmeta.get("source"),

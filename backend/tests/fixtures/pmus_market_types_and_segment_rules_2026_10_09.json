@@ -1,0 +1,3044 @@
+{
+ "_what": "Production rows the RC6.2 p-coverage ontology fixes are written against: every active Polymarket US market type with the registry's labels and settlement reason head (F3), the unmapped-sport venue codes with one event each (F5), every active wbc row (F6), and real venue rule texts of segment winners and full-game winners (T1).",
+ "_source": {
+  "F3_F5_F6": "research-sql run 37945671144 (research/rc6_p-coverage_fix_evidence.sql, 2026-10-09T14:38Z)",
+  "T1": "research-sql run 37939739782 (research/rc6_p-coverage_texts.sql, 2026-10-09)",
+  "collisions": "research-sql run 37946677103 (research/rc6_p-coverage_code_collisions.sql)"
+ },
+ "_note": "Registry labels are production's (release 732cc0c6: competition read off the second slug segment). Rule texts are the venue's own, verbatim.",
+ "market_types": [
+  [
+   "futures",
+   "OUTRIGHT",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   10703
+  ],
+  [
+   "football_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3944
+  ],
+  [
+   "soccer_team_full_time_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2897
+  ],
+  [
+   "football_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2509
+  ],
+  [
+   "football_team_points_full_game_total",
+   "POINTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2421
+  ],
+  [
+   "soccer_game_exact_score",
+   "EXACT_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1856
+  ],
+  [
+   "football_team_first_half_total",
+   "TOTAL",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1386
+  ],
+  [
+   "football_game_exact_margin",
+   "EXACT_MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1383
+  ],
+  [
+   "football_team_first_half_spread",
+   "MARGIN",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1270
+  ],
+  [
+   "football_team_second_half_spread",
+   "MARGIN",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1270
+  ],
+  [
+   "football_game_first_half_total",
+   "TOTAL",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1045
+  ],
+  [
+   "soccer_game_first_half_exact_score",
+   "EXACT_SCORE",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1044
+  ],
+  [
+   "football_team_total_field_goals_made",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   882
+  ],
+  [
+   "football_team_second_half_total",
+   "TOTAL",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   850
+  ],
+  [
+   "soccer_game_total_corners",
+   "TOTAL_CORNERS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   812
+  ],
+  [
+   "football_game_first_quarter_total",
+   "TOTAL",
+   "Q1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   733
+  ],
+  [
+   "football_game_fourth_quarter_total",
+   "TOTAL",
+   "Q4",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   733
+  ],
+  [
+   "football_game_second_quarter_total",
+   "TOTAL",
+   "Q2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   733
+  ],
+  [
+   "football_game_third_quarter_total",
+   "TOTAL",
+   "Q3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   733
+  ],
+  [
+   "football_team_total_first_downs",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   708
+  ],
+  [
+   "football_team_total_pass_touchdowns",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   708
+  ],
+  [
+   "football_team_total_pass_yards",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   708
+  ],
+  [
+   "football_team_total_receptions",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   708
+  ],
+  [
+   "football_team_total_rush_touchdowns",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   708
+  ],
+  [
+   "football_player_receiving_yards",
+   "RECEIVING_YARDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   702
+  ],
+  [
+   "football_player_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   649
+  ],
+  [
+   "football_game_second_half_total",
+   "TOTAL",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   643
+  ],
+  [
+   "football_team_total_touchdowns",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   624
+  ],
+  [
+   "football_game_total_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   586
+  ],
+  [
+   "soccer_team_first_half_total",
+   "TOTAL",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   580
+  ],
+  [
+   "soccer_team_second_half_total",
+   "TOTAL",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   580
+  ],
+  [
+   "football_team_total_offensive_yards",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   552
+  ],
+  [
+   "football_team_first_quarter_spread",
+   "MARGIN",
+   "Q1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   542
+  ],
+  [
+   "football_team_fourth_quarter_spread",
+   "MARGIN",
+   "Q4",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   542
+  ],
+  [
+   "football_team_second_quarter_spread",
+   "MARGIN",
+   "Q2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   542
+  ],
+  [
+   "football_team_third_quarter_spread",
+   "MARGIN",
+   "Q3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   542
+  ],
+  [
+   "hockey_team_total_goals",
+   "GOALS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   479
+  ],
+  [
+   "soccer_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   478
+  ],
+  [
+   "table_tennis_match_total_sets",
+   "TOTAL_SETS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   474
+  ],
+  [
+   "soccer_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   468
+  ],
+  [
+   "soccer_team_first_half_spread",
+   "MARGIN",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   464
+  ],
+  [
+   "soccer_team_second_half_spread",
+   "MARGIN",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   464
+  ],
+  [
+   "football_player_receptions",
+   "RECEPTIONS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   442
+  ],
+  [
+   "football_game_first_score",
+   "SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_game_first_touchdown",
+   "TOUCHDOWN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_first_half_winner",
+   "WINNER",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_first_quarter_winner",
+   "WINNER",
+   "Q1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_fourth_quarter_winner",
+   "WINNER",
+   "Q4",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_second_half_winner",
+   "WINNER",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_second_quarter_winner",
+   "WINNER",
+   "Q2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_team_third_quarter_winner",
+   "WINNER",
+   "Q3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   441
+  ],
+  [
+   "football_game_race_to_points",
+   "POINTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   435
+  ],
+  [
+   "tennis_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   382
+  ],
+  [
+   "football_team_total_rush_yards",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   378
+  ],
+  [
+   "football_player_team_first_touchdown",
+   "TOUCHDOWN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   370
+  ],
+  [
+   "football_player_first_touchdown",
+   "TOUCHDOWN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   356
+  ],
+  [
+   "soccer_game_first_half_first_team_to_score",
+   "TO_SCORE",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   348
+  ],
+  [
+   "soccer_game_first_team_to_score",
+   "TO_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   348
+  ],
+  [
+   "soccer_game_second_half_first_team_to_score",
+   "TO_SCORE",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   348
+  ],
+  [
+   "soccer_team_first_half_winner",
+   "WINNER",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   348
+  ],
+  [
+   "soccer_team_second_half_winner",
+   "WINNER",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   348
+  ],
+  [
+   "football_player_rushing_yards",
+   "RUSHING_YARDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   321
+  ],
+  [
+   "hockey_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   319
+  ],
+  [
+   "table_tennis_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   296
+  ],
+  [
+   "football_game_double_result",
+   "DOUBLE_RESULT",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   261
+  ],
+  [
+   "hockey_player_points",
+   "POINTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   239
+  ],
+  [
+   "hockey_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   238
+  ],
+  [
+   "basketball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "INCOMPATIBLE_NOT_PRICEABLE",
+   237
+  ],
+  [
+   "soccer_team_full_time_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   237
+  ],
+  [
+   "table_tennis_set_3_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   237
+  ],
+  [
+   "table_tennis_set_2_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   235
+  ],
+  [
+   "football_player_passing_yards",
+   "PASSING_YARDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   234
+  ],
+  [
+   "table_tennis_set_1_winner",
+   "WINNER",
+   "SET_1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   233
+  ],
+  [
+   "football_game_total_pass_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   232
+  ],
+  [
+   "hockey_team_saves",
+   "SAVES",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   210
+  ],
+  [
+   "football_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "INCOMPATIBLE_NOT_PRICEABLE",
+   192
+  ],
+  [
+   "tennis_match_games_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   180
+  ],
+  [
+   "hockey_player_goals",
+   "GOALS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   178
+  ],
+  [
+   "basketball_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   166
+  ],
+  [
+   "hockey_team_first_period_spread",
+   "MARGIN",
+   "P1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "hockey_team_first_period_total",
+   "TOTAL",
+   "P1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "hockey_team_second_period_spread",
+   "MARGIN",
+   "P2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "hockey_team_second_period_total",
+   "TOTAL",
+   "P2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "hockey_team_third_period_spread",
+   "MARGIN",
+   "P3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "hockey_team_third_period_total",
+   "TOTAL",
+   "P3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   160
+  ],
+  [
+   "football_game_first_quarter_both_teams_score_points",
+   "POINTS",
+   "Q1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_fourth_quarter_both_teams_score_points",
+   "POINTS",
+   "Q4",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_overtime",
+   "OVERTIME",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_second_quarter_both_teams_score_points",
+   "POINTS",
+   "Q2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_third_quarter_both_teams_score_points",
+   "POINTS",
+   "Q3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_total_defensive_special_teams_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_game_total_two_point_conversions",
+   "TOTAL_TWO_POINT_CONVERSIONS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   147
+  ],
+  [
+   "football_player_fantasy_points_ppr",
+   "POINTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   134
+  ],
+  [
+   "hockey_team_first_period_winner",
+   "WINNER",
+   "P1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   120
+  ],
+  [
+   "hockey_team_regulation_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "INCOMPATIBLE_NOT_PRICEABLE",
+   120
+  ],
+  [
+   "hockey_team_second_period_winner",
+   "WINNER",
+   "P2",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   120
+  ],
+  [
+   "hockey_team_third_period_winner",
+   "WINNER",
+   "P3",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   120
+  ],
+  [
+   "tennis_match_exact_score",
+   "EXACT_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   120
+  ],
+  [
+   "ufc_method_of_victory",
+   "METHOD_OF_VICTORY",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   119
+  ],
+  [
+   "football_game_total_fourth_down_conversions",
+   "TOTAL_DOWN_CONVERSIONS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   118
+  ],
+  [
+   "football_game_total_rush_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   116
+  ],
+  [
+   "soccer_game_btts",
+   "BTTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   116
+  ],
+  [
+   "soccer_game_first_half_btts",
+   "BTTS",
+   "FIRST_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   116
+  ],
+  [
+   "soccer_game_second_half_btts",
+   "BTTS",
+   "SECOND_HALF",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   116
+  ],
+  [
+   "esports_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   107
+  ],
+  [
+   "football_player_passing_touchdowns",
+   "TOUCHDOWNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   104
+  ],
+  [
+   "hockey_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "INCOMPATIBLE_NOT_PRICEABLE",
+   99
+  ],
+  [
+   "tennis_match_total_games",
+   "GAMES",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   90
+  ],
+  [
+   "ufc_round_of_victory",
+   "ROUND_OF_VICTORY",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   88
+  ],
+  [
+   "efootball_team_full_time_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   81
+  ],
+  [
+   "football_player_passing_attempts",
+   "PASSING_ATTEMPTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   78
+  ],
+  [
+   "football_player_passing_completions",
+   "PASSING_COMPLETIONS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   78
+  ],
+  [
+   "basketball_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   77
+  ],
+  [
+   "football_player_rushing_attempts",
+   "RUSHING_ATTEMPTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   72
+  ],
+  [
+   "esports_map_winner_2",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   63
+  ],
+  [
+   "hockey_game_first_team_to_score",
+   "TO_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   63
+  ],
+  [
+   "esports_map_winner_1",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   61
+  ],
+  [
+   "football_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "<null>",
+   61
+  ],
+  [
+   "baseball_player_hits_runs_rbis",
+   "RUNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   60
+  ],
+  [
+   "tennis_match_sets_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   60
+  ],
+  [
+   "football_team_total_defensive_special_teams_touchdowns",
+   "TEAM_SCORE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   58
+  ],
+  [
+   "football_player_longest_reception",
+   "LONGEST_RECEPTION",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   55
+  ],
+  [
+   "football_player_interceptions_thrown",
+   "INTERCEPTIONS_THROWN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   52
+  ],
+  [
+   "baseball_player_total_bases",
+   "TOTAL_BASES",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   50
+  ],
+  [
+   "esports_series_total_maps",
+   "SERIES_TOTAL_MAPS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   48
+  ],
+  [
+   "football_player_scrimmage_yards",
+   "SCRIMMAGE_YARDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   48
+  ],
+  [
+   "esports_map_total_rounds_2",
+   "TOTAL_ROUNDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   47
+  ],
+  [
+   "basketball_player_points",
+   "POINTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   46
+  ],
+  [
+   "esports_map_rounds_handicap_2",
+   "ROUNDS_HANDICAP",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   46
+  ],
+  [
+   "darts_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   45
+  ],
+  [
+   "table_tennis_set_4_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   45
+  ],
+  [
+   "esports_map_total_rounds_1",
+   "TOTAL_ROUNDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   44
+  ],
+  [
+   "esports_map_rounds_handicap_1",
+   "ROUNDS_HANDICAP",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   43
+  ],
+  [
+   "esports_series_map_handicap",
+   "SERIES_HANDICAP",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   41
+  ],
+  [
+   "basketball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "<null>",
+   39
+  ],
+  [
+   "ufc_method_of_finish",
+   "METHOD_OF_FINISH",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   36
+  ],
+  [
+   "basketball_player_rebounds",
+   "REBOUNDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   31
+  ],
+  [
+   "ufc_fight_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   31
+  ],
+  [
+   "baseball_player_hits",
+   "HITS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   30
+  ],
+  [
+   "baseball_player_rbis",
+   "RBIS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   30
+  ],
+  [
+   "tennis_match_total_sets",
+   "TOTAL_SETS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   30
+  ],
+  [
+   "tennis_set_1_winner",
+   "WINNER",
+   "SET_1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   30
+  ],
+  [
+   "tennis_set_2_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   30
+  ],
+  [
+   "football_game_safety",
+   "SAFETY",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   29
+  ],
+  [
+   "football_game_tie",
+   "TIE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   29
+  ],
+  [
+   "ufc_round_of_finish",
+   "ROUND_OF_FINISH",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   26
+  ],
+  [
+   "basketball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "VENUE_RULES_SILENT_ON",
+   24
+  ],
+  [
+   "football_player_most_passing_yards",
+   "PASSING_YARDS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   24
+  ],
+  [
+   "cricket_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   23
+  ],
+  [
+   "basketball_player_assists",
+   "ASSISTS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   22
+  ],
+  [
+   "hockey_game_overtime",
+   "OVERTIME",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   21
+  ],
+  [
+   "hockey_game_shootout",
+   "SHOOTOUT",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   21
+  ],
+  [
+   "rugby_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   21
+  ],
+  [
+   "baseball_player_home_runs",
+   "RUNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   20
+  ],
+  [
+   "pickleball_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   20
+  ],
+  [
+   "football_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   18
+  ],
+  [
+   "ufc_go_the_distance",
+   "GO_THE_DISTANCE",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   17
+  ],
+  [
+   "basketball_player_threes",
+   "THREES",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   15
+  ],
+  [
+   "esports_game_winner_2",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   15
+  ],
+  [
+   "hockey_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "<null>",
+   15
+  ],
+  [
+   "soccer_player_goals",
+   "GOALS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   15
+  ],
+  [
+   "esports_game_winner_1",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   14
+  ],
+  [
+   "esports_game_total_kills_2",
+   "TOTAL_KILLS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   13
+  ],
+  [
+   "baseball_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   12
+  ],
+  [
+   "esports_game_winner_3",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   11
+  ],
+  [
+   "esports_game_winner_4",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   11
+  ],
+  [
+   "baseball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   10
+  ],
+  [
+   "baseball_team_total_runs",
+   "RUNS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   10
+  ],
+  [
+   "esports_game_first_blood_2",
+   "BLOOD",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   10
+  ],
+  [
+   "esports_series_total_games",
+   "GAMES",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   10
+  ],
+  [
+   "moneyline",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   9
+  ],
+  [
+   "esports_game_first_blood_1",
+   "BLOOD",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   8
+  ],
+  [
+   "boxing_match_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   7
+  ],
+  [
+   "esports_game_total_kills_1",
+   "TOTAL_KILLS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   7
+  ],
+  [
+   "baseball_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   6
+  ],
+  [
+   "esports_series_game_handicap",
+   "SERIES_HANDICAP",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   6
+  ],
+  [
+   "baseball_team_first_five_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   5
+  ],
+  [
+   "football_team_points_full_game_total",
+   "POINTS",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   5
+  ],
+  [
+   "basketball_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   4
+  ],
+  [
+   "esports_game_first_blood_3",
+   "BLOOD",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   4
+  ],
+  [
+   "esports_game_first_blood_4",
+   "BLOOD",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   4
+  ],
+  [
+   "baseball_team_first_five_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   3
+  ],
+  [
+   "baseball_team_inning1_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning2_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning3_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning4_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning5_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning6_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning7_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning8_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_inning9_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   3
+  ],
+  [
+   "baseball_team_first_five_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning2_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning3_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning4_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning5_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning6_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning7_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning8_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "baseball_team_inning9_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "esports_game_kills_odd_even_1",
+   "KILLS_ODD_EVEN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "esports_game_kills_odd_even_2",
+   "KILLS_ODD_EVEN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "esports_game_kills_odd_even_3",
+   "KILLS_ODD_EVEN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "esports_game_kills_odd_even_4",
+   "KILLS_ODD_EVEN",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   2
+  ],
+  [
+   "hockey_team_full_game_spread",
+   "MARGIN",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   2
+  ],
+  [
+   "baseball_game_extra_innings",
+   "EXTRA_INNINGS",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1
+  ],
+  [
+   "baseball_team_first_inning_run",
+   "RUN",
+   "INNING_1",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1
+  ],
+  [
+   "baseball_team_inning1_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "BOOKMAKER_TERMS_NOT_HELD",
+   1
+  ],
+  [
+   "basketball_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ],
+  [
+   "basketball_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ],
+  [
+   "football_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ],
+  [
+   "hockey_team_full_game_total",
+   "TOTAL",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ],
+  [
+   "hockey_team_full_game_winner",
+   "WINNER",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ],
+  [
+   "hockey_team_total_goals",
+   "GOALS",
+   "FULL_EVENT",
+   "SETTLEMENT_VERDICT",
+   1
+  ]
+ ],
+ "unmapped_codes": [
+  [
+   "nfl",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   3987,
+   "nfl-wrtop12fp-2027-01-10",
+   "WR Fantasy Football Points Per Game (PPR)",
+   "Zay Flowers"
+  ],
+  [
+   "cfb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   1739,
+   "cfb-wins-ou-2026-11-28",
+   "Wisconsin Regular Season Win Total",
+   "Yannick Smith"
+  ],
+  [
+   "btc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED,METRIC_NOT_NORMALIZED",
+   1358,
+   "btc-updown-1h-2026-10-09-1400z",
+   "BTC Up or Down Hourly",
+   "BTC Up or Down Hourly"
+  ],
+  [
+   "nhl",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   779,
+   "nhl-westconf-2027-05-19-w",
+   "NHL Western Conference Final Qualifiers",
+   "Zeev Buium"
+  ],
+  [
+   "epl",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   435,
+   "epl-title-2027-05-30-w",
+   "Tottenham EPL Points",
+   "Tottenham EPL Points"
+  ],
+  [
+   "mlb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   420,
+   "mlb-wsleague-2026-11-01-w",
+   "World Series MVP",
+   "Yoshinobu Yamamoto"
+  ],
+  [
+   "dpwt",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   393,
+   "dpwt-deespa-2026-10-08-w",
+   "Open de Espana Winner",
+   "Open de Espana Winner"
+  ],
+  [
+   "nba",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   365,
+   "nba-westseed1-2027-04-11-w",
+   "NBA Worst Regular Season Record",
+   "NBA Worst Regular Season Record"
+  ],
+  [
+   "ucl",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   276,
+   "ucl-final-2026-06-05-w",
+   "UEFA Champions League Winner",
+   "Yan Diomande"
+  ],
+  [
+   "pgatc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   246,
+   "pgatc-consfury-2026-10-09-w",
+   "Constellation Furyk & Friends Winner",
+   "Constellation Furyk & Friends Winner"
+  ],
+  [
+   "kft",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   177,
+   "kft-kornferr-2026-10-08-w",
+   "Korn Ferry Tour Championship Winner",
+   "Korn Ferry Tour Championship Winner"
+  ],
+  [
+   "f1",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   153,
+   "f1-sasgp-qual-2026-10-10-w",
+   "Singapore Airlines Singapore Grand Prix Winning Constructor",
+   "Singapore Airlines Singapore Grand Prix Winning Constructor"
+  ],
+  [
+   "pga",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   147,
+   "pga-ryder-2027-09-19-w",
+   "Baycurrent Classic Winner",
+   "Baycurrent Classic Winner"
+  ],
+  [
+   "lal",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   146,
+   "lal-title-2027-05-30-w",
+   "LALIGA Top Goalscorer",
+   "LALIGA Top Goalscorer"
+  ],
+  [
+   "wbc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   145,
+   "wbc-welterw-2026-12-31-champ",
+   "WBC Welterweight Champion on Dec 31, 2026",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "ufc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   136,
+   "ufc-welterw-2026-12-31-champ",
+   "UFC Welterweight Champion on Dec 31, 2026",
+   "UFC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "atp",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   103,
+   "atp-slam-2027-09-12-w",
+   "Shanghai Masters Men's Winner",
+   "Men's Shanghai Masters Winner"
+  ],
+  [
+   "wta",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   95,
+   "wta-wuhan-2026-10-18-w",
+   "Wuhan Open Women's Winner",
+   "Women's Wuhan Open Winner"
+  ],
+  [
+   "sea",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   86,
+   "sea-title-2027-05-30-w",
+   "Serie A Top Goalscorer",
+   "Serie A Top Goalscorer"
+  ],
+  [
+   "bun",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   79,
+   "bun-title-2027-05-22-w",
+   "Bundesliga Top Goalscorer",
+   "Bundesliga Top Goalscorer"
+  ],
+  [
+   "lg1",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   77,
+   "lg1-title-2027-05-29-w",
+   "Ligue 1 Top 4 Finishers",
+   "Ligue 1 Top 4 Finishers"
+  ],
+  [
+   "cbb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   73,
+   "cbb-champ-2027-04-05-w",
+   "2027 Men's College Basketball National Champion",
+   "2027 Men's College Basketball National Champion"
+  ],
+  [
+   "nascar",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   73,
+   "nascar-truckseries-2026-11-06-w",
+   "NASCAR O'Reilly Auto Parts Series Champion",
+   "NASCAR O'Reilly Auto Parts Series Champion"
+  ],
+  [
+   "temp",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   60,
+   "temp-sfohigh-2026-10-10",
+   "Highest temperature in San Francisco on October 9?",
+   "Highest temperature in San Francisco on October 9?"
+  ],
+  [
+   "nobel",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   45,
+   "nobel-peace-2026-10-09",
+   "2026 Nobel Peace Prize Winner",
+   "2026 Nobel Peace Prize Winner"
+  ],
+  [
+   "lmx",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   36,
+   "lmx-clausura-2027-05-30-w",
+   "Liga MX Clausura Champion",
+   "Liga MX Clausura Champion"
+  ],
+  [
+   "uecl",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   36,
+   "uecl-final-2027-06-02-w",
+   "UEFA Conference League Winner",
+   "UEFA Conference League Winner"
+  ],
+  [
+   "uel",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   36,
+   "uel-final-2027-05-26-w",
+   "UEFA Europa League Winner",
+   "UEFA Europa League Winner"
+  ],
+  [
+   "mls",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   30,
+   "mls-westconf-2026-12-12-w",
+   "MLS Western Conference Champion",
+   "MLS Western Conference Champion"
+  ],
+  [
+   "eflch",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   24,
+   "eflch-title-2027-05-01-w",
+   "EFL Championship Champion",
+   "EFL Championship Champion"
+  ],
+  [
+   "uscpicore",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   23,
+   "uscpicore-september-yoy-2026-10-14",
+   "Core CPI YoY in September",
+   "Core CPI YoY in September"
+  ],
+  [
+   "uscpi",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   21,
+   "uscpi-september-yoy-2026-10-14",
+   "CPI YoY in September",
+   "CPI YoY in September"
+  ],
+  [
+   "ppa",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   20,
+   "ppa-tyrblacatpar-lacschjesirv-2026-10-10",
+   "Staksrud / Patriquin vs. Newman / Khlif",
+   "Who will win in the upcoming pickleball event Tyra Hurricane Black / Catherine Parenteau v"
+  ],
+  [
+   "dfb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   18,
+   "dfb-final-2027-05-29-w",
+   "DFB-Pokal Champion",
+   "DFB-Pokal Champion"
+  ],
+  [
+   "pdc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   18,
+   "pdc-worldchamp-2027-01-03-w",
+   "PDC World Darts Championship Winner",
+   "PDC World Darts Championship Winner"
+  ],
+  [
+   "cs2",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   16,
+   "cs2-eslpl-2026-10-11-w",
+   "ESL Pro League Season 24 Winner",
+   "ESL Pro League Season 24 Winner"
+  ],
+  [
+   "dota2",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   16,
+   "dota2-blastslam-2026-10-11-w",
+   "BLAST Slam VIII Winner",
+   "BLAST Slam VIII Winner"
+  ],
+  [
+   "bra",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   15,
+   "bra-title-2026-12-02-w",
+   "Brasileiro Serie A Champion",
+   "Brasileiro Serie A Champion"
+  ],
+  [
+   "valorant",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   14,
+   "valorant-champs-2026-10-18-w",
+   "Valorant Champions Winner",
+   "Valorant Champions Winner"
+  ],
+  [
+   "us",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   13,
+   "us-saa-q3-2026-10-29",
+   "US GDP Growth in Q3 2026?",
+   "US GDP Growth in Q3 2026?"
+  ],
+  [
+   "wnba",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   13,
+   "wnba-white-2027-06-30",
+   "WNBA Finals Qualifiers",
+   "WNBA Finals Qualifiers"
+  ],
+  [
+   "uefa",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   12,
+   "uefa-bdor-2026-10-26-w",
+   "Ballon d'Or 2026 Winner",
+   "Ballon d'Or 2026 Winner"
+  ],
+  [
+   "usfed",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   12,
+   "usfed-hike2-2026-12-31",
+   "Fed Rate Cut in 2026?",
+   "Fed Rate Cut in 2026?"
+  ],
+  [
+   "usgas",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   12,
+   "usgas-low-2026-12-31",
+   "How Low Will US Gas Prices Get in 2026?",
+   "How Low Will US Gas Prices Get in 2026?"
+  ],
+  [
+   "cut",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   9,
+   "cut-by-2026-12-31",
+   "Which Central Banks Will Cut by Dec. 31?",
+   "Which Central Banks Will Cut by Dec. 31?"
+  ],
+  [
+   "hike",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   9,
+   "hike-by-2026-12-31",
+   "Which Central Banks Will Hike by Dec. 31?",
+   "Which Central Banks Will Hike by Dec. 31?"
+  ],
+  [
+   "usunemp",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   9,
+   "usunemp-sa-october-2026-11-06",
+   "October Unemployment Rate",
+   "October Unemployment Rate"
+  ],
+  [
+   "powerslap",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   8,
+   "powerslap-wilsho-acesam-2026-10-09",
+   "William Shockey vs Ace Samples",
+   "William Shockey vs Ace Samples"
+  ],
+  [
+   "motogp",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   6,
+   "motogp-title-2026-11-29-w",
+   "MotoGP World Champion",
+   "MotoGP World Champion"
+  ],
+  [
+   "npb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   6,
+   "npb-series-2026-11-01-w",
+   "NPB Japan Series Champion",
+   "NPB Japan Series Champion"
+  ],
+  [
+   "usnfp",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   6,
+   "usnfp-sa-october-2026-11-06",
+   "Jobs Numbers in October 2026",
+   "Jobs Numbers in October 2026"
+  ],
+  [
+   "bcb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "bcb-2026-11-04",
+   "Bank of Brazil Decision in November?",
+   "Bank of Brazil Decision in November?"
+  ],
+  [
+   "boc",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "boc-2026-10-28",
+   "Bank of Canada Decision in October?",
+   "Bank of Canada Decision in October?"
+  ],
+  [
+   "boe",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "boe-2026-11-05",
+   "Bank of England Decision in November?",
+   "Bank of England Decision in November?"
+  ],
+  [
+   "boi",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "boi-2026-10-21",
+   "Bank of Israel Decision in October?",
+   "Bank of Israel Decision in October?"
+  ],
+  [
+   "boj",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "boj-2026-10-30",
+   "Bank of Japan Decision in October?",
+   "Bank of Japan Decision in October?"
+  ],
+  [
+   "cbr",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "cbr-2026-10-23",
+   "Bank of Russia Decision in October?",
+   "Bank of Russia Decision in October?"
+  ],
+  [
+   "ecb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "ecb-2026-10-29",
+   "European Central Bank Decision in October?",
+   "European Central Bank Decision in October?"
+  ],
+  [
+   "kbo",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   5,
+   "kbo-series-2026-11-01-w",
+   "KBO Korean Series Champion",
+   "KBO Korean Series Champion"
+  ],
+  [
+   "cdb",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   4,
+   "cdb-title-2026-12-06-w",
+   "Copa do Brasil Champion",
+   "Copa do Brasil Champion"
+  ],
+  [
+   "lib",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   4,
+   "lib-title-2026-11-28-w",
+   "Copa Libertadores Champion",
+   "Copa Libertadores Champion"
+  ],
+  [
+   "fide",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   2,
+   "fide-wcc-2026-12-17-w",
+   "FIDE World Chess Championship Winner 2026",
+   "FIDE World Chess Championship Winner 2026"
+  ],
+  [
+   "boxing",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   1,
+   "boxing-canalv-chrmbi-2026-10-31",
+   "Canelo Alvarez vs Christian Mbilli",
+   "Canelo Alvarez vs Christian Mbilli"
+  ],
+  [
+   "fed",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   1,
+   "fed-gt25bps",
+   "Fed Rate Cut Greater Than 25bps?",
+   "Fed Rate Cut Greater Than 25bps?"
+  ],
+  [
+   "football",
+   "ONTOLOGY_GAPS:SPORT_NOT_NORMALIZED",
+   1,
+   "football-txs-2026-02-14-w",
+   "Team from Texas wins the Pro or College Football Championship",
+   "Team from Texas wins the Pro or College Football Championship"
+  ]
+ ],
+ "wbc_rows": [
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-alegon",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-andbon",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-andcai",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-chrjim",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-davcue",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-davmwa",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-emmrod",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-jasmol",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-jossal",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-juaest",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-kataki",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-kaziok",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-kenllo",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-micang",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-petchi",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-rikmas",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-takino",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-tennas",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-vacant",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-bantamw-2026-12-31-champ-yostak",
+   "wbc-bantamw-2026-12-31-champ",
+   "futures",
+   "WBC Bantamweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-aloyou",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-badjac",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-bragla",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-chrsmi",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-flomas",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-gilram",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-ilumak",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-jaiope",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-kevram",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-leomos",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-matmas",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-miccie",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-noemik",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-ryaroz",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-vacant",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-vidril",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-yamper",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-cruiserw-2026-12-31-champ-yundor",
+   "wbc-cruiserw-2026-12-31-champ",
+   "futures",
+   "WBC Cruiserweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-alapic",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-angleo",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-brucar",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-crilor",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-joegon",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-luiner",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-miccon",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-miknak",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-natcol",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-nicbal",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-omatri",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-otakho",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-rafesp",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-reiabe",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-renpal",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-reyvar",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-featherw-2026-12-31-champ-vacant",
+   "wbc-featherw-2026-12-31-champ",
+   "futures",
+   "WBC Featherweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-anglar",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-antola",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-arvpac",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-bradao",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-felalv",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-frarod",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-galyaf",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-jesesp",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-josvel",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-kyotak",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-masyab",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-ndaphi",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-renbib",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-ricsan",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-thacha",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-tobrey",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-vacant",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-yanriv",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-flyw-2026-12-31-champ-yoamos",
+   "wbc-flyw-2026-12-31-champ",
+   "futures",
+   "WBC Flyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-agikab",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-andnov",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-antjos",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-dandub",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-deowil",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-derchi",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-efeaja",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-fabwar",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-filhrg",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-jospar",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-lawoko",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-marbak",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-mosita",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-murgas",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-oleusy",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-tysfur",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-heavyw-2026-12-31-champ-vacant",
+   "wbc-heavyw-2026-12-31-champ",
+   "futures",
+   "WBC Heavyweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-abdmas",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-alacha",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-andcru",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-bakusm",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-dzmasa",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-jadher",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-joecor",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-jorwhi",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-juspau",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-lamroa",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-lucbah",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-raymur",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-ricnun",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-samnoa",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-shuuts",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-vacant",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-lightw-2026-12-31-champ-wilzep",
+   "wbc-lightw-2026-12-31-champ",
+   "futures",
+   "WBC Lightweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-aarmck",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-auswil",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-biljki",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-calwal",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-carada",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-dylbig",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-etioli",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-eummar",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-fiocze",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-jesram",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-keithu",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-meinur",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-sebfun",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-serboh",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-troisl",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-vacant",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-vitmie",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-yoeher",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-middlew-2026-12-31-champ-zhaali",
+   "wbc-middlew-2026-12-31-champ",
+   "futures",
+   "WBC Middleweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-arnbar",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-brinor",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-conben",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-devhan",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-egikav",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-jaccat",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-karchu",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-lewcro",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-manpac",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-marbar",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-raucur",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-rohpol",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-ryagar",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-sammol",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-soucis",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-teolop",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-vacant",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ],
+  [
+   "aachc-wbc-welterw-2026-12-31-champ-yarmyk",
+   "wbc-welterw-2026-12-31-champ",
+   "futures",
+   "WBC Welterweight Champion on Dec 31, 2026"
+  ]
+ ],
+ "rules_rows": [
+  {
+   "contract_id": "atc-mlb-cws-cle-2026-10-10-f5-cws",
+   "event_id": "mlb-cws-cle-2026-10-10",
+   "market_type": "baseball_team_first_five_winner",
+   "competition": "cws",
+   "production_sport": "baseball",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "6b427b18ca30b3a15c623f67d218abcdd5562e6907f6226bf21ecc653f8e28ab",
+   "rules_text": "This market will settle to Yes if the Chicago White Sox lead after the first 5 innings in the Chicago White Sox vs Cleveland Guardians MLB AL Division Series Game 5 scheduled for 2026-10-10 at 8:00PM ET. If the score is tied at the end of the first 5 innings, this market will settle to No. If the game is delayed, postponed, or suspended before the first 5 innings are completed and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB."
+  },
+  {
+   "contract_id": "atc-mlb-cws-cle-2026-10-10-i3-draw",
+   "event_id": "mlb-cws-cle-2026-10-10",
+   "market_type": "baseball_team_inning3_winner",
+   "competition": "cws",
+   "production_sport": "baseball",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "40d47c0c2f20063b8a275c3e9d148ef05e8d5bec3ebb2f2d6ad3f74311c9e670",
+   "rules_text": "This market will settle to the team that scores more runs in the 3rd Inning in the Chicago White Sox vs Cleveland Guardians MLB AL Division Series Game 5 scheduled for 2026-10-10. If both teams score the same number of runs in the inning, this market will settle to Tie. This market will settle based on the official result of the inning regardless of whether both teams come to bat. If the inning is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB."
+  },
+  {
+   "contract_id": "astatc-cs2-furia-mouz-2026-10-09-map1",
+   "event_id": "cs2-furia-mouz-2026-10-09",
+   "market_type": "esports_map_winner_1",
+   "competition": "furia",
+   "production_sport": "esports",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:esports/WINNER/FULL_EVENT",
+   "rules_sha256": "12e020ff81f2c8ada16222cda147958b6cc153f404b030472dd774217ce03a1f",
+   "rules_text": "This market resolves to \"Yes\" if FURIA wins Map 1 of the esports series against MOUZ, scheduled for October 9, 2026 at 1:30 PM UTC. Otherwise it resolves to \"No\". If Map 1 is not played (for example, the series concludes before that map), is abandoned, or no official winner is declared, this market will resolve to the last fair market price. In the event of a forfeit, disqualification, or concession before the map begins, the market will resolve to the last fair market price; if it occurs after the map has begun and the governing body declares an official winner, the market will resolve based on that result."
+  },
+  {
+   "contract_id": "astatc-cfb-rutger-mary-2026-10-17-fd-h-19pt5",
+   "event_id": "cfb-rutger-mary-2026-10-17",
+   "market_type": "football_team_total_first_downs",
+   "competition": "rutger",
+   "production_sport": "football",
+   "production_family": "TEAM_SCORE",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:football/TEAM_SCORE/FULL_EVENT",
+   "rules_sha256": "897e4b097f75602dae84f7877085d58cbd7294b62400e6d088ab68cd9b933d16",
+   "rules_text": "Team Total First Downs settles Yes if Maryland records more than 19.5 first downs in the Rutgers vs Maryland College Football game scheduled for Oct 17, 2026. Overtime is included if played. The market will settle based on the official box score at the conclusion of the game. For purposes of this market, stat corrections enforced after the game has been completed will not count. If the game is delayed, postponed, or suspended before this market is determined and is not resumed or rescheduled within two days of the originally scheduled date, it will be flagged for manual last-fair-market-price settlement. Outcome sourced from the relevant governing body."
+  },
+  {
+   "contract_id": "aec-nhl-van-nyr-2026-10-11",
+   "event_id": "nhl-van-nyr-2026-10-11",
+   "market_type": "hockey_team_full_game_winner",
+   "competition": "van",
+   "production_sport": "hockey",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "INCOMPATIBLE_NOT_PRICEABLE:POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED:SETTLEMENT_DIFFERENCE_ORDINARY_COMPLETION_NOT_ESTABLISHED",
+   "rules_sha256": "9769678e03b9162309d16c40b277e1e4217dca9b360f6fc9dbb58ce26db17d2a",
+   "rules_text": "This market will settle to the winner of the VAN Canucks vs NYR Rangers NHL game scheduled for Oct 11, 2026 at 6:00PM ET. Overtime and any shootout are included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL."
+  },
+  {
+   "contract_id": "atc-nhl-fla-buf-2026-10-12-reg-fla",
+   "event_id": "nhl-fla-buf-2026-10-12",
+   "market_type": "hockey_team_regulation_winner",
+   "competition": "fla",
+   "production_sport": "hockey",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "INCOMPATIBLE_NOT_PRICEABLE:POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED:SETTLEMENT_DIFFERENCE_ORDINARY_COMPLETION_NOT_ESTABLISHED",
+   "rules_sha256": "eaa9ca813dab60fd9d6bf4e3789c6f415fa68935663725837c6054e1d37366d3",
+   "rules_text": "This market will settle to the winner at the end of regulation (60 minutes) in the FLA Panthers vs BUF Sabres NHL game scheduled for Oct 12, 2026 at 1:00PM ET. If the game is tied after regulation (60 minutes), the market will settle to Tie. Overtime and any shootout are not included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL."
+  },
+  {
+   "contract_id": "atc-nhl-min-fla-2026-10-10-reg-draw",
+   "event_id": "nhl-min-fla-2026-10-10",
+   "market_type": "hockey_team_regulation_winner",
+   "competition": "min",
+   "production_sport": "hockey",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "INCOMPATIBLE_NOT_PRICEABLE:POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED:SETTLEMENT_DIFFERENCE_ORDINARY_COMPLETION_NOT_ESTABLISHED",
+   "rules_sha256": "57e17e86863c9e00389b8ae744f7fbeca49d5d0bfdf188a4359088ea5fa241c1",
+   "rules_text": "This market will settle to the winner at the end of regulation (60 minutes) in the MIN Wild vs FLA Panthers NHL game scheduled for Oct 10, 2026 at 6:00PM ET. If the game is tied after regulation (60 minutes), the market will settle to Tie. Overtime and any shootout are not included if played. If the game is delayed, postponed, suspended, or otherwise rescheduled and is not rescheduled to start within two calendar days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NHL."
+  },
+  {
+   "contract_id": "atc-uecl-ata-paf-2026-10-15-paf",
+   "event_id": "uecl-ata-paf-2026-10-15",
+   "market_type": "soccer_team_full_time_winner",
+   "competition": "ata",
+   "production_sport": "soccer",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "2cc0995b49c6273cee052e0fba0de826db45d32cb4cc10e38aa1e0d8f036a9d3",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Atalanta BC vs P\u00e1fos FC UECL match scheduled for 2026-10-15 3:00PM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from UEFA."
+  },
+  {
+   "contract_id": "astatc-setkameua-shcden-lazrus-2026-10-09-sw2",
+   "event_id": "setkameua-shcden-lazrus-2026-10-09",
+   "market_type": "table_tennis_set_2_winner",
+   "competition": "shcden",
+   "production_sport": "table_tennis",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:table_tennis/WINNER/FULL_EVENT",
+   "rules_sha256": "f79a79ff8c6fafd390cdcb6e869373aea6f55149e3156e508cbf68de33fff062",
+   "rules_text": "This market will settle to the winner of Set 2 of the Shcherbak Denys vs Lazebnyi Ruslan Setka Cup Ukraine Men match scheduled for Oct 9, 2026. If the match does not begin due to a walkover, withdrawal, or cancellation, the market will settle to $0.50. If the match is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50. If the match begins but ends before Set 2 is completed, the market will settle to the last fair market price. Outcome sourced from Setka Cup Ukraine Men."
+  },
+  {
+   "contract_id": "aec-npb-ygo-ybo-2026-10-10",
+   "event_id": "npb-ygo-ybo-2026-10-10",
+   "market_type": "baseball_team_full_game_winner",
+   "competition": "ygo",
+   "production_sport": "baseball",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "78091ed78edf353156d8dd5c74fdf0c0b98c29ef44ee03f011b5e486d201a1a4",
+   "rules_text": "This market will settle to the winner of the Yomiuri Giants vs Yokohama BayStars NPB game scheduled for Oct 10, 2026 at 1:00AM ET (as of the listing of the event's first instrument). Extra innings are included if played. If the game ends in a tie, the market will settle to $0.50. If the game is delayed, postponed, suspended or otherwise rescheduled to a date and time not within two days of the originally scheduled date and time, the market will settle to the last fair market price. Outcome sourced from NPB."
+  },
+  {
+   "contract_id": "atc-spl-fay-riy-2026-10-11-draw",
+   "event_id": "spl-fay-riy-2026-10-11",
+   "market_type": "soccer_team_full_time_winner",
+   "competition": "fay",
+   "production_sport": "soccer",
+   "production_family": "WINNER",
+   "production_period": "FULL_EVENT",
+   "production_settlement_why": "BOOKMAKER_TERMS_NOT_HELD:QUOTE_CONTEXT_NOT_ESTABLISHED,COMPETITION_PHASE_NOT_ESTABLISHED,GAME_FORMAT_NOT_ESTABLISHED",
+   "rules_sha256": "23dad6392671394eef203f39676d826422428e7e9a2b35f9dfb92d7d964b9d9a",
+   "rules_text": "This market will settle to the winner at the end of 90 minutes plus stoppage time in the Al Fayha Saudi Club vs Al Riyadh Saudi Club Saudi Pro League match scheduled for 2026-10-11 9:40AM ET. If the match is tied following 90 minutes plus stoppage time, the market will settle to Tie. If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from SAFF."
+  }
+ ]
+}
