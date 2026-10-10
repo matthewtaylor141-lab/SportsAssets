@@ -5,8 +5,20 @@
 -- Every digest covers only rows whose own creation clock is before the cutoff, so rows the running system
 -- appends after the cutoff never enter it; a row changed, removed or back-dated before the cutoff changes it.
 --
--- PLACEHOLDER. 2026-10-10 19:00:00+00 : an ISO timestamp with zone (e.g. 2026-10-10 19:00:00+00), fixed once, used for both
--- runs. It must be at or before the deploy instant.
+-- PLACEHOLDER. 2026-10-10 19:00:00+00 : an ISO timestamp with zone (e.g. 2026-10-10 19:00:00+00), fixed ONCE and used
+-- unchanged for the BEFORE run and for EVERY AFTER run. It must be AT LEAST 5 MINUTES BEFORE THE START OF THE
+-- BEFORE RUN (and therefore before the deploy); both runs are made after it. Why 5 minutes and not "the deploy
+-- instant": every digest filters on the row's creation clock, and that clock precedes the instant the row becomes
+-- visible -- recorded_at / created_at DEFAULT now() is the TRANSACTION START (migrations 171, 172), filled_at /
+-- settled_at / at / decided_at are code clocks equal to the pass start (bettor_paper_ledger.settle at=_ts(at),
+-- paper_xavier.step_settle at=_clock(ctx)), and a step may commit up to 80 s later (paper_runtime steps_bound_s).
+-- Measured on production (research-sql 38082216890 V3a/V3b): ledger committed_at - fills.recorded_at up to 6.8 s,
+-- - orders.created_at up to 2.6 s; settlements recorded_at - settled_at up to 33.0 s; fills recorded_at - filled_at
+-- up to 6.8 s. A cutoff inside that margin before the before-run makes a row that was merely committed late appear
+-- only in the after-run: a false "back-dated row" FAIL. The F0 row prints the cutoff, now() and the margin and FLAGS
+-- a run whose margin is under 5 minutes; it also prints the session settings every text digest depends on
+-- (TimeZone, DateStyle, extra_float_digits) and pg_is_in_recovery(), so a before/after comparison is
+-- self-validating: F0 must be identical between the runs apart from run_at and margin.
 --
 -- THE DIGEST. Per table: the row count before the cutoff, and md5 over (count, three order-independent sums of
 -- 60-bit slices of each row's md5). Order independence is by construction (sums), so no sort runs and the read
@@ -47,14 +59,23 @@
 -- settlements settled before the cutoff (bettor_paper_ledger._position_from arithmetic: proceeds - avg x sold +
 -- payout - avg x settled, avg = BUY cost incl. fees / bought), and the ledger's cash by kind before the cutoff.
 --
--- PASS CRITERIA. Before/after outputs identical for every row of F1-F4 and F6 (rows_before_cutoff, digest,
--- newest_before_cutoff). F5 counts may only grow (session health passes/errors) or stay. Any differing digest =
--- a historical PAPER row was changed, removed or back-dated: FAIL, name the table.
+-- PASS CRITERIA. F0 margin_ok = 'ok' in BOTH runs (cutoff >= 5 min before the before-run; the after-run is later
+-- still) and F0 tz / datestyle / extra_float_digits / replica identical between the runs. Then: before/after
+-- outputs identical for every row of F1-F4 and F6 (rows_before_cutoff, digest, newest_before_cutoff). F5 counts
+-- may only grow (session health passes/errors) or stay. Any differing digest = a historical PAPER row was changed,
+-- removed or back-dated: FAIL, name the table. (A run with F0 margin_ok <> 'ok' is not a valid before-run: pick an
+-- earlier cutoff and run both again.)
 --
 -- SIZE (probe 38078866534 Q1/Q13): ledger 2,309 rows; fills 1,219; orders 11,628; order_events 414,016 (162 MB);
 -- settlements 195; decisions 200,153 (4 GB incl. jsonb); book observations 195,887 (245 MB); xavier reviews
 -- 172,313 (1.6 GB incl. jsonb). Every statement below finishes well inside the 600 s statement timeout; took_s
 -- is printed per branch (seconds since the statement started).
+\echo F0 the cutoff, this run, the margin between them (must be >= 5 min in the BEFORE run), and the session settings the text digests depend on (must be identical between the runs)
+SELECT to_char(TIMESTAMPTZ '2026-10-10 19:00:00+00', 'YYYY-MM-DD HH24:MI:SS TZ') AS cutoff, to_char(now(), 'YYYY-MM-DD HH24:MI:SS TZ') AS run_at,
+       round(extract(epoch FROM now() - TIMESTAMPTZ '2026-10-10 19:00:00+00')::numeric / 60, 2) AS margin_min,
+       CASE WHEN now() - TIMESTAMPTZ '2026-10-10 19:00:00+00' >= interval '5 minutes' THEN 'ok' ELSE 'FAIL_CUTOFF_LESS_THAN_5_MIN_BEFORE_THIS_RUN' END AS margin_ok,
+       current_setting('TimeZone') AS tz, current_setting('DateStyle') AS datestyle, current_setting('extra_float_digits') AS extra_float_digits,
+       current_setting('IntervalStyle') AS intervalstyle, pg_is_in_recovery() AS replica, left(version(), 40) AS pg;
 \echo F1 ledger core (database append-only): rows before the cutoff and their digest
 SELECT 'paper_ledger' AS tbl, 'committed_at' AS cutoff_col, count(*) AS rows_before_cutoff,
        md5(count(*)::text || ':' || coalesce(sum(('x' || substr(h, 1, 15))::bit(60)::bigint), 0)::text || ':' || coalesce(sum(('x' || substr(h, 17, 15))::bit(60)::bigint), 0)::text || ':' || coalesce(sum(('x' || substr(h, 2, 15))::bit(60)::bigint), 0)::text) AS digest,
