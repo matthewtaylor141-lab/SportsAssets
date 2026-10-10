@@ -78,16 +78,14 @@ STATEMENT_TIMEOUT_MS = 3000
 #: 216..316 since LIVE GAME STATE V1 (316: the Trader live-game DISPLAY
 #: sidecar -- append-only score bindings / observations, a rebuildable latest
 #: view and the collector heartbeat; display only, no price, order,
-#: settlement or ledger authority); 216..365 since the RC6 PROVENANCE FIX
-#: (365: the research training set's change stamp -- a counter and its
-#: triggers; no price, order, settlement or ledger authority; 317..364 are
-#: held by parallel RC6 lanes and absent from this build); 216..366 since
-#: RC6.2 PMUS-EXEC (366: a NEW table, execmirror_exposure_caps -- the ACTUAL
-#: lane's aggregate open + held notional cap per account, no row =
-#: max_order_usd -- and one nullable column, smalllive_reconciliations.
-#: stale_reason, which with status PENDING is Audrey's STALE; no constraint,
-#: trigger or index added to or changed on any existing table, no mode
-#: change, no value of any existing column changed).
+#: settlement or ledger authority); 216..366 since RC6.2 PMUS-EXEC (366: a
+#: NEW table, execmirror_exposure_caps -- the ACTUAL lane's aggregate open +
+#: held notional cap per account, no row = max_order_usd -- and one nullable
+#: column, smalllive_reconciliations.stale_reason, which with status PENDING
+#: is Audrey's STALE; no constraint, trigger or index added to or changed on
+#: any existing table, no mode change, no value of any existing column
+#: changed; 317..365 are held by parallel RC6 lanes and absent from this
+#: build).
 #: Numbers inside the range that no migration uses (reserved stream
 #: slots) are reported in `numbers_absent`, never hidden.
 TRACKED_FROM, TRACKED_TO = 216, 366
