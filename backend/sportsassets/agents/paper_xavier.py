@@ -1028,6 +1028,14 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             evidence_state=measure["evidence_state"], selected=chosen)
         if fresh and not rankable:
             recorded = XF.REC_UNAVAILABLE
+        # THE INTENT IS BUILT HERE AND RECORDED WITH THE REVIEW, IN ONE
+        # TRANSACTION, AT THE END (RC6.3c pass-hardening): it used to be
+        # recorded here, before the action, and the review row was written
+        # after the action and the adapters. A pass cut in between (the
+        # adapter hook, or any await after the protective order) left a
+        # canonical_management_intents row -- and its adapter executions --
+        # whose review_id never got a review row. See "THE REVIEW AND ITS
+        # CANONICAL INTENT ARE ONE WRITE" below.
         mintent = None
         try:
             mintent = CI.build_management_intent(
@@ -1049,9 +1057,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         "exceptional": list(exceptional),
                         "management_packet": pgate},
                 created_at=at, alternative_set=alt_set, policy=mgmt_policy)
-            rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
-            if rec_hook is None or not await rec_hook(conn, mintent):
-                mintent = None
         except Exception:                                       # noqa: BLE001
             mintent = None
         act = decided["action"]
@@ -1193,16 +1198,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             action["exit_intent_state"] = xi["state"]
             if xi.get("resolution"):
                 action["exit_intent_resolution"] = xi["resolution"]
-        if mintent is not None:
-            action["canonical_intent_id"] = mintent["intent_id"]
-            ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
-            if ad is not None:
-                try:
-                    action["live_parity"] = await ad(
-                        conn, mintent, taken=dict(action),
-                        open_qty=pos["open_qty"])
-                except Exception as exc:                        # noqa: BLE001
-                    action["live_parity"] = {"error": type(exc).__name__}
         # THE REVIEWED POSITION'S OWN FILLED PROTECTION (RC6 archer-
         # lifecycle): the simulated fills of the standing sales of THIS
         # (account, group, market, holding side) -- the same key the standing
@@ -1222,47 +1217,91 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         valuation = XF.valuation_block(
             measure, assessed_at=at,
             limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
-        await conn.execute(
-            "INSERT INTO paper_xavier_reviews (review_id, session_id, "
-            " account_id, group_id, reviewed_at, trigger, recommendation, "
-            " refusal, alternatives, selection, exposure, standing, "
-            " confirmed_protection, incomplete_search, exceptional, measure,"
-            " action, strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,"
-            " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
-            " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
-            rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
-            recorded, (pgate["refusal"] if not pgate["complete"]
-                       and cont is None else sel.get("refusal")),
-            json.dumps(alts, default=str),
-            json.dumps(dict({k: sel.get(k) for k in (
-                "selected", "refusal", "selection_reason",
-                "margin_over_runner_up", "decision_policy", "tie_break",
-                "hold_is_priced", "limits_applied")},
-                management_policy=mpol,
-                mechanical_selection=chosen,
-                management_packet=dict(packet, gate=pgate),
-                recommendation_state=XF.write_state(
-                    evidence_state=measure["evidence_state"],
-                    recommendation=recorded),
-                valuation=valuation), default=str),
-            json.dumps(exposure, default=str),
-            json.dumps({"live_orders": [L.order_view(s) for s in standing],
-                        "protective_price": prot,
-                        "invariant": SPO.WHY_ONE_LIVE_ORDER},
-                       default=str),
-            json.dumps({"filled_protection_qty": float(confirmed),
-                        "basis": "simulated fills of the standing sale",
-                        # the column's name predates the lanes: this is
-                        # PAPER (SIMULATOR) fills of THIS position, never a
-                        # venue confirmation
-                        "scope": "POSITION",
-                        "position_key": pos.get("position_key"),
-                        "execution_environment": "PAPER_SIMULATED"},
-                       default=str),
-            json.dumps(alts["incomplete_search"], default=str),
-            json.dumps(exceptional), json.dumps(measure, default=str),
-            json.dumps(action, default=str), pos.get("strategy")
-            or L.DEFAULT_STRATEGY)
+        # ── THE REVIEW AND ITS CANONICAL INTENT ARE ONE WRITE ───────────
+        # (RC6.3c pass-hardening.) The canonical management intent, what the
+        # two adapters did with it (canonical_intent_executions, the parity
+        # ledger) and the review row that carries its review_id are written
+        # in ONE transaction, after the action. A pass cut anywhere in it --
+        # the adapter hook hanging, the step bound, a restart -- rolls ALL of
+        # them back: there is never an intent whose review_id has no review
+        # row (found by a reviewer of 5979416f: the pass was cut in the
+        # adapter hook, between the protective order and this INSERT). What
+        # the action already did stays (the protective order is its own
+        # committed write and the next review finds it standing: the one-
+        # live-protective-order invariant, SPO.WHY_ONE_LIVE_ORDER, holds, so
+        # no second protective order is placed); the review is then simply
+        # made again, by the next pass, as a review that was never written.
+        # The hook and the adapters each run in a savepoint of their own: a
+        # failure in one never aborts the transaction the review rides on.
+        async with conn.transaction():
+            if mintent is not None:
+                recorded_intent = False
+                try:
+                    rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
+                    if rec_hook is not None:
+                        async with conn.transaction():
+                            recorded_intent = bool(
+                                await rec_hook(conn, mintent))
+                except Exception:                               # noqa: BLE001
+                    recorded_intent = False
+                if not recorded_intent:
+                    mintent = None
+            if mintent is not None:
+                action["canonical_intent_id"] = mintent["intent_id"]
+                ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
+                if ad is not None:
+                    try:
+                        async with conn.transaction():
+                            action["live_parity"] = await ad(
+                                conn, mintent, taken=dict(action),
+                                open_qty=pos["open_qty"])
+                    except Exception as exc:                    # noqa: BLE001
+                        action["live_parity"] = {
+                            "error": type(exc).__name__}
+            await conn.execute(
+                "INSERT INTO paper_xavier_reviews (review_id, session_id, "
+                " account_id, group_id, reviewed_at, trigger, "
+                " recommendation, refusal, alternatives, selection, "
+                " exposure, standing, confirmed_protection, "
+                " incomplete_search, exceptional, measure, action, "
+                " strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,"
+                " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
+                " $15::jsonb,$16::jsonb,$17::jsonb,$18) "
+                "ON CONFLICT DO NOTHING",
+                rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
+                recorded, (pgate["refusal"] if not pgate["complete"]
+                           and cont is None else sel.get("refusal")),
+                json.dumps(alts, default=str),
+                json.dumps(dict({k: sel.get(k) for k in (
+                    "selected", "refusal", "selection_reason",
+                    "margin_over_runner_up", "decision_policy", "tie_break",
+                    "hold_is_priced", "limits_applied")},
+                    management_policy=mpol,
+                    mechanical_selection=chosen,
+                    management_packet=dict(packet, gate=pgate),
+                    recommendation_state=XF.write_state(
+                        evidence_state=measure["evidence_state"],
+                        recommendation=recorded),
+                    valuation=valuation), default=str),
+                json.dumps(exposure, default=str),
+                json.dumps({"live_orders": [L.order_view(s)
+                                            for s in standing],
+                            "protective_price": prot,
+                            "invariant": SPO.WHY_ONE_LIVE_ORDER},
+                           default=str),
+                json.dumps({"filled_protection_qty": float(confirmed),
+                            "basis": "simulated fills of the standing sale",
+                            # the column's name predates the lanes: this is
+                            # PAPER (SIMULATOR) fills of THIS position, never
+                            # a venue confirmation
+                            "scope": "POSITION",
+                            "position_key": pos.get("position_key"),
+                            "execution_environment": "PAPER_SIMULATED"},
+                           default=str),
+                json.dumps(alts["incomplete_search"], default=str),
+                json.dumps(exceptional), json.dumps(measure, default=str),
+                json.dumps(action, default=str), pos.get("strategy")
+                or L.DEFAULT_STRATEGY)
         # THE MANAGEMENT ASSESSMENT (migration 206): latency against the
         # bound, thesis state, every alternative incl. the SHADOW
         # REALLOCATE, the policy record. Record only -- the action above
