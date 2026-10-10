@@ -128,9 +128,13 @@ UPGRADE_FIELDS = ("reason", "provenance.run_id", "provenance.workflow_path",
                   "receipt.unseeded_touched_tables", "receipt.seeded",
                   "receipt.rows", "receipt.after",
                   "receipt.rollback_compatibility")
+#: rollback_by_service (rc6.3 rollback-fix): each service's own action --
+#: DEPLOY_PREVIOUS to its own previous live commit, NONE (stays; no
+#: command) when it is not on the release, or REFUSED by name
 ROLLBACK_FIELDS = ("version", "sha", "status", "reasons", "target_sha",
                    "target_is_ancestor_of_release", "migrations",
-                   "services", "commands", "procedure", "deploys_nothing")
+                   "services", "rollback_by_service", "commands",
+                   "procedure", "deploys_nothing")
 
 
 def load(acc: pathlib.Path, name: str):
