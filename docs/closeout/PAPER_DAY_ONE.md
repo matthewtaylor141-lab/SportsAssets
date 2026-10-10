@@ -178,6 +178,12 @@ pm-acceptance job the rollback step runs before the production readbacks, so
 its record says `RELEASE_READBACK_NOT_IN_ACC` and the judge, which runs after
 them, decides; moving that step after "Production readbacks" (a workflow
 change left to owner review) would let the record carry the same verdict.
+Both rules run from the judge checkout (the commit pm-acceptance is
+dispatched from), so they take effect only in runs dispatched from a commit
+that contains them; a packet judged at the pinned `42616dcd`, the only judge
+activation accepts, does not apply them. Re-pinning `JUDGE_SHA` after review
+is an owner decision; the anchor is unchanged here. The `paper_epochs`
+readback itself is served by the deployed API.
 
 Tests use synthetic local accounts and acceptance fixtures, including simulated
 signature command failures; those fixtures are not production acceptance.
