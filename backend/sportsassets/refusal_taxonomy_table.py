@@ -2525,6 +2525,14 @@ NOT_REFUSAL = {
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
     'ROLLBACK_RELEASE_MIGRATIONS_UNREADABLE':
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_COMMIT_NOT_PREVIOUSLY_LIVE_ON_THE_SERVICE':
+        "tools/rollback_readiness (rc6.3 rollback-fix): a service's rollback is refused and no deploy command is written because the commit is not one that service's OWN Render deploy history shows it was live on before -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_FOR_A_SERVICE_NOT_ON_THE_RELEASE':
+        "tools/scorecard_14 (rc6.3 rollback-fix): the rollback record wrote a deploy command for a service that is not live on the release (approved-judge 38002788631: market plane on 732cc0c6 given 3d5af039, the release that hung it); the judge passes no command for it, the service stays on its current commit -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT':
+        "tools/scorecard_14 (rc6.3 rollback-fix): a service's rollback command, or the record's live or previous commit for it, is not what that service's OWN Render deploy history in the packet says (its previous live commit); the judge passes no command for it -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_DEPLOY_ACTION':
+        "tools/scorecard_14 (rc6.3 rollback-fix): the command written for a service is not that service's own documented deploy-by-commit action (a right commit must never ride to another service); the judge passes no command for it -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
     'UPGRADE_NOT_A_FULL_SHA':
         "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
     'UPGRADE_BASE_BUILD_FAILED':

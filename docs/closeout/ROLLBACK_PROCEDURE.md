@@ -15,6 +15,26 @@ deploy older than the live one whose commit differs from it). It is not the
 release commit's git parent: release 69a8a07e's parent is 93dc6f41, an interim
 release commit that never ran; Render shows 7fd4574e on every service.
 
+**Each service goes back to its own previous, from its own history (rc6.3).**
+`rollback_by_service.<svc>` decides per service, from that service's deploy
+list only, never from another service's:
+
+| Action | When | Command |
+|---|---|---|
+| `DEPLOY_PREVIOUS` (`from`, `to`) | the service is live on the release | its own previous live commit (`to`) only |
+| `NONE` (`stay_on`) | the service is NOT on the release (`ROLLBACK_SERVICE_NOT_ON_THE_RELEASE`) | none: it stays on its current commit |
+| `REFUSED` (`reason`) | its history is unreadable (also one row of the wrong shape where it decides what is live or what ran before: `ROLLBACK_DEPLOY_HISTORY_UNREADABLE`, never read past to an older commit), has no single live deploy, disagrees with `render.json`, or shows no previous live commit | none |
+
+No command is ever written for a commit the service's own history does not
+show it was live on before. Production evidence: approved-judge pm-acceptance
+38002788631 on release 16d23450 had api and workers on 16d23450 and the market
+plane on 732cc0c6 (moved back there at ~15:59Z on 2026-10-09 after RC6.1
+3d5af039's Kalshi client hung it). The record wrote one command per service
+from the single target 3d5af039, including a market-plane deploy of 3d5af039
+that would have redeployed the hang; the plane's action is now `NONE`, stay on
+732cc0c6, and no market-plane command is written. The rollback stays
+`NOT_READY` while any service is off the release.
+
 The target is usable only when, in `acc/rollback.json`:
 
 | Fact | Field | Why |
@@ -24,7 +44,7 @@ The target is usable only when, in `acc/rollback.json`:
 | the target is an ancestor of the release | `target_is_ancestor_of_release` | it is on the release line |
 | its four gates are green on its own SHA | `target_gates` (backend-tests, capital-critical, commit-guard, engine-diagnostic) | it passed the same gates |
 | it runs on the release's schema | `migrations` (identical) or the upgrade-path receipt's `rollback_compatibility` = `COMPATIBLE` | migrations are never rolled back on production |
-| every service's deploy command is written down | `commands` | no improvisation under pressure |
+| every service's deploy command is written down, each naming that service's own previous live commit | `commands`, `rollback_by_service` | no improvisation under pressure |
 
 ## 2. Migration compatibility (the schema stays)
 
@@ -56,13 +76,17 @@ rollback is then not ready until a person has decided what to do about each.
 
 ## 3. The commands (deploy by commit id, one service at a time)
 
-`T` = `target_sha` from the latest pm-acceptance packet. In the release order
-(API, workers, market plane):
+Run exactly the commands the scorecard's `rollback_ready` unit passes on
+(`detail.commands`, re-derived by the judge from each service's own deploy
+history), never a command typed from `target_sha`. A service whose action is
+`NONE` or `REFUSED` has no command: leave it where it is. The forms, in the
+release order (API, workers, market plane), with `$T_<svc>` =
+`rollback_by_service.<svc>.to`:
 
 ```
-gh workflow run render-ops.yml --ref claude/p0-closeout -f action=deploy-api-commit -f service=sportsassets-api -f arg=$T -f confirm=DO
-gh workflow run render-ops.yml --ref claude/p0-closeout -f action=workers-commit-deploy -f service=sportsassets-workers -f arg=$T -f confirm=DO
-gh workflow run market-plane.yml --ref claude/release-api -f action=deploy-commit -f arg=$T -f confirm=DO
+gh workflow run render-ops.yml --ref claude/p0-closeout -f action=deploy-api-commit -f service=sportsassets-api -f arg=$T_api -f confirm=DO
+gh workflow run render-ops.yml --ref claude/p0-closeout -f action=workers-commit-deploy -f service=sportsassets-workers -f arg=$T_workers -f confirm=DO
+gh workflow run market-plane.yml --ref claude/release-api -f action=deploy-commit -f arg=$T_market_plane -f confirm=DO
 ```
 
 `workers-commit-deploy` refuses unless the workers' autoDeploy is `no`

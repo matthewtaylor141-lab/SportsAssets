@@ -213,6 +213,36 @@ R_ROLLBACK_TARGET_GATE = "ROLLBACK_TARGET_GATE_NOT_GREEN"
 R_ROLLBACK_COMMANDS_INCOMPLETE = "ROLLBACK_COMMANDS_INCOMPLETE"
 R_ROLLBACK_SCHEMA_BLOCKED = "ROLLBACK_SCHEMA_BLOCKED"
 R_ROLLBACK_SCHEMA_UNPROVEN = "ROLLBACK_SCHEMA_COMPATIBILITY_UNPROVEN"
+# (rc6.3 rollback-fix) the judge re-derives each service's rollback from
+# that service's OWN deploy list in the packet and passes on only commands
+# it re-derived (approved-judge 38002788631 wrote a market-plane command for
+# 3d5af039, the release that hung the plane, onto a plane not on the release)
+R_ROLLBACK_HISTORY_UNREADABLE = "ROLLBACK_DEPLOY_HISTORY_UNREADABLE"
+R_ROLLBACK_LIVE_NOT_RENDERS = "ROLLBACK_LIVE_DEPLOY_DIFFERS_FROM_RENDER_SUMMARY"
+R_ROLLBACK_COMMAND_OFF_RELEASE = \
+    "ROLLBACK_COMMAND_FOR_A_SERVICE_NOT_ON_THE_RELEASE"
+R_ROLLBACK_NOT_OWN_PREVIOUS = \
+    "ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT"
+R_ROLLBACK_NOT_ITS_SERVICE = \
+    "ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_DEPLOY_ACTION"
+#: each service's documented deploy-by-commit action (the same text as
+#: tools/rollback_readiness.COMMANDS, pinned equal by test; this file stays
+#: one standard-library file): a command is passed on only when it is
+#: exactly its own service's form with its own previous live commit, so a
+#: right commit can never ride to the wrong service
+ROLLBACK_COMMAND_FORMS = {
+    "sportsassets-api":
+        "gh workflow run render-ops.yml --ref claude/p0-closeout "
+        "-f action=deploy-api-commit -f service=sportsassets-api "
+        "-f arg=%s -f confirm=DO",
+    "sportsassets-workers":
+        "gh workflow run render-ops.yml --ref claude/p0-closeout "
+        "-f action=workers-commit-deploy -f service=sportsassets-workers "
+        "-f arg=%s -f confirm=DO",
+    "sportsassets-market-plane":
+        "gh workflow run market-plane.yml --ref claude/release-api "
+        "-f action=deploy-commit -f arg=%s -f confirm=DO",
+}
 IDENTICAL = "IDENTICAL_MIGRATION_SET"
 COMPATIBLE = "COMPATIBLE"
 
@@ -1155,6 +1185,119 @@ def upgrade_path(acc, release_sha):
         "reasons": rec["reasons"], "migration_delta": delta, "receipt": rec}
 
 
+_SHA_IN_TEXT = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+
+
+def _deploy_row(row):
+    """A deploy-list row's `deploy` object, or None when the row cannot be
+    read (not {"deploy": {...}}, or a status that is not a string)."""
+    d = row.get("deploy") if isinstance(row, dict) else None
+    return d if isinstance(d, dict) and isinstance(d.get("status"), str) \
+        else None
+
+
+def _deploy_commit(d):
+    """A deploy's commit SHA, or None: a `commit` that is not an object (a
+    string, a list, a number) or names no 40-hex id is unreadable."""
+    c = d.get("commit")
+    cid = c.get("id") if isinstance(c, dict) else None
+    return cid if _is_sha(cid) else None
+
+
+def _deploy_history(acc, svc):
+    """(live commit, [every commit previously live on it, newest first])
+    from THIS service's own Render deploy list in the packet
+    (deploys_<svc>.json, newest first, as pm-acceptance stores it), or None
+    when it is unreadable, has not exactly one live deploy, or the live
+    deploy names no commit. `deactivated` = was live, then replaced; a
+    failed, cancelled or still-building deploy never served.
+
+    Never raises on a field of the wrong shape (one bad deploy row must
+    not take the whole scorecard out of the packet): a row it cannot read
+    newer than the live deploy, a live commit it cannot read, or a row it
+    cannot read between the live deploy and the previous live commit (it
+    may be what ran before) -> None, refused by name by the caller. A row
+    it cannot read older than that is not counted as previously live."""
+    raw = _opt(acc, "deploys_%s.json" % svc)
+    if not isinstance(raw, list):
+        return None
+    deps = [_deploy_row(x) for x in raw]    # None = a row it cannot read
+    live = [i for i, d in enumerate(deps)
+            if d is not None and d["status"] == "live"]
+    if len(live) != 1:
+        return None
+    lc = _deploy_commit(deps[live[0]])
+    if lc is None or any(d is None for d in deps[:live[0]]):
+        return None
+    before = []
+    for d in deps[live[0] + 1:]:
+        if d is not None and d["status"] != "deactivated":
+            continue                    # never served: its commit is moot
+        c = _deploy_commit(d) if d is not None else None
+        if c is None:
+            if not before:
+                return None             # what ran before cannot be read
+            continue                    # older: not counted as live
+        if c != lc and c not in before:
+            before.append(c)
+    return lc, before
+
+
+def _service_rollback(acc, svc, rec, cmd, release_sha):
+    """ONE service's rollback, re-derived by the judge from that service's
+    own deploy list: (plan, the command passed on or None, reasons).
+
+      * not live on the release -> NONE: it stays on its current commit,
+        named ROLLBACK_SERVICE_NOT_ON_THE_RELEASE, and no command is passed
+        on (a record that wrote one is named);
+      * on the release -> DEPLOY_PREVIOUS to ITS OWN previous live commit,
+        and only that service's own documented command naming exactly that
+        commit is passed on;
+      * its history unreadable, or the record's live / previous commit not
+        what its own history says -> REFUSED by name, no command."""
+    live = rec.get("live_commit")
+    named = set(_SHA_IN_TEXT.findall(str(cmd or "")))
+    hist = _deploy_history(acc, svc)
+    why = []
+    if live != release_sha:
+        why.append("%s:%s" % (R_ROLLBACK_SERVICE_NOT_ON_RELEASE, svc))
+        if cmd:
+            why.append("%s:%s" % (R_ROLLBACK_COMMAND_OFF_RELEASE, svc))
+    if hist is None:
+        return ({"action": "REFUSED", "reason": R_ROLLBACK_HISTORY_UNREADABLE},
+                None, why + ["%s:%s" % (R_ROLLBACK_HISTORY_UNREADABLE, svc)])
+    hist_live, before = hist
+    if live != release_sha:
+        if hist_live != live:
+            why.append("%s:%s:%s" % (R_ROLLBACK_NOT_OWN_PREVIOUS, svc, live))
+        # it stays on what its OWN deploy list says is live
+        return ({"action": "NONE", "stay_on": hist_live,
+                 "reason": R_ROLLBACK_SERVICE_NOT_ON_RELEASE}, None, why)
+    ren = _opt(acc, "render.json")
+    ren = ren.get(svc) if isinstance(ren, dict) else None
+    if not isinstance(ren, dict) or ren.get("live_commit") != hist_live:
+        # its deploy list and Render's service summary disagree on what is
+        # live (or the summary is unread): neither says what ran before
+        return ({"action": "REFUSED", "reason": R_ROLLBACK_LIVE_NOT_RENDERS},
+                None, ["%s:%s" % (R_ROLLBACK_LIVE_NOT_RENDERS, svc)])
+    own = before[0] if before else None
+    if hist_live != live or own is None or rec.get("previous_commit") != own:
+        # the record's facts are not this service's own history: what it
+        # was live on before cannot be taken from the record
+        return ({"action": "REFUSED", "reason": R_ROLLBACK_NOT_OWN_PREVIOUS},
+                None, ["%s:%s:%s" % (R_ROLLBACK_NOT_OWN_PREVIOUS, svc,
+                                     rec.get("previous_commit"))])
+    p = {"action": "DEPLOY_PREVIOUS", "from": live, "to": own}
+    if named - {own}:
+        return p, None, ["%s:%s:%s" % (R_ROLLBACK_NOT_OWN_PREVIOUS, svc,
+                                       ",".join(sorted(named - {own})))]
+    if not cmd:
+        return p, None, ["%s:%s" % (R_ROLLBACK_COMMANDS_INCOMPLETE, svc)]
+    if cmd != ROLLBACK_COMMAND_FORMS[svc] % own:
+        return p, None, ["%s:%s" % (R_ROLLBACK_NOT_ITS_SERVICE, svc)]
+    return p, cmd, []
+
+
 def rollback_ready(acc, release_sha):
     """THE PREVIOUS RELEASE CAN BE PUT BACK (acc/rollback.json, tools/
     rollback_readiness.py; facts re-judged here, its own status is not
@@ -1165,7 +1308,14 @@ def rollback_ready(acc, release_sha):
     down, and the target runs on the release's schema -- identical
     migration sets, or the attested upgrade receipt's compatibility check
     (no table / column the target uses dropped, retyped or tightened) from
-    a base that IS the target. Nothing here deploys anything."""
+    a base that IS the target. Nothing here deploys anything.
+
+    EACH SERVICE FROM ITS OWN HISTORY (rc6.3 rollback-fix): the commands
+    passed on are the judge's own per-service derivation
+    (_service_rollback), never the record's list as written -- a service
+    off the release stays where it is (NONE, no command, NOT_READY kept),
+    and no command is passed on for a commit that service was not live on
+    before."""
     rb, why = _rollback_doc(acc, release_sha)
     if rb is None:
         if why.startswith("READ_UNAVAILABLE"):
@@ -1174,22 +1324,29 @@ def rollback_ready(acc, release_sha):
     reasons = []
     target = rb.get("target_sha")
     svcs = rb.get("services") if isinstance(rb.get("services"), dict) else {}
+    cmds = rb.get("commands") if isinstance(rb.get("commands"), dict) else {}
+    plans, passed = {}, {}
     for svc in SERVICES:
         s = svcs.get(svc) if isinstance(svcs.get(svc), dict) else {}
-        if s.get("live_commit") != release_sha:
-            reasons.append("%s:%s" % (R_ROLLBACK_SERVICE_NOT_ON_RELEASE, svc))
-        if not _is_sha(target) or s.get("previous_commit") != target:
+        on = s.get("live_commit") == release_sha
+        if on and (not _is_sha(target) or s.get("previous_commit") != target):
             reasons.append("%s:%s:%s" % (R_ROLLBACK_TARGET_UNKNOWN, svc,
                                          s.get("previous_commit")))
+        plans[svc], passed[svc], why = _service_rollback(
+            acc, svc, s, cmds.get(svc), release_sha)
+        reasons += why
+    if not any(p["action"] != "NONE" for p in plans.values()):
+        # nobody is on the release: there is no rollback target at all
+        reasons.append("%s:NO_SERVICE_ON_THE_RELEASE" %
+                       R_ROLLBACK_TARGET_UNKNOWN)
     if _is_sha(target):
         if rb.get("target_is_ancestor_of_release") is not True:
             reasons.append(R_ROLLBACK_TARGET_NOT_ON_RELEASE_LINE)
         reasons += ["%s:%s" % (R_ROLLBACK_TARGET_GATE, b)
                     for b in _gates_green(rb.get("target_gates"), target)]
-        cmds = rb.get("commands") if isinstance(rb.get("commands"),
-                                                dict) else {}
-        if any(target not in str(cmds.get(svc) or "") for svc in SERVICES):
-            reasons.append(R_ROLLBACK_COMMANDS_INCOMPLETE)
+    if any(p["action"] == "DEPLOY_PREVIOUS" and passed[s] is None
+           for s, p in plans.items()):
+        reasons.append(R_ROLLBACK_COMMANDS_INCOMPLETE)
     delta = _migration_delta(rb)
     rec = upgrade_receipt(acc, release_sha, delta["target_fingerprint"])
     compat = rec.get("rollback_compatibility") if isinstance(
@@ -1211,10 +1368,11 @@ def rollback_ready(acc, release_sha):
     return not reasons, {
         "status": "READY" if not reasons else "NOT_READY",
         "target_sha": target, "schema": schema,
-        "previous_by_service": {s: (svcs.get(s) or {}).get("previous_commit")
-                                for s in SERVICES},
-        "commands": rb.get("commands"), "procedure": rb.get("procedure"),
-        "migration_delta": delta, "reasons": reasons[:12]}
+        # what each service would do, from its OWN history (NONE = stays
+        # on `stay_on`); the commands are only those re-derived here
+        "rollback_by_service": plans,
+        "commands": passed, "procedure": rb.get("procedure"),
+        "migration_delta": delta, "reasons": reasons[:16]}
 
 
 # ── V2: the inputs' identities, and the pinning record ───────────────────
@@ -1440,7 +1598,9 @@ GRADING_CHANGES = (
      "units": [["Deployment infrastructure", "rollback_ready"]],
      "reason": "ADDED (owner directive 2E): previous release per service, "
                "its gates, its deploy commands, and its compatibility with "
-               "the new schema"},
+               "the new schema; rc6.3: each service's rollback and command "
+               "from its OWN deploy history, a service off the release "
+               "stays (NONE, no command)"},
     {"id": "RC6E_INPUT_PINNING", "since": VERSION, "units": [["*", "*"]],
      "when_current_detail_contains": R_INPUT_NAMES_ANOTHER_RELEASE,
      "reason": "an input that names another release than the one graded "

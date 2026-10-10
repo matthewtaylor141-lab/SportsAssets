@@ -1,0 +1,51 @@
+{
+ "sportsassets-api": {
+  "present": true,
+  "service_id": "srv-d9gcv6urnols73ce6er0",
+  "deploy_id": "dep-db4le9d9fdbs73fo5140",
+  "live_commit": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "live_since": "2026-10-09T21:07:07.247009Z",
+  "oom_events_since_live": 0,
+  "server_failed_since_live": 0,
+  "restarts_since_live": 0,
+  "instances": [
+   "srv-d9gcv6urnols73ce6er0-7mzh7",
+   "srv-d9gcv6urnols73ce6er0-c6xmz"
+  ],
+  "status": "CLEAN",
+  "reasons": []
+ },
+ "sportsassets-workers": {
+  "present": true,
+  "service_id": "srv-d9gcv6urnols73ce6erg",
+  "deploy_id": "dep-db4le9rncjis73fvjr8g",
+  "live_commit": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "live_since": "2026-10-09T21:07:03.490197Z",
+  "oom_events_since_live": 0,
+  "server_failed_since_live": 0,
+  "restarts_since_live": 0,
+  "instances": [
+   "srv-d9gcv6urnols73ce6erg-ddslr",
+   "srv-d9gcv6urnols73ce6erg-l92dl"
+  ],
+  "status": "CLEAN",
+  "reasons": []
+ },
+ "sportsassets-market-plane": {
+  "present": true,
+  "service_id": "srv-db3idqvavr4c739udecg",
+  "deploy_id": "dep-db4gu7jbc2fs73boqcu0",
+  "live_commit": "732cc0c696db614cbf63f83c3f843adec00301d6",
+  "live_since": "2026-10-09T15:59:44.491646Z",
+  "oom_events_since_live": 0,
+  "server_failed_since_live": 0,
+  "restarts_since_live": 0,
+  "instances": [
+   "srv-db3idqvavr4c739udecg-8fstf"
+  ],
+  "status": "UNKNOWN",
+  "reasons": [
+   "RUNTIME_DEPLOY_NOT_ON_RELEASE_SHA:732cc0c696db"
+  ]
+ }
+}

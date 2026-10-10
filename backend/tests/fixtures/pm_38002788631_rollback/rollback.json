@@ -1,0 +1,109 @@
+{
+ "commands": {
+  "sportsassets-api": "gh workflow run render-ops.yml --ref claude/p0-closeout -f action=deploy-api-commit -f service=sportsassets-api -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO",
+  "sportsassets-market-plane": "gh workflow run market-plane.yml --ref claude/release-api -f action=deploy-commit -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO",
+  "sportsassets-workers": "gh workflow run render-ops.yml --ref claude/p0-closeout -f action=workers-commit-deploy -f service=sportsassets-workers -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO"
+ },
+ "deploys_nothing": true,
+ "migrations": {
+  "added": [],
+  "changed": [],
+  "identical": true,
+  "release": {
+   "count": 224,
+   "fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0"
+  },
+  "removed": [],
+  "target": {
+   "count": 224,
+   "fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0"
+  }
+ },
+ "procedure": "docs/closeout/ROLLBACK_PROCEDURE.md",
+ "reasons": [
+  "ROLLBACK_SERVICE_NOT_ON_THE_RELEASE:sportsassets-market-plane"
+ ],
+ "services": {
+  "sportsassets-api": {
+   "live_commit": "16d234506a0683acc8577465b1beadf5423dc3f7",
+   "live_deploy_id": "dep-db4le9d9fdbs73fo5140",
+   "previous_commit": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+   "previous_deploy_id": "dep-db4fpup42hec73b5d4q0",
+   "previous_finished_at": "2026-10-09T14:42:33.094622Z",
+   "reasons": [],
+   "render_summary_commit": "16d234506a0683acc8577465b1beadf5423dc3f7"
+  },
+  "sportsassets-market-plane": {
+   "live_commit": "732cc0c696db614cbf63f83c3f843adec00301d6",
+   "live_deploy_id": "dep-db4gu7jbc2fs73boqcu0",
+   "previous_commit": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+   "previous_deploy_id": "dep-db4fq1942hec73b5dedg",
+   "previous_finished_at": "2026-10-09T14:42:25.437985Z",
+   "reasons": [],
+   "render_summary_commit": "732cc0c696db614cbf63f83c3f843adec00301d6"
+  },
+  "sportsassets-workers": {
+   "live_commit": "16d234506a0683acc8577465b1beadf5423dc3f7",
+   "live_deploy_id": "dep-db4le9rncjis73fvjr8g",
+   "previous_commit": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+   "previous_deploy_id": "dep-db4fpve7bikc73ejfqm0",
+   "previous_finished_at": "2026-10-09T14:42:22.991263Z",
+   "reasons": [],
+   "render_summary_commit": "16d234506a0683acc8577465b1beadf5423dc3f7"
+  }
+ },
+ "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+ "status": "NOT_READY",
+ "target_gates": {
+  "backend_tests_green": true,
+  "capital_critical_green": true,
+  "commit_guard_green": true,
+  "engine_diagnostic_green": true,
+  "no_verdict": [],
+  "runs": {
+   "backend_tests": {
+    "conclusion": "success",
+    "created_at": "2026-10-09T13:55:16Z",
+    "event": "push",
+    "head_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+    "html_url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37940326991",
+    "id": 37940326991,
+    "name": "backend-tests",
+    "status": "completed"
+   },
+   "capital_critical": {
+    "conclusion": "success",
+    "created_at": "2026-10-09T13:55:16Z",
+    "event": "push",
+    "head_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+    "html_url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37940327105",
+    "id": 37940327105,
+    "name": "capital-critical",
+    "status": "completed"
+   },
+   "commit_guard": {
+    "conclusion": "success",
+    "created_at": "2026-10-09T13:55:16Z",
+    "event": "push",
+    "head_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+    "html_url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37940326998",
+    "id": 37940326998,
+    "name": "commit-guard",
+    "status": "completed"
+   },
+   "engine_diagnostic": {
+    "conclusion": "success",
+    "created_at": "2026-10-09T13:55:16Z",
+    "event": "push",
+    "head_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+    "html_url": "https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/37940326995",
+    "id": 37940326995,
+    "name": "engine-diagnostic",
+    "status": "completed"
+   }
+  }
+ },
+ "target_is_ancestor_of_release": true,
+ "target_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+ "version": "ROLLBACK_READINESS_V1"
+}
