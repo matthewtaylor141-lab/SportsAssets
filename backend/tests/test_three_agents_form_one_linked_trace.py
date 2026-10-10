@@ -152,6 +152,27 @@ def _restart(monkeypatch):
     monkeypatch.setattr(loop, "_EXEC_LOCK", {"lock": None, "loop": None})
 
 
+async def _league_reports_not_started(conn):
+    """THE LEAGUE'S "NOT STARTED" REPORT, RESTATED BEFORE CYCLE 2 (as
+    test_derek_enters_on_conservative_agreement.league_reports_not_started
+    does for its own cycle).
+
+    Cycle 1 acquires the fixture row (`fixture_metadata.retrieved_at`), and
+    `bettor_fixture_store.needs_acquisition` keeps a row younger than 300 s,
+    so cycle 2 is judged against cycle 1's report. A quote is pre-game only
+    if it was observed at or before that report
+    (`bettor_fixture_metadata.context_for`), and the substituted odds carry
+    a 2-second stamp age -- so cycle 2's valuation, the row cycle 3's exit is
+    valued on, was pre-game only when cycle 2 began within about 2 s of
+    cycle 1's report. A slower run (3.5 s before cycle 2, measured) made its
+    context UNKNOWN, the terminal rule unestablished
+    (THE_SETTLEMENT_RULE_IS_NOT_ESTABLISHED_FOR_A_FUNDED_ACTION) and no exit
+    was sent. In production a 900 s cycle always meets a re-acquired report;
+    the harness's premise is that fresh report, and this states it."""
+    await conn.execute("UPDATE fixture_metadata SET retrieved_at = now() "
+                       " WHERE condition_id = $1", F.CONDITION)
+
+
 async def _clean(conn, *, since=None):
     """Everything this test (or an earlier run of it) wrote. `since`: the
     test's start -- the Audrey rows the runtime wrote from then on (the
@@ -366,6 +387,7 @@ async def test_derek_xavier_and_audrey_form_one_linked_trace_by_id(
         s1 = await _statuses(conn)
 
         # ══ CYCLE 2: RECOVERY FILLS THE REST; XAVIER REVIEWS (HOLD) ═══════
+        await _league_reports_not_started(conn)
         c2 = await loop.cycle(conn)
         assert len(venue.creates_sent()) == 1, "nothing further was sent"
         assert ("orders.retrieve", intent["venue_order_id"]) in venue.sent
