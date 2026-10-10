@@ -406,6 +406,75 @@ def default_steps() -> list:
 
 
 # ═════════════════════════════════════════════════════════════════════
+# THE PASS ALWAYS RECORDS ITSELF (RC6.3b)
+# ═════════════════════════════════════════════════════════════════════
+#
+# PRODUCTION, 2026-10-10 02:17Z onward: every pass was cut by HARD_TIMEOUT_S
+# inside ONE step (the coverage step's first league statement ran 50+ s on
+# the pooled connection). The cut took the WHOLE pass with it: the steps
+# after it never ran, `S.record_pass` never ran (paper_session_health's
+# heartbeat stood at 02:17:23Z for hours), and the heartbeat row read
+# "ran=false, TimeoutError" with no step named. One step could erase the
+# pass's own record, and nothing said which step it was or what did not run.
+#
+# NO SINGLE STEP CAN NOW PREVENT THE PASS FROM RECORDING ITSELF. Every step
+# is bounded by the pass time that is left -- HARD_TIMEOUT_S less a fixed
+# reserve kept for the record (PASS_RECORD_RESERVE_S; HARD_TIMEOUT_S itself
+# is not raised). A step that runs past that bound is CANCELLED (asyncpg
+# cancels the server-side query), recorded in `errors` under the step's name
+# with R_STEP_EXCEEDED, and the connection is put back to a clean state (a
+# transaction the step opened does not stay open). Every step after the point
+# where the time is spent is recorded as SKIPPED by name with R_STEP_SKIPPED
+# -- in `errors` and in `skipped_steps` -- instead of silently not running.
+# The step order and every step's semantics are unchanged: nothing is
+# reordered, and a step that ends in time behaves exactly as before. The pass
+# then records paper_session_health and the heartbeat normally (ran=true, the
+# errors visible), and the advisory lock is released.
+
+#: pass time kept for the record (S.record_pass and the lock release): no
+#: step may run into it
+PASS_RECORD_RESERVE_S = 10.0
+#: a step is not started with less than this of pass time left (it could do
+#: nothing in it but be cut); it is recorded as skipped instead
+STEP_MIN_START_S = 1.0
+#: the bound on putting the connection back after a step was cut
+CONNECTION_RESET_TIMEOUT_S = 5.0
+#: pass time kept after the record for the advisory-lock release
+LOCK_RELEASE_MARGIN_S = 1.0
+R_STEP_EXCEEDED = "PAPER_STEP_EXCEEDED_PASS_TIME"
+R_STEP_SKIPPED = "PAPER_STEP_SKIPPED_PASS_TIME_SPENT"
+
+
+def pass_steps_deadline(t0: float) -> float:
+    """The monotonic instant by which every step must have ended: the pass's
+    start plus HARD_TIMEOUT_S less the record's reserve."""
+    return float(t0) + float(HARD_TIMEOUT_S) - float(PASS_RECORD_RESERVE_S)
+
+
+def _in_transaction(conn) -> bool:
+    try:
+        return bool(conn.is_in_transaction())
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+async def _reset_after_cut(conn, *, was_in_tx: bool) -> str | None:
+    """Put the pass connection back after a step was cancelled: a transaction
+    the step opened and did not close is rolled back (asyncpg has already
+    cancelled the statement). A transaction the CALLER held before the pass
+    is not the pass's to end. None when clean, else the problem, by name."""
+    try:
+        async with asyncio.timeout(CONNECTION_RESET_TIMEOUT_S):
+            if _in_transaction(conn) and not was_in_tx:
+                await conn.execute("ROLLBACK")
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        return "%s: %s" % (type(exc).__name__, str(exc)[:160])
+    return None
+
+
+# ═════════════════════════════════════════════════════════════════════
 # THE PASS
 # ═════════════════════════════════════════════════════════════════════
 
@@ -414,12 +483,15 @@ async def paper_pass(conn, *, now: float | None = None,
                      steps: list | None = None, config: dict | None = None,
                      force: bool = False, fee_fn=None,
                      trigger: str = "SCHEDULED_SERVICING",
-                     cycle: dict | None = None, sleep=None) -> dict:
+                     cycle: dict | None = None, sleep=None,
+                     progress: dict | None = None) -> dict:
     """ONE BOUNDED PAPER PASS. Never raises (CancelledError excepted).
 
     `force` skips the enablement check (tests only; the scheduled hook never
     passes it). `steps` replaces the default steps (a list of callables or
-    (name, callable) pairs taking (conn, ctx))."""
+    (name, callable) pairs taking (conn, ctx)). `progress`, when given, is
+    updated as the pass runs (the step in flight, the steps ended) so a
+    caller that has to cut the whole pass can still say where it was."""
     live_clock = now is None
     at = float(now if now is not None else time.time())
     t0 = time.monotonic()
@@ -448,13 +520,24 @@ async def paper_pass(conn, *, now: float | None = None,
                         % type(exc).__name__)
         if not got:
             return dict(out, refusal=R_BUSY, why="ADVISORY_LOCK_HELD")
+        was_in_tx = _in_transaction(conn)
         try:
             return await _run(conn, out, at=at, t0=t0,
                               account_id=account_id, market_data=market_data,
                               steps=steps, config=config, fee_fn=fee_fn,
                               cycle=cycle, live_clock=live_clock,
-                              sleep=sleep)
+                              sleep=sleep, progress=progress,
+                              was_in_tx=was_in_tx)
         finally:
+            # THE LOCK IS RELEASED ON EVERY EXIT: a transaction the pass left
+            # open (a cut step) would make the unlock fail ("current
+            # transaction is aborted") and keep the lock for as long as this
+            # pooled connection lives, so it is ended first
+            try:
+                if _in_transaction(conn) and not was_in_tx:
+                    await conn.execute("ROLLBACK")
+            except Exception:                                  # noqa: BLE001
+                pass
             try:
                 await conn.execute("SELECT pg_advisory_unlock($1)",
                                    ADVISORY_LOCK_KEY)
@@ -462,8 +545,17 @@ async def paper_pass(conn, *, now: float | None = None,
                 pass
 
 
+def _skipped(out: dict, name: str, *, left: float) -> None:
+    """A step that did not run because the pass time was spent: named, in
+    `skipped_steps` and in `errors` (a pass that skipped work is not clean)."""
+    out["skipped_steps"][name] = R_STEP_SKIPPED
+    out["errors"][name] = "%s: %.1fs of pass time left for steps" % (
+        R_STEP_SKIPPED, max(0.0, left))
+
+
 async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
-               fee_fn, cycle, live_clock=False, sleep=None) -> dict:
+               fee_fn, cycle, live_clock=False, sleep=None, progress=None,
+               was_in_tx=False) -> dict:
     try:
         sess = await S.ensure_session(conn, now=at, config=config,
                                       account_id=account_id)
@@ -499,24 +591,76 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     # recorded anywhere -- 27.7 s / 36.4 s passes with nothing held could
     # not be attributed. Record only.
     out["step_elapsed_s"] = {}
+    # THE PASS ALWAYS RECORDS ITSELF: every step ends by `steps_end`, the
+    # pass's start plus HARD_TIMEOUT_S less the record's reserve
+    steps_end = pass_steps_deadline(t0)
+    out["pass_time"] = {"hard_timeout_s": float(HARD_TIMEOUT_S),
+                        "record_reserve_s": float(PASS_RECORD_RESERVE_S),
+                        "steps_bound_s": round(steps_end - t0, 3)}
+    out["skipped_steps"] = {}
+    out["exceeded_step"] = None
+    prog = progress if progress is not None else {}
+    prog.update(step=None, steps_ended=[])
     for item in (steps if steps is not None else default_steps()):
         name, fn = (item if isinstance(item, tuple)
                     else (getattr(item, "__name__", "step"), item))
+        left = steps_end - time.monotonic()
+        if left < STEP_MIN_START_S:
+            _skipped(out, name, left=left)
+            continue
+        # the step may read how long it has (a step that has its own budget
+        # ends before it is cut, and so can still write its own watermark)
+        ctx["step_deadline"] = time.monotonic() + left
+        prog["step"] = name
+        step_in_tx = _in_transaction(conn)
         t_step = time.monotonic()
+        bound = asyncio.timeout(left)
+        cut = False
         try:
-            out["steps"][name] = await fn(conn, ctx)
+            async with bound:
+                out["steps"][name] = await fn(conn, ctx)
         except asyncio.CancelledError:
             raise
         except G.PaperVenueMutationRefused as exc:
             out["errors"][name] = "%s: %s" % (G.R_MUTATION_REFUSED,
                                               str(exc)[:200])
         except Exception as exc:                               # noqa: BLE001
-            out["errors"][name] = "%s: %s" % (type(exc).__name__,
-                                              str(exc)[:200])
+            if bound.expired():
+                # the bound cancelled the step (whatever it raised on being
+                # cancelled): named, with the time it had and the time it took
+                cut = True
+                out["steps"].pop(name, None)
+                out["errors"][name] = (
+                    "%s: cancelled after %.1fs of the %.1fs pass time left "
+                    "for steps (HARD_TIMEOUT_S %.0fs less %.0fs kept for the "
+                    "record)" % (R_STEP_EXCEEDED, time.monotonic() - t_step,
+                                 left, float(HARD_TIMEOUT_S),
+                                 float(PASS_RECORD_RESERVE_S)))
+            else:
+                out["errors"][name] = "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:200])
+        else:
+            if bound.expired():
+                # the step swallowed its cancellation and returned late
+                out["errors"][name] = (
+                    "%s: returned after %.1fs, past the %.1fs pass time "
+                    "left for steps" % (R_STEP_EXCEEDED,
+                                        time.monotonic() - t_step, left))
+                cut = True
+        if cut:
+            out["exceeded_step"] = out["exceeded_step"] or name
         out["step_elapsed_s"][name] = round(time.monotonic() - t_step, 3)
+        prog["steps_ended"].append(name)
+        prog["step"] = None
+        if cut:
+            # asyncpg has cancelled the statement; end what the step opened
+            problem = await _reset_after_cut(conn, was_in_tx=step_in_tx)
+            if problem:
+                out["errors"]["CONNECTION_RESET"] = problem
         # A HELD MARKET THAT MOVED WHILE THIS PASS RUNS is reviewed now,
-        # between steps, not after the pass (SW-2; see HELD_IN_PASS_MAX_S)
-        await _held_checkpoint(conn, ctx, out)
+        # between steps, not after the pass (SW-2; see HELD_IN_PASS_MAX_S) --
+        # and only in the pass time that is left
+        await _bounded_checkpoint(conn, ctx, out, steps_end)
     out["budget_exhausted"] = not _budget_left(ctx)
     out["books_read"] = ctx["books_read"]
     out["fills"] = ctx["fills"]
@@ -526,13 +670,24 @@ async def _run(conn, out, *, at, t0, account_id, market_data, steps, config,
     for k in ("decisions_recorded", "orders_submitted", "reviews"):
         out[k] = sum(int((v or {}).get(k) or 0)
                      for v in out["steps"].values() if isinstance(v, dict))
+    # THE RECORD: paper_session_health, bounded by what is left of the hard
+    # timeout (less the lock release) -- a record that hangs is a named
+    # HEALTH error on a pass that still returns, and so still writes its
+    # heartbeat, not a cut that erases the pass
     try:
-        await S.record_pass(
-            conn, sess["session_id"], result=_digest(out), now=at,
-            mutation_attempts=attempts,
-            last_mutation_attempt=getattr(md, "last_mutation_attempt", None),
-            error=("; ".join("%s=%s" % kv for kv in out["errors"].items())
-                   [:500] or None))
+        record_room = max(1.0, t0 + float(HARD_TIMEOUT_S)
+                          - time.monotonic() - LOCK_RELEASE_MARGIN_S)
+        async with asyncio.timeout(record_room):
+            await S.record_pass(
+                conn, sess["session_id"], result=_digest(out), now=at,
+                mutation_attempts=attempts,
+                last_mutation_attempt=getattr(md, "last_mutation_attempt",
+                                              None),
+                error=("; ".join("%s=%s" % kv
+                                 for kv in out["errors"].items())
+                       [:500] or None))
+    except asyncio.CancelledError:
+        raise
     except Exception as exc:                                   # noqa: BLE001
         out["errors"]["HEALTH"] = type(exc).__name__
     return out
@@ -544,7 +699,8 @@ def _digest(out: dict) -> dict:
         "errors", "budget_exhausted", "books_read", "fills",
         "decisions_recorded", "orders_submitted", "reviews",
         "mutation_attempts", "elapsed_s", "step_elapsed_s",
-        "held_in_pass")} | {
+        "held_in_pass", "skipped_steps", "exceeded_step",
+        "pass_time")} | {
         "steps": {k: (v if not isinstance(v, dict) else
                       {kk: vv for kk, vv in v.items()
                        if not isinstance(vv, (list, dict))})
@@ -553,7 +709,10 @@ def _digest(out: dict) -> dict:
 
 def describe() -> dict:
     return {"version": VERSION, "steps": [n for n, _ in default_steps()],
-            "advisory_lock_key": ADVISORY_LOCK_KEY}
+            "advisory_lock_key": ADVISORY_LOCK_KEY,
+            "hard_timeout_s": HARD_TIMEOUT_S,
+            "record_reserve_s": PASS_RECORD_RESERVE_S,
+            "steps_bound_s": HARD_TIMEOUT_S - PASS_RECORD_RESERVE_S}
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -588,7 +747,9 @@ HEARTBEAT_MAX_CHARS = 60000
 def _heartbeat_body(res: dict) -> str:
     import json as _json
     body = _json.dumps(dict(_digest(res), refusal=res.get("refusal"),
-                            why=res.get("why"), written_at=time.time()),
+                            why=res.get("why"), in_step=res.get("in_step"),
+                            steps_ended=res.get("steps_ended"),
+                            written_at=time.time()),
                        default=str)
     if len(body) <= HEARTBEAT_MAX_CHARS:
         return body
@@ -610,21 +771,39 @@ async def write_heartbeat(conn, res: dict) -> None:
 
 async def run_once(get_pool, *, trigger: str, now: float | None = None,
                    **kw) -> dict:
-    """ONE PASS ON ITS OWN CONNECTION, bounded; never raises."""
+    """ONE PASS ON ITS OWN CONNECTION, bounded; never raises.
+
+    HARD_TIMEOUT_S is the last resort. Since RC6.3b every step is bounded
+    inside it (paper_pass), so a pass that reaches it again was held by
+    something outside the steps; its heartbeat now says which step was in
+    flight and which had ended, instead of an empty "TimeoutError: "."""
+    progress = kw.pop("progress", None)
+    if progress is None:
+        progress = {}
     try:
         pool = await get_pool()
         async with pool.acquire(timeout=ACQUIRE_TIMEOUT_S) as conn:
             try:
                 res = await asyncio.wait_for(
-                    paper_pass(conn, now=now, trigger=trigger, **kw),
+                    paper_pass(conn, now=now, trigger=trigger,
+                               progress=progress, **kw),
                     HARD_TIMEOUT_S)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                           # noqa: BLE001
+                said = str(exc)[:200] or (
+                    "the pass was cut by HARD_TIMEOUT_S (%.0f s)"
+                    % HARD_TIMEOUT_S if isinstance(exc, TimeoutError)
+                    else "")
                 res = {"ran": False, "trigger": trigger,
                        "refusal": "PAPER_PASS_RAISED_OR_TIMED_OUT",
-                       "why": "%s: %s" % (type(exc).__name__,
-                                          str(exc)[:200])}
+                       "why": "%s: %s%s" % (
+                           type(exc).__name__, said,
+                           (" in step %s" % progress["step"])
+                           if progress.get("step") else ""),
+                       "in_step": progress.get("step"),
+                       "steps_ended": list(progress.get("steps_ended")
+                                           or [])}
             await write_heartbeat(conn, res)
             _TASK["last"] = res
             return res
@@ -1859,19 +2038,26 @@ HELD_IN_PASS_COUNTS = ("slugs", "groups", "reviews", "reviewed_slugs",
                        "deferred", "review_errors", "left_for_scheduler")
 
 
-async def _held_checkpoint(conn, ctx: dict, out: dict) -> None:
+async def _held_checkpoint(conn, ctx: dict, out: dict, *,
+                           room: float | None = None) -> None:
     """Between two steps of a pass: the pending held changes, at most
     HELD_IN_PASS_MAX_S of them per pass (recorded on the pass as
     held_in_pass). The time it takes is NOT charged to the pass: the
     pass's deadline moves later by it, so the steps after it (books,
     simulate, entries, Xavier) keep their whole budget. Free when nothing
-    is pending. Never raises (CancelledError excepted)."""
+    is pending. `room`, when given, is the pass time left for steps (RC6.3b:
+    the cap is cut to it, so the checkpoint cannot run into the time kept
+    for the pass's record); with none left it is capped like a spent
+    HELD_IN_PASS_MAX_S and the slugs stay with the scheduler. Never raises
+    (CancelledError excepted)."""
     if not _HELD.get("pending"):
         return
     rec = out.setdefault("held_in_pass", dict(
         {k: 0 for k in HELD_IN_PASS_COUNTS}, checkpoints=0, elapsed_s=0.0,
         pass_deadline_moved_s=0.0, capped=False, errors=[]))
     left = HELD_IN_PASS_MAX_S - rec["elapsed_s"]
+    if room is not None:
+        left = min(left, float(room))
     if left <= 0:
         rec["capped"] = True
         # the slugs stay with the scheduler (retried busy, then dropped)
@@ -1897,6 +2083,42 @@ async def _held_checkpoint(conn, ctx: dict, out: dict) -> None:
         rec[k] += int(got.get(k) or 0)
     if got.get("error"):
         rec["errors"] = (rec["errors"] + [got["error"]])[-5:]
+
+
+async def _bounded_checkpoint(conn, ctx: dict, out: dict,
+                              steps_end: float) -> None:
+    """The between-steps held checkpoint, inside the pass time that is left
+    for steps (`steps_end`, a monotonic instant). The checkpoint's own cap
+    is cut to that room; should it still run past it (one group review in
+    flight) it is cancelled -- its slugs go back to the pending set, where
+    the scheduler retries or drops them -- the cut is named on
+    held_in_pass.errors, and the connection is put back. Never raises
+    (CancelledError excepted)."""
+    if not _HELD.get("pending"):
+        return
+    room = steps_end - time.monotonic()
+    t_cp = time.monotonic()
+    in_tx = _in_transaction(conn)
+    bound = asyncio.timeout(max(0.0, room))
+    try:
+        async with bound:
+            await _held_checkpoint(conn, ctx, out, room=max(0.0, room))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:                                   # noqa: BLE001
+        rec = out.setdefault("held_in_pass", dict(
+            {k: 0 for k in HELD_IN_PASS_COUNTS}, checkpoints=0, elapsed_s=0.0,
+            pass_deadline_moved_s=0.0, capped=False, errors=[]))
+        why = ("%s: the held checkpoint was cancelled after %.1fs at the end "
+               "of the pass time left for steps" % (R_STEP_EXCEEDED,
+                                                    time.monotonic() - t_cp)
+               if bound.expired() else
+               "%s: %s" % (type(exc).__name__, str(exc)[:160]))
+        rec["errors"] = (rec["errors"] + [why])[-5:]
+        rec["capped"] = True
+        problem = await _reset_after_cut(conn, was_in_tx=in_tx)
+        if problem:
+            out["errors"]["CONNECTION_RESET"] = problem
 
 
 def schedule_held_review(slugs, *, get_pool=None, clock=time.time) -> dict:

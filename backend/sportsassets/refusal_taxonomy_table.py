@@ -1783,6 +1783,12 @@ INLINE = {
     "NO_VENUE_CONTRACT_SO_NO_LADDER": (S, MAP, "VENUE_MAPPING"),
     "PAPER_PASS_HAD_NO_CONNECTION": (S, DATA, "AGENT_EVALUATION"),
     "PAPER_PASS_RAISED_OR_TIMED_OUT": (S, INT, "AGENT_EVALUATION"),
+    # (rc6.3b pass-stall) a paper-pass step is bounded by the pass time left
+    # (HARD_TIMEOUT_S less the record's reserve): cancelled past it, and every
+    # later step named as not run -- so one step can never erase the pass's
+    # own health record and heartbeat
+    "PAPER_STEP_EXCEEDED_PASS_TIME": (S, INT, "AGENT_EVALUATION"),
+    "PAPER_STEP_SKIPPED_PASS_TIME_SPENT": (S, CAP, "AGENT_EVALUATION"),
     # Xavier's held measure: an ok feed read naming no change instant is
     # not evidence of currency (paper_benchmark.xavier_measure)
     "PINNAPI_FEED_READ_CARRIED_NO_CHANGE_INSTANT": (S, FRESH, "FRESHNESS"),
