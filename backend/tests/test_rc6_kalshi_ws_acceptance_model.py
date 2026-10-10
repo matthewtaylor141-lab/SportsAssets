@@ -27,12 +27,19 @@ orderbook-updates, changelog 2025-09-25 / 2026-06-18), in three variants:
      the markets it holds.
   S  as D, but control frames (`ok`, `unsubscribed`, scoped errors) carry a
      SEPARATE per-sid counter (from 1; a lost control frame still advanced
-     it); data frames run by themselves.
+     it); data frames run by themselves; the venue may send ONE scoped
+     non-terminal error unasked (no id) on a subscription (assumption C1).
   R  as D, and a number whose subscription an error ended is REUSED: by the
      next acknowledged subscription (WsBooks level), by the venue for
      frames that answer none of our commands (the Subscriber level; the
      runtime ends its session at the error and reads none of them), and by
      the next connection.
+  S1 (round 3) as S, and the separate counter also numbered our
+     subscribe's `subscribed` (which shows no seq): the first control
+     frame carries 2 -- with the unasked frame, the case the third review
+     found the client's bound one short for.
+  Under D and R the venue also REPLAYS control frames (a replay breaks the
+  shared sequence, as a replayed data frame does).
 
 THE REFERENCE ORACLE (`Oracle`) is written from that protocol, told the
 variant, and imports nothing from kalshi_ws:
@@ -135,18 +142,21 @@ GENERATORS (deterministic):
       errors 10 / 25 and the venue's `unsubscribed`; our ack (bind +
       `subscribed`, a fresh number, or under R an ended one); an
       announcement answering no command of ours; forget; want; disconnect /
-      connect.
+      connect; (round 3) under S / S1 the one unasked scoped error, under
+      D / R a replay of the latest control frame.
   (b) Subscriber: the real Subscriber.run, the worker's wanted-set step
       (prune_untracked + retire_untracked), flush, reassert and gap sink
       against the model venue (late command processing, chunks of two,
       losses / duplicates / replays of data frames, lost control frames,
-      terminal errors, the venue's unsubscribe, disconnects; the worker drops
-      and re-wants markets at arbitrary points, also while a command is being
-      sent). Seeds per variant; odd seeds inject faults, half of those as a
-      storm. Under D every seed must end with every wanted market CURRENT,
-      equal to venue truth and served by the store, and the commands sent
-      bounded by O(markets x connections + gaps + refreshes); under S and R
-      safety is asserted and liveness measured.
+      (round 3) duplicated and replayed control frames, deletes refused by
+      error 27, the separate counter's unasked frame, terminal errors, the
+      venue's unsubscribe, disconnects; the worker drops and re-wants
+      markets at arbitrary points, also while a command is being sent).
+      Seeds per variant; odd seeds inject faults, half of those as a storm.
+      Under D every seed must end with every wanted market CURRENT, equal to
+      venue truth and served by the store, and the commands sent bounded by
+      O(markets x connections + gaps + refreshes); under S, R and S1 safety
+      is asserted and liveness measured.
   (c) every _ORDERINGS script, the 63 drop-anywhere cases and the other
       scripted Subscriber tests re-run with the oracle (D) checking every
       step, on top of their own assertions.
@@ -156,7 +166,15 @@ and S5 (first snapshots on numbers never acknowledged as ours; counted
 below); H0 (`subscribed` means the venue took every market the subscribe
 named) and H1 (an add answered by an `ok` with no list took its markets) --
 the venue membership rule; C1 / C2 (a SEPARATE control counter answers each
-command at most once, in command order) -- variant S only.
+command at most once, in command order, numbers its `subscribed` at most
+once and sends at most CONTROL_SEQ_SLACK frames unasked -- round 3) --
+variants S and S1 only, whose venues stay inside them; C3 (EITHER reading:
+a control frame's seq is a new number on its counter, never an echo of the
+sid's current seq) -- not modelled: an echo `ok` after a lost data frame
+is, on the wire, exactly the documented counter's `ok` with nothing lost,
+so no client covers it short of a gap at every reply; RC6.1's production
+storm required a numbering counter, and the KWS_CTRL diagnostics confirm
+it (module docstring, THE SEQUENCE RULE FOR CONTROL FRAMES).
 
 FOUND AND FIXED by this model (each has a directed test): an acknowledged
 subscription ended by error 10 / 25 kept its markets associated with its
@@ -173,7 +191,22 @@ while the venue streamed nothing for it -- the venue-membership rule
 (tests/test_rc62_kalshi_ws_venue_membership.py); the model's venue used to
 answer get_snapshot only for held markets, never refused an add, and
 compared books with the truth at their own last frame, so it could not see
-either.
+either. (RC6.2 review, round 3, blocking) the separate-counter bound was
+one short of C1 (j + CONTROL_SEQ_SLACK; a counter that numbered
+`subscribed` and sent one unasked frame put it on the shared slot, and a
+lost delta behind it went unseen): variant S1 and the unasked event, which
+the old bound fails from "acked" at depth 3
+(test_a_numbered_subscribed_and_an_unasked_frame_never_hide_a_lost_delta);
+a replayed control frame switched a shared sid to SEPARATE without a gap
+(control-frame replays under D / R; test_a_replayed_control_frame_breaks_
+the_shared_sequence); and in the sims a delete refused by error 27 left a
+re-wanted market waiting for ever (refused deletes; the D liveness check).
+Offline runs past the CI seeds (3,000 D seeds) found two more liveness
+holes, both pre-existing: a market whose add's reply was lost, refused
+with another market by one error 26, stayed GAP while the venue held it
+(seed D-50869); a market dropped and re-wanted while its add was in flight
+waited on that add's own snapshot, which no gap could name (seed D-50213)
+-- each has a directed test in tests/test_rc62_kalshi_ws_control_frames.py.
 
 MUTATION CHECK (offline, scratch script; each mutant of the client must be
 caught): RC6.1's `ok` that never advances the sequence (P2, D), no
@@ -182,13 +215,18 @@ books CURRENT (I2 / P2), no gap sink (R0 in the Subscriber sims), an ended
 subscription keeping its associations (P1b), a replayed frame accepted (P2),
 a late ack reviving a dropped market (P1); (RC6.2 review) a snapshot
 applied whatever the venue holds, an unanswered add counted as held, an
-`ok`'s list ignored (P2 by true membership; the sims) -- all caught.
+`ok`'s list ignored (P2 by true membership; the sims) -- all caught;
+(round 3) the bound one short (P2, S1 from "acked" at depth 3), a replay
+taken as a separate counter (P2, D with control replays) -- caught here;
+an unknown id's bound counting no command, the separate-mode loss check
+removed, the refused-delete repair removed -- caught by
+tests/test_rc62_kalshi_ws_control_frames.py.
 Applying frames on
 a number first seen after our ack is NOT a safety violation (the RC6 rules
 for numbers not ours are safe); the runtime ignores them by policy
 (test_rc62_kalshi_ws_protocol pins it).
 
-CI runs the default sizes (700,278 enumerated sequences; 100 Subscriber
+CI runs the default sizes (937,385 enumerated sequences; 100 Subscriber
 seeds per variant). Larger runs (offline): KALSHI_PROOF_DEPTH (every root's
 depth), KALSHI_PROOF_SEEDS / KALSHI_PROOF_SEED_BASE. SMALL LIVE = SHADOW:
 read-only market data only; nothing here touches an order path.
@@ -212,9 +250,17 @@ from tests import test_rc6_kalshi_ws_sequencing as SEQ
 
 NOW = 1_791_600_000.0
 SNAP, DELTA = "orderbook_snapshot", "orderbook_delta"
-D, S, R = "D", "S", "R"
-VARIANTS = (D, S, R)
+D, S, R, S1 = "D", "S", "R", "S1"
+VARIANTS = (D, S, R, S1)
+#: the variants whose control frames carry their own counter
+SEPARATE_COUNTERS = (S, S1)
 TERMINAL = (10, 25)
+#: (round 3) a non-terminal error code for frames the venue sends unasked,
+#: and how many a subscription may carry -- assumption C1 for a separate
+#: control counter (the client's CONTROL_SEQ_SLACK must cover it:
+#: test_the_model_venue_stays_inside_the_clients_stated_assumptions)
+UNASKED_CODE = 18
+C1_UNASKED = 1
 
 
 def _clock():
@@ -279,7 +325,7 @@ class _Sub:
     __slots__ = ("acks", "anchored", "book", "cmds", "created", "ctop",
                  "ctrl_at", "ended", "first_snap", "held_since", "known",
                  "last_break", "msgs", "pend", "s0", "s5", "seen", "sid",
-                 "snap_at", "top", "vsince", "dels")
+                 "snap_at", "top", "vsince", "dels", "unasked")
 
     def __init__(self, sid, created, *, anchored=False):
         self.sid = sid
@@ -312,11 +358,14 @@ class _Sub:
         #: the venue has held t on this subscription without a break
         self.vsince = {}
         self.dels = {}              # add / delete command id -> a delete?
+        #: (round 3) frames the venue sent unasked on it (scoped errors
+        #: answering no command) -- C1 allows CONTROL_SEQ_SLACK of them
+        self.unasked = 0
 
     def copy(self) -> _Sub:
         c = _Sub(self.sid, self.created, anchored=self.anchored)
         for k in ("ended", "top", "ctop", "last_break", "ctrl_at",
-                  "first_snap", "s0", "s5"):
+                  "first_snap", "s0", "s5", "unasked"):
             setattr(c, k, getattr(self, k))
         c.msgs, c.acks, c.cmds = list(self.msgs), list(self.acks), \
             list(self.cmds)
@@ -340,7 +389,7 @@ class _Sub:
                 sorted(self.known.items()),
                 sorted((t, tuple(v)) for t, v in self.pend.items()),
                 sorted(self.held_since.items()), sorted(self.vsince.items()),
-                sorted(self.dels.items()))
+                sorted(self.dels.items()), self.unasked)
 
     def is_held(self, t) -> bool:
         """By the venue's replies: the latest known state holds t and no
@@ -603,6 +652,10 @@ class Oracle:
                     for t in self.cmds[cid][2]:
                         s.known[t] = (0, True)
                         self._mark(s, t, i)
+                    if self.variant == S1:
+                        # (round 3) its control counter numbered this
+                        # `subscribed` (which shows no seq)
+                        s.ctop = 1
             s.acks.append(cid)
             return
         if typ in ("ok", "error", "unsubscribed"):
@@ -632,6 +685,10 @@ class Oracle:
                     self._control(i, s, m["seq"])
                 s.ended = True
                 return
+            if typ == "error" and "id" not in m and \
+                    m.get("seq") is not None and m["seq"] > s.ctop and \
+                    self.variant in SEPARATE_COUNTERS:
+                s.unasked += 1      # (generator state: C1's allowance)
             self._settle(i, s, cid, typ, m)
             if m.get("seq") is not None:
                 self._control(i, s, m["seq"])
@@ -697,7 +754,7 @@ class Oracle:
         pos = len(s.msgs)
         s.msgs.append((i, seq, "ctrl", None))
         s.ctrl_at = pos
-        if self.variant == S:
+        if self.variant in SEPARATE_COUNTERS:
             s.ctop = max(s.ctop, seq)
             return
         top = s.top if s.top is not None else 0
@@ -925,9 +982,9 @@ def _top(o, sid, *, control=False):
     s = o.subs.get(sid)
     if s is None or s.ended:
         return None if not control else 0
-    if control and o.variant == S:
+    if control and o.variant in SEPARATE_COUNTERS:
         return s.ctop
-    if o.variant == S:
+    if o.variant in SEPARATE_COUNTERS:
         q = o.data_seqs(sid)
         return max(q) if q else (0 if s.anchored else None)
     return s.top
@@ -952,6 +1009,15 @@ def _w_seq(o, sid, variant):
 def _live_anchor(o, sid):
     s = o.subs.get(sid)
     return s is not None and s.anchored and not s.ended
+
+
+def _last_control(o, s):
+    """(round 3) The latest control frame with a seq delivered on
+    subscription s (to be replayed), or None."""
+    for i, _seq, ty, _t in reversed(s.msgs):
+        if ty == "ctrl":
+            return o.log[i][1]
+    return None
 
 
 def _may_ack(o, sid):
@@ -994,6 +1060,15 @@ def w_events(o: Oracle) -> list:
                             o.cmds[c][1] == "add_markets"
                             for c in pend or ())):
                         ev.append(("delete", sid, t))
+                # (round 3) separate counters: ONE scoped non-terminal
+                # error the venue sends unasked (C1's CONTROL_SEQ_SLACK)
+                if o.variant in SEPARATE_COUNTERS and \
+                        s.unasked < C1_UNASKED:
+                    ev.append(("unasked", sid))
+                # (round 3) the shared counter: the venue replays its
+                # latest control frame (a replay breaks the sequence)
+                if o.variant in (D, R) and _last_control(o, s) is not None:
+                    ev.append(("creplay", sid))
             if _may_ack(o, sid):
                 ev.append(("ack", sid))
             ev.append(("announce", sid))
@@ -1099,6 +1174,20 @@ def w_apply(b: KWS.WsBooks, o: Oracle, ev) -> list:
              else m_unsubscribed(0, sid, seq))
         b.on_message(m, recv_at=NOW)
         return [("msg", m)]
+    if kind == "unasked":
+        # (round 3) a scoped non-terminal error answering no command (no
+        # id), the subscription's control counter's next number
+        sid = ev[1]
+        m = {"type": "error", "sid": sid,
+             "seq": _top(o, sid, control=True) + 1,
+             "msg": {"code": UNASKED_CODE, "msg": "unasked"}}
+        b.on_message(m, recv_at=NOW)
+        return [("msg", m)]
+    if kind == "creplay":
+        # (round 3) the venue replays its latest control frame
+        m = json.loads(json.dumps(_last_control(o, o.subs[ev[1]])))
+        b.on_message(m, recv_at=NOW)
+        return [("msg", m)]
     if kind == "forget":
         b.forget([ev[1]])
         return [("drop", ev[1])]
@@ -1175,6 +1264,11 @@ ROOTS = {
 #: 2 everywhere else
 DEEP = {("fresh", D), ("all_current_on_sid_1", D), ("acked", S),
         ("a_reply_after_data", S), ("sid_1_ended_by_error", R),
+        # (round 3) a control counter that numbered `subscribed`, and the
+        # one frame it sends unasked: the blocking finding is a depth-3 path
+        # from "acked" (A's snapshot, the unasked frame on the shared slot,
+        # a delta past a lost one)
+        ("acked", S1), ("a_reply_after_data", S1),
         # (RC6.2 review) venue membership: a refused add, a delete and a
         # re-add in flight
         ("an_add_refused", D), ("b_deleted_and_wanted_again", D)}
@@ -1187,58 +1281,75 @@ def ci_depth(root, variant):
 #: sequences enumerated per (variant, root) at its CI depth -- pinned: the
 #: alphabet is the oracle's, so the count does not depend on the code
 CI_COUNTS = {
-    (D, 'a_reply_after_data'): 2364,
-    (D, 'acked'): 1428,
-    (D, 'all_current_on_sid_1'): 116831,
-    (D, 'an_add_refused'): 98783,
-    (D, 'an_add_unanswered'): 2059,
+    (D, 'a_reply_after_data'): 2459,
+    (D, 'acked'): 1431,
+    (D, 'all_current_on_sid_1'): 117245,
+    (D, 'an_add_refused'): 104769,
+    (D, 'an_add_unanswered'): 2063,
     (D, 'announced_not_ours_then_a_delta'): 1508,
-    (D, 'b_deleted_and_wanted_again'): 117100,
-    (D, 'b_dropped_and_wanted_again'): 2364,
-    (D, 'b_dropped_on_live_sid_1'): 2457,
+    (D, 'b_deleted_and_wanted_again'): 117518,
+    (D, 'b_dropped_and_wanted_again'): 2367,
+    (D, 'b_dropped_on_live_sid_1'): 2460,
     (D, 'delta_before_the_first_snapshot'): 1508,
     (D, 'first_snapshot_refused_after_a_delta'): 1502,
-    (D, 'frames_on_a_number_not_ours'): 2350,
-    (D, 'fresh'): 44796,
-    (D, 'gapped_on_sid_1'): 2364,
+    (D, 'frames_on_a_number_not_ours'): 2353,
+    (D, 'fresh'): 44802,
+    (D, 'gapped_on_sid_1'): 2367,
     (D, 'reconnected_after_all_current'): 1154,
-    (D, 'recovering_on_sid_1'): 2364,
+    (D, 'recovering_on_sid_1'): 2459,
     (D, 'sid_1_ended_by_error'): 1430,
-    (R, 'a_reply_after_data'): 2366,
-    (R, 'acked'): 1430,
-    (R, 'all_current_on_sid_1'): 2366,
-    (R, 'an_add_refused'): 2062,
-    (R, 'an_add_unanswered'): 2061,
+    (R, 'a_reply_after_data'): 2461,
+    (R, 'acked'): 1433,
+    (R, 'all_current_on_sid_1'): 2369,
+    (R, 'an_add_refused'): 2149,
+    (R, 'an_add_unanswered'): 2065,
     (R, 'announced_not_ours_then_a_delta'): 1508,
-    (R, 'b_deleted_and_wanted_again'): 2368,
-    (R, 'b_dropped_and_wanted_again'): 2366,
-    (R, 'b_dropped_on_live_sid_1'): 2459,
+    (R, 'b_deleted_and_wanted_again'): 2371,
+    (R, 'b_dropped_and_wanted_again'): 2369,
+    (R, 'b_dropped_on_live_sid_1'): 2462,
     (R, 'delta_before_the_first_snapshot'): 1508,
     (R, 'first_snapshot_refused_after_a_delta'): 1502,
-    (R, 'frames_on_a_number_not_ours'): 2352,
+    (R, 'frames_on_a_number_not_ours'): 2355,
     (R, 'fresh'): 1154,
-    (R, 'gapped_on_sid_1'): 2366,
+    (R, 'gapped_on_sid_1'): 2369,
     (R, 'reconnected_after_all_current'): 1154,
-    (R, 'recovering_on_sid_1'): 2366,
-    (R, 'sid_1_ended_by_error'): 60418,
-    (S, 'a_reply_after_data'): 117047,
-    (S, 'acked'): 60059,
-    (S, 'all_current_on_sid_1'): 2364,
-    (S, 'an_add_refused'): 2060,
-    (S, 'an_add_unanswered'): 2059,
-    (S, 'announced_not_ours_then_a_delta'): 1508,
-    (S, 'b_deleted_and_wanted_again'): 2366,
-    (S, 'b_dropped_and_wanted_again'): 2364,
-    (S, 'b_dropped_on_live_sid_1'): 2457,
-    (S, 'delta_before_the_first_snapshot'): 1508,
-    (S, 'first_snapshot_refused_after_a_delta'): 1502,
-    (S, 'frames_on_a_number_not_ours'): 2350,
-    (S, 'fresh'): 1154,
-    (S, 'gapped_on_sid_1'): 2364,
-    (S, 'reconnected_after_all_current'): 1154,
-    (S, 'recovering_on_sid_1'): 2364,
-    (S, 'sid_1_ended_by_error'): 1430,
-}                       # 700,278 sequences in all
+    (R, 'recovering_on_sid_1'): 2461,
+    (R, 'sid_1_ended_by_error'): 60424,
+    (S, 'a_reply_after_data'): 123912,
+    (S, 'acked'): 64176,
+    (S, 'all_current_on_sid_1'): 2459,
+    (S, 'an_add_refused'): 2147,
+    (S, 'an_add_unanswered'): 2146,
+    (S, 'announced_not_ours_then_a_delta'): 1509,
+    (S, 'b_deleted_and_wanted_again'): 2461,
+    (S, 'b_dropped_and_wanted_again'): 2459,
+    (S, 'b_dropped_on_live_sid_1'): 2554,
+    (S, 'delta_before_the_first_snapshot'): 1509,
+    (S, 'first_snapshot_refused_after_a_delta'): 1503,
+    (S, 'frames_on_a_number_not_ours'): 2442,
+    (S, 'fresh'): 1156,
+    (S, 'gapped_on_sid_1'): 2459,
+    (S, 'reconnected_after_all_current'): 1156,
+    (S, 'recovering_on_sid_1'): 2459,
+    (S, 'sid_1_ended_by_error'): 1431,
+    (S1, 'a_reply_after_data'): 123912,
+    (S1, 'acked'): 64176,
+    (S1, 'all_current_on_sid_1'): 2459,
+    (S1, 'an_add_refused'): 2147,
+    (S1, 'an_add_unanswered'): 2146,
+    (S1, 'announced_not_ours_then_a_delta'): 1509,
+    (S1, 'b_deleted_and_wanted_again'): 2461,
+    (S1, 'b_dropped_and_wanted_again'): 2459,
+    (S1, 'b_dropped_on_live_sid_1'): 2554,
+    (S1, 'delta_before_the_first_snapshot'): 1509,
+    (S1, 'first_snapshot_refused_after_a_delta'): 1503,
+    (S1, 'frames_on_a_number_not_ours'): 2442,
+    (S1, 'fresh'): 1156,
+    (S1, 'gapped_on_sid_1'): 2459,
+    (S1, 'reconnected_after_all_current'): 1156,
+    (S1, 'recovering_on_sid_1'): 2459,
+    (S1, 'sid_1_ended_by_error'): 1431,
+}                       # 937,385 sequences in all
 
 
 def root_state(root, variant, *, s5=True, s0=True):
@@ -1371,7 +1482,9 @@ def test_s0_and_s5_are_the_only_assumptions_beyond_the_protocol():
 
 #: sequences (depth 2, all roots and variants) ending in a CURRENT book the
 #: protocol alone does not vouch for, by the one assumption admitting it
-ASSUMPTION_ONLY = {"sequences": 1323, "S0": 1134, "S5": 189}
+#: (round 3: four variants, each the same 441 = 378 S0 + 63 S5 as the
+#: three had -- the new events touch no number that is not ours)
+ASSUMPTION_ONLY = {"sequences": 1764, "S0": 1512, "S5": 252}
 
 
 # ── the reader path: kalshi_books_current as the worker writes it ─────────
@@ -1500,6 +1613,7 @@ class _VenueConn:
         self.max_seq = {}           # vinc -> highest data seq delivered
         self.refusals = {}          # market -> adds of it refused (26 / 27
                                     # / not taken) on this connection
+        self.ctrl_seen = []         # (round 3) control frames delivered
 
 
 class _Socket:
@@ -1534,7 +1648,10 @@ class SubscriberSim:
                   "activity": r.randint(8, 25), "drop": r.randint(1, 6),
                   "rewant": r.randint(1, 6), "flush": 3, "reassert": 2,
                   "venue_end": r.randint(0, 2), "disconnect": r.randint(0, 2),
-                  "idle": 1}
+                  "idle": 1,
+                  # (round 3) a separate counter's one unasked frame (C1)
+                  "unasked": (r.randint(1, 3) if variant in SEPARATE_COUNTERS
+                              else 0)}
         storm = faults and seed % 4 == 3
         self.p_loss, self.p_dup, self.p_replay = (
             (0.0, 0.0, 0.0) if not faults else
@@ -1612,7 +1729,12 @@ class SubscriberSim:
                        "snapshots_delivered_not_held": 0,
                        "get_snapshot_without_ok": 0, "adds_snap_first": 0,
                        "rewant_with_snapshot_in_flight": 0,
-                       "idle_rechecks": 0, "time_waits": 0}
+                       "idle_rechecks": 0, "time_waits": 0,
+                       # (round 3) control frames duplicated / replayed by
+                       # the venue, a delete it refused (27), the separate
+                       # counter's unasked frame
+                       "ctrl_duplicated": 0, "ctrl_replayed": 0,
+                       "refused_delete": 0, "unasked": 0}
 
     # ── the run ──
     def run(self):
@@ -1847,6 +1969,8 @@ class SubscriberSim:
                 self._reassert()
             elif act == "venue_end":
                 self._venue_end()
+            elif act == "unasked":
+                self._unasked()
             elif act == "disconnect":
                 self.counts["disconnects"] += 1
                 raise ConnectionError("venue dropped the connection")
@@ -1866,6 +1990,7 @@ class SubscriberSim:
         w["deliver"] *= bool(c.out_q)
         w["process"] *= bool(c.in_q)
         w["venue_end"] *= c.sub is not None
+        w["unasked"] *= c.sub is not None and c.sub["unasked"] < C1_UNASKED
         w["disconnect"] *= self.counts["disconnects"] < self.max_disconnects
         acts = sorted(w)
         return self.rng.choices(acts, weights=[w[a] for a in acts])[0]
@@ -1873,11 +1998,22 @@ class SubscriberSim:
     # ── the venue ──
     def _seq(self, control):
         sub = self.conn.sub
-        if control and self.variant == S:
+        if control and self.variant in SEPARATE_COUNTERS:
             sub["cseq"] += 1
             return sub["cseq"]
         sub["seq"] += 1
         return sub["seq"]
+
+    def _unasked(self):
+        """(round 3, S / S1) The venue sends a scoped non-terminal error
+        answering no command -- at most C1_UNASKED per subscription."""
+        sub = self.conn.sub
+        sub["unasked"] += 1
+        self.counts["unasked"] += 1
+        self.conn.out_q.append(({"type": "error", "sid": sub["sid"],
+                                 "seq": self._seq(True),
+                                 "msg": {"code": UNASKED_CODE,
+                                         "msg": "unasked"}}, None, "ctrl"))
 
     def _emit_ok(self, cid):
         sub = self.conn.sub
@@ -1902,8 +2038,10 @@ class SubscriberSim:
             sid = c.next_sid
             c.next_sid += 1
         self.vinc_n += 1
-        c.sub = {"sid": sid, "markets": [], "seq": 0, "cseq": 0,
-                 "vinc": self.vinc_n}
+        # (round 3) S1: the control counter numbered the `subscribed`
+        c.sub = {"sid": sid, "markets": [], "seq": 0,
+                 "cseq": 1 if self.variant == S1 else 0,
+                 "vinc": self.vinc_n, "unasked": 0}
         return c.sub
 
     def _process(self):
@@ -1966,6 +2104,12 @@ class SubscriberSim:
                 for t in taken:
                     self._emit(sub, t, None)
         elif action == "delete_markets":
+            if r.random() < self.p_27:
+                # (round 3) error 27 is documented for any command on the
+                # subscription: the venue keeps the markets
+                self.counts["refused_delete"] += 1
+                self._emit_error(cid, 27)
+                return
             sub["markets"] = [t for t in sub["markets"] if t not in ts]
             self._emit_ok(cid)
         elif action == "get_snapshot":
@@ -2064,6 +2208,20 @@ class SubscriberSim:
                 m.get("seq") is not None and r.random() < self.p_ctrl_loss:
             self.counts["ctrl_lost"] += 1
             return None
+        if kind == "ctrl" and not calm and self.faults and \
+                m.get("seq") is not None:
+            # (round 3) the venue duplicates or replays a control frame (a
+            # break of a shared sequence, as for data)
+            x = r.random()
+            if x < self.p_dup:
+                c.out_q.appendleft((m, vinc, kind))
+                self.counts["ctrl_duplicated"] += 1
+            elif x < self.p_dup + self.p_replay and c.ctrl_seen:
+                c.out_q.appendleft((m, vinc, kind))
+                m = r.choice(c.ctrl_seen)
+                self.counts["ctrl_replayed"] += 1
+        if kind == "ctrl" and m.get("seq") is not None:
+            c.ctrl_seen.append(m)
         if kind == "data" and not calm and self.faults:
             x = r.random()
             if x < self.p_loss:
@@ -2160,7 +2318,9 @@ class SubscriberSim:
                 + st["gaps"] * -(-m // 2)
                 + c["drops"] + c["rewants"]
                 + 2 * (c["refused_26"] + c["refused_27"]) + c["not_taken"]
-                + 2 * st["readd_after_gap"] + st["snapshots_not_held"])
+                + 2 * st["readd_after_gap"] + st["snapshots_not_held"]
+                # (round 3) a refused delete -> its one later retry
+                + c["refused_delete"])
 
 
 def _new_sim(seed, variant):
@@ -2168,7 +2328,7 @@ def _new_sim(seed, variant):
 
 
 #: CI seeds per variant (deterministic); odd seeds inject faults
-CI_SEEDS = {D: 100, S: 100, R: 100}
+CI_SEEDS = {D: 100, S: 100, R: 100, S1: 100}
 
 
 def _seeds(variant):
@@ -2219,10 +2379,16 @@ def test_the_subscriber_against_the_model_venue(variant):
               # snapshots_of_markets_not_held.)
               "refused_26", "refused_27", "not_taken",
               "snapshots_delivered_not_held", "get_snapshot_without_ok",
-              "adds_snap_first", "rewant_with_snapshot_in_flight"):
+              "adds_snap_first", "rewant_with_snapshot_in_flight",
+              # (round 3) control frames duplicated and replayed, deletes
+              # refused (27)
+              "ctrl_duplicated", "ctrl_replayed", "refused_delete"):
         assert total[k] > 0, (variant, k, total)
     if variant == R:
         assert total["reused_sids"] > 0
+    if variant in SEPARATE_COUNTERS:
+        # (round 3) the separate counter's unasked frame (C1)
+        assert total["unasked"] > 0
 
 
 # ── (c) the scripted Subscriber tests, re-run under the oracle ──────────
@@ -2491,6 +2657,90 @@ def test_a_separate_counters_coincidence_never_hides_a_lost_delta():
         assert check(o, b, universe=WMARKETS) == [], ev
     assert b.current(WA)["ok"] and b.stats["gaps"] == 0
     assert b.stats["deltas"] == 1
+
+
+def test_the_model_venue_stays_inside_the_clients_stated_assumptions():
+    """(round 3) The S / S1 venues send at most C1_UNASKED unasked frames a
+    subscription, which the client's bound covers (CONTROL_SEQ_SLACK), and
+    S1's control counter numbered our `subscribed` (control seq 1 before any
+    reply) -- the case C1 names."""
+    assert KWS.CONTROL_SEQ_SLACK >= C1_UNASKED == 1
+    b, o = root_state("acked", S1)
+    assert o.subs[1].ctop == 1 and _top(o, 1, control=True) == 1
+    b, o = root_state("acked", S)
+    assert o.subs[1].ctop == 0
+
+
+def test_a_numbered_subscribed_and_an_unasked_frame_never_hide_a_lost_delta(
+        monkeypatch):
+    """(round 3, BLOCKING finding, in the model) Variant S1 from "acked":
+    A's snapshot (data 1), the venue's one unasked scoped error (control 2:
+    `subscribed` took 1) -- exactly the shared slot -- then A's delta past a
+    lost data frame. The client gaps at the unasked frame and the oracle
+    agrees at every step. With the bound one short (j + CONTROL_SEQ_SLACK,
+    the code under review) the same path is a P2 violation: the oracle
+    catches it."""
+    path = [("msg", 1, WA, SNAP, "next"), ("unasked", 1),
+            ("msg", 1, WA, DELTA, "skip")]
+    b, o = root_state("acked", S1)
+    for ev in path:
+        for e in w_apply(b, o, ev):
+            o.record(e)
+        assert check(o, b, universe=WMARKETS) == [], ev
+    assert not b.current(WA)["ok"]
+    assert b.books[WA]["why"] == KWS.R_CONTROL_SEQUENCE_AMBIGUOUS
+    old = staticmethod(lambda a, cid: (a["cmd_index"].get(cid, a["n_cmds"])
+                                       if type(cid) is int else a["n_cmds"])
+                       + KWS.CONTROL_SEQ_SLACK)
+    monkeypatch.setattr(KWS.WsBooks, "_ctrl_bound", old)
+    b, o = root_state("acked", S1)
+    bad = []
+    for ev in path:
+        for e in w_apply(b, o, ev):
+            o.record(e)
+        bad += check(o, b, universe=WMARKETS)
+    assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" and x[1] == WA
+               for x in bad), bad
+
+
+def test_a_replayed_control_frame_breaks_the_shared_sequence(monkeypatch):
+    """(round 3, in the model) Variant D: our command's `ok` taken as the
+    shared slot, then the venue REPLAYS it. A replay breaks the sequence:
+    the client gaps (a second reply to one command) and the oracle agrees
+    at every step. A client that took the replay as proof of a separate
+    counter (the code under review switched without a gap) holds A CURRENT
+    across the break: a P2 violation."""
+    path = [("reply", 1, "ok", "next"), ("msg", 1, WA, DELTA, "next"),
+            ("creplay", 1)]
+    b, o = root_state("all_current_on_sid_1", D)
+    for ev in path:
+        for e in w_apply(b, o, ev):
+            o.record(e)
+        assert check(o, b, universe=WMARKETS) == [], ev
+    assert not b.current(WA)["ok"] and b.books[WA]["why"] == KWS.R_SEQ_GAP
+    assert b.anchors[1]["mode"] == KWS.SHARED
+    assert b.stats["control_replayed"] == 1
+
+    class Reviewed(KWS.WsBooks):
+        """The rule under review: ANY control frame at or below the last
+        seq switched the sid to SEPARATE, without a gap."""
+
+        def _control_seq(self, a, sid, seq, cid=None, *, dup=False):
+            if seq is not None and a["mode"] == KWS.SHARED and \
+                    seq <= (self.sid_seq.get(sid) or 0):
+                a["mode"] = KWS.SEPARATE
+                self.sid_seq[sid] = a["last_data"]
+                return "SEPARATE"
+            return super()._control_seq(a, sid, seq, cid, dup=dup)
+    monkeypatch.setattr(KWS, "WsBooks", Reviewed)
+    b, o = root_state("all_current_on_sid_1", D)
+    bad = []
+    for ev in path:
+        for e in w_apply(b, o, ev):
+            o.record(e)
+        bad += check(o, b, universe=WMARKETS)
+    assert b.anchors[1]["mode"] == KWS.SEPARATE
+    assert any(x[0] == "P2_CURRENT_WITHOUT_CONTINUITY" for x in bad), bad
 
 
 def _forced_current(b, t, sid):
