@@ -85,11 +85,13 @@ R_XAVIER_CANNOT_PROTECT = "XAVIER_CANNOT_PROTECT_THIS_ENTRY_NO_PROTECTIVE_PRICE"
 
 
 def _xavier_protect(**kw) -> dict:
-    """paper_explore.xavier_can_protect_fills: the one protectability check
-    every paper entry strategy runs (imported at call time, because
+    """paper_explore.xavier_can_protect_entry: the one protectability check
+    every paper entry strategy runs -- the decision walk AND the order's
+    whole quantity booked at its limit, the highest price the simulator can
+    book any fill of the order at (imported at call time, because
     paper_explore imports this module)."""
     from . import paper_explore as PEX
-    return PEX.xavier_can_protect_fills(**kw)
+    return PEX.xavier_can_protect_entry(**kw)
 
 #: WHERE A DECISION WAS FORMED. In the cycle, at the instant the valuation
 #: was written (the lane's own inputs and instant): the primary path. By the
@@ -800,11 +802,12 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
             refusals.append(DP.R_NO_QTY)
         elif not refusals and econ.get("fills"):
             # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED (SW-1b,
-            # paper_explore.xavier_can_protect_fills): the walked quantity at
-            # the cost basis the ledger books, before the capital gate, so
+            # paper_explore.xavier_can_protect_entry): the decision walk AND
+            # the order's whole quantity at its limit (the simulator fills it
+            # on a later book, up to the limit), before the capital gate, so
             # an entry no protection can exist for is never a shadow either.
             mgmt_protect = _xavier_protect(
-                fills=econ["fills"], qty=econ["qty"], limit=sized["limit"],
+                fills=econ["fills"], qty=sized["qty"], limit=sized["limit"],
                 fee_fn=fee_fn, at=at)
             econ["xavier_protection"] = mgmt_protect
             pd["xavier_protection"] = mgmt_protect
@@ -844,9 +847,11 @@ async def decide_one(conn, ctx: dict, row: dict) -> dict:
         if ce.get("capital_eligible"):
             sized = dict(sized, qty=int(ce["qty"]))
             # THE GATE MAY SHRINK THE SIZE; fees are rounded to the cent per
-            # fill, so the protection is asked again at the size entered.
+            # fill, so the protection is asked again -- walk and limit -- at
+            # the size entered.
             if econ is not None and econ.get("fills") and abs(float(
-                    sized["qty"]) - float(econ.get("qty") or 0.0)) > 1e-9:
+                    sized["qty"]) - float((econ.get("xavier_protection")
+                                           or {}).get("qty") or 0.0)) > 1e-9:
                 bound_protect = _xavier_protect(
                     fills=econ["fills"], qty=sized["qty"],
                     limit=sized["limit"], fee_fn=fee_fn, at=at)

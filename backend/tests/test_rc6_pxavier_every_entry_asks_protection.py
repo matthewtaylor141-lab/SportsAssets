@@ -16,9 +16,11 @@ did not:
   Derek V2            are protectable. With a fee of 0.025 per contract they
                       are not (0.94 + 0.025 + 0.01 > 0.99 - 0.025).
 
-Each now runs paper_explore.xavier_can_protect_fills on the quantity it
-would enter and refuses R_XAVIER_CANNOT_PROTECT by name, with no paper
-order. The benchmark and Derek ask again at the size the capital gate
+Each now runs paper_explore.xavier_can_protect_entry on the quantity it
+would enter (rc6.3 review round 3: the decision walk AND the whole quantity
+at the order's limit, the price the simulator can book every fill at; see
+tests/test_rc63_pxavier_protection_at_the_order_limit.py) and refuses
+R_XAVIER_CANNOT_PROTECT by name, with no paper order. The benchmark and Derek ask again at the size the capital gate
 leaves, because fees are rounded to the cent per fill. Nothing here reads or
 moves a price, edge, fee, size or risk threshold, and the protective price
 rule is unchanged.
@@ -137,14 +139,18 @@ def _called(fn_name: str, path: pathlib.Path) -> list:
 def test_every_paper_entry_decision_runs_the_check():
     """The four paper entry decisions besides exploration call it (the
     benchmark's decide_one serves both the strict and COMPLETED_GAME
-    policies)."""
+    policies). (rc6.3 review round 3) The maker and exploration now call
+    the one entry check, xavier_can_protect_entry (decision walk AND whole
+    quantity at the order's limit), that the benchmark's and Derek's
+    _xavier_protect wrap; tests/test_rc63_pxavier_protection_at_the_order_
+    limit.py pins that no decide_one calls a walk-only check directly."""
     agents = ROOT / "agents"
     assert len(_called("_xavier_protect", agents / "paper_benchmark.py")) == 2
     assert len(_called("_xavier_protect", agents / "paper_derek.py")) == 2
-    assert len(_called("xavier_can_protect_fills",
+    assert len(_called("xavier_can_protect_entry",
                        agents / "paper_maker.py")) == 1
-    assert len(_called("xavier_can_protect", agents / "paper_explore.py")) \
-        == 1
+    assert len(_called("xavier_can_protect_entry",
+                       agents / "paper_explore.py")) == 1
 
 
 def test_calling_the_check_from_the_benchmark_loads_no_forbidden_module():

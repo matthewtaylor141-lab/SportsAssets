@@ -326,11 +326,14 @@ async def decide_one(conn, ctx: dict, row: dict, pol=None) -> dict:
                             refusals.extend(r for r in capital["refusals"]
                                             if r not in refusals)
                         # ── XAVIER MUST BE ABLE TO PROTECT WHAT IS ENTERED
-                        # (SW-1b): the resting order's quantity filled at
-                        # its own limit, with the fee the simulator charges
+                        # (SW-1b, paper_explore.xavier_can_protect_entry,
+                        # the check every paper entry runs): a resting order
+                        # is booked at its own limit, every fill
+                        # (BASIS_CROSS), so its walk IS the whole quantity
+                        # at the limit, with the fee the simulator charges
                         # on that fill. Resting one cent below a 0.99 ask is
                         # 0.98, where no protective price exists.
-                        mgmt_protect = PEX.xavier_can_protect_fills(
+                        mgmt_protect = PEX.xavier_can_protect_entry(
                             fills=[(lim, qty)], qty=qty, limit=lim,
                             fee_fn=fee_fn, at=at)
                         econ["xavier_protection"] = mgmt_protect
