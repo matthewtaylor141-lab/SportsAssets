@@ -16,7 +16,7 @@ SELECT date_trunc('month', created_at)::date AS month,
 
 \echo == 2. the newest ten intents, the component as recorded
 SELECT created_at, strategy, left(us_market_slug, 40) AS slug,
-       left(evidence->'settlement_exception_risk'::text, 160) AS component
+       left((evidence->'settlement_exception_risk')::text, 160) AS component
   FROM canonical_decision_intents
  ORDER BY created_at DESC
  LIMIT 10;
