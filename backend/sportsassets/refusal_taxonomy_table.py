@@ -2501,6 +2501,12 @@ NOT_REFUSAL = {
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
     'ROLLBACK_RELEASE_MIGRATIONS_UNREADABLE':
         'tools/rollback_readiness (RC6 lane E): why the previous release cannot be shown ready to put back (Render deploy history, its gates, its migrations) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal',
+    'ROLLBACK_PREVIOUS_COMMIT_WAS_ROLLED_BACK_FROM':
+        "tools/rollback_readiness and tools/scorecard_14 (rc6.3 rollback): a service's previous live commit is one it was rolled back FROM (its own Render deploy list: live -> previous -> live, or a rollback trigger), so it is never a rollback target or a deploy command -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_FOR_A_SERVICE_NOT_ON_THE_RELEASE':
+        "tools/scorecard_14 (rc6.3 rollback): the rollback record wrote a deploy command for a service the release never touched (pm-acceptance 38002788631: the market plane on 732cc0c6 given deploy-commit 3d5af039) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
+    'ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT':
+        "tools/scorecard_14 (rc6.3 rollback): a rollback deploy command whose commit is not that service's OWN previous live commit in its own Render deploy list (or the list is unreadable) -- evidence quality of the acceptance judge, never a trading, decision, order or collector refusal",
     'UPGRADE_NOT_A_FULL_SHA':
         "tools/upgrade_path_receipt (RC6 lane E): an upgrade-path / rollback-compatibility evidence reason of capital-critical's build of the previous release's database (representative rows, this release's migrations), read by the pm-acceptance judge -- evidence quality, never a trading, decision, order or collector refusal",
     'UPGRADE_BASE_BUILD_FAILED':

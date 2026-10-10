@@ -213,6 +213,26 @@ R_ROLLBACK_TARGET_GATE = "ROLLBACK_TARGET_GATE_NOT_GREEN"
 R_ROLLBACK_COMMANDS_INCOMPLETE = "ROLLBACK_COMMANDS_INCOMPLETE"
 R_ROLLBACK_SCHEMA_BLOCKED = "ROLLBACK_SCHEMA_BLOCKED"
 R_ROLLBACK_SCHEMA_UNPROVEN = "ROLLBACK_SCHEMA_COMPATIBILITY_UNPROVEN"
+#: (rc6.3, pm-acceptance 38002788631) a deploy command written for a
+#: service the release never touched (the market plane, live on 732cc0c6,
+#: was given `market-plane.yml deploy-commit 3d5af039`)
+R_ROLLBACK_COMMAND_OFF_RELEASE = \
+    "ROLLBACK_COMMAND_FOR_A_SERVICE_NOT_ON_THE_RELEASE"
+#: a deploy command whose commit is not the service's OWN previous live
+#: commit in its own Render deploy list (re-read here), or that list is
+#: unreadable
+R_ROLLBACK_COMMAND_NOT_OWN_PREVIOUS = \
+    "ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT"
+#: tools/rollback_readiness.R_PREVIOUS_ROLLED_BACK, re-judged here from the
+#: service's own deploy list: its previous commit is one it was rolled
+#: back FROM (live -> previous -> live, or a Render `rollback` trigger)
+R_ROLLBACK_PREVIOUS_ROLLED_BACK = \
+    "ROLLBACK_PREVIOUS_COMMIT_WAS_ROLLED_BACK_FROM"
+#: what a rollback of the release does to one service (tools/
+#: rollback_readiness: DEPLOY_PREVIOUS / NONE / NO_TARGET)
+ROLLBACK_DEPLOY, ROLLBACK_STAY, ROLLBACK_NO_TARGET = (
+    "DEPLOY_PREVIOUS", "NONE", "NO_TARGET")
+_COMMAND_ARG = re.compile(r"(?:^|\s)-f arg=([0-9a-f]{40})(?:\s|$)")
 IDENTICAL = "IDENTICAL_MIGRATION_SET"
 COMPATIBLE = "COMPATIBLE"
 
@@ -1155,6 +1175,37 @@ def upgrade_path(acc, release_sha):
         "reasons": rec["reasons"], "migration_delta": delta, "receipt": rec}
 
 
+def _own_deploy_history(acc, svc):
+    """THE SERVICE'S OWN Render deploy list (acc/deploys_<svc>.json, newest
+    first), re-read by the judge: its live commit, its previous live
+    commit (the newest `deactivated` deploy older than the live one whose
+    commit differs) and whether it was rolled back FROM that commit (the
+    live commit was live before it too, or Render's trigger on the live
+    deploy is `rollback`). None when unreadable or not one live deploy."""
+    raw = _opt(acc, "deploys_%s.json" % svc)
+    if not isinstance(raw, list):
+        return None
+    deps = [x.get("deploy") for x in raw
+            if isinstance(x, dict) and isinstance(x.get("deploy"), dict)]
+    live = [i for i, d in enumerate(deps) if d.get("status") == "live"]
+    if len(live) != 1:
+        return None
+
+    def commit(d):
+        return _sha_or_none((d.get("commit") or {}).get("id"))
+    i = live[0]
+    lc, prev, back = commit(deps[i]), None, False
+    for j in range(i + 1, len(deps)):
+        c = commit(deps[j])
+        if deps[j].get("status") == "deactivated" and c and c != lc:
+            prev = c
+            back = deps[i].get("trigger") == "rollback" or any(
+                o.get("status") == "deactivated" and commit(o) == lc
+                for o in deps[j + 1:])
+            break
+    return {"live": lc, "previous": prev, "previous_rolled_back_from": back}
+
+
 def rollback_ready(acc, release_sha):
     """THE PREVIOUS RELEASE CAN BE PUT BACK (acc/rollback.json, tools/
     rollback_readiness.py; facts re-judged here, its own status is not
@@ -1165,7 +1216,15 @@ def rollback_ready(acc, release_sha):
     down, and the target runs on the release's schema -- identical
     migration sets, or the attested upgrade receipt's compatibility check
     (no table / column the target uses dropped, retyped or tightened) from
-    a base that IS the target. Nothing here deploys anything."""
+    a base that IS the target. Nothing here deploys anything.
+
+    Per service (rc6.3, pm-acceptance 38002788631): a service NOT on the
+    release stays where it is (NONE) -- still a reason the rollback is not
+    ready, and any deploy command written for it is a further reason; a
+    service on the release goes back to its OWN previous live commit, read
+    again here from its own deploy list: a command to any other commit, a
+    previous commit the service was rolled back from, or an unreadable
+    list is a named reason. Nothing is relabelled into a pass."""
     rb, why = _rollback_doc(acc, release_sha)
     if rb is None:
         if why.startswith("READ_UNAVAILABLE"):
@@ -1174,21 +1233,53 @@ def rollback_ready(acc, release_sha):
     reasons = []
     target = rb.get("target_sha")
     svcs = rb.get("services") if isinstance(rb.get("services"), dict) else {}
+    cmds = rb.get("commands") if isinstance(rb.get("commands"), dict) else {}
+    by_service, on_release = {}, []
     for svc in SERVICES:
         s = svcs.get(svc) if isinstance(svcs.get(svc), dict) else {}
+        cmd = cmds.get(svc)
         if s.get("live_commit") != release_sha:
             reasons.append("%s:%s" % (R_ROLLBACK_SERVICE_NOT_ON_RELEASE, svc))
+            if cmd:
+                reasons.append("%s:%s" % (R_ROLLBACK_COMMAND_OFF_RELEASE,
+                                          svc))
+            by_service[svc] = {"action": ROLLBACK_STAY,
+                               "commit": s.get("live_commit"),
+                               "reason": R_ROLLBACK_SERVICE_NOT_ON_RELEASE}
+            continue
+        on_release.append(svc)
         if not _is_sha(target) or s.get("previous_commit") != target:
             reasons.append("%s:%s:%s" % (R_ROLLBACK_TARGET_UNKNOWN, svc,
                                          s.get("previous_commit")))
+        own = _own_deploy_history(acc, svc)
+        prev = (own or {}).get("previous")
+        if (own or {}).get("previous_rolled_back_from") or \
+                s.get("previous_rolled_back_from") is True:
+            reasons.append("%s:%s:%s" % (
+                R_ROLLBACK_PREVIOUS_ROLLED_BACK, svc,
+                (prev or s.get("previous_commit") or "NONE")[:12]))
+            plan = (ROLLBACK_NO_TARGET, None,
+                    R_ROLLBACK_PREVIOUS_ROLLED_BACK)
+        elif own is None or own["live"] != release_sha or prev is None:
+            plan = (ROLLBACK_NO_TARGET, None, R_ROLLBACK_TARGET_UNKNOWN)
+        else:
+            plan = (ROLLBACK_DEPLOY, prev, None)
+        by_service[svc] = dict(zip(("action", "commit", "reason"), plan))
+        if cmd:
+            m = _COMMAND_ARG.search(str(cmd))
+            arg = m.group(1) if m else None
+            if plan[0] != ROLLBACK_DEPLOY or arg != plan[1]:
+                reasons.append("%s:%s:%s" % (
+                    R_ROLLBACK_COMMAND_NOT_OWN_PREVIOUS, svc,
+                    "DEPLOY_HISTORY_UNREADABLE" if own is None
+                    else (arg or "NONE")[:12]))
     if _is_sha(target):
         if rb.get("target_is_ancestor_of_release") is not True:
             reasons.append(R_ROLLBACK_TARGET_NOT_ON_RELEASE_LINE)
         reasons += ["%s:%s" % (R_ROLLBACK_TARGET_GATE, b)
                     for b in _gates_green(rb.get("target_gates"), target)]
-        cmds = rb.get("commands") if isinstance(rb.get("commands"),
-                                                dict) else {}
-        if any(target not in str(cmds.get(svc) or "") for svc in SERVICES):
+        # every service the rollback moves has its command to the target
+        if any(target not in str(cmds.get(svc) or "") for svc in on_release):
             reasons.append(R_ROLLBACK_COMMANDS_INCOMPLETE)
     delta = _migration_delta(rb)
     rec = upgrade_receipt(acc, release_sha, delta["target_fingerprint"])
@@ -1211,8 +1302,11 @@ def rollback_ready(acc, release_sha):
     return not reasons, {
         "status": "READY" if not reasons else "NOT_READY",
         "target_sha": target, "schema": schema,
+        # the commit each service ran before its live deploy, from its OWN
+        # deploy list: a fact, not an instruction (rollback_by_service is)
         "previous_by_service": {s: (svcs.get(s) or {}).get("previous_commit")
                                 for s in SERVICES},
+        "rollback_by_service": by_service,
         "commands": rb.get("commands"), "procedure": rb.get("procedure"),
         "migration_delta": delta, "reasons": reasons[:12]}
 

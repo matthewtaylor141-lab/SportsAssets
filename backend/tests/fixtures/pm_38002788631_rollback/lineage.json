@@ -1,0 +1,14 @@
+{
+  "accepted_base_sha": "a91be09f125f0ab0d1f29a0d0866b5cb6f5765fd",
+  "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "descendant_of_base": true,
+  "release_branch": "claude/release-api",
+  "release_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "implementation_sha": "34cb9544e13295bb62f5f5afbe61c6e2bd73aeb2",
+  "implementation_tree": "3b0430e483a64c6855a227665ab4a063767b836f",
+  "release_tree": "3b0430e483a64c6855a227665ab4a063767b836f",
+  "trees_equal": true,
+  "release_parents": [
+    "3d5af039d42026df16d9dad6ec0d4587b0141101"
+  ]
+}

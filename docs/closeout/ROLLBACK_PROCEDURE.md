@@ -15,16 +15,32 @@ deploy older than the live one whose commit differs from it). It is not the
 release commit's git parent: release 69a8a07e's parent is 93dc6f41, an interim
 release commit that never ran; Render shows 7fd4574e on every service.
 
+Each service's previous commit is read from **that service's own** deploy list
+(`deploys_<svc>.json`), and each service gets its own plan in
+`services.<svc>.action` (rc6.3, pm-acceptance 38002788631):
+
+| Action | When | Command |
+|---|---|---|
+| `DEPLOY_PREVIOUS` | the service is live on the release | to `services.<svc>.rollback_commit` = its OWN previous live commit |
+| `NONE` | the service is NOT on the release (rolling the release back does not touch it) | none: it stays on its own live commit, named `ROLLBACK_SERVICE_NOT_ON_THE_RELEASE` |
+| `NO_TARGET` | on the release, but no previous live deploy, an unreadable deploy list, or a previous commit it was rolled back FROM (`ROLLBACK_PREVIOUS_COMMIT_WAS_ROLLED_BACK_FROM`: its live commit ran before that commit too, or Render's trigger says rollback) | none |
+
+No command is ever written to a commit the service was not live on, and none
+for a service the release did not touch. Why: in pm-acceptance 38002788631
+(release 16d23450 on api and workers, the market plane still on 732cc0c6) one
+shared target wrote `market-plane.yml deploy-commit 3d5af039` for the plane --
+the RC6.1 commit the plane had hung on and been rolled back from at 15:59Z.
+
 The target is usable only when, in `acc/rollback.json`:
 
 | Fact | Field | Why |
 |---|---|---|
-| all three services are live on the release | `services.<svc>.live_commit` | rollback starts from a consistent release |
-| all three name the SAME previous commit | `target_sha`, `services.<svc>.previous_commit` | one release goes back, not three |
+| all three services are live on the release (a service left off it is `NONE` and the rollback stays NOT_READY) | `services.<svc>.live_commit` | rollback starts from a consistent release |
+| every service on the release names the SAME own previous commit, not one it was rolled back from | `target_sha`, `services.<svc>.previous_commit`, `services.<svc>.previous_rolled_back_from` | one release goes back, not three |
 | the target is an ancestor of the release | `target_is_ancestor_of_release` | it is on the release line |
 | its four gates are green on its own SHA | `target_gates` (backend-tests, capital-critical, commit-guard, engine-diagnostic) | it passed the same gates |
 | it runs on the release's schema | `migrations` (identical) or the upgrade-path receipt's `rollback_compatibility` = `COMPATIBLE` | migrations are never rolled back on production |
-| every service's deploy command is written down | `commands` | no improvisation under pressure |
+| every service the rollback moves has its deploy command written down, to its own previous live commit (the scorecard re-reads each service's own deploy list) | `commands` | no improvisation under pressure |
 
 ## 2. Migration compatibility (the schema stays)
 
@@ -56,8 +72,11 @@ rollback is then not ready until a person has decided what to do about each.
 
 ## 3. The commands (deploy by commit id, one service at a time)
 
-`T` = `target_sha` from the latest pm-acceptance packet. In the release order
-(API, workers, market plane):
+Run exactly the commands in `commands` of the latest pm-acceptance packet's
+`rollback.json` (a service whose command is `null` is NOT deployed: its
+action is `NONE` or `NO_TARGET`). When every service is on the release they
+read, with `T` = `target_sha`, in the release order (API, workers, market
+plane):
 
 ```
 gh workflow run render-ops.yml --ref claude/p0-closeout -f action=deploy-api-commit -f service=sportsassets-api -f arg=$T -f confirm=DO

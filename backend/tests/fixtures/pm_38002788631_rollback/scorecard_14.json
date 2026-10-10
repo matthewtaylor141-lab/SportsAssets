@@ -1,0 +1,2439 @@
+{
+ "version": "SCORECARD_14_V2",
+ "target": 0.95,
+ "release_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+ "categories": [
+  {
+   "category": "Core trading engine",
+   "readiness": 0.875,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 7,
+     "denominator": 8,
+     "rate": 0.875
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "software_reds_zero",
+     "passed": false,
+     "detail": 75,
+     "class": "FAIL"
+    },
+    {
+     "unit": "production_canary_clean",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "profitability_bind_active",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "executable_ev_priced_decisions",
+     "passed": true,
+     "detail": 1994,
+     "class": "PASS"
+    },
+    {
+     "unit": "cash_when_no_candidate_qualifies",
+     "passed": true,
+     "detail": "NO_CANDIDATE_BEATS_CASH_ON_ABSOLUTE_FORWARD_ECONOMICS",
+     "class": "PASS"
+    },
+    {
+     "unit": "decision_pipeline_live",
+     "passed": true,
+     "detail": "LIVE",
+     "class": "PASS"
+    },
+    {
+     "unit": "capital_critical_loops_healthy",
+     "passed": true,
+     "detail": {
+      "HEALTHY": 29,
+      "EVENT_DRIVEN": 1,
+      "UNAVAILABLE": 14,
+      "DISABLED": 1,
+      "UNHEALTHY": 7
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "historical_paper_immutable_by_receipt",
+     "passed": true,
+     "detail": {
+      "status": "PROVEN",
+      "immutable": true,
+      "cutoff": "2026-10-08T14:12:00Z",
+      "pre_captured_at": "2026-10-08T14:27:15.576155Z",
+      "post_captured_at": "2026-10-09T23:08:23.172103Z",
+      "reasons": []
+     },
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "GitHub CI and regression tests",
+   "readiness": 1.0,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 6,
+     "denominator": 6,
+     "rate": 1.0
+    }
+   ],
+   "passes": true,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "backend_tests",
+     "passed": true,
+     "detail": {
+      "run": 37985899520,
+      "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "conclusion": "success"
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "capital_critical",
+     "passed": true,
+     "detail": {
+      "run": 37985899433,
+      "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "conclusion": "success"
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "commit_guard",
+     "passed": true,
+     "detail": {
+      "run": 37985899569,
+      "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "conclusion": "success"
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "engine_diagnostic",
+     "passed": true,
+     "detail": {
+      "run": 37985899688,
+      "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "conclusion": "success"
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "gates_on_release_sha",
+     "passed": true,
+     "detail": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "class": "PASS"
+    },
+    {
+     "unit": "frontend_device_gate",
+     "passed": true,
+     "detail": {
+      "views": 17,
+      "views_ok": 17
+     },
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Red-team safeguards",
+   "readiness": 0.5,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 8,
+     "denominator": 16,
+     "rate": 0.5
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "ATTRIBUTION",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "CANONICAL_EXPOSURE",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "CAPACITY",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "NO_POSITIVE_CAPACITY"
+      ]
+     },
+     "class": "FORWARD"
+    },
+    {
+     "unit": "CREDENTIAL_CLASSES",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "CREDENTIAL_CLASS_MISMATCH:PMUS:POLYMARKET_EXCHANGE_RSA_M2M"
+      ]
+     },
+     "class": "FAIL"
+    },
+    {
+     "unit": "DIGITAL_TWIN",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "FEWER_THAN_100_FRESH_ORDERS:7"
+      ]
+     },
+     "class": "FORWARD"
+    },
+    {
+     "unit": "FEE_EVIDENCE",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "KAREN_VALUE",
+     "passed": false,
+     "detail": {
+      "status": "UNKNOWN",
+      "blockers": [
+       "KAREN_COUNTERFACTUALS_UNMEASURED",
+       "KAREN_TWIN_UNAVAILABLE:loss_avoided_paper_basis:NO_BLOCKED_POSITION_SCORED_IN_BOTH_WORLDS",
+       "KAREN_TWIN_UNAVAILABLE:profit_sacrificed_paper_basis:NO_BLOCKED_POSITION_SCORED_IN_BOTH_WORLDS"
+      ]
+     },
+     "class": "FAIL"
+    },
+    {
+     "unit": "MIGRATION_INTEGRITY",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": [],
+      "api_status": "UNKNOWN",
+      "api_blockers": [
+       "FRESH_DB_RESULT_NOT_IN_THIS_PROCESS"
+      ],
+      "api_evidence": {
+       "applied": 224,
+       "repo": 224,
+       "edited_in_place": [],
+       "applied_not_in_build": [],
+       "not_yet_applied": [],
+       "applied_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "repo_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "fresh_db": "UNPROVEN_HERE"
+      },
+      "fresh_db": {
+       "run_id": "37985899433",
+       "workflow_path": ".github/workflows/capital-critical.yml",
+       "head_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "conclusion": "success",
+       "attestation_verified": true,
+       "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "result": "PASSED",
+       "migrations_applied": 224,
+       "migrations_in_tree": 224,
+       "fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
+       "build_outcome": "success",
+       "receipt_reasons": [],
+       "status": "PROVEN",
+       "reasons": []
+      }
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "MULTIPLE_TESTING",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "DSR_NOT_ACCEPTABLE",
+       "PBO_NOT_ACCEPTABLE"
+      ]
+     },
+     "class": "FORWARD"
+    },
+    {
+     "unit": "PROFIT_BREAKERS",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "MECHANISM_DISABLED:EXECUTION_ALPHA",
+       "MECHANISM_DISABLED:XAVIER_MANAGEMENT"
+      ]
+     },
+     "class": "FORWARD"
+    },
+    {
+     "unit": "RELEASE",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": [],
+      "api_status": "UNKNOWN",
+      "api_blockers": [
+       "NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA"
+      ],
+      "api_running_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "release_verdict": {
+       "recorded": "GREEN",
+       "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "running_api_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "release_gate": {
+        "blockers": [],
+        "green": true
+       },
+       "refused": [],
+       "posted": false,
+       "status": "GREEN",
+       "reasons": []
+      }
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "SAMPLE_INTEGRITY",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "SETTLEMENT_CERTIFICATES",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "TRUTH_QUORUM",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "MISSING_SOURCE:MARKET_DATA",
+       "MISSING_SOURCE:VENUE_BALANCE",
+       "MISSING_SOURCE:VENUE_POSITIONS",
+       "STALE_SOURCE:VENUE_BALANCE"
+      ]
+     },
+     "class": "FAIL"
+    },
+    {
+     "unit": "UI_TRUTH",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "VENUE_HEALTH",
+     "passed": false,
+     "detail": {
+      "status": "RED",
+      "blockers": [
+       "POLYMARKET_US:FRESHNESS_BELOW_TARGET",
+       "POLYMARKET_US:NO_REQUIRED_BOOKS_DENOMINATOR"
+      ]
+     },
+     "class": "FAIL"
+    }
+   ]
+  },
+  {
+   "category": "Deployment infrastructure",
+   "readiness": 0.6667,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 6,
+     "denominator": 9,
+     "rate": 0.6667
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "sportsassets-api_on_release",
+     "passed": true,
+     "detail": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "class": "PASS"
+    },
+    {
+     "unit": "sportsassets-workers_on_release",
+     "passed": true,
+     "detail": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "class": "PASS"
+    },
+    {
+     "unit": "sportsassets-market-plane_on_release",
+     "passed": false,
+     "detail": "732cc0c696db614cbf63f83c3f843adec00301d6",
+     "class": "FAIL"
+    },
+    {
+     "unit": "workers_boot_on_release",
+     "passed": true,
+     "detail": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "class": "PASS"
+    },
+    {
+     "unit": "market_plane_heartbeat_on_release",
+     "passed": false,
+     "detail": {
+      "present": true,
+      "commit": "732cc0c696db614cbf63f83c3f843adec00301d6",
+      "mode": "UMP_AND_KALSHI_WS",
+      "process_locked": true,
+      "age_s": 15.8
+     },
+     "class": "FAIL"
+    },
+    {
+     "unit": "migration_integrity",
+     "passed": true,
+     "detail": {
+      "status": "GREEN",
+      "blockers": [],
+      "api_status": "UNKNOWN",
+      "api_blockers": [
+       "FRESH_DB_RESULT_NOT_IN_THIS_PROCESS"
+      ],
+      "api_evidence": {
+       "applied": 224,
+       "repo": 224,
+       "edited_in_place": [],
+       "applied_not_in_build": [],
+       "not_yet_applied": [],
+       "applied_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "repo_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "fresh_db": "UNPROVEN_HERE"
+      },
+      "fresh_db": {
+       "run_id": "37985899433",
+       "workflow_path": ".github/workflows/capital-critical.yml",
+       "head_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "conclusion": "success",
+       "attestation_verified": true,
+       "sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+       "result": "PASSED",
+       "migrations_applied": 224,
+       "migrations_in_tree": 224,
+       "fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "server_version": "16.15 (Debian 16.15-1.pgdg13+2)",
+       "build_outcome": "success",
+       "receipt_reasons": [],
+       "status": "PROVEN",
+       "reasons": []
+      }
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "release_lineage",
+     "passed": true,
+     "detail": {
+      "implementation_sha": "34cb9544e13295bb62f5f5afbe61c6e2bd73aeb2",
+      "release_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "tested_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+      "implementation_tree": "3b0430e483a64c6855a227665ab4a063767b836f",
+      "release_tree": "3b0430e483a64c6855a227665ab4a063767b836f",
+      "release_parents": [
+       "3d5af039d42026df16d9dad6ec0d4587b0141101"
+      ],
+      "reasons": []
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "upgrade_path",
+     "passed": true,
+     "detail": {
+      "status": "PROVEN",
+      "evidence": "IDENTICAL_MIGRATION_SET",
+      "reasons": [],
+      "migration_delta": {
+       "identical": true,
+       "target_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "release_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "target_count": 224,
+       "release_count": 224,
+       "added": [],
+       "removed": [],
+       "changed": []
+      },
+      "receipt": {
+       "run_id": "37985899433",
+       "result": "PASSED",
+       "base_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+       "base_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "new_migrations": [],
+       "seeded": {
+        "coverage": 0.8028,
+        "inserted": 270,
+        "not_seeded": 71,
+        "preexisting": 19,
+        "refusals": {
+         "adriana_arb_refusals": "CHECK:adriana_ref_codes_ck",
+         "agent_conversation_messages": "CHECK:agent_conv_grounded_ck",
+         "agent_finding_stages": "PARENT_NOT_SEEDED:agent_findings",
+         "agent_findings": "CHECK:agent_findings_grounded_ck",
+         "agent_lesson_retrievals": "IntegrityConstraintViolationError:agent_lesson_retrievals: agent_memory_events agent_memory_events is not a lesson of DEREK",
+         "agent_lesson_supersessions": "IntegrityConstraintViolationError:agent_lesson_supersessions: agent_memory_events agent_memory_events is not a lesson of DEREK",
+         "agent_memory_events": "CHECK:agent_memory_grounded_ck",
+         "agent_work_request_events": "IntegrityConstraintViolationError:agent_work_request_events: COMPLETED before ENQUEUED for seed",
+         "audrey_audit_reports": "CHECK:audrey_report_id_ck",
+         "bettor_funded_settlement_corrections": "CHECK:bettor_funded_correction_event_ck",
+         "bettor_xavier_execution_events": "RaiseError:xavier decision seed chose <NULL> with plan <NULL>; plan <NULL> is not claimable against it",
+         "canonical_decision_intents": "CHECK:cdi_opportunity_ck",
+         "canonical_management_intents": "CHECK:cmi_action_ck",
+         "coverage_collapse_alerts": "CHECK:coverage_collapse_alerts_routed_ck",
+         "derek_entry_decisions": "CHECK:derek_entry_decisions_refusal_ck",
+         "derek_research_model_attempts": "CHECK:derek_research_model_attempts_outcome_ck",
+         "derek_research_observations": "CHECK:derek_research_observations_basis_follows_purpose_ck",
+         "eddie_execution_estimates": "CHECK:eddie_estimates_grounded_ck",
+         "eddie_execution_outcomes": "PARENT_NOT_SEEDED:eddie_execution_estimates",
+         "external_valuations": "CHECK:external_valuations_admissible_is_complete",
+         "improve_disagreements": "PARENT_NOT_SEEDED:improve_items",
+         "improve_events": "PARENT_NOT_SEEDED:improve_items",
+         "improve_items": "CHECK:None",
+         "improvement_cluster_events": "PARENT_NOT_SEEDED:improvement_clusters",
+         "improvement_clusters": "CHECK:improvement_clusters_key_ck",
+         "institutional_stream_evidence": "CHECK:institutional_stream_evidence_minute_ck",
+         "karen_challenge_events": "PARENT_NOT_SEEDED:karen_challenges",
+         "karen_challenges": "CHECK:karen_challenges_grounded_ck",
+         "live_parity_cutover": "PARENT_NOT_SEEDED:live_parity_hook_installs",
+         "live_parity_hook_installs": "CHECK:lphi_hooks_ck",
+         "lol_horizon_forecast_scores": "PARENT_NOT_SEEDED:lol_horizon_forecasts",
+         "lol_horizon_forecasts": "CHECK:lol_hfc_scope_named_ck",
+         "lol_ledger": "CHECK:lol_ledger_hypothetical_ck",
+         "lol_opportunity_scores": "CHECK:lol_score_null_ck",
+         "opportunity_score_tournament": "CHECK:None",
+         "p5_c12_decision_proof": "CHECK:p5_c12_decision_proof_status_ck",
+         "pos_candidate_review_steps": "RaiseError:pos_candidate_review_steps: step 2 cannot follow step 0 (none is skipped)",
+         "pos_forecast_scores": "PARENT_NOT_SEEDED:pos_forecasts",
+         "pos_forecasts": "CHECK:pos_fc_scope_named_ck",
+         "pos_metric_observations": "CHECK:pos_metric_scope_named_ck",
+         "pos_position_economics": "CHECK:pos_econ_named_nulls_ck",
+         "poslearn_experiment_assignments": "PARENT_NOT_SEEDED:poslearn_experiments",
+         "poslearn_experiment_outcomes": "PARENT_NOT_SEEDED:poslearn_experiment_assignments",
+         "poslearn_experiment_reviews": "PARENT_NOT_SEEDED:poslearn_experiments",
+         "poslearn_experiments": "CHECK:poslearn_exp_design_ck",
+         "poslearn_forecasts": "PARENT_NOT_SEEDED:poslearn_registrations",
+         "poslearn_human_approvals": "PARENT_NOT_SEEDED:poslearn_registrations",
+         "poslearn_promotion_steps": "PARENT_NOT_SEEDED:poslearn_registrations",
+         "poslearn_registrations": "CHECK:None",
+         "scout_feature_observations": "PARENT_NOT_SEEDED:scout_features",
+         "scout_feature_tournaments": "PARENT_NOT_SEEDED:scout_features",
+         "scout_features": "RaiseError:SCOUT_SOURCE_NOT_COMPLIANT: seed has not passed the declared compliance check; nothing is ingested",
+         "scout_tournament_samples": "PARENT_NOT_SEEDED:scout_feature_tournaments",
+         "shadow_decisions": "CHECK:shadow_decisions_lane",
+         "shadow_executions": "PARENT_NOT_SEEDED:shadow_decisions",
+         "shadow_position_events": "PARENT_NOT_SEEDED:shadow_positions",
+         "shadow_positions": "PARENT_NOT_SEEDED:shadow_decisions",
+         "shadow_scores": "PARENT_NOT_SEEDED:shadow_decisions",
+         "small_live_order_events": "CHECK:None",
+         "twin_agent_scorecards": "CHECK:twin_scorecards_null_ck"
+        },
+        "tables": 360,
+        "with_rows": 289
+       },
+       "rollback_compatibility": {
+        "base_runner_on_new_schema": {
+         "applied": [],
+         "drift": [],
+         "rc": 0
+        },
+        "blocking": [],
+        "unproven": [],
+        "verdict": "COMPATIBLE"
+       },
+       "representative": "COMPLETE",
+       "receipt_reasons": [],
+       "status": "PROVEN",
+       "reasons": []
+      }
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "rollback_ready",
+     "passed": false,
+     "detail": {
+      "status": "NOT_READY",
+      "target_sha": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+      "schema": "COMPATIBLE_IDENTICAL_SCHEMA",
+      "previous_by_service": {
+       "sportsassets-api": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+       "sportsassets-workers": "3d5af039d42026df16d9dad6ec0d4587b0141101",
+       "sportsassets-market-plane": "3d5af039d42026df16d9dad6ec0d4587b0141101"
+      },
+      "commands": {
+       "sportsassets-api": "gh workflow run render-ops.yml --ref claude/p0-closeout -f action=deploy-api-commit -f service=sportsassets-api -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO",
+       "sportsassets-market-plane": "gh workflow run market-plane.yml --ref claude/release-api -f action=deploy-commit -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO",
+       "sportsassets-workers": "gh workflow run render-ops.yml --ref claude/p0-closeout -f action=workers-commit-deploy -f service=sportsassets-workers -f arg=3d5af039d42026df16d9dad6ec0d4587b0141101 -f confirm=DO"
+      },
+      "procedure": "docs/closeout/ROLLBACK_PROCEDURE.md",
+      "migration_delta": {
+       "identical": true,
+       "target_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "release_fingerprint": "f442188ef69cbc9ff875d576dbe218271df2c1536081e7f54b51305f3e0463a0",
+       "target_count": 224,
+       "release_count": 224,
+       "added": [],
+       "removed": [],
+       "changed": []
+      },
+      "reasons": [
+       "ROLLBACK_SERVICE_NOT_ON_THE_RELEASE:sportsassets-market-plane"
+      ]
+     },
+     "class": "FAIL"
+    }
+   ]
+  },
+  {
+   "category": "Market-plane stability",
+   "readiness": 0.8,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 4,
+     "denominator": 5,
+     "rate": 0.8
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [
+    "runtime_window_ge_60_min"
+   ],
+   "units": [
+    {
+     "unit": "zero_oom_since_live",
+     "passed": true,
+     "detail": 0,
+     "class": "PASS"
+    },
+    {
+     "unit": "zero_server_failed_since_live",
+     "passed": true,
+     "detail": 0,
+     "class": "PASS"
+    },
+    {
+     "unit": "runtime_window_ge_60_min",
+     "passed": false,
+     "detail": "READ_UNAVAILABLE:acceptance.json:runtime_window:UNKNOWN",
+     "class": "READ_UNAVAILABLE"
+    },
+    {
+     "unit": "memory_highwater_le_85pct",
+     "passed": true,
+     "detail": {
+      "pid": 1,
+      "rss_mb": 305.8,
+      "peak_mb": 351.0,
+      "limit_mb": 4096.0,
+      "rss_fraction": 0.0747,
+      "highwater_fraction": 0.0857
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "snapshot_current",
+     "passed": true,
+     "detail": "CURRENT",
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Data freshness and latency",
+   "readiness": null,
+   "binding_component": "held_positions_fresh",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 1,
+     "denominator": 1,
+     "rate": 1.0
+    },
+    {
+     "component": "held_positions_fresh",
+     "numerator": 0,
+     "denominator": 0,
+     "rate": null
+    },
+    {
+     "component": "priority_members_fresh",
+     "numerator": 158,
+     "denominator": 232,
+     "rate": 0.681
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [
+    "held_positions_fresh"
+   ],
+   "units": [
+    {
+     "unit": "held_positions_fresh",
+     "members": [
+      0,
+      0
+     ],
+     "passed": false,
+     "detail": "(FRESH + QUIET_VALID) / markable, SLA 300.0s",
+     "class": "UNMEASURED"
+    },
+    {
+     "unit": "priority_members_fresh",
+     "members": [
+      158,
+      232
+     ],
+     "passed": false,
+     "detail": "priority freshness (dedicated plane snapshot)",
+     "class": "FAIL"
+    },
+    {
+     "unit": "latency_slo_green",
+     "passed": true,
+     "detail": {
+      "n": 2000,
+      "p50": 259.26852226257324,
+      "p95": 411.96237802505493,
+      "p99": 464.34469699859613
+     },
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Sports and market coverage",
+   "readiness": 0.0006,
+   "binding_component": "active_contracts_priceable",
+   "components": [
+    {
+     "component": "active_contracts_priceable",
+     "numerator": 93,
+     "denominator": 161088,
+     "rate": 0.0006
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "active_contracts_priceable",
+     "members": [
+      93,
+      161088
+     ],
+     "passed": false,
+     "detail": {
+      "by_state": {
+       "PRICEABLE": 93,
+       "CODE_CONTROLLED_GAP": 70677,
+       "EXTERNAL_DATA_UNAVAILABLE": 0,
+       "MAPPED_BUT_NO_FAIR_VALUE_SOURCE": 3,
+       "MAPPED_BUT_SETTLEMENT_NOT_PROVEN": 90315
+      },
+      "external_excluded_and_reported": 0
+     },
+     "class": "FAIL"
+    }
+   ]
+  },
+  {
+   "category": "EV and pricing methodology",
+   "readiness": 0.625,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 5,
+     "denominator": 8,
+     "rate": 0.625
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "calibration_measured",
+     "passed": true,
+     "detail": {
+      "ece10": 0.03428241950844556,
+      "independent_events": 357
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "executable_ev_computed",
+     "passed": true,
+     "detail": "CASH",
+     "class": "PASS"
+    },
+    {
+     "unit": "control_FEE_EVIDENCE",
+     "passed": true,
+     "detail": [],
+     "class": "PASS"
+    },
+    {
+     "unit": "control_DIGITAL_TWIN",
+     "passed": false,
+     "detail": [
+      "FEWER_THAN_100_FRESH_ORDERS:7"
+     ],
+     "class": "FORWARD"
+    },
+    {
+     "unit": "control_SAMPLE_INTEGRITY",
+     "passed": true,
+     "detail": [],
+     "class": "PASS"
+    },
+    {
+     "unit": "control_MULTIPLE_TESTING",
+     "passed": false,
+     "detail": [
+      "DSR_NOT_ACCEPTABLE",
+      "PBO_NOT_ACCEPTABLE"
+     ],
+     "class": "FORWARD"
+    },
+    {
+     "unit": "control_CAPACITY",
+     "passed": false,
+     "detail": [
+      "NO_POSITIVE_CAPACITY"
+     ],
+     "class": "FORWARD"
+    },
+    {
+     "unit": "control_ATTRIBUTION",
+     "passed": true,
+     "detail": [],
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Xavier and agent coordination",
+   "readiness": null,
+   "binding_component": "held_positions_with_complete_current_packet",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 1,
+     "denominator": 1,
+     "rate": 1.0
+    },
+    {
+     "component": "held_positions_with_complete_current_packet",
+     "numerator": 0,
+     "denominator": 0,
+     "rate": null
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [
+    "held_positions_with_complete_current_packet"
+   ],
+   "units": [
+    {
+     "unit": "held_positions_with_complete_current_packet",
+     "members": [
+      0,
+      0
+     ],
+     "passed": false,
+     "detail": "xavier_packet_complete_rate x open positions",
+     "class": "UNMEASURED"
+    },
+    {
+     "unit": "no_open_position_without_review",
+     "passed": true,
+     "detail": {
+      "positions": 100,
+      "open_positions": 0,
+      "by_evidence_state": {},
+      "by_thesis_state": {},
+      "by_recommendation_state": {},
+      "validity_context_unchecked": [],
+      "reviews_overdue": 0,
+      "open_without_review": 0,
+      "open_not_handed_off": 0,
+      "open_not_handed_off_groups": [],
+      "population": {
+       "open": "OPEN: every canonical open paper position (open_position_canon.CANONICAL_OPEN_POSITIONS_SQL) with or without a handoff, and every OPEN smalllive_handoffs row -- never limited; CLOSED: the newest `limit` handoffs of each book whose position is no longer held",
+       "open_complete": true,
+       "closed_history_limit": 100
+      },
+      "reallocate_shadow_recommended": 0,
+      "value_add_rows": 0,
+      "policy_status": "APPROVED",
+      "policy_approved": true
+     },
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Archer and reconciliation",
+   "readiness": 0.6667,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 4,
+     "denominator": 6,
+     "rate": 0.6667
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "no_phantom_opens",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "no_live_protection_on_closed",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "no_economic_duplicate_suspects",
+     "passed": true,
+     "detail": {
+      "groups": 0,
+      "extra_qty": 0
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "management_epoch_reconciled",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "truth_quorum",
+     "passed": false,
+     "detail": [
+      "MISSING_SOURCE:MARKET_DATA",
+      "MISSING_SOURCE:VENUE_BALANCE",
+      "MISSING_SOURCE:VENUE_POSITIONS",
+      "STALE_SOURCE:VENUE_BALANCE"
+     ],
+     "class": "FAIL"
+    },
+    {
+     "unit": "retail_venue_confirmed",
+     "passed": false,
+     "detail": null,
+     "class": "FAIL"
+    }
+   ]
+  },
+  {
+   "category": "Adriana cross-venue arbitrage",
+   "readiness": 0.75,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 3,
+     "denominator": 4,
+     "rate": 0.75
+    },
+    {
+     "component": "scanned_markets_with_fresh_books",
+     "numerator": 400,
+     "denominator": 446,
+     "rate": 0.8969
+    }
+   ],
+   "passes": false,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "claim_scan_ran",
+     "passed": true,
+     "detail": "adr-claims-1791587189894",
+     "class": "PASS"
+    },
+    {
+     "unit": "scanned_markets_with_fresh_books",
+     "members": [
+      400,
+      446
+     ],
+     "passed": false,
+     "detail": "books_fresh / markets_read",
+     "class": "FAIL"
+    },
+    {
+     "unit": "void_terms_established",
+     "passed": false,
+     "detail": "census: void terms established for 10 of 10 contracts from each one's own published rules (LAST_FAIR_PRICE/LAST_FAIR_PRICE 10); separate markets' fair prices are never summed to $1, so structures across markets are refused at their priced void-state floor; cross_venue: void terms not established for 240 of 446 aliases (VOID_TERMS_POSTPONEMENT_PAYOUT_NOT_STATED 240) -> those structures refused; cross_venue: void terms not established for what the scan did not read: 82 readable fixture(s) cut by the 80-fixture cap (KXMLS2H-26OCT10CHINYC, KXMLSGAME-26OCT10CHINYC, KXNHL1PSPREAD-26OCT10VANNJ)",
+     "class": "FAIL"
+    },
+    {
+     "unit": "every_refusal_named",
+     "passed": true,
+     "detail": 20,
+     "class": "PASS"
+    },
+    {
+     "unit": "shadow_only",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Risk management and capital controls",
+   "readiness": 1.0,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 8,
+     "denominator": 8,
+     "rate": 1.0
+    }
+   ],
+   "passes": true,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "small_live_shadow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "kalshi_live_money_not_activated",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "adriana_shadow_only",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "no_capital_authority_granted",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "canonical_exposure_lock",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "workers_venue_writes_locked",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "market_plane_process_locked",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "actual_orders_impossible_now",
+     "passed": true,
+     "detail": [
+      "the actual lane is STOPPED",
+      "no approved live book-currency rule"
+     ],
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Kalshi integration",
+   "readiness": 1.0,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 4,
+     "denominator": 4,
+     "rate": 1.0
+    },
+    {
+     "component": "tracked_books_fresh",
+     "numerator": 402,
+     "denominator": 402,
+     "rate": 1.0
+    }
+   ],
+   "passes": true,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "websocket_is_the_mechanism",
+     "passed": true,
+     "detail": [],
+     "class": "PASS"
+    },
+    {
+     "unit": "tracked_books_fresh",
+     "members": [
+      402,
+      402
+     ],
+     "passed": true,
+     "detail": {
+      "by_source": {
+       "WS": 402,
+       "REST": 0
+      },
+      "sla_s": 30.0
+     },
+     "class": "PASS"
+    },
+    {
+     "unit": "catalogue_complete",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "health_state_ok",
+     "passed": true,
+     "detail": "OK",
+     "class": "PASS"
+    },
+    {
+     "unit": "credential_class_control",
+     "passed": true,
+     "detail": {
+      "scope": "KALSHI",
+      "kalshi_verdict": "MATCHES",
+      "kalshi_by_process": {
+       "api": "KALSHI_ED25519_API_KEY",
+       "workers": "KALSHI_ED25519_API_KEY"
+      },
+      "approved": [
+       "KALSHI_ED25519_API_KEY",
+       "KALSHI_RSA_API_KEY"
+      ],
+      "kalshi_blockers": [],
+      "reasons": [],
+      "aggregate_status": "RED",
+      "aggregate_blockers_outside_kalshi": [
+       "CREDENTIAL_CLASS_MISMATCH:PMUS:POLYMARKET_EXCHANGE_RSA_M2M"
+      ]
+     },
+     "class": "PASS"
+    }
+   ]
+  },
+  {
+   "category": "Command Center desktop and mobile",
+   "readiness": 1.0,
+   "binding_component": "checks",
+   "components": [
+    {
+     "component": "checks",
+     "numerator": 153,
+     "denominator": 153,
+     "rate": 1.0
+    },
+    {
+     "component": "trader_device_acceptance",
+     "numerator": 5,
+     "denominator": 5,
+     "rate": 1.0
+    }
+   ],
+   "passes": true,
+   "unreadable_units": [],
+   "units": [
+    {
+     "unit": "desktop_command:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_command:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_floor:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_trader:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_floor:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_trader:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_floor:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_portrait_command:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_trader:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "ipad_landscape_command:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_floor:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_landscape_trader:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_floor_reduced_motion:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "desktop_trader_reduced_motion:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:http_200",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:signed_in",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:main_thread_responsive",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:no_horizontal_overflow",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:no_fixed_bar_overlap",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:touch_targets_ge_44",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:paper_or_shadow_label",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:no_console_errors",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "iphone_command_reduced_motion:no_example_wording",
+     "passed": true,
+     "detail": null,
+     "class": "PASS"
+    },
+    {
+     "unit": "trader_device_acceptance",
+     "passed": true,
+     "members": [
+      5,
+      5
+     ],
+     "detail": {
+      "desktop": "PASS",
+      "iphone": "PASS",
+      "iphone_landscape": "PASS",
+      "ipad_portrait": "PASS",
+      "ipad_landscape": "PASS"
+     },
+     "class": "PASS"
+    }
+   ]
+  }
+ ],
+ "all_categories_pass": false,
+ "passing": 4,
+ "not_averaged": true,
+ "profitability": "classified separately (PROVEN / UNPROVEN); not a category here",
+ "pinning": {
+  "evaluator": {
+   "sha": "42616dcdb3c80effaa6406faeda100ae995872cb",
+   "version": "SCORECARD_14_V2",
+   "source": "backend/tools/scorecard_14.py",
+   "source_sha256": "b6ce98ad5e91f1ac2988c0168f67730274fb2ba79de26b05ffc13b4820b667ca"
+  },
+  "release_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "implementation_sha": "34cb9544e13295bb62f5f5afbe61c6e2bd73aeb2",
+  "implementation_sha_sources": {
+   "argument": "34cb9544e13295bb62f5f5afbe61c6e2bd73aeb2",
+   "lineage.json": "34cb9544e13295bb62f5f5afbe61c6e2bd73aeb2"
+  },
+  "frontend_sha": "3f401f4b509a15d0f8b28ee163f282f72d17c614",
+  "frontend_preview_sha": "3f401f4b509a15d0f8b28ee163f282f72d17c614",
+  "api_serving_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+  "inputs_sha256": {
+   "acceptance.json": "f44b765a557045959ec8203a3a6fba567e035535ee739c3a718a004da83611eb",
+   "canary.json": "7408004c0669a6531f77ec98a02569dda294388fa2ec09e9492b061cd8ff405e",
+   "capital_readiness.json": "a3247dc6b75214159f28b9cbbb2c45463296af9f06bfe07d56b9975a4710bcec",
+   "completion.json": "19e337bbebfd74238b48d7f55081580d7ace77ebd9ae537adb8ba36baff97847",
+   "fresh_db.json": "4f5cd308f2293d42a1eb3ac656cdf4f2b7cad635b0451b507001bd36840ff16d",
+   "frontend_build.json": "d201d9ccbc0a59d8e0ad19062550c55e1f3b60bd491b9272b8f9e1d91a1eeb37",
+   "frontend_preview.json": "bcb14bee73786ae614d38b23479803f2c002c457c2072b602a528e99e2b96766",
+   "frontend_preview_identity.json": "8a65c5bac652c5a29e63eafab70d2618b90f29e4aa8399e93ddeb210d22c7626",
+   "gates.json": "d065145b08b574733300b9de9444dd8c792c46c10c321d478ceab9a086a34e09",
+   "gates_implementation.json": "45c91fa935378b9667324aaa93cebd5418b3e043178ced4c2c178bee8941ce20",
+   "lineage.json": "79fd02ea1b7e2d9cbf8fa93c688f111f7a8280d23dcda8bc2a88ed1b78e57347",
+   "loop_health.json": "6c356de28158203d6af1c284f5529b4acac0443afa5cb710ae0a241261a42d7c",
+   "market_plane.json": "50f94758d834e0c993046eb8f0d4f129677eb1312a7d1782742bfaeb8e6070d5",
+   "paper_freshness.json": "b06e3c58cc7cb3295dada7d6420279a66252b0a9474fef4db333ee29bc6a7571",
+   "paper_reconciliation.json": "7722c90c8fc9a0fb2a328a305178d314b02a2f8f950a0bd0d093896efdcc1ea3",
+   "pm_after.json": "d5e35439801d806b69bc171227630cf5a64281e9a87f0ce7202cf3ec82bb36b7",
+   "pm_before.json": "d5e35439801d806b69bc171227630cf5a64281e9a87f0ce7202cf3ec82bb36b7",
+   "red_team.json": "fb3e533691367fadbc07d49cefe8f92aaef11efb63b68df7b2e816baae46f82b",
+   "release.json": "974db41562b7a951189bfb039f1eb6cc871129f209cb0860d061ca21367ce189",
+   "release_verdict.json": "ae6436ac3f4c7a76f9a45378239475b6556fdb1585275c449d5105976656cd15",
+   "render.json": "33de415786a8300ad62a2da3427282350d0e085b6b967bebd5fc39d1dc75625a",
+   "rollback.json": "ad13bfdfc3b3ed1d73912eb01432d5391a2d6a8c7b3a50708bf775d43653f1f5",
+   "runtime_window.json": "5dbef89af02164c79cde24c39b91044a8b650bb771ed50f7e24d0c5bf6185d46",
+   "shadow_health.json": "b1c7ea36d21d52d3cc9dff165cb1a631fb15c2bf4fe2181983fa4b69f85b6579",
+   "small_live.json": "a00472d9362d5059766a6ddb5e88792660d3e286183a0a7d8afac9e0dea37d8e",
+   "trader_accept.json": "c6f978ba75ecad6f5a7e0ff28ca6615a89d44ada883761e97cf3edb7de8b16b9",
+   "upgrade_path.json": "68cf74707fe1a8da9e49e25170f524c97b9ffcdcd78b8767b5b87c257edef1e4",
+   "venues.json": "ae3a1ff202839b40b0bc7e433801d4ac4db7c8bca5425f34aa1b52aec0bf1098",
+   "xavier_management.json": "0aa00cfa12829954a01742f4b8c3af7b57db06d41e03afdce915fa76d7bce135"
+  },
+  "inputs_unreadable": {},
+  "identity": {
+   "reference": "16d234506a0683acc8577465b1beadf5423dc3f7",
+   "api": {
+    "sources": {
+     "red_team.json:data.readiness.implementation_sha": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "release.json:api.sha": "16d234506a0683acc8577465b1beadf5423dc3f7"
+    },
+    "conflict": false,
+    "sha": "16d234506a0683acc8577465b1beadf5423dc3f7"
+   },
+   "files": {
+    "acceptance.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:sha"
+    },
+    "canary.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:boots.api.commit_sha"
+    },
+    "capital_readiness.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:data.source_sha"
+    },
+    "completion.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "loop_health.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "market_plane.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "paper_freshness.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "paper_reconciliation.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "pm_after.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:data.pm_acceptance.evidence_input.deployed_sha"
+    },
+    "pm_before.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:data.pm_acceptance.evidence_input.deployed_sha"
+    },
+    "profitability_scoreboard.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "red_team.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:data.readiness.implementation_sha"
+    },
+    "release.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:api.sha"
+    },
+    "revenue_readiness.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "runtime_window.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:expected_commit"
+    },
+    "shadow_health.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "small_live.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "own:launch.serving_build"
+    },
+    "venues.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    },
+    "xavier_management.json": {
+     "verdict": "MATCHES",
+     "named": "16d234506a0683acc8577465b1beadf5423dc3f7",
+     "reason": null,
+     "source": "api"
+    }
+   },
+   "frontend": {
+    "verdict": "MATCHES",
+    "named": "3f401f4b509a15d0f8b28ee163f282f72d17c614",
+    "reason": null,
+    "production_sha": "3f401f4b509a15d0f8b28ee163f282f72d17c614",
+    "preview_sha": "3f401f4b509a15d0f8b28ee163f282f72d17c614"
+   },
+   "trader_api": {
+    "verdict": "MATCHES",
+    "named": [
+     "16d234506a0683acc8577465b1beadf5423dc3f7"
+    ],
+    "reason": null
+   }
+  },
+  "refused_inputs": [],
+  "unattributed_inputs": [],
+  "verdict": "PINNED"
+ },
+ "grading_changes": [
+  {
+   "id": "RC6_BOUND_MIGRATION_INTEGRITY",
+   "since": "7ea9a61a",
+   "units": [
+    [
+     "Red-team safeguards",
+     "MIGRATION_INTEGRITY"
+    ],
+    [
+     "Deployment infrastructure",
+     "migration_integrity"
+    ]
+   ],
+   "reason": "the API's MIGRATION_INTEGRITY read UNKNOWN for the sole absence FRESH_DB_RESULT_NOT_IN_THIS_PROCESS (applied 224 = repo 224, fingerprints equal, 37836393458); bound with capital-critical's attested fresh-database receipt of the release SHA: lifted only when PROVEN, RED from either side is RED, absent is UNPROVEN"
+  },
+  {
+   "id": "RC6_BOUND_RELEASE",
+   "since": "7ea9a61a",
+   "units": [
+    [
+     "Red-team safeguards",
+     "RELEASE"
+    ]
+   ],
+   "reason": "the API's RELEASE read UNKNOWN for the sole absence NO_RELEASE_RECEIPT_FOR_THE_RUNNING_SHA (post_receipt off); bound with the judge's release verdict for the release SHA (the API's own release gate): only GREEN lifts it"
+  },
+  {
+   "id": "RC6E_KALSHI_CREDENTIAL_SCOPE",
+   "since": "SCORECARD_14_V2",
+   "units": [
+    [
+     "Kalshi integration",
+     "credential_class_control"
+    ]
+   ],
+   "reason": "read the AGGREGATE CREDENTIAL_CLASSES status, RED only from CREDENTIAL_CLASS_MISMATCH:PMUS:POLYMARKET_EXCHANGE_RSA_M2M while evidence.verdicts.KALSHI = MATCHES (37836393458); now Kalshi's own verdict, provisioning in every process and Kalshi blockers. The Red-team CREDENTIAL_CLASSES unit stays the aggregate"
+  },
+  {
+   "id": "RC6E_RELEASE_LINEAGE",
+   "since": "SCORECARD_14_V2",
+   "units": [
+    [
+     "Deployment infrastructure",
+     "release_lineage"
+    ]
+   ],
+   "reason": "ADDED (owner directive 2E): implementation tree == release tree, single-parent release commit, the release branch at the release, gates green on both SHAs"
+  },
+  {
+   "id": "RC6E_UPGRADE_PATH",
+   "since": "SCORECARD_14_V2",
+   "units": [
+    [
+     "Deployment infrastructure",
+     "upgrade_path"
+    ]
+   ],
+   "reason": "ADDED (owner directive 2E): the release's migrations onto the previous release's schema with representative rows, no applied migration changed"
+  },
+  {
+   "id": "RC6E_ROLLBACK_READY",
+   "since": "SCORECARD_14_V2",
+   "units": [
+    [
+     "Deployment infrastructure",
+     "rollback_ready"
+    ]
+   ],
+   "reason": "ADDED (owner directive 2E): previous release per service, its gates, its deploy commands, and its compatibility with the new schema"
+  },
+  {
+   "id": "RC6E_INPUT_PINNING",
+   "since": "SCORECARD_14_V2",
+   "units": [
+    [
+     "*",
+     "*"
+    ]
+   ],
+   "when_current_detail_contains": "INPUT_NAMES_ANOTHER_RELEASE",
+   "reason": "an input that names another release than the one graded is UNMEASURED (never graded as this release's evidence)"
+  }
+ ]
+}
