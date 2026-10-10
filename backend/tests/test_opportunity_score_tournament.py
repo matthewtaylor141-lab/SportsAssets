@@ -704,6 +704,46 @@ async def test_the_database_refuses_backfill_authority_and_any_change():
         await conn.close()
 
 
+async def _quiet_instant(conn, *, lead: float) -> float:
+    """The instant T a bounded-read proof dates its decisions at, chosen so
+    that the tournament read's window [T - lead, +inf) holds NO committed
+    INVESTMENT tournament row another test (or process) left in the shared
+    database.
+
+    WHY IT IS NEEDED. command_opportunity_tournament.gather reads the most
+    recent MAX_ENTRIES rows decided at or after `since`, whoever wrote them --
+    it is the global tournament read, scoped by time and sleeve and
+    deliberately by nothing else -- and it has no upper bound. The proofs
+    that run the paper pass on a plain connection (paper_live_fixture's
+    paper-live-syn-* decisions in test_live_parity_through_the_paper_pass,
+    test_rc63_one_paper_decision_through_every_duty,
+    test_settlement_exception_risk and this file's own; the aec-nfl-* /
+    aec-cfb-* ones in test_nfl_ and test_ncaaf_through_the_paper_pass)
+    COMMIT, and they date their decisions time.time() + 5.0: a committed
+    opportunity_score_tournament row stays dated 3.8 - 4.9 s AHEAD of the
+    moment it was written, in a table nothing may clean (append-only, and
+    the database refuses any change). A proof that opened its window at
+    time.time() - 0.5 within ~5 s of such a file found a stranger's row
+    inside it -- the newest of all, so with MAX_ENTRIES 1 it was the one
+    row kept and rows_in_window read 4, not 3. This walks T past every
+    committed row at or after T - lead until none is, so the three rows the
+    test makes are the only rows the read can see (the same idiom as
+    test_execution_calibration._quiet_instant).
+    """
+    T = time.time()
+    for _ in range(1000):
+        newest = await conn.fetchval(
+            "SELECT max(extract(epoch FROM decided_at))::float8 "
+            "  FROM opportunity_score_tournament "
+            " WHERE sleeve = $1 AND decided_at >= to_timestamp($2)",
+            OT.INVESTMENT, T - lead)
+        if newest is None:
+            return T
+        T = float(newest) + lead + 0.001
+    raise AssertionError("no empty window after the committed tournament "
+                         "rows")
+
+
 @pg
 async def test_a_bounded_tournament_read_never_scores_a_reevaluation_as_first(
         monkeypatch):
@@ -714,7 +754,9 @@ async def test_a_bounded_tournament_read_never_scores_a_reevaluation_as_first(
         await F.prepare(conn)
         await F.record_cutover(conn)
         acct = await H.new_account(conn, "ostcap")
-        T = time.time()
+        # the window [T - 0.5, +inf) is read globally: T is chosen where no
+        # other test's committed (future-dated) tournament row already sits
+        T = await _quiet_instant(conn, lead=0.5)
         tag = uuid.uuid4().hex[:8]
         a = await F.decision(conn, acct, T=T, slug="test-ostcap-a-%s" % tag,
                              event="ev-a-%s" % tag, offers=[(0.50, 3000)],
@@ -736,6 +778,67 @@ async def test_a_bounded_tournament_read_never_scores_a_reevaluation_as_first(
         assert got["truncated"] is True
         # c re-evaluates b's opportunity; b (its first decision) was not
         # read, so c is never scored as if it were the first
+        assert got["series_excluded"] == {
+            "FIRST_DECISION_OF_THE_OPPORTUNITY_NOT_IN_THE_READ_WINDOW": 1}
+        assert got["entries"] == 0
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+async def test_a_neighbours_future_dated_entry_never_enters_the_bounded_window(
+        monkeypatch):
+    """THE LEAK THE QUIET INSTANT CLOSES, MADE ON PURPOSE. A neighbour's
+    tournament row dated 1 s AHEAD of now (the paper-pass proofs commit
+    theirs 5 s ahead) sits inside the naive window [now - 0.5, +inf) and is
+    the newest row in it; the quiet window starts after it and holds
+    nothing; and the bounded read over the quiet window counts exactly the
+    three rows this test makes, keeps the newest, says it truncated and
+    never scores the re-evaluation as a first decision. With _quiet_instant
+    replaced by time.time() this fails at `T - 0.5 > now + 1.0`."""
+    conn = await asyncpg.connect(H.DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        await F.prepare(conn)
+        await F.record_cutover(conn)
+        now = time.time()
+        tag = uuid.uuid4().hex[:8]
+        # the neighbour: a stranger's decision, future-dated like a paper
+        # pass's (inside this transaction, so it is rolled back with it)
+        other = await H.new_account(conn, "ostnbr")
+        n = await F.decision(conn, other, T=now + 1.0,
+                             slug="test-ostnbr-%s" % tag,
+                             event="ev-n-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        assert n["tournament_recorded"]
+        _, _, naive = await CT.gather(conn, since=now - 0.5)
+        assert naive["read"]["rows_in_window"] >= 1       # the leak
+        T = await _quiet_instant(conn, lead=0.5)
+        assert T - 0.5 > now + 1.0                        # starts after it
+        _, _, quiet = await CT.gather(conn, since=T - 0.5)
+        assert quiet["read"]["rows_in_window"] == 0
+        acct = await H.new_account(conn, "ostcap2")
+        a = await F.decision(conn, acct, T=T, slug="test-ostcap2-a-%s" % tag,
+                             event="ev-a-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        b = await F.decision(conn, acct, T=T + 1,
+                             slug="test-ostcap2-b-%s" % tag,
+                             event="ev-b-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        c = await F.decision(conn, acct, T=T + 2,
+                             slug="test-ostcap2-b-%s" % tag,
+                             event="ev-b-%s" % tag, offers=[(0.50, 3000)],
+                             bids=[(0.48, 3000)])
+        assert all(x["tournament_recorded"] for x in (a, b, c))
+        monkeypatch.setattr(CT, "MAX_ENTRIES", 1)
+        entries, outcomes, ctx = await CT.gather(conn, since=T - 0.5)
+        assert [e["intent_id"] for e in entries] == [c["intent"]["intent_id"]]
+        assert ctx["read"]["rows_in_window"] == 3
+        assert ctx["read"]["truncated"] is True
+        got = OT.compute(entries, outcomes, since=T - 0.5, cutover=T - 60,
+                         **ctx)
         assert got["series_excluded"] == {
             "FIRST_DECISION_OF_THE_OPPORTUNITY_NOT_IN_THE_READ_WINDOW": 1}
         assert got["entries"] == 0
