@@ -15,6 +15,7 @@ import datetime as dt
 import json
 from decimal import Decimal
 
+from . import audrey_reconciliation_status as ARS
 from . import order_state_truth as OST
 from .open_position_canon import CANONICAL_OPEN_POSITIONS_SQL
 
@@ -841,9 +842,13 @@ async def _management(conn, rows: list) -> dict:
                     out["groups_live"][g]["unrealized_usd"] = lv["unrealized_usd"]
                     out["groups_live"][g]["review_at"] = lv["reviewed_at"]
         if await conn.fetchval("SELECT to_regclass('smalllive_reconciliations') IS NOT NULL"):
+            # the status as it is READ: PENDING + stale_reason is STALE
+            # (migration 366; audrey_reconciliation_status)
             for c in await conn.fetch(
-                    """SELECT group_id, status, discrepancies, reconciled_at, changed_at, chain
-                         FROM smalllive_reconciliations WHERE group_id = ANY($1)""", groups):
+                    "SELECT group_id, " + ARS.effective_sql() + " AS status, "
+                    "       discrepancies, reconciled_at, changed_at, chain "
+                    "  FROM smalllive_reconciliations WHERE group_id = ANY($1)",
+                    groups):
                 out["reconciliations"][c["group_id"]] = dict(c)
     if subjects:
         for f in await conn.fetch(
@@ -968,6 +973,11 @@ RECONCILIATION_MEANING = {
     "PENDING": "a live order in the group is still working: not yet final",
     "NOT_MIRRORED": ("paper only: every mirror row was excluded before submission, "
                      "nothing was sent to the venue and no actual leg exists by design"),
+    # rc6.2 pmus-exec (migration 366): stored as PENDING + stale_reason, read as
+    # STALE (audrey_reconciliation_status)
+    "STALE": ("not decided: Audrey would have called it MATCHED or NOT_MIRRORED, but "
+              "the newest account snapshot is missing or older than its 180 s "
+              "admissibility bound, so the venue side is not currently evidenced"),
 }
 PROTECTION_RULE = ("a resting protective order is NOT filled protection: the standing "
                    "(resting) quantity and the filled protection quantity are shown "

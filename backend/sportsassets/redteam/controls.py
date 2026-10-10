@@ -33,6 +33,7 @@ import os
 import pathlib
 from decimal import Decimal
 
+from .. import audrey_reconciliation_status as ARS
 from ..red_team import attribution as RTA
 from ..red_team import capacity_guard as RTC
 from ..red_team import credential_guard as RTCRED
@@ -253,7 +254,8 @@ def quorum(rows: list, *, now: float, audrey_open_discrepancies: int | None,
 #: venue fills per (market, group), and every OPEN hand-off to Xavier
 AUDREY_POSITIONS_SQL = """
     SELECT f.us_market_slug, f.group_id, f.held,
-           extract(epoch FROM r.reconciled_at) AS reconciled_at, r.status,
+           extract(epoch FROM r.reconciled_at) AS reconciled_at,
+           {STATUS} AS status,
            'execmirror_fills' AS source
       FROM (SELECT us_market_slug, group_id,
                    sum(CASE WHEN intent ILIKE '%SELL%' THEN -qty ELSE qty END)
@@ -263,12 +265,12 @@ AUDREY_POSITIONS_SQL = """
      WHERE f.held <> 0
     UNION ALL
     SELECT h.us_market_slug, h.group_id, h.live_held,
-           extract(epoch FROM r.reconciled_at), r.status,
+           extract(epoch FROM r.reconciled_at), {STATUS},
            'smalllive_handoffs (OPEN)'
       FROM smalllive_handoffs h
       LEFT JOIN smalllive_reconciliations r ON r.group_id = h.group_id
      WHERE h.state = 'OPEN'
-"""
+""".replace("{STATUS}", ARS.effective_sql("r"))
 async def quorum_rows(conn, *, now: float, venue_confirmed: bool,
                       market_data_green: bool,
                       detail: dict | None = None) -> tuple:

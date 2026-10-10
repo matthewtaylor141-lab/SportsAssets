@@ -3216,10 +3216,13 @@ async def admin_execmirror_control(response: Response,
                 raise HTTPException(status_code=409,
                                     detail="EXECMIRROR_ACCOUNT_NOT_EMPTY (positions or open "
                                            "orders exist; pass acknowledge_existing)")
+            # SIGNED, as the venue states it (long +, short -) and as
+            # execmirror.Mirror.snapshot now compares it (rc6.2 pmus-exec,
+            # audit item 4); abs() made a short baseline read as a long
             positions_net = {}
             for p in snap.get("positions") or []:
                 try:
-                    positions_net[p["slug"]] = abs(int(float(p.get("netPosition") or 0)))
+                    positions_net[p["slug"]] = float(p.get("netPosition") or 0)
                 except (TypeError, ValueError):
                     positions_net[p["slug"]] = 0
             baseline = {"at": snap.get("at"), "balances": snap.get("balances"),

@@ -256,7 +256,7 @@ async def test_workers_and_schema_come_from_the_database(monkeypatch):
         assert sch["tracked_range"] == [216, 367]
         for n in (248, 249, 251, 260, 261, 264, 265, 266, 270, 290, 300,
                   301, 302, 303, 305, 306, 309, 310, 311, 312, 313,
-                  314, 315, 316, 367):
+                  314, 315, 316, 366, 367):
             assert tracked[n]["status"] == "APPLIED", n
             assert tracked[n]["in_this_build"] is True, n
         assert sch["numbers_absent"] == EXPECTED_ABSENT_216_367
@@ -302,10 +302,13 @@ EXPECTED_ABSENT_216_314 = EXPECTED_ABSENT_216_313
 EXPECTED_ABSENT_216_315 = EXPECTED_ABSENT_216_314
 #: (LIVE GAME STATE V1) 216..316: 316 present, nothing new absent
 EXPECTED_ABSENT_216_316 = EXPECTED_ABSENT_216_315
-#: (RC6.3 KALSHI-SHADOW) 216..367: 367 present (the Kalshi SHADOW planner's
-#: append-only records); 317..366 are the numbers parallel RC6 lanes hold,
-#: absent from this build
-EXPECTED_ABSENT_216_367 = EXPECTED_ABSENT_216_316 + list(range(317, 367))
+#: (RC6.3 KALSHI-SHADOW + RC6.2 PMUS-EXEC) 216..367: 366 present (a new table
+#: for the ACTUAL lane's aggregate exposure cap and one nullable column that,
+#: with status PENDING, is Audrey's STALE; nothing existing constrained or
+#: changed) and 367 present (the Kalshi SHADOW planner's append-only
+#: records); 317..365 are the numbers parallel RC6 lanes hold, absent from
+#: this build
+EXPECTED_ABSENT_216_367 = EXPECTED_ABSENT_216_316 + list(range(317, 366))
 
 
 def test_the_tracked_range_covers_every_migration_in_this_build():
@@ -321,7 +324,7 @@ def test_the_tracked_range_covers_every_migration_in_this_build():
     absent = [k for k in range(R.TRACKED_FROM, R.TRACKED_TO + 1)
               if k not in present]
     assert absent == EXPECTED_ABSENT_216_367
-    assert len(absent) == 30 + 31 + 1 + 2 + 50
+    assert len(absent) == 30 + 31 + 1 + 2 + 49
 
 
 # ── §5 listed ────────────────────────────────────────────────────────

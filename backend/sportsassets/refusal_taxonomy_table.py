@@ -2894,3 +2894,35 @@ for _k in ("KALSHI_SHADOW_STOOD_DOWN_CONTROL_ENABLED",
            "KALSHI_SHADOW_SCHEMA_ABSENT",
            "KALSHI_SHADOW_ACCOUNT_READ_TIMEOUT"):
     NOT_REFUSAL.setdefault(_k, _KSH_RUNNER)
+#: (rc6.2 pmus-exec) THE RETAIL ACTUAL PATH'S AUDIT FIXES (ActualLane ->
+#: execmirror.Venue on the PMUS_EXECMIRROR account): a risk-reducing SELL of
+#: an ACTUAL position above its uncommitted venue-confirmed inventory, or on
+#: the side the group does not hold, is an integrity refusal of the plan; a
+#: cancel the venue did not accept (5xx / timeout / 429) and a resend budget
+#: spent are venue-answer data at the order; Audrey's group with no current
+#: account snapshot is a freshness gap at accounting; an emergency stop that
+#: could not be confirmed done is an integrity state of the order book; and
+#: the ACTUAL lane's new admission rails -- a venue position that disagrees
+#: with our fills (integrity), one exposure per market and the aggregate
+#: open + held notional cap (risk rails).
+PMUS_EXEC_STREAM = {
+    "RISK_REDUCING_SELL_ABOVE_UNCOMMITTED_LIVE_INVENTORY": (S, INT, "MANAGEMENT"),
+    "RISK_REDUCING_SELL_DOES_NOT_CLOSE_THE_HELD_SIDE": (S, INT, "MANAGEMENT"),
+    "CANCEL_NOT_ACCEPTED_BY_THE_VENUE": (S, DATA, "ORDER"),
+    "CANCEL_RESEND_EXHAUSTED": (S, DATA, "ORDER"),
+    "AUDREY_ACCOUNT_SNAPSHOT_NOT_CURRENT": (S, FRESH, "ACCOUNTING"),
+    "EMERGENCY_STOP_INCOMPLETE": (S, INT, "ORDER"),
+    "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS": (S, INT, "RISK_ADMISSION"),
+    "ACTUAL_MARKET_HAS_A_NON_TERMINAL_ORDER": (E, RAIL, "RISK_ADMISSION"),
+    "ACTUAL_MARKET_ALREADY_HELD": (E, RAIL, "RISK_ADMISSION"),
+    "ACTUAL_OPEN_AND_HELD_NOTIONAL_ABOVE_CAP": (E, RAIL, "RISK_ADMISSION"),
+    # (rc6.3 pmus-exec, review r2) a risk-reducing SELL on a market with a
+    # close-position requested at or after the newest account snapshot (or
+    # with no snapshot at all): the venue's position there is not currently
+    # evidenced -- a freshness gap of the venue evidence at management
+    # (review r3: the SELL first WAITS, PLANNED, and is refused by this code
+    # only when execmirror.SELL_EVIDENCE_WAIT_MAX_S passes without evidence)
+    "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED": (S, FRESH, "MANAGEMENT"),
+}
+for _k, _v in PMUS_EXEC_STREAM.items():
+    TABLE.setdefault(_k, _v)

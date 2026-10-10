@@ -1266,6 +1266,21 @@ async def test_absence_is_not_concluded_while_the_send_may_still_be_on_the_wire(
 
 # ── same-shape attempts on one market ──
 
+def _one_market_rail_stated_absent(monkeypatch):
+    """rc6.2 pmus-exec: the ACTUAL lane now refuses a second exposure on one
+    market (execution_intent.R_MARKET_HAS_OPEN_ORDER / R_MARKET_ALREADY_HELD,
+    proven in tests/test_rc62_pmus_exec_retail_path.py), so two of its claims
+    can no longer be in flight on one market together. The three scenarios
+    below prove RECOVERY among same-shape attempts on one market -- rows that
+    can still meet there (a NOT_FOUND row reopened by its lane's late answer
+    beside a later claim; rows written before this release) -- so the rail is
+    stated absent for them, by the same test-only means as the canonical
+    authorization above. Recovery itself is unchanged."""
+    async def nothing_on_the_market(conn, slug):
+        return {"non_terminal": [], "net_held": Decimal(0)}
+    monkeypatch.setattr(M, "market_exposure", nothing_on_the_market)
+
+
 @pg
 async def test_a_later_same_shape_attempt_never_takes_the_earlier_attempts_fill(
         monkeypatch):
@@ -1276,6 +1291,7 @@ async def test_a_later_same_shape_attempt_never_takes_the_earlier_attempts_fill(
     first: A owns the order, B has none left and is not concluded until its
     send can no longer be on the wire."""
     e = await _env(monkeypatch)
+    _one_market_rail_stated_absent(monkeypatch)
     try:
         slug = "aec-mlb-chaos-same-%s" % uuid.uuid4().hex[:6]
         a = await _intent(e, qty=3000, slug=slug)
@@ -1310,6 +1326,7 @@ async def test_a_later_same_shape_attempt_never_takes_the_earlier_attempts_fill(
 async def test_two_same_shape_attempts_that_both_traded_each_get_one_order_in_time_order(
         monkeypatch):
     e = await _env(monkeypatch)
+    _one_market_rail_stated_absent(monkeypatch)
     try:
         slug = "aec-mlb-chaos-same-%s" % uuid.uuid4().hex[:6]
         a = await _intent(e, qty=3000, slug=slug)
@@ -1338,6 +1355,7 @@ async def test_an_unknown_row_waits_while_a_same_shape_claim_is_still_submitting
     B's acknowledgement would then collide with the unique venue order id),
     so recovery WAITS; once B's lease is over, earliest attempt first."""
     e = await _env(monkeypatch)
+    _one_market_rail_stated_absent(monkeypatch)
     try:
         slug = "aec-mlb-chaos-same-%s" % uuid.uuid4().hex[:6]
         a = await _intent(e, qty=3000, slug=slug, tif="GTD", otype="RESTING")

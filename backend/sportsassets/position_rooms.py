@@ -2337,6 +2337,16 @@ async def _karen(conn, decision_ids: list, groups: list) -> list:
     return [dict(r) for r in rows]
 
 
+#: Audrey's status as it is READ (migration 366): STALE is stored as status
+#: PENDING + stale_reason. This is audrey_reconciliation_status.effective_sql()
+#: written out, not imported: this module's import graph is pinned exactly by
+#: tests/test_position_rooms_authority.py (no order or paper-writer module
+#: reachable), and tests/test_rc63_pmus_exec_366_additive.py pins the two
+#: expressions equal.
+_AUDREY_STATUS_SQL = ("(CASE WHEN status = 'PENDING' AND stale_reason IS NOT "
+                      "NULL THEN 'STALE' ELSE status END)")
+
+
 async def _audrey(conn, subjects: list, groups: list) -> dict:
     out = {"findings": [], "reconciliations": [], "postmortems": []}
     if subjects and await _exists(conn, "paper_audrey_findings"):
@@ -2347,9 +2357,10 @@ async def _audrey(conn, subjects: list, groups: list) -> dict:
                 ORDER BY found_at DESC LIMIT 200""", subjects)]
     if groups and await _exists(conn, "smalllive_reconciliations"):
         out["reconciliations"] = [dict(r) for r in await conn.fetch(
-            """SELECT group_id, venue, status, reconciled_at, discrepancies
-                 FROM smalllive_reconciliations
-                WHERE group_id = ANY($1::text[])""", groups)]
+            "SELECT group_id, venue, " + _AUDREY_STATUS_SQL + " AS status, "
+            "       reconciled_at, discrepancies "
+            "  FROM smalllive_reconciliations "
+            " WHERE group_id = ANY($1::text[])", groups)]
     if groups and await _exists(conn, "position_postmortems"):
         out["postmortems"] = [dict(r) for r in await conn.fetch(
             """SELECT position_key, group_id, realized_pnl_usd,

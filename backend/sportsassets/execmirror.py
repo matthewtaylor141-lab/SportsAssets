@@ -9,8 +9,10 @@ order derived from it, the venue's fills and the difference.
 THE RULES (owner: "set the rules to achieve the closest outcome")
   quantity   live = paper qty / scale (1,000), rounded to the NEAREST whole
              contract (the venue's quantity is an integer); the rounding is
-             recorded on the row. A paper order under half a live contract
-             is EXCLUDED as BELOW_VENUE_MINIMUM, never rounded up to one.
+             recorded on the row. A paper BUY under ONE live contract (exact
+             paper qty / scale < 1) is EXCLUDED as BELOW_VENUE_MINIMUM, never
+             rounded up to one (entry_live_qty; rc6.2 pmus-exec review: 0.5 <
+             raw < 1 used to round to one contract -- enlarged).
   intent     copied: same contract (us_market_slug), same venue intent
              (BUY_LONG / BUY_SHORT / SELL_LONG / SELL_SHORT), same wire
              price, limit order, same time in force (IOC / FOK / GTD with
@@ -55,6 +57,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_EVEN, Decimal
 from typing import Any
 
+from . import audrey_reconciliation_status as ARS
 from . import execmirror_probe as EP
 from .db import advisory_held, lease_session
 from . import loop_health as _LH
@@ -145,6 +148,175 @@ VENUE_TERMINAL = {"ORDER_STATE_FILLED": "FILLED",
 EXIT_FOR = {"ORDER_INTENT_BUY_LONG": "ORDER_INTENT_SELL_LONG",
             "ORDER_INTENT_BUY_SHORT": "ORDER_INTENT_SELL_SHORT"}
 
+# ── MANAGING AN ACTUAL POSITION (rc6.2 pmus-exec, audit item 1) ────────────
+#
+# THE GAP. Every SELL on this lane (a mirrored EXIT / REDUCE / STANDING_
+# PROTECTION and the ORPHAN_CLOSE) goes through Mirror.submit_planned, which
+# called Venue.place with no authorization, and Venue.place refuses every
+# order without the canonical LiveAuthorization -- which only the ACTUAL
+# lane's BUY ever obtains. So in a LIVE release an actual position could be
+# opened but never exited, protected or closed by order (audit probe A1: a
+# paper EXIT of a 2-lot ACTUAL position became REJECTED
+# LegacyOriginationRetired).
+#
+# THE RULE NOW. A SELL is admitted WITHOUT a token only when ALL hold:
+#   * SMALL LIVE is not SHADOW (live_parity AND live_authorization agree; in
+#     this release both are SHADOW, so it is still refused exactly as before:
+#     claimed, refused before the client, REJECTED);
+#   * the row's role is a risk-reducing one (RISK_REDUCING_ROLES) and its
+#     intent sells the side the group holds (EXIT_FOR of the group's opened
+#     intent);
+#   * its quantity is at most the group's live inventory not already
+#     committed to another open SELL -- re-read from execmirror_fills (venue
+#     fills only) under the row's lock, in the transaction that claims it
+#     (Mirror._admit_and_claim_sell); a SELL above it is EXCLUDED by name and
+#     never sent.
+# Venue.place re-checks the admission it is handed (mode, intent, market,
+# quantity) at the last line before the client. A BUY always needs the
+# canonical authorization.
+RISK_REDUCING_ROLES = ("EXIT", "REDUCE", "STANDING_PROTECTION", "ORPHAN_CLOSE")
+SELL_INTENTS = ("ORDER_INTENT_SELL_LONG", "ORDER_INTENT_SELL_SHORT")
+R_SELL_ABOVE_UNCOMMITTED_INVENTORY = \
+    "RISK_REDUCING_SELL_ABOVE_UNCOMMITTED_LIVE_INVENTORY"
+R_SELL_NOT_THE_HELD_SIDE = "RISK_REDUCING_SELL_DOES_NOT_CLOSE_THE_HELD_SIDE"
+# rc6.3 pmus-exec (review r2): THE VENUE'S RECORD BOUNDS THE SELL TOO.
+# execmirror_fills books only our own orders' fills, never a close-position
+# (the stop's flatten): after a stop with flatten and a resume, the group read
+# as held 2 while the venue was flat, and an exit of 2 was admitted -- a
+# SELL_LONG with nothing held opens a short of the same size. Now the claim
+# also reads, under the same row lock, the newest account snapshot: a
+# close-position requested on the market at or after that snapshot (the
+# snapshot no longer evidences the position) EXCLUDES the SELL by name, and so
+# does a snapshot whose reconciliation names the market (the venue's position
+# there is not what our fills say). Nothing is sent in either case.
+#
+# rc6.3 pmus-exec (review r3): A GAP IN THE VENUE'S EVIDENCE IS A WAIT, NOT
+# A REFUSAL. Made terminal (EXCLUDED), the rule above dropped real exits while
+# the venue still held the position: (a) the first RUNNING tick after a stop
+# submitted before its next snapshot (taken only every SNAPSHOT_EVERY_S), so
+# after a stop whose flatten did not trade and a quick resume every SELL was
+# NOT_EVIDENCED; (b) with no stop at all, one snapshot can read the venue
+# after a resting fill landed but before our poll booked it, so it names the
+# market with the venue holding MORE than our fills said. Either way the live
+# STANDING_PROTECTION was refused on every tick until MAX_PROTECTION_ROWS was
+# spent (lost for good), and a paper REDUCE -- mirrored once, never planned
+# again -- was dropped. Now:
+#   * the first RUNNING tick after any stopped one takes its account snapshot
+#     BEFORE it recovers, plans or submits (outside SHADOW, one attempt;
+#     Mirror._snapshot_due);
+#   * a SELL WAITS -- the row stays PLANNED, still committed against the
+#     inventory so nothing else sells the same contracts, nothing is sent,
+#     no attempt counted, the evidence on the row and one
+#     AWAITING_VENUE_EVIDENCE event per change of it -- while the newest
+#     snapshot predates a close-position on the market (NOT_EVIDENCED), or
+#     names the market with the venue holding MORE on the held side than our
+#     fills said (the snapshot is behind our books, it does not say the sale
+#     would oversell); it is judged again on every pass and goes out, or is
+#     refused by name, against the first snapshot newer than the one it waits
+#     on; a waiting row is taken after every other PLANNED row;
+#   * the wait is bounded: a newer snapshot that still names the market, or
+#     SELL_EVIDENCE_WAIT_MAX_S without one, EXCLUDES the row by the code it
+#     waited on (`wait_expired` on the row);
+#   * a snapshot whose venue position on the market is LESS than our fills
+#     say (flat after a flatten that traded: the P4 case) still EXCLUDES the
+#     SELL at once -- selling our count could open the other side;
+#   * resync_protection plans a protection again only a minute after a
+#     refusal on the venue's evidence (as after a REJECTED), and those
+#     refusals do not count toward MAX_PROTECTION_ROWS, so the protection
+#     comes back once a snapshot agrees.
+R_SELL_VENUE_POSITION_NOT_EVIDENCED = \
+    "RISK_REDUCING_SELL_VENUE_POSITION_NOT_EVIDENCED"
+R_SELL_VENUE_POSITION_DISAGREES = "VENUE_POSITION_DISAGREES_WITH_MIRROR_FILLS"
+#: the event (and the admission's return) of a risk-reducing SELL left
+#: PLANNED until a snapshot evidences its market (review r3)
+AWAITING_VENUE_EVIDENCE = "RISK_REDUCING_SELL_AWAITING_VENUE_EVIDENCE"
+#: how long a risk-reducing SELL waits for that evidence: as long as an
+#: account snapshot is admissible evidence at all (review r3)
+SELL_EVIDENCE_WAIT_MAX_S = 180.0
+#: the venue's signed netPosition for the side a group holds (signed_net_sql)
+HELD_SIGN = {"ORDER_INTENT_BUY_LONG": 1, "ORDER_INTENT_BUY_SHORT": -1}
+#: a protection child the admission refused on the venue's evidence is planned
+#: again only after the same minute's pause as a REJECTED one, and is not
+#: counted toward MAX_PROTECTION_ROWS (review r3)
+PROTECTION_PAUSE_EXCLUSIONS = (R_SELL_VENUE_POSITION_DISAGREES,
+                               R_SELL_VENUE_POSITION_NOT_EVIDENCED)
+PROTECTION_PAUSE_S = 60.0
+#: the event every close-position request writes BEFORE it is sent (so a
+#: request whose answer was lost, or whose process died, is still on record)
+FLATTEN_REQUESTED = "FLATTEN_REQUESTED"
+
+# ── CANCELLATION THAT IS ACTUALLY DONE (rc6.2 pmus-exec, audit item 3) ─────
+#
+# A cancel the venue refused because the order can no longer be cancelled
+# (already filled / expired / unknown: a 4xx naming the order) is a RACE the
+# next poll settles from the order record. Any other failure (5xx, timeout,
+# 429, a dropped connection) is NOT ACCEPTED: the row still records that we
+# asked (CANCEL_REQUESTED, so no other path re-asks every tick), but the
+# event is CANCEL_NOT_ACCEPTED and `detail.cancel.accepted` is false -- never
+# recorded as requested-and-accepted. A CANCEL_REQUESTED row whose venue
+# record still shows a working order is re-sent from `poll`: first after
+# CANCEL_RESEND_AFTER_S, then doubling, at most CANCEL_MAX_ATTEMPTS sends in
+# all, each one an event; when they are spent the row is named
+# CANCEL_RESEND_EXHAUSTED once (emergency_stop's cancel_all still runs).
+CANCEL_RESEND_AFTER_S = 10.0
+CANCEL_MAX_ATTEMPTS = 5
+CANCEL_RACE_STATUSES = (400, 404, 409, 422)
+WORKING_VENUE_STATES = ("ORDER_STATE_NEW", "ORDER_STATE_PENDING_NEW",
+                        "ORDER_STATE_PENDING_REPLACE",
+                        "ORDER_STATE_PENDING_RISK",
+                        "ORDER_STATE_PARTIALLY_FILLED")
+R_CANCEL_NOT_ACCEPTED = "CANCEL_NOT_ACCEPTED_BY_THE_VENUE"
+R_CANCEL_RESEND_EXHAUSTED = "CANCEL_RESEND_EXHAUSTED"
+
+# ── RECONCILIATION FROM A CURRENT SNAPSHOT (rc6.2 pmus-exec, audit item 4) ─
+#: the account snapshot is admissible evidence this long (the ACTUAL lane's
+#: own bound, execution_intent.MAX_ACCOUNT_SNAPSHOT_AGE_S; pinned equal)
+ACCOUNT_SNAPSHOT_MAX_AGE_S = 180.0
+#: Audrey's status for a group she would otherwise call MATCHED or
+#: NOT_MIRRORED while the newest account snapshot is missing or older than
+#: ACCOUNT_SNAPSHOT_MAX_AGE_S: the venue side is not currently evidenced.
+#: It is READ as STALE everywhere; the table stores it as status PENDING plus
+#: smalllive_reconciliations.stale_reason (migration 366 adds only that
+#: nullable column -- the status CHECK of an existing table is not touched,
+#: so the previous release stays provably compatible): see
+#: audrey_reconciliation_status for the representation and why PENDING.
+AUDREY_STALE = ARS.STALE
+R_AUDREY_SNAPSHOT_NOT_CURRENT = ARS.R_SNAPSHOT_NOT_CURRENT
+
+# ── A STOP IS DONE ONLY WHEN IT IS DONE (rc6.2 pmus-exec, audit item 5) ────
+#: rows that can still be (or become) a working venue order: while any
+#: remains, or the venue's cancel-all failed, the stop is INCOMPLETE
+STOP_BLOCKING_STATES = ("SUBMITTING", "UNKNOWN", "OPEN", "PARTIALLY_FILLED")
+#: REVIEW (items 5 and 3): a row whose cancel was ASKED is not a cancelled
+#: order. `_send_cancel` moves an OPEN / PARTIALLY_FILLED row to
+#: CANCEL_REQUESTED whatever the venue answered (a 503 included), so the check
+#: above could never fail after the stop's own cancels, and a cancel-all
+#: answering 2xx while cancelling nothing completed the stop with the order
+#: still working -- after which nothing re-sent its cancel. Now every
+#: CANCEL_REQUESTED row is read again from the venue AFTER the cancel-all;
+#: one still in this state (its record is not terminal -- a terminal record
+#: moves the row out of it -- or could not be read) blocks the stop as well.
+#: The venue's record, not the cancel-all's `canceledOrderIds`, is the gate:
+#: an order the per-order cancel already ended is rightly absent from that
+#: list (the list is recorded as evidence).
+STOP_BLOCKING_AFTER_REREAD = ("CANCEL_REQUESTED",)
+#: an incomplete stop is re-attempted at most this often
+STOP_RETRY_S = 10.0
+R_STOP_INCOMPLETE = "EMERGENCY_STOP_INCOMPLETE"
+
+
+def signed_net_sql(alias: str = "") -> str:
+    """The venue's sign for a position (Polymarket US keeps ONE signed
+    netPosition per market: long positive, short negative), summed over
+    execmirror_fills rows: BUY_LONG and SELL_SHORT add, SELL_LONG and
+    BUY_SHORT subtract."""
+    a = (alias + ".") if alias else ""
+    return ("sum(CASE %(a)sintent WHEN 'ORDER_INTENT_BUY_LONG' THEN %(a)sqty "
+            "WHEN 'ORDER_INTENT_SELL_SHORT' THEN %(a)sqty "
+            "WHEN 'ORDER_INTENT_SELL_LONG' THEN -%(a)sqty "
+            "WHEN 'ORDER_INTENT_BUY_SHORT' THEN -%(a)sqty ELSE 0 END)"
+            % {"a": a})
+
 # Exclusion codes (precise, never silent)
 BELOW_VENUE_MINIMUM = "BELOW_VENUE_MINIMUM"
 NO_LIVE_INVENTORY = "NO_LIVE_INVENTORY"
@@ -219,6 +391,20 @@ def scale_qty(paper_qty, scale=1000) -> tuple[Decimal, int, Decimal]:
     return exact, live, Decimal(live) - exact
 
 
+def entry_live_qty(paper_qty, scale=1000) -> tuple[Decimal, int, Decimal]:
+    """A BUY's (exact scaled qty, live whole contracts, rounding delta): the
+    nearest whole contract (scale_qty), EXCEPT that a size below one whole
+    contract is 0 -- never enlarged to reach the venue minimum (rc6.2
+    pmus-exec review: raw 0.6 of a contract went out as 1). The exact rule:
+    raw = paper qty / scale exactly; raw < 1 -> 0 (BELOW_VENUE_MINIMUM);
+    raw >= 1 -> nearest whole contract, half to even (1.5 -> 2, 2.5 -> 2).
+    A SELL's quantity is a fraction of held inventory (plan_sell), not this."""
+    exact, live, delta = scale_qty(paper_qty, scale)
+    if exact < 1:
+        return exact, 0, -exact
+    return exact, live, delta
+
+
 def collateral_per_contract(intent: str, wire_price) -> Decimal:
     """What one contract ties up: a long pays the wire price, a short buy
     the complement (live_executor.wire_limit's convention)."""
@@ -256,12 +442,12 @@ def plan_buy(order: dict, *, scale, buying_power, max_order_usd) -> Plan:
     if str(order.get("time_in_force")) not in TIF:
         return Plan("EXCLUDED", exclusion=UNSUPPORTED_ORDER,
                     detail={"time_in_force": order.get("time_in_force")})
-    exact, live, delta = scale_qty(order["qty"], scale)
+    exact, live, delta = entry_live_qty(order["qty"], scale)
     base = dict(scaled_qty=exact, rounding_delta=delta)
     if live < 1:
         return Plan("EXCLUDED", exclusion=BELOW_VENUE_MINIMUM, **base,
-                    detail={"why": "paper qty / %s rounds to 0 whole contracts"
-                            % scale})
+                    detail={"why": "paper qty / %s is %s: below one whole "
+                            "contract, never enlarged" % (scale, exact)})
     cost = collateral_per_contract(order["intent"], order["wire_price"]) * live
     if cost > Decimal(str(max_order_usd)):
         return Plan("EXCLUDED", exclusion=ABOVE_ORDER_CAP, live_qty=live, **base,
@@ -640,6 +826,53 @@ def _canonical_live_authorized(token) -> bool:
     return LPAR.canonical_live_authorized(token)
 
 
+def small_live_is_shadow() -> bool:
+    """True when EITHER module that names the SMALL LIVE mode says SHADOW
+    (live_parity.SMALL_LIVE_MODE and live_authorization.SMALL_LIVE_MODE;
+    migration 225 CHECKs the same). Fail closed: they must both say otherwise
+    before a risk-reducing SELL is admitted without a token."""
+    from . import live_authorization as LA
+    from . import live_parity as LPAR
+    return (LPAR.SMALL_LIVE_MODE == LPAR.MODE_SHADOW
+            or LA.SMALL_LIVE_MODE == LA.SHADOW)
+
+
+class RiskReducingSell:
+    """What Mirror._admit_and_claim_sell established, under the row's lock,
+    for ONE claimed SELL row: the group's held live contracts (venue fills),
+    those committed to its OTHER open SELLs, and so the quantity this row may
+    sell. Venue.place admits that row's params with it (outside SHADOW
+    only). Built only by Mirror._admit_and_claim_sell."""
+    __slots__ = ("mirror_id", "group_id", "role", "slug", "intent", "qty",
+                 "held", "committed_other", "available")
+
+    def __init__(self, *, mirror_id, group_id, role, slug, intent, qty, held,
+                 committed_other):
+        self.mirror_id, self.group_id, self.role = mirror_id, group_id, role
+        self.slug, self.intent, self.qty = slug, intent, int(qty)
+        self.held, self.committed_other = int(held), int(committed_other)
+        self.available = self.held - self.committed_other
+
+
+def risk_reducing_sell_admitted(params: dict, admission) -> bool:
+    """THE LAST-LINE CHECK of a risk-reducing SELL (pure; see the rule at
+    RISK_REDUCING_ROLES): an admission established under the row lock, SMALL
+    LIVE not SHADOW, a SELL intent, the admitted market, intent and quantity,
+    and the quantity within the uncommitted live inventory. Anything else --
+    a BUY above all -- is False."""
+    if not isinstance(admission, RiskReducingSell) or small_live_is_shadow():
+        return False
+    try:
+        q = int(params.get("quantity"))
+    except (TypeError, ValueError):
+        return False
+    return (params.get("intent") in SELL_INTENTS
+            and params.get("intent") == admission.intent
+            and params.get("marketSlug") == admission.slug
+            and admission.role in RISK_REDUCING_ROLES
+            and 1 <= q == admission.qty <= admission.available)
+
+
 # R30A · WHY EXECMIRROR ORIGINATION IS RETIRED, AND WHERE IT IS PROVEN.
 #
 # Mirror.plan_new / submit_planned (a HEDGE copied from a paper order) and
@@ -708,15 +941,22 @@ class Venue:
                 venue_pace.penalize()
             raise
 
-    def place(self, params: dict, *, canonical_live_authorization=None) -> dict:
+    def place(self, params: dict, *, canonical_live_authorization=None,
+              risk_reducing_sell=None) -> dict:
         """R30 LIVE PARITY: NEW REAL-MONEY EXPOSURE IS ORIGINATED ONLY BY THE
         CANONICAL SMALL LIVE ADAPTER (live_parity), never by a lane that
         re-decides or copies a paper order. That adapter is SHADOW in this
         release (the database admits no other mode), so no caller can present
         an authorization and every new order is refused here, at the last
         line before the venue. Cancels and protective closes (risk-reducing)
-        are unaffected."""
-        if not _canonical_live_authorized(canonical_live_authorization):
+        are unaffected.
+
+        rc6.2 pmus-exec: a risk-reducing SELL of an ACTUAL position is
+        admitted without a token only with the admission the mirror
+        established under the row lock (`risk_reducing_sell_admitted`), and
+        never in SHADOW. A BUY always needs the canonical authorization."""
+        if not (_canonical_live_authorized(canonical_live_authorization)
+                or risk_reducing_sell_admitted(params, risk_reducing_sell)):
             raise LegacyOriginationRetired(
                 "LEGACY_LIVE_ORIGINATION_RETIRED_R30: new venue orders come "
                 "only from the canonical SMALL LIVE adapter, which is SHADOW")
@@ -1079,6 +1319,208 @@ async def live_inventory(conn, group_id) -> dict:
             "opened_intent": opened}
 
 
+async def venue_position_evidence(conn, slug: str, held_sign: int | None = None) -> dict:
+    """WHAT THE VENUE LAST SAID ABOUT ONE MARKET'S POSITION, for a
+    risk-reducing SELL (rc6.3 pmus-exec, review r2; the rule at
+    R_SELL_VENUE_POSITION_NOT_EVIDENCED). `code` is None when the newest
+    account snapshot evidences the position: it exists, no close-position was
+    requested on the market at or after it (FLATTEN_REQUESTED -- the fills
+    never book one), and its reconciliation does not name the market.
+    Otherwise the refusal code, with the evidence. A difference on ANOTHER
+    market never blocks this market's exit. With `held_sign` (HELD_SIGN of
+    the side the group holds), a difference also says whether the venue held
+    MORE on that side than our fills (net of the baseline) said
+    (`venue_holds_more_than_fills`, review r3: the snapshot was behind our
+    books, so the SELL waits for a newer one)."""
+    snap = await conn.fetchrow(
+        """SELECT snapshot_id, at, reconciliation FROM execmirror_snapshots
+            ORDER BY at DESC, snapshot_id DESC LIMIT 1""")
+    if snap is None:
+        return {"code": R_SELL_VENUE_POSITION_NOT_EVIDENCED,
+                "account_snapshot": None,
+                "why": "no account snapshot evidences the venue position"}
+    ev = {"account_snapshot_id": snap["snapshot_id"],
+          "account_snapshot_at": snap["at"].timestamp()}
+    # bounded by the snapshot instant (execmirror_events_at_idx): only the
+    # requests since the newest snapshot are read
+    closes = await conn.fetchval(
+        """SELECT count(*) FROM execmirror_events
+            WHERE at >= $1 AND kind = $2 AND detail->>'slug' = $3""",
+        snap["at"], FLATTEN_REQUESTED, slug)
+    if closes:
+        return dict(ev, code=R_SELL_VENUE_POSITION_NOT_EVIDENCED,
+                    flatten_requests_since_snapshot=int(closes),
+                    why="a close-position was requested on this market at or "
+                        "after the newest account snapshot")
+    rec = snap["reconciliation"]
+    rec = json.loads(rec) if isinstance(rec, str) else dict(rec or {})
+    diff = (rec.get("differences") or {}).get(slug)
+    if rec.get("reconciled") is not True and diff is not None:
+        out = dict(ev, code=R_SELL_VENUE_POSITION_DISAGREES, difference=diff)
+        if held_sign in (1, -1):
+            try:
+                ahead = held_sign * (Decimal(str(diff.get("venue") or 0))
+                                     - Decimal(str(diff.get("baseline") or 0))
+                                     - Decimal(str(diff.get("mirror_fills_net") or 0)))
+                more = bool(ahead.is_finite() and ahead > 0)
+            except Exception:                                 # noqa: BLE001
+                more = False                                  # unreadable: never more
+            out["venue_holds_more_than_fills"] = more
+        return out
+    return dict(ev, code=None)
+
+
+async def market_exposure(conn, slug: str) -> dict:
+    """ONE MARKET'S ACTUAL EXPOSURE (rc6.2 pmus-exec, audit item 2): the
+    non-terminal execmirror_orders rows on it (any role, any lane) and its net
+    live inventory from venue fills (bought - sold, every group)."""
+    rows = await conn.fetch(
+        """SELECT mirror_id, state, role, intent FROM execmirror_orders
+            WHERE us_market_slug = $1 AND state = ANY($2::text[])
+            ORDER BY created_at, mirror_id LIMIT 5""", slug, list(OPEN_STATES))
+    held = await conn.fetchval(
+        """SELECT coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0)
+                - coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_SELL%'), 0)
+             FROM execmirror_fills WHERE us_market_slug = $1""", slug)
+    return {"non_terminal": [dict(r) for r in rows],
+            "net_held": Decimal(str(held or 0))}
+
+
+async def open_and_held_notional(conn) -> dict:
+    """THE ACCOUNT'S ACTUAL NOTIONAL (rc6.2 pmus-exec, audit item 2), in the
+    collateral each contract ties up (collateral_per_contract: a long pays its
+    price, a short buy the complement):
+      open  every non-terminal BUY row's unfilled quantity at its wire price
+            (a row whose price is unknown counts the contract's full $1);
+      held  every holding's net contracts (venue fills, bought - sold) at the
+            average collateral its buys paid -- EXCEPT a market whose live side
+            has RESOLVED at the venue (rc6.3 pmus-exec, review r2:
+            resolved_markets). The fills never book a settlement, so a settled
+            holding counted for ever: once the pilot's first $1.00 position
+            resolved, every later BUY was refused against the $1.00 default
+            cap, with no way out but a manual change of the cap."""
+    open_usd = await conn.fetchval(
+        """SELECT coalesce(sum(greatest(live_qty - cum_qty, 0)
+                  * CASE WHEN wire_price IS NULL THEN 1
+                         WHEN intent = 'ORDER_INTENT_BUY_SHORT' THEN 1 - wire_price
+                         ELSE wire_price END), 0)
+             FROM execmirror_orders
+            WHERE intent LIKE 'ORDER_INTENT_BUY%' AND state = ANY($1::text[])""",
+        list(OPEN_STATES))
+    holdings = await conn.fetch(
+        """SELECT us_market_slug, held * buy_cost / bought AS usd, last_fill_at FROM (
+             SELECT us_market_slug,
+                    coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS bought,
+                    coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0)
+                      - coalesce(sum(qty) FILTER (WHERE intent LIKE 'ORDER_INTENT_SELL%'), 0) AS held,
+                    coalesce(sum(qty * CASE WHEN intent = 'ORDER_INTENT_BUY_SHORT'
+                                            THEN 1 - price ELSE price END)
+                             FILTER (WHERE intent LIKE 'ORDER_INTENT_BUY%'), 0) AS buy_cost,
+                    max(observed_at) AS last_fill_at
+               FROM execmirror_fills
+              GROUP BY coalesce(group_id, ''), us_market_slug) h
+            WHERE held > 0 AND bought > 0""")
+    last_fill: dict = {}            # observed_at is NOT NULL
+    for h in holdings:
+        s, at = h["us_market_slug"], h["last_fill_at"]
+        last_fill[s] = max(last_fill.get(s, at), at)
+    resolved = await resolved_markets(conn, last_fill)
+    held_usd = sum((Decimal(str(h["usd"])) for h in holdings
+                    if h["us_market_slug"] not in resolved), Decimal(0))
+    return {"open_usd": Decimal(str(open_usd or 0)), "held_usd": held_usd,
+            "held_resolved_excluded": resolved}
+
+
+async def resolved_markets(conn, last_fill_at: dict) -> dict:
+    """{slug: why} for the held markets given ({slug: its newest fill
+    instant}) whose live side has RESOLVED at the venue, by the rule
+    Mirror.snapshot reconciles with, read from the newest account snapshot:
+      VENUE_POSITION_EXPIRED               the venue reports it expired;
+      PAPER_SETTLED_AND_NO_VENUE_POSITION  a paper settlement exists for the
+          market and that snapshot -- taken AFTER the market's newest fill, so
+          the absence is not merely a position bought since -- shows no
+          position there.
+    No snapshot, or anything unreadable: nothing is resolved (the holding
+    keeps counting -- fail closed)."""
+    if not last_fill_at:
+        return {}
+    snap = await conn.fetchrow(
+        """SELECT at, positions FROM execmirror_snapshots
+            ORDER BY at DESC, snapshot_id DESC LIMIT 1""")
+    if snap is None:
+        return {}
+    pos = snap["positions"]
+    pos = json.loads(pos) if isinstance(pos, str) else (pos or [])
+    by_slug = {p["slug"]: p for p in pos if isinstance(p, dict) and p.get("slug")}
+    out: dict = {}
+    absent: list = []
+    for slug, fill_at in last_fill_at.items():
+        p = by_slug.get(slug)
+        if p is not None and (p.get("expired") is True
+                              or str(p.get("expired")).lower() == "true"):
+            out[slug] = "VENUE_POSITION_EXPIRED"
+            continue
+        if fill_at is None or snap["at"] <= fill_at:
+            continue
+        try:
+            net = Decimal(str((p or {}).get("netPosition") or 0))
+        except Exception:                                     # noqa: BLE001
+            continue
+        if net == 0:
+            absent.append(slug)
+    if absent:
+        for r in await conn.fetch(
+                """SELECT DISTINCT us_market_slug FROM paper_settlements
+                    WHERE us_market_slug = ANY($1::text[])""", absent):
+            out[r["us_market_slug"]] = "PAPER_SETTLED_AND_NO_VENUE_POSITION"
+    return out
+
+
+#: the ACTUAL lane's account: its credential namespace
+#: (PMUS_EXECMIRROR_KEY_ID / PMUS_EXECMIRROR_SECRET_KEY), and the key of its
+#: row in execmirror_exposure_caps
+ACTUAL_ACCOUNT_ID = "PMUS_EXECMIRROR"
+EXPOSURE_CAPS_TABLE = "execmirror_exposure_caps"
+CAP_BASIS_CONFIGURED = "execmirror_exposure_caps.max_open_notional_usd"
+CAP_BASIS_DEFAULT = ("DEFAULT_EQUALS_max_order_usd (no row in "
+                     "execmirror_exposure_caps for the account)")
+
+
+def aggregate_cap_usd(max_order_usd, configured) -> tuple[Decimal, str]:
+    """(cap, basis) for the account's open + held ACTUAL notional. The
+    account's row in execmirror_exposure_caps (migration 366) when there is
+    one -- the database guarantees it is positive, and a value that were not
+    would not be believed here either; with NO row, FAIL-CLOSED SMALL: the
+    per-order cap max_order_usd, so at most one order's worth is ever open or
+    held. Pure."""
+    if configured is not None and Decimal(str(configured)) > 0:
+        return Decimal(str(configured)), CAP_BASIS_CONFIGURED
+    return Decimal(str(max_order_usd or 0)), CAP_BASIS_DEFAULT
+
+
+async def aggregate_cap(conn) -> tuple[Decimal, str]:
+    """The cap in force for the ACTUAL account, read from the database: the
+    control row LEFT JOINed to the account's row in execmirror_exposure_caps.
+    A new table is never a reason to fail open or to fail the claim: where it
+    does not exist (a schema rolled back to before 366, or not yet migrated)
+    the answer is the fail-closed default, max_order_usd. Reads only; the
+    kill switch's own reader (`control`) never touches the table."""
+    if await conn.fetchval("SELECT to_regclass($1) IS NOT NULL",
+                           EXPOSURE_CAPS_TABLE):
+        r = await conn.fetchrow(
+            """SELECT c.max_order_usd, k.max_open_notional_usd
+                 FROM execmirror_control c
+                 LEFT JOIN execmirror_exposure_caps k ON k.account_id = $1
+                WHERE c.id = 1""", ACTUAL_ACCOUNT_ID)
+    else:
+        r = await conn.fetchrow(
+            "SELECT max_order_usd, NULL::numeric AS max_open_notional_usd "
+            "  FROM execmirror_control WHERE id = 1")
+    if r is None:
+        return aggregate_cap_usd(0, None)
+    return aggregate_cap_usd(r["max_order_usd"], r["max_open_notional_usd"])
+
+
 async def live_entry_qty(conn, group_id) -> Decimal:
     """Venue-confirmed live contracts bought by the group's ENTRY orders only
     (a hedge's own fills never count as the inventory it protects)."""
@@ -1205,14 +1647,27 @@ class Mirror:
         self._last_management = 0.0
         self._last_snapshot = 0.0
         self._buying_power = None
+        # set by every stopped tick: the first RUNNING tick after it takes its
+        # account snapshot before anything else (outside SHADOW; cleared by
+        # that attempt, or by any snapshot that succeeded -- review r3,
+        # AWAITING_VENUE_EVIDENCE)
+        self._snapshot_due = False
+        # an incomplete emergency stop: when it was last attempted, the slugs
+        # (and our net at the time) already flattened in this stop, and the
+        # last reason recorded (one event per change of reason)
+        self._stop_last_attempt = 0.0
+        self._stop_flattened: dict = {}
+        self._stop_incomplete_seen = None
+        # the execmirror_control.revision that memory was built under
+        self._stop_revision = None
 
     def venue(self):
         if self._venue is None:
             self._venue = self._venue_factory()
         return self._venue
 
-    async def call(self, fn, *a):
-        return await asyncio.to_thread(fn, *a)
+    async def call(self, fn, *a, **kw):
+        return await asyncio.to_thread(fn, *a, **kw)
 
     # --- one cycle -------------------------------------------------------
     async def tick(self, conn) -> dict:
@@ -1234,15 +1689,34 @@ class Mirror:
                          found=fp)
             return {"state": "HALTED_ACCOUNT_CHANGED"}
         if ctl.get("stopped"):
+            # rc6.3 review r3: a stop can move the venue's positions behind our
+            # fills (the flatten's close-position is never booked), so the
+            # first RUNNING tick after this one snapshots before it submits.
+            # A stopped lane itself still takes no snapshot
+            # (OWNER_SNAPSHOT_WHILE_STOPPED).
+            self._snapshot_due = True
             out = await self.emergency_stop(conn, ctl)
-            if out.get("state") == "STOPPED" and ctl.get("stop_done_at"):
-                # after the stop has completed: reviews and Audrey's
-                # reconciliation only (records)
+            if (out.get("state") == "STOPPED" and ctl.get("stop_done_at")) \
+                    or out.get("state") == "STOP_INCOMPLETE":
+                # after the stop has completed (or while an incomplete one
+                # is retried): reviews and Audrey's reconciliation only
+                # (records)
                 out["xavier_live_reviews"] = await self._reviews_only(conn)
                 out.update(await self._audrey_lane_off(conn))
             return out
+        # running, not stopped: any emergency stop's memory is over (a later
+        # stop flattens what it is asked to, whatever an earlier one sent)
+        self._reset_stop_memory()
         out = {"state": "RUNNING"}
-        if self._buying_power is None:
+        # the first RUNNING tick after a stop: the snapshot comes BEFORE
+        # recover / plan_new / submit_planned, so a risk-reducing SELL is
+        # judged against the venue's record taken after the stop (outside
+        # SHADOW, where that admission exists; SHADOW keeps its cadence).
+        # One attempt: if it fails, a waiting SELL waits for the next one at
+        # the usual cadence (never a read of the account on every tick)
+        if self._buying_power is None or (
+                self._snapshot_due and not small_live_is_shadow()):
+            self._snapshot_due = False
             out["snapshot"] = await self.snapshot(conn, ctl)
         out["recovered"] = await self.recover(conn)
         out["planned"] = await self.plan_new(conn, ctl)
@@ -1536,8 +2010,13 @@ class Mirror:
 
     # --- submission --------------------------------------------------------
     async def submit_planned(self, conn) -> int:
+        # a risk-reducing SELL left PLANNED until a snapshot evidences its
+        # market (AWAITING_VENUE_EVIDENCE) is taken after every other PLANNED
+        # row, so waiting rows never hold one up
         rows = await conn.fetch(
-            "SELECT * FROM execmirror_orders WHERE state = 'PLANNED' ORDER BY created_at LIMIT 10")
+            """SELECT * FROM execmirror_orders WHERE state = 'PLANNED'
+                ORDER BY coalesce((detail->'risk_reducing_sell') ? 'awaiting', false),
+                         created_at LIMIT 10""")
         n = 0
         for r in rows:
             params = (json.loads(r["detail"]) if isinstance(r["detail"], str)
@@ -1546,16 +2025,29 @@ class Mirror:
             if stale is not None:
                 n += 1
                 continue
-            claimed = await conn.fetchval(
-                """UPDATE execmirror_orders SET state = 'SUBMITTING', attempts = attempts + 1,
-                     submit_started_at = now(), updated_at = now()
-                   WHERE mirror_id = $1 AND state = 'PLANNED' RETURNING mirror_id""",
-                r["mirror_id"])
-            if not claimed:
-                continue
+            place_kw: dict = {}
+            if r["role"] in RISK_REDUCING_ROLES and r["intent"] in SELL_INTENTS \
+                    and not small_live_is_shadow():
+                # outside SHADOW only: the inventory re-read and the claim in
+                # one transaction under the row lock (SHADOW: unchanged below)
+                adm = await self._admit_and_claim_sell(conn, r["mirror_id"])
+                if adm is None or adm == AWAITING_VENUE_EVIDENCE:
+                    continue
+                if isinstance(adm, str):
+                    n += 1
+                    continue
+                place_kw = {"risk_reducing_sell": adm}
+            else:
+                claimed = await conn.fetchval(
+                    """UPDATE execmirror_orders SET state = 'SUBMITTING', attempts = attempts + 1,
+                         submit_started_at = now(), updated_at = now()
+                       WHERE mirror_id = $1 AND state = 'PLANNED' RETURNING mirror_id""",
+                    r["mirror_id"])
+                if not claimed:
+                    continue
             t0 = time.monotonic()
             try:
-                resp = await self.call(self.venue().place, params)
+                resp = await self.call(self.venue().place, params, **place_kw)
             except Exception as exc:                          # noqa: BLE001
                 state = _classify(exc)
                 err = {"error": type(exc).__name__,
@@ -1608,15 +2100,130 @@ class Mirror:
             n += 1
         return n
 
+    async def _admit_and_claim_sell(self, conn, mirror_id: str):
+        """A RISK-REDUCING SELL, OUTSIDE SHADOW: in ONE transaction, lock the
+        PLANNED row, re-read the group's live inventory from execmirror_fills
+        (venue fills only) and the quantity its OTHER open SELLs already
+        commit, and either claim the row (SUBMITTING) and return the
+        RiskReducingSell that Venue.place admits, or EXCLUDE it by name (the
+        code is returned) -- nothing sent. AWAITING_VENUE_EVIDENCE when the
+        venue's position on the market is not yet evidenced, or the newest
+        snapshot is behind our books (review r3): the row stays PLANNED,
+        nothing sent, judged again on the next pass, for at most
+        SELL_EVIDENCE_WAIT_MAX_S and at most until one newer snapshot. None
+        when the row is no longer PLANNED (another pass took it)."""
+        async with conn.transaction():
+            cur = await conn.fetchrow(
+                "SELECT * FROM execmirror_orders WHERE mirror_id = $1 FOR UPDATE",
+                mirror_id)
+            if cur is None or cur["state"] != "PLANNED":
+                return None
+            det = cur["detail"]
+            det = json.loads(det) if isinstance(det, str) else dict(det or {})
+            prev = det.get("risk_reducing_sell") or {}
+            inv = await live_inventory(conn, cur["group_id"])
+            mine = int(cur["live_qty"] or 0) - int(Decimal(str(cur["cum_qty"] or 0)))
+            committed_other = max(int(inv["committed"]) - mine, 0)
+            held = int(inv["held"])
+            want = EXIT_FOR.get(inv["opened_intent"] or "")
+            code = None
+            if want is None or want != cur["intent"]:
+                code = R_SELL_NOT_THE_HELD_SIDE
+            elif int(cur["live_qty"] or 0) < 1 or \
+                    int(cur["live_qty"]) > held - committed_other:
+                code = R_SELL_ABOVE_UNCOMMITTED_INVENTORY
+            ev = {"held": held, "committed_by_other_sells": committed_other,
+                  "available": held - committed_other,
+                  "live_qty": int(cur["live_qty"] or 0),
+                  "opened_intent": inv["opened_intent"],
+                  "basis": "execmirror_fills under the row lock"}
+            if code is None:
+                # rc6.3 review r2: the venue's own record of the position
+                venue = await venue_position_evidence(
+                    conn, cur["us_market_slug"],
+                    held_sign=HELD_SIGN.get(inv["opened_intent"] or ""))
+                code = venue.pop("code")
+                ev["venue_position"] = venue
+            # rc6.3 review r3: a gap in the venue's evidence is a WAIT. The row
+            # stays PLANNED (still committed against the inventory), nothing
+            # is sent, no attempt is counted, the evidence is on the row and
+            # one event is written per change of it -- not one per pass.
+            waiting = prev.get("awaiting")
+            since = prev.get("awaiting_since_epoch_s") if waiting else None
+            since = self._now() if since is None else since
+            sid = (ev.get("venue_position") or {}).get("account_snapshot_id")
+            wait = False
+            if code == R_SELL_VENUE_POSITION_NOT_EVIDENCED:
+                wait = True              # until a snapshot after the close
+            elif code == R_SELL_VENUE_POSITION_DISAGREES and \
+                    ev["venue_position"].get("venue_holds_more_than_fills"):
+                # the snapshot was behind our books: wait for a NEWER one;
+                # one newer that still names the market ends the wait
+                first = (prev.get("waiting_on_snapshot_id")
+                         if waiting == code else None)
+                wait = first is None or first == sid
+            if wait and self._now() - since > SELL_EVIDENCE_WAIT_MAX_S:
+                wait = False             # bounded: refused by the code it waited on
+                ev["wait_expired"] = True
+            if wait:
+                rec = json.loads(_j(dict(ev, awaiting=code, waiting_on_snapshot_id=sid,
+                                         awaiting_since_epoch_s=since)))
+                if prev != rec:
+                    await conn.execute(
+                        """UPDATE execmirror_orders SET detail = detail || $2::jsonb,
+                             updated_at = now()
+                           WHERE mirror_id = $1 AND state = 'PLANNED'""",
+                        mirror_id, _j({"risk_reducing_sell": rec}))
+                    await _event(conn, AWAITING_VENUE_EVIDENCE, mirror_id=mirror_id,
+                                 paper_order_id=cur["paper_order_id"], **rec)
+                return AWAITING_VENUE_EVIDENCE
+            if waiting:
+                # what this row waited for, kept beside how it ended
+                ev["awaited"] = {k: prev.get(k) for k in (
+                    "awaiting", "awaiting_since_epoch_s", "waiting_on_snapshot_id",
+                    "venue_position")}
+                ev["waited_s"] = round(self._now() - since, 3)
+            if code is not None:
+                await conn.execute(
+                    """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = $2,
+                         detail = detail || $3::jsonb, updated_at = now()
+                       WHERE mirror_id = $1 AND state = 'PLANNED'""",
+                    mirror_id, code,
+                    _j({"risk_reducing_sell": dict(ev, refused=code)}))
+                await _event(conn, "EXCLUDED", mirror_id=mirror_id,
+                             paper_order_id=cur["paper_order_id"],
+                             exclusion=code, **ev)
+                return code
+            await conn.execute(
+                """UPDATE execmirror_orders SET state = 'SUBMITTING', attempts = attempts + 1,
+                     submit_started_at = now(), updated_at = now(),
+                     detail = detail || $2::jsonb
+                   WHERE mirror_id = $1 AND state = 'PLANNED'""",
+                mirror_id, _j({"risk_reducing_sell": dict(ev, admitted=True)}))
+            return RiskReducingSell(
+                mirror_id=mirror_id, group_id=cur["group_id"], role=cur["role"],
+                slug=cur["us_market_slug"], intent=cur["intent"],
+                qty=int(cur["live_qty"]), held=held,
+                committed_other=committed_other)
+
     async def _revalidate(self, conn, r) -> str | None:
         """Exclude a PLANNED order whose intent is no longer the decision it
         copies. Returns the exclusion code, or None when it may be sent."""
         now = self._now()
         why, ev = None, {"checked_at": now, "max_intent_age_s": MAX_INTENT_AGE_S}
-        if r["paper_order_id"]:
+        # rc6.3 review r3: a protection CHILD (resync_protection) copies its
+        # paper protection too, named in detail.for_paper_order -- checked
+        # alike, so a child that waited for the venue's evidence is never sent
+        # after that paper protection ended
+        pid = r["paper_order_id"]
+        if not pid and r["role"] == "STANDING_PROTECTION":
+            det = r["detail"]
+            det = json.loads(det) if isinstance(det, str) else (det or {})
+            pid = det.get("for_paper_order")
+        if pid:
             p = await conn.fetchrow(
                 "SELECT state, expires_at FROM paper_orders WHERE order_id = $1",
-                r["paper_order_id"])
+                pid)
             ev["paper_state"] = None if p is None else p["state"]
             if p is None or p["state"] in PAPER_DEAD:
                 why = PAPER_ORDER_ENDED
@@ -1652,19 +2259,111 @@ class Mirror:
             n += await self._cancel(conn, dict(r), "PAPER_ORDER_ENDED")
         return n
 
-    async def _cancel(self, conn, r, why) -> int:
+    async def _send_cancel(self, conn, r, why: str) -> dict:
+        """ONE cancel request and what it established, recorded on the row
+        (`detail.cancel`: attempts, last attempt, outcome, accepted). The
+        outcome is SENT (the venue accepted the request), RACE (a 4xx naming
+        the order: it can no longer be cancelled -- the poll settles it from
+        the order record) or NOT_ACCEPTED (anything else: nothing says the
+        venue acted). An OPEN / PARTIALLY_FILLED row becomes
+        CANCEL_REQUESTED whatever the outcome, so no path re-asks every tick;
+        the resend is `poll`'s, bounded (see CANCEL_RESEND_AFTER_S)."""
+        now = self._now()
+        err = None
         try:
             await self.call(self.venue().cancel, r["venue_order_id"], r["us_market_slug"])
         except Exception as exc:                              # noqa: BLE001
+            err = exc
+        if err is None:
+            outcome = "SENT"
+        elif getattr(err, "status_code", None) in CANCEL_RACE_STATUSES:
+            outcome = "RACE"
+        else:
+            outcome = "NOT_ACCEPTED"
+        rec = {"why": why, "last_attempt_at": now, "last_outcome": outcome,
+               "accepted": outcome == "SENT",
+               "error": None if err is None else EP._error(err)}
+        got = await conn.fetchrow(
+            """UPDATE execmirror_orders SET
+                 state = CASE WHEN state IN ('OPEN','PARTIALLY_FILLED')
+                              THEN 'CANCEL_REQUESTED' ELSE state END,
+                 detail = detail || jsonb_build_object('cancel',
+                     coalesce(detail->'cancel', '{}'::jsonb) || $2::jsonb
+                     || jsonb_build_object('attempts',
+                          coalesce((detail->'cancel'->>'attempts')::int, 0) + 1)),
+                 updated_at = now()
+               WHERE mirror_id = $1
+                 AND state IN ('OPEN','PARTIALLY_FILLED','CANCEL_REQUESTED')
+               RETURNING (detail->'cancel'->>'attempts')::int AS attempts""",
+            r["mirror_id"], _j(rec))
+        rec["attempts"] = None if got is None else got["attempts"]
+        return rec
+
+    async def _cancel(self, conn, r, why) -> int:
+        rec = await self._send_cancel(conn, r, why)
+        if rec["last_outcome"] == "SENT":
+            await _event(conn, "CANCEL_REQUESTED", mirror_id=r["mirror_id"], why=why)
+        elif rec["last_outcome"] == "RACE":
             # A cancel race (already filled / expired) is settled by the poll.
             await _event(conn, "CANCEL_FAILED", mirror_id=r["mirror_id"],
-                         why=why, error=EP._error(exc))
-        await conn.execute(
-            """UPDATE execmirror_orders SET state = 'CANCEL_REQUESTED', updated_at = now()
-                WHERE mirror_id = $1 AND state IN ('OPEN','PARTIALLY_FILLED')""",
-            r["mirror_id"])
-        await _event(conn, "CANCEL_REQUESTED", mirror_id=r["mirror_id"], why=why)
+                         why=why, error=rec["error"])
+            await _event(conn, "CANCEL_REQUESTED", mirror_id=r["mirror_id"], why=why)
+        else:
+            # NOT recorded as requested-and-accepted: named, and re-sent by
+            # `poll` while the venue's record still shows a working order
+            await _event(conn, "CANCEL_NOT_ACCEPTED", mirror_id=r["mirror_id"],
+                         why=why, code=R_CANCEL_NOT_ACCEPTED, error=rec["error"],
+                         attempts=rec["attempts"],
+                         resend_after_s=CANCEL_RESEND_AFTER_S)
         await self._refresh(conn, r)
+        return 1
+
+    async def _resend_cancel_if_due(self, conn, mirror_id: str) -> int:
+        """A CANCEL_REQUESTED row whose venue record (just refreshed) still
+        shows a WORKING order: the cancel is sent again once its back-off has
+        passed (CANCEL_RESEND_AFTER_S, doubling per attempt), at most
+        CANCEL_MAX_ATTEMPTS sends in all, each one an event; when they are
+        spent the row is named CANCEL_RESEND_EXHAUSTED once. 1 when re-sent."""
+        cur = await conn.fetchrow(
+            """SELECT mirror_id, state, venue_state, venue_order_id,
+                      us_market_slug, detail
+                 FROM execmirror_orders WHERE mirror_id = $1""", mirror_id)
+        if cur is None or cur["state"] != "CANCEL_REQUESTED" \
+                or cur["venue_state"] not in WORKING_VENUE_STATES:
+            return 0
+        det = cur["detail"]
+        det = json.loads(det) if isinstance(det, str) else (det or {})
+        c = det.get("cancel") or {}
+        now = self._now()
+        if c.get("last_attempt_at") is None:
+            # a row asked before this rule existed: its clock starts now
+            await conn.execute(
+                """UPDATE execmirror_orders SET detail = detail || $2::jsonb
+                    WHERE mirror_id = $1""",
+                mirror_id, _j({"cancel": dict(c, attempts=int(c.get("attempts") or 1),
+                                              last_attempt_at=now,
+                                              last_outcome=c.get("last_outcome")
+                                              or "UNRECORDED")}))
+            return 0
+        attempts = int(c.get("attempts") or 1)
+        if attempts >= CANCEL_MAX_ATTEMPTS:
+            if not c.get("exhausted"):
+                await conn.execute(
+                    """UPDATE execmirror_orders SET detail = detail || $2::jsonb
+                        WHERE mirror_id = $1""",
+                    mirror_id, _j({"cancel": dict(c, exhausted=True)}))
+                await _event(conn, "CANCEL_RESEND_EXHAUSTED", mirror_id=mirror_id,
+                             code=R_CANCEL_RESEND_EXHAUSTED, attempts=attempts,
+                             venue_state=cur["venue_state"])
+            return 0
+        wait = CANCEL_RESEND_AFTER_S * (2 ** (attempts - 1))
+        if now - float(c["last_attempt_at"]) < wait:
+            return 0
+        rec = await self._send_cancel(conn, dict(cur), c.get("why") or "RESEND")
+        await _event(conn, "CANCEL_RESENT", mirror_id=mirror_id,
+                     attempt=rec["attempts"], outcome=rec["last_outcome"],
+                     accepted=rec["accepted"], error=rec["error"],
+                     waited_s=wait, venue_state=cur["venue_state"])
         return 1
 
     # --- fills ---------------------------------------------------------------
@@ -1675,6 +2374,8 @@ class Mirror:
                 ORDER BY last_polled_at NULLS FIRST LIMIT 15""")
         for r in rows:
             await self._refresh(conn, dict(r))
+            if r["state"] == "CANCEL_REQUESTED":
+                await self._resend_cancel_if_due(conn, r["mirror_id"])
         return len(rows)
 
     async def _refresh(self, conn, r) -> None:
@@ -1808,7 +2509,8 @@ class Mirror:
         size no longer matches live inventory is cancelled; once nothing is
         working, a new live protection is placed at the current size (a
         child row, `detail.for_paper_order`). At most MAX_PROTECTION_ROWS
-        per paper order, and none within a minute of a refusal."""
+        per paper order (a refusal on the venue's evidence not counted --
+        review r3), and none within a minute of a refusal."""
         papers = await conn.fetch(
             """SELECT p.* FROM paper_orders p
                 WHERE p.role = 'STANDING_PROTECTION' AND p.account_id = $1
@@ -1840,10 +2542,21 @@ class Mirror:
                     await self._cancel(conn, cur, "PROTECTION_RESIZE")
                     n += 1
                 continue
-            if want <= 0 or len(rows) >= MAX_PROTECTION_ROWS:
+            # review r3: a refusal on the venue's evidence says nothing about
+            # the protection itself, so it does not spend MAX_PROTECTION_ROWS
+            # (the minute's pause below bounds how often it recurs)
+            counted = [x for x in rows if not (
+                x["state"] == "EXCLUDED"
+                and x["exclusion"] in PROTECTION_PAUSE_EXCLUSIONS)]
+            if want <= 0 or len(counted) >= MAX_PROTECTION_ROWS:
                 continue
-            if cur["state"] == "REJECTED" and (
-                    self._now() - cur["updated_at"].timestamp()) < 60:
+            # a refusal pauses the next attempt a minute: the venue's (REJECTED)
+            # and, review r3, the admission's on the venue's evidence --
+            # otherwise every 2 s tick spent a row until none were left
+            if (cur["state"] == "REJECTED" or (
+                    cur["state"] == "EXCLUDED"
+                    and cur["exclusion"] in PROTECTION_PAUSE_EXCLUSIONS)) and (
+                    self._now() - cur["updated_at"].timestamp()) < PROTECTION_PAUSE_S:
                 continue
             child = "em:%s:r%d" % (p["order_id"], len(rows))
             plan.detail["for_paper_order"] = p["order_id"]
@@ -1914,30 +2627,43 @@ class Mirror:
             return {"ok": False}
         if bal:
             self._buying_power = bal[0].get("buyingPower")
-        ours = {r["us_market_slug"]: int(Decimal(str(r["net"]))) for r in await conn.fetch(
-            """SELECT us_market_slug,
-                      sum(CASE WHEN intent LIKE 'ORDER_INTENT_BUY%' THEN qty ELSE -qty END) AS net
-                 FROM execmirror_fills GROUP BY 1""")}
+        # SIGNED, AS THE VENUE IS (rc6.2 pmus-exec, audit item 4). Polymarket
+        # US keeps ONE signed netPosition per market (long positive, short
+        # negative; live_executor._pm_held). This comparison took abs() of
+        # the venue's figure and counted every BUY_% fill positive, so a short
+        # the venue held where we booked a long (or the reverse) reconciled.
+        # Now both sides carry the venue's sign: BUY_LONG / SELL_SHORT add,
+        # SELL_LONG / BUY_SHORT subtract (signed_net_sql), and quantities are
+        # compared exactly (a fractional venue position is not truncated).
+        ours = {r["us_market_slug"]: Decimal(str(r["net"])) for r in await conn.fetch(
+            "SELECT us_market_slug, %s AS net FROM execmirror_fills GROUP BY 1"
+            % signed_net_sql())}
         venue_net = {}
         for slug, p in pos.items():
             try:
-                venue_net[slug] = abs(int(Decimal(str(p.get("netPosition") or 0))))
+                venue_net[slug] = Decimal(str(p.get("netPosition") or 0))
             except Exception:                                 # noqa: BLE001
                 venue_net[slug] = None
         base = (ctl.get("baseline") or {})
         base = json.loads(base) if isinstance(base, str) else base
-        base_net = {k: int(v) for k, v in (base.get("positions_net") or {}).items()}
+        base_net = {k: Decimal(str(v)) for k, v in (base.get("positions_net") or {}).items()}
         settled = {r["us_market_slug"] for r in await conn.fetch(
             "SELECT DISTINCT us_market_slug FROM paper_settlements")}
         expired = {s for s, p in pos.items() if p.get("expired")}
+
+        def num(v):
+            return None if v is None else (int(v) if v == v.to_integral_value()
+                                           else str(v))
         diffs = {}
         for slug in set(ours) | set(venue_net):
             if slug in expired or (slug in settled and not venue_net.get(slug)):
                 continue          # resolved at the venue: the live side settled
-            if venue_net.get(slug, 0) != abs(ours.get(slug, 0) + base_net.get(slug, 0)):
-                diffs[slug] = {"mirror_fills_net": ours.get(slug, 0),
-                               "baseline": base_net.get(slug, 0),
-                               "venue": venue_net.get(slug)}
+            want = ours.get(slug, Decimal(0)) + base_net.get(slug, Decimal(0))
+            if venue_net.get(slug, Decimal(0)) != want:
+                diffs[slug] = {"mirror_fills_net": num(ours.get(slug, Decimal(0))),
+                               "baseline": num(base_net.get(slug, Decimal(0))),
+                               "venue": num(venue_net.get(slug)),
+                               "signed": True}
         rec = {"reconciled": not diffs, "differences": diffs}
         await conn.execute(
             """INSERT INTO execmirror_snapshots (account_fingerprint, balances, positions,
@@ -1946,6 +2672,8 @@ class Mirror:
             _j([EP._pick(b, EP.BALANCE_FIELDS) for b in bal]),
             _j([dict(slug=s, **EP._pick(p, EP.POSITION_FIELDS)) for s, p in pos.items()]),
             len(oo), _j(rec))
+        # the venue's record after any stop is now on file (review r3)
+        self._snapshot_due = False
         if diffs:
             await _event(conn, "RECONCILIATION_DIFFERENCE", **rec)
         return rec
@@ -2219,8 +2947,16 @@ class Mirror:
                 " ORDER BY (h.group_id IS NOT NULL) DESC, "
                 "          r.reconciled_at ASC NULLS FIRST, u.group_id "
                 " LIMIT $1", int(limit))
+        # THE SNAPSHOT IS EVIDENCE ONLY WHILE CURRENT (rc6.2 pmus-exec, audit
+        # item 4): its age by the DATABASE clock (the clock that stamped it);
+        # a group she would call MATCHED / NOT_MIRRORED is STALE when the
+        # newest snapshot is missing or older than ACCOUNT_SNAPSHOT_MAX_AGE_S
         snap = await conn.fetchrow(
-            "SELECT reconciliation, at FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
+            "SELECT reconciliation, at, extract(epoch FROM now() - at) AS age_s"
+            "  FROM execmirror_snapshots ORDER BY at DESC LIMIT 1")
+        snap_age = None if snap is None else float(snap["age_s"])
+        snap_current = snap_age is not None and \
+            -1.0 <= snap_age <= ACCOUNT_SNAPSHOT_MAX_AGE_S
         n = 0
         for g in groups:
             gid = g["group_id"]
@@ -2362,8 +3098,20 @@ class Mirror:
                 and Decimal(c["live_fill_qty"]) == 0 for c in chain)
             status = ("DISCREPANCY" if disc else "PENDING" if pending
                       else "NOT_MIRRORED" if paper_only else "MATCHED")
+            stale = None
+            if status in ("MATCHED", "NOT_MIRRORED") and not snap_current:
+                # never MATCHED / NOT_MIRRORED from a snapshot that is not
+                # current: what she would have said is kept, the status is
+                # STALE
+                stale = {"code": R_AUDREY_SNAPSHOT_NOT_CURRENT,
+                         "would_be": status,
+                         "account_snapshot_age_s": (None if snap_age is None
+                                                    else round(snap_age, 1)),
+                         "limit_s": ACCOUNT_SNAPSHOT_MAX_AGE_S}
+                status = AUDREY_STALE
             chain_doc = {"links": chain, "live_held": held,
                          "handoff_id": None if hrow is None else hrow["handoff_id"],
+                         "stale": stale,
                          "account_snapshot_at": None if snap is None else snap["at"],
                          "paper_and_actual_pnl_are_separate": True,
                          # the positions this reconciliation covers, each
@@ -2384,18 +3132,31 @@ class Mirror:
                                  "live_held": str(held),
                                  "basis": "execmirror_fills (venue fills)",
                                  "execution_environment": "VENUE_CONFIRMED"}}}
+            # THE STATUS AS THE TABLE STORES IT (migration 366): STALE is
+            # status PENDING + stale_reason, written in this one statement,
+            # because the status CHECK of an existing table is not widened;
+            # every reader projects it back (audrey_reconciliation_status).
+            # `prev` is the status as it was READ, so a change between STALE
+            # and a real PENDING is a change (changed_at, and the event).
+            stored_status, stale_reason = ARS.stored(
+                status, None if stale is None else stale["code"])
             prev = await conn.fetchval(
-                "SELECT status FROM smalllive_reconciliations WHERE group_id = $1", gid)
+                "SELECT " + ARS.effective_sql() + " FROM smalllive_reconciliations "
+                " WHERE group_id = $1", gid)
             await conn.execute(
-                """INSERT INTO smalllive_reconciliations (group_id, venue, status, discrepancies, chain)
-                   VALUES ($1,$2,$3,$4::jsonb,$5::jsonb)
+                """INSERT INTO smalllive_reconciliations
+                     (group_id, venue, status, stale_reason, discrepancies, chain)
+                   VALUES ($1,$2,$3,$4,$5::jsonb,$6::jsonb)
                    ON CONFLICT (group_id) DO UPDATE SET status = EXCLUDED.status,
+                     stale_reason = EXCLUDED.stale_reason,
                      discrepancies = EXCLUDED.discrepancies, chain = EXCLUDED.chain,
                      reconciled_at = now(),
                      changed_at = CASE WHEN smalllive_reconciliations.status
                                        IS DISTINCT FROM EXCLUDED.status
+                                       OR smalllive_reconciliations.stale_reason
+                                       IS DISTINCT FROM EXCLUDED.stale_reason
                                        THEN now() ELSE smalllive_reconciliations.changed_at END""",
-                gid, VENUE, status, _j(disc), _j(chain_doc))
+                gid, VENUE, stored_status, stale_reason, _j(disc), _j(chain_doc))
             if prev != status:
                 await _event(conn, "AUDREY_RECONCILIATION_" + status, group_id=gid,
                              discrepancies=disc)
@@ -2404,35 +3165,131 @@ class Mirror:
 
     # --- emergency stop -------------------------------------------------------
     async def emergency_stop(self, conn, ctl) -> dict:
+        """THE LANE'S KILL SWITCH, DONE ONLY WHEN DONE (rc6.2 pmus-exec, audit
+        item 5). Before this, `stop_done_at` was written after ONE pass
+        whatever happened in it: a cancel-all the venue refused (audit probe
+        A5: STOP_CANCEL_ALL_FAILED and EMERGENCY_STOP_DONE side by side), an
+        ambiguous submission never reconciled (A3: recovery runs only on the
+        RUNNING lane) or an order still working were all reported STOPPED.
+
+        Now each pass: ambiguous submissions are decided from venue evidence
+        (`recover`: read-only, never a resend), every working mirror order is
+        cancelled (a row already CANCEL_REQUESTED is read again and its
+        cancel re-sent on the bounded back-off, `_resend_cancel_if_due` --
+        never once per pass), the venue's cancel-all is sent, every
+        CANCEL_REQUESTED row is read again from the venue, PLANNED rows are
+        excluded, and (on request) positions are flattened -- each slug once
+        per stop and net. `stop_done_at` is written only when the cancel-all
+        SUCCEEDED and no SUBMITTING / UNKNOWN / OPEN / PARTIALLY_FILLED row
+        remains and no CANCEL_REQUESTED row does either after that re-read
+        (STOP_BLOCKING_AFTER_REREAD: its record does not say the order
+        ended); otherwise the pass returns STOP_INCOMPLETE (R_STOP_INCOMPLETE,
+        one event per change of reason) and is retried every STOP_RETRY_S."""
         if ctl.get("stop_done_at"):
             return {"state": "STOPPED"}
-        out = {"state": "STOPPING", "cancelled": 0, "closed": []}
+        # rc6.3 review r2: the memory belongs to ONE stop. The owner may
+        # resume while a stop is incomplete and stop again; the admin route
+        # moves execmirror_control.revision on every action, so a stop met
+        # under another revision than the memory's starts clean (tick also
+        # forgets it whenever it sees the lane running). Otherwise the second
+        # stop skipped the close of a holding the first had asked to flatten
+        # (its fills unchanged: a close is never booked) and was reported done.
+        if ctl.get("revision") != self._stop_revision:
+            self._reset_stop_memory()
+            self._stop_revision = ctl.get("revision")
+        now = self._now()
+        if self._stop_last_attempt and \
+                0 <= now - self._stop_last_attempt < STOP_RETRY_S:
+            return {"state": "STOP_INCOMPLETE", "code": R_STOP_INCOMPLETE,
+                    "retry_in_s": round(STOP_RETRY_S
+                                        - (now - self._stop_last_attempt), 1)}
+        self._stop_last_attempt = now
+        out = {"state": "STOPPING", "cancelled": 0, "cancel_resent": 0,
+               "closed": [], "recovered": 0}
+        try:
+            out["recovered"] = await self.recover(conn)
+        except Exception as exc:                              # noqa: BLE001
+            await _event(conn, "STOP_RECOVER_FAILED", error=EP._error(exc))
         for r in await conn.fetch(
                 """SELECT * FROM execmirror_orders WHERE venue_order_id IS NOT NULL
-                      AND state IN ('OPEN','PARTIALLY_FILLED','CANCEL_REQUESTED')"""):
-            out["cancelled"] += await self._cancel(conn, dict(r), "EMERGENCY_STOP")
+                      AND state IN ('OPEN','PARTIALLY_FILLED','CANCEL_REQUESTED')
+                    ORDER BY created_at, mirror_id"""):
+            if r["state"] == "CANCEL_REQUESTED":
+                # asked before (this stop's earlier pass, or the running
+                # lane): read the record, re-send only when the back-off says
+                await self._refresh(conn, dict(r))
+                out["cancel_resent"] += await self._resend_cancel_if_due(
+                    conn, r["mirror_id"])
+            else:
+                out["cancelled"] += await self._cancel(conn, dict(r),
+                                                       "EMERGENCY_STOP")
+        cancel_all_ok = True
         try:
-            await self.call(self.venue().cancel_all)
+            got = await self.call(self.venue().cancel_all)
+            if isinstance(got, dict) and "canceledOrderIds" in got:
+                out["cancel_all_canceled_order_ids"] = list(
+                    got.get("canceledOrderIds") or [])
         except Exception as exc:                              # noqa: BLE001
+            cancel_all_ok = False
             await _event(conn, "STOP_CANCEL_ALL_FAILED", error=EP._error(exc))
+        # THE VENUE'S RECORD, READ AGAIN AFTER THE CANCEL-ALL: a cancel that
+        # was asked is done only when the record says the order ended
+        for r in await conn.fetch(
+                """SELECT * FROM execmirror_orders WHERE venue_order_id IS NOT NULL
+                      AND state = ANY($1::text[])
+                    ORDER BY created_at, mirror_id""",
+                list(STOP_BLOCKING_AFTER_REREAD)):
+            await self._refresh(conn, dict(r))
         await conn.execute(
             """UPDATE execmirror_orders SET state = 'EXCLUDED', exclusion = 'EMERGENCY_STOP',
                  updated_at = now() WHERE state = 'PLANNED'""")
         if ctl.get("flatten_on_stop"):
             for s in await conn.fetch(
-                    """SELECT us_market_slug FROM execmirror_fills GROUP BY 1
+                    """SELECT us_market_slug,
+                              sum(CASE WHEN intent LIKE 'ORDER_INTENT_BUY%' THEN qty ELSE -qty END) AS net
+                         FROM execmirror_fills GROUP BY 1
                         HAVING sum(CASE WHEN intent LIKE 'ORDER_INTENT_BUY%' THEN qty ELSE -qty END) > 0"""):
+                slug, net = s["us_market_slug"], str(s["net"])
+                if self._stop_flattened.get(slug) == net:
+                    continue          # this stop already flattened this holding
+                # on record BEFORE it is sent: the fills never book a close,
+                # so a risk-reducing SELL on this market waits for a snapshot
+                # taken after it (venue_position_evidence)
+                await _event(conn, FLATTEN_REQUESTED, slug=slug, net=net)
                 try:
-                    await self.call(self.venue().close, s["us_market_slug"])
-                    out["closed"].append(s["us_market_slug"])
+                    await self.call(self.venue().close, slug)
+                    out["closed"].append(slug)
+                    self._stop_flattened[slug] = net
                 except Exception as exc:                      # noqa: BLE001
-                    await _event(conn, "FLATTEN_FAILED", slug=s["us_market_slug"],
+                    await _event(conn, "FLATTEN_FAILED", slug=slug,
                                  error=EP._error(exc))
+        remaining = {r["state"]: int(r["n"]) for r in await conn.fetch(
+            """SELECT state, count(*) AS n FROM execmirror_orders
+                WHERE state = ANY($1::text[]) GROUP BY 1 ORDER BY 1""",
+            list(STOP_BLOCKING_STATES) + list(STOP_BLOCKING_AFTER_REREAD))}
+        if not cancel_all_ok or remaining:
+            why = {"code": R_STOP_INCOMPLETE,
+                   "cancel_all": "OK" if cancel_all_ok else "FAILED",
+                   "remaining": remaining}
+            out.update(state="STOP_INCOMPLETE", retry_after_s=STOP_RETRY_S, **why)
+            if why != self._stop_incomplete_seen:
+                self._stop_incomplete_seen = why
+                await _event(conn, "EMERGENCY_STOP_INCOMPLETE",
+                             **{k: v for k, v in out.items() if k != "state"})
+            return out
         await conn.execute("UPDATE execmirror_control SET stop_done_at = now(),"
-                           " updated_at = now() WHERE id = 1")
+                           " updated_at = now() WHERE id = 1 AND stopped")
         await _event(conn, "EMERGENCY_STOP_DONE", **out)
+        self._reset_stop_memory()
         out["state"] = "STOPPED"
         return out
+
+    def _reset_stop_memory(self) -> None:
+        """Forget an emergency stop's in-process memory (its retry instant,
+        the holdings it flattened, the last incomplete reason)."""
+        self._stop_last_attempt = 0.0
+        self._stop_flattened = {}
+        self._stop_incomplete_seen = None
 
 
 async def run(get_pool, *, probability_reader=None, management_assessor=None) -> None:
