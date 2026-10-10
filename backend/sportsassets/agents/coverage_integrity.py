@@ -437,13 +437,52 @@ def catalogue_token_map() -> dict:
     return out
 
 
+#: THE LEAGUE READS ARE PLAN-ROBUST AND BOUNDED (RC6.3b pass-stall).
+#: Production 2026-10-10: the five league statements take 0.1-0.5 s from a
+#: fresh session on every coverage window -- literal values, prepared under
+#: force_generic_plan and force_custom_plan, as written or with m / ms
+#: MATERIALIZED -- yet pg_stat_statements shows EVALUATED_SQL 2,051 calls,
+#: mean 410 ms, max 46.5 s and ACTUAL_SQL 1,800 calls, mean 901 ms, max
+#: 59.4 s, and on the API's long-lived pooled connection the first of them
+#: ran 50+ s every pass. The LEADING HYPOTHESIS, NOT PROVEN: a plan cached by
+#: the pooled connection (asyncpg's statement cache) on old statistics. So no
+#: coverage read depends on any plan the connection has cached or on any
+#: setting it holds: inside its own transaction each read plans for THIS
+#: call's values (plan_cache_mode = force_custom_plan) and is cut by a
+#: statement timeout of its own (SET LOCAL: gone when the transaction ends).
+#: A read cut by the timeout is SOURCE_READ_FAILED, NULL, never a zero; the
+#: statements themselves (and so every count) are unchanged.
+#: ten times the normal read (0.1-0.5 s, mean 0.9 s at worst), and well under
+#: the run's budget: one bad statement cannot spend the run
+READ_STATEMENT_TIMEOUT_MS = 10_000
+
+
+def _supports_plan_cache_mode(conn) -> bool:
+    """plan_cache_mode exists from PostgreSQL 12."""
+    try:
+        return int(conn.get_server_version().major) >= 12
+    except Exception:                                           # noqa: BLE001
+        return False
+
+
+async def _bound_the_read(conn) -> None:
+    """Inside the read's transaction: a custom plan, and a statement
+    timeout."""
+    if _supports_plan_cache_mode(conn):
+        await conn.execute("SET LOCAL plan_cache_mode = force_custom_plan")
+    await conn.execute("SET LOCAL statement_timeout = %d"
+                       % int(READ_STATEMENT_TIMEOUT_MS))
+
+
 async def _read(conn, table_deps: tuple, sql: str, *args):
-    """Rows, or a reason string when a source is absent/unreadable."""
+    """Rows, or a reason string when a source is absent/unreadable (or not
+    readable within READ_STATEMENT_TIMEOUT_MS)."""
     for t in table_deps:
         if not await _regclass(conn, t):
             return "%s:%s" % (R_TABLE_ABSENT, t)
     try:
         async with conn.transaction():
+            await _bound_the_read(conn)
             return [dict(r) for r in await conn.fetch(sql, *args)]
     except Exception as exc:                                    # noqa: BLE001
         return "%s:%s" % (R_READ_FAILED, type(exc).__name__)
