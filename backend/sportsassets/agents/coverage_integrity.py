@@ -57,6 +57,17 @@ NEVER ZERO FOR UNMEASURED. A stage whose source table is absent or whose read
 failed is NULL, with the reason in `unavailable`; a ratio over a NULL or zero
 denominator is NULL with its reason.
 
+A FAILED READ NEITHER FINALISES A DAY NOR ERASES A MEASURED VALUE (RC6.3c
+pass-hardening). A past day's row is final once the day has ended and is never
+written again, so a day is final only when EVERY source of it was read
+(`day_is_final`): a day with a SOURCE_READ_FAILED stays open and the next run
+reads it again; and a column whose read failed keeps the value an earlier run
+read for it on a row that is not final, the failure named in `unavailable`
+(`keep_last_good`). Before this, the first run after midnight whose read was
+cut by READ_STATEMENT_TIMEOUT_MS finalised the day with that column NULL for
+good. An absent table or a stage the ledger does not record is not a failed
+read. Final rows written before this change are not rewritten.
+
 COLLAPSE DETECTION (declared in THRESHOLDS, applied by `detect`):
   RATIO_COLLAPSE     a consecutive stage ratio below (1 - max_relative_drop)
                      x its trailing baseline (the median of the previous
@@ -760,17 +771,85 @@ def detect(today: dict, history: list, *, th: dict = THRESHOLDS) -> list:
 # PERSISTENCE
 # ═════════════════════════════════════════════════════════════════════
 
+#: appended to the reason of a failed read whose column kept the last good value
+KEPT_LAST_GOOD = "LAST_GOOD_VALUE_KEPT"
+
+
+def failed_reads(f: dict) -> dict:
+    """{column: reason} of every source of one computed day whose READ FAILED
+    (SOURCE_READ_FAILED: a statement cut by its timeout, or any error). An
+    absent table (SOURCE_TABLE_ABSENT) and a stage the ledger does not record
+    (R_SETTLEMENT_UNMEASURED) are not failed reads: they are what the source
+    is, the same on every run. Pure."""
+    out: dict = {}
+    for src in [f.get("unavailable")] + [
+            (r or {}).get("unavailable") for r in (f.get("leagues")
+                                                    or {}).values()]:
+        for c, why in (src or {}).items():
+            if isinstance(why, str) and why.startswith(R_READ_FAILED):
+                out.setdefault(c, why)
+    return out
+
+
+def day_is_final(f: dict, *, now: float) -> bool:
+    """A DAY IS FINAL ONLY WHEN IT HAS ENDED AND EVERY SOURCE OF IT WAS READ
+    (RC6.3c pass-hardening). It was `now >= window end` alone: the first run
+    after midnight whose read was cut by READ_STATEMENT_TIMEOUT_MS finalised
+    the day with that column NULL, and a final row is never written again, so
+    no later healthy run could repair it. A day with a failed read stays
+    open and the next run reads it again. Pure."""
+    return now >= f["window"][1] and not failed_reads(f)
+
+
+def keep_last_good(row: dict, prior: dict | None) -> dict:
+    """The row to write: a column whose read FAILED this run keeps the value
+    an earlier run read for it (a non-NULL value of a row that is not final),
+    and the failure stays on the row BY NAME in `unavailable` (the failed
+    reason, then KEPT_LAST_GOOD) -- a failed read never turns a measured
+    number into NULL. A column with no earlier value stays NULL with its
+    reason, never a zero. The ratios are recomputed from the values written.
+    A final prior row is never merged (it is not written again). Pure."""
+    if prior is None or prior.get("final"):
+        return row
+    un = dict(row.get("unavailable") or {})
+    kept = {}
+    for c in [COLUMN[s] for s in STAGES] + list(EXTRA_COLUMNS):
+        why = un.get(c)
+        if isinstance(why, str) and why.startswith(R_READ_FAILED) and \
+                row.get(c) is None and prior.get(c) is not None:
+            kept[c] = prior[c]
+            un[c] = "%s;%s" % (why, KEPT_LAST_GOOD)
+    if not kept:
+        return row
+    out = dict(row, unavailable=un, **kept)
+    out["ratios"] = ratios(out)
+    return out
+
+
 async def persist_day(conn, f: dict, *, now: float) -> int:
     """Upsert every league row of one computed day, in one transaction.
-    Returns rows written."""
+    Returns rows written.
+
+    A FAILED READ NEITHER FINALISES A DAY NOR ERASES A MEASURED VALUE
+    (RC6.3c pass-hardening): `day_is_final` keeps a day with a failed read
+    open, and `keep_last_good` writes the last value an earlier run read for
+    a column whose read failed now, with the failure named in `unavailable`.
+    The run after the failure reads the day again and, healthy, finalises it."""
     day = _dt.date.fromisoformat(f["day"])
-    final = now >= f["window"][1]
+    final = day_is_final(f, now=now)
     n = 0
     cols = [COLUMN[s] for s in STAGES] + list(EXTRA_COLUMNS)
     # ONE DAY IS WRITTEN WHOLE OR NOT AT ALL (RC6.3b): a run cut between two
     # league rows leaves none of this day's rows, and the days before it stay
     async with conn.transaction():
+        prior: dict = {}
+        if failed_reads(f):
+            # only a day with a failed read has anything to keep
+            prior = {p["league"]: dict(p) for p in await conn.fetch(
+                "SELECT league, final, %s FROM coverage_funnel_snapshots "
+                " WHERE tz=$1 AND day=$2" % ", ".join(cols), f["tz"], day)}
         for league, r in f["leagues"].items():
+            r = keep_last_good(r, prior.get(league))
             vals = [r.get(c) for c in cols]
             await conn.execute(
                 "INSERT INTO coverage_funnel_snapshots (tz, day, league, "
