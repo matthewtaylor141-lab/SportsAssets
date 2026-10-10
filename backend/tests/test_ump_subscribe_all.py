@@ -154,7 +154,14 @@ def test_every_reconnect_sends_exactly_one_empty_subscribe(venue):
     t = _all_transport(b, venue)
     assert t.run_once() == "ended"
     assert t.run_once() == "ended"
-    until(lambda: len(venue.received) >= 2)
+    # No wait: the fake venue reads a connection's opening command BEFORE it
+    # streams (tests/test_institutional_md_grpc_transport.FakeVenue), so by
+    # the time each run_once has seen its book that connection's subscribe is
+    # on record. This used to poll `until(len(received) >= 2)` for 10 s of
+    # wall clock, and on a loaded host the second subscribe was never going
+    # to arrive (the call had ended before the server read it).
+    assert [r.WhichOneof("command") for r in venue.received] == \
+        ["subscribe", "subscribe"]
     assert [list(r.subscribe.symbols) for r in venue.received] == [[], []]
 
 
