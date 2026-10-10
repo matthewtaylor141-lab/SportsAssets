@@ -31,7 +31,11 @@ orderbook-updates, changelog 2025-09-25 / 2026-06-18), in three variants:
      after it), an errored get_snapshot's snapshots went out. No error code
      is documented to mean "not executed": errors 26 / 27 are modelled as
      refusals the venue did not run, and the client must not rely on that
-     for either.
+     for either. (Round 5) A reply may also never arrive: a control frame
+     carrying a seq is lost (the sequence shows the hole), and a reply
+     WITHOUT (sid, seq) -- an unscoped error -- is lost silently (no hole
+     shows it; only the client's reply timeout, and a reply to a later
+     command arriving while an earlier delete is unanswered, can).
   S  as D, but control frames (`ok`, `unsubscribed`, scoped errors) carry a
      SEPARATE per-sid counter (from 1; a lost control frame still advanced
      it); data frames run by themselves; the venue may send ONE scoped
@@ -159,8 +163,10 @@ GENERATORS (deterministic):
       error 27, the separate counter's unasked frame, terminal errors, the
       venue's unsubscribe, disconnects; (round 4) add / delete /
       get_snapshot commands the venue EXECUTES and answers by error 18,
-      drawn from a generator of their own; the worker drops and re-wants
-      markets at arbitrary points, also while a command is being sent).
+      drawn from a generator of their own; (round 5) replies without
+      (sid, seq) that never arrive, from a generator of their own; the
+      worker drops and re-wants markets at arbitrary points, also while a
+      command is being sent).
       Seeds per variant; odd seeds inject faults, half of those as a storm.
       Under D every seed must end with every wanted market CURRENT, equal to
       venue truth and served by the store, and the commands sent bounded by
@@ -184,11 +190,17 @@ nothing (Oracle._settle).
 ASSUMPTIONS beyond the documented text, each named where it is used: S0
 and S5 (first snapshots on numbers never acknowledged as ours; counted
 below); H0 (`subscribed` means the venue took every market the subscribe
-named) and H1 (an add answered by an `ok` with no list took its markets) --
-the venue membership rule; C1 / C2 (a SEPARATE control counter answers each
-command at most once, in command order, numbers its `subscribed` at most
-once and sends at most CONTROL_SEQ_SLACK frames unasked -- round 3) --
-variants S and S1 only, whose venues stay inside them; C3 (EITHER reading:
+named), H1 (an add answered by an `ok` with no list took its markets) and
+(round 5) H2 (the full-list `ok` reflects every earlier command of the
+subscription) -- the venue membership rule; C1 / C2 (a SEPARATE control
+counter answers each command at most once, in command order, numbers its
+`subscribed` at most once and sends at most CONTROL_SEQ_SLACK frames
+unasked -- round 3) -- variants S and S1 only, whose venues stay inside
+them -- and (round 5) C2 for the membership rule on EVERY variant: a reply
+to a later command with a delete of ours before it unanswered means that
+delete's reply was lost (the venue answers in order; the sims' venue does);
+refused: E0 (an error means "not run", round 4) and E1 (a delete in flight
+WILL run, round 5); C3 (EITHER reading:
 a control frame's seq is a new number on its counter, never an echo of the
 sid's current seq) -- not modelled: an echo `ok` after a lost data frame
 is, on the wire, exactly the documented counter's `ok` with nothing lost,
@@ -239,6 +251,24 @@ it as CURRENT_BOOK_IS_NOT_VENUE_TRUTH; tests/test_rc62_kalshi_ws_errored_
 commands.py pins it. The same rule left a market whose ADD had run but been
 answered by error 18 waiting for an own snapshot that had gone (a liveness
 hole, now closed; a re-add refused by 18 is retried later like 27).
+
+(Round 5, blocking, found by this model's own liveness property at fresh
+seeds, past the CI ones: D-910795, D-921381, D-930151, D-931845, and 910795
+/ 914069 with the executed-error behaviours off) three holes, each
+pre-existing and fail closed -- a market the venue held and streamed left
+AWAITING_SNAPSHOT or GAP (R_NOT_HELD_BY_VENUE) for the session: an add
+queued behind an unanswered delete expected its own snapshot as if the
+delete took effect first (E1) -- refused or lost, the delete leaves the
+market held, the add is "no action" and the snapshot never comes; a delete
+whose reply never came was never timed out and kept its market out of
+_refuse when the add behind it was answered by an error; and the gap re-add
+of a market whose add was unanswered shared a command with another market,
+whose error 26 hid that the venue held it. tests/test_rc62_kalshi_ws_lost_
+replies.py pins each directed; test_the_round_5_seeds_end_live pins the
+seeds; the sims now also lose replies without (sid, seq) silently, which
+found a fourth, of the same kind: a get_snapshot refused by an error that
+never arrived left its books waiting for ever (D-951069) -- it is now asked
+again REPLY_TIMEOUT_S after the request, within the per-market bounds.
 
 MUTATION CHECK (offline, scratch script; each mutant of the client must be
 caught): RC6.1's `ok` that never advances the sequence (P2, D), no
@@ -1714,7 +1744,7 @@ class SubscriberSim:
     the oracle after every event."""
 
     def __init__(self, seed, *, variant=D, faults, chaos_steps=400,
-                 max_disconnects=3):
+                 max_disconnects=3, exec_errors=True, silent_loss=True):
         self.seed, self.variant, self.faults = seed, variant, faults
         self.rng = r = random.Random("%s-%d" % (variant, seed))
         self.chaos_steps = chaos_steps
@@ -1762,6 +1792,21 @@ class SubscriberSim:
             "delete_markets": rx.uniform(0.25, 0.7) if erroring else 0.0,
             "add_markets": rx.uniform(0.05, 0.25) if erroring else 0.0,
             "get_snapshot": rx.uniform(0.05, 0.25) if erroring else 0.0}
+        if not exec_errors:
+            # (round 5) the executed-error behaviours off (the round-4
+            # review's runs "with exec errors off"): the draws above are
+            # made all the same, so every other behaviour of the seed is
+            # the one it has with them on
+            self.p_exec_err = {k: 0.0 for k in self.p_exec_err}
+        # (round 5) replies the venue never delivers and that carry no
+        # (sid, seq): a lost error without one shows no hole in the
+        # sequence -- only the client's reply timeout and the order of the
+        # replies that do come (C2) can notice it. From a generator of its
+        # own, so the scenarios of every other seed are those the earlier
+        # rounds pinned until such a frame is lost
+        rs = self.rng_s = random.Random("%s-silent-loss-%d" % (variant, seed))
+        self.p_silent_loss = (rs.uniform(0.1, 0.4) if (
+            faults and silent_loss and rs.random() < 0.6) else 0.0)
         self.truth = {t: {"yes": {Decimal("0.4%d" % k): Decimal(10 + k)},
                           "no": {Decimal("0.5%d" % k): Decimal(20 + k)}}
                       for k, t in enumerate(SMARKETS)}
@@ -1826,6 +1871,8 @@ class SubscriberSim:
                        # that took them, a get_snapshot whose snapshots went
                        "err_exec_delete": 0, "err_exec_add": 0,
                        "err_exec_get_snapshot": 0,
+                       # (round 5) replies without (sid, seq) never delivered
+                       "ctrl_lost_silent": 0,
                        # a market the venue holds but the client gave up on
                        # (see _quiescence): measured, not required
                        "liveness_budget_spent": 0}
@@ -2346,6 +2393,12 @@ class SubscriberSim:
                 m.get("seq") is not None and r.random() < self.p_ctrl_loss:
             self.counts["ctrl_lost"] += 1
             return None
+        if kind == "ctrl" and not calm and m.get("seq") is None and \
+                self.p_silent_loss and \
+                self.rng_s.random() < self.p_silent_loss:
+            # (round 5) a reply without (sid, seq) never arrives
+            self.counts["ctrl_lost_silent"] += 1
+            return None
         if kind == "ctrl" and not calm and self.faults and \
                 m.get("seq") is not None:
             # (round 3) the venue duplicates or replays a control frame (a
@@ -2462,7 +2515,9 @@ class SubscriberSim:
         """O(markets x connections + gaps + refreshes): per connection one
         subscribe, ceil(M / 2) adds (chunks of two) and one re-add per
         market; per gap ceil(M / 2) get_snapshots (one recovery, the same
-        chunks); per refresh one delete or add or get_snapshot. (RC6.2
+        chunks); per refresh one delete or add or get_snapshot ((round 5) a
+        want two: its add and the get_snapshot its confirming `ok` asks
+        for when a delete was in flight). (RC6.2
         review) That bound is unchanged; on top of it, each documented
         venue behaviour the old venue never showed is allowed exactly its
         own price, so a seed without them meets the old bound: an add
@@ -2478,7 +2533,11 @@ class SubscriberSim:
         c, st = self.counts, self.books.stats
         return (self.connections * per_conn
                 + st["gaps"] * -(-m // 2)
-                + c["drops"] + c["rewants"]
+                # (round 5) a drop costs its delete; a want its add and --
+                # an add queued behind a delete in flight expects no
+                # snapshot of its own -- the get_snapshot its confirming
+                # `ok` asks for
+                + c["drops"] + 2 * c["rewants"]
                 + 2 * (c["refused_26"] + c["refused_27"]) + c["not_taken"]
                 + 2 * st["readd_after_gap"] + st["snapshots_not_held"]
                 # (round 3) a refused delete -> its one later retry
@@ -2561,6 +2620,42 @@ def test_the_subscriber_against_the_model_venue(variant):
     if variant in SEPARATE_COUNTERS:
         # (round 3) the separate counter's unasked frame (C1)
         assert total["unasked"] > 0
+
+
+#: (round 5) the seeds the round-4 review found D's liveness property failing
+#: at past the CI ones (fail closed, never stale): the sim as the review ran
+#: it ("old": no silent reply loss), the sim now, and -- 910795 / 914069 --
+#: with the executed-error behaviours off
+ROUND5_SEEDS = (910795, 921381, 930151, 931845)
+ROUND5_SEEDS_NO_EXEC_ERRORS = (910795, 914069)
+
+
+@pytest.mark.parametrize("silent_loss", [False, True])
+@pytest.mark.parametrize("seed", ROUND5_SEEDS)
+def test_the_round_5_seeds_end_live(seed, silent_loss):
+    """fails on 8e6911d1 with silent_loss=False (the review's runs): each
+    left a wanted market the venue holds AWAITING_SNAPSHOT / GAP at
+    quiescence. Under D every wanted market the venue holds ends CURRENT with
+    the venue's book."""
+    sim = SubscriberSim(seed, variant=D, faults=bool(seed % 2),
+                        silent_loss=silent_loss).run()
+    assert sim.violations == [], sim.violations[:3]
+    assert sim.done and sim.live
+
+
+@pytest.mark.parametrize("silent_loss", [False, True])
+@pytest.mark.parametrize("seed", ROUND5_SEEDS_NO_EXEC_ERRORS)
+def test_the_round_5_seeds_end_live_without_executed_errors(seed,
+                                                            silent_loss):
+    """The same, with the model venue's executed-then-errored behaviours
+    off (the review's second run): fails on 8e6911d1 with silent_loss=False
+    -- the holes were not the round-4 behaviours' doing."""
+    sim = SubscriberSim(seed, variant=D, faults=bool(seed % 2),
+                        exec_errors=False, silent_loss=silent_loss).run()
+    assert sim.violations == [], sim.violations[:3]
+    assert sim.done and sim.live
+    assert sim.counts["err_exec_delete"] == sim.counts["err_exec_add"] == \
+        sim.counts["err_exec_get_snapshot"] == 0
 
 
 # ── (c) the scripted Subscriber tests, re-run under the oracle ──────────

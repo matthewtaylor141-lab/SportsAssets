@@ -160,10 +160,12 @@ venue HOLDS the market on the sid by its own replies, with nothing naming
 the market unanswered: held from our subscribe's `subscribed` (every market
 it named -- assumption H0: `subscribed` means the venue took them all),
 then by every add / delete reply -- the `ok`'s msg.market_tickers is the
-full list after that command and settles every command up to it (an `ok`
-with no list settles its own command: assumption H1, an add answered `ok`
-took its markets). AN ERROR SAYS NOTHING ABOUT MEMBERSHIP (round 4; see
-below). A snapshot of a
+full list after that command and settles every command up to it
+(assumption H2: the venue runs a subscription's commands in the order it
+got them, so the list reflects them all; an `ok` with no list settles its
+own command: assumption H1, an add answered `ok` took its markets). AN
+ERROR SAYS NOTHING ABOUT MEMBERSHIP (round 4), AND NEITHER DOES SILENCE
+(round 5); see below. A snapshot of a
 market not held is in the sequence and never applied (snapshots_not_held);
 get_snapshot names only held markets; a held book the list lacks is GAP
 (R_NOT_HELD_BY_VENUE); a market whose add or re-add a reply confirms gets
@@ -210,8 +212,48 @@ is deleted again RATE_LIMIT_RETRY_S later (MAX_RATE_LIMIT_RETRIES a
 session); an add refused by 18 or 27 is retried later after its one re-add
 (RETRY_LATER_ERROR_CODES). Errors still count, end a subscription only when
 they are 10 / 25, and carry (sid, seq) into the sequence rule as before.
-The assumptions the membership rule rests on are H0 and H1 above and no
-other: not E0.
+The assumptions the membership rule rests on are named: H0 and H1 above,
+H2 (the full-list `ok` reflects every earlier command of the subscription)
+and C2 (the venue answers a subscription's commands in the order it got
+them: a reply to a LATER command, with a delete of ours before it still
+unanswered, means that reply was lost -- round 5, below); not E0, and not
+"a delete in flight will run" (E1, refused in round 5).
+
+NO SILENCE IS EVIDENCE EITHER (round 5, the acceptance model's liveness
+property at fresh seeds: D-910795, D-921381, D-930151, D-931845). Round 4
+stopped reading an error as "the command did not run" but still read
+silence as "a delete in flight WILL run" (assumption E1, never named):
+  * an add queued behind an unanswered delete expected the market's own
+    snapshot, as if the delete took effect first. Refused, or never run, or
+    its reply lost, the delete leaves the market held, the add is "no
+    action", its `ok` lists the market and no snapshot follows -- the book
+    waited for ever. Such an add expects nothing of its own: its confirming
+    `ok` asks for the snapshot (one get_snapshot, the price of the
+    assumption).
+  * a delete whose reply never came was never timed out (the reply timeout
+    covered adds), and when the add behind it was answered by an error the
+    older delete kept the market out of `_refuse`: no re-add, no retry, no
+    mark. Now a delete unanswered REPLY_TIMEOUT_S, or unanswered when a
+    reply to a later command of the subscription arrives (C2), has lost its
+    reply, and is settled like an errored one: its markets are not held and
+    UNSURE, a wanted one is refused (GAP) and re-added alone, a dropped one
+    the venue may hold is deleted again (bounded). A late reply of a timed
+    out delete is still the venue's word (it settles what it says).
+  * a get_snapshot whose snapshots never came (refused by an error that
+    carried no id or never arrived, or never run) left its books waiting
+    for ever: nothing on the sid shows the loss. REPLY_TIMEOUT_S after the
+    request it is asked again, within the per-market request bounds (the
+    third request of a market without a snapshot ends the session by name,
+    ResubscribeStorm).
+  * a market the venue may hold (UNSURE: an add or delete of it answered by
+    an error or never, or an add replaced at a gap) is ADDED ALONE
+    wherever it was queued from -- the gap re-add put it in a chunk with
+    another market and error 26 for that one refused the whole command,
+    hiding that the venue held this one (its single refusal re-add spent,
+    26 never retried: GAP, streamed, for the session). At most
+    MAX_SOLO_ADDS_PER_BURST markets a burst go alone (the command rate);
+    the rest go in chunks, and a chunk refused as a whole re-adds its
+    markets alone.
 
 SNAPSHOTS ARE IN THE SEQUENCE TOO (RC6 red-team, replay). Kalshi: seq is
 "used for snapshot/delta consistency". A replayed or out-of-order snapshot
@@ -328,6 +370,12 @@ MAX_READDS_PER_MARKET = 2
 #: rate window would be refused again)
 RATE_LIMIT_RETRY_S = 30.0
 MAX_RATE_LIMIT_RETRIES = 3
+#: (round 5) markets re-added each ALONE in one burst, at most (a market the
+#: venue may hold already is added alone so that one refusal of a whole
+#: command -- error 26 -- cannot hide it; a gap with hundreds of unanswered
+#: adds must not become hundreds of commands: the rest go in chunks, and a
+#: whole-command refusal of a chunk re-adds its markets alone, one by one)
+MAX_SOLO_ADDS_PER_BURST = 25
 #: (RC6.2 review) an add / delete the venue has not answered this long after
 #: it was sent: its reply is taken as lost, as at a gap (a market the venue
 #: then holds nothing for sends no frame that could reveal the loss)
@@ -351,6 +399,10 @@ UNSUBSCRIBED = "UNSUBSCRIBED"
 #: control-frame sequence modes of one acknowledged subscription
 SHARED = "SHARED"
 SEPARATE = "SEPARATE"
+
+#: (round 5) the reply type _settle reads for an add / delete whose reply
+#: never came (taken as lost): like an error, it says nothing about the venue
+LOST = "lost"
 
 R_SEQ_GAP = "KALSHI_WS_SEQUENCE_GAP"
 R_DISCONNECT = "KALSHI_WS_DISCONNECTED"
@@ -534,7 +586,10 @@ class WsBooks:
                       "control_replayed": 0, "control_seq_shared_again": 0,
                       # (round 4) errors answering our add / delete: the
                       # venue's membership after them is unknown (UNSURE)
-                      "membership_unknown_after_error": 0}
+                      "membership_unknown_after_error": 0,
+                      # (round 5) the same for an add / delete whose reply
+                      # never came
+                      "membership_unknown_after_lost_reply": 0}
         self.resubscribe: set = set()
         #: (RC6 acceptance model) sid -> the HIGHEST seq of a delta seen on
         #: a sid not acknowledged as ours, before its first snapshot: not its
@@ -979,13 +1034,15 @@ class WsBooks:
     def _pending_add(a, t) -> bool:
         return any(act == "add_markets" for _c, act in a["pend"].get(t, ()))
 
-    def _settle(self, a, sid, cid, typ, m, code=None) -> None:
+    def _settle(self, a, sid, cid, typ, m, code=None, *,
+                keep: bool = False) -> None:
         """The venue's reply (`ok` / `error`) to our add / delete `cid`.
         The `ok` carries the subscription's FULL ticker list after the
         update (asyncapi OK Response, msg.market_tickers): every market's
         state after `cid` is known -- held exactly when listed -- and every
-        command up to `cid` is reflected in it. An `ok` without a list
-        speaks for its own command (an add held its markets, a delete
+        command up to `cid` is reflected in it (H2: the venue runs a
+        subscription's commands in the order it got them). An `ok` without a
+        list speaks for its own command (an add held its markets, a delete
         removed them).
 
         (Round 4) AN ERROR SAYS NOTHING ABOUT MEMBERSHIP. No error code is
@@ -1002,18 +1059,46 @@ class WsBooks:
         market not already held UNSURE (an add never removes a market). The
         command is just no longer pending (so a refused re-add of a market
         whose earlier add the venue confirmed leaves it held). Each command
-        is settled once: a repeated reply is ignored."""
-        info = a["cmds"].pop(cid, None) if type(cid) is int else None
+        is settled once: a repeated reply is ignored.
+
+        (Round 5) NO SILENCE IS EVIDENCE EITHER. A command whose reply never
+        came (`LOST`: its reply was taken as lost at REPLY_TIMEOUT_S, or a
+        reply to a LATER command of ours came -- assumption C2, the venue
+        answers a subscription's commands in the order it got them -- while
+        it was still unanswered) is read exactly like an error: its effect
+        is unknown. A delete whose reply never came used to stay pending for
+        ever: the market was not held, and the follow-up add, answered by an
+        error behind it, never reached _refuse (an older command was left),
+        so nothing re-added the market or retried it; an add behind it that
+        found the market held ("no action") waited for a snapshot of its own
+        that never came. `keep`: the command stays known (a LATE reply of it
+        is still the venue's word and settles what it says)."""
+        info = (a["cmds"].get(cid) if keep else a["cmds"].pop(cid, None)) \
+            if type(cid) is int else None
         if info is None:
             return
         action, ts = info
         msg = m.get("msg") if isinstance(m.get("msg"), dict) else {}
         listed = msg.get("market_tickers") if typ == "ok" else None
+        failed = typ in ("error", LOST)
         if isinstance(listed, list):
             on = set(listed)
             touched = set(a["known"]) | set(a["pend"]) | on
+            # the list reflects every command up to cid: an earlier one
+            # whose own reply never came needs none
+            for y in [c for c in a["cmds"] if c < cid]:
+                del a["cmds"][y]
         else:
             touched = set(ts)
+            if typ != LOST:
+                # (round 5, C2) a reply to cid with a DELETE of ours before
+                # it unanswered: that reply was lost. (An add's lost reply
+                # is the gap re-add's and the reply timeout's, as before: a
+                # market added again and refused again by the venue must
+                # not spend its refusal re-add on a reply merely late.)
+                for y in [c for c in a["cmds"] if c < cid
+                          and a["cmds"][c][0] == "delete_markets"]:
+                    self._settle(a, sid, y, LOST, {})
         for t in sorted(touched):
             was = self._held(a, t)
             p = a["pend"].get(t, [])
@@ -1027,16 +1112,17 @@ class WsBooks:
                 if typ == "ok" and a["known"].get(t, (-1, False))[0] <= cid:
                     a["known"][t] = (cid, action == "add_markets")
                     a["unsure"].discard(t)
-                elif typ == "error" and cid in (x[0] for x in p):
-                    self._unknown_effect(a, t, cid, action)
+                elif failed and cid in (x[0] for x in p):
+                    if self._unknown_effect(a, t, cid, action):
+                        self.stats["membership_unknown_after_" + (
+                            "lost_reply" if typ == LOST else "error")] += 1
             answered = len(left) != len(p)
             if left:
                 a["pend"][t] = left
-                if answered and typ == "error" and \
-                        action == "delete_markets":
-                    # our delete answered by an error: it may or may not
-                    # have run, so the add after it may find t held --
-                    # "no action", no snapshot of its own -- or take it:
+                if answered and failed and action == "delete_markets":
+                    # our delete answered by an error, or never: it may or
+                    # may not have run, so the add after it may find t held
+                    # -- "no action", no snapshot of its own -- or take it:
                     # its own snapshot is not to be waited for (its
                     # confirmation asks for one by get_snapshot)
                     a["expect"].pop(t, None)
@@ -1048,29 +1134,31 @@ class WsBooks:
             elif not now and not left and (was or answered):
                 self._refuse(a, sid, t, code if typ == "error" else None)
 
-    def _unknown_effect(self, a, t, cid, action) -> None:
-        """(Round 4) Our add / delete `cid` of t was answered by an ERROR:
-        what the venue holds is unknown (see _settle). A later reply that
-        already spoke about t stands (`known` carries the command id it
-        speaks for). A delete: t is no longer known held, and may or may not
-        be on the subscription. An add: a market not known held may be on
-        the subscription now (an add of a held market changes nothing).
-        Either way t is UNSURE: not held, so no snapshot of it is applied
-        and no get_snapshot names it, until a reply with the full list
-        settles it; wanted again it is added ALONE (an add of a held market
-        is "no action", answered by an `ok` listing it; of one not held, it
-        takes it and sends its own snapshot) and its confirmation asks for a
-        snapshot (no own snapshot is expected for an unsure market)."""
+    def _unknown_effect(self, a, t, cid, action) -> bool:
+        """(Round 4) Our add / delete `cid` of t was answered by an ERROR --
+        (round 5) or its reply never came: what the venue holds is unknown
+        (see _settle). A later reply that already spoke about t stands
+        (`known` carries the command id it speaks for). A delete: t is no
+        longer known held, and may or may not be on the subscription. An
+        add: a market not known held may be on the subscription now (an add
+        of a held market changes nothing). Either way t is UNSURE: not held,
+        so no snapshot of it is applied and no get_snapshot names it, until
+        a reply with the full list settles it; wanted again it is added
+        ALONE (an add of a held market is "no action", answered by an `ok`
+        listing it; of one not held, it takes it and sends its own snapshot)
+        and its confirmation asks for a snapshot (no own snapshot is
+        expected for an unsure market). True when t was marked."""
         k = a["known"].get(t)
         if k is not None and k[0] > cid:
-            return
+            return False
         if action == "delete_markets":
             a["known"][t] = (cid, False)
             a["unsure"].add(t)
-            self.stats["membership_unknown_after_error"] += 1
-        elif k is None or not k[1]:
+            return True
+        if k is None or not k[1]:
             a["unsure"].add(t)
-            self.stats["membership_unknown_after_error"] += 1
+            return True
+        return False
 
     def _confirm(self, a, sid, t, cid) -> None:
         """The venue holds t on the subscription (settled by the reply to
@@ -1145,14 +1233,24 @@ class WsBooks:
         REPLY_TIMEOUT_S: its reply is taken as lost, as at a gap -- every
         market still waiting on it is named for a re-add (`readd_lost`) and
         no longer expects the add's own snapshot; returns them. (A late
-        reply is still the venue's word: it settles what it says. A delete
-        whose reply is lost stays unanswered: until a later reply settles
-        it the market is not held.)"""
+        reply is still the venue's word: it settles what it says.)
+
+        (Round 5) A DELETE whose reply is lost is settled like one answered
+        by an error (WsBooks._settle, LOST): its markets are not held and
+        UNSURE until a reply with the full list says, and one wanted again
+        whose add is the only command left is refused (GAP, re-added). It
+        used to stay unanswered for ever. Returns [] (a delete has no
+        re-add budget; the subscriber retries a dropped market's delete)."""
         a = self.anchors.get(sid)
         if a is None or a["ended"]:
             return []
         info = a["cmds"].get(cid)
-        if info is None or info[0] != "add_markets":
+        if info is None:
+            return []
+        if info[0] == "delete_markets":
+            self._settle(a, sid, cid, LOST, {}, keep=True)
+            return []
+        if info[0] != "add_markets":
             return []
         out = []
         for t in info[1]:
@@ -1596,12 +1694,16 @@ class WsBooks:
             a["cmds"].pop(next(iter(a["cmds"])))
         for t in tickers:
             p = a["pend"].setdefault(t, [])
-            # an add expects the market's own snapshot when the venue will
-            # not hold it before the add: not known held with nothing in
-            # flight, or our delete goes first
-            fresh = (p[-1][1] == "delete_markets") if p else (
-                not a["known"].get(t, (0, False))[1]
-                and t not in a["unsure"])
+            # an add expects the market's own snapshot only when nothing of
+            # ours naming the market is in flight and the venue is not known
+            # to hold it. (Round 5) An add queued behind an unanswered DELETE
+            # used to count too ("the delete takes effect first"): a delete
+            # in flight is not assumed to run. Refused, or its reply lost,
+            # the add finds the market held -- "no action", no snapshot of
+            # its own, and its `ok` found the book waiting for ever (the
+            # confirmation now asks for the snapshot: one get_snapshot).
+            fresh = not p and not a["known"].get(t, (0, False))[1] \
+                and t not in a["unsure"]
             p.append((cid, action))
             a["unheld_snap"].discard(t)
             a["expect"].pop(t, None)
@@ -1977,6 +2079,10 @@ class Subscriber:
         #: (RC6.2 review) add / delete command id -> when it was sent (its
         #: reply's timeout, REPLY_TIMEOUT_S)
         self.sent_at: dict = {}
+        #: (round 5) market -> when the latest get_snapshot naming it was
+        #: sent, while its snapshot is outstanding (the reply timeout of a
+        #: get_snapshot: _reply_timeouts)
+        self.snap_at: dict = {}
         #: (RC6.2 review, round 3) delete_markets id -> the markets it named
         #: (until the venue answers it); a market whose delete the venue
         #: refused while it is still dropped -> when its delete is sent
@@ -1988,7 +2094,9 @@ class Subscriber:
         #: (round 3) markets to re-add ALONE: refused while the reply to an
         #: earlier add of them may have been lost (the venue may hold them;
         #: a refusal of the whole command -- error 26 -- for another market
-        #: named with them hid it)
+        #: named with them hid it). (Round 5) Every UNSURE market goes alone
+        #: whatever queued it (_commands), up to MAX_SOLO_ADDS_PER_BURST a
+        #: burst
         self.solo_readd: set = set()
         self._w_obj, self._w_len, self._w_ver, self._w_frames = \
             None, -1, -1, 0
@@ -2028,6 +2136,7 @@ class Subscriber:
         self.subscribed.difference_update(gone)
         for t in gone:
             self.unrecovered.pop(t, None)
+            self.snap_at.pop(t, None)
             if t in self.on_venue:
                 self.queued_delete.add(t)
         # an unanswered command no longer names them
@@ -2180,7 +2289,7 @@ class Subscriber:
                 elif not self.books.adding(sid, t):
                     self.queued_add.append(t)
             self.rewant = keep
-        if sid is not None and self.sent_at:
+        if sid is not None and (self.sent_at or self.snap_at):
             self._reply_timeouts(sid)
         if sid is not None:
             if self.delete_retry:
@@ -2226,8 +2335,19 @@ class Subscriber:
             # held is "no action", answered by `ok` with the full list -- a
             # refusal of the whole command for another market (error 26, the
             # market limit) can no longer hide that the venue holds it
-            solo = [t for t in adds if t in self.solo_readd]
-            self.solo_readd.difference_update(solo)
+            #
+            # (round 5) ANY market the venue may hold although no reply said
+            # so (UNSURE: an add or delete of it answered by an error, or
+            # never, or an add replaced at a gap) goes alone, wherever it
+            # was queued from -- the gap re-add put such a market in a chunk
+            # with another, and error 26 for the other hid that the venue
+            # held it (it stayed GAP, streamed, its one refusal re-add
+            # spent). At most MAX_SOLO_ADDS_PER_BURST a burst (the command
+            # rate); the rest go in chunks, and a chunk refused as a whole
+            # is re-added alone market by market (_readds).
+            solo = [t for t in adds if t in self.solo_readd
+                    or self.books.unsure(sid, t)][:MAX_SOLO_ADDS_PER_BURST]
+            self.solo_readd.difference_update(adds)
             rest = [t for t in adds if t not in solo]
             for c in [[t] for t in solo] + list(chunks(rest)):
                 # a drop during an earlier send in this burst
@@ -2272,6 +2392,9 @@ class Subscriber:
                     self.pending[cmd["id"]] = list(c)
                     self.books.bind(sid, c)
                     self.books.requested(sid, c)
+                    at = self.clock()
+                    for t in c:
+                        self.snap_at[t] = at
                     await self._send(ws, cmd, sid)
                     sent += 1
         if sent:
@@ -2298,6 +2421,9 @@ class Subscriber:
             # our one subscribe answered by anything but `subscribed`
             self.books.fatal = self.books.fatal or R_SUBSCRIBE_REFUSED
         out = self.books.on_message(m, recv_at=self.clock())
+        if typ in ("ok", "error") and type(cid) is int and \
+                self.cmd_kind.get(cid) in ("add_markets", "delete_markets"):
+            self._earlier_deletes_lost(cid)
         if typ == "ok":
             if type(cid) is int:
                 self.pending.pop(cid, None)
@@ -2360,6 +2486,12 @@ class Subscriber:
                 self.gap_readds[t] = n + 1
                 self.books.replace_add(self.sid, t)
                 self.readd.append(t)
+                if self.books.unsure(self.sid, t):
+                    # (round 5) replace_add marks it UNSURE: the venue may
+                    # hold it already (the lost reply an `ok`); re-added
+                    # alone, so that error 26 for another market in the same
+                    # command cannot hide it (_commands)
+                    self.solo_readd.add(t)
 
     def _reply_timeouts(self, sid) -> None:
         """(RC6.2 review) An add the venue has not answered REPLY_TIMEOUT_S
@@ -2367,7 +2499,9 @@ class Subscriber:
         nothing else would never show the loss) -- its markets are re-added
         within the gap re-add budget; a market whose budget is spent ends
         the session (ReplyTimeout: fail closed, the reconnect subscribes
-        afresh). Never a loop: each command times out once."""
+        afresh). Never a loop: each command times out once. (Round 5) A
+        delete's lost reply is settled like an errored one, and a
+        get_snapshot unanswered by its snapshots is asked again."""
         now = self.clock()
         open_ = self.books.unanswered(sid)
         for cid, at in list(self.sent_at.items()):
@@ -2381,6 +2515,29 @@ class Subscriber:
                 if self.gap_readds.get(t, 0) >= MAX_READDS_PER_MARKET:
                     self._end(ReplyTimeout, "%s unanswered %.0f s after its "
                               "re-adds" % (t, now - at))
+            if self.cmd_kind.get(cid) == "delete_markets":
+                # (round 5) a delete whose reply never came: settled by the
+                # books like an errored one (not held, UNSURE); a market
+                # still dropped that the venue may hold is deleted again
+                self._delete_refused(self.deleting.pop(cid, None) or [])
+        if self.snap_at:
+            # (round 5) a get_snapshot whose snapshot has not come
+            # REPLY_TIMEOUT_S after it was sent -- the venue refused it by
+            # an error that never arrived (or carried no id), or never ran
+            # it: nothing on the sid shows the loss, the book waited for
+            # ever. Asked again (the sid is intact), within the per-market
+            # request bounds: past them the session ends and the reconnect
+            # subscribes afresh.
+            awaited = self.books.awaiting(sid)
+            late = []
+            for t, at in list(self.snap_at.items()):
+                if t not in awaited:
+                    del self.snap_at[t]
+                elif now - at >= REPLY_TIMEOUT_S:
+                    del self.snap_at[t]
+                    late.append(t)
+            if late:
+                self.books.unrequest(sid, late)
         self._readds()
 
     def next_due(self):
@@ -2392,6 +2549,10 @@ class Subscriber:
             open_ = self.books.unanswered(self.sid)
             due += [at + REPLY_TIMEOUT_S for cid, at in self.sent_at.items()
                     if cid in open_]
+            if self.snap_at:
+                awaited = self.books.awaiting(self.sid)
+                due += [at + REPLY_TIMEOUT_S for t, at in self.snap_at.items()
+                        if t in awaited]
         return min(due) if due else None
 
     def _refused(self, cid, m: dict) -> None:
@@ -2416,6 +2577,16 @@ class Subscriber:
             self.books.unrequest(self.sid, [
                 t for t in named if t in self.books.books
                 and t not in self.books.forgotten])
+
+    def _earlier_deletes_lost(self, cid) -> None:
+        """(Round 5, C2) A reply to our add / delete `cid` came while a
+        delete of ours before it was unanswered: the venue answers a
+        subscription's commands in the order it got them, so that delete's
+        reply was lost. The books settled it like an errored one (UNSURE,
+        or listed by the reply's full list); a market still dropped that the
+        venue may hold is deleted again, as after a refused delete."""
+        for d in [k for k in self.deleting if k < cid]:
+            self._delete_refused(self.deleting.pop(d))
 
     def _delete_refused(self, tickers) -> None:
         """(RC6.2 review, round 3; round 4) Our delete_markets answered by an
