@@ -81,7 +81,7 @@ SELECT id, buy_intent, outcome, outcome_known, outcome_basis, outcome_at
  WHERE us_market_slug = (SELECT us_market_slug FROM paper_fills ORDER BY filled_at DESC LIMIT 1) AND outcome_basis IS NOT NULL
  ORDER BY id;
 
-\echo B1c the production cost of the ONE new batched read over every position's contract (OUTCOME_ROWS_SQL)
+\echo B1c the production cost of the ONE new batched read over the contracts of every position (OUTCOME_ROWS_SQL)
 EXPLAIN (ANALYZE, BUFFERS, TIMING OFF)
 SELECT id, us_market_slug, buy_intent, outcome, outcome_known, outcome_basis, outcome_at
   FROM external_valuations
@@ -296,7 +296,7 @@ SELECT count(*) AS shadows_total, count(o.shadow_id) AS settled_total, count(*) 
        to_char(max(o.settled_at), 'YYYY-MM-DD HH24:MI:SS') AS newest_settled_at
   FROM paper_shadow_counterfactuals s LEFT JOIN paper_shadow_counterfactual_outcomes o USING (shadow_id);
 
-\echo B5 the last pass: settle and shadow_settlement elapsed seconds and digests (heartbeat, then the health row's last_pass)
+\echo B5 the last pass: settle and shadow_settlement elapsed seconds and digests (heartbeat, then the health row last_pass)
 SELECT to_char(to_timestamp((value->>'written_at')::float8), 'YYYY-MM-DD HH24:MI:SS') AS hb_written, value->>'ran' AS ran, value->>'elapsed_s' AS pass_elapsed_s,
        value->'step_elapsed_s'->>'settle' AS settle_s, value->'step_elapsed_s'->>'shadow_settlement' AS shadow_settlement_s,
        left((value->'steps'->'settle')::text, 240) AS settle_digest, left((value->'steps'->'shadow_settlement')::text, 240) AS shadow_settlement_digest,

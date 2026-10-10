@@ -79,7 +79,7 @@ SELECT count(*) AS beats, count(*) FILTER (WHERE b->>'ok' = 'true') AS ok_beats,
        (SELECT string_agg(DISTINCT r2.b->>'slowest_step', ',') FROM ring r2) AS slowest_steps_seen
   FROM g;
 
-\echo C4 the newest attempt's heartbeat: ran, trigger, refusal, elapsed, cut step, skipped steps, error keys, in-flight step
+\echo C4 the heartbeat of the newest attempt: ran, trigger, refusal, elapsed, cut step, skipped steps, error keys, in-flight step
 SELECT to_char(to_timestamp((value->>'written_at')::float8), 'MM-DD HH24:MI:SS') AS written, to_char(to_timestamp((value->>'at')::float8), 'MM-DD HH24:MI:SS') AS pass_at,
        value->>'ran' AS ran, value->>'trigger' AS trigger, value->>'refusal' AS refusal, left(value->>'why', 160) AS why,
        value->>'elapsed_s' AS elapsed_s, value->>'exceeded_step' AS exceeded_step,
@@ -99,7 +99,7 @@ SELECT key AS step, value AS elapsed_s
 SELECT key, left(value::text, 300) AS error
   FROM jsonb_each(coalesce((SELECT value->'errors' FROM ingestion_state WHERE key = 'paper_session_last_pass'), '{}'::jsonb));
 
-\echo C7 the health row's own last_pass digest (must agree with C4 when the newest attempt ran): elapsed, cut, skipped, error keys, steps count
+\echo C7 the last_pass digest on the health row (must agree with C4 when the newest attempt ran): elapsed, cut, skipped, error keys, steps count
 SELECT to_char(heartbeat_at, 'MM-DD HH24:MI:SS') AS heartbeat_at, last_pass->>'elapsed_s' AS elapsed_s, last_pass->>'exceeded_step' AS exceeded_step,
        (SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(last_pass->'skipped_steps', '{}'::jsonb)) k) AS skipped,
        (SELECT string_agg(k, ',') FROM jsonb_object_keys(coalesce(last_pass->'errors', '{}'::jsonb)) k) AS error_keys,

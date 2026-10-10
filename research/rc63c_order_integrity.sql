@@ -73,8 +73,8 @@ SELECT 'all_time',
 SELECT 'paper_audrey_findings' AS src, kind, count(*) AS n, to_char(max(found_at), 'MM-DD HH24:MI:SS') AS newest
   FROM paper_audrey_findings WHERE found_at >= TIMESTAMPTZ '2026-10-10 18:00:00+00' GROUP BY 1, 2
 UNION ALL
-SELECT 'paper_hook_failures', coalesce(h.failure, h.kind, '?'), count(*), to_char(max(h.recorded_at), 'MM-DD HH24:MI:SS')
-  FROM (SELECT recorded_at, to_jsonb(x)->>'failure' AS failure, to_jsonb(x)->>'kind' AS kind FROM paper_hook_failures x WHERE recorded_at >= TIMESTAMPTZ '2026-10-10 18:00:00+00') h
+SELECT 'paper_hook_failures', coalesce(h.strategy, '-') || ' ' || coalesce(h.stage, '-') || ' ' || coalesce(h.outcome, '-'), count(*), to_char(max(h.recorded_at), 'MM-DD HH24:MI:SS')
+  FROM paper_hook_failures h WHERE h.recorded_at >= TIMESTAMPTZ '2026-10-10 18:00:00+00'
  GROUP BY 1, 2
 ORDER BY 1, 3 DESC;
 

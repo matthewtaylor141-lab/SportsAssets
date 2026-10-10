@@ -24,9 +24,12 @@
 --
 -- PLACEHOLDER. 2026-10-10 18:00:00+00 : the deploy instant (ISO timestamp with zone), e.g. 2026-10-10 18:00:00+00.
 --
--- PASS CRITERIA. E1: coverage_ratio = 1.0 for completed days (final versions) and today's newest version within
--- 900 s + one pass of the newest activity (or no activity since it); no AUDREY_DAY_NOT_RECONCILED finding after the
--- deploy. E2: every recomputed check true (fills_without_ledger_entry = 0, ledger_fill_entries_without_fill = 0,
+-- PASS CRITERIA. E1: coverage_ratio = 1.0 (every day with activity has a report); a completed day carries a FINAL
+-- version when it ended after day closing shipped (2026-10-09 is the first closed day; 2026-10-07 and 10-08 show
+-- COMPLETED_DAY_NOT_FINAL before AND after the deploy -- the documented deploy-time transient of the day-closing
+-- release, not an RC6.3c effect); the newest version of the current day within 900 s + one pass of the newest
+-- activity (or no activity since it); no AUDREY_DAY_NOT_RECONCILED finding after the deploy; the newest version of
+-- every day reconciles. E2: every recomputed check true (fills_without_ledger_entry = 0, ledger_fill_entries_without_fill = 0,
 -- cash_matches, settlements_match, running_balances_consistent). E3: open_handed_without_review_in_window = 0 for
 -- the AFTER window once it is longer than two passes (and the BEFORE window), open_without_any_review = 0,
 -- reviews_done > 0 whenever open_handed_groups > 0, and the AFTER rate per open group per minute comparable to
@@ -93,7 +96,7 @@ SELECT CASE WHEN found_at >= TIMESTAMPTZ '2026-10-10 18:00:00+00' THEN 'AFTER' E
   FROM paper_audrey_findings WHERE found_at >= TIMESTAMPTZ '2026-10-10 18:00:00+00' - interval '60 minutes'
  GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC LIMIT 30;
 
-\echo E2 AUDREY reconciliation recomputed now, per account (the report's checks on the whole ledger)
+\echo E2 AUDREY reconciliation recomputed now, per account (the checks of the report, on the whole ledger)
 WITH l AS (
   SELECT account_id, seq, kind, cash_delta_usd, reserved_delta_usd, cash_after_usd, reserved_after_usd, fill_id,
          lag(cash_after_usd) OVER (PARTITION BY account_id ORDER BY seq) AS prev_cash,
