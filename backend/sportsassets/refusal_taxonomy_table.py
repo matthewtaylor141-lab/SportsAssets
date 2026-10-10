@@ -22,6 +22,19 @@ FRESH, INT = "FRESHNESS_PLUMBING", "INTEGRITY"
 EDGE, EV, PRICE, DEPTH, RAIL = "EDGE", "EV", "PRICE", "DEPTH", "RISK_RAIL"
 
 TABLE = {
+    # (rc6.3 capability) why an assigned research review was not a genuine
+    # grounded review, by name (capability_work.incomplete_reason): the
+    # persona refused or the directive path answered instead (912 Audrey
+    # reviews REQUIRES_OPERATOR_CREDENTIAL in production), the model's answer
+    # was not used (its provider failure: HTTP_400 55 times, or a guard),
+    # no model is configured, the reply was interrupted, the persona errored,
+    # or an answer that cited no paper record or investigation item
+    "NO_GENUINE_GROUNDED_REVIEW": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_REFUSED": (S, CAP, "OUT_OF_FUNNEL"),
+    "REVIEW_MODEL_ANSWER_NOT_USED": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_MODEL_UNAVAILABLE": (S, CAP, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_INTERRUPTED": (S, DATA, "OUT_OF_FUNNEL"),
+    "REVIEW_PERSONA_ERROR": (S, INT, "OUT_OF_FUNNEL"),
     # (RC5, economic funnel F2/F3 2026-10-08) codes that reached production
     # records unclassified, so the funnel could not class its stopping
     # points: exploration sizing found no quantity at the best level
