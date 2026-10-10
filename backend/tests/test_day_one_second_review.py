@@ -11,6 +11,30 @@ from sportsassets import bettor_paper_day_one as E, bettor_paper_ledger as L, be
 # admission evidence for synthetic order creation. Risk assertions use no stub.
 PRODUCTION_FORWARD_ECONOMICS = CA.forward_economics
 
+
+async def _valuation(conn, *, cid: str, price: float, decided: float) -> int:
+    """A SYNTHETIC entry-experiment valuation, outcome unknown at insert
+    (the table's own prospective-only trigger), in the shape the entry
+    lane writes. Local copy: the release tree reverted the provenance
+    suite this helper was first written in."""
+    from sportsassets import bettor_external_shadow as ext
+    return await conn.fetchval(
+        "INSERT INTO external_valuations (experiment_id, version, "
+        " source_class, provider, book, devig_method, venue, condition_id, "
+        " us_market_slug, contract_selection, sport_family, market, period, "
+        " raw_odds, outcomes_priced, expected_outcomes, observed_at, "
+        " received_at, probability, executable_price, cost_per_contract, "
+        " decision, admissible, refusals, why, payout_event, buy_intent, "
+        " ladder_side, record_purpose, decided_at, event_key) "
+        "VALUES ($1,'PINNACLE_DEVIG_V1','EXTERNAL_BOOKMAKER_VALUATION',"
+        " 'the-odds-api.com/v4','pinnacle','power','PMUS',$2,$2,"
+        " 'HOME','baseball','h2h','FULL_GAME','{}'::jsonb,2,2,"
+        " to_timestamp($3 - 5),to_timestamp($3 - 4),0.55,$4,0.0175,"
+        " 'NO_TRADE', false, ARRAY['SYNTHETIC_RESEARCH_RECORD'],"
+        " 'synthetic test evidence','HOME','ORDER_INTENT_BUY_LONG','ASK',"
+        " 'ENTRY_DECISION',to_timestamp($3),'e-' || $2) RETURNING id",
+        ext.EXPERIMENT_ID, cid, float(decided), float(price))
+
 @pytest.mark.parametrize('second_epoch', [False, True])
 async def test_rolled_back_epoch_settlement_is_revised_by_production_pass(conn, second_epoch):
     child = await activate(conn, 'first')
@@ -23,7 +47,6 @@ async def test_rolled_back_epoch_settlement_is_revised_by_production_pass(conn, 
     await E.rollback(conn, epoch_id='first', request_id='rollback')
     selected = await activate(conn, 'second') if second_epoch else {'account_id': L.ACCOUNT_ID}
     from sportsassets.agents import paper_xavier as X
-    from tests.test_rc6_provenance_refuses_after_change import _valuation
     vid = await _valuation(conn, cid=order['us_market_slug'], price=.5, decided=H.T0)
     await conn.execute('UPDATE external_valuations SET outcome=1,outcome_known=true,outcome_basis=$2,outcome_at=now() WHERE id=$1', vid, next(iter(X.LABEL_BASES)))
     ctx = await account(conn, selected['account_id'])
@@ -122,7 +145,6 @@ async def test_archived_policy_variant_losses_settle_in_production_pass(conn, ro
     from sportsassets import bettor_paper_profitability_stack as P
     from sportsassets.agents import paper_xavier as X
     from tests.test_profitability_stack_binding import bind, _ev, CG
-    from tests.test_rc6_provenance_refuses_after_change import _valuation
     source = await activate(conn, 'variant-source') if rolled_back else {'account_id': L.ACCOUNT_ID}
     slug = 'test-archived-policy-variant'
     now = time.time()

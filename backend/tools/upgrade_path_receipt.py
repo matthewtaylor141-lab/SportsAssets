@@ -234,8 +234,7 @@ def compatibility(before: dict, after: dict) -> dict:
                 ("triggers", R_TRIGGER_ADDED, R_TRIGGER_CHANGED)):
             for name, d in sorted(a[kind].items()):
                 if name not in b[kind]:
-                    if kind == "triggers" and (name in a.get("proven_dormant_epoch_triggers", [])
-                            or name in a.get("proven_metadata_only_triggers", [])):
+                    if kind == "triggers" and name in a.get("proven_dormant_epoch_triggers", []):
                         continue
                     unproven.append("%s:%s:%s" % (added, t, name))
                 elif b[kind][name] != d:
@@ -293,41 +292,6 @@ WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p')
 """
 
 
-# Reviewed migration 365 sidecar: AFTER triggers return NULL and only move
-# the new research counter/GUC. They do not reject or rewrite an old row.
-# Exact catalog hashes bind that limited proof; a name alone is insufficient.
-_RESEARCH_COUNTER_BODY_SHA = "09416cd23cfd0e4c69392cb60d1e075faf6fc2bb680b4ca22257b29e8e7a8986"
-_RESEARCH_COUNTER_SCHEMA_SHA = "5db1773d417b1290cc1cfc97a7847c50d1300173b381d7f8dabf44d1fef3ce0c"
-_RESEARCH_COUNTER_TRIGGERS = {
-    "research_training_set_observation_changed": ("derek_research_observations", "DELETE OR UPDATE", "ROW", ""),
-    "research_training_set_observations_truncated": ("derek_research_observations", "TRUNCATE", "STATEMENT", ""),
-    "research_training_set_valuation_changed": ("external_valuations", "DELETE OR UPDATE", "ROW", " WHEN (old.outcome_known)"),
-    "research_training_set_valuations_truncated": ("external_valuations", "TRUNCATE", "STATEMENT", ""),
-    "research_training_set_model_changed": ("bettor_funded_models", "DELETE OR UPDATE OF training_provenance, params, features, model_key, model_id, estimator, kernel", "ROW", ""),
-    "research_training_set_models_truncated": ("bettor_funded_models", "TRUNCATE", "STATEMENT", ""),
-}
-
-
-async def _prove_research_counter_sidecar(conn, out):
-    sidecar = out.get("research_training_set_changes")
-    if sidecar is None or hashlib.sha256(json.dumps(sidecar, sort_keys=True,
-            separators=(",", ":")).encode()).hexdigest() != _RESEARCH_COUNTER_SCHEMA_SHA:
-        return
-    guards = await conn.fetch("SELECT c.relname AS t, g.tgname AS name, pg_get_triggerdef(g.oid) AS definition, p.prosrc, p.prosecdef, p.proconfig, l.lanname, g.tgenabled::text AS tgenabled FROM pg_trigger g JOIN pg_class c ON c.oid=g.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=g.tgfoid JOIN pg_namespace pn ON pn.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname='public' AND pn.nspname='public' AND p.proname='research_training_set_changed' AND NOT g.tgisinternal")
-    for g in guards:
-        spec = _RESEARCH_COUNTER_TRIGGERS.get(g['name'])
-        if spec is None:
-            continue
-        table, events, level, condition = spec
-        expected = ("CREATE TRIGGER %s AFTER %s ON public.%s FOR EACH %s%s EXECUTE FUNCTION research_training_set_changed()"
-                    % (g['name'], events, table, level, condition))
-        if (g['t'] == table and g['definition'] == expected
-                and hashlib.sha256(g['prosrc'].encode()).hexdigest() == _RESEARCH_COUNTER_BODY_SHA
-                and not g['prosecdef'] and g['proconfig'] is None
-                and g['lanname'] == 'plpgsql' and g['tgenabled'] == 'A'):
-            out[table].setdefault('proven_metadata_only_triggers', []).append(g['name'])
-
-
 async def snapshot(conn) -> dict:
     out = {}
     for r in await conn.fetch(SNAPSHOT_SQL):
@@ -351,7 +315,6 @@ async def snapshot(conn) -> dict:
             exact_definition = "CREATE TRIGGER %s BEFORE INSERT ON public.%s FOR EACH ROW EXECUTE FUNCTION %s()" % (guard['name'], guard['t'], guard['proname'])
             if expected and body == guard['prosrc'] and early_return in body and guard['definition'] == exact_definition and not guard['prosecdef'] and guard['proconfig'] is None:
                 out[guard['t']].setdefault('proven_dormant_epoch_triggers', []).append(guard['name'])
-    await _prove_research_counter_sidecar(conn, out)
     return out
 
 

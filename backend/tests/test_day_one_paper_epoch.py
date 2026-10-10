@@ -572,35 +572,3 @@ async def test_malformed_epoch_policy_ancestry_fails_closed(monkeypatch,fault):
     assert not gate['ok'] and gate['size_factor']==0
     assert gate['refusal']==LC.R_LIFECYCLE_UNREADABLE
 
-
-@pytest.mark.parametrize('mutation',['body','context','sidecar_schema','trigger'])
-async def test_upgrade_counter_proof_requires_exact_side_effects(conn,mutation):
-    from tools import upgrade_path_receipt as UP
-    original=await UP.snapshot(conn)
-    assert len(original['external_valuations']['proven_metadata_only_triggers'])==2
-    if mutation=='body':
-        await conn.execute("CREATE OR REPLACE FUNCTION research_training_set_changed() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'not a metadata sidecar'; RETURN NULL; END;$$")
-    elif mutation=='context':
-        await conn.execute('ALTER FUNCTION research_training_set_changed() SECURITY DEFINER')
-    elif mutation=='sidecar_schema':
-        await conn.execute("ALTER TABLE research_training_set_changes ADD CONSTRAINT unknown_counter_check CHECK (changes < 100)")
-    else:
-        await conn.execute('DROP TRIGGER research_training_set_valuation_changed ON external_valuations')
-        await conn.execute('CREATE TRIGGER research_training_set_valuation_changed AFTER INSERT ON external_valuations FOR EACH ROW EXECUTE FUNCTION research_training_set_changed()')
-    changed=await UP.snapshot(conn)
-    assert 'research_training_set_valuation_changed' not in changed['external_valuations'].get('proven_metadata_only_triggers',[])
-
-
-async def test_old_model_writes_and_refusals_stay_unchanged_with_counter_sidecar(conn):
-    before=await L.cash_state(conn,L.ACCOUNT_ID)
-    stamp=await conn.fetchval("SELECT changes FROM research_training_set_changes WHERE scope='DEREK_RESEARCH_TRAINING_SET'")
-    await conn.execute("INSERT INTO bettor_funded_models(model_id,model_key,model_version,kernel,estimator,features,params,fit_through,train_rows) VALUES('epoch-compat-model','epoch-compat-model','synthetic','synthetic','synthetic',ARRAY['x'],'{\"probe\":1}',now(),1)")
-    await conn.execute("UPDATE bettor_funded_models SET evaluation='{\"probe\":2}' WHERE model_id='epoch-compat-model'")
-    row=await conn.fetchrow("SELECT * FROM bettor_funded_models WHERE model_id='epoch-compat-model'")
-    assert json.loads(row['params'])=={'probe':1} and json.loads(row['evaluation'])=={'probe':2} and row['state']=='CANDIDATE'
-    assert row['model_key']=='epoch-compat-model' and row['features']==['x']
-    assert await conn.fetchval("SELECT changes FROM research_training_set_changes WHERE scope='DEREK_RESEARCH_TRAINING_SET'")==stamp
-    with pytest.raises(asyncpg.exceptions.RaiseError):
-        async with conn.transaction():
-            await conn.execute("UPDATE bettor_funded_models SET params='{\"probe\":3}' WHERE model_id='epoch-compat-model'")
-    assert await L.cash_state(conn,L.ACCOUNT_ID)==before
