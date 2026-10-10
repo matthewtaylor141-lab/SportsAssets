@@ -2791,3 +2791,14 @@ ECON_BINDING_STREAM = {
 }
 for _k, _v in ECON_BINDING_STREAM.items():
     TABLE.setdefault(_k, _v)
+
+#: (rc6.3 pr5-port) THE DAY ONE EPOCH ON THE RELEASE TREE. An operator's
+#: PAPER account switch (activation or rollback, bettor_paper_day_one) that
+#: could not write the outgoing account's Audrey report is refused whole
+#: (nothing moves): a report the software failed to write is SOFTWARE /
+#: INTEGRITY, out of the trading funnel (an operator action, no order).
+DAY_ONE_PORT_STREAM = {
+    "PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED": (S, INT, "OUT_OF_FUNNEL"),
+}
+for _k, _v in DAY_ONE_PORT_STREAM.items():
+    TABLE.setdefault(_k, _v)

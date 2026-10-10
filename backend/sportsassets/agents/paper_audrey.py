@@ -733,10 +733,84 @@ async def close_days(conn, *, session: dict, account_id: str,
     return out
 
 
+#: why a family account's day close could not run (its session is absent):
+#: a reporting state, the pass is not failed for it
+FAMILY_SESSION_UNAVAILABLE = "PAPER_ARCHIVE_SESSION_UNAVAILABLE"
+
+
+async def write_switch_version(conn, *, account_id: str, at: float) -> dict:
+    """THE OUTGOING ACCOUNT'S REPORT AT A PAPER SELECTOR SWITCH.
+
+    After an activation or a rollback the paper pass runs this step only for
+    the newly selected account, so the outgoing account's day would keep its
+    last REPORT_EVERY_S version and miss everything recorded after it (a
+    late settlement, its last realized loss) -- in no Audrey report at all.
+    The switch (bettor_paper_day_one, under the PAPER lock and the account's
+    own lock, before the selector moves) therefore does for the outgoing
+    session what step() does at a pass: close every reported day that is
+    over, then write the version of its current day as far as the later of
+    the switch instant and the account's last fill or ledger entry --
+    everything recorded on the account up to the switch. That version is an
+    intra-day one (never final); the day's ONE final version is written once
+    the day is over by the selected account's step (close_family_days)."""
+    from .. import bettor_paper_session as S
+    session = await S.active_session(conn, account_id)
+    if session is None:
+        raise ValueError(FAMILY_SESSION_UNAVAILABLE + ":" + account_id)
+    last = await conn.fetchval(
+        "SELECT greatest((SELECT max(filled_at) FROM paper_fills "
+        "                  WHERE account_id=$1), "
+        "                (SELECT max(committed_at) FROM paper_ledger "
+        "                  WHERE account_id=$1))", account_id)
+    now = max(float(at), L._epoch(last) or 0.0)
+    closing = await close_days(conn, session=session, account_id=account_id,
+                               closed_at=now)
+    held = bool(closing) and not closing[-1].get("final")
+    rep = None if held else await write_report(
+        conn, session=session, account_id=account_id, now=now)
+    return {"account_id": account_id, "session_id": session["session_id"],
+            "at": now, "closing": closing,
+            "report_held": "CLOSING_VERSION_NOT_STORED" if held else None,
+            "report": None if rep is None else {
+                k: rep.get(k) for k in ("written", "report_id", "report_day",
+                                        "version", "why", "final")}}
+
+
+async def close_family_days(conn, *, account_id: str,
+                            closed_at: float) -> dict:
+    """THE DAY CLOSE OF EVERY OTHER ACCOUNT OF THE SELECTED ACCOUNT'S EPOCH
+    FAMILY (simulated_account_context.risk_history_accounts: the archived
+    source, rolled-back children, sibling epochs). A deselected account's
+    session no longer gets step(), so its last reported day -- the day of
+    the switch -- would never get its final version. Each family session's
+    reported days that are over by `closed_at` get their one final version
+    exactly as the selected session's do (days_to_close / close_days, the
+    same per-(session, day) lock and append-only rules); nothing else is
+    written for a family account (no intra-day version, no monitoring, no
+    task). An account outside the family is never touched; before any epoch
+    exists the family is the selected account alone, so this writes
+    nothing."""
+    from ..simulated_account_context import risk_history_accounts
+    from .. import bettor_paper_session as S
+    out = {}
+    for aid in await risk_history_accounts(conn, account_id):
+        if aid == account_id:
+            continue
+        sess = await S.active_session(conn, aid)
+        if sess is None:
+            out[aid] = [{"written": False, "why": FAMILY_SESSION_UNAVAILABLE}]
+            continue
+        out[aid] = await close_days(conn, session=sess, account_id=aid,
+                                    closed_at=closed_at)
+    return out
+
+
 async def step(conn, ctx: dict) -> dict:
     """EVERY PASS: monitor, and close every reported day that is over (its
-    one final version). EVERY REPORT_EVERY_S (and at the day's turn): the
-    daily report. WARNING/CRITICAL findings and shortfalls open tasks."""
+    one final version) -- the selected account's and every other account of
+    its epoch family's (close_family_days). EVERY REPORT_EVERY_S (and at the
+    day's turn): the daily report. WARNING/CRITICAL findings and shortfalls
+    open tasks."""
     findings = await monitor(conn, ctx)
     sess = ctx["session"]
     # THE REPORT COVERS EVERYTHING RECORDED SO FAR: its instant is the later
@@ -792,7 +866,14 @@ async def step(conn, ctx: dict) -> dict:
         if f["new"] and f["severity"] in ("WARNING", "CRITICAL"):
             tasks.append(await open_task(conn, ctx, f, detail={
                 "kind": f["kind"]}))
+    # THE FAMILY'S DAY CLOSE: a deselected account's reported day that is
+    # over gets its one final version here (its own step no longer runs)
+    family = await close_family_days(conn, account_id=ctx["account_id"],
+                                     closed_at=rep_now)
     return {"findings": len(findings),
+            "family_closing": family,
+            "family_days_closed": sum(1 for v in family.values() for c in v
+                                      if c.get("written")),
             "new_findings": sum(1 for f in findings if f["new"]),
             "tasks_opened": sum(1 for t in tasks if t.get("created")),
             # the closing writes of this pass (each day's outcome), and the

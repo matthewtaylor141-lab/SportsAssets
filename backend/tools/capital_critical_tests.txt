@@ -1485,3 +1485,5 @@ tests/test_rc62_audrey_closing_gap_and_atomicity.py
 tests/test_rc63_rollback_per_service.py
 # (rc6.3 pr5-port) PR #5 on the release tree with migration 365 still reverted: the upgrade-path receipt honours no 365 research-counter exemption (a trigger only a proven_metadata_only list vouches for stays NOT_PROVEN; the proven-dormant 317 epoch guard is the only trigger exemption), no test imports the reverted provenance suite, and PAPER_DAY_ONE.md no longer describes the 365 proof as shipped
 tests/test_rc63_pr5_port.py
+# (rc6.3 pr5-port) Audrey on a deselected account: at activation and rollback (under the PAPER lock, before the selector moves) the outgoing session's current day gets a version covering everything up to the switch, and Audrey's day close on the selected account writes the one final version of every family account's (risk_history_accounts) reported day once it is over -- the archive's / rolled-back epoch's last realized loss is in its final version (reviewer A2, A2r, the no-activation control, and the same through the real paper pass); an account outside the family is never closed
+tests/test_rc63_day_one_audrey_switch.py

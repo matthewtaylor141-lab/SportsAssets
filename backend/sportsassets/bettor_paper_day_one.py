@@ -20,6 +20,11 @@ LOCK = 0x50415052  # same lock as the scheduled PAPER pass
 OPENING = Decimal('500000.000000')
 
 
+#: the outgoing account's Audrey report could not be written at the switch
+#: (no session, or the write raised): the switch is refused, nothing moves
+R_OUTGOING_AUDREY_REPORT_FAILED = 'PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED'
+
+
 class EpochRefused(ValueError):
     pass
 
@@ -50,6 +55,22 @@ async def flat_receipt(conn, account):
     return {'account_id': account, 'cash_usd': str(cs['cash']),
             'reserved_usd': str(cs['reserved']), 'last_sequence': cs['last_seq'],
             'ledger_entries': cs['entries'], 'balances': bal}
+
+
+async def _outgoing_audrey(conn, account):
+    """Audrey's report of the account the selector is about to leave, under
+    the PAPER lock and before the selector moves: every reported day that is
+    over closed, and its current day's version as far as the switch (after
+    the switch the paper pass reports only the selected account; the day's
+    final version comes from Audrey's family day close once it is over).
+    A report that cannot be written refuses the switch by name."""
+    from .agents import paper_audrey as PA
+    at = await conn.fetchval('SELECT extract(epoch FROM clock_timestamp())::float8')
+    try:
+        return await PA.write_switch_version(conn, account_id=account, at=at)
+    except Exception as exc:                                  # noqa: BLE001
+        raise EpochRefused('%s:%s' % (R_OUTGOING_AUDREY_REPORT_FAILED,
+                                      type(exc).__name__)) from exc
 
 
 async def _activate_verified(conn, *, epoch_id, request_id, proof, deployment_check=None):
@@ -103,6 +124,7 @@ async def _activate_verified(conn, *, epoch_id, request_id, proof, deployment_ch
         await conn.execute('INSERT INTO paper_account_epochs(epoch_id,account_id,previous_account_id,opened_at,release_sha,acceptance_digest,opening_equity_usd,opening_receipt,historical_receipt) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb)',
                            epoch_id, account, old, L._ts(at), proof['release_sha'], proof['packet_digest'], OPENING,
                            json.dumps(opening, default=str), json.dumps(history, default=str))
+        await _outgoing_audrey(conn, old)
         await conn.execute('UPDATE paper_epoch_control SET account_id=$1,generation=generation+1 WHERE singleton', account)
         await conn.execute("INSERT INTO paper_epoch_events(request_id,kind,epoch_id,from_account_id,to_account_id,detail) VALUES($1,'ACTIVATE',$2,$3,$4,$5::jsonb)", request_id, epoch_id, old, account, json.dumps(proof))
         return await read(conn, account)
@@ -142,6 +164,7 @@ async def rollback(conn, *, epoch_id, request_id):
                 raise EpochRefused('ROLLBACK_STRATEGY_STATE_UNREADABLE:'+strategy)
             if LC.RANK[current['state']] > LC.RANK[restored['state']]:
                 raise EpochRefused('ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION:'+strategy)
+        await _outgoing_audrey(conn, epoch['account_id'])
         await conn.execute('UPDATE paper_epoch_control SET account_id=$1,generation=generation+1 WHERE singleton', epoch['previous_account_id'])
         await conn.execute("INSERT INTO paper_epoch_events(request_id,kind,epoch_id,from_account_id,to_account_id,detail) VALUES($1,'ROLLBACK',$2,$3,$4,$5::jsonb)", request_id, epoch_id, epoch['account_id'], epoch['previous_account_id'], json.dumps(receipt, default=str))
         return {'rolled_back': True, 'account_id': epoch['previous_account_id'], 'idempotent': False}

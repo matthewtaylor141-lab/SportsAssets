@@ -69,6 +69,15 @@ counterfactual outcomes
 remain distinct from realized ledger P&L. Audrey's update snapshot and three
 PAPER-pass audit steps, and both default shadow runners, resolve the selected
 account. Archived accounts do not gain selected-account audit authority.
+Audrey's daily report of the account being deselected is not left stale: at
+activation and at rollback, under the same lock and before the selector moves,
+the outgoing session's reported days that are over are closed and its current
+day gets a version covering everything recorded up to the switch (a switch
+whose outgoing report cannot be written is refused,
+`PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED`). Audrey's day close on the
+selected account also writes the one final version of every other family
+account's reported day once that day is over; nothing else is written for an
+archived account, and accounts outside the family are never touched.
 Database guards reject stale order/session/fill/
 ledger ownership and pre-epoch valuation attribution. Streams terminate on an
 account switch and request a new cursor. Management/equity caches resolve the
