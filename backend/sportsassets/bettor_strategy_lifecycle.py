@@ -173,6 +173,10 @@ R_TRANSITION_RETIRED_TERMINAL = "LIFECYCLE_RETIRED_IS_TERMINAL"
 R_TRANSITION_NOT_ONE_STEP = "LIFECYCLE_UPWARD_TRANSITION_IS_NOT_THE_DECLARED_STEP"
 R_TRANSITION_RULE_FIRING = "LIFECYCLE_A_STOPPING_RULE_IS_STILL_FIRING"
 R_TRANSITION_NO_FORWARD_EVIDENCE = "LIFECYCLE_FORWARD_EVIDENCE_INSUFFICIENT"
+#: (rc6.3 pr5-port) a lifecycle event for a REGISTERED PAPER account (the
+#: main account or a registered epoch) that is not the selected one: the
+#: write would land on an archived account, where no entry gate reads it
+R_EPOCH_ACCOUNT_NOT_SELECTED = "PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED"
 
 ENTRY_STATE_REFUSAL = {SHADOW_ONLY: R_LIFECYCLE_SHADOW_ONLY,
                        QUARANTINED: R_LIFECYCLE_QUARANTINED,
@@ -515,7 +519,20 @@ async def record(conn, *, account_id: str, strategy: str, from_state,
                  to_state: str, rule_id: str, actor: str, evidence: dict,
                  why: str, at: float) -> int:
     """APPEND one transition (the table refuses UPDATE / DELETE). `at` is the
-    evaluation instant the evidence was computed at."""
+    evaluation instant the evidence was computed at.
+
+    SERIALISED WITH THE PAPER SELECTOR (rc6.3 pr5-port). Every lifecycle
+    write -- a named person's transition and every automatic tightening --
+    first takes the selector row FOR SHARE (held to the end of the caller's
+    transaction). An activation or a rollback takes that row FOR UPDATE, so
+    it waits for an in-flight tightening to commit and then reads it (its
+    ROLLBACK_WOULD_RELEASE_STRATEGY_RESTRICTION check can no longer be
+    raced past), and a write that waited for a switch re-reads the selector
+    after it. A write for a REGISTERED account (paper_acct_main or a
+    registered epoch) that is not the selected one is refused by name
+    (PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED) instead of landing silently on an
+    archived account. Tightening the SELECTED account is never refused
+    here; an unregistered (legacy / test) account is unaffected."""
     from . import bettor_paper_ledger as L
     if to_state not in RANK or (from_state is not None
                                 and from_state not in RANK):
@@ -524,14 +541,27 @@ async def record(conn, *, account_id: str, strategy: str, from_state,
             and not is_tightening(from_state, to_state):
         # THE EVALUATOR CAN ONLY TIGHTEN, enforced at the write as well.
         raise ValueError(R_TRANSITION_NEEDS_PERSON)
-    return await conn.fetchval(
-        "INSERT INTO paper_strategy_lifecycle_events (account_id, strategy, "
-        " from_state, to_state, rule_id, rules_version, rules_sha, actor, "
-        " evidence, why, recorded_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,"
-        " $9::jsonb,$10,$11) RETURNING event_id", account_id, strategy,
-        from_state, to_state, rule_id, RULES_VERSION, RULES_SHA, actor,
-        json.dumps(dict(evidence, rules=RULES), default=str), why,
-        L._ts(float(at)))
+    async with conn.transaction():
+        if await conn.fetchval(
+                "SELECT to_regclass('public.paper_epoch_control') IS NOT NULL"):
+            selected = await conn.fetchval(
+                "SELECT account_id FROM paper_epoch_control WHERE singleton "
+                "   FOR SHARE")
+            registered = account_id == L.ACCOUNT_ID or bool(
+                await conn.fetchval(
+                    "SELECT EXISTS(SELECT 1 FROM paper_account_epochs "
+                    " WHERE account_id=$1)", account_id))
+            if registered and account_id != selected:
+                raise ValueError(R_EPOCH_ACCOUNT_NOT_SELECTED)
+        return await conn.fetchval(
+            "INSERT INTO paper_strategy_lifecycle_events (account_id, "
+            " strategy, from_state, to_state, rule_id, rules_version, "
+            " rules_sha, actor, evidence, why, recorded_at) VALUES ($1,$2,"
+            " $3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11) RETURNING event_id",
+            account_id, strategy, from_state, to_state, rule_id,
+            RULES_VERSION, RULES_SHA, actor,
+            json.dumps(dict(evidence, rules=RULES), default=str), why,
+            L._ts(float(at)))
 
 
 async def transition(conn, *, account_id: str, strategy: str, to_state: str,
@@ -554,13 +584,21 @@ async def transition(conn, *, account_id: str, strategy: str, to_state: str,
         return {"ok": False, "refusal": refusal, "from_state": cur["state"],
                 "to_state": to_state, "rolling": _brief(m),
                 "forward": _brief(fwd)}
-    eid = await record(conn, account_id=account_id, strategy=strategy,
-                       from_state=cur["state"], to_state=to_state,
-                       rule_id=RULE_MANUAL, actor=actor,
-                       evidence={"rolling": m, "forward": fwd,
-                                 "rules_firing": rules_firing(
-                                     m, current=to_state, forward=fwd)},
-                       why=why, at=at)
+    try:
+        eid = await record(conn, account_id=account_id, strategy=strategy,
+                           from_state=cur["state"], to_state=to_state,
+                           rule_id=RULE_MANUAL, actor=actor,
+                           evidence={"rolling": m, "forward": fwd,
+                                     "rules_firing": rules_firing(
+                                         m, current=to_state, forward=fwd)},
+                           why=why, at=at)
+    except ValueError as exc:
+        if str(exc) != R_EPOCH_ACCOUNT_NOT_SELECTED:
+            raise
+        # the account was deselected (or never selected): a named refusal,
+        # nothing recorded on an archived account
+        return {"ok": False, "refusal": R_EPOCH_ACCOUNT_NOT_SELECTED,
+                "from_state": cur["state"], "to_state": to_state}
     return {"ok": True, "event_id": eid, "from_state": cur["state"],
             "to_state": to_state}
 

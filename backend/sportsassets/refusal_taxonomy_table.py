@@ -2799,6 +2799,11 @@ for _k, _v in ECON_BINDING_STREAM.items():
 #: INTEGRITY, out of the trading funnel (an operator action, no order).
 DAY_ONE_PORT_STREAM = {
     "PAPER_EPOCH_OUTGOING_AUDREY_REPORT_FAILED": (S, INT, "OUT_OF_FUNNEL"),
+    # a write for a registered PAPER account that is not the selected one --
+    # an order (migration 317's guard) or a strategy-lifecycle event
+    # (bettor_strategy_lifecycle.record under the selector lock): the
+    # software's own account selection, SOFTWARE / INTEGRITY at the order
+    "PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED": (S, INT, "ORDER"),
 }
 for _k, _v in DAY_ONE_PORT_STREAM.items():
     TABLE.setdefault(_k, _v)

@@ -106,7 +106,11 @@ reactivated; a later epoch needs a new identity and acceptance proof.
 Rollback also refuses when the previous account's strategy state would be less
 restrictive than the selected epoch's state. It cannot silently undo quarantine
 or retirement; the existing named-person recovery workflow still governs any
-upward transition. Losses from rolled-back accounts remain in subsequent risk
+upward transition. Every strategy-lifecycle write takes the selector row FOR
+SHARE, so a rollback waits for a tightening already in flight and then refuses,
+and a tightening that waited for a switch is refused by name
+(`PAPER_EPOCH_ACCOUNT_IS_NOT_SELECTED`) instead of landing on the archived
+account; tightening the selected account is never refused. Losses from rolled-back accounts remain in subsequent risk
 and learning populations without moving cash or changing accounting receipts.
 
 DDL rollback 317 is permitted only before any epoch/evidence exists and only
