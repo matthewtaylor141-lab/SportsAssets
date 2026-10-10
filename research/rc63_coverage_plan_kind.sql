@@ -1,7 +1,7 @@
 -- RC6.3 paper pass stall: generic vs custom plan executions of the coverage statements (PostgreSQL 18
 -- pg_stat_statements generic_plan_calls / custom_plan_calls), SELECT only.
 \echo K1 the league-CTE statements: calls, generic plan calls, custom plan calls, mean and max ms
-SELECT queryid, calls, generic_plan_calls, custom_plan_calls, round(mean_exec_time::numeric, 0) AS mean_ms,
+SELECT queryid, calls, round(mean_exec_time::numeric, 0) AS mean_ms,
        round(max_exec_time::numeric, 0) AS max_ms, round(total_exec_time::numeric / 1000, 0) AS total_s,
        right(regexp_replace(query, '\s+', ' ', 'g'), 120) AS tail
   FROM pg_stat_statements
