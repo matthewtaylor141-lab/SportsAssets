@@ -63,7 +63,13 @@ venue's own settlement joined onto `external_valuations` (outcome_basis
 VENUE_SETTLEMENT_PRICE / VENUE_REPORTED_OUTCOME for a 0/1, CONFIRMED_VOID for
 a refund), unanimous across the rows for the contract. A later disagreement
 with what was settled books a CORRECTION; conflicting evidence settles
-nothing and is recorded as a finding.
+nothing and is recorded as a finding. The settle step reads the outcome rows
+of EVERY position's contract -- open and closed, because a closed position's
+settlement can still be corrected -- in ONE statement (OUTCOME_ROWS_SQL,
+grouped per contract in id order), never one statement per position:
+external_valuations has no index on us_market_slug, so each per-contract read
+scanned the table, and production (release 4534b43f, 2026-10-10) spent about
+35 s of every pass on ~517 such reads that settled nothing.
 """
 from __future__ import annotations
 
@@ -1028,6 +1034,14 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             evidence_state=measure["evidence_state"], selected=chosen)
         if fresh and not rankable:
             recorded = XF.REC_UNAVAILABLE
+        # THE INTENT IS BUILT HERE AND RECORDED WITH THE REVIEW, IN ONE
+        # TRANSACTION, AT THE END (RC6.3c pass-hardening): it used to be
+        # recorded here, before the action, and the review row was written
+        # after the action and the adapters. A pass cut in between (the
+        # adapter hook, or any await after the protective order) left a
+        # canonical_management_intents row -- and its adapter executions --
+        # whose review_id never got a review row. See "THE REVIEW AND ITS
+        # CANONICAL INTENT ARE ONE WRITE" below.
         mintent = None
         try:
             mintent = CI.build_management_intent(
@@ -1049,9 +1063,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
                         "exceptional": list(exceptional),
                         "management_packet": pgate},
                 created_at=at, alternative_set=alt_set, policy=mgmt_policy)
-            rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
-            if rec_hook is None or not await rec_hook(conn, mintent):
-                mintent = None
         except Exception:                                       # noqa: BLE001
             mintent = None
         act = decided["action"]
@@ -1193,16 +1204,6 @@ async def review_group(conn, ctx: dict, group_id: str, *,
             action["exit_intent_state"] = xi["state"]
             if xi.get("resolution"):
                 action["exit_intent_resolution"] = xi["resolution"]
-        if mintent is not None:
-            action["canonical_intent_id"] = mintent["intent_id"]
-            ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
-            if ad is not None:
-                try:
-                    action["live_parity"] = await ad(
-                        conn, mintent, taken=dict(action),
-                        open_qty=pos["open_qty"])
-                except Exception as exc:                        # noqa: BLE001
-                    action["live_parity"] = {"error": type(exc).__name__}
         # THE REVIEWED POSITION'S OWN FILLED PROTECTION (RC6 archer-
         # lifecycle): the simulated fills of the standing sales of THIS
         # (account, group, market, holding side) -- the same key the standing
@@ -1222,47 +1223,91 @@ async def review_group(conn, ctx: dict, group_id: str, *,
         valuation = XF.valuation_block(
             measure, assessed_at=at,
             limit_s=float(ctx["config"]["entry"]["pinnacle_max_age_s"]))
-        await conn.execute(
-            "INSERT INTO paper_xavier_reviews (review_id, session_id, "
-            " account_id, group_id, reviewed_at, trigger, recommendation, "
-            " refusal, alternatives, selection, exposure, standing, "
-            " confirmed_protection, incomplete_search, exceptional, measure,"
-            " action, strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,"
-            " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
-            " $15::jsonb,$16::jsonb,$17::jsonb,$18) ON CONFLICT DO NOTHING",
-            rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
-            recorded, (pgate["refusal"] if not pgate["complete"]
-                       and cont is None else sel.get("refusal")),
-            json.dumps(alts, default=str),
-            json.dumps(dict({k: sel.get(k) for k in (
-                "selected", "refusal", "selection_reason",
-                "margin_over_runner_up", "decision_policy", "tie_break",
-                "hold_is_priced", "limits_applied")},
-                management_policy=mpol,
-                mechanical_selection=chosen,
-                management_packet=dict(packet, gate=pgate),
-                recommendation_state=XF.write_state(
-                    evidence_state=measure["evidence_state"],
-                    recommendation=recorded),
-                valuation=valuation), default=str),
-            json.dumps(exposure, default=str),
-            json.dumps({"live_orders": [L.order_view(s) for s in standing],
-                        "protective_price": prot,
-                        "invariant": SPO.WHY_ONE_LIVE_ORDER},
-                       default=str),
-            json.dumps({"filled_protection_qty": float(confirmed),
-                        "basis": "simulated fills of the standing sale",
-                        # the column's name predates the lanes: this is
-                        # PAPER (SIMULATOR) fills of THIS position, never a
-                        # venue confirmation
-                        "scope": "POSITION",
-                        "position_key": pos.get("position_key"),
-                        "execution_environment": "PAPER_SIMULATED"},
-                       default=str),
-            json.dumps(alts["incomplete_search"], default=str),
-            json.dumps(exceptional), json.dumps(measure, default=str),
-            json.dumps(action, default=str), pos.get("strategy")
-            or L.DEFAULT_STRATEGY)
+        # ── THE REVIEW AND ITS CANONICAL INTENT ARE ONE WRITE ───────────
+        # (RC6.3c pass-hardening.) The canonical management intent, what the
+        # two adapters did with it (canonical_intent_executions, the parity
+        # ledger) and the review row that carries its review_id are written
+        # in ONE transaction, after the action. A pass cut anywhere in it --
+        # the adapter hook hanging, the step bound, a restart -- rolls ALL of
+        # them back: there is never an intent whose review_id has no review
+        # row (found by a reviewer of 5979416f: the pass was cut in the
+        # adapter hook, between the protective order and this INSERT). What
+        # the action already did stays (the protective order is its own
+        # committed write and the next review finds it standing: the one-
+        # live-protective-order invariant, SPO.WHY_ONE_LIVE_ORDER, holds, so
+        # no second protective order is placed); the review is then simply
+        # made again, by the next pass, as a review that was never written.
+        # The hook and the adapters each run in a savepoint of their own: a
+        # failure in one never aborts the transaction the review rides on.
+        async with conn.transaction():
+            if mintent is not None:
+                recorded_intent = False
+                try:
+                    rec_hook = DH.CANONICAL_MANAGEMENT_RECORD
+                    if rec_hook is not None:
+                        async with conn.transaction():
+                            recorded_intent = bool(
+                                await rec_hook(conn, mintent))
+                except Exception:                               # noqa: BLE001
+                    recorded_intent = False
+                if not recorded_intent:
+                    mintent = None
+            if mintent is not None:
+                action["canonical_intent_id"] = mintent["intent_id"]
+                ad = DH.CANONICAL_MANAGEMENT_ADAPTERS
+                if ad is not None:
+                    try:
+                        async with conn.transaction():
+                            action["live_parity"] = await ad(
+                                conn, mintent, taken=dict(action),
+                                open_qty=pos["open_qty"])
+                    except Exception as exc:                    # noqa: BLE001
+                        action["live_parity"] = {
+                            "error": type(exc).__name__}
+            await conn.execute(
+                "INSERT INTO paper_xavier_reviews (review_id, session_id, "
+                " account_id, group_id, reviewed_at, trigger, "
+                " recommendation, refusal, alternatives, selection, "
+                " exposure, standing, confirmed_protection, "
+                " incomplete_search, exceptional, measure, action, "
+                " strategy) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,"
+                " $10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,"
+                " $15::jsonb,$16::jsonb,$17::jsonb,$18) "
+                "ON CONFLICT DO NOTHING",
+                rid, ctx["session_id"], acct, group_id, L._ts(at), trigger,
+                recorded, (pgate["refusal"] if not pgate["complete"]
+                           and cont is None else sel.get("refusal")),
+                json.dumps(alts, default=str),
+                json.dumps(dict({k: sel.get(k) for k in (
+                    "selected", "refusal", "selection_reason",
+                    "margin_over_runner_up", "decision_policy", "tie_break",
+                    "hold_is_priced", "limits_applied")},
+                    management_policy=mpol,
+                    mechanical_selection=chosen,
+                    management_packet=dict(packet, gate=pgate),
+                    recommendation_state=XF.write_state(
+                        evidence_state=measure["evidence_state"],
+                        recommendation=recorded),
+                    valuation=valuation), default=str),
+                json.dumps(exposure, default=str),
+                json.dumps({"live_orders": [L.order_view(s)
+                                            for s in standing],
+                            "protective_price": prot,
+                            "invariant": SPO.WHY_ONE_LIVE_ORDER},
+                           default=str),
+                json.dumps({"filled_protection_qty": float(confirmed),
+                            "basis": "simulated fills of the standing sale",
+                            # the column's name predates the lanes: this is
+                            # PAPER (SIMULATOR) fills of THIS position, never
+                            # a venue confirmation
+                            "scope": "POSITION",
+                            "position_key": pos.get("position_key"),
+                            "execution_environment": "PAPER_SIMULATED"},
+                           default=str),
+                json.dumps(alts["incomplete_search"], default=str),
+                json.dumps(exceptional), json.dumps(measure, default=str),
+                json.dumps(action, default=str), pos.get("strategy")
+                or L.DEFAULT_STRATEGY)
         # THE MANAGEMENT ASSESSMENT (migration 206): latency against the
         # bound, thesis state, every alternative incl. the SHADOW
         # REALLOCATE, the policy record. Record only -- the action above
@@ -1792,6 +1837,87 @@ def venue_price_settlement(rows: list, *, holding_side: str) -> dict:
             "rule": "the contract's stated last-fair-market-price settlement"}
 
 
+#: THE VENUE-JOINED OUTCOME ROWS OF MANY CONTRACTS IN ONE STATEMENT (RC6.3c
+#: pass-hardening S). The settle step used to run, PER POSITION,
+#:   SELECT id, buy_intent, outcome, outcome_known, outcome_basis, outcome_at
+#:     FROM external_valuations WHERE us_market_slug=$1
+#:      AND outcome_basis IS NOT NULL ORDER BY id
+#: -- with include_closed=True that is one statement for every position the
+#: account ever held (production 2026-10-10: ~517, almost all closed), and
+#: external_valuations has no index on us_market_slug, so each one scanned
+#: the table: step_elapsed_s settle 35.374 s with settled 0, waiting 0; one
+#: pass of 80.2 s hit the step bound and lost agent_work_queues, lesson_usage
+#: and agent_memory. This statement reads the same rows for every contract at
+#: once; `outcome_rows_by_slug` groups them per contract in the same id
+#: order, so `outcome_for` sees, per position, exactly the rows the per-slug
+#: statement returned.
+OUTCOME_ROWS_SQL = """
+    SELECT id, us_market_slug, buy_intent, outcome, outcome_known,
+           outcome_basis, outcome_at
+      FROM external_valuations
+     WHERE us_market_slug = ANY($1::text[]) AND outcome_basis IS NOT NULL
+     ORDER BY id
+"""
+
+
+async def _rows_by_slug(conn, sql: str, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement `sql` -- the `us_market_slug = ANY($1::text[]) ... ORDER BY id`
+    form of a per-slug read, selecting us_market_slug too. Each slug's rows
+    are the per-slug read's rows as dicts with the same keys (the slug key
+    removed), in the same id order; a slug with no rows maps to []. The one
+    statement orders by id over all contracts, and appending in that order
+    keeps each contract's rows in id order."""
+    wanted = sorted({s for s in slugs if s})
+    out: dict = {s: [] for s in wanted}
+    if not wanted:
+        return out
+    for r in await conn.fetch(sql, wanted):
+        d = dict(r)
+        out[d.pop("us_market_slug")].append(d)
+    return out
+
+
+async def outcome_rows_by_slug(conn, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement (OUTCOME_ROWS_SQL). Each slug's rows are the rows of the former
+    per-slug read (`WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL
+    ORDER BY id`), as dicts with the same keys, in the same id order; a slug
+    with no outcome rows maps to []."""
+    return await _rows_by_slug(conn, OUTCOME_ROWS_SQL, slugs)
+
+
+#: THE VENUE PRICE-SETTLEMENT ROWS OF MANY CONTRACTS IN ONE STATEMENT (RC6.3c
+#: pass-hardening, round 3): VENUE_PRICE_SQL's rows for every contract of a
+#: batch at once. bettor_capital_authority.settle_shadows (pass step
+#: shadow_settlement, BEFORE derek in the pass order) ran, per PENDING shadow,
+#: the per-slug outcome read above and then VENUE_PRICE_SQL when that settled
+#: nothing: up to 2 x SETTLE_PER_PASS = 400 scans of external_valuations a
+#: run, every RUN_EVERY_S, with a pending shadow re-read on every run (the
+#: independent reviewer's measurement: 200 pending shadows, 400 scans, 10.3 s
+#: on a 40,000-row table). `venue_price_rows_by_slug` groups the rows per
+#: contract in the same id order with the same keys, so
+#: `venue_price_settlement` sees, per shadow, exactly the rows VENUE_PRICE_SQL
+#: returned.
+VENUE_PRICE_ROWS_SQL = """
+    SELECT id, us_market_slug, buy_intent, settlement_read, settlement_read_at,
+           settlement_comparison->>'venue_rules_text' AS rules
+      FROM external_valuations
+     WHERE us_market_slug = ANY($1::text[]) AND outcome_basis IS NULL
+       AND settlement_read IS NOT NULL AND settlement_read_at IS NOT NULL
+     ORDER BY id
+"""
+
+
+async def venue_price_rows_by_slug(conn, slugs) -> dict:
+    """{us_market_slug: [row, ...]} for every distinct slug in `slugs`, in ONE
+    statement (VENUE_PRICE_ROWS_SQL). Each slug's rows are the rows
+    VENUE_PRICE_SQL returns for it, as dicts with the same keys (id,
+    buy_intent, settlement_read, settlement_read_at, rules), in the same id
+    order; a slug with no such rows maps to []."""
+    return await _rows_by_slug(conn, VENUE_PRICE_ROWS_SQL, slugs)
+
+
 def outcome_for(rows: list, *, holding_side: str) -> dict:
     """Our side's settlement from the venue-joined valuation rows. Pure."""
     ours = DP.LONG if holding_side == "LONG" else DP.SHORT
@@ -1831,12 +1957,14 @@ async def step_settle(conn, ctx: dict) -> dict:
     if not has:
         return dict(out, refusal="OUTCOME_EVIDENCE_COLUMNS_ABSENT")
     allpos = await L.positions(conn, acct, include_closed=True)
+    # EVERY POSITION'S OUTCOME ROWS IN ONE STATEMENT (RC6.3c pass-hardening
+    # S; see OUTCOME_ROWS_SQL): the per-position read ran once for each of
+    # the account's positions ever held and took ~35 s of every production
+    # pass. Per position the rows are the same, in the same id order.
+    by_slug = await outcome_rows_by_slug(
+        conn, [p["us_market_slug"] for p in allpos])
     for p in allpos:
-        rows = [dict(r) for r in await conn.fetch(
-            "SELECT id, buy_intent, outcome, outcome_known, outcome_basis, "
-            "       outcome_at FROM external_valuations "
-            " WHERE us_market_slug=$1 AND outcome_basis IS NOT NULL "
-            " ORDER BY id", p["us_market_slug"])]
+        rows = by_slug.get(p["us_market_slug"], [])
         got = outcome_for(rows, holding_side=p["holding_side"])
         key = "venue-final:%s" % p["us_market_slug"]
         vp = None

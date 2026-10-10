@@ -524,8 +524,15 @@ READERS = {
     # newest reading of that exact contract (slug, intent, payout,
     # complement, market, line, event key): a held-position measure, never a
     # candidate selection
+    # (rc6.3c pass-hardening S, +3; round 3, +2) OUTCOME_ROWS_SQL and
+    # VENUE_PRICE_ROWS_SQL, the `us_market_slug = ANY($1::text[])` forms of
+    # the two per-slug settlement-evidence reads above, and their prose: the
+    # settle step reads every held position's outcome rows in one statement
+    # and the shadow-settlement step its batch's outcome and venue-price rows
+    # in two -- settlement evidence for positions already held / shadows
+    # already recorded, never a candidate selection
     "agents/paper_xavier.py": (
-        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 10),
+        "PAPER_ONLY_MEASURE_AND_SETTLEMENT_EVIDENCE_READS", 15),
     # (206) XAVIER'S MANAGEMENT RECORD: the entry thesis reads the held
     # position's own decision valuation BY ID (its source stamp, its
     # condition's event start) and the value-add reads venue settlement
