@@ -274,8 +274,39 @@ async def audrey_payload(conn, *, account_id: str = L.ACCOUNT_ID,
         reports(), empty_why="NO_PAPER_DAILY_REPORT_YET")
     out["audit_entries"] = await _section(
         findings(), empty_why="NO_PAPER_AUDIT_FINDING")
+    out["days_not_reconciled"] = await _days_not_reconciled(
+        conn, account_id=account_id, limit=limit)
     out["last_updated_at"] = await _last_updated(conn, account_id)
     return out
+
+
+async def _days_not_reconciled(conn, *, account_id: str, limit: int) -> dict:
+    """THE COUNT OF COMPLETED DAYS WITH PAPER ACTIVITY AND NO AUDREY REPORT
+    (her AUDREY_DAY_NOT_RECONCILED findings, one per session and day), with
+    the newest days. A count beside the sections, not a section of its own:
+    the audit entries stay the page's list, and these rows are among them."""
+    from .agents import paper_audrey as PA
+    out = {"kind": PA.DAY_NOT_RECONCILED,
+           "basis": ("one paper_audrey_findings row per session and day: the "
+                     "day is over, the account had paper activity on it, "
+                     "and no Audrey report covers it; no report is written "
+                     "for it after the fact")}
+    try:
+        rows = await conn.fetch(
+            "SELECT session_id, subject AS day, found_at, "
+            "       (detail->>'activity_total')::int AS activity_total, "
+            "       improvement_task_id, count(*) OVER () AS n "
+            "  FROM paper_audrey_findings WHERE account_id=$1 AND kind=$2 "
+            " ORDER BY subject DESC, session_id LIMIT $3", account_id,
+            PA.DAY_NOT_RECONCILED, limit)
+    except Exception as exc:                                    # noqa: BLE001
+        return dict(out, count=None, days=None, why="%s: %s" % (
+            type(exc).__name__, str(exc)[:160]))
+    days = [_row(r) for r in rows]
+    for d in days:
+        d.pop("n", None)
+    return dict(out, count=int(rows[0]["n"]) if rows else 0, days=days,
+                why=None)
 
 
 #: THE STRATEGY OF A RECORD (migration 182) and a one-line explanation of

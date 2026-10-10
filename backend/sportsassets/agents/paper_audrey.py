@@ -20,6 +20,41 @@ day with no report (no pass ran on it) gets none, final or otherwise; the
 days before the session's first closed day are history and are not closed
 retroactively. Final never implies `reconciles`.
 
+A DAY NO REPORT COVERS IS RECORDED BY NAME. A day on which the paper pass
+ran and the account has activity (ledger entries, decisions, orders, fills,
+settlements, Xavier reviews) but Audrey's step never finished has no report,
+so nothing of its own reconciles it: its activity reaches only the balances
+of later reports. Every pass, after closing days (and unless its clock is
+behind the newest report), looks at each completed day after the session's
+newest closed day (with no closed day: after its newest reported day that
+is over; with no such day: from the session's start) up to the report
+clock's day; one that has no report version and has activity gets ONE
+finding, AUDREY_DAY_NOT_RECONCILED (WARNING, owner Audrey, subject the day),
+with the day's window, its activity counts and why. It is recorded once per
+(session, day): the finding id is deterministic in both and the insert is
+ON CONFLICT DO NOTHING. The day is read again, and the finding inserted,
+under that day's report lock (the one write_report takes), so a version
+landing while the day is looked at wins and the day is not named; a version
+stored after the finding (a late host still in that day) does not remove it:
+the finding says the day had no report when it was over and looked at. No
+report and no final version is written for such a day after the fact, and
+nothing before the newest closed day is looked at again (no backfill). A
+completed day with no activity gets nothing.
+
+THE FIRST DEPLOY OF DAY CLOSING (deploy-time transient). Before it no version
+was ever final, and the code before it never closes a day: at midnight it
+writes the old day's last version (not final) and the new day's first one.
+If a worker still on that code reaches midnight first, the new code's first
+pass finds no closed day and the new day already reported. So a session with
+no closed day closes its newest reported day that is OVER, not its newest
+reported day: that first pass still closes the day before the deploy. What
+the guard cannot cover: if old-code workers turn two midnights before the
+new code's first pass, only the later of those days is closed, and the
+earlier stays without a final version, as history; and while both versions
+run, an old-code worker whose clock is behind midnight can append a non-final
+version to a day the new code closed (it has no ALREADY_FINAL rule). Such a
+day keeps its final version and is never closed again.
+
 DEFINITIONS, ENFORCED IN CODE:
   acquisition volume   sum(qty x price + fee) over BUY fills of the day,
                        ENTRY and HEDGE reported separately; SELL fills (exit,
@@ -73,11 +108,30 @@ REPORT_EVERY_S = 900.0
 #: REPORT_LOCK_CLASS, hashtext('<session>:<day>')). The two-key space never
 #: meets the paper pass's single-key lock.
 REPORT_LOCK_CLASS = 0x41554452
+#: THE FINDING THAT NAMES A COMPLETED DAY WITH PAPER ACTIVITY AND NO AUDREY
+#: REPORT (one per session and day; see the module docstring).
+DAY_NOT_RECONCILED = "AUDREY_DAY_NOT_RECONCILED"
+#: WHAT COUNTS AS A DAY'S PAPER ACTIVITY ON THE SESSION'S ACCOUNT: each
+#: record on its own clock (the column the daily report windows it by; an
+#: order by the instant it was decided).
+ACTIVITY = (("ledger_entries", "paper_ledger", "committed_at"),
+            ("decisions", "paper_decisions", "decided_at"),
+            ("orders", "paper_orders", "decided_at"),
+            ("fills", "paper_fills", "filled_at"),
+            ("settlements", "paper_settlements", "settled_at"),
+            ("xavier_reviews", "paper_xavier_reviews", "reviewed_at"))
 
 
 def _h(*parts) -> str:
     return hashlib.sha256(":".join(str(p) for p in parts).encode()
                           ).hexdigest()[:24]
+
+
+def finding_id(session_id: str, kind: str, subject: str,
+               scope: str = "") -> str:
+    """The deterministic id of a finding: one row per (session, kind,
+    subject, scope)."""
+    return "paperfind:" + _h(session_id, kind, subject, scope)
 
 
 def day_bounds(at: float, tz: str = "America/New_York") -> tuple:
@@ -589,12 +643,13 @@ OWNER_OF = {"LEDGER_INCONSISTENT": "AUDREY",
             "PAPER_EVENT_SETTLEMENT": "AUDREY",
             "PAPER_EVENT_SETTLED_AT_VENUE_PRICE": "AUDREY",
             "PAPER_EVENT_EXCEPTIONAL_OUTCOME": "DEREK",
-            "PAPER_EVENT_LEDGER_INCONSISTENCY": "AUDREY"}
+            "PAPER_EVENT_LEDGER_INCONSISTENCY": "AUDREY",
+            DAY_NOT_RECONCILED: "AUDREY"}
 
 
 async def finding(conn, ctx: dict, *, kind: str, subject: str,
                   detail: dict, severity: str, scope: str = "") -> dict:
-    fid = "paperfind:" + _h(ctx["session_id"], kind, subject, scope)
+    fid = finding_id(ctx["session_id"], kind, subject, scope)
     got = await conn.fetchval(
         "INSERT INTO paper_audrey_findings (finding_id, session_id, "
         " account_id, found_at, kind, severity, subject, detail) "
@@ -695,19 +750,24 @@ async def days_to_close(conn, *, session: dict, closed_at: float) -> list:
     """THE REPORTED DAYS THAT ARE OVER AND HAVE NO FINAL VERSION, oldest
     first: every day after the session's newest closed day that has a
     version and no final version, and whose end is at or before `closed_at`.
-    A session with no closed day yet closes only its newest reported day:
-    the days before it were reported before any day was closed and are
-    history (no retroactive closing). A day with no version is never a
-    candidate (no pass reported it, so it gets no report)."""
+    A session with no closed day yet closes only its newest reported day
+    THAT IS OVER: the days before it were reported before any day was closed
+    and are history (no retroactive closing), and a day already reported
+    after it (a worker on the code before day closing reached midnight
+    first: the deploy-time transient in the module docstring) does not hide
+    it. A day with no version is never a candidate (no pass reported it, so
+    it gets no report)."""
     tz = session.get("reporting_tz") or "America/New_York"
+    today = day_bounds(closed_at, tz)[0]
     rows = await conn.fetch(
         "WITH d AS (SELECT report_day, bool_or(final) AS closed "
         "             FROM paper_audrey_reports WHERE session_id=$1 "
         "            GROUP BY report_day) "
-        "SELECT report_day FROM d WHERE NOT closed AND report_day > "
-        "       coalesce((SELECT max(report_day) FROM d WHERE closed), "
-        "                (SELECT max(report_day) FROM d) - 1) "
-        " ORDER BY report_day", session["session_id"])
+        "SELECT report_day FROM d WHERE NOT closed AND report_day < $2 "
+        "   AND report_day > coalesce("
+        "       (SELECT max(report_day) FROM d WHERE closed), "
+        "       (SELECT max(report_day) FROM d WHERE report_day < $2) - 1) "
+        " ORDER BY report_day", session["session_id"], today)
     return [w for w in (day_window(r["report_day"], tz) for r in rows)
             if w[2] <= float(closed_at)]
 
@@ -733,10 +793,135 @@ async def close_days(conn, *, session: dict, account_id: str,
     return out
 
 
+async def days_not_reconciled(conn, *, session: dict, account_id: str,
+                              closed_at: float) -> list:
+    """THE COMPLETED DAYS NO REPORT COVERS THAT HAVE PAPER ACTIVITY AND ARE
+    NOT YET RECORDED (read only), oldest first.
+
+    The days looked at are those after the session's newest closed day --
+    with no closed day, after its newest reported day that is over by
+    `closed_at`; with neither, from the day the session started -- and
+    before the day of `closed_at` (each is over). Of those, a day with any
+    report version is covered by it; a day already recorded (its
+    DAY_NOT_RECONCILED finding exists) is skipped; a day with no activity on
+    the account (ACTIVITY) is not a gap of Audrey's. Each remaining day is
+    returned with its window and its activity counts per source."""
+    tz = session.get("reporting_tz") or "America/New_York"
+    sid = session["session_id"]
+    today = day_bounds(closed_at, tz)[0]
+    b = await conn.fetchrow(
+        "SELECT (SELECT max(report_day) FROM paper_audrey_reports "
+        "         WHERE session_id=$1 AND final) AS closed, "
+        "       (SELECT max(report_day) FROM paper_audrey_reports "
+        "         WHERE session_id=$1 AND report_day < $2) AS reported, "
+        "       (SELECT started_at FROM paper_sessions "
+        "         WHERE session_id=$1) AS started", sid, today)
+    if b["closed"] is not None:
+        after, basis = b["closed"], "NEWEST_CLOSED_DAY"
+    elif b["reported"] is not None:
+        after, basis = b["reported"], "NEWEST_REPORTED_DAY_OVER"
+    elif b["started"] is not None:
+        after = day_bounds(L._epoch(b["started"]), tz)[0] \
+            - _dt.timedelta(days=1)
+        basis = "SESSION_START"
+    else:
+        return []
+    days = [after + _dt.timedelta(days=k)
+            for k in range(1, (today - after).days)]
+    if not days:
+        return []
+    reported = {r["report_day"] for r in await conn.fetch(
+        "SELECT DISTINCT report_day FROM paper_audrey_reports "
+        " WHERE session_id=$1 AND report_day >= $2 AND report_day <= $3",
+        sid, days[0], days[-1])}
+    ids = {finding_id(sid, DAY_NOT_RECONCILED, str(d)): d for d in days
+           if d not in reported}
+    if not ids:
+        return []
+    have = {r["finding_id"] for r in await conn.fetch(
+        "SELECT finding_id FROM paper_audrey_findings "
+        " WHERE finding_id = ANY($1::text[])", list(ids))}
+    cand = sorted(d for f, d in ids.items() if f not in have)
+    if not cand:
+        return []
+    t0 = L._ts(day_window(cand[0], tz)[1])
+    t1 = L._ts(day_window(cand[-1], tz)[2])
+    counts: dict = {}
+    for r in await conn.fetch(" UNION ALL ".join(
+            "SELECT '%s' AS src, (%s AT TIME ZONE $4)::date AS day, "
+            "       count(*) AS n FROM %s WHERE account_id=$1 "
+            "   AND %s >= $2 AND %s < $3 GROUP BY 2" % (
+                name, col, tbl, col, col)
+            for name, tbl, col in ACTIVITY), account_id, t0, t1, tz):
+        counts.setdefault(r["day"], {})[r["src"]] = int(r["n"])
+    out = []
+    for d in cand:
+        act = {name: (counts.get(d) or {}).get(name, 0)
+               for name, _t, _c in ACTIVITY}
+        if sum(act.values()):
+            _day, start, end = day_window(d, tz)
+            out.append({"day": d, "start": start, "end": end,
+                        "activity": act, "after_day": after,
+                        "after_basis": basis})
+    return out
+
+
+async def record_days_not_reconciled(conn, ctx: dict, *, session: dict,
+                                     account_id: str,
+                                     closed_at: float) -> list:
+    """RECORD EACH DAY days_not_reconciled() RETURNS, ONCE: one
+    DAY_NOT_RECONCILED finding per (session, day). Under the day's report
+    lock (write_report's), the day is read again and the finding is
+    inserted only while the day still has no report version; the
+    deterministic finding id and ON CONFLICT DO NOTHING keep one row per
+    (session, day) across passes and concurrent callers, and `new` is true
+    for the one caller that stored it. Nothing is written to
+    paper_audrey_reports: no report and no final version for such a day."""
+    tz = session.get("reporting_tz") or "America/New_York"
+    sid = session["session_id"]
+    out = []
+    for g in await days_not_reconciled(conn, session=session,
+                                       account_id=account_id,
+                                       closed_at=closed_at):
+        day = g["day"]
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1, hashtext($2))",
+                REPORT_LOCK_CLASS, f"{sid}:{day}")
+            if await conn.fetchval(
+                    "SELECT count(*) FROM paper_audrey_reports "
+                    " WHERE session_id=$1 AND report_day=$2", sid, day):
+                continue
+            f = await finding(
+                conn, dict(ctx, session_id=sid, account_id=account_id),
+                kind=DAY_NOT_RECONCILED, subject=str(day),
+                severity="WARNING", detail={
+                    "day": str(day), "reporting_tz": tz,
+                    "window": {"start": g["start"], "end": g["end"]},
+                    "activity": g["activity"],
+                    "activity_total": sum(g["activity"].values()),
+                    "report_versions": 0,
+                    "observed_at": float(closed_at),
+                    "looked_after_day": str(g["after_day"]),
+                    "looked_after_basis": g["after_basis"],
+                    "report_written": False,
+                    "why": ("the day is over and the account has paper "
+                            "activity on it, but no Audrey report covers "
+                            "it: no pass finished Audrey's step on that "
+                            "day, so it was never reconciled. No report or "
+                            "final version is written for it after the "
+                            "fact; its activity reaches only the balances "
+                            "of later reports, never a day's own figures")})
+        out.append(f)
+    return out
+
+
 async def step(conn, ctx: dict) -> dict:
-    """EVERY PASS: monitor, and close every reported day that is over (its
-    one final version). EVERY REPORT_EVERY_S (and at the day's turn): the
-    daily report. WARNING/CRITICAL findings and shortfalls open tasks."""
+    """EVERY PASS: monitor, close every reported day that is over (its one
+    final version), and record every completed day with activity and no
+    report (AUDREY_DAY_NOT_RECONCILED, once per day). EVERY REPORT_EVERY_S
+    (and at the day's turn): the daily report. WARNING/CRITICAL findings and
+    shortfalls open tasks."""
     findings = await monitor(conn, ctx)
     sess = ctx["session"]
     # THE REPORT COVERS EVERYTHING RECORDED SO FAR: its instant is the later
@@ -764,6 +949,14 @@ async def step(conn, ctx: dict) -> dict:
     # or a host behind the one that ran the last pass) writes nothing: the
     # day it reads is already reported past, or closed.
     behind = last is not None and last["report_day"] > day
+    # EVERY COMPLETED DAY NO REPORT COVERS THAT HAS ACTIVITY is recorded by
+    # name, once; never on a clock behind the record. Before this pass's
+    # own report: a pass that fails here writes no report, so the newest
+    # closed day cannot move past an unnamed day.
+    unreconciled = [] if behind else await record_days_not_reconciled(
+        conn, ctx, session=sess, account_id=ctx["account_id"],
+        closed_at=rep_now)
+    findings.extend(unreconciled)
     rep = None
     due = not held and not behind and (
         last is None or rep_now - L._epoch(last["generated_at"])
@@ -800,6 +993,9 @@ async def step(conn, ctx: dict) -> dict:
             # the heartbeat carry it
             "closing": closing,
             "days_closed": sum(1 for c in closing if c.get("written")),
+            # the completed days with activity and no report that this pass
+            # recorded (AUDREY_DAY_NOT_RECONCILED), a scalar like days_closed
+            "days_not_reconciled": sum(1 for f in unreconciled if f["new"]),
             "report_held": ("CLOSING_VERSION_NOT_STORED" if held else
                             "REPORT_CLOCK_BEHIND_THE_NEWEST_REPORT"
                             if behind else None),
