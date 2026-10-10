@@ -461,26 +461,35 @@ async def test_a_superseded_memory_leaves_the_agents_own_context():
 @pg
 async def test_karens_and_archers_lessons_are_retrieved_and_reported():
     """(R30B review) Production's 224 LESSON memories are Karen's and
-    Archer's, and retrieval covered only Derek's and Xavier's decisions."""
+    Archer's, and retrieval covered only Derek's and Xavier's decisions.
+
+    THE PROOF RUNS AT F.ISOLATED, a time no other proof commits at (the
+    idiom test_agent_scorecards and test_agent_work_queues use). Archer's
+    runner reads the ENTER decisions of a two-day window oldest first, at
+    most 25 a pass, whoever's they are; a shared database keeps what other
+    proofs commit, so at the fixture's NOW a second capital-critical run on
+    one database left this test's own decision behind older leftovers and no
+    estimate of it was written. Every assertion below is unchanged."""
     from sportsassets.agents import archer as E
     from sportsassets.agents import karen as K
     conn, tx = await F.tx()
+    now = F.ISOLATED
     try:
         await R.ensure_identities(conn)
-        a = await F.account(conn, "lu7")
+        a = await F.account(conn, "lu7", now=now - 10 * 86400)
         acct = a["account_id"]
         # KAREN: a detector lesson, then a challenge she opens
         ref = "adr:lu7-%s" % uuid.uuid4().hex[:8]
         await conn.execute(
             "INSERT INTO agent_decisions (decision_ref, agent_id, kind, "
             " decided_at) VALUES ($1,'DEREK','TEST',to_timestamp($2))",
-            ref, NOW - 5 * H)
+            ref, now - 5 * H)
         first = await K.open_challenge(
             conn, target_agent="DEREK", target_kind="agent_decisions",
             target_id=ref, detector="DECISION_WITHOUT_EVIDENCE",
             claim="no evidence", severity="MEDIUM",
             evidence_refs=[{"kind": "agent_decisions", "id": ref}],
-            record_at=NOW - 5 * H, at=NOW - 4 * H)
+            record_at=now - 5 * H, at=now - 4 * H)
         assert first["ok"], first
         km = await M.promote(conn, {
             "agent_id": "KAREN", "memory_kind": "LESSON",
@@ -489,22 +498,22 @@ async def test_karens_and_archers_lessons_are_retrieved_and_reported():
             "summary": "This detector's challenges are usually upheld.",
             "evidence_refs": [{"kind": "karen_challenges",
                                "id": first["challenge_id"]}],
-            "confidence": 0.7, "deriver": "test_fixture"}, now=NOW - 3 * H)
+            "confidence": 0.7, "deriver": "test_fixture"}, now=now - 3 * H)
         assert km["ok"] and km["created"], km
         ref2 = "adr:lu7-%s" % uuid.uuid4().hex[:8]
         await conn.execute(
             "INSERT INTO agent_decisions (decision_ref, agent_id, kind, "
             " decided_at) VALUES ($1,'DEREK','TEST',to_timestamp($2))",
-            ref2, NOW - 2 * H)
+            ref2, now - 2 * H)
         later = await K.open_challenge(
             conn, target_agent="DEREK", target_kind="agent_decisions",
             target_id=ref2, detector="DECISION_WITHOUT_EVIDENCE",
             claim="no evidence", severity="MEDIUM",
             evidence_refs=[{"kind": "agent_decisions", "id": ref2}],
-            record_at=NOW - 2 * H, at=NOW - H)
+            record_at=now - 2 * H, at=now - H)
         assert later["ok"], later
         # ARCHER: an execution lesson, then an estimate of a filled decision
-        did, _ = await _entry(conn, a, at=NOW - 2 * H, won=False)
+        did, _ = await _entry(conn, a, at=now - 2 * H, won=False)
         em = await M.promote(conn, {
             "agent_id": "ARCHER", "memory_kind": "LESSON",
             "subject_type": "execution_calibration",
@@ -512,16 +521,16 @@ async def test_karens_and_archers_lessons_are_retrieved_and_reported():
             "summary": "Slippage runs above the estimate on thin books.",
             "evidence_refs": [{"kind": "paper_decisions", "id": did}],
             "confidence": 0.6, "deriver": "test_fixture"},
-            now=NOW - 2 * H - 600)
+            now=now - 2 * H - 600)
         assert em["ok"] and em["created"], em
         # Archer's REAL runner writes his estimate of the decision
         from sportsassets.agents import archer_runner as ER
-        s_ = await ER.pass_once(conn, now=NOW - 2 * H + 300)
+        s_ = await ER.pass_once(conn, now=now - 2 * H + 300)
         est = E.estimate_id_for(did)
         assert await conn.fetchval(
             "SELECT count(*) FROM eddie_execution_estimates WHERE "
             " estimate_id = $1", est) == 1, s_
-        await LU.retrieve(conn, account_id=acct, now=NOW)
+        await LU.retrieve(conn, account_id=acct, now=now)
         rk = await conn.fetch(
             "SELECT decision_table, decision_id FROM agent_lesson_retrievals"
             " WHERE lesson_id = $1", km["memory_id"])
@@ -532,7 +541,7 @@ async def test_karens_and_archers_lessons_are_retrieved_and_reported():
             " WHERE lesson_id = $1", em["memory_id"])
         assert [(r["decision_table"], r["decision_id"]) for r in re_] == [
             ("eddie_execution_estimates", est)]
-        rep = await LU.usefulness(conn, account_id=acct, now=NOW)
+        rep = await LU.usefulness(conn, account_id=acct, now=now)
         by = {x["lesson_id"]: x for x in rep["lessons"]}
         mk = by[km["memory_id"]]["measure"]
         assert mk["status"] == LU.UNAVAILABLE
@@ -547,14 +556,14 @@ async def test_karens_and_archers_lessons_are_retrieved_and_reported():
         never = {x["lesson_id"]: x for x in rep["never_in_force"]}
         assert km["memory_id"] not in never
         nl = await _lesson(conn, a, agent="AUDREY", strategy=None,
-                           at=NOW - H)
-        rep = await LU.usefulness(conn, account_id=acct, now=NOW)
+                           at=now - H)
+        rep = await LU.usefulness(conn, account_id=acct, now=now)
         never = {x["lesson_id"]: x for x in rep["never_in_force"]}
         assert never[nl]["measure"] == {"status": LU.UNAVAILABLE,
                                         "why": LU.R_NEVER}
         # and the scorecards' memory summary now sees Karen and Archer
         from sportsassets.agents import agent_scorecards as S
-        cards = await S.scorecards(conn, now=NOW, window_days=1,
+        cards = await S.scorecards(conn, now=now, window_days=1,
                                    agents=("KAREN", "ARCHER"))
         mem = {c["agent"]: c["memory_usefulness"] for c in cards["agents"]}
         assert mem["KAREN"]["status"] == "MEASURED"

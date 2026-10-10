@@ -28,6 +28,7 @@ import time
 
 import pytest
 
+from sportsassets import bettor_external_shadow as ext
 from sportsassets import bettor_live_read as LR
 from sportsassets import bettor_paper_session as S
 from sportsassets import pmus
@@ -121,18 +122,53 @@ async def test_the_cycle_fetches_persists_and_decides_on_the_venue_text(
                                " control_key=$1", key, on)
         DT._stub(monkeypatch, p_home=0.60, stamp_age_s=2.0)
         # UNDO the harness's rules stub: the REAL reader runs, against the
-        # venue client's listing response
-        monkeypatch.setattr(loop, "_read_venue_rules_blocking", real_rules)
+        # venue client's listing response -- and every contract it is asked
+        # for is recorded, so the rules read is pinned apart from any other
+        # venue listing the cycle makes
+        rules_asked = []
+
+        def rules(slug, **kw):
+            rules_asked.append(slug)
+            return real_rules(slug, **kw)
+        monkeypatch.setattr(loop, "_read_venue_rules_blocking", rules)
         client = _Client()
         monkeypatch.setattr(pmus, "_get_client", lambda: client)
         monkeypatch.setattr(venue_pace, "pace", lambda *a, **k: 0.0)
         loop.rules_cache_reset()
+        # WHAT THE CYCLE'S OUTCOME JOIN IS ENTITLED TO ASK THE VENUE ABOUT,
+        # read before the cycle with the join's own selection: the markets
+        # of this experiment's valuations still owed an outcome and older
+        # than two hours, held markets first (ext_pinnacle_loop
+        # UNJOINED_MARKETS_SQL / HELD_UNSETTLED_SQL, its bounds). On a fresh
+        # database this is empty; on one other proofs have written to it
+        # holds THEIR leftovers (rc6-held-*, paper_test_stalem_*: open paper
+        # positions and valuations they COMMIT, in append-only tables -- the
+        # second capital-critical run on one database found them), and the
+        # join reads each one's resolution by slug, which is production's
+        # job, not this proof's defect.
+        held = [r["us_market_slug"] for r in await conn.fetch(
+            loop.HELD_UNSETTLED_SQL)]
+        owed = {r["us_market_slug"] for r in await conn.fetch(
+            loop.UNJOINED_MARKETS_SQL, ext.EXPERIMENT_ID,
+            loop.MAX_JOINS_PER_RUN, held, loop.HELD_REASK_S)}
 
         out = await loop.cycle(conn)
         assert out.get("written", 0) >= 1, out.get("refusals")
         assert client.markets.calls, "the venue listing was never read"
-        assert all(c.get("slug") == [DT.US_SLUG]
-                   for c in client.markets.calls)
+        # THE RULES READ -- the subject here -- asked for THIS cycle's own
+        # market and nothing else, once; and on the wire every listing is
+        # asked for by slug, one contract a request (never a batch, never a
+        # catalogue crawl): this market, plus only what the outcome join
+        # already owed before the cycle began. The original
+        # `all(slug == [US_SLUG])` read the join's leftovers as this proof's
+        # fault; on a fresh database the two assertions are the same.
+        assert rules_asked == [DT.US_SLUG], rules_asked
+        asked = [c.get("slug") for c in client.markets.calls]
+        assert all(isinstance(s, list) and len(s) == 1 for s in asked), asked
+        assert [DT.US_SLUG] in asked, asked
+        stray = {s[0] for s in asked} - {DT.US_SLUG} - owed
+        assert not stray, ("venue listing read for a contract neither this "
+                           "cycle's nor owed an outcome", sorted(stray))
 
         # ── PERSISTED: the venue's words, where and when they were read ──
         v = await conn.fetchrow(
