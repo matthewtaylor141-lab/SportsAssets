@@ -225,6 +225,21 @@ R_ROLLBACK_NOT_OWN_PREVIOUS = \
     "ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_PREVIOUS_LIVE_COMMIT"
 R_ROLLBACK_NOT_ITS_SERVICE = \
     "ROLLBACK_COMMAND_NOT_THE_SERVICES_OWN_DEPLOY_ACTION"
+#: a deploy status Render does not document, newer than the live deploy or
+#: between it and the previous live commit: whether it served is unknown
+R_ROLLBACK_DEPLOY_STATUS_UNKNOWN = "ROLLBACK_DEPLOY_STATUS_UNKNOWN"
+#: a served (`deactivated`) deploy newer in the list than the live one: the
+#: list is not newest-first, so what ran before cannot be read from it
+R_ROLLBACK_SERVED_NEWER_THAN_LIVE = \
+    "ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY"
+#: Render's deploy statuses that never served (the same set as
+#: tools/rollback_readiness.NEVER_SERVED, pinned equal by test): an
+#: allowlist -- any status that is not one of these, `live` or
+#: `deactivated` is unknown, never taken to mean "never served"
+RENDER_NEVER_SERVED = frozenset((
+    "build_failed", "update_failed", "canceled", "pre_deploy_failed",
+    "created", "queued", "build_in_progress", "update_in_progress",
+    "pre_deploy_in_progress"))
 #: each service's documented deploy-by-commit action (the same text as
 #: tools/rollback_readiness.COMMANDS, pinned equal by test; this file stays
 #: one standard-library file): a command is passed on only when it is
@@ -1205,42 +1220,63 @@ def _deploy_commit(d):
 
 
 def _deploy_history(acc, svc):
-    """(live commit, [every commit previously live on it, newest first])
-    from THIS service's own Render deploy list in the packet
-    (deploys_<svc>.json, newest first, as pm-acceptance stores it), or None
-    when it is unreadable, has not exactly one live deploy, or the live
-    deploy names no commit. `deactivated` = was live, then replaced; a
-    failed, cancelled or still-building deploy never served.
+    """(live commit, [every commit previously live on it, newest first],
+    None) from THIS service's own Render deploy list in the packet
+    (deploys_<svc>.json, newest first, as pm-acceptance stores it), or
+    (None, None, why) when it cannot say what is live or what ran before.
+    `deactivated` = was live, then replaced; only a status in
+    RENDER_NEVER_SERVED never served -- any other status is unknown.
 
     Never raises on a field of the wrong shape (one bad deploy row must
-    not take the whole scorecard out of the packet): a row it cannot read
-    newer than the live deploy, a live commit it cannot read, or a row it
-    cannot read between the live deploy and the previous live commit (it
-    may be what ran before) -> None, refused by name by the caller. A row
-    it cannot read older than that is not counted as previously live."""
+    not take the whole scorecard out of the packet). Refused by name:
+      * unreadable, not exactly one live deploy, a live commit it cannot
+        read, or a row it cannot read newer than the live deploy or between
+        it and the previous live commit (it may be what ran before) ->
+        R_ROLLBACK_HISTORY_UNREADABLE;
+      * a status Render does not document newer than the live deploy or
+        between it and the previous live commit (it may have served) ->
+        R_ROLLBACK_DEPLOY_STATUS_UNKNOWN;
+      * a served (`deactivated`) deploy newer than the live deploy ->
+        R_ROLLBACK_SERVED_NEWER_THAN_LIVE.
+    A row it cannot read, or of an unknown status, older than the previous
+    live commit is not counted as previously live."""
     raw = _opt(acc, "deploys_%s.json" % svc)
     if not isinstance(raw, list):
-        return None
+        return None, None, R_ROLLBACK_HISTORY_UNREADABLE
     deps = [_deploy_row(x) for x in raw]    # None = a row it cannot read
     live = [i for i, d in enumerate(deps)
             if d is not None and d["status"] == "live"]
     if len(live) != 1:
-        return None
+        return None, None, R_ROLLBACK_HISTORY_UNREADABLE
     lc = _deploy_commit(deps[live[0]])
-    if lc is None or any(d is None for d in deps[:live[0]]):
-        return None
+    if lc is None:
+        return None, None, R_ROLLBACK_HISTORY_UNREADABLE
+    for d in deps[:live[0]]:                # newer than the live deploy
+        if d is None:
+            return None, None, R_ROLLBACK_HISTORY_UNREADABLE
+        if d["status"] in RENDER_NEVER_SERVED:
+            continue                    # never served: changes nothing
+        return None, None, (R_ROLLBACK_SERVED_NEWER_THAN_LIVE
+                            if d["status"] == "deactivated"
+                            else R_ROLLBACK_DEPLOY_STATUS_UNKNOWN)
     before = []
     for d in deps[live[0] + 1:]:
-        if d is not None and d["status"] != "deactivated":
+        st = d["status"] if d is not None else None
+        if st in RENDER_NEVER_SERVED:
             continue                    # never served: its commit is moot
-        c = _deploy_commit(d) if d is not None else None
+        c = _deploy_commit(d) if st == "deactivated" else None
         if c is None:
             if not before:
-                return None             # what ran before cannot be read
+                # what ran before cannot be read, or may have been a
+                # deploy of a status Render does not document
+                return None, None, (
+                    R_ROLLBACK_DEPLOY_STATUS_UNKNOWN
+                    if st not in (None, "deactivated")
+                    else R_ROLLBACK_HISTORY_UNREADABLE)
             continue                    # older: not counted as live
         if c != lc and c not in before:
             before.append(c)
-    return lc, before
+    return lc, before, None
 
 
 def _service_rollback(acc, svc, rec, cmd, release_sha):
@@ -1253,20 +1289,21 @@ def _service_rollback(acc, svc, rec, cmd, release_sha):
       * on the release -> DEPLOY_PREVIOUS to ITS OWN previous live commit,
         and only that service's own documented command naming exactly that
         commit is passed on;
-      * its history unreadable, or the record's live / previous commit not
-        what its own history says -> REFUSED by name, no command."""
+      * its history unusable (_deploy_history's named reason: unreadable,
+        an unknown deploy status, a served deploy newer than the live one),
+        or the record's live / previous commit not what its own history
+        says -> REFUSED by name, no command."""
     live = rec.get("live_commit")
     named = set(_SHA_IN_TEXT.findall(str(cmd or "")))
-    hist = _deploy_history(acc, svc)
+    hist_live, before, bad = _deploy_history(acc, svc)
     why = []
     if live != release_sha:
         why.append("%s:%s" % (R_ROLLBACK_SERVICE_NOT_ON_RELEASE, svc))
         if cmd:
             why.append("%s:%s" % (R_ROLLBACK_COMMAND_OFF_RELEASE, svc))
-    if hist is None:
-        return ({"action": "REFUSED", "reason": R_ROLLBACK_HISTORY_UNREADABLE},
-                None, why + ["%s:%s" % (R_ROLLBACK_HISTORY_UNREADABLE, svc)])
-    hist_live, before = hist
+    if bad is not None:
+        return ({"action": "REFUSED", "reason": bad},
+                None, why + ["%s:%s" % (bad, svc)])
     if live != release_sha:
         if hist_live != live:
             why.append("%s:%s:%s" % (R_ROLLBACK_NOT_OWN_PREVIOUS, svc, live))

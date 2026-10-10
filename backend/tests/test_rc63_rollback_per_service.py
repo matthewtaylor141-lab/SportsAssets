@@ -34,7 +34,16 @@ the packet's SHA256SUMS) and on synthetic histories:
     where it decides what is live or what ran before: never a crash (the
     judge's raise would drop all 14 scorecard categories from the packet,
     the tool's the rollback record), and never read past to an older
-    commit. A bad row older than the previous live commit is not counted.
+    commit. A bad row older than the previous live commit is not counted;
+  * a deploy status is "never served" only when it is one Render documents
+    as such (an allowlist, the same in the tool and the judge): any other
+    status -- `Deactivated`, `succeeded`, `Live`, empty -- newer than the
+    live deploy or between it and the previous live commit is refused by
+    name (ROLLBACK_DEPLOY_STATUS_UNKNOWN), never skipped to an older
+    commit; and a served (`deactivated`) deploy newer than the live one is
+    refused by name (ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY),
+    never ignored. Both in the tool and in the judge, on synthetic
+    histories and on the signed packet's own files.
 """
 from __future__ import annotations
 
@@ -569,3 +578,248 @@ def test_the_tool_never_writes_a_command_for_a_commit_never_live_there():
     assert RB.command(API, {"action": RB.NONE, "stay_on": REL}, rec) is None
     # the judge's command forms are the tool's, text for text
     assert SC.ROLLBACK_COMMAND_FORMS == RB.COMMANDS
+
+
+# ── 3. deploy statuses: an allowlist, and Render's newest-first order ────
+
+#: the reason names, written out (the names are the contract; and a module
+#: that fails to import would hide which case failed)
+STATUS_UNKNOWN = "ROLLBACK_DEPLOY_STATUS_UNKNOWN"
+SERVED_NEWER = "ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY"
+#: Render's deploy statuses that never served (API `deploy.status`)
+RENDER_NEVER_SERVED = frozenset((
+    "build_failed", "update_failed", "canceled", "pre_deploy_failed",
+    "created", "queued", "build_in_progress", "update_in_progress",
+    "pre_deploy_in_progress"))
+
+
+def _rows(*rows):
+    """A Render deploy list, newest first, from (status, commit) pairs."""
+    return [_dep(len(rows) - i, st, c) for i, (st, c) in enumerate(rows)]
+
+
+#: the plane's history with ONE row where it decides what is live or what
+#: ran before: a status Render does not document, or a served deploy newer
+#: than the live one. At 3fa0ede0 every one of these gave READY and a
+#: plane command for PREV (an unknown status was skipped as "never served";
+#: a served row newer than the live one was ignored): each must be refused
+#: by name with no command
+_STATUS_ROWS = [
+    # an unknown status between the live deploy and the previous live
+    # commit (review: [live REL, 'Deactivated'/'succeeded' HANG,
+    # deactivated PREV] -> READY + PREV)
+    ("Deactivated_between_live_and_previous",
+     _rows(("live", REL), ("Deactivated", HANG), ("deactivated", PREV)),
+     STATUS_UNKNOWN),
+    ("succeeded_between_live_and_previous",
+     _rows(("live", REL), ("succeeded", HANG), ("deactivated", PREV)),
+     STATUS_UNKNOWN),
+    ("unknown_after_a_redeploy_of_the_live_commit",
+     _rows(("live", REL), ("build_failed", OTHER), ("deactivated", REL),
+           ("DEACTIVATED", HANG), ("deactivated", PREV)), STATUS_UNKNOWN),
+    ("empty_status_between_live_and_previous",
+     _rows(("live", REL), ("", HANG), ("deactivated", PREV)),
+     STATUS_UNKNOWN),
+    # an unknown, or live-like, status newer than the live deploy (it may
+    # be what is live)
+    ("unknown_status_newer_than_live",
+     _rows(("succeeded", HANG), ("live", REL), ("deactivated", PREV)),
+     STATUS_UNKNOWN),
+    ("Live_newer_than_live",
+     _rows(("Live", HANG), ("live", REL), ("deactivated", PREV)),
+     STATUS_UNKNOWN),
+    # a served deploy newer than the live one (review: [deactivated HANG,
+    # live REL, deactivated PREV] -> READY + PREV)
+    ("deactivated_newer_than_live",
+     _rows(("deactivated", HANG), ("live", REL), ("deactivated", PREV)),
+     SERVED_NEWER),
+    ("deactivated_newer_than_live_behind_a_failed_build",
+     _rows(("build_failed", OTHER), ("deactivated", HANG), ("live", REL),
+           ("deactivated", PREV)), SERVED_NEWER),
+    ("redeploy_of_the_live_commit_newer_than_live",
+     _rows(("deactivated", REL), ("live", REL), ("deactivated", PREV)),
+     SERVED_NEWER),
+]
+_STATUS_PARAMS = [pytest.param(h, r, id=n) for n, h, r in _STATUS_ROWS]
+
+
+@pytest.mark.parametrize("hist,reason", _STATUS_PARAMS)
+def test_an_unknown_status_or_a_served_deploy_newer_than_live_is_refused(
+        tmp_path, hist, reason):
+    """The tool over the plane's history with one such row: the plane is
+    REFUSED by name with no command (never PREV, an older commit than the
+    one it may last have run), api and workers keep their own, NOT_READY;
+    the judge, over the tool's own record, passes on nothing for the plane
+    and names the same reason (FAIL, never READY)."""
+    acc = _acc(tmp_path, {API: _hist(REL, ("deactivated", PREV)),
+                          WORKERS: _hist(REL, ("deactivated", PREV)),
+                          PLANE: hist})
+    _gates(acc, PREV)
+    rb = _record(acc, tmp_path)
+    _no_plane_command(rb["commands"])          # the defect itself, first
+    assert rb["rollback_by_service"][PLANE] == {"action": "REFUSED",
+                                                "reason": reason}
+    assert "%s:%s" % (reason, PLANE) in rb["reasons"]
+    assert rb["services"][PLANE]["previous_commit"] is None
+    assert rb["services"][PLANE]["previously_live_commits"] == []
+    for s in (API, WORKERS):
+        assert rb["commands"][s] == RB.COMMANDS[s] % PREV
+    assert rb["status"] == RB.NOT_READY
+    u = _score(acc, REL)
+    d = u["detail"]
+    assert u["class"] == "FAIL" and u["passed"] is False, u
+    assert d["status"] == "NOT_READY"
+    assert d["rollback_by_service"][PLANE] == {"action": "REFUSED",
+                                               "reason": reason}
+    assert "%s:%s" % (reason, PLANE) in d["reasons"]
+    _no_plane_command(d["commands"])
+    for s in (API, WORKERS):
+        assert d["commands"][s] == RB.COMMANDS[s] % PREV
+
+
+@pytest.mark.parametrize("hist,reason", _STATUS_PARAMS)
+def test_the_judge_refuses_an_unknown_status_with_the_record_present(
+        tmp_path, hist, reason):
+    """The judge on its own: rollback.json written while the plane's
+    history read cleanly (it carries a market-plane command for PREV), then
+    the plane's deploy list as it now reads. score() completes all 14
+    categories; the plane is REFUSED by name, the record's plane command is
+    not passed on, rollback_ready is FAIL; api and workers keep their own."""
+    acc = _acc(tmp_path, {s: _GOOD for s in SERVICES})
+    _gates(acc, PREV)
+    clean = _record(acc, tmp_path)
+    assert clean["commands"][PLANE] == RB.COMMANDS[PLANE] % PREV
+    assert clean["status"] == RB.READY, clean["reasons"]
+    (acc / ("deploys_%s.json" % PLANE)).write_text(json.dumps(hist))
+    u = _score(acc, REL)
+    d = u["detail"]
+    _no_plane_command(d["commands"])           # the defect itself, first
+    assert u["class"] == "FAIL" and u["passed"] is False, u
+    assert d["rollback_by_service"][PLANE] == {"action": "REFUSED",
+                                               "reason": reason}
+    assert "%s:%s" % (reason, PLANE) in d["reasons"]
+    for s in (API, WORKERS):
+        assert d["commands"][s] == RB.COMMANDS[s] % PREV
+
+
+@pytest.mark.parametrize("status", sorted(RENDER_NEVER_SERVED))
+def test_a_status_render_documents_as_never_served_is_skipped(tmp_path,
+                                                              status):
+    """Each status Render documents as never served, newer than the live
+    deploy (a deploy still building or that failed after it) and between
+    the live deploy and PREV (around a redeploy of the live commit): it
+    changes nothing -- each service goes back to PREV, counted as the only
+    previously-live commit, READY, and the judge passes the three own
+    commands. The allowlist refuses only what it does not know."""
+    hist = _rows((status, OTHER), ("live", REL), (status, HANG),
+                 ("deactivated", REL), (status, OLD), ("deactivated", PREV))
+    acc = _acc(tmp_path, {s: hist for s in SERVICES})
+    _gates(acc, PREV)
+    rb = _record(acc, tmp_path)
+    for s in SERVICES:
+        assert rb["rollback_by_service"][s] == {
+            "action": RB.DEPLOY_PREVIOUS, "from": REL, "to": PREV}, s
+        assert rb["services"][s]["previously_live_commits"] == [PREV]
+    assert rb["status"] == RB.READY, rb["reasons"]
+    u = _score(acc, REL)
+    assert u["passed"] is True, u["detail"]
+    assert u["detail"]["commands"] == {s: RB.COMMANDS[s] % PREV
+                                       for s in SERVICES}
+
+
+def test_an_unknown_status_older_than_the_previous_live_commit_is_not_counted(
+        tmp_path):
+    """An unknown status OLDER than the previous live commit cannot change
+    what ran before: not refused, and never counted as previously live
+    (only the `deactivated` PREV and OLD are); READY, the judge passes the
+    three own commands."""
+    hist = _rows(("live", REL), ("deactivated", PREV), ("Deactivated", HANG),
+                 ("succeeded", OTHER), ("deactivated", OLD))
+    acc = _acc(tmp_path, {s: hist for s in SERVICES})
+    _gates(acc, PREV)
+    rb = _record(acc, tmp_path)
+    for s in SERVICES:
+        assert rb["services"][s]["previously_live_commits"] == [PREV, OLD]
+        assert rb["rollback_by_service"][s]["to"] == PREV
+    assert rb["status"] == RB.READY, rb["reasons"]
+    u = _score(acc, REL)
+    assert u["passed"] is True, u["detail"]
+    assert u["detail"]["commands"] == {s: RB.COMMANDS[s] % PREV
+                                       for s in SERVICES}
+
+
+def test_the_never_served_allowlist_is_renders_in_the_tool_and_the_judge():
+    """One allowlist, Render's documented never-served statuses, text for
+    text in the tool and the judge (each stays one standard-library file);
+    the two reason names are the same in both. The signed packet's own
+    deploy lists carry only statuses Render documents, so the allowlist
+    never refuses production's history."""
+    assert RB.NEVER_SERVED == SC.RENDER_NEVER_SERVED == RENDER_NEVER_SERVED
+    assert RB.LIVE == "live" and RB.DEACTIVATED == "deactivated"
+    assert not ({RB.LIVE, RB.DEACTIVATED} & RB.NEVER_SERVED)
+    assert RB.R_DEPLOY_STATUS_UNKNOWN == \
+        SC.R_ROLLBACK_DEPLOY_STATUS_UNKNOWN == STATUS_UNKNOWN
+    assert RB.R_SERVED_NEWER_THAN_LIVE == \
+        SC.R_ROLLBACK_SERVED_NEWER_THAN_LIVE == SERVED_NEWER
+    for s in SERVICES:
+        rows = json.loads((FIX / ("deploys_%s.json" % s)).read_text())
+        assert {r["deploy"]["status"] for r in rows} <= \
+            RB.NEVER_SERVED | {RB.LIVE, RB.DEACTIVATED}, s
+
+
+def _status_edit(rows, edit):
+    rows = copy.deepcopy(rows)
+    if edit.startswith("status="):
+        rows[1]["deploy"]["status"] = edit.split("=", 1)[1]
+    else:                       # a served deploy newer than the live one
+        newer = copy.deepcopy(rows[1])
+        newer["deploy"]["id"] = "dep-newer-than-live"
+        rows.insert(0, newer)
+    return rows
+
+
+@pytest.mark.parametrize("svc,edit,reason", [
+    (API, "status=Deactivated", STATUS_UNKNOWN),
+    (API, "status=succeeded", STATUS_UNKNOWN),
+    (API, "served_newer_than_live", SERVED_NEWER),
+    (PLANE, "served_newer_than_live", SERVED_NEWER)],
+    ids=["api_previous_status_Deactivated", "api_previous_status_succeeded",
+         "api_served_deploy_newer_than_live",
+         "plane_served_deploy_newer_than_live"])
+def test_the_signed_packet_with_an_unknown_status_is_refused_by_name(
+        tmp_path, svc, edit, reason):
+    """The packet AS SIGNED with ONE row of one service's own deploy list
+    changed. api: [0] live 16d23450, [1] 3d5af039 (what it ran before),
+    [2] 732cc0c6. With [1]'s status one Render does not document, the tool
+    at 3fa0ede0 skipped it as never served and wrote an api command for
+    732cc0c6 (the plane's commit, older than what api last ran); with a
+    served 3d5af039 row newer than the live deploy it ignored the row. Now
+    api is REFUSED by name with no command, in the record and in what the
+    judge passes on, and no command names 732cc0c6. The plane (live on
+    732cc0c6, [1] 3d5af039) with a served row newer than its live deploy
+    is REFUSED by name with no command (never a command for 3d5af039).
+    Whatever else: the plane gets no command, workers keeps its own
+    3d5af039, NOT_READY."""
+    acc = _packet_acc(tmp_path)
+    p = acc / ("deploys_%s.json" % svc)
+    rows = json.loads(p.read_text())
+    assert [rows[i]["deploy"]["status"] for i in range(2)] == [
+        "live", "deactivated"]
+    p.write_text(json.dumps(_status_edit(rows, edit)))
+    for rec in (_score(acc, REL_16D)["detail"],
+                RB.build(acc, sha=REL_16D, target_is_ancestor=True)):
+        cmds = rec["commands"]
+        _no_plane_command(cmds)                # the defect class, first
+        assert not any(PLANE_732 in str(c or "") for c in cmds.values())
+        assert rec["status"] == "NOT_READY"
+        assert rec["rollback_by_service"][svc] == {"action": "REFUSED",
+                                                   "reason": reason}
+        assert "%s:%s" % (reason, svc) in rec["reasons"]
+        assert cmds[svc] is None
+        assert cmds[WORKERS] == RB.COMMANDS[WORKERS] % HANG_3D5
+        if svc == API:
+            assert rec["rollback_by_service"][PLANE] == {
+                "action": "NONE", "stay_on": PLANE_732,
+                "reason": RB.R_SERVICE_NOT_ON_RELEASE}
+        else:
+            assert cmds[API] == RB.COMMANDS[API] % HANG_3D5

@@ -54,8 +54,13 @@ list only:
     commit (`stay_on`), named ROLLBACK_SERVICE_NOT_ON_THE_RELEASE, and no
     command is written for it (the release-level NOT_READY reason stays);
   * REFUSED -- its history is unreadable, has no single live deploy,
-    disagrees with render.json, or shows no previous live commit: named,
-    and no command.
+    disagrees with render.json, or shows no previous live commit; or, where
+    it decides what is live or what ran before, carries a deploy status
+    Render does not document (ROLLBACK_DEPLOY_STATUS_UNKNOWN: only the
+    statuses in NEVER_SERVED are skipped as never served) or a served
+    deploy newer than the live one
+    (ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY): named, and no
+    command.
 
 A command is written only for DEPLOY_PREVIOUS and only for a commit that
 service's own deploy list shows was live on it before. `target_sha` (the
@@ -128,8 +133,27 @@ R_TARGET_MIGRATIONS_UNREADABLE = "ROLLBACK_TARGET_MIGRATIONS_UNREADABLE"
 R_RELEASE_MIGRATIONS_UNREADABLE = "ROLLBACK_RELEASE_MIGRATIONS_UNREADABLE"
 R_COMMIT_NOT_PREVIOUSLY_LIVE = \
     "ROLLBACK_COMMIT_NOT_PREVIOUSLY_LIVE_ON_THE_SERVICE"
+#: a deploy status Render does not document sits where it decides what is
+#: live or what ran before: whether that deploy served cannot be known
+R_DEPLOY_STATUS_UNKNOWN = "ROLLBACK_DEPLOY_STATUS_UNKNOWN"
+#: a deploy that served (`deactivated`) is newer in the list than the live
+#: deploy: the list is not newest-first as Render writes it, so what ran
+#: before the live deploy cannot be read from its order
+R_SERVED_NEWER_THAN_LIVE = "ROLLBACK_SERVED_DEPLOY_NEWER_THAN_THE_LIVE_DEPLOY"
 #: a service's history is not usable at all: no action can be derived
-_HISTORY_UNUSABLE = (R_DEPLOYS_UNREADABLE, R_NO_SINGLE_LIVE_DEPLOY)
+_HISTORY_UNUSABLE = (R_DEPLOYS_UNREADABLE, R_NO_SINGLE_LIVE_DEPLOY,
+                     R_DEPLOY_STATUS_UNKNOWN, R_SERVED_NEWER_THAN_LIVE)
+
+#: Render's deploy statuses (API `deploy.status`, exact strings): `live`
+#: serves now, `deactivated` served and was replaced, and these never
+#: served. Any other status is UNKNOWN -- never taken to mean "never
+#: served" (a `Deactivated` or `succeeded` row skipped as moot would roll a
+#: service back past what it last ran).
+LIVE, DEACTIVATED = "live", "deactivated"
+NEVER_SERVED = frozenset((
+    "build_failed", "update_failed", "canceled", "pre_deploy_failed",
+    "created", "queued", "build_in_progress", "update_in_progress",
+    "pre_deploy_in_progress"))
 
 
 def _json(path):
@@ -161,6 +185,26 @@ def _commit(d):
     return _sha(c.get("id")) if isinstance(c, dict) else None
 
 
+def _newer_than_live(deps) -> str | None:
+    """Why the rows NEWER than the live deploy (Render lists newest first)
+    leave what is live, or what ran before it, unknown -- or None when
+    every one is a deploy that never served (a failed, cancelled, queued or
+    still-building one changes nothing). The first such row, in list order,
+    names it: a row it cannot read (it may be what is live), a status
+    Render does not document (it may have served), or a deploy that served
+    (`deactivated`) newer than the live one (the list is not in Render's
+    order, so the deploy before the live one cannot be read from it)."""
+    for d in deps:
+        if d is None:
+            return R_DEPLOYS_UNREADABLE
+        if d["status"] in NEVER_SERVED:
+            continue
+        if d["status"] == DEACTIVATED:
+            return R_SERVED_NEWER_THAN_LIVE
+        return R_DEPLOY_STATUS_UNKNOWN
+    return None
+
+
 def service(acc: pathlib.Path, svc: str) -> dict:
     """The live and the previous commit of one service, from the job's own
     Render deploy list (newest first) and render.json.
@@ -172,7 +216,14 @@ def service(acc: pathlib.Path, svc: str) -> dict:
     between the live deploy and the previous live commit (it may be what
     ran before -- skipping it would roll back to an OLDER commit than the
     one the service last ran). A row it cannot read older than the
-    previous live commit is not counted as previously live."""
+    previous live commit is not counted as previously live.
+
+    The same holds for a status Render does not document (NEVER_SERVED is
+    an allowlist, never "anything but deactivated"): newer than the live
+    deploy, or between it and the previous live commit, it is refused by
+    name (R_DEPLOY_STATUS_UNKNOWN); older, it is not counted. A deploy that
+    served (`deactivated`) newer than the live deploy is refused by name
+    (R_SERVED_NEWER_THAN_LIVE), never ignored."""
     raw = _json(acc / ("deploys_%s.json" % svc))
     ren = _json(acc / "render.json")
     row = ren.get(svc) if isinstance(ren, dict) else None
@@ -186,34 +237,45 @@ def service(acc: pathlib.Path, svc: str) -> dict:
         return out
     deps = [_deploy(x) for x in raw]        # None = a row it cannot read
     live = [i for i, d in enumerate(deps)
-            if d is not None and d["status"] == "live"]
+            if d is not None and d["status"] == LIVE]
     if len(live) != 1:
         out["reasons"].append("%s:%d" % (R_NO_SINGLE_LIVE_DEPLOY, len(live)))
         return out
     i = live[0]
     lc = _commit(deps[i])
-    if lc is None or any(d is None for d in deps[:i]):
-        # a live deploy that names no readable commit (nothing to go back
-        # FROM), or a newer row it cannot read (it may be what is live)
+    if lc is None:
+        # a live deploy that names no readable commit: nothing to go back
+        # FROM
         out["reasons"].append(R_DEPLOYS_UNREADABLE)
+        return out
+    newer = _newer_than_live(deps[:i])
+    if newer:
+        # a newer row that may be what is live, or that shows the list is
+        # not in the order the deploy before the live one is read from
+        out["reasons"].append(newer)
         return out
     out.update(live_commit=lc, live_deploy_id=deps[i].get("id"))
     if summary != lc:
         out["reasons"].append(R_LIVE_DIFFERS_FROM_RENDER)
     # every commit THIS service was live on before its live deploy (a
-    # `deactivated` deploy was live and then replaced; a failed, cancelled
-    # or still-building one never served), newest first: the only commits
-    # a rollback command may ever name for it
+    # `deactivated` deploy was live and then replaced; a status in
+    # NEVER_SERVED never served), newest first: the only commits a rollback
+    # command may ever name for it
     seen = out["previously_live_commits"]
     for d in deps[i + 1:]:
-        if d is not None and d["status"] != "deactivated":
+        st = d["status"] if d is not None else None
+        if st in NEVER_SERVED:
             continue                    # never served: its commit is moot
-        c = _commit(d) if d is not None else None
+        c = _commit(d) if st == DEACTIVATED else None
         if c is None:
             if out["previous_commit"] is None:
-                # what ran before the live deploy cannot be read: refused,
-                # never skipped over to an older commit
-                out["reasons"].append(R_DEPLOYS_UNREADABLE)
+                # what ran before the live deploy cannot be read (a row or
+                # a served deploy's commit it cannot read, or a status
+                # Render does not document -- it may have served): refused
+                # by name, never skipped over to an older commit
+                out["reasons"].append(
+                    R_DEPLOY_STATUS_UNKNOWN if st not in (None, DEACTIVATED)
+                    else R_DEPLOYS_UNREADABLE)
                 return out
             continue                    # older: not counted as live
         if c != lc:
